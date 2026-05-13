@@ -19,6 +19,33 @@ Pre-release. The design is settled; implementation is a moving
 target. No installable image yet — the repos build and run inside
 test VMs driven by the scripts in `scripts/vm/`.
 
+## Repository layout (sibling checkout required)
+
+The three qdistro repos are designed to live side-by-side under a
+common parent directory. Build scripts and tests reference siblings
+with relative paths (`../qdwin`, `../qdshell`). Clone them like this:
+
+```sh
+mkdir qdistro-org && cd qdistro-org
+git clone https://codeberg.org/qdistro/qdistro.git
+git clone https://codeberg.org/qdistro/qdwin.git
+git clone https://codeberg.org/qdistro/qdshell.git
+```
+
+Resulting tree:
+
+```
+qdistro-org/
+├── qdistro/     ← this repo (umbrella)
+├── qdwin/       ← compositor
+└── qdshell/     ← desktop shell
+```
+
+Build order: `qdwin` first (the umbrella's daemons compile against
+qdwin's protocol XML at `../qdwin/qdwin/*.xml`), then `qdistro`,
+then `qdshell`. See [doc/dev.md](doc/dev.md) for the full developer
+setup.
+
 ## Project principles
 
 1. **LLM-modifiability first.** Userspace (apps, shell, session

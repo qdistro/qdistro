@@ -5,6 +5,47 @@ qnotebook) and the broker / SDK / admin-app stack. These conventions are
 the canonical reference — when in doubt about layout, testing, config, or
 idioms, follow what's described here.
 
+## Multi-repo dev setup
+
+qdistro spans three repos that must be cloned side-by-side. Scripts
+and tests reference siblings with hard-coded relative paths
+(`../qdwin`, `../qdshell`). No env vars to set; no system install
+required.
+
+```sh
+mkdir qdistro-org && cd qdistro-org
+git clone https://codeberg.org/qdistro/qdistro.git
+git clone https://codeberg.org/qdistro/qdwin.git
+git clone https://codeberg.org/qdistro/qdshell.git
+```
+
+Build order (from the parent `qdistro-org/` directory):
+
+```sh
+# 1. Build qdwin — the compositor.
+(cd qdwin && meson setup build && meson compile -C build)
+
+# 2. Build the umbrella's C daemons against qdwin's XML.
+(cd qdistro/daemons && meson setup build && meson compile -C build)
+
+# 3. Headless unit tests.
+(cd qdistro && pytest)
+
+# 4. Bake a test VM (one-time, ~5-10 min for baseweed, ~10-25 min
+#    for the dependency-baked overlay).
+qdistro/scripts/vm/build-baseweed-from-scratch.sh
+qdistro/scripts/vm/build-baked-baseweed.sh
+
+# 5. Spin a fresh test VM + run the integration suite.
+qdistro/scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
+```
+
+Integration tests run **inside the baked VM**. GUI tests must never
+run on the host (see [AGENTS.md](AGENTS.md)).
+
+For the qdshell QML stack: `cd qdshell && quickshell -p shell.qml`,
+but only inside a VM session where qdwin is the active compositor.
+
 ## Tech stack
 
 - **PyQt6** 6.5+ (not PyQt5). Modern Qt, better Wayland support.
