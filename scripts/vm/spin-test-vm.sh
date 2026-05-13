@@ -26,8 +26,17 @@
 
 set -euo pipefail
 
-: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD}"
-: "${QDWIN_VM_TEMPLATE:?must export QDWIN_VM_TEMPLATE (name of an existing libvirt domain whose XML we clone)}"
+: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD — the test password baked into the cloned VM's user accounts}"
+
+# QDWIN_VM_TEMPLATE: optional. clone-baseweed.sh dumps this domain's
+# XML and substitutes name + disk path + MAC for each new test VM.
+# If unset, auto-create a minimal qdistro-template domain.
+QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
+if ! virsh -c qemu:///session dominfo "$QDWIN_VM_TEMPLATE" >/dev/null 2>&1; then
+    echo "[spin-test-vm] template domain '$QDWIN_VM_TEMPLATE' not defined; creating..." >&2
+    "$(dirname "$0")/create-template-domain.sh" "$QDWIN_VM_TEMPLATE" >&2
+fi
+export QDWIN_VM_TEMPLATE
 
 PREFIX="${1:-qd-test}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -37,7 +37,20 @@ qdistro/scripts/vm/build-baseweed-from-scratch.sh
 qdistro/scripts/vm/build-baked-baseweed.sh
 
 # 5. Spin a fresh test VM + run the integration suite.
+#    QDISTRO_VM_PASSWORD is the password baked into the cloned VM's
+#    user accounts. QDWIN_VM_TEMPLATE is optional — spin-test-vm.sh
+#    auto-creates a "qdistro-template" libvirt domain on first run.
+export QDISTRO_VM_PASSWORD="<test-password>"
 qdistro/scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
+```
+
+Prerequisites for the libvirt session (set up once):
+
+```sh
+sudo zypper install libvirt qemu-kvm virt-install virt-manager
+sudo usermod -aG libvirt $(whoami)
+# Then log out / log in for the group change to take effect.
+systemctl --user enable --now libvirtd.service   # or via virt-manager UI
 ```
 
 Integration tests run **inside the baked VM**. GUI tests must never

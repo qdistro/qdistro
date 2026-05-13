@@ -146,10 +146,17 @@ LICENSE             GPL-3.0-or-later
 # Unit tests (headless, <1s):
 pytest
 
-# Integration tests (require a built test VM):
+# Integration tests require a libvirt session + a built test VM.
+# QDISTRO_VM_PASSWORD is the password baked into the cloned VM's
+# user accounts (any non-trivial string is fine for a test VM).
+export QDISTRO_VM_PASSWORD="<test-password>"
 scripts/vm/spin-test-vm.sh my-test
 tests/integration/vm/run-parallel.sh
 ```
+
+`spin-test-vm.sh` auto-creates a libvirt template domain
+(`qdistro-template`) on first run. Set `QDWIN_VM_TEMPLATE=<name>`
+to point at an existing template instead.
 
 The unit suite assumes the dependencies installed by
 `scripts/vm/install-deps.sh`. The simplest reliable host setup is a

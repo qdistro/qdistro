@@ -73,16 +73,10 @@ exit code rolls up into the runner's exit code.
 Each @test wraps one of the reproducible probes in
 `scripts/vm/`. The tests assume the VM is already booted,
 has pipewire up, and has a recent qdwin-shell.so + qdistro-forward
-installed. If you changed code on the host, sync+build first:
-
-```bash
-# In one terminal:
-cd compositor && python3 -m http.server 8765 --bind 127.0.0.1
-
-# Then:
-$(git rev-parse --show-toplevel)/scripts/vm/vm-exec "$VM_NAME" \
- 'bash /root/s3c-sync-and-build.sh'
-```
+installed. If you changed code on the host, re-run
+`scripts/vm/spin-test-vm.sh <prefix>` against a fresh clone — the
+bake pipeline tarballs the three sibling repos, pushes them into
+the VM, rebuilds qdwin + daemons, and reruns the install scripts.
 
 ## Dependencies
 
