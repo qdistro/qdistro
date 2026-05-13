@@ -1,10 +1,9 @@
 #!/bin/bash
-# Idempotent qsu install for fresh-vm-bootstrap. Pulls qsu.py +
-# qdistro_root_exec.py + the systemd unit pair from
-# host:8765 (qdistro/qsu/), drops them under /usr/local, and
-# enables the socket-activated service so end-to-end qsu tests
-# (s58-qsu-real-flow.sh + phase7-qsu-real-flow.bats) can drive the
-# real `/run/qdistro-root-exec/sock` path.
+# Idempotent qsu install for fresh-vm-bootstrap. Takes the qsu/
+# source dir as $1 (default /root/qdistro-src/qdistro/qsu), copies
+# qsu.py + qdistro_root_exec.py + the systemd unit pair into place,
+# and enables the socket-activated service so end-to-end qsu tests
+# can drive the real /run/qdistro-root-exec/sock path.
 #
 # Pre-reqs: python313 + dbus-python (already baked into baseweed).
 #
@@ -13,12 +12,18 @@
 # so install order is broker → qsu.
 set -eu
 
-QSU_URL=${QSU_URL:-http://10.0.2.2:8765/spike-6.5/qsu}
+QSU_SRC=${1:-/root/qdistro-src/qdistro/qsu}
 DEST_LIB=/usr/local/lib/qdistro
 DEST_BIN=/usr/local/bin
 SYSTEMD_DIR=/etc/systemd/system
 SOCKET_UNIT=$SYSTEMD_DIR/qdistro-root-exec.socket
 SERVICE_UNIT=$SYSTEMD_DIR/qdistro-root-exec.service
+
+if [ ! -d "$QSU_SRC" ]; then
+    echo "ERROR: qsu source not found at $QSU_SRC" >&2
+    echo "       pass the qsu/ dir as \$1 or untar qdistro to /root/qdistro-src/qdistro/" >&2
+    exit 2
+fi
 
 install -d -o root -g root -m 0755 "$DEST_LIB"
 install -d -o root -g root -m 0755 "$DEST_BIN"
@@ -26,15 +31,7 @@ install -d -o root -g root -m 0755 "$DEST_BIN"
 # 1. Privileged-exec service (root-side D-Bus delegator + subprocess
 #    streamer). Same install layout as the broker — under
 #    /usr/local/lib/qdistro/ so an unprivileged user can't replace it.
-TMP=$(mktemp -d /tmp/qsu-install-XXXXXX)
-trap 'rm -rf "$TMP"' EXIT
-
-wget -q -O "$TMP/qdistro_root_exec.py"   "$QSU_URL/qdistro_root_exec.py"
-wget -q -O "$TMP/qsu.py"                  "$QSU_URL/qsu.py"
-wget -q -O "$TMP/qdistro-root-exec.socket"  "$QSU_URL/qdistro-root-exec.socket"
-wget -q -O "$TMP/qdistro-root-exec.service" "$QSU_URL/qdistro-root-exec.service"
-
-install -o root -g root -m 0644 "$TMP/qdistro_root_exec.py" \
+install -o root -g root -m 0644 "$QSU_SRC/qdistro_root_exec.py" \
     "$DEST_LIB/qdistro_root_exec.py"
 
 # 2. User-facing wrapper. /usr/local/bin/qsu is what humans type; it
@@ -45,11 +42,11 @@ cat >"$DEST_BIN/qsu" <<'EOF'
 exec /usr/bin/python3 /usr/local/lib/qdistro/qsu.py "$@"
 EOF
 chmod 0755 "$DEST_BIN/qsu"
-install -o root -g root -m 0644 "$TMP/qsu.py" "$DEST_LIB/qsu.py"
+install -o root -g root -m 0644 "$QSU_SRC/qsu.py" "$DEST_LIB/qsu.py"
 
 # 3. Systemd unit pair.
-install -m 0644 "$TMP/qdistro-root-exec.socket"  "$SOCKET_UNIT"
-install -m 0644 "$TMP/qdistro-root-exec.service" "$SERVICE_UNIT"
+install -m 0644 "$QSU_SRC/qdistro-root-exec.socket"  "$SOCKET_UNIT"
+install -m 0644 "$QSU_SRC/qdistro-root-exec.service" "$SERVICE_UNIT"
 
 systemctl daemon-reload
 systemctl enable --now qdistro-root-exec.socket >/dev/null
