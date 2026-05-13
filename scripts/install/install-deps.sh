@@ -1,6 +1,6 @@
 #!/bin/bash
 # Idempotent zypper install of all qdwin §6.5/§6.6 build+runtime deps.
-# Names are Tumbleweed as of 2026-04-25 (per memory/fresh_vm_recipe_phase6.5.md).
+# Names are Tumbleweed as of 2026-04-25.
 #
 # Two modes:
 #   - executed:  runs zypper -n install ... + emits "[install-deps] DONE".

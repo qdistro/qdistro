@@ -60,23 +60,29 @@ meson compile -C build
 meson install -C build
 
 # ---- 4. Install Python modules + systemd units --------------------------
+# Each install-*.sh takes the module's source dir as $1. We pass paths
+# under $SRC/qdistro/<module>/ instead of the legacy /root/<module>-src/.
 log "installing Python modules..."
 cd "$SRC/qdistro"
-# Each module's install-*.sh handles its own per-module install. Order
-# matters only for the broker (others depend on it).
-for installer in \
-    scripts/install/install-broker-for-qdwin.sh \
-    scripts/install/install-polkit-agent-for-vm.sh \
-    scripts/install/install-pwd-for-vm.sh \
-    scripts/install/install-qsu-for-vm.sh \
-    scripts/install/install-browser-bridge-for-vm.sh \
-    scripts/install/install-phone-for-vm.sh \
-    scripts/install/install-print-proxy-for-vm.sh \
-    scripts/install/install-recall-for-vm.sh \
-    scripts/install/install-snapshots-for-vm.sh; do
+QD="$SRC/qdistro"
+INSTALLERS=(
+    "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
+    "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
+    "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
+    "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
+    "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge"
+    "scripts/install/install-phone-for-vm.sh           $QD/phone"
+    "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
+    "scripts/install/install-recall-for-vm.sh          $QD/recall"
+    "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
+)
+for entry in "${INSTALLERS[@]}"; do
+    set -- $entry
+    installer="$1"
+    src_dir="$2"
     if [ -x "$installer" ]; then
-        log "  running $(basename "$installer")..."
-        bash "$installer" || { echo "[bootstrap] $installer failed"; exit 3; }
+        log "  running $(basename "$installer") <- $src_dir"
+        bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
     fi
 done
 

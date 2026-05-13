@@ -19,7 +19,7 @@ fi
 #   VM_SSH_KEY        — default ~/.ssh/qdistro_enforcing_id_ed25519
 #   VM_SSH_HOST       — default 127.0.0.1
 #
-# Per memory/phase7_session_260428_night.md "virt_qemu_ga_t is too
+# virt_qemu_ga_t is too
 # restricted under enforcing".
 : "${VM_SSH_USER:=root}"
 : "${VM_SSH_KEY:=$HOME/.ssh/qdistro_enforcing_id_ed25519}"

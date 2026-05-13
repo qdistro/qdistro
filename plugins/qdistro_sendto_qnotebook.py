@@ -113,7 +113,7 @@ class Plugin:
             )
             # Anchor the plugin on the window so the receiver's
             # BusName survives the plugin-manager's local-var GC.
-            # Matches memory/busname_anchor.md's pattern.
+            # dbus-python releases the name on GC; bind it to a local that outlives the mainloop.
             window._qdistro_plugin = self  # type: ignore[attr-defined]
             print(f"[qdistro_sendto] claimed {service}",
                   file=sys.stderr, flush=True)

@@ -126,7 +126,7 @@ def verify(user: str, system_bus: Any,
 
 def admin_username(admin_uid: int) -> str:
     """Resolve the admin uid into a username via the system passwd db.
-    Falls back to "admin" (per memory/admin_user_jan.md) if the lookup
+    Falls back to "admin" if the lookup
     fails so an offline / chroot env still picks a meaningful default.
     """
     try:

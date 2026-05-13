@@ -30,7 +30,7 @@
 #   $LOG_DIR/<file>.bootstrap.log — install-deps + fresh-vm-bootstrap
 #   $LOG_DIR/summary.txt  — one-line per file: PASS/FAIL + count
 #
-# Per memory/parallel_bats_runner.md (after this commit lands).
+# One VM per bats file — file-scope is the natural seam since tests inside one file share fixtures.
 set -uo pipefail
 
 KEEP=0

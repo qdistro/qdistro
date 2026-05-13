@@ -3,7 +3,7 @@
 # from SKIP into hard PASS by spinning up a config-pinned-enforcing VM
 # and routing helpers.bash:vm_run through SSH.
 #
-# Workflow (per memory/phase7_session_260428_night.md):
+# Workflow:
 #   1. Ensure baseweed-enforcing-baked.qcow2 exists
 #      (build-enforcing-baseweed.sh produces it; one-time ~10 min).
 #   2. Clone --from-enforcing-baked: qcow2 chain enforcing-baked → baked

@@ -11,23 +11,22 @@
 # the runtime chcon was a workaround. /usr/libexec/ is outside the
 # lib glob so .fc wins natively.
 #
-# Source: assumes the broker tree has been synced into
-# /root/qdistro-deploy/broker/ ahead of this call. A companion
-# sync-broker.sh (see nearby) handles the sync.
+# Source: takes the broker tree path as $1. fresh-vm-bootstrap.sh
+# untars the umbrella repo to /root/qdistro-src/qdistro/ and invokes
+# this script with that path's broker/ subdir.
 #
 # Pre-reqs already baked into baseweed: python313-dbus-python,
-# python313-gobject (Gdk/GLib), user `admin` (uid 1000). Verified on
-# qdwin-fresh-260423-1134 + qdwin-weston-260422-1208.
+# python313-gobject (Gdk/GLib), user `admin` (uid 1000).
 set -eu
 
-BROKER_SRC=/root/qdistro-deploy/broker
+BROKER_SRC=${1:-/root/qdistro-src/qdistro/broker}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-admin-broker.service
 POLICY=/etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
 
 if [ ! -d "$BROKER_SRC" ]; then
     echo "ERROR: broker source not found at $BROKER_SRC" >&2
-    echo "       run sync-broker.sh first (HTTP pull from host)" >&2
+    echo "       pass the broker/ dir as \$1 or untar qdistro to /root/qdistro-src/qdistro/" >&2
     exit 2
 fi
 
