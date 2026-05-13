@@ -1,0 +1,20 @@
+[Unit]
+Description=qdistro stub notepad (Phase 3 thesis demo receiver)
+# Wants the per-user relay to be up so broker.ListReceivers sees us
+# via UserRelay — we're still addressable without it, but discovery
+# depends on the relay.
+Wants=qdistro-user-relay.service
+After=qdistro-user-relay.service
+
+[Service]
+Type=simple
+# Headless by default for Phase 3 smoke tests. Real-display launches
+# override by dropping QT_QPA_PLATFORM in an environment file or
+# using `systemctl --user set-environment`.
+Environment=QT_QPA_PLATFORM=offscreen
+ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/stubs/qstub_notepad.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
