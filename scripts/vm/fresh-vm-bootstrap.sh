@@ -94,17 +94,12 @@ for pol in selinux/broker selinux/pwd selinux/tier1; do
     fi
 done
 
-# ---- 6. Install qdshell QML stack ---------------------------------------
-log "installing qdshell QML..."
-install -d -o admin -g users /home/admin/.config/quickshell/qdshell
-cp -r "$SRC/qdshell"/* /home/admin/.config/quickshell/qdshell/
-chown -R admin:users /home/admin/.config/quickshell/qdshell
-
-# ---- 7. Greetd wiring ---------------------------------------------------
-if [ -f "$SRC/qdistro/deploy/greetd-config.toml" ]; then
-    log "wiring greetd..."
-    install -m 0644 "$SRC/qdistro/deploy/greetd-config.toml" /etc/greetd/config.toml
-fi
+# ---- 6. Install qdwin session (weston + qdshell user units) -------------
+log "installing qdwin session (noctalia-session + noctalia-shell user units)..."
+bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
+    "$SRC/qdshell" \
+    || { echo "[bootstrap] qdwin-session install failed"; exit 3; }
 
 log "bootstrap complete."
-log "to start the qdwin session: systemctl start greetd.service"
+log "start the session now with:"
+log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"

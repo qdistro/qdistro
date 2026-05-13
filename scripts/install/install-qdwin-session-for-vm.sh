@@ -1,0 +1,116 @@
+#!/bin/bash
+# Install the admin-user systemd session that runs qdwin + qdshell.
+#
+# Two user units land in /home/admin/.config/systemd/user/:
+#
+#   noctalia-session.service  — weston with qdwin-shell.so on the drm
+#                               backend, claiming wayland-1.
+#   noctalia-shell.service    — quickshell loading the qdshell QML stack
+#                               from /usr/share/quickshell/qdshell/.
+#
+# The unit names are kept as noctalia-* for compatibility with the
+# qdwin-noctalia GUI test harness (tests/integration/qdwin-noctalia/
+# noctalia-helpers.sh greps these specific names).
+#
+# Args:
+#   $1 — path to qdshell source tree (default /root/qdistro-src/qdshell)
+#
+# Side effects:
+#   - admin added to video / input / render groups (needed for drm
+#     backend + libinput).
+#   - admin lingering enabled so the user manager runs after
+#     autologin completes.
+#   - /home/admin/weston.ini written with qdwin-shell.so + drm backend.
+#   - qdshell QML copied to /usr/share/quickshell/qdshell/ (system-
+#     wide so multiple users could share).
+#   - Both user units enabled (but not started — caller decides when
+#     to start them, typically at next greetd tty3 login).
+
+set -eu
+
+QDSHELL_SRC=${1:-/root/qdistro-src/qdshell}
+
+if [ ! -d "$QDSHELL_SRC" ]; then
+    echo "ERROR: qdshell source not found at $QDSHELL_SRC" >&2
+    echo "       pass the qdshell/ dir as \$1 or untar qdshell to /root/qdistro-src/qdshell/" >&2
+    exit 2
+fi
+
+# 1. Groups + linger.
+usermod -aG video,input,render admin
+loginctl enable-linger admin
+
+# 2. weston.ini: qdwin-shell.so + drm backend so SPICE sees the
+# framebuffer in a VM.
+cat > /home/admin/weston.ini <<'EOF'
+[core]
+shell=/usr/lib64/weston/qdwin-shell.so
+modules=
+
+[shell]
+locking=false
+client=
+
+# drm backend so qdwin renders to virtio-gpu and SPICE shows the
+# framebuffer in a VM.
+[output]
+name=Virtual-1
+mode=1920x1080@60
+EOF
+chown admin:users /home/admin/weston.ini
+
+# 3. System-wide qdshell QML at /usr/share/quickshell/qdshell/.
+install -d -o root -g root -m 0755 /usr/share/quickshell
+rm -rf /usr/share/quickshell/qdshell
+cp -r "$QDSHELL_SRC" /usr/share/quickshell/qdshell
+chown -R root:root /usr/share/quickshell/qdshell
+
+# 4. User systemd units.
+install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
+
+cat > /home/admin/.config/systemd/user/noctalia-session.service <<'EOF'
+[Unit]
+Description=qdwin compositor session (libweston + qdwin-shell.so)
+After=graphical.target
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-1
+ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1 --tty=2
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat > /home/admin/.config/systemd/user/noctalia-shell.service <<'EOF'
+[Unit]
+Description=qdshell QML on top of qdwin
+After=noctalia-session.service
+Requires=noctalia-session.service
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=QML_DISABLE_DISK_CACHE=1
+ExecStartPre=/bin/sh -c 'while [ ! -e $XDG_RUNTIME_DIR/wayland-1 ]; do sleep 0.5; done'
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+chown -R admin:users /home/admin/.config/systemd
+
+# 5. Enable (but don't start — caller decides).
+runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service' \
+    2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
+
+echo "qdwin session installed."
+echo "  start now:    runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
+echo "  start at boot: systemctl --user --machine=admin@ start noctalia-shell.service  (after reboot/relogin)"
