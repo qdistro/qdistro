@@ -31,6 +31,11 @@ dist/
 *-execution.log
 test-output/
 screenshots/
+test-screenshots/
+**/screenshots/
+*.screenshot.png
+shot-*.png
+shot-*.jpg
 
 # meson out-of-tree builds at every level
 daemons/build/
