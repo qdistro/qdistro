@@ -100,14 +100,25 @@ tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
 # can fetch it before unpacking anything.
 cp "$REPO/scripts/vm/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
-log "stage 4b: starting host HTTP server on 127.0.0.1:8765..."
-if ss -tln 2>/dev/null | grep -q ':8765 '; then
-    log "WARN: port 8765 already bound — assuming compatible server"
-else
-    (cd "$STAGE" && python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/spin-http.log 2>&1) &
-    HTTP_PID=$!
-    sleep 1
+log "stage 4b: starting host HTTP server on 0.0.0.0:8765..."
+# A stale server from a prior test run will likely serve from a
+# different staging dir (or be bound to 127.0.0.1 only, unreachable
+# from the VM's SLIRP NAT view at 10.0.2.2). Take ownership of the
+# port: if it's bound, kill the holder and rebind from $STAGE.
+if ss -tln 2>/dev/null | awk '{print $4}' | grep -q ':8765$'; then
+    log "stage 4b: port 8765 already bound; reclaiming..."
+    PIDS=$(ss -tlnp 2>/dev/null | awk '/:8765 / { for(i=1;i<=NF;i++) if (match($i, /pid=([0-9]+)/, m)) print m[1] }' | sort -u)
+    if [ -n "$PIDS" ]; then
+        kill $PIDS 2>/dev/null || true
+        sleep 0.5
+    fi
 fi
+# Bind on 0.0.0.0 so the VM (which reaches us via 10.0.2.2 over SLIRP
+# NAT) can connect. Restricting to 127.0.0.1 is unreachable from the
+# guest.
+(cd "$STAGE" && python3 -m http.server 8765 --bind 0.0.0.0 >/tmp/spin-http.log 2>&1) &
+HTTP_PID=$!
+sleep 1
 
 log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 "$SCRIPT_DIR/vm-exec" "$VM" "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:8765/fresh-vm-bootstrap.sh" >&2 \

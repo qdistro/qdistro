@@ -128,6 +128,8 @@ virt-customize \
     -a "$PARTIAL" \
     --run-command 'zypper -n --no-gpg-checks refresh' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
+    --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
+    --run-command 'systemctl mask greetd.service 2>/dev/null || true' \
     --run-command 'zypper clean -a' \
     --run-command 'rm -rf /var/cache/zypp/* /tmp/* /var/tmp/* 2>/dev/null; true' \
     --run-command 'journalctl --vacuum-time=1s 2>/dev/null; true'

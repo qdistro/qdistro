@@ -5,7 +5,7 @@
 #   3. Build qdistro's C daemons against qdwin's protocol XML.
 #   4. Install the Python broker / polkit-agent / pwd / etc. services.
 #   5. Install the qdshell QML stack.
-#   6. Wire greetd to start qdwin + qdshell on tty3.
+#   6. Install + enable user systemd units that start qdwin + qdshell.
 #
 # Prerequisites (handled by build-baked-baseweed.sh):
 #   - SELinux permissive
@@ -34,6 +34,17 @@ HOST="${QDISTRO_HTTP_HOST:-http://10.0.2.2:8765}"
 SRC=/root/qdistro-src
 
 log() { echo "[bootstrap] $*"; }
+
+# ---- 0. Defensive masking ------------------------------------------------
+# jeos-firstboot fights us for tty1 and blocks multi-user.target;
+# greetd would grab the DRM seat and prevent admin's user manager from
+# starting noctalia-session.service ("Device or resource busy" from
+# libseat). build-baked-baseweed.sh masks both at bake time; this is
+# belt-and-braces for images baked before that fix.
+log "masking jeos-firstboot + greetd (idempotent)..."
+systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true
+systemctl disable --now greetd.service 2>/dev/null || true
+systemctl mask greetd.service 2>/dev/null || true
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
