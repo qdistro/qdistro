@@ -29,7 +29,6 @@
 # Time budget: roughly equal to one normal fresh-vm-bootstrap plus
 # ~30s of virt-customize. Reuses baseweed-baked, so no zypper install.
 #
-# Per memory/fresh_vm_recipe_phase6.5.md and vm_naming.md.
 set -eo pipefail
 
 FORCE=0

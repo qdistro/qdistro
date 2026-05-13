@@ -36,7 +36,7 @@ cat > "$TMPXML" <<EOF
   <currentMemory unit='KiB'>4194304</currentMemory>
   <vcpu placement='static'>2</vcpu>
   <os>
-    <type arch='x86_64' machine='pc-q35'>hvm</type>
+    <type arch='x86_64' machine='pc'>hvm</type>
     <boot dev='hd'/>
   </os>
   <features><acpi/><apic/></features>

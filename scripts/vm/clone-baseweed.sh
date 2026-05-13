@@ -27,8 +27,10 @@
 # zypper install-deps becomes a no-op (idempotent: already installed).
 # Build the baked image first via build-baked-baseweed.sh.
 #
-# Per memory/fresh_vm_recipe_phase6.5.md and vm_naming.md.
 set -euo pipefail
+
+# Force session URI so we do not silently query system libvirtd.
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///session}"
 
 PREFIX=""
 GPU=0
@@ -59,7 +61,7 @@ if [ "$FROM_BAKED" = 1 ] && [ "$FROM_ENFORCING" = 1 ]; then
 fi
 
 VM="${PREFIX}-$(date +%y%m%d-%H%M)"
-TEMPLATE="${QDWIN_VM_TEMPLATE:-qdwin-weston-260422-1208}"
+TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
 if [ "$FROM_ENFORCING" = 1 ]; then

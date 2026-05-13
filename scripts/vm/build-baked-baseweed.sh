@@ -26,8 +26,6 @@
 # zypper inside libguestfs's appliance, which has no qga involvement.
 #
 # Failure mode of the previous approach is documented in:
-#   memory/phase8_session_260430_late.md   §Bake post-mortem
-#   memory/phase8_session_260430_continued.md   §task(100) bake
 #
 # Usage:
 #   ./build-baked-baseweed.sh                # builds, errors if baked exists
@@ -38,7 +36,6 @@
 # one. Mostly the zypper download + install. virt-customize itself
 # adds ~30–60 s of overhead (appliance boot + mount).
 #
-# Per memory/fresh_vm_recipe_phase6.5.md and vm_naming.md.
 set -euo pipefail
 
 FORCE=0

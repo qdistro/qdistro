@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD — the test password baked into the cloned VM's user accounts}"
+: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD (test password baked into cloned VM user accounts)}"
 
 # QDWIN_VM_TEMPLATE: optional. clone-baseweed.sh dumps this domain's
 # XML and substitutes name + disk path + MAC for each new test VM.

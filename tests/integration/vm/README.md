@@ -14,7 +14,7 @@ qdwin-weston VM because they depend on:
 
 ```bash
 # Point at the VM:
-export VM_NAME=qdwin-weston-260422-1208 # or any clone
+export VM_NAME=qdistro-template # or any clone
 
 # Run the whole suite:
 bats tests/integration/vm/
@@ -127,7 +127,7 @@ When a new probe lands in `scripts/vm/`, add a matching
 @test here. The test body should:
 
 1. Assume the VM already has the probe deployed (or deploy it via
- HTTP-server-on-host pattern; see `memory/http_server_vm_deploy.md`).
+HTTP-server-on-host pattern: the host serves the three sibling-repo tarballs over SLIRP NAT on 10.0.2.2:8765.
 2. Run the probe via `vm-exec`.
 3. Assert on exit code via `[ "$status" -eq 0 ]`.
 4. Optionally `run-asserts` specific log lines via grep.
