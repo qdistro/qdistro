@@ -48,14 +48,14 @@ done
 # ---- 2. Build qdwin ------------------------------------------------------
 log "building qdwin (libweston shell plugin)..."
 cd "$SRC/qdwin"
-meson setup build --wipe
+meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
 
 # ---- 3. Build qdistro daemons (C, against ../qdwin XML) ------------------
 log "building qdistro daemons..."
 cd "$SRC/qdistro/daemons"
-meson setup build --wipe
+meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
 
@@ -73,7 +73,7 @@ INSTALLERS=(
     "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-    "scripts/install/install-recall-for-vm.sh          $QD/recall"
+    "scripts/install/install-recall-for-vm.sh          $QD"
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
 )
 for entry in "${INSTALLERS[@]}"; do

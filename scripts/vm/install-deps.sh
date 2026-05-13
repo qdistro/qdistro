@@ -39,6 +39,13 @@ QDISTRO_PKGS=(
   qemu-x86 qemu-tools qemu-ui-spice-core qemu-ui-spice-app spice-vdagent
   qemu-audio-pipewire qemu-audio-alsa
   libguestfs guestfs-tools
+  # qdshell QML stack: noctalia-qs is Tumbleweed's quickshell package
+  # (the binary is /usr/bin/qs, despite the package being named
+  # noctalia-qs after the Noctalia project that ships it).
+  noctalia-qs
+  qt6-declarative-imports qt6-svg qt6-shadertools
+  # bats for in-VM integration tests
+  bats
 )
 
 # When sourced, return without running zypper. Sourceable detection:

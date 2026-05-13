@@ -1,115 +1,84 @@
-# 02 — dismiss the first-run "Privacy Update" modal
+# 02 — no upgrade/privacy wizard on fresh launch
 
-**Acceptance criterion:** Noctalia's first-launch "Privacy Update"
-consent modal can be dismissed via a left-click on its "GOT IT"
-button, after which the wallpaper is fully visible.
+**Acceptance criterion:** A first-launch qdshell session shows the bar
+and wallpaper immediately, with no telemetry / privacy / upgrade
+modal in the way.
 
-This exercises:
-- Layer-surface modal rendering (Noctalia models the modal as a
- dimmer + content layer surface, not an xdg_popup)
-- Pointer event delivery to a layer surface
-- Layer-surface destroy path on dismissal
-
-This is the simplest interaction test that proves clicks reach
-Noctalia.
+This is a regression test for the qdshell fork's strip pass.
+Upstream Noctalia ships an `UpdateService.qml` that pops a
+"Privacy Update" consent modal on version bumps, and a 5-step
+first-run setup wizard for new installs. Both were removed during
+the fork (see qdshell's CREDITS.md + the fork-base strip commit).
+This scenario keeps them removed: if either component creeps back
+in via an upstream cherry-pick, this test catches it.
 
 ## Setup
 
 ```bash
 source qdwin/tests/gui/qdwin-helpers.sh
 source tests/integration/qdwin-noctalia/noctalia-helpers.sh
-qdwin_set_vm "${VMNAME:-noctalia-vis-260503-1021}"
+qdwin_set_vm "${VMNAME:?set VMNAME to a running qdshell-on-qdwin VM}"
 
-# The "Privacy Update" telemetry wizard is shown on a Noctalia
-# *upgrade* (UpdateService.qml triggers it when
-# `compareVersions(changelogLastSeenVersion, "4.0.2") < 0` AND
-# `Settings.isFreshInstall == false`). A wholly fresh user account
-# would show the 5-step *first-run* setup wizard instead, which
-# this scenario isn't asserting on. So: reset state, then seed
-# settings.json to look like a pre-4.0.2 install — that is the
-# minimum state required to trigger the privacy wizard.
+# Reset state so the first-run wizard *would* trigger if it still
+# existed. Both ~/.config/qdshell/ (the qdshell-renamed settings
+# path) and ~/.config/noctalia/ (the original) are cleared, so
+# either codepath would fire.
 ADMIN_USER=$("$QDWIN_VM_EXEC" "$VMNAME" 'getent passwd 1000 | cut -d: -f1' 2>/dev/null | tail -1)
 "$QDWIN_VM_EXEC" "$VMNAME" "
- runuser -u $ADMIN_USER -- rm -rf /home/$ADMIN_USER/.config/noctalia /run/user/1000/quickshell
- install -d -o $ADMIN_USER -g $ADMIN_USER /home/$ADMIN_USER/.config/noctalia
- cat > /home/$ADMIN_USER/.config/noctalia/settings.json <<'JSON'
-{
- \"application\": { \"isFreshInstall\": false },
- \"changelog\": { \"lastSeenVersion\": \"3.0.0\" }
-}
-JSON
- chown $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.config/noctalia/settings.json
+    runuser -u $ADMIN_USER -- rm -rf \
+        /home/$ADMIN_USER/.config/qdshell \
+        /home/$ADMIN_USER/.config/noctalia \
+        /run/user/1000/quickshell
 "
 noct_restart
-# Wizard rendering is async; give it ~2s to mount.
 sleep 2
 ```
 
 ## Steps
 
-### Step 1 — capture initial frame, confirm modal is up
+### Step 1 — fresh-launch frame
 
 ```bash
-noct_screenshot_awake /tmp/02-step1-modal.png
+noct_screenshot_awake /tmp/02-fresh-launch.png
 ```
 
-**Assert (1.1):** the screenshot shows a dark dimmer covering the
-desktop (background outside the modal is dimmed dark blue/black).
-**Assert (1.2):** there is a centered modal panel with text
-including "PRIVACY" or "ANONYMOUS" (OCR check: extract text from
-the central 50% of the screenshot via tesseract; expect at least
-one of those substrings).
-**Assert (1.3):** there is a "GOT IT" button visible roughly
-between (1100, 540) and (1230, 600).
+**Assert (1.1):** the bar is visible at the top of the screen.
+**Assert (1.2):** the wallpaper (or default solid colour) is
+visible across the full desktop — no centered modal panel, no dark
+dimmer.
+**Assert (1.3):** OCR of the central 50% of the screenshot contains
+NEITHER of: "Privacy", "PRIVACY", "GOT IT", "Welcome to Noctalia",
+"Setup Wizard", "Continue".
 
-### Step 2 — click "GOT IT"
-
-```bash
-qdwin_click 1170 570 left
-sleep 1.5
-noct_screenshot_awake /tmp/02-step2-after-click.png
-```
-
-**Assert (2.1):** the modal is gone — comparing the central 50% of
-the screenshot to step 1, the dark dimmer is no longer present.
-A pixel-level cheap check: average brightness of the central
-1000×600 px is now > 40 (was < 30 with the modal up); the dimmer
-is fully transparent or destroyed.
-**Assert (2.2):** the wallpaper (Noctalia owl/moon or user's
-configured wallpaper) is now visible in the central area.
-**Assert (2.3):** the bar is still in the top 31 px.
-
-### Step 3 — confirm the dimmer layer-surface was destroyed
+### Step 2 — service log
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
- "runuser -l admin -c \"journalctl --user -u noctalia-session.service --since '30 seconds ago' --no-pager\"" \
- > /tmp/02-weston.log
+    "runuser -l admin -c \"journalctl --user -u noctalia-shell.service --since '30 seconds ago' --no-pager\"" \
+    > /tmp/02-shell.log
 ```
 
-**Assert (3.1):** zero protocol errors in the captured log.
-**Assert (3.2):** Noctalia is still alive — `noct_session_healthy`.
-
-## Cleanup
-
-Modal stays dismissed across this VM's lifetime. To reset for next
-test runs, delete `/home/admin/.config/noctalia/Settings.json`.
+**Assert (2.1):** zero protocol errors in the captured log.
+**Assert (2.2):** `noct_session_healthy` returns OK — the shell
+unit is active and `/usr/bin/qs` is running.
+**Assert (2.3):** the log does NOT contain the strings
+`UpdateService.qml`, `TelemetryWizard`, or `PrivacyModal` — those
+modules were stripped and should not be re-introduced.
 
 ## Pass criteria
 
-All asserts in steps 1-3 pass.
+All asserts in steps 1 and 2 pass.
 
 ## Known failure modes
 
-1. **Modal at unexpected coordinates** — Noctalia may center the
- modal at slightly different positions on different scaling
- factors. If the click in step 2 misses (assert 2.1 fails),
- re-screenshot, locate "GOT IT" via OCR with a tighter
- bounding-box, recompute the click target.
+1. **Upstream cherry-pick re-introduced the wizard.** If a
+   pull from noctalia-shell-upstream landed `UpdateService.qml` or
+   `Modules/Welcome/`, the wizard fires again. The fix is to
+   re-apply the strip to those files. See qdshell's CREDITS.md
+   for the strip rationale; the source files to look at are
+   `Commons/Settings.qml` (which gates the welcome flow) and any
+   new `Modules/Welcome*/` directory.
 
-2. **Wallpaper not yet loaded** — the "Wallpaper Scan failed for
- Virtual-1 exit code: 1 (directory might not exist)" warning
- means `/home/admin/Pictures/Wallpapers` is empty. Default
- bundled wallpaper should still render. If post-dismiss
- screenshot is fully black, the wallpaper service has the issue.
- Not a layer-shell bug.
+2. **Bar not yet rendered** (assert 1.1 fails): `noctalia-shell.service`
+   needs ~2-3 seconds after `noctalia-session.service` to bind its
+   layer-shell surfaces. Increase the post-`noct_restart` sleep.

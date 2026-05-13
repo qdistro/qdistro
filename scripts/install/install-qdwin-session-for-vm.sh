@@ -42,17 +42,26 @@ loginctl enable-linger admin
 
 # 2. weston.ini: qdwin-shell.so + drm backend so SPICE sees the
 # framebuffer in a VM.
+#
+# Path resolution: qdwin was built with `meson setup build` (no
+# --prefix) which defaults to /usr/local. fresh-vm-bootstrap.sh
+# passes --prefix=/usr so qdwin-shell.so lands at /usr/lib64/weston/.
+# If you're hand-building elsewhere, adjust this path to match
+# `meson install --dry-run` output.
+#
+# renderer=pixman is critical for virtio-gpu VMs without accel3d —
+# the GL renderer segfaults on a software-only virtio-gpu. Drop the
+# line on hardware with a real GPU to get hardware acceleration.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
+renderer=pixman
 modules=
 
 [shell]
 locking=false
 client=
 
-# drm backend so qdwin renders to virtio-gpu and SPICE shows the
-# framebuffer in a VM.
 [output]
 name=Virtual-1
 mode=1920x1080@60
@@ -77,7 +86,7 @@ After=graphical.target
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
-ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1 --tty=2
+ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
 

@@ -2,7 +2,10 @@
 # install-recall-for-vm.sh — idempotent install of qdistro-recall
 # Phase-8 §step 0 MVP onto a fresh-clone VM.
 #
-# Sources from /root/recall-src/ (staged by fresh-vm-bootstrap.sh).
+# Takes the umbrella root as $1 (default /root/qdistro-src/qdistro).
+# Recall is unusual: its files are spread across three subtrees of
+# the umbrella — recall/ (daemon + ingest + units), cli/ (CLI), and
+# sdk/qdistro_app/ (SDK module). We pull from all three.
 #
 # Layout:
 #   /usr/libexec/qdistro/qdistro_recall_ingest.py      # engine
@@ -18,11 +21,16 @@
 # `import qdistro_app.recall` works without PYTHONPATH gymnastics.
 set -euo pipefail
 
-SRC=${1:-/root/recall-src}
-if [ ! -d "$SRC" ]; then
-    echo "[install-recall] missing source dir $SRC" >&2
+UMBRELLA=${1:-/root/qdistro-src/qdistro}
+if [ ! -d "$UMBRELLA/recall" ] || [ ! -d "$UMBRELLA/cli" ] || [ ! -d "$UMBRELLA/sdk/qdistro_app" ]; then
+    echo "[install-recall] umbrella tree incomplete at $UMBRELLA" >&2
+    echo "       need $UMBRELLA/{recall,cli,sdk/qdistro_app}/" >&2
     exit 2
 fi
+
+RECALL_SRC="$UMBRELLA/recall"
+CLI_SRC="$UMBRELLA/cli"
+SDK_SRC="$UMBRELLA/sdk/qdistro_app"
 
 DEST_LIB_QDISTRO=/usr/libexec/qdistro
 DEST_BIN=/usr/local/bin
@@ -32,8 +40,8 @@ DEST_VAR=/var/lib/qdistro/recall
 install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_BIN" "$DEST_SYSD"
 
 # Engine + reaper modules.
-install -m 0644 "$SRC/qdistro_recall_ingest.py"  "$DEST_LIB_QDISTRO/"
-install -m 0644 "$SRC/qdistro_recall_daemon.py"  "$DEST_LIB_QDISTRO/"
+install -m 0644 "$RECALL_SRC/qdistro_recall_ingest.py"  "$DEST_LIB_QDISTRO/"
+install -m 0644 "$RECALL_SRC/qdistro_recall_daemon.py"  "$DEST_LIB_QDISTRO/"
 
 # Host CLI shim (so `qdistro-recall search ...` works for any user).
 cat >"$DEST_BIN/qdistro-recall" <<'CLI'
@@ -41,11 +49,11 @@ cat >"$DEST_BIN/qdistro-recall" <<'CLI'
 exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_recall_cli.py "$@"
 CLI
 chmod 0755 "$DEST_BIN/qdistro-recall"
-install -m 0644 "$SRC/qdistro_recall_cli.py" "$DEST_LIB_QDISTRO/"
+install -m 0644 "$CLI_SRC/qdistro_recall_cli.py" "$DEST_LIB_QDISTRO/"
 
 # systemd instance unit + timer.
-install -m 0644 "$SRC/qdistro-recall@.service" "$DEST_SYSD/"
-install -m 0644 "$SRC/qdistro-recall@.timer"   "$DEST_SYSD/"
+install -m 0644 "$RECALL_SRC/qdistro-recall@.service" "$DEST_SYSD/"
+install -m 0644 "$RECALL_SRC/qdistro-recall@.timer"   "$DEST_SYSD/"
 
 # SDK drop under site-packages. Find the python3 sitepackages dir
 # at runtime — Tumbleweed jumps minor versions across rebases, so
@@ -56,9 +64,9 @@ install -d -m 0755 "$PY_SITE/qdistro_app"
 # Don't clobber the existing __init__.py if the SDK is already
 # installed (e.g. from a future qdistro_app RPM); just drop the
 # recall submodule.
-install -m 0644 "$SRC/qdistro_app/recall.py" "$PY_SITE/qdistro_app/"
+install -m 0644 "$SDK_SRC/recall.py" "$PY_SITE/qdistro_app/"
 if [ ! -f "$PY_SITE/qdistro_app/__init__.py" ]; then
-    install -m 0644 "$SRC/qdistro_app/__init__.py" \
+    install -m 0644 "$SDK_SRC/__init__.py" \
         "$PY_SITE/qdistro_app/__init__.py"
 fi
 
