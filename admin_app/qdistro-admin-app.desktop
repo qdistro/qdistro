@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=qdistro admin approvals
+Exec=env QT_QPA_PLATFORM=xcb /usr/bin/python3 /home/admin/qdistro/admin_app/qdistro_admin_app.py
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
