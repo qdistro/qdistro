@@ -1,0 +1,20 @@
+[Unit]
+Description=qdistro polkit authentication agent (PAM / fprintd / broker)
+Documentation=https://qdistro.invalid/spec/13
+# Runs in the admin's user session so it can register with polkitd
+# scoped to that session. Needs the user session bus + the qdistro
+# admin broker (broker delegation method).
+After=graphical-session-pre.target xdg-desktop-portal.service
+Wants=qdistro-admin-broker.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_polkit_agent.py
+Restart=on-failure
+RestartSec=3
+# Subprocess prompt path — agent spawns this on PAM auth.
+Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
+
+[Install]
+WantedBy=graphical-session.target

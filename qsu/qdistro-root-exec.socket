@@ -1,0 +1,21 @@
+[Unit]
+Description=qdistro privileged-exec listen socket
+
+[Socket]
+# Socket lives in a systemd-managed RuntimeDirectory (0755 root:root)
+# rather than directly in /run — closes a symlink-race window at
+# unlink-then-bind for the non-systemd fallback path, and prevents
+# any non-root user from replacing the sock node between stop/start.
+ListenStream=/run/qdistro-root-exec/sock
+# World-writable on the socket node itself is intentional: peers
+# from any uid connect; peer identity is authoritative via
+# SO_PEERCRED inside the service, and every privileged action still
+# passes admin approval. Defense-in-depth would be per-user ACLs +
+# membership in a "qsu" group; deferred.
+SocketMode=0666
+RuntimeDirectory=qdistro-root-exec
+RuntimeDirectoryMode=0755
+Accept=no
+
+[Install]
+WantedBy=sockets.target
