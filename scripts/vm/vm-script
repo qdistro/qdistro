@@ -1,0 +1,49 @@
+#!/bin/bash
+# vm-script — run a multi-line script inside a libvirt VM without
+# fighting vm-exec's JSON-quoting fragility.
+#
+# vm-exec builds qemu-ga's guest-exec payload via string concatenation,
+# so any embedded " or ' in the command line breaks the parse with
+# "failed to parse JSON: array value separator ',' expected". vm-script
+# sidesteps this by:
+#   1. Reading the script body from stdin (or a file with -f).
+#   2. Base64-encoding it on the host (one opaque ASCII token, no quotes).
+#   3. Invoking vm-exec with a quote-free wrapper that base64-decodes
+#      and pipes into bash inside the guest.
+#
+# Usage:
+#   echo 'foo "bar"' | scripts/vm/vm-script <vm>
+#   scripts/vm/vm-script <vm> -f /tmp/script.sh
+#   scripts/vm/vm-script <vm> <<'EOF'
+#   command with "quotes" 'and apostrophes' and $(subshells)
+#   EOF
+#
+# Exit code: vm-exec's exit code (and the guest script's exit code is
+# echoed on stderr if non-zero).
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "Usage: vm-script <vm> [-f <script-file>]" >&2
+    echo "       vm-script <vm> < <(...)" >&2
+    exit 2
+fi
+
+VM="$1"; shift
+SCRIPT_FILE=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f|--file) SCRIPT_FILE="$2"; shift 2 ;;
+        *) echo "vm-script: unknown arg '$1'" >&2; exit 2 ;;
+    esac
+done
+
+if [ -n "$SCRIPT_FILE" ]; then
+    [ -r "$SCRIPT_FILE" ] || { echo "vm-script: cannot read $SCRIPT_FILE" >&2; exit 2; }
+    B64=$(base64 -w0 <"$SCRIPT_FILE")
+else
+    B64=$(base64 -w0)
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$SCRIPT_DIR/vm-exec" "$VM" "echo $B64 | base64 -d | bash"
