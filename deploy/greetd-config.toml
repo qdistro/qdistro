@@ -1,0 +1,6 @@
+[terminal]
+vt = 3
+
+[default_session]
+user = "admin"
+command = "/usr/local/bin/qdistro-startlxqtwayland"
