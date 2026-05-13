@@ -1,0 +1,12 @@
+[Unit]
+Description=qdistro recall TTL reaper timer for user %i
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=15min
+Unit=qdistro-recall@%i.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
