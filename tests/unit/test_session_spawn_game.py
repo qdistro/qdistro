@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent
+_MOD = (Path(__file__).resolve().parent.parent.parent
         / "games" / "qdistro_session_spawn_game.py")
 spec = importlib.util.spec_from_file_location(
     "qdistro_session_spawn_game", _MOD)

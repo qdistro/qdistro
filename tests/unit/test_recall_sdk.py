@@ -15,11 +15,11 @@ import sys
 from pathlib import Path
 
 # Make recall importable.
-PHASE1 = Path(__file__).resolve().parent.parent
-RECALL_DIR = PHASE1 / "recall"
-SDK_DIR = PHASE1 / "sdk"
-CLI_DIR = PHASE1 / "cli"
-BB_DIR = PHASE1 / "browser_bridge"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+RECALL_DIR = REPO_ROOT / "recall"
+SDK_DIR = REPO_ROOT / "sdk"
+CLI_DIR = REPO_ROOT / "cli"
+BB_DIR = REPO_ROOT / "browser_bridge"
 
 # Pre-import the engine so `import qdistro_recall_ingest` resolves
 # without going through /usr/libexec/qdistro.

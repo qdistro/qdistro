@@ -6,8 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-PHASE1 = Path(__file__).resolve().parent.parent
-SNAP_DIR = PHASE1 / "snapshots"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SNAP_DIR = REPO_ROOT / "snapshots"
 
 
 def _load(label: str, path: Path):

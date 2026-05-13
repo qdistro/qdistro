@@ -15,7 +15,7 @@ import struct
 import sys
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent
+_MOD = (Path(__file__).resolve().parent.parent.parent
         / "browser_bridge" / "qdistro_browser_bridge.py")
 spec = importlib.util.spec_from_file_location(
     "qdistro_browser_bridge", _MOD)

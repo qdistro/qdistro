@@ -10,7 +10,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent
+_MOD = (Path(__file__).resolve().parent.parent.parent
         / "snapshots" / "qdistro_snapshots.py")
 spec = importlib.util.spec_from_file_location(
     "qdistro_snapshots", _MOD)

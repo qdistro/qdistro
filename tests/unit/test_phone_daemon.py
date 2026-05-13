@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-PHASE1 = Path(__file__).resolve().parent.parent
-PHONE_DIR = PHASE1 / "phone"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+PHONE_DIR = REPO_ROOT / "phone"
 
 
 def _load(label: str, path: Path):

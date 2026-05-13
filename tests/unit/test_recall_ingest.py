@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent
+_MOD = (Path(__file__).resolve().parent.parent.parent
         / "recall" / "qdistro_recall_ingest.py")
 spec = importlib.util.spec_from_file_location(
     "qdistro_recall_ingest", _MOD)

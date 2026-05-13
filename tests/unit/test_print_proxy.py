@@ -19,7 +19,7 @@ import time
 import pytest
 
 PROXY_PY = os.path.join(
-    os.path.dirname(__file__), "..", "print", "qdistro_print_proxy.py")
+    os.path.dirname(__file__), "..", "..", "print", "qdistro_print_proxy.py")
 
 
 def _wait_for_socket(path: str, timeout: float = 5.0) -> None:

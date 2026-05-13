@@ -12,8 +12,7 @@ import re
 import pytest
 
 POLICY_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "compositor",
-                 "spike-6.5", "pwd-policy"))
+    os.path.join(os.path.dirname(__file__), "..", "..", "selinux", "pwd"))
 
 
 def _read(name: str) -> str:
