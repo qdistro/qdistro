@@ -1,0 +1,28 @@
+[Unit]
+Description=qdistro phone integration (spec/18 Phase-8 MVP)
+# Reads /etc/qdistro/phone/qdistro-phone.conf for the ntfy URL +
+# secret. ConditionPathExists-skips on a vanilla install (the
+# phone tab in the admin app drops the conf when the operator
+# pairs a phone for the first time).
+ConditionPathExists=/etc/qdistro/phone/qdistro-phone.conf
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/qdistro/phone/qdistro-phone.conf
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_phone_daemon.py \
+    --listen-host ${QDISTRO_PHONE_LISTEN_HOST:-127.0.0.1} \
+    --listen-port ${QDISTRO_PHONE_LISTEN_PORT:-7867} \
+    --queue-path ${QDISTRO_PHONE_QUEUE_PATH:-/var/lib/qdistro/phone/decisions.sqlite} \
+    --config-dir ${QDISTRO_PHONE_CONFIG_DIR:-/etc/qdistro/phone}
+Restart=on-failure
+RestartSec=5
+DynamicUser=false
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qdistro/phone
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
