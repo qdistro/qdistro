@@ -1,0 +1,26 @@
+# Minimal pyproject for pytest config. qdistro's Python modules are
+# installed as flat .py files on target machines (each module lives
+# next to its companions on the VM); this file exists purely so pytest
+# can discover the unit tests + populate sys.path.
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+python_files = ["test_*.py"]
+# Promote module directories onto sys.path so tests can import
+# qdistro_admin_*, qdistro_polkit_*, qdistro_pwd_*, etc. directly.
+pythonpath = [
+  "broker",
+  "cli",
+  "tui",
+  "qsu",
+  "polkit",
+  "user_relay",
+  "pwd",
+  "print",
+  "phone",
+  "recall",
+  "browser_bridge",
+  "snapshots",
+  "sdk",
+  "admin_app",
+]

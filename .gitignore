@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Build
+build/
+build-*/
+dist/
+*.o
+*.so
+
+# Generated wayland-scanner outputs
+*-server-protocol.h
+*-client-protocol.h
+*-protocol.c
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.obsidian/
+
+# Local test artifacts
+*-credentials.txt
+*-execution.log
+test-output/
+screenshots/
