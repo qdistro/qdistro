@@ -17,7 +17,7 @@ from qdistro_print_audit import PrintAuditLog
 
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-PROXY = os.path.join(REPO, "phase1", "print", "qdistro_print_proxy.py")
+PROXY = os.path.join(REPO, "print", "qdistro_print_proxy.py")
 
 
 def _wait_for_socket(path: str, timeout: float = 5.0) -> None:
@@ -67,7 +67,7 @@ def test_audit_rows_recorded_for_allowed_connection(tmp_path):
     # Make sure the proxy can find the audit module — print/
     # is on sys.path via the conftest, but the subprocess inherits a
     # fresh PYTHONPATH so the proxy needs an explicit hint.
-    env["PYTHONPATH"] = (os.path.join(REPO, "phase1", "print")
+    env["PYTHONPATH"] = (os.path.join(REPO, "print")
                          + os.pathsep + env.get("PYTHONPATH", ""))
 
     proxy = _start_proxy(env)
@@ -111,7 +111,7 @@ def test_audit_records_deny_on_gate_error(tmp_path):
     # Force the broker gate ON with broker unreachable -> deny.
     env["QDISTRO_PRINT_GATE_REQUIRED"] = "1"
     env["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/nonexistent/dbus"
-    env["PYTHONPATH"] = (os.path.join(REPO, "phase1", "print")
+    env["PYTHONPATH"] = (os.path.join(REPO, "print")
                          + os.pathsep + env.get("PYTHONPATH", ""))
 
     proxy = _start_proxy(env)

@@ -20,7 +20,7 @@ import pytest
 
 XML_PATH = (
     Path(__file__).resolve().parents[2]
-    / "compositor" / "qdwin" / "qdwin-shell-v1.xml"
+    .parent / "qdwin" / "qdwin" / "qdwin-shell-v1.xml"
 )
 
 
@@ -81,7 +81,7 @@ def test_modifier_bits_match_c_handler() -> None:
     """
     src = (
         Path(__file__).resolve().parents[2]
-        / "compositor" / "qdwin" / "qdwin.c"
+        .parent / "qdwin" / "qdwin" / "qdwin.c"
     ).read_text()
     # Each line of the form `if (mods & N) wmods |= MODIFIER_X;` must
     # appear exactly once with the expected bit→name pairing.

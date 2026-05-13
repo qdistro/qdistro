@@ -29,9 +29,9 @@ pytest.importorskip("dbus")
 
 # --- shared setup ---------------------------------------------------------
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _SDK = _ROOT / "sdk"
-_PLUGINS = _ROOT / "qdistro_plugins"
+_PLUGINS = _ROOT / "plugins"
 
 # qdistro_app must be importable for the plugins.
 sys.path.insert(0, str(_SDK))

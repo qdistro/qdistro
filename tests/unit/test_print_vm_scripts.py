@@ -20,7 +20,7 @@ import pytest
 
 REPO = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", ".."))
-PRINT_VM_DIR = os.path.join(REPO, "compositor", "spike-6.5", "print-vm")
+PRINT_VM_DIR = os.path.join(REPO, "print-vm")
 
 INSTALL = os.path.join(PRINT_VM_DIR, "install-print-vm.sh")
 ATTACH = os.path.join(PRINT_VM_DIR, "qdistro-print-attach-usb.sh")
