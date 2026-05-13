@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""qdistro-print-allowlist — render + push the cups-browsed allowlist.
+
+spec/20 Phase-9 §step 2 + priority #5 from 2026-04-30-continued.
+
+Subcommands:
+
+  render               Print the cups-browsed.conf snippet to stdout.
+                       Used to inspect what the broker rules currently
+                       resolve to without touching a VM.
+
+  apply --vm <name>    Render + push to the qdistro-print VM via
+                       libvirt guest-exec, then restart cups-browsed.
+                       Requires the VM to be running.
+
+The broker ListRules() call needs admin uid (1000); when running as
+root, it succeeds the same way. Non-admin / non-root invocations fail
+fast with a helpful message.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+
+# Resolve the qdistro_print_browse module — both an in-source dev path
+# (qdistro/print) and the installed path (/usr/lib/qdistro/print).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for cand in (
+    os.path.abspath(os.path.join(_HERE, "..", "..", "..", "phase1", "print")),
+    "/usr/lib/qdistro/print",
+    "/usr/libexec/qdistro/print",
+):
+    if os.path.isdir(cand) and cand not in sys.path:
+        sys.path.insert(0, cand)
+
+
+from qdistro_print_browse import render_from_broker_rules  # noqa: E402
+
+
+def _broker_list_rules() -> list[dict]:
+    try:
+        import dbus
+    except ImportError:
+        print("dbus-python missing; install python313-dbus-python",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        bus = dbus.SystemBus()
+        proxy = bus.get_object("com.qdistro.AdminBroker1",
+                               "/com/qdistro/AdminBroker1")
+        ifc = dbus.Interface(proxy, "com.qdistro.AdminBroker1")
+        rows = ifc.ListRules()
+    except dbus.DBusException as e:
+        print(f"broker ListRules failed: {e.get_dbus_message()}",
+              file=sys.stderr)
+        sys.exit(3)
+    out = []
+    for r in rows:
+        out.append({k: str(v) if not isinstance(v, (int, bool)) else v
+                    for k, v in dict(r).items()})
+    return out
+
+
+def cmd_render(args) -> int:
+    rules = _broker_list_rules()
+    sys.stdout.write(render_from_broker_rules(rules))
+    return 0
+
+
+def cmd_apply(args) -> int:
+    """Push the rendered conf into a running qdistro-print VM via
+    qga guest-file-{open,write,close}, then restart cups-browsed via
+    guest-exec. Each qga step is its own JSON-RPC call so we don't
+    need to encode the conf body inside a shell heredoc.
+    """
+    import base64
+    import json as _json
+    rules = _broker_list_rules()
+    body = render_from_broker_rules(rules).encode("utf-8")
+
+    def qga(payload: dict) -> dict:
+        argv = ["virsh", "-c", args.libvirt_uri, "qemu-agent-command",
+                args.vm, _json.dumps(payload)]
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"qga rpc {payload.get('execute')!r} failed: {r.stderr}")
+        try:
+            return _json.loads(r.stdout)
+        except _json.JSONDecodeError:
+            raise RuntimeError(
+                f"qga rpc {payload.get('execute')!r}: not JSON: {r.stdout}")
+
+    # 1. open for write+truncate.
+    open_resp = qga({"execute": "guest-file-open",
+                     "arguments": {"path": "/etc/cups/cups-browsed.conf",
+                                   "mode": "w+"}})
+    handle = open_resp.get("return")
+    if not isinstance(handle, int):
+        print(f"unexpected guest-file-open response: {open_resp}",
+              file=sys.stderr)
+        return 4
+    try:
+        # 2. base64-encode + write.
+        b64 = base64.b64encode(body).decode("ascii")
+        qga({"execute": "guest-file-write",
+             "arguments": {"handle": handle, "buf-b64": b64}})
+    finally:
+        qga({"execute": "guest-file-close",
+             "arguments": {"handle": handle}})
+    # 3. restart cups-browsed inside the VM.
+    qga({"execute": "guest-exec",
+         "arguments": {"path": "/bin/systemctl",
+                       "arg": ["restart", "cups-browsed.service"],
+                       "capture-output": False}})
+    print(f"[allowlist] pushed cups-browsed.conf to {args.vm} + "
+          f"restarted cups-browsed", file=sys.stderr)
+    sys.stdout.write(body.decode("utf-8"))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="qdistro-print-allowlist",
+        description="Render or apply cups-browsed allowlist from broker rules.")
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True
+    sp = sub.add_parser("render", help="Print rendered conf to stdout.")
+    sp.set_defaults(fn=cmd_render)
+    sp = sub.add_parser("apply",
+                        help="Push rendered conf to a running qdistro-print VM.")
+    sp.add_argument("--vm", default=os.environ.get(
+        "QDISTRO_PRINT_VM_NAME", "qdistro-print"))
+    sp.add_argument("--libvirt-uri", default=os.environ.get(
+        "QDISTRO_PRINT_LIBVIRT_URI", "qemu:///system"))
+    sp.set_defaults(fn=cmd_apply)
+    args = p.parse_args(argv[1:])
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

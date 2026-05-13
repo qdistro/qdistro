@@ -1,0 +1,29 @@
+[Unit]
+Description=qdistro IPP proxy → CUPS-in-VM (spec/20 Phase-9 skeleton)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/qdistro-print-proxy
+Restart=on-failure
+RestartSec=2
+# MVP runs as root; production should use a dedicated qdistro-print
+# system uid + AmbientCapabilities= for the bind on /run/qdistro-print/.
+User=root
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/run/qdistro-print
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_VSOCK AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
