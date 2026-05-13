@@ -1,0 +1,19 @@
+# File contexts for qdistro admin broker.
+#
+# Phase 2 (0.2.0): labels the broker .py so systemd's exec of the
+# script triggers the init_daemon_domain transition into
+# qdistro_broker_t. The .py is installed mode 0755 with a
+# `#!/usr/bin/env python3` shebang and the unit's ExecStart points
+# at the script directly (not at /usr/bin/python3 + arg). The
+# kernel reads the shebang, exec's the interpreter, but the
+# transition decision is taken on the FIRST execve target — i.e.
+# the labelled .py — so the daemon ends up in qdistro_broker_t
+# regardless of the python interpreter's own label.
+#
+# /run/qdistro/* is left unlabelled in Phase 2 — the broker's
+# runtime data is still under /var/lib/qdistro/ and /run is touched
+# only via per-uid bus sockets mediated by session_dbusd_t. A
+# future Phase 3 may move audit DB / cache under /run/qdistro/<uid>/
+# and add a regex here.
+
+/usr/libexec/qdistro/qdistro_admin_broker\.py    --  gen_context(system_u:object_r:qdistro_broker_exec_t,s0)

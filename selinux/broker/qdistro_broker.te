@@ -1,0 +1,214 @@
+## <summary>qdistro admin broker SELinux types.</summary>
+## <desc>
+##   Dedicated SELinux types for the per-uid admin broker process
+##   (qdistro-admin-broker.service).
+##
+##   Phase 1 (0.1.0) declared the types but left the broker exec
+##   unlabelled — the broker still ran as `system_dbusd_t` via dbus
+##   activation, and the dbus-chat interface forwarded to that type.
+##
+##   Phase 2 (0.2.0): labelled
+##   /usr/libexec/qdistro/qdistro_admin_broker.py as
+##   `qdistro_broker_exec_t`, added the init_daemon_domain transition
+##   so systemd-started broker runs as `qdistro_broker_t`, switched
+##   the qdistro_broker_dbus_chat() interface body to send_msg
+##   against qdistro_broker_t. The broker was declared `permissive`
+##   for the rollout pending audit2allow harvesting.
+##
+##   Phase 3 (0.3.0): dropped the permissive tag and added the allow
+##   rules audit2allow harvested from a representative workload
+##   (bats phase6.5 + phase6.6 + phase7 clipboard / handoff / qsu /
+##   SPICE clipboard probe paths) on val-260428-end. The broker
+##   became properly confined.
+##
+##   0.3.1 (2026-04-29 late): added `dbus { acquire_svc }` against
+##   `system_dbusd_t` because Tumbleweed's `dbus_system_bus_client`
+##   interface — unlike upstream refpolicy — does NOT include
+##   acquire_svc. Without it the broker died on startup with
+##   `AccessDenied: Request to own name refused by policy` and no
+##   AVCs. See gen_require + allow rule below.
+##
+##   0.3.2 (2026-04-29 evening): broker exec moved from
+##   /usr/local/lib/qdistro/ to /usr/libexec/qdistro/ so the .fc rule
+##   wins natively against Tumbleweed's `/usr/(.*/)?lib(/.*)?` →
+##   `lib_t` glob.
+##
+##   0.4.0 (2026-04-30 — co-shipped with qdistro_pwd 0.2.0): the pwd
+##   module's .fc labels the WHOLE /var/lib/qdistro/audit/ dir as
+##   qdistro_pwd_audit_t (so the daemon's pwd_audit.sqlite picks up
+##   the right type without a file_name_trans). The broker writes
+##   audit.sqlite alongside in the same dir, so it now needs explicit
+##   manage perms on qdistro_pwd_audit_t. Plus self:capability
+##   sys_ptrace because the broker's caller-identity layering also
+##   reads /proc/<other-uid>/exe for cross-uid clients.
+##
+##   0.4.1 (2026-05-01 — task(108)): grant
+##   self:capability { dac_read_search dac_override } so the broker
+##   (root in qdistro_broker_t) can traverse /var/lib/qdistro/audit/
+##   (mode 0700, owned qdistro-pwd:qdistro-pwd by install-pwd-for-vm.sh)
+##   and open audit.sqlite when install-pwd's `chown -R` reassigns its
+##   ownership to qdistro-pwd. Without these capabilities the broker
+##   dies on startup under enforcing with `sqlite3.OperationalError:
+##   unable to open database file` — DAC blocks root before SELinux
+##   even sees the file-class operation. The dir-search + file-rw
+##   manage_*_perms from 0.4.0 are necessary but not sufficient: the
+##   capability check fires *first*, and SELinux silences the file
+##   access AVC because the open never happens.
+##
+##   Caller modules (tier1, future tier2/3 .te) don't change between
+##   phases — only this module's body shifts.
+##
+##   Spec refs: doc/selinux.md §"Broker module split-out".
+## </desc>
+policy_module(qdistro_broker, 0.4.1)
+
+########################################
+#
+# Declarations
+#
+
+# Broker process domain + the labelled exec. application_domain
+# stays from Phase 2 (it pulls in the standard application allow-set
+# the daemon needs to read /usr/lib/python*/site-packages, etc.);
+# init_daemon_domain layers the systemd entry-point semantics on top.
+type qdistro_broker_t;
+type qdistro_broker_exec_t;
+application_domain(qdistro_broker_t, qdistro_broker_exec_t)
+
+# Per-uid runtime state under /run/qdistro/<uid>/* (audit DB,
+# pending-request socket). Phase 2 declared the type but doesn't
+# yet label /run/qdistro/ — a future bootstrap-side restorecon
+# will pick this up once the .fc adds the runtime regex.
+type qdistro_broker_runtime_t;
+files_type(qdistro_broker_runtime_t)
+
+# Phase 2: standard systemd-started long-running daemon. systemd
+# spawns the unit with the labelled exec as the entry-point, the
+# kernel applies init_daemon_domain's automatic type transition,
+# and the broker process drops into qdistro_broker_t.
+init_daemon_domain(qdistro_broker_t, qdistro_broker_exec_t)
+
+########################################
+#
+# Phase 3 allow-set (audit2allow-derived from the val-260428-end
+# representative workload).
+#
+
+# D-Bus client. The broker claims a well-known name on the SYSTEM
+# bus (com.qdistro.AdminBroker1) and dispatches both inbound calls
+# from qdshell / admin-app and outbound RulesReloaded / Decided /
+# RequestPending broadcasts. The interface here covers the connectto
+# + sock_file write + bus message forwarding leg.
+dbus_system_bus_client(qdistro_broker_t)
+# 0.3.1: Tumbleweed's selinux-policy ships a `dbus_system_bus_client`
+# that does NOT include `acquire_svc` (unlike upstream refpolicy
+# which lumps both into one interface). Without this explicit rule
+# the broker can talk on the bus but cannot
+# RequestName('com.qdistro.AdminBroker1') — dbus-broker rejects the
+# request with `org.freedesktop.DBus.Error.AccessDenied: Request to
+# own name refused by policy` and the broker dies on startup. The
+# policy XML's `<allow own="...">` doesn't help: the SELinux dbus
+# class check is enforced before the XML deny/allow decision.
+#
+# `gen_require` is needed because dbus_system_bus_client only pulls
+# in the `send_msg` perm — `acquire_svc` is silently absent from the
+# module's view of the dbus class on Tumbleweed.
+gen_require(`
+    class dbus acquire_svc;
+')
+allow qdistro_broker_t system_dbusd_t:dbus acquire_svc;
+
+# /var/lib/qdistro/{audit,approvals,cache}/*.sqlite. The broker
+# creates the dirs on first run (mode 0755, owner root) and writes
+# .sqlite files with sqlite3's default "open + lock + write" pattern.
+# Phase 3 stays on the generic var_lib_t label — a future Phase 4
+# may declare qdistro_broker_var_lib_t and migrate. For now the
+# inherited var_lib_t typing is fine because the directory tree
+# under /var/lib/qdistro is broker-exclusive (only root + the broker
+# domain ever touch it; no other refpolicy module manages it).
+files_search_var_lib(qdistro_broker_t)
+files_manage_var_lib_files(qdistro_broker_t)
+files_manage_var_lib_dirs(qdistro_broker_t)
+
+# Inotify on /etc/qdistro/rules.d/*.yaml. The dir itself is etc_t
+# (the broker creates it via os.makedirs but the .fc doesn't
+# label it — kept generic so admin can ship rules.d/ entries via
+# normal config-management tooling without re-labelling). The watch
+# permission is a single allow line; no upstream interface covers
+# "watch a generic etc dir".
+files_search_etc(qdistro_broker_t)
+files_read_etc_files(qdistro_broker_t)
+allow qdistro_broker_t etc_t:dir { watch read open getattr search list_dir_perms };
+allow qdistro_broker_t etc_t:file watch;
+
+# /proc/<pid>/{stat,exe,attr/current,cgroup} reads for caller
+# identity layering (qdistro_admin_broker._caller_identity_layer).
+domain_read_all_domains_state(qdistro_broker_t)
+domain_getattr_all_domains(qdistro_broker_t)
+
+# Audispd → broker AVC ingestion (spec/30 §audit). The broker
+# follows /var/log/audit/audit.log via inotify when the audisp
+# plugin is installed. logging_read_audit_log + the log dir search
+# pattern.
+logging_read_audit_log(qdistro_broker_t)
+logging_search_logs(qdistro_broker_t)
+# auditd-process /proc/<pid>/* reads (caller-identity layering walks
+# every domain's process info). domain_read_all_domains_state above
+# covers most of this; auditd_t needs its own gen_require because
+# refpolicy treats it specially.
+gen_require(`
+    type auditd_t;
+')
+allow qdistro_broker_t auditd_t:dir search;
+allow qdistro_broker_t auditd_t:file { getattr ioctl open read };
+allow qdistro_broker_t auditd_t:lnk_file read;
+
+# Python interpreter / dbus-send / similar shells the broker may
+# fork+execve under nominal operation (e.g. an admin-app launcher
+# spawn from the broker's RequestPending broadcast — actually those
+# fork from qdshell, not the broker, but Python's import-time
+# subprocess wrappers transitively need exec rights).
+corecmd_exec_bin(qdistro_broker_t)
+
+# tmpfs files (typically /run, /dev/shm). The broker creates and
+# reads these via Python's tempfile module + multiprocessing.Queue
+# style IPC (sqlite3 also memory-maps WAL files in tmpfs). The
+# `execute` perm here covers Python's anonymous-mapping path for
+# sqlite's PRAGMA mmap_size.
+gen_require(`
+    type tmpfs_t;
+')
+allow qdistro_broker_t tmpfs_t:file { execute read write };
+
+# Self-signal + fifo for SIGHUP-driven reload (GLib.unix_signal_add).
+# 0.4.0: sys_ptrace for cross-uid /proc/<other-uid>/exe readlink in
+# the caller-identity layering (same kernel path as qdistro_pwd_t).
+allow qdistro_broker_t self:process { signal sigkill sigchld getsched };
+allow qdistro_broker_t self:fifo_file rw_fifo_file_perms;
+allow qdistro_broker_t self:capability { sys_resource sys_ptrace dac_read_search dac_override };
+
+# 0.4.0: shared audit dir. /var/lib/qdistro/audit is labelled
+# qdistro_pwd_audit_t by the qdistro_pwd module's .fc; the broker's
+# own audit.sqlite (NOT pwd_audit.sqlite — distinct filenames inside
+# the same dir) inherits that label too. Allow manage on the dir +
+# files so the broker can create + write its audit DB.
+gen_require(`
+    type qdistro_pwd_audit_t;
+')
+allow qdistro_broker_t qdistro_pwd_audit_t:dir  manage_dir_perms;
+allow qdistro_broker_t qdistro_pwd_audit_t:file manage_file_perms;
+
+# Optional: PAM / login1 / fprintd integration for the admin-approval
+# auth path. Wrapped in optional_policy() so the module loads cleanly
+# on hosts without those refpolicy modules.
+optional_policy(`
+    auth_use_pam(qdistro_broker_t)
+')
+
+optional_policy(`
+    systemd_dbus_chat_logind(qdistro_broker_t)
+')
+
+optional_policy(`
+    fprintd_dbus_chat(qdistro_broker_t)
+')

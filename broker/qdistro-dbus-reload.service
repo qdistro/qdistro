@@ -1,0 +1,45 @@
+[Unit]
+# spec/30 §"dbus-broker policy-reload mystery (2026-04-29)"
+#
+# On first boot of a baked image (notably baseweed-enforcing-baked.qcow2)
+# the broker's RequestName('com.qdistro.AdminBroker1') fails with
+# `org.freedesktop.DBus.Error.AccessDenied: Request to own name refused
+# by policy` even though /etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
+# is present and grants `<allow own="..."/>` to user="root". A `systemctl
+# reload dbus-broker.service` makes the failure disappear for the rest
+# of the session. Root cause hasn't been pinned down — best-supported
+# hypothesis is that dbus-broker's startup scan of /etc/dbus-1/system.d/
+# happens at a moment when the policy parsing path has different state
+# than after a live reload (possibly an early-boot ordering quirk
+# specific to the enforcing-baked image where SELinux policy load races
+# the dbus-broker startup scan). Notably no AVCs are logged.
+#
+# This oneshot makes the mitigation deterministic and non-flaky: it
+# fires once before qdistro-admin-broker.service activates, regardless
+# of whether the workaround is needed or not. RemainAfterExit=yes so
+# subsequent qdistro-admin-broker restarts don't re-trigger the reload.
+Description=Refresh dbus-broker policy with qdistro additions
+After=dbus.service dbus-broker.service
+Before=qdistro-admin-broker.service
+DefaultDependencies=no
+RefuseManualStart=no
+ConditionPathExists=/etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 2026-04-29: `systemctl reload dbus-broker.service` returns success
+# but does NOT actually reload the policy on Tumbleweed dbus-broker
+# 35.x — the failure surfaces as qdistro-pwd's RequestName denying
+# AFTER /etc/dbus-1/system.d/com.qdistro.Pwd1.conf is on disk and
+# this oneshot has reported success. The reliable mechanism is the
+# org.freedesktop.DBus.ReloadConfig method, which dbus-broker
+# implements faithfully. We try busctl first; fall back to the
+# systemctl path for hosts where busctl isn't installed.
+ExecStart=/bin/sh -c 'busctl --system --quiet call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig 2>/dev/null || systemctl reload dbus-broker.service 2>/dev/null || systemctl reload dbus.service 2>/dev/null || true'
+
+[Install]
+# WantedBy the broker so installing/enabling the broker pulls this in;
+# also WantedBy multi-user.target so it fires even on hosts where the
+# broker is disabled/masked but qdshell still queries the bus.
+WantedBy=multi-user.target qdistro-admin-broker.service

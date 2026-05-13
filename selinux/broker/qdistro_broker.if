@@ -1,0 +1,65 @@
+## <summary>qdistro admin broker policy interfaces.</summary>
+
+########################################
+## <summary>
+##	Authorise a domain to make dbus calls against the qdistro
+##	admin broker. Phase 2 (module 0.2.0): the broker exec is
+##	labelled qdistro_broker_exec_t and systemd-started runs as
+##	qdistro_broker_t, so this interface allows send_msg directly
+##	against the broker domain (plus the obligatory dbus daemon
+##	proxy edge - without that the dbus daemon refuses to forward
+##	the message even when both endpoints would allow it). Caller
+##	modules unchanged between Phase 1 and Phase 2 - only this
+##	interface body shifts.
+## </summary>
+## <param name="domain">
+##	<summary>Domain calling broker methods.</summary>
+## </param>
+#
+interface(`qdistro_broker_dbus_chat',`
+	gen_require(`
+		type system_dbusd_t;
+		type qdistro_broker_t;
+	')
+	# Phase 2: caller-to-broker direct messaging. The dbus class is
+	# kernel-declared; it does not need a class-line in gen_require,
+	# and including one breaks Tumbleweed checkmodule parsing when
+	# this .if is pulled into other modules via the contrib include
+	# search path. Avoid backticks and apostrophes in comments here
+	# too: m4 sees quote characters inside .if files even when they
+	# are preceded by # (m4 has no shell-style comment skip), and
+	# unbalanced quotes break the m4 expansion of any caller .te.
+	allow $1 qdistro_broker_t:dbus send_msg;
+	allow qdistro_broker_t $1:dbus send_msg;
+	# The dbus daemon mediates every send between two endpoints, so
+	# the daemon must be allowed to forward in both directions
+	# (caller-to-daemon, daemon-to-broker). The caller side is
+	# usually pulled in by dbus_system_bus_client(domain) in the
+	# caller module; we add the daemon-to-broker leg here so routing
+	# succeeds end-to-end without callers having to know the broker
+	# module internal split.
+	allow system_dbusd_t qdistro_broker_t:dbus send_msg;
+	allow qdistro_broker_t system_dbusd_t:dbus send_msg;
+')
+
+########################################
+## <summary>
+##	Reserve callers the right to discover the broker's runtime
+##	state directory (/run/qdistro/<uid>/). Read-only. Today the
+##	dir is `user_tmp_t` so this interface is a no-op when the
+##	broker module's `qdistro_broker_runtime_t` isn't applied; once
+##	Phase 2 labels the dir, callers gain typed read access here
+##	without having to gen_require qdistro_broker_runtime_t
+##	directly.
+## </summary>
+## <param name="domain">
+##	<summary>Domain inspecting broker runtime state.</summary>
+## </param>
+#
+interface(`qdistro_broker_read_runtime',`
+	gen_require(`
+		type qdistro_broker_runtime_t;
+	')
+	allow $1 qdistro_broker_runtime_t:dir list_dir_perms;
+	allow $1 qdistro_broker_runtime_t:file read_file_perms;
+')

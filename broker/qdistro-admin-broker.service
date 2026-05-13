@@ -1,0 +1,21 @@
+[Unit]
+Description=qdistro admin broker (Phase 1 prototype)
+After=dbus.service qdistro-dbus-reload.service
+Requires=dbus.service
+# spec/30 §"dbus-broker policy-reload mystery": pull in the dbus-reload
+# oneshot. Wants= (not Requires=) so a missing reload unit on legacy
+# images doesn't block the broker.
+Wants=qdistro-dbus-reload.service
+
+[Service]
+Type=dbus
+BusName=com.qdistro.AdminBroker1
+ExecStart=/usr/libexec/qdistro/qdistro_admin_broker.py
+Restart=on-failure
+RestartSec=2
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
