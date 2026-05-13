@@ -1,0 +1,80 @@
+<!-- Tier-5-Linux libvirt domain template. spec/29 §3 picked path.
+     Substituted by spawn-tier5.sh in vm mode:
+       __VM_NAME__       domain name
+       __MAC__           virtio-net MAC
+       __MEM_KIB__       memory in KiB (default 524288 = 512 MiB)
+       __CID__           guest vsock CID (greater than 2; uniqueness
+                         is the caller's responsibility)
+       __DISK_PATH__     guest disk image (qcow2). Linux-only per spec/00.
+     Notes:
+       vsock model='virtio' with cid auto='no' address sets the
+       guest's local CID; in-guest processes see CID=2 for outgoing
+       connections to the host. Disk and qemu-guest-agent inside the
+       guest are required so the host wrapper can drive waypipe-server.
+       Audio: spec/29 picked qemu-audiodev-pipewire. Domain is
+       qemu:///session so qemu inherits XDG_RUNTIME_DIR=/run/user/<uid>
+       and connects to /run/user/<uid>/pipewire-0 — the admin user's
+       PipeWire daemon. Requires qemu-audio-pipewire-10.x on the host
+       (already in install-deps via task(028)). ich9-hda exposes a
+       single HDA codec to the guest; the guest's snd-hda-intel
+       driver enumerates it as a normal ALSA card. PipeWire sound
+       streams from the guest then appear as a regular client of
+       the host's PipeWire — broker policy / per-uid routing applies
+       at the PipeWire level, not at the QEMU level.
+-->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='usb' model='qemu-xhci'/>
+    <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    <interface type='user'>
+      <mac address='__MAC__'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <vsock model='virtio'>
+      <cid auto='no' address='__CID__'/>
+    </vsock>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <video>
+      <model type='virtio' heads='1'/>
+    </video>
+    <sound model='ich9'>
+      <audio id='1'/>
+    </sound>
+    <audio id='1' type='pipewire'>
+      <input name='qdistro-tier5-in'/>
+      <output name='qdistro-tier5-out'/>
+    </audio>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>

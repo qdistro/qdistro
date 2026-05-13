@@ -1,0 +1,15 @@
+# File-context regexes for Tier-1.
+#
+# The launcher binary triggers the type transition. Every Tier-1
+# spawn invokes /usr/libexec/qdistro-tier1-exec; staff_t / unconfined_t
+# auto-transitions into qdistro_tier1_t on exec of this binary
+# (per the domain_auto_trans rule in qdistro_tier1.te).
+#
+# Per-app private state lives under ~/.local/share/qdistro/tier1/
+# and is relabelled on first launch by spawn-tier1.sh:
+#   restorecon -R ~/.local/share/qdistro/tier1/
+# which picks up the qdistro_tier1_config_t label via the regex below.
+
+/usr/libexec/qdistro-tier1-exec     --      gen_context(system_u:object_r:qdistro_tier1_exec_t,s0)
+
+HOME_DIR/\.local/share/qdistro/tier1(/.*)?      gen_context(unconfined_u:object_r:qdistro_tier1_config_t,s0)

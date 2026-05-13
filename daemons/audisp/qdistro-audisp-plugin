@@ -1,0 +1,171 @@
+#!/usr/bin/python3
+"""qdistro audispd plugin — spec/30 step 7.
+
+Long-lived child of auditd's audispd dispatcher. Reads kernel audit
+records on stdin, filters AVC entries whose subject context names a
+qdistro_*_t domain, and forwards a structured payload to the admin
+broker via D-Bus (com.qdistro.AdminBroker1.RecordSelinuxAvc).
+
+Contract:
+
+  - audispd descriptor at /etc/audit/plugins.d/qdistro-audisp.conf
+    (this directory's qdistro-audisp.conf) sets `format = string`
+    so each line is one auparse_get_record_text() string.
+
+  - Plugin runs as root (auditd's uid). System bus access is open;
+    the broker side enforces uid==0 via the dbus policy + a runtime
+    check.
+
+  - Plugin must NOT exit on errors that audispd considers transient
+    (broker restart, dbus reload). Audispd respawns dead plugins
+    aggressively but with backoff — surviving across the typical
+    `systemctl restart qdistro-admin-broker` is cheap and avoids
+    audit-record gaps.
+
+Diagnostic output goes to stderr (auditd routes it to its log).
+Volume is one line per AVC denial that mentions qdistro_*_t plus
+occasional reconnect notices; AVC bursts during a rule-tightening
+session can spike but are still well below journald's per-process
+rate limits.
+
+SPDX-License-Identifier: MIT
+"""
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+
+# Make the qdistro broker modules importable. install.sh deploys this
+# script to /usr/local/sbin/qdistro-audisp-plugin and the broker
+# modules (incl. qdistro_audisp_parser.py) to /usr/libexec/qdistro/.
+# Fall back to the legacy /usr/local/lib/qdistro path so an in-place
+# upgrade where audisp lands first still resolves the import.
+sys.path.insert(0, "/usr/libexec/qdistro")
+sys.path.insert(0, "/usr/local/lib/qdistro")
+
+# Lazy: dbus + GLib are heavy; defer the import so a syntax error in
+# the parser surfaces immediately on boot rather than getting masked
+# behind a "no module named dbus" traceback in a non-dbus host.
+import dbus  # noqa: E402
+
+from qdistro_audisp_parser import (  # noqa: E402
+    parse_avc_line,
+    is_qdistro_subj_type,
+    avc_to_broker_args,
+)
+
+BUS_NAME = "com.qdistro.AdminBroker1"
+OBJ_PATH = "/com/qdistro/AdminBroker1"
+IFACE = "com.qdistro.AdminBroker1"
+
+# Reconnect backoff. The broker restarts in ~1s; longer waits add
+# nothing but lose audit records. Ceiling at 30s for the cold-boot
+# case (broker may be slow if rules.d is large).
+_BACKOFF_INITIAL_S = 0.5
+_BACKOFF_MAX_S = 30.0
+
+
+class BrokerForwarder:
+    """Lazy + reconnecting D-Bus proxy for RecordSelinuxAvc.
+
+    The proxy's lifetime spans broker restarts — dbus-python caches
+    a connection that may go stale when the broker re-claims its
+    bus name. We catch DBusException, drop the cached proxy, and
+    let the next call re-resolve. dropped_count is incremented so
+    long broker-down windows are visible in stderr."""
+
+    def __init__(self) -> None:
+        self._bus = None
+        self._proxy = None
+        self._iface = None
+        self.forwarded = 0
+        self.dropped = 0
+        self._backoff = _BACKOFF_INITIAL_S
+
+    def _connect(self) -> bool:
+        try:
+            if self._bus is None:
+                self._bus = dbus.SystemBus()
+            self._proxy = self._bus.get_object(BUS_NAME, OBJ_PATH)
+            self._iface = dbus.Interface(self._proxy, IFACE)
+            self._backoff = _BACKOFF_INITIAL_S
+            return True
+        except dbus.DBusException as e:
+            sys.stderr.write(
+                f"[qdistro-audisp] broker connect failed: {e!r}; "
+                f"retry in {self._backoff:.1f}s\n")
+            sys.stderr.flush()
+            time.sleep(self._backoff)
+            self._backoff = min(self._backoff * 2, _BACKOFF_MAX_S)
+            self._proxy = None
+            self._iface = None
+            return False
+
+    def forward(self, rec: dict) -> None:
+        args = avc_to_broker_args(rec)
+        if self._iface is None and not self._connect():
+            self.dropped += 1
+            return
+        try:
+            self._iface.RecordSelinuxAvc(
+                args["scontext"], args["tcontext"], args["tclass"],
+                args["perms"], args["verdict"], args["comm"],
+                int(args["permissive"]), int(args["pid"]),
+                args["exe"], args["path"], float(args["ts"]),
+                timeout=5.0,
+            )
+            self.forwarded += 1
+        except dbus.DBusException as e:
+            sys.stderr.write(
+                f"[qdistro-audisp] forward failed: {e!r}; "
+                f"dropping proxy\n")
+            sys.stderr.flush()
+            self._proxy = None
+            self._iface = None
+            self.dropped += 1
+
+
+def _install_signal_handlers() -> None:
+    """audispd sends SIGTERM on shutdown and SIGHUP on reload. We
+    treat both as 'flush stderr and exit' — there is no in-memory
+    state worth preserving across a reload, and the plugin will be
+    restarted with a fresh stdin stream."""
+    def _exit(signo, _frame):
+        sys.stderr.write(f"[qdistro-audisp] received signal {signo}; exit\n")
+        sys.stderr.flush()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _exit)
+    signal.signal(signal.SIGHUP, _exit)
+    signal.signal(signal.SIGINT, _exit)
+
+
+def main() -> int:
+    _install_signal_handlers()
+    fwd = BrokerForwarder()
+    sys.stderr.write(
+        f"[qdistro-audisp] started pid={os.getpid()} "
+        f"uid={os.getuid()}\n")
+    sys.stderr.flush()
+    # Read line-by-line. audispd flushes per record; a bare
+    # `for line in sys.stdin` would buffer and stall AVC delivery.
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            sys.stderr.write(
+                f"[qdistro-audisp] stdin closed; "
+                f"forwarded={fwd.forwarded} dropped={fwd.dropped}\n")
+            sys.stderr.flush()
+            return 0
+        rec = parse_avc_line(line)
+        if rec is None:
+            continue
+        if not is_qdistro_subj_type(rec.get("subj_type", "")):
+            continue
+        fwd.forward(rec)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

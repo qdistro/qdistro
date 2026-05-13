@@ -1,0 +1,102 @@
+<!-- Tier-4 libvirt domain template. Linux-only per spec/00.
+     Substitution markers (replaced by spawn-tier4.sh):
+       __VM_NAME__       domain name (1-63 chars, alnum + - + _)
+       __MAC__           MAC address (52:54:00:xx:xx:xx)
+       __MEM_KIB__       memory in KiB (default 262144 = 256 MiB)
+       __SPICE_PASSWD__  per-launch SPICE ticket (16 hex chars). spawn-
+                         tier4.sh generates a fresh value each invocation
+                         and embeds it via <graphics passwd='...'>.
+       __SPICE_CLIPBOARD__  'yes' or 'no' for the in-guest spice-vdagent
+                         clipboard channel. Default 'no' (spec/10 §"SPICE
+                         main-channel clipboard"); admin opts in via
+                         TIER4_SPICE_CLIPBOARD=allowed.
+       __DISK_XML__      empty by default (no bootable device). Set to a
+                         <disk> element when TIER4_DISK_BASE points at a
+                         qcow2 backing image (spawn-tier4.sh creates a
+                         per-VM linked clone and substitutes the path).
+
+     Notes:
+     - No <disk> by design — the bats smoke just observes the
+       virt-viewer toplevel arriving on the outer compositor; the
+       guest can boot to a "no bootable device" firmware screen
+       and that's enough. A real Tier-4 use case would add a
+       <disk> entry with type='file' device='disk'.
+     - <graphics type='spice' autoport='yes' listen='127.0.0.1'
+       passwd='__SPICE_PASSWD__'> ties SPICE attach to a per-launch
+       password. virt-viewer reads it from the domdisplay URI when
+       invoked with the include-password flag. Defense-in-depth
+       against unauthorised SPICE attaches even on 127.0.0.1 (spec/10
+       §"SPICE main-channel clipboard"). Re-spawning the VM rotates
+       the password.
+     - <clipboard copypaste='no'/> disables the SPICE main-channel
+       clipboard sync (cliprdr / spice-vdagent path) by default.
+       That forces ALL host ↔ guest clipboard traffic through the
+       wayland selection bridge in virt-viewer's spice-gtk, which
+       qdistro already gates via wp_security_context_v1 (set side,
+       task 034) and qdwin_shell_v1@v14 focus-aware-clear (receive
+       side, task 037). Admin can opt-in to the SPICE clipboard
+       channel by setting TIER4_SPICE_CLIPBOARD=allowed at spawn
+       time (spec/10 §"SPICE main-channel clipboard").
+     - virtio-rng + virtio-balloon + ich9-usb keep the guest
+       behaving like a normal Linux VM.
+     - vdagent channel is present so future spec/10 clipboard
+       wiring can route through spice-vdagent.
+     - cpu mode='host-passthrough' propagates host SVM/VMX flags
+       (this domain runs nested-KVM-friendly though it doesn't
+       run another VM inside; saves time on a future "tier-4-as-
+       admin-host" experiment).
+-->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    __DISK_XML__
+    <controller type='usb' model='qemu-xhci'/>
+    <controller type='pci' model='pcie-root'/>
+    <interface type='user'>
+      <mac address='__MAC__'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+    </channel>
+    <input type='tablet' bus='usb'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='spice' autoport='yes' listen='127.0.0.1'
+              passwd='__SPICE_PASSWD__'>
+      <listen type='address' address='127.0.0.1'/>
+      <image compression='off'/>
+      <clipboard copypaste='__SPICE_CLIPBOARD__'/>
+    </graphics>
+    <sound model='ich9'/>
+    <video>
+      <model type='virtio' heads='1'/>
+    </video>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>
