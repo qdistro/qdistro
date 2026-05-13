@@ -31,3 +31,6 @@ dist/
 *-execution.log
 test-output/
 screenshots/
+
+# meson out-of-tree builds at every level
+daemons/build/
