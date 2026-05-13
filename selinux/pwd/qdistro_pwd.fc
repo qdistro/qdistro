@@ -1,0 +1,14 @@
+# File contexts for qdistro password manager (spec/13).
+#
+# Daemon exec: labelled so init_daemon_domain transitions the
+# systemd-started unit into qdistro_pwd_t. The shebang/python
+# pattern is the same as qdistro_broker — the kernel takes the
+# transition decision on the FIRST execve target, i.e. the .py.
+#
+# Vault + audit dirs declared with our types so files inherit
+# them via inheritance + restorecon.
+
+/usr/libexec/qdistro/qdistro_pwd_daemon\.py    --  gen_context(system_u:object_r:qdistro_pwd_exec_t,s0)
+
+/var/lib/qdistro/vaults(/.*)?                       gen_context(system_u:object_r:qdistro_pwd_var_t,s0)
+/var/lib/qdistro/audit(/.*)?                        gen_context(system_u:object_r:qdistro_pwd_audit_t,s0)

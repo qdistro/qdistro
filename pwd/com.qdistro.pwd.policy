@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  spec/13 Phase-8.2 — polkit unlock action.
+
+  qdistro-pwd's UnlockVault handler routes non-admin callers through
+  this polkit action. The default policy requires admin authentication
+  per call (auth_admin); a future per-vault rule (see
+  qdistro-pwd.rules) can downgrade specific vaults to auth_admin_keep
+  ("admin auth, then cached for the session") or auth_self for vaults
+  the caller's own user owns.
+
+  The vault name is passed as the polkit action detail "vault"; admin
+  polkit agents render it in the prompt ("Allow {{ exe }} to unlock the
+  {{ vault }} vault?").
+-->
+<policyconfig>
+
+  <vendor>qdistro</vendor>
+  <vendor_url>https://qdistro.invalid/</vendor_url>
+
+  <action id="com.qdistro.pwd.unlock">
+    <description>Unlock a qdistro password vault</description>
+    <description xml:lang="en">Unlock a qdistro password vault</description>
+    <message>Authentication is required to unlock the qdistro vault</message>
+    <message xml:lang="en">Authentication is required to unlock the qdistro vault</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>

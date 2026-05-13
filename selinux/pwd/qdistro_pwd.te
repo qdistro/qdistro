@@ -1,0 +1,158 @@
+## <summary>qdistro password manager SELinux types.</summary>
+## <desc>
+##   Dedicated SELinux types for qdistro-pwd.service (spec/13
+##   Phase-8 password manager).
+##
+##   Phase 1 (0.1.0): permissive rollout — labels exec + vault/audit
+##   dirs, declares qdistro_pwd_t, init_daemon_domain transition,
+##   initial allow set covering dbus-claim + vault dir + /proc identity.
+##
+##   Phase 2 (0.2.0, this version): drops the permissive tag after
+##   audit2allow harvest from the representative workload (s60 +
+##   s61 + portal-keys vault flow on val-260430-tasks090-094). New
+##   allow lines:
+##     - cert_t :dir search + :file { getattr open read } (Python's
+##       ssl module pre-loads /etc/pki/tls cert chain at import time
+##       even though qdistro-pwd doesn't open TLS sockets — dbus-python
+##       transitively imports ssl).
+##     - cgroup_t :dir search + :file getattr (the layered-identity
+##       /proc/<pid>/cgroup read sees a symlink off /proc into the
+##       unified cgroup hierarchy; getattr is enough since the cgroup
+##       LINE itself is read from /proc/<pid>/cgroup, not from cgroupfs).
+##     - self:capability sys_ptrace — without this, even with the
+##       systemd-unit AmbientCapability=CAP_SYS_PTRACE, SELinux denies
+##       the cross-uid /proc/<other-uid>/exe readlink. The kernel
+##       capability check happens AFTER the SELinux check, so the
+##       allow rule is independent of the unit's ambient set.
+##
+##   Spec refs: doc/password-manager.md §"Daemon architecture",
+##   doc/selinux.md §"Per-daemon module split".
+## </desc>
+policy_module(qdistro_pwd, 0.2.0)
+
+########################################
+#
+# Declarations
+#
+
+# Daemon process domain + labelled exec.
+type qdistro_pwd_t;
+type qdistro_pwd_exec_t;
+application_domain(qdistro_pwd_t, qdistro_pwd_exec_t)
+init_daemon_domain(qdistro_pwd_t, qdistro_pwd_exec_t)
+
+# Vault dir: /var/lib/qdistro/vaults/*.vault. The .fc adds the
+# regex; this declares the type with files_type so it inherits
+# the standard "ordinary on-disk file" attributes.
+type qdistro_pwd_var_t;
+files_type(qdistro_pwd_var_t)
+
+# Audit log dir: /var/lib/qdistro/audit/*. The dir is shared with
+# qdistro-admin-broker (which writes audit.sqlite alongside our
+# pwd_audit.sqlite). The .fc labels the WHOLE dir under our type;
+# the broker module gets explicit manage perms on qdistro_pwd_audit_t
+# (qdistro_broker.te 0.4.0+) so its own audit.sqlite write succeeds.
+# Phase 2 keeps the type pwd-named because adding a renamed shared
+# audit type would invalidate every existing on-disk label without
+# adding policy clarity.
+type qdistro_pwd_audit_t;
+files_type(qdistro_pwd_audit_t)
+
+# Phase 2: enforcing. Removed `permissive qdistro_pwd_t;`.
+
+########################################
+#
+# Allow set
+#
+
+# D-Bus client + name claim. com.qdistro.Pwd1 on the system bus.
+# Tumbleweed's dbus_system_bus_client doesn't include acquire_svc,
+# matching the qdistro_broker workaround at 0.3.1 — same fix here.
+dbus_system_bus_client(qdistro_pwd_t)
+gen_require(`
+    class dbus acquire_svc;
+')
+allow qdistro_pwd_t system_dbusd_t:dbus acquire_svc;
+
+# Vault + audit dir. Daemon needs to traverse /var/lib (search) +
+# create files under our typed sub-dirs.
+files_search_var_lib(qdistro_pwd_t)
+allow qdistro_pwd_t qdistro_pwd_var_t:dir   manage_dir_perms;
+allow qdistro_pwd_t qdistro_pwd_var_t:file  manage_file_perms;
+allow qdistro_pwd_t qdistro_pwd_audit_t:dir   manage_dir_perms;
+allow qdistro_pwd_t qdistro_pwd_audit_t:file  manage_file_perms;
+
+# /proc/<pid>/{exe,attr/current,cgroup,stat} for the layered
+# caller-identity snapshot in qdistro_pwd_identity.snapshot_caller.
+domain_read_all_domains_state(qdistro_pwd_t)
+domain_getattr_all_domains(qdistro_pwd_t)
+
+# Phase 2: cgroupfs traversal needed by /proc/<pid>/cgroup readers.
+# The /proc/<pid>/cgroup file content is plain text but the
+# domain_read_all_domains_state above doesn't cover the cgroup_t
+# entries the kernel exposes alongside /sys/fs/cgroup. Search +
+# getattr is the minimum needed for snapshot_caller.read_proc_cgroup.
+gen_require(`
+    type cgroup_t;
+')
+allow qdistro_pwd_t cgroup_t:dir  search;
+allow qdistro_pwd_t cgroup_t:file getattr;
+
+# Phase 2: cert_t (the trust-store under /etc/pki/tls). Python's
+# ssl module loads the system trust store at import time when any
+# transitively-imported module touches ssl — dbus-python does so via
+# its socket-bootstrap pathway. The daemon does not initiate TLS
+# itself; this is read-only access for module init.
+miscfiles_read_generic_certs(qdistro_pwd_t)
+
+# tpm2-tools subprocess: the daemon shells out to tpm2_create /
+# tpm2_unseal which open /dev/tpmrm0 + spawn under tpm2_t-ish
+# context. Allow exec of bin + open of TPM device.
+corecmd_exec_bin(qdistro_pwd_t)
+
+# Try to use refpolicy's tpm interface if present; fall back to
+# a raw allow on chr_file otherwise so the module still loads on
+# hosts whose refpolicy lacks dev_rw_tpm.
+optional_policy(`
+    dev_rw_tpm(qdistro_pwd_t)
+')
+
+# Polkit chat for the Phase-8.2 unlock gate. The daemon calls
+# org.freedesktop.PolicyKit1.Authority.CheckAuthorization on the
+# system bus.
+optional_policy(`
+    policykit_dbus_chat(qdistro_pwd_t)
+')
+
+# tmpfs (sqlite WAL files; tpm2-tools temp dir under /tmp).
+gen_require(`
+    type tmpfs_t;
+    type tmp_t;
+')
+allow qdistro_pwd_t tmpfs_t:file { execute read write };
+allow qdistro_pwd_t tmp_t:dir   manage_dir_perms;
+allow qdistro_pwd_t tmp_t:file  manage_file_perms;
+
+# Self-signal + fifo for the GLib mainloop.
+allow qdistro_pwd_t self:fifo_file rw_fifo_file_perms;
+
+# Phase 2: sys_ptrace alongside the existing self capabilities. The
+# daemon does NOT need ptrace_attach — only readlink /proc/<pid>/exe
+# of a process owned by a different uid. The kernel routes the
+# permission check through ptrace_may_access(task, READ_FSCREDS),
+# which requires CAP_SYS_PTRACE for the cross-uid case. Without this
+# allow, the per-item pin gate fails closed for every legitimate
+# non-admin GetItem.
+allow qdistro_pwd_t self:process { signal sigkill sigchld getsched };
+allow qdistro_pwd_t self:capability { setuid setgid sys_resource sys_ptrace };
+
+# Optional fprintd / login1 for the future fprintd-direct unlock
+# path. Wrapped so the module still loads where these refpolicy
+# modules are absent.
+optional_policy(`
+    fprintd_dbus_chat(qdistro_pwd_t)
+')
+
+optional_policy(`
+    systemd_dbus_chat_logind(qdistro_pwd_t)
+')
