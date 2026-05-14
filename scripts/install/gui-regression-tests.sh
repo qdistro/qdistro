@@ -107,6 +107,44 @@ kill_all_foots() {
     "$VM_EXEC" "$VM" "pkill -9 foot 2>/dev/null; sleep 1; true" >/dev/null 2>&1
 }
 
+# Inject a single key down or up via QMP input-send-event. Args: qcode
+# (alt/ctrl/tab/spc/l/etc — see qapi/ui.json QKeyCode), down|up. This
+# is the only key path that fires weston modifier_binding callbacks
+# correctly (virsh send-key presses + releases atomically, skipping
+# the modifier-held-alone transition). See AGENTS.md in qdwin/tests/gui.
+vm_qmp_key() {
+    local qcode="$1" updown="$2"
+    local down=true
+    [ "$updown" = up ] && down=false
+    virsh -c qemu:///session qemu-monitor-command "$VM" \
+        "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"key\",\"data\":{\"down\":$down,\"key\":{\"type\":\"qcode\",\"data\":\"$qcode\"}}}]}}" \
+        >/dev/null 2>&1 || true
+}
+
+# Send a real-keyboard chord: hold each <mod>, tap each <tap>, release
+# each <mod> in reverse. Mimics what a physical keyboard produces so
+# weston's modifier_binding and qdwin's switcher_grab see the
+# modifier-alone-then-tap transitions they require.
+# Usage: vm_qmp_chord <mod...> -- <tap...>
+vm_qmp_chord() {
+    local mods=() taps=()
+    local in_taps=0
+    for tok in "$@"; do
+        if [ "$tok" = "--" ]; then in_taps=1; continue; fi
+        if [ "$in_taps" = 1 ]; then taps+=("$tok"); else mods+=("$tok"); fi
+    done
+    local m t
+    for m in "${mods[@]}"; do vm_qmp_key "$m" down; sleep 0.05; done
+    for t in "${taps[@]}"; do
+        vm_qmp_key "$t" down; sleep 0.04
+        vm_qmp_key "$t" up;   sleep 0.04
+    done
+    local i
+    for (( i=${#mods[@]}-1; i>=0; i-- )); do
+        vm_qmp_key "${mods[$i]}" up; sleep 0.05
+    done
+}
+
 # ---------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------
@@ -712,18 +750,7 @@ t_focus_event_on_alt_tab() {
     spawn_foot
     sleep 0.5
     local cursor; cursor=$(vm_journal_cursor)
-    # Real-keyboard sequence: alt down, tab down, tab up, alt up.
-    local qmp_alt_down='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"alt"}}}]}}'
-    local qmp_alt_up='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"alt"}}}]}}'
-    local qmp_tab_down='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"tab"}}}]}}'
-    local qmp_tab_up='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"tab"}}}]}}'
-    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_alt_down" >/dev/null 2>&1 || true
-    sleep 0.1
-    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_tab_down" >/dev/null 2>&1 || true
-    sleep 0.05
-    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_tab_up" >/dev/null 2>&1 || true
-    sleep 0.1
-    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_alt_up" >/dev/null 2>&1 || true
+    vm_qmp_chord alt -- tab
     sleep 1
     local n
     n=$(vm_journal_since "$cursor" "qdwin: focus handle=" | wc -l)
@@ -820,6 +847,84 @@ t_bar_content_quiet_through_window_cycle() {
         pass "$name ($n bar-content remaps across spawn+close)"
     else
         fail "$name: $n bar-content remaps across one window cycle (storm-y)"
+    fi
+}
+
+# Ctrl+Space drives qdshell's launcher key handler in qdwin. After the
+# 2026-05-14 keybinding-instrumentation fix, the launcher_requested
+# event leaves a `qdwin: launcher_requested` log line independent of
+# whether qdshell consumes it. See todo/qdwin-keybindings-uninstrumented.md.
+t_launcher_keybind_logged() {
+    local name="launcher_keybind_logged"
+    should_run "$name" || { skip "$name"; return; }
+    local cursor; cursor=$(vm_journal_cursor)
+    vm_qmp_chord ctrl -- spc
+    sleep 0.6
+    vm_qmp_key esc down; sleep 0.04; vm_qmp_key esc up
+    sleep 0.3
+    # Accept either branch: shell-bound path emits "launcher_requested",
+    # unbound path emits "launcher key pressed; no shell bound". Both
+    # prove the compositor saw and processed the keybind — silent drop
+    # (the motivating bug) would emit neither.
+    local n_req n_unbound
+    n_req=$(vm_journal_since "$cursor" "qdwin: launcher_requested" | wc -l)
+    n_unbound=$(vm_journal_since "$cursor" "qdwin: launcher key pressed" | wc -l)
+    local total=$((n_req + n_unbound))
+    if [ "$total" -ge 1 ]; then
+        pass "$name (req=$n_req, unbound=$n_unbound)"
+    else
+        fail "$name: zero launcher-keybind log lines after Ctrl+Space"
+    fi
+}
+
+# Alt+Tab — the switcher_grab path should now log switcher_next dir=±1
+# AND switcher_commit when Alt is released.
+t_switcher_keybinds_logged() {
+    local name="switcher_keybinds_logged"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots; sleep 1
+    spawn_foot; sleep 0.5
+    spawn_foot; sleep 0.5
+    local cursor; cursor=$(vm_journal_cursor)
+    vm_qmp_chord alt -- tab
+    sleep 0.5
+    # Shell-bound branch logs switcher_next + switcher_commit; unbound
+    # branch (qdwin_on_switcher_key bails before the grab installs) logs
+    # "switcher key pressed; no shell bound". Either proves the
+    # keybinding was observed by the compositor.
+    local nn nc nub
+    nn=$(vm_journal_since "$cursor" "qdwin: switcher_next dir=" | wc -l)
+    nc=$(vm_journal_since "$cursor" "qdwin: switcher_commit" | wc -l)
+    nub=$(vm_journal_since "$cursor" "qdwin: switcher.*key pressed" | wc -l)
+    kill_all_foots
+    if { [ "$nn" -ge 1 ] && [ "$nc" -ge 1 ]; } || [ "$nub" -ge 1 ]; then
+        pass "$name (next=$nn, commit=$nc, unbound=$nub)"
+    else
+        fail "$name: next=$nn commit=$nc unbound=$nub (none fired — silent drop)"
+    fi
+}
+
+# Ctrl+Alt+L drives the manual-lock keybinding. The lock_requested
+# event is emitted only when qdshell is bound at shell-v>=7; the
+# preceding log line fires regardless of binding state. We assert the
+# log path (the gate decision is observable adjacent to it).
+t_lock_keybind_logged() {
+    local name="lock_keybind_logged"
+    should_run "$name" || { skip "$name"; return; }
+    local cursor; cursor=$(vm_journal_cursor)
+    vm_qmp_chord ctrl alt -- l
+    sleep 0.6
+    local m_req m_unbound m_oldver
+    m_req=$(vm_journal_since "$cursor" "qdwin: lock_requested" | wc -l)
+    m_unbound=$(vm_journal_since "$cursor" "qdwin: lock key pressed; no shell bound" | wc -l)
+    m_oldver=$(vm_journal_since "$cursor" "qdwin: lock key pressed but shell bound <v7" | wc -l)
+    # Pass if ANY of the three branches logged — the keybinding fired
+    # in the compositor and we have observability into which branch.
+    local total=$((m_req + m_unbound + m_oldver))
+    if [ "$total" -ge 1 ]; then
+        pass "$name (req=$m_req, unbound=$m_unbound, oldver=$m_oldver)"
+    else
+        fail "$name: zero lock-keybind log lines after Ctrl+Alt+L"
     fi
 }
 
@@ -948,6 +1053,12 @@ main() {
     t_focus_drops_to_no_window_on_last_close
     t_focus_event_on_alt_tab
     t_focus_handle_advances_across_spawn_cycles
+
+    echo
+    echo "=== keybinding events ==="
+    t_launcher_keybind_logged
+    t_switcher_keybinds_logged
+    t_lock_keybind_logged
 
     echo
     echo "=== agent-driven exploration ==="

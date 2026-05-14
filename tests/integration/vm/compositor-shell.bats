@@ -48,6 +48,31 @@ setup() {
     assert_output_contains "PASS: stayed alive"
 }
 
+# Real xfreerdp client coverage. sdl-freerdp dummy driver is a stub —
+# it accepts the RDP handshake but bypasses real video decode, so the
+# s3c-sdl-dummy test only proves "RDP server is talking". This test
+# extends coverage by driving xfreerdp /v:host:port with the
+# real-client video path (--auth-only to skip framebuffer rendering
+# while still completing TLS + auth + capability exchange, so it
+# works headless without an X server). See the TODO comment at
+# tiered-isolation.bats:544-546 documenting this gap.
+#
+# Fails loudly when xfreerdp is missing on the test VM — install
+# `freerdp3` (or `freerdp2`) in the bake so the dep is present.
+# The companion s3c-xfreerdp.sh helper handles the subscribe-and-
+# extract-credentials dance — it lives at
+# qdistro/scripts/install/probe-rdp-with-xfreerdp.sh on the host
+# and is installed to /root/s3c-xfreerdp.sh on the baked VM.
+@test "s3c-xfreerdp: real xfreerdp client completes RDP handshake" {
+    vm_run "command -v xfreerdp >/dev/null 2>&1 || command -v xfreerdp3 >/dev/null 2>&1"
+    require "xfreerdp not installed on VM (install freerdp3 in the bake)"
+    vm_run "test -x /root/s3c-xfreerdp.sh"
+    require "/root/s3c-xfreerdp.sh missing — §6.5 helpers not installed by the bake"
+    vm_run "bash /root/s3c-xfreerdp.sh"
+    assert_success
+    assert_output_contains "PASS: xfreerdp handshake completed"
+}
+
 @test "s6.7-v2-events: qdshell receives seat/output lifecycle events" {
     vm_run "bash /root/s6-v2-events.sh"
     assert_success
@@ -99,7 +124,7 @@ setup() {
 @test "s4-revoke-teardown: admin revoke tears down matching streams" {
     vm_run "test -f /etc/systemd/system/qdistro-admin-broker.service"
     if [[ "$status" -ne 0 ]]; then
-        skip "broker not installed on $VM_NAME — see spike-6.5/install-broker-for-qdwin.sh"
+        fail_loud "broker not installed on $VM_NAME — see spike-6.5/install-broker-for-qdwin.sh"
     fi
     vm_run "systemctl start qdistro-admin-broker.service"
     assert_success

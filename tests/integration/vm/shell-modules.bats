@@ -216,7 +216,7 @@ setup() {
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s31-pixelfeed-dmabuf.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "no virtio-gpu accel3d on this VM"
+        fail_loud "no virtio-gpu accel3d on this VM"
     fi
     assert_output_contains "PASS: outer advertises zwp_linux_dmabuf_v1"
     assert_output_contains "PASS: pixelfeed bound zwp_linux_dmabuf_v1"

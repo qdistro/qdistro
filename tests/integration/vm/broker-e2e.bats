@@ -31,7 +31,7 @@ setup() {
     # phaseN bats already use.
     local script_path
     script_path="$(dirname "$BATS_TEST_FILENAME")/s90-phase5-broker-e2e.sh"
-    [ -f "$script_path" ] || skip "driver script not found at $script_path"
+    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
 
     # Stage on host http server (port 8765 by convention).
     cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"

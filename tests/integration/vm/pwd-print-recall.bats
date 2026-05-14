@@ -25,7 +25,7 @@ setup() {
     vm_run "bash /root/s60-pwd-e2e.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-pwd.service absent (rerun fresh-vm-bootstrap.sh after task 088)"
+        fail_loud "qdistro-pwd.service absent (rerun fresh-vm-bootstrap.sh after task 088)"
     fi
     assert_output_contains "PASS: qdistro-pwd.service active"
     assert_output_contains "PASS: CreateVault as admin"
@@ -44,7 +44,7 @@ setup() {
     vm_run "bash /root/s61-pwd-tpm-e2e.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-pwd.service absent or TPM backend not selectable"
+        fail_loud "qdistro-pwd.service absent or TPM backend not selectable"
     fi
     assert_output_contains "PASS: CreateVaultTPM"
     assert_output_contains "PASS: v2 on-disk format (tpm_seal present, no kdf)"
@@ -58,12 +58,12 @@ setup() {
 
 @test "phase9-print-vm-helpers-probe: spec/20 Phase-9 §step 2 helpers shape probe" {
     if ! vm_run "test -f /root/s63-print-vm-helpers-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s63 script absent (rerun fresh-vm-bootstrap.sh after task 099)"
+        fail_loud "s63 script absent (rerun fresh-vm-bootstrap.sh after task 099)"
     fi
     vm_run "bash /root/s63-print-vm-helpers-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "print-VM helpers not installed"
+        fail_loud "print-VM helpers not installed"
     fi
     assert_output_contains "PASS: print-VM helpers installed"
     assert_output_contains "PASS: install-print-vm --remove on absent domain"
@@ -75,12 +75,12 @@ setup() {
 
 @test "phase8-pwd-portal-autounlock-e2e: spec/13 portal-keys auto-unlock end-to-end" {
     if ! vm_run "test -f /root/s62-pwd-portal-autounlock-e2e.sh && echo HAVE_SCRIPT"; then
-        skip "s62 script absent (rerun fresh-vm-bootstrap.sh after task 097)"
+        fail_loud "s62 script absent (rerun fresh-vm-bootstrap.sh after task 097)"
     fi
     vm_run "bash /root/s62-pwd-portal-autounlock-e2e.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-pwd.service absent"
+        fail_loud "qdistro-pwd.service absent"
     fi
     assert_output_contains "PASS: portal-keys vault created"
     assert_output_contains "PASS: store-portal-pin sealed"
@@ -94,12 +94,12 @@ setup() {
 
 @test "phase9-print-allowlist-caps-probe: spec/20 priority #5/#6 — allowlist + caps shape" {
     if ! vm_run "test -f /root/s64-print-allowlist-caps-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s64 script absent (rerun fresh-vm-bootstrap.sh after task 105)"
+        fail_loud "s64 script absent (rerun fresh-vm-bootstrap.sh after task 105)"
     fi
     vm_run "bash /root/s64-print-allowlist-caps-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "print-allowlist surfaces not installed (legacy bake)"
+        fail_loud "print-allowlist surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: print-allowlist CLI + module installed"
     assert_output_contains "PASS: qdistro_print_browse module shape"
@@ -109,12 +109,12 @@ setup() {
 
 @test "phase8-pwd-fprint-probe: spec/13 — fprintd helper module + Pwd1.UnlockVaultFprint" {
     if ! vm_run "test -f /root/s65-pwd-fprint-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s65 script absent (rerun fresh-vm-bootstrap.sh after task 102)"
+        fail_loud "s65 script absent (rerun fresh-vm-bootstrap.sh after task 102)"
     fi
     vm_run "bash /root/s65-pwd-fprint-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "fprint surfaces not installed (legacy bake)"
+        fail_loud "fprint surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: qdistro_pwd_fprint module installed"
     assert_output_contains "PASS: polkit rule shape"
@@ -125,12 +125,12 @@ setup() {
 
 @test "phase8-browser-bridge-probe: spec/14 — native-messaging host + install tool + manifest shape" {
     if ! vm_run "test -f /root/s66-browser-bridge-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s66 script absent (rerun fresh-vm-bootstrap.sh after browser-bridge task)"
+        fail_loud "s66 script absent (rerun fresh-vm-bootstrap.sh after browser-bridge task)"
     fi
     vm_run "bash /root/s66-browser-bridge-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "browser-bridge surfaces not installed (legacy bake)"
+        fail_loud "browser-bridge surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: browser-bridge surfaces installed"
     assert_output_contains "PASS: Firefox manifest shape via --print"
@@ -143,12 +143,12 @@ setup() {
 
 @test "phase8-recall-probe: spec/17 §step 0 — recall ingest + search + reaper end-to-end" {
     if ! vm_run "test -f /root/s67-recall-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s67 script absent (rerun fresh-vm-bootstrap.sh after recall task)"
+        fail_loud "s67 script absent (rerun fresh-vm-bootstrap.sh after recall task)"
     fi
     vm_run "bash /root/s67-recall-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "recall surfaces not installed (legacy bake)"
+        fail_loud "recall surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: recall surfaces installed"
     assert_output_contains "PASS: SDK push_text_snapshot inserts a row"
@@ -161,12 +161,12 @@ setup() {
 
 @test "phase8-snapshots-probe: spec/19 — Snapper bridge engine + qdistro-snap-export + qdistro-backup unit" {
     if ! vm_run "test -f /root/s68-snapshots-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s68 script absent (rerun fresh-vm-bootstrap.sh after snapshots task)"
+        fail_loud "s68 script absent (rerun fresh-vm-bootstrap.sh after snapshots task)"
     fi
     vm_run "bash /root/s68-snapshots-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "snapshot surfaces not installed (legacy bake)"
+        fail_loud "snapshot surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: snapshot surfaces installed"
     assert_output_contains "PASS: qdistro-snap-export print-cmd renders the canonical pipeline"
@@ -179,12 +179,12 @@ setup() {
 
 @test "phase8-phone-probe: spec/18 — qdistro-phone daemon + CLI + ntfy push body + signed-callback HTTP listener" {
     if ! vm_run "test -f /root/s69-phone-probe.sh && echo HAVE_SCRIPT"; then
-        skip "s69 script absent (rerun fresh-vm-bootstrap.sh after phone task)"
+        fail_loud "s69 script absent (rerun fresh-vm-bootstrap.sh after phone task)"
     fi
     vm_run "bash /root/s69-phone-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "phone surfaces not installed (legacy bake)"
+        fail_loud "phone surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: phone surfaces installed"
     assert_output_contains "PASS: qdistro-phone pair/list round-trip"

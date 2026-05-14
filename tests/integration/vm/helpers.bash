@@ -63,3 +63,33 @@ assert_output_contains() {
         return 1
     fi
 }
+
+# require <description> — fail the test loudly when a precondition
+# check (vm_run, command -v, [ -x ...]) returned non-zero. Use this
+# in place of the previous `skip "<dep missing>"` pattern: missing
+# deps should be loud failures, not silent skips, so bake / install
+# regressions surface immediately instead of masquerading as "all
+# tests pass (most skipped)" green CI.
+#
+# Pattern:
+#   vm_run "command -v xfreerdp >/dev/null"
+#   require "xfreerdp not installed on VM (need freerdp3 package)"
+require() {
+    if [[ "$status" -ne 0 ]]; then
+        echo "--- MISSING REQUIREMENT: $1 ---" >&2
+        echo "vm exit=$status, output below:" >&2
+        echo "$output" >&2
+        return 1
+    fi
+}
+
+# fail_loud <description> — alias for `require` when the test wants
+# to fail unconditionally on a control-flow branch (e.g. after the
+# helper script emits "SKIP:" in its output). Same shape as the
+# pre-2026-05-14 `skip "..."` calls; deps should be in the bake or
+# the bake is broken — silent skips masked too many missing-dep
+# regressions.
+fail_loud() {
+    echo "--- TEST FAILED: $* ---" >&2
+    return 1
+}

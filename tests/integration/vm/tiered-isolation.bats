@@ -17,7 +17,7 @@ setup() {
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s32-tier2-podman.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "podman or qdistro/tier2 image absent on this VM"
+        fail_loud "podman or qdistro/tier2 image absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: container 'tier2-c1' running"
@@ -32,7 +32,7 @@ setup() {
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s33-tier2-input.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "podman or qdistro/tier2 image absent on this VM"
+        fail_loud "podman or qdistro/tier2 image absent on this VM"
     fi
     assert_output_contains "PASS: in-container nested compositor decoded QDNI events"
     assert_output_contains "PASS: pointer button (S3B) reached in-container nested compositor"
@@ -52,7 +52,7 @@ setup() {
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s34-tier2-lifecycle.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "podman or qdistro/tier2 image absent on this VM"
+        fail_loud "podman or qdistro/tier2 image absent on this VM"
     fi
     assert_output_contains "PASS: two containers running concurrently"
     assert_output_contains "PASS: stop(A) → toplevel_removed handle="
@@ -71,7 +71,7 @@ setup() {
     vm_run "bash /root/s35-tier3-waypipe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe or silo user absent on this VM"
+        fail_loud "waypipe or silo user absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: silo command actually ran as uid 1001"
@@ -84,7 +84,7 @@ setup() {
     vm_run "bash /root/s36-tier3-app.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe or silo user absent on this VM"
+        fail_loud "waypipe or silo user absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: bridged toplevel reached the outer admin compositor"
@@ -96,7 +96,7 @@ setup() {
     vm_run "bash /root/s37-tier3-lifecycle.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe or silo users absent on this VM"
+        fail_loud "waypipe or silo users absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: two distinct silo toplevels reached the outer compositor"
@@ -110,7 +110,7 @@ setup() {
     vm_run "bash /root/s38-tier3-chrome.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe or silo users absent on this VM"
+        fail_loud "waypipe or silo users absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdshell up"
@@ -124,7 +124,7 @@ setup() {
     vm_run "bash /root/s40-secctx.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe / silo / qdistro-test-window absent on this VM"
+        fail_loud "waypipe / silo / qdistro-test-window absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: wp_security_context_manager_v1 advertised by qdwin"
@@ -148,7 +148,7 @@ setup() {
     vm_run "bash /root/s39-clipboard-gate.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "wl-clipboard / waypipe / silo / sdl-freerdp absent on this VM"
+        fail_loud "wl-clipboard / waypipe / silo / sdl-freerdp absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdshell up"
@@ -168,7 +168,7 @@ setup() {
     vm_run "bash /root/s41-secctx-toplevel-event.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "waypipe / silo / qdistro-test-window absent on this VM"
+        fail_loud "waypipe / silo / qdistro-test-window absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdwin_shell_v1 protocol XML at version"
@@ -188,7 +188,7 @@ setup() {
     vm_run "bash /root/s42-tier4-spawn.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-4 stack (libvirt/qemu/virt-viewer) not installed on this VM"
+        fail_loud "tier-4 stack (libvirt/qemu/virt-viewer) not installed on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: define-only mode created domain"
@@ -205,7 +205,7 @@ setup() {
     vm_run "bash /root/s43-tier5-loopback.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
+        fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
     fi
     assert_output_contains "PASS: vsock_loopback module loaded"
     assert_output_contains "PASS: outer admin compositor up"
@@ -221,7 +221,7 @@ setup() {
     vm_run "bash /root/s44-tier4-secctx-exec.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-secctx-exec / qdistro-test-window absent on this VM"
+        fail_loud "qdistro-secctx-exec / qdistro-test-window absent on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdistro-secctx-exec --help"
@@ -239,7 +239,7 @@ setup() {
     vm_run "bash /root/s45-tier5-vm.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1, or invoke qdistro-tier5-build-guest-image manually)"
+        fail_loud "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1, or invoke qdistro-tier5-build-guest-image manually)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: host-side waypipe-client vsock listener ready"
@@ -255,7 +255,7 @@ setup() {
     vm_run "bash /root/s47-tier5-audio.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
+        fail_loud "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
     fi
     assert_output_contains "PASS: host preconditions met"
     assert_output_contains "PASS: domain template carries <audio type='pipewire'>"
@@ -278,7 +278,7 @@ setup() {
     vm_run "bash /root/s46-tier4-clipboard-gate.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-secctx-exec / qdistro-test-window / qdistro-test-clipboard-source absent"
+        fail_loud "qdistro-secctx-exec / qdistro-test-window / qdistro-test-clipboard-source absent"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdshell up"
@@ -316,7 +316,7 @@ setup() {
     vm_run "bash /root/s49-tier4-spice-clipboard.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-tier4-spawn / virsh absent on this VM"
+        fail_loud "qdistro-tier4-spawn / virsh absent on this VM"
     fi
     assert_output_contains "PASS: default XML disables SPICE clipboard channel"
     assert_output_contains "PASS: default XML carries 16-hex SPICE password"
@@ -336,7 +336,7 @@ setup() {
     vm_run "bash /root/s48-focus-aware-clear.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-3 stack / qdistro-test-window / qdistro-test-clipboard-source absent"
+        fail_loud "tier-3 stack / qdistro-test-window / qdistro-test-clipboard-source absent"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdshell up"
@@ -359,7 +359,7 @@ setup() {
     vm_run "bash /root/s51-tier1-e2e.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "SELinux disabled / policy not loaded / qdistro-tier1-spawn absent"
+        fail_loud "SELinux disabled / policy not loaded / qdistro-tier1-spawn absent"
     fi
     assert_output_contains "PASS: SELinux enabled"
     assert_output_contains "PASS: qdistro_tier1 policy module loaded"
@@ -385,7 +385,7 @@ setup() {
     vm_run "bash /root/s53-data-offer-receive-v15.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "qdistro-test-clipboard-sink absent or v15 binding missing"
+        fail_loud "qdistro-test-clipboard-sink absent or v15 binding missing"
     fi
     assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 15"
     assert_output_contains "PASS: qdwin installed v15 data_source send-shim"
@@ -409,7 +409,7 @@ setup() {
     # signal so a failed run still leaves the VM in permissive mode.
     vm_run "bash /root/s55-tier1-enforcing.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "SELinux disabled, policy not loaded, or config pins permissive"
+        fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
     fi
     assert_success
     assert_output_contains "PASS: SELinux mode now Enforcing"
@@ -428,7 +428,7 @@ setup() {
     # config pins SELINUX=permissive, the runtime flip is refused.
     vm_run "bash /root/s56-broker-enforcing.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "SELinux disabled, policy not loaded, or config pins permissive"
+        fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
     fi
     assert_success
     assert_output_contains "PASS: SELinux mode now Enforcing"
@@ -446,7 +446,7 @@ setup() {
     vm_run "bash /root/s54-tier4-spice-clipboard-live.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "tier-4 SPICE base image absent (run build-guest-image.sh) or virsh missing"
+        fail_loud "tier-4 SPICE base image absent (run build-guest-image.sh) or virsh missing"
     fi
     assert_output_contains "PASS: running domain XML carries copypaste='no'"
     assert_output_contains "PASS: qga reachable inside"
@@ -471,7 +471,7 @@ setup() {
     vm_run "bash /root/s57-qsu-argv-scopes.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL:"*"qdistro-admin-broker.service not active"* ]]; then
-        skip "broker service inactive on this VM"
+        fail_loud "broker service inactive on this VM"
     fi
     assert_output_contains "PASS: forever_argv same"
     assert_output_contains "PASS: forever_argv install→argv differs"
@@ -504,10 +504,10 @@ setup() {
     vm_run "bash /root/s58-qsu-real-flow.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL: /usr/local/bin/qsu absent"* ]]; then
-        skip "qsu not installed on this VM (older bootstrap)"
+        fail_loud "qsu not installed on this VM (older bootstrap)"
     fi
     if [[ "$output" == *"FAIL: /run/qdistro-root-exec/sock not present"* ]]; then
-        skip "qdistro-root-exec.socket inactive on this VM"
+        fail_loud "qdistro-root-exec.socket inactive on this VM"
     fi
     assert_output_contains "PASS: pending rid="
     assert_output_contains "PASS: qsu /bin/true rc=0 after admin allow forever_argv"
@@ -524,7 +524,7 @@ setup() {
     vm_run "bash /root/s52-tier1-audisp.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        skip "SELinux disabled / policy not loaded / audisp plugin absent / auditd down"
+        fail_loud "SELinux disabled / policy not loaded / audisp plugin absent / auditd down"
     fi
     assert_output_contains "PASS: audispd plugin + descriptor installed"
     assert_output_contains "PASS: broker up on com.qdistro.AdminBroker1"
