@@ -1009,6 +1009,87 @@ EOF
 }
 
 # ---------------------------------------------------------------------
+# View-stream subscribe path (qdwin-bystander --subscribe)
+# ---------------------------------------------------------------------
+
+# qdwin-bystander gained --subscribe HANDLE / --subscribe last on
+# 2026-05-14 so the §6.5 RDP-forward path can be exercised without the
+# /root/s3c-subscribe-extract.sh helper that only exists on the spike
+# bake. install-qdwin-session-for-vm.sh now writes
+# `[pipewire] num-outputs=2` + loads pipewire-backend.so, so on a
+# freshly-baked VM this test hits the `approved` branch (stdout has
+# HANDLE=, PIPEWIRE_NODE_NAME=, RDP_PORT=, RDP_CERT_PATH=,
+# RDP_PASSWORD= sourceable creds). On a VM without the pipewire
+# sub-backend it falls back to the `denied "no free pipewire output"`
+# branch — also a load-bearing round-trip — and still passes.
+t_bystander_subscribe_sends_request() {
+    local name="bystander_subscribe_sends_request"
+    should_run "$name" || { skip "$name"; return; }
+
+    "$VM_EXEC" "$VM" "test -x /usr/bin/qdwin-bystander" >/dev/null 2>&1 || {
+        fail "$name: /usr/bin/qdwin-bystander missing on VM (deploy needed)"
+        return
+    }
+    "$VM_EXEC" "$VM" "/usr/bin/qdwin-bystander --help 2>&1 | grep -q -- --subscribe" >/dev/null 2>&1 || {
+        fail "$name: deployed bystander lacks --subscribe (stale binary)"
+        return
+    }
+
+    kill_all_foots
+    "$VM_EXEC" "$VM" "pkill -x qdwin-bystander 2>/dev/null; pkill -x qdistro-forward 2>/dev/null; sleep 0.5; true" >/dev/null 2>&1
+
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot
+    local handle
+    handle=$(last_toplevel_handle "$cursor")
+    if [ -z "$handle" ]; then
+        kill_all_foots
+        fail "$name: no toplevel_added in journal after spawn_foot"
+        return
+    fi
+
+    "$VM_SCRIPT" "$VM" <<EOF >/dev/null 2>&1
+runuser -l admin -c "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 timeout 4 /usr/bin/qdwin-bystander --subscribe $handle > /tmp/bys-subscribe-stdout 2>/tmp/bys-subscribe-stderr" || true
+EOF
+
+    local stderr_tail; stderr_tail=$("$VM_EXEC" "$VM" "cat /tmp/bys-subscribe-stderr 2>/dev/null")
+    local stdout_dump; stdout_dump=$("$VM_EXEC" "$VM" "cat /tmp/bys-subscribe-stdout 2>/dev/null")
+    local journal_hit
+    journal_hit=$(vm_journal_since "$cursor" "qdwin: (view_stream approved|subscribe_view_stream denied) handle=$handle" | wc -l)
+
+    kill_all_foots
+    "$VM_EXEC" "$VM" "pkill -x qdwin-bystander 2>/dev/null; pkill -x qdistro-forward 2>/dev/null; sleep 0.5; true" >/dev/null 2>&1
+
+    if ! printf '%s\n' "$stderr_tail" | grep -q "subscribe sent handle=$handle"; then
+        fail "$name: bystander stderr missing 'subscribe sent handle=$handle' (got: $(printf '%s' "$stderr_tail" | tail -1))"
+        return
+    fi
+    if [ "$journal_hit" -lt 1 ]; then
+        fail "$name: no 'qdwin: view_stream approved|subscribe_view_stream denied handle=$handle' line in journal"
+        return
+    fi
+
+    # If approved, stdout must carry the sourceable creds. If denied,
+    # stdout stays empty and stderr carries the denial reason. Both are
+    # acceptable proofs of round-trip; assert the right one for the
+    # branch we observed.
+    if printf '%s\n' "$stderr_tail" | grep -q "view_stream approved handle=$handle"; then
+        if printf '%s\n' "$stdout_dump" | grep -qE "^HANDLE=$handle\$" \
+            && printf '%s\n' "$stdout_dump" | grep -qE "^PIPEWIRE_NODE_NAME=" \
+            && printf '%s\n' "$stdout_dump" | grep -qE "^RDP_PORT=[0-9]+\$" \
+            && printf '%s\n' "$stdout_dump" | grep -qE "^RDP_PASSWORD=." ; then
+            pass "$name (approved: stdout carries sourceable creds)"
+        else
+            fail "$name: approved fired but stdout missing creds: $stdout_dump"
+        fi
+    elif printf '%s\n' "$stderr_tail" | grep -q "view_stream denied handle=$handle"; then
+        pass "$name (denied: round-trip OK; weston.ini lacks [pipewire] num-outputs>=1 — re-run install-qdwin-session-for-vm.sh to bake it in)"
+    else
+        fail "$name: subscribe sent but no approved/denied callback fired (stderr tail: $(printf '%s' "$stderr_tail" | tail -1))"
+    fi
+}
+
+# ---------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------
 
@@ -1059,6 +1140,10 @@ main() {
     t_launcher_keybind_logged
     t_switcher_keybinds_logged
     t_lock_keybind_logged
+
+    echo
+    echo "=== view_stream subscribe ==="
+    t_bystander_subscribe_sends_request
 
     echo
     echo "=== agent-driven exploration ==="

@@ -4,7 +4,9 @@
 # Two user units land in /home/admin/.config/systemd/user/:
 #
 #   noctalia-session.service  — weston with qdwin-shell.so on the drm
-#                               backend, claiming wayland-1.
+#                               backend (+ pipewire sub-backend for
+#                               §6.5 view_stream outputs), claiming
+#                               wayland-1.
 #   noctalia-shell.service    — quickshell loading the qdshell QML stack
 #                               from /usr/share/quickshell/qdshell/.
 #
@@ -20,7 +22,8 @@
 #     backend + libinput).
 #   - admin lingering enabled so the user manager runs after
 #     autologin completes.
-#   - /home/admin/weston.ini written with qdwin-shell.so + drm backend.
+#   - /home/admin/weston.ini written with qdwin-shell.so + drm backend
+#     + pipewire sub-backend (num-outputs=2).
 #   - qdshell QML copied to /usr/share/quickshell/qdshell/ (system-
 #     wide so multiple users could share).
 #   - Both user units enabled (but not started — caller decides when
@@ -52,6 +55,13 @@ loginctl enable-linger admin
 # renderer=pixman is critical for virtio-gpu VMs without accel3d —
 # the GL renderer segfaults on a software-only virtio-gpu. Drop the
 # line on hardware with a real GPU to get hardware acceleration.
+#
+# The `[pipewire]` section enables the pipewire sub-backend so qdwin's
+# §6.5 view_stream forwarding (qdwin_shell_v1.subscribe_view_stream)
+# has free pipewire outputs to pin views onto. Pair with the
+# `--backend=drm-backend.so,pipewire-backend.so` cmdline in the
+# noctalia-session unit below. num-outputs=2 gives headroom for
+# concurrent forwards.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
@@ -65,6 +75,9 @@ client=
 [output]
 name=Virtual-1
 mode=1920x1080@60
+
+[pipewire]
+num-outputs=2
 EOF
 chown admin:users /home/admin/weston.ini
 
@@ -86,7 +99,7 @@ After=graphical.target
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
-ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
+ExecStart=/usr/bin/weston --backend=drm-backend.so,pipewire-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
 
