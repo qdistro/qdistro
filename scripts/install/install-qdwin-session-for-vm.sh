@@ -26,6 +26,11 @@
 #     + pipewire sub-backend (num-outputs=2).
 #   - qdshell QML copied to /usr/share/quickshell/qdshell/ (system-
 #     wide so multiple users could share).
+#   - qdshell's compiled QML plugin (libqdistro-qdwin.so + qmldir)
+#     copied to /usr/share/qdistro/qml/Qdistro/Qdwin/. Caller is
+#     expected to have run `meson compile -C build` under qdshell/
+#     so qdshell/build/qml-plugin/libqdistro-qdwin.so exists. Override
+#     the source location via $QDSHELL_PLUGIN_BUILD if needed.
 #   - Both user units enabled (but not started — caller decides when
 #     to start them, typically at next greetd tty3 login).
 
@@ -87,6 +92,28 @@ rm -rf /usr/share/quickshell/qdshell
 cp -r "$QDSHELL_SRC" /usr/share/quickshell/qdshell
 chown -R root:root /usr/share/quickshell/qdshell
 
+# 3b. Qdistro.Qdwin QML plugin — qdshell's native binding to
+# qdwin_shell_v1. Built from qdshell/qml-plugin/ (which reads the
+# protocol XML from the qdwin sibling repo at build time). Without
+# this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
+# `import Qdistro.Qdwin 1.0` and falls back to the no-binding stubs.
+QDSHELL_PLUGIN_BUILD="${QDSHELL_PLUGIN_BUILD:-$QDSHELL_SRC/build}"
+if [ -f "$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so" ]; then
+    install -d -o root -g root -m 0755 /usr/share/qdistro/qml/Qdistro/Qdwin
+    install -m 0755 -o root -g root \
+        "$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so" \
+        /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
+    install -m 0644 -o root -g root \
+        "$QDSHELL_SRC/qml-plugin/qmldir" \
+        /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir
+    echo "qdwin-shell-v1 QML plugin installed: $(ls -la /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so | awk '{print $5}') bytes"
+else
+    echo "WARN: $QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so not found —" \
+         "qdshell will run without qdwin_shell_v1 binding (Qdwin.qml" \
+         "import will fail). Rebuild qdshell with 'meson setup build &&" \
+         "meson compile -C build' in $QDSHELL_SRC, then re-run this script."
+fi
+
 # 4. User systemd units.
 install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
 
@@ -118,6 +145,12 @@ Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=QML_DISABLE_DISK_CACHE=1
+# Tell qs to look in /usr/share/qdistro/qml for the
+# Qdistro.Qdwin QML plugin (libqdistro-qdwin.so installed in step 3b).
+# Without this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
+# `import Qdistro.Qdwin 1.0` and the qdwin_shell_v1 binding stays
+# unbound.
+Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
 ExecStartPre=/bin/sh -c 'while [ ! -e $XDG_RUNTIME_DIR/wayland-1 ]; do sleep 0.5; done'
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
 Restart=on-failure

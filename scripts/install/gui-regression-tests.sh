@@ -1038,12 +1038,26 @@ t_bystander_subscribe_sends_request() {
     kill_all_foots
     "$VM_EXEC" "$VM" "pkill -x qdwin-bystander 2>/dev/null; pkill -x qdistro-forward 2>/dev/null; sleep 0.5; true" >/dev/null 2>&1
 
+    # qdshell now holds the bind_as_shell role at v14+ (see the
+    # qdshell_binds_qdwin_shell_v1 test). qdwin allows only one bound
+    # shell at a time, and subscribe_view_stream is gated on
+    # qdwin_shell_require_bound. Stop noctalia-shell.service for the
+    # duration of this test so the bystander can stand in as the bound
+    # shell, then bounce it back at the end.
+    "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop noctalia-shell.service'
+EOF
+    sleep 1
+
     local cursor; cursor=$(vm_journal_cursor)
     spawn_foot
     local handle
     handle=$(last_toplevel_handle "$cursor")
     if [ -z "$handle" ]; then
         kill_all_foots
+        "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start noctalia-shell.service'
+EOF
         fail "$name: no toplevel_added in journal after spawn_foot"
         return
     fi
@@ -1059,6 +1073,12 @@ EOF
 
     kill_all_foots
     "$VM_EXEC" "$VM" "pkill -x qdwin-bystander 2>/dev/null; pkill -x qdistro-forward 2>/dev/null; sleep 0.5; true" >/dev/null 2>&1
+    # Restore qdshell so subsequent tests in the suite see the bound-
+    # shell state they expect.
+    "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start noctalia-shell.service'
+EOF
+    sleep 4
 
     if ! printf '%s\n' "$stderr_tail" | grep -q "subscribe sent handle=$handle"; then
         fail "$name: bystander stderr missing 'subscribe sent handle=$handle' (got: $(printf '%s' "$stderr_tail" | tail -1))"
@@ -1087,6 +1107,104 @@ EOF
     else
         fail "$name: subscribe sent but no approved/denied callback fired (stderr tail: $(printf '%s' "$stderr_tail" | tail -1))"
     fi
+}
+
+# ---------------------------------------------------------------------
+# qdshell ↔ qdwin_shell_v1 binding (Qdistro.Qdwin QML plugin)
+# ---------------------------------------------------------------------
+#
+# As of 2026-05-14 qdshell binds qdwin_shell_v1 at v14 via the native
+# QML plugin built from qdshell/qml-plugin/ (libqdistro-qdwin.so
+# installed at /usr/share/qdistro/qml/Qdistro/Qdwin/, picked up via
+# QML_IMPORT_PATH on the noctalia-shell.service unit). Until the
+# binding landed, qdshell observed zero qdwin_shell_v1 events; the
+# focus + keybinding code paths in qdwin emit a different journal line
+# depending on whether a v14+ shell is bound, so these tests are the
+# load-bearing assertion that the bind is live.
+
+t_qdshell_binds_qdwin_shell_v1() {
+    local name="qdshell_binds_qdwin_shell_v1"
+    should_run "$name" || { skip "$name"; return; }
+
+    # Plugin artefact present?
+    "$VM_EXEC" "$VM" "test -f /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so" >/dev/null 2>&1 || {
+        fail "$name: /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so missing (rebuild qdshell + re-deploy)"
+        return
+    }
+    "$VM_EXEC" "$VM" "test -f /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir" >/dev/null 2>&1 || {
+        fail "$name: qmldir missing alongside the plugin .so"
+        return
+    }
+
+    # noctalia-shell.service must carry QML_IMPORT_PATH=/usr/share/qdistro/qml
+    # — otherwise qs can't resolve `import Qdistro.Qdwin 1.0`.
+    "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Environment noctalia-shell.service' | grep -q 'QML_IMPORT_PATH=/usr/share/qdistro/qml'
+EOF
+    if [ $? -ne 0 ]; then
+        fail "$name: noctalia-shell.service lacks QML_IMPORT_PATH=/usr/share/qdistro/qml — re-run install-qdwin-session-for-vm.sh"
+        return
+    fi
+
+    # Force a clean restart and assert the bind lines appear AFTER our
+    # cursor — otherwise we'd be reading a stale bind from minutes ago.
+    local cursor; cursor=$(vm_journal_cursor)
+    "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart noctalia-shell.service'
+EOF
+    # Give the shell time to start + bind. qdshell loads a lot of QML
+    # before the binding runs; 8s covers it on a busy VM.
+    sleep 8
+    local qdwin_line qdshell_line
+    qdwin_line=$(vm_journal_since "$cursor" "qdwin: bind accepted for uid=1000" | tail -1)
+    qdshell_line=$(vm_journal_since "$cursor" "Qdwin .*qdwin_shell_v1 bound v[0-9]+" | tail -1)
+
+    if [ -z "$qdwin_line" ]; then
+        fail "$name: 'qdwin: bind accepted for uid=1000' not in last 400 journal lines (shell never bound)"
+        return
+    fi
+    if [ -z "$qdshell_line" ]; then
+        fail "$name: QML-side 'Qdwin qdwin_shell_v1 bound v<n>' not in journal (plugin loaded but binding failed at the QML side)"
+        return
+    fi
+    pass "$name (qdwin: bind accepted + QML: $qdshell_line)"
+}
+
+# When no shell is bound at v14+, qdwin emits only the ground-truth
+# `qdwin: focus handle=` line; `seat_focus_changed` (the v14-gated
+# protocol event) is skipped. With qdshell bound at v14, both lines
+# fire on every focus transition. Asserting the protocol-emit line
+# fires is the load-bearing proof that the binding is functional.
+t_seat_focus_changed_protocol_emit() {
+    local name="seat_focus_changed_protocol_emit"
+    should_run "$name" || { skip "$name"; return; }
+
+    kill_all_foots
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot
+    local handle
+    handle=$(last_toplevel_handle "$cursor")
+    if [ -z "$handle" ]; then
+        kill_all_foots
+        fail "$name: no toplevel_added in journal after spawn_foot"
+        return
+    fi
+
+    sleep 0.5
+    local protocol_emits ground_truth
+    protocol_emits=$(vm_journal_since "$cursor" "qdwin: seat_focus_changed seat=default handle=$handle" | wc -l)
+    ground_truth=$(vm_journal_since "$cursor" "qdwin: focus handle=$handle" | wc -l)
+    kill_all_foots
+
+    if [ "$ground_truth" -lt 1 ]; then
+        fail "$name: 'qdwin: focus handle=$handle' missing (qdwin never focused the spawned window — separate bug)"
+        return
+    fi
+    if [ "$protocol_emits" -lt 1 ]; then
+        fail "$name: protocol-emit branch did not fire — 'qdwin: seat_focus_changed seat=default handle=$handle' absent though ground-truth focus did fire; shell isn't bound at v14+"
+        return
+    fi
+    pass "$name (protocol_emits=$protocol_emits, ground_truth=$ground_truth — both branches firing)"
 }
 
 # ---------------------------------------------------------------------
@@ -1144,6 +1262,11 @@ main() {
     echo
     echo "=== view_stream subscribe ==="
     t_bystander_subscribe_sends_request
+
+    echo
+    echo "=== qdshell ↔ qdwin_shell_v1 binding ==="
+    t_qdshell_binds_qdwin_shell_v1
+    t_seat_focus_changed_protocol_emit
 
     echo
     echo "=== agent-driven exploration ==="
