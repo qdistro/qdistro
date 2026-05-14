@@ -36,11 +36,13 @@ mkdir -p "$OUT_DIR"
 
 ONLY=""
 RUN_AGENT=1
+RUN_AGENT_ALL=0
 KEEP_SCREENS=0
 for arg in "$@"; do
     case "$arg" in
         --only=*)        ONLY="${arg#*=}" ;;
         --no-agent)      RUN_AGENT=0 ;;
+        --agent-all)     RUN_AGENT_ALL=1 ;;
         --keep-screens)  KEEP_SCREENS=1 ;;
     esac
 done
@@ -421,20 +423,12 @@ t_screenshot_smoke() {
     fi
 }
 
-# Agent-driven exploration: launch claude with a permission narrowed to
-# wrappers that read the journal + send protocol requests. Goal: walk
-# the system looking for surface-state regressions the deterministic
-# tests don't model.
-t_agent_explores_window_states() {
-    local name="agent_explores_window_states"
-    should_run "$name" || { skip "$name"; return; }
-    if [ "$RUN_AGENT" -eq 0 ]; then skip "$name (--no-agent)"; return; fi
-    if ! command -v claude >/dev/null 2>&1; then skip "$name (no claude CLI)"; return; fi
-
-    local workdir="$OUT_DIR/agent"
-    mkdir -p "$workdir"
-
-    # Wrapper scripts the agent calls (locks down what it can do).
+# Set up the wrapper scripts the agent is allowed to Bash. Locks the
+# blast radius — the agent can ONLY do these things, no arbitrary
+# virsh / vm-exec / network calls. Each call to _agent_explore makes
+# its own private workdir so multiple agent runs don't share state.
+_agent_setup_wrappers() {
+    local workdir="$1"
     cat > "$workdir/spawn-foot.sh" <<EOF
 #!/bin/bash
 "$VM_SCRIPT" "$VM" <<XEOF
@@ -446,6 +440,13 @@ EOF
     cat > "$workdir/journal-tail.sh" <<EOF
 #!/bin/bash
 "$VM_EXEC" "$VM" "journalctl _UID=1000 --no-pager 2>/dev/null | grep qdwin | tail -\${1:-30}"
+EOF
+    cat > "$workdir/journal-grep.sh" <<EOF
+#!/bin/bash
+# args: PATTERN [N=20] — egrep recent qdwin journal for PATTERN
+pat="\${1:-.}"
+n="\${2:-20}"
+"$VM_EXEC" "$VM" "journalctl _UID=1000 --since '5 minutes ago' --no-pager 2>/dev/null | grep -E '\$pat' | tail -\$n"
 EOF
     cat > "$workdir/screenshot.sh" <<EOF
 #!/bin/bash
@@ -460,41 +461,61 @@ EOF
 #!/bin/bash
 "$VM_EXEC" "$VM" "pkill -9 foot 2>/dev/null; sleep 1; true"
 EOF
+    cat > "$workdir/vm-shell.sh" <<EOF
+#!/bin/bash
+exec "$VM_SCRIPT" "$VM"
+EOF
     chmod +x "$workdir"/*.sh
+}
+
+# Parameterised agent runner. Each focus area gets its own prompt
+# tailored to the protocol surface it should poke at, plus a known-
+# fixed list so the agent doesn't waste budget re-confirming wins.
+_agent_explore() {
+    local name="$1" focus="$2" known_fixed="$3" examples="$4"
+    should_run "$name" || { skip "$name"; return; }
+    if [ "$RUN_AGENT" -eq 0 ]; then skip "$name (--no-agent)"; return; fi
+    if ! command -v claude >/dev/null 2>&1; then skip "$name (no claude CLI)"; return; fi
+
+    local workdir="$OUT_DIR/$name"
+    mkdir -p "$workdir"
+    _agent_setup_wrappers "$workdir"
 
     local prompt
     prompt=$(cat <<EOF
-You are testing qdwin (a Wayland compositor) for window-state bugs.
+You are testing qdwin (a Wayland compositor) for $focus.
 
-Tools (Bash only):
-  $workdir/spawn-foot.sh [args]    spawn a foot terminal with args
-  $workdir/journal-tail.sh [N]     last N qdwin journal lines (default 30)
-  $workdir/kill-foots.sh           kill all foot processes
+Tools (Bash only — invoke ONLY these wrappers, no raw virsh/vm-exec):
+  $workdir/spawn-foot.sh [args]            spawn a foot terminal
+  $workdir/journal-tail.sh [N]             last N qdwin journal lines (default 30)
+  $workdir/journal-grep.sh PATTERN [N=20]  grep recent qdwin entries
+  $workdir/kill-foots.sh                   kill all foot processes
+  $workdir/screenshot.sh [out]             PNG screenshot
+  $workdir/vm-shell.sh                     run a script via stdin in the VM
 
-KNOWN-FIXED (don't re-test, would waste time):
-  - xdg_toplevel.set_maximized: works (qdwin: set_maximized handle=N max=1)
-  - xdg_toplevel.set_fullscreen: works (qdwin: set_fullscreen handle=N fs=1)
+KNOWN-FIXED (don't re-test, would waste budget):
+$known_fixed
 
-YOUR JOB: do ONE focused exploration (max 6 Bash calls) to find a
-window-state bug or quirk not yet covered by deterministic tests.
-Examples to try (pick ONE):
-  - foot --app-id=X then check if app_id propagates correctly in qdwin journal
-  - foot --window-size-pixels=2000x2000 (oversize) and check qdwin's response
-  - foot --title="my title" (does qdwin log the title?)
-  - rapid spawn+kill cycle: 5 foots in a row, check journal for leaks
+YOUR JOB: do ONE focused exploration (max 8 Bash calls) targeting
+$focus. Find a real bug or quirk not yet covered by deterministic
+tests, OR confirm a suspect path works correctly.
+
+Examples to try:
+$examples
 
 Steps:
   1. kill_all_foots first.
-  2. Pick ONE exploration and run it.
-  3. Read the journal output you got, look for anything unexpected.
-  4. Output ONE line: CHECK <name>: <PASS|FAIL|UNEXPECTED> -- <one-sentence detail>
-  5. End with: AGENT DONE
+  2. Pick ONE thing and investigate.
+  3. Parse the journal / screenshot evidence.
+  4. Output exactly ONE summary line:
+       CHECK <name>: <PASS|FAIL|UNEXPECTED> -- <one-sentence detail>
+  5. End with the literal line: AGENT DONE
 
 Be terse. Do not narrate. Do not repeat the prompt back.
 EOF
 )
 
-    log "running agent (10-min budget)..."
+    log "running agent for '$name' (10-min budget)..."
     local agent_out
     agent_out=$(printf '%s\n' "$prompt" | timeout 600 claude \
         --model claude-sonnet-4-6 \
@@ -507,6 +528,106 @@ EOF
         pass "$name (agent ran to completion)"
     else
         fail "$name: agent did not finish cleanly"
+    fi
+}
+
+t_agent_explores_window_states() {
+    _agent_explore "agent_explore_window_states" "window-state bugs" \
+"  - xdg_toplevel.set_maximized works (qdwin: set_maximized handle=N max=1)
+  - xdg_toplevel.set_fullscreen works (qdwin: set_fullscreen handle=N fs=1)
+  - xdg_toplevel.set_title diff path works (qdwin: toplevel_title handle=N)
+  - xdg_toplevel.set_app_id propagates at toplevel_added time" \
+"  - foot --window-size-pixels=2000x2000 (oversize) — does qdwin clamp/honor?
+  - foot --window-size-chars=NxM with weird ratios — geometry quirks?
+  - rapid spawn+kill of 5+ foots — handle leak?
+  - kill -STOP on foot then check qdwin's view of it"
+}
+
+# Focus / popup / parent-child relationships. qdwin tracks toplevel
+# stacking and emits raise/lower events; popups should layer above
+# their parent. Easy way to trigger: spawn nested foot that opens a
+# child via the desktop entry, OR send a key chord that triggers a
+# qdshell popup (none defined right now, but agent might find one).
+t_agent_explores_focus_popups() {
+    _agent_explore "agent_explore_focus_popups" \
+"focus, popups, parent-child stacking, and z-order" \
+"  - toplevel_added fires for every foot spawn
+  - cascading offset is +40px per existing toplevel
+  - layer-shell surfaces (qdshell-bar) sit above normal toplevels" \
+"  - spawn 3 foots in sequence, check the cascade offset and z-order
+  - kill the focused foot, check that focus passes to a sibling (focus event?)
+  - look for any 'qdwin: focus' / 'raise' / 'lower' / 'activate' log lines
+    when foots come and go — are they emitted reliably?
+  - search the journal for 'popup' references after spawning foots"
+}
+
+# Layer-shell exclusive zones are how qdshell's panel claims screen
+# real-estate. The work-area maximize math depends on these being
+# computed correctly. Edge cases: zone of 0, zone larger than output,
+# multiple bars on different anchors.
+t_agent_explores_layer_shell() {
+    _agent_explore "agent_explore_layer_shell" \
+"layer-shell anchors, exclusive zones, and work-area math" \
+"  - qdshell-bar maps at top with 30px exclusive zone
+  - maximize honours work-area (1920x1050 with the 30px panel)
+  - layer-shell mapped lines show ns=qdshell-* with anchor + size" \
+"  - spawn foot --maximized, then read 'qdwin: layer-shell' AND
+    'qdwin: set_maximized' lines side-by-side — does the math match
+    (panel height + maximized height = output height)?
+  - look for ALL ns=qdshell-* layer surfaces in the journal — is
+    there one with size > output (would be a clip bug)?
+  - look for 'qdwin: layer-shell unmapped' on session restart — does
+    the exclusive zone get reclaimed cleanly?"
+}
+
+# Keybindings, idle, lock, switcher events. qdwin-shell-v1 has events
+# for switcher_next/commit, launcher_requested, lock_requested,
+# overlay_key, idle_lock_hint. Most are wired by qdwin's keyboard
+# grab; without qdshell consuming them, they may fire into the void.
+t_agent_explores_keybindings() {
+    _agent_explore "agent_explore_keybindings" \
+"keybindings, idle/lock state, and switcher events" \
+"  - 'qdwin: shell loaded' fires once per session
+  - 'qdwin: ext-idle-notify' shows the idle timeout config
+  - layer-shell maps for qdshell-bar fire on session start" \
+"  - look for any 'qdwin: switcher' / 'launcher' / 'overlay_key' /
+    'lock_requested' lines in the journal — are any wired?
+  - send a Super key press from the VM and see if anything fires
+    (use vm-shell.sh: ydotool/wtype keystroke if available)
+  - check for idle-related events after the VM has been idle"
+}
+
+# ---------- deterministic layer-shell ---------------
+# The qdshell panel claims a 30px top exclusive zone. The work-area
+# helper subtracts that from the output, which feeds maximize. If
+# the zone math regresses, maximize math regresses too. This test
+# pins the panel size to the maximize outer.
+t_layer_shell_zone_matches_maximize() {
+    local name="layer_shell_zone_matches_maximize"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot --maximized
+    sleep 1
+    local layer_h max_h
+    layer_h=$("$VM_SCRIPT" "$VM" <<'EOF' | tail -1
+journalctl _UID=1000 --no-pager 2>/dev/null \
+  | grep -E 'qdshell-bar-content-Virtual-1.*1920x[0-9]+' \
+  | tail -1 \
+  | sed -nE 's/.* 1920x([0-9]+).*/\1/p'
+EOF
+)
+    max_h=$(vm_journal_since "$cursor" "qdwin: set_maximized" | tail -1 | sed -nE 's/.*outer=1920x([0-9]+).*/\1/p')
+    kill_all_foots
+    if [ -z "$layer_h" ] || [ -z "$max_h" ]; then
+        fail "$name: missing layer ($layer_h) or max ($max_h)"; return
+    fi
+    local total=$((layer_h + max_h - 1))  # bar zone is 30, maximize is 1050; sum = 1080 with 1px overlap or so
+    # Allow small slack: layer_h + max_h should be within 5px of 1080 (output height)
+    if [ "$total" -ge 1075 ] && [ "$total" -le 1085 ]; then
+        pass "$name (panel=${layer_h}px + maximized=${max_h}px ≈ output)"
+    else
+        fail "$name: panel=${layer_h} + maximized=${max_h} = $((layer_h + max_h)) (expected ~1080)"
     fi
 }
 
@@ -542,8 +663,21 @@ main() {
     t_xdg_toplevel_set_app_id
 
     echo
+    echo "=== layer-shell zones ==="
+    t_layer_shell_zone_matches_maximize
+
+    echo
     echo "=== agent-driven exploration ==="
     t_agent_explores_window_states
+    if [ "${RUN_AGENT_ALL:-0}" = "1" ]; then
+        t_agent_explores_focus_popups
+        t_agent_explores_layer_shell
+        t_agent_explores_keybindings
+    else
+        skip "agent_explore_focus_popups (set --agent-all)"
+        skip "agent_explore_layer_shell (set --agent-all)"
+        skip "agent_explore_keybindings (set --agent-all)"
+    fi
 
     echo
     log "summary: ${c_green}${PASSED} pass${c_off}, ${c_red}${FAILED} fail${c_off}, ${c_yel}${SKIPPED} skip${c_off}"
