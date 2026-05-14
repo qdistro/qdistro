@@ -338,6 +338,31 @@ vm-exec "$VM" "echo $B64 | base64 -d | bash"
 This matches what each scenario's Setup would do itself, but running
 it centrally keeps weaker scenarios honest.
 
+### Smoke subset (5-minute pre-push sweep)
+
+The full GUI corpus is 49 scenarios. For a pre-push smoke pass, run the
+five scenarios below — they cover the broker → compositor → shell
+happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
+
+| Scenario | Why it's load-bearing |
+|---|---|
+| `tests/integration/permissions-gui/04-qt-admin-app-approve.md` | broker + Qt admin app + scope cache — the cross-cutting permission path that touches almost every component |
+| `tests/integration/qdwin-noctalia/01-bar-visible.md` | qdshell renders at all; smoke-detects a fully-broken shell |
+| `qdwin/tests/gui/04-alt-tab-switch.md` | switcher + focus + raise + close-and-refocus; the most-touched compositor code path |
+| `qdwin/tests/gui/03-locker-cycle.md` | lock + unlock end-to-end; exercises the pwd vault binding |
+| `qdwin/tests/gui/13-focus-events-emitted.md` | spawn / close / drop-to-no-window — the focus-event ground truth that downstream window-list highlight depends on |
+
+Optional add-ons when you're touching the bar:
+
+| Scenario | Why |
+|---|---|
+| `qdwin/tests/gui/12-bar-no-overdraw.md` | bar height == exclusion height; verifies the 1px-overdraw fix and the `exclusionZoneBleed` toggle round-trip |
+| `qdwin/tests/gui/14-bar-content-quiet-when-idle.md` | journal stays quiet when idle; catches a returning remap storm |
+
+Run them in series (`one VM at a time`) and drain state between scenarios
+per the [Between scenarios](#between-scenarios) block. A green smoke is
+not a green full pass — it just blocks the most expensive merge mistakes.
+
 ### Interpreting reports
 
 - **PASS** — all Assert bullets passed; trust the runner.

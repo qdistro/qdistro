@@ -1,0 +1,26 @@
+#!/bin/sh
+# qdistro pre-commit hook — runs the Python unit suite before allowing a
+# commit. Catches broker / pwd / SDK regressions in <15s; VM-based bats
+# and GUI scenarios stay manual (too slow per-commit).
+#
+# Bypass with `git commit --no-verify` only for emergencies; the cost of
+# the hook is small enough that bypassing it routinely means it's working
+# on something it shouldn't have to.
+#
+# Install with:
+#   scripts/install-git-hooks.sh
+# from the qdistro repo root.
+
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+if ! command -v pytest >/dev/null 2>&1; then
+    echo "pre-commit: pytest not found — install dev deps or skip with --no-verify" >&2
+    exit 1
+fi
+
+# Run only the fast unit suite. VM bats + GUI scenarios are out-of-scope
+# for per-commit (they need a running libvirt VM).
+pytest tests/unit/ -q --tb=line

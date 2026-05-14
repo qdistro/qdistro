@@ -16,6 +16,11 @@ from pathlib import Path
 
 import pytest
 
+# Skip the whole module cleanly if textual isn't installed — the TUI
+# approver pulls it transitively, and a missing optional dev dep
+# shouldn't break the pre-commit hook for unrelated changes.
+pytest.importorskip("textual")
+
 # Promote tui/ onto sys.path so test imports work.
 _TUI = Path(__file__).resolve().parents[1] / "tui"
 sys.path.insert(0, str(_TUI))

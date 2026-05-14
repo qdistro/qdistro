@@ -524,6 +524,24 @@ EOF
         --allowed-tools "Bash" 2>&1 \
         | tee "$workdir/agent.log")
     printf '    %s\n' "$agent_out" | sed 's/^/    /'
+
+    # Persist the agent's CHECK line into a durable findings log so we
+    # don't lose the discoveries when $OUT_DIR (a /tmp dir) is cleaned
+    # up. Each line is tagged with date + run so we can audit what an
+    # agent saw historically without re-running the full suite. See
+    # todo/known-regressions.md for how to promote a finding to a
+    # tracked todo + regression test.
+    local findings_dir="$SCRIPT_DIR/agent-findings"
+    mkdir -p "$findings_dir"
+    local findings_log="$findings_dir/$(date -u +%Y-%m-%d).log"
+    {
+        printf '%s  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name"
+        # Capture every CHECK ... line plus any UNEXPECTED note line
+        printf '%s\n' "$agent_out" | grep -E '^\s*(CHECK |UNEXPECTED|>|note: )' \
+            | sed 's/^/    /'
+        printf '\n'
+    } >> "$findings_log"
+
     if printf '%s' "$agent_out" | grep -q "AGENT DONE"; then
         pass "$name (agent ran to completion)"
     else
@@ -536,7 +554,12 @@ t_agent_explores_window_states() {
 "  - xdg_toplevel.set_maximized works (qdwin: set_maximized handle=N max=1)
   - xdg_toplevel.set_fullscreen works (qdwin: set_fullscreen handle=N fs=1)
   - xdg_toplevel.set_title diff path works (qdwin: toplevel_title handle=N)
-  - xdg_toplevel.set_app_id propagates at toplevel_added time" \
+  - xdg_toplevel.set_app_id propagates at toplevel_added time
+  - auto-focus on toplevel map (since 2026-05-14): new windows get
+    keyboard focus by default (qdwin: focus handle=N (was M) seat=...).
+    Focus is only assigned after the surface is BOTH decorated AND
+    mapped (qdwin_toplevel_autofocus_if_ready) — a focus on an
+    unmapped surface would be a regression." \
 "  - foot --window-size-pixels=2000x2000 (oversize) — does qdwin clamp/honor?
   - foot --window-size-chars=NxM with weird ratios — geometry quirks?
   - rapid spawn+kill of 5+ foots — handle leak?
@@ -553,11 +576,18 @@ t_agent_explores_focus_popups() {
 "focus, popups, parent-child stacking, and z-order" \
 "  - toplevel_added fires for every foot spawn
   - cascading offset is +40px per existing toplevel
-  - layer-shell surfaces (qdshell-bar) sit above normal toplevels" \
+  - layer-shell surfaces (qdshell-bar) sit above normal toplevels
+  - keyboard focus auto-assigns to newly mapped toplevels and emits
+    'qdwin: focus handle=N (was M) seat=...' (since 2026-05-14)
+  - closing the focused toplevel transfers focus to a surviving
+    sibling (chosen from the toplevel list head, most-recently-added
+    first). Falls through to UINT32_MAX only when no sibling exists.
+    A drop-to-null with live siblings would be a regression in
+    qdwin_surface_removed's focus-transfer block." \
 "  - spawn 3 foots in sequence, check the cascade offset and z-order
-  - kill the focused foot, check that focus passes to a sibling (focus event?)
-  - look for any 'qdwin: focus' / 'raise' / 'lower' / 'activate' log lines
-    when foots come and go — are they emitted reliably?
+  - kill a NON-focused foot — focus should NOT move
+  - kill the focused foot when others remain — focus should move to a
+    live sibling, not drop to UINT32_MAX
   - search the journal for 'popup' references after spawning foots"
 }
 
@@ -568,9 +598,16 @@ t_agent_explores_focus_popups() {
 t_agent_explores_layer_shell() {
     _agent_explore "agent_explore_layer_shell" \
 "layer-shell anchors, exclusive zones, and work-area math" \
-"  - qdshell-bar maps at top with 30px exclusive zone
-  - maximize honours work-area (1920x1050 with the 30px panel)
-  - layer-shell mapped lines show ns=qdshell-* with anchor + size" \
+"  - qdshell-bar-content and qdshell-bar-exclusion-top both map at 1920x31
+    (with Settings.data.bar.exclusionZoneBleed=false, the default since
+    todo/qdshell-bar-pixel-mismatch.md was resolved 2026-05-14). Pre-fix
+    the exclusion was 1920x30 with a 1px bleed.
+  - maximize honours work-area (1920x1049 with the 31px panel + no
+    bleed; total 1080)
+  - layer-shell mapped lines show ns=qdshell-* with anchor + size, ONE
+    line per actual map event (per-commit log spam was fixed 2026-05-14;
+    a >1Hz remap rate would be a regression — see
+    todo/known-regressions.md entry for the bar-content remap storm)" \
 "  - spawn foot --maximized, then read 'qdwin: layer-shell' AND
     'qdwin: set_maximized' lines side-by-side — does the math match
     (panel height + maximized height = output height)?
@@ -622,12 +659,247 @@ EOF
     if [ -z "$layer_h" ] || [ -z "$max_h" ]; then
         fail "$name: missing layer ($layer_h) or max ($max_h)"; return
     fi
-    local total=$((layer_h + max_h - 1))  # bar zone is 30, maximize is 1050; sum = 1080 with 1px overlap or so
-    # Allow small slack: layer_h + max_h should be within 5px of 1080 (output height)
-    if [ "$total" -ge 1075 ] && [ "$total" -le 1085 ]; then
+    local total=$((layer_h + max_h))
+    # With exclusionZoneBleed off (default) the bar + work area should sum
+    # exactly to the output height (1080). Allow ±2px for compositor rounding.
+    if [ "$total" -ge 1078 ] && [ "$total" -le 1082 ]; then
         pass "$name (panel=${layer_h}px + maximized=${max_h}px ≈ output)"
     else
-        fail "$name: panel=${layer_h} + maximized=${max_h} = $((layer_h + max_h)) (expected ~1080)"
+        fail "$name: panel=${layer_h} + maximized=${max_h} = $total (expected ~1080)"
+    fi
+}
+
+# Focus must drop to UINT32_MAX (= 4294967295) when the last focused
+# toplevel is destroyed and no other toplevel inherits focus. Without
+# this transition logged, a "stuck-focus" state (shell believes a now-
+# destroyed handle still has focus) is invisible from the journal.
+t_focus_drops_to_no_window_on_last_close() {
+    local name="focus_drops_to_no_window_on_last_close"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot
+    sleep 1
+    "$VM_EXEC" "$VM" "pkill -9 -x foot" >/dev/null 2>&1
+    sleep 1
+    local final
+    final=$(vm_journal_since "$cursor" "qdwin: focus handle=" | tail -1)
+    if printf '%s' "$final" | grep -qE 'qdwin: focus handle=4294967295'; then
+        pass "$name (final focus handle=UINT32_MAX as expected)"
+    else
+        fail "$name: last focus line did not drop to UINT32_MAX: '$final'"
+    fi
+}
+
+# Focus transitions must fire on Alt+Tab as well as on spawn/close. The
+# kbd_focus_listener should observe the focus moves caused by qdwin's
+# switcher grab. Two foots + one Alt+Tab cycle → expect ≥1 extra focus
+# event over baseline (spawn-only emits 2).
+#
+# Alt+Tab MUST be driven via QMP input-send-event, not virsh send-key.
+# virsh send-key holds and releases all keys atomically — there is no
+# "alt held alone, then tab" transition in its evdev output, so weston's
+# modifier_binding (the basis of qdwin's switcher_grab) never fires.
+# See qdwin/tests/gui/AGENTS.md "Why two key paths" for the post-mortem.
+t_focus_event_on_alt_tab() {
+    local name="focus_event_on_alt_tab"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    spawn_foot
+    sleep 0.5
+    spawn_foot
+    sleep 0.5
+    local cursor; cursor=$(vm_journal_cursor)
+    # Real-keyboard sequence: alt down, tab down, tab up, alt up.
+    local qmp_alt_down='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"alt"}}}]}}'
+    local qmp_alt_up='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"alt"}}}]}}'
+    local qmp_tab_down='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"tab"}}}]}}'
+    local qmp_tab_up='{"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"tab"}}}]}}'
+    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_alt_down" >/dev/null 2>&1 || true
+    sleep 0.1
+    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_tab_down" >/dev/null 2>&1 || true
+    sleep 0.05
+    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_tab_up" >/dev/null 2>&1 || true
+    sleep 0.1
+    virsh -c qemu:///session qemu-monitor-command "$VM" "$qmp_alt_up" >/dev/null 2>&1 || true
+    sleep 1
+    local n
+    n=$(vm_journal_since "$cursor" "qdwin: focus handle=" | wc -l)
+    kill_all_foots
+    if [ "$n" -ge 1 ]; then
+        pass "$name ($n focus events after alt+tab)"
+    else
+        fail "$name: zero focus events recorded for alt+tab cycle"
+    fi
+}
+
+# A spawn/close cycle should not leave any stuck cached handle in the
+# seat tracker. Spawn foot, close it, spawn again — the second spawn's
+# focus event should report a previous-handle != current-handle.
+t_focus_handle_advances_across_spawn_cycles() {
+    local name="focus_handle_advances_across_spawn_cycles"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot
+    sleep 1
+    "$VM_EXEC" "$VM" "pkill -9 -x foot" >/dev/null 2>&1
+    sleep 1
+    spawn_foot
+    sleep 1
+    local handles
+    handles=$(vm_journal_since "$cursor" "qdwin: focus handle=" \
+        | sed -nE 's/.*focus handle=([0-9]+) \(was ([0-9]+)\).*/\1 \2/p')
+    kill_all_foots
+    # Need at least 3 lines: first spawn (was=UINT32_MAX), close→drop,
+    # second spawn (was=UINT32_MAX again).
+    local n; n=$(printf '%s\n' "$handles" | grep -c .)
+    if [ "$n" -ge 3 ]; then
+        pass "$name ($n focus transitions across spawn/close/spawn)"
+    else
+        fail "$name: only $n focus transitions (expected ≥3)"
+    fi
+}
+
+# The exclusionZoneBleed setting toggles the 1px bleed. When false
+# (default), bar height == exclusion height. The integration of the
+# setting is verified by t_bar_content_matches_exclusion_zone; this
+# adjacent test asserts the qdwin work area equals (output - bar) when
+# bleed is off — i.e. maximize.outer == output - bar_height.
+t_maximize_outer_excludes_full_bar_no_bleed() {
+    local name="maximize_outer_excludes_full_bar_no_bleed"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot --maximized
+    sleep 1
+    local bar_h max_h
+    bar_h=$("$VM_SCRIPT" "$VM" <<'EOF' | tail -1
+journalctl _UID=1000 --no-pager 2>/dev/null \
+  | grep -E 'qdshell-bar-content-Virtual-1.*1920x[0-9]+' \
+  | tail -1 \
+  | sed -nE 's/.* 1920x([0-9]+).*/\1/p'
+EOF
+)
+    max_h=$(vm_journal_since "$cursor" "qdwin: set_maximized" | tail -1 \
+        | sed -nE 's/.*outer=1920x([0-9]+).*/\1/p')
+    kill_all_foots
+    if [ -z "$bar_h" ] || [ -z "$max_h" ]; then
+        fail "$name: missing bar=$bar_h or max=$max_h"; return
+    fi
+    local total=$((bar_h + max_h))
+    # Expect 1080 exactly with bleed off (allow ±1 for compositor rounding).
+    if [ "$total" -ge 1079 ] && [ "$total" -le 1081 ]; then
+        pass "$name (bar=$bar_h + max=$max_h = $total, no overdraw)"
+    else
+        fail "$name: bar=$bar_h + max=$max_h = $total (expected 1080 ±1; bleed leaking?)"
+    fi
+}
+
+# Workspace-cycle quietness regression: after a non-trivial action
+# (open + close a foot), the per-frame remap noise must stay below the
+# storm threshold even though the bar may legitimately remap once or
+# twice on visibility changes.
+t_bar_content_quiet_through_window_cycle() {
+    local name="bar_content_quiet_through_window_cycle"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot
+    sleep 1
+    "$VM_EXEC" "$VM" "pkill -9 -x foot" >/dev/null 2>&1
+    sleep 1
+    local n
+    n=$(vm_journal_since "$cursor" "qdshell-bar-content-Virtual-1" | wc -l)
+    if [ "$n" -le 5 ]; then
+        pass "$name ($n bar-content remaps across spawn+close)"
+    else
+        fail "$name: $n bar-content remaps across one window cycle (storm-y)"
+    fi
+}
+
+# After 10s of idle (no user input, no spawns), the bar-content layer
+# surface should not log re-map events. Re-map storms (~6-20 Hz seen in
+# the wild) drown qdwin signal and indicate either a QML repaint loop
+# or a logging bug. See todo/qdshell-bar-remap-storm.md.
+t_bar_content_remap_quiet_when_idle() {
+    local name="bar_content_remap_quiet_when_idle"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    sleep 1
+    local cursor; cursor=$(vm_journal_cursor)
+    sleep 10
+    local n
+    n=$(vm_journal_since "$cursor" "qdshell-bar-content-Virtual-1" | wc -l)
+    # Allow up to 2 (one stray remap on settle is acceptable; storm = ~200).
+    if [ "$n" -le 2 ]; then
+        pass "$name ($n bar-content remap events in 10s idle)"
+    else
+        fail "$name: $n bar-content remap events in 10s idle (expected ≤2, storm = ≥50)"
+    fi
+}
+
+# qdwin must log a focus-change line whenever keyboard focus moves between
+# toplevels, independent of qdshell binding state. Without these lines,
+# focus handoff after window close is unverifiable from the journal. See
+# todo/qdwin-focus-events.md.
+t_focus_events_emitted() {
+    local name="focus_events_emitted"
+    should_run "$name" || { skip "$name"; return; }
+    kill_all_foots
+    local cursor; cursor=$(vm_journal_cursor)
+    spawn_foot                # foot 1, gains focus
+    sleep 0.5
+    spawn_foot                # foot 2, gains focus
+    sleep 0.5
+    "$VM_EXEC" "$VM" "pkill -9 -n foot" >/dev/null 2>&1  # close foot 2
+    sleep 1
+    local matches
+    matches=$(vm_journal_since "$cursor" "qdwin: focus handle=" | wc -l)
+    kill_all_foots
+    if [ "$matches" -ge 3 ]; then
+        pass "$name ($matches focus events; expected ≥3)"
+    else
+        fail "$name: only $matches 'qdwin: focus handle=' lines (expected ≥3 for spawn,spawn,close-handoff)"
+    fi
+}
+
+# bar-content and bar-exclusion-top must agree to within 1 physical pixel.
+# When they diverge (e.g. exclusionZoneBleed defaulting on) the bar's bottom
+# row paints into the work area. See todo/qdshell-bar-pixel-mismatch.md.
+#
+# Use vm-script (base64-wrapped) for the sed backreference; vm-exec's JSON
+# encoder mangles "\1" — see permissions-gui/AGENTS.md pitfall #1.
+t_bar_content_matches_exclusion_zone() {
+    local name="bar_content_matches_exclusion_zone"
+    should_run "$name" || { skip "$name"; return; }
+    local bar_h excl_h
+    bar_h=$("$VM_SCRIPT" "$VM" <<'EOF' | tail -1
+journalctl _UID=1000 --no-pager 2>/dev/null \
+  | grep -E 'qdshell-bar-content-Virtual-1.*1920x[0-9]+' \
+  | tail -1 \
+  | sed -nE 's/.* 1920x([0-9]+).*/\1/p'
+EOF
+)
+    excl_h=$("$VM_SCRIPT" "$VM" <<'EOF' | tail -1
+journalctl _UID=1000 --no-pager 2>/dev/null \
+  | grep -E 'qdshell-bar-exclusion-top-Virtual-1.*1920x[0-9]+' \
+  | tail -1 \
+  | sed -nE 's/.* 1920x([0-9]+).*/\1/p'
+EOF
+)
+    if [ -z "$bar_h" ] || [ -z "$excl_h" ]; then
+        fail "$name: missing bar=$bar_h or excl=$excl_h"; return
+    fi
+    if [ "$bar_h" = "$excl_h" ]; then
+        pass "$name (bar=${bar_h} == excl=${excl_h})"
+    else
+        fail "$name: bar=${bar_h} != excl=${excl_h} (1px overdraw into work area)"
     fi
 }
 
@@ -665,6 +937,17 @@ main() {
     echo
     echo "=== layer-shell zones ==="
     t_layer_shell_zone_matches_maximize
+    t_bar_content_matches_exclusion_zone
+    t_maximize_outer_excludes_full_bar_no_bleed
+    t_bar_content_remap_quiet_when_idle
+    t_bar_content_quiet_through_window_cycle
+
+    echo
+    echo "=== focus events ==="
+    t_focus_events_emitted
+    t_focus_drops_to_no_window_on_last_close
+    t_focus_event_on_alt_tab
+    t_focus_handle_advances_across_spawn_cycles
 
     echo
     echo "=== agent-driven exploration ==="
