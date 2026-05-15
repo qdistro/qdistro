@@ -229,7 +229,8 @@ stage_tier2_driver() {
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
     # define-only and no-viewer modes; full virt-viewer-on-wayland-1
     # integration is exercised manually until the chrome path is stable.
-    vm_run "bash /root/s42-tier4-spawn.sh 2>/dev/null"
+    stage_tier2_driver "s42-tier4-spawn.sh"
+    vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-4 stack (libvirt/qemu/virt-viewer) not installed on this VM"
@@ -244,9 +245,9 @@ stage_tier2_driver() {
 @test "phase7-tier5-loopback: qdistro-tier5-spawn --loopback bridges wayland-info via vsock" {
     # §Phase-7 tier-5-Linux — waypipe-over-vsock wrapper smoke. Linux-only
     # per spec/00. Tests the data path with vsock CID=1 (loopback).
-    # Real-VM mode (--vm <name>) is wiring-only in this shipset; gated
-    # on the still-deferred guest-disk build.
-    vm_run "bash /root/s43-tier5-loopback.sh 2>/dev/null"
+    # Real-VM mode (--vm <name>) is covered by phase7-tier5-vm.
+    stage_tier2_driver "s43-tier5-loopback.sh"
+    vm_run "curl -s -o /tmp/s43.sh http://10.0.2.2:8768/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
@@ -262,7 +263,8 @@ stage_tier2_driver() {
     # aware client (virt-viewer being the motivating case). Tests the
     # wrapper end-to-end with qdistro-test-window as a stand-in for
     # virt-viewer to avoid dragging libvirt+qemu into the test.
-    vm_run "bash /root/s44-tier4-secctx-exec.sh 2>/dev/null"
+    stage_tier2_driver "s44-tier4-secctx-exec.sh"
+    vm_run "curl -s -o /tmp/s44.sh http://10.0.2.2:8768/s44-tier4-secctx-exec.sh && chmod +x /tmp/s44.sh && bash /tmp/s44.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-secctx-exec / qdistro-test-window absent on this VM"
@@ -280,7 +282,8 @@ stage_tier2_driver() {
     # §Phase-7 tier-5 --vm — full per-app guest VM path. Skips when
     # /var/lib/libvirt/images/qdistro-tier5-base.qcow2 is absent (build
     # is opt-in: ~400MB Tumbleweed-Minimal-VM cloud download).
-    vm_run "bash /root/s45-tier5-vm.sh 2>/dev/null"
+    stage_tier2_driver "s45-tier5-vm.sh"
+    vm_run "curl -s -o /tmp/s45.sh http://10.0.2.2:8768/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1, or invoke qdistro-tier5-build-guest-image manually)"
@@ -290,6 +293,24 @@ stage_tier2_driver() {
     assert_output_contains "PASS: guest qemu-guest-agent responded"
     assert_output_contains "PASS: guest publisher pid reported via qga guest-exec"
     assert_output_contains "PASS: §Phase-7 tier-5-Linux --vm end-to-end smoke"
+}
+
+@test "phase7-tier5-close-cleanup: SIGTERM teardown reclaims libvirt domain + per-VM overlay" {
+    # §Phase-7 tier-5 cleanup — orphan-resource budget. The wrapper's
+    # EXIT trap MUST destroy+undefine the domain and rm the overlay.
+    # Anything left after SIGTERM is a leak; the bats variant catches
+    # the regression class the user-facing close button can't see.
+    # Pairs with permissions-gui/21-tier5-close-cleanup.md (visual).
+    stage_tier2_driver "s48-tier5-close-cleanup.sh"
+    vm_run "curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
+    fi
+    assert_output_contains "PASS: domain"
+    assert_output_contains "PASS: libvirt domain"
+    assert_output_contains "PASS: per-VM overlay"
+    assert_output_contains "PASS: §Phase-7 tier-5 SIGTERM teardown reclaims all per-VM resources"
 }
 
 @test "phase7-tier5-audio: qemu -audiodev pipewire bridges guest audio to host PipeWire" {
@@ -319,7 +340,8 @@ stage_tier2_driver() {
     # 037) the test runs end-to-end on sdl-freerdp /v: dummy as well —
     # the focus state that real virt-viewer would deliver naturally is
     # injected via qdshell's ctrl-socket.
-    vm_run "bash /root/s46-tier4-clipboard-gate.sh 2>/dev/null"
+    stage_tier2_driver "s46-tier4-clipboard-gate.sh"
+    vm_run "curl -s -o /tmp/s46.sh http://10.0.2.2:8768/s46-tier4-clipboard-gate.sh && chmod +x /tmp/s46.sh && bash /tmp/s46.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-secctx-exec / qdistro-test-window / qdistro-test-clipboard-source absent"
@@ -357,7 +379,8 @@ stage_tier2_driver() {
     # host ↔ guest clipboard via wayland selection, which qdistro
     # already gates) and a per-launch 16-hex SPICE ticket. Admin
     # opts in to the SPICE clipboard via TIER4_SPICE_CLIPBOARD=allowed.
-    vm_run "bash /root/s49-tier4-spice-clipboard.sh 2>/dev/null"
+    stage_tier2_driver "s49-tier4-spice-clipboard.sh"
+    vm_run "curl -s -o /tmp/s49.sh http://10.0.2.2:8768/s49-tier4-spice-clipboard.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-tier4-spawn / virsh absent on this VM"
@@ -487,7 +510,8 @@ stage_tier2_driver() {
     # verifies running domain XML carries the configured copypaste
     # value (default 'no', opt-in 'yes'). Skips when the base image
     # isn't built (qdistro-tier4-base.qcow2 absent).
-    vm_run "bash /root/s54-tier4-spice-clipboard-live.sh 2>/dev/null"
+    stage_tier2_driver "s54-tier4-spice-clipboard-live.sh"
+    vm_run "curl -s -o /tmp/s54.sh http://10.0.2.2:8768/s54-tier4-spice-clipboard-live.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-4 SPICE base image absent (run build-guest-image.sh) or virsh missing"
