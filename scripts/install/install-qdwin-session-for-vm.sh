@@ -114,6 +114,26 @@ else
          "meson compile -C build' in $QDSHELL_SRC, then re-run this script."
 fi
 
+# 3c. Tier-2 host-side spawn helper. PodApps.qml shells out to
+# `qdistro-tier2-spawn` on PATH; install spawn-tier2.sh under that
+# canonical name so launches from the live shell work without baking
+# the dev-tree path in QML. The script is self-contained — entrypoint.sh
+# and the rest live inside the container image, not on the host.
+QDISTRO_SRC="${QDISTRO_SRC:-/root/qdistro-src/qdistro}"
+if [ -f "$QDISTRO_SRC/tier2/spawn-tier2.sh" ]; then
+    install -m 0755 -o root -g root \
+        "$QDISTRO_SRC/tier2/spawn-tier2.sh" \
+        /usr/bin/qdistro-tier2-spawn
+    install -m 0755 -o root -g root \
+        "$QDISTRO_SRC/tier2/podapps-scan.sh" \
+        /usr/bin/qdistro-podapps-scan
+    echo "qdistro-tier2-spawn + qdistro-podapps-scan installed in /usr/bin"
+else
+    echo "WARN: $QDISTRO_SRC/tier2/spawn-tier2.sh not found —" \
+         "PodApps.launch() will fail with 'qdistro-tier2-spawn: not found'." \
+         "Pass QDISTRO_SRC=<path> or untar qdistro to /root/qdistro-src/qdistro/."
+fi
+
 # 4. User systemd units.
 install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
 

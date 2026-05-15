@@ -160,18 +160,18 @@ else
     fail "no 'qdwin/nested-proxy: created handle=' line within 15s"
 fi
 
-# qdshell spawns qdistro-nested-pixelfeed per inner toplevel. Match
-# any line referencing the consumer binary or "pixelfeed".
+# qdshell spawns qdistro-nested-pixelfeed per inner toplevel. The
+# consumer process is the wire from nested_proxy_pixel_source →
+# bind_proxy_pixels; without it the proxy view stays on the placeholder
+# curtain. Match running process first, fall back to a journal grep
+# (in case the consumer exited cleanly between toplevel-add and assert).
 if pgrep -f qdistro-nested-pixelfeed >/dev/null 2>&1; then
     pass "qdshell spawned pixelfeed for in-container toplevel"
+elif [ -n "$CURSOR" ] && journalctl --after-cursor="$CURSOR" 2>/dev/null \
+        | grep -q "spawning pixelfeed\|qdistro-nested-pixelfeed\|bind_proxy_pixels"; then
+    pass "qdshell spawned pixelfeed for in-container toplevel (journal-confirmed)"
 else
-    # Fallback to journal grep.
-    if [ -n "$CURSOR" ] && journalctl --after-cursor="$CURSOR" 2>/dev/null \
-            | grep -q "qdistro-nested-pixelfeed"; then
-        pass "qdshell spawned pixelfeed for in-container toplevel"
-    else
-        pass "qdshell spawned pixelfeed for in-container toplevel (SOFT: no pixelfeed observed — qdshell QdwinBinding.nested_proxy_pixel_source is currently a no-op; tier-2 substrate is otherwise green)"
-    fi
+    fail "qdshell did not spawn qdistro-nested-pixelfeed for inner toplevel — check Qdwin.qml onNestedProxyPixelSource handler is firing (qdwin_shell_v1 v9+)"
 fi
 
 # --- Cleanup --------------------------------------------------------------
