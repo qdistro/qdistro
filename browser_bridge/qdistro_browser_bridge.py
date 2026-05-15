@@ -90,11 +90,65 @@ def write_message(stream, payload: dict) -> None:
 # ---- parent-chain identity check ---------------------------------
 
 def _resolve_allowlist() -> tuple[str, ...]:
-    override = os.environ.get(
+    """Return the effective parent-exe allowlist.
+
+    The unsuffixed ``QDISTRO_BROWSER_BRIDGE_ALLOWLIST`` env var was a
+    historical escape hatch that production builds also honored — any
+    process in the bridge's launch environment could replace the trust
+    boundary. P0-2 closes that: only ``..._ALLOWLIST_TEST`` is
+    accepted, and only under ``QDISTRO_TEST_MODE=1``. The legacy name
+    is now an explicit hard error rather than a silent override so
+    nothing accidentally reaches production with the old behaviour.
+    """
+    legacy = os.environ.get(
         "QDISTRO_BROWSER_BRIDGE_ALLOWLIST", "").strip()
+    if legacy:
+        raise RuntimeError(
+            "QDISTRO_BROWSER_BRIDGE_ALLOWLIST is rejected; use "
+            "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST under "
+            "QDISTRO_TEST_MODE=1")
+    override = os.environ.get(
+        "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST", "").strip()
     if override:
+        if os.environ.get("QDISTRO_TEST_MODE", "").strip() != "1":
+            raise RuntimeError(
+                "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST requires "
+                "QDISTRO_TEST_MODE=1")
         return tuple(p for p in override.split(":") if p)
     return ALLOWED_PARENT_EXES
+
+
+# ---- extension-identity from kernel-attested argv (P0-1) ----------
+
+def parse_extension_id_from_argv(
+        argv: list[str] | None, parent_exe: str) -> str:
+    """Return the authentic extension ID for the connecting WebExtension.
+
+    The browser passes the calling extension's identity as a command-line
+    argument when it spawns a native-messaging host; this value is set
+    by the browser at exec time and is not forgeable by extension JS.
+
+    - **Chrome / Chromium-family (Linux, macOS):** ``argv[1]`` is the
+      caller origin in the form ``chrome-extension://<ID>/``.
+    - **Firefox** (since Firefox 55): ``argv[1]`` is the path to the
+      host manifest; ``argv[2]`` is the extension ID as declared in
+      ``browser_specific_settings.gecko.id``.
+
+    Returns "" if argv shape doesn't match either form — caller treats
+    empty as "unknown extension," not "trusted to be anything." The
+    bridge no longer accepts a stdio-supplied extension_id field; only
+    this argv-derived value is authoritative.
+    """
+    if not argv or len(argv) < 2:
+        return ""
+    exe = (parent_exe or "").lower()
+    if "firefox" in exe:
+        return argv[2].strip() if len(argv) >= 3 else ""
+    chrome_origin = argv[1].strip()
+    if chrome_origin.startswith("chrome-extension://"):
+        rest = chrome_origin[len("chrome-extension://"):]
+        return rest.rstrip("/").strip()
+    return ""
 
 
 def read_parent_exe(ppid: int) -> str:
@@ -124,21 +178,32 @@ def verify_parent(
         exe_reader: Callable[[int], str] = read_parent_exe,
         selinux_reader: Callable[[int], str] = read_parent_selinux,
         allowlist: tuple[str, ...] | None = None,
+        argv: list[str] | None = None,
 ) -> dict:
     """Build an identity dict for the parent process.
 
     Always returns a dict; ``allowed`` is the gate the dispatcher
-    checks. Tests inject the four callables to drive every branch.
+    checks. Tests inject the callables (and optionally argv) to drive
+    every branch.
+
+    The ``extension_id`` field is derived from ``argv`` via
+    :func:`parse_extension_id_from_argv` — kernel-attested at the
+    browser's ``execve`` time. The bridge never trusts a stdio-supplied
+    ``extension_id`` field (P0-1).
     """
     allow = allowlist if allowlist is not None else _resolve_allowlist()
     ppid = int(ppid_fn())
     exe = exe_reader(ppid)
     selinux = selinux_reader(ppid)
     allowed = bool(exe) and exe in allow
+    if argv is None:
+        argv = sys.argv
+    extension_id = parse_extension_id_from_argv(argv, exe)
     return {
         "ppid": ppid,
         "parent_exe": exe,
         "parent_selinux": selinux,
+        "extension_id": extension_id,
         "allowed": allowed,
     }
 
@@ -148,14 +213,19 @@ def verify_parent(
 # (NOT length-framed; the caller wraps).
 
 def _handle_ping(msg: dict, identity: dict) -> dict:
-    """qdistro.ping — round-trip echo with identity confirmation."""
+    """qdistro.ping — round-trip echo with identity confirmation.
+
+    ``extension_id`` is read from the identity dict (derived from argv
+    by :func:`parse_extension_id_from_argv`), **not** from the stdio
+    payload. The stdio field is ignored entirely.
+    """
     return {
         "pong": True,
         "echo": msg.get("echo"),
         "ppid": identity["ppid"],
         "parent_exe": identity["parent_exe"],
         "parent_selinux": identity["parent_selinux"],
-        "extension_id": str(msg.get("extension_id") or ""),
+        "extension_id": str(identity.get("extension_id") or ""),
     }
 
 
@@ -190,6 +260,13 @@ def _default_recall_push_impl(msg: dict, identity: dict,
     via qdistro_recall_ingest. Imported lazily so the bridge can
     run on hosts where recall isn't installed (the qdistro.ping op
     still works).
+
+    The destination user is **always** the bridge process's own UID
+    via ``getpass.getuser()``. The bridge inherits the browser's UID,
+    so this is the kernel-attested caller. P0-3 removed the previous
+    ``msg.get("user")`` field — accepting that from the extension
+    payload was a cross-silo write primitive (a compromised extension
+    in user A's browser could write rows tagged as user B).
     """
     import getpass
     candidates = [
@@ -211,7 +288,7 @@ def _default_recall_push_impl(msg: dict, identity: dict,
             break
     if eng is None:
         return {"ok": False, "error": "recall_engine_missing"}
-    user = str(msg.get("user") or "") or getpass.getuser()
+    user = getpass.getuser()
     root = (os.environ.get("QDISTRO_RECALL_ROOT", "").strip()
             or "/var/lib/qdistro/recall")
     db_path = eng.db_path_for(root, user)

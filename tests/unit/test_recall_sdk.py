@@ -174,9 +174,11 @@ class TestBridgeRecallPush:
             "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
             "parent_selinux": "", "allowed": True,
         }
+        # P0-3: bridge no longer accepts msg.user; destination is
+        # derived from the bridge process's own UID
+        # (getpass.getuser()).
         msg = {"op": "recall.push",
                "text": "page snapshot text",
-               "user": "admin",
                "url": "https://qdistro.example/page"}
         # Reset any test-injected impl.
         bb._recall_push_impl = None
@@ -184,7 +186,10 @@ class TestBridgeRecallPush:
         assert resp.get("ok") is True, resp
         assert resp.get("op") == "recall.push", resp
         assert resp.get("row_id") >= 1, resp
-        # Confirm the row landed on disk.
+        # The row lands under the test runner's user — proving the
+        # bridge ignored any potential msg.user spoofing.
+        import getpass
+        assert resp.get("user") == getpass.getuser(), resp
         import sqlite3
         dbs = list(tmp_path.rglob("*.db"))
         assert len(dbs) == 1
@@ -192,6 +197,29 @@ class TestBridgeRecallPush:
         n = conn.execute(
             "SELECT COUNT(*) FROM recall_entries").fetchone()[0]
         assert n == 1
+
+    def test_recall_push_ignores_spoofed_user_field(
+            self, tmp_path, monkeypatch):
+        """P0-3 regression: a stdio-supplied user field must not steer
+        the destination directory. The bridge MUST derive user from
+        its own kernel-attested UID, not from extension JSON."""
+        import getpass
+        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
+        identity = {
+            "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
+            "parent_selinux": "", "allowed": True,
+        }
+        bb._recall_push_impl = None
+        resp = bb.dispatch(
+            {"op": "recall.push",
+             "text": "spoof attempt",
+             # A compromised extension cannot steer the row into
+             # another user's recall directory.
+             "user": "victim-user"},
+            identity)
+        assert resp.get("ok") is True, resp
+        assert resp.get("user") == getpass.getuser(), resp
+        assert "victim-user" not in str(resp.get("db", ""))
 
     def test_recall_push_pwd_domain_refused_via_dispatch(
             self, tmp_path, monkeypatch):
@@ -202,7 +230,6 @@ class TestBridgeRecallPush:
         }
         msg = {"op": "recall.push",
                "text": "pwd field text",
-               "user": "admin",
                "secctx": "qdistro:pwd:fill"}
         bb._recall_push_impl = None
         resp = bb.dispatch(msg, identity)
