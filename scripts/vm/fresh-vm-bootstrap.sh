@@ -176,6 +176,19 @@ else
     log "qdlocker tarball not present, skipping installation"
 fi
 
+# ---- 7b. Install tier-5 launcher infrastructure -------------------------
+# Symlinks qdistro-tier5-spawn + cleanup + build-guest-image into
+# /usr/local/bin, and installs the polkit policy that lets the active
+# admin session pkexec the spawn helper without re-auth. Required for
+# qdshell's VMAppsProvider to actually launch tier-5 apps (admin uid
+# can't run libvirt/virsh as root without this).
+if [ -x "$SRC/qdistro/scripts/install/install-tier5-for-vm.sh" ]; then
+    log "installing tier-5 launcher symlinks + polkit policy..."
+    bash "$SRC/qdistro/scripts/install/install-tier5-for-vm.sh" \
+        "$SRC/qdistro" \
+        || log "  WARN: tier-5 launcher install failed; VMAppsProvider will not work"
+fi
+
 # ---- 8. Opt-in: build tier-4 / tier-5 guest base images ----------------
 # These produce the qcow2 base images that spawn-tier4.sh / spawn-tier5.sh
 # linked-clone from. ~400-500 MB upstream Tumbleweed Minimal-VM Cloud

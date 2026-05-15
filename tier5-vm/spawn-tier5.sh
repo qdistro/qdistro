@@ -59,8 +59,33 @@
 #   TIER5_ADMIN_USER     Admin uid (default "admin").
 #   TIER5_TITLE_PREFIX   Window title prefix. Default "[tier5:<silo>] ".
 #   TIER5_NO_GPU         Block dmabuf (default 1; loopback always 1).
-#   TIER5_SECCTX         App-id passed to waypipe `--secctx`. Default
+#   TIER5_SECCTX         App-id passed to waypipe `--secctx` (legacy
+#                        single-string secctx). Default
 #                        "qdistro.tier5.<silo>". Set "" to disable.
+#                        Kept for backwards compatibility; the
+#                        load-bearing secctx is now set via
+#                        qdistro-secctx-exec wrapping waypipe-client
+#                        (see TIER5_USE_SECCTX below) which carries
+#                        the full engine/app_id/instance_id triple
+#                        that qdshell needs for placeholder
+#                        correlation.
+#   TIER5_USE_SECCTX     Default 1 — wrap waypipe-client with
+#                        qdistro-secctx-exec so the outer Wayland
+#                        connection carries sandbox_engine +
+#                        app_id + instance_id. Mirrors tier-4's
+#                        default. Set to 0 only when debugging
+#                        without secctx (placeholder correlation
+#                        in qdshell's VMApps service breaks).
+#   TIER5_SECCTX_ENGINE  Override sandbox_engine (default
+#                        "qdistro.tier5"). Used when TIER5_USE_SECCTX=1.
+#   TIER5_SECCTX_APPID   Override app_id (default
+#                        "qdistro.tier5.<silo>"). Used when
+#                        TIER5_USE_SECCTX=1.
+#   TIER5_SECCTX_INSTANCE
+#                        Override instance_id (default the per-spawn
+#                        LAUNCH_TOKEN). qdshell's VMApps resolves
+#                        placeholders by matching this against the
+#                        LAUNCH_TOKEN emitted on stdout.
 #   TIER5_DEBUG=1        Pass --debug to both waypipe halves.
 #   TIER5_PORT           vsock port (default 7777 in loopback;
 #                        auto-allocated 7777+CID-3 in --vm mode).
@@ -299,6 +324,37 @@ SECCTX="${TIER5_SECCTX-qdistro.tier5.$SILO_TAG}"
 TITLE_PREFIX="${TIER5_TITLE_PREFIX:-[tier5:$SILO_TAG] }"
 APP_BASENAME=$(basename "$1")
 
+# Generate a per-spawn LAUNCH_TOKEN (32 lowercase hex chars). qdshell's
+# VMApps service reads this from stdout to seed a cold-start placeholder
+# and matches against the inner toplevel's instance_id (which we plant
+# below via qdistro-secctx-exec) to resolve it. Mirrors spawn-tier2.sh
+# correlation. Cheap entropy is fine; this is correlation, not auth.
+LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
+    echo "[tier5] FAIL: could not generate launch token from /dev/urandom" >&2
+    exit 5
+fi
+# Emit correlation lines that qdshell's PodApps-style placeholder
+# correlator reads. Always before any waypipe start so the
+# token-watcher in qdshell catches it on stdout.
+echo "LAUNCH_TOKEN=$LAUNCH_TOKEN"
+echo "VM_NAME=$VM_NAME"
+echo "APP_ID=$APP_BASENAME"
+
+# Resolve secctx triple. TIER5_USE_SECCTX=1 (default) wraps waypipe-
+# client with qdistro-secctx-exec so the outer Wayland connection
+# carries engine + app_id + instance_id; without it, only waypipe's
+# --secctx single-string is set (app_id only — placeholder correlation
+# in qdshell breaks).
+USE_SECCTX="${TIER5_USE_SECCTX:-1}"
+SECCTX_ENGINE="${TIER5_SECCTX_ENGINE:-qdistro.tier5}"
+SECCTX_APPID="${TIER5_SECCTX_APPID:-qdistro.tier5.$SILO_TAG}"
+SECCTX_INSTANCE="${TIER5_SECCTX_INSTANCE:-$LAUNCH_TOKEN}"
+if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
+    echo "[tier5] WARN: qdistro-secctx-exec not in PATH; placeholder correlation will not work" >&2
+    USE_SECCTX=0
+fi
+
 CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-client.log"
 SERVER_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-server.log"
 mkdir -p "$ADMIN_RUNTIME"
@@ -335,13 +391,27 @@ CLIENT_OPTS=(-s "$HOST_LISTEN_CID:$PORT" --vsock -o)
 [ "$NO_GPU" = "1" ] && CLIENT_OPTS+=(--no-gpu)
 [ -n "$TITLE_PREFIX" ] && CLIENT_OPTS+=(--title-prefix "$TITLE_PREFIX")
 [ "$DEBUG" = "1" ] && CLIENT_OPTS+=(--debug)
+# waypipe's --secctx only carries app_id (single string in 0.11). We
+# keep it for tools that inspect the waypipe client's own secctx, but
+# the *load-bearing* secctx (full engine/app_id/instance_id triple)
+# comes from qdistro-secctx-exec wrapping waypipe-client below.
 [ -n "$SECCTX" ] && CLIENT_OPTS+=(--secctx "$SECCTX")
+
+# Build the secctx-exec wrap if enabled.
+SECCTX_WRAP=()
+if [ "$USE_SECCTX" = "1" ]; then
+    SECCTX_WRAP=(qdistro-secctx-exec
+        --sandbox-engine "$SECCTX_ENGINE"
+        --app-id         "$SECCTX_APPID"
+        --instance-id    "$SECCTX_INSTANCE"
+        --)
+fi
 
 runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
-    waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do

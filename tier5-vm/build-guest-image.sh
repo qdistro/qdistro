@@ -130,7 +130,7 @@ echo "[tier5-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable (not transactional), so
 # zypper install works directly via virt-customize.
 virt-customize -a "$BASE_QCOW" \
-    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils \
+    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,MozillaFirefox \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
