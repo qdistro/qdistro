@@ -140,7 +140,14 @@ TIER2_ALLOW_PRIVESC_VAL="${TIER2_ALLOW_PRIVESC:-0}"
 # wp_security_context_v1.instance_id. qdshell uses this to swap its
 # placeholder taskbar entry for the real one when toplevel_added
 # arrives. Cheap entropy is fine; this is correlation, not auth.
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || echo $$-$(date +%s%N))"
+# Always 32 lowercase hex chars — the orphan-dir reaper filters on
+# `^[0-9a-f]{32}$` to ignore podman's "<no value>" sentinel and any
+# other label noise.
+LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
+    echo "spawn-tier2: failed to generate launch token from /dev/urandom" >&2
+    exit 5
+fi
 
 # --- pre-flight ---------------------------------------------------------
 fail() { echo "spawn-tier2: $*" >&2; exit 2; }
@@ -369,18 +376,40 @@ exec podman "${PODMAN_ARGS[@]}" "$@"
 # script and the trap evaporates — the per-container dir would only
 # get cleaned by the next spawn's orphan reaper, which is fine for
 # crashes but not for one-shot single-spawn runs.
+#
+# Forward TERM/INT to the child so non-tty callers (systemd unit,
+# qdshell launcher via Quickshell.execDetached) can still stop the
+# container by signaling the script PID — without exec, script-PID
+# is not container-PID and the signal otherwise dies in the bash
+# parent. SIGINT from a TTY already broadcasts to the whole
+# foreground process group, so this matters for the non-tty path.
+forward_signal() {
+    [ -n "${child_pid:-}" ] && kill -"$1" "$child_pid" 2>/dev/null || true
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT'  INT
+
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$SECCTX_APPID" \
         --instance-id "$LAUNCH_TOKEN" \
-        -- bash -c "$WRAPPER_BODY"
-    rc=$?
+        -- bash -c "$WRAPPER_BODY" &
 else
     if [ "$USE_SECCTX" = "1" ]; then
         echo "spawn-tier2: WARN: qdistro-secctx-exec not in PATH; running un-tagged" >&2
     fi
-    bash -c "$WRAPPER_BODY"
-    rc=$?
+    bash -c "$WRAPPER_BODY" &
 fi
+child_pid=$!
+
+# `wait` returns 128+signo when a trap interrupts it — the child may
+# still be alive (mid-podman-teardown). Loop until the child actually
+# exits so cleanup_percont (EXIT trap) can't rm the per-container dir
+# while podman still has bind-mounts into it.
+while kill -0 "$child_pid" 2>/dev/null; do
+    wait "$child_pid" 2>/dev/null || true
+done
+wait "$child_pid" 2>/dev/null
+rc=$?
 exit "$rc"
