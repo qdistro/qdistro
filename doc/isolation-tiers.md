@@ -102,11 +102,12 @@ plus a per-container runtime dir at
 `$XDG_RUNTIME_DIR/qdistro-tier2/<launch-token>/` (mode 0700,
 admin-owned, rm-rf'd on spawn-script exit). The host's `/run/user/<uid>`
 is **not** exposed; only the resolved outer wayland socket
-(`wayland-secctx-NN` from `qdistro-secctx-exec`) and any
-`pipewire-N`/`pipewire-N-manager` sockets that exist at spawn time
-are bind-mounted in as individual files. The container therefore can't
-see the dbus session bus, ssh-agent, gnupg-agent, or sibling tier-2
-sockets.
+(`wayland-secctx-NN` when wrapping with `qdistro-secctx-exec`, or
+the unwrapped name like `wayland-1` when `TIER2_USE_SECCTX=0`)
+and any `pipewire-N`/`pipewire-N-manager` sockets that exist at spawn
+time are bind-mounted in as individual files. The container therefore
+can't see the dbus session bus, ssh-agent, gnupg-agent, or sibling
+tier-2 sockets.
 
 Hardening flags applied by `tier2/spawn-tier2.sh` (overridable via
 `TIER2_*` env knobs):

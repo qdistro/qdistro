@@ -138,9 +138,14 @@ fi
 # /var/lib/qdistro/podapps/<container>/apps.json — by default the dir
 # is root-owned 0755 so the admin user can't refresh the cache from
 # the live launcher path. Make it group-writable for the admin user's
-# primary group (users on Tumbleweed, wheel on others) with the
+# primary group (admin on Tumbleweed, users/wheel on others) with the
 # group-sticky bit so newly-created subdirs inherit the group.
-ADMIN_GROUP=$(id -gn admin 2>/dev/null || echo users)
+if ! id admin >/dev/null 2>&1; then
+    echo "ERROR: admin user missing — run the bootstrap step that" \
+         "creates the user account before this install" >&2
+    exit 2
+fi
+ADMIN_GROUP=$(id -gn admin)
 install -d -o root -g "$ADMIN_GROUP" -m 02775 /var/lib/qdistro/podapps
 echo "/var/lib/qdistro/podapps perms: $(stat -c '%U:%G %a' /var/lib/qdistro/podapps)"
 

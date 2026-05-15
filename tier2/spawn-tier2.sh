@@ -170,10 +170,15 @@ PARENT_DIR="$RUNTIME_DIR/qdistro-tier2"
 PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
 
 # Reap orphan per-container dirs from prior spawns that died without
-# running their EXIT trap (segfault, kill -9, host crash). Running
-# containers' tokens come from `podman ps`; anything else is stale.
+# running their EXIT trap (segfault, kill -9, host crash). Use `podman
+# ps -a` so containers in Exited / Created / Stopping that haven't been
+# auto-removed yet still count as "live" — we don't want to rm a dir
+# while podman still has a record of the container. Filter the label
+# set to 32-hex-char tokens to ignore podman's "<no value>" sentinel
+# for unlabeled containers.
 if [ -d "$PARENT_DIR" ]; then
-    live_tokens=$(podman ps --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
+    live_tokens=$(podman ps -a --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
+                    | grep -E '^[0-9a-f]{32}$' \
                     | sort -u || true)
     for d in "$PARENT_DIR"/*/; do
         [ -d "$d" ] || continue
@@ -188,12 +193,11 @@ fi
 mkdir -p "$PERCONT_DIR"
 chmod 0700 "$PERCONT_DIR"
 
-# The trap fires only on EARLY exit (pre-flight failure, fail() call
-# before the exec below). Once we exec into qdistro-secctx-exec the
-# trap is gone — cleanup of the per-container dir for normal /
-# crash exits relies on the orphan-reaper above running on the NEXT
-# spawn. That'\''s why the reaper exists; it'\''s the primary mechanism,
-# not a fallback.
+# Cleanup runs from both the EXIT trap (covers pre-flight `fail`s and
+# the explicit call after the wrapper returns below) and the orphan-
+# reaper on the next spawn (covers `kill -9` of this script and any
+# crash that bypasses the trap). Keep cleanup_percont idempotent so
+# both paths can fire safely.
 cleanup_percont() {
     rm -rf "$PERCONT_DIR" 2>/dev/null || true
     rmdir "$PARENT_DIR" 2>/dev/null || true
@@ -359,16 +363,24 @@ exec podman "${PODMAN_ARGS[@]}" "$@"
 # Callers that want non-blocking semantics should background the
 # whole script instead (`bash spawn-tier2.sh ... &`).
 
-# --- exec --------------------------------------------------------------
+# --- run --------------------------------------------------------------
+# Run as a child (not exec) so the EXIT trap above runs cleanup_percont
+# on every normal exit path. Without this, exec'ing replaces the
+# script and the trap evaporates — the per-container dir would only
+# get cleaned by the next spawn's orphan reaper, which is fine for
+# crashes but not for one-shot single-spawn runs.
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    exec qdistro-secctx-exec \
+    qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$SECCTX_APPID" \
         --instance-id "$LAUNCH_TOKEN" \
         -- bash -c "$WRAPPER_BODY"
+    rc=$?
 else
     if [ "$USE_SECCTX" = "1" ]; then
         echo "spawn-tier2: WARN: qdistro-secctx-exec not in PATH; running un-tagged" >&2
     fi
-    exec bash -c "$WRAPPER_BODY"
+    bash -c "$WRAPPER_BODY"
+    rc=$?
 fi
+exit "$rc"

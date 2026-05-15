@@ -110,12 +110,13 @@ else
 fi
 
 # --- 4. Root mountinfo ro ---
-# mountinfo is space-separated; field 5 is mount point, field 6 is opts.
-# The root entry can come before or after submounts, so grep on " / "
-# (with the trailing space-after-slash) and take the first match's
-# 6th field via shell tokenisation.
+# mountinfo: field 5 = mount point, field 6 = mount opts. Use awk to
+# match $5 == "/" exactly so we don't accidentally pick up /dev or
+# similar (the kernel's emit order isn't guaranteed). The container
+# image lacks awk, so we cat mountinfo out and parse on the host.
 ROOT_LINE=$(runuser -u admin -- podman exec "$CONTAINER" \
-    grep ' / ' /proc/self/mountinfo 2>/dev/null | head -1)
+    cat /proc/self/mountinfo 2>/dev/null \
+    | awk '$5 == "/" {print; exit}')
 # shellcheck disable=SC2086 # intentional word-split for field index
 set -- $ROOT_LINE
 ROOT_MOUNT_OPTS="${6:-}"
