@@ -26,9 +26,16 @@
           filesystem="btrfs"
           firmware="uefi"
           installiso="true"
+          installboot="harddisk"
           kernelcmdline="quiet systemd.default_vt=3"
           efipartsize="512">
-      <bootloader name="grub2" timeout="3"/>
+      <!-- timeout=30 gives a human time to read the menu; the install
+           ISO's default entry is "Boot from Hard Disk" (installboot=
+           harddisk), so a timeout expiry never auto-installs. kiwi-
+           oem-dump *additionally* asks "Destroying ALL data on
+           /dev/vda? <Yes>/<No>" before writing — that prompt is
+           unconditional unless oem-unattended is set (we don't). -->
+      <bootloader name="grub2" timeout="30" timeout_style="menu"/>
       <oemconfig>
         <oem-systemsize>20480</oem-systemsize>
         <oem-swap>true</oem-swap>

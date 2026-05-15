@@ -1,35 +1,86 @@
-"""qdistro-browser-bridge — native-messaging host (Phase-8 MVP skeleton).
+"""qdistro-browser-bridge — native-messaging host (Phase-8 + Phase-9).
 
-Per doc/browser.md §"Phase-8 MVP scope". Closes the
-architectural seam: the browser launches us as a native-messaging
-host, we read 4-byte length-prefixed JSON on stdin, we verify our
-parent is an allowlisted RPM browser binary, and we round-trip a
-single ``qdistro.ping`` op to prove the channel works end-to-end.
+Per doc/browser.md §"Phase-8 MVP scope" + todo/browser/01-bridge-phase9.md.
 
-Heavier ops (pwd.fill, page.extract, recall.push, MPRIS bridging,
-intent tokens, persistent-port heartbeat, cross-uid republish) are
-all called out in the spec as Phase-9 deferrals. This module is
-deliberately the smallest surface that retires the architecture
-risk: parent-chain identity check, length-prefix protocol, JSON
-shape, and the dispatch table.
+Phase-8 closed the architectural seam: the browser launches us as a
+native-messaging host, we read 4-byte length-prefixed JSON on stdin, we
+verify our parent is an allowlisted RPM browser binary, and we
+round-trip ``qdistro.ping`` and ``recall.push``.
 
-Identity-chain check is the load-bearing piece. Per spec/14
-§"Supported-browser matrix" the bridge fails closed if its parent
-binary isn't on the allowlist (the RPM Firefox / Chromium / Brave /
-Vivaldi / Edge paths). Snap-Firefox / Flatpak-browsers route
-through xdg-desktop-portal which strips the parent identity; those
-hit the allowlist miss and bail.
+Phase-9 (this module) adds the richer dispatch surface described in
+``todo/browser/01-bridge-phase9.md``:
 
-The module is pure-python (no Qt, no DBus) so tests drive every
-branch in-process by injecting fakes for stdin/stdout, getppid, the
-parent-readers, and the dispatch table.
+* **9a** ``pwd.fill`` / ``pwd.save`` — forwarded to ``qdistro-pwd``
+  daemon via D-Bus. The D-Bus client is injectable so tests can mock
+  the daemon.
+* **9b** ``tabs.list`` / ``tabs.open`` / ``tabs.close`` — these flow
+  *inbound* from a desktop daemon, into the bridge, down to the
+  extension over the persistent native-messaging port, back to the
+  daemon. The bridge correlates request/reply via ``request_id``.
+  An MV3 heartbeat (``qdistro.heartbeat`` ↔ ``qdistro.heartbeat.ack``)
+  keeps the Chromium service worker alive: every
+  :data:`HEARTBEAT_INTERVAL_S` (25s) the bridge sends a heartbeat; if
+  three in a row miss their :data:`HEARTBEAT_DEADLINE_S` (50s) reply
+  window, the bridge exits with :data:`EXIT_HEARTBEAT_LOST`.
+* **9c** ``page.extract`` — forwarded to the ``qbus-admin`` cross-user
+  broker via D-Bus (also mocked through the injectable client).
+* **9d** ``qdistro.handshake`` + ``cookies.export`` — handshake
+  exchanges a per-session HMAC secret with the extension; cookies and
+  any other sensitive op require an intent-token of the shape
+  ``{request_id, ts, op, hmac}`` with a 5-second TTL and single-use
+  semantics. The verifier lives here so the bridge can fast-fail; a
+  daemon-side verifier is stubbed for later replacement.
+* **9e** ``mpris.publish`` / ``downloads.notify`` /
+  ``notifications.show`` / ``screenlock.inhibit`` /
+  ``screenlock.release`` — forwarded to the relevant daemons via the
+  same injectable D-Bus client; daemons themselves are not yet shipped
+  in qdistro, so the handlers currently land at the mock and return
+  ``{"ok": True, "stub": True}`` in production until the daemons land.
+
+Inbound D-Bus surface
+---------------------
+
+The bridge registers a session-bus name of the form
+``org.qdistro.BrowserBridge.<ppid>`` so co-resident daemons can
+initiate browser-bound operations. The object lives at
+``/org/qdistro/BrowserBridge`` and exposes a single method:
+
+* ``RequestTabs(s op, s args_json) -> s reply_json``
+
+  ``op`` is one of ``tabs.list``, ``tabs.open``, ``tabs.close``,
+  ``page.extract``, ``cookies.export``, ``mpris.publish``,
+  ``downloads.notify``, ``notifications.show``,
+  ``screenlock.inhibit``, ``screenlock.release``. ``args_json`` is a
+  JSON object with the per-op arguments. The reply is a JSON object
+  ``{"ok": bool, ...}``.
+
+Tests do not need a real bus running — they call
+:func:`enqueue_inbound_request` directly and read the matching
+``request_id`` off the stdio pipe, then call :func:`deliver_reply`
+to unblock the simulated daemon caller.
+
+Identity-chain check (Phase-8) is still load-bearing. Every Phase-9
+handler receives the ``identity`` dict and the central
+:func:`dispatch` enforces ``parent_not_allowed`` before any handler
+runs. Handlers strip ``identity`` from their reply bodies so the
+extension never sees the kernel-attested fields it might otherwise
+spoof on the next message.
+
+The module is pure-python (no Qt, no GTK). The jeepney D-Bus library
+is used at runtime, but every D-Bus call routes through the injectable
+:data:`_dbus_client` so unit tests run without a session bus.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import struct
 import sys
+import threading
+import time
 from typing import Any, Callable
 
 # Allowlist of acceptable parent-process exe paths. Per spec/14:
@@ -90,11 +141,65 @@ def write_message(stream, payload: dict) -> None:
 # ---- parent-chain identity check ---------------------------------
 
 def _resolve_allowlist() -> tuple[str, ...]:
-    override = os.environ.get(
+    """Return the effective parent-exe allowlist.
+
+    The unsuffixed ``QDISTRO_BROWSER_BRIDGE_ALLOWLIST`` env var was a
+    historical escape hatch that production builds also honored — any
+    process in the bridge's launch environment could replace the trust
+    boundary. P0-2 closes that: only ``..._ALLOWLIST_TEST`` is
+    accepted, and only under ``QDISTRO_TEST_MODE=1``. The legacy name
+    is now an explicit hard error rather than a silent override so
+    nothing accidentally reaches production with the old behaviour.
+    """
+    legacy = os.environ.get(
         "QDISTRO_BROWSER_BRIDGE_ALLOWLIST", "").strip()
+    if legacy:
+        raise RuntimeError(
+            "QDISTRO_BROWSER_BRIDGE_ALLOWLIST is rejected; use "
+            "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST under "
+            "QDISTRO_TEST_MODE=1")
+    override = os.environ.get(
+        "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST", "").strip()
     if override:
+        if os.environ.get("QDISTRO_TEST_MODE", "").strip() != "1":
+            raise RuntimeError(
+                "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST requires "
+                "QDISTRO_TEST_MODE=1")
         return tuple(p for p in override.split(":") if p)
     return ALLOWED_PARENT_EXES
+
+
+# ---- extension-identity from kernel-attested argv (P0-1) ----------
+
+def parse_extension_id_from_argv(
+        argv: list[str] | None, parent_exe: str) -> str:
+    """Return the authentic extension ID for the connecting WebExtension.
+
+    The browser passes the calling extension's identity as a command-line
+    argument when it spawns a native-messaging host; this value is set
+    by the browser at exec time and is not forgeable by extension JS.
+
+    - **Chrome / Chromium-family (Linux, macOS):** ``argv[1]`` is the
+      caller origin in the form ``chrome-extension://<ID>/``.
+    - **Firefox** (since Firefox 55): ``argv[1]`` is the path to the
+      host manifest; ``argv[2]`` is the extension ID as declared in
+      ``browser_specific_settings.gecko.id``.
+
+    Returns "" if argv shape doesn't match either form — caller treats
+    empty as "unknown extension," not "trusted to be anything." The
+    bridge no longer accepts a stdio-supplied extension_id field; only
+    this argv-derived value is authoritative.
+    """
+    if not argv or len(argv) < 2:
+        return ""
+    exe = (parent_exe or "").lower()
+    if "firefox" in exe:
+        return argv[2].strip() if len(argv) >= 3 else ""
+    chrome_origin = argv[1].strip()
+    if chrome_origin.startswith("chrome-extension://"):
+        rest = chrome_origin[len("chrome-extension://"):]
+        return rest.rstrip("/").strip()
+    return ""
 
 
 def read_parent_exe(ppid: int) -> str:
@@ -124,21 +229,32 @@ def verify_parent(
         exe_reader: Callable[[int], str] = read_parent_exe,
         selinux_reader: Callable[[int], str] = read_parent_selinux,
         allowlist: tuple[str, ...] | None = None,
+        argv: list[str] | None = None,
 ) -> dict:
     """Build an identity dict for the parent process.
 
     Always returns a dict; ``allowed`` is the gate the dispatcher
-    checks. Tests inject the four callables to drive every branch.
+    checks. Tests inject the callables (and optionally argv) to drive
+    every branch.
+
+    The ``extension_id`` field is derived from ``argv`` via
+    :func:`parse_extension_id_from_argv` — kernel-attested at the
+    browser's ``execve`` time. The bridge never trusts a stdio-supplied
+    ``extension_id`` field (P0-1).
     """
     allow = allowlist if allowlist is not None else _resolve_allowlist()
     ppid = int(ppid_fn())
     exe = exe_reader(ppid)
     selinux = selinux_reader(ppid)
     allowed = bool(exe) and exe in allow
+    if argv is None:
+        argv = sys.argv
+    extension_id = parse_extension_id_from_argv(argv, exe)
     return {
         "ppid": ppid,
         "parent_exe": exe,
         "parent_selinux": selinux,
+        "extension_id": extension_id,
         "allowed": allowed,
     }
 
@@ -148,14 +264,19 @@ def verify_parent(
 # (NOT length-framed; the caller wraps).
 
 def _handle_ping(msg: dict, identity: dict) -> dict:
-    """qdistro.ping — round-trip echo with identity confirmation."""
+    """qdistro.ping — round-trip echo with identity confirmation.
+
+    ``extension_id`` is read from the identity dict (derived from argv
+    by :func:`parse_extension_id_from_argv`), **not** from the stdio
+    payload. The stdio field is ignored entirely.
+    """
     return {
         "pong": True,
         "echo": msg.get("echo"),
         "ppid": identity["ppid"],
         "parent_exe": identity["parent_exe"],
         "parent_selinux": identity["parent_selinux"],
-        "extension_id": str(msg.get("extension_id") or ""),
+        "extension_id": str(identity.get("extension_id") or ""),
     }
 
 
@@ -190,6 +311,13 @@ def _default_recall_push_impl(msg: dict, identity: dict,
     via qdistro_recall_ingest. Imported lazily so the bridge can
     run on hosts where recall isn't installed (the qdistro.ping op
     still works).
+
+    The destination user is **always** the bridge process's own UID
+    via ``getpass.getuser()``. The bridge inherits the browser's UID,
+    so this is the kernel-attested caller. P0-3 removed the previous
+    ``msg.get("user")`` field — accepting that from the extension
+    payload was a cross-silo write primitive (a compromised extension
+    in user A's browser could write rows tagged as user B).
     """
     import getpass
     candidates = [
@@ -211,7 +339,7 @@ def _default_recall_push_impl(msg: dict, identity: dict,
             break
     if eng is None:
         return {"ok": False, "error": "recall_engine_missing"}
-    user = str(msg.get("user") or "") or getpass.getuser()
+    user = getpass.getuser()
     root = (os.environ.get("QDISTRO_RECALL_ROOT", "").strip()
             or "/var/lib/qdistro/recall")
     db_path = eng.db_path_for(root, user)
@@ -243,9 +371,760 @@ def _default_recall_push_impl(msg: dict, identity: dict,
 _recall_push_impl: Callable[[dict, dict, str], dict] | None = None
 
 
+# =====================================================================
+# Phase-9 infrastructure
+# =====================================================================
+
+# ---- exit codes --------------------------------------------------
+EXIT_OK = 0
+EXIT_FRAME_ERROR = 2
+EXIT_HEARTBEAT_LOST = 3
+
+# ---- heartbeat tunables (overridable for tests) ------------------
+# Default per todo/browser/01-bridge-phase9.md §9b: 25s interval,
+# 50s reply deadline, 3 misses → exit. The Chromium MV3 service
+# worker is killed after 30s of idle, so 25s keeps it alive.
+HEARTBEAT_INTERVAL_S: float = 25.0
+HEARTBEAT_DEADLINE_S: float = 50.0
+HEARTBEAT_MAX_MISSES: int = 3
+
+# ---- intent-token tunables ---------------------------------------
+INTENT_TOKEN_TTL_S: float = 5.0
+# Ops that REQUIRE a valid intent token before they will be served.
+# Anything not in this set bypasses token validation (e.g. ping,
+# recall.push, heartbeat ack).
+INTENT_TOKEN_REQUIRED_OPS: frozenset[str] = frozenset({
+    "pwd.fill", "pwd.save", "cookies.export", "page.extract",
+})
+
+
+# ---- D-Bus client abstraction ------------------------------------
+# All outbound D-Bus calls go through a single small interface so
+# tests can mock the daemon side without a running bus. Production
+# binds the jeepney-backed default at first use.
+
+class _BaseDBusClient:
+    """Outbound D-Bus client surface used by Phase-9 handlers.
+
+    A single ``call`` entry point — daemons named here are
+    ``qdistro-pwd``, ``qbus-admin``, ``qdistro-downloads``,
+    ``qdistro-notifications``, ``qdistro-mpris``, ``qdistro-compositor``.
+    Any of them may not yet exist; in that case the default jeepney
+    client returns ``{"ok": False, "error": "daemon_missing"}`` and
+    the handler propagates it.
+    """
+
+    def call(self, service: str, object_path: str, interface: str,
+             method: str, signature: str, body: tuple) -> dict:
+        raise NotImplementedError
+
+
+class _JeepneyDBusClient(_BaseDBusClient):
+    """Default production client. jeepney is pure-Python so it never
+    pulls a C extension into the bridge process.
+    """
+
+    def call(self, service: str, object_path: str, interface: str,
+             method: str, signature: str, body: tuple) -> dict:
+        try:
+            from jeepney import DBusAddress, new_method_call
+            from jeepney.io.blocking import open_dbus_connection
+        except ImportError:
+            return {"ok": False, "error": "jeepney_missing"}
+        try:
+            addr = DBusAddress(
+                object_path=object_path,
+                bus_name=service,
+                interface=interface)
+            msg = new_method_call(addr, method, signature, body)
+            conn = open_dbus_connection(bus="SESSION")
+            try:
+                reply = conn.send_and_get_reply(msg, timeout=5.0)
+            finally:
+                conn.close()
+            if reply.header.message_type.name == "ERROR":
+                return {"ok": False, "error": "dbus_error",
+                        "detail": str(reply.body)[:200]}
+            # Daemons return a single JSON-string reply by convention;
+            # decode it. Any other shape is surfaced as-is.
+            if reply.body and isinstance(reply.body[0], str):
+                try:
+                    return json.loads(reply.body[0])
+                except json.JSONDecodeError:
+                    return {"ok": True, "raw": reply.body[0]}
+            return {"ok": True, "body": list(reply.body)}
+        except Exception as e:
+            return {"ok": False, "error": "dbus_call_failed",
+                    "detail": str(e)[:200]}
+
+
+# Tests override by assigning a _BaseDBusClient instance. Production
+# leaves it None so the jeepney default binds lazily on first use.
+_dbus_client: _BaseDBusClient | None = None
+
+
+def _get_dbus_client() -> _BaseDBusClient:
+    global _dbus_client
+    if _dbus_client is None:
+        _dbus_client = _JeepneyDBusClient()
+    return _dbus_client
+
+
+# ---- intent-token store ------------------------------------------
+# Per-process, in-memory. Each bridge launch rotates the session
+# secret. The store is keyed by request_id so single-use is trivial:
+# verification pops the entry. Expired entries are swept on every
+# verify call.
+
+_SESSION_SECRET: bytes = secrets.token_bytes(32)
+_USED_TOKENS: dict[str, float] = {}
+_TOKEN_LOCK = threading.Lock()
+
+
+def reset_session_secret() -> bytes:
+    """Rotate the per-session HMAC secret. Called on bridge startup
+    and exposed for tests."""
+    global _SESSION_SECRET, _USED_TOKENS
+    with _TOKEN_LOCK:
+        _SESSION_SECRET = secrets.token_bytes(32)
+        _USED_TOKENS = {}
+    return _SESSION_SECRET
+
+
+def _compute_token_hmac(request_id: str, ts: float, op: str,
+                        secret: bytes | None = None) -> str:
+    """Compute the canonical HMAC for an intent token. Exposed so
+    tests can mint valid tokens against the live session secret."""
+    s = secret if secret is not None else _SESSION_SECRET
+    msg = f"{request_id}|{ts}|{op}".encode("utf-8")
+    return hmac.new(s, msg, hashlib.sha256).hexdigest()
+
+
+def _sweep_used_tokens(now: float | None = None) -> None:
+    """Drop tokens whose TTL has elapsed. Called under _TOKEN_LOCK."""
+    now = time.time() if now is None else now
+    cutoff = now - INTENT_TOKEN_TTL_S
+    dead = [k for k, ts in _USED_TOKENS.items() if ts < cutoff]
+    for k in dead:
+        _USED_TOKENS.pop(k, None)
+
+
+def verify_intent_token(token: dict | None, op: str,
+                        now_fn: Callable[[], float] = time.time
+                        ) -> tuple[bool, str]:
+    """Return ``(ok, error)``. Single-use: a successful verify marks
+    the request_id as consumed.
+
+    Rejects:
+      * missing / malformed token → ``"missing_intent_token"``
+      * wrong op → ``"intent_token_op_mismatch"``
+      * expired (ts older than INTENT_TOKEN_TTL_S) → ``"intent_token_expired"``
+      * future-dated by > 1s → ``"intent_token_future"``
+      * bad HMAC → ``"intent_token_bad_hmac"``
+      * replay (request_id already used) → ``"intent_token_replay"``
+    """
+    if not isinstance(token, dict):
+        return False, "missing_intent_token"
+    request_id = token.get("request_id")
+    ts = token.get("ts")
+    tok_op = token.get("op")
+    mac = token.get("hmac")
+    if not (isinstance(request_id, str) and request_id
+            and isinstance(ts, (int, float))
+            and isinstance(tok_op, str)
+            and isinstance(mac, str) and mac):
+        return False, "missing_intent_token"
+    if tok_op != op:
+        return False, "intent_token_op_mismatch"
+    now = now_fn()
+    if ts > now + 1.0:
+        return False, "intent_token_future"
+    if now - ts > INTENT_TOKEN_TTL_S:
+        return False, "intent_token_expired"
+    expected = _compute_token_hmac(request_id, ts, tok_op)
+    if not hmac.compare_digest(expected, mac):
+        return False, "intent_token_bad_hmac"
+    with _TOKEN_LOCK:
+        _sweep_used_tokens(now)
+        if request_id in _USED_TOKENS:
+            return False, "intent_token_replay"
+        _USED_TOKENS[request_id] = now
+    return True, ""
+
+
+# ---- pending-request correlation (Phase-9b inbound flow) --------
+# When a daemon calls into the bridge (via D-Bus), the bridge mints
+# a request_id, parks the caller on a threading.Event, and pushes
+# ``{op, request_id, ...}`` down the stdio pipe to the extension.
+# When the extension replies with ``{op: '<op>.reply', request_id}``
+# we set the Event and the caller wakes up to read the reply.
+
+class _PendingRequest:
+    __slots__ = ("event", "reply", "op", "created")
+
+    def __init__(self, op: str) -> None:
+        self.event = threading.Event()
+        self.reply: dict | None = None
+        self.op = op
+        self.created = time.time()
+
+
+_pending: dict[str, _PendingRequest] = {}
+_pending_lock = threading.Lock()
+_request_seq: int = 0
+
+
+def _next_request_id() -> str:
+    global _request_seq
+    with _pending_lock:
+        _request_seq += 1
+        # Mix in a few random bits so an extension that observes one
+        # request_id can't trivially predict the next one and inject a
+        # spoofed reply.
+        return f"r{_request_seq}-{secrets.token_hex(4)}"
+
+
+def enqueue_inbound_request(op: str, args: dict | None,
+                            out_stream,
+                            timeout_s: float = 75.0) -> dict:
+    """Push an inbound op down the stdio pipe and block for the reply.
+
+    Used by the D-Bus surface (and by tests). Returns the reply dict
+    when the extension answers, or ``{"ok": False, "error":
+    "request_timeout"}`` on no reply within ``timeout_s``.
+    """
+    if not isinstance(args, dict):
+        args = {}
+    req_id = _next_request_id()
+    pending = _PendingRequest(op)
+    with _pending_lock:
+        _pending[req_id] = pending
+    payload = {"op": op, "request_id": req_id, **args}
+    try:
+        write_message(out_stream, payload)
+    except Exception as e:
+        with _pending_lock:
+            _pending.pop(req_id, None)
+        return {"ok": False, "error": "stdio_write_failed",
+                "detail": str(e)[:200]}
+    ok = pending.event.wait(timeout=timeout_s)
+    with _pending_lock:
+        _pending.pop(req_id, None)
+    if not ok:
+        return {"ok": False, "error": "request_timeout",
+                "op": op, "request_id": req_id}
+    return pending.reply or {"ok": False, "error": "empty_reply"}
+
+
+def deliver_reply(msg: dict) -> bool:
+    """Try to match ``msg`` as a reply to a pending inbound request.
+
+    Returns True if it matched (caller is unblocked and should NOT
+    dispatch the message further); False if there's no pending entry
+    with that request_id (in which case dispatch continues normally).
+    """
+    req_id = msg.get("request_id")
+    if not isinstance(req_id, str) or not req_id:
+        return False
+    with _pending_lock:
+        pending = _pending.get(req_id)
+    if pending is None:
+        return False
+    pending.reply = msg
+    pending.event.set()
+    return True
+
+
+# ---- identity rejection helper -----------------------------------
+
+def _identity_gate(identity: dict) -> dict | None:
+    """Return an error dict if identity is not allowed, else None.
+
+    Called at the top of every Phase-9 handler. ``dispatch`` already
+    gates inbound stdio messages, but inbound D-Bus paths call handlers
+    via :func:`enqueue_inbound_request` which doesn't pass through
+    ``dispatch``. We re-check defensively.
+    """
+    if not identity.get("allowed"):
+        return {"ok": False, "error": "parent_not_allowed",
+                "parent_exe": identity.get("parent_exe", "")}
+    return None
+
+
+# =====================================================================
+# Phase-9 handlers
+# =====================================================================
+
+def _strip_identity(reply: dict) -> dict:
+    """Defensive: handlers must never leak identity fields back to
+    the extension on the stdio reply path. Kernel-attested fields
+    on the identity dict (parent_exe, ppid, parent_selinux,
+    extension_id) belong to the bridge, not to the daemon's reply.
+    """
+    for k in ("ppid", "parent_exe", "parent_selinux",
+              "extension_id", "allowed"):
+        reply.pop(k, None)
+    return reply
+
+
+# ---- 9a: pwd.fill / pwd.save -------------------------------------
+
+_PWD_BUS = "org.qdistro.Pwd"
+_PWD_PATH = "/org/qdistro/Pwd"
+_PWD_IFACE = "org.qdistro.Pwd1"
+
+
+def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
+    """pwd.fill — fetch credentials for a URL.
+
+    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd / Pwd.Fill).
+    Requires an intent token (see :data:`INTENT_TOKEN_REQUIRED_OPS`).
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    ok, err = verify_intent_token(msg.get("intent_token"), "pwd.fill")
+    if not ok:
+        return {"ok": False, "error": err}
+    url = msg.get("url")
+    if not isinstance(url, str) or not url:
+        return {"ok": False, "error": "missing_url"}
+    body = json.dumps({
+        "url": url,
+        "username": str(msg.get("username") or "") or None,
+        "extension_id": identity.get("extension_id") or "",
+        "parent_exe": identity.get("parent_exe") or "",
+    })
+    reply = _get_dbus_client().call(
+        _PWD_BUS, _PWD_PATH, _PWD_IFACE, "Fill", "s", (body,))
+    return _strip_identity(dict(reply))
+
+
+def _handle_pwd_save(msg: dict, identity: dict) -> dict:
+    """pwd.save — persist credentials for a URL.
+
+    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd / Pwd.Save).
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    ok, err = verify_intent_token(msg.get("intent_token"), "pwd.save")
+    if not ok:
+        return {"ok": False, "error": err}
+    url = msg.get("url")
+    username = msg.get("username")
+    password = msg.get("password")
+    if not (isinstance(url, str) and url
+            and isinstance(username, str) and username
+            and isinstance(password, str) and password):
+        return {"ok": False, "error": "missing_credentials"}
+    body = json.dumps({
+        "url": url, "username": username, "password": password,
+        "extension_id": identity.get("extension_id") or "",
+        "parent_exe": identity.get("parent_exe") or "",
+    })
+    reply = _get_dbus_client().call(
+        _PWD_BUS, _PWD_PATH, _PWD_IFACE, "Save", "s", (body,))
+    return _strip_identity(dict(reply))
+
+
+# ---- 9b: tabs.* (extension-side replies) -------------------------
+# The tabs ops normally arrive *inbound* via D-Bus (see
+# :func:`enqueue_inbound_request`), but the bridge also accepts them
+# from the extension as a fallback for development / testing.
+# In that case there's no daemon waiting, so we just echo back.
+
+def _handle_tabs_reply(msg: dict, identity: dict) -> dict:
+    """Generic *.reply landing for tabs ops the extension answers.
+
+    When the extension replies to an inbound tabs.list/open/close
+    request, deliver_reply() unblocks the parked daemon thread.
+    This handler is also reached if the extension sends a *.reply
+    without a matching request_id (no-op).
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    delivered = deliver_reply(msg)
+    return {"ok": True, "delivered": delivered}
+
+
+# ---- 9b: heartbeat ack -------------------------------------------
+
+class _HeartbeatState:
+    """Track outstanding heartbeats. Thread-safe."""
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._outstanding: dict[str, float] = {}
+        self._misses = 0
+
+    def sent(self, req_id: str, now: float) -> None:
+        with self._lock:
+            self._outstanding[req_id] = now
+
+    def acked(self, req_id: str) -> bool:
+        with self._lock:
+            if req_id in self._outstanding:
+                self._outstanding.pop(req_id, None)
+                self._misses = 0
+                return True
+            return False
+
+    def sweep(self, now: float, deadline_s: float) -> int:
+        """Drop heartbeats older than deadline; increment misses for
+        each. Returns current consecutive-miss count."""
+        with self._lock:
+            dead = [k for k, t in self._outstanding.items()
+                    if now - t > deadline_s]
+            for k in dead:
+                self._outstanding.pop(k, None)
+                self._misses += 1
+            return self._misses
+
+
+_heartbeat = _HeartbeatState()
+
+
+def _handle_heartbeat_ack(msg: dict, identity: dict) -> dict:
+    """qdistro.heartbeat.ack — extension confirms it's still alive."""
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    req_id = str(msg.get("request_id") or "")
+    matched = _heartbeat.acked(req_id) if req_id else False
+    return {"ok": True, "matched": matched}
+
+
+# ---- 9c: page.extract --------------------------------------------
+
+_BROKER_BUS = "org.qdistro.BrokerAdmin"
+_BROKER_PATH = "/org/qdistro/BrokerAdmin"
+_BROKER_IFACE = "org.qdistro.BrokerAdmin1"
+
+
+def _handle_page_extract(msg: dict, identity: dict) -> dict:
+    """page.extract — share a page snippet via the qbus-admin broker."""
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    ok, err = verify_intent_token(msg.get("intent_token"),
+                                  "page.extract")
+    if not ok:
+        return {"ok": False, "error": err}
+    url = msg.get("url")
+    if not isinstance(url, str) or not url:
+        return {"ok": False, "error": "missing_url"}
+    body = json.dumps({
+        "url": url,
+        "title": str(msg.get("title") or ""),
+        "selected_text": str(msg.get("selected_text") or ""),
+        "dest_uid": str(msg.get("dest_uid") or ""),
+        "content_type": str(msg.get("content_type") or "url"),
+        "parent_exe": identity.get("parent_exe") or "",
+        "extension_id": identity.get("extension_id") or "",
+    })
+    reply = _get_dbus_client().call(
+        _BROKER_BUS, _BROKER_PATH, _BROKER_IFACE,
+        "PageExtract", "s", (body,))
+    return _strip_identity(dict(reply))
+
+
+# ---- 9d: handshake + cookies.export ------------------------------
+
+def _handle_handshake(msg: dict, identity: dict) -> dict:
+    """qdistro.handshake — return the per-session HMAC secret.
+
+    The extension uses this to mint intent tokens. The secret rotates
+    each bridge launch, so a captured token is useless after a browser
+    restart. The secret is returned as hex; the extension uses it
+    directly for HMAC-SHA256.
+
+    Trust model: the extension is trusted (it lives in the browser
+    process). A compromised extension can forge any token — intent
+    tokens defend against web-page-triggered calls and replays, not
+    against extension compromise (see todo/browser/01-bridge-phase9.md
+    §9d Threat scope).
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return {
+        "ok": True,
+        "session_secret_hex": _SESSION_SECRET.hex(),
+        "token_ttl_s": INTENT_TOKEN_TTL_S,
+        "hmac_algo": "sha256",
+        "token_canonical": "request_id|ts|op",
+    }
+
+
+_COOKIES_BUS = "org.qdistro.Pwd"  # cookies live with pwd daemon
+_COOKIES_PATH = "/org/qdistro/Pwd"
+_COOKIES_IFACE = "org.qdistro.Pwd1"
+
+
+def _handle_cookies_export(msg: dict, identity: dict) -> dict:
+    """cookies.export — audit-logged TTL-limited cookie export."""
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    ok, err = verify_intent_token(msg.get("intent_token"),
+                                  "cookies.export")
+    if not ok:
+        return {"ok": False, "error": err}
+    domain = msg.get("domain") or msg.get("url")
+    if not isinstance(domain, str) or not domain:
+        return {"ok": False, "error": "missing_domain"}
+    cookies = msg.get("cookies") or []
+    if not isinstance(cookies, list):
+        return {"ok": False, "error": "bad_cookies"}
+    body = json.dumps({
+        "domain": domain,
+        "cookies": cookies,
+        "extension_id": identity.get("extension_id") or "",
+        "parent_exe": identity.get("parent_exe") or "",
+    })
+    reply = _get_dbus_client().call(
+        _COOKIES_BUS, _COOKIES_PATH, _COOKIES_IFACE,
+        "ExportCookies", "s", (body,))
+    return _strip_identity(dict(reply))
+
+
+# ---- 9e: MPRIS / downloads / notifications / screenlock ----------
+
+_MPRIS_BUS = "org.qdistro.Mpris"
+_MPRIS_PATH = "/org/qdistro/Mpris"
+_MPRIS_IFACE = "org.qdistro.Mpris1"
+
+_DOWNLOADS_BUS = "org.qdistro.Downloads"
+_DOWNLOADS_PATH = "/org/qdistro/Downloads"
+_DOWNLOADS_IFACE = "org.qdistro.Downloads1"
+
+_NOTIF_BUS = "org.qdistro.Notifications"
+_NOTIF_PATH = "/org/qdistro/Notifications"
+_NOTIF_IFACE = "org.qdistro.Notifications1"
+
+_COMPOSITOR_BUS = "org.qdistro.Compositor"
+_COMPOSITOR_PATH = "/org/qdistro/Compositor"
+_COMPOSITOR_IFACE = "org.qdistro.Compositor1"
+
+
+def _forward(msg: dict, identity: dict,
+             bus: str, path: str, iface: str, method: str,
+             fields: tuple[str, ...]) -> dict:
+    body = {f: msg.get(f) for f in fields}
+    body["extension_id"] = identity.get("extension_id") or ""
+    body["parent_exe"] = identity.get("parent_exe") or ""
+    reply = _get_dbus_client().call(
+        bus, path, iface, method, "s", (json.dumps(body),))
+    return _strip_identity(dict(reply))
+
+
+def _handle_mpris_publish(msg: dict, identity: dict) -> dict:
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return _forward(msg, identity,
+                    _MPRIS_BUS, _MPRIS_PATH, _MPRIS_IFACE, "Publish",
+                    ("title", "artist", "album", "playback_status",
+                     "position_us", "tab_id"))
+
+
+def _handle_downloads_notify(msg: dict, identity: dict) -> dict:
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return _forward(msg, identity,
+                    _DOWNLOADS_BUS, _DOWNLOADS_PATH, _DOWNLOADS_IFACE,
+                    "Notify",
+                    ("download_id", "filename", "state",
+                     "bytes_received", "total_bytes", "url", "mime"))
+
+
+def _handle_notifications_show(msg: dict, identity: dict) -> dict:
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return _forward(msg, identity,
+                    _NOTIF_BUS, _NOTIF_PATH, _NOTIF_IFACE, "Show",
+                    ("title", "body", "icon_url", "origin", "tag"))
+
+
+def _handle_screenlock_inhibit(msg: dict, identity: dict) -> dict:
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return _forward(msg, identity,
+                    _COMPOSITOR_BUS, _COMPOSITOR_PATH,
+                    _COMPOSITOR_IFACE, "ScreenlockInhibit",
+                    ("reason", "tab_id", "url"))
+
+
+def _handle_screenlock_release(msg: dict, identity: dict) -> dict:
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    return _forward(msg, identity,
+                    _COMPOSITOR_BUS, _COMPOSITOR_PATH,
+                    _COMPOSITOR_IFACE, "ScreenlockRelease",
+                    ("tab_id", "url"))
+
+
+# =====================================================================
+# heartbeat loop (Phase-9b)
+# =====================================================================
+
+def heartbeat_loop(out_stream,
+                   stop_event: threading.Event,
+                   interval_s: float | None = None,
+                   deadline_s: float | None = None,
+                   max_misses: int | None = None,
+                   on_exit: Callable[[int], None] | None = None,
+                   now_fn: Callable[[], float] = time.time,
+                   ) -> None:
+    """Send periodic heartbeats; exit if too many miss their deadline.
+
+    Runs in a daemon thread. ``stop_event`` is set when the bridge
+    main loop is exiting, so we don't keep tripping after EOF on
+    stdin. On too-many misses, calls ``on_exit`` (default os._exit
+    with EXIT_HEARTBEAT_LOST) so the process tears down even though
+    main may be blocked on stdin.read().
+    """
+    interval = interval_s if interval_s is not None else HEARTBEAT_INTERVAL_S
+    deadline = deadline_s if deadline_s is not None else HEARTBEAT_DEADLINE_S
+    misses_cap = max_misses if max_misses is not None else HEARTBEAT_MAX_MISSES
+    exit_fn = on_exit if on_exit is not None else (
+        lambda rc: os._exit(rc))
+    while not stop_event.is_set():
+        now = now_fn()
+        req_id = _next_request_id()
+        _heartbeat.sent(req_id, now)
+        try:
+            write_message(out_stream,
+                          {"op": "qdistro.heartbeat",
+                           "request_id": req_id, "ts": now})
+        except Exception:
+            # stdio closed — main loop will exit on its own.
+            return
+        # Wait for the next tick OR for the stop signal. Using
+        # stop_event.wait lets tests unblock the thread promptly.
+        stop_event.wait(timeout=interval)
+        misses = _heartbeat.sweep(now_fn(), deadline)
+        if misses >= misses_cap:
+            exit_fn(EXIT_HEARTBEAT_LOST)
+            return
+
+
+# =====================================================================
+# inbound D-Bus surface (Phase-9b)
+# =====================================================================
+
+def inbound_dbus_serve(ppid: int, out_stream,
+                       stop_event: threading.Event,
+                       request_timeout_s: float = 75.0,
+                       ) -> None:
+    """Register ``org.qdistro.BrowserBridge.<ppid>`` and dispatch.
+
+    Pulled into its own function so unit tests can skip it. The
+    implementation uses jeepney's blocking router; if jeepney isn't
+    available (e.g. inside a minimal test image) we log and return.
+
+    Method exported:
+
+      ``RequestTabs(s op, s args_json) -> s reply_json``
+    """
+    try:
+        from jeepney import (DBusAddress, MessageType,
+                             new_method_return, new_error,
+                             new_signal)
+        from jeepney.bus_messages import message_bus
+        from jeepney.io.blocking import open_dbus_connection
+        from jeepney.wrappers import DBusErrorResponse
+    except ImportError:
+        sys.stderr.write(
+            "qdistro-browser-bridge: jeepney missing; inbound "
+            "D-Bus surface disabled\n")
+        return
+    bus_name = f"org.qdistro.BrowserBridge.{ppid}"
+    try:
+        conn = open_dbus_connection(bus="SESSION")
+    except Exception as e:
+        sys.stderr.write(
+            f"qdistro-browser-bridge: SESSION bus unavailable: {e}\n")
+        return
+    try:
+        reply = conn.send_and_get_reply(
+            message_bus.RequestName(bus_name, 4))  # DO_NOT_QUEUE
+        # Best-effort: even if the name is already taken we keep
+        # serving — co-resident daemons can fall back to the alt
+        # name. Tests skip this path entirely.
+        sys.stderr.write(
+            f"qdistro-browser-bridge: requested name {bus_name} "
+            f"reply={reply.body}\n")
+        while not stop_event.is_set():
+            # jeepney blocking receive with a short timeout so we can
+            # check stop_event regularly.
+            try:
+                msg = conn.receive(timeout=1.0)
+            except Exception:
+                continue
+            if msg is None:
+                continue
+            if msg.header.message_type != MessageType.method_call:
+                continue
+            member = msg.header.fields.get(3)  # MEMBER
+            if member != "RequestTabs":
+                conn.send(new_error(
+                    msg, "org.freedesktop.DBus.Error.UnknownMethod",
+                    "s", ("unknown method",)))
+                continue
+            try:
+                op, args_json = msg.body
+                args = json.loads(args_json) if args_json else {}
+            except Exception as e:
+                conn.send(new_error(
+                    msg, "org.freedesktop.DBus.Error.InvalidArgs",
+                    "s", (str(e),)))
+                continue
+            reply_body = enqueue_inbound_request(
+                op, args, out_stream, timeout_s=request_timeout_s)
+            conn.send(new_method_return(
+                msg, "s", (json.dumps(reply_body),)))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 DEFAULT_HANDLERS: dict[str, Callable[[dict, dict], dict]] = {
     "qdistro.ping": _handle_ping,
     "recall.push": _handle_recall_push,
+    # 9a
+    "pwd.fill": _handle_pwd_fill,
+    "pwd.save": _handle_pwd_save,
+    # 9b — extension-initiated *.reply landings
+    "tabs.list.reply": _handle_tabs_reply,
+    "tabs.open.reply": _handle_tabs_reply,
+    "tabs.close.reply": _handle_tabs_reply,
+    "page.extract.reply": _handle_tabs_reply,
+    "cookies.export.reply": _handle_tabs_reply,
+    "mpris.publish.reply": _handle_tabs_reply,
+    "downloads.notify.reply": _handle_tabs_reply,
+    "notifications.show.reply": _handle_tabs_reply,
+    "screenlock.inhibit.reply": _handle_tabs_reply,
+    "screenlock.release.reply": _handle_tabs_reply,
+    "qdistro.heartbeat.ack": _handle_heartbeat_ack,
+    # 9c
+    "page.extract": _handle_page_extract,
+    # 9d
+    "qdistro.handshake": _handle_handshake,
+    "cookies.export": _handle_cookies_export,
+    # 9e
+    "mpris.publish": _handle_mpris_publish,
+    "downloads.notify": _handle_downloads_notify,
+    "notifications.show": _handle_notifications_show,
+    "screenlock.inhibit": _handle_screenlock_inhibit,
+    "screenlock.release": _handle_screenlock_release,
 }
 
 
@@ -284,29 +1163,98 @@ def dispatch(
 
 # ---- main loop ---------------------------------------------------
 
-def main(stdin=None, stdout=None) -> int:
+def main(stdin=None, stdout=None,
+         enable_heartbeat: bool | None = None,
+         enable_dbus: bool | None = None) -> int:
     """Native-messaging host main loop.
 
     Reads one message at a time, dispatches, writes the response,
     repeats until stdin closes. Returns process exit code.
+
+    Phase-9 additions:
+
+    * Rotates the per-session HMAC secret on entry (intent tokens).
+    * Optionally starts the heartbeat thread (Chromium MV3 keep-alive)
+      — only after the extension performs ``qdistro.handshake`` so
+      that bare ``qdistro.ping`` clients (Phase-8 tests, manual
+      smoke-checks) keep their single-frame reply shape.
+    * Optionally registers the inbound D-Bus surface
+      ``org.qdistro.BrowserBridge.<ppid>`` — disabled by default;
+      enable in production installs by setting
+      ``QDISTRO_BRIDGE_ENABLE_DBUS=1``.
+
+    Heartbeat starts on the first ``qdistro.handshake`` op, NOT
+    unconditionally on startup. This keeps the Phase-8 single-message
+    test shape working — a bridge that only sees ``qdistro.ping`` and
+    then EOF emits exactly one frame in reply.
     """
     if stdin is None:
         stdin = getattr(sys.stdin, "buffer", sys.stdin)
     if stdout is None:
         stdout = getattr(sys.stdout, "buffer", sys.stdout)
     identity = verify_parent()
-    while True:
-        try:
-            msg = read_message(stdin)
-        except ValueError as e:
-            write_message(stdout,
-                          {"ok": False, "error": "frame_error",
-                           "detail": str(e)})
-            return 2
-        if msg is None:
-            return 0
-        resp = dispatch(msg, identity)
-        write_message(stdout, resp)
+    reset_session_secret()
+    stop_event = threading.Event()
+    heartbeat_started = False
+
+    def _start_heartbeat() -> None:
+        nonlocal heartbeat_started
+        if heartbeat_started:
+            return
+        if not identity.get("allowed", False):
+            return
+        if enable_heartbeat is False:
+            return
+        if os.environ.get(
+                "QDISTRO_BRIDGE_DISABLE_HEARTBEAT", "") == "1":
+            return
+        threading.Thread(
+            target=heartbeat_loop,
+            args=(stdout, stop_event),
+            name="qdistro-bridge-heartbeat",
+            daemon=True).start()
+        heartbeat_started = True
+
+    if enable_heartbeat is True:
+        _start_heartbeat()
+    want_dbus = (enable_dbus is True
+                 or (enable_dbus is None
+                     and identity.get("allowed", False)
+                     and os.environ.get(
+                         "QDISTRO_BRIDGE_ENABLE_DBUS", "") == "1"))
+    if want_dbus:
+        threading.Thread(
+            target=inbound_dbus_serve,
+            args=(int(identity.get("ppid") or 0), stdout, stop_event),
+            name="qdistro-bridge-dbus",
+            daemon=True).start()
+    try:
+        while True:
+            try:
+                msg = read_message(stdin)
+            except ValueError as e:
+                write_message(stdout,
+                              {"ok": False, "error": "frame_error",
+                               "detail": str(e)})
+                return EXIT_FRAME_ERROR
+            if msg is None:
+                return EXIT_OK
+            # Inbound-reply correlation: if the extension is answering
+            # a daemon-initiated request, deliver_reply unblocks the
+            # waiter and we skip the normal dispatch path so we don't
+            # echo a duplicate frame back at the extension.
+            if deliver_reply(msg):
+                continue
+            resp = dispatch(msg, identity)
+            write_message(stdout, resp)
+            # Start heartbeat after a successful handshake. Extensions
+            # that never handshake (Phase-8 ping-only clients) get the
+            # single-frame reply shape they were built against.
+            if (resp.get("ok")
+                    and msg.get("op") == "qdistro.handshake"):
+                _start_heartbeat()
+    finally:
+        stop_event.set()
 
 
 if __name__ == "__main__":

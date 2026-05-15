@@ -19,11 +19,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
-VERIFY_DIR="$HERE/logs/verify-$(date +%y%m%d-%H%M%S)"
-VM="qdistro-verify"
-SSH_PORT=2299
+STAMP="$(date +%y%m%d-%H%M)"
+VERIFY_DIR="$HERE/logs/verify-${STAMP}$(date +%S)"
+# AGENTS.md requires VM names end in YYMMDD-HHMM so parallel runs don't collide.
+VM="${QDISTRO_VERIFY_VM:-qdistro-verify-${STAMP}}"
+SSH_PORT="${QDISTRO_VERIFY_PORT:-2299}"
 SSH_USER="admin"
-SSH_PASS="qdistro"
+SSH_PASS="${QDISTRO_IMAGE_PASSWORD:-qdistro}"
 URI="qemu:///session"
 
 log()  { printf '\033[1;36m[verify]\033[0m %s\n' "$*"; }
@@ -42,7 +44,7 @@ case "${1:-}" in
 esac
 
 #-- 0. Locate the built image -------------------------------------------------
-IMG=$(find "$BUILD_DIR" -maxdepth 2 -name '*.raw' -o -name '*.qcow2' 2>/dev/null | grep -v "$VM" | head -1)
+IMG=$(find "$BUILD_DIR" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -F "$VM" | head -1)
 [ -n "$IMG" ] || die "no image in $BUILD_DIR; run build.sh first"
 log "image: $IMG"
 
@@ -143,37 +145,31 @@ shoot() {
 
 shoot 00-just-booted
 
-#-- 6. Wait for SSH (~3-5 min for first-boot resize + firstboot) -------------
-log "waiting for SSH on 127.0.0.1:$SSH_PORT (max 600s)..."
+#-- 6. SSH wrapper + wait for auth to actually succeed -----------------------
+# First-boot resize + greetd autologin together take ~2-5 min; we poll
+# real SSH auth (not /dev/tcp — passt-forwarded ports accept connections
+# even when sshd isn't listening yet) until it returns 0.
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o LogLevel=ERROR"
+command -v sshpass >/dev/null 2>&1 || die "sshpass not installed; install with: sudo zypper in sshpass"
+remote() {
+    sshpass -p "$SSH_PASS" ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@127.0.0.1" "$@"
+}
+
+log "waiting for sshd to accept auth (max 600s)..."
 deadline=$(( $(date +%s) + 600 ))
 ready=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if exec 3<>/dev/tcp/127.0.0.1/$SSH_PORT 2>/dev/null; then
-        exec 3<&-; exec 3>&-
-        ready=1
-        break
+    if remote 'true' 2>/dev/null; then
+        ready=1; break
     fi
     sleep 5
 done
 [ "$ready" = 1 ] || { shoot 99-ssh-timeout; die "SSH never came up; see $VERIFY_DIR/screenshots/99-ssh-timeout.png"; }
-
 shoot 01-ssh-ready
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o LogLevel=ERROR"
-if ! command -v sshpass >/dev/null 2>&1; then
-    die "sshpass not installed; install with: sudo zypper in sshpass"
-fi
-remote() {
-    sshpass -p "$SSH_PASS" ssh $SSH_OPTS -p "$SSH_PORT" "$SSH_USER@127.0.0.1" "$@"
-}
-log "waiting for sshd to actually accept auth (kex banner can race)..."
-for i in $(seq 1 30); do
-    if remote 'true' 2>/dev/null; then
-        log "sshd ready after ${i}x5s"
-        break
-    fi
-    sleep 5
-done
-log "giving services 30s to come up (broker, greetd, user units)..."
+
+# admin's user systemd starts after the autologin pam session opens, which
+# happens at greetd-time. Give it 30s to bring up noctalia-{session,shell}.
+log "giving services 30s to come up..."
 sleep 30
 
 #-- 8. Assertions (journal-side, per project memory) --------------------------
@@ -204,22 +200,19 @@ expect "default target is graphical" remote 'systemctl get-default | grep -qx gr
 expect "qdistro-admin-broker active" remote 'systemctl is-active qdistro-admin-broker.service || sudo -n systemctl is-active qdistro-admin-broker.service'
 expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q com.qdistro.AdminBroker1"
 
-# qdwin + qdshell user units for admin
 expect "noctalia-session user unit enabled" \
-    remote "sudo -n machinectl shell admin@.host /usr/bin/systemctl --user is-enabled noctalia-session.service 2>/dev/null | grep -qx enabled || \
-            sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-session.service | grep -qx enabled"
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-session.service | grep -qx enabled"
 expect "noctalia-shell user unit enabled" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-shell.service | grep -qx enabled"
 
-# qdwin compositor process check (best-effort; may not have started yet
-# on serial-console login since DRM seat goes to greetd)
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'
 
-# No fatal errors in this boot's journal
-expect "no priority=0/1 errors in journal" \
-    remote 'sudo -n journalctl -b -p emerg..alert --no-pager -q | wc -l | grep -qx 0'
+# Priority 0/1 journal entries. The single benign one we tolerate is the
+# kernel's "RDSEED32 is broken" CPUID-quirk notice on qemu hosts.
+expect "no unexpected priority=0/1 errors in journal" \
+    remote 'sudo -n journalctl -b -p emerg..alert --no-pager -q | grep -v "RDSEED32 is broken" | grep -q . && exit 1 || exit 0'
 
 #-- 9. Capture journals + systemctl state for evidence -----------------------
 log "capturing journals + systemd state"
@@ -232,11 +225,6 @@ remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pa
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
 shoot 02-fully-booted
-
-#-- 10. Try to advance into graphical session via tty switch -----------------
-# greetd lives on tty1 in our config; trying to take a screenshot of the
-# qdwin compositor when greetd auto-logs admin in.
-log "waiting 30s for graphical session to come up, then capturing..."
 sleep 30
 shoot 03-after-30s
 sleep 30
@@ -256,13 +244,10 @@ TOTAL=$((PASS+FAIL))
     echo "=========================================="
 } | tee -a "$VERIFY_DIR/report.txt"
 
-case "${1:-}" in
-  --keep)
+if [ "${1:-}" = --keep ]; then
     log "VM left running (--keep). To tear down: $0 --teardown"
-    ;;
-  *)
+else
     teardown
-    ;;
-esac
+fi
 
 [ "$FAIL" -eq 0 ]
