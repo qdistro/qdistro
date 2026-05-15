@@ -31,9 +31,14 @@ log()  { printf '\033[1;36m[install-test]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[install-test] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
 
 teardown() {
-    log "tearing down $VM"
-    virsh destroy  "$VM" 2>/dev/null || true
-    virsh undefine "$VM" --nvram 2>/dev/null || true
+    # Sweep any prior install VM (current + stale) so port 2300 is free.
+    local v
+    for v in $(virsh list --all --name 2>/dev/null | grep '^qdistro-install-'); do
+        log "tearing down $v"
+        virsh destroy  "$v" 2>/dev/null || true
+        virsh undefine "$v" --nvram 2>/dev/null || true
+        rm -f "$BUILD_DIR/${v}-target.qcow2"
+    done
     rm -f "$TARGET"
 }
 
@@ -124,18 +129,80 @@ shoot() {
     rm -f "$tmp"
 }
 
-# Drive the OVMF boot picker (Enter to select UEFI DVD-ROM) then the
-# kiwi-built GRUB menu (Down + Enter to select "Install qdistro" within
-# its 1-second timeout). This is the racy bit — see AGENTS.md.
+# Drive the OVMF picker → GRUB → kiwi-oem-dump confirm sequence by
+# hashing virsh screenshots and waiting for the screen content to
+# *change* between stages. Plain PPM-size detection fails because OVMF
+# picker and GRUB menu both render at ~3-7 KB text mode and aren't
+# distinguishable by size alone.
+ppm_hash() {
+    local tmp
+    tmp=$(mktemp --suffix=.ppm)
+    virsh screenshot "$VM" "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; echo ""; return; }
+    sha256sum < "$tmp" | cut -c1-16
+    rm -f "$tmp"
+}
+wait_for_change() {
+    # Block until the screen hash differs from $1 or $2 deadline-seconds elapse.
+    local from_hash="$1"
+    local deadline=$(( SECONDS + ${2:-30} ))
+    local h
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        h=$(ppm_hash)
+        if [ -n "$h" ] && [ "$h" != "$from_hash" ]; then
+            echo "$h"; return 0
+        fi
+        sleep 1
+    done
+    echo ""; return 1
+}
 drive_install_menu() {
-    log "driving UEFI + GRUB menus via send-key"
-    sleep 5                                          # wait for OVMF picker
+    log "driving UEFI + GRUB menus via send-key (hash-driven)"
+    # Stage 1: wait for OVMF picker to stabilize (hash stops changing
+    # for 2 consecutive samples).
+    local h prev=""
+    for _ in $(seq 1 60); do
+        sleep 1
+        h=$(ppm_hash)
+        if [ -n "$h" ] && [ "$h" = "$prev" ]; then
+            log "  OVMF picker stable (hash=$h); sending Enter"
+            break
+        fi
+        prev="$h"
+    done
+    local ovmf_hash="$h"
     virsh send-key "$VM" KEY_ENTER >/dev/null
-    sleep 1                                          # wait for GRUB to render
+    # Stage 2: wait for GRUB menu (screen hash MUST differ from OVMF).
+    log "  waiting for GRUB menu (max 30s)..."
+    h=$(wait_for_change "$ovmf_hash" 30)
+    if [ -z "$h" ]; then
+        log "  WARN: screen never changed after OVMF Enter; bailing"; return
+    fi
+    log "  GRUB menu reached (hash=$h); sending Down + Enter"
     virsh send-key "$VM" KEY_DOWN  >/dev/null
-    virsh send-key "$VM" KEY_ENTER >/dev/null        # picks "Install qdistro"
-    sleep 8                                          # wait for kiwi-oem-dump confirm
-    virsh send-key "$VM" KEY_ENTER >/dev/null        # confirm "destroy /dev/vda? Yes"
+    sleep 1
+    virsh send-key "$VM" KEY_ENTER >/dev/null
+    # Stage 3: kiwi-oem-dump destroy-confirm. Blue-background dialog
+    # is a big graphical frame (~30 KB+); both OVMF and GRUB are
+    # smaller text screens. Detect by size.
+    local stage3_deadline=$(( SECONDS + 60 ))
+    while [ "$SECONDS" -lt "$stage3_deadline" ]; do
+        local tmp
+        tmp=$(mktemp --suffix=.ppm)
+        if virsh screenshot "$VM" "$tmp" >/dev/null 2>&1; then
+            local size
+            size=$(stat -c %s "$tmp")
+            rm -f "$tmp"
+            if [ "$size" -gt 20000 ]; then
+                log "  destroy-confirm detected (ppm=$size B); confirming Yes"
+                virsh send-key "$VM" KEY_ENTER >/dev/null
+                return
+            fi
+        else
+            rm -f "$tmp"
+        fi
+        sleep 2
+    done
+    log "  WARN: never reached destroy-confirm; install may have hung at GRUB"
 }
 drive_install_menu &
 KEYS_PID=$!
