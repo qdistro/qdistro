@@ -1,9 +1,12 @@
 #!/usr/bin/env bats
 # §Phase-7 isolation tiers — tier-2 podman + nested compositor.
 # Reuses the same qdwin / qdshell / pixelfeed binaries from phase6.x;
-# the new ingredient is the `qdistro/tier2:latest` container image
-# built by scripts/vm/tier2/build-tier2-container.sh.
-# Skips on VMs without podman or without the image present.
+# the new ingredient is the `qdistro/tier2-<workload>:latest` container
+# images (image-per-workload model) built by tier2/make-tier2-image.sh.
+# First workload: qdistro/tier2-weston-terminal:latest.
+# Drivers stage themselves over the bats http server (port 8768) the
+# same way broker-e2e.bats stages s90; s32 builds the image on-demand
+# inside the VM if missing. Skips on VMs without podman.
 
 load helpers
 
@@ -13,8 +16,29 @@ setup() {
     vm_run "systemctl stop qdistro-admin-broker.service 2>/dev/null || true"
 }
 
+# Stage the in-VM driver script onto the host's bats http server
+# (port 8768 by convention) so the VM can fetch it. Mirrors the
+# self-staging pattern in broker-e2e.bats.
+stage_tier2_driver() {
+    local script_name="$1"
+    local script_path
+    script_path="$(dirname "$BATS_TEST_FILENAME")/$script_name"
+    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
+
+    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
+
+    if ! ss -tln 2>/dev/null | grep -q ":8768 "; then
+        local stage_dir
+        stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
+        (cd "$stage_dir" && nohup python3 -m http.server 8768 \
+            >/tmp/qdistro-bats-http.log 2>&1 &)
+        sleep 1
+    fi
+}
+
 @test "phase7-tier2-podman: in-container weston-terminal becomes a peer toplevel on outer" {
-    vm_run "systemctl start qdistro-admin-broker.service && bash /root/s32-tier2-podman.sh 2>/dev/null"
+    stage_tier2_driver "s32-tier2-podman.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s32.sh http://10.0.2.2:8768/s32-tier2-podman.sh && chmod +x /tmp/s32.sh && bash /tmp/s32.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -29,7 +53,8 @@ setup() {
 }
 
 @test "phase7-tier2-input: QDNI input forwards into the in-container nested compositor" {
-    vm_run "systemctl start qdistro-admin-broker.service && bash /root/s33-tier2-input.sh 2>/dev/null"
+    stage_tier2_driver "s33-tier2-input.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s33.sh http://10.0.2.2:8768/s33-tier2-input.sh && chmod +x /tmp/s33.sh && bash /tmp/s33.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -49,7 +74,8 @@ setup() {
 }
 
 @test "phase7-tier2-lifecycle: two containers + stop-cleanup" {
-    vm_run "systemctl start qdistro-admin-broker.service && bash /root/s34-tier2-lifecycle.sh 2>/dev/null"
+    stage_tier2_driver "s34-tier2-lifecycle.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s34.sh http://10.0.2.2:8768/s34-tier2-lifecycle.sh && chmod +x /tmp/s34.sh && bash /tmp/s34.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -545,3 +571,24 @@ setup() {
 # clipboard since wl-clipboard waits on focus before set_selection.
 # A future bats can drive xfreerdp instead, or use a focus-bypass
 # helper plus a separate paste-side helper.
+
+# --- §Phase-7 tier-2 podapps discovery (s59) -----------------------------
+# Once a tier-2 container is running, qdistro/tier2/podapps-scan.sh
+# enumerates its .desktop files into /var/lib/qdistro/podapps/<name>/
+# apps.json. This is what the qdshell PodApps service / launcher reads.
+# The s32 image-build prerequisite is shared; if missing this test
+# skips with the same fail_loud as the rest.
+
+@test "phase7-tier2-podapps-discovery: podman exec scan writes apps.json" {
+    stage_tier2_driver "s59-tier2-podapps-discovery.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s59.sh http://10.0.2.2:8768/s59-tier2-podapps-discovery.sh && chmod +x /tmp/s59.sh && bash /tmp/s59.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "podman or qdistro/tier2 image absent on this VM"
+    fi
+    assert_output_contains "PASS: container running for scan"
+    assert_output_contains "PASS: podapps cache file present"
+    assert_output_contains "PASS: podapps cache parses + has entry"
+    assert_output_contains "PASS: entry carries silo tier2/tier2-c-discovery"
+    assert_output_contains "PASS: §Phase-7 tier-2 podapps discovery end-to-end"
+}

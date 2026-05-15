@@ -1,0 +1,72 @@
+# Tier-2 minimal weston-terminal image. The bats-test floor: smallest
+# image that can host an inner nested weston + qdwin-shell.so + one
+# guest app and satisfy the §Phase-7 tier-2 assertions.
+#
+# Built by tier2/make-tier2-image.sh; produces:
+#   qdistro/tier2-weston-terminal:latest
+#
+# The host-side spawn-tier2.sh wraps `podman run` with
+# qdistro-secctx-exec so the inner weston's outer-connection lands on
+# the compositor with a wp_security_context_v1 tag of
+# (qdistro.tier2, <container>/<app>, <launch-token>).
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# Runtime deps. weston pulls libpipewire-0_3 + wayland-backend +
+# pipewire-backend transitively on Tumbleweed; we list them
+# explicitly so a future weston rebuild on a slimmer base still works.
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install --no-recommends \
+        weston \
+        libweston-14 \
+        libpipewire-0_3-0 \
+        wayland-utils \
+        libwayland-client0 \
+        libwayland-server0 \
+        Mesa-libGL1 \
+        Mesa-libEGL1 \
+        libxkbcommon0 \
+        xkeyboard-config \
+        coreutils \
+        procps \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# qdwin-shell.so is installed by the host build (the same artifact
+# the outer compositor uses) and bind-mounted in at run time at
+# /usr/lib64/weston/qdwin-shell.so. Same applies to the qdwin-nested
+# protocol XMLs (not needed at runtime). The container provides the
+# weston binary + runtime libs only.
+
+# Minimal XDG desktop entry for the workload — picked up by
+# tier2/podapps-scan.sh and surfaced as a badged launcher entry in
+# qdshell. Each tier-2 image is expected to ship at least one
+# .desktop file matching the workload name.
+RUN install -d -o root -g root -m 0755 /usr/share/applications \
+ && cat > /usr/share/applications/weston-terminal.desktop <<'DESK' \
+ && chmod 0644 /usr/share/applications/weston-terminal.desktop
+[Desktop Entry]
+Name=Weston Terminal
+GenericName=Terminal Emulator
+Comment=Simple terminal emulator that ships with weston (tier-2 minimum image)
+Exec=weston-terminal
+Icon=utilities-terminal
+Type=Application
+Categories=System;TerminalEmulator;
+Terminal=false
+DESK
+
+# Inner weston needs a config that loads qdwin-shell.so + the wayland
+# backend + the pipewire backend. We ship a minimal weston.ini.
+COPY weston.ini /etc/xdg/weston/weston.ini
+
+# In-container entrypoint: starts inner weston, exec's the inner app
+# once the inner socket appears.
+COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint
+
+# uid 1000 = admin on the host; --userns=keep-id maps it 1:1.
+USER 1000:1000
+WORKDIR /home/admin
+
+ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+CMD ["weston-terminal"]

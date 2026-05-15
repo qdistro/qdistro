@@ -180,3 +180,35 @@ for admin-launcher search:
 - Search by title / metadata → matching subunits, colour-tagged.
 - Click → activate the subunit in its originating session.
 - Content-level search is handled by [recall](recall.md).
+
+## Cold-start placeholder taskbar entries
+
+When the user launches an app that lives in a not-yet-running silo
+(podman container off, VM not started, cross-uid silo not yet bridged),
+qdshell inserts a **placeholder taskbar entry** as immediate visual
+feedback while the silo starts up. The placeholder:
+
+- Renders with the resolved app icon (or host placeholder glyph) and
+  the silo badge.
+- Carries an `NBusyIndicator` overlay.
+- Renders at reduced opacity (≈0.6) to distinguish from real toplevels.
+- Is keyed off the launch token returned by the spawn helper, **not**
+  off `app_id` — multiple instances of the same app from the same
+  silo each get their own placeholder.
+
+When `qdwin_shell_v1.toplevel_added` arrives with a
+`wp_security_context_v1.instance_id` matching the launch token, the
+placeholder is removed and the real toplevel takes its slot in the
+taskbar model. If no match arrives within 15s, the placeholder is
+removed and a toast surfaces ("Failed to start <app> in <silo>").
+
+No placeholder *window* is created — the taskbar entry is the sole
+visible feedback during cold start. The standard cursor busy/wait
+feedback (provided by qdwin / the desktop environment) covers the
+pointer-side cue.
+
+This contract is identical across tiers. Tier-2 / tier-5 spawn
+helpers each emit a launch token on stdout; qdshell's PodApps and
+(future) VMApps services share the same token-correlation code path.
+See [containers.md](containers.md#cold-start-contract) for the tier-2
+implementation.

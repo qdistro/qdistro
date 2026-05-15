@@ -102,6 +102,14 @@ bind-mount `/run/user/<uid>` so the container's nested compositor (with
 qdwin-shell.so) connects to the outer admin compositor's Wayland socket
 and advertises each inner toplevel via `qdwin_nested_manager_v1`.
 
+Tier-2 is the **first tier with first-class qdshell launcher integration**
+(badged app icons, click-to-launch, placeholder taskbar entry on cold
+start). The full design — image-per-workload model, secctx contract,
+podapps discovery, cold-start UX — is in [containers.md](containers.md).
+Host-side bits live under `tier2/`; bats coverage is the
+`phase7-tier2-*` block in
+`tests/integration/vm/tiered-isolation.bats`.
+
 ## Tier 3 — different user (waypipe over UNIX)
 
 Primary mechanism for data-silo separation. `qdistro-tier3-spawn

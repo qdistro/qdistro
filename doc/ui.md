@@ -453,3 +453,34 @@ qdistro-specific deviations from KDE:
 - **Source-user colour tinting** across cross-user surfaces (qdistro-
  specific because of the multi-silo model).
 - **Dialog button order matches Win95 / Delphi**, not necessarily KDE's.
+
+## Silo badges
+
+Apps that live in a non-tier-0 silo (podman container, VM, different uid)
+are rendered in launcher / taskbar / dock with a small **silo badge**
+overlay on their icon. The badge encodes two things:
+
+1. **A subtle ring tint** keyed off a deterministic hash of the silo
+   name. Same silo → same colour across qdshell, qbrowser, qfileman, and
+   any future surface that lists silo-scoped items. Different silos →
+   visibly distinct rings so the user can tell at a glance whether the
+   firefox they're clicking is the "work" one or the "private" one.
+2. **A bottom-right glyph** indicating the silo class:
+   - `podman` (small container box) — tier-2.
+   - `vm` (small monitor) — tier-4 / tier-5.
+   - `user` (small user silhouette) — tier-3 cross-uid.
+   - tier-0 / tier-1: no glyph (these are "native"; no badge).
+
+Badges live on top of the icon, not next to it — they must not change
+the icon's bounding box, so launcher grid layout stays stable
+regardless of how many silos a user has.
+
+When the host icon theme can't resolve an entry's `Icon=` name, the
+icon falls back to a generic placeholder glyph (the silo badge still
+renders on top). qdistro does not fetch icons from guest filesystems;
+the host is expected to have the same icon set installed. The cross-silo
+icon-theme story is explicitly deferred.
+
+Tier-specific design pages link back to this convention:
+[containers.md](containers.md#badging) for tier-2; tier-4 / tier-5
+add their entries when those land.
