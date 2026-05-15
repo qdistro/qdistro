@@ -317,7 +317,8 @@ stage_tier2_driver() {
     # §Phase-7 tier-5 audio — spec/29 §3 picked path. Skips when the
     # tier-5 base disk is absent OR pipewire-tools / qemu-audio-pipewire
     # are missing.
-    vm_run "bash /root/s47-tier5-audio.sh 2>/dev/null"
+    stage_tier2_driver "s47-tier5-audio.sh"
+    vm_run "curl -s -o /tmp/s47.sh http://10.0.2.2:8768/s47-tier5-audio.sh && chmod +x /tmp/s47.sh && bash /tmp/s47.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
@@ -364,8 +365,12 @@ stage_tier2_driver() {
     # qdshell tier1 secctx parser all survived the bootstrap rsync.
     # The implementation pass picks up from this baseline once the four
     # blocking spikes in tier1/spike-checklist.md resolve.
-    vm_run "bash /root/s50-tier1-skeleton.sh 2>/dev/null"
+    stage_tier2_driver "s50-tier1-skeleton.sh"
+    vm_run "curl -s -o /tmp/s50.sh http://10.0.2.2:8768/s50-tier1-skeleton.sh && chmod +x /tmp/s50.sh && bash /tmp/s50.sh 2>/dev/null"
     assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier1 source not staged in this VM"
+    fi
     assert_output_contains "PASS: tier1 README present"
     assert_output_contains "PASS: spike-checklist.md covers Spikes 1-5"
     assert_output_contains "PASS: qdistro_tier1.te declares type + Wayland connect interface"
@@ -423,7 +428,8 @@ stage_tier2_driver() {
     # policy module loaded, type_transition rule active, spawn pipeline
     # places the inner command in qdistro_tier1_t, broker spawn-action
     # gate denies an authored rule.
-    vm_run "bash /root/s51-tier1-e2e.sh 2>/dev/null"
+    stage_tier2_driver "s51-tier1-e2e.sh"
+    vm_run "curl -s -o /tmp/s51.sh http://10.0.2.2:8768/s51-tier1-e2e.sh && chmod +x /tmp/s51.sh && bash /tmp/s51.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled / policy not loaded / qdistro-tier1-spawn absent"
@@ -449,7 +455,8 @@ stage_tier2_driver() {
     # injections preserve the active selection and the sink helper's
     # wl_data_device receives the offer. The byte-for-byte payload
     # assertion is now load-bearing whenever the sink helper is built.
-    vm_run "bash /root/s53-data-offer-receive-v15.sh 2>/dev/null"
+    stage_tier2_driver "s53-data-offer-receive-v15.sh"
+    vm_run "curl -s -o /tmp/s53.sh http://10.0.2.2:8768/s53-data-offer-receive-v15.sh && chmod +x /tmp/s53.sh && bash /tmp/s53.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-test-clipboard-sink absent or v15 binding missing"
@@ -474,7 +481,8 @@ stage_tier2_driver() {
     #
     # Restoration: trap re-issues setenforce 0 on natural exit OR
     # signal so a failed run still leaves the VM in permissive mode.
-    vm_run "bash /root/s55-tier1-enforcing.sh 2>/dev/null"
+    stage_tier2_driver "s55-tier1-enforcing.sh"
+    vm_run "curl -s -o /tmp/s55.sh http://10.0.2.2:8768/s55-tier1-enforcing.sh && chmod +x /tmp/s55.sh && bash /tmp/s55.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
     fi
@@ -493,7 +501,8 @@ stage_tier2_driver() {
     #
     # Same SKIP semantics as phase7-tier1-enforcing: when /etc/selinux/
     # config pins SELINUX=permissive, the runtime flip is refused.
-    vm_run "bash /root/s56-broker-enforcing.sh 2>/dev/null"
+    stage_tier2_driver "s56-broker-enforcing.sh"
+    vm_run "curl -s -o /tmp/s56.sh http://10.0.2.2:8768/s56-broker-enforcing.sh && chmod +x /tmp/s56.sh && bash /tmp/s56.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
     fi
@@ -536,7 +545,8 @@ stage_tier2_driver() {
     #   forever_exe      — any argv with the same exe (legacy).
     #
     # Re-run-safe: probe revokes its own rows on entry + exit.
-    vm_run "bash /root/s57-qsu-argv-scopes.sh 2>/dev/null"
+    stage_tier2_driver "s57-qsu-argv-scopes.sh"
+    vm_run "curl -s -o /tmp/s57.sh http://10.0.2.2:8768/s57-qsu-argv-scopes.sh && chmod +x /tmp/s57.sh && bash /tmp/s57.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL:"*"qdistro-admin-broker.service not active"* ]]; then
         fail_loud "broker service inactive on this VM"
@@ -569,7 +579,8 @@ stage_tier2_driver() {
     # place — a regression in the delegated gate would either time
     # out step B (re-prompt instead of cache) or fail step A's
     # DecideRequest with "forbidden scope on delegated request".
-    vm_run "bash /root/s58-qsu-real-flow.sh 2>/dev/null"
+    stage_tier2_driver "s58-qsu-real-flow.sh"
+    vm_run "curl -s -o /tmp/s58.sh http://10.0.2.2:8768/s58-qsu-real-flow.sh && chmod +x /tmp/s58.sh && bash /tmp/s58.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL: /usr/local/bin/qsu absent"* ]]; then
         fail_loud "qsu not installed on this VM (older bootstrap)"
@@ -589,7 +600,8 @@ stage_tier2_driver() {
     # Validates the audispd plugin pipeline (spec/30 step 7):
     # AVC denial in qdistro_tier1_t → audispd plugin → broker
     # RecordSelinuxAvc → audit DB row with selinux_subj_type set.
-    vm_run "bash /root/s52-tier1-audisp.sh 2>/dev/null"
+    stage_tier2_driver "s52-tier1-audisp.sh"
+    vm_run "curl -s -o /tmp/s52.sh http://10.0.2.2:8768/s52-tier1-audisp.sh && chmod +x /tmp/s52.sh && bash /tmp/s52.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled / policy not loaded / audisp plugin absent / auditd down"
