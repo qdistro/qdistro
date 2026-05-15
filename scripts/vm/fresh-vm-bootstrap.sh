@@ -176,6 +176,33 @@ else
     log "qdlocker tarball not present, skipping installation"
 fi
 
+# ---- 8. Opt-in: build tier-4 / tier-5 guest base images ----------------
+# These produce the qcow2 base images that spawn-tier4.sh / spawn-tier5.sh
+# linked-clone from. ~400-500 MB upstream Tumbleweed Minimal-VM Cloud
+# download per tier + ~30-60s of virt-customize. Opt-in via env vars:
+# the phase7-tier{4,5}-* bats SKIPs gracefully when the base disk is
+# absent, so this is only needed when the operator wants those tests
+# to actually exercise the full --vm path. tiered-isolation.bats's
+# error message points at these env vars.
+if [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = "1" ]; then
+    if [ -x "$SRC/qdistro/tier4-vm/build-guest-image.sh" ]; then
+        log "building tier-4 base disk (QDISTRO_BUILD_TIER4_BASE=1)..."
+        bash "$SRC/qdistro/tier4-vm/build-guest-image.sh" \
+            || log "  WARN: tier-4 base build failed; phase7-tier4-spice-clipboard-live will SKIP"
+    else
+        log "  WARN: tier4-vm/build-guest-image.sh not staged; skipping"
+    fi
+fi
+if [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = "1" ]; then
+    if [ -x "$SRC/qdistro/tier5-vm/build-guest-image.sh" ]; then
+        log "building tier-5 base disk (QDISTRO_BUILD_TIER5_BASE=1)..."
+        bash "$SRC/qdistro/tier5-vm/build-guest-image.sh" \
+            || log "  WARN: tier-5 base build failed; phase7-tier5-vm will SKIP"
+    else
+        log "  WARN: tier5-vm/build-guest-image.sh not staged; skipping"
+    fi
+fi
+
 log "bootstrap complete."
 log "start the session now with:"
 log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
