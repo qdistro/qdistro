@@ -17,10 +17,14 @@ ISO="$BUILD_DIR/qdistro.x86_64-0.1.0.install.iso"
 URI="qemu:///session"
 export LIBVIRT_DEFAULT_URI="$URI"
 
-VM="qdistro-install"
+STAMP="$(date +%y%m%d-%H%M)"
+# AGENTS.md: VM names must end YYMMDD-HHMM so parallel runs don't collide.
+VM="${QDISTRO_INSTALL_VM:-qdistro-install-${STAMP}}"
 TARGET="$BUILD_DIR/$VM-target.qcow2"
 TARGET_SIZE_GB=30
-INSTALL_DIR="$HERE/logs/install-$(date +%y%m%d-%H%M%S)"
+SSH_PORT="${QDISTRO_INSTALL_PORT:-2300}"
+SSH_PASS="${QDISTRO_IMAGE_PASSWORD:-qdistro}"
+INSTALL_DIR="$HERE/logs/install-${STAMP}$(date +%S)"
 mkdir -p "$INSTALL_DIR/screenshots"
 
 log()  { printf '\033[1;36m[install-test]\033[0m %s\n' "$*"; }
@@ -50,11 +54,10 @@ teardown
 qemu-img create -f qcow2 "$TARGET" "${TARGET_SIZE_GB}G" >/dev/null
 log "target disk: $TARGET ($TARGET_SIZE_GB GB blank qcow2)"
 NVRAM="$INSTALL_DIR/$VM.nvram.fd"
-cp "$OVMF" "$NVRAM" 2>/dev/null
-# Actual vars template
 for tpl in /usr/share/qemu/ovmf-x86_64-4m-vars.bin /usr/share/qemu/ovmf-x86_64-vars.bin /usr/share/OVMF/OVMF_VARS.fd; do
     [ -f "$tpl" ] && cp "$tpl" "$NVRAM" && break
 done
+[ -f "$NVRAM" ] || die "no OVMF nvram template (ovmf-x86_64-4m-vars.bin / OVMF_VARS.fd)"
 
 #-- Define VM: CD-first, disk attached, passt+SSH so we can verify later -----
 DOMAIN_XML=$(cat <<XML
@@ -89,7 +92,7 @@ DOMAIN_XML=$(cat <<XML
       <backend type='passt'/>
       <model type='virtio'/>
       <portForward proto='tcp' address='127.0.0.1'>
-        <range start='2300' to='22'/>
+        <range start='$SSH_PORT' to='22'/>
       </portForward>
     </interface>
     <serial type='pty'><target port='0'/></serial>
@@ -112,11 +115,30 @@ shoot() {
     local tmp
     tmp=$(mktemp --suffix=.ppm)
     if virsh screenshot "$VM" "$tmp" >/dev/null 2>&1; then
-        convert "$tmp" "$out" 2>/dev/null
-        log "screenshot: $(basename "$out")"
+        if command -v convert >/dev/null 2>&1; then
+            convert "$tmp" "$out" 2>/dev/null && log "screenshot: $(basename "$out")"
+        elif command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -y -loglevel error -i "$tmp" "$out" && log "screenshot: $(basename "$out")"
+        fi
     fi
     rm -f "$tmp"
 }
+
+# Drive the OVMF boot picker (Enter to select UEFI DVD-ROM) then the
+# kiwi-built GRUB menu (Down + Enter to select "Install qdistro" within
+# its 1-second timeout). This is the racy bit — see AGENTS.md.
+drive_install_menu() {
+    log "driving UEFI + GRUB menus via send-key"
+    sleep 5                                          # wait for OVMF picker
+    virsh send-key "$VM" KEY_ENTER >/dev/null
+    sleep 1                                          # wait for GRUB to render
+    virsh send-key "$VM" KEY_DOWN  >/dev/null
+    virsh send-key "$VM" KEY_ENTER >/dev/null        # picks "Install qdistro"
+    sleep 8                                          # wait for kiwi-oem-dump confirm
+    virsh send-key "$VM" KEY_ENTER >/dev/null        # confirm "destroy /dev/vda? Yes"
+}
+drive_install_menu &
+KEYS_PID=$!
 
 #-- Watch the installer ------------------------------------------------------
 # kiwi-oem-dump's flow:
@@ -164,13 +186,10 @@ virt-filesystems -a "$TARGET" 2>&1 | tee -a "$INSTALL_DIR/state.log" | head -10 
     || log "WARN: virt-filesystems on target failed (image may be unwritten)"
 
 #-- Detach the CD and reboot from the installed disk -------------------------
+# Per-disk <boot order='2'/> on vda already biases UEFI to the HD; we just
+# need to remove the CD so it isn't a candidate.
 log "detaching install ISO and rebooting from disk"
-virsh detach-disk "$VM" sda --config 2>&1 | head -3 || true
-
-# Flip the boot order: HD first
-NEW_XML=$(virsh dumpxml "$VM" | sed -e "s|<boot dev='cdrom'/>||" \
-                                    -e "s|<boot dev='hd'/>|<boot dev='hd'/>|")
-echo "$NEW_XML" | virsh define /dev/stdin >/dev/null
+virsh detach-disk "$VM" sda --config >/dev/null || true
 virsh start "$VM"
 
 log "second boot: from installed disk; polling for real SSH auth"
@@ -178,7 +197,7 @@ deadline=$(( $(date +%s) + 600 ))
 ssh_up=0
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -o PreferredAuthentications=password -o PubkeyAuthentication=no -o LogLevel=ERROR"
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if sshpass -p qdistro ssh $SSH_OPTS -p 2300 admin@127.0.0.1 true 2>/dev/null; then
+    if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -p "$SSH_PORT" admin@127.0.0.1 true 2>/dev/null; then
         ssh_up=1
         break
     fi
@@ -190,9 +209,9 @@ shoot "final"
 
 if [ "$ssh_up" = 1 ]; then
     log "SSH up on installed system; capturing identity"
-    sshpass -p qdistro ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o PreferredAuthentications=password -o PubkeyAuthentication=no \
-        -o ConnectTimeout=10 -p 2300 admin@127.0.0.1 \
+        -o ConnectTimeout=10 -p "$SSH_PORT" admin@127.0.0.1 \
         'echo "hostname=$(cat /etc/hostname)"; echo "id=$(grep ^ID= /etc/os-release)"; lsblk; df -h /' \
         2>&1 | tee "$INSTALL_DIR/installed-fingerprint.log"
     echo "RESULT: PASS — installer wrote the system to disk and it booted."

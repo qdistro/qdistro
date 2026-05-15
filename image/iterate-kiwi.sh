@@ -1,12 +1,23 @@
 #!/bin/bash
 # Push the local config.xml/build.sh/config.sh into the running builder VM
 # and re-run kiwi. Faster than re-running build-in-vm.sh from scratch.
+#
+# Usage:
+#   ./iterate-kiwi.sh              # picks most-recent qdistro-builder-*
+#   ./iterate-kiwi.sh <vm-name>    # explicit VM
 set -euo pipefail
-VM="${1:-$(virsh -c qemu:///session list --name 2>/dev/null | grep -m1 ^qdistro-builder-)}"
+if [ -n "${1:-}" ]; then
+    VM="$1"
+else
+    # VM names end in YYMMDD-HHMM so lexicographic sort = chronological.
+    VM=$(virsh -c qemu:///session list --name 2>/dev/null \
+         | grep '^qdistro-builder-' | sort | tail -1)
+fi
 [ -n "$VM" ] || { echo "no qdistro-builder VM running" >&2; exit 2; }
+echo "[iterate] target VM: $VM"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-EXEC=/home/playai/doc/qdistro-org/qdistro/scripts/vm/vm-exec
-SCRIPT=/home/playai/doc/qdistro-org/qdistro/scripts/vm/vm-script
+EXEC="$HERE/../scripts/vm/vm-exec"
+SCRIPT="$HERE/../scripts/vm/vm-script"
 
 B64_CFG=$(base64 -w0 < "$HERE/config.xml")
 B64_BUILD=$(base64 -w0 < "$HERE/build.sh")

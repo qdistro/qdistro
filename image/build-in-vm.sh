@@ -97,7 +97,7 @@ else
     # (baseweed.qcow2 doesn't) and the qdistro deps preinstalled so the
     # in-VM zypper for kiwi-ng is fast.
     CLONE_OUT=$("$VM_TOOLS/clone-baseweed.sh" "$PREFIX" --from-baked 2>&1 | tee "$LOGS/clone.log")
-    VM=$(printf '%s\n' "$CLONE_OUT" | grep -E '^qdistro-builder-' | tail -1 || true)
+    VM=$(printf '%s\n' "$CLONE_OUT" | grep -E '^qdistro-builder-' | tail -1)
     [ -n "$VM" ] || die "could not parse VM name from clone-baseweed output (see $LOGS/clone.log)"
     log "VM name: $VM"
 fi
@@ -136,9 +136,8 @@ if [ "$(virsh domstate "$VM")" != "shut off" ]; then
 fi
 
 virt-customize -a "$IMG_DIR/$VM.qcow2" \
-    --mkdir /root/qdistro-image \
     --copy-in "$TAR:/root" \
-    --run-command 'tar -xf /root/qdistro-image.tar -C /root/qdistro-image && rm -f /root/qdistro-image.tar' \
+    --run-command 'rm -rf /root/qdistro-image && mkdir /root/qdistro-image && tar -xf /root/qdistro-image.tar -C /root/qdistro-image && rm -f /root/qdistro-image.tar' \
     >>"$LOGS/virt-customize.log" 2>&1 \
     || die "virt-customize failed; see $LOGS/virt-customize.log"
 
@@ -170,27 +169,25 @@ log "running kiwi-ng build inside VM (this will take 30-60 min)"
 log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
+set +e
 vms <<'EOS' | tee "$LOGS/kiwi-driver.log"
 cd /root/qdistro-image
-# TMPDIR intentionally NOT redirected to /build/tmp: dracut runs inside
-# the image-root chroot and won't see anything mounted under /build.
+# TMPDIR is intentionally NOT redirected to /build/tmp: dracut runs inside
+# the image-root chroot and won't see anything mounted under /build there.
 QDISTRO_BUILD_DIR=/build/out bash build.sh --no-sync \
     >/root/kiwi-build.log 2>&1
-rc=$?
-echo "kiwi-exit=$rc"
-exit "$rc"
 EOS
-
-KIWI_RC=$(grep -oE 'kiwi-exit=[0-9]+' "$LOGS/kiwi-driver.log" | tail -1 | cut -d= -f2)
-log "kiwi exit code: ${KIWI_RC:-unknown}"
+KIWI_RC=${PIPESTATUS[0]}
+set -e
+log "kiwi exit code: $KIWI_RC"
 
 log "fetching kiwi-build.log to host"
 vmx 'tail -100 /root/kiwi-build.log' > "$LOGS/kiwi-build.tail.log" 2>&1 || true
 virt-cat -a "$IMG_DIR/$VM.qcow2" /root/kiwi-build.log > "$LOGS/kiwi-build.full.log" 2>&1 \
     || vmx 'cat /root/kiwi-build.log' > "$LOGS/kiwi-build.full.log" 2>&1 || true
 
-if [ "${KIWI_RC:-1}" != "0" ]; then
-    warn "kiwi build failed; see $LOGS/kiwi-build.full.log"
+if [ "$KIWI_RC" != "0" ]; then
+    warn "kiwi build failed (exit $KIWI_RC); see $LOGS/kiwi-build.full.log"
     warn "VM left running so you can inspect: virsh -c $URI console $VM"
     exit 1
 fi
@@ -206,31 +203,23 @@ log "copying artifacts back to host ($HOST_BUILD_DIR)"
 # has no inbound from host. Use virt-copy-out after a clean shutdown.
 log "shutting down VM for offline copy-out"
 virsh shutdown "$VM" 2>/dev/null || true
-for i in $(seq 1 90); do
+for _ in $(seq 1 90); do
     [ "$(virsh domstate "$VM")" = "shut off" ] && break
     sleep 2
 done
-[ "$(virsh domstate "$VM")" = "shut off" ] || virsh destroy "$VM" || true
-
-# The build disk is the second qcow2; mount it via guestfish-style copy.
-# But that disk has xfs and isn't part of the VM's libguestfs default
-# inspection. We use a direct virt-copy-out on the disk image.
-mkdir -p "$HOST_BUILD_DIR"
-guestmount -a "$BUILD_DISK" -m /dev/sda "$LOGS/guestmnt" 2>>"$LOGS/copy-out.log" || true
-if mountpoint -q "$LOGS/guestmnt"; then
-    cp -av "$LOGS/guestmnt/out/"* "$HOST_BUILD_DIR/" 2>&1 | tail -10
-    guestunmount "$LOGS/guestmnt"
-else
-    # Fall back: extract via libguestfs commandline.
-    log "guestmount failed; trying virt-copy-out"
-    virt-copy-out -a "$BUILD_DISK" /out "$HOST_BUILD_DIR/" \
-        2>>"$LOGS/copy-out.log" \
-        || die "could not extract artifacts; see $LOGS/copy-out.log"
-    if [ -d "$HOST_BUILD_DIR/out" ]; then
-        mv "$HOST_BUILD_DIR/out/"* "$HOST_BUILD_DIR/"
-        rmdir "$HOST_BUILD_DIR/out"
-    fi
+if [ "$(virsh domstate "$VM")" != "shut off" ]; then
+    virsh destroy "$VM" || true
 fi
+
+# The build disk is a bare xfs filesystem on /dev/sda (no partition table),
+# so libguestfs auto-inspection finds no OS and refuses; mount /dev/sda
+# explicitly via guestfish (-m /dev/sda /). Trap unmount in case copy fails.
+mkdir -p "$HOST_BUILD_DIR" "$LOGS/guestmnt"
+trap 'guestunmount "$LOGS/guestmnt" 2>/dev/null || true' EXIT
+guestmount -a "$BUILD_DISK" -m /dev/sda --ro "$LOGS/guestmnt" 2>>"$LOGS/copy-out.log"
+cp -av "$LOGS/guestmnt/out/"* "$HOST_BUILD_DIR/" 2>&1 | tail -10
+guestunmount "$LOGS/guestmnt"
+trap - EXIT
 
 log "artifacts on host:"
 ls -lh "$HOST_BUILD_DIR/" | tee -a "$LOGS/artifacts.txt"
