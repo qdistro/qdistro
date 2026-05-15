@@ -72,6 +72,19 @@
 #                        (--vm only) override domain XML template path.
 #   TIER5_KEEP_DOMAIN=1  (--vm only) skip destroy+undefine on exit
 #                        (useful for debug; normally one-VM-per-spawn).
+#   TIER5_NETWORK        (--vm only) Network configuration. Default
+#                        "none" — no NIC, mirroring podman's
+#                        --network=none hardening for tier-2.
+#                        "user" gives the guest a virtio NIC with
+#                        QEMU usermode NAT (for debug); other values
+#                        are rejected.
+#   TIER5_NO_REAP=1      (--vm only) Skip the orphan-overlay reaper
+#                        that runs at startup. The reaper unlinks
+#                        per-VM overlay qcow2 files in DISK_DIR
+#                        whose spawn-tier5.sh wrapper is no longer
+#                        alive AND whose libvirt domain is gone or
+#                        not running. Default is to reap (matches
+#                        tier-2's at-startup orphan-dir reaper).
 #
 # Lifecycle:
 #   - Loopback mode: waypipe-client + waypipe-server are spawned on the
@@ -201,6 +214,54 @@ else
     if [ ! -f "$DISK_BASE" ]; then
         echo "[tier5] FAIL: base disk $DISK_BASE missing — run tier5/build-guest-image.sh" >&2
         exit 3
+    fi
+
+    # --- TIER5_NETWORK resolution (hardening default: no NIC) ---
+    NETWORK="${TIER5_NETWORK:-none}"
+    case "$NETWORK" in
+        none) NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default (hardening parity with tier-2's --network=none) -->" ;;
+        user) NIC_XML="<interface type='user'><mac address='__MAC__'/><model type='virtio'/></interface>" ;;
+        *)
+            echo "[tier5] FAIL: TIER5_NETWORK='$NETWORK' invalid; expected 'none' or 'user'" >&2
+            exit 1
+            ;;
+    esac
+
+    # --- orphan-overlay reaper (mirrors tier-2's at-startup reaper) ---
+    # Per-VM overlay qcow2 files in $DISK_DIR are orphaned when a
+    # prior spawn-tier5.sh wrapper died without running its EXIT trap
+    # (segfault, kill -9, host crash, OOM-killer). Reap those whose
+    # wrapper is no longer alive AND whose libvirt domain is either
+    # absent or not running. Conservative: only touches qcow2 files
+    # whose backing file is $DISK_BASE (won't accidentally rm a
+    # user's unrelated qcow2 in the same dir).
+    if [ "${TIER5_NO_REAP:-0}" != "1" ] && [ -d "$DISK_DIR" ]; then
+        for overlay in "$DISK_DIR"/*.qcow2; do
+            [ -f "$overlay" ] || continue
+            base=$(basename "$overlay" .qcow2)
+            # Don't touch our own per-spawn name even before it's created.
+            [ "$base" = "$VM_NAME" ] && continue
+            # Confirm the overlay is one of ours (backed by DISK_BASE).
+            if ! run_as_admin qemu-img info "$overlay" 2>/dev/null \
+                    | grep -qF "backing file: $DISK_BASE"; then
+                continue
+            fi
+            # Live wrapper holding it? Skip.
+            if pgrep -af "spawn-tier5\.sh.*--vm[[:space:]]+$base([[:space:]]|$)" \
+                    >/dev/null 2>&1; then
+                continue
+            fi
+            # Domain still running? Skip — admin may be using it via
+            # an out-of-band virsh start.
+            if run_as_admin virsh domstate "$base" 2>/dev/null \
+                    | grep -qw running; then
+                continue
+            fi
+            # Orphan: undefine any stopped domain + unlink overlay.
+            run_as_admin virsh undefine "$base" >/dev/null 2>&1 || true
+            rm -f "$overlay" 2>/dev/null || true
+            echo "[tier5] reaped orphan overlay $overlay" >&2
+        done
     fi
     # Make sure admin can read the base disk (qemu-img create -b reads it).
     if ! runuser -u "$ADMIN_USER" -- test -r "$DISK_BASE"; then
@@ -345,7 +406,13 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
     TMP_XML="/tmp/qdistro-tier5-${VM_NAME}-$$.xml"
+    # NIC_XML resolved above from TIER5_NETWORK. The default is the
+    # empty-NIC variant (TIER5_NETWORK=none). When TIER5_NETWORK=user
+    # the substituted snippet still contains the __MAC__ marker so the
+    # later MAC sed pass fills it in.
+    NIC_XML_ESCAPED=$(printf '%s' "$NIC_XML" | sed 's|[\\/&]|\\&|g')
     sed \
+        -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
         -e "s|__VM_NAME__|$VM_NAME|g" \
         -e "s|__MAC__|$NEW_MAC|g" \
         -e "s|__MEM_KIB__|$MEM_KIB|g" \

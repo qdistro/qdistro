@@ -25,9 +25,18 @@ Tier 2 lands before tier 4 and tier 5 because:
 - Podman is cheap to start (sub-second), no virtualization, no qga,
   no vsock, no SPICE — the entire isolation pipeline fits in two
   bash scripts plus a Containerfile.
-- The qdshell launcher integration ("PodApps") it unlocks is
-  structurally identical to the eventual "VMApps" service for tier-5;
-  picking podman first establishes the contract that tier-5 will reuse.
+- The qdshell launcher integration ("PodApps") it unlocks shares
+  the **UI surface** (placeholder cold-start entries, silo badge
+  rings, secctx-driven correlation) with the eventual "VMApps"
+  service for tier-5, even though the underlying wayland transport
+  is different. Tier-2 uses a nested weston (`qdwin-shell.so`)
+  inside the container advertising via `qdwin_nested_manager_v1`;
+  tier-5 uses `waypipe` over `AF_VSOCK` (per `spec/29`, landed
+  2026-05-13 `1ceaf04`), so tier-5 apps arrive at the outer
+  compositor as ordinary `xdg_toplevel`s tagged via
+  `wp_security_context_v1`. PodApps and VMApps share the launcher
+  vocabulary but **not** the nested-manager wiring — see
+  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest).
 
 ## Image-per-workload model
 
@@ -244,9 +253,18 @@ independently in phase 6.8.
   + bottom-right glyph). PodAppsProvider currently prefixes each
   entry's description with `[tier2/<container>]` as a stand-in;
   the launcher / taskbar delegate badge is the real fix.
-- **Tier-5 VMApps service**: same shape as PodApps, badge ring is
-  different colour. Lands once tier-5 `--vm` mode is finished
-  (see [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)
+- **Tier-5 VMApps service**: shares the launcher / taskbar / badge
+  vocabulary with PodApps but **not** the wayland transport. Tier-5
+  apps arrive at the outer compositor as ordinary `xdg_toplevel`s
+  from the host-side `waypipe-client` (waypipe-over-`AF_VSOCK` per
+  `spec/29`), tagged via `wp_security_context_v1`
+  app_id=`qdistro.tier5.<silo>`. VMApps therefore filters the
+  existing toplevel list by secctx prefix rather than wiring its
+  own `qdwin_nested_manager_v1` consumer like PodApps does. Badge
+  ring colour differs (see [ui.md](ui.md#silo-badges)). Lands
+  once spawn-tier5.sh hardening parity + tier-5 base image are
+  hardened (see
+  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)
   and `todo/qdwin-vm/tier5-vm-bringup.md`).
 - **End-to-end click validation** is gated on synthetic input in the
   test VM — see `todo/qdwin-vm/ydotool-install-uinput-missing.md`

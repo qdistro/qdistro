@@ -1,11 +1,19 @@
 <!-- Tier-5-Linux libvirt domain template. spec/29 §3 picked path.
      Substituted by spawn-tier5.sh in vm mode:
        __VM_NAME__       domain name
-       __MAC__           virtio-net MAC
+       __MAC__           virtio-net MAC (only used when TIER5_NETWORK=user)
        __MEM_KIB__       memory in KiB (default 524288 = 512 MiB)
        __CID__           guest vsock CID (greater than 2; uniqueness
                          is the caller's responsibility)
-       __DISK_PATH__     guest disk image (qcow2). Linux-only per spec/00.
+       __DISK_PATH__     per-VM qcow2 overlay (linked clone of the
+                         base image). spawn-tier5.sh creates this fresh
+                         per spawn; the base disk it references is
+                         immutable (qcow2 backing-chain semantics).
+       __NIC_XML__       network configuration. Default empty (no NIC
+                         — TIER5_NETWORK=none, mirrors podman's
+                         --network=none hardening). TIER5_NETWORK=user
+                         substitutes <interface type='user'> so the
+                         guest can NAT out for debug.
      Notes:
        vsock model='virtio' with cid auto='no' address sets the
        guest's local CID; in-guest processes see CID=2 for outgoing
@@ -45,10 +53,7 @@
     <controller type='usb' model='qemu-xhci'/>
     <controller type='pci' model='pcie-root'/>
     <controller type='virtio-serial' index='0'/>
-    <interface type='user'>
-      <mac address='__MAC__'/>
-      <model type='virtio'/>
-    </interface>
+    __NIC_XML__
     <serial type='pty'><target type='isa-serial' port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
     <channel type='unix'>
