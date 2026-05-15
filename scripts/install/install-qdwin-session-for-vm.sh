@@ -134,6 +134,16 @@ else
          "Pass QDISTRO_SRC=<path> or untar qdistro to /root/qdistro-src/qdistro/."
 fi
 
+# 3d. Tier-2 podapps cache directory. qdistro-podapps-scan writes
+# /var/lib/qdistro/podapps/<container>/apps.json — by default the dir
+# is root-owned 0755 so the admin user can't refresh the cache from
+# the live launcher path. Make it group-writable for the admin user's
+# primary group (users on Tumbleweed, wheel on others) with the
+# group-sticky bit so newly-created subdirs inherit the group.
+ADMIN_GROUP=$(id -gn admin 2>/dev/null || echo users)
+install -d -o root -g "$ADMIN_GROUP" -m 02775 /var/lib/qdistro/podapps
+echo "/var/lib/qdistro/podapps perms: $(stat -c '%U:%G %a' /var/lib/qdistro/podapps)"
+
 # 4. User systemd units.
 install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
 
