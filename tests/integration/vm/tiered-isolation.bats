@@ -86,6 +86,24 @@ stage_tier2_driver() {
     assert_output_contains "PASS: §Phase-7 tier-2 lifecycle (multi-container + stop-cleanup) end-to-end"
 }
 
+@test "phase7-tier2-hardening: container-runtime isolation flags effective" {
+    stage_tier2_driver "s40-tier2-hardening.sh"
+    vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-tier2-hardening.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "podman / tier-2 image / outer compositor absent on this VM"
+    fi
+    assert_output_contains "PASS: CapEff=0 (--cap-drop=ALL effective)"
+    assert_output_contains "PASS: NoNewPrivs=1 (no-new-privileges effective)"
+    assert_output_contains "PASS: network=none (only lo present)"
+    assert_output_contains "PASS: rootfs mounted read-only"
+    assert_output_contains "PASS: touch / blocked by read-only"
+    assert_output_contains "PASS: /run/user/1000/ contains only allowed sockets/logs"
+    assert_output_contains "PASS: no host bus/pulse/gnupg/ssh-agent in /run/user/1000/"
+    assert_output_contains "PASS: qdistro_tier2_token label set"
+    assert_output_contains "PASS: §Phase-7 tier-2 hardening invariants enforced"
+}
+
 # --- §Phase-7 tier-3: cross-uid silos via waypipe ---------------------
 # spec/02 row 3. waypipe-client runs as admin (uid 1000), waypipe-server
 # runs as the silo uid; the two halves cross-uid bridge a wl_display

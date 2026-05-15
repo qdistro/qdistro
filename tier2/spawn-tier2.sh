@@ -166,14 +166,37 @@ fi
 # and sibling tier-2 wayland sockets are all invisible to it. The single
 # resolved outer wayland socket is bind-mounted on top by the post-secctx
 # wrapper below.
-PERCONT_DIR="$RUNTIME_DIR/qdistro-tier2/$LAUNCH_TOKEN"
+PARENT_DIR="$RUNTIME_DIR/qdistro-tier2"
+PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
+
+# Reap orphan per-container dirs from prior spawns that died without
+# running their EXIT trap (segfault, kill -9, host crash). Running
+# containers' tokens come from `podman ps`; anything else is stale.
+if [ -d "$PARENT_DIR" ]; then
+    live_tokens=$(podman ps --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
+                    | sort -u || true)
+    for d in "$PARENT_DIR"/*/; do
+        [ -d "$d" ] || continue
+        token=$(basename "$d")
+        case " $live_tokens " in
+            *" $token "*) ;;
+            *) rm -rf "$d" 2>/dev/null || true ;;
+        esac
+    done
+fi
+
 mkdir -p "$PERCONT_DIR"
 chmod 0700 "$PERCONT_DIR"
+
+# The trap fires only on EARLY exit (pre-flight failure, fail() call
+# before the exec below). Once we exec into qdistro-secctx-exec the
+# trap is gone — cleanup of the per-container dir for normal /
+# crash exits relies on the orphan-reaper above running on the NEXT
+# spawn. That'\''s why the reaper exists; it'\''s the primary mechanism,
+# not a fallback.
 cleanup_percont() {
     rm -rf "$PERCONT_DIR" 2>/dev/null || true
-    # Belt-and-suspenders: if the parent dir is empty after our cleanup,
-    # remove it too so /run/user/<uid>/qdistro-tier2/ doesn't accumulate.
-    rmdir "$RUNTIME_DIR/qdistro-tier2" 2>/dev/null || true
+    rmdir "$PARENT_DIR" 2>/dev/null || true
 }
 trap cleanup_percont EXIT
 
@@ -298,6 +321,9 @@ PODMAN_ARGS=(
     --rm
     --userns=keep-id
     --user "${TIER2_ADMIN_UID_RESOLVED}:${TIER2_ADMIN_UID_RESOLVED}"
+    # Label so the orphan-dir reaper in the next spawn can tell which
+    # per-container dirs still belong to a live container.
+    --label "qdistro_tier2_token=$QDWIN_LAUNCH_TOKEN"
     "${PODMAN_HARDENING[@]}"
     -v "$TIER2_PERCONT_DIR:/run/user/${TIER2_ADMIN_UID_RESOLVED}:rw"
     -v "$OUTER_SOCKET_PATH:/run/user/${TIER2_ADMIN_UID_RESOLVED}/$DISPLAY_NAME:rw"

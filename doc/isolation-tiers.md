@@ -97,10 +97,33 @@ process is actually in `qdistro_tier1_t`. If the two disagree, broker's
 
 ## Tier 2 — podman / container
 
-Default for most user-owned apps. Rootless podman + `--userns=keep-id` +
-bind-mount `/run/user/<uid>` so the container's nested compositor (with
-qdwin-shell.so) connects to the outer admin compositor's Wayland socket
-and advertises each inner toplevel via `qdwin_nested_manager_v1`.
+Default for most user-owned apps. Rootless podman + `--userns=keep-id`
+plus a per-container runtime dir at
+`$XDG_RUNTIME_DIR/qdistro-tier2/<launch-token>/` (mode 0700,
+admin-owned, rm-rf'd on spawn-script exit). The host's `/run/user/<uid>`
+is **not** exposed; only the resolved outer wayland socket
+(`wayland-secctx-NN` from `qdistro-secctx-exec`) and any
+`pipewire-N`/`pipewire-N-manager` sockets that exist at spawn time
+are bind-mounted in as individual files. The container therefore can't
+see the dbus session bus, ssh-agent, gnupg-agent, or sibling tier-2
+sockets.
+
+Hardening flags applied by `tier2/spawn-tier2.sh` (overridable via
+`TIER2_*` env knobs):
+
+  - `--cap-drop=ALL` (CapEff = 0)
+  - `--security-opt=no-new-privileges`
+  - `--network=none` (default — relax with `TIER2_NETWORK=slirp4netns`)
+  - `--pids-limit=512` (only delegated cgroup controller in the
+    typical Tumbleweed user@1000.service setup; memory/cpu need
+    `Delegate=memory cpu pids io` drop-in to use)
+  - `--ipc=private --pid=private`
+  - `--read-only` rootfs + tmpfs at `/tmp`, `/var/cache`,
+    `/home/admin/.cache`, `/run` (ENOSPC on any image-rootfs write)
+
+The container's nested compositor (qdwin-shell.so) connects to the
+outer admin compositor's Wayland socket and advertises each inner
+toplevel via `qdwin_nested_manager_v1`.
 
 Tier-2 is the **first tier with first-class qdshell launcher integration**
 (badged app icons, click-to-launch, placeholder taskbar entry on cold
