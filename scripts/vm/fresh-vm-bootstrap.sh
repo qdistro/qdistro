@@ -105,6 +105,21 @@ for entry in "${INSTALLERS[@]}"; do
     fi
 done
 
+# ---- 4b. Stage bats in-VM probes at /root/ ------------------------------
+# Bats tests in tests/integration/vm/*.bats run `bash
+# /root/sNN-foo-probe.sh` to drive end-to-end checks inside the VM.
+# Source lives at tests/integration/vm/probes/ in the qdistro umbrella;
+# copy them to /root/ so the bats files find them.
+PROBE_SRC="$QD/tests/integration/vm/probes"
+if [ -d "$PROBE_SRC" ]; then
+    log "staging bats probes from $PROBE_SRC -> /root/"
+    install -d -m 0755 /root
+    for probe in "$PROBE_SRC"/*.sh; do
+        [ -e "$probe" ] || continue
+        install -m 0755 "$probe" "/root/$(basename "$probe")"
+    done
+fi
+
 # ---- 5. Install SELinux policy modules (permissive by default) ----------
 log "installing SELinux policy modules (permissive)..."
 for pol in selinux/broker selinux/pwd selinux/tier1; do
