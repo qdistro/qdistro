@@ -215,17 +215,43 @@ independently in phase 6.8.
 | `tests/integration/vm/s33-tier2-input.sh`             | s33 driver                                    |
 | `tests/integration/vm/s34-tier2-lifecycle.sh`         | s34 driver                                    |
 
+## Status (2026-05-15)
+
+- **Phase A — substrate:** ✓ container image build, host
+  `spawn-tier2.sh` wrapper, nested-mode weston publisher, secctx
+  tagging. End-to-end green in `phase7-tier2-podman` bats.
+- **Phase B — `qdistro-podapps-scan`:** ✓ `tier2/podapps-scan.sh`
+  shipped, installed as `/usr/bin/qdistro-podapps-scan`. Auto-fires
+  when PodApps observes a container go off→running (see PodApps
+  state poll), so the cache self-bootstraps.
+- **Phase C — qdshell PodApps service:** ✓ `Services/Qdistro/PodApps.qml`.
+  Reads the cache, exposes `apps` and `placeholders` ListModels,
+  resolves placeholders by `wp_security_context_v1.instance_id` match.
+  Forced-instantiated in shell.qml so the state poll runs whether or
+  not a panel is open.
+- **Phase D — Containers panel:** ✓ `Modules/Panels/Containers/ContainersPanel.qml`,
+  wired through MainScreen + IPC (`qs ipc call containers togglePanel`).
+- **Phase E — cold-start placeholder UX:** ✓ `Modules/Bar/Widgets/Taskbar.qml`
+  consumes `PodApps.placeholders` (dimmed icon + busy spinner; replaced
+  by the real toplevel on secctx match).
+- **Phase F — pixel pipeline:** ✓ `qdwin_shell_v1.nested_proxy_pixel_source`
+  wired in `qml-plugin/qdwin-binding.{h,cpp}`; Qdwin.qml spawns
+  `qdistro-nested-pixelfeed` on each event.
+
 ## Future work
 
-- **qdistro-podapps-scan** (Phase B): currently sketched in this doc;
-  implementation lands as `tier2/podapps-scan.sh` alongside.
-- **qdshell PodApps service** (Phase C): `Services/Qdistro/PodApps.qml`
-  in qdshell, with the badge convention from [ui.md](ui.md#silo-badges).
-- **Containers panel** (Phase D): `Modules/Containers/ContainersPanel.qml`
-  in qdshell.
+- **Delegate-side silo badge** ([ui.md](ui.md#silo-badges) — ring tint
+  + bottom-right glyph). PodAppsProvider currently prefixes each
+  entry's description with `[tier2/<container>]` as a stand-in;
+  the launcher / taskbar delegate badge is the real fix.
 - **Tier-5 VMApps service**: same shape as PodApps, badge ring is
   different colour. Lands once tier-5 `--vm` mode is finished
-  (see [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)).
+  (see [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)
+  and `todo/qdwin-vm/tier5-vm-bringup.md`).
+- **End-to-end click validation** is gated on synthetic input in the
+  test VM — see `todo/qdwin-vm/ydotool-install-uinput-missing.md`
+  and `todo/qdwin-vm/visual-gui-tests-pending.md`. Wire-level
+  correctness is journal-asserted by `phase7-tier2-*` today.
 - **Adopt user-created libvirt domains / podman containers**: out of
   scope. Tier 2 surfaces only containers spawned through
   `spawn-tier2.sh`.
