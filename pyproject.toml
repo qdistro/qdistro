@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdlocker"
+version = "0.1.0"
+description = "qdistro screen locker — Qt/QML peer client to qdwin"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "dbus-next>=0.2.3",
+    "python-pam>=2.0",
+    # Pin <0.5 — pywayland's pre-1.0 API has changed between minor
+    # releases (e.g. dispatcher signature, registry binding). The
+    # scanner output we ship under qdlocker/protocol/ targets the
+    # 0.4.x API.
+    "pywayland>=0.4.18,<0.5",
+]
+
+[project.scripts]
+qdlocker = "qdlocker.app:main"
+
+[tool.setuptools.packages.find]
+include = ["qdlocker*"]
+
+[tool.setuptools.package-data]
+# Ship the QML + the auto-generated protocol module with the wheel.
+# Globs are relative to the package directory (`qdlocker/`), so
+# `qml/...` resolves to `qdlocker/qml/...`. Earlier drafts used
+# `../qml/**/*.qml` — setuptools silently drops paths that escape
+# the package, so the wheel shipped no QML at all.
+qdlocker = [
+    "qml/*.qml",
+    "qml/qmldir",
+    "protocol/qdwin_locker_v1/*.py",
+]

@@ -1,0 +1,39 @@
+[Unit]
+Description=qdistro screen locker (qdlocker)
+Documentation=https://codeberg.org/qdistro/qdlocker
+# Peer to the shell — comes up alongside it, not after it. We use
+# After= (ordering only, not a hard dep) on the user-session unit
+# because qdshell may be slow to start and we don't want to block the
+# locker behind it. Requires= on a system unit (qdwin.service) from a
+# --user unit is silently ignored by systemd, so we don't bother.
+# Wants= makes systemd actually try to start us when the session
+# target is activated; PartOf= propagates stop/restart so we go
+# down cleanly on logout. Without Wants=, PartOf alone is a one-way
+# "follow you down" relationship — we'd never start.
+Wants=graphical-session.target
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Type=simple — we don't sd_notify until a later iteration wires the
+# READY=1 + STATUS= path. Earlier drafts used Type=notify but the
+# process never notified, so systemd held the unit `activating` until
+# TimeoutStartSec.
+Type=simple
+ExecStart=/usr/bin/qdlocker
+Environment=QT_QPA_PLATFORM=wayland
+Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
+# WAYLAND_DISPLAY / XDG_RUNTIME_DIR are inherited from the systemd
+# --user environment; the session manager imports them after qdwin
+# advertises the socket.
+Restart=always
+RestartSec=2
+# If the locker dies, the compositor stays locked and the screen
+# goes black until systemd brings us back. That's the fail-safe
+# documented in qdwin/doc/locker.md §Lifecycle invariants.
+
+[Install]
+# default.target for the user manager is the right target for an
+# always-on user service. PartOf=graphical-session.target above ties
+# our lifetime to the session so we go down cleanly on logout.
+WantedBy=default.target

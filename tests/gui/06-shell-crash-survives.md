@@ -1,0 +1,133 @@
+# 06 — qdshell crashing while locked does NOT unlock the screen
+
+**Acceptance criterion (lifecycle independence):** the locker's
+process is a peer of qdshell, not a child. If qdshell crashes while
+the screen is locked:
+
+1. The lock surface stays composited (qdwin keeps rendering it on
+   the LOCK layer).
+2. qdlocker keeps receiving `overlay_key` events.
+3. Auth still succeeds.
+4. After unlock, qdwin's `Restart=always` on qdshell brings the
+   shell back in the unlocked state.
+
+This is the regression test for the architectural decision to split
+qdlocker out of qdshell. If a shell crash drops the screen unlocked,
+the split bought us nothing.
+
+## Setup
+
+```bash
+source "$(dirname "$0")/qdlocker-helpers.sh"
+qdwin_set_vm "${VMNAME:-$(virsh -c qemu:///session list --name --state-running | head -1)}"
+qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
+
+case "$(qdlocker_ctrl status 2>/dev/null)" in
+    *locked=True*)
+        "$QDWIN_VM_EXEC" "$VMNAME" \
+          'runuser -u admin -- systemctl --user restart qdlocker.service; sleep 2' \
+          >/dev/null
+        ;;
+esac
+```
+
+## Steps
+
+### Step 1 — engage the locker
+
+```bash
+qdwin_chord ctrl alt -- l
+qdlocker_wait_for_lock 5
+qdwin_screenshot /tmp/qdlocker-06-step1-locked.png
+```
+
+**Assert (1.1):** `qdlocker_ctrl status` reports `locked=True`.
+
+### Step 2 — kill qdshell
+
+```bash
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -u admin -- systemctl --user kill --signal=KILL qdshell.service'
+sleep 2
+qdwin_screenshot /tmp/qdlocker-06-step2-shell-dead.png
+qdlocker_ctrl status
+```
+
+**Assert (2.1):** `qdlocker_ctrl status` still reports
+`locked=True`. The shell death did not affect the locker's process
+or the compositor's lock state.
+**Assert (2.2):** screenshot still shows the qdlocker UI. The LOCK
+layer is owned by qdwin from the locker's wl_surface — the shell's
+death doesn't tear it down. Chrome / panel may be absent (shell is
+dead, no decorations) but the lock UI is intact.
+
+### Step 3 — type the password into the still-locked screen
+
+```bash
+for c in k r u g e r; do
+    qdwin_qmp_key "$c" down; sleep 0.05
+    qdwin_qmp_key "$c" up;   sleep 0.05
+done
+sleep 0.3
+qdlocker_assert_prompt_len 6
+```
+
+**Assert (3.1):** `prompt-len=6`. The keyboard grab and overlay_key
+forwarding survive the shell death.
+
+### Step 4 — unlock
+
+```bash
+qdwin_send_key KEY_ENTER
+qdlocker_wait_for_unlock 5
+qdlocker_ctrl status
+qdwin_screenshot /tmp/qdlocker-06-step4-unlocked.png
+```
+
+**Assert (4.1):** `last=success`; `locked=False`.
+**Assert (4.2):** screenshot shows qdwin has brought qdshell back
+up — chrome around any pre-existing toplevels is rendered again.
+`systemctl --user is-active qdshell.service` reports `active`.
+
+### Step 5 — qdshell is fully functional post-recovery
+
+```bash
+"$QDWIN_VM_EXEC" "$VMNAME" 'runuser -l admin -c "systemctl --user is-active qdshell.service"' 2>&1
+ls /run/user/1000/qdshell.sock 2>&1
+```
+
+**Assert (5.1):** systemd reports `active`. The ctrl-socket file
+exists. qdshell came back online via `Restart=always`.
+
+## Cleanup
+
+```bash
+true
+```
+
+## Pass criteria
+
+All asserts 1.1 → 5.1 pass. Confirms the lifecycle independence:
+neither process owns the other.
+
+## Known-broken-if
+
+- Step 2 FAIL with `locked=False` after killing qdshell — qdwin's
+  lock state is tied to the shell binding instead of the locker
+  binding. This would mean `bind_qdwin_shell` destroy handler is
+  calling `set_locked(0)`; it must not.
+- Step 2 screenshot shows a black screen with no lock UI — qdwin
+  unmapped the lock surface when the shell disconnected. The lock
+  surface must be owned by the locker resource, not the shell. The
+  C-side reorganization in `qdwin/doc/locker.md §1` is the fix.
+- Step 3 PASS at `prompt-len=6` but Step 4 FAIL — PAM authentication
+  needs the seat/session, which logind might tear down when the
+  shell exits. Check `loginctl list-sessions` inside the VM; if the
+  admin session is gone, the shell's
+  `Restart=always` plus its own logind activation should bring it
+  back, but a transient PAM failure is possible. Re-run after the
+  retry path is wired in `auth.py`.
+- Step 4 reports `locked=False` but screenshot still shows lock UI —
+  qdwin destroyed the lock_surface resource but did not flip the
+  compositor state machine. B1-style bug; see qdwin's 03-locker-cycle
+  §"Known-broken-if".

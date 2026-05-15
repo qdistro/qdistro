@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="qdwin_locker_v1">
+  <copyright>
+    Copyright © 2026 qdistro contributors
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <description summary="qdwin compositor locker attach protocol">
+    Private protocol between the qdwin compositor and the qdistro
+    PyQt locker (qdlocker). Same trust model as qdwin_shell_v1: qdwin
+    only advertises this global to clients whose peer credentials
+    (uid, exe, SELinux label) match the admin-configured locker
+    identity. Regular app clients never see it; the shell client
+    (qdwin_shell_v1) does not see it either — the locker is a
+    separate peer process from the shell.
+
+    Why a separate global from qdwin_shell_v1:
+
+    - The shell client and the locker client have different
+      lifetimes. The shell can crash and restart while the locker is
+      live; the locker can crash and restart while the shell is
+      composing decorations. Wiring them through a single global
+      would couple their lifecycles.
+    - attach_lock_surface needs a wl_surface from the same wl_display
+      that bound the global. Forcing the shell to attach the locker's
+      surface would require a cross-process wl_surface handoff, which
+      Wayland does not provide.
+    - The locker is the only process allowed to drive the compositor's
+      `locked` state. Keeping that authority on its own global lets
+      qdwin filter it independently from the shell's chrome / focus
+      requests.
+
+    The compositor remains authoritative over lock state. The locker
+    requests `set_locked(1)`, but qdwin is the actor: it hides all
+    non-lock surfaces, mutes input to them, and emits
+    `locked_changed`. The shell observes via the existing
+    qdwin_shell_v1 `locked_changed` event and swaps its UI off.
+
+    Warning! Experimental and pre-stable. Versioning follows the
+    "experimental" convention: version 1 is the first unstable draft.
+  </description>
+
+  <interface name="qdwin_locker_v1" version="1">
+    <description summary="the qdwin locker attach point">
+      The locker binds this global once and holds it for the lifetime
+      of its process. qdwin rejects a second bind from the same
+      client. If a new locker comes up while the old one is still
+      bound, qdwin destroys the old binding (the old process is
+      considered dead — only one locker may exist at a time).
+
+      Bootstrap: until the locker has sent `bind_as_locker` and
+      attached a lock surface, qdwin treats `set_locked` requests as
+      no-ops. The compositor starts in locked state by default (see
+      sessions.md §"Admin logout / compositor crash") and waits for
+      the locker to attach its surface before showing anything.
+
+      If the locker process dies while the compositor is in locked
+      state, qdwin keeps the screen black and refuses input until a
+      replacement locker binds. Admin's compositor is the trusted
+      computing base; a missing locker is fail-safe (locked), not
+      fail-open.
+    </description>
+
+    <enum name="error">
+      <entry name="role" value="0"
+             summary="surface already has a role"/>
+      <entry name="already_bound" value="1"
+             summary="locker is already bound by another process"/>
+      <entry name="no_surface" value="2"
+             summary="set_locked called before attach_lock_surface"/>
+      <entry name="invalid_reason" value="3"
+             summary="unknown reason code for lock_acknowledged"/>
+    </enum>
+
+    <request name="bind_as_locker">
+      <description summary="claim the locker role">
+        The locker announces that it is ready to receive lock-trigger
+        events and to drive lock state. Must be the first request on
+        the interface. qdwin replies with `ready` once it has
+        confirmed the peer credentials and registered the binding.
+      </description>
+    </request>
+
+    <event name="ready">
+      <description summary="locker binding accepted">
+        Sent after `bind_as_locker` succeeds. The locker should now
+        attach its lock surface and (if the compositor is already
+        locked) wait for the user to authenticate.
+      </description>
+      <arg name="initially_locked" type="uint"
+           summary="1 if the compositor is currently locked, 0 otherwise"/>
+    </event>
+
+    <request name="attach_lock_surface">
+      <description summary="install the lock overlay">
+        Places `surface` on the compositor LOCK layer, covering every
+        output. The surface is not yet "live" — the lock state is
+        still driven by `set_locked`. Multiple lock surfaces are not
+        allowed; a second attach replaces the first and dismisses
+        the prior surface.
+
+        The surface must not have a role yet. After attach, it has
+        the implicit "lock surface" role; any wl_surface.commit
+        triggers a frame on the LOCK layer.
+      </description>
+      <arg name="id" type="new_id" interface="qdwin_locker_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="set_locked">
+      <description summary="transition compositor lock state">
+        `locked=1` → compositor enters the locked state: the lock
+        surface (from attach_lock_surface) is the only thing
+        composited; user-session surfaces stop rendering; input is
+        delivered only to the locker via `overlay_key`.
+
+        `locked=0` → unlocks; user surfaces resume rendering. The
+        locker is expected to call this only after a successful
+        authentication.
+
+        Compositor emits `locked_changed(locked)` to the shell on
+        qdwin_shell_v1 after the transition completes, and emits
+        the equivalent `locked_changed` event on this interface to
+        the locker.
+
+        Fails with `no_surface` if no lock surface is attached.
+      </description>
+      <arg name="locked" type="uint"/>
+    </request>
+
+    <event name="locked_changed">
+      <description summary="compositor entered or left locked state">
+        Mirror of qdwin_shell_v1.locked_changed for the locker. Fires
+        on every transition, including transitions the locker did not
+        request (e.g. the lid-close path inside the compositor).
+      </description>
+      <arg name="locked" type="uint"/>
+    </event>
+
+    <event name="lock_requested">
+      <description summary="user pressed the manual-lock keybinding or lid closed">
+        Aggregates the triggers in sessions.md §"Lock triggers" that
+        the compositor observes directly:
+
+          reason = 0  idle     — ext-idle-notify-v1 timeout
+          reason = 1  lid      — systemd-logind lid close
+          reason = 2  suspend  — prepare-for-sleep
+          reason = 3  manual   — Ctrl+Alt+L global hotkey or admin
+                                 panel "Lock now"
+
+        The locker decides whether to call `set_locked(1)` (it
+        usually does immediately, but may delay if a fingerprint
+        verification is already in progress).
+      </description>
+      <arg name="reason" type="uint"/>
+    </event>
+
+    <event name="overlay_key">
+      <description summary="key forwarded while locked">
+        While the lock surface is attached and the compositor is
+        locked, qdwin installs a keyboard grab and forwards each
+        pressed key to the locker here. Identical wire format to
+        qdwin_shell_v1.overlay_key (since v17) for the role=2
+        (locker) value, but delivered on the locker's connection so
+        the shell cannot observe lock-time keystrokes — i.e. the
+        password the user types never reaches the shell process.
+
+        `sym` is the xkb keysym; `utf8` is the printable character
+        (or "" if non-printable). The locker prefers utf8 when
+        non-empty and falls back to `sym` for control keys
+        (Escape, Return, BackSpace, Tab).
+
+        Only PRESSED transitions are sent. Releases are absorbed by
+        the grab.
+      </description>
+      <arg name="sym" type="uint"
+           summary="xkb keysym (XKB_KEY_* / xkbcommon-keysyms.h)"/>
+      <arg name="utf8" type="string"
+           summary="UTF-8 for printable keys, '' otherwise"/>
+    </event>
+
+    <request name="lock_acknowledged">
+      <description summary="ack a lock_requested event">
+        Tells the compositor the locker has handled (or deliberately
+        ignored) a `lock_requested` event. Used for tests and for
+        deciding whether the compositor should escalate (e.g. drop
+        to a black screen if the locker fails to lock within a
+        reasonable window after suspend).
+      </description>
+      <arg name="reason" type="uint"
+           summary="must match the most recent lock_requested.reason"/>
+    </request>
+  </interface>
+
+  <interface name="qdwin_locker_surface_v1" version="1">
+    <description summary="handle to a previously-attached lock surface">
+      Created by `qdwin_locker_v1.attach_lock_surface`. Destroying
+      this object dismisses the lock surface; if the compositor is
+      currently locked, the screen goes black until a fresh
+      attach_lock_surface fires.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="dismiss the lock surface"/>
+    </request>
+
+    <event name="configure">
+      <description summary="output geometry hint">
+        Tells the locker the dimensions it should commit a buffer at
+        to cover every output. Re-fires on output hot-plug or
+        rotation.
+      </description>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="serial" type="uint"/>
+    </event>
+
+    <request name="ack_configure">
+      <description summary="ack the most recent configure"/>
+      <arg name="serial" type="uint"/>
+    </request>
+  </interface>
+</protocol>
