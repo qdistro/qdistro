@@ -48,10 +48,18 @@ systemctl mask greetd.service 2>/dev/null || true
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
-mkdir -p "$SRC"/{qdistro,qdwin,qdshell}
-for repo in qdistro qdwin qdshell; do
-    wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz" \
-        || { echo "[bootstrap] failed to fetch $HOST/$repo.tar.gz"; exit 2; }
+mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker}
+for repo in qdistro qdwin qdshell qdlocker; do
+    if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
+        # qdlocker is optional during the rollout; older spin scripts
+        # don't stage it. Don't fail the whole bootstrap if it's absent.
+        if [ "$repo" = "qdlocker" ]; then
+            log "qdlocker tarball not staged; skipping (no peer locker installed)"
+            rmdir "$SRC/qdlocker" 2>/dev/null || true
+            continue
+        fi
+        echo "[bootstrap] failed to fetch $HOST/$repo.tar.gz"; exit 2
+    fi
     tar -xzf "/tmp/$repo.tar.gz" -C "$SRC/$repo"
     rm -f "/tmp/$repo.tar.gz"
 done
@@ -111,6 +119,49 @@ bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
     "$SRC/qdshell" \
     || { echo "[bootstrap] qdwin-session install failed"; exit 3; }
 
+# ---- 7. Install qdlocker (peer screen-locker process) -------------------
+# Optional: skipped when the qdlocker tarball was not staged (see §1).
+#
+# Package names verified against openSUSE Tumbleweed Minimal-VM Cloud
+# 2026-05-15 during the qdlocker smoke run. The generic `python3-*`
+# names don't exist there; the actual packages are `python313-*`.
+# pip install of the locker uses `--no-deps` because letting pip
+# resolve transitive deps reaches for pywayland-0.5+ wheels that
+# fail to build without wayland-devel + gcc — the zypper-shipped
+# python313-pywayland 0.4.x is what we want.
+if [ -d "$SRC/qdlocker/qdlocker" ]; then
+    log "installing qdlocker (Python+QML peer locker via qdwin_locker_v1)..."
+    zypper -n install --no-recommends \
+        python313-pip python313-pyside6 python313-python-pam \
+        python313-dbus_next python313-pywayland \
+        >/dev/null 2>&1 || \
+        { log "  ERROR: zypper install of qdlocker deps failed"; exit 3; }
+
+    python3 -m pip install --break-system-packages --no-deps --quiet \
+        "$SRC/qdlocker" \
+        || { log "  ERROR: pip install qdlocker failed"; exit 3; }
+
+    # Install the systemd user unit for admin. The unit's
+    # `qdshell-path` drop-in points the QML engine at qdshell's
+    # styling (installed by install-qdwin-session-for-vm.sh).
+    install -d /home/admin/.config/systemd/user
+    install -m 644 "$SRC/qdlocker/systemd/qdlocker.service" \
+        /home/admin/.config/systemd/user/qdlocker.service
+    chown -R admin:users /home/admin/.config/systemd
+    install -d /etc/systemd/user/qdlocker.service.d
+    cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<EOF
+[Service]
+Environment=QDLOCKER_QDSHELL_PATH=/usr/share/quickshell/qdshell
+EOF
+
+    runuser -l admin -c 'systemctl --user daemon-reload' || true
+    runuser -l admin -c 'systemctl --user enable qdlocker.service' || true
+    log "  qdlocker installed; will start with the user session"
+else
+    log "qdlocker tarball not present, skipping installation"
+fi
+
 log "bootstrap complete."
 log "start the session now with:"
 log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
+log "  runuser -l admin -c 'systemctl --user start qdlocker.service'"

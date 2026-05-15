@@ -95,6 +95,11 @@ tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     --exclude='.git' --exclude='build' --exclude='build-*' \
     -czf "$STAGE/qdshell.tar.gz" -C "$PARENT/qdshell" .
+if [ -d "$PARENT/qdlocker" ]; then
+    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
+        --exclude='.git' --exclude='build' --exclude='build-*' \
+        -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
+fi
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
