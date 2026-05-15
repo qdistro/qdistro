@@ -532,11 +532,11 @@ Fix plan lives in
 [`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md)
 §"Phase 9 prerequisites". Summary:
 
-| ID | Defect | Severity |
-|---|---|---|
-| P0-1 | `extension_id` read from stdio (untrusted) instead of argv (kernel-attested) | High |
-| P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High |
-| P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High |
-| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium |
-| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) |
-| P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) |
+| ID | Defect | Severity | Status |
+|---|---|---|---|
+| P0-1 | `extension_id` read from stdio (untrusted) instead of argv (kernel-attested) | High | ✅ landed (commit `0c3a7a8`) |
+| P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High | ✅ landed (commit `0c3a7a8`) |
+| P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
+| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | open — decision needed |
+| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | open — needs extension work |
+| P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | open — needs release-engineering |
