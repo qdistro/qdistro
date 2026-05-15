@@ -260,6 +260,16 @@ PODMAN_HARDENING=(
     --ipc=private
     --pid=private
     # Block setuid escalation inside the container.
+    # Read-only image rootfs + small tmpfs scratch dirs. Writes inside
+    # the container land in tmpfs (lost on container exit) or in the
+    # per-container runtime dir (cleaned by the host trap). Any
+    # attempt to persist into the image rootfs returns ENOSPC, which
+    # is the security property we want.
+    --read-only
+    --tmpfs=/tmp:size=64m,mode=1777
+    --tmpfs=/var/cache:size=16m,mode=0755
+    --tmpfs=/home/admin/.cache:size=32m,mode=0700
+    --tmpfs=/run:size=4m,mode=0755
 )
 # --memory and --cpus only when explicitly requested — both require
 # delegation of the corresponding cgroup v2 controller to admin'"'"'s
