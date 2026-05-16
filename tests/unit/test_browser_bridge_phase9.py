@@ -298,6 +298,113 @@ class TestRequestCorrelation:
         assert all(p.op != "tabs.list" for p in bb._pending.values())
 
 
+class TestPageExtractRequest:
+    """Bridge-initiated `page.extract.request` — the read-side
+    counterpart to user-initiated `page.extract`. Daemons (compositor,
+    agent-control, recall) call the bridge's D-Bus surface with
+    op="page.extract.request" + JSON args; the bridge enqueues the
+    inbound op down the stdio pipe and blocks on the extension's
+    reply. Wire shape is symmetric with the tabs.* bridge → ext
+    family — no intent token (the bridge's identity gate is the
+    security boundary; the extension trusts whatever the bridge
+    relays)."""
+
+    def test_round_trip(self):
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "page.extract.request",
+                {"tab_id": 5, "mode": "visible_text"},
+                out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        assert sent["op"] == "page.extract.request"
+        assert sent["tab_id"] == 5
+        assert sent["mode"] == "visible_text"
+        bb.deliver_reply({
+            "op": "page.extract.request.reply",
+            "request_id": sent["request_id"],
+            "ok": True,
+            "mode": "visible_text",
+            "url": "https://example.com/",
+            "title": "Example",
+            "content": "Hello world",
+            "truncated": False,
+        })
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert result["reply"]["ok"] is True
+        assert result["reply"]["content"] == "Hello world"
+        assert result["reply"]["url"] == "https://example.com/"
+
+    def test_by_selector_round_trip(self):
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "page.extract.request",
+                {"tab_id": 7, "mode": "by_selector", "selector": "h1"},
+                out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        assert sent["op"] == "page.extract.request"
+        assert sent["mode"] == "by_selector"
+        assert sent["selector"] == "h1"
+        bb.deliver_reply({
+            "op": "page.extract.request.reply",
+            "request_id": sent["request_id"],
+            "ok": True, "mode": "by_selector",
+            "content": "Headline", "matched": True,
+            "url": "https://example.com/", "title": "Example",
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["matched"] is True
+        assert result["reply"]["content"] == "Headline"
+
+    def test_extension_error_surfaces_through(self):
+        """If the extension returns ok:false (e.g. tab closed mid-flight),
+        the bridge returns it as-is to the D-Bus caller — no
+        bridge-side massaging beyond the wire-correlation."""
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "page.extract.request",
+                {"tab_id": 999, "mode": "visible_text"},
+                out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        bb.deliver_reply({
+            "op": "page.extract.request.reply",
+            "request_id": sent["request_id"],
+            "ok": False,
+            "error": "executeScript_failed",
+            "detail": "Error: No tab with id 999",
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["ok"] is False
+        assert result["reply"]["error"] == "executeScript_failed"
+
+    def test_timeout_returns_request_timeout(self):
+        out = _FrameStream()
+        reply = bb.enqueue_inbound_request(
+            "page.extract.request",
+            {"tab_id": 1, "mode": "visible_text"},
+            out, timeout_s=0.1)
+        assert reply["ok"] is False
+        assert reply["error"] == "request_timeout"
+
+
 class TestHeartbeat:
     def test_send_and_ack_resets_misses(self):
         """heartbeat_loop sends a frame, ack clears miss counter."""

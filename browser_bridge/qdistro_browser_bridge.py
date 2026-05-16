@@ -48,11 +48,19 @@ initiate browser-bound operations. The object lives at
 * ``RequestTabs(s op, s args_json) -> s reply_json``
 
   ``op`` is one of ``tabs.list``, ``tabs.open``, ``tabs.close``,
-  ``page.extract``, ``cookies.export``, ``mpris.publish``,
-  ``downloads.notify``, ``notifications.show``,
-  ``screenlock.inhibit``, ``screenlock.release``. ``args_json`` is a
-  JSON object with the per-op arguments. The reply is a JSON object
+  ``page.extract``, ``page.extract.request`` (bridge → ext read of
+  the page content; modes ``selection`` / ``visible_text`` /
+  ``full_text`` / ``outer_html`` / ``by_selector`` / ``title``),
+  ``cookies.export``, ``mpris.publish``, ``downloads.notify``,
+  ``notifications.show``, ``screenlock.inhibit``,
+  ``screenlock.release``. ``args_json`` is a JSON object with the
+  per-op arguments. The reply is a JSON object
   ``{"ok": bool, ...}``.
+
+  Note that the RequestTabs method body does not gate ``op`` against
+  this list — anything the extension's dispatcher knows how to
+  handle will round-trip. New inbound ops can be added on the
+  extension side and the bridge will route them transparently.
 
 Tests do not need a real bus running — they call
 :func:`enqueue_inbound_request` directly and read the matching
