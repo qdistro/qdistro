@@ -257,6 +257,38 @@ The **bridge-side journal logging** described in
 op; that's a separate Phase-9 follow-up tracked in
 [`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md).
 
+## Calling from a qdistro daemon
+
+The `qdistro_browser_bridge_client` module wraps both paths so
+daemons don't reinvent the jeepney boilerplate. Same-uid:
+
+```python
+from qdistro_browser_bridge_client import call_bridge
+
+reply = call_bridge("containers.list")
+# {"ok": True, "containers": [{"cookie_store_id": ..., "name": ...}, ...]}
+```
+
+Cross-uid (the qdistro-user-relay must be running as the target user
+and the caller must be system-bus-authorized to send to
+`com.qdistro.UserRelay.uid<NNNN>`):
+
+```python
+from qdistro_browser_bridge_client import call_via_relay
+
+reply = call_via_relay("containers.list", uid=2000, any_bridge=True)
+# {"ok": True, "containers": [...]}
+# or
+# {"ok": False, "error": "no_bridge_found"}      # no Firefox bridge on uid 2000
+# {"ok": False, "error": "relay_call_failed"}    # relay not running / unauthorized
+# {"ok": False, "error": "bad_call"}             # neither uid nor any_bridge provided
+```
+
+Both functions always return a dict; failures inside the client
+become `{"ok": False, "error": "<code>"}` rather than raised
+exceptions so callers handle relay-side, bridge-side, and
+transport-side failures with the same code path.
+
 ## Integration with existing ops
 
 Two ops already accept a container id; their handling is
@@ -279,7 +311,8 @@ forward-compatible regardless of which routing option above wins:
 | qdfirefox-extension `tabs.open` | Accepts `cookie_store_id` end-to-end. |
 | qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge ignores it. |
 | Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
-| Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (12 cases). |
+| Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (17 cases). |
+| Daemon client helper | **Landed 2026-05-16** as `qdistro_browser_bridge_client.call_bridge` (own-uid) / `call_via_relay` (cross-uid). Tests: `tests/unit/test_browser_bridge_client.py` (23 cases). |
 | Cross-user admin opt-in | **Not implemented.** Per-feature toggle row in the admin panel still gates whether a cross-uid call is allowed for a given user-browser. UI doesn't exist yet for any Phase-9 feature. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
 | Cross-user gate | Per-feature opt-in toggle row in the admin panel — UI doesn't exist yet for any of the Phase-9 features; this adds a "Containers" row. |
@@ -291,8 +324,10 @@ forward-compatible regardless of which routing option above wins:
 |------|---------|
 | `qdfirefox-extension/src/modules/containers.js` | Extension-side dispatcher handlers |
 | `qdfirefox-extension/tests/containers.test.js` | Wire-shape tests |
-| `qdistro/browser_bridge/qdistro_browser_bridge.py` | Adds `_handle_containers_*` |
-| `qdistro/doc/browser.md` | Add Phase 9? section once the routing decision lands |
+| `qdistro/browser_bridge/qdistro_browser_bridge.py` | `*.reply` registrations for the bridge → ext round trip |
+| `qdistro/browser_bridge/qdistro_browser_bridge_client.py` | Daemon-side helper: `call_bridge` (own-uid) + `call_via_relay` (cross-uid) |
+| `qdistro/user_relay/qdistro_user_relay.py` | `ForwardBrowserBridgeOp` cross-uid surface |
+| `qdistro/doc/browser.md` | `containers.*` Operations entry referencing this doc |
 
 ## See also
 
