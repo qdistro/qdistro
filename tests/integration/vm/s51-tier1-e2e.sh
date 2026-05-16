@@ -72,15 +72,20 @@ SPAWN="$TIER1_DIR/spawn-tier1.sh"
 [ -x "$SPAWN" ] || chmod +x "$SPAWN" 2>/dev/null || true
 [ -f "$SPAWN" ] || skip "spawn-tier1.sh missing at $SPAWN"
 
-# qdistro-secctx-exec + qdistro-tier1-exec must be on PATH (the wrapper
-# uses both); fall back to bypassing secctx if the helper is absent.
-if ! command -v qdistro-tier1-exec >/dev/null 2>&1; then
+# qdistro-tier1-exec installs to libexecdir (not on PATH); check
+# command -v AND the libexec fallbacks. Matches the resolution order
+# inside spawn-tier1.sh.
+if ! command -v qdistro-tier1-exec >/dev/null 2>&1 \
+   && [ ! -x /usr/libexec/qdistro-tier1-exec ] \
+   && [ ! -x /usr/local/libexec/qdistro-tier1-exec ]; then
     skip "qdistro-tier1-exec not installed (build daemons/tier1-exec)"
 fi
-TIER1_USE_SECCTX_FLAG=""
-if ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
-fi
+# Always disable the secctx wrap for this test. The driver runs as
+# root under qemu-guest-agent with no XDG_RUNTIME_DIR; qdistro-secctx-
+# exec then errors out before reaching qdistro-tier1-exec and the
+# type transition never fires. The secctx wrap itself is covered by
+# s44 (phase7-tier4-secctx-exec); s51's job is the SELinux pipeline.
+TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
 
 # Run spawn-tier1.sh sleep 0.5 in the background; while it sleeps,
 # `ps -eo pid,label` should show the sleep PID under qdistro_tier1_t.
@@ -93,8 +98,7 @@ rm -f "$RULE_DIR"/s51-*.yaml 2>/dev/null || true
 # Bounce the broker's inotify so it picks up the removal.
 systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
 
-# shellcheck disable=SC2086
-TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
+env TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
     bash "$SPAWN" s51silo -- /usr/bin/sleep 2 \
     >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!

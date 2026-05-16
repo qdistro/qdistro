@@ -48,8 +48,13 @@ command -v semodule >/dev/null 2>&1 || skip "semodule absent"
 semodule -l 2>/dev/null | grep -q '^qdistro_tier1\b' \
     || skip "qdistro_tier1 policy module not loaded"
 [ -x "$SPAWN" ] || [ -f "$SPAWN" ] || skip "spawn-tier1.sh missing"
-command -v qdistro-tier1-exec >/dev/null 2>&1 \
-    || skip "qdistro-tier1-exec not installed"
+# qdistro-tier1-exec installs to libexecdir (not on PATH); check
+# command -v AND the libexec fallbacks. Matches spawn-tier1.sh.
+if ! command -v qdistro-tier1-exec >/dev/null 2>&1 \
+   && [ ! -x /usr/libexec/qdistro-tier1-exec ] \
+   && [ ! -x /usr/local/libexec/qdistro-tier1-exec ]; then
+    skip "qdistro-tier1-exec not installed"
+fi
 
 # --- restore-on-exit trap ----------------------------------------------
 restore_permissive() {
@@ -79,15 +84,17 @@ fi
 WORKLOAD_LOG=/tmp/s55-workload.log
 : >"$WORKLOAD_LOG"
 
-TIER1_USE_SECCTX_FLAG=""
-command -v qdistro-secctx-exec >/dev/null 2>&1 \
-    || TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
+# Always disable the secctx wrap for this test: the driver runs as
+# root under qemu-guest-agent with no XDG_RUNTIME_DIR, so
+# qdistro-secctx-exec aborts before reaching qdistro-tier1-exec.
+# secctx is covered by s44; s55's job is the AVC budget under
+# enforcing.
+TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
 
 run_step() {
     local label="$1"; shift
     echo "--- $label ---" >>"$WORKLOAD_LOG"
-    # shellcheck disable=SC2086
-    TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
+    env TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
         bash "$SPAWN" s55silo -- "$@" \
         >>"$WORKLOAD_LOG" 2>&1 || true
 }

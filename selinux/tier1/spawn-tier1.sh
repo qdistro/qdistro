@@ -134,7 +134,23 @@ if command -v dbus-send >/dev/null 2>&1 && \
     esac
 fi
 
-CMD=(qdistro-tier1-exec --)
+# qdistro-tier1-exec installs to libexecdir (meson default
+# /usr/libexec), which isn't on $PATH for ordinary users. Resolve
+# absolutely so the wrapper works regardless of who's invoking us.
+TIER1_EXEC=""
+for cand in \
+    "${QDISTRO_TIER1_EXEC:-}" \
+    "$(command -v qdistro-tier1-exec 2>/dev/null)" \
+    /usr/libexec/qdistro-tier1-exec \
+    /usr/local/libexec/qdistro-tier1-exec; do
+    [ -n "$cand" ] && [ -x "$cand" ] && TIER1_EXEC="$cand" && break
+done
+if [ -z "$TIER1_EXEC" ]; then
+    echo "[tier1] FAIL: qdistro-tier1-exec not found (PATH or libexec)" >&2
+    exit 1
+fi
+
+CMD=("$TIER1_EXEC" --)
 CMD+=("$@")
 
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
