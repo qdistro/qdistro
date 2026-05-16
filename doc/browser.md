@@ -235,6 +235,25 @@ user clicks to authorize. **Requires an `intent_token` (mandatory, not
 30 seconds at the destination by default (configurable per-policy).
 Treated as a vault-grade item.
 
+`cookies.export` accepts a `cookie_store_id` field (Firefox containers
+only) to scope the export to a single contextual identity. See
+[firefox-containers.md](firefox-containers.md).
+
+### `containers.list` / `.create` / `.remove` — Firefox only (own-uid round-trip pinned 2026-05-16)
+
+Firefox contextual identities (Multi-Account Containers). Bridge → ext
+direction; the bridge enqueues the op down stdio and blocks on the
+extension's reply, mirroring the `tabs.*` pattern. Same-uid daemons
+reach these via the session-bus `RequestTabs` method; cross-uid daemons
+go through `UserRelay.ForwardBrowserBridgeOp` on the system bus.
+
+Wire shape, error codes, cross-uid routing model, and the impostor-name
+gate are documented in [firefox-containers.md](firefox-containers.md).
+Test coverage: `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`
+(round-trip + Chromium-unavailable + timeout) and
+`tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (cross-uid
+selector + audit).
+
 ### Heartbeat for persistent ports under Chromium MV3 — Phase 9b
 
 Chromium MV3 service workers terminate after **30 seconds of inactivity**
