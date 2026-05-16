@@ -112,7 +112,20 @@ stage_tier2_driver() {
 # bootstraps).
 
 @test "phase7-tier3-waypipe: cross-uid bridge smoke (wayland-info as user1)" {
-    fail_loud "tier-3 spawn unimplemented (driver s35-tier3-waypipe.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
+    stage_tier2_driver "s35-tier3-waypipe.sh"
+    vm_run "curl -s -o /tmp/s35.sh http://10.0.2.2:8768/s35-tier3-waypipe.sh && chmod +x /tmp/s35.sh && bash /tmp/s35.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / wayland-info / qdistro-tier3 group / user1 silo) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    # The silo's uid is whatever useradd assigned — assert on the
+    # substring not the literal number, so the test stays correct if
+    # the VM has a different /etc/login.defs UID_MIN baseline.
+    assert_output_contains "PASS: silo command actually ran as uid "
+    assert_output_contains "PASS: wayland-info enumerated wl_compositor through the bridge"
+    assert_output_contains "PASS: bridge socket carried qdistro-tier3:0660"
+    assert_output_contains "PASS: §Phase-7 tier-3 waypipe smoke end-to-end"
 }
 
 @test "phase7-tier3-app: cross-uid weston-terminal as user1 reaches outer" {

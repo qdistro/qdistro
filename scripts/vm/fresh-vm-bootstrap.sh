@@ -189,6 +189,18 @@ if [ -x "$SRC/qdistro/scripts/install/install-tier5-for-vm.sh" ]; then
         || log "  WARN: tier-5 launcher install failed; VMAppsProvider will not work"
 fi
 
+# ---- 7c. Install tier-3 launcher infrastructure -------------------------
+# Creates the qdistro-tier3 group + user1/user2 silo accounts, adds
+# admin to the group, symlinks spawn-tier3 + cleanup, and installs the
+# polkit policy. Required for the phase7-tier3-* bats family to have
+# a populated silo to spawn into.
+if [ -x "$SRC/qdistro/scripts/install/install-tier3-for-vm.sh" ]; then
+    log "installing tier-3 silo + launcher symlinks + polkit policy..."
+    bash "$SRC/qdistro/scripts/install/install-tier3-for-vm.sh" \
+        "$SRC/qdistro" \
+        || log "  WARN: tier-3 launcher install failed; phase7-tier3-* bats will fail loud"
+fi
+
 # ---- 8. Opt-in: build tier-4 / tier-5 guest base images ----------------
 # These produce the qcow2 base images that spawn-tier4.sh / spawn-tier5.sh
 # linked-clone from. ~400-500 MB upstream Tumbleweed Minimal-VM Cloud
