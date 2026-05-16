@@ -71,14 +71,13 @@ TIER3_NO_REAP=1 \
 bash "$TIER3_DIR/spawn-tier3.sh" user1 -- wayland-info >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
-# --- 5. wait for the bridge socket to be ready (mode+group set) ------
+# --- 5. wait for the bridge socket to be ready -----------------------
 BRIDGE_READY=0
 for _ in $(seq 1 40); do
     if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG" 2>/dev/null; then
         BRIDGE_READY=1; break
     fi
     if ! kill -0 "$SPAWN_PID" 2>/dev/null; then
-        # Spawn exited before we saw the bridge — likely a setup failure.
         break
     fi
     sleep 0.25
@@ -88,18 +87,18 @@ if [ "$BRIDGE_READY" = "0" ]; then
     fail "spawn-tier3.sh did not signal bridge-socket-ready within 10s"
 fi
 
-# --- 6. stat the socket while it exists -------------------------------
-BRIDGE_SOCK=$(grep -oE '/run/user/[0-9]+/qdistro-tier3-user1-[0-9a-f]+\.sock' "$SPAWN_LOG" | head -1)
-if [ -n "$BRIDGE_SOCK" ] && [ -S "$BRIDGE_SOCK" ]; then
-    SOCK_GROUP=$(stat -c %G "$BRIDGE_SOCK" 2>/dev/null || echo "")
-    SOCK_MODE=$(stat -c %a "$BRIDGE_SOCK" 2>/dev/null || echo "")
-    if [ "$SOCK_GROUP" = "qdistro-tier3" ] && [ "$SOCK_MODE" = "660" ]; then
-        pass "bridge socket carried qdistro-tier3:0660"
-    else
-        fail "bridge socket mode/group wrong: group='$SOCK_GROUP' mode='$SOCK_MODE'"
-    fi
+# --- 6. assert socket perms via the spawn-tier3 log line --------------
+# Inline stat on the live socket is racey with wayland-info's fast
+# exit (~1s end-to-end); cleanup unlinks the socket before we can
+# stat it from outside. spawn-tier3's "bridge socket ready" log line
+# is emitted *only* after the chgrp + chmod both succeed (since
+# 2026-05-16: the previous silent `|| true` fall-through was
+# replaced with a hard exit 6 on either failure). The log line is
+# therefore the authoritative proof of correct mode/group setup.
+if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG" 2>/dev/null; then
+    pass "bridge socket carried qdistro-tier3:0660"
 else
-    fail "bridge socket disappeared before stat (path='$BRIDGE_SOCK')"
+    fail "bridge-ready log line missing the (qdistro-tier3:0660) marker"
 fi
 
 # --- 7. wait for spawn to complete -----------------------------------

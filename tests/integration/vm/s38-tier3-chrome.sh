@@ -83,52 +83,73 @@ journalctl --since=now -n0 --show-cursor >"$JCURSOR_FILE" 2>/dev/null || true
 CURSOR=$(awk -F': ' '/-- cursor:/ {print $2}' "$JCURSOR_FILE")
 
 # --- 6. spawn user1 + user2 in parallel ------------------------------
-# Each wayland-info exits in <2s once the bridge is up; both should
-# coexist long enough for qdshell to observe both toplevels.
+# wayland-info doesn't create a wl_surface (it only enumerates globals
+# and exits) — so it never produces an xdg_toplevel and qdwin's
+# toplevel_added never fires for it. Tier3Apps observes nothing.
+# weston-terminal is the next-cheapest persistent-toplevel client.
+# Both spawns run long enough for qdshell to observe their toplevels;
+# we tear them down at the end.
 SPAWN_LOG_A=/tmp/s38-spawn-user1.log
 SPAWN_LOG_B=/tmp/s38-spawn-user2.log
 : >"$SPAWN_LOG_A" >"$SPAWN_LOG_B"
 
 TIER3_NO_REAP=1 \
-bash "$TIER3_DIR/spawn-tier3.sh" user1 -- wayland-info >"$SPAWN_LOG_A" 2>&1 &
+bash "$TIER3_DIR/spawn-tier3.sh" user1 -- weston-terminal >"$SPAWN_LOG_A" 2>&1 &
 SPAWN_A=$!
 TIER3_NO_REAP=1 \
-bash "$TIER3_DIR/spawn-tier3.sh" user2 -- wayland-info >"$SPAWN_LOG_B" 2>&1 &
+bash "$TIER3_DIR/spawn-tier3.sh" user2 -- weston-terminal >"$SPAWN_LOG_B" 2>&1 &
 SPAWN_B=$!
 
-# Wait for both spawns to settle (either bridge-ready or early failure).
-for spawn_pid in "$SPAWN_A" "$SPAWN_B"; do
-    for _ in $(seq 1 40); do
-        if ! kill -0 "$spawn_pid" 2>/dev/null; then break; fi
+# Wait up to 20s for both bridges to come up. Then leave the spawns
+# running while we grep the journal; tear down at the end.
+for tag in A B; do
+    case "$tag" in
+        A) log=$SPAWN_LOG_A; pid=$SPAWN_A ;;
+        B) log=$SPAWN_LOG_B; pid=$SPAWN_B ;;
+    esac
+    for _ in $(seq 1 80); do
+        if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$log" 2>/dev/null; then
+            break
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then break; fi
         sleep 0.25
     done
 done
 
-# Reap; SIGTERM any stragglers so the wrappers' cleanup traps fire.
-for spawn_pid in "$SPAWN_A" "$SPAWN_B"; do
-    if kill -0 "$spawn_pid" 2>/dev/null; then
-        kill -TERM "$spawn_pid" 2>/dev/null || true
-    fi
-    wait "$spawn_pid" 2>/dev/null || true
-done
-
-# --- 7. journal grep -------------------------------------------------
-# Allow qdshell a moment to drain its log buffer.
-sleep 1
-
-jgrep() {
+# --- 7. journal grep with polled wait --------------------------------
+# qdshell observes the toplevel + logs after qdwin emits
+# toplevel_security_context. Polling because weston-terminal cold-
+# start + waypipe relay + qdshell QML signal fan-out can run several
+# seconds on a slow VM.
+jgrep_once() {
     local pat="$1"
     if [ -n "$CURSOR" ]; then
         journalctl --after-cursor="$CURSOR" 2>/dev/null | grep -m1 -E "$pat" || true
     else
-        journalctl --since="-1min" 2>/dev/null | grep -m1 -E "$pat" || true
+        journalctl --since="-2min" 2>/dev/null | grep -m1 -E "$pat" || true
     fi
 }
 
-OBS_USER1=$(jgrep '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')
-OBS_USER2=$(jgrep '\[tier3\] toplevel observed silo=user2 secctx=qdistro\.tier3\.user2 handle=[0-9]+')
-COL_USER1=$(jgrep '\[tier3\] silo=user1 color=#[0-9a-fA-F]{6}')
-COL_USER2=$(jgrep '\[tier3\] silo=user2 color=#[0-9a-fA-F]{6}')
+OBS_USER1=""
+OBS_USER2=""
+COL_USER1=""
+COL_USER2=""
+deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ -z "$OBS_USER1" ] && \
+        OBS_USER1=$(jgrep_once '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')
+    [ -z "$OBS_USER2" ] && \
+        OBS_USER2=$(jgrep_once '\[tier3\] toplevel observed silo=user2 secctx=qdistro\.tier3\.user2 handle=[0-9]+')
+    [ -z "$COL_USER1" ] && \
+        COL_USER1=$(jgrep_once '\[tier3\] silo=user1 color=#[0-9a-fA-F]{6}')
+    [ -z "$COL_USER2" ] && \
+        COL_USER2=$(jgrep_once '\[tier3\] silo=user2 color=#[0-9a-fA-F]{6}')
+    if [ -n "$OBS_USER1" ] && [ -n "$OBS_USER2" ] && \
+       [ -n "$COL_USER1" ] && [ -n "$COL_USER2" ]; then
+        break
+    fi
+    sleep 0.5
+done
 
 if [ -n "$OBS_USER1" ] && [ -n "$OBS_USER2" ]; then
     pass "qdshell observed two tier-3 toplevels"
@@ -157,6 +178,19 @@ if [ -n "$COL_USER1" ] || [ -n "$COL_USER2" ]; then
 else
     fail "qdshell did not log a [tier3] silo=<name> color=#... line for either silo"
 fi
+
+# Tear down both spawns.
+for pid in "$SPAWN_A" "$SPAWN_B"; do
+    kill -TERM "$pid" 2>/dev/null || true
+done
+for pid in "$SPAWN_A" "$SPAWN_B"; do
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$pid" 2>/dev/null; then break; fi
+        sleep 0.25
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+done
 
 rm -f "$SPAWN_LOG_A" "$SPAWN_LOG_B" "$JCURSOR_FILE" 2>/dev/null || true
 

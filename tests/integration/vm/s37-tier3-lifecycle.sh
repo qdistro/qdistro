@@ -132,19 +132,23 @@ else
     [ -z "$OBS_B" ] && fail "qdshell did not log [tier3] observation for user2"
 fi
 
-# --- 6. both bridge sockets present ---------------------------------
-BRIDGE_A=$(grep -oE '/run/user/[0-9]+/qdistro-tier3-user1-[0-9a-f]+\.sock' "$SPAWN_LOG_A" | head -1)
-BRIDGE_B=$(grep -oE '/run/user/[0-9]+/qdistro-tier3-user2-[0-9a-f]+\.sock' "$SPAWN_LOG_B" | head -1)
-if [ -S "$BRIDGE_A" ] && [ -S "$BRIDGE_B" ]; then
-    GA=$(stat -c %G "$BRIDGE_A" 2>/dev/null)
-    GB=$(stat -c %G "$BRIDGE_B" 2>/dev/null)
-    if [ "$GA" = "qdistro-tier3" ] && [ "$GB" = "qdistro-tier3" ]; then
-        pass "both bridge sockets present"
-    else
-        fail "bridge socket group(s) wrong: A=$GA B=$GB"
-    fi
+# --- 6. both bridge sockets present (via log-line proof) ------------
+# waypipe-client with -o (oneshot) UNLINKS its listen socket
+# immediately after accepting the first connection from waypipe-server,
+# so file-existence checks race with the unlink and almost always
+# observe an empty /run/qdistro-tier3/. The authoritative proof of
+# "the bridge socket existed with the right perms" is spawn-tier3's
+# own log line, which is emitted only AFTER chgrp + chmod both
+# succeeded (hard-exit otherwise — see spawn-tier3.sh's chgrp/chmod
+# block).
+BRIDGE_A=$(grep -oE '/run/[a-zA-Z0-9_/-]*qdistro-tier3-user1-[0-9a-f]+\.sock' "$SPAWN_LOG_A" | head -1)
+BRIDGE_B=$(grep -oE '/run/[a-zA-Z0-9_/-]*qdistro-tier3-user2-[0-9a-f]+\.sock' "$SPAWN_LOG_B" | head -1)
+if [ -n "$BRIDGE_A" ] && [ -n "$BRIDGE_B" ] && \
+   grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_A" && \
+   grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_B"; then
+    pass "both bridge sockets present"
 else
-    fail "bridge sockets missing: A=$BRIDGE_A B=$BRIDGE_B"
+    fail "bridge-ready log missing: A_log=$([ -n "$BRIDGE_A" ] && echo OK || echo MISSING) B_log=$([ -n "$BRIDGE_B" ] && echo OK || echo MISSING)"
 fi
 
 # --- 7. silo A runs as user1 -----------------------------------------
@@ -155,25 +159,36 @@ else
 fi
 
 # --- 8. kill A, confirm B survives -----------------------------------
+UID_A=$(id -u user1)
+UID_B=$(id -u user2)
 kill -TERM "$SPAWN_A" 2>/dev/null || true
-# Wait up to 5s for A's cleanup trap to remove the bridge socket.
+# Wait up to 5s for A's spawn wrapper to exit + weston-terminal under
+# user1 to disappear. Socket file is unlinked by waypipe-client's
+# oneshot already (see s37 §6 comment); A's exit signal here is the
+# wrapper pid + the silo's weston-terminal process going away.
 A_GONE=0
 for _ in $(seq 1 20); do
-    if [ ! -S "$BRIDGE_A" ] && ! kill -0 "$SPAWN_A" 2>/dev/null; then
+    if ! kill -0 "$SPAWN_A" 2>/dev/null && \
+       ! pgrep -u "$UID_A" weston-terminal >/dev/null 2>&1; then
         A_GONE=1; break
     fi
     sleep 0.25
 done
 if [ "$A_GONE" = "0" ]; then
     kill -KILL "$SPAWN_A" 2>/dev/null || true
+    pkill -KILL -u "$UID_A" weston-terminal 2>/dev/null || true
 fi
 wait "$SPAWN_A" 2>/dev/null || true
 
-# B should still be alive (its own spawn wrapper pid + own bridge socket).
-if kill -0 "$SPAWN_B" 2>/dev/null && [ -S "$BRIDGE_B" ]; then
+# B should still be alive — its own spawn wrapper pid + its
+# weston-terminal process under user2's uid.
+if kill -0 "$SPAWN_B" 2>/dev/null && \
+   pgrep -u "$UID_B" weston-terminal >/dev/null 2>&1; then
     pass "silo B still running after silo A teardown"
 else
-    fail "silo B wrapper died (pid alive=$(kill -0 "$SPAWN_B" 2>/dev/null && echo yes || echo no), socket=$([ -S "$BRIDGE_B" ] && echo present || echo gone))"
+    B_PID_ALIVE=$(kill -0 "$SPAWN_B" 2>/dev/null && echo yes || echo no)
+    B_WESTON=$(pgrep -u "$UID_B" weston-terminal >/dev/null 2>&1 && echo yes || echo no)
+    fail "silo B not running: wrapper=$B_PID_ALIVE weston-terminal=$B_WESTON"
 fi
 
 # --- 9. final cleanup ------------------------------------------------

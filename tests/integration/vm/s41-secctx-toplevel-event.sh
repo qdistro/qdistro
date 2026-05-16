@@ -74,8 +74,8 @@ QDWIN_XML="/root/qdistro-src/qdwin/qdwin/qdwin-shell-v1.xml"
 if [ ! -f "$QDWIN_XML" ]; then
     skip "qdwin-shell-v1.xml not staged at $QDWIN_XML"
 fi
-XML_VERSION=$(grep -oE '<interface name="qdwin_shell_v1" version="[0-9]+"' "$QDWIN_XML" \
-              | grep -oE '[0-9]+$' | head -1)
+XML_VERSION=$(grep -oE 'name="qdwin_shell_v1" version="[0-9]+"' "$QDWIN_XML" \
+              | sed -n 's/.*version="\([0-9]\+\)".*/\1/p' | head -1)
 if [ -z "$XML_VERSION" ]; then
     fail "could not parse qdwin_shell_v1 version from $QDWIN_XML"
 elif [ "$XML_VERSION" -ge 13 ]; then
@@ -127,8 +127,13 @@ deadline=$(( $(date +%s) + 30 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -z "$QDWIN_LINE" ] && \
         QDWIN_LINE=$(jgrep_once 'qdwin: toplevel_security_context handle=[0-9]+ engine=qdistro\.tier3 app_id=qdistro\.tier3\.user1 instance=')
+    # Logger.i format is "<14-char-padded module name> <message>", not
+    # "[Module] message". The actual journal text reads:
+    #   INFO qml: [20260516-053949]          Qdwin toplevel_security_context handle=…
+    # So we match the module name as a literal token, not a bracketed
+    # prefix.
     [ -z "$QDSHELL_LINE" ] && \
-        QDSHELL_LINE=$(jgrep_once '\[Qdwin\] toplevel_security_context handle=[0-9]+ engine=qdistro\.tier3 app_id=qdistro\.tier3\.user1 instance=')
+        QDSHELL_LINE=$(jgrep_once 'Qdwin toplevel_security_context handle=[0-9]+ engine=qdistro\.tier3 app_id=qdistro\.tier3\.user1 instance=')
     [ -z "$TIER3_OBS" ] && \
         TIER3_OBS=$(jgrep_once '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')
     [ -z "$TIER3_COL" ] && \
@@ -159,7 +164,7 @@ fi
 if [ -n "$QDSHELL_LINE" ]; then
     pass "qdshell received toplevel_security_context"
 else
-    fail "no [Qdwin] toplevel_security_context line in qdshell journal — Qdwin.qml's onToplevelSecurityContext didn't fire (or Logger.i regression)"
+    fail "no 'Qdwin toplevel_security_context' line in qdshell journal — Qdwin.qml's onToplevelSecurityContext didn't fire (or Logger.i regression)"
 fi
 if [ -n "$TIER3_OBS" ]; then
     pass "qdshell derived silo=user1 from secctx app_id"

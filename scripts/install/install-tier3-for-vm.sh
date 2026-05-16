@@ -63,6 +63,30 @@ for u in $SILO_USERS; do
     usermod -a -G "$TIER3_GROUP" "$u" 2>/dev/null || true
 done
 
+# --- 2b. /run/qdistro-tier3 socket dir -------------------------------
+# Bridge sockets land here. Mode 0710 group=qdistro-tier3 lets group
+# members traverse (silos can reach a socket by full path) but not
+# list (so silo A can't enumerate silo B's tokens). Admin owns it +
+# can write (creates sockets at spawn time).
+#
+# admin's own /run/user/$UID is mode 0700 and excludes the silo uid
+# entirely, so bridge sockets there hit EACCES on dir-traverse from
+# the silo side. /run/qdistro-tier3 is the dedicated dir.
+#
+# tmpfiles.d entry persists the dir across reboots (systemd-tmpfiles
+# recreates it on boot before any user services start).
+install -d -o "$ADMIN_USER" -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3 2>/dev/null \
+    || install -d -o root -g "$TIER3_GROUP" -m 0710 /run/qdistro-tier3
+echo "[install-tier3] socket dir /run/qdistro-tier3 ($(stat -c '%U:%G %a' /run/qdistro-tier3))"
+
+install -d /etc/tmpfiles.d
+cat > /etc/tmpfiles.d/qdistro-tier3.conf <<EOF
+# Persistent /run/qdistro-tier3 socket dir for tier-3 bridge sockets.
+# See qdistro/tier3/spawn-tier3.sh + scripts/install/install-tier3-for-vm.sh.
+d  /run/qdistro-tier3  0710  $ADMIN_USER  $TIER3_GROUP  -  -
+EOF
+echo "[install-tier3] tmpfiles entry at /etc/tmpfiles.d/qdistro-tier3.conf"
+
 # --- 3. admin in qdistro-tier3 ---------------------------------------
 # Admin needs to be in the group so it can chgrp the bridge socket
 # after waypipe creates it. (chgrp requires either CAP_CHOWN or

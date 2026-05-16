@@ -51,7 +51,11 @@
 #   TIER3_NO_GPU          Block dmabuf via waypipe --no-gpu (default 1).
 #   TIER3_DEBUG=1         Pass --debug to both waypipe halves.
 #   TIER3_SOCKET_DIR      Where to place the bridge socket. Default
-#                         /run/user/$ADMIN_UID.
+#                         /run/qdistro-tier3 (group-traversable;
+#                         created by install-tier3-for-vm.sh). The
+#                         silo uid needs +x on the dir to reach the
+#                         socket path; admin's own /run/user/$UID is
+#                         mode 0700 and excludes the silo entirely.
 #   TIER3_GROUP           Group that gates silo→admin socket access.
 #                         Default qdistro-tier3.
 #   TIER3_SILO_RUNTIME    Per-launch XDG_RUNTIME_DIR for the silo half
@@ -184,13 +188,22 @@ if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; 
 fi
 
 # --- paths ------------------------------------------------------------
-SOCKET_DIR="${TIER3_SOCKET_DIR:-$ADMIN_RUNTIME}"
+SOCKET_DIR="${TIER3_SOCKET_DIR:-/run/qdistro-tier3}"
 BRIDGE_SOCK="$SOCKET_DIR/qdistro-tier3-$SILO-$LAUNCH_TOKEN.sock"
 SILO_RUNTIME="${TIER3_SILO_RUNTIME:-/tmp/qdistro-tier3-$LAUNCH_TOKEN}"
 INNER_DISPLAY="wayland-tier3-$SILO-$$"
 CLIENT_LOG="$ADMIN_RUNTIME/tier3-${SILO}-${APP_BASENAME}-client.log"
 SERVER_LOG="$ADMIN_RUNTIME/tier3-${SILO}-${APP_BASENAME}-server.log"
-mkdir -p "$ADMIN_RUNTIME" "$SOCKET_DIR"
+mkdir -p "$ADMIN_RUNTIME"
+# Idempotent socket-dir setup. install-tier3-for-vm.sh creates this
+# with the right perms persistently (+ tmpfiles.d), but be defensive
+# in case the install was skipped or /run was wiped after reboot.
+if [ ! -d "$SOCKET_DIR" ]; then
+    install -d -o "$ADMIN_USER" -g "$TIER3_GROUP" -m 0710 "$SOCKET_DIR" || {
+        echo "[tier3] FAIL: cannot create $SOCKET_DIR (group $TIER3_GROUP)" >&2
+        exit 3
+    }
+fi
 : >"$CLIENT_LOG" >"$SERVER_LOG"
 chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
 
@@ -241,7 +254,19 @@ CLIENT_OPTS=(-s "$BRIDGE_SOCK" -o)
 [ "$NO_GPU" = "1" ] && CLIENT_OPTS+=(--no-gpu)
 [ -n "$TITLE_PREFIX" ] && CLIENT_OPTS+=(--title-prefix "$TITLE_PREFIX")
 [ "$DEBUG" = "1" ] && CLIENT_OPTS+=(--debug)
-[ -n "$SECCTX" ] && CLIENT_OPTS+=(--secctx "$SECCTX")
+# IMPORTANT: only pass --secctx when the wrapper is *disabled*. When
+# qdistro-secctx-exec wraps waypipe-client (USE_SECCTX=1, the default),
+# waypipe-client runs *inside* a secctx-tagged Wayland session — and
+# qdwin correctly hides wp_security_context_manager_v1 from already-
+# tagged clients (preventing sub-sandbox escape). waypipe's --secctx
+# tries to bind manager_v1 to plant its own tag → fails with
+# "Compositor did not provide wp_security_context_manager_v1 global"
+# and the bridge never comes up. The wrapper's secctx triple (engine
+# + app_id + instance_id) is the load-bearing identity; waypipe's
+# legacy single-string --secctx is redundant when wrapped.
+if [ "$USE_SECCTX" != "1" ] && [ -n "$SECCTX" ]; then
+    CLIENT_OPTS+=(--secctx "$SECCTX")
+fi
 
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
@@ -275,8 +300,17 @@ if [ "$SOCK_OK" != "1" ]; then
     cat "$CLIENT_LOG" >&2 || true
     exit 6
 fi
-chgrp "$TIER3_GROUP" "$BRIDGE_SOCK" 2>/dev/null || true
-chmod 0660 "$BRIDGE_SOCK" 2>/dev/null || true
+# chgrp/chmod failures here are load-bearing (silo-side ECONNREFUSED
+# if the perms aren't right). Don't swallow them silently; the log
+# line below is the bats-asserted proof of correct setup.
+if ! chgrp "$TIER3_GROUP" "$BRIDGE_SOCK" 2>/dev/null; then
+    echo "[tier3] FAIL: chgrp $TIER3_GROUP on $BRIDGE_SOCK failed (admin not in group?)" >&2
+    exit 6
+fi
+if ! chmod 0660 "$BRIDGE_SOCK" 2>/dev/null; then
+    echo "[tier3] FAIL: chmod 0660 on $BRIDGE_SOCK failed" >&2
+    exit 6
+fi
 echo "[tier3] bridge socket ready at $BRIDGE_SOCK ($TIER3_GROUP:0660)" >&2
 
 # --- 2. silo-side runtime dir ----------------------------------------
