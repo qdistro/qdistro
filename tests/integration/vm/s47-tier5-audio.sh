@@ -90,47 +90,79 @@ else
     fail "domain template at $TMPL does not declare pipewire audio + ich9 sound card"
 fi
 
-# ---- 2. define+start a tier-5 domain via spawn-tier5.sh --vm --------
-# spawn-tier5.sh handles overlay creation, template substitution,
-# virsh define+start, qga readiness wait, and EXIT-trap cleanup. We
-# piggyback on its setup so audio sees the same domain shape a real
-# tier-5 spawn would produce. The publisher.sh that runs inside the
-# guest after qga is fine to ignore — it tries to launch weston-
-# terminal under waypipe, which is orthogonal to audio.
+# ---- 2. define+start a tier-5 domain DIRECTLY (no spawn-tier5) ------
+# Bypass spawn-tier5.sh: it waits on the waypipe-client (--oneshot)
+# which exits as soon as the in-guest publisher.sh decides the inner
+# app isn't a Wayland client. That tears down the VM before we can
+# qga-exec speaker-test. We only need the domain itself for the
+# audio routing path; everything spawn-tier5 layers on top
+# (waypipe, vsock listener, publisher) is orthogonal here.
 
 VM_NAME="qdistro-tier5-audio-$$"
 OVERLAY="/home/$ADMIN_USER/.local/share/libvirt/images/$VM_NAME.qcow2"
+TMP_XML="/tmp/qdistro-tier5-audio-$$.xml"
 SPAWN_LOG=/tmp/s47-spawn.log
 : >"$SPAWN_LOG"
 
-# The inner "app" only needs to be something that keeps the spawned
-# tier-5 guest VM alive long enough for the audio probe to run.
-# weston-terminal (the natural choice) exits immediately under the
-# guest's no-Wayland-session, which triggers spawn-tier5.sh's
-# teardown and destroys the VM before we can qga-exec speaker-test.
-# Pass `sleep 600` so the guest stays up; spawn-tier5.sh's EXIT trap
-# still cleans up when the driver's cleanup_vm() kills SPAWN_PID.
-bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
-    -- /bin/sleep 600 >"$SPAWN_LOG" 2>&1 &
-SPAWN_PID=$!
-
 cleanup_vm() {
-    kill -TERM "$SPAWN_PID" 2>/dev/null || true
-    wait "$SPAWN_PID" 2>/dev/null || true
-    # Belt-and-braces — spawn-tier5.sh's EXIT trap normally handles
-    # these, but if it died early or got SIGKILL'd we still want a
-    # clean slate (same pattern as s45/s48).
     runuser -u "$ADMIN_USER" -- virsh destroy  "$VM_NAME" >/dev/null 2>&1 || true
     runuser -u "$ADMIN_USER" -- virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-    rm -f "$OVERLAY" 2>/dev/null || true
+    rm -f "$OVERLAY" "$TMP_XML" 2>/dev/null || true
 }
 trap cleanup_vm EXIT
 
-# Wait for domain to reach running. 90s budget like s45.
+# Overlay disk — linked clone of $BASE.
+install -d -m 0755 "$(dirname "$OVERLAY")"
+chown "$ADMIN_USER" "$(dirname "$OVERLAY")"
+qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$OVERLAY" >>"$SPAWN_LOG" 2>&1
+chown "$ADMIN_USER" "$OVERLAY"
+
+# Per-VM vsock CID — pick one high enough to avoid collision with
+# other tier-5 spawns + above CID=2 (host reserved). s47 doesn't
+# care about the CID's actual contents.
+CID=$(( 100 + (RANDOM % 100) ))
+
+# Substitute the template. Mirrors spawn-tier5.sh's logic but inlined.
+NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default -->"
+NIC_XML_ESCAPED=$(printf '%s' "$NIC_XML" | sed 's|[\\/&]|\\&|g')
+sed \
+    -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
+    -e "s|__VM_NAME__|$VM_NAME|g" \
+    -e "s|__MAC__|52:54:00:11:22:33|g" \
+    -e "s|__MEM_KIB__|524288|g" \
+    -e "s|__CID__|$CID|g" \
+    -e "s|__DISK_PATH__|$OVERLAY|g" \
+    "$TMPL" >"$TMP_XML"
+chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
+
+if grep -q '__[A-Z_]*__' "$TMP_XML"; then
+    fail "unsubstituted markers in domain XML: $(grep -oE '__[A-Z_]*__' "$TMP_XML" | sort -u | xargs)"
+fi
+
+if ! runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+        virsh define "$TMP_XML" >>"$SPAWN_LOG" 2>&1; then
+    cat "$SPAWN_LOG" >&2 || true
+    fail "virsh define refused the domain XML"
+fi
+
+if ! runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+        virsh start "$VM_NAME" >>"$SPAWN_LOG" 2>&1; then
+    cat "$SPAWN_LOG" >&2 || true
+    # qemu-audio-pipewire missing surfaces here: virsh start refuses
+    # the audio stanza. Soft-probe before hard-failing.
+    if grep -qiE "audiodev|pipewire.*not (found|supported)|unknown audio" \
+            "$SPAWN_LOG" 2>/dev/null; then
+        skip "qemu-audio-pipewire backend not available on this host (virsh start refused the audio stanza)"
+    fi
+    fail "virsh start refused the domain"
+fi
+
+# Wait for domain to reach running (qcow2 overlay creation + boot
+# can take 60s+ on a slow nested VM).
 DOMAIN_OK=0
-for _ in $(seq 1 180); do
-    if runuser -u "$ADMIN_USER" -- virsh domstate "$VM_NAME" 2>/dev/null \
-        | grep -qw running; then
+for _ in $(seq 1 240); do
+    if runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+        virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
         DOMAIN_OK=1; break
     fi
     sleep 0.5
@@ -139,23 +171,16 @@ if [ "$DOMAIN_OK" = "1" ]; then
     pass "domain $VM_NAME running"
 else
     cat "$SPAWN_LOG" >&2 || true
-    # qemu-audio-pipewire missing surfaces here: virsh start would
-    # have failed with "unknown audiodev type pipewire" or similar.
-    # Soft-probe that case before declaring a hard fail so the bats
-    # SKIP path stays usable on hosts without qemu-audio-pipewire.
-    if grep -qiE "audiodev|pipewire.*not (found|supported)|unknown audio" \
-            "$SPAWN_LOG" 2>/dev/null; then
-        skip "qemu-audio-pipewire backend not available on this host (virsh start refused the audio stanza)"
-    fi
-    fail "libvirt domain never reached running state within 90s"
+    fail "libvirt domain never reached running state within 120s"
 fi
 
-# Wait for "[tier5] qga ready" in spawn log (90s budget; spawn-tier5
-# already polls guest-ping internally up to 90s).
+# Wait for qga inside the guest to respond. cloud-init firstboot
+# can take 60s+; qemu-guest-agent doesn't bind until after that.
 QGA_OK=0
-deadline=$(( $(date +%s) + 120 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -q "qga ready" "$SPAWN_LOG" 2>/dev/null; then
+for _ in $(seq 1 120); do
+    if runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+        virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' \
+        >/dev/null 2>&1; then
         QGA_OK=1; break
     fi
     sleep 1
@@ -163,7 +188,6 @@ done
 if [ "$QGA_OK" = "1" ]; then
     pass "qga ready"
 else
-    cat "$SPAWN_LOG" >&2 || true
     fail "guest qemu-guest-agent never responded within 120s"
 fi
 
@@ -175,7 +199,7 @@ fi
 # qga guest-exec returns {"return":{"pid":N}}. Anything else (no pid,
 # error, or the binary missing in the guest) is a hard fail.
 SPK_REQ='{"execute":"guest-exec","arguments":{"path":"/usr/bin/speaker-test","arg":["-t","sine","-f","440","-l","2","-c","2"],"capture-output":false}}'
-SPK_REPLY=$(runuser -u "$ADMIN_USER" -- \
+SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
     virsh qemu-agent-command "$VM_NAME" "$SPK_REQ" 2>/dev/null || true)
 
 if [ -z "$SPK_REPLY" ]; then
@@ -183,7 +207,7 @@ if [ -z "$SPK_REPLY" ]; then
     # missing entirely. Retry with a bare command name to let the guest
     # PATH resolve it, in case absolute path was wrong for this image.
     SPK_REQ2='{"execute":"guest-exec","arguments":{"path":"speaker-test","arg":["-t","sine","-f","440","-l","2","-c","2"],"capture-output":false}}'
-    SPK_REPLY=$(runuser -u "$ADMIN_USER" -- \
+    SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
         virsh qemu-agent-command "$VM_NAME" "$SPK_REQ2" 2>/dev/null || true)
 fi
 
