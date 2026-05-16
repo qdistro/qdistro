@@ -1,9 +1,8 @@
 # Firefox containers (contextual identities)
 
-> **Draft, 2026-05-16.** This document pins the wire shape so the
-> qdfirefox-extension's `containers` module isn't dead code, and forces
-> the still-open cross-user routing question into the open. Sections
-> marked *Open* below name the unresolved design questions.
+> **First version 2026-05-16.** Wire shape pinned, own-uid round-trip
+> tested, cross-uid relay (Option B) landed. Remaining open work is
+> the per-feature admin opt-in UI — tracked in the Status table.
 
 Firefox's **Multi-Account Containers** primitive (`browser.contextualIdentities`)
 gives each Firefox profile a set of colour/icon-tagged cookie stores.
@@ -120,18 +119,19 @@ The three `containers.*` ops add no new D-Bus surface — they just need
 `qdistro_browser_bridge.py`, mirroring the existing
 `_handle_tabs_list / _open / _close`.
 
-## Cross-user routing — *Open*
+## Cross-user routing
 
 The bridge is per-user, per-browser: there is one
 `org.qdistro.BrowserBridge.<ppid>` on each user's session bus. A daemon
-running as **the same uid** as the Firefox process can call
-`containers.list` directly through the session bus today (modulo the
-bridge gap).
+running as **the same uid** as the Firefox process calls
+`containers.*` directly through the session bus
+(`org.qdistro.BrowserBridge.<ppid>.RequestTabs`).
 
-The unresolved question is whether a daemon running as **a different
-uid** (typically admin daemons, the admin panel, recall ingest) gets
-to enumerate another user's Firefox containers. There is no design doc
-that resolves this; the existing options are:
+A daemon running as **a different uid** (typically admin daemons, the
+admin panel, recall ingest) reaches the same op via the user-relay's
+system-bus surface (`UserRelay.ForwardBrowserBridgeOp`). Three options
+were considered; the implementation choice is recorded in the
+"Decision" subsection below.
 
 ### Option A — own-uid only (default per [browser.md](browser.md#cross-user-defaults))
 
@@ -143,21 +143,52 @@ user-browser.
 
 When enabled, the routing still has to happen — see B/C below.
 
-### Option B — UserRelay-style narrow forward
+### Option B — UserRelay-style narrow forward — **landed 2026-05-16 for all three ops**
 
-Reuse the existing `qdistro_user_relay.py` pattern. Today UserRelay
-only exposes `Forward(kind, payload)` for broker → user-session
-notifications. Extend with (or add a sibling daemon for) a narrow
-`ForwardBrowserBridgeOp(op, args_json) -> reply_json` that the broker
-(root, system bus) calls on behalf of any allowlisted caller.
+`UserRelay.ForwardBrowserBridgeOp(op, args_json, selector_json) -> reply_json`
+shipped in `qdistro_user_relay.py`. Cross-uid callers reach it on the
+system bus (`com.qdistro.UserRelay.uid<NNNN>`); the relay forwards to
+the user's `org.qdistro.BrowserBridge.<ppid>` via `RequestTabs`. Wire
+matches the bridge's `RequestTabs(s, s) -> s` so callers handle relay
+and direct paths identically.
 
-Pros: matches the existing pattern; the auth gate is the broker's
-existing rules engine; system-bus → session-bus crossing is already
-solved.
+`selector_json` chooses which bridge:
 
-Cons: each new bridge op needs a UserRelay routing rule. The
-container-add surface is wide enough (every `tabs.*`, `cookies.*`,
-etc.) that the relay turns into a generic browser-bridge proxy.
+| Selector | Meaning |
+|----------|---------|
+| `{"ppid": <int>}` | Exact match on `org.qdistro.BrowserBridge.<ppid>`. Must be a JSON integer; a quoted `"1234"` is refused as `bad_selector` to surface caller serialization bugs. |
+| `{"any": true}` | First bridge by **numeric ppid** (so `9999` precedes `10000`, matching operator intuition rather than lexicographic order on the full bus name). |
+| `{}` | Refused with `no_bridge_found` — callers must opt in to "any" so a typo doesn't route to a random browser. |
+| `{"ppid": N, "any": true}` | Refused with `bad_selector` — the caller's intent is ambiguous. |
+
+The relay's bridge enumeration **requires the suffix after
+`org.qdistro.BrowserBridge.` to be all-digits**. A same-uid attacker
+that can claim `org.qdistro.BrowserBridge.impostor` on the session
+bus is *not* a routing target — without this gate, `{"any": true}`
+could send admin calls there.
+
+Failures inside the relay return JSON `{"ok": false, "error":
+"<code>"}` rather than D-Bus exceptions, so callers handle them
+identically to bridge-side `ok:false` replies:
+
+| `error` | When |
+|---------|------|
+| `missing_op` | empty `op` string |
+| `bad_selector` | `selector_json` isn't a JSON object |
+| `no_bridge_found` | nothing matches the selector |
+| `bridge_call_failed` | bridge raised — `detail` carries the underlying message |
+
+Authorization is the **system-bus peer-uid policy** on
+`com.qdistro.UserRelay.uid<NNNN>` — same model as the existing
+`UserRelay.Forward` for notifications. No new authn surface inside the
+relay. Test coverage: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp`
+(12 cases).
+
+Trade-off accepted: the relay turns into a generic browser-bridge
+proxy. The narrow `Forward(kind, payload)` precedent does NOT carry
+over — every bridge op is now reachable cross-uid. If a future op
+needs admin sign-off, route *that op* through option C explicitly;
+don't broaden the relay's gate.
 
 ### Option C — broker-mediated per-call admin approval
 
@@ -174,17 +205,16 @@ Cons: each container enumeration is a user interaction. Untenable for
 flows that want to populate a "send to container…" submenu on every
 right-click.
 
-### Recommendation (subject to your call)
+### Decision — landed 2026-05-16
 
-**B for `containers.list`** (read-only enumeration, low blast radius,
-high UX cost of a per-call prompt), **C for `containers.create` and
-`.remove`** (write ops; admin should sign off on creating or destroying
-a cross-user data partition). Either way, **A is the default until the
-admin toggle is flipped**.
-
-If you disagree, the next step is filling out the routing choice and
-the dedicated daemon name (something like `qdistro-browser-relay` if
-it ends up being more than a UserRelay extension).
+**Option B for all three ops.** The doc's earlier draft recommended
+hybrid B-for-list / C-for-create+remove. After implementation review,
+the broker layer adds enough operational complexity for write ops
+(per-call user prompt every container create) that we shipped pure B
+and left the option open to escalate writes to broker mediation if a
+real abuse vector surfaces. Each user-browser still has to be opted
+into "Containers in admin panel" before any cross-uid call lands;
+that toggle is Option A's gate and stays in place.
 
 ## Security model
 
@@ -237,7 +267,8 @@ forward-compatible regardless of which routing option above wins:
 | qdfirefox-extension `tabs.open` | Accepts `cookie_store_id` end-to-end. |
 | qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge ignores it. |
 | Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
-| Bridge cross-user surface | **Not implemented.** Blocked on the routing decision (Option B vs C) above. |
+| Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (12 cases). |
+| Cross-user admin opt-in | **Not implemented.** Per-feature toggle row in the admin panel still gates whether a cross-uid call is allowed for a given user-browser. UI doesn't exist yet for any Phase-9 feature. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
 | Cross-user gate | Per-feature opt-in toggle row in the admin panel — UI doesn't exist yet for any of the Phase-9 features; this adds a "Containers" row. |
 | Audit | Bridge-side journal logging follows the existing `qdistro-browser-bridge` pattern; consumer-side audit lives in whichever daemon ends up calling it. |

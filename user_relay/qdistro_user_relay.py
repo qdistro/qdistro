@@ -19,6 +19,7 @@ no retry; no payload size cap beyond broker's detail sanitiser.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -31,6 +32,15 @@ BUS_NAME = "com.qdistro.UserRelay"
 OBJ_PATH = "/com/qdistro/UserRelay"
 APP1_IFACE = "com.qdistro.App1"
 APP1_OBJ_PATH = "/com/qdistro/App1"
+
+# Browser-bridge surface (see qdistro/doc/firefox-containers.md).
+# A bridge claims org.qdistro.BrowserBridge.<ppid> on each user's
+# session bus and exposes RequestTabs(s op, s args_json) -> s reply_json.
+# ForwardBrowserBridgeOp lets the broker reach those bridges without
+# crossing into a non-owning uid's session bus directly.
+BRIDGE_NAME_PREFIX = "org.qdistro.BrowserBridge."
+BRIDGE_OBJ_PATH = "/org/qdistro/BrowserBridge"
+BRIDGE_IFACE = "org.qdistro.BrowserBridge"
 
 # System-bus name per uid. Broker (running as root on the system bus)
 # talks to the relay here so it doesn't have to open cross-uid session
@@ -85,6 +95,135 @@ class UserRelay(dbus.service.Object):
                 continue
             out.append((n, _friendly_name(n)))
         return dbus.Array(out, signature="(ss)")
+
+    @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s")
+    def ForwardBrowserBridgeOp(self, op: str, args_json: str,
+                               selector_json: str) -> str:
+        """Forward a bridge op to an `org.qdistro.BrowserBridge.<ppid>`
+        on this user's session bus and return the bridge's JSON reply.
+
+        Wire shape mirrors the bridge's `RequestTabs(s, s) -> s`. The
+        relay is a uid-crossing wrapper: cross-uid callers reach this
+        method on the *system* bus, the relay forwards to the bridge
+        on its own *session* bus.
+
+        ``selector_json`` chooses which bridge instance receives the
+        op. The user may have multiple browsers running, each with its
+        own bridge:
+
+        - ``{"ppid": <int>}`` — exact match on
+          ``org.qdistro.BrowserBridge.<ppid>``. Use when the caller
+          already knows the bridge's ppid (e.g. via a prior probe).
+        - ``{"any": true}`` — pick the first bridge found.
+          Adequate when only one browser is running, or when the op
+          doesn't care which browser (e.g. ``qdistro.ping``).
+
+        Returns a JSON-encoded reply dict. Failures inside the relay
+        are surfaced as ``{"ok": false, "error": "<code>", ...}``
+        rather than D-Bus exceptions so callers handle them
+        identically to bridge-side ``ok:false`` replies. Authorization
+        is the system-bus peer-uid policy on
+        ``com.qdistro.UserRelay.uid<NNNN>`` — same model as
+        :meth:`Forward`.
+        """
+        op_s = str(op)
+        if not op_s:
+            return json.dumps({"ok": False, "error": "missing_op"})
+        try:
+            selector = json.loads(str(selector_json) or "{}")
+            if not isinstance(selector, dict):
+                raise ValueError("selector must be a JSON object")
+        except (ValueError, json.JSONDecodeError) as e:
+            return json.dumps({
+                "ok": False, "error": "bad_selector",
+                "detail": str(e)[:200],
+            })
+        # Refuse selectors that mix `ppid` and `any` rather than
+        # silently letting one win — the caller's intent is ambiguous.
+        if "ppid" in selector and selector.get("any") is True:
+            return json.dumps({
+                "ok": False, "error": "bad_selector",
+                "detail": "selector cannot set both 'ppid' and 'any'",
+            })
+        # Tighten `ppid` typing: JSON ints only. A quoted "1234"
+        # likely indicates a caller bug worth surfacing rather than
+        # silently coercing.
+        if "ppid" in selector and not isinstance(selector["ppid"], int):
+            return json.dumps({
+                "ok": False, "error": "bad_selector",
+                "detail": "'ppid' must be a JSON integer",
+            })
+        bridge_name = self._select_bridge(selector)
+        if bridge_name is None:
+            return json.dumps({
+                "ok": False, "error": "no_bridge_found",
+                "selector": selector,
+            })
+        try:
+            obj = self._bus.get_object(bridge_name, BRIDGE_OBJ_PATH)
+            # args_json is opaque pass-through; default to "{}" so the
+            # bridge always receives JSON-parseable args even when the
+            # caller passes "" or None.
+            reply = obj.RequestTabs(
+                op_s, str(args_json) or "{}",
+                dbus_interface=BRIDGE_IFACE)
+        except dbus.DBusException as e:
+            return json.dumps({
+                "ok": False, "error": "bridge_call_failed",
+                "bridge": bridge_name,
+                "dbus_name": e.get_dbus_name(),
+                "detail": str(e)[:200],
+            })
+        except Exception as e:  # noqa: BLE001
+            return json.dumps({
+                "ok": False, "error": "bridge_call_failed",
+                "bridge": bridge_name,
+                "detail": f"{type(e).__name__}: {e}"[:200],
+            })
+        return str(reply)
+
+    def _select_bridge(self, selector: dict) -> str | None:
+        """Return the chosen org.qdistro.BrowserBridge.<ppid> name
+        on the session bus, or None if no bridge matches.
+
+        Only names whose suffix after :data:`BRIDGE_NAME_PREFIX` is
+        all-digits count — a same-uid attacker can claim
+        ``org.qdistro.BrowserBridge.impostor`` on the session bus, and
+        without the digit check ``{"any": true}`` could route admin
+        calls there. The bridge itself always uses ``<ppid>`` (an int),
+        so the gate is lossless for legitimate names.
+        """
+        proxy = self._bus.get_object("org.freedesktop.DBus",
+                                      "/org/freedesktop/DBus")
+        iface = dbus.Interface(proxy, "org.freedesktop.DBus")
+        bridges_with_ppid: list[tuple[int, str]] = []
+        for n in iface.ListNames():
+            name = str(n)
+            if not name.startswith(BRIDGE_NAME_PREFIX):
+                continue
+            if name.startswith(":"):
+                continue
+            suffix = name[len(BRIDGE_NAME_PREFIX):]
+            if not suffix.isdigit():
+                continue
+            bridges_with_ppid.append((int(suffix), name))
+        if not bridges_with_ppid:
+            return None
+        if "ppid" in selector:
+            want = int(selector["ppid"])  # already validated above
+            target = f"{BRIDGE_NAME_PREFIX}{want}"
+            for _, name in bridges_with_ppid:
+                if name == target:
+                    return name
+            return None
+        if selector.get("any") is True:
+            # Sort numerically by ppid so the choice is stable AND
+            # matches operator intuition (lexicographic on the full
+            # name would put "BrowserBridge.10000" before
+            # "BrowserBridge.9999").
+            bridges_with_ppid.sort(key=lambda t: t[0])
+            return bridges_with_ppid[0][1]
+        return None
 
     @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="")
     def Forward(self, service: str, kind: str, payload: str):

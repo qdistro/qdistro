@@ -12,6 +12,9 @@ Scope:
   friendly-name derivation.
 - `Forward` rejects non-`com.qdistro.*` targets and excluded
   names, and wraps peer failures in a relay-side error.
+- `ForwardBrowserBridgeOp` selects the right bridge name, calls
+  RequestTabs, and surfaces failures as JSON ok:false rather
+  than D-Bus exceptions.
 - `_friendly_name` corner cases not covered in test_sendto.py.
 
 End-to-end forwarding (to a live QPlainTextEdit-backed receiver)
@@ -19,6 +22,7 @@ is covered by the in-VM GUI scenarios.
 """
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -64,6 +68,26 @@ class _FakeReceiver:
         if self.raise_exc is not None:
             raise self.raise_exc
         self.calls.append((str(kind), str(payload)))
+
+
+class _FakeBridge:
+    """Stand-in for an org.qdistro.BrowserBridge.<ppid> object.
+
+    Records every RequestTabs call and returns a canned JSON reply.
+    Tests vary the reply per call by mutating `next_reply`.
+    """
+
+    def __init__(self, next_reply: dict | None = None,
+                 raise_exc: BaseException | None = None):
+        self.calls: list[tuple[str, str]] = []
+        self.next_reply = next_reply or {"ok": True}
+        self.raise_exc = raise_exc
+
+    def RequestTabs(self, op, args_json, dbus_interface=None):  # noqa: ARG002
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        self.calls.append((str(op), str(args_json)))
+        return json.dumps(self.next_reply)
 
 
 class _FakeBus:
@@ -198,6 +222,210 @@ class TestForward:
         with pytest.raises(dbus.DBusException) as ei:
             relay.Forward("com.qdistro.StubNotepad.uid2000", "k", "v")
         assert ei.value.get_dbus_name() == "com.example.Nope"
+
+
+# --- ForwardBrowserBridgeOp -----------------------------------------------
+
+class TestForwardBrowserBridgeOp:
+    """Option-B cross-uid routing for browser-bridge ops. The relay
+    runs as the target user; cross-uid callers reach it on the system
+    bus and the relay turns around to call the bridge on the user's
+    session bus. See qdistro/doc/firefox-containers.md."""
+
+    def _relay(self, *, bridges: dict[int, _FakeBridge] | None = None):
+        bridges = bridges or {}
+        bus = _FakeBus(names=[
+            f"org.qdistro.BrowserBridge.{ppid}" for ppid in bridges
+        ])
+        for ppid, bridge in bridges.items():
+            bus.objects[
+                (f"org.qdistro.BrowserBridge.{ppid}",
+                 R.BRIDGE_OBJ_PATH)
+            ] = bridge
+        return _StubUserRelay(bus), bridges
+
+    def test_any_selector_forwards_to_first_bridge(self):
+        bridge = _FakeBridge(next_reply={
+            "ok": True,
+            "containers": [{"cookie_store_id": "firefox-container-1",
+                            "name": "Personal"}],
+        })
+        relay, _ = self._relay(bridges={4321: bridge})
+        reply_json = relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}')
+        reply = json.loads(reply_json)
+        assert reply["ok"] is True
+        assert reply["containers"][0]["name"] == "Personal"
+        assert bridge.calls == [("containers.list", "{}")]
+
+    def test_ppid_selector_exact_match(self):
+        b1 = _FakeBridge(next_reply={"ok": True, "via": "first"})
+        b2 = _FakeBridge(next_reply={"ok": True, "via": "second"})
+        relay, _ = self._relay(bridges={1111: b1, 2222: b2})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "qdistro.ping", "{}", '{"ppid": 2222}'))
+        assert reply["via"] == "second"
+        assert b1.calls == []
+        assert b2.calls == [("qdistro.ping", "{}")]
+
+    def test_ppid_selector_no_match_returns_no_bridge_found(self):
+        bridge = _FakeBridge()
+        relay, _ = self._relay(bridges={1234: bridge})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 9999}'))
+        assert reply["ok"] is False
+        assert reply["error"] == "no_bridge_found"
+        assert bridge.calls == []
+
+    def test_any_selector_with_no_bridges(self):
+        relay, _ = self._relay(bridges={})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}'))
+        assert reply["ok"] is False
+        assert reply["error"] == "no_bridge_found"
+
+    def test_any_selector_picks_numerically_lowest_ppid(self):
+        """`{"any": true}` sorts numerically on the ppid so the choice
+        matches operator intuition. Lexicographic sort on the full bus
+        name would put 'BrowserBridge.10000' before 'BrowserBridge.9999';
+        the relay sorts numerically to avoid that surprise."""
+        b_999 = _FakeBridge(next_reply={"ok": True, "ppid": 999})
+        b_10000 = _FakeBridge(next_reply={"ok": True, "ppid": 10000})
+        relay, _ = self._relay(bridges={999: b_999, 10000: b_10000})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}'))
+        assert reply["ppid"] == 999
+        assert b_999.calls == [("containers.list", "{}")]
+        assert b_10000.calls == []
+
+    def test_empty_op_rejected(self):
+        relay, _ = self._relay()
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "", "{}", '{"any": true}'))
+        assert reply["error"] == "missing_op"
+
+    def test_bad_selector_json_returns_bad_selector(self):
+        relay, _ = self._relay()
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", "not-json"))
+        assert reply["error"] == "bad_selector"
+
+    def test_selector_not_object_returns_bad_selector(self):
+        relay, _ = self._relay()
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '["not", "an", "object"]'))
+        assert reply["error"] == "bad_selector"
+
+    def test_empty_selector_returns_no_bridge_found(self):
+        """A bare ``{}`` chooses nothing — neither ppid nor any. This
+        is intentional: callers must opt in to "pick any" so a typo
+        doesn't accidentally route to a random browser."""
+        relay, _ = self._relay(bridges={1111: _FakeBridge()})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", "{}"))
+        assert reply["error"] == "no_bridge_found"
+
+    def test_bridge_raises_dbus_exception(self):
+        bridge = _FakeBridge(
+            raise_exc=dbus.DBusException(
+                "service not running",
+                name="org.freedesktop.DBus.Error.ServiceUnknown"))
+        relay, _ = self._relay(bridges={5555: bridge})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 5555}'))
+        assert reply["ok"] is False
+        assert reply["error"] == "bridge_call_failed"
+        assert reply["dbus_name"] == "org.freedesktop.DBus.Error.ServiceUnknown"
+
+    def test_bridge_raises_generic_exception(self):
+        bridge = _FakeBridge(raise_exc=RuntimeError("kaboom"))
+        relay, _ = self._relay(bridges={7777: bridge})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 7777}'))
+        assert reply["ok"] is False
+        assert reply["error"] == "bridge_call_failed"
+        assert "kaboom" in reply["detail"]
+
+    def test_skips_non_digit_suffix_bridges(self):
+        """Same-uid attacker can claim
+        `org.qdistro.BrowserBridge.impostor` on the session bus. The
+        relay's `_select_bridge` requires the suffix to be all-digits
+        so `{"any": true}` cannot route admin calls to the impostor
+        even if it's the only name on the bus."""
+        real = _FakeBridge(next_reply={"ok": True, "via": "real"})
+        impostor = _FakeBridge(next_reply={"ok": True, "via": "impostor"})
+        bus = _FakeBus(names=[
+            "org.qdistro.BrowserBridge.evil",
+            "org.qdistro.BrowserBridge.1234",
+        ])
+        bus.objects[("org.qdistro.BrowserBridge.evil",
+                     R.BRIDGE_OBJ_PATH)] = impostor
+        bus.objects[("org.qdistro.BrowserBridge.1234",
+                     R.BRIDGE_OBJ_PATH)] = real
+        relay = _StubUserRelay(bus)
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}'))
+        assert reply["via"] == "real"
+        assert impostor.calls == []
+
+    def test_impostor_only_returns_no_bridge_found(self):
+        """If the *only* name on the bus is a non-digit-suffix
+        impostor, the relay refuses entirely rather than routing
+        through it."""
+        impostor = _FakeBridge(next_reply={"ok": True, "via": "impostor"})
+        bus = _FakeBus(names=["org.qdistro.BrowserBridge.evil"])
+        bus.objects[("org.qdistro.BrowserBridge.evil",
+                     R.BRIDGE_OBJ_PATH)] = impostor
+        relay = _StubUserRelay(bus)
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}'))
+        assert reply["error"] == "no_bridge_found"
+        assert impostor.calls == []
+
+    def test_selector_with_both_ppid_and_any_rejected(self):
+        """Mixing `ppid` and `any` is rejected as bad_selector rather
+        than silently letting one win — the caller's intent is
+        ambiguous."""
+        relay, _ = self._relay(bridges={1234: _FakeBridge()})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 1234, "any": true}'))
+        assert reply["error"] == "bad_selector"
+        assert "both" in reply["detail"]
+
+    def test_ppid_must_be_int_not_string(self):
+        """A quoted JSON ppid is rejected rather than coerced —
+        callers should send a JSON int, and a quoted form usually
+        indicates a serialization bug worth surfacing."""
+        relay, _ = self._relay(bridges={1234: _FakeBridge()})
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": "1234"}'))
+        assert reply["error"] == "bad_selector"
+
+    def test_empty_args_json_becomes_braces(self):
+        """args_json="" is normalised to "{}" so the bridge always
+        receives JSON-parseable args. Same-uid callers that go direct
+        get whatever they send; the relay enforces the JSON invariant
+        on the cross-uid path."""
+        bridge = _FakeBridge(next_reply={"ok": True})
+        relay, _ = self._relay(bridges={4242: bridge})
+        relay.ForwardBrowserBridgeOp(
+            "qdistro.ping", "", '{"ppid": 4242}')
+        assert bridge.calls == [("qdistro.ping", "{}")]
+
+    def test_args_json_passes_through_verbatim(self):
+        """The relay does not parse or rewrite args_json — it's an
+        opaque pass-through so future bridge ops with unknown fields
+        keep working."""
+        bridge = _FakeBridge(next_reply={"ok": True})
+        relay, _ = self._relay(bridges={4242: bridge})
+        relay.ForwardBrowserBridgeOp(
+            "containers.create",
+            '{"name": "Banking", "color": "red", "icon": "dollar"}',
+            '{"ppid": 4242}')
+        assert bridge.calls == [
+            ("containers.create",
+             '{"name": "Banking", "color": "red", "icon": "dollar"}'),
+        ]
 
 
 # --- _friendly_name edge cases --------------------------------------------
