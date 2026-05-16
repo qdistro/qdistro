@@ -5,7 +5,7 @@ Subcommands:
 
 - ``containers --uid N``  Firefox containers for that user's browser
 - ``tabs --uid N``        open tabs in that user's browser
-- ``search <query> --uid N [--user U]``
+- ``search <query> --uid N [--silo S]``
                           FTS recall search, with each row annotated
                           by the matching live tab (if any) via
                           ``recall_admin.annotate_with_live_tabs``
@@ -20,7 +20,14 @@ system bus, which is restricted to root by the relay's
 ``com.qdistro.UserRelay.conf`` policy. It also reads recall DBs
 under ``/var/lib/qdistro/recall/`` which are root-owned. Therefore
 the CLI requires root; it fails closed otherwise so the failure mode
-isn't a confusing D-Bus AccessDenied.
+isn't a confusing D-Bus AccessDenied. There is no env-var escape
+hatch — tests monkey-patch :func:`_require_root` directly.
+
+Exit codes:
+  0  success
+  1  command/usage error or relay/bridge failure for read subcommands
+  2  search annotation failed (recall results still printed) OR
+     --silo filter matched zero silos OR FTS query malformed
 """
 from __future__ import annotations
 
@@ -82,19 +89,29 @@ def _require_root() -> None:
         sys.exit(1)
 
 
-def _walk_dbs(root: str, user: str | None) -> list[str]:
+def _validate_silo(silo: str) -> None:
+    """Reject silo names that would traverse outside <root>/<silo>/.
+    Silos are silo-name-shaped (alnum + `-_`), never paths.
+    """
+    if not silo or "/" in silo or ".." in silo or silo.startswith("."):
+        raise ValueError(f"bad silo name: {silo!r}")
+
+
+def _walk_dbs(root: str, silo: str | None) -> list[str]:
     out: list[str] = []
     if not os.path.isdir(root):
         return out
-    user_dirs = [user] if user else [
+    if silo is not None:
+        _validate_silo(silo)
+    silo_dirs = [silo] if silo else [
         d for d in sorted(os.listdir(root))
         if os.path.isdir(os.path.join(root, d))]
-    for u in user_dirs:
-        u_dir = os.path.join(root, u)
-        if not os.path.isdir(u_dir):
+    for s in silo_dirs:
+        s_dir = os.path.join(root, s)
+        if not os.path.isdir(s_dir):
             continue
-        for ym in sorted(os.listdir(u_dir)):
-            ym_dir = os.path.join(u_dir, ym)
+        for ym in sorted(os.listdir(s_dir)):
+            ym_dir = os.path.join(s_dir, ym)
             if not os.path.isdir(ym_dir):
                 continue
             for f in sorted(os.listdir(ym_dir)):
@@ -160,48 +177,87 @@ def cmd_search(args) -> int:
     eng = _load_engine()
     ra = _load_admin()
     root = _resolve_root(args.root)
-    paths = _walk_dbs(root, args.user)
+    try:
+        paths = _walk_dbs(root, args.silo)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     if not paths:
+        # Distinguish "operator typo on --silo" from "no recall yet".
+        if args.silo is not None:
+            print(f"error: silo {args.silo!r} has no recall DBs under "
+                  f"{root!r}", file=sys.stderr)
+            return 2
         print("(no recall DBs)", file=sys.stderr)
         return 0
     hits: list[dict] = []
+    fts_error: str | None = None
     for p in paths:
-        conn = eng.open_db(p)
         try:
-            for row in eng.search(conn, args.query,
-                                  user=args.user, limit=args.limit):
+            conn = eng.open_db(p)
+        except Exception as e:
+            print(f"warn: open {p}: {e}", file=sys.stderr)
+            continue
+        try:
+            try:
+                rows = eng.search(conn, args.query,
+                                  user=args.silo, limit=args.limit)
+            except Exception as e:
+                # FTS5 errors look the same across DBs — a malformed
+                # MATCH query fails everywhere. Surface it once and
+                # stop rather than spamming N warn lines.
+                if _is_fts_error(e):
+                    fts_error = str(e)
+                    break
+                print(f"warn: search {p}: {e}", file=sys.stderr)
+                continue
+            for row in rows:
                 row["_db"] = p
                 hits.append(row)
-        except Exception as e:
-            print(f"warn: {p}: {e}", file=sys.stderr)
         finally:
             conn.close()
+    if fts_error is not None:
+        print(f"error: malformed FTS query: {fts_error}",
+              file=sys.stderr)
+        return 2
     hits.sort(key=lambda r: r.get("ts", 0), reverse=True)
     hits = hits[:args.limit]
     annotated = ra.annotate_with_live_tabs(hits, args.uid)
     rows = annotated.get("rows", hits)
-    live_warning = None
-    if not annotated.get("ok"):
-        live_warning = (
-            f"warn: live-tab annotation unavailable "
-            f"({annotated.get('error')})")
+    live_ok = bool(annotated.get("ok"))
+    live_status = {
+        "ok": live_ok,
+        "error": annotated.get("error") if not live_ok else None,
+        "detail": annotated.get("detail") if not live_ok else None,
+    }
     if args.json:
-        out = {"rows": rows}
-        if live_warning:
-            out["live_warning"] = live_warning
+        out = {"ok": True, "rows": rows, "live": live_status}
         print(json.dumps(out, indent=2, default=str))
-        return 0
-    if live_warning:
-        print(live_warning, file=sys.stderr)
+        return 0 if live_ok else 2
+    if not live_ok:
+        print(f"warn: live-tab annotation unavailable "
+              f"({live_status['error']})", file=sys.stderr)
     for h in rows:
         ts = time.strftime("%Y-%m-%d %H:%M:%S",
                            time.gmtime(h.get("ts") or 0))
         head = (h.get("text") or "")[:60].replace("\n", " ")
+        url = h.get("url") or ""
         live = h.get("live_tab")
         live_marker = (f"  [live: w{live.get('window_id')} "
                        f"t{live.get('id')}]") if live else ""
-        print(f"{ts} [{h.get('source')}] {head}{live_marker}")
-    return 0
+        print(f"{ts} [{h.get('source')}] {url}  {head}{live_marker}")
+    return 0 if live_ok else 2
+
+
+def _is_fts_error(e: Exception) -> bool:
+    """Best-effort sniff for an FTS5-syntax-level failure. Matches the
+    sqlite3.OperationalError shapes we've actually seen
+    (`"fts5: syntax error..."` and `"malformed MATCH expression"`).
+    """
+    msg = str(e).lower()
+    return ("fts5" in msg
+            or "match expression" in msg
+            or "no such cursor" in msg)
 
 
 # ---- argparse + main ----------------------------------------------
@@ -234,10 +290,14 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="FTS recall search joined to the user's live tabs")
     p_s.add_argument("query")
     p_s.add_argument("--uid", type=int, required=True,
-                     help="target user uid (for live-tab join)")
-    p_s.add_argument("--user", default=None,
+                     help="target user uid (for live-tab join via "
+                          "the system-bus relay)")
+    p_s.add_argument("--silo", default=None,
                      help="filter recall results by silo name "
-                          "(default: all silos)")
+                          "(the recall DB layout key; default: all "
+                          "silos). Distinct from --uid because the "
+                          "relay keys on uid while recall DBs key on "
+                          "silo name.")
     p_s.add_argument("--limit", type=int, default=50)
     p_s.add_argument("--json", action="store_true")
     p_s.set_defaults(fn=cmd_search)
@@ -246,10 +306,9 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Tests inject argv directly and bypass the root check by
-    # monkey-patching _require_root or running as root.
-    if os.environ.get("QDISTRO_RECALL_ADMIN_SKIP_ROOT") != "1":
-        _require_root()
+    # No env-var escape hatch. Tests monkey-patch _require_root
+    # directly; production runs through it.
+    _require_root()
     args = _build_argparser().parse_args(argv)
     return args.fn(args)
 

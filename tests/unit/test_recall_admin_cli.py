@@ -5,8 +5,9 @@ the modules themselves have their own coverage. These tests pin the
 argparse dispatch, the human-readable output shape, the JSON output
 shape, the exit codes, and the recall-DB walking integration.
 
-We bypass the root check via the QDISTRO_RECALL_ADMIN_SKIP_ROOT=1
-env var; CI agents and these tests never run as root.
+The CLI requires root in production (no env-var escape hatch).
+Tests bypass via a monkey-patch of :func:`CLI._require_root` so a
+misconfigured environment can't silently disable the auth check.
 """
 from __future__ import annotations
 
@@ -22,10 +23,15 @@ import qdistro_recall_admin as RA
 import qdistro_browser_bridge_client as _client
 
 
-# Force-disable the root check for every test in this file.
+# Capture the real _require_root at import time so the TestRootCheck
+# cases can restore it even after the autouse fixture replaced it.
+_REAL_REQUIRE_ROOT = CLI._require_root
+
+
+# Bypass the root check via a direct monkey-patch — no env var.
 @pytest.fixture(autouse=True)
 def _no_root_check(monkeypatch):
-    monkeypatch.setenv("QDISTRO_RECALL_ADMIN_SKIP_ROOT", "1")
+    monkeypatch.setattr(CLI, "_require_root", lambda: None)
     _client.set_dbus_client(None)
     yield
     _client.set_dbus_client(None)
@@ -214,10 +220,31 @@ class TestSearchSubcommand:
         assert "[live: w1 t7]" in joined
         # b.example is non-matching → no live marker on its line.
         b_line = next(l for l in out.splitlines()
-                      if "https://b.example" in l or "foo extra context" in l)
+                      if "https://b.example" in l)
         assert "[live" not in b_line
 
-    def test_search_json_output(self, populated_recall_db, capsys):
+    def test_search_text_includes_url(self, populated_recall_db, capsys):
+        """U3 fix: search text output prints the URL — that's what an
+        admin grepping for 'is this URL open?' actually wants."""
+        _set_fake_relay({
+            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+             "ForwardBrowserBridgeOp"): json.dumps({
+                "ok": True, "tabs": [],
+            }),
+        })
+        CLI.main([
+            "--root", populated_recall_db,
+            "search", "foo", "--uid", "2000",
+        ])
+        out = capsys.readouterr().out
+        assert "https://a.example/article" in out
+        assert "https://b.example/other" in out
+
+    def test_search_json_output_structured_live_status(
+            self, populated_recall_db, capsys):
+        """C1 fix: search --json includes a top-level `live` object
+        with ok/error/detail so consumers can programmatically detect
+        relay failures."""
         _set_fake_relay({
             ("SYSTEM", "com.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
@@ -233,6 +260,9 @@ class TestSearchSubcommand:
         ])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["live"] == {"ok": True, "error": None,
+                                   "detail": None}
         rows = payload["rows"]
         # Two rows; one annotated, one not.
         live = [r for r in rows if r.get("live_tab")]
@@ -241,32 +271,48 @@ class TestSearchSubcommand:
         assert len(not_live) == 1
         assert live[0]["live_tab"]["id"] == 7
 
-    def test_search_relay_failure_falls_back_to_unannotated(
+    def test_search_relay_failure_returns_rc_2_with_structured_live(
             self, populated_recall_db, capsys):
-        """If the relay can't be reached we still want to see the
-        recall results — just without the live-tab join."""
+        """C2: relay failure is now an rc=2 — distinguishable from
+        rc=0 (full success). Recall results still print. JSON shape
+        carries live.ok=false + error code."""
         _set_fake_relay({
             ("SYSTEM", "com.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False, "error": "relay_call_failed",
+                "detail": "no relay for uid 2000",
             }),
         })
         rc = CLI.main([
             "--root", populated_recall_db,
             "search", "foo", "--uid", "2000",
         ])
-        # Search still succeeds — relay failure is a warning.
-        assert rc == 0
+        assert rc == 2
         captured = capsys.readouterr()
-        # Both rows show up; no live markers.
         assert "[live:" not in captured.out
         assert "live-tab annotation unavailable" in captured.err
+
+    def test_search_relay_failure_json_carries_error(
+            self, populated_recall_db, capsys):
+        _set_fake_relay({
+            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+             "ForwardBrowserBridgeOp"): json.dumps({
+                "ok": False, "error": "no_bridge_found",
+            }),
+        })
+        rc = CLI.main([
+            "--root", populated_recall_db,
+            "search", "foo", "--uid", "2000", "--json",
+        ])
+        assert rc == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True  # search itself succeeded
+        assert payload["live"]["ok"] is False
+        assert payload["live"]["error"] == "no_bridge_found"
 
     def test_search_no_dbs_yields_empty(self, tmp_path, capsys):
         """A root with no DBs is a clean no-op, not an error."""
         empty_root = str(tmp_path / "empty")
-        # The walker handles a non-existent root by returning [];
-        # an empty existing root returns the same. Cover both.
         os.makedirs(empty_root)
         rc = CLI.main([
             "--root", empty_root,
@@ -274,6 +320,58 @@ class TestSearchSubcommand:
         ])
         assert rc == 0
         assert "(no recall DBs)" in capsys.readouterr().err
+
+    def test_search_unknown_silo_returns_rc_2(self, tmp_path, capsys):
+        """C3 fix: --silo that matches zero silos is rc=2 so an
+        operator typo is distinguishable from 'no recall yet'."""
+        empty_root = str(tmp_path / "recall")
+        os.makedirs(empty_root)
+        rc = CLI.main([
+            "--root", empty_root,
+            "search", "foo", "--uid", "2000",
+            "--silo", "nonexistent-silo",
+        ])
+        assert rc == 2
+        assert "nonexistent-silo" in capsys.readouterr().err
+
+    def test_search_silo_with_traversal_rejected(
+            self, populated_recall_db, capsys):
+        """C4 fix: --silo with '/' or '..' is refused. Root-only
+        blast radius but still worth a guard."""
+        for bad in ("../../etc", "..", "foo/bar", ".hidden"):
+            rc = CLI.main([
+                "--root", populated_recall_db,
+                "search", "foo", "--uid", "2000", "--silo", bad,
+            ])
+            assert rc == 1, f"silo {bad!r} should have been rejected"
+
+    def test_search_malformed_fts_query_rc_2_single_error(
+            self, populated_recall_db, capsys, monkeypatch):
+        """S3 fix: a malformed FTS query produces ONE error line, not
+        N warn lines per DB, and exits rc=2."""
+        # Force the engine.search to raise an FTS-shaped error.
+        import qdistro_recall_ingest as eng
+
+        def _broken_search(conn, q, **_kw):
+            raise eng.sqlite3.OperationalError(
+                "fts5: syntax error near 'OR'")
+        monkeypatch.setattr(eng, "search", _broken_search)
+
+        _set_fake_relay({
+            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+             "ForwardBrowserBridgeOp"): json.dumps(
+                 {"ok": True, "tabs": []}),
+        })
+        rc = CLI.main([
+            "--root", populated_recall_db,
+            "search", "foo OR", "--uid", "2000",
+        ])
+        err = capsys.readouterr().err
+        assert rc == 2
+        # One "error: malformed FTS query" line, not multiple warn
+        # lines per DB.
+        assert err.count("malformed FTS query") == 1
+        assert "warn:" not in err
 
 
 # ---- argparse-level -------------------------------------------------
@@ -298,27 +396,112 @@ class TestArgparse:
 # ---- root check -----------------------------------------------------
 
 class TestRootCheck:
-    def test_skip_root_env_var_bypasses_check(self, capsys):
-        """The escape hatch tests rely on must actually work."""
+    def test_geteuid_nonzero_exits_with_message(
+            self, monkeypatch, capsys):
+        """Without root the CLI fails closed. No env-var escape hatch
+        — tests must monkey-patch _require_root directly (and the
+        autouse fixture does so for the rest of this file)."""
+        # Undo the autouse monkey-patch so the real _require_root runs.
+        monkeypatch.setattr(CLI, "_require_root", _REAL_REQUIRE_ROOT)
+        monkeypatch.setattr(CLI.os, "geteuid", lambda: 1000)
+        with pytest.raises(SystemExit) as ei:
+            CLI.main(["containers", "--uid", "2000"])
+        assert ei.value.code != 0
+        assert "must be run as root" in capsys.readouterr().err
+
+    def test_geteuid_zero_proceeds(self, monkeypatch):
+        """The geteuid==0 branch is the production path; make sure
+        it actually reaches the subcommand handler. (Most tests
+        bypass _require_root entirely, so this branch wouldn't
+        otherwise be exercised.)"""
+        # Run the *real* root check, but pretend we're root.
+        monkeypatch.setattr(CLI, "_require_root", _REAL_REQUIRE_ROOT)
+        monkeypatch.setattr(CLI.os, "geteuid", lambda: 0)
         _set_fake_relay({
             ("SYSTEM", "com.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "containers": [],
             }),
         })
-        # QDISTRO_RECALL_ADMIN_SKIP_ROOT=1 is already set by the
-        # autouse fixture; this asserts the bypass is effective.
         rc = CLI.main(["containers", "--uid", "2000"])
         assert rc == 0
 
-    def test_root_check_calls_geteuid_when_not_skipped(
-            self, monkeypatch, capsys):
-        """If the bypass env var is absent, _require_root() is called
-        and exits when geteuid() != 0."""
-        monkeypatch.delenv("QDISTRO_RECALL_ADMIN_SKIP_ROOT",
-                           raising=False)
+    def test_no_env_var_escape_hatch(self, monkeypatch, capsys):
+        """Setting QDISTRO_RECALL_ADMIN_SKIP_ROOT in the environment
+        must NOT bypass the check — the var was a security hole in
+        an earlier iteration and is gone now."""
+        monkeypatch.setattr(CLI, "_require_root", _REAL_REQUIRE_ROOT)
         monkeypatch.setattr(CLI.os, "geteuid", lambda: 1000)
+        monkeypatch.setenv("QDISTRO_RECALL_ADMIN_SKIP_ROOT", "1")
         with pytest.raises(SystemExit) as ei:
             CLI.main(["containers", "--uid", "2000"])
         assert ei.value.code != 0
-        assert "must be run as root" in capsys.readouterr().err
+
+
+class TestCallsRelayWithCorrectUid:
+    """Pin that --uid N actually drives a call to
+    com.qdistro.UserRelay.uidN — surprisingly absent from the
+    initial test set."""
+
+    def test_containers_routes_to_uid_specific_relay(self):
+        fake = _FakeDBus(replies={
+            ("SYSTEM", "com.qdistro.UserRelay.uid4242",
+             "ForwardBrowserBridgeOp"): json.dumps(
+                 {"ok": True, "containers": []}),
+        })
+        _client.set_dbus_client(fake)
+        CLI.main(["containers", "--uid", "4242"])
+        assert fake.calls[0]["service"] == "com.qdistro.UserRelay.uid4242"
+
+    def test_tabs_routes_to_uid_specific_relay(self):
+        fake = _FakeDBus(replies={
+            ("SYSTEM", "com.qdistro.UserRelay.uid7777",
+             "ForwardBrowserBridgeOp"): json.dumps(
+                 {"ok": True, "tabs": []}),
+        })
+        _client.set_dbus_client(fake)
+        CLI.main(["tabs", "--uid", "7777"])
+        assert fake.calls[0]["service"] == "com.qdistro.UserRelay.uid7777"
+
+
+class TestWalkDbsValidation:
+    """Cover _walk_dbs edge cases (review T1)."""
+
+    def test_missing_root_returns_empty(self):
+        assert CLI._walk_dbs("/nonexistent/path", None) == []
+
+    def test_traversal_silo_rejected_at_validator(self):
+        with pytest.raises(ValueError):
+            CLI._validate_silo("../etc")
+        with pytest.raises(ValueError):
+            CLI._validate_silo("foo/bar")
+        with pytest.raises(ValueError):
+            CLI._validate_silo(".hidden")
+        with pytest.raises(ValueError):
+            CLI._validate_silo("")
+        # Valid names pass.
+        CLI._validate_silo("work-user")
+        CLI._validate_silo("work_2")
+
+    def test_skips_non_dir_entries_at_silo_level(self, tmp_path):
+        root = tmp_path / "recall"
+        root.mkdir()
+        # A stray file at the silo level (not a directory) is skipped.
+        (root / "stray.txt").write_text("nope")
+        # A real silo with a valid DB.
+        import qdistro_recall_ingest as eng
+        db = eng.db_path_for(str(root), "work-user")
+        os.makedirs(os.path.dirname(db))
+        eng.open_db(db).close()
+        out = CLI._walk_dbs(str(root), None)
+        assert any(p.endswith(".db") for p in out)
+
+    def test_skips_non_db_files_in_ym_dir(self, tmp_path):
+        root = tmp_path / "recall"
+        ym = root / "work-user" / "2026-05"
+        ym.mkdir(parents=True)
+        (ym / "notes.txt").write_text("nope")
+        (ym / "2026-05-16.db").write_text("not a real db, walker doesn't open")
+        out = CLI._walk_dbs(str(root), None)
+        assert len(out) == 1
+        assert out[0].endswith("2026-05-16.db")
