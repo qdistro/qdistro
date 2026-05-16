@@ -180,7 +180,18 @@ stage_tier2_driver() {
 }
 
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
-    fail_loud "wp_security_context_v1 advertise + waypipe-tagged client unimplemented (driver s40-secctx.sh missing); see todo/qdwin-vm/dead-bats-entries.md"
+    stage_tier2_driver "s40-secctx.sh"
+    vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-secctx.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / wayland-info / user1 silo) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: wp_security_context_manager_v1 advertised by qdwin"
+    assert_output_contains "PASS: waypipe bound wp_security_context_manager_v1"
+    assert_output_contains "PASS: silo client tagged with secctx"
+    assert_output_contains "PASS: secctx app_id propagated via wrapper default"
+    assert_output_contains "PASS: §6.10 wp_security_context_v1 end-to-end"
 }
 
 @test "phase7-clipboard-gate: spec/10 cross-uid clipboard policy gate end-to-end" {
@@ -198,7 +209,20 @@ stage_tier2_driver() {
 }
 
 @test "phase7-secctx-toplevel-event: qdwin_shell_v1@v13 toplevel_security_context end-to-end" {
-    fail_loud "qdwin_shell_v1@v13 toplevel_security_context end-to-end unimplemented (driver s41-secctx-toplevel-event.sh missing); see todo/qdwin-vm/dead-bats-entries.md"
+    stage_tier2_driver "s41-secctx-toplevel-event.sh"
+    vm_run "curl -s -o /tmp/s41.sh http://10.0.2.2:8768/s41-secctx-toplevel-event.sh && chmod +x /tmp/s41.sh && bash /tmp/s41.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / weston-terminal / user1 silo / qdshell / qdwin source tree) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdwin_shell_v1 protocol XML at version "
+    assert_output_contains "PASS: qdshell up"
+    assert_output_contains "PASS: compositor emitted toplevel_security_context"
+    assert_output_contains "PASS: qdshell received toplevel_security_context"
+    assert_output_contains "PASS: qdshell derived silo=user1 from secctx app_id"
+    assert_output_contains "PASS: silo colour override applied via secctx path"
+    assert_output_contains "PASS: §Phase-7 v13 toplevel_security_context end-to-end"
 }
 
 @test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + spice display" {
