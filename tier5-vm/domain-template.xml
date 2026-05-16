@@ -9,10 +9,10 @@
                          base image). spawn-tier5.sh creates this fresh
                          per spawn; the base disk it references is
                          immutable (qcow2 backing-chain semantics).
-       __NIC_XML__       network configuration. Default empty (no NIC
+       NIC_XML marker    network configuration. Default empty (no NIC
                          — TIER5_NETWORK=none, mirrors podman's
-                         --network=none hardening). TIER5_NETWORK=user
-                         substitutes <interface type='user'> so the
+                         network=none hardening). TIER5_NETWORK=user
+                         substitutes a user-mode interface so the
                          guest can NAT out for debug.
      Notes:
        vsock model='virtio' with cid auto='no' address sets the

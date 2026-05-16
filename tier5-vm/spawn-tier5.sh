@@ -244,7 +244,7 @@ else
     # --- TIER5_NETWORK resolution (hardening default: no NIC) ---
     NETWORK="${TIER5_NETWORK:-none}"
     case "$NETWORK" in
-        none) NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default (hardening parity with tier-2's --network=none) -->" ;;
+        none) NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default (hardening parity with tier-2 network=none) -->" ;;
         user) NIC_XML="<interface type='user'><mac address='__MAC__'/><model type='virtio'/></interface>" ;;
         *)
             echo "[tier5] FAIL: TIER5_NETWORK='$NETWORK' invalid; expected 'none' or 'user'" >&2

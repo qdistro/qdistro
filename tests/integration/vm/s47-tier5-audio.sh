@@ -103,8 +103,15 @@ OVERLAY="/home/$ADMIN_USER/.local/share/libvirt/images/$VM_NAME.qcow2"
 SPAWN_LOG=/tmp/s47-spawn.log
 : >"$SPAWN_LOG"
 
+# The inner "app" only needs to be something that keeps the spawned
+# tier-5 guest VM alive long enough for the audio probe to run.
+# weston-terminal (the natural choice) exits immediately under the
+# guest's no-Wayland-session, which triggers spawn-tier5.sh's
+# teardown and destroys the VM before we can qga-exec speaker-test.
+# Pass `sleep 600` so the guest stays up; spawn-tier5.sh's EXIT trap
+# still cleans up when the driver's cleanup_vm() kills SPAWN_PID.
 bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
-    -- weston-terminal >"$SPAWN_LOG" 2>&1 &
+    -- /bin/sleep 600 >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
 cleanup_vm() {
