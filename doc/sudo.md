@@ -291,3 +291,39 @@ qsu is **one more caller** on the qbus-admin broker. It reuses:
 
 No new subsystem — qsu is a thin client on top of the broker stack.
 Think of it as `pkexec++` with a richer scope model and approval cache.
+
+## Test coverage
+
+The qsu surface is covered by three test layers:
+
+| Layer | Location | What it pins |
+|---|---|---|
+| Unit | `tests/unit/test_broker_argv.py`, `tests/unit/test_qsu_handler.py`, `tests/unit/test_admin_cache.py` | Scope→match_kind mapping, argv selectors in rules, `_USERNAME_RE`, cache lookup priority |
+| Integration (bats) | `tests/integration/vm/s57-qsu-argv-scopes.sh`, `s58-qsu-real-flow.sh` | D-Bus argv-scope round-trips for all four match_kind shapes; real qsu binary end-to-end one allow + one re-prompt |
+| Integration (GUI scenarios) | `tests/integration/permissions-gui/43-…` through `54-…` | Admin-UX + audit + security invariants — the surface humans actually touch |
+
+The GUI scenarios (43-54) specifically pin behavior the bats tests
+cannot see — admin clicks the argv-aware Forever radios, the audit
+`ListHistory` argv field carries a lossless `as` array, the TUI
+shows `Argv:` on its own line, and the security-critical guards
+(delegated-scope rejection, target_user in action key, username
+validation, in-flight cap, env sanitization) fail closed against
+realistic abuse.
+
+## What's implemented vs planned
+
+| Area | Status |
+|---|---|
+| qsu client, qdistro-root-exec service, broker action `qsu.exec:<target>` | LIVE (validated by s57 + s58 + 43-54) |
+| Argv-aware approval scopes (`forever_argv` / `forever_basename` / `forever_prefix`) | LIVE on delegated path; admin app + TUI radios wired |
+| Delegated guard rejecting `1h` / `24h` / `forever` / `forever_exe` on qsu | LIVE (`_DELEGATED_FORBIDDEN_SCOPES` in broker) |
+| Per-uid in-flight cap (MAX_INFLIGHT_PER_UID=4) | LIVE |
+| Username validation (`_USERNAME_RE`) | LIVE |
+| Env sanitization (PATH reset, LD_* / PYTHONPATH stripped) | LIVE |
+| Audit `caller_exe` + lossless argv via `ListHistory` | LIVE; `caller_exe` resolves to `/usr/bin/python3.X` because qsu wrapper exec's into python — see todo `qsu-wrapper-loses-name` |
+| pty forwarding (interactive `qsu vim`, `qsu bash`) | PLANNED (qsu v1 is non-pty; spec/21 follow-up) |
+| stdin forwarding | PLANNED (v1 uses `/dev/null`) |
+| `--keep-env VAR` policy-gated env passthrough | PLANNED |
+| Sudo compat wrapper (`/usr/bin/sudo` → `qsu`) | PLANNED (Phase-2 per qsu.py docstring) |
+| Phone approval routing for qsu prompts | PLANNED |
+| Polkit action namespace (`com.qdistro.sudo.exec`) | PARTIAL — the broker uses `qsu.exec:<target>` natively; polkit-action shim is not wired |
