@@ -12,15 +12,19 @@ import sys
 import dbus
 import dbus.mainloop.glib
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QHBoxLayout, QHeaderView, QLabel, QListView,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSplitter,
-    QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QDialog, QDialogButtonBox, QFormLayout,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
+    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox,
+    QSplitter, QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
 )
 
 BUS_NAME = "com.qdistro.AdminBroker1"
 OBJ_PATH = "/com/qdistro/AdminBroker1"
+
+SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
+SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
 
 
 class BrokerBridge(QObject):
@@ -299,6 +303,255 @@ class CacheTab(QWidget):
         self.refresh()
 
 
+class SessionManagerBridge(QObject):
+    """Thin proxy around com.qdistro.SessionManager1 on the system bus.
+
+    Signal `siloChanged(name, state)` re-emits the daemon's SiloChanged
+    signal onto the Qt main-thread. The Silos tab refreshes on every
+    emit (cheap: ListSilos is read-only and runs in-process in the
+    manager).
+    """
+
+    siloChanged = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        # DBusGMainLoop is already set up by BrokerBridge in main();
+        # constructing a SystemBus here just hooks onto it.
+        self.bus = dbus.SystemBus()
+        self._proxy = self.bus.get_object(
+            SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH)
+        self.bus.add_signal_receiver(
+            self._on_changed, signal_name="SiloChanged",
+            dbus_interface=SESSION_MANAGER_BUS_NAME,
+        )
+
+    def _on_changed(self, name, state):
+        self.siloChanged.emit(str(name), str(state))
+
+    def _reconnect(self) -> None:
+        self._proxy = self.bus.get_object(
+            SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH)
+
+    def _call(self, name, *args):
+        method = getattr(self._proxy, name)
+        try:
+            return method(*args, dbus_interface=SESSION_MANAGER_BUS_NAME)
+        except dbus.DBusException:
+            self._reconnect()
+            method = getattr(self._proxy, name)
+            return method(*args, dbus_interface=SESSION_MANAGER_BUS_NAME)
+
+    def list_silos(self) -> list[dict]:
+        import json
+        raw = self._call("ListSilos")
+        return json.loads(str(raw))
+
+    def create(self, name: str, uid: int) -> None:
+        self._call("CreateSilo", str(name), int(uid))
+
+    def delete(self, name: str) -> None:
+        self._call("DeleteSilo", str(name))
+
+    def start(self, name: str) -> None:
+        self._call("StartSilo", str(name))
+
+    def stop(self, name: str, grace_s: int = 5) -> None:
+        self._call("StopSilo", str(name), int(grace_s))
+
+    def freeze(self, name: str) -> None:
+        self._call("FreezeSilo", str(name))
+
+    def resume(self, name: str) -> None:
+        self._call("ResumeSilo", str(name))
+
+
+class NewSiloDialog(QDialog):
+    """+ New silo dialog. Default uid suggestion = max(2000, max_uid+1)."""
+
+    def __init__(self, suggested_uid: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New silo")
+        form = QFormLayout(self)
+        self.name_edit = QLineEdit(self); self.name_edit.setObjectName("silo_name_edit")
+        self.uid_spin = QSpinBox(self); self.uid_spin.setObjectName("silo_uid_spin")
+        self.uid_spin.setRange(2000, 60000)
+        self.uid_spin.setValue(int(suggested_uid))
+        form.addRow("Name:", self.name_edit)
+        form.addRow("UID:", self.uid_spin)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+
+class SilosTab(QWidget):
+    """Tab listing silos with state badges + lifecycle action buttons.
+
+    Refreshes on SiloChanged or after a successful action. Refuses to
+    construct without a SessionManagerBridge — the tab is gated at
+    MainWindow startup based on whether the system bus has the
+    SessionManager1 well-known name.
+    """
+
+    COLUMNS = ("name", "uid", "state", "autostart")
+    STATE_COLOURS = {
+        "Created":  QColor("#a0a0a0"),
+        "Active":   QColor("#7bc97b"),
+        "Frozen":   QColor("#e6c95a"),
+        "Stopping": QColor("#e69a5a"),
+        "Stopped":  QColor("#d56b6b"),
+        "Deleting": QColor("#666666"),
+    }
+
+    def __init__(self, session: SessionManagerBridge):
+        super().__init__()
+        self.session = session
+
+        self.table = QTableView(self); self.table.setObjectName("silos_table")
+        self.table.setSelectionBehavior(
+            QTableView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QTableView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.model = QStandardItemModel(self)
+        self.model.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.setModel(self.model)
+
+        btns = QHBoxLayout()
+        self.btn_new = QPushButton("+ New silo"); self.btn_new.setObjectName("btn_new_silo")
+        self.btn_start = QPushButton("Start"); self.btn_start.setObjectName("btn_start_silo")
+        self.btn_stop = QPushButton("Stop"); self.btn_stop.setObjectName("btn_stop_silo")
+        self.btn_freeze = QPushButton("Freeze"); self.btn_freeze.setObjectName("btn_freeze_silo")
+        self.btn_resume = QPushButton("Resume"); self.btn_resume.setObjectName("btn_resume_silo")
+        self.btn_delete = QPushButton("Delete"); self.btn_delete.setObjectName("btn_delete_silo")
+        self.btn_refresh = QPushButton("Refresh"); self.btn_refresh.setObjectName("btn_refresh_silos")
+        for b in (self.btn_new, self.btn_start, self.btn_stop, self.btn_freeze,
+                  self.btn_resume, self.btn_delete, self.btn_refresh):
+            btns.addWidget(b)
+        btns.addStretch()
+
+        self.btn_new.clicked.connect(self._on_new)
+        self.btn_start.clicked.connect(lambda: self._do("start"))
+        self.btn_stop.clicked.connect(lambda: self._do("stop"))
+        self.btn_freeze.clicked.connect(lambda: self._do("freeze"))
+        self.btn_resume.clicked.connect(lambda: self._do("resume"))
+        self.btn_delete.clicked.connect(self._on_delete)
+        self.btn_refresh.clicked.connect(self.refresh)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.table)
+        lay.addLayout(btns)
+
+        # Coalesce SiloChanged bursts into one refresh per ~200ms.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(200)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self.session.siloChanged.connect(
+            lambda _n, _s: self._refresh_timer.start())
+
+    def refresh(self) -> None:
+        try:
+            rows = self.session.list_silos()
+        except dbus.DBusException as e:
+            QMessageBox.warning(self, "Session manager unavailable",
+                                f"Couldn't list silos:\n\n{e}")
+            return
+        self.model.removeRows(0, self.model.rowCount())
+        for r in rows:
+            items = [
+                QStandardItem(str(r.get("name", ""))),
+                QStandardItem(str(r.get("uid", ""))),
+                QStandardItem(str(r.get("state", ""))),
+                QStandardItem("yes" if r.get("autostart") else "no"),
+            ]
+            colour = self.STATE_COLOURS.get(str(r.get("state", "")))
+            if colour is not None:
+                items[2].setForeground(colour)
+            for it in items:
+                it.setEditable(False)
+            items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
+            self.model.appendRow(items)
+        self.table.resizeColumnsToContents()
+
+    def _selected_row(self) -> dict | None:
+        idx = self.table.currentIndex()
+        if not idx.isValid():
+            return None
+        item = self.model.item(idx.row(), 0)
+        return item.data(Qt.ItemDataRole.UserRole + 1)
+
+    def _suggest_next_uid(self) -> int:
+        try:
+            rows = self.session.list_silos()
+        except dbus.DBusException:
+            return 2000
+        if not rows:
+            return 2000
+        return max(2000, max(int(r.get("uid", 1999)) for r in rows) + 1)
+
+    def _on_new(self) -> None:
+        dlg = NewSiloDialog(self._suggest_next_uid(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dlg.name_edit.text().strip()
+        uid = int(dlg.uid_spin.value())
+        if not name:
+            QMessageBox.warning(self, "Invalid name", "Silo name required.")
+            return
+        try:
+            self.session.create(name, uid)
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Create failed", str(e))
+            return
+        self.refresh()
+
+    def _do(self, action: str) -> None:
+        row = self._selected_row()
+        if row is None:
+            return
+        name = str(row.get("name", ""))
+        try:
+            if action == "start":
+                self.session.start(name)
+            elif action == "stop":
+                self.session.stop(name, 5)
+            elif action == "freeze":
+                self.session.freeze(name)
+            elif action == "resume":
+                self.session.resume(name)
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, f"{action.capitalize()} failed",
+                                 str(e))
+            return
+        self.refresh()
+
+    def _on_delete(self) -> None:
+        row = self._selected_row()
+        if row is None:
+            return
+        name = str(row.get("name", ""))
+        # Destructive: explicit confirm.
+        confirm = QMessageBox.question(
+            self, "Delete silo",
+            f"Delete silo {name!r}? This removes the Linux user, "
+            f"the per-silo state directory, and the home subvolume.")
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.session.delete(name)
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Delete failed", str(e))
+            return
+        self.refresh()
+
+
 def _fmt_epoch(ts: int) -> str:
     """Short human-ish expiry rendering. Mirrors the CLI's _fmt_expiry
     but is kept local to avoid a cross-module import — the CLI has
@@ -315,9 +568,11 @@ def _fmt_epoch(ts: int) -> str:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, broker: BrokerBridge):
+    def __init__(self, broker: BrokerBridge,
+                 session: SessionManagerBridge | None = None):
         super().__init__()
         self.broker = broker
+        self.session = session
         self.setWindowTitle("admin approvals")
         self.resize(900, 600)
 
@@ -339,10 +594,17 @@ class MainWindow(QMainWindow):
         # Cache pane — second tab.
         self.cache_tab = CacheTab(broker)
 
+        # Silos pane — third tab, only when the session manager is up.
+        self.silos_tab: SilosTab | None = None
+        if self.session is not None:
+            self.silos_tab = SilosTab(self.session)
+
         # Tab container. Pending first so it's the default on launch.
         self.tabs = QTabWidget(self); self.tabs.setObjectName("main_tabs")
         self.tabs.addTab(pending, "Pending")
         self.tabs.addTab(self.cache_tab, "Cache")
+        if self.silos_tab is not None:
+            self.tabs.addTab(self.silos_tab, "Silos")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
 
@@ -450,17 +712,40 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _on_tab_changed(self, index: int) -> None:
-        # Refresh the Cache tab lazily so it's fresh when the admin
-        # navigates to it; skipping when it's hidden keeps Pending-tab
-        # interaction snappy.
+        # Refresh the Cache / Silos tabs lazily so they're fresh when
+        # the admin navigates to them; skipping when they're hidden
+        # keeps Pending-tab interaction snappy.
         if self.tabs.widget(index) is self.cache_tab:
             self.cache_tab.refresh()
+        elif self.silos_tab is not None and self.tabs.widget(index) is self.silos_tab:
+            self.silos_tab.refresh()
+
+
+def _maybe_session_bridge() -> SessionManagerBridge | None:
+    """Construct a SessionManagerBridge if the daemon is reachable.
+
+    On hosts without qdistro-session-manager (legacy bake, dev test
+    machines), the Silos tab is simply not shown; the broker and
+    Cache tabs keep working as before.
+    """
+    try:
+        bus = dbus.SystemBus()
+        bus.get_object(SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH)
+        # Touching get_object alone doesn't activate; do a tiny call.
+        bridge = SessionManagerBridge()
+        bridge.list_silos()
+        return bridge
+    except Exception as e:  # noqa: BLE001
+        print(f"[admin_app] session manager unavailable: {e!r}",
+              file=sys.stderr)
+        return None
 
 
 def main():
     app = QApplication(sys.argv)
     broker = BrokerBridge()
-    win = MainWindow(broker)
+    session = _maybe_session_bridge()
+    win = MainWindow(broker, session=session)
     win.show()
     sys.exit(app.exec())
 

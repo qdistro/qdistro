@@ -1,0 +1,27 @@
+[Unit]
+Description=qdistro session manager (user-silo lifecycle)
+After=dbus.service qdistro-dbus-reload.service
+Requires=dbus.service
+# Mirrors qdistro-admin-broker: a Wants= on the dbus-reload oneshot
+# so a fresh image with the policy file installed has the new bus
+# name ownable on first boot. Wants= (not Requires=) so a missing
+# reload unit on legacy images doesn't block the manager.
+Wants=qdistro-dbus-reload.service
+
+[Service]
+Type=dbus
+BusName=com.qdistro.SessionManager1
+ExecStart=/usr/libexec/qdistro/qdistro_session_manager.py
+Restart=on-failure
+RestartSec=2
+User=root
+# The manager runs as root because it calls useradd / userdel and
+# writes /sys/fs/cgroup/qdistro-silos. No capability drops yet —
+# CAP_SYS_ADMIN is needed for cgroup creation and CAP_AUDIT_WRITE
+# is needed for useradd to log to audit; tightening this is a
+# follow-up task once the cgroup ops are stable.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

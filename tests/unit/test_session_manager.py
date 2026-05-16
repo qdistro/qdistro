@@ -1,0 +1,395 @@
+"""Unit tests for the session-manager state machine and silo store.
+
+The store is exercised against a `_FakeOps` adapter that records
+useradd/userdel/cgroup calls and pretends success. The pure state
+machine + persistence file are real; no dbus or root needed.
+
+Mirrors the `_StubBroker` pattern in test_broker_sendto.py — the
+production class is run as-is, only the side-effecting boundary is
+swapped.
+"""
+from __future__ import annotations
+
+import signal
+import time
+from pathlib import Path
+
+import pytest
+
+import qdistro_session_manager as sm
+from qdistro_session_manager import (
+    BadArgument, BadState, Silo, SiloBusy, SiloExists, State, UnknownSilo,
+    _SiloStore, _STATE_TRANSITIONS, validate_name, validate_uid,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fake side-effect adapter
+# ---------------------------------------------------------------------------
+
+class _FakeOps:
+    def __init__(self):
+        self.users: dict[str, int] = {}        # name → uid
+        self.state_dirs: dict[str, tuple[int, int, int]] = {}  # name → (uid, gid, mode)
+        self.cgroups: set[str] = set()
+        self.cgroup_pids_map: dict[str, list[int]] = {}
+        self.cgroup_frozen: dict[str, bool] = {}
+        self.systemctl_calls: list[tuple[str, str]] = []
+        self.killed: list[tuple[int, int]] = []
+        self.useradd_should_fail = False
+        self.userdel_should_fail = False
+        # When True, kill_pids drains cgroup_pids_map for that cgroup
+        # (simulates the launcher exiting after SIGTERM). Tests that
+        # exercise the SIGKILL fallback set this False.
+        self.kill_drains = True
+
+    # ---- queries ----------------------------------------------------------
+
+    def user_exists(self, name: str) -> bool:
+        return name in self.users
+
+    def uid_exists(self, uid: int) -> bool:
+        return int(uid) in self.users.values()
+
+    # ---- mutations --------------------------------------------------------
+
+    def useradd(self, name: str, uid: int) -> None:
+        if self.useradd_should_fail:
+            import subprocess
+            raise subprocess.CalledProcessError(1, ["useradd", name])
+        self.users[name] = int(uid)
+
+    def userdel(self, name: str) -> None:
+        if self.userdel_should_fail:
+            import subprocess
+            raise subprocess.CalledProcessError(1, ["userdel", name])
+        self.users.pop(name, None)
+
+    def make_state_dir(self, name: str, uid: int):
+        self.state_dirs[name] = (int(uid), int(uid), 0o700)
+        return Path("/var/lib/qdistro/silos") / name
+
+    def remove_state_dir(self, name: str) -> None:
+        self.state_dirs.pop(name, None)
+
+    def cgroup_create(self, name: str):
+        self.cgroups.add(name)
+        self.cgroup_pids_map.setdefault(name, [])
+        return Path("/sys/fs/cgroup/qdistro-silos") / name
+
+    def cgroup_remove(self, name: str) -> None:
+        self.cgroups.discard(name)
+        self.cgroup_pids_map.pop(name, None)
+        self.cgroup_frozen.pop(name, None)
+
+    def cgroup_freeze(self, name: str, frozen: bool) -> None:
+        self.cgroup_frozen[name] = bool(frozen)
+
+    def cgroup_pids(self, name: str) -> list[int]:
+        return list(self.cgroup_pids_map.get(name, []))
+
+    def cgroup_is_populated(self, name: str) -> bool:
+        return bool(self.cgroup_pids_map.get(name))
+
+    def systemctl_start(self, unit: str) -> None:
+        self.systemctl_calls.append(("start", unit))
+        # Pretend the launcher spawned a PID inside the cgroup. The
+        # test sets cgroup_pids_map[name] later if it cares.
+        for name in list(self.cgroups):
+            if unit.startswith(f"qdshell-session-{name}@"):
+                self.cgroup_pids_map.setdefault(name, []).append(99000)
+
+    def systemctl_stop(self, unit: str) -> None:
+        self.systemctl_calls.append(("stop", unit))
+
+    def kill_pids(self, pids, sig: int) -> None:
+        for pid in pids:
+            self.killed.append((int(pid), int(sig)))
+        if self.kill_drains:
+            for name in list(self.cgroup_pids_map.keys()):
+                self.cgroup_pids_map[name] = []
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ops() -> _FakeOps:
+    return _FakeOps()
+
+
+@pytest.fixture
+def store(ops: _FakeOps, tmp_path: Path) -> _SiloStore:
+    return _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+
+
+@pytest.fixture
+def signals():
+    return []
+
+
+@pytest.fixture
+def store_with_signals(ops: _FakeOps, tmp_path: Path, signals):
+    return _SiloStore(
+        ops, config_path=tmp_path / "silos.yaml",
+        on_change=lambda n, s: signals.append((n, s)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+class TestValidation:
+    def test_valid_name(self):
+        assert validate_name("work") == "work"
+
+    @pytest.mark.parametrize("bad", [
+        "Work", "1work", "work!", "work space", "",
+        "x" * 33, "admin", "root", "qdistro",
+    ])
+    def test_invalid_name(self, bad):
+        with pytest.raises(BadArgument):
+            validate_name(bad)
+
+    def test_uid_in_range(self):
+        assert validate_uid(2000) == 2000
+        assert validate_uid(60000) == 60000
+
+    @pytest.mark.parametrize("bad", [0, 100, 1999, 60001, -1, "x"])
+    def test_uid_out_of_range(self, bad):
+        with pytest.raises(BadArgument):
+            validate_uid(bad)
+
+
+# ---------------------------------------------------------------------------
+# Create / delete
+# ---------------------------------------------------------------------------
+
+class TestCreate:
+    def test_create_writes_state_dir_and_user(self, store, ops):
+        silo = store.create("work", 2000)
+        assert silo.name == "work"
+        assert silo.uid == 2000
+        assert silo.state == State.CREATED
+        assert ops.users == {"work": 2000}
+        assert ops.state_dirs["work"] == (2000, 2000, 0o700)
+
+    def test_create_emits_signal(self, store_with_signals, signals):
+        store_with_signals.create("work", 2000)
+        assert ("work", State.CREATED) in signals
+
+    def test_create_duplicate_name(self, store):
+        store.create("work", 2000)
+        with pytest.raises(SiloExists):
+            store.create("work", 2001)
+
+    def test_create_duplicate_uid(self, store):
+        store.create("work", 2000)
+        with pytest.raises(SiloExists):
+            store.create("other", 2000)
+
+    def test_create_system_user_exists(self, store, ops):
+        ops.users["work"] = 999
+        with pytest.raises(SiloExists):
+            store.create("work", 2000)
+
+    def test_create_persists_to_yaml(self, store, tmp_path):
+        store.create("work", 2000)
+        text = (tmp_path / "silos.yaml").read_text()
+        assert "name: work" in text
+        assert "uid: 2000" in text
+        assert "state: Created" in text
+
+
+class TestDelete:
+    def test_delete_refuses_active(self, store):
+        store.create("work", 2000)
+        store.start("work")
+        with pytest.raises(SiloBusy):
+            store.delete("work")
+
+    def test_delete_refuses_frozen(self, store):
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        with pytest.raises(SiloBusy):
+            store.delete("work")
+
+    def test_delete_after_stop(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        store.stop("work")
+        store.delete("work")
+        assert "work" not in ops.users
+        assert "work" not in ops.state_dirs
+        with pytest.raises(UnknownSilo):
+            store.get("work")
+
+    def test_delete_from_created_state(self, store, ops):
+        store.create("work", 2000)
+        store.delete("work")
+        assert "work" not in ops.users
+
+    def test_delete_unknown(self, store):
+        with pytest.raises(UnknownSilo):
+            store.delete("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# Start / stop / freeze / resume
+# ---------------------------------------------------------------------------
+
+class TestLifecycle:
+    def test_start_creates_cgroup_and_unit(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        assert "work" in ops.cgroups
+        assert any(call == ("start", "qdshell-session-work@2000.service")
+                   for call in ops.systemctl_calls)
+        assert store.get("work").state == State.ACTIVE
+
+    def test_start_is_idempotent(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        store.start("work")  # no-op, no second systemctl call
+        starts = [c for c in ops.systemctl_calls if c[0] == "start"]
+        assert len(starts) == 1
+
+    def test_freeze_then_resume(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        assert store.get("work").state == State.FROZEN
+        assert ops.cgroup_frozen["work"] is True
+        store.resume("work")
+        assert store.get("work").state == State.ACTIVE
+        assert ops.cgroup_frozen["work"] is False
+
+    def test_freeze_idempotent(self, store):
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        store.freeze("work")  # no-op
+        assert store.get("work").state == State.FROZEN
+
+    def test_resume_from_active_is_idempotent(self, store):
+        store.create("work", 2000)
+        store.start("work")
+        store.resume("work")
+        assert store.get("work").state == State.ACTIVE
+
+    def test_resume_from_stopped_rejected(self, store):
+        store.create("work", 2000)
+        store.start("work")
+        store.stop("work")
+        with pytest.raises(BadState):
+            store.resume("work")
+
+    def test_stop_sends_sigterm(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        # systemctl_start put PID 99000 in the cgroup.
+        store.stop("work", grace_s=0)
+        sigterms = [k for k in ops.killed if k[1] == signal.SIGTERM]
+        assert sigterms, "expected at least one SIGTERM"
+        assert store.get("work").state == State.STOPPED
+
+    def test_stop_sigkill_after_grace(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        # Pretend the process refuses to exit on SIGTERM.
+        ops.kill_drains = False
+        store.stop("work", grace_s=0)
+        sigkills = [k for k in ops.killed if k[1] == signal.SIGKILL]
+        assert sigkills, "expected at least one SIGKILL after grace"
+
+    def test_stop_unfreezes_first(self, store, ops):
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        store.stop("work", grace_s=0)
+        assert ops.cgroup_frozen.get("work", False) is False
+        assert store.get("work").state == State.STOPPED
+
+
+# ---------------------------------------------------------------------------
+# State-machine table
+# ---------------------------------------------------------------------------
+
+class TestStateMachine:
+    def test_illegal_freeze_from_created(self, store):
+        store.create("work", 2000)
+        with pytest.raises(BadState):
+            store.freeze("work")
+
+    def test_illegal_stop_from_created(self, store):
+        store.create("work", 2000)
+        with pytest.raises(BadState):
+            store.stop("work")
+
+    def test_transitions_table_pinned(self):
+        # Pin the table so an accidental relaxation surfaces as a
+        # test failure. If the design changes, update this assertion.
+        assert _STATE_TRANSITIONS[State.CREATED] == frozenset(
+            (State.ACTIVE, State.DELETING))
+        assert _STATE_TRANSITIONS[State.ACTIVE] == frozenset(
+            (State.FROZEN, State.STOPPING, State.STOPPED))
+        assert _STATE_TRANSITIONS[State.FROZEN] == frozenset(
+            (State.ACTIVE, State.STOPPING, State.STOPPED))
+        assert _STATE_TRANSITIONS[State.STOPPING] == frozenset(
+            (State.STOPPED,))
+        assert _STATE_TRANSITIONS[State.STOPPED] == frozenset(
+            (State.ACTIVE, State.DELETING))
+
+
+# ---------------------------------------------------------------------------
+# Persistence + autostart
+# ---------------------------------------------------------------------------
+
+class TestPersistence:
+    def test_yaml_round_trip(self, ops, tmp_path):
+        s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        s1.create("work", 2000)
+        s1.start("work")
+        # New store on the same path picks up the saved file.
+        s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        loaded = s2.get("work")
+        assert loaded.uid == 2000
+        assert loaded.state == State.ACTIVE
+
+    def test_yaml_has_schema_comment(self, store, tmp_path):
+        store.create("work", 2000)
+        text = (tmp_path / "silos.yaml").read_text()
+        assert "qdistro-session-manager persistence file" in text
+        assert "Schema:" in text
+        assert "autostart:" in text
+
+    def test_autostart_pass_starts_marked_silos(self, ops, tmp_path):
+        s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        s1.create("work", 2000, autostart=True)
+        s1.create("scratch", 2001, autostart=False)
+        # Simulate reboot: drop the in-memory state, reload from disk.
+        ops.cgroups.clear()
+        ops.cgroup_pids_map.clear()
+        ops.systemctl_calls.clear()
+        s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        started = s2.autostart_pass()
+        assert "work" in started
+        assert "scratch" not in started
+        assert s2.get("work").state == State.ACTIVE
+        # scratch was never started, autostart=False → stays Created.
+        assert s2.get("scratch").state == State.CREATED
+
+    def test_active_silo_restarts_across_reboot(self, ops, tmp_path):
+        s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        s1.create("work", 2000)
+        s1.start("work")  # Active gets persisted
+        # Reboot: cgroups gone, but the state file still says Active.
+        ops.cgroups.clear()
+        ops.cgroup_pids_map.clear()
+        ops.systemctl_calls.clear()
+        s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        started = s2.autostart_pass()
+        assert "work" in started

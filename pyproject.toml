@@ -23,4 +23,12 @@ pythonpath = [
   "snapshots",
   "sdk",
   "admin_app",
+  "session_manager",
 ]
+
+# Linter config — house style across qdistro favours stacking trivial
+# Qt setup statements with semicolons (admin_app/qdistro_admin_app.py
+# is the reference); E702 is therefore explicitly off. Anything else
+# the default ruff rule set flags is a real bug — leave the defaults.
+[tool.ruff.lint]
+ignore = ["E702"]

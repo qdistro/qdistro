@@ -113,6 +113,15 @@ USER_RELAY_IFACE = "com.qdistro.UserRelay"
 # own session bus for actual receiver lookup and delivery.
 USER_RELAY_SYSTEM_NAME_FMT = "com.qdistro.UserRelay.uid{uid}"
 
+# P02 session-manager gate. The broker asks the manager for the
+# target silo's state before letting a cross-uid relay proceed.
+# A missing/unknown manager means "no silo registry yet" → fall back
+# to the pre-P02 behaviour of trusting the target uid; an explicit
+# "not Active" answer is the load-bearing reject path.
+SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
+SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
+SESSION_MANAGER_IFACE = "com.qdistro.SessionManager1"
+
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
 # the user relay.
@@ -1075,6 +1084,15 @@ class Broker(dbus.service.Object):
                     f"target_service {target_service_s!r} does not match "
                     f"expected com.qdistro.* shape",
                     name=BUS_NAME + ".BadArgument")
+            # P02: refuse cross-uid relay when the session manager
+            # says the target silo isn't Active. Unknown uid (manager
+            # offline or no row) falls through to the legacy trust path.
+            silo_state = self._silo_state(target_uid_i)
+            if silo_state is not None and silo_state != "Active":
+                raise dbus.DBusException(
+                    f"target silo for uid {target_uid_i} is "
+                    f"{silo_state!r}, not Active",
+                    name=BUS_NAME + ".SiloNotActive")
             action_s = f"app.send-to:{target_uid_i}:{target_service_s}"
             details = {
                 "kind": kind_s,
@@ -1138,6 +1156,43 @@ class Broker(dbus.service.Object):
                 dispatch = None
         if dispatch is not None:
             dispatch()
+
+    def _silo_state(self, target_uid: int) -> str | None:
+        """Ask the session manager for the silo state of `target_uid`.
+
+        Returns the state string ('Created'/'Active'/'Frozen'/...) when
+        the manager has a row, None when the manager is unreachable or
+        knows no silo for that uid. ADMIN_UID short-circuits to
+        'Active' — admin never appears in silos.yaml.
+
+        Called by RelayMessage; overridable by the broker test stub.
+        """
+        if int(target_uid) == ADMIN_UID:
+            return "Active"
+        try:
+            import json as _json
+            system_bus = dbus.SystemBus()
+            mgr = system_bus.get_object(SESSION_MANAGER_BUS_NAME,
+                                        SESSION_MANAGER_OBJ_PATH)
+            raw = mgr.ListSilos(dbus_interface=SESSION_MANAGER_IFACE,
+                                timeout=2.0)
+            for row in _json.loads(str(raw)):
+                if int(row.get("uid", -1)) == int(target_uid):
+                    return str(row.get("state", ""))
+            return None
+        except dbus.DBusException as e:
+            name = e.get_dbus_name() or ""
+            if name.endswith(".ServiceUnknown") or name.endswith(".NameHasNoOwner"):
+                # Session manager not running yet (legacy bake) — fall
+                # back to pre-P02 trust-the-uid behaviour.
+                return None
+            print(f"[broker] _silo_state({target_uid}) error: {e!r}",
+                  flush=True)
+            return None
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] _silo_state({target_uid}) error: {e!r}",
+                  flush=True)
+            return None
 
     def _relay_forward(self, target_uid: int, target_service: str,
                        kind: str, payload: str) -> None:

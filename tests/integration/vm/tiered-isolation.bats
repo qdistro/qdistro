@@ -668,3 +668,30 @@ stage_vm_driver() {
     assert_output_contains "PASS: entry carries silo tier2/tier2-c-discovery"
     assert_output_contains "PASS: §Phase-7 tier-2 podapps discovery end-to-end"
 }
+
+# --- P02 session-manager lifecycle (s101) --------------------------------
+# Drives the qdistro-session-manager daemon through every transition
+# documented in plan2/tasks/P02-session-manager.md (Create → Start →
+# Freeze → Resume → Stop → Delete) and pins each PASS line so a
+# regression in the daemon or its dbus surface fails the test.
+# Skips on VMs that don't have the session-manager bake yet.
+
+@test "session-lifecycle: P02 com.qdistro.SessionManager1 end-to-end" {
+    stage_vm_driver "s101-session-lifecycle.sh"
+    vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && bash /tmp/s101.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"FAIL: qdistro-session-manager.service failed to start"* ]]; then
+        fail_loud "qdistro-session-manager not installed on this VM (older bootstrap)"
+    fi
+    assert_output_contains "PASS: SessionManager1.CreateSilo created silo 'work' (uid 2000)"
+    assert_output_contains "PASS: CreateSilo wrote /var/lib/qdistro/silos/work/ with mode 0700 work:work"
+    assert_output_contains "PASS: StartSilo brought silo 'work' to active state (cgroup populated)"
+    assert_output_contains "PASS: PodApps.silos reflects active silo 'work' via D-Bus signal"
+    assert_output_contains "PASS: FreezeSilo paused all processes (cgroup.freeze=1)"
+    assert_output_contains "PASS: ResumeSilo unfroze (cgroup.freeze=0; previously paused PID resumed)"
+    assert_output_contains "PASS: DeleteSilo refused while silo is active (returned 'SiloBusy')"
+    assert_output_contains "PASS: StopSilo terminated SIGTERM then SIGKILL after grace"
+    assert_output_contains "PASS: DeleteSilo succeeded after StopSilo"
+    assert_output_contains "PASS: ListSilos returned the expected JSON for admin"
+    assert_output_contains "ALL_PASS: s101 session lifecycle end-to-end"
+}
