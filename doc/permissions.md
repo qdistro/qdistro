@@ -228,3 +228,64 @@ Upstream Flatpak / GTK / Qt apps already use portals for clipboard, camera,
 screenshot, and file-picker. The qdistro portal backend routes those
 requests through `qbus-admin` instead of the usual same-user approval. It
 is a PyQt service registered as `org.freedesktop.impl.portal.qdistro`.
+
+> Status (2026-05-16): doc-only. No portal backend ships yet; SDK
+> callers use direct D-Bus today. Tracked in
+> `todo/qdistro-portal-backend.md`.
+
+## What's implemented vs planned
+
+Implemented and exercised by tests today:
+
+- `RequestPermission` + `WaitForDecision` (sync wait), `CheckPermission`
+  fast-path with `allow|deny|unknown` semantics, fire-and-forget
+  `RequestPermission` (no waiter).
+- `DecideRequest` from admin TUI / Qt admin app, `ListCache`, `ListHistory`,
+  `RevokeApproval`, `RevokeAllForUid`, `RunCacheGc`, `RunAuditGc`.
+- Declarative rules in `/etc/qdistro/rules.d/*.yaml`: `allow`/`deny`
+  decisions, fnmatch globs on string selectors, first-match-wins
+  ordering, hot-reload via inotify and SIGHUP, `SaveRule` validation,
+  `ReloadRules`, `ListRules`.
+- Signals: `RequestPending`, `RequestDecided`, `ApprovalRevoked` (one
+  per row), `RulesReloaded`.
+- Scope vocabulary: `once`, `1h`, `24h`, `forever`, `forever_exe`,
+  `forever_argv`, `forever_basename`, `forever_prefix`.
+- Cross-silo clipboard policy (`CheckClipboardTransfer`): same-silo
+  short-circuit allow, cross-silo default-deny, opt-in via rule.
+- Per-uid + per-action rate limiting (`.RateLimited` D-Bus error).
+- Audit log with `source ∈ {prompt, cache, rule, revoke,
+  clipboard_same_silo, clipboard_rule, clipboard_default_deny}`.
+
+Doc-only / not yet wired:
+
+- **Python hooks executor** — the *sandboxed hook executor* described
+  in §Python hooks is not implemented; the broker has no forward-trigger
+  hook surface. Tracked in `todo/qdistro-hook-executor.md`.
+- **xdg-desktop-portal backend** (`org.freedesktop.impl.portal.qdistro`).
+  Tracked in `todo/qdistro-portal-backend.md`.
+- **Workflow engine** (triggers / steps / roles / secrets-needed) — the
+  rule engine is the seed; the full orchestration framework is future.
+  Tracked in `todo/qdistro-workflow-engine.md`.
+- **Admin-app Rules tab + "Rule from this" button** — `SaveRule` /
+  `ListRules` are exposed on D-Bus, no UI surface yet. Tracked in
+  `todo/qdistro-admin-rules-tab.md`.
+- **Notification surface / tray-counter / mobile admin** — current Qt
+  admin app is an always-on window with no badge. Tracked in
+  `todo/qdistro-admin-notifications.md`.
+
+## Test coverage
+
+End-to-end behaviour is covered by:
+
+- `tests/unit/test_broker_*.py` — pytest, mocked, fast: rule matching,
+  cache row shapes, sendto, polkit mapper, scope round-trip, layered
+  identity, audit, rate-limit.
+- `tests/integration/vm/*.bats` and `s*.sh` — bats / shell on a real
+  VM: tier-1 audisp/selinux, tier-2 podman, tier-3/4/5 isolation,
+  broker enforcing, qsu argv scopes.
+- `tests/integration/permissions-gui/NN-*.md` — agent-driven GUI
+  acceptance against a labwc VM: admin TUI + Qt approval app, cross-
+  user send-to, signal contracts (`ApprovalRevoked`, `RulesReloaded`),
+  rule hot-reload, clipboard policy, scope isolation, fire-and-forget,
+  rate-limit, multi-pending navigation, TUI/Qt concurrent subscribers.
+  See the index in `tests/integration/permissions-gui/README.md`.

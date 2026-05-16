@@ -26,6 +26,7 @@ OBJ_PATH = "/com/qdistro/AdminBroker1"
 class BrokerBridge(QObject):
     requestPending = pyqtSignal(int)
     requestDecided = pyqtSignal(int, str)
+    approvalRevoked = pyqtSignal(int, str, str)
 
     def __init__(self):
         super().__init__()
@@ -47,12 +48,19 @@ class BrokerBridge(QObject):
             self._on_decided, signal_name="RequestDecided",
             dbus_interface=BUS_NAME,
         )
+        self.bus.add_signal_receiver(
+            self._on_revoked, signal_name="ApprovalRevoked",
+            dbus_interface=BUS_NAME,
+        )
 
     def _on_pending(self, rid):
         self.requestPending.emit(int(rid))
 
     def _on_decided(self, rid, decision):
         self.requestDecided.emit(int(rid), str(decision))
+
+    def _on_revoked(self, uid, action, exe):
+        self.approvalRevoked.emit(int(uid), str(action), str(exe))
 
     def _reconnect(self) -> None:
         """Rebuild the proxy after the broker restarted.
@@ -352,6 +360,18 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self.refresh)
         self.broker.requestPending.connect(lambda _rid: self._refresh_timer.start())
         self.broker.requestDecided.connect(lambda _rid, _decision: self._refresh_timer.start())
+        # ApprovalRevoked is broker→subscriber for cache-row deletions
+        # the admin app didn't initiate (CLI revoke, RevokeAllForUid,
+        # another peer's Cache-tab Revoke). Refresh the Cache tab so
+        # it doesn't render rows the broker no longer holds. Same 250ms
+        # coalescer as Pending — a RevokeAllForUid burst collapses to
+        # one refresh.
+        self._cache_refresh_timer = QTimer(self)
+        self._cache_refresh_timer.setSingleShot(True)
+        self._cache_refresh_timer.setInterval(250)
+        self._cache_refresh_timer.timeout.connect(self.cache_tab.refresh)
+        self.broker.approvalRevoked.connect(
+            lambda _uid, _action, _exe: self._cache_refresh_timer.start())
 
         # PyQt6's QShortcut constructor does not accept `activated=` as a
         # keyword arg — the signal must be connected after construction.
@@ -400,6 +420,13 @@ class MainWindow(QMainWindow):
                     break
         idx = self.model.index(target_row, 0)
         self.list.setCurrentIndex(idx)
+        # setCurrentIndex normally fires currentChanged → _on_selection
+        # which rebinds the detail pane. After a model.clear() bounce,
+        # though, Qt's selectionModel can short-circuit the signal when
+        # the new "current" position matches the same row index a since-
+        # removed item used to occupy. Force-rebind so the detail pane
+        # never stays stale after a decide-removes-row transition.
+        self._on_selection(idx, idx)
 
     def _on_selection(self, current, _previous):
         if not current.isValid():

@@ -175,7 +175,14 @@ else
     systemctl reload dbus-broker.service 2>/dev/null \
         || systemctl reload dbus.service 2>/dev/null || true
 fi
-systemctl enable --now qdistro-pwd.service
+# `--now` may fail on a fresh VM if the dbus policy hasn't fully
+# propagated yet, or if a TPM/keyring dependency is missing. The
+# sanity-probe block below handles a delayed start with a warning;
+# allow this line to fail without taking the whole bootstrap down
+# (set -e at the top of the script would otherwise abort here, which
+# breaks `spin-test-vm.sh` chains that don't need pwd to be live).
+systemctl enable --now qdistro-pwd.service || \
+    echo "[install-pwd] WARN: enable --now returned non-zero; sanity probe will retry" >&2
 
 # Sanity probe — broker will be active+listening within ~1s normally.
 for _ in 1 2 3 4 5; do

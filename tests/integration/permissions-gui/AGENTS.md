@@ -252,6 +252,16 @@ executed, and you'll spawn runner subagents to do it.
  the runner will use vision-direct on the screenshots instead
  (Claude is vision-capable; Read of a PNG surfaces the text).
 
+### Provisioning a fresh VM for permissions-gui
+
+`spin-test-vm.sh` only builds a broker-only VM (no work/work2 users,
+no admin-app launchers, no labwc/qdwin session up). Use
+`scripts/vm/spin-test-vm-gui.sh` instead — it layers the
+permissions-gui prereqs (work/work2 users, `qdistro-test-permission`,
+`qdistro-start-admin-{app,tui}`, qterminal.ini, and starts admin's
+noctalia-session/shell) on top. The last stdout line is the VM name,
+ready to feed runners as `VMNAME`.
+
 ### Spawn pattern (validated)
 
 Use the Agent tool with `subagent_type=general-purpose`. The prompt
@@ -327,9 +337,19 @@ pkill -u admin -f qdistro_admin_app 2>/dev/null || true
 pkill -u admin -f qdistro_admin_tui 2>/dev/null || true
 pkill -u work -f qdistro-test-permission 2>/dev/null || true
 pkill -u work -f dbus-send 2>/dev/null || true
+pkill -f "dbus-monitor.*qdistro" 2>/dev/null || true
+# Scenario-authored rule files use a two-digit NN-* prefix (matching
+# the scenario filename). Wipe them so a prior scenario's rule does
+# not bias the rules engine for the next scenario. Hand-authored
+# admin rules (no NN- prefix) survive.
+rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml 2>/dev/null || true
 systemctl restart qdistro-admin-broker.service
 sleep 2
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals;" 2>/dev/null || true
+# Wipe scenario-authored audit too. Production keeps audit forever,
+# but cross-scenario assertions like "audit row count == 1 since
+# this scenario started" need a clean tail.
+sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE source IN ('revoke','clipboard_default_deny','clipboard_rule','clipboard_same_silo') OR action LIKE 'test.%' OR action LIKE 'multi.%' OR action LIKE 'scenario%' OR action LIKE 'qdistro.clipboard.transfer:%';" 2>/dev/null || true
 EOF
 )
 vm-exec "$VM" "echo $B64 | base64 -d | bash"
@@ -337,6 +357,12 @@ vm-exec "$VM" "echo $B64 | base64 -d | bash"
 
 This matches what each scenario's Setup would do itself, but running
 it centrally keeps weaker scenarios honest.
+
+**Hard rule for new scenarios**: if your Setup installs files under
+`/etc/qdistro/rules.d/`, also `rm -f` your own scenario's prefix in
+Setup (defensive) AND in Teardown (cleanup). Don't rely on the
+orchestrator's drain alone — a scenario may be run in isolation
+without the drain wrapper.
 
 ### Smoke subset (5-minute pre-push sweep)
 

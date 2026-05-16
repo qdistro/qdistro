@@ -5,6 +5,36 @@ User-authored GUI acceptance scenarios for qdistro . Each
 prose. A graphic-aware subagent executes them against a running VM
 following the instructions in `AGENTS.md`.
 
+## Scenario index by area
+
+Numbering is roughly chronological; each scenario stands on its own.
+
+- **01–10** — admin app + TUI smoke (visual / scope picker / approve /
+  deny / mouse / CLI round-trip / restart-resilience / cache revoke).
+- **11–17** — cross-user `RelayMessage` flow (headless + visual,
+  approve / deny / forbidden scope, realapp variants).
+- **18** — pod-apps launcher badge.
+- **19–21** — tier-5 loopback / cold-start / close-cleanup.
+- **22–23** — `ApprovalRevoked` and `RevokeAllForUid` signal contracts.
+- **24–28** — declarative rules: allow-short-circuit, deny-short-circuit,
+  inotify hot-reload, first-match-wins ordering, exe glob match.
+- **29** — `CheckPermission` `"unknown"` fast-path (no prompt, no audit).
+- **30** — rate-limit raises `.RateLimited`.
+- **31** — fire-and-forget `RequestPermission` (no waiter).
+- **32** — `forever_exe` cache scope grants only the approved exe.
+- **33** — `RunCacheGc` deletes expired rows (and lookup filters them).
+- **34** — admin-app navigation across multiple pending requests.
+- **35** — TUI + Qt admin app concurrent subscribers stay in sync.
+- **36–37** — clipboard transfer policy: same-silo allow, cross-silo
+  default-deny + rule allow.
+- **38** — `ListRules` surface for tooling.
+- **39** — `SaveRule` validation rejects bad filename / YAML / shape.
+- **40–41** — clipboard *receive* gate: same-silo short-circuit (40),
+  cross-silo default-deny + rule allow + MIME glob (`text/*`) + rate-
+  limit (41).
+- **42** — `CheckHandoffActivation`: same-silo allow, cross-silo
+  default-deny + per-`app_id` rule allow + non-admin bus-policy deny.
+
 ## Running
 
 Dispatch a subagent (Explore or general-purpose) and point it at
