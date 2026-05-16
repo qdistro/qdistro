@@ -19,7 +19,7 @@ setup() {
 # Stage the in-VM driver script onto the host's bats http server
 # (port 8768 by convention) so the VM can fetch it. Mirrors the
 # self-staging pattern in broker-e2e.bats.
-stage_tier2_driver() {
+stage_vm_driver() {
     local script_name="$1"
     local script_path
     script_path="$(dirname "$BATS_TEST_FILENAME")/$script_name"
@@ -37,7 +37,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier2-podman: in-container weston-terminal becomes a peer toplevel on outer" {
-    stage_tier2_driver "s32-tier2-podman.sh"
+    stage_vm_driver "s32-tier2-podman.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s32.sh http://10.0.2.2:8768/s32-tier2-podman.sh && chmod +x /tmp/s32.sh && bash /tmp/s32.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -53,7 +53,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier2-input: QDNI input forwards into the in-container nested compositor" {
-    stage_tier2_driver "s33-tier2-input.sh"
+    stage_vm_driver "s33-tier2-input.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s33.sh http://10.0.2.2:8768/s33-tier2-input.sh && chmod +x /tmp/s33.sh && bash /tmp/s33.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -74,7 +74,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier2-lifecycle: two containers + stop-cleanup" {
-    stage_tier2_driver "s34-tier2-lifecycle.sh"
+    stage_vm_driver "s34-tier2-lifecycle.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s34.sh http://10.0.2.2:8768/s34-tier2-lifecycle.sh && chmod +x /tmp/s34.sh && bash /tmp/s34.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -87,7 +87,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier2-hardening: container-runtime isolation flags effective" {
-    stage_tier2_driver "s40-tier2-hardening.sh"
+    stage_vm_driver "s40-tier2-hardening.sh"
     vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-tier2-hardening.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -112,7 +112,7 @@ stage_tier2_driver() {
 # bootstraps).
 
 @test "phase7-tier3-waypipe: cross-uid bridge smoke (wayland-info as user1)" {
-    stage_tier2_driver "s35-tier3-waypipe.sh"
+    stage_vm_driver "s35-tier3-waypipe.sh"
     vm_run "curl -s -o /tmp/s35.sh http://10.0.2.2:8768/s35-tier3-waypipe.sh && chmod +x /tmp/s35.sh && bash /tmp/s35.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -129,7 +129,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier3-app: cross-uid weston-terminal as user1 reaches outer" {
-    stage_tier2_driver "s36-tier3-app.sh"
+    stage_vm_driver "s36-tier3-app.sh"
     vm_run "curl -s -o /tmp/s36.sh http://10.0.2.2:8768/s36-tier3-app.sh && chmod +x /tmp/s36.sh && bash /tmp/s36.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -145,7 +145,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier3-lifecycle: two silos (user1+user2), kill A leaves B running" {
-    stage_tier2_driver "s37-tier3-lifecycle.sh"
+    stage_vm_driver "s37-tier3-lifecycle.sh"
     vm_run "curl -s -o /tmp/s37.sh http://10.0.2.2:8768/s37-tier3-lifecycle.sh && chmod +x /tmp/s37.sh && bash /tmp/s37.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -160,7 +160,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier3-chrome: qdshell parses silo identifier + applies per-silo color override" {
-    stage_tier2_driver "s38-tier3-chrome.sh"
+    stage_vm_driver "s38-tier3-chrome.sh"
     vm_run "curl -s -o /tmp/s38.sh http://10.0.2.2:8768/s38-tier3-chrome.sh && chmod +x /tmp/s38.sh && bash /tmp/s38.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -180,7 +180,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
-    stage_tier2_driver "s40-secctx.sh"
+    stage_vm_driver "s40-secctx.sh"
     vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-secctx.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -205,7 +205,7 @@ stage_tier2_driver() {
     #      silo helper's serial=0 set_selection succeeds.
     #   3. waypipe wl_client mismatch is moot once focus is set —
     #      qdwin emits source_handle = silo_toplevel.handle.
-    stage_tier2_driver "s39-clipboard-gate.sh"
+    stage_vm_driver "s39-clipboard-gate.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s39.sh http://10.0.2.2:8768/s39-clipboard-gate.sh && chmod +x /tmp/s39.sh && bash /tmp/s39.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -223,7 +223,7 @@ stage_tier2_driver() {
 }
 
 @test "phase7-secctx-toplevel-event: qdwin_shell_v1@v13 toplevel_security_context end-to-end" {
-    stage_tier2_driver "s41-secctx-toplevel-event.sh"
+    stage_vm_driver "s41-secctx-toplevel-event.sh"
     vm_run "curl -s -o /tmp/s41.sh http://10.0.2.2:8768/s41-secctx-toplevel-event.sh && chmod +x /tmp/s41.sh && bash /tmp/s41.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -244,7 +244,7 @@ stage_tier2_driver() {
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
     # define-only and no-viewer modes; full virt-viewer-on-wayland-1
     # integration is exercised manually until the chrome path is stable.
-    stage_tier2_driver "s42-tier4-spawn.sh"
+    stage_vm_driver "s42-tier4-spawn.sh"
     vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -261,7 +261,7 @@ stage_tier2_driver() {
     # §Phase-7 tier-5-Linux — waypipe-over-vsock wrapper smoke. Linux-only
     # per spec/00. Tests the data path with vsock CID=1 (loopback).
     # Real-VM mode (--vm <name>) is covered by phase7-tier5-vm.
-    stage_tier2_driver "s43-tier5-loopback.sh"
+    stage_vm_driver "s43-tier5-loopback.sh"
     vm_run "curl -s -o /tmp/s43.sh http://10.0.2.2:8768/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -278,7 +278,7 @@ stage_tier2_driver() {
     # aware client (virt-viewer being the motivating case). Tests the
     # wrapper end-to-end with qdistro-test-window as a stand-in for
     # virt-viewer to avoid dragging libvirt+qemu into the test.
-    stage_tier2_driver "s44-tier4-secctx-exec.sh"
+    stage_vm_driver "s44-tier4-secctx-exec.sh"
     vm_run "curl -s -o /tmp/s44.sh http://10.0.2.2:8768/s44-tier4-secctx-exec.sh && chmod +x /tmp/s44.sh && bash /tmp/s44.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -297,7 +297,7 @@ stage_tier2_driver() {
     # §Phase-7 tier-5 --vm — full per-app guest VM path. Skips when
     # /var/lib/libvirt/images/qdistro-tier5-base.qcow2 is absent (build
     # is opt-in: ~400MB Tumbleweed-Minimal-VM cloud download).
-    stage_tier2_driver "s45-tier5-vm.sh"
+    stage_vm_driver "s45-tier5-vm.sh"
     vm_run "curl -s -o /tmp/s45.sh http://10.0.2.2:8768/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -316,7 +316,7 @@ stage_tier2_driver() {
     # Anything left after SIGTERM is a leak; the bats variant catches
     # the regression class the user-facing close button can't see.
     # Pairs with permissions-gui/21-tier5-close-cleanup.md (visual).
-    stage_tier2_driver "s48-tier5-close-cleanup.sh"
+    stage_vm_driver "s48-tier5-close-cleanup.sh"
     vm_run "curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -332,7 +332,7 @@ stage_tier2_driver() {
     # §Phase-7 tier-5 audio — spec/29 §3 picked path. Skips when the
     # tier-5 base disk is absent OR pipewire-tools / qemu-audio-pipewire
     # are missing.
-    stage_tier2_driver "s47-tier5-audio.sh"
+    stage_vm_driver "s47-tier5-audio.sh"
     vm_run "curl -s -o /tmp/s47.sh http://10.0.2.2:8768/s47-tier5-audio.sh && chmod +x /tmp/s47.sh && bash /tmp/s47.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -356,7 +356,7 @@ stage_tier2_driver() {
     # 037) the test runs end-to-end on sdl-freerdp /v: dummy as well —
     # the focus state that real virt-viewer would deliver naturally is
     # injected via qdshell's ctrl-socket.
-    stage_tier2_driver "s46-tier4-clipboard-gate.sh"
+    stage_vm_driver "s46-tier4-clipboard-gate.sh"
     vm_run "curl -s -o /tmp/s46.sh http://10.0.2.2:8768/s46-tier4-clipboard-gate.sh && chmod +x /tmp/s46.sh && bash /tmp/s46.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -380,7 +380,7 @@ stage_tier2_driver() {
     # qdshell tier1 secctx parser all survived the bootstrap rsync.
     # The implementation pass picks up from this baseline once the four
     # blocking spikes in tier1/spike-checklist.md resolve.
-    stage_tier2_driver "s50-tier1-skeleton.sh"
+    stage_vm_driver "s50-tier1-skeleton.sh"
     vm_run "curl -s -o /tmp/s50.sh http://10.0.2.2:8768/s50-tier1-skeleton.sh && chmod +x /tmp/s50.sh && bash /tmp/s50.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -399,7 +399,7 @@ stage_tier2_driver() {
     # host ↔ guest clipboard via wayland selection, which qdistro
     # already gates) and a per-launch 16-hex SPICE ticket. Admin
     # opts in to the SPICE clipboard via TIER4_SPICE_CLIPBOARD=allowed.
-    stage_tier2_driver "s49-tier4-spice-clipboard.sh"
+    stage_vm_driver "s49-tier4-spice-clipboard.sh"
     vm_run "curl -s -o /tmp/s49.sh http://10.0.2.2:8768/s49-tier4-spice-clipboard.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -420,7 +420,7 @@ stage_tier2_driver() {
     # Qubes-style mitigation. The headless ctrl-socket inject-focus
     # path is what this script exercises; real chrome click-to-focus
     # uses the same set_keyboard_focus request.
-    stage_tier2_driver "s48-focus-aware-clear.sh"
+    stage_vm_driver "s48-focus-aware-clear.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-focus-aware-clear.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -444,7 +444,7 @@ stage_tier2_driver() {
     # policy module loaded, type_transition rule active, spawn pipeline
     # places the inner command in qdistro_tier1_t, broker spawn-action
     # gate denies an authored rule.
-    stage_tier2_driver "s51-tier1-e2e.sh"
+    stage_vm_driver "s51-tier1-e2e.sh"
     vm_run "curl -s -o /tmp/s51.sh http://10.0.2.2:8768/s51-tier1-e2e.sh && chmod +x /tmp/s51.sh && bash /tmp/s51.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -471,7 +471,7 @@ stage_tier2_driver() {
     # injections preserve the active selection and the sink helper's
     # wl_data_device receives the offer. The byte-for-byte payload
     # assertion is now load-bearing whenever the sink helper is built.
-    stage_tier2_driver "s53-data-offer-receive-v15.sh"
+    stage_vm_driver "s53-data-offer-receive-v15.sh"
     vm_run "curl -s -o /tmp/s53.sh http://10.0.2.2:8768/s53-data-offer-receive-v15.sh && chmod +x /tmp/s53.sh && bash /tmp/s53.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -497,7 +497,7 @@ stage_tier2_driver() {
     #
     # Restoration: trap re-issues setenforce 0 on natural exit OR
     # signal so a failed run still leaves the VM in permissive mode.
-    stage_tier2_driver "s55-tier1-enforcing.sh"
+    stage_vm_driver "s55-tier1-enforcing.sh"
     vm_run "curl -s -o /tmp/s55.sh http://10.0.2.2:8768/s55-tier1-enforcing.sh && chmod +x /tmp/s55.sh && bash /tmp/s55.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
@@ -517,7 +517,7 @@ stage_tier2_driver() {
     #
     # Same SKIP semantics as phase7-tier1-enforcing: when /etc/selinux/
     # config pins SELINUX=permissive, the runtime flip is refused.
-    stage_tier2_driver "s56-broker-enforcing.sh"
+    stage_vm_driver "s56-broker-enforcing.sh"
     vm_run "curl -s -o /tmp/s56.sh http://10.0.2.2:8768/s56-broker-enforcing.sh && chmod +x /tmp/s56.sh && bash /tmp/s56.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "SELinux disabled, policy not loaded, or config pins permissive"
@@ -535,7 +535,7 @@ stage_tier2_driver() {
     # verifies running domain XML carries the configured copypaste
     # value (default 'no', opt-in 'yes'). Skips when the base image
     # isn't built (qdistro-tier4-base.qcow2 absent).
-    stage_tier2_driver "s54-tier4-spice-clipboard-live.sh"
+    stage_vm_driver "s54-tier4-spice-clipboard-live.sh"
     vm_run "curl -s -o /tmp/s54.sh http://10.0.2.2:8768/s54-tier4-spice-clipboard-live.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -561,7 +561,7 @@ stage_tier2_driver() {
     #   forever_exe      — any argv with the same exe (legacy).
     #
     # Re-run-safe: probe revokes its own rows on entry + exit.
-    stage_tier2_driver "s57-qsu-argv-scopes.sh"
+    stage_vm_driver "s57-qsu-argv-scopes.sh"
     vm_run "curl -s -o /tmp/s57.sh http://10.0.2.2:8768/s57-qsu-argv-scopes.sh && chmod +x /tmp/s57.sh && bash /tmp/s57.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL:"*"qdistro-admin-broker.service not active"* ]]; then
@@ -595,7 +595,7 @@ stage_tier2_driver() {
     # place — a regression in the delegated gate would either time
     # out step B (re-prompt instead of cache) or fail step A's
     # DecideRequest with "forbidden scope on delegated request".
-    stage_tier2_driver "s58-qsu-real-flow.sh"
+    stage_vm_driver "s58-qsu-real-flow.sh"
     vm_run "curl -s -o /tmp/s58.sh http://10.0.2.2:8768/s58-qsu-real-flow.sh && chmod +x /tmp/s58.sh && bash /tmp/s58.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL: /usr/local/bin/qsu absent"* ]]; then
@@ -616,7 +616,7 @@ stage_tier2_driver() {
     # Validates the audispd plugin pipeline (spec/30 step 7):
     # AVC denial in qdistro_tier1_t → audispd plugin → broker
     # RecordSelinuxAvc → audit DB row with selinux_subj_type set.
-    stage_tier2_driver "s52-tier1-audisp.sh"
+    stage_vm_driver "s52-tier1-audisp.sh"
     vm_run "curl -s -o /tmp/s52.sh http://10.0.2.2:8768/s52-tier1-audisp.sh && chmod +x /tmp/s52.sh && bash /tmp/s52.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
@@ -650,7 +650,7 @@ stage_tier2_driver() {
 # skips with the same fail_loud as the rest.
 
 @test "phase7-tier2-podapps-discovery: podman exec scan writes apps.json" {
-    stage_tier2_driver "s59-tier2-podapps-discovery.sh"
+    stage_vm_driver "s59-tier2-podapps-discovery.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s59.sh http://10.0.2.2:8768/s59-tier2-podapps-discovery.sh && chmod +x /tmp/s59.sh && bash /tmp/s59.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
