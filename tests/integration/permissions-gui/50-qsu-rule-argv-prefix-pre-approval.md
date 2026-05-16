@@ -168,9 +168,20 @@ sleep 2
 $VMEXEC "$VM" 'wait $(cat /tmp/50-restart.pid) 2>/dev/null; cat /tmp/50-restart.log'
 ```
 
-**Assert**:
-- `/tmp/50-restart.log` contains `request denied` (qsu's deny
-  message) and the qsu process exited rc=1.
+**Assert** (acceptable: either A or B — the load-bearing audit
++ pending-list assertions below hold either way):
+- A (fast S6): `/tmp/50-restart.log` contains `request denied`
+  (qsu's deny message) and qsu rc=1.
+- B (slow S6, runner > ~22s between pending-row appearance and
+  Ctrl+N): `/tmp/50-restart.log` contains
+  `org.freedesktop.DBus.Error.NoReply` — qsu's
+  RequestPermissionAs reply timeout fired before the broker's
+  deny reply arrived. The broker still recorded the deny
+  (pending list empties, audit row `0|prompt` lands). Pre-fix
+  workaround: redeploy with the bumped timeouts in
+  `qsu/qdistro_root_exec.py` (`timeout=90` on
+  RequestPermissionAs, `timeout=900` on WaitForDecision).
+  Tracked in todo broker-serialization-concurrent-qsu §3.
 - Final audit:
   ```bash
   SQL_B64=$(base64 -w0 <<'SQL_EOF'

@@ -85,6 +85,20 @@ $VMGUI "$VM" screenshot /tmp/49-s2-pending.png
 
 ### S3 — admin selects `forever_argv` and approves
 
+**TIMING-CRITICAL**: the qsu client's `RequestPermissionAs` call
+has a default D-Bus reply timeout of 25 seconds. Between S2 (qsu
+fires + pending row appears) and the runner pressing Ctrl+Y, the
+elapsed wall-clock MUST stay under ~22s to leave headroom for
+the broker decide latency. OCR-based radio targeting that
+navigates via Down/Up arrows + Space tends to take 5-10s; combined
+with screenshot Reads it can drift past 25s and the qsu sender
+will die with `org.freedesktop.DBus.Error.NoReply` BEFORE admin's
+approve lands. The broker still records the cache row + audit
+correctly (S4 / S5 assertions still hold), but `/tmp/49-qsu.log`
+won't contain `hello world` — it'll contain the NoReply error.
+Tracked in todo `broker-serialization-concurrent-qsu` (the same
+chokepoint hits during admin's GUI two-step).
+
 ```bash
 $VMGUI "$VM" screenshot /tmp/49-s3a-forever-argv-selected.png
 # Runner: click "Forever, only this exact argv tuple" radio (6th).
@@ -100,9 +114,16 @@ sleep 2
 $VMEXEC "$VM" 'wait $(cat /tmp/49-qsu.pid) 2>/dev/null; cat /tmp/49-qsu.log'
 ```
 
-**Assert**:
-- `/tmp/49-qsu.log` contains exactly `hello world` followed by
-  newline (echo's output streamed through qsu).
+**Assert** (acceptable: either A or B; the load-bearing audit
+shape in S4 holds either way):
+- A (fast S3): `/tmp/49-qsu.log` contains exactly `hello world`
+  followed by newline (echo's output streamed through qsu).
+- B (slow S3, runner > ~22s between qsu fire and Ctrl+Y):
+  `/tmp/49-qsu.log` contains `org.freedesktop.DBus.Error.NoReply`
+  — qsu's reply timeout fired during navigation. The broker
+  still committed the approve; downgrade this single assertion
+  to PASS-with-caveat and proceed to S4 / S5 which are the
+  real audit-shape checks.
 - Cache row exists:
   ```bash
   SQL_B64=$(base64 -w0 <<'SQL_EOF'

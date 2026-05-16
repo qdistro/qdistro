@@ -39,7 +39,7 @@ SCOPES: dict[str, str] = {
     "forever_exe":      "Forever, only this exact program",
     "forever_argv":     "Forever, only this exact argv tuple",
     "forever_basename": "Forever, this argv basename anywhere",
-    "forever_prefix":   "Forever, this argv[0] (any trailing args)",
+    "forever_prefix":   "Forever, this argv prefix + any trailing args",
 }
 SCOPE_KEYS: list[str] = list(SCOPES.keys())  # for Pilot tests + ordering
 

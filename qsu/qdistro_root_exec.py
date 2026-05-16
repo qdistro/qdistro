@@ -175,11 +175,32 @@ def _ask_broker(target_user: str, argv: list[str],
         # admin app's detail pane renders them in order.
         **{f"argv[{i:02d}]": a for i, a in enumerate(argv)},
     }
+    # 2026-05-16: bumped dbus reply timeouts. Two manifestations of
+    # broker serialisation tripped over the dbus-python default 25s:
+    #
+    # (a) 4 concurrent qsu calls serialise through _read_proc_layered
+    #     and take 8-15s aggregate to enqueue, so the 4th can blow
+    #     RequestPermissionAs's 25s budget (todo:
+    #     broker-serialization-concurrent-qsu §1).
+    # (b) admin's single-handed GUI two-step (OCR-find-radio + click
+    #     + Ctrl+Y) routinely takes >25s on a vision-driven runner,
+    #     so the qsu client bails out of WaitForDecision BEFORE the
+    #     approve reaches the broker (§3). The broker still commits
+    #     the approve — but the streamed stdout never reaches the
+    #     user because qsu is already dead.
+    #
+    # WaitForDecision is async on the broker side (it enqueues
+    # `(_reply, _error)` waiters and returns the response when admin
+    # decides); the only timeout is dbus-python's client-side reply
+    # cutoff. 900s = "admin's plausible attention span." If admin
+    # really takes 15 minutes to click, the user almost certainly
+    # ctrl+C'd qsu by then anyway.
     rid = int(iface.RequestPermissionAs(
         int(caller_uid), int(caller_pid), str(caller_exe),
         action, details,
+        timeout=90,
     ))
-    return bool(iface.WaitForDecision(rid))
+    return bool(iface.WaitForDecision(rid, timeout=900))
 
 
 # -- Target user handling --------------------------------------------------

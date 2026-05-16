@@ -71,11 +71,13 @@ $VMGUI "$VM" screenshot /tmp/46-s1-pending.png
 
 ```bash
 $VMGUI "$VM" screenshot /tmp/46-s2a-radios.png
-# Runner: click "Forever, this argv[0] (any trailing args)" (8th
-# radio). Note the misleading label — internally `forever_prefix`
-# pins argv[:len(prefix)] as a TUPLE, not "argv[0] only". Here
-# the prefix is the full argv from S1: ["/usr/bin/systemctl",
-# "status"].
+# Runner: click "Forever, this argv prefix + any trailing args"
+# (8th radio). Internally `forever_prefix` pins argv[:len(prefix)]
+# as a TUPLE. Here the prefix is the full argv from S1:
+# ["/usr/bin/systemctl", "status"]. (Prior label
+# "Forever, this argv[0] (any trailing args)" was renamed
+# 2026-05-16 alongside this scenario — see todo
+# qsu-forever-prefix-label-misleading.md.)
 $VMGUI "$VM" screenshot /tmp/46-s2b-selected.png
 
 B64=$(base64 -w0 <<'EOF'
@@ -190,9 +192,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 ## Notes for the runner
 
-- The admin app's radio label `Forever, this argv[0] (any trailing
-  args)` is technically misleading: `forever_prefix` pins
-  `argv[:len(prefix)]` from the originally-approved call. If
+- The admin app's radio label `Forever, this argv prefix + any
+  trailing args` reflects the actual semantic: `forever_prefix`
+  pins `argv[:len(prefix)]` from the originally-approved call. If
   admin approved `qsu systemctl status` then the prefix is
   length 2; trailing means "argv beyond index 1". If admin
   approved `qsu systemctl` alone then the prefix is length 1

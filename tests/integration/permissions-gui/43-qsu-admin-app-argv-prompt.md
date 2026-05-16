@@ -6,7 +6,7 @@
 in this exact order: `Just this once`, `1 hour`, `24 hours`,
 `Forever, any command`, `Forever, only this exact program`,
 `Forever, only this exact argv tuple`, `Forever, this argv
-basename anywhere`, `Forever, this argv[0] (any trailing args)`.
+basename anywhere`, `Forever, this argv prefix + any trailing args`.
 Approve the request with the default `once` scope; verify qsu
 runs `/bin/true` and exits rc=0; verify NO cache row is written
 (once-scope is not persisted).
@@ -88,7 +88,7 @@ $VMGUI "$VM" screenshot /tmp/43-s2-pending.png
   5. `Forever, only this exact program`
   6. `Forever, only this exact argv tuple`
   7. `Forever, this argv basename anywhere`
-  8. `Forever, this argv[0] (any trailing args)`
+  8. `Forever, this argv prefix + any trailing args`
 
   Use OCR to capture each label; if any label is missing, that's
   the regression to flag.

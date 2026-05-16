@@ -1345,7 +1345,8 @@ class Broker(dbus.service.Object):
             if req.delegated and scope_s in _DELEGATED_FORBIDDEN_SCOPES:
                 raise dbus.DBusException(
                     f"scope {scope_s!r} not permitted for delegated requests; "
-                    f"use '1h' or '24h' instead",
+                    f"use 'once' or an argv-pinned scope "
+                    f"('forever_argv', 'forever_basename', 'forever_prefix')",
                     name=BUS_NAME + ".ScopeNotPermitted",
                 )
             if req.one_shot and scope_s in _ONESHOT_FORBIDDEN_SCOPES:

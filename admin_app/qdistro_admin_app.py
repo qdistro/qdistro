@@ -170,7 +170,7 @@ class DetailPane(QWidget):
             ("forever_exe",      "Forever, only this exact program", False),
             ("forever_argv",     "Forever, only this exact argv tuple", False),
             ("forever_basename", "Forever, this argv basename anywhere", False),
-            ("forever_prefix",   "Forever, this argv[0] (any trailing args)", False),
+            ("forever_prefix",   "Forever, this argv prefix + any trailing args", False),
         ):
             rb = QRadioButton(label)
             rb.setObjectName(f"scope_{key}")

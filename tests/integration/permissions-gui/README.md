@@ -34,7 +34,7 @@ Numbering is roughly chronological; each scenario stands on its own.
   limit (41).
 - **42** — `CheckHandoffActivation`: same-silo allow, cross-silo
   default-deny + per-`app_id` rule allow + non-admin bus-policy deny.
-- **43–54** — `qsu` admin-UX + audit + security invariants. 43
+- **43–55** — `qsu` admin-UX + audit + security invariants. 43
   (prompt + scope radios rendered), 44 (`forever_argv` isolation),
   45 (`forever_basename` cross-binary), 46 (`forever_prefix`
   trailing args), 47 (delegated `forever_exe` rejected with
@@ -44,7 +44,9 @@ Numbering is roughly chronological; each scenario stands on its own.
   + `rule_path`), 51 (`qsu -u target` ⇒ action key
   `qsu.exec:<target>`), 52 (invalid target_user rejected at
   qdistro-root-exec, never reaches broker), 53 (per-uid in-flight
-  cap at 4), 54 (sanitized env strips LD_* / PYTHONPATH).
+  cap at 4), 54 (sanitized env strips LD_* / PYTHONPATH), 55
+  (qsu end-to-end under SELinux Enforcing — zero new AVCs;
+  requires SSH transport, qga cannot setenforce).
 
 ## Running
 
