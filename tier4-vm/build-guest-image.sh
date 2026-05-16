@@ -154,11 +154,20 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
     --run-command 'systemctl enable spice-vdagentd.service' \
+    --mkdir /etc/systemd/system/multi-user.target.wants \
+    --link /usr/lib/systemd/system/qemu-guest-agent.service:/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service \
+    --link /usr/lib/systemd/system/spice-vdagentd.service:/etc/systemd/system/multi-user.target.wants/spice-vdagentd.service \
     --copy-in "$HELPER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier4-clip-set.sh' \
     --run-command 'echo "qdistro-tier4-base" >/etc/hostname' \
     --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
     >/dev/null
+
+# Belt-and-braces: openSUSE Tumbleweed-Minimal-VM-Cloud's systemd
+# presets disable qemu-guest-agent + spice-vdagentd by default, so
+# `systemctl enable` above silently no-ops (it respects the preset
+# unless --force is passed). Explicit --link below forces the
+# multi-user.target.wants symlinks regardless of preset state.
 
 # Sparsify to keep the published base small.
 echo "[tier4-build] sparsifying..."
