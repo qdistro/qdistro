@@ -24,6 +24,17 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+SPAWN_PID=""
+TRAP_FIRED=0
+cleanup() {
+    [ "$TRAP_FIRED" -eq 1 ] && return 0
+    TRAP_FIRED=1
+    [ -n "$SPAWN_PID" ] && kill -TERM "$SPAWN_PID" 2>/dev/null || true
+    [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
+    rm -f /tmp/s35-spawn.log 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # --- 1. stage tier3 source into /tmp ---------------------------------
 SRC=/root/qdistro-src/qdistro
 TIER3_DIR=/tmp/qdistro-tier3-src

@@ -25,6 +25,34 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+# EXIT trap — guards against the bats wrapper or operator interrupt
+# (Ctrl-C, timeout) between rule install and rule cleanup. Without
+# this trap a leaked allow rule in /etc/qdistro/rules.d/ silently
+# defeats default-deny in subsequent test runs.
+SPAWN_PID=""
+RULES_FILE="qdistro-tier3-user1-allow.yaml"
+TRAP_FIRED=0
+cleanup() {
+    [ "$TRAP_FIRED" -eq 1 ] && return 0
+    TRAP_FIRED=1
+    [ -n "$SPAWN_PID" ] && kill -TERM "$SPAWN_PID" 2>/dev/null || true
+    [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
+    # Username, not UID.
+    pkill -u user1 -f qdistro-test-clipboard-source 2>/dev/null || true
+    pkill -u user2 -f qdistro-test-clipboard-source 2>/dev/null || true
+    # Remove any leaked rule from this run.
+    local rule_path
+    rule_path=$(find /etc/qdistro/rules.d -name "$RULES_FILE" 2>/dev/null | head -1)
+    if [ -n "$rule_path" ] && [ -f "$rule_path" ]; then
+        rm -f "$rule_path"
+        dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
+            /com/qdistro/AdminBroker1 com.qdistro.AdminBroker1.ReloadRules \
+            >/dev/null 2>&1 || true
+    fi
+    rm -f /tmp/s39-spawn.log /tmp/s39-saverule.log 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # --- 1. stage tier3 source -------------------------------------------
 SRC=/root/qdistro-src/qdistro
 TIER3_DIR=/tmp/qdistro-tier3-src
@@ -88,7 +116,8 @@ journal_after() {
 SILO_NAME=user1
 ENGINE="qdistro.tier3"
 APPID="qdistro.tier3.$SILO_NAME"
-RULES_FILE="qdistro-tier3-$SILO_NAME-allow.yaml"
+# RULES_FILE is also declared in the cleanup trap (line ~33) so the
+# trap can reach it on early exit. Kept consistent here.
 
 # --- 6. admin→admin selection prerequisite (synthesized) --------------
 # spec/10 v13 wants ClipboardGate to observe an admin selection_set
@@ -234,23 +263,7 @@ else
     fail "no journal evidence of RulesReloaded propagation to qdshell"
 fi
 
-# --- cleanup ---------------------------------------------------------
-kill -TERM "$SPAWN_PID" 2>/dev/null || true
-for _ in $(seq 1 20); do
-    if ! kill -0 "$SPAWN_PID" 2>/dev/null; then break; fi
-    sleep 0.25
-done
-kill -KILL "$SPAWN_PID" 2>/dev/null || true
-wait "$SPAWN_PID" 2>/dev/null || true
-pkill -u "$SILO_UID" -x qdistro-test-clipboard-source 2>/dev/null || true
-
-# Remove the test rule.
-RULE_PATH=$(find /etc/qdistro/rules.d -name "$RULES_FILE" 2>/dev/null | head -1)
-[ -n "$RULE_PATH" ] && rm -f "$RULE_PATH"
-dbus-send --system --print-reply --dest="$DBUS_DEST" \
-    "$DBUS_PATH" "$DBUS_IFACE.ReloadRules" >/dev/null 2>&1 || true
-
-rm -f "$SPAWN_LOG" /tmp/s39-saverule.log 2>/dev/null || true
+# --- cleanup handled by trap above ----------------------------------
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     pass "spec/10 cross-uid clipboard policy gate end-to-end"

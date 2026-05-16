@@ -18,7 +18,7 @@
 #
 #   qs ipc call tier3focus findSiloHandle <silo>   → HANDLE=N
 #   qs ipc call tier3focus injectFocus <handle>    → ok handle=…
-#   qs ipc call tier3focus selectionState          → src_silo=… dst_silo=…
+#   qs ipc call tier3focus selectionState          → tier3_toplevels=N hint=grep_journal_for_CLIPBOARD_GATE
 #
 # PASS strings MUST match the assert_output_contains in the bats
 # @test phase7-focus-aware-clear block.
@@ -31,6 +31,35 @@ FAILCOUNT=0
 pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
+
+# EXIT trap — kill admin/silo background processes on operator
+# interrupt or bats timeout. Without this, a Ctrl-C between spawn
+# and end-of-script leaves a tier-3-bridged weston-terminal +
+# qdistro-test-clipboard-source running, which then poisons qdwin's
+# secctx state for the next test (same class as the s46-leaked-
+# clipboard-source incident).
+ADMIN_PID=""
+ADMIN_TOPLEVEL_PID=""
+SILO_PID=""
+TRAP_FIRED=0
+cleanup() {
+    [ "$TRAP_FIRED" -eq 1 ] && return 0
+    TRAP_FIRED=1
+    for pid in "$ADMIN_PID" "$ADMIN_TOPLEVEL_PID" "$SILO_PID"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 0.5
+    for pid in "$ADMIN_PID" "$ADMIN_TOPLEVEL_PID" "$SILO_PID"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
+    # Usernames, not UIDs — uid assignment can drift across VMs.
+    pkill -u user1 -x weston-terminal 2>/dev/null || true
+    pkill -u user1 -f qdistro-test-clipboard-source 2>/dev/null || true
+    pkill -u admin -f "qdistro-test-clipboard-source.*admin-secret-s48" 2>/dev/null || true
+    rm -f /tmp/s48-admin.log /tmp/s48-admin.log.toplevel /tmp/s48-silo.log 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 # --- 1. stage tier3 source -------------------------------------------
 SRC=/root/qdistro-src/qdistro
@@ -202,11 +231,13 @@ fi
 # logs a "Tier3FocusIPC selectionState ..." line we can grep.
 STATE_PRE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)
-if [ -n "$STATE_PRE" ]; then
+# Tighter assertion: not just non-empty, but the expected key=val shape
+# (after the M4 fix that removed the dead _last* writes).
+if echo "$STATE_PRE" | grep -q 'tier3_toplevels='; then
     pass "ctrl selection-state shows admin clipboard source"
     echo "  (IPC reply: $STATE_PRE)" >&2
 else
-    fail "qs ipc call tier3focus selectionState returned empty"
+    fail "qs ipc call tier3focus selectionState returned unexpected: '$STATE_PRE'"
 fi
 
 # --- 9. find silo handle via IPC -------------------------------------
@@ -268,23 +299,7 @@ else
     fail "qs ipc call tier3focus selectionState (post-inject) returned empty"
 fi
 
-# --- cleanup ---------------------------------------------------------
-kill -TERM "$ADMIN_PID" "$ADMIN_TOPLEVEL_PID" "$SILO_PID" 2>/dev/null || true
-for pid in "$ADMIN_PID" "$ADMIN_TOPLEVEL_PID" "$SILO_PID"; do
-    for _ in $(seq 1 20); do
-        if ! kill -0 "$pid" 2>/dev/null; then break; fi
-        sleep 0.25
-    done
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-done
-pkill -u "$SILO_UID"  -f qdistro-test-clipboard-source 2>/dev/null || true
-pkill -u "$SILO_UID"  -x weston-terminal 2>/dev/null || true
-pkill -u "$ADMIN_UID" -f "qdistro-test-clipboard-source.*admin-secret-s48" 2>/dev/null || true
-# Don't kill ALL admin weston-terminals — only ours.
-[ -n "$ADMIN_TOPLEVEL_PID" ] && kill -KILL "$ADMIN_TOPLEVEL_PID" 2>/dev/null || true
-
-rm -f "$ADMIN_LOG" "$ADMIN_TOPLEVEL_LOG" "$SILO_LOG" 2>/dev/null || true
+# --- cleanup handled by trap above ----------------------------------
 
 if [ "$FAILCOUNT" -eq 0 ]; then
     pass "spec/10 v14 focus-aware selection clear end-to-end"

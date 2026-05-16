@@ -31,6 +31,27 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+SPAWN_A=""
+SPAWN_B=""
+TRAP_FIRED=0
+cleanup() {
+    [ "$TRAP_FIRED" -eq 1 ] && return 0
+    TRAP_FIRED=1
+    for pid in "$SPAWN_A" "$SPAWN_B"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 0.5
+    for pid in "$SPAWN_A" "$SPAWN_B"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
+    # Username, not UID — uid assignment can drift across VMs.
+    pkill -u user1 -x weston-terminal 2>/dev/null || true
+    pkill -u user2 -x weston-terminal 2>/dev/null || true
+    rm -f /tmp/s38-spawn-user1.log /tmp/s38-spawn-user2.log 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # --- 1. stage tier3 source -------------------------------------------
 SRC=/root/qdistro-src/qdistro
 TIER3_DIR=/tmp/qdistro-tier3-src

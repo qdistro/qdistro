@@ -28,6 +28,28 @@ pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
 skip() { echo "SKIP: $*"; exit 0; }
 
+SPAWN_A=""
+SPAWN_B=""
+TRAP_FIRED=0
+cleanup() {
+    [ "$TRAP_FIRED" -eq 1 ] && return 0
+    TRAP_FIRED=1
+    for pid in "$SPAWN_A" "$SPAWN_B"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    sleep 0.5
+    for pid in "$SPAWN_A" "$SPAWN_B"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
+    # Use silo usernames (not UIDs) — pkill accepts both, and the
+    # username is stable across VMs where the assigned uid may drift.
+    pkill -u user1 -x weston-terminal 2>/dev/null || true
+    pkill -u user2 -x weston-terminal 2>/dev/null || true
+    rm -f /tmp/s37-spawn-user1.log /tmp/s37-spawn-user2.log 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # --- 1. stage tier3 source -------------------------------------------
 SRC=/root/qdistro-src/qdistro
 TIER3_DIR=/tmp/qdistro-tier3-src
@@ -141,8 +163,8 @@ fi
 # own log line, which is emitted only AFTER chgrp + chmod both
 # succeeded (hard-exit otherwise — see spawn-tier3.sh's chgrp/chmod
 # block).
-BRIDGE_A=$(grep -oE '/run/[a-zA-Z0-9_/-]*qdistro-tier3-user1-[0-9a-f]+\.sock' "$SPAWN_LOG_A" | head -1)
-BRIDGE_B=$(grep -oE '/run/[a-zA-Z0-9_/-]*qdistro-tier3-user2-[0-9a-f]+\.sock' "$SPAWN_LOG_B" | head -1)
+BRIDGE_A=$(grep -oE '/run/qdistro-tier3/qdistro-tier3-user1-[0-9a-f]{32}\.sock' "$SPAWN_LOG_A" | head -1)
+BRIDGE_B=$(grep -oE '/run/qdistro-tier3/qdistro-tier3-user2-[0-9a-f]{32}\.sock' "$SPAWN_LOG_B" | head -1)
 if [ -n "$BRIDGE_A" ] && [ -n "$BRIDGE_B" ] && \
    grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_A" && \
    grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_B"; then
