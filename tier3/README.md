@@ -82,30 +82,84 @@ spawn-tier3.sh user1 firefox https://example.com
 
 Run as root (uses `runuser` to drop to both admin + silo uid). The
 polkit policy installed by `install-tier3-for-vm.sh` lets the
-admin's active session pkexec the helper without password.
+admin's active session pkexec the helper with **one** admin-password
+prompt per 5-minute session (`auth_admin_keep`).
 
 ## Env knobs
 
 See the header comment in `spawn-tier3.sh` for the full table. The
 common ones: `TIER3_USE_SECCTX` (default 1), `TIER3_SECCTX_*` for
-overriding the secctx triple, `TIER3_DEBUG=1` for waypipe debug,
-`TIER3_GROUP` to override the gating group name.
+overriding the secctx triple, `TIER3_DEBUG=1` for waypipe debug.
+
+Note: `TIER3_GROUP` is NOT a runtime knob — the group name is hard-
+coded to `qdistro-tier3` because the bats wrappers grep the literal
+string in spawn-tier3's log output. The install script has its own
+`TIER3_GROUP` knob for choosing what to create; override both in
+lockstep if you really need a different name.
+
+When invoked via `pkexec`, security-sensitive env knobs are refused
+(`TIER3_SOCKET_DIR`, `TIER3_SILO_RUNTIME`, `TIER3_USE_SECCTX`,
+`TIER3_GROUP`, `TIER3_ADMIN_USER`, `TIER3_NO_REAP`, `TIER3_REAP_AGE`,
+`TIER3_SECCTX*`, `TIER3_OUTER_DISPLAY`). Cosmetic knobs
+(`TIER3_TITLE_PREFIX`, `TIER3_NO_GPU`, `TIER3_DEBUG`) stay allowed.
+
+## Security model
+
+Two-round independent code review (2026-05-16) closed the following:
+
+- **Bridge socket race**: bridge socket born `0660 admin:admin` via
+  `umask 0117` before backgrounding waypipe-client. Silos aren't in
+  `admin` group, so cannot `connect()` until the chgrp flips group
+  to `qdistro-tier3` — eliminates the inter-silo bridge-hijack window
+  that the v1 had open via a "sub-ms race, ECONNREFUSED" comment.
+- **Orphan reaper forgery**: live-owner check reads a sidecar PID
+  file (`<sock>.pid`, written at socket-create time in `$SOCKET_DIR`
+  mode 0710 — silos can't write there). Was previously `pgrep -af
+  "spawn-tier3.*$token"` substring match, which hostile silos could
+  forge via `exec -a "spawn-tier3.sh user1 dummy <token>" sleep`.
+- **Silo name validation**: rejects `-` and other non-`[A-Za-z_][A-
+  Za-z0-9_]*` chars to keep the trailing-32-hex token regex
+  unambiguous.
+- **Polkit `auth_admin_keep`** (was: `allow_active=yes`): closes the
+  "any compromised admin-session process can pkexec arbitrary
+  silo/cmd" hole. Cost: one password prompt per session.
+- **Hard-fail on missing `qdistro-secctx-exec`** instead of silent
+  `USE_SECCTX=0` downgrade. The wrapper provides the load-bearing
+  `wp_security_context_v1` triple; absent, the tier-3 toplevel
+  would arrive un-tagged and the clipboard gate would silently treat
+  it as admin.
+- **install-tier3-for-vm.sh validates pre-existing silo accounts**:
+  refuses to co-opt user1/user2 if uid<1000, shell isn't bash/sh, or
+  password isn't strictly locked (`L`/`LK`). Defense-in-depth against
+  package-collision installs.
 
 ## Limitations of the v1
 
-- **Socket mode/group race**: waypipe creates the bridge socket with
-  default umask; spawn-tier3.sh chmods + chgrps it after the fact.
-  Sub-ms race window; failure mode is silo-side `ECONNREFUSED`.
-  Acceptable as a v1 — see `todo/qdwin-vm/tier3-spawn-design.md`
-  open question 2 for the upstream-patch alternatives.
 - **Persistent silo state**: tier-3 silos are real Linux users with
   potentially long-lived processes outside any spawn invocation.
   Cleanup intentionally does NOT reap silo-uid processes that
   weren't started by the spawn wrapper. Use
   `qdistro-tier3-cleanup.sh --all` to force a sweep.
-- **No clipboard wiring beyond what the broker already gates**: the
-  tier-3-tagged toplevel reaches the admin compositor with its
-  secctx triple set, which the broker's `CheckClipboardTransfer`
-  rules-engine matches. The full silo→admin clipboard
-  default-deny round trip is `s39-clipboard-gate.sh` (still DEAD
-  pending broker + helpers).
+- **Per-launch silo runtime dir** lives at
+  `$SOCKET_DIR/runtime-<token>` (default `/run/qdistro-tier3/runtime-
+  <token>`). Created 0700 owned by the silo uid, inside a 0710
+  group-traverse parent — other silos in the group can `cd` into
+  the parent but can't list it (no `r`) nor enter sibling subdirs.
+  The token is 128-bit; full-path attacks would require knowing the
+  token a priori.
+- **Clipboard gate end-to-end**: tier-3 toplevels reach the admin
+  compositor with their full secctx triple. The broker's
+  `CheckClipboardTransfer` rules-engine matches, default-denies, and
+  the rules path is exercised by `s39-clipboard-gate.sh` + the v14
+  focus-injection path by `s48-focus-aware-clear.sh`. One residual
+  PASS line in s39 is journal-soft (the "qdshell cleared the silo→
+  admin selection" assertion needs real wl_data_offer.receive flow
+  to a focused tier-3 toplevel — best done with the new
+  Tier3FocusIPC inject-focus path landed for s48).
+
+## VM validation
+
+All 8 tier-3 bats pass green on `tier2-bats-260515-0917` as of
+2026-05-16. See `qdistro/tests/integration/vm/tiered-isolation.bats`
+for the @test blocks and `qdistro/tests/integration/vm/s{35,36,37,
+38,39,40,41,48}-*.sh` for the drivers.

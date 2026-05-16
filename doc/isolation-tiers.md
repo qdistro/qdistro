@@ -136,19 +136,47 @@ Host-side bits live under `tier2/`; bats coverage is the
 
 ## Tier 3 — different user (waypipe over UNIX)
 
-Primary mechanism for data-silo separation. `qdistro-tier3-spawn
-<silo_user> -- <app...>` runs `waypipe client` as admin uid 1000
-(creating a bridge socket against the local `wayland-1`), and
-`waypipe server -- <app>` as the silo uid (which connects to the same
-socket and exposes a synthetic `wayland-tier3-<silo>-<pid>` display for
-the app).
+**Status: shipped 2026-05-16.** Primary mechanism for data-silo
+separation. `qdistro-tier3-spawn <silo_user> -- <app...>` runs
+`waypipe client` as admin uid 1000 (creating a bridge socket against
+the local `wayland-1`), and `waypipe server -- <app>` as the silo
+uid (which connects to the same socket and exposes a synthetic
+`wayland-tier3-<silo>-<pid>` display for the app).
 
-Cross-uid socket access is gated by the `qdistro-tier3` group — the silo
-can't reach `wayland-1` directly (qdwin's `QDWIN_ALLOWED_UID` rejects via
-`SO_PEERCRED`), but waypipe-client on the admin side passes the gate and
-re-marshals the protocol. Default `--no-gpu` (SHM-only, VM-safe; flip on
-accel3d clones); `--oneshot` per bridge so each silo lifecycle is
-independent.
+Cross-uid socket access is gated by the `qdistro-tier3` group — the
+silo can't reach `wayland-1` directly (qdwin's `QDWIN_ALLOWED_UID`
+rejects via `SO_PEERCRED`), but waypipe-client on the admin side
+passes the gate and re-marshals the protocol. Default `--no-gpu`
+(SHM-only, VM-safe; flip on accel3d clones); `--oneshot` per bridge
+so each silo lifecycle is independent.
+
+The bridge socket lives at
+`/run/qdistro-tier3/qdistro-tier3-<silo>-<token>.sock`. Mode 0660
+group `qdistro-tier3`, born under `umask 0117` so the inter-silo
+hijack window is closed before waypipe accepts the first connection.
+Each spawn writes a sidecar `<sock>.pid` file so the orphan reaper
+has a forgery-resistant way to check whether the owner is alive.
+
+Each tier-3 toplevel arrives at qdwin tagged via
+`wp_security_context_v1` (engine `qdistro.tier3`, app_id
+`qdistro.tier3.<silo>`, instance_id = the spawn's LAUNCH_TOKEN).
+qdshell's `Tier3Apps` singleton filters `Qdwin.windows` on the
+prefix and exposes per-silo chrome + colour via the standard
+qdshell rendering path.
+
+For headless test-driving of cross-silo focus injection (Qubes-style
+focus-aware-clear from spec/10 v14), qdshell ships
+`Tier3FocusIPC` — a Quickshell IPC handler bound to target
+`tier3focus` with `injectFocus(handle)` / `clearSelection(seat)` /
+`findSiloHandle(silo)` / `selectionState()` operations. Driven by
+`qs -p /usr/share/quickshell/qdshell ipc --any-display call …` from
+the bats drivers.
+
+Reference: `qdistro/tier3/README.md` for the operator-facing entry
+point; `tests/integration/vm/s{35..41,48}-*.sh` for the 8 bats
+drivers; `todo/qdwin-vm/tier3-spawn-design.md` for the original
+design + the 2026-05-16 hardening deltas from the two-round
+security/correctness/operational review.
 
 ## Tier 4 — whole-VM windowed
 
