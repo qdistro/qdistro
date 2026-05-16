@@ -173,7 +173,11 @@ virt-customize -a "$BASE_QCOW" \
 echo "[tier4-build] sparsifying..."
 virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 
-install -d "$(dirname "$DEST")"
+# install -d would chmod the destination directory's permissions,
+# which fails when --dest points at /tmp or another system-owned
+# directory the caller doesn't own. mkdir -p suffices — the
+# destination's existing perms are honoured.
+mkdir -p "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
 chmod 0644 "$DEST"
 # Only chown when running as root — non-root builds keep ownership
