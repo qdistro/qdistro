@@ -236,7 +236,8 @@ forward-compatible regardless of which routing option above wins:
 | qdfirefox-extension | `containers.list/.create/.remove` dispatcher handlers implemented + tested (`tests/containers.test.js`). Module is currently dead — no inbound caller. |
 | qdfirefox-extension `tabs.open` | Accepts `cookie_store_id` end-to-end. |
 | qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge ignores it. |
-| Bridge `_handle_containers_*` | **Not implemented.** Blocked on the routing decision above. |
+| Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
+| Bridge cross-user surface | **Not implemented.** Blocked on the routing decision (Option B vs C) above. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
 | Cross-user gate | Per-feature opt-in toggle row in the admin panel — UI doesn't exist yet for any of the Phase-9 features; this adds a "Containers" row. |
 | Audit | Bridge-side journal logging follows the existing `qdistro-browser-bridge` pattern; consumer-side audit lives in whichever daemon ends up calling it. |

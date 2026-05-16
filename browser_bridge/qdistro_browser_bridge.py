@@ -1115,12 +1115,19 @@ DEFAULT_HANDLERS: dict[str, Callable[[dict, dict], dict]] = {
     "tabs.open.reply": _handle_tabs_reply,
     "tabs.close.reply": _handle_tabs_reply,
     "page.extract.reply": _handle_tabs_reply,
+    "page.extract.request.reply": _handle_tabs_reply,
     "cookies.export.reply": _handle_tabs_reply,
     "mpris.publish.reply": _handle_tabs_reply,
     "downloads.notify.reply": _handle_tabs_reply,
     "notifications.show.reply": _handle_tabs_reply,
     "screenlock.inhibit.reply": _handle_tabs_reply,
     "screenlock.release.reply": _handle_tabs_reply,
+    # Firefox containers (contextual identities). Bridge → ext only;
+    # see qdistro/doc/firefox-containers.md. The qdfirefox-extension
+    # answers; Chromium replies contextualIdentities_unavailable.
+    "containers.list.reply": _handle_tabs_reply,
+    "containers.create.reply": _handle_tabs_reply,
+    "containers.remove.reply": _handle_tabs_reply,
     "qdistro.heartbeat.ack": _handle_heartbeat_ack,
     # 9c
     "page.extract": _handle_page_extract,

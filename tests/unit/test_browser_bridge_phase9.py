@@ -405,6 +405,167 @@ class TestPageExtractRequest:
         assert reply["error"] == "request_timeout"
 
 
+class TestContainersRequest:
+    """Bridge-initiated `containers.list / .create / .remove` —
+    Firefox-only contextual identities. Daemons (admin panel, recall)
+    call the bridge's D-Bus surface; the bridge enqueues down stdio
+    and blocks on the extension's reply. Wire shape symmetric with
+    tabs.* and page.extract.request. No intent token — the bridge's
+    identity gate is the security boundary; cross-uid routing for
+    *other* uids' bridges is an open question (see
+    doc/firefox-containers.md). This class only covers own-uid Option-A."""
+
+    def test_list_round_trip(self):
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "containers.list", {}, out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        assert sent["op"] == "containers.list"
+        bb.deliver_reply({
+            "op": "containers.list.reply",
+            "request_id": sent["request_id"],
+            "ok": True,
+            "containers": [
+                {
+                    "cookie_store_id": "firefox-container-1",
+                    "name": "Personal", "color": "blue",
+                    "color_code": "#37adff", "icon": "fingerprint",
+                    "icon_url": "resource://usercontext-content/fingerprint.svg",
+                },
+                {
+                    "cookie_store_id": "firefox-container-2",
+                    "name": "Work", "color": "red",
+                    "color_code": "#ff613d", "icon": "briefcase",
+                    "icon_url": "resource://usercontext-content/briefcase.svg",
+                },
+            ],
+        })
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert result["reply"]["ok"] is True
+        assert len(result["reply"]["containers"]) == 2
+        assert result["reply"]["containers"][0]["name"] == "Personal"
+
+    def test_create_round_trip(self):
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "containers.create",
+                {"name": "Banking", "color": "red", "icon": "dollar"},
+                out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        assert sent["op"] == "containers.create"
+        assert sent["name"] == "Banking"
+        assert sent["color"] == "red"
+        assert sent["icon"] == "dollar"
+        bb.deliver_reply({
+            "op": "containers.create.reply",
+            "request_id": sent["request_id"],
+            "ok": True,
+            "container": {
+                "cookie_store_id": "firefox-container-9",
+                "name": "Banking", "color": "red",
+                "color_code": "#ff613d", "icon": "dollar",
+                "icon_url": "resource://usercontext-content/dollar.svg",
+            },
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["container"]["cookie_store_id"] == "firefox-container-9"
+
+    def test_remove_round_trip(self):
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "containers.remove",
+                {"cookie_store_id": "firefox-container-9"},
+                out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        assert sent["op"] == "containers.remove"
+        assert sent["cookie_store_id"] == "firefox-container-9"
+        bb.deliver_reply({
+            "op": "containers.remove.reply",
+            "request_id": sent["request_id"],
+            "ok": True,
+            "container": {
+                "cookie_store_id": "firefox-container-9",
+                "name": "Banking", "color": "red",
+                "color_code": "#ff613d", "icon": "dollar",
+                "icon_url": "resource://usercontext-content/dollar.svg",
+            },
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["ok"] is True
+
+    def test_chromium_replies_unavailable(self):
+        """qdchrome-extension has no containers module — the extension
+        replies unknown_op, which the bridge surfaces verbatim."""
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "containers.list", {}, out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        bb.deliver_reply({
+            "op": "containers.list.reply",
+            "request_id": sent["request_id"],
+            "ok": False,
+            "error": "contextualIdentities_unavailable",
+            "containers": [],
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["ok"] is False
+        assert result["reply"]["error"] == "contextualIdentities_unavailable"
+
+    def test_remove_missing_id_extension_error_surfaces(self):
+        """If the daemon forgets cookie_store_id, the extension replies
+        ok:false / missing_cookie_store_id; the bridge passes it
+        through unchanged."""
+        out = _FrameStream()
+        result: dict = {}
+
+        def daemon():
+            result["reply"] = bb.enqueue_inbound_request(
+                "containers.remove", {}, out, timeout_s=2.0)
+
+        t = threading.Thread(target=daemon)
+        t.start()
+        sent = out.pop_frame()
+        bb.deliver_reply({
+            "op": "containers.remove.reply",
+            "request_id": sent["request_id"],
+            "ok": False, "error": "missing_cookie_store_id",
+        })
+        t.join(timeout=2.0)
+        assert result["reply"]["error"] == "missing_cookie_store_id"
+
+    def test_timeout_returns_request_timeout(self):
+        out = _FrameStream()
+        reply = bb.enqueue_inbound_request(
+            "containers.list", {}, out, timeout_s=0.1)
+        assert reply["ok"] is False
+        assert reply["error"] == "request_timeout"
+
+
 class TestHeartbeat:
     def test_send_and_ack_resets_misses(self):
         """heartbeat_loop sends a frame, ack clears miss counter."""
