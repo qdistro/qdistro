@@ -23,8 +23,9 @@ VR, and GPU-heavy workloads (see [games](games.md)).
 |-------|-------------------------------|------------------------------------|--------------------------------------------------------------------------------------------------------------------|
 | tty1 | Emergency text console | `agetty` | Raw getty; no greetd; recovery path if everything else breaks. |
 | tty2 | Textual admin login | `greetd` + `tuigreet` | Admin login for repairs when Wayland won't start. |
-| tty3 | Admin graphical session | `greetd` → admin compositor | Pinned; boots here by default; the PyQt locker is active from start. |
-| tty4+ | Pinned and dynamic mix | `qdistro-session-manager` | Some TTYs may be pinned to special roles (recall-user, future ones); remaining slots are allocated dynamically. |
+| tty3 | Admin graphical session | `greetd` → `qdgreeter` → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell) | Pinned; boots here by default; the PyQt locker is active from start. P01 wired this path in 2026-05; before that, greetd ran LXQt+labwc here. |
+| tty4 | Escape hatch — legacy LXQt+labwc | `greetd-fallback.service` → `qdistro-startlxqtwayland` | Recovery path when qdwin is broken. Same code that used to run on tty3 pre-P01. |
+| tty5+ | Pinned and dynamic mix | `qdistro-session-manager` | Some TTYs may be pinned to special roles (recall-user, future ones); remaining slots are allocated dynamically. |
 
 Kernel cmdline: `systemd.default_vt=3`. Boot lands on admin.
 

@@ -21,10 +21,16 @@ Each TTY starts a greetd instance with a role-specific config:
 |-------|------------------------------------------|---------------------------------------------------------------------|
 | tty1 | (none — agetty only) | Raw text login, emergency only. |
 | tty2 | `initial_session = tuigreet` | Textual admin login via PAM (fingerprint or password) → shell. |
-| tty3 | `initial_session = qdistro-admin-compositor` | Auto-launches admin compositor; starts locked. |
-| tty4+ | Dynamic; session manager writes ephemeral configs | Fullscreen user sessions or VM viewers. |
+| tty3 | `default_session.command = /usr/bin/qdgreeter` (deploy/greetd-config.toml) | Graphical qdgreeter → admin auth via greetd JSON-IPC → `qdwin-session-launcher` → `qdwin-session.target` → qdwin compositor + qdshell. |
+| tty4 | `default_session.command = qdistro-startlxqtwayland` (deploy/greetd-config-fallback.toml, run by greetd-fallback.service) | **Escape hatch.** Legacy LXQt+labwc session for recovering from a broken qdwin commit. Reachable via Ctrl+Alt+F4. Documented in `deploy/AGENTS.md`. |
+| tty5+ | Dynamic; session manager writes ephemeral configs | Fullscreen user sessions or VM viewers. |
 
 `systemd.default_vt=3` boots to admin.
+
+> **History:** before P01 (closed 2026-05), tty3 ran
+> `qdistro-startlxqtwayland` (LXQt+labwc) with qdshell as a
+> parity-test overlay. P01 made qdgreeter functional and made qdwin
+> the actual compositor greetd boots; LXQt+labwc demoted to tty4.
 
 ## PyQt locker
 

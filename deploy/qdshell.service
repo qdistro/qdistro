@@ -1,0 +1,26 @@
+[Unit]
+Description=qdshell desktop (Quickshell QML on top of qdwin)
+Documentation=https://codeberg.org/qdistro/qdshell
+After=qdwin-compositor.service
+Requires=qdwin-compositor.service
+PartOf=qdwin-session.target
+
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_SESSION_TYPE=wayland
+Environment=QML_DISABLE_DISK_CACHE=1
+# /usr/share/qdistro/qml hosts the Qdistro.Qdwin QML plugin
+# (libqdistro-qdwin.so) that binds qdwin_shell_v1 from QML.
+Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
+# Wait for the compositor's wayland socket. qdwin-compositor.service
+# uses Type=notify so the wayland socket is up by the time this
+# unit starts, but a short guard keeps cold-start ordering stable.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done'
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
+Restart=on-failure
+RestartSec=1
+# qdshell crashes should not bring qdwin down; the compositor keeps
+# the screen lit while systemd respawns the shell.
+StartLimitBurst=5
+StartLimitIntervalSec=30s

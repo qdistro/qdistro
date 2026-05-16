@@ -132,3 +132,22 @@ setup() {
     assert_success
     assert_output_contains "PASS: revoke teardown end-to-end"
 }
+
+# P01 (plan2/tasks/P01-greeter-boot-path.md):
+# greetd → qdgreeter → qdwin-session.target → qdshell-on-qdwin.
+# Smoke driver s100 asserts every step in the boot path including
+# "LXQt is NOT running" and the tty4 fallback escape hatch.
+@test "greeter-to-qdshell: greetd boots qdgreeter→qdwin→qdshell on tty3" {
+    vm_run "test -x /root/s100-greeter-boots-qdshell.sh"
+    require "/root/s100-greeter-boots-qdshell.sh missing — see plan2/tasks/P01"
+    vm_run "bash /root/s100-greeter-boots-qdshell.sh"
+    assert_success
+    assert_output_contains "PASS: greetd launched qdgreeter on tty3"
+    assert_output_contains "PASS: qdgreeter received password via greetd JSON-IPC"
+    assert_output_contains "PASS: qdgreeter handed off to qdwin (pid recorded)"
+    assert_output_contains "PASS: qdwin started qdshell-session.target"
+    assert_output_contains "PASS: qdshell bound qdwin_shell_v1 v14"
+    assert_output_contains "PASS: qdshell panel visible (screenshot OCR found 'system menu')"
+    assert_output_contains "PASS: LXQt is NOT running (no labwc / lxqt-panel processes)"
+    assert_output_contains "PASS: fallback escape-hatch documented and reachable via tty4"
+}

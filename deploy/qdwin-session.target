@@ -1,0 +1,19 @@
+[Unit]
+Description=qdistro desktop session (qdwin compositor + qdshell)
+Documentation=https://codeberg.org/qdistro/qdistro
+# qdwin-session.target is what greetd's [default_session].command
+# resolves to (via deploy/qdwin-session-launcher.sh). It wants both
+# the compositor and the shell; the compositor starts first, the
+# shell binds qdwin_shell_v1 once the wayland socket appears.
+#
+# qdshell's death must not bring down the compositor — the user
+# may need to retry an unlock, kill a wedged frame, etc. — so
+# qdshell is a Wants= (recoverable) and qdwin is Requires= (the
+# whole target dies if the compositor dies). qdshell.service has
+# Restart=on-failure inside the unit; the target itself stays up.
+Wants=qdshell.service
+Requires=qdwin-compositor.service
+After=qdwin-compositor.service
+
+[Install]
+WantedBy=default.target

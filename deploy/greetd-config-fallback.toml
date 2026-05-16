@@ -1,0 +1,24 @@
+# greetd config for tty4 — the deliberate escape hatch.
+#
+# If qdwin lands in a wedged commit (compositor segfaults, qdshell
+# QML failure, qdwin_shell_v1 binding error) the developer can
+# Ctrl+Alt+F4 to tty4 and log into the legacy LXQt+labwc session.
+#
+# This is the SAME session greetd used to launch by default before
+# P01 — it remains in tree so the test VM stays recoverable. Do not
+# remove this without also deleting tty4 from the bake scripts.
+#
+# Installed at /etc/greetd/config-fallback.toml. A sibling systemd
+# unit (greetd-fallback.service, drop-in template
+#   ExecStart=/usr/bin/greetd --config /etc/greetd/config-fallback.toml
+# ) runs greetd against this file on tty4.
+
+[terminal]
+vt = 4
+
+# tuigreet on tty4 — text-mode login. Keep it textual so even if
+# all of wayland is broken (driver bug, missing libweston) the
+# developer still gets a shell.
+[default_session]
+command = "/usr/local/bin/qdistro-startlxqtwayland"
+user = "admin"

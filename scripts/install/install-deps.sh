@@ -19,7 +19,9 @@ QDISTRO_PKGS=(
   libinput-devel libgbm-devel libdrm-devel seatd-devel
   libXcursor-devel adwaita-icon-theme xcursor-themes
   python313-pywayland python313-cffi python313-PyQt6
+  python313-pyside6
   qt6-wayland python313-setuptools
+  tesseract-ocr grim
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
   python313-python-pam fprintd
