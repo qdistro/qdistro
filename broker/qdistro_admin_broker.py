@@ -1097,10 +1097,17 @@ class Broker(dbus.service.Object):
                          sender_keyword="sender", connection_keyword="conn")
     def RelayMessage(self, target_uid, target_service, kind, payload,
                      _reply, _error, sender=None, conn=None):
-        """Cross-user app message. Admin approves each send individually
-        (one-shot; only scope='once' is permitted). On allow, broker
-        opens the target uid's session bus and asks UserRelay.Forward
-        to invoke <target_service>.Receive(kind, payload).
+        """Cross-user app message. Admin approves each cross-silo send
+        individually (one-shot; only scope='once' is permitted). On
+        allow, broker opens the target uid's session bus and asks
+        UserRelay.Forward to invoke <target_service>.Receive(kind,
+        payload).
+
+        Same-silo (caller_uid == target_uid) sends bypass the admin
+        prompt — the two apps already share a unix uid + session bus,
+        so the relay only saves the sender the cost of resolving the
+        target service itself. The audit row is still written
+        (source="same_silo") so admins can review what flowed.
         """
         try:
             caller_uid, caller_pid, caller_exe, start_time = self._peer_info(sender, conn)
@@ -1117,21 +1124,66 @@ class Broker(dbus.service.Object):
                     f"target_service {target_service_s!r} does not match "
                     f"expected com.qdistro.* shape",
                     name=BUS_NAME + ".BadArgument")
-            # P02: refuse cross-uid relay when the session manager
-            # says the target silo isn't Active. Unknown uid (manager
-            # offline or no row) falls through to the legacy trust path.
-            silo_state = self._silo_state(target_uid_i)
-            if silo_state == "Unreachable":
-                raise dbus.DBusException(
-                    f"session manager unreachable; refusing cross-uid "
-                    f"relay to uid {target_uid_i} (require_silo_active=on)",
-                    name=BUS_NAME + ".SiloManagerUnreachable")
-            if silo_state is not None and silo_state != "Active":
-                raise dbus.DBusException(
-                    f"target silo for uid {target_uid_i} is "
-                    f"{silo_state!r}, not Active",
-                    name=BUS_NAME + ".SiloNotActive")
+            same_silo = (int(caller_uid) == target_uid_i)
+            # P02 silo-active gate. Same-silo skips it: the caller is
+            # already running as that uid, so "silo is not Active" is
+            # impossible by construction (a frozen silo can't make
+            # outbound D-Bus calls).
+            if not same_silo:
+                silo_state = self._silo_state(target_uid_i)
+                if silo_state == "Unreachable":
+                    raise dbus.DBusException(
+                        f"session manager unreachable; refusing cross-uid "
+                        f"relay to uid {target_uid_i} (require_silo_active=on)",
+                        name=BUS_NAME + ".SiloManagerUnreachable")
+                if silo_state is not None and silo_state != "Active":
+                    raise dbus.DBusException(
+                        f"target silo for uid {target_uid_i} is "
+                        f"{silo_state!r}, not Active",
+                        name=BUS_NAME + ".SiloNotActive")
             action_s = f"app.send-to:{target_uid_i}:{target_service_s}"
+        except dbus.DBusException as e:
+            _error(e)
+            return
+        except Exception as e:  # noqa: BLE001
+            _error(dbus.DBusException(str(e),
+                                      name=BUS_NAME + ".Internal"))
+            return
+
+        # Same-silo fast path — no admin prompt, just forward and
+        # audit. Wrapped in a try so audit-log failures don't sink
+        # delivery (audit failure mode mirrors the cross-silo path
+        # below, which also surfaces the structured warning rather
+        # than rejecting).
+        if same_silo:
+            try:
+                self._relay_forward(target_uid_i, target_service_s,
+                                    kind_s, payload_s)
+            except dbus.DBusException as e:
+                _error(e)
+                return
+            except Exception as e:  # noqa: BLE001
+                _error(dbus.DBusException(
+                    f"relay forward failed: {e}",
+                    name=BUS_NAME + ".RelayFailed"))
+                return
+            try:
+                self.audit.log(
+                    caller_uid=caller_uid, caller_pid=caller_pid,
+                    caller_exe=caller_exe,
+                    action=action_s, decision=True, scope="once",
+                    source=f"same_silo kind={kind_s} "
+                           f"target={target_service_s}",
+                    approver_uid=None,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] qdistro.audit.failure: same_silo "
+                      f"relay uid={caller_uid} target={target_service_s}: "
+                      f"{e}", flush=True)
+            _reply()
+            return
+
+        try:
             details = {
                 "kind": kind_s,
                 # Payload is rendered verbatim in the admin UI; the
