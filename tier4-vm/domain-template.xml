@@ -73,6 +73,10 @@
     __DISK_XML__
     <controller type='usb' model='qemu-xhci'/>
     <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
     <interface type='user'>
       <mac address='__MAC__'/>
       <model type='virtio'/>

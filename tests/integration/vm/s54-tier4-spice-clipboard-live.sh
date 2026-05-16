@@ -48,8 +48,8 @@ VMS=()
 cleanup() {
     for vm in "${VMS[@]:-}"; do
         [ -z "$vm" ] && continue
-        runuser -u admin -- virsh destroy "$vm" >/dev/null 2>&1 || true
-        runuser -u admin -- virsh undefine "$vm" >/dev/null 2>&1 || true
+        runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh destroy "$vm" >/dev/null 2>&1 || true
+        runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh undefine "$vm" >/dev/null 2>&1 || true
         rm -f /home/admin/.local/share/libvirt/images/"$vm".qcow2 2>/dev/null || true
     done
 }
@@ -66,16 +66,17 @@ spawn_and_wait() {
     local pid=$!
     VMS+=("$vm_name")
 
-    # Wait for domain running.
-    local d=$(( $(date +%s) + 90 ))
+    # Wait for domain running — virt-customize overlay + first-boot
+    # under nested KVM can exceed 90s on a cold cache.
+    local d=$(( $(date +%s) + 180 ))
     while [ "$(date +%s)" -lt "$d" ]; do
-        if runuser -u admin -- virsh domstate "$vm_name" 2>/dev/null \
+        if runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh domstate "$vm_name" 2>/dev/null \
             | grep -qw running; then
             break
         fi
         sleep 1
     done
-    if ! runuser -u admin -- virsh domstate "$vm_name" 2>/dev/null \
+    if ! runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh domstate "$vm_name" 2>/dev/null \
             | grep -qw running; then
         cat "$log" >&2
         rm -f "$log"
@@ -87,7 +88,7 @@ spawn_and_wait() {
 
 qga_ping() {
     local vm="$1"
-    runuser -u admin -- virsh qemu-agent-command "$vm" \
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh qemu-agent-command "$vm" \
         '{"execute":"guest-ping"}' >/dev/null 2>&1
 }
 
@@ -95,7 +96,7 @@ qga_exec_check_vdagent() {
     local vm="$1"
     local req='{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["is-active","spice-vdagentd.service"],"capture-output":true}}'
     local reply
-    reply=$(runuser -u admin -- virsh qemu-agent-command "$vm" "$req" 2>/dev/null)
+    reply=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh qemu-agent-command "$vm" "$req" 2>/dev/null)
     [ -z "$reply" ] && return 1
     local pid
     pid=$(echo "$reply" | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
@@ -105,7 +106,7 @@ qga_exec_check_vdagent() {
     local d=$(( $(date +%s) + 15 ))
     while [ "$(date +%s)" -lt "$d" ]; do
         local s
-        s=$(runuser -u admin -- virsh qemu-agent-command "$vm" \
+        s=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh qemu-agent-command "$vm" \
             "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}" 2>/dev/null)
         if echo "$s" | grep -q '"exited"[[:space:]]*:[[:space:]]*true'; then
             # base64-decoded stdout of `systemctl is-active spice-vdagentd`
@@ -127,7 +128,7 @@ if ! spawn_and_wait "$VM_DEFAULT" ""; then
     fail "default-config domain never reached running state"
 fi
 
-XML_DEFAULT=$(runuser -u admin -- virsh dumpxml "$VM_DEFAULT" 2>/dev/null)
+XML_DEFAULT=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh dumpxml "$VM_DEFAULT" 2>/dev/null)
 if echo "$XML_DEFAULT" | grep -q "copypaste='no'"; then
     pass "running domain XML carries copypaste='no'"
 else
@@ -135,17 +136,19 @@ else
     fail "default running XML does not contain copypaste='no'"
 fi
 
-# Wait for qga.
+# Wait for qga. cloud-init firstboot + qga binding can take >90s under
+# nested KVM on a first-boot disk; budget 240s to keep this driver
+# robust under cold caches.
 QGA_OK=0
-deadline=$(( $(date +%s) + 90 ))
+deadline=$(( $(date +%s) + 240 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if qga_ping "$VM_DEFAULT"; then QGA_OK=1; break; fi
-    sleep 1
+    sleep 2
 done
 if [ "$QGA_OK" = "1" ]; then
     pass "qga reachable inside $VM_DEFAULT"
 else
-    fail "qga never reachable inside $VM_DEFAULT within 90s"
+    fail "qga never reachable inside $VM_DEFAULT within 240s"
 fi
 
 if qga_exec_check_vdagent "$VM_DEFAULT"; then
@@ -156,8 +159,8 @@ fi
 
 # Tear down default before opt-in (don't keep two domains around — keeps
 # memory pressure low for the bats VM).
-runuser -u admin -- virsh destroy "$VM_DEFAULT" >/dev/null 2>&1 || true
-runuser -u admin -- virsh undefine "$VM_DEFAULT" >/dev/null 2>&1 || true
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh destroy "$VM_DEFAULT" >/dev/null 2>&1 || true
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh undefine "$VM_DEFAULT" >/dev/null 2>&1 || true
 rm -f /home/admin/.local/share/libvirt/images/"$VM_DEFAULT".qcow2 2>/dev/null || true
 
 # --- 2. opt-in config (copypaste='yes') ---
@@ -166,7 +169,7 @@ if ! spawn_and_wait "$VM_OPTIN" "TIER4_SPICE_CLIPBOARD=allowed"; then
     fail "opt-in-config domain never reached running state"
 fi
 
-XML_OPTIN=$(runuser -u admin -- virsh dumpxml "$VM_OPTIN" 2>/dev/null)
+XML_OPTIN=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 virsh dumpxml "$VM_OPTIN" 2>/dev/null)
 if echo "$XML_OPTIN" | grep -q "copypaste='yes'"; then
     pass "opt-in running domain XML carries copypaste='yes'"
 else
