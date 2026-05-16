@@ -142,3 +142,18 @@ class TestRelayGate:
                             "text/plain", "hi", cb.reply, cb.error)
         assert len(cb.errors) == 0
         assert len(broker._pending) == 1
+
+    def test_unreachable_refuses_in_fail_closed_mode(self, broker_factory):
+        # SEC-H1: when REQUIRE_SILO_ACTIVE is on, a session-manager
+        # outage (modelled as _silo_state returning "Unreachable")
+        # rejects the relay with SiloManagerUnreachable instead of
+        # falling through to legacy trust.
+        broker = broker_factory({3000: "Unreachable"})
+        broker.set_peer(uid=2000)
+        cb = _CB()
+        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+                            "text/plain", "hi", cb.reply, cb.error)
+        assert cb.replies == []
+        assert len(cb.errors) == 1
+        err = cb.errors[0]
+        assert "SiloManagerUnreachable" in err.get_dbus_name()

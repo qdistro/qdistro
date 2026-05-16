@@ -393,3 +393,130 @@ class TestPersistence:
         s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
         started = s2.autostart_pass()
         assert "work" in started
+
+
+# ---------------------------------------------------------------------------
+# Review fixups: H1/H2/H3/SEC-H2 regression coverage
+# ---------------------------------------------------------------------------
+
+class TestReviewFixups:
+    def test_start_rollback_emits_signal(self, ops, tmp_path, signals):
+        """H2 — failed start() must emit SiloChanged(Stopped) after
+        rolling back so the admin UI doesn't stick on Active."""
+        store = _SiloStore(
+            ops, config_path=tmp_path / "silos.yaml",
+            on_change=lambda n, s: signals.append((n, s)),
+        )
+        store.create("work", 2000)
+        # Force systemctl_start to fail.
+        import subprocess
+
+        def _boom(unit):
+            raise subprocess.CalledProcessError(1, ["systemctl", "start", unit])
+
+        ops.systemctl_start = _boom
+        with pytest.raises(sm.SessionError):
+            store.start("work")
+        # Saw Active (the optimistic transition) then Stopped (rollback).
+        states = [s for (n, s) in signals if n == "work"]
+        assert State.ACTIVE in states
+        assert states[-1] == State.STOPPED
+        assert store.get("work").state == State.STOPPED
+
+    def test_delete_rollback_emits_signal(self, ops, tmp_path, signals):
+        """H2 — failed delete() (e.g. userdel error) rolls back to
+        Stopped via _force_state, emitting SiloChanged."""
+        store = _SiloStore(
+            ops, config_path=tmp_path / "silos.yaml",
+            on_change=lambda n, s: signals.append((n, s)),
+        )
+        store.create("work", 2000)
+        store.start("work")
+        store.stop("work", grace_s=0)
+        ops.userdel_should_fail = True
+        with pytest.raises(sm.SessionError):
+            store.delete("work")
+        # Saw Deleting then Stopped (rollback).
+        states = [s for (n, s) in signals if n == "work"]
+        assert State.DELETING in states
+        assert states[-1] == State.STOPPED
+        assert store.get("work").state == State.STOPPED
+
+    def test_stop_recovers_from_mid_teardown_error(self, store, ops):
+        """H3 — if cgroup_pids raises, stop() must not wedge the silo
+        in STOPPING (which has no recovery path)."""
+        store.create("work", 2000)
+        store.start("work")
+
+        # Make cgroup_pids blow up after the transition to STOPPING.
+        def _boom(name):
+            raise OSError("synthetic procfs corruption")
+
+        ops.cgroup_pids = _boom
+        # stop() should still drive the silo to STOPPED via _force_state.
+        # It might raise; either way, the silo is no longer wedged.
+        try:
+            store.stop("work", grace_s=0)
+        except sm.SessionError:
+            pass
+        assert store.get("work").state == State.STOPPED
+
+    def test_load_drops_row_with_invalid_name(self, ops, tmp_path, caplog):
+        """SEC-H2 — hand-edited silos.yaml with a path-traversal name
+        must be rejected at load(), not silently accepted."""
+        cfg = tmp_path / "silos.yaml"
+        cfg.write_text(
+            "silos:\n"
+            '  - name: "../etc/passwd"\n'
+            "    uid: 2000\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 0\n"
+            "    last_change: 0\n"
+        )
+        import logging as _logging
+        with caplog.at_level(_logging.ERROR):
+            store = _SiloStore(ops, config_path=cfg)
+        assert store.list_silos() == []
+        assert any("invalid" in r.message.lower() or
+                   "dropping" in r.message.lower()
+                   for r in caplog.records)
+
+    def test_load_drops_row_with_reserved_name(self, ops, tmp_path, caplog):
+        """SEC-H2 — reserved names get the same treatment."""
+        cfg = tmp_path / "silos.yaml"
+        cfg.write_text(
+            "silos:\n"
+            "  - name: root\n"
+            "    uid: 2000\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 0\n"
+            "    last_change: 0\n"
+        )
+        import logging as _logging
+        with caplog.at_level(_logging.ERROR):
+            store = _SiloStore(ops, config_path=cfg)
+        assert store.list_silos() == []
+
+    def test_load_drops_row_with_bad_uid_range(self, ops, tmp_path):
+        """SEC-H2 — out-of-range uid gets dropped, valid rows survive."""
+        cfg = tmp_path / "silos.yaml"
+        cfg.write_text(
+            "silos:\n"
+            "  - name: bogus\n"
+            "    uid: 50\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 0\n"
+            "    last_change: 0\n"
+            "  - name: good\n"
+            "    uid: 2000\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 0\n"
+            "    last_change: 0\n"
+        )
+        store = _SiloStore(ops, config_path=cfg)
+        names = [s.name for s in store.list_silos()]
+        assert names == ["good"]

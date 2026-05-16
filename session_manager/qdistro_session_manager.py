@@ -219,6 +219,61 @@ class _SystemOps:
             ["useradd", "-m", "-u", str(int(uid)), "-U",
              "-s", "/bin/bash", str(name)],
             check=True)
+        # Replace the plain /home/<name> dir useradd created with a
+        # fresh btrfs subvolume so each silo has its own snapshot
+        # boundary + per-quota target. Falls through (warning only)
+        # on non-btrfs hosts so dev VMs without btrfs still work.
+        self._convert_home_to_subvolume(name, uid)
+
+    def _convert_home_to_subvolume(self, name: str, uid: int) -> None:
+        home = Path("/home") / name
+        try:
+            # Are we on btrfs at all? `btrfs filesystem df` exits 0 on
+            # btrfs, non-zero elsewhere. Cheap probe.
+            probe = subprocess.run(
+                ["btrfs", "filesystem", "df", str(home)],
+                check=False, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            if probe.returncode != 0:
+                log.warning(
+                    "btrfs not available at %s; leaving plain dir "
+                    "(per-silo subvolume isolation skipped)", home)
+                return
+            # Save what useradd populated from /etc/skel.
+            skel_backup = Path("/var/lib/qdistro/silos") / name / ".skel-backup"
+            skel_backup.parent.mkdir(parents=True, exist_ok=True)
+            if skel_backup.exists():
+                shutil.rmtree(skel_backup)
+            shutil.copytree(home, skel_backup, symlinks=True)
+            # Replace dir with subvolume.
+            shutil.rmtree(home)
+            subprocess.run(
+                ["btrfs", "subvolume", "create", str(home)],
+                check=True)
+            # Restore the skeleton contents.
+            for child in skel_backup.iterdir():
+                dst = home / child.name
+                if child.is_dir():
+                    shutil.copytree(child, dst, symlinks=True)
+                else:
+                    shutil.copy2(child, dst, follow_symlinks=False)
+            shutil.rmtree(skel_backup)
+            os.chown(home, int(uid), int(uid))
+            home.chmod(0o700)
+            # Recursive chown for the restored files.
+            for root, dirs, files in os.walk(home):
+                for d in dirs:
+                    os.chown(Path(root) / d, int(uid), int(uid))
+                for f in files:
+                    try:
+                        os.chown(Path(root) / f, int(uid), int(uid),
+                                 follow_symlinks=False)
+                    except OSError:
+                        pass
+        except (subprocess.CalledProcessError, FileNotFoundError,
+                OSError) as e:
+            log.warning("btrfs subvolume conversion for %s failed: %s "
+                        "(home left as plain dir)", home, e)
 
     def userdel(self, name: str) -> None:
         # -r removes home dir + mail spool. -f forces removal even
@@ -250,11 +305,10 @@ class _SystemOps:
         if p.exists():
             # cgroup dirs are removed with rmdir (not rmtree) — the
             # kernel rejects rmtree on the synthetic cgroup files.
-            try:
-                p.rmdir()
-            except OSError:
-                # Stale PID in the cgroup; one more SIGKILL pass.
-                pass
+            # If rmdir fails (EBUSY: live tasks still in cgroup.procs)
+            # we surface the error so the caller can decide — silently
+            # swallowing leaks the cgroup directory.
+            p.rmdir()
 
     def cgroup_freeze(self, name: str, frozen: bool) -> None:
         p = CGROUP_ROOT / name / "cgroup.freeze"
@@ -343,6 +397,22 @@ class _SiloStore:
                 name = row.get("name")
                 uid = row.get("uid")
                 if not isinstance(name, str) or not isinstance(uid, int):
+                    log.error(
+                        "silos.yaml: dropping row with bad name/uid "
+                        "types (name=%r uid=%r)", name, uid)
+                    continue
+                # Re-run the same validation we use on CreateSilo so a
+                # hand-edited silos.yaml row can't smuggle a bogus name
+                # (path traversal in shutil.rmtree, argv injection in
+                # useradd/userdel, etc.) or an out-of-range uid into
+                # the privileged code paths.
+                try:
+                    validate_name(name)
+                    validate_uid(uid)
+                except BadArgument as e:
+                    log.error(
+                        "silos.yaml: dropping row with invalid "
+                        "name/uid: %s", e)
                     continue
                 state = row.get("state", State.STOPPED)
                 if state not in State.ALL:
@@ -392,9 +462,23 @@ class _SiloStore:
         silo.state = new_state
         silo.last_change = int(time.time())
         self.save()
+        self._emit_change(silo.name, silo.state)
+
+    def _force_state(self, silo: Silo, new_state: str) -> None:
+        # Bypass the transition table for rollback paths. Always
+        # persists + emits SiloChanged so subscribers don't get
+        # stuck on the previous state. Used when a side-effect
+        # failed mid-transition and the daemon has to declare a
+        # recoverable resting state regardless of the table.
+        silo.state = new_state
+        silo.last_change = int(time.time())
+        self.save()
+        self._emit_change(silo.name, silo.state)
+
+    def _emit_change(self, name: str, state: str) -> None:
         if self._on_change is not None:
             try:
-                self._on_change(silo.name, silo.state)
+                self._on_change(name, state)
             except Exception:  # noqa: BLE001
                 log.exception("on_change callback raised; continuing")
 
@@ -424,11 +508,7 @@ class _SiloStore:
             )
             self._silos[name] = silo
             self.save()
-            if self._on_change is not None:
-                try:
-                    self._on_change(silo.name, silo.state)
-                except Exception:  # noqa: BLE001
-                    log.exception("on_change raised; continuing")
+            self._emit_change(silo.name, silo.state)
             return silo
 
     def delete(self, name: str) -> None:
@@ -437,25 +517,34 @@ class _SiloStore:
             # Refuse while the silo is anything other than Created or
             # Stopped — the admin must explicitly Stop it first.
             if silo.state not in (State.CREATED, State.STOPPED):
-                raise SiloBusy(
-                    f"silo {silo.name!r} is {silo.state}; stop it first")
+                if silo.state in (State.STOPPING,):
+                    msg = (f"silo {silo.name!r} is {silo.state}; "
+                           f"wait for it to reach Stopped")
+                elif silo.state == State.DELETING:
+                    msg = (f"silo {silo.name!r} is {silo.state}; "
+                           f"the daemon may have crashed mid-delete")
+                else:
+                    msg = (f"silo {silo.name!r} is {silo.state}; "
+                           f"stop it first")
+                raise SiloBusy(msg)
             self._transition(silo, State.DELETING)
             try:
                 self._ops.cgroup_remove(silo.name)
                 self._ops.remove_state_dir(silo.name)
                 self._ops.userdel(silo.name)
-            except subprocess.CalledProcessError as e:
-                # Roll back to Stopped — the admin can retry.
-                silo.state = State.STOPPED
-                self.save()
+            except Exception as e:  # noqa: BLE001
+                # Side-effect failure mid-delete: roll back to
+                # Stopped so the admin can retry. Use _force_state
+                # so subscribers see the Deleting→Stopped emit and
+                # the silo isn't wedged in a terminal-on-paper state
+                # (DELETING has no legal outgoing edges).
+                log.error("delete of silo %r failed during teardown: %s",
+                          silo.name, e)
+                self._force_state(silo, State.STOPPED)
                 raise SessionError(f"delete failed: {e}") from e
             self._silos.pop(name, None)
             self.save()
-            if self._on_change is not None:
-                try:
-                    self._on_change(silo.name, "Deleted")
-                except Exception:  # noqa: BLE001
-                    log.exception("on_change raised; continuing")
+            self._emit_change(silo.name, "Deleted")
 
     # ---- start / stop / freeze / resume -------------------------------
 
@@ -466,16 +555,21 @@ class _SiloStore:
                 # idempotent
                 return
             self._transition(silo, State.ACTIVE)
-            self._ops.cgroup_create(silo.name)
-            unit = SILO_LAUNCHER_FMT.format(name=silo.name, uid=silo.uid)
             try:
+                self._ops.cgroup_create(silo.name)
+                unit = SILO_LAUNCHER_FMT.format(name=silo.name,
+                                                uid=silo.uid)
                 self._ops.systemctl_start(unit)
-            except subprocess.CalledProcessError as e:
-                # Roll back state on failure.
-                silo.state = State.STOPPED
-                self.save()
+            except Exception as e:  # noqa: BLE001
+                # Roll back state on failure. _force_state emits
+                # SiloChanged so the admin UI / PodApps don't stick on
+                # "Active" after a failed launch.
+                log.error("start of silo %r failed: %s", silo.name, e)
+                self._force_state(silo, State.STOPPED)
+                if isinstance(e, SessionError):
+                    raise
                 raise SessionError(
-                    f"systemctl start {unit} failed: {e}") from e
+                    f"start of silo {silo.name!r} failed: {e}") from e
 
     def stop(self, name: str, grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
         with self._lock:
@@ -487,23 +581,78 @@ class _SiloStore:
                     f"cannot stop silo {silo.name!r} in state {silo.state}")
             # If frozen we must thaw before SIGTERM has any effect.
             if silo.state == State.FROZEN:
-                self._ops.cgroup_freeze(silo.name, False)
+                try:
+                    self._ops.cgroup_freeze(silo.name, False)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cgroup_freeze(False) for %r failed during "
+                                "stop pre-thaw: %s — continuing",
+                                silo.name, e)
             self._transition(silo, State.STOPPING)
-            unit = SILO_LAUNCHER_FMT.format(name=silo.name, uid=silo.uid)
-            self._ops.systemctl_stop(unit)
-            pids = self._ops.cgroup_pids(silo.name)
-            if pids:
-                self._ops.kill_pids(pids, signal.SIGTERM)
-                deadline = time.monotonic() + max(0, int(grace_s))
-                while time.monotonic() < deadline:
-                    if not self._ops.cgroup_pids(silo.name):
+            try:
+                unit = SILO_LAUNCHER_FMT.format(name=silo.name,
+                                                uid=silo.uid)
+                self._ops.systemctl_stop(unit)
+                # Capture pids defensively — cgroup_pids may raise on a
+                # corrupted procfs entry. Treat any read failure as
+                # "assume populated; SIGKILL anything we can find".
+                try:
+                    pids = self._ops.cgroup_pids(silo.name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cgroup_pids for %r raised %s; assuming "
+                                "empty", silo.name, e)
+                    pids = []
+                if pids:
+                    self._ops.kill_pids(pids, signal.SIGTERM)
+                    deadline = time.monotonic() + max(0, int(grace_s))
+                    while time.monotonic() < deadline:
+                        try:
+                            if not self._ops.cgroup_pids(silo.name):
+                                break
+                        except Exception:  # noqa: BLE001
+                            break
+                        time.sleep(0.1)
+                    try:
+                        remaining = self._ops.cgroup_pids(silo.name)
+                    except Exception:  # noqa: BLE001
+                        remaining = []
+                    if remaining:
+                        self._ops.kill_pids(remaining, signal.SIGKILL)
+                # After SIGKILL the kernel needs a moment to reap the
+                # task and drop it from cgroup.procs. Without this poll
+                # the rmdir below races EBUSY and the cgroup dir leaks.
+                reap_deadline = time.monotonic() + 1.0
+                while time.monotonic() < reap_deadline:
+                    try:
+                        if not self._ops.cgroup_pids(silo.name):
+                            break
+                    except Exception:  # noqa: BLE001
                         break
-                    time.sleep(0.1)
-                remaining = self._ops.cgroup_pids(silo.name)
-                if remaining:
-                    self._ops.kill_pids(remaining, signal.SIGKILL)
-            self._ops.cgroup_remove(silo.name)
-            self._transition(silo, State.STOPPED)
+                    time.sleep(0.05)
+                try:
+                    self._ops.cgroup_remove(silo.name)
+                except OSError as e:
+                    # The cgroup is still populated — kernel didn't reap
+                    # in time, or one of the processes is stuck in D.
+                    # Log loudly so the leak is visible; transition to
+                    # STOPPED anyway so the admin can retry stop or
+                    # delete (the autostart sweep will paper over the
+                    # leftover dir on next daemon start).
+                    log.error("cgroup rmdir for silo %r failed: %s "
+                              "(cgroup may have leaked)", silo.name, e)
+                self._transition(silo, State.STOPPED)
+            except SessionError:
+                # Already-typed errors propagate; the silo is wedged
+                # in STOPPING but the caller can retry stop() once
+                # because STOPPING is now forced back to STOPPED below.
+                self._force_state(silo, State.STOPPED)
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.error("stop of silo %r failed mid-teardown: %s — "
+                          "forcing STOPPED so the silo isn't wedged",
+                          silo.name, e)
+                self._force_state(silo, State.STOPPED)
+                raise SessionError(
+                    f"stop of silo {silo.name!r} failed: {e}") from e
 
     def freeze(self, name: str) -> None:
         with self._lock:

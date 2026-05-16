@@ -687,7 +687,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: CreateSilo wrote /var/lib/qdistro/silos/work/ with mode 0700 work:work"
     assert_output_contains "PASS: StartSilo brought silo 'work' to active state (cgroup populated)"
     assert_output_contains "PASS: PodApps.silos reflects active silo 'work' via D-Bus signal"
-    assert_output_contains "PASS: FreezeSilo paused all processes (cgroup.freeze=1)"
+    assert_output_contains "PASS: FreezeSilo froze all processes (cgroup.freeze=1)"
     assert_output_contains "PASS: ResumeSilo unfroze (cgroup.freeze=0; previously paused PID resumed)"
     assert_output_contains "PASS: DeleteSilo refused while silo is active (returned 'SiloBusy')"
     assert_output_contains "PASS: StopSilo terminated SIGTERM then SIGKILL after grace"

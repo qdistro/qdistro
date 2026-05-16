@@ -122,6 +122,39 @@ SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
 SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
 SESSION_MANAGER_IFACE = "com.qdistro.SessionManager1"
 
+# When set, _silo_state errors (manager offline, timeout, parse error)
+# stop falling through to the legacy trust-the-uid path. Instead they
+# return the sentinel "Unreachable" which RelayMessage rejects with
+# SiloManagerUnreachable. Hosts that have rolled out the session
+# manager should flip this on; legacy bakes keep the fail-open default.
+# Read at broker start from $QDISTRO_BROKER_REQUIRE_SILO_ACTIVE or
+# /etc/qdistro/broker.conf (key = require_silo_active = true).
+_REQUIRE_SILO_ACTIVE_ENV = "QDISTRO_BROKER_REQUIRE_SILO_ACTIVE"
+_BROKER_CONF_PATH = "/etc/qdistro/broker.conf"
+
+
+def _read_require_silo_active() -> bool:
+    val = os.environ.get(_REQUIRE_SILO_ACTIVE_ENV, "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "require_silo_active":
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+    except OSError:
+        pass
+    return False
+
+
+REQUIRE_SILO_ACTIVE = _read_require_silo_active()
+
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
 # the user relay.
@@ -1088,6 +1121,11 @@ class Broker(dbus.service.Object):
             # says the target silo isn't Active. Unknown uid (manager
             # offline or no row) falls through to the legacy trust path.
             silo_state = self._silo_state(target_uid_i)
+            if silo_state == "Unreachable":
+                raise dbus.DBusException(
+                    f"session manager unreachable; refusing cross-uid "
+                    f"relay to uid {target_uid_i} (require_silo_active=on)",
+                    name=BUS_NAME + ".SiloManagerUnreachable")
             if silo_state is not None and silo_state != "Active":
                 raise dbus.DBusException(
                     f"target silo for uid {target_uid_i} is "
@@ -1161,14 +1199,25 @@ class Broker(dbus.service.Object):
         """Ask the session manager for the silo state of `target_uid`.
 
         Returns the state string ('Created'/'Active'/'Frozen'/...) when
-        the manager has a row, None when the manager is unreachable or
-        knows no silo for that uid. ADMIN_UID short-circuits to
-        'Active' — admin never appears in silos.yaml.
+        the manager has a row, None when the manager has no row but
+        was reachable, or the sentinel "Unreachable" when REQUIRE_
+        SILO_ACTIVE is on and the manager isn't responding. ADMIN_UID
+        short-circuits to 'Active' — admin never appears in silos.yaml.
 
         Called by RelayMessage; overridable by the broker test stub.
+
+        Fail-open vs fail-closed: the legacy (default) behaviour is to
+        return None on every error so RelayMessage falls through to
+        the pre-P02 trust path. Every fail-open branch logs a
+        structured warning so operators auditing "why was this relay
+        allowed?" have a breadcrumb. Hosts can flip to fail-closed by
+        setting QDISTRO_BROKER_REQUIRE_SILO_ACTIVE=true or
+        require_silo_active=true in /etc/qdistro/broker.conf — then
+        every error becomes "Unreachable" and RelayMessage refuses.
         """
         if int(target_uid) == ADMIN_UID:
             return "Active"
+        fail_token = "Unreachable" if REQUIRE_SILO_ACTIVE else None
         try:
             import json as _json
             system_bus = dbus.SystemBus()
@@ -1183,16 +1232,24 @@ class Broker(dbus.service.Object):
         except dbus.DBusException as e:
             name = e.get_dbus_name() or ""
             if name.endswith(".ServiceUnknown") or name.endswith(".NameHasNoOwner"):
-                # Session manager not running yet (legacy bake) — fall
-                # back to pre-P02 trust-the-uid behaviour.
-                return None
-            print(f"[broker] _silo_state({target_uid}) error: {e!r}",
-                  flush=True)
-            return None
+                print(
+                    f"[broker] WARN _silo_state({target_uid}): session "
+                    f"manager not on bus ({name}); "
+                    f"{'failing closed' if REQUIRE_SILO_ACTIVE else 'falling through to legacy trust'}",
+                    flush=True)
+                return fail_token
+            print(
+                f"[broker] WARN _silo_state({target_uid}) DBusException: "
+                f"{e!r}; "
+                f"{'failing closed' if REQUIRE_SILO_ACTIVE else 'falling through to legacy trust'}",
+                flush=True)
+            return fail_token
         except Exception as e:  # noqa: BLE001
-            print(f"[broker] _silo_state({target_uid}) error: {e!r}",
-                  flush=True)
-            return None
+            print(
+                f"[broker] WARN _silo_state({target_uid}) error: {e!r}; "
+                f"{'failing closed' if REQUIRE_SILO_ACTIVE else 'falling through to legacy trust'}",
+                flush=True)
+            return fail_token
 
     def _relay_forward(self, target_uid: int, target_service: str,
                        kind: str, payload: str) -> None:

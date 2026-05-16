@@ -77,31 +77,96 @@ on admin; the locker (which runs in admin's session) auths against admin's
 DB directly. A future PAM module backed by a system-wide fingerprint store
 would let any context verify against admin's enrolled fingers.
 
-## Admin-controlled user lifecycle
+## Admin-controlled silo lifecycle
 
-A separate daemon, `qdistro-session-manager.service`, owns user session
-state.
+A separate daemon, `qdistro-session-manager.service`, owns silo state.
+A "silo" is a Linux uid plus its per-silo state (subvolume, runtime dir,
+cgroup-v2 scope) plus a registry entry the broker reads when routing
+send-to / cross-uid actions. The terms "user" and "silo" are used
+interchangeably in older spec text; new code and the D-Bus surface
+both use "silo".
 
-### User states
+### Silo states
 
-- **absent** — the account doesn't exist.
-- **stopped** — account exists; no processes running, no session.
-- **paused / frozen** — cgroup-frozen; no CPU, surfaces hidden; admin can
- resume.
-- **running** — processes executing; surfaces render when admin is unlocked.
+The state machine has six states. Two of them (`Stopping`, `Deleting`)
+are transient — they're observable on the `SiloChanged` signal for UI
+progress badges, but settle to a resting state within a few seconds.
+
+- **Created** — `useradd` happened, per-silo state dir exists, but
+ `systemctl start` has never run for the silo. Initial state after
+ `CreateSilo`.
+- **Active** — silo's launcher unit is running; cgroup is populated;
+ surfaces render when admin is unlocked. (Spec's old "running.")
+- **Frozen** — cgroup-v2 `cgroup.freeze=1`; no CPU; surfaces hidden;
+ admin can `ResumeSilo`. This is `cgroup.freeze`, not POSIX SIGSTOP —
+ syscalls in flight unwind cleanly when thawed. (Spec's old
+ "paused / frozen.")
+- **Stopping** — transient. SIGTERM has been sent; the daemon is
+ waiting for the grace window before SIGKILL. `SiloChanged` fires
+ once on entry and once on Stopped.
+- **Stopped** — account still exists, but no processes are running and
+ the cgroup is empty (or has been removed). `DeleteSilo` is only
+ legal from this or `Created`.
+- **Deleting** — transient. `userdel`, state-dir teardown, cgroup
+ removal in progress. On success the silo's row vanishes from
+ `ListSilos`; on failure mid-teardown the silo is rolled back to
+ `Stopped` with a `SiloChanged` emit.
+
+Silos that don't exist in `silos.yaml` are simply absent from
+`ListSilos`; the spec's old "absent" state is now "no row in the
+registry."
 
 ### Admin panel operations
 
 A PyQt app in admin's session:
 
-- **Create user** — wraps `useradd`, sets qdistro metadata (colour, default
- isolation tier, default device grants, netns policy).
-- **Delete user** — teardown session + `userdel`.
-- **Start / stop / pause / resume** — session manager transitions state.
-- **Edit permissions** — device grants, clipboard policies, netns, per-app
- isolation tier.
-- **Schedule** — optional; systemd timers can pause/resume users on time
- windows.
+- **Create silo** — wraps `useradd -m -u <uid>` and replaces the
+ created `/home/<name>` with a btrfs subvolume so each silo has its
+ own snapshot / quota boundary. Also seeds qdistro metadata
+ (colour, default isolation tier, default device grants, netns
+ policy) — planned (post-P02).
+- **Delete silo** — teardown silo + `userdel -r`. Only legal from
+ `Stopped` or `Created`.
+- **Start / Stop / Freeze / Resume** — session manager transitions
+ state. Freeze/Resume use cgroup-v2 `cgroup.freeze` rather than
+ POSIX-signal pause so SDK hooks and signal handlers behave
+ predictably across the pause.
+- **Edit permissions** — device grants, clipboard policies, netns,
+ per-app isolation tier. **Planned (post-P02).**
+- **Schedule** — optional; systemd timers can freeze/resume silos on
+ time windows. **Planned (post-P02).**
+
+### D-Bus surface
+
+Bus name `com.qdistro.SessionManager1` on the system bus; object path
+`/com/qdistro/SessionManager1`.
+
+```
+method  CreateSilo(s name, i uid)        → ()
+method  DeleteSilo(s name)               → ()
+method  StartSilo(s name)                → ()
+method  StopSilo(s name, i grace_s)      → ()
+method  FreezeSilo(s name)               → ()
+method  ResumeSilo(s name)               → ()
+method  ListSilos()                      → (s)   # JSON-encoded array
+signal  SiloChanged(s name, s state)
+```
+
+`ListSilos` returns a JSON-encoded `s` (not `aa{sv}`) so the same wire
+shape is consumable from `gdbus` / `busctl` / Python without an
+introspection-driven binding. Subscribers to `SiloChanged` may see the
+transient `Stopping` / `Deleting` states followed by the resting
+`Stopped` / row-deletion; treat unknown state strings as "transient,
+wait."
+
+Error names live under `com.qdistro.SessionManager1.*`:
+`UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
+`NotAuthorized`, plus a `Generic` fallback for unexpected
+side-effect failures.
+
+`StartSilo` invokes `systemctl start qdshell-session-<name>@<uid>.service`.
+The launcher unit is a templated systemd service provided by the
+qdshell package (to be added in a follow-up task).
 
 ## What admin "unlock" does
 

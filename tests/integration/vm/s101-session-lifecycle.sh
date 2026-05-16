@@ -128,7 +128,7 @@ busctl --system call \
 FREEZE=$(cat "$CG/cgroup.freeze" 2>/dev/null || echo "?")
 [ "$FREEZE" = "1" ] || err "cgroup.freeze=$FREEZE, expected 1"
 
-printf "PASS: FreezeSilo paused all processes (cgroup.freeze=1)\n"
+printf "PASS: FreezeSilo froze all processes (cgroup.freeze=1)\n"
 
 # ---------------------------------------------------------------------------
 # Step 5 — ResumeSilo.
