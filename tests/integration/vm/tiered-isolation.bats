@@ -205,7 +205,21 @@ stage_tier2_driver() {
     #      silo helper's serial=0 set_selection succeeds.
     #   3. waypipe wl_client mismatch is moot once focus is set —
     #      qdwin emits source_handle = silo_toplevel.handle.
-    fail_loud "broker + qdshell + clipboard helpers end-to-end unimplemented (driver s39-clipboard-gate.sh missing — multi-day); see todo/qdwin-vm/dead-bats-entries.md"
+    stage_tier2_driver "s39-clipboard-gate.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s39.sh http://10.0.2.2:8768/s39-clipboard-gate.sh && chmod +x /tmp/s39.sh && bash /tmp/s39.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / qdistro-test-clipboard-source / dbus / user1 silo / qdshell / broker) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdshell up"
+    assert_output_contains "PASS: admin → admin selection_set seen by qdshell"
+    assert_output_contains "PASS: silo toplevel registered with silo=user1"
+    assert_output_contains "PASS: broker logged clipboard-transfer audit"
+    assert_output_contains "PASS: qdshell cleared the silo→admin selection (default-deny)"
+    assert_output_contains "PASS: rule install flipped broker verdict to allow"
+    assert_output_contains "PASS: qdshell observed RulesReloaded + ran live re-check"
+    assert_output_contains "PASS: spec/10 cross-uid clipboard policy gate end-to-end"
 }
 
 @test "phase7-secctx-toplevel-event: qdwin_shell_v1@v13 toplevel_security_context end-to-end" {
