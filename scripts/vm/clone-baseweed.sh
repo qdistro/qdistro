@@ -305,13 +305,27 @@ if [ "$FROM_ENFORCING" = 1 ]; then
               -o LogLevel=ERROR
               -o ConnectTimeout=4
               -o BatchMode=yes)
+    SSH_READY=0
     for _ in $(seq 1 60); do
         if ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" root@127.0.0.1 \
                 'true' 2>/dev/null; then
+            SSH_READY=1
             break
         fi
         sleep 3
     done
+    if [ "$SSH_READY" = 0 ]; then
+        # 180-second budget exceeded without an SSH round-trip. Most
+        # often this means the cloned VM never reached userspace (the
+        # baked image's GRUB has no auto-load entry, or first-boot
+        # under enforcing wedged). Surface the failure non-zero so
+        # callers don't proceed with a half-built VM. The VM is left
+        # defined for `virsh console` post-mortem.
+        echo "ERROR: --from-enforcing-baked: SSH never came up on 127.0.0.1:$SSH_PORT" >&2
+        echo "       hint: virsh -c qemu:///session screenshot $VM /tmp/$VM.png  (often shows a grub> rescue)" >&2
+        echo "       hint: if the baked image is rotten, rebuild via scripts/vm/build-enforcing-baseweed.sh --force" >&2
+        exit 7
+    fi
 else
     "$VM_TOOLS/vm-start-and-wait" "$VM" >/dev/null
 fi

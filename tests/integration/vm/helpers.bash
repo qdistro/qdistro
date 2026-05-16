@@ -25,11 +25,47 @@ fi
 : "${VM_SSH_KEY:=$HOME/.ssh/qdistro_enforcing_id_ed25519}"
 : "${VM_SSH_HOST:=127.0.0.1}"
 
+# Host IP as seen from inside the VM. Under SLIRP/qga this is the
+# QEMU convention 10.0.2.2; under passt/SSH it's whatever the guest's
+# default-route gateway happens to be (the host's outbound IP, since
+# passt's shared-network mode places the guest on the host's LAN).
+# Discovered lazily on first use and cached for the bats run.
+_vm_host_ip_cache=""
+vm_host_ip() {
+    if [[ -n "$_vm_host_ip_cache" ]]; then
+        printf '%s' "$_vm_host_ip_cache"
+        return
+    fi
+    if [[ -n "${VM_SSH_PORT:-}" ]]; then
+        _vm_host_ip_cache=$(ssh \
+            -p "$VM_SSH_PORT" \
+            -i "$VM_SSH_KEY" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            -o ConnectTimeout=5 \
+            -o BatchMode=yes \
+            "$VM_SSH_USER@$VM_SSH_HOST" \
+            "ip route | awk '/^default/ {print \$3; exit}'" 2>/dev/null)
+    fi
+    [[ -z "$_vm_host_ip_cache" ]] && _vm_host_ip_cache="10.0.2.2"
+    printf '%s' "$_vm_host_ip_cache"
+}
+
 # vm_run <cmd> — exec a single-line command inside the VM and capture
 # stdout+stderr into $output, exit status into $status. Routes via SSH
 # if VM_SSH_PORT is set, otherwise via qemu-guest-agent.
+#
+# Under SSH transport (passt), the SLIRP-only 10.0.2.2 literal that
+# many @test bodies hardcode for fetching staged drivers is rewritten
+# to the discovered gateway IP. Under qga transport (SLIRP), 10.0.2.2
+# stays as-is.
 vm_run() {
+    local cmd="$1"
     if [[ -n "${VM_SSH_PORT:-}" ]]; then
+        local host_ip
+        host_ip="$(vm_host_ip)"
+        cmd="${cmd//10.0.2.2/$host_ip}"
         run ssh \
             -p "$VM_SSH_PORT" \
             -i "$VM_SSH_KEY" \
@@ -39,9 +75,9 @@ vm_run() {
             -o ConnectTimeout=5 \
             -o BatchMode=yes \
             "$VM_SSH_USER@$VM_SSH_HOST" \
-            "$1"
+            "$cmd"
     else
-        run "$VM_EXEC" "$VM_NAME" "$1"
+        run "$VM_EXEC" "$VM_NAME" "$cmd"
     fi
 }
 

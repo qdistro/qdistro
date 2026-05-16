@@ -93,6 +93,9 @@ cleanup() {
     if [ -n "${HTTP_PID:-}" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
         kill "$HTTP_PID" 2>/dev/null || true
     fi
+    if [ -n "${STAGE:-}" ] && [ -d "$STAGE" ]; then
+        rm -rf "$STAGE"
+    fi
     if [ "$KEEP_VM" -eq 1 ]; then
         echo "[bake-enforcing] --keep-vm set; leaving '$VM' defined and disk at $IMG/${VM}.qcow2"
         return $rc
@@ -104,27 +107,64 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 2. Bring up the host HTTP server so fresh-vm-bootstrap.sh can pull
-#    sources from 10.0.2.2:$HTTP_PORT.
-( cd "$COMPOSITOR_DIR" && nohup python3 -m http.server "$HTTP_PORT" \
-        --bind 127.0.0.1 ) >/tmp/bake-enforcing-http.log 2>&1 &
+# 2. Stage tarballs + the bootstrap script in a temp dir, then serve
+#    that dir over http on 0.0.0.0 (the VM reaches us via 10.0.2.2 over
+#    SLIRP/passt NAT — 127.0.0.1 is unreachable from the guest). This
+#    mirrors spin-test-vm.sh's staging pattern; fresh-vm-bootstrap.sh
+#    expects /qdistro.tar.gz, /qdwin.tar.gz, /qdshell.tar.gz at the
+#    HTTP root, optionally /qdlocker.tar.gz.
+PARENT="$(cd "$REPO_ROOT/.." && pwd)"
+STAGE="$(mktemp -d -t bake-enforcing-stage.XXXXXX)"
+echo "[bake-enforcing] tarballing qdistro, qdwin, qdshell, qdlocker into $STAGE..."
+TAR_EXCLUDES=(--exclude='__pycache__' --exclude='*.pyc'
+              --exclude='.pytest_cache' --exclude='.git'
+              --exclude='build' --exclude='build-*')
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdistro.tar.gz" -C "$PARENT/qdistro" .
+tar "${TAR_EXCLUDES[@]}" --exclude='libweston-vendored/src/build' \
+    -czf "$STAGE/qdwin.tar.gz" -C "$PARENT/qdwin" .
+tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdshell.tar.gz" -C "$PARENT/qdshell" .
+if [ -d "$PARENT/qdlocker" ]; then
+    tar "${TAR_EXCLUDES[@]}" -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
+fi
+cp "$VM_TOOLS/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
+
+# Detect + reclaim port: a stale http.server from a prior run silently
+# steals it and the in-VM wget then 404s against the wrong tree,
+# surfacing as a confusing rc=8 four steps later.
+if ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
+    echo "[bake-enforcing] port $HTTP_PORT already bound; reclaiming..."
+    PIDS=$(ss -tlnp 2>/dev/null \
+        | awk -v p=":$HTTP_PORT" '$4 ~ p { for(i=1;i<=NF;i++) if (match($i, /pid=([0-9]+)/, m)) print m[1] }' | sort -u)
+    [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
+    sleep 0.5
+fi
+(cd "$STAGE" && nohup python3 -m http.server "$HTTP_PORT" \
+        --bind 0.0.0.0 ) >/tmp/bake-enforcing-http.log 2>&1 &
 HTTP_PID=$!
 sleep 1
+if ! ss -tln 2>/dev/null | awk -v p=":$HTTP_PORT" '$4 ~ p {found=1} END {exit !found}'; then
+    echo "ERROR: http.server failed to bind $HTTP_PORT (see /tmp/bake-enforcing-http.log)" >&2
+    tail -5 /tmp/bake-enforcing-http.log >&2 || true
+    exit 6
+fi
 
 # 3. Push fresh-vm-bootstrap.sh + run it. Long-running; poll for DONE.
 echo "[bake-enforcing] running fresh-vm-bootstrap.sh inside $VM (this is the slow step)..."
 "$VM_TOOLS/vm-exec" "$VM" \
-    "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:$HTTP_PORT/spike-6.5/fresh-vm-bootstrap.sh && chmod +x /root/fresh-vm-bootstrap.sh"
+    "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:$HTTP_PORT/fresh-vm-bootstrap.sh && chmod +x /root/fresh-vm-bootstrap.sh"
 
 "$VM_TOOLS/vm-exec" "$VM" \
     "nohup bash /root/fresh-vm-bootstrap.sh >/root/bootstrap.log 2>&1 &" \
     || true
 
-MAX_WAIT=1800
+MAX_WAIT=2400
 WAITED=0
 while [ "$WAITED" -lt "$MAX_WAIT" ]; do
+    # fresh-vm-bootstrap.sh emits `[bootstrap] bootstrap complete.` on
+    # success. Earlier pattern (`bootstrap.* DONE`) never matched —
+    # both this check and the bootstrap's success path drifted apart.
     READY=$("$VM_TOOLS/vm-exec" "$VM" \
-            "grep -q 'bootstrap.* DONE' /root/bootstrap.log 2>/dev/null && echo READY" \
+            "grep -q 'bootstrap complete' /root/bootstrap.log 2>/dev/null && echo READY" \
             2>/dev/null || true)
     if printf '%s' "$READY" | grep -q READY; then
         break
