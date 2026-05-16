@@ -112,70 +112,23 @@ stage_tier2_driver() {
 # bootstraps).
 
 @test "phase7-tier3-waypipe: cross-uid bridge smoke (wayland-info as user1)" {
-    vm_run "bash /root/s35-tier3-waypipe.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe or silo user absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: silo command actually ran as uid 1001"
-    assert_output_contains "PASS: wayland-info enumerated wl_compositor through the bridge"
-    assert_output_contains "PASS: bridge socket carried qdistro-tier3:0660"
-    assert_output_contains "PASS: §Phase-7 tier-3 waypipe smoke end-to-end"
+    fail_loud "tier-3 spawn unimplemented (driver s35-tier3-waypipe.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
 }
 
 @test "phase7-tier3-app: cross-uid weston-terminal as user1 reaches outer" {
-    vm_run "bash /root/s36-tier3-app.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe or silo user absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: bridged toplevel reached the outer admin compositor"
-    assert_output_contains "PASS: weston-terminal genuinely runs as uid 1001"
-    assert_output_contains "PASS: §Phase-7 tier-3 cross-uid graphical app end-to-end"
+    fail_loud "tier-3 spawn unimplemented (driver s36-tier3-app.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
 }
 
 @test "phase7-tier3-lifecycle: two silos (user1+user2), kill A leaves B running" {
-    vm_run "bash /root/s37-tier3-lifecycle.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe or silo users absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: two distinct silo toplevels reached the outer compositor"
-    assert_output_contains "PASS: both bridge sockets present"
-    assert_output_contains "PASS: silo A runs as user1"
-    assert_output_contains "PASS: silo B still running after silo A teardown"
-    assert_output_contains "PASS: §Phase-7 tier-3 multi-silo lifecycle end-to-end"
+    fail_loud "tier-3 spawn unimplemented (driver s37-tier3-lifecycle.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
 }
 
 @test "phase7-tier3-chrome: qdshell parses silo prefix + applies per-silo color override" {
-    vm_run "bash /root/s38-tier3-chrome.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe or silo users absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: qdshell up"
-    assert_output_contains "PASS: qdshell observed two tier-3 toplevels"
-    assert_output_contains "PASS: qdshell parsed both silo identifiers from title prefix"
-    assert_output_contains "PASS: silo color override applied"
-    assert_output_contains "PASS: §Phase-7 tier-3 silo chrome differentiation end-to-end"
+    fail_loud "tier-3 spawn + qdshell silo-prefix parser unimplemented (driver s38-tier3-chrome.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
 }
 
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
-    vm_run "bash /root/s40-secctx.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe / silo / qdistro-test-window absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: wp_security_context_manager_v1 advertised by qdwin"
-    assert_output_contains "PASS: waypipe bound wp_security_context_manager_v1"
-    assert_output_contains "PASS: silo client tagged with secctx"
-    assert_output_contains "PASS: secctx app_id propagated via wrapper default"
-    assert_output_contains "PASS: §6.10 wp_security_context_v1 end-to-end"
+    fail_loud "wp_security_context_v1 advertise + waypipe-tagged client unimplemented (driver s40-secctx.sh missing); see todo/qdwin-vm/dead-bats-entries.md"
 }
 
 @test "phase7-clipboard-gate: spec/10 cross-uid clipboard policy gate end-to-end" {
@@ -189,39 +142,11 @@ stage_tier2_driver() {
     #      silo helper's serial=0 set_selection succeeds.
     #   3. waypipe wl_client mismatch is moot once focus is set —
     #      qdwin emits source_handle = silo_toplevel.handle.
-    vm_run "bash /root/s39-clipboard-gate.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "wl-clipboard / waypipe / silo / sdl-freerdp absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: qdshell up"
-    assert_output_contains "PASS: admin → admin selection_set seen by qdshell"
-    assert_output_contains "PASS: silo toplevel registered with silo=user1"
-    assert_output_contains "PASS: broker logged clipboard-transfer audit"
-    assert_output_contains "PASS: qdshell cleared the silo→admin selection (default-deny)"
-    # task(067): round 3 now probes broker via D-Bus instead of firing
-    # a second wire set_selection. See s39-clipboard-gate.sh §round-3
-    # for the rationale (stale-serial-guard + waypipe oneshot bridge).
-    assert_output_contains "PASS: rule install flipped broker verdict to allow"
-    assert_output_contains "PASS: qdshell observed RulesReloaded + ran live re-check"
-    assert_output_contains "PASS: spec/10 cross-uid clipboard policy gate end-to-end"
+    fail_loud "broker + qdshell + clipboard helpers end-to-end unimplemented (driver s39-clipboard-gate.sh missing — multi-day); see todo/qdwin-vm/dead-bats-entries.md"
 }
 
 @test "phase7-secctx-toplevel-event: qdwin_shell_v1@v13 toplevel_security_context end-to-end" {
-    vm_run "bash /root/s41-secctx-toplevel-event.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "waypipe / silo / qdistro-test-window absent on this VM"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: qdwin_shell_v1 protocol XML at version"
-    assert_output_contains "PASS: qdshell up"
-    assert_output_contains "PASS: compositor emitted toplevel_security_context"
-    assert_output_contains "PASS: qdshell received toplevel_security_context"
-    assert_output_contains "PASS: qdshell derived silo=user1 from secctx app_id"
-    assert_output_contains "PASS: silo colour override applied via secctx path"
-    assert_output_contains "PASS: §Phase-7 v13 toplevel_security_context end-to-end"
+    fail_loud "qdwin_shell_v1@v13 toplevel_security_context end-to-end unimplemented (driver s41-secctx-toplevel-event.sh missing); see todo/qdwin-vm/dead-bats-entries.md"
 }
 
 @test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + spice display" {
@@ -405,22 +330,7 @@ stage_tier2_driver() {
     # Qubes-style mitigation. The headless ctrl-socket inject-focus
     # path is what this script exercises; real chrome click-to-focus
     # uses the same set_keyboard_focus request.
-    vm_run "bash /root/s48-focus-aware-clear.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-3 stack / qdistro-test-window / qdistro-test-clipboard-source absent"
-    fi
-    assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: qdshell up"
-    assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 14"
-    assert_output_contains "PASS: admin toplevel registered handle="
-    assert_output_contains "PASS: silo toplevel registered silo=user1"
-    assert_output_contains "PASS: admin selection recorded by qdshell"
-    assert_output_contains "PASS: ctrl selection-state shows admin clipboard source"
-    assert_output_contains "PASS: qdshell cleared the admin selection on cross-silo focus"
-    assert_output_contains "PASS: weston processed clear_selection request"
-    assert_output_contains "PASS: ctrl selection-state cleared post-focus-change"
-    assert_output_contains "PASS: spec/10 v14 focus-aware selection clear end-to-end"
+    fail_loud "qdwin_shell_v1@v14 set_keyboard_focus + qdshell ctrl-socket unimplemented (driver s48-focus-aware-clear.sh missing — multi-day); see todo/qdwin-vm/dead-bats-entries.md"
 }
 
 @test "phase7-tier1-e2e: spec/30 Tier-1 SELinux pipeline end-to-end" {
