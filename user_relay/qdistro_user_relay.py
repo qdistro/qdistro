@@ -96,9 +96,11 @@ class UserRelay(dbus.service.Object):
             out.append((n, _friendly_name(n)))
         return dbus.Array(out, signature="(ss)")
 
-    @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s")
+    @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s",
+                         sender_keyword="sender")
     def ForwardBrowserBridgeOp(self, op: str, args_json: str,
-                               selector_json: str) -> str:
+                               selector_json: str,
+                               sender: str | None = None) -> str:
         """Forward a bridge op to an `org.qdistro.BrowserBridge.<ppid>`
         on this user's session bus and return the bridge's JSON reply.
 
@@ -128,59 +130,71 @@ class UserRelay(dbus.service.Object):
         """
         op_s = str(op)
         if not op_s:
-            return json.dumps({"ok": False, "error": "missing_op"})
+            reply = {"ok": False, "error": "missing_op"}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
         try:
             selector = json.loads(str(selector_json) or "{}")
             if not isinstance(selector, dict):
                 raise ValueError("selector must be a JSON object")
         except (ValueError, json.JSONDecodeError) as e:
-            return json.dumps({
-                "ok": False, "error": "bad_selector",
-                "detail": str(e)[:200],
-            })
+            reply = {"ok": False, "error": "bad_selector",
+                     "detail": str(e)[:200]}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
         # Refuse selectors that mix `ppid` and `any` rather than
         # silently letting one win — the caller's intent is ambiguous.
         if "ppid" in selector and selector.get("any") is True:
-            return json.dumps({
-                "ok": False, "error": "bad_selector",
-                "detail": "selector cannot set both 'ppid' and 'any'",
-            })
+            reply = {"ok": False, "error": "bad_selector",
+                     "detail": "selector cannot set both 'ppid' and 'any'"}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
         # Tighten `ppid` typing: JSON ints only. A quoted "1234"
         # likely indicates a caller bug worth surfacing rather than
         # silently coercing.
         if "ppid" in selector and not isinstance(selector["ppid"], int):
-            return json.dumps({
-                "ok": False, "error": "bad_selector",
-                "detail": "'ppid' must be a JSON integer",
-            })
+            reply = {"ok": False, "error": "bad_selector",
+                     "detail": "'ppid' must be a JSON integer"}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
         bridge_name = self._select_bridge(selector)
         if bridge_name is None:
-            return json.dumps({
-                "ok": False, "error": "no_bridge_found",
-                "selector": selector,
-            })
+            reply = {"ok": False, "error": "no_bridge_found",
+                     "selector": selector}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
         try:
             obj = self._bus.get_object(bridge_name, BRIDGE_OBJ_PATH)
             # args_json is opaque pass-through; default to "{}" so the
             # bridge always receives JSON-parseable args even when the
             # caller passes "" or None.
-            reply = obj.RequestTabs(
+            reply_str = obj.RequestTabs(
                 op_s, str(args_json) or "{}",
                 dbus_interface=BRIDGE_IFACE)
         except dbus.DBusException as e:
-            return json.dumps({
-                "ok": False, "error": "bridge_call_failed",
-                "bridge": bridge_name,
-                "dbus_name": e.get_dbus_name(),
-                "detail": str(e)[:200],
-            })
+            reply = {"ok": False, "error": "bridge_call_failed",
+                     "bridge": bridge_name,
+                     "dbus_name": e.get_dbus_name(),
+                     "detail": str(e)[:200]}
+            _audit("forward_bridge_op", sender, op_s, bridge_name, reply)
+            return json.dumps(reply)
         except Exception as e:  # noqa: BLE001
-            return json.dumps({
-                "ok": False, "error": "bridge_call_failed",
-                "bridge": bridge_name,
-                "detail": f"{type(e).__name__}: {e}"[:200],
-            })
-        return str(reply)
+            reply = {"ok": False, "error": "bridge_call_failed",
+                     "bridge": bridge_name,
+                     "detail": f"{type(e).__name__}: {e}"[:200]}
+            _audit("forward_bridge_op", sender, op_s, bridge_name, reply)
+            return json.dumps(reply)
+        # Parse the bridge's reply purely so the audit line can record
+        # ok/error; fall back to {} if it isn't JSON.
+        reply_str_s = str(reply_str)
+        try:
+            audit_reply = json.loads(reply_str_s)
+            if not isinstance(audit_reply, dict):
+                audit_reply = {}
+        except (ValueError, json.JSONDecodeError):
+            audit_reply = {}
+        _audit("forward_bridge_op", sender, op_s, bridge_name, audit_reply)
+        return reply_str_s
 
     def _select_bridge(self, selector: dict) -> str | None:
         """Return the chosen org.qdistro.BrowserBridge.<ppid> name
@@ -251,6 +265,33 @@ class UserRelay(dbus.service.Object):
                 f"Forward to {service_s!r} failed: {e}",
                 name=BUS_NAME + ".ForwardFailed",
             )
+
+
+def _audit(kind: str, sender: str | None, op: str,
+           bridge: str, reply: dict) -> None:
+    """Write one journal line summarising a relay operation.
+
+    Goes to stderr; systemd routes that to the journal under the
+    relay's unit. Fields are space-separated key=value so journalctl
+    grep over the relay log is trivial. ``reply`` is parsed for
+    ``ok`` and ``error`` only — full reply bodies could contain
+    container metadata (names, icons) which we don't want to mirror
+    into a second log site.
+
+    Example::
+
+        [qdistro-user-relay/audit] kind=forward_bridge_op
+            sender=:1.42 op=containers.list
+            bridge=org.qdistro.BrowserBridge.1234 ok=true error=
+    """
+    ok = bool(reply.get("ok", False)) if isinstance(reply, dict) else False
+    err = str(reply.get("error", "")) if isinstance(reply, dict) else ""
+    print(
+        f"[qdistro-user-relay/audit] kind={kind} "
+        f"sender={sender or '-'} op={op} bridge={bridge} "
+        f"ok={'true' if ok else 'false'} error={err}",
+        file=sys.stderr, flush=True,
+    )
 
 
 def _friendly_name(service: str) -> str:

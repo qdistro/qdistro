@@ -233,17 +233,29 @@ that toggle is Option A's gate and stays in place.
 
 ## Audit
 
-Per [browser.md §Audit](browser.md#audit), ops that reach a daemon are
-logged by that daemon. For `containers.*`, the daemon is the
-hypothetical consumer (admin panel, recall, etc.); the bridge itself
-logs the inbound op + reply summary to the journal with tag
-`qdistro-browser-bridge` (caller_uid, op, ok/error, container count).
-Container metadata (names, icons) is not sensitive enough to redact;
-log it verbatim.
+Per [browser.md §Audit](browser.md#audit), ops that reach a daemon
+are logged by that daemon. For `containers.*` the eventual daemon
+audit lives in whichever consumer ends up calling it (admin panel,
+recall, etc.).
 
-The cross-uid path adds a second log site — the UserRelay or broker
-records the admin → user-bridge call exactly as it does for other
-cross-uid operations.
+The **cross-uid relay** writes one journal line per
+`ForwardBrowserBridgeOp` call, format:
+
+```
+[qdistro-user-relay/audit] kind=forward_bridge_op sender=<bus-name>
+    op=<op> bridge=<bridge-name-or-"-"> ok=<true|false> error=<code-or-empty>
+```
+
+Fields are space-separated `key=value` so `journalctl -u
+qdistro-user-relay | grep audit` is the audit-trail. The relay does
+**not** log container names, icons, or cookie_store_ids — those
+belong in the bridge's own audit (not yet implemented) so they aren't
+mirrored into a second log site.
+
+The **bridge-side journal logging** described in
+[browser.md §Audit](browser.md#audit) is not yet implemented for any
+op; that's a separate Phase-9 follow-up tracked in
+[`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md).
 
 ## Integration with existing ops
 

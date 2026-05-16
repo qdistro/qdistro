@@ -412,6 +412,60 @@ class TestForwardBrowserBridgeOp:
             "qdistro.ping", "", '{"ppid": 4242}')
         assert bridge.calls == [("qdistro.ping", "{}")]
 
+    def test_audit_line_on_happy_path(self, capsys):
+        bridge = _FakeBridge(next_reply={"ok": True, "containers": []})
+        relay, _ = self._relay(bridges={1234: bridge})
+        relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 1234}', sender=":1.42")
+        line = capsys.readouterr().err
+        assert "[qdistro-user-relay/audit]" in line
+        assert "kind=forward_bridge_op" in line
+        assert "sender=:1.42" in line
+        assert "op=containers.list" in line
+        assert "bridge=org.qdistro.BrowserBridge.1234" in line
+        assert "ok=true" in line
+
+    def test_audit_line_on_bad_selector(self, capsys):
+        relay, _ = self._relay()
+        relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", "not-json", sender=":1.7")
+        line = capsys.readouterr().err
+        assert "ok=false" in line
+        assert "error=bad_selector" in line
+        # No bridge was selected, so the bridge field is "-".
+        assert "bridge=-" in line
+
+    def test_audit_line_on_bridge_failure(self, capsys):
+        bridge = _FakeBridge(
+            raise_exc=dbus.DBusException(
+                "boom", name="org.freedesktop.DBus.Error.ServiceUnknown"))
+        relay, _ = self._relay(bridges={1234: bridge})
+        relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 1234}', sender=":1.99")
+        line = capsys.readouterr().err
+        assert "ok=false" in line
+        assert "error=bridge_call_failed" in line
+        assert "bridge=org.qdistro.BrowserBridge.1234" in line
+
+    def test_audit_does_not_leak_container_metadata(self, capsys):
+        """Audit lines record ok/error only. Container names, icons,
+        and cookie_store_ids belong in the bridge's own audit (not yet
+        implemented) — the relay is a routing layer, not a content
+        log."""
+        bridge = _FakeBridge(next_reply={
+            "ok": True,
+            "containers": [
+                {"cookie_store_id": "firefox-container-1",
+                 "name": "MY-SECRET-CONTAINER"},
+            ],
+        })
+        relay, _ = self._relay(bridges={1234: bridge})
+        relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"ppid": 1234}', sender=":1.42")
+        line = capsys.readouterr().err
+        assert "MY-SECRET-CONTAINER" not in line
+        assert "firefox-container-1" not in line
+
     def test_args_json_passes_through_verbatim(self):
         """The relay does not parse or rewrite args_json — it's an
         opaque pass-through so future bridge ops with unknown fields
