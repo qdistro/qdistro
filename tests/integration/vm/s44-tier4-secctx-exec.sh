@@ -129,10 +129,12 @@ else
     fi
 fi
 
-# Inner client acceptance — qdwin logs the new wl_client. Match
-# generously.
+# Inner client acceptance — qdwin logs the new wl_client as
+# `qdwin/secctx: client accepted engine=... app_id=... instance_id=...`
+# (qdwin.c:11574). Match generously on either the canonical line or
+# any secctx-namespaced journal line that names this app_id.
 INNER_LINE=$(journal_after | grep -m1 -E \
-    "qdwin:.*(secctx|new client|wl_client).*$APPID|secctx-listener.*accepted" || true)
+    "qdwin/secctx: client accepted.*app_id=$APPID|qdwin/secctx:.*$APPID" || true)
 if [ -n "$INNER_LINE" ]; then
     pass "inner client accepted on the secctx listener"
 else
