@@ -138,19 +138,25 @@ PATH="$SHIMS:$PATH" bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "
 rm -rf "$SHIMS"
 
 install -d -m 0755 /etc/greetd
-cat > /etc/greetd/config.toml <<'EOF'
-[terminal]
-vt = 1
 
-[default_session]
-command = "agreety --cmd /bin/bash"
-user = "greeter"
+# P01 boot path: qdgreeter on tty3, LXQt+labwc fallback on tty4.
+# _greeter system user owns the unprivileged greeter process; PAM
+# does the privilege handoff at start_session time.
+if ! getent passwd _greeter >/dev/null; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin _greeter || true
+fi
 
-[initial_session]
-command = "/bin/bash --login"
-user = "admin"
-EOF
+install -m 0644 "$QD/deploy/greetd-config.toml"          /etc/greetd/config.toml
+install -m 0644 "$QD/deploy/greetd-config-fallback.toml" /etc/greetd/config-fallback.toml
+install -m 0644 "$QD/deploy/greetd-fallback.service"     /etc/systemd/system/greetd-fallback.service
+install -m 0755 "$QD/deploy/qdwin-session-launcher.sh"   /usr/local/bin/qdwin-session-launcher
+
+# Install qdgreeter package files (the Python module + entry point are
+# packaged separately under qdgreeter/; this assumes they're already
+# on $PATH as /usr/bin/qdgreeter from a sibling pip-install step).
+
 systemctl enable greetd.service
+systemctl enable greetd-fallback.service || true
 systemctl set-default graphical.target
 
 # Keep /root/qdistro-src on the image — the LLM-modifiability principle

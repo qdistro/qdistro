@@ -421,36 +421,64 @@ install_qdwin_session() {
 }
 
 # ---------------------------------------------------------------------------
-# 10. greetd autologin -> admin
+# 10. greetd P01 boot path -> qdgreeter (tty3) + fallback (tty4)
 # ---------------------------------------------------------------------------
 configure_greetd() {
     if [ -n "$SKIP_GREETD" ]; then
-        log "skipping greetd autologin (--skip-greetd)"
+        log "skipping greetd configuration (--skip-greetd)"
         return 0
     fi
     if ! command -v greetd >/dev/null 2>&1; then
-        warn "greetd not installed; skipping autologin config"
+        warn "greetd not installed; skipping greetd config"
         return 0
     fi
-    log "configuring greetd autologin to admin -> qdistro session..."
+    log "configuring greetd: qdgreeter on tty3, LXQt+labwc fallback on tty4..."
+
+    # 10a. _greeter system user. greetd's [default_session].user
+    # convention; runs the qdgreeter UI without admin privileges.
+    # PAM does the privilege handoff at start_session time.
+    if ! getent passwd _greeter >/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin _greeter \
+            || warn "useradd _greeter failed (already present from RPM scriptlet?)"
+    fi
+
+    # 10b. greetd config (tty3 — production qdgreeter path).
     install -d -m 0755 /etc/greetd
-    cat > /etc/greetd/config.toml <<'EOF'
-# Auto-login admin straight into the qdistro session. The user systemd
-# units (noctalia-session.service + noctalia-shell.service) are enabled
-# WantedBy=default.target so they fire as soon as admin's user manager
-# starts.
-[terminal]
-vt = 1
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/greetd-config.toml" \
+        /etc/greetd/config.toml
 
-[default_session]
-command = "agreety --cmd /bin/bash"
-user = "greeter"
+    # 10c. fallback config + unit (tty4 — escape hatch).
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/greetd-config-fallback.toml" \
+        /etc/greetd/config-fallback.toml
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/greetd-fallback.service" \
+        /etc/systemd/system/greetd-fallback.service
 
-[initial_session]
-command = "/bin/bash --login"
-user = "admin"
-EOF
+    # 10d. session launcher — what greetd execs as admin post-auth.
+    # qdgreeter's QDGREETER_SESSION_CMD default points at this path.
+    install -m 0755 \
+        "$REPO_ROOT/qdistro/deploy/qdwin-session-launcher.sh" \
+        /usr/local/bin/qdwin-session-launcher
+
+    # 10e. qdwin-session.target + sub-units (system-wide copy of the
+    # production target; install-qdwin-session-for-vm.sh also installs
+    # the noctalia-* per-user units used by the legacy path).
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/qdwin-session.target" \
+        /etc/systemd/user/qdwin-session.target 2>/dev/null || true
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/qdwin-compositor.service" \
+        /etc/systemd/user/qdwin-compositor.service 2>/dev/null || true
+    install -m 0644 \
+        "$REPO_ROOT/qdistro/deploy/qdshell.service" \
+        /etc/systemd/user/qdshell.service 2>/dev/null || true
+
+    systemctl daemon-reload
     systemctl enable greetd.service
+    systemctl enable greetd-fallback.service \
+        || warn "greetd-fallback.service enable failed"
     systemctl set-default graphical.target
 }
 

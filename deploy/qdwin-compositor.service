@@ -13,8 +13,11 @@ Environment=XDG_SESSION_TYPE=wayland
 # qdwin's protocol surface (qdwin_shell_v1 v14, qdwin_locker_v1,
 # wp_security_context_v1) is compiled into qdwin-shell.so; weston
 # loads it as a plugin via shell= in weston.ini.
+# weston --backend takes a single plugin; pipewire is not a display
+# backend — view_stream output goes through weston.ini's [pipewire]
+# section, not the cmdline.
 ExecStart=/usr/bin/weston \
-    --backend=drm-backend.so,pipewire-backend.so \
+    --backend=drm-backend.so \
     --config=%h/weston.ini \
     --socket=wayland-1
 Restart=on-failure

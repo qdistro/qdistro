@@ -63,10 +63,10 @@ loginctl enable-linger admin
 #
 # The `[pipewire]` section enables the pipewire sub-backend so qdwin's
 # §6.5 view_stream forwarding (qdwin_shell_v1.subscribe_view_stream)
-# has free pipewire outputs to pin views onto. Pair with the
-# `--backend=drm-backend.so,pipewire-backend.so` cmdline in the
-# noctalia-session unit below. num-outputs=2 gives headroom for
-# concurrent forwards.
+# has free pipewire outputs to pin views onto. weston's --backend
+# cmdline takes a single plugin name, so the sub-backend is wired here
+# in weston.ini rather than appended to the unit's ExecStart.
+# num-outputs=2 gives headroom for concurrent forwards.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
@@ -161,7 +161,7 @@ After=graphical.target
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
-ExecStart=/usr/bin/weston --backend=drm-backend.so,pipewire-backend.so --config=%h/weston.ini --socket=wayland-1
+ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
 

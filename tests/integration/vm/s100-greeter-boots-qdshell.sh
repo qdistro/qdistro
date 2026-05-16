@@ -57,6 +57,16 @@ elif systemctl --user -M admin@ is-active qdwin-session.target >/dev/null 2>&1; 
 else
     err "neither qdgreeter nor qdwin-session.target is in a recognized state"
 fi
+
+# greetd journal must show it actually launched the greeter THIS boot
+# (otherwise the OR-branch above can green when qdgreeter never ran
+# on this boot — see correctness review T3). Look for the standard
+# greetd "Starting session" / "Running session" log line in the
+# current boot's journal.
+if ! journalctl -u greetd.service -b --since "20 minutes ago" 2>/dev/null \
+        | grep -qE 'Starting session|Running session|running greeter'; then
+    err "greetd journal has no session-start entry in the current boot — greeter never ran"
+fi
 echo "PASS: greetd launched qdgreeter on tty3"
 
 # ---------------------------------------------------------------------------
