@@ -37,13 +37,12 @@ $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
 sleep 1
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';
-DELETE FROM audit WHERE action LIKE 'qsu.exec:%';
-SQL_EOF
+B64=$(base64 -w0 <<'EOF'
+sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 ## Steps
@@ -204,13 +203,12 @@ $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /tmp/50-*.log /tmp/50-*.pid'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/50-*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';
-DELETE FROM audit WHERE action LIKE 'qsu.exec:%';
-SQL_EOF
+B64=$(base64 -w0 <<'EOF'
+sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 ## Notes for the runner

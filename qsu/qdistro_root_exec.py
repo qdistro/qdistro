@@ -354,16 +354,23 @@ def handle_one(sock: socket.socket) -> None:
             return
         acquired_uid = uid
 
-        # Step 3: read the request.
+        # Step 3: read the request. Every pre-broker validation
+        # rejection MUST send both an `error` AND an `exit` frame so
+        # qsu clients waiting on the wire-shape don't have to rely on
+        # _stream's "no-exit-frame-seen-before-EOF → rc=1" fallback.
+        # Other later error paths (broker-deny, internal-error, command-
+        # not-found) already do this; keep the early ones consistent.
         req = _recv_request(sock)
         if not req or not isinstance(req, dict):
             _send(sock, {"type": "error", "message": "empty or malformed request"})
+            _send(sock, {"type": "exit",  "code": 1})
             return
 
         target_user = str(req.get("target_user") or "")
         argv = list(req.get("argv") or [])
         if not target_user or not argv:
             _send(sock, {"type": "error", "message": "target_user and argv required"})
+            _send(sock, {"type": "exit",  "code": 1})
             return
 
         # Step 4: validate target_user. Without this, embedded newlines
@@ -373,12 +380,14 @@ def handle_one(sock: socket.socket) -> None:
         if not _USERNAME_RE.match(target_user):
             _send(sock, {"type": "error",
                          "message": f"invalid target_user: {target_user!r}"})
+            _send(sock, {"type": "exit",  "code": 1})
             return
 
         # argv elements must be strings — json.loads preserves types
         # but a malicious client can send nested lists etc.
         if not all(isinstance(a, str) and a for a in argv):
             _send(sock, {"type": "error", "message": "argv must be a list of non-empty strings"})
+            _send(sock, {"type": "exit",  "code": 1})
             return
 
         try:

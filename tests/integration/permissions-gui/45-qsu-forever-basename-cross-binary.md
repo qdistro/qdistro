@@ -33,13 +33,12 @@ $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
 sleep 1
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';
-DELETE FROM audit WHERE action LIKE 'qsu.exec:%';
-SQL_EOF
+B64=$(base64 -w0 <<'EOF'
+sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 # Ensure an alternate python3 path exists so the cross-path test
 # is meaningful. /usr/local/bin/python3 is a symlink we create
@@ -215,13 +214,12 @@ $VMEXEC "$VM" 'rm -f /usr/local/bin/python3-45-symlink'
 # Only remove /usr/local/bin/python3 if we created it (symlink to
 # /usr/bin/python3 specifically); don't yank a real install.
 $VMEXEC "$VM" 'if [ -L /usr/local/bin/python3 ] && [ "$(readlink /usr/local/bin/python3)" = "/usr/bin/python3" ]; then rm -f /usr/local/bin/python3; fi'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
-DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';
-DELETE FROM audit WHERE action LIKE 'qsu.exec:%';
-SQL_EOF
+B64=$(base64 -w0 <<'EOF'
+sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
+sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
+EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 ## Notes for the runner
