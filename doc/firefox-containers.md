@@ -313,6 +313,7 @@ forward-compatible regardless of which routing option above wins:
 | Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
 | Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (17 cases). |
 | Daemon client helper | **Landed 2026-05-16** as `qdistro_browser_bridge_client.call_bridge` (own-uid) / `call_via_relay` (cross-uid). Tests: `tests/unit/test_browser_bridge_client.py` (23 cases). |
+| First consumer | **Landed 2026-05-16**: `qdistro_recall_admin` (`recall/qdistro_recall_admin.py`) — `list_user_containers` + `list_user_tabs` building blocks, and `annotate_with_live_tabs(rows, uid)` joins historical recall rows with the user's currently-open tabs by exact URL match. Tests: `tests/unit/test_recall_admin.py` (13 cases). |
 | Cross-user admin opt-in | **Not implemented.** Per-feature toggle row in the admin panel still gates whether a cross-uid call is allowed for a given user-browser. UI doesn't exist yet for any Phase-9 feature. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
 | Cross-user gate | Per-feature opt-in toggle row in the admin panel — UI doesn't exist yet for any of the Phase-9 features; this adds a "Containers" row. |
