@@ -420,7 +420,23 @@ stage_tier2_driver() {
     # Qubes-style mitigation. The headless ctrl-socket inject-focus
     # path is what this script exercises; real chrome click-to-focus
     # uses the same set_keyboard_focus request.
-    fail_loud "qdwin_shell_v1@v14 set_keyboard_focus + qdshell ctrl-socket unimplemented (driver s48-focus-aware-clear.sh missing — multi-day); see todo/qdwin-vm/dead-bats-entries.md"
+    stage_tier2_driver "s48-focus-aware-clear.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-focus-aware-clear.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / qs / qdistro-test-clipboard-source / user1 silo / qdshell) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdshell up"
+    assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 14"
+    assert_output_contains "PASS: admin toplevel registered handle="
+    assert_output_contains "PASS: silo toplevel registered silo=user1"
+    assert_output_contains "PASS: admin selection recorded by qdshell"
+    assert_output_contains "PASS: ctrl selection-state shows admin clipboard source"
+    assert_output_contains "PASS: qdshell cleared the admin selection on cross-silo focus"
+    assert_output_contains "PASS: weston processed clear_selection request"
+    assert_output_contains "PASS: ctrl selection-state cleared post-focus-change"
+    assert_output_contains "PASS: spec/10 v14 focus-aware selection clear end-to-end"
 }
 
 @test "phase7-tier1-e2e: spec/30 Tier-1 SELinux pipeline end-to-end" {
