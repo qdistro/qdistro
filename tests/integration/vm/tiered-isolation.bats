@@ -136,8 +136,24 @@ stage_tier2_driver() {
     fail_loud "tier-3 spawn unimplemented (driver s37-tier3-lifecycle.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
 }
 
-@test "phase7-tier3-chrome: qdshell parses silo prefix + applies per-silo color override" {
-    fail_loud "tier-3 spawn + qdshell silo-prefix parser unimplemented (driver s38-tier3-chrome.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
+@test "phase7-tier3-chrome: qdshell parses silo identifier + applies per-silo color override" {
+    stage_tier2_driver "s38-tier3-chrome.sh"
+    vm_run "curl -s -o /tmp/s38.sh http://10.0.2.2:8768/s38-tier3-chrome.sh && chmod +x /tmp/s38.sh && bash /tmp/s38.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / silo users / qdshell) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdshell up"
+    assert_output_contains "PASS: qdshell observed two tier-3 toplevels"
+    # Per the design-vs-impl note in Tier3Apps.qml + the user-confirmed
+    # scope change (2026-05-16): we parse silo from the secctx app_id,
+    # not from window title prefix scraping. Secctx is the load-bearing
+    # identity per spec/02 row 3; title prefix is decoration only and
+    # is asserted by the visual permissions-gui test instead.
+    assert_output_contains "PASS: qdshell parsed both silo identifiers from secctx app_id"
+    assert_output_contains "PASS: silo color override applied"
+    assert_output_contains "PASS: §Phase-7 tier-3 silo chrome differentiation end-to-end"
 }
 
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
