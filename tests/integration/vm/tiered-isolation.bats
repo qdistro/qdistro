@@ -129,11 +129,34 @@ stage_tier2_driver() {
 }
 
 @test "phase7-tier3-app: cross-uid weston-terminal as user1 reaches outer" {
-    fail_loud "tier-3 spawn unimplemented (driver s36-tier3-app.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
+    stage_tier2_driver "s36-tier3-app.sh"
+    vm_run "curl -s -o /tmp/s36.sh http://10.0.2.2:8768/s36-tier3-app.sh && chmod +x /tmp/s36.sh && bash /tmp/s36.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / weston-terminal / user1 silo / qdshell Tier3Apps) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: bridged toplevel reached the outer admin compositor"
+    # Silo uid is whatever useradd assigned; the driver prints the
+    # real uid in the message so this stays correct across VMs with
+    # different UID_MIN baselines.
+    assert_output_contains "PASS: weston-terminal genuinely runs as uid "
+    assert_output_contains "PASS: §Phase-7 tier-3 cross-uid graphical app end-to-end"
 }
 
 @test "phase7-tier3-lifecycle: two silos (user1+user2), kill A leaves B running" {
-    fail_loud "tier-3 spawn unimplemented (driver s37-tier3-lifecycle.sh missing); see todo/qdwin-vm/dead-bats-entries.md + tier3-spawn-design.md"
+    stage_tier2_driver "s37-tier3-lifecycle.sh"
+    vm_run "curl -s -o /tmp/s37.sh http://10.0.2.2:8768/s37-tier3-lifecycle.sh && chmod +x /tmp/s37.sh && bash /tmp/s37.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / weston-terminal / user1+user2 silos / qdshell Tier3Apps) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: two distinct silo toplevels reached the outer compositor"
+    assert_output_contains "PASS: both bridge sockets present"
+    assert_output_contains "PASS: silo A runs as user1"
+    assert_output_contains "PASS: silo B still running after silo A teardown"
+    assert_output_contains "PASS: §Phase-7 tier-3 multi-silo lifecycle end-to-end"
 }
 
 @test "phase7-tier3-chrome: qdshell parses silo identifier + applies per-silo color override" {
