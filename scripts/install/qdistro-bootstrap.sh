@@ -242,7 +242,8 @@ prompt_inputs() {
 # ---------------------------------------------------------------------------
 install_packages_tumbleweed() {
     log "refreshing zypper repositories..."
-    zypper -n --no-gpg-checks refresh >/dev/null
+    zypper -n --no-gpg-checks refresh 2>&1 | grep -v "^$" | sed 's/^/  /' \
+        || warn "zypper refresh failed; proceeding with cached metadata (install may fail)"
 
     # Reuse the canonical Tumbleweed list from install-deps.sh.
     # shellcheck disable=SC1091
@@ -357,18 +358,21 @@ install_packages() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Btrfs subvolume helpers
+# 4. Btrfs detection + subvolume helpers
 # ---------------------------------------------------------------------------
-provision_subvolumes() {
-    if [ -n "$SKIP_SUBVOLUMES" ]; then
-        log "skipping subvolume provisioning (--skip-subvolumes)"
-        return 0
-    fi
+detect_btrfs() {
+    if [ -n "$SKIP_SUBVOLUMES" ]; then return 0; fi
     local fstype
     fstype=$(findmnt -o FSTYPE / --noheadings 2>/dev/null | tr -d ' ' || echo unknown)
     if [ "$fstype" != "btrfs" ]; then
-        warn "root filesystem is $fstype, not btrfs — subvolume layout skipped (snapshot features will not work)"
+        warn "root filesystem is '$fstype', not btrfs — subvolume layout and snapshots disabled"
         SKIP_SUBVOLUMES=1
+    fi
+}
+
+provision_subvolumes() {
+    if [ -n "$SKIP_SUBVOLUMES" ]; then
+        log "skipping subvolume provisioning (--skip-subvolumes)"
         return 0
     fi
     log "provisioning btrfs subvolumes..."
@@ -546,7 +550,7 @@ pip_install_apps() {
     for app in qdgreeter qdlocker qdbrowser; do
         if [ -f "$REPO_ROOT/$app/pyproject.toml" ]; then
             log "  pip install $app..."
-            python3 -m pip install --break-system-packages --no-deps --quiet \
+            python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
                 "$REPO_ROOT/$app" \
                 || warn "  pip install $app failed (non-fatal)"
         else
@@ -584,6 +588,8 @@ install_python_modules() {
             log "  -> $(basename "$installer")"
             bash "$installer" "$src_dir" \
                 || warn "$installer failed; continuing"
+        else
+            warn "  installer not found or not executable: $installer"
         fi
     done
 }
@@ -604,9 +610,11 @@ install_qdlocker_service() {
 Environment=QDLOCKER_QDSHELL_PATH=/usr/share/quickshell/qdshell
 EOF
     runuser -l admin -c 'systemctl --user daemon-reload' 2>/dev/null || true
-    runuser -l admin -c 'systemctl --user enable qdlocker.service' 2>/dev/null \
-        || warn "qdlocker service enable failed (admin loginctl linger may be needed)"
-    log "qdlocker service installed and enabled for admin"
+    if runuser -l admin -c 'systemctl --user enable qdlocker.service' 2>/dev/null; then
+        log "qdlocker service installed and enabled for admin"
+    else
+        warn "qdlocker service installed but enable failed (loginctl enable-linger may be needed)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -731,7 +739,7 @@ smoke_check() {
         ok=0
     fi
     # D-Bus name checks — services may not be up without reboot
-    if busctl list --no-pager 2>/dev/null | grep -q com.qdistro.Broker1; then
+    if busctl list --no-pager 2>/dev/null | grep -q com.qdistro.AdminBroker1; then
         log "  broker: ONLINE"
     else
         warn "  broker not on bus (normal before reboot)"
@@ -767,32 +775,32 @@ main() {
     # Step 5: Install packages
     install_packages
 
-    # Step 6: Create users (each user gets a subvolume home via create_user_subvolume)
+    # Step 6: Detect btrfs (must run before create_users to set SKIP_SUBVOLUMES)
+    detect_btrfs
+
+    # Step 7: Create users (each user gets a subvolume home via create_user_subvolume)
     create_users
 
-    # Step 7: System btrfs subvolumes (vaults, libvirt, containers)
+    # Step 8: System btrfs subvolumes (vaults, libvirt, containers)
     provision_subvolumes
 
-    # Step 8: Fetch sources
+    # Step 9: Fetch sources
     fetch_sources
 
-    # Step 9: Build qdwin
+    # Step 10: Build qdwin
     build_qdwin
 
-    # Step 10: Build qdistro daemons
+    # Step 11: Build qdistro daemons
     build_qdistro_daemons
 
-    # Step 11: Build qdshell QML plugin
+    # Step 12: Build qdshell QML plugin
     build_qdshell_plugin
 
-    # Step 12: pip install Python apps
+    # Step 13: pip install Python apps
     pip_install_apps
 
-    # Step 13: Install Python modules + systemd units via installer chain
+    # Step 14: Install Python modules + systemd units via installer chain
     install_python_modules
-
-    # Step 14: Install qdlocker systemd user service
-    install_qdlocker_service
 
     # Step 15: Install locker config
     install_locker_config_file
@@ -800,20 +808,23 @@ main() {
     # Step 16: SELinux policies
     install_selinux_policies
 
-    # Step 17: qdwin session
+    # Step 17: qdwin session (sets up loginctl enable-linger admin)
     install_qdwin_session
 
-    # Step 18: greetd
+    # Step 18: Install qdlocker systemd user service (needs linger from step 17)
+    install_qdlocker_service
+
+    # Step 19: greetd
     configure_greetd
 
-    # Step 19 (opt-in): tier-4 guest base image bake
+    # Step 20 (opt-in): tier-4 guest base image bake
     if [ -n "$BUILD_TIER4_BASE" ]; then
         log "building tier-4 guest base image (--tier4-base)..."
         bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
             || warn "tier-4 base build failed; tier-4 VM apps will not work"
     fi
 
-    # Step 20: Smoke check
+    # Step 21: Smoke check
     smoke_check
 
     log "DONE."
