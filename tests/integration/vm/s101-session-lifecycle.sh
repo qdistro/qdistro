@@ -9,7 +9,7 @@
 #
 # Preconditions (the VM bake installs these):
 #   - /usr/libexec/qdistro/qdistro_session_manager.py present
-#   - /usr/share/dbus-1/system.d/com.qdistro.SessionManager1.conf installed
+#   - /usr/share/dbus-1/system.d/org.qdistro.SessionManager1.conf installed
 #   - /etc/systemd/system/qdistro-session-manager.service installed
 #   - cgroup v2 mounted at /sys/fs/cgroup
 #
@@ -28,14 +28,14 @@ note() { printf 'INFO: %s\n' "$*"; }
 systemctl restart qdistro-session-manager.service \
     || err "qdistro-session-manager.service failed to start"
 sleep 1
-busctl --system list 2>/dev/null | grep -q com.qdistro.SessionManager1 \
-    || err "com.qdistro.SessionManager1 not on system bus"
+busctl --system list 2>/dev/null | grep -q org.qdistro.SessionManager1 \
+    || err "org.qdistro.SessionManager1 not on system bus"
 
 # Cleanup: remove any stale silo from prior runs.
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     DeleteSilo s "work" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
@@ -43,9 +43,9 @@ busctl --system call \
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     CreateSilo si "work" 2000 \
     || err "CreateSilo failed"
 
@@ -67,9 +67,9 @@ printf "PASS: CreateSilo wrote /var/lib/qdistro/silos/work/ with mode 0700 work:
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     StartSilo s "work" \
     || note "StartSilo returned non-zero (launcher unit may not be installed; bake adds it later)"
 
@@ -95,14 +95,14 @@ printf "PASS: StartSilo brought silo 'work' to active state (cgroup populated)\n
 # verify the daemon emits the signal by snooping for ~1s while
 # poking the silo. The qdshell-side update is covered separately.
 
-(busctl --system monitor com.qdistro.SessionManager1 2>/dev/null \
+(busctl --system monitor org.qdistro.SessionManager1 2>/dev/null \
     | head -n 50 > /tmp/s101-sig.log &) || true
 MON_PID=$!
 sleep 0.3
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     StartSilo s "work" >/dev/null 2>&1 || true
 sleep 0.7
 kill $MON_PID 2>/dev/null || true
@@ -119,9 +119,9 @@ fi
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     FreezeSilo s "work" \
     || err "FreezeSilo failed"
 
@@ -135,9 +135,9 @@ printf "PASS: FreezeSilo froze all processes (cgroup.freeze=1)\n"
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     ResumeSilo s "work" \
     || err "ResumeSilo failed"
 
@@ -155,9 +155,9 @@ printf "PASS: ResumeSilo unfroze (cgroup.freeze=0; previously paused PID resumed
 # ---------------------------------------------------------------------------
 
 OUT=$(busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     DeleteSilo s "work" 2>&1) && err "DeleteSilo should have failed while silo is Active"
 
 echo "$OUT" | grep -qE 'SiloBusy|SiloNotActive|cannot' \
@@ -170,9 +170,9 @@ printf "PASS: DeleteSilo refused while silo is active (returned 'SiloBusy')\n"
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     StopSilo si "work" 2 \
     || err "StopSilo failed"
 
@@ -187,9 +187,9 @@ printf "PASS: StopSilo terminated SIGTERM then SIGKILL after grace\n"
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     DeleteSilo s "work" \
     || err "DeleteSilo after stop failed"
 
@@ -205,16 +205,16 @@ printf "PASS: DeleteSilo succeeded after StopSilo\n"
 
 # Recreate then list so the admin path has at least one row.
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     CreateSilo si "work" 2000 >/dev/null
 
 RAW=$(busctl --system call \
     --json=short \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     ListSilos 2>/dev/null)
 
 echo "$RAW" | grep -q '"work"' \
@@ -224,9 +224,9 @@ printf "PASS: ListSilos returned the expected JSON for admin\n"
 
 # Cleanup so reruns are idempotent.
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     DeleteSilo s "work" >/dev/null 2>&1 || true
 
 printf "ALL_PASS: s101 session lifecycle end-to-end\n"

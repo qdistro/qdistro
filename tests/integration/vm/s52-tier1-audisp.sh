@@ -60,18 +60,18 @@ fi
 
 # 2. broker reachable on the system bus ---------------------------------
 command -v dbus-send >/dev/null 2>&1 || skip "dbus-send absent"
-if dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
+if dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
         / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-    pass "broker up on com.qdistro.AdminBroker1"
+    pass "broker up on org.qdistro.AdminBroker1"
 else
     # The broker uses dbus activation; a Ping should activate it.
     systemctl start qdistro-admin-broker.service 2>/dev/null || true
     sleep 0.5
-    if dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
+    if dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
             / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-        pass "broker up on com.qdistro.AdminBroker1"
+        pass "broker up on org.qdistro.AdminBroker1"
     else
-        skip "broker did not answer Ping on com.qdistro.AdminBroker1"
+        skip "broker did not answer Ping on org.qdistro.AdminBroker1"
     fi
 fi
 

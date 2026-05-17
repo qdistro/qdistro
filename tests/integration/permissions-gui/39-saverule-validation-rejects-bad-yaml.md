@@ -29,9 +29,9 @@ sleep 1
 
 # Capture the pre-scenario rule count for the unchanged-count check.
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ListRules' \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListRules' \
   | grep -c '"name"' > /tmp/39-pre-count.txt
 PRE_COUNT=$(cat /tmp/39-pre-count.txt)
 echo "pre-count = $PRE_COUNT"
@@ -44,9 +44,9 @@ echo "pre-count = $PRE_COUNT"
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"../39-traversal.yaml" \
   string:"- name: x\n  decision: allow\n  match:\n    action: x\n" \
   2>&1 | tee /tmp/39-s1.out
@@ -56,7 +56,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 **Assert**:
-- `/tmp/39-s1.out` contains `Error com.qdistro.AdminBroker1.RulesEngineRefused`.
+- `/tmp/39-s1.out` contains `Error org.qdistro.AdminBroker1.RulesEngineRefused`.
 - No file `../39-traversal.yaml` exists anywhere:
   ```bash
   $VMEXEC "$VM" 'find /etc/qdistro -name "*traversal*" 2>/dev/null; \
@@ -69,9 +69,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"39-bad-yaml.yaml" \
   string:"- name: x\n  decision: allow\n  match: {action: : [unbalanced" \
   2>&1 | tee /tmp/39-s2.out
@@ -82,7 +82,7 @@ $VMEXEC "$VM" 'ls -l /etc/qdistro/rules.d/ | grep 39 || echo NO-FILE'
 ```
 
 **Assert**:
-- `/tmp/39-s2.out` contains `Error com.qdistro.AdminBroker1.RulesEngineRefused`.
+- `/tmp/39-s2.out` contains `Error org.qdistro.AdminBroker1.RulesEngineRefused`.
 - The grep prints `NO-FILE` — no `39-bad-yaml.yaml` landed on
   disk. (Validation happens in a tempdir; the atomic rename
   never runs.)
@@ -93,9 +93,9 @@ $VMEXEC "$VM" 'ls -l /etc/qdistro/rules.d/ | grep 39 || echo NO-FILE'
 # Top-level is a dict, not a list — RulesEngine expects a list.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"39-bad-shape.yaml" \
   string:"name: x\ndecision: allow\nmatch:\n  action: x\n" \
   2>&1 | tee /tmp/39-s3.out
@@ -113,9 +113,9 @@ $VMEXEC "$VM" 'ls -l /etc/qdistro/rules.d/ | grep 39 || echo NO-FILE'
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ListRules' \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListRules' \
   | grep -c '"name"' > /tmp/39-post-count.txt
 diff /tmp/39-pre-count.txt /tmp/39-post-count.txt
 ```

@@ -46,7 +46,7 @@ def _reset_client():
 class TestListUserContainers:
     def test_routes_through_relay_with_any_selector(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True,
                 "containers": [
@@ -65,11 +65,11 @@ class TestListUserContainers:
         op, _args, sel = call["body"]
         assert op == "containers.list"
         assert json.loads(sel) == {"any": True}
-        assert call["service"] == "com.qdistro.UserRelay.uid2000"
+        assert call["service"] == "org.qdistro.UserRelay.uid2000"
 
     def test_chromium_unavailable_propagates(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid3000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid3000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False,
                 "error": "contextualIdentities_unavailable",
@@ -83,7 +83,7 @@ class TestListUserContainers:
 
     def test_no_bridge_found_propagates(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid4000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid4000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False,
                 "error": "no_bridge_found",
@@ -100,7 +100,7 @@ class TestListUserContainers:
 class TestListUserTabs:
     def test_calls_tabs_list_op(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True,
                 "tabs": [
@@ -122,7 +122,7 @@ class TestListUserTabs:
 class TestAnnotateWithLiveTabs:
     def _fake_with_tabs(self, tabs):
         return _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "tabs": tabs,
             }),
@@ -182,7 +182,7 @@ class TestAnnotateWithLiveTabs:
 
     def test_relay_failure_returns_rows_unchanged_with_error(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False, "error": "no_bridge_found",
             }),
@@ -213,7 +213,7 @@ class TestAnnotateWithLiveTabs:
 
     def test_bad_tabs_payload_returns_bad_reply(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "tabs": "not-a-list",
             }),

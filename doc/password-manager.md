@@ -176,7 +176,7 @@ Not an acceptable delivery channel for secrets.
 ## Polkit unlock
 
 `UnlockVault` for non-admin callers routes through the polkit action
-`com.qdistro.pwd.unlock` (default `auth_admin_keep` — admin auth, cached
+`org.qdistro.pwd.unlock` (default `auth_admin_keep` — admin auth, cached
 for the session). The daemon calls polkit's `CheckAuthorization` with the
 vault name + caller details before any unsealing. The admin uid bypasses
 polkit entirely.
@@ -196,7 +196,7 @@ below).
 
 1. The vault is locked.
 2. An app requests an item from that vault.
-3. The daemon triggers a polkit action `com.qdistro.pwd.unlock.<vault>`.
+3. The daemon triggers a polkit action `org.qdistro.pwd.unlock.<vault>`.
 4. Admin's polkit agent shows a dialog in admin's compositor:
  "dev-user's firefox wants an item from the work vault."
 5. Admin fingerprint → the daemon unseals the vault master key via TPM.
@@ -216,7 +216,7 @@ dispatches `BeginAuthentication` to one of three methods:
 
 The method is picked per polkit action via fnmatch globs in
 `/etc/qdistro/polkit-agent.conf`. The default is `broker`. The shipped
-config maps `com.qdistro.pwd.*` to `pam` so vault unlocks always require
+config maps `org.qdistro.pwd.*` to `pam` so vault unlocks always require
 a fresh admin password.
 
 ## Portal Secret integration

@@ -36,9 +36,9 @@ qdistro-print-attach-usb --vendor-product 0411:00be # via lsusb VID:PID
 qdistro-print-attach-usb --bus-addr 1.2 # via lsusb -d 1:2
 ```
 
-Both wrappers gate through polkit (`com.qdistro.print.{attach,detach}-usb`).
+Both wrappers gate through polkit (`org.qdistro.print.{attach,detach}-usb`).
 The qdistro-polkit-agent renders the prompt; default config maps
-`com.qdistro.print.*` to `broker` so admin sees the request in the
+`org.qdistro.print.*` to `broker` so admin sees the request in the
 admin-approval-app queue.
 
 ## CID

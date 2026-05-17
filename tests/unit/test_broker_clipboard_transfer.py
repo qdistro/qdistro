@@ -104,16 +104,24 @@ def _write_clipboard_rule(rules_dir: Path, *, decision: str,
 # --- same-silo: always allowed -------------------------------------------
 
 class TestSameSilo:
+    # Option-B contract (todo/decisions/secctx-identity-contract.md):
+    # same-silo allow now requires identity_verified=True from qdshell.
+    # Without it the gate falls through to the cross-silo policy path
+    # (default-deny), which is exercised by TestSameSiloUnverified below.
+
     def test_admin_to_admin(self, broker):
         assert broker.CheckClipboardTransfer(
-            "admin", "admin", ["text/plain"]) == "allow"
+            "admin", "admin", ["text/plain"],
+            "", "", "", True) == "allow"
 
     def test_user1_to_user1(self, broker):
         assert broker.CheckClipboardTransfer(
-            "user1", "user1", ["text/plain", "text/html"]) == "allow"
+            "user1", "user1", ["text/plain", "text/html"],
+            "", "", "", True) == "allow"
 
     def test_same_silo_writes_audit(self, broker):
-        broker.CheckClipboardTransfer("user2", "user2", ["text/plain"])
+        broker.CheckClipboardTransfer("user2", "user2", ["text/plain"],
+                                      "", "", "", True)
         rows = broker.audit.recent(10)
         assert len(rows) == 1
         assert rows[0]["decision"] is True
@@ -122,8 +130,33 @@ class TestSameSilo:
 
     def test_same_silo_ignores_rules(self, broker, rules_dir):
         # Even an explicit deny rule for the same-silo action shouldn't
-        # fire — same-silo is short-circuit allow.
+        # fire — verified-same-silo is short-circuit allow.
         _write_clipboard_rule(rules_dir, decision="deny",
+                              source="user1", dest="user1")
+        broker.rules.reload()
+        assert broker.CheckClipboardTransfer(
+            "user1", "user1", ["text/plain"],
+            "", "", "", True) == "allow"
+
+
+class TestSameSiloUnverified:
+    """Option-B gate: same-silo without identity_verified falls through."""
+
+    def test_falls_through_to_default_deny(self, broker):
+        assert broker.CheckClipboardTransfer(
+            "user1", "user1", ["text/plain"]) == "deny"
+
+    def test_falls_through_explicit_false(self, broker):
+        assert broker.CheckClipboardTransfer(
+            "admin", "admin", ["text/plain"],
+            "", "", "", False) == "deny"
+
+    def test_can_be_overridden_by_explicit_rule(self, broker, rules_dir):
+        # An admin rule that explicitly allows the same-silo synthetic
+        # action still lets the unverified transfer through — this is
+        # the documented escape hatch for callers that can't (yet)
+        # propagate identity_verified.
+        _write_clipboard_rule(rules_dir, decision="allow",
                               source="user1", dest="user1")
         broker.rules.reload()
         assert broker.CheckClipboardTransfer(
@@ -345,7 +378,7 @@ class TestInputValidation:
         # Some clients (e.g. drag-and-drop start) set selection with no
         # mime types yet; gate must still return a decision.
         assert broker.CheckClipboardTransfer(
-            "user1", "user1", []) == "allow"
+            "user1", "user1", [], "", "", "", True) == "allow"
         assert broker.CheckClipboardTransfer(
             "user1", "admin", []) == "deny"
 
@@ -360,7 +393,8 @@ class TestInputValidation:
 
     def test_strips_whitespace(self, broker):
         assert broker.CheckClipboardTransfer(
-            "  user1  ", "  user1  ", ["text/plain"]) == "allow"
+            "  user1  ", "  user1  ", ["text/plain"],
+            "", "", "", True) == "allow"
 
 
 # --- rate-limit ---------------------------------------------------------
@@ -375,9 +409,12 @@ class TestRateLimit:
             ratelimit_window_s=10.0,
         )
         # First two pass.
-        assert b.CheckClipboardTransfer("user1", "user1", []) == "allow"
-        assert b.CheckClipboardTransfer("user1", "user1", []) == "allow"
+        assert b.CheckClipboardTransfer(
+            "user1", "user1", [], "", "", "", True) == "allow"
+        assert b.CheckClipboardTransfer(
+            "user1", "user1", [], "", "", "", True) == "allow"
         # Third trips rate-limit.
         import dbus
         with pytest.raises(dbus.DBusException):
-            b.CheckClipboardTransfer("user1", "user1", [])
+            b.CheckClipboardTransfer(
+                "user1", "user1", [], "", "", "", True)

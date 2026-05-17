@@ -19,7 +19,7 @@ The two public entry points:
 P05a wires these via:
 
 - ``qdistro_integration.py`` (App1 launcher entry) — claims
-  ``com.qdistro.Tier4VM.uid<NNNN>`` and exposes a "Close" method.
+  ``org.qdistro.Tier4VM.uid<NNNN>`` and exposes a "Close" method.
 - ``Tier4Apps.qml`` (qdshell) — calls ``QdwinBinding.setBorderColor``
   with the resolved rgba on every ``toplevelSecurityContext`` event.
 

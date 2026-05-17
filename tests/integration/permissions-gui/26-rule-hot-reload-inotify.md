@@ -43,7 +43,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 $VMEXEC "$VM" 'rm -f /tmp/26-signals.log; \
   setsid dbus-monitor --system \
-    "type=signal,interface=com.qdistro.AdminBroker1,member=RulesReloaded" \
+    "type=signal,interface=org.qdistro.AdminBroker1,member=RulesReloaded" \
     >/tmp/26-signals.log 2>&1 </dev/null &
   echo $! >/tmp/26-monitor.pid'
 sleep 1
@@ -90,9 +90,9 @@ $VMEXEC "$VM" 'kill $(cat /tmp/26-monitor.pid) 2>/dev/null; sleep 0.3; cat /tmp/
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ListRules'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListRules'
 ```
 
 **Assert**: output contains a dict entry with
@@ -112,9 +112,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMEXEC "$VM" 'wait $(cat /tmp/26-work.pid) 2>/dev/null; cat /tmp/26-work.log'
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:

@@ -18,8 +18,8 @@ import sys
 
 import dbus
 
-BUS_NAME = "com.qdistro.Pwd1"
-OBJ_PATH = "/com/qdistro/Pwd1"
+BUS_NAME = "org.qdistro.Pwd1"
+OBJ_PATH = "/org/qdistro/Pwd1"
 
 
 def main() -> int:

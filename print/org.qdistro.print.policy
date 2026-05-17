@@ -6,12 +6,12 @@
   spec/20 Phase-9 §step 2 — polkit actions for the qdistro-print VM
   control surface.
 
-  - com.qdistro.print.attach-usb       — admin attaches a USB printer to
+  - org.qdistro.print.attach-usb       — admin attaches a USB printer to
                                           the qdistro-print VM.
-  - com.qdistro.print.detach-usb       — admin detaches a USB device.
-  - com.qdistro.print.cancel-job       — admin cancels a job in cupsd.
-  - com.qdistro.print.purge-jobs       — admin purges all queued jobs.
-  - com.qdistro.print.access           — qdistro-print-proxy gate (the
+  - org.qdistro.print.detach-usb       — admin detaches a USB device.
+  - org.qdistro.print.cancel-job       — admin cancels a job in cupsd.
+  - org.qdistro.print.purge-jobs       — admin purges all queued jobs.
+  - org.qdistro.print.access           — qdistro-print-proxy gate (the
                                           host-side broker also has its
                                           own broker action with the
                                           same name; this polkit-side
@@ -20,7 +20,7 @@
                                           interrogate the same identifier).
 
   Defaults all require admin authentication. The qdistro-polkit-agent's
-  /etc/qdistro/polkit-agent.conf maps com.qdistro.print.* to the
+  /etc/qdistro/polkit-agent.conf maps org.qdistro.print.* to the
   `broker` method by default (admin sees the request in the approval
   queue and approves yes/no). To require the actual admin password
   instead, change the glob mapping to `pam`.
@@ -30,7 +30,7 @@
   <vendor>qdistro</vendor>
   <vendor_url>https://qdistro.invalid/spec/20</vendor_url>
 
-  <action id="com.qdistro.print.attach-usb">
+  <action id="org.qdistro.print.attach-usb">
     <description>Attach a USB device to the qdistro-print VM</description>
     <message>Authentication is required to attach a USB device to the print VM</message>
     <defaults>
@@ -41,7 +41,7 @@
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
-  <action id="com.qdistro.print.detach-usb">
+  <action id="org.qdistro.print.detach-usb">
     <description>Detach a USB device from the qdistro-print VM</description>
     <message>Authentication is required to detach a USB device from the print VM</message>
     <defaults>
@@ -52,7 +52,7 @@
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
-  <action id="com.qdistro.print.cancel-job">
+  <action id="org.qdistro.print.cancel-job">
     <description>Cancel a job in the qdistro-print queue</description>
     <message>Authentication is required to cancel a print job</message>
     <defaults>
@@ -63,7 +63,7 @@
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
-  <action id="com.qdistro.print.purge-jobs">
+  <action id="org.qdistro.print.purge-jobs">
     <description>Purge all jobs from the qdistro-print queue</description>
     <message>Authentication is required to purge all print jobs</message>
     <defaults>
@@ -74,7 +74,7 @@
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 
-  <action id="com.qdistro.print.access">
+  <action id="org.qdistro.print.access">
     <description>Print through the qdistro-print proxy</description>
     <message>Authentication is required to access the qdistro-print proxy</message>
     <defaults>

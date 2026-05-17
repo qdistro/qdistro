@@ -147,7 +147,7 @@ class TestSnapperUnavailable:
         def boom(self_):
             raise dbus.DBusException(
                 "qdistro_snapshots module unavailable: forced",
-                name="com.qdistro.AdminBroker1.SnapperUnavailable")
+                name="org.qdistro.AdminBroker1.SnapperUnavailable")
         monkeypatch.setattr(
             type(broker), "_snapper_client", boom)
         broker.set_peer(uid=ADMIN_UID)

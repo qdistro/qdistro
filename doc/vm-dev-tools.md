@@ -109,7 +109,7 @@ vm-* tools drive **full-stack integration tests** from the host.
 
 Direct `xdotool`-based input only works against XWayland sessions. For
 qdistro compositor sessions the right surface is the
-`com.qdistro.App1.UIModel` D-Bus interface — tests reference buttons by
+`org.qdistro.App1.UIModel` D-Bus interface — tests reference buttons by
 stable widget ID ("approve-button") rather than pixel coordinates.
 Survives layout changes, resolution changes, and theme changes.
 

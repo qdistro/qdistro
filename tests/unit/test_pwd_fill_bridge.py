@@ -1,7 +1,7 @@
 """P04 Phase-C unit tests: pwd.fill end-to-end (intent token → daemon).
 
 Drives :func:`qdistro_browser_bridge._handle_pwd_fill` from valid
-intent token mint through the (mocked) ``com.qdistro.Pwd1.Fill``
+intent token mint through the (mocked) ``org.qdistro.Pwd1.Fill``
 daemon call and asserts:
 
   * intent-token replay is rejected on second use,
@@ -138,9 +138,9 @@ class TestPwdFillHappyPath:
         # same-uid process claim the name and serve forged Fill replies
         # (P04 H3 / HIGH-1 review). Pin all four bus-coordinates here.
         assert c["bus"] == "SYSTEM"
-        assert c["service"] == "com.qdistro.Pwd1"
-        assert c["object_path"] == "/com/qdistro/Pwd1"
-        assert c["interface"] == "com.qdistro.Pwd1"
+        assert c["service"] == "org.qdistro.Pwd1"
+        assert c["object_path"] == "/org/qdistro/Pwd1"
+        assert c["interface"] == "org.qdistro.Pwd1"
         assert c["method"] == "Fill"
 
 

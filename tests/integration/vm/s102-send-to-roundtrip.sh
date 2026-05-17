@@ -8,9 +8,9 @@
 #   PASS: qdshell PodApps lists qterminator with silo badge 'work'
 #   PASS: qdshell PodApps lists qnotebook   with silo badge 'work'
 #   PASS: qdshell PodApps lists qfileman    with silo badge 'work'
-#   PASS: qterminator registered com.qdistro.App1 on session bus
-#   PASS: qnotebook   registered com.qdistro.App1 on session bus
-#   PASS: qfileman    registered com.qdistro.App1 on session bus
+#   PASS: qterminator registered org.qdistro.App1 on session bus
+#   PASS: qnotebook   registered org.qdistro.App1 on session bus
+#   PASS: qfileman    registered org.qdistro.App1 on session bus
 #   PASS: send-to from qterminator to qnotebook delivered via broker
 #   PASS: qnotebook received payload (content verified)
 #   PASS: qsu elevated qterminator shell (uid=0 confirmed)
@@ -48,29 +48,29 @@ systemctl restart qdistro-session-manager.service \
     || err "qdistro-session-manager.service failed to start"
 sleep 1
 
-busctl --system list 2>/dev/null | grep -q com.qdistro.AdminBroker1 \
-    || err "com.qdistro.AdminBroker1 not on system bus"
-busctl --system list 2>/dev/null | grep -q com.qdistro.SessionManager1 \
-    || err "com.qdistro.SessionManager1 not on system bus"
+busctl --system list 2>/dev/null | grep -q org.qdistro.AdminBroker1 \
+    || err "org.qdistro.AdminBroker1 not on system bus"
+busctl --system list 2>/dev/null | grep -q org.qdistro.SessionManager1 \
+    || err "org.qdistro.SessionManager1 not on system bus"
 
 # ---------------------------------------------------------------------------
 # Step 1 — ensure the 'work' silo exists and is Active.
 # ---------------------------------------------------------------------------
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     CreateSilo si "work" 2000 >/dev/null 2>&1 || true
 
 busctl --system call \
-    com.qdistro.SessionManager1 \
-    /com/qdistro/SessionManager1 \
-    com.qdistro.SessionManager1 \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
     StartSilo s "work" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
-# Step 2 — boot three com.qdistro.App1 receivers as uid 2000.
+# Step 2 — boot three org.qdistro.App1 receivers as uid 2000.
 # ---------------------------------------------------------------------------
 
 # Each receiver runs the SDK's AppReceiver against a tiny in-process
@@ -81,7 +81,7 @@ cat >/tmp/s102/receiver.py <<'PYEOF'
 """s102 in-VM receiver bootstrap.
 
 Argv: <friendly_name>
-Claims com.qdistro.<friendly_name>.uid<euid> and runs GLib main loop.
+Claims org.qdistro.<friendly_name>.uid<euid> and runs GLib main loop.
 """
 import os, sys
 import dbus, dbus.service, dbus.mainloop.glib
@@ -100,7 +100,7 @@ from qdistro_app import AppReceiver  # noqa: E402
 
 friendly = sys.argv[1]
 silo = os.environ.get("QDISTRO_SILO", "work")
-service = f"com.qdistro.{friendly}.uid{os.geteuid()}"
+service = f"org.qdistro.{friendly}.uid{os.geteuid()}"
 
 received = []
 def on_recv(kind, payload):
@@ -149,9 +149,9 @@ start_receiver QNotebook
 start_receiver QFileMan
 
 # Each successful start emits its PASS string.
-printf "PASS: qterminator registered com.qdistro.App1 on session bus\n"
-printf "PASS: qnotebook registered com.qdistro.App1 on session bus\n"
-printf "PASS: qfileman registered com.qdistro.App1 on session bus\n"
+printf "PASS: qterminator registered org.qdistro.App1 on session bus\n"
+printf "PASS: qnotebook registered org.qdistro.App1 on session bus\n"
+printf "PASS: qfileman registered org.qdistro.App1 on session bus\n"
 
 # ---------------------------------------------------------------------------
 # Step 3 — PodApps view: broker.ListReceivers must return all three with
@@ -159,9 +159,9 @@ printf "PASS: qfileman registered com.qdistro.App1 on session bus\n"
 # ---------------------------------------------------------------------------
 
 LIST_OUT=$(busctl --system call \
-    com.qdistro.AdminBroker1 \
-    /com/qdistro/AdminBroker1 \
-    com.qdistro.AdminBroker1 \
+    org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1 \
     ListReceivers 2>&1 || true)
 
 for app_token in QTerminator QNotebook QFileMan; do
@@ -189,11 +189,11 @@ runuser -u work -- env \
     XDG_RUNTIME_DIR=/run/user/2000 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/2000/bus \
     busctl --system call \
-        com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1 \
+        org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1 \
         RelayMessage isss \
-        2000 "com.qdistro.QNotebook.uid2000" "text/plain" "$PAYLOAD" \
+        2000 "org.qdistro.QNotebook.uid2000" "text/plain" "$PAYLOAD" \
         >/tmp/s102/relay.out 2>&1
 RELAY_RC=$?
 
@@ -232,11 +232,11 @@ CROSS_PAYLOAD="cross-silo-$$"
         XDG_RUNTIME_DIR=/run/user/2000 \
         DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/2000/bus \
         busctl --system call \
-            com.qdistro.AdminBroker1 \
-            /com/qdistro/AdminBroker1 \
-            com.qdistro.AdminBroker1 \
+            org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 \
+            org.qdistro.AdminBroker1 \
             RelayMessage isss \
-            $CROSS_TARGET_UID "com.qdistro.QNotebook.uid$CROSS_TARGET_UID" \
+            $CROSS_TARGET_UID "org.qdistro.QNotebook.uid$CROSS_TARGET_UID" \
             "text/plain" "$CROSS_PAYLOAD" \
             >/tmp/s102/cross.out 2>&1
 ) &
@@ -245,9 +245,9 @@ CROSS_PID=$!
 # Give the broker a moment to enqueue the request, then check pending.
 sleep 1
 PENDING=$(busctl --system call \
-    com.qdistro.AdminBroker1 \
-    /com/qdistro/AdminBroker1 \
-    com.qdistro.AdminBroker1 \
+    org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1 \
     GetPending 2>&1 || true)
 if echo "$PENDING" | grep -q "app.send-to:$CROSS_TARGET_UID"; then
     note "cross-silo RelayMessage enqueued — admin approval required"
@@ -258,9 +258,9 @@ fi
 RID=$(echo "$PENDING" | grep -oE '"id"[ :]+[0-9]+' | head -1 | grep -oE '[0-9]+')
 if [ -n "$RID" ]; then
     busctl --system call \
-        com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1 \
+        org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1 \
         DecideRequest iss "$RID" "deny" "once" >/dev/null 2>&1 || true
 fi
 wait $CROSS_PID 2>/dev/null || true
@@ -278,9 +278,9 @@ else
     # Fall back to checking the GetHistory surface in case the audit
     # DB lives elsewhere on this bake.
     HIST=$(busctl --system call \
-        com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1 \
+        org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1 \
         ListHistory u 20 2>&1 || true)
     if echo "$HIST" | grep -q "app.send-to:$CROSS_TARGET_UID"; then
         printf "PASS: admin approval required and logged for cross-silo send-to\n"

@@ -49,9 +49,9 @@ def _broker_list_rules() -> list[dict]:
         sys.exit(2)
     try:
         bus = dbus.SystemBus()
-        proxy = bus.get_object("com.qdistro.AdminBroker1",
-                               "/com/qdistro/AdminBroker1")
-        ifc = dbus.Interface(proxy, "com.qdistro.AdminBroker1")
+        proxy = bus.get_object("org.qdistro.AdminBroker1",
+                               "/org/qdistro/AdminBroker1")
+        ifc = dbus.Interface(proxy, "org.qdistro.AdminBroker1")
         rows = ifc.ListRules()
     except dbus.DBusException as e:
         print(f"broker ListRules failed: {e.get_dbus_message()}",

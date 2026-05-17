@@ -19,8 +19,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 
 
 @dataclass

@@ -60,9 +60,9 @@ YAML='- name: allow-work-systemctl-status
   rationale: scenario 50 — argv_prefix pre-approval for read-only systemctl
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"50-allow-systemctl-status.yaml" \
   string:"$YAML"
 EOF

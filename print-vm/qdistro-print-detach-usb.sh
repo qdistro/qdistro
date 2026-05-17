@@ -1,12 +1,12 @@
 #!/bin/bash
 # spec/20 Phase-9 §step 2 — detach a USB device from the qdistro-print VM.
 #
-# Polkit action: com.qdistro.print.detach-usb (auth_admin defaults).
+# Polkit action: org.qdistro.print.detach-usb (auth_admin defaults).
 set -euo pipefail
 
 VM_NAME="${QDISTRO_PRINT_VM_NAME:-qdistro-print}"
 LIBVIRT_URI="${QDISTRO_PRINT_LIBVIRT_URI:-qemu:///system}"
-ACTION="com.qdistro.print.detach-usb"
+ACTION="org.qdistro.print.detach-usb"
 
 VID=""
 PID=""
@@ -37,7 +37,7 @@ Usage:
   qdistro-print-detach-usb --vendor-product VVVV:PPPP [--vm <name>]
   qdistro-print-detach-usb --bus-addr BUS.ADDR        [--vm <name>]
 
-Polkit action: com.qdistro.print.detach-usb (auth_admin defaults).
+Polkit action: org.qdistro.print.detach-usb (auth_admin defaults).
 USAGE
             exit 0;;
         *) echo "unknown arg: $1" >&2; exit 2;;

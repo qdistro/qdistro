@@ -816,12 +816,12 @@ smoke_check() {
         ok=0
     fi
     # D-Bus name checks — services may not be up without reboot
-    if busctl list --no-pager 2>/dev/null | grep -q com.qdistro.AdminBroker1; then
+    if busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1; then
         log "  broker: ONLINE"
     else
         warn "  broker not on bus (normal before reboot)"
     fi
-    if busctl list --no-pager 2>/dev/null | grep -q com.qdistro.SessionManager1; then
+    if busctl list --no-pager 2>/dev/null | grep -q org.qdistro.SessionManager1; then
         log "  session-manager: ONLINE"
     else
         warn "  session-manager not on bus (normal before reboot)"

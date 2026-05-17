@@ -10,7 +10,7 @@ Scope:
 - `ListLocalReceivers` filters by prefix, excludes its own name,
   ignores unique-connection names (`:1.N`), and surfaces the
   friendly-name derivation.
-- `Forward` rejects non-`com.qdistro.*` targets and excluded
+- `Forward` rejects non-`org.qdistro.*` targets and excluded
   names, and wraps peer failures in a relay-side error.
 - `ForwardBrowserBridgeOp` selects the right bridge name, calls
   RequestTabs, and surfaces failures as JSON ok:false rather
@@ -131,14 +131,14 @@ class TestListLocalReceivers:
         bus = _FakeBus(names=[
             "org.freedesktop.DBus",
             ":1.4",
-            "com.qdistro.StubNotepad.uid3000",
-            "com.qdistro.Foo.Bar",
+            "org.qdistro.StubNotepad.uid3000",
+            "org.qdistro.Foo.Bar",
         ])
         relay = _StubUserRelay(bus)
         rows = relay.ListLocalReceivers()
         as_tuples = [(str(a), str(b)) for a, b in rows]
-        assert ("com.qdistro.StubNotepad.uid3000", "StubNotepad") in as_tuples
-        assert ("com.qdistro.Foo.Bar", "Foo.Bar") in as_tuples
+        assert ("org.qdistro.StubNotepad.uid3000", "StubNotepad") in as_tuples
+        assert ("org.qdistro.Foo.Bar", "Foo.Bar") in as_tuples
 
     def test_filters_unique_colon_names(self):
         bus = _FakeBus(names=[":1.1", ":1.2", ":1.99"])
@@ -151,21 +151,21 @@ class TestListLocalReceivers:
         assert list(relay.ListLocalReceivers()) == []
 
     def test_excludes_relay_own_name(self):
-        bus = _FakeBus(names=[R.BUS_NAME, "com.qdistro.StubNotepad.uid2000"])
+        bus = _FakeBus(names=[R.BUS_NAME, "org.qdistro.StubNotepad.uid2000"])
         relay = _StubUserRelay(bus)
         rows = [str(r[0]) for r in relay.ListLocalReceivers()]
         assert R.BUS_NAME not in rows
-        assert "com.qdistro.StubNotepad.uid2000" in rows
+        assert "org.qdistro.StubNotepad.uid2000" in rows
 
     def test_excludes_stub_sender(self):
         bus = _FakeBus(names=[
-            "com.qdistro.StubSender",
-            "com.qdistro.StubNotepad.uid2000",
+            "org.qdistro.StubSender",
+            "org.qdistro.StubNotepad.uid2000",
         ])
         relay = _StubUserRelay(bus)
         rows = [str(r[0]) for r in relay.ListLocalReceivers()]
-        assert "com.qdistro.StubSender" not in rows
-        assert "com.qdistro.StubNotepad.uid2000" in rows
+        assert "org.qdistro.StubSender" not in rows
+        assert "org.qdistro.StubNotepad.uid2000" in rows
 
     def test_empty_bus(self):
         relay = _StubUserRelay(_FakeBus(names=[]))
@@ -178,10 +178,10 @@ class TestForward:
     def test_happy_path_invokes_receiver(self):
         recv = _FakeReceiver()
         bus = _FakeBus()
-        bus.objects[("com.qdistro.StubNotepad.uid3000",
+        bus.objects[("org.qdistro.StubNotepad.uid3000",
                      R.APP1_OBJ_PATH)] = recv
         relay = _StubUserRelay(bus)
-        relay.Forward("com.qdistro.StubNotepad.uid3000", "text/plain", "hi")
+        relay.Forward("org.qdistro.StubNotepad.uid3000", "text/plain", "hi")
         assert recv.calls == [("text/plain", "hi")]
 
     def test_rejects_non_qdistro_target(self):
@@ -193,19 +193,19 @@ class TestForward:
 
     def test_rejects_excluded_names(self):
         relay = _StubUserRelay(_FakeBus())
-        for bad in (R.BUS_NAME, "com.qdistro.AdminBroker1",
-                    "com.qdistro.StubSender"):
+        for bad in (R.BUS_NAME, "org.qdistro.AdminBroker1",
+                    "org.qdistro.StubSender"):
             with pytest.raises(dbus.DBusException):
                 relay.Forward(bad, "k", "v")
 
     def test_wraps_receiver_exception(self):
         recv = _FakeReceiver(raise_exc=RuntimeError("kaboom"))
         bus = _FakeBus()
-        bus.objects[("com.qdistro.StubNotepad.uid2000",
+        bus.objects[("org.qdistro.StubNotepad.uid2000",
                      R.APP1_OBJ_PATH)] = recv
         relay = _StubUserRelay(bus)
         with pytest.raises(dbus.DBusException) as ei:
-            relay.Forward("com.qdistro.StubNotepad.uid2000", "k", "v")
+            relay.Forward("org.qdistro.StubNotepad.uid2000", "k", "v")
         assert "ForwardFailed" in ei.value.get_dbus_name() \
             or "kaboom" in str(ei.value)
 
@@ -216,11 +216,11 @@ class TestForward:
         inner = dbus.DBusException("no", name="com.example.Nope")
         recv = _FakeReceiver(raise_exc=inner)
         bus = _FakeBus()
-        bus.objects[("com.qdistro.StubNotepad.uid2000",
+        bus.objects[("org.qdistro.StubNotepad.uid2000",
                      R.APP1_OBJ_PATH)] = recv
         relay = _StubUserRelay(bus)
         with pytest.raises(dbus.DBusException) as ei:
-            relay.Forward("com.qdistro.StubNotepad.uid2000", "k", "v")
+            relay.Forward("org.qdistro.StubNotepad.uid2000", "k", "v")
         assert ei.value.get_dbus_name() == "com.example.Nope"
 
 
@@ -489,18 +489,18 @@ class TestFriendlyNameEdgeCases:
         assert R._friendly_name("") == ""
 
     def test_only_prefix(self):
-        # com.qdistro. alone: prefix strip → empty; no dot to rsplit on
+        # org.qdistro. alone: prefix strip → empty; no dot to rsplit on
         # → returned as-is.
-        assert R._friendly_name("com.qdistro.") == ""
+        assert R._friendly_name("org.qdistro.") == ""
 
     def test_uid_without_digits(self):
-        assert R._friendly_name("com.qdistro.Foo.uid") == "Foo.uid"
+        assert R._friendly_name("org.qdistro.Foo.uid") == "Foo.uid"
 
     def test_uid_with_mixed(self):
-        assert R._friendly_name("com.qdistro.Foo.uid3000abc") == "Foo.uid3000abc"
+        assert R._friendly_name("org.qdistro.Foo.uid3000abc") == "Foo.uid3000abc"
 
     def test_nested_components(self):
-        assert R._friendly_name("com.qdistro.A.B.C") == "A.B.C"
+        assert R._friendly_name("org.qdistro.A.B.C") == "A.B.C"
 
 
 # --- EXCLUDED_NAMES invariants --------------------------------------------
@@ -512,14 +512,14 @@ class TestRelayConstants:
     def test_excluded_contains_broker(self):
         # Broker is on the system bus, not this session bus, but we're
         # defensive about the name appearing anywhere.
-        assert "com.qdistro.AdminBroker1" in R.EXCLUDED_NAMES
+        assert "org.qdistro.AdminBroker1" in R.EXCLUDED_NAMES
 
     def test_excluded_contains_sender(self):
-        assert "com.qdistro.StubSender" in R.EXCLUDED_NAMES
+        assert "org.qdistro.StubSender" in R.EXCLUDED_NAMES
 
     def test_prefix_is_com_qdistro_dot(self):
-        assert R.RECEIVER_PREFIX == "com.qdistro."
+        assert R.RECEIVER_PREFIX == "org.qdistro."
 
     def test_system_bus_name_fmt_interpolates_uid(self):
         assert R.SYSTEM_BUS_NAME_FMT.format(uid=2000) == \
-            "com.qdistro.UserRelay.uid2000"
+            "org.qdistro.UserRelay.uid2000"

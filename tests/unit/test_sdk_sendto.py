@@ -73,20 +73,20 @@ class TestListReceivers:
         qdistro_app.list_receivers()
         assert fake_broker.calls[0][0] == "ListReceivers"
         assert fake_broker.calls[0][2]["dbus_interface"] == \
-            "com.qdistro.AdminBroker1"
+            "org.qdistro.AdminBroker1"
 
     def test_coerces_row_types(self, fake_broker):
         # dbus typically hands us `dbus.Int32 / dbus.String` wrappers;
         # the SDK must return plain ints and strs.
         fake_broker._responses["ListReceivers"] = [
-            (dbus.Int32(2000), dbus.String("com.qdistro.X"),
+            (dbus.Int32(2000), dbus.String("org.qdistro.X"),
              dbus.String("X")),
-            (3000, "com.qdistro.Y", "Y"),  # raw types also fine
+            (3000, "org.qdistro.Y", "Y"),  # raw types also fine
         ]
         rows = qdistro_app.list_receivers()
         assert rows == [
-            (2000, "com.qdistro.X", "X"),
-            (3000, "com.qdistro.Y", "Y"),
+            (2000, "org.qdistro.X", "X"),
+            (3000, "org.qdistro.Y", "Y"),
         ]
         for uid, svc, friendly in rows:
             assert isinstance(uid, int)
@@ -103,7 +103,7 @@ class TestListReceivers:
 class TestSendTo:
     def test_passes_typed_args(self, fake_broker):
         fake_broker._responses["RelayMessage"] = None
-        ok = qdistro_app.send_to(3000, "com.qdistro.StubNotepad.uid3000",
+        ok = qdistro_app.send_to(3000, "org.qdistro.StubNotepad.uid3000",
                                   "text/plain", "hi")
         assert ok is True
         assert len(fake_broker.calls) == 1
@@ -111,19 +111,19 @@ class TestSendTo:
         assert name == "RelayMessage"
         # First four are positional: target_uid, service, kind, payload.
         assert int(args[0]) == 3000
-        assert str(args[1]) == "com.qdistro.StubNotepad.uid3000"
+        assert str(args[1]) == "org.qdistro.StubNotepad.uid3000"
         assert str(args[2]) == "text/plain"
         assert str(args[3]) == "hi"
 
     def test_uses_admin_broker_interface(self, fake_broker):
         fake_broker._responses["RelayMessage"] = None
-        qdistro_app.send_to(3000, "com.qdistro.X", "k", "v")
+        qdistro_app.send_to(3000, "org.qdistro.X", "k", "v")
         _name, _args, kwargs = fake_broker.calls[0]
-        assert kwargs["dbus_interface"] == "com.qdistro.AdminBroker1"
+        assert kwargs["dbus_interface"] == "org.qdistro.AdminBroker1"
 
     def test_custom_timeout_propagates(self, fake_broker):
         fake_broker._responses["RelayMessage"] = None
-        qdistro_app.send_to(3000, "com.qdistro.X", "k", "v", timeout=42.0)
+        qdistro_app.send_to(3000, "org.qdistro.X", "k", "v", timeout=42.0)
         _name, _args, kwargs = fake_broker.calls[0]
         assert kwargs["timeout"] == pytest.approx(42.0)
 
@@ -132,13 +132,13 @@ class TestSendTo:
             def RelayMessage(self, *_a, **_kw):
                 raise dbus.DBusException(
                     "admin denied relay",
-                    name="com.qdistro.AdminBroker1.Denied")
+                    name="org.qdistro.AdminBroker1.Denied")
         # Replace the monkey-patched proxy with a raising one.
         import qdistro_app as qa
         bus = _FakeSystemBus(_Proxy())
         qa.dbus.SystemBus = lambda: bus  # type: ignore[assignment]
         with pytest.raises(dbus.DBusException):
-            qa.send_to(3000, "com.qdistro.X", "k", "v")
+            qa.send_to(3000, "org.qdistro.X", "k", "v")
 
 
 # --- request (regression, should still work after Phase 3 SDK changes) ---
@@ -195,12 +195,12 @@ class TestAppReceiver:
 
         got: list[tuple[str, str]] = []
         rx = qdistro_app.AppReceiver(
-            "com.qdistro.StubNotepad.uid2000",
+            "org.qdistro.StubNotepad.uid2000",
             on_receive=lambda k, p: got.append((k, p)),
             bus=object())  # real object not needed with monkeypatched init
 
-        assert claimed == ["com.qdistro.StubNotepad.uid2000"]
-        assert rx.service_name == "com.qdistro.StubNotepad.uid2000"
+        assert claimed == ["org.qdistro.StubNotepad.uid2000"]
+        assert rx.service_name == "org.qdistro.StubNotepad.uid2000"
         rx.Receive("text/plain", "hello")
         assert got == [("text/plain", "hello")]
 
@@ -213,7 +213,7 @@ class TestAppReceiver:
 
         captured: list[tuple] = []
         rx = qdistro_app.AppReceiver(
-            "com.qdistro.Foo", on_receive=lambda k, p: captured.append(
+            "org.qdistro.Foo", on_receive=lambda k, p: captured.append(
                 (type(k).__name__, type(p).__name__)),
             bus=object())
         # Even if dbus hands us dbus.String, callback sees `str`.
@@ -227,7 +227,7 @@ class TestAppReceiver:
         monkeypatch.setattr(qdistro_app.dbus.service.Object, "__init__",
                             lambda self, bus, path: None)
         rx = qdistro_app.AppReceiver(
-            "com.qdistro.Foo", on_receive=lambda k, p: None,
+            "org.qdistro.Foo", on_receive=lambda k, p: None,
             bus=object())
         assert rx.GetLastReceived() == ""
         assert rx.last_received is None
@@ -239,7 +239,7 @@ class TestAppReceiver:
         monkeypatch.setattr(qdistro_app.dbus.service.Object, "__init__",
                             lambda self, bus, path: None)
         rx = qdistro_app.AppReceiver(
-            "com.qdistro.Foo", on_receive=lambda k, p: None,
+            "org.qdistro.Foo", on_receive=lambda k, p: None,
             bus=object())
         rx.Receive(dbus.String("text/plain"), dbus.String("first"))
         assert rx.GetLastReceived() == "[text/plain] first"
@@ -261,7 +261,7 @@ class TestAppReceiver:
             raise RuntimeError("callback broken")
 
         rx = qdistro_app.AppReceiver(
-            "com.qdistro.Foo", on_receive=_boom, bus=object())
+            "org.qdistro.Foo", on_receive=_boom, bus=object())
         with pytest.raises(RuntimeError):
             rx.Receive("text/plain", "payload")
         # Probe still sees what landed even though the user callback
@@ -273,7 +273,7 @@ class TestAppReceiver:
 # --- constants pinned ----------------------------------------------------
 
 def test_app1_iface_constant():
-    assert qdistro_app.APP1_IFACE == "com.qdistro.App1"
+    assert qdistro_app.APP1_IFACE == "org.qdistro.App1"
 
 
 def test_default_timeout_is_long_enough_for_admin():

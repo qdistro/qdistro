@@ -4,7 +4,7 @@
 Long-lived child of auditd's audispd dispatcher. Reads kernel audit
 records on stdin, filters AVC entries whose subject context names a
 qdistro_*_t domain, and forwards a structured payload to the admin
-broker via D-Bus (com.qdistro.AdminBroker1.RecordSelinuxAvc).
+broker via D-Bus (org.qdistro.AdminBroker1.RecordSelinuxAvc).
 
 Contract:
 
@@ -56,9 +56,9 @@ from qdistro_audisp_parser import (  # noqa: E402
     avc_to_broker_args,
 )
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
-IFACE = "com.qdistro.AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
+IFACE = "org.qdistro.AdminBroker1"
 
 # Reconnect backoff. The broker restarts in ~1s; longer waits add
 # nothing but lose audit records. Ceiling at 30s for the cold-boot

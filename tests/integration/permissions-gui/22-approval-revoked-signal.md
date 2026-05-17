@@ -61,7 +61,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # scenario succeeds.
 $VMEXEC "$VM" 'rm -f /tmp/22-signals.log; \
   setsid dbus-monitor --system \
-    "type=signal,interface=com.qdistro.AdminBroker1,member=ApprovalRevoked" \
+    "type=signal,interface=org.qdistro.AdminBroker1,member=ApprovalRevoked" \
     >/tmp/22-signals.log 2>&1 </dev/null &
   echo $! >/tmp/22-monitor.pid'
 sleep 1
@@ -111,7 +111,7 @@ $VMEXEC "$VM" 'kill $(cat /tmp/22-monitor.pid) 2>/dev/null; sleep 0.3; cat /tmp/
 ```
 
 **Assert** (textual analysis of `/tmp/22-signals.log`):
-- Exactly **one** `signal ... interface=com.qdistro.AdminBroker1;
+- Exactly **one** `signal ... interface=org.qdistro.AdminBroker1;
   member=ApprovalRevoked` block.
 - The signal body contains three arguments in this order:
   - `int32 2000`  (caller_uid)

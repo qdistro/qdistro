@@ -56,8 +56,8 @@ from typing import Any
 import dbus
 import dbus.mainloop.glib  # noqa: F401 — ensures glib is imported before bus access
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 
 # Socket lives inside systemd's RuntimeDirectory so the kernel
 # creates the parent 0700-owned-by-root — unlink-then-bind races on

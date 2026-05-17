@@ -90,11 +90,11 @@ if [ -f "$SRC/domain-template.xml" ]; then
     install -m 0644 "$SRC/domain-template.xml" \
         "$DEST_TEMPLATE_DIR/domain-template.xml"
 fi
-# polkit actions for com.qdistro.print.* — safe to install even when
+# polkit actions for org.qdistro.print.* — safe to install even when
 # no admin agent is registered yet (polkitd just enumerates actions).
-if [ -f "$SRC/com.qdistro.print.policy" ]; then
-    install -m 0644 "$SRC/com.qdistro.print.policy" \
-        "$DEST_POLKIT_ACTION/com.qdistro.print.policy"
+if [ -f "$SRC/org.qdistro.print.policy" ]; then
+    install -m 0644 "$SRC/org.qdistro.print.policy" \
+        "$DEST_POLKIT_ACTION/org.qdistro.print.policy"
 fi
 
 systemctl daemon-reload

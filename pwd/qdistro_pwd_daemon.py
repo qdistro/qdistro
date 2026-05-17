@@ -13,7 +13,7 @@ fresh-vm-bootstrap.sh / install-pwd-for-vm.sh). The vault directory
 domain can read .vault files (enforced by the SELinux module
 qdistro_pwd.{te,fc} once shipped).
 
-Bus name: `com.qdistro.Pwd1` on the system bus, object `/com/qdistro/Pwd1`.
+Bus name: `org.qdistro.Pwd1` on the system bus, object `/org/qdistro/Pwd1`.
 
 Method matrix (admin uid = 1000):
 
@@ -80,8 +80,8 @@ from qdistro_pwd_fprint import (  # type: ignore[import-not-found]
     verify as fprint_verify,
 )
 
-BUS_NAME = "com.qdistro.Pwd1"
-OBJ_PATH = "/com/qdistro/Pwd1"
+BUS_NAME = "org.qdistro.Pwd1"
+OBJ_PATH = "/org/qdistro/Pwd1"
 ADMIN_UID = 1000
 
 VAULT_DIR = os.environ.get("QDISTRO_PWD_VAULT_DIR", DEFAULT_VAULT_DIR)
@@ -114,27 +114,27 @@ IDLE_TIMEOUT_S = int(os.environ.get("QDISTRO_PWD_IDLE_S", "600"))
 
 
 class PwdPolicyError(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.PolicyError"
+    _dbus_error_name = "org.qdistro.Pwd1.PolicyError"
 
 
 class PwdNotUnlocked(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.NotUnlocked"
+    _dbus_error_name = "org.qdistro.Pwd1.NotUnlocked"
 
 
 class PwdBadPassword(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.BadPassword"
+    _dbus_error_name = "org.qdistro.Pwd1.BadPassword"
 
 
 class PwdNotFound(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.NotFound"
+    _dbus_error_name = "org.qdistro.Pwd1.NotFound"
 
 
 class PwdDuplicate(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.Duplicate"
+    _dbus_error_name = "org.qdistro.Pwd1.Duplicate"
 
 
 class PwdIntegrityError(dbus.DBusException):
-    _dbus_error_name = "com.qdistro.Pwd1.Integrity"
+    _dbus_error_name = "org.qdistro.Pwd1.Integrity"
 
 
 def _wipe_bytearray(b: bytearray) -> None:
@@ -287,7 +287,7 @@ class PwdDaemon(dbus.service.Object):
         v1 → secret is the scrypt password; v2 → secret is the TPM PIN.
 
         For non-admin callers, gated through the polkit action
-        `com.qdistro.pwd.unlock` so an admin polkit agent prompts
+        `org.qdistro.pwd.unlock` so an admin polkit agent prompts
         before any secret is unsealed. Admin uid bypasses polkit
         (caller is already authoritative).
         """

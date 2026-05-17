@@ -2,9 +2,9 @@
 # spec/30 §"dbus-broker policy-reload mystery (2026-04-29)"
 #
 # On first boot of a baked image (notably baseweed-enforcing-baked.qcow2)
-# the broker's RequestName('com.qdistro.AdminBroker1') fails with
+# the broker's RequestName('org.qdistro.AdminBroker1') fails with
 # `org.freedesktop.DBus.Error.AccessDenied: Request to own name refused
-# by policy` even though /etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
+# by policy` even though /etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 # is present and grants `<allow own="..."/>` to user="root". A `systemctl
 # reload dbus-broker.service` makes the failure disappear for the rest
 # of the session. Root cause hasn't been pinned down — best-supported
@@ -23,7 +23,7 @@ After=dbus.service dbus-broker.service
 Before=qdistro-admin-broker.service
 DefaultDependencies=no
 RefuseManualStart=no
-ConditionPathExists=/etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
+ConditionPathExists=/etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 
 [Service]
 Type=oneshot
@@ -31,7 +31,7 @@ RemainAfterExit=yes
 # 2026-04-29: `systemctl reload dbus-broker.service` returns success
 # but does NOT actually reload the policy on Tumbleweed dbus-broker
 # 35.x — the failure surfaces as qdistro-pwd's RequestName denying
-# AFTER /etc/dbus-1/system.d/com.qdistro.Pwd1.conf is on disk and
+# AFTER /etc/dbus-1/system.d/org.qdistro.Pwd1.conf is on disk and
 # this oneshot has reported success. The reliable mechanism is the
 # org.freedesktop.DBus.ReloadConfig method, which dbus-broker
 # implements faithfully. We try busctl first; fall back to the

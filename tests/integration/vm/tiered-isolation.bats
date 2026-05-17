@@ -593,7 +593,7 @@ stage_vm_driver() {
         fail_loud "SELinux disabled / policy not loaded / audisp plugin absent / auditd down"
     fi
     assert_output_contains "PASS: audispd plugin + descriptor installed"
-    assert_output_contains "PASS: broker up on com.qdistro.AdminBroker1"
+    assert_output_contains "PASS: broker up on org.qdistro.AdminBroker1"
     assert_output_contains "PASS: audit DB qdistro_tier1_t rows after="
     assert_output_contains "PASS: row carries selinux.avc:* action + verdict source"
     assert_output_contains "PASS: qdistro-audisp-plugin still running"
@@ -640,7 +640,7 @@ stage_vm_driver() {
 # regression in the daemon or its dbus surface fails the test.
 # Skips on VMs that don't have the session-manager bake yet.
 
-@test "session-lifecycle: P02 com.qdistro.SessionManager1 end-to-end" {
+@test "session-lifecycle: P02 org.qdistro.SessionManager1 end-to-end" {
     stage_vm_driver "s101-session-lifecycle.sh"
     vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && bash /tmp/s101.sh 2>/dev/null"
     assert_success

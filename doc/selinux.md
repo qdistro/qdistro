@@ -121,7 +121,7 @@ workloads:
 - `dbus { acquire_svc }` against `system_dbusd_t` — Tumbleweed's
  `dbus_system_bus_client(...)` interface body doesn't bundle
  `acquire_svc`, so the broker needs an explicit allow to
- `RequestName('com.qdistro.AdminBroker1')`. Without this, dbus-broker
+ `RequestName('org.qdistro.AdminBroker1')`. Without this, dbus-broker
  rejects RequestName with a generic policy denial and no AVC is logged.
 - `files_search_var_lib(qdistro_broker_t)` + `files_manage_var_lib_*` for
  `/var/lib/qdistro/{audit,approvals,cache}/*.sqlite`.
@@ -163,7 +163,7 @@ kernel cap check).
 
 ## dbus-broker reload requirement
 
-On first install of `/etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf`
+On first install of `/etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf`
 on a host where dbus-broker is already running, dbus-broker doesn't
 re-read the directory until SIGHUP. A broker restart immediately after
 install would fail `RequestName` because the policy still excludes the
@@ -186,7 +186,7 @@ audispd plugin script that runs as a long-lived child of auditd via
 `/etc/audit/plugins.d/qdistro-audisp.conf`. Each line on stdin is parsed
 by `qdistro_audisp_parser.parse_avc_line`; AVC records whose subject
 context names a `qdistro_*_t` domain are forwarded to the broker via
-`com.qdistro.AdminBroker1.RecordSelinuxAvc`. The broker validates the
+`org.qdistro.AdminBroker1.RecordSelinuxAvc`. The broker validates the
 caller is uid 0, re-checks the subject prefix, and writes one audit row
 with `action='selinux.avc:<tclass>:<perms>'`, `source='selinux_avc
 verdict=…'`, and the new `selinux_subj_type` column populated.
@@ -233,3 +233,13 @@ independently verifies via `/proc/<pid>/attr/current` that the process is
 actually in `qdistro_tier1_t`. If they disagree, broker's
 `CheckPermission` denies — defence in depth against a process that
 managed to get the secctx tag without the SELinux transition.
+
+This independent verification applies to **direct broker authorization**
+(the broker resolves the D-Bus caller pid and reads its SELinux context
+itself). For **qdshell-mediated decisions** — clipboard receive gates,
+handoff requests, and other paths where qdshell forwards
+`(app_id, instance_id, secctx)` strings on behalf of an application —
+the broker only sees qdshell's process identity, not the source/
+destination application's. There is no per-call SELinux re-verification
+of the underlying app on that path yet. See
+`todo/qdistro-qdwin-wider-codex-review.md` finding #2.

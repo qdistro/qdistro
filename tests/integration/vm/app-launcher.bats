@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # §P03 — App launcher wiring (qterminator + qnotebook + qfileman via
-# com.qdistro.App1).
+# org.qdistro.App1).
 #
 # Exercises the round-trip declared in
 # plan2/tasks/P03-app-launcher.md "Success criterion": each app
@@ -46,9 +46,9 @@ setup() {
     assert_output_contains "PASS: qdshell PodApps lists qterminator with silo badge 'work'"
     assert_output_contains "PASS: qdshell PodApps lists qnotebook with silo badge 'work'"
     assert_output_contains "PASS: qdshell PodApps lists qfileman with silo badge 'work'"
-    assert_output_contains "PASS: qterminator registered com.qdistro.App1 on session bus"
-    assert_output_contains "PASS: qnotebook registered com.qdistro.App1 on session bus"
-    assert_output_contains "PASS: qfileman registered com.qdistro.App1 on session bus"
+    assert_output_contains "PASS: qterminator registered org.qdistro.App1 on session bus"
+    assert_output_contains "PASS: qnotebook registered org.qdistro.App1 on session bus"
+    assert_output_contains "PASS: qfileman registered org.qdistro.App1 on session bus"
     assert_output_contains "PASS: send-to from qterminator to qnotebook delivered via broker"
     assert_output_contains "PASS: qnotebook received payload (content verified)"
     assert_output_contains "PASS: qsu elevated qterminator shell (uid=0 confirmed)"

@@ -21,7 +21,7 @@
        - USB controllers: a qemu-xhci is present for hot-plug. The
          host's qdistro-print-attach-usb wrapper performs `virsh
          attach-device <usb-hostdev.xml>` after a polkit gate
-         (com.qdistro.print.attach-usb).
+         (org.qdistro.print.attach-usb).
        - qemu-guest-agent enabled so the host can run job-control
          commands (cancel, purge) by guest-exec'ing cupsd CLIs.
      -->

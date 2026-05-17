@@ -1,4 +1,4 @@
-"""Tests for the P03 com.qdistro.App1 launcher contract.
+"""Tests for the P03 org.qdistro.App1 launcher contract.
 
 Covers the new methods added to :class:`qdistro_app.AppReceiver`
 (``GetName`` / ``GetSilo`` / ``CanReceive`` / ``ReceivePayload`` /
@@ -74,15 +74,15 @@ class _BusFreeAppReceiver(AppReceiver):
 
 class TestFriendlyFromService:
     @pytest.mark.parametrize("service, expected", [
-        ("com.qdistro.QTerminator.uid1000", "QTerminator"),
-        ("com.qdistro.QNotebook.uid2000",   "QNotebook"),
-        ("com.qdistro.QFileMan.uid3000",    "QFileMan"),
-        ("com.qdistro.SomeApp",             "SomeApp"),
-        ("com.qdistro.Multi.Word.uid4000",  "Multi.Word"),
+        ("org.qdistro.QTerminator.uid1000", "QTerminator"),
+        ("org.qdistro.QNotebook.uid2000",   "QNotebook"),
+        ("org.qdistro.QFileMan.uid3000",    "QFileMan"),
+        ("org.qdistro.SomeApp",             "SomeApp"),
+        ("org.qdistro.Multi.Word.uid4000",  "Multi.Word"),
         # uidNNN suffix that isn't all-digits stays attached — the
         # only legitimate "uid<int>" form is broker-injected and
         # always numeric.
-        ("com.qdistro.Foo.uidbad",          "Foo.uidbad"),
+        ("org.qdistro.Foo.uidbad",          "Foo.uidbad"),
         # Non-qdistro service names pass through (defensive — the
         # broker's _SERVICE_NAME_RE rejects these before they reach
         # the SDK, but the helper shouldn't crash on them).
@@ -124,44 +124,44 @@ class TestKindAccepted:
 
 class TestAppReceiverMetadata:
     def test_friendly_name_default_from_service(self):
-        r = _BusFreeAppReceiver("com.qdistro.QTerminator.uid1234")
+        r = _BusFreeAppReceiver("org.qdistro.QTerminator.uid1234")
         assert r.friendly_name == "QTerminator"
         assert r.GetName() == "QTerminator"
 
     def test_friendly_name_override(self):
-        r = _BusFreeAppReceiver("com.qdistro.X.uid1",
+        r = _BusFreeAppReceiver("org.qdistro.X.uid1",
                                 friendly_name="Pretty Name")
         assert r.friendly_name == "Pretty Name"
         assert r.GetName() == "Pretty Name"
 
     def test_silo_from_env(self, monkeypatch):
         monkeypatch.setenv("QDISTRO_SILO", "work")
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         assert r.silo == "work"
         assert r.GetSilo() == "work"
 
     def test_silo_override(self, monkeypatch):
         monkeypatch.setenv("QDISTRO_SILO", "ignored")
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1", silo="personal")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1", silo="personal")
         assert r.silo == "personal"
         assert r.GetSilo() == "personal"
 
     def test_silo_fallback_to_username(self, monkeypatch):
         monkeypatch.delenv("QDISTRO_SILO", raising=False)
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         # On the host the value is whoever ran pytest; just assert
         # it's a non-empty string so we don't pin a specific username.
         assert isinstance(r.silo, str)
 
     def test_supported_kinds_default_wildcard(self):
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         assert r.supported_kinds == ("*",)
         assert r.CanReceive("text/plain") is True
         assert r.CanReceive("application/octet-stream") is True
 
     def test_can_receive_with_prefix_list(self):
         r = _BusFreeAppReceiver(
-            "com.qdistro.A.uid1",
+            "org.qdistro.A.uid1",
             supported_kinds=("text/*", "application/json"))
         assert r.CanReceive("text/plain") is True
         assert r.CanReceive("text/markdown") is True
@@ -173,7 +173,7 @@ class TestAppReceiverDelivery:
     def test_receive_records_last_and_calls_callback(self):
         seen: list[tuple[str, str]] = []
         r = _BusFreeAppReceiver(
-            "com.qdistro.A.uid1",
+            "org.qdistro.A.uid1",
             on_receive=lambda k, p: seen.append((k, p)))
         r.Receive("text/plain", "hello")
         assert seen == [("text/plain", "hello")]
@@ -183,7 +183,7 @@ class TestAppReceiverDelivery:
     def test_receive_payload_normalises_to_default_kind(self):
         seen: list[tuple[str, str]] = []
         r = _BusFreeAppReceiver(
-            "com.qdistro.A.uid1",
+            "org.qdistro.A.uid1",
             on_receive=lambda k, p: seen.append((k, p)))
         r.ReceivePayload("just bytes")
         assert seen == [(DEFAULT_KIND, "just bytes")]
@@ -193,7 +193,7 @@ class TestAppReceiverDelivery:
     def test_callback_exception_does_not_break_last_received(self):
         def boom(k, p):
             raise RuntimeError("kaboom")
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1", on_receive=boom)
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1", on_receive=boom)
         # _deliver wraps on_receive in try/finally so last_received and
         # the signal still fire even on a buggy app callback.
         with pytest.raises(RuntimeError):
@@ -201,7 +201,7 @@ class TestAppReceiverDelivery:
         assert r.last_received == ("k", "p")
 
     def test_signal_emitted_per_delivery(self):
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         r.Receive("text/plain", "one")
         r.ReceivePayload("two")
         assert r._signals == [
@@ -210,7 +210,7 @@ class TestAppReceiverDelivery:
         ]
 
     def test_get_last_received_empty_initially(self):
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         assert r.last_received is None
         assert r.GetLastReceived() == ""
 
@@ -220,16 +220,16 @@ class TestAppReceiverDelivery:
 class TestCanonicalServiceName:
     def test_short_name_gets_prefix_and_uid(self):
         s = app_receiver_mod._canonical_service_name("QTerminator")
-        assert s == f"com.qdistro.QTerminator.uid{os.geteuid()}"
+        assert s == f"org.qdistro.QTerminator.uid{os.geteuid()}"
 
     def test_partial_qualified_gets_uid(self):
-        s = app_receiver_mod._canonical_service_name("com.qdistro.QFileMan")
-        assert s == f"com.qdistro.QFileMan.uid{os.geteuid()}"
+        s = app_receiver_mod._canonical_service_name("org.qdistro.QFileMan")
+        assert s == f"org.qdistro.QFileMan.uid{os.geteuid()}"
 
     def test_fully_qualified_passthrough(self):
         s = app_receiver_mod._canonical_service_name(
-            "com.qdistro.QTerminator.uid42")
-        assert s == "com.qdistro.QTerminator.uid42"
+            "org.qdistro.QTerminator.uid42")
+        assert s == "org.qdistro.QTerminator.uid42"
 
 
 class TestSessionBusAvailability:
@@ -274,17 +274,17 @@ class TestSendToMenuTargets:
     def test_excludes_self_service(self, monkeypatch):
         monkeypatch.setattr(app_receiver_mod, "list_receivers",
                             lambda: [
-                                (1000, "com.qdistro.QTerminator.uid1000", "QTerminator"),
-                                (1000, "com.qdistro.QNotebook.uid1000",   "QNotebook"),
+                                (1000, "org.qdistro.QTerminator.uid1000", "QTerminator"),
+                                (1000, "org.qdistro.QNotebook.uid1000",   "QNotebook"),
                             ])
         rows = app_receiver_mod.send_to_menu_targets(
-            self_service="com.qdistro.QTerminator.uid1000")
-        assert [r["service"] for r in rows] == ["com.qdistro.QNotebook.uid1000"]
+            self_service="org.qdistro.QTerminator.uid1000")
+        assert [r["service"] for r in rows] == ["org.qdistro.QNotebook.uid1000"]
 
     def test_returns_row_shape(self, monkeypatch):
         monkeypatch.setattr(app_receiver_mod, "list_receivers",
                             lambda: [
-                                (2000, "com.qdistro.QNotebook.uid2000", "QNotebook"),
+                                (2000, "org.qdistro.QNotebook.uid2000", "QNotebook"),
                             ])
         # Force the cross-uid silo/CanReceive probes to be skipped
         # (uid 2000 != current uid) so we don't accidentally touch
@@ -294,7 +294,7 @@ class TestSendToMenuTargets:
         r = rows[0]
         assert set(r.keys()) == {"uid", "service", "name", "silo"}
         assert r["uid"] == 2000
-        assert r["service"] == "com.qdistro.QNotebook.uid2000"
+        assert r["service"] == "org.qdistro.QNotebook.uid2000"
         assert r["name"] == "QNotebook"
         # silo defaults to "" for cross-uid peers (probe not reachable)
         assert r["silo"] == ""
@@ -315,13 +315,13 @@ class TestBackwardsCompatibleSurface:
     """
 
     def test_receive_signature_unchanged(self):
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         # Two positional args, no kwargs — matches in_signature="ss".
         r.Receive("kind", "payload")
         assert r.last_received == ("kind", "payload")
 
     def test_get_last_received_format_matches_stub_notepad(self):
-        r = _BusFreeAppReceiver("com.qdistro.A.uid1")
+        r = _BusFreeAppReceiver("org.qdistro.A.uid1")
         r.Receive("text/plain", "abc")
         # qstub-notepad formats as `[kind] payload\n` and trims; the
         # SDK never appends the newline, so the canonical assertion
@@ -331,6 +331,6 @@ class TestBackwardsCompatibleSurface:
     def test_iface_constants_unchanged(self):
         # The interface name and object path are wire contracts —
         # changing them breaks every receiver in the field.
-        assert APP1_IFACE == "com.qdistro.App1"
-        assert APP1_OBJ_PATH == "/com/qdistro/App1"
+        assert APP1_IFACE == "org.qdistro.App1"
+        assert APP1_OBJ_PATH == "/org/qdistro/App1"
         assert AppReceiver.OBJ_PATH == APP1_OBJ_PATH

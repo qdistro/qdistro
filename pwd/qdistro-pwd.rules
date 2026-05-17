@@ -7,7 +7,7 @@
 // so the admin's own CLI doesn't trigger a popup loop.
 
 polkit.addRule(function(action, subject) {
-    if (action.id !== "com.qdistro.pwd.unlock") {
+    if (action.id !== "org.qdistro.pwd.unlock") {
         return undefined;
     }
     // Admin uid 1000 (admin) is implicitly authorised — the daemon's

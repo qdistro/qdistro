@@ -7,8 +7,8 @@ send-to protocol *without* modifying qterminator itself.
 
 Two responsibilities:
 
-1. **Receiver**: claims `com.qdistro.Qterminator.uid<N>` on the
-   session bus and exposes `com.qdistro.App1.Receive(kind, payload)`.
+1. **Receiver**: claims `org.qdistro.Qterminator.uid<N>` on the
+   session bus and exposes `org.qdistro.App1.Receive(kind, payload)`.
    Incoming payloads are injected into the active terminal's PTY
    via `terminal.send_text()`. The SDK's `AppReceiver` also exposes
    `GetLastReceived()` so headless tests can assert delivery without
@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import QMenu, QMessageBox
 from qterminator.plugin import MenuProvider
 
 
-SERVICE_FMT = "com.qdistro.Qterminator.uid{uid}"
+SERVICE_FMT = "org.qdistro.Qterminator.uid{uid}"
 
 # Match qstub-sender: 120 s is long enough for a human admin to pick
 # a scope and click, short enough that a forgotten prompt doesn't

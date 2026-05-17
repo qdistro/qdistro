@@ -2,8 +2,8 @@
 
 P05a wires tier-4 VMs into the same launcher contract qfileman /
 qterminator / qnotebook use (P03): on registration, this module claims
-``com.qdistro.Tier4VM.uid<NNNN>`` on the session bus and exposes the
-``com.qdistro.App1`` interface plus a tier-4-specific ``Close()``
+``org.qdistro.Tier4VM.uid<NNNN>`` on the session bus and exposes the
+``org.qdistro.App1`` interface plus a tier-4-specific ``Close()``
 method that drives the ACPI→destroy lifecycle in
 :mod:`tier4_chrome`.
 
@@ -110,7 +110,7 @@ def maybe_install(vm_name: str, *, on_close=None) -> Any | None:
         return None
 
     # NOTE: the Close() RPC is registered by tier4_control.py on a
-    # separate bus name (com.qdistro.Tier4VM.Control.uid<N>). The
+    # separate bus name (org.qdistro.Tier4VM.Control.uid<N>). The
     # AppReceiver SDK has no add_close_handler hook; the pre-fix-pass
     # `hasattr(receiver, "add_close_handler")` branch here was dead
     # code — removed. ``on_close`` is now used only by the standalone
@@ -182,7 +182,7 @@ def send_to_targets(*, kind: str = "text/plain") -> list[dict]:
     if _app_receiver is None:
         return []
     try:
-        self_service = f"com.qdistro.{APP_FRIENDLY_NAME}.uid{os.geteuid()}"
+        self_service = f"org.qdistro.{APP_FRIENDLY_NAME}.uid{os.geteuid()}"
         return _app_receiver.send_to_menu_targets(
             self_service=self_service, kind=kind)
     except Exception as e:  # noqa: BLE001

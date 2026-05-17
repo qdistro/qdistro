@@ -118,9 +118,9 @@ cat >/tmp/32-perl-caller.pl <<'PERL'
 use strict; use warnings;
 use Net::DBus;
 my $bus = Net::DBus->system;
-my $svc = $bus->get_service("com.qdistro.AdminBroker1");
-my $obj = $svc->get_object("/com/qdistro/AdminBroker1",
-                           "com.qdistro.AdminBroker1");
+my $svc = $bus->get_service("org.qdistro.AdminBroker1");
+my $obj = $svc->get_object("/org/qdistro/AdminBroker1",
+                           "org.qdistro.AdminBroker1");
 my $rid = $obj->RequestPermission("test.action", { caller => "perl-32" });
 print "rid=$rid\n";
 my $ok = $obj->WaitForDecision(int $rid);
@@ -136,9 +136,9 @@ sleep 2
 
 $VMGUI "$VM" screenshot /tmp/32-s4-perl-pending.png
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:

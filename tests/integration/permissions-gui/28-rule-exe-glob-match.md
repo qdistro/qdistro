@@ -55,9 +55,9 @@ YAML='- name: allow-python-test-action
   rationale: scenario 28 — exe glob match
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"28-allow-python.yaml" \
   string:"$YAML"
 EOF
@@ -105,18 +105,18 @@ B64=$(base64 -w0 <<'EOF'
 # timeout so admin's deny click has time to land.
 sudo -u work bash -c '
   RID_OUT=$(dbus-send --system --print-reply --reply-timeout=5000 \
-    --dest=com.qdistro.AdminBroker1 \
-    /com/qdistro/AdminBroker1 \
-    com.qdistro.AdminBroker1.RequestPermission \
+    --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1.RequestPermission \
     string:"test.action" \
     dict:string:string:"caller","dbus-send-28" 2>&1)
   echo "$RID_OUT" > /tmp/28-rid.out
   RID=$(echo "$RID_OUT" | awk "/int32/{print \$2; exit}")
   echo "rid=$RID" >> /tmp/28-rid.out
   dbus-send --system --print-reply --reply-timeout=60000 \
-    --dest=com.qdistro.AdminBroker1 \
-    /com/qdistro/AdminBroker1 \
-    com.qdistro.AdminBroker1.WaitForDecision \
+    --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1.WaitForDecision \
     int32:$RID > /tmp/28-work-alt.log 2>&1 &
   echo $! > /tmp/28-work-alt.pid'
 EOF
@@ -125,9 +125,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMGUI "$VM" screenshot /tmp/28-s3-prompt-visible.png
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert** (`/tmp/28-s3-prompt-visible.png` + GetPending output):
@@ -156,7 +156,7 @@ $VMEXEC "$VM" 'wait $(cat /tmp/28-work-alt.pid) 2>/dev/null; cat /tmp/28-work-al
 - `/tmp/28-s4-after-deny.png` shows the pending list empty.
 - `/tmp/28-work-alt.log` contains the substring `boolean false`
   (dbus-send's rendering of `WaitForDecision`'s `False` reply for
-  a denied request). A `com.qdistro.AdminBroker1.Denied` error
+  a denied request). A `org.qdistro.AdminBroker1.Denied` error
   name is also acceptable if the broker raises instead of
   returning false — both reflect the deny on the wire.
 
@@ -190,5 +190,5 @@ $VMEXEC "$VM" 'rm -f /tmp/28-work-*.log /tmp/28-work-*.pid'
   `/tmp/28-rid.out`.
 - `WaitForDecision` returns a boolean: `dbus-send` renders true /
   false as `boolean true` / `boolean false`. Older broker
-  builds raised `com.qdistro.AdminBroker1.Denied` on the deny
+  builds raised `org.qdistro.AdminBroker1.Denied` on the deny
   path instead; either form satisfies the assert.

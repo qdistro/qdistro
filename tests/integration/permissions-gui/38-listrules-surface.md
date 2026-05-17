@@ -58,9 +58,9 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ReloadRules'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ReloadRules'
 ```
 
 **Assert**: ReloadRules reply contains `int32 3` and an empty error
@@ -70,9 +70,9 @@ array.
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ListRules' \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListRules' \
   | tee /tmp/38-listrules.out
 ```
 
@@ -96,16 +96,16 @@ $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ListRules 2>&1 | tee /tmp/38-listrules-work.out
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListRules 2>&1 | tee /tmp/38-listrules-work.out
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 **Assert**: `/tmp/38-listrules-work.out` contains
-`Error com.qdistro.AdminBroker1.AccessDenied` (broker-side
+`Error org.qdistro.AdminBroker1.AccessDenied` (broker-side
 admin-only check; the system-bus policy may reject the call
 even earlier with `org.freedesktop.DBus.Error.AccessDenied`,
 which is also acceptable — log whichever appears).

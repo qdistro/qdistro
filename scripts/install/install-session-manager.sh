@@ -10,7 +10,7 @@ set -eu
 SRC=${1:-/root/qdistro-src/qdistro/session_manager}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-session-manager.service
-POLICY=/etc/dbus-1/system.d/com.qdistro.SessionManager1.conf
+POLICY=/etc/dbus-1/system.d/org.qdistro.SessionManager1.conf
 
 if [ ! -d "$SRC" ]; then
     echo "ERROR: session-manager source not found at $SRC" >&2
@@ -33,7 +33,7 @@ install -d -o root -g root -m 0755 "$DEST"
 install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
     "$DEST/qdistro_session_manager.py"
 
-install -m 0644 "$SRC/com.qdistro.SessionManager1.conf" "$POLICY"
+install -m 0644 "$SRC/org.qdistro.SessionManager1.conf" "$POLICY"
 install -m 0644 "$SRC/qdistro-session-manager.service" "$UNIT"
 
 systemctl reload dbus-broker.service 2>/dev/null \
@@ -45,15 +45,15 @@ systemctl enable --now qdistro-session-manager.service
 
 for _ in 1 2 3 4 5; do
     busctl list --no-pager 2>/dev/null \
-        | grep -q com.qdistro.SessionManager1 && break
+        | grep -q org.qdistro.SessionManager1 && break
     sleep 0.5
 done
 
 if ! busctl list --no-pager 2>/dev/null \
-        | grep -q com.qdistro.SessionManager1; then
+        | grep -q org.qdistro.SessionManager1; then
     echo "ERROR: qdistro-session-manager failed to claim bus name" >&2
     journalctl -u qdistro-session-manager.service --no-pager -n 30 >&2
     exit 3
 fi
 
-echo "session manager ready on com.qdistro.SessionManager1"
+echo "session manager ready on org.qdistro.SessionManager1"

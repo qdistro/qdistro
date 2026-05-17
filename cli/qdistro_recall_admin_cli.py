@@ -15,9 +15,9 @@ load-bearing one — historical recall results joined to live browser
 state in a single command.
 
 Authorization: this CLI calls
-``com.qdistro.UserRelay.uid<NNNN>.ForwardBrowserBridgeOp`` on the
+``org.qdistro.UserRelay.uid<NNNN>.ForwardBrowserBridgeOp`` on the
 system bus, which is restricted to root by the relay's
-``com.qdistro.UserRelay.conf`` policy. It also reads recall DBs
+``org.qdistro.UserRelay.conf`` policy. It also reads recall DBs
 under ``/var/lib/qdistro/recall/`` which are root-owned. Therefore
 the CLI requires root; it fails closed otherwise so the failure mode
 isn't a confusing D-Bus AccessDenied. There is no env-var escape

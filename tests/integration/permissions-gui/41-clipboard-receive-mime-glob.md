@@ -44,9 +44,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" \
   string:"admin" \
   string:"text/plain" \
@@ -81,9 +81,9 @@ YAML='- name: allow-user1-to-admin-receive
     action: qdistro.clipboard.receive:user1:admin
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"41a-allow.yaml" \
   string:"$YAML"
 EOF
@@ -94,8 +94,8 @@ sleep 1
 # text/plain: allow
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"text/plain" \
   string:"" string:"" string:""
 EOF
@@ -105,8 +105,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # image/png: also allow (no mime selector on the rule)
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"image/png" \
   string:"" string:"" string:""
 EOF
@@ -129,9 +129,9 @@ YAML='- name: allow-user1-to-admin-text-only
     mime_type: text/*
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"41b-text-only.yaml" \
   string:"$YAML"
 EOF
@@ -142,8 +142,8 @@ sleep 1
 # text/plain: match → allow
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"text/plain" \
   string:"" string:"" string:""
 EOF
@@ -153,8 +153,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # text/html: also matches `text/*` → allow
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"text/html" \
   string:"" string:"" string:""
 EOF
@@ -164,8 +164,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # image/png: does NOT match `text/*` → falls through to default deny
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"image/png" \
   string:"" string:"" string:""
 EOF
@@ -175,8 +175,8 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # application/pdf: also does NOT match `text/*` → deny
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardReceive \
+  --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardReceive \
   string:"user1" string:"admin" string:"application/pdf" \
   string:"" string:"" string:""
 EOF
@@ -213,14 +213,14 @@ B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- python3 - <<'PY'
 import dbus
 bus = dbus.SystemBus()
-proxy = bus.get_object("com.qdistro.AdminBroker1",
-                       "/com/qdistro/AdminBroker1")
+proxy = bus.get_object("org.qdistro.AdminBroker1",
+                       "/org/qdistro/AdminBroker1")
 ok = 0; err_name = None
 for i in range(60):
     try:
         proxy.CheckClipboardReceive(
             "user1", "admin", "text/plain", "", "", "",
-            dbus_interface="com.qdistro.AdminBroker1")
+            dbus_interface="org.qdistro.AdminBroker1")
         ok += 1
     except dbus.DBusException as e:
         err_name = e.get_dbus_name()
@@ -235,7 +235,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 **Assert**: output contains `ok_before_raise=49` (or `50` depending
 on whether prior S3 calls consumed bucket slots) and
-`com.qdistro.AdminBroker1.RateLimited`.
+`org.qdistro.AdminBroker1.RateLimited`.
 
 ## Teardown
 

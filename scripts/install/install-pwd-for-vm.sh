@@ -13,7 +13,7 @@
 #   /usr/libexec/qdistro/qdistro_pwd_audit.py
 #   /usr/local/bin/qdistro-pwd-admin               # admin CLI
 #   /usr/local/bin/qdistro-pwd-get                 # app CLI
-#   /etc/dbus-1/system.d/com.qdistro.Pwd1.conf
+#   /etc/dbus-1/system.d/org.qdistro.Pwd1.conf
 #   /etc/systemd/system/qdistro-pwd.service
 #   /var/lib/qdistro/vaults/                       # 0700 root:root
 #   /var/lib/qdistro/audit/pwd_audit.sqlite        # created on first record
@@ -115,10 +115,10 @@ install -m 0644 "$SRC/org.qdistro.PortalSecret.portal" \
 install -m 0644 "$SRC/qdistro-portals.conf" \
     "$DEST_PORTAL_CFG/qdistro-portals.conf"
 
-# Polkit action + rule (Phase-8.2). Action defines com.qdistro.pwd.unlock;
+# Polkit action + rule (Phase-8.2). Action defines org.qdistro.pwd.unlock;
 # rule routes non-admin callers through admin auth.
-install -m 0644 "$SRC/com.qdistro.pwd.policy" \
-    "$DEST_POLKIT_ACTION/com.qdistro.pwd.policy"
+install -m 0644 "$SRC/org.qdistro.pwd.policy" \
+    "$DEST_POLKIT_ACTION/org.qdistro.pwd.policy"
 install -m 0644 "$SRC/qdistro-pwd.rules" \
     "$DEST_POLKIT_RULES/50-qdistro-pwd.rules"
 # spec/13 fprintd-bound auto-unlock: lets the qdistro-pwd uid invoke
@@ -149,7 +149,7 @@ install -m 0755 "$SRC/qdistro-pwd-admin.py" "$DEST_BIN/qdistro-pwd-admin"
 install -m 0755 "$SRC/qdistro-pwd-get.py"   "$DEST_BIN/qdistro-pwd-get"
 
 # D-Bus policy + systemd unit.
-install -m 0644 "$SRC/com.qdistro.Pwd1.conf" "$DEST_DBUS/com.qdistro.Pwd1.conf"
+install -m 0644 "$SRC/org.qdistro.Pwd1.conf" "$DEST_DBUS/org.qdistro.Pwd1.conf"
 install -m 0644 "$SRC/qdistro-pwd.service"   "$DEST_SYSD/qdistro-pwd.service"
 
 # Phase-8.4: load the qdistro_pwd SELinux module if a pwd-policy

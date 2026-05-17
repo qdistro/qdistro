@@ -11,7 +11,7 @@ The proxy intentionally has narrow responsibilities:
 - Per-connection forward (one socketpair per incoming stream).
 - Peer-cred capture (uid/pid + best-effort /proc/<pid>/exe) for
   audit + the broker gate.
-- Broker gate via com.qdistro.AdminBroker1.CheckPermission — opt-in
+- Broker gate via org.qdistro.AdminBroker1.CheckPermission — opt-in
   via QDISTRO_PRINT_GATE_REQUIRED=1. Default OFF for MVP; flip to ON
   once admin has authored print.* rules.
 - Spawn-on-demand for the vsock backend: if the backend connect
@@ -49,8 +49,8 @@ Phase-9 §step 2 (this task) adds:
     - The actual qdistro-print libvirt domain template + image
       builder (print-vm/).
     - USB hot-plug helpers (qdistro-print-{attach,detach}-usb)
-      gated through polkit (com.qdistro.print.{attach,detach}-usb).
-    - polkit policy library (com.qdistro.print.policy).
+      gated through polkit (org.qdistro.print.{attach,detach}-usb).
+    - polkit policy library (org.qdistro.print.policy).
 
 Phase-9 deferred (per spec/20):
     - Job-size + page-count caps.
@@ -110,8 +110,8 @@ GATE_ACTION = os.environ.get("QDISTRO_PRINT_GATE_ACTION", "print.access")
 VM_SPAWN = os.environ.get("QDISTRO_PRINT_VM_SPAWN", "")
 SPAWN_BACKOFF_S = float(os.environ.get("QDISTRO_PRINT_SPAWN_BACKOFF_S", "1.5"))
 
-BROKER_BUS = "com.qdistro.AdminBroker1"
-BROKER_OBJ = "/com/qdistro/AdminBroker1"
+BROKER_BUS = "org.qdistro.AdminBroker1"
+BROKER_OBJ = "/org/qdistro/AdminBroker1"
 
 
 def _read_proc_exe(pid: int) -> str:

@@ -103,8 +103,8 @@ def cmd_list(_args) -> int:
     return 0
 
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 
 
 def _broker():

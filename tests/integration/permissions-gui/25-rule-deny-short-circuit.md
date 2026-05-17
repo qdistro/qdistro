@@ -48,9 +48,9 @@ YAML='- name: deny-work-test-action
   rationale: scenario 25 — rule-deny short-circuit
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"25-deny-test-action.yaml" \
   string:"$YAML"
 EOF
@@ -87,9 +87,9 @@ $VMGUI "$VM" screenshot /tmp/25-s3-stillempty.png
 
 $VMEXEC "$VM" 'wait $(cat /tmp/25-work.pid) 2>/dev/null; cat /tmp/25-work.log'
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:

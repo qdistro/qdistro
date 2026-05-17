@@ -197,7 +197,7 @@ expect "default target is graphical" remote 'systemctl get-default | grep -qx gr
 
 # qdistro admin broker on the system bus
 expect "qdistro-admin-broker active" remote 'systemctl is-active qdistro-admin-broker.service || sudo -n systemctl is-active qdistro-admin-broker.service'
-expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q com.qdistro.AdminBroker1"
+expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q org.qdistro.AdminBroker1"
 
 expect "noctalia-session user unit enabled" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-session.service | grep -qx enabled"

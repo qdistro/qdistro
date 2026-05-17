@@ -37,8 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-BUS_NAME = "com.qdistro.SessionManager1"
-OBJ_PATH = "/com/qdistro/SessionManager1"
+BUS_NAME = "org.qdistro.SessionManager1"
+OBJ_PATH = "/org/qdistro/SessionManager1"
 ADMIN_UID = 1000
 
 # Where per-silo broker state lives. The dir for each silo is owned
@@ -100,7 +100,7 @@ _STATE_TRANSITIONS: dict[str, frozenset[str]] = {
 class SessionError(Exception):
     """Base for session-manager-raised errors. The dbus shim maps
     each subclass to a typed DBusException with a stable error name
-    (com.qdistro.SessionManager1.<Class>); unit tests assert on the
+    (org.qdistro.SessionManager1.<Class>); unit tests assert on the
     exception class directly."""
 
     dbus_name = "Generic"

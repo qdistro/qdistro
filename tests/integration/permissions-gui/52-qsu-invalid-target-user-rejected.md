@@ -51,7 +51,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- bash -c "dbus-monitor --system \
-  \"interface='\''com.qdistro.AdminBroker1'\''\" \
+  \"interface='\''org.qdistro.AdminBroker1'\''\" \
   >/tmp/52-dbusmon.log 2>&1 & echo \$! >/tmp/52-dbusmon.pid"'
 sleep 1
 $VMEXEC "$VM" 'cat /tmp/52-dbusmon.pid'

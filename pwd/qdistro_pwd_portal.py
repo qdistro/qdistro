@@ -19,7 +19,7 @@ working backend. Bridges to the system-bus pwd daemon's
      ▼
   qdistro-pwd-portal (this daemon, per-user session bus)
      │
-     │ system-bus: com.qdistro.Pwd1.GetPortalKey(app_id) -> ay
+     │ system-bus: org.qdistro.Pwd1.GetPortalKey(app_id) -> ay
      ▼
   qdistro-pwd (system bus)
      │
@@ -65,8 +65,8 @@ PORTAL_BUS_NAME = "org.qdistro.PortalSecret"
 PORTAL_OBJ_PATH = "/org/freedesktop/portal/desktop"
 PORTAL_IFC = "org.freedesktop.impl.portal.Secret"
 
-PWD_BUS = "com.qdistro.Pwd1"
-PWD_OBJ = "/com/qdistro/Pwd1"
+PWD_BUS = "org.qdistro.Pwd1"
+PWD_OBJ = "/org/qdistro/Pwd1"
 
 
 # Per the portal Request flow, response codes are:

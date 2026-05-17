@@ -21,7 +21,7 @@ lxqt-policykit, polkit-gnome, or (future) the qdistro admin agent
 care which agent renders the prompt; it just calls polkit and reads
 the verdict.
 
-Action: `com.qdistro.pwd.unlock`
+Action: `org.qdistro.pwd.unlock`
 Action details:
   - "vault"      = vault name
   - "caller-pid" = caller PID
@@ -43,7 +43,7 @@ POLKIT_IFC = "org.freedesktop.PolicyKit1.Authority"
 
 ADMIN_UID = 1000
 
-ACTION_UNLOCK = "com.qdistro.pwd.unlock"
+ACTION_UNLOCK = "org.qdistro.pwd.unlock"
 
 # CheckAuthorization flags. Bit 1 = AllowUserInteraction (let polkit
 # trigger the registered agent for an interactive auth dialog).

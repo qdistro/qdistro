@@ -141,9 +141,9 @@ B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- python3 - <<'PYEOF'
 import dbus, json
 bus = dbus.SystemBus()
-obj = bus.get_object("com.qdistro.AdminBroker1",
-                     "/com/qdistro/AdminBroker1")
-iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 rows = iface.ListHistory(10)
 # Find the qsu.exec:root row this scenario just wrote.
 for r in rows:
@@ -209,9 +209,9 @@ B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- python3 - <<'PYEOF'
 import dbus, json
 bus = dbus.SystemBus()
-obj = bus.get_object("com.qdistro.AdminBroker1",
-                     "/com/qdistro/AdminBroker1")
-iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 rows = iface.ListHistory(10)
 sources = [str(r.get("source")) for r in rows
            if str(r.get("action", "")).startswith("qsu.exec:")]

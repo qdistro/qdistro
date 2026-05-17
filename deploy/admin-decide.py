@@ -9,8 +9,8 @@ Usage: admin-decide.py <id> <allow|deny> [once|session]
 import sys
 import dbus
 
-BUS = "com.qdistro.AdminBroker1"
-PATH = "/com/qdistro/AdminBroker1"
+BUS = "org.qdistro.AdminBroker1"
+PATH = "/org/qdistro/AdminBroker1"
 
 
 def main():

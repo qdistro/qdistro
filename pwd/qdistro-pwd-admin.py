@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """qdistro-pwd-admin — admin CLI for managing vaults + items.
 
-Talks to com.qdistro.Pwd1 on the system bus. Must be run as the admin
+Talks to org.qdistro.Pwd1 on the system bus. Must be run as the admin
 uid (1000 / admin); the daemon enforces this on every admin-only call.
 
 Usage:
@@ -41,8 +41,8 @@ from typing import Any
 
 import dbus
 
-BUS_NAME = "com.qdistro.Pwd1"
-OBJ_PATH = "/com/qdistro/Pwd1"
+BUS_NAME = "org.qdistro.Pwd1"
+OBJ_PATH = "/org/qdistro/Pwd1"
 
 
 def proxy() -> dbus.Interface:

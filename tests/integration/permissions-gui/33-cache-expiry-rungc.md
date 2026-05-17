@@ -77,9 +77,9 @@ less than the current unix time (you can compare against `date +%s`).
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckPermission \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckPermission \
   string:"test.action" \
   dict:string:string:"purpose","33-expired"
 EOF
@@ -95,9 +95,9 @@ expiry is not honoured — a regression.)
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.RunCacheGc'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RunCacheGc'
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT count(*) FROM approvals WHERE action='test.action';

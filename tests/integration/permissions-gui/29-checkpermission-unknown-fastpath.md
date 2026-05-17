@@ -48,9 +48,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 # 'purpose' key — the smallest legal payload is below).
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckPermission \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckPermission \
   string:"test.action" \
   dict:string:string:"purpose","scenario-29-fastpath"
 EOF
@@ -64,9 +64,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ```bash
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT count(*) FROM audit WHERE action='test.action';
@@ -93,9 +93,9 @@ YAML='- name: scenario-29-allow
     action: test.action
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"29-allow.yaml" \
   string:"$YAML"
 EOF
@@ -105,9 +105,9 @@ sleep 1
 
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckPermission \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckPermission \
   string:"test.action" \
   dict:string:string:"purpose","scenario-29-rule"
 EOF
@@ -125,9 +125,9 @@ installed — proves the rule engine drives the fast-path.)
 # Drop the rule again so the only signal is the cache row.
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ReloadRules'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ReloadRules'
 sleep 1
 
 B64=$(base64 -w0 <<'EOF'
@@ -145,9 +145,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckPermission \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckPermission \
   string:"test.action" \
   dict:string:string:"purpose","scenario-29-cache"
 EOF

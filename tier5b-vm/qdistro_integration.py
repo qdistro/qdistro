@@ -7,7 +7,7 @@ the broker can find it for placeholder correlation.
 
 Each running tier-5b VM claims a bus name of the form
 
-    com.qdistro.Tier5bVM.uid<NNNN>
+    org.qdistro.Tier5bVM.uid<NNNN>
 
 on the session bus. The placeholder-correlator in qdshell's PodApps
 service matches the per-spawn ``LAUNCH_TOKEN`` echoed by
@@ -30,7 +30,7 @@ Public entry-points:
   secctx triple. Exposed for unit tests so we don't have to fork a
   shell to verify argv assembly.
 - :func:`expected_service_name` — pure function returning the
-  ``com.qdistro.Tier5bVM.uidNNNN`` name the launcher will claim for
+  ``org.qdistro.Tier5bVM.uidNNNN`` name the launcher will claim for
   the running uid. Used by tests and by PodApps' placeholder
   correlator.
 """
@@ -63,10 +63,10 @@ DEFAULT_SECCTX_ENGINE = "qdistro.tier5b"
 def expected_service_name(uid: int | None = None) -> str:
     """Return the bus name the tier-5b launcher claims.
 
-    Format: ``com.qdistro.Tier5bVM.uid<NNNN>``.
+    Format: ``org.qdistro.Tier5bVM.uid<NNNN>``.
     """
     u = os.geteuid() if uid is None else int(uid)
-    return f"com.qdistro.{APP_FRIENDLY_NAME}.uid{u}"
+    return f"org.qdistro.{APP_FRIENDLY_NAME}.uid{u}"
 
 
 def build_launcher_argv(

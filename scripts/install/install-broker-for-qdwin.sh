@@ -22,7 +22,7 @@ set -eu
 BROKER_SRC=${1:-/root/qdistro-src/qdistro/broker}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-admin-broker.service
-POLICY=/etc/dbus-1/system.d/com.qdistro.AdminBroker1.conf
+POLICY=/etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 
 if [ ! -d "$BROKER_SRC" ]; then
     echo "ERROR: broker source not found at $BROKER_SRC" >&2
@@ -61,7 +61,7 @@ if command -v restorecon >/dev/null 2>&1; then
 fi
 
 # 3. dbus policy + systemd unit.
-install -m 0644 "$BROKER_SRC/com.qdistro.AdminBroker1.conf" "$POLICY"
+install -m 0644 "$BROKER_SRC/org.qdistro.AdminBroker1.conf" "$POLICY"
 install -m 0644 "$BROKER_SRC/qdistro-admin-broker.service" "$UNIT"
 # Defensive dbus-broker reload oneshot, ordered Before=qdistro-admin-
 # broker.service. Closes a flaky-on-first-enforcing-baked-boot path
@@ -86,14 +86,14 @@ systemctl enable --now qdistro-admin-broker.service
 # 6. Wait for the bus name (Type=dbus activates automatically, but
 #    give it a moment to claim).
 for _ in 1 2 3 4 5; do
-    busctl list --no-pager 2>/dev/null | grep -q com.qdistro.AdminBroker1 && break
+    busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1 && break
     sleep 0.5
 done
 
-if ! busctl list --no-pager 2>/dev/null | grep -q com.qdistro.AdminBroker1; then
+if ! busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1; then
     echo "ERROR: broker service failed to claim bus name" >&2
     journalctl -u qdistro-admin-broker.service --no-pager -n 30 >&2
     exit 3
 fi
 
-echo "broker ready on com.qdistro.AdminBroker1"
+echo "broker ready on org.qdistro.AdminBroker1"

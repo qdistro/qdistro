@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """qdistro-user-relay — per-user session-bus daemon.
 
-One instance runs as each user with `com.qdistro.UserRelay` on the
+One instance runs as each user with `org.qdistro.UserRelay` on the
 session bus. Lets the broker (running as root on the system bus)
 reach receivers in that user's session without the broker having
 to open session-bus connections as arbitrary uids itself.
 
 Why the indirection? The broker is root; it CAN open any user's
 session-bus socket via DAC_OVERRIDE. But the call surface it would
-need (arbitrary `com.qdistro.*.Receive` invocations) is wide. With
+need (arbitrary `org.qdistro.*.Receive` invocations) is wide. With
 a relay in between, root only ever calls `UserRelay.Forward(...)`
 and `UserRelay.ListLocalReceivers()` — two narrow methods. Easier
 to audit, easier to lock down with a session-bus policy later.
@@ -28,10 +28,10 @@ import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
 
-BUS_NAME = "com.qdistro.UserRelay"
-OBJ_PATH = "/com/qdistro/UserRelay"
-APP1_IFACE = "com.qdistro.App1"
-APP1_OBJ_PATH = "/com/qdistro/App1"
+BUS_NAME = "org.qdistro.UserRelay"
+OBJ_PATH = "/org/qdistro/UserRelay"
+APP1_IFACE = "org.qdistro.App1"
+APP1_OBJ_PATH = "/org/qdistro/App1"
 
 # Browser-bridge surface (see qdistro/doc/firefox-containers.md).
 # A bridge claims org.qdistro.BrowserBridge.<ppid> on each user's
@@ -47,18 +47,18 @@ BRIDGE_IFACE = "org.qdistro.BrowserBridge"
 # buses — dbus-broker's session instances only accept the session
 # owner's uid as a connection peer, so root-to-user-session is a
 # non-starter on modern openSUSE.
-SYSTEM_BUS_NAME_FMT = "com.qdistro.UserRelay.uid{uid}"
+SYSTEM_BUS_NAME_FMT = "org.qdistro.UserRelay.uid{uid}"
 
 # Receivers claim bus names starting with this prefix; Forward and
 # ListLocalReceivers both filter on it. Keeps the relay from being
 # tricked into dispatching to arbitrary org.freedesktop.* services.
-RECEIVER_PREFIX = "com.qdistro."
+RECEIVER_PREFIX = "org.qdistro."
 
 # Names to never treat as receivers even if they match the prefix.
 EXCLUDED_NAMES = frozenset({
     BUS_NAME,
-    "com.qdistro.AdminBroker1",   # system-bus name; wouldn't appear here, but be defensive
-    "com.qdistro.StubSender",     # senders aren't receivers
+    "org.qdistro.AdminBroker1",   # system-bus name; wouldn't appear here, but be defensive
+    "org.qdistro.StubSender",     # senders aren't receivers
 })
 
 
@@ -125,7 +125,7 @@ class UserRelay(dbus.service.Object):
         rather than D-Bus exceptions so callers handle them
         identically to bridge-side ``ok:false`` replies. Authorization
         is the system-bus peer-uid policy on
-        ``com.qdistro.UserRelay.uid<NNNN>`` — same model as
+        ``org.qdistro.UserRelay.uid<NNNN>`` — same model as
         :meth:`Forward`.
         """
         op_s = str(op)
@@ -300,7 +300,7 @@ def _friendly_name(service: str) -> str:
     Phase 3 doesn't have an attestation channel for a receiver to
     declare a friendly name — the service name itself is the only
     thing we know. Strip the common prefix and the uid suffix:
-    `com.qdistro.StubNotepad.uid3000` -> `StubNotepad`.
+    `org.qdistro.StubNotepad.uid3000` -> `StubNotepad`.
     """
     name = service
     if name.startswith(RECEIVER_PREFIX):

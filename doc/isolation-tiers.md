@@ -95,6 +95,16 @@ The broker independently verifies via `/proc/<pid>/attr/current` that the
 process is actually in `qdistro_tier1_t`. If the two disagree, broker's
 `CheckPermission` denies (defence in depth).
 
+Scope of "independent verification": this holds for **direct broker
+authorization**, where the broker resolves the D-Bus caller's pid and
+checks its SELinux context itself. It does **not** currently hold for
+**qdshell-mediated decisions** (e.g. clipboard / handoff gates), where
+qdshell forwards `(app_id, instance_id, secctx)` strings to the broker
+but the broker has no source/destination application pid to re-verify
+per call. Treat secctx-only decisions on that path as advisory until
+the protocol carries process identity end-to-end. See
+`todo/qdistro-qdwin-wider-codex-review.md` finding #2.
+
 ## Tier 2 — podman / container
 
 Default for most user-owned apps. Rootless podman + `--userns=keep-id`

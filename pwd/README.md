@@ -8,7 +8,7 @@ this README covers what's actually shipped vs deferred.
 
 ```
 pwd/
-├── qdistro_pwd_daemon.py ─ system-bus D-Bus service (com.qdistro.Pwd1)
+├── qdistro_pwd_daemon.py ─ system-bus D-Bus service (org.qdistro.Pwd1)
 ├── qdistro_pwd_vault.py ─ on-disk vault crypto (v1 scrypt + v2 TPM)
 ├── qdistro_pwd_tpm.py ─ TPM2 backend abstraction (tpm2tools/mock/none)
 ├── qdistro_pwd_polkit.py ─ polkit gate for UnlockVault ()
@@ -17,8 +17,8 @@ pwd/
 ├── qdistro_pwd_audit.py ─ sqlite audit log (payload never persisted)
 ├── qdistro-pwd-admin.py ─ admin CLI (uid 1000 only)
 ├── qdistro-pwd-get.py ─ app CLI (any uid; pin-gated)
-├── com.qdistro.Pwd1.conf ─ system-bus policy
-├── com.qdistro.pwd.policy ─ polkit action (com.qdistro.pwd.unlock)
+├── org.qdistro.Pwd1.conf ─ system-bus policy
+├── org.qdistro.pwd.policy ─ polkit action (org.qdistro.pwd.unlock)
 ├── qdistro-pwd.rules ─ polkit rule (admin bypass + auth_admin_keep)
 ├── org.qdistro.PortalSecret.portal ─ xdg-desktop-portal backend declaration
 ├── qdistro-portals.conf ─ xdg-desktop-portal preferred-backend config
@@ -111,7 +111,7 @@ Override the persistent SRK handle via `QDISTRO_PWD_TPM_PRIMARY_HANDLE`
 ### Polkit unlock gate ()
 
 `UnlockVault` for non-admin callers is gated through the polkit action
-`com.qdistro.pwd.unlock` (default `auth_admin_keep`). The daemon calls
+`org.qdistro.pwd.unlock` (default `auth_admin_keep`). The daemon calls
 `org.freedesktop.PolicyKit1.Authority.CheckAuthorization` with these
 details:
 
@@ -153,7 +153,7 @@ get a working secret service through qdistro-pwd.
  └── xdg-desktop-portal (per-user front-end)
  └── org.freedesktop.impl.portal.Secret.RetrieveSecret(handle, app_id, fd, options)
  └── qdistro-pwd-portal (per-user session daemon)
- └── system bus: com.qdistro.Pwd1.GetPortalKey(app_id) -> ay
+ └── system bus: org.qdistro.Pwd1.GetPortalKey(app_id) -> ay
  └── qdistro-pwd: lookup or auto-provision
  portal/<app_id> in the "portal-keys" vault
 ```

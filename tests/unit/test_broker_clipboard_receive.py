@@ -98,9 +98,13 @@ def _write_rule(rules_dir: Path, *, decision: str, action: str,
 # ---------------------------------------------------------------------
 
 class TestSameSilo:
-    def test_same_silo_allow_without_rule(self, broker, tmp_path):
+    # Option-B contract: same-silo allow requires identity_verified=True.
+    # See todo/decisions/secctx-identity-contract.md.
+
+    def test_same_silo_allow_when_verified(self, broker, tmp_path):
         verdict = broker.CheckClipboardReceive(
-            "user1", "user1", "text/plain")
+            "user1", "user1", "text/plain",
+            "", "", "", True)
         assert verdict == "allow"
         # Audit row should land regardless.
         row = sqlite3.connect(str(tmp_path / "audit.sqlite")).execute(
@@ -112,10 +116,16 @@ class TestSameSilo:
         assert "clipboard_receive_same_silo" in source
         assert "mime=text/plain" in source
 
-    def test_same_silo_admin_admin_allow(self, broker):
+    def test_same_silo_admin_admin_allow_when_verified(self, broker):
         verdict = broker.CheckClipboardReceive(
-            "admin", "admin", "image/png")
+            "admin", "admin", "image/png",
+            "", "", "", True)
         assert verdict == "allow"
+
+    def test_same_silo_unverified_falls_through_to_deny(self, broker):
+        # Default-deny once identity_verified is missing.
+        assert broker.CheckClipboardReceive(
+            "user1", "user1", "text/plain") == "deny"
 
 
 # ---------------------------------------------------------------------

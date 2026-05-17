@@ -67,9 +67,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 $VMGUI "$VM" screenshot /tmp/34-s2-three-rows.png
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:
@@ -117,9 +117,9 @@ sleep 1
 $VMGUI "$VM" screenshot /tmp/34-s4-after-approve.png
 
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:

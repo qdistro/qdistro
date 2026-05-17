@@ -188,7 +188,7 @@ class TestCallBridgeSameUid:
 class TestCallViaRelay:
     def test_with_ppid(self):
         fake = _FakeDBus(by_call={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "containers": [{"name": "Personal"}]}),
         })
@@ -200,7 +200,7 @@ class TestCallViaRelay:
         # Verify the relay was actually called with the right selector.
         call = fake.calls[0]
         assert call["bus"] == "SYSTEM"
-        assert call["service"] == "com.qdistro.UserRelay.uid2000"
+        assert call["service"] == "org.qdistro.UserRelay.uid2000"
         assert call["method"] == "ForwardBrowserBridgeOp"
         op, args_json, sel_json = call["body"]
         assert op == "containers.list"
@@ -209,7 +209,7 @@ class TestCallViaRelay:
 
     def test_with_any_bridge_sends_any_selector(self):
         fake = _FakeDBus(by_call={
-            ("SYSTEM", "com.qdistro.UserRelay.uid3000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid3000",
              "ForwardBrowserBridgeOp"): json.dumps({"ok": True}),
         })
         C.set_dbus_client(fake)
@@ -242,12 +242,12 @@ class TestCallViaRelay:
         reply = C.call_via_relay(
             "containers.list", uid=9999, any_bridge=True)
         assert reply["error"] == "relay_call_failed"
-        assert reply["relay"] == "com.qdistro.UserRelay.uid9999"
+        assert reply["relay"] == "org.qdistro.UserRelay.uid9999"
         assert reply["dbus_name"] == "org.freedesktop.DBus.Error.ServiceUnknown"
 
     def test_relay_reply_bad_json_becomes_bad_reply(self):
         fake = _FakeDBus(by_call={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): "not-json-at-all",
         })
         C.set_dbus_client(fake)
@@ -257,7 +257,7 @@ class TestCallViaRelay:
 
     def test_args_default_to_empty_object(self):
         fake = _FakeDBus(by_call={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({"ok": True}),
         })
         C.set_dbus_client(fake)
@@ -267,7 +267,7 @@ class TestCallViaRelay:
 
     def test_args_passed_through(self):
         fake = _FakeDBus(by_call={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({"ok": True}),
         })
         C.set_dbus_client(fake)

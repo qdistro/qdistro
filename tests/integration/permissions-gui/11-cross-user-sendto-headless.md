@@ -45,16 +45,16 @@ sleep 1
 
 ```bash
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.ListReceivers'
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.ListReceivers'
 ```
 
 **Assert**:
 - Output contains a struct with `int32 2000` and
- `string "com.qdistro.StubNotepad.uid2000"`.
+ `string "org.qdistro.StubNotepad.uid2000"`.
 - Output contains a struct with `int32 3000` and
- `string "com.qdistro.StubNotepad.uid3000"`.
+ `string "org.qdistro.StubNotepad.uid3000"`.
 
 ### S2 — work sends to work2, admin approves once
 
@@ -64,11 +64,11 @@ set -e
 # Kick off the blocking RelayMessage as work in the background;
 # capture its stdout/stderr so we can inspect the return code.
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.StubNotepad.uid3000 \
+ string:org.qdistro.StubNotepad.uid3000 \
  string:text/plain \
  string:hello_from_work_headless \
  > /tmp/sendto-relay.out 2>&1 &
@@ -77,15 +77,15 @@ sleep 1
 
 # Pick off the pending request id and approve as admin.
 RID=$(dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.GetPending 2>&1 \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.GetPending 2>&1 \
  | grep -A1 '"id"' | grep int32 | head -1 | awk '{print $NF}')
 echo "request_id=$RID"
 runuser -u admin -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.DecideRequest \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.DecideRequest \
  int32:$RID string:allow string:once >/tmp/sendto-decide.out 2>&1
 wait $(cat /tmp/sendto-relay.pid) || true
 echo "=== relay.out ==="
@@ -107,9 +107,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.StubNotepad.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetDocument'
+ --dest=org.qdistro.StubNotepad.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetDocument'
 ```
 
 **Assert**: output contains `"[text/plain] hello_from_work_headless"`.
@@ -126,7 +126,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**: output is exactly
-`2000|app.send-to:3000:com.qdistro.StubNotepad.uid3000|1|once|prompt|1000`.
+`2000|app.send-to:3000:org.qdistro.StubNotepad.uid3000|1|once|prompt|1000`.
 
 ### S5 — cache NOT extended
 
@@ -154,7 +154,7 @@ $VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.serv
 - If ListReceivers in S1 is empty, the relay daemon(s) aren't running
  — linger likely missing, or dbus policy file absent. Check
  `journalctl _UID=2000 --since '1 minute ago'` for relay boot
- messages and `/etc/dbus-1/system.d/com.qdistro.UserRelay.conf`.
+ messages and `/etc/dbus-1/system.d/org.qdistro.UserRelay.conf`.
 - S2's `wait $(cat /tmp/sendto-relay.pid)` is where a failure would
  hang the scenario. If RelayMessage returns an error DBusException
  (e.g. `.ScopeNotPermitted` or `.Denied`), it appears in

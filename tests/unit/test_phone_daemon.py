@@ -100,7 +100,7 @@ class TestHttpListener:
         try:
             push = ph.build_approval_push(
                 request_id="abc",
-                action_id="com.qdistro.pwd.unlock",
+                action_id="org.qdistro.pwd.unlock",
                 user="admin",
                 callback_base_url=f"http://{host}:{port}/v1/decision",
                 callback_secret=secret,
@@ -230,7 +230,7 @@ class TestCli:
         rc = cli.main([
             "push",
             "--request-id", "abc",
-            "--action", "com.qdistro.pwd.unlock",
+            "--action", "org.qdistro.pwd.unlock",
             "--user", "admin",
             "--callback-base", "https://qdistro.example/cb",
             "--secret", "abc123",

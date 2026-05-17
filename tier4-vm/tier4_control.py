@@ -3,14 +3,14 @@
 Owns three responsibilities that, pre-fix-pass, were split across the
 shell script and the SDK:
 
-1. **App1 receiver claim** — registers ``com.qdistro.Tier4VM.uid<NNNN>``
+1. **App1 receiver claim** — registers ``org.qdistro.Tier4VM.uid<NNNN>``
    on the session bus so the qdshell PodApps panel sees the tier-4
    VM as a launcher peer (the same Send-To plumbing as qfileman /
    qterminator). Without this claim, PodApps will not group tier-4
    windows under the Tier4VM badge.
 
 2. **Close RPC** — exposes a same-uid-only ``Close()`` method on the
-   ``com.qdistro.Tier4VM.Control`` interface. qdshell's chrome
+   ``org.qdistro.Tier4VM.Control`` interface. qdshell's chrome
    close-button route invokes this; the handler runs
    :func:`tier4_chrome.close_vm` (ACPI → destroy → orphan reap) and
    returns a ``(ok, method, stderr, orphans)`` tuple the caller can
@@ -81,8 +81,8 @@ except ImportError:  # pragma: no cover — flat layout fallback
         _tier4_chrome = None  # type: ignore[assignment]
 
 
-CONTROL_IFACE = "com.qdistro.Tier4VM.Control"
-CONTROL_OBJ_PATH = "/com/qdistro/Tier4VM"
+CONTROL_IFACE = "org.qdistro.Tier4VM.Control"
+CONTROL_OBJ_PATH = "/org/qdistro/Tier4VM"
 APP_FRIENDLY_NAME = "Tier4VM"
 
 # vm_name validation mirrors tier4_chrome._VM_NAME_RE. We re-check here
@@ -114,7 +114,7 @@ def _build_tier4_dbus_object(vm_name: str, owner_uid: int,
     class Tier4VMControl(dbus.service.Object):
         """Same-uid-gated Close() RPC for the tier-4 VM.
 
-        Claims ``com.qdistro.Tier4VM.Control`` on the session bus. The
+        Claims ``org.qdistro.Tier4VM.Control`` on the session bus. The
         Close method runs the ACPI→destroy lifecycle and replies with
         the structured outcome before the process tears down.
         """
@@ -233,7 +233,7 @@ def _install_control(vm_name: str) -> tuple[Any, Any] | tuple[None, None]:
         bus = dbus.SessionBus()
         owner_uid = os.geteuid()
         bus_name = dbus.service.BusName(
-            f"com.qdistro.Tier4VM.Control.uid{owner_uid}",
+            f"org.qdistro.Tier4VM.Control.uid{owner_uid}",
             bus, do_not_queue=True)
     except Exception as e:  # noqa: BLE001
         _log(f"Could not claim Tier4VM.Control bus name: {e!r}")

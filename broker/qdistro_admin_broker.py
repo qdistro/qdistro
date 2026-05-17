@@ -30,8 +30,8 @@ from qdistro_admin_ratelimit import RateLimiter  # type: ignore[import-not-found
 from qdistro_admin_rules import RulesEngine  # type: ignore[import-not-found]
 from qdistro_audisp_parser import is_qdistro_subj_type  # type: ignore[import-not-found]
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 ADMIN_UID = 1000
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
@@ -105,22 +105,22 @@ _ONESHOT_FORBIDDEN_SCOPES = frozenset((
     "forever_argv", "forever_basename", "forever_prefix",
 ))
 
-USER_RELAY_OBJ_PATH = "/com/qdistro/UserRelay"
-USER_RELAY_IFACE = "com.qdistro.UserRelay"
+USER_RELAY_OBJ_PATH = "/org/qdistro/UserRelay"
+USER_RELAY_IFACE = "org.qdistro.UserRelay"
 # Per-uid bus name on the SYSTEM bus. dbus-broker session instances
 # refuse non-owner-uid peers, so the broker (root) reaches each
 # user's relay on the system bus; the relay itself bridges onto its
 # own session bus for actual receiver lookup and delivery.
-USER_RELAY_SYSTEM_NAME_FMT = "com.qdistro.UserRelay.uid{uid}"
+USER_RELAY_SYSTEM_NAME_FMT = "org.qdistro.UserRelay.uid{uid}"
 
 # P02 session-manager gate. The broker asks the manager for the
 # target silo's state before letting a cross-uid relay proceed.
 # A missing/unknown manager means "no silo registry yet" → fall back
 # to the pre-P02 behaviour of trusting the target uid; an explicit
 # "not Active" answer is the load-bearing reject path.
-SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
-SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
-SESSION_MANAGER_IFACE = "com.qdistro.SessionManager1"
+SESSION_MANAGER_BUS_NAME = "org.qdistro.SessionManager1"
+SESSION_MANAGER_OBJ_PATH = "/org/qdistro/SessionManager1"
+SESSION_MANAGER_IFACE = "org.qdistro.SessionManager1"
 
 # When set, _silo_state errors (manager offline, timeout, parse error)
 # stop falling through to the legacy trust-the-uid path. Instead they
@@ -158,7 +158,7 @@ REQUIRE_SILO_ACTIVE = _read_require_silo_active()
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
 # the user relay.
-_SERVICE_NAME_RE = re.compile(r"^com\.qdistro\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$")
+_SERVICE_NAME_RE = re.compile(r"^org\.qdistro\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*$")
 
 
 def _sanitize_details(raw) -> dict[str, str]:
@@ -225,6 +225,39 @@ def _argv_from_details(details: dict) -> list[str] | None:
         return None
     indexed.sort(key=lambda kv: kv[0])
     return [v for _, v in indexed]
+
+
+def _read_proc_uid(pid: int) -> int | None:
+    """Return the real uid of pid from /proc/<pid>/status, or None if the
+    process is gone. Used by VerifyClientIdentity to cross-check the
+    uid qdwin observed via SO_PEERCRED.
+    """
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+                    break
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _read_proc_selinux_label(pid: int) -> str:
+    """Return the SELinux label for pid from /proc/<pid>/attr/current,
+    or "" if the file is unreadable (SELinux off, process gone). Used
+    by VerifyClientIdentity to re-check the qdshell-forwarded tuple
+    against the live process — see todo/decisions/
+    secctx-identity-contract.md.
+    """
+    try:
+        with open(f"/proc/{pid}/attr/current", "rb") as f:
+            label = f.read(4096)
+        return label.rstrip(b"\x00\n\r ").decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _read_proc_identity(pid: int) -> tuple[str, int]:
@@ -623,13 +656,107 @@ class Broker(dbus.service.Object):
         return "unknown"
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="ssassss", out_signature="s",
+                         in_signature="utusssss", out_signature="b",
+                         sender_keyword="sender", connection_keyword="conn")
+    def VerifyClientIdentity(self, pid: int, starttime: int, uid: int,
+                             exe: str, selinux_label: str,
+                             claimed_sandbox_engine: str,
+                             claimed_app_id: str,
+                             claimed_instance_id: str,
+                             sender=None, conn=None) -> bool:
+        """Option-B identity re-verification for qdshell-mediated gates.
+
+        Confirms that the (pid, starttime, uid, exe, selinux_label)
+        tuple qdwin observed at secctx-bind time still names a live
+        process with the same attributes. Returns True iff every live
+        check matches; False on any mismatch or if the process is gone.
+        Anti-PID-reuse is anchored on starttime — a PID that was
+        recycled into a different process will have a different field-22.
+
+        SELinux is checked only when both sides carry a non-empty label
+        (kernel off / unconfined → skip that axis but still match the
+        rest). Empty `exe` from the caller is treated as "qdwin could
+        not read it"; we then skip the exe match instead of failing it.
+
+        See todo/decisions/secctx-identity-contract.md (Option B).
+        """
+        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        # Defensive sanitisation — same envelope as the other broker
+        # methods. The dbus policy file already pins this method to
+        # admin uid; keep the in-method check as defense-in-depth.
+        try:
+            pid_i = int(pid)
+            start_i = int(starttime)
+            uid_i = int(uid)
+        except (TypeError, ValueError):
+            return False
+        exe_s = str(exe or "")[:4096]
+        label_s = str(selinux_label or "")[:512]
+        seng_s = str(claimed_sandbox_engine or "")[:128]
+        sapp_s = str(claimed_app_id or "")[:128]
+        sinst_s = str(claimed_instance_id or "")[:128]
+
+        verdict = True
+        reasons: list[str] = []
+        live_exe, live_start = _read_proc_identity(pid_i)
+        if live_start == 0:
+            verdict = False
+            reasons.append("proc-gone")
+        else:
+            if int(live_start) != start_i:
+                verdict = False
+                reasons.append(
+                    f"starttime-mismatch live={live_start} claimed={start_i}")
+            # Exe match: skip if caller couldn't read /proc/<pid>/exe at
+            # qdwin time (empty / "?"). Otherwise require equality.
+            if exe_s and exe_s != "?" and live_exe and live_exe != "?":
+                if live_exe != exe_s:
+                    verdict = False
+                    reasons.append(
+                        f"exe-mismatch live={live_exe!r} claimed={exe_s!r}")
+            # UID match: from /proc/<pid>/status (cheap-enough; reuse
+            # the existing helper that already reads /proc/<pid>/status).
+            live_uid = _read_proc_uid(pid_i)
+            if live_uid is not None and int(live_uid) != uid_i:
+                verdict = False
+                reasons.append(
+                    f"uid-mismatch live={live_uid} claimed={uid_i}")
+            # SELinux: only meaningful when both sides report a label.
+            live_label = _read_proc_selinux_label(pid_i)
+            if label_s and live_label:
+                if live_label != label_s:
+                    verdict = False
+                    reasons.append(
+                        f"label-mismatch live={live_label!r} "
+                        f"claimed={label_s!r}")
+
+        # Structured audit line — broker-wide grep target.
+        try:
+            self.audit.log(
+                caller_uid=caller_uid, caller_pid=caller_pid,
+                caller_exe=caller_exe,
+                action=f"qdistro.identity.verify:{seng_s}:{sapp_s}:{sinst_s}",
+                decision=bool(verdict), scope=None,
+                source=(f"verify_client_identity pid={pid_i} "
+                        f"starttime={start_i} uid={uid_i} "
+                        f"exe={exe_s!r} label={label_s!r} "
+                        f"reasons={'|'.join(reasons) or 'ok'}"),
+                approver_uid=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: identity_verify,"
+                  f" reason={e!r}", flush=True)
+        return bool(verdict)
+
+    @dbus.service.method(BUS_NAME,
+                         in_signature="ssassssb", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckClipboardTransfer(self, source_silo: str, dest_silo: str,
                                mime_types: list,
                                source_app_id: str = "",
                                dest_app_id: str = "",
                                source_sandbox_engine: str = "",
+                               identity_verified: bool = False,
                                sender=None, conn=None) -> str:
         """Cross-silo clipboard policy gate. Spec/10.
 
@@ -696,13 +823,20 @@ class Broker(dbus.service.Object):
         audit_id = (f" src_app={sapp or '(unknown)'}"
                     f" dst_app={dapp or '(unknown)'}"
                     f" src_engine={seng or '(unknown)'}")
-        # Same-silo: trivial allow, still audited for completeness.
-        if src == dst and src:
+        # Same-silo: trivial allow IFF the caller (qdshell) has already
+        # independently verified the source AND destination process
+        # identity against the broker via VerifyClientIdentity. Without
+        # that flag, the same-uid-spoof window from
+        # qdwin-secctx-self-asserted strings is open, so we fall through
+        # to the cross-silo rule path (default-deny). See
+        # todo/decisions/secctx-identity-contract.md (Option B).
+        if src == dst and src and bool(identity_verified):
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
-                    source=f"clipboard_same_silo mime={mimes_joined}{audit_id}",
+                    source=(f"clipboard_same_silo_verified "
+                            f"mime={mimes_joined}{audit_id}"),
                     approver_uid=None,
                 )
             except Exception as e:  # noqa: BLE001
@@ -737,13 +871,14 @@ class Broker(dbus.service.Object):
         return decision
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="ssssss", out_signature="s",
+                         in_signature="ssssssb", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckClipboardReceive(self, source_silo: str, dest_silo: str,
                               mime_type: str,
                               source_app_id: str = "",
                               dest_app_id: str = "",
                               source_sandbox_engine: str = "",
+                              identity_verified: bool = False,
                               sender=None, conn=None) -> str:
         """Per-MIME, per-recipient clipboard receive gate. Spec/10 v15.
 
@@ -800,12 +935,13 @@ class Broker(dbus.service.Object):
                     f"src_app={sapp or '(unknown)'} "
                     f"dst_app={dapp or '(unknown)'} "
                     f"src_engine={seng or '(unknown)'}")
-        if src == dst and src:
+        # Same-silo: same Option-B gate as CheckClipboardTransfer.
+        if src == dst and src and bool(identity_verified):
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
-                    source=f"clipboard_receive_same_silo{audit_id}",
+                    source=f"clipboard_receive_same_silo_verified{audit_id}",
                     approver_uid=None,
                 )
             except Exception as e:  # noqa: BLE001
@@ -836,11 +972,12 @@ class Broker(dbus.service.Object):
         return decision
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="sssss", out_signature="s",
+                         in_signature="sssssb", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckHandoffActivation(self, source_silo: str, dest_silo: str,
                                source_app_id: str, dest_app_id: str,
                                source_sandbox_engine: str = "",
+                               identity_verified: bool = False,
                                sender=None, conn=None) -> str:
         """Cross-silo window-activation policy gate. Spec/09.
 
@@ -883,12 +1020,13 @@ class Broker(dbus.service.Object):
                 f"{self.ratelimit.window_s}s). Activation rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
-        if src == dst and src:
+        # Same-silo: same Option-B gate as the clipboard methods.
+        if src == dst and src and bool(identity_verified):
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
-                    source=(f"handoff_same_silo src_app={sapp} "
+                    source=(f"handoff_same_silo_verified src_app={sapp} "
                             f"dst_app={dapp} src_engine={seng}"),
                     approver_uid=None,
                 )
@@ -1051,7 +1189,7 @@ class Broker(dbus.service.Object):
                          sender_keyword="sender", connection_keyword="conn")
     def ListReceivers(self, sender=None, conn=None):
         """Return [(uid, service_name, friendly_name)] for every
-        com.qdistro.App1 receiver currently registered across all
+        org.qdistro.App1 receiver currently registered across all
         running user sessions.
 
         Readable by any uid — this is the data the "Send to…" menu
@@ -1122,7 +1260,7 @@ class Broker(dbus.service.Object):
             if not _SERVICE_NAME_RE.match(target_service_s):
                 raise dbus.DBusException(
                     f"target_service {target_service_s!r} does not match "
-                    f"expected com.qdistro.* shape",
+                    f"expected org.qdistro.* shape",
                     name=BUS_NAME + ".BadArgument")
             same_silo = (int(caller_uid) == target_uid_i)
             # P02 silo-active gate. Same-silo skips it: the caller is

@@ -45,8 +45,8 @@ cleanup() {
     rule_path=$(find /etc/qdistro/rules.d -name "$RULES_FILE" 2>/dev/null | head -1)
     if [ -n "$rule_path" ] && [ -f "$rule_path" ]; then
         rm -f "$rule_path"
-        dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
-            /com/qdistro/AdminBroker1 com.qdistro.AdminBroker1.ReloadRules \
+        dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.ReloadRules \
             >/dev/null 2>&1 || true
     fi
     rm -f /tmp/s39-spawn.log /tmp/s39-saverule.log 2>/dev/null || true
@@ -186,9 +186,9 @@ else
 fi
 
 # --- 9. broker default-deny via CheckClipboardTransfer ---------------
-DBUS_DEST=com.qdistro.AdminBroker1
-DBUS_PATH=/com/qdistro/AdminBroker1
-DBUS_IFACE=com.qdistro.AdminBroker1
+DBUS_DEST=org.qdistro.AdminBroker1
+DBUS_PATH=/org/qdistro/AdminBroker1
+DBUS_IFACE=org.qdistro.AdminBroker1
 
 VERDICT_DENY=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
     "$DBUS_PATH" "$DBUS_IFACE.CheckClipboardTransfer" \

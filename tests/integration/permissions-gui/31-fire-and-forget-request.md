@@ -44,9 +44,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.RequestPermission \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RequestPermission \
   string:"test.action" \
   dict:string:string:"purpose","fire-and-forget-31" \
   2>&1 | tee /tmp/31-s1.out
@@ -68,9 +68,9 @@ sleep 3
 $VMGUI "$VM" screenshot /tmp/31-s2-app-pending.png
 
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 ```
 
 **Assert**:
@@ -84,9 +84,9 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 ```bash
 sleep 10
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.GetPending'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.GetPending'
 $VMGUI "$VM" screenshot /tmp/31-s3-app-still-pending.png
 ```
 
@@ -99,7 +99,7 @@ $VMGUI "$VM" screenshot /tmp/31-s3-app-still-pending.png
 ```bash
 $VMEXEC "$VM" 'rm -f /tmp/31-decided.log; \
   setsid dbus-monitor --system \
-    "type=signal,interface=com.qdistro.AdminBroker1,member=RequestDecided" \
+    "type=signal,interface=org.qdistro.AdminBroker1,member=RequestDecided" \
     >/tmp/31-decided.log 2>&1 </dev/null &
   echo $! >/tmp/31-monitor.pid'
 sleep 1

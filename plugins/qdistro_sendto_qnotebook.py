@@ -8,8 +8,8 @@ itself.
 
 Two responsibilities (same shape as the qterminator plugin):
 
-1. **Receiver**: claims `com.qdistro.Qnotebook.uid<N>` on the
-   session bus and exposes `com.qdistro.App1.Receive(kind, payload)`.
+1. **Receiver**: claims `org.qdistro.Qnotebook.uid<N>` on the
+   session bus and exposes `org.qdistro.App1.Receive(kind, payload)`.
    Incoming payloads are appended to the current page at the cursor
    (or at end-of-document if no cursor is active), and the page is
    saved. The SDK's `AppReceiver.GetLastReceived` is available for
@@ -50,7 +50,7 @@ from PyQt6.QtGui import QAction, QCursor, QTextCursor
 from PyQt6.QtWidgets import QMenu, QMessageBox
 
 
-SERVICE_FMT = "com.qdistro.Qnotebook.uid{uid}"
+SERVICE_FMT = "org.qdistro.Qnotebook.uid{uid}"
 SEND_TIMEOUT_S = 120.0
 
 

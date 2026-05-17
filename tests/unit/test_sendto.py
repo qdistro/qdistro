@@ -1,7 +1,7 @@
 """Tests for Phase 3 cross-user send-to pieces that don't need a live bus.
 
 Covered here:
-- `_SERVICE_NAME_RE` accepts well-formed com.qdistro.* names and
+- `_SERVICE_NAME_RE` accepts well-formed org.qdistro.* names and
   rejects obvious injection shapes.
 - The one_shot semantics in `_Request`: the flag plumbs through
   and scope validation rejects non-'once' scopes at DecideRequest-time.
@@ -98,19 +98,19 @@ def _stub_dbus_and_paths():
 
 def test_service_name_regex_accepts_typical_shapes():
     from qdistro_admin_broker import _SERVICE_NAME_RE
-    assert _SERVICE_NAME_RE.match("com.qdistro.StubNotepad.uid3000")
-    assert _SERVICE_NAME_RE.match("com.qdistro.StubNotepad")
-    assert _SERVICE_NAME_RE.match("com.qdistro.Foo.Bar.Baz")
+    assert _SERVICE_NAME_RE.match("org.qdistro.StubNotepad.uid3000")
+    assert _SERVICE_NAME_RE.match("org.qdistro.StubNotepad")
+    assert _SERVICE_NAME_RE.match("org.qdistro.Foo.Bar.Baz")
 
 
 @pytest.mark.parametrize("bad", [
     "",
     "org.freedesktop.DBus",
-    "com.qdistro.",           # trailing dot
-    "com.qdistro..Double",    # empty component
-    "com.qdistro.Name-dash",  # dash not allowed
+    "org.qdistro.",           # trailing dot
+    "org.qdistro..Double",    # empty component
+    "org.qdistro.Name-dash",  # dash not allowed
     "com.evil;rm -rf /",      # shell injection-ish
-    "com.qdistro.Name\nEOF",  # newline
+    "org.qdistro.Name\nEOF",  # newline
 ])
 def test_service_name_regex_rejects_garbage(bad):
     from qdistro_admin_broker import _SERVICE_NAME_RE
@@ -164,11 +164,11 @@ def test_oneshot_and_delegated_share_argv_blind_bans():
 
 
 @pytest.mark.parametrize("service,expected", [
-    ("com.qdistro.StubNotepad.uid3000", "StubNotepad"),
-    ("com.qdistro.StubNotepad", "StubNotepad"),
-    ("com.qdistro.Foo.uid1", "Foo"),
-    ("com.qdistro.Foo.Bar", "Foo.Bar"),              # not a uidN suffix
-    ("com.qdistro.Foo.uidABC", "Foo.uidABC"),        # non-numeric suffix
+    ("org.qdistro.StubNotepad.uid3000", "StubNotepad"),
+    ("org.qdistro.StubNotepad", "StubNotepad"),
+    ("org.qdistro.Foo.uid1", "Foo"),
+    ("org.qdistro.Foo.Bar", "Foo.Bar"),              # not a uidN suffix
+    ("org.qdistro.Foo.uidABC", "Foo.uidABC"),        # non-numeric suffix
     ("com.notqdistro.X", "com.notqdistro.X"),        # unchanged if prefix absent
 ])
 def test_friendly_name_strips_prefix_and_uid(service, expected):

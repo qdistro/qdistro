@@ -7,14 +7,14 @@
 #   --vendor-product XXXX:YYYY      hex vendor:product
 #   --bus-addr BUS.ADDR             integer bus + addr (lsusb -d)
 #
-# Polkit action: com.qdistro.print.attach-usb (auth_admin defaults).
+# Polkit action: org.qdistro.print.attach-usb (auth_admin defaults).
 #
 # Detach via qdistro-print-detach-usb.
 set -euo pipefail
 
 VM_NAME="${QDISTRO_PRINT_VM_NAME:-qdistro-print}"
 LIBVIRT_URI="${QDISTRO_PRINT_LIBVIRT_URI:-qemu:///system}"
-ACTION="com.qdistro.print.attach-usb"
+ACTION="org.qdistro.print.attach-usb"
 
 VID=""
 PID=""
@@ -45,7 +45,7 @@ Usage:
   qdistro-print-attach-usb --vendor-product VVVV:PPPP [--vm <name>]
   qdistro-print-attach-usb --bus-addr BUS.ADDR        [--vm <name>]
 
-Polkit action: com.qdistro.print.attach-usb (auth_admin defaults).
+Polkit action: org.qdistro.print.attach-usb (auth_admin defaults).
 USAGE
             exit 0;;
         *) echo "unknown arg: $1" >&2; exit 2;;

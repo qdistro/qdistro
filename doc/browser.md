@@ -144,8 +144,8 @@ rejecting mismatched stdio payloads or dropping the stdio field entirely.
 ### 4. Daemon policy (Phase 9 — not implemented)
 
 Once Phase 9 daemons exist, the per-op polkit policy file
-(`com.qdistro.browser.policy`, per-op actions in the style of
-`com.qdistro.pwd.unlock`) gates dispatch. Match criteria will be drawn
+(`org.qdistro.browser.policy`, per-op actions in the style of
+`org.qdistro.pwd.unlock`) gates dispatch. Match criteria will be drawn
 from the identity stack:
 
 ```yaml

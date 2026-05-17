@@ -194,7 +194,7 @@ class TestCallViaRelay:
             return {"ok": True}
 
         bus = _FakeBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              client.RELAY_IFACE, "ForwardBrowserBridgeOp"): reply})
         client.set_dbus_client(bus)
         out = client.call_via_relay(
@@ -213,7 +213,7 @@ class TestCallViaRelay:
             return {"ok": True}
 
         bus = _FakeBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid3000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid3000",
              client.RELAY_IFACE, "ForwardBrowserBridgeOp"): reply})
         client.set_dbus_client(bus)
         out = client.call_via_relay(

@@ -109,9 +109,9 @@ APP_BASENAME=$(basename -- "$1")
 if command -v dbus-send >/dev/null 2>&1 && \
    [ "${TIER1_BROKER_OPTIONAL:-0}" != "1" ]; then
     BROKER_REPLY=$(dbus-send --system --print-reply=literal \
-        --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.CheckPermission \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
         "string:qdistro.tier1.spawn:$APP_BASENAME" \
         "dict:string:string:" 2>/dev/null \
         | tr -d ' \t\n' || true)

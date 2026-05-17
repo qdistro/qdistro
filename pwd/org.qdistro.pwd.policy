@@ -21,7 +21,7 @@
   <vendor>qdistro</vendor>
   <vendor_url>https://qdistro.invalid/</vendor_url>
 
-  <action id="com.qdistro.pwd.unlock">
+  <action id="org.qdistro.pwd.unlock">
     <description>Unlock a qdistro password vault</description>
     <description xml:lang="en">Unlock a qdistro password vault</description>
     <message>Authentication is required to unlock the qdistro vault</message>

@@ -32,7 +32,7 @@ Consequences:
 | | * new | | |
 | | work-user | User: work-user (blue) | |
 | | fill gmail | App: /usr/bin/firefox | |
-| | 3s ago | Action: com.qdistro.pwd.fill | |
+| | 3s ago | Action: org.qdistro.pwd.fill | |
 | | ------ | Detail: gmail.com login form | |
 | | dev-user | Reason: "login flow" | |
 | | sudo apt | | |

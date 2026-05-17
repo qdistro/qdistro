@@ -2,7 +2,7 @@
 broker and with peer user silos.
 
 Phase 1 surface was a single `request()` call. Phase 3 added a minimal
-receiver mixin for the `com.qdistro.App1` cross-user contract, plus
+receiver mixin for the `org.qdistro.App1` cross-user contract, plus
 helpers for enumerating peer receivers and sending to one. P03 extends
 the App1 surface with the app-launcher contract:
 
@@ -31,11 +31,11 @@ from typing import Callable, Iterable
 import dbus
 import dbus.service
 
-_BUS_NAME = "com.qdistro.AdminBroker1"
-_OBJ_PATH = "/com/qdistro/AdminBroker1"
+_BUS_NAME = "org.qdistro.AdminBroker1"
+_OBJ_PATH = "/org/qdistro/AdminBroker1"
 
-APP1_IFACE = "com.qdistro.App1"
-APP1_OBJ_PATH = "/com/qdistro/App1"
+APP1_IFACE = "org.qdistro.App1"
+APP1_OBJ_PATH = "/org/qdistro/App1"
 
 DEFAULT_TIMEOUT_S = 600
 
@@ -85,7 +85,7 @@ def _resolve_silo() -> str:
 
 
 class AppReceiver(dbus.service.Object):
-    """Claims a session-bus name and exposes ``com.qdistro.App1``.
+    """Claims a session-bus name and exposes ``org.qdistro.App1``.
 
     The Phase-3 minimum surface (``Receive(kind, payload)`` plus
     ``GetLastReceived``) is kept verbatim so existing stubs and tests
@@ -234,11 +234,11 @@ class AppReceiver(dbus.service.Object):
 
 
 def _friendly_from_service(service: str) -> str:
-    """Best-effort friendly name derived from a com.qdistro.<Name>[.uidNNNN]
+    """Best-effort friendly name derived from a org.qdistro.<Name>[.uidNNNN]
     bus name. Mirrors qdistro_user_relay._friendly_name so the
     launcher and the receiver agree on what to display."""
     name = str(service)
-    prefix = "com.qdistro."
+    prefix = "org.qdistro."
     if name.startswith(prefix):
         name = name[len(prefix):]
     parts = name.rsplit(".", 1)

@@ -84,7 +84,7 @@ class TestApprovalPush:
     def _build(self, **overrides):
         defaults = dict(
             request_id="req-001",
-            action_id="com.qdistro.pwd.unlock",
+            action_id="org.qdistro.pwd.unlock",
             user="work-user",
             callback_base_url="https://admin.tailnet.ts.net/cb",
             callback_secret=b"shared-secret",
@@ -99,7 +99,7 @@ class TestApprovalPush:
         assert body["topic"] == "qdistro-work-user"
         assert "Approval" in body["title"]
         assert body["x-qdistro-request-id"] == "req-001"
-        assert body["x-qdistro-action-id"] == "com.qdistro.pwd.unlock"
+        assert body["x-qdistro-action-id"] == "org.qdistro.pwd.unlock"
         assert body["x-qdistro-expires-at"] == 1120
         assert len(body["actions"]) == 2
         labels = [a["label"] for a in body["actions"]]

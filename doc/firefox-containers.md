@@ -147,7 +147,7 @@ When enabled, the routing still has to happen — see B/C below.
 
 `UserRelay.ForwardBrowserBridgeOp(op, args_json, selector_json) -> reply_json`
 shipped in `qdistro_user_relay.py`. Cross-uid callers reach it on the
-system bus (`com.qdistro.UserRelay.uid<NNNN>`); the relay forwards to
+system bus (`org.qdistro.UserRelay.uid<NNNN>`); the relay forwards to
 the user's `org.qdistro.BrowserBridge.<ppid>` via `RequestTabs`. Wire
 matches the bridge's `RequestTabs(s, s) -> s` so callers handle relay
 and direct paths identically.
@@ -179,7 +179,7 @@ identically to bridge-side `ok:false` replies:
 | `bridge_call_failed` | bridge raised — `detail` carries the underlying message |
 
 Authorization is the **system-bus peer-uid policy** on
-`com.qdistro.UserRelay.uid<NNNN>` — same model as the existing
+`org.qdistro.UserRelay.uid<NNNN>` — same model as the existing
 `UserRelay.Forward` for notifications. No new authn surface inside the
 relay. Test coverage: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp`
 (12 cases).
@@ -271,7 +271,7 @@ reply = call_bridge("containers.list")
 
 Cross-uid (the qdistro-user-relay must be running as the target user
 and the caller must be system-bus-authorized to send to
-`com.qdistro.UserRelay.uid<NNNN>`):
+`org.qdistro.UserRelay.uid<NNNN>`):
 
 ```python
 from qdistro_browser_bridge_client import call_via_relay

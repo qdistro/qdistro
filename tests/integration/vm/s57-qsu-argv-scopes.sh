@@ -43,8 +43,8 @@ systemctl start qdistro-admin-broker.service 2>/dev/null || true
 # Give it a moment to claim the bus name.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if dbus-send --system --print-reply \
-        --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
         org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
         break
     fi
@@ -60,8 +60,8 @@ pass "broker service active"
 
 # Sanity: the in-process API we'll call from python is reachable.
 if ! dbus-send --system --print-reply \
-    --dest=com.qdistro.AdminBroker1 \
-    /com/qdistro/AdminBroker1 \
+    --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
     org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null \
     | grep -q "RequestPermissionAs"; then
     fail "broker missing RequestPermissionAs method on D-Bus surface"
@@ -100,8 +100,8 @@ except Exception as e:  # noqa: BLE001
 
 DBusGMainLoop(set_as_default=True)
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 
 ADMIN_UID = 1000
 CLAIM_UID = 2050  # arbitrary non-admin uid we claim is the qsu caller
@@ -136,9 +136,9 @@ def _get_pending_ids():
         ["runuser", "-u", "admin", "--",
          "python3", "-c",
          "import dbus; bus=dbus.SystemBus(); "
-         "obj=bus.get_object('com.qdistro.AdminBroker1', "
-         "'/com/qdistro/AdminBroker1'); "
-         "iface=dbus.Interface(obj, 'com.qdistro.AdminBroker1'); "
+         "obj=bus.get_object('org.qdistro.AdminBroker1', "
+         "'/org/qdistro/AdminBroker1'); "
+         "iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
          "rows=iface.GetPending(); "
          "import sys,json; "
          "print(json.dumps([int(r['id']) for r in rows]))"],
@@ -153,9 +153,9 @@ def _decide_as_admin(rid, decision, scope):
         ["runuser", "-u", "admin", "--",
          "python3", "-c",
          f"import dbus; bus=dbus.SystemBus(); "
-         f"obj=bus.get_object('com.qdistro.AdminBroker1', "
-         f"'/com/qdistro/AdminBroker1'); "
-         f"iface=dbus.Interface(obj, 'com.qdistro.AdminBroker1'); "
+         f"obj=bus.get_object('org.qdistro.AdminBroker1', "
+         f"'/org/qdistro/AdminBroker1'); "
+         f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
          f"iface.DecideRequest({int(rid)}, '{decision}', '{scope}')"],
         capture_output=True, text=True, timeout=10)
     if out.returncode != 0:
@@ -172,9 +172,9 @@ def _revoke_cache_for_uid(uid):
         ["runuser", "-u", "admin", "--",
          "python3", "-c",
          f"import dbus; bus=dbus.SystemBus(); "
-         f"obj=bus.get_object('com.qdistro.AdminBroker1', "
-         f"'/com/qdistro/AdminBroker1'); "
-         f"iface=dbus.Interface(obj, 'com.qdistro.AdminBroker1'); "
+         f"obj=bus.get_object('org.qdistro.AdminBroker1', "
+         f"'/org/qdistro/AdminBroker1'); "
+         f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
          f"print(iface.RevokeAllForUid({int(uid)}))"],
         capture_output=True, text=True, timeout=10)
 

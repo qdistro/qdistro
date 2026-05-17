@@ -33,11 +33,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 
-BUS_NAME = "com.qdistro.AdminBroker1"
-OBJ_PATH = "/com/qdistro/AdminBroker1"
+BUS_NAME = "org.qdistro.AdminBroker1"
+OBJ_PATH = "/org/qdistro/AdminBroker1"
 
-SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
-SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
+SESSION_MANAGER_BUS_NAME = "org.qdistro.SessionManager1"
+SESSION_MANAGER_OBJ_PATH = "/org/qdistro/SessionManager1"
 
 # NOTE: HISTORY_FILE is an aspirational path documented in the task spec.
 # Current history is served from the broker's sqlite audit DB via
@@ -389,7 +389,7 @@ class CacheTab(QWidget):
 
 
 class SessionManagerBridge(QObject):
-    """Thin proxy around com.qdistro.SessionManager1 on the system bus.
+    """Thin proxy around org.qdistro.SessionManager1 on the system bus.
 
     Signal `siloChanged(name, state)` re-emits the daemon's SiloChanged
     signal onto the Qt main-thread. The Silos tab refreshes on every

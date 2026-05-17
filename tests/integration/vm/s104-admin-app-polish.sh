@@ -44,8 +44,8 @@ set -u
 err() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 note() { printf 'INFO: %s\n' "$*"; }
 
-BUS="com.qdistro.AdminBroker1"
-OBJ="/com/qdistro/AdminBroker1"
+BUS="org.qdistro.AdminBroker1"
+OBJ="/org/qdistro/AdminBroker1"
 RULES_DIR="/etc/qdistro/rules.d"
 
 # ---------------------------------------------------------------------------
@@ -138,8 +138,8 @@ pending_count() {
     admin_py <<'PYEOF'
 import dbus
 bus = dbus.SystemBus()
-obj = bus.get_object("com.qdistro.AdminBroker1", "/com/qdistro/AdminBroker1")
-iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+obj = bus.get_object("org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 print(len(iface.GetPending()))
 PYEOF
 }
@@ -148,8 +148,8 @@ PYEOF
 admin_py <<'PYEOF' >/dev/null 2>&1 || true
 import dbus
 bus = dbus.SystemBus()
-obj = bus.get_object("com.qdistro.AdminBroker1", "/com/qdistro/AdminBroker1")
-iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+obj = bus.get_object("org.qdistro.AdminBroker1", "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 for r in iface.GetPending():
     try:
         iface.DecideRequest(int(r["id"]), "deny", "once")

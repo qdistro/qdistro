@@ -36,11 +36,11 @@ sleep 3
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.StubNotepad.uid3000 \
+ string:org.qdistro.StubNotepad.uid3000 \
  string:text/plain \
  string:scope_test_payload \
  >/tmp/14-relay.out 2>&1 &
@@ -53,7 +53,7 @@ $VMGUI "$VM" screenshot /tmp/14-s1-pending.png
 ```
 
 **Assert (OCR /tmp/14-s1-pending.png)**:
-- `uid=2000` and `app.send-to:3000:com.qdistro.StubNotepad.uid3000` visible.
+- `uid=2000` and `app.send-to:3000:org.qdistro.StubNotepad.uid3000` visible.
 - `payload=scope_test_payload` visible.
 - Scope labels `Just this once`, `1 hour`, `24 hours`, `Forever`
  all visible (default radio is `Just this once`).
@@ -121,9 +121,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.StubNotepad.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetDocument'
+ --dest=org.qdistro.StubNotepad.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetDocument'
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT decision, scope FROM audit

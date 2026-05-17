@@ -127,9 +127,9 @@ vm_ssh '
   runuser -u admin -- python3 - <<PYEOF
 import dbus
 bus = dbus.SystemBus()
-obj = bus.get_object("com.qdistro.AdminBroker1",
-                     "/com/qdistro/AdminBroker1")
-iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
 rows = [r for r in iface.GetPending() if str(r.get("action", "")).startswith("qsu.exec:")]
 assert rows, "no qsu pending row found"
 rid = int(rows[0]["id"])

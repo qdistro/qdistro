@@ -59,11 +59,11 @@ POLKIT_OBJ = "/org/freedesktop/PolicyKit1/Authority"
 POLKIT_IFACE_AUTHORITY = "org.freedesktop.PolicyKit1.Authority"
 POLKIT_IFACE_AGENT = "org.freedesktop.PolicyKit1.AuthenticationAgent"
 
-AGENT_OBJ = "/com/qdistro/PolkitAgent"
-AGENT_BUS = "com.qdistro.PolkitAgent"
+AGENT_OBJ = "/org/qdistro/PolkitAgent"
+AGENT_BUS = "org.qdistro.PolkitAgent"
 
-QDISTRO_BROKER_BUS = "com.qdistro.AdminBroker1"
-QDISTRO_BROKER_OBJ = "/com/qdistro/AdminBroker1"
+QDISTRO_BROKER_BUS = "org.qdistro.AdminBroker1"
+QDISTRO_BROKER_OBJ = "/org/qdistro/AdminBroker1"
 
 ADMIN_UID = 1000  # admin; the uid the agent runs as and the identity
                   # it presents to polkit as the authenticated admin.

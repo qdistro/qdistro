@@ -2,7 +2,7 @@
 """qstub-notepad — Phase 3 stub receiver.
 
 Claims a unique session-bus name of the form
-`com.qdistro.StubNotepad.uid<N>`, exposes com.qdistro.App1.Receive,
+`org.qdistro.StubNotepad.uid<N>`, exposes org.qdistro.App1.Receive,
 and appends every received payload to a QPlainTextEdit. Also exposes
 a GetDocument method so tests can assert the final document state
 without driving the UI.
@@ -31,8 +31,8 @@ import dbus.mainloop.glib
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPlainTextEdit
 
-APP1_IFACE = "com.qdistro.App1"
-APP1_OBJ_PATH = "/com/qdistro/App1"
+APP1_IFACE = "org.qdistro.App1"
+APP1_OBJ_PATH = "/org/qdistro/App1"
 
 
 class NotepadReceiver(dbus.service.Object):
@@ -76,7 +76,7 @@ class Notepad(QMainWindow):
 def main() -> int:
     uid = os.geteuid()
     service_name = os.environ.get("QSTUB_NOTEPAD_SERVICE",
-                                   f"com.qdistro.StubNotepad.uid{uid}")
+                                   f"org.qdistro.StubNotepad.uid{uid}")
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     app = QApplication(sys.argv)

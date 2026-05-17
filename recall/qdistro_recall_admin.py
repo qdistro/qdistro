@@ -25,7 +25,7 @@ propagate through unchanged so callers handle them identically to
 direct ``call_via_relay`` use.
 
 The relay must be running as the target user
-(``com.qdistro.UserRelay.uid<NNNN>``) and the caller must be
+(``org.qdistro.UserRelay.uid<NNNN>``) and the caller must be
 system-bus-authorized to call ``ForwardBrowserBridgeOp`` on that
 name; see ``doc/firefox-containers.md``.
 """

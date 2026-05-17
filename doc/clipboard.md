@@ -37,7 +37,7 @@ need a bridge.
 User A right-clicks the selection or uses a shortcut → "Send clipboard
 to..." submenu lists other users.
 
-1. A's compositor (or the app's SDK) invokes `com.qdistro.clipboard.send`
+1. A's compositor (or the app's SDK) invokes `org.qdistro.clipboard.send`
  on `qbus-admin`.
 2. The broker applies policy (declarative rules + Python hooks).
 3. If approved, the broker sets up an ephemeral peer socket between A's

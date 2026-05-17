@@ -5,7 +5,7 @@ tight Python loop. After `LIMIT` successful calls (the broker pins
 `LIMIT=50, WINDOW_S=1.0` at construction in
 `broker/qdistro_admin_broker.py` line ~357), the next call within
 the same 1-second window must raise the D-Bus error
-`com.qdistro.AdminBroker1.RateLimited`. Verify the error name, that
+`org.qdistro.AdminBroker1.RateLimited`. Verify the error name, that
 the threshold is exactly 50 calls, and that a fresh request after
 the window has elapsed succeeds again.
 
@@ -43,8 +43,8 @@ B64=$(base64 -w0 <<'EOF'
 sudo -u work python3 - <<'PY' >/tmp/30-s1.out 2>&1
 import dbus
 bus = dbus.SystemBus()
-proxy = bus.get_object("com.qdistro.AdminBroker1",
-                       "/com/qdistro/AdminBroker1")
+proxy = bus.get_object("org.qdistro.AdminBroker1",
+                       "/org/qdistro/AdminBroker1")
 ok = 0
 err_name = None
 err_msg = None
@@ -52,7 +52,7 @@ for i in range(60):  # try 10 past the limit
     try:
         result = proxy.CheckPermission(
             "test.action", {"i": str(i)},
-            dbus_interface="com.qdistro.AdminBroker1")
+            dbus_interface="org.qdistro.AdminBroker1")
         if str(result) == "unknown":
             ok += 1
         else:
@@ -76,7 +76,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 **Assert** (textual analysis of `/tmp/30-s1.out`):
 - `ok_before_raise=50` — exactly 50 calls returned `"unknown"`
   before the limiter fired.
-- `err_name=com.qdistro.AdminBroker1.RateLimited` — the 51st call
+- `err_name=org.qdistro.AdminBroker1.RateLimited` — the 51st call
   raised the typed error name.
 - The accompanying `err_msg` mentions `uid=2000`, `'test.action'`,
   and the configured limit/window pair (`>50/1.0s` substring).
@@ -90,11 +90,11 @@ B64=$(base64 -w0 <<'EOF'
 sudo -u work python3 - <<'PY' >/tmp/30-s2.out 2>&1
 import dbus
 bus = dbus.SystemBus()
-proxy = bus.get_object("com.qdistro.AdminBroker1",
-                       "/com/qdistro/AdminBroker1")
+proxy = bus.get_object("org.qdistro.AdminBroker1",
+                       "/org/qdistro/AdminBroker1")
 result = proxy.CheckPermission(
     "test.other-action", {"i": "0"},
-    dbus_interface="com.qdistro.AdminBroker1")
+    dbus_interface="org.qdistro.AdminBroker1")
 print(f"other-action verdict={result!r}")
 PY
 cat /tmp/30-s2.out
@@ -116,11 +116,11 @@ B64=$(base64 -w0 <<'EOF'
 sudo -u work python3 - <<'PY' >/tmp/30-s3.out 2>&1
 import dbus
 bus = dbus.SystemBus()
-proxy = bus.get_object("com.qdistro.AdminBroker1",
-                       "/com/qdistro/AdminBroker1")
+proxy = bus.get_object("org.qdistro.AdminBroker1",
+                       "/org/qdistro/AdminBroker1")
 result = proxy.CheckPermission(
     "test.action", {"i": "postwindow"},
-    dbus_interface="com.qdistro.AdminBroker1")
+    dbus_interface="org.qdistro.AdminBroker1")
 print(f"postwindow verdict={result!r}")
 PY
 cat /tmp/30-s3.out

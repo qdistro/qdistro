@@ -9,7 +9,7 @@ work2's qnotebook via `GetLastReceived`.
 
 **Why**: 15 covered the wire; 16 proves the admin GUI surface
 carries the real-app action strings (`app.send-to:3000:
-com.qdistro.Qnotebook.uid3000`) and the approve click reaches the
+org.qdistro.Qnotebook.uid3000`) and the approve click reaches the
 plugin's receive code on the target uid.
 
 **Caveat (loud)**: relies on the shared-XWayland
@@ -77,14 +77,14 @@ on the bus in S2.
 
 ```bash
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.ListReceivers'
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.ListReceivers'
 ```
 
 **Assert**:
-- `com.qdistro.Qnotebook.uid2000` present.
-- `com.qdistro.Qnotebook.uid3000` present.
+- `org.qdistro.Qnotebook.uid2000` present.
+- `org.qdistro.Qnotebook.uid3000` present.
 
 ### S3 — trigger a RelayMessage as work
 
@@ -92,11 +92,11 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.Qnotebook.uid3000 \
+ string:org.qdistro.Qnotebook.uid3000 \
  string:text/plain \
  string:visual_phase4_hello \
  >/tmp/16-relay.out 2>&1 &
@@ -110,9 +110,9 @@ $VMGUI "$VM" screenshot /tmp/16-s3-pending.png
 
 **Assert (OCR /tmp/16-s3-pending.png)**:
 - `uid=2000` in the detail pane header.
-- `app.send-to:3000:com.qdistro.Qnotebook.uid3000` on the action line.
+- `app.send-to:3000:org.qdistro.Qnotebook.uid3000` on the action line.
 - `kind=text/plain`, `payload=visual_phase4_hello`, `target_uid=3000`,
- `target_service=com.qdistro.Qnotebook.uid3000` — all four
+ `target_service=org.qdistro.Qnotebook.uid3000` — all four
  `key=value` substrings present (OCR whitespace may wrap).
 - `Just this once` scope label with radio in filled state (or, if
  OCR can't reliably detect the glyph, `Just this once`,
@@ -142,9 +142,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.Qnotebook.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetLastReceived'
+ --dest=org.qdistro.Qnotebook.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetLastReceived'
 ```
 
 **Assert**: output contains `"[text/plain] visual_phase4_hello"`.
@@ -166,7 +166,7 @@ $VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approv
 ```
 
 **Assert**:
-- Audit row: `2000|app.send-to:3000:com.qdistro.Qnotebook.uid3000|1|once|prompt|1000`.
+- Audit row: `2000|app.send-to:3000:org.qdistro.Qnotebook.uid3000|1|once|prompt|1000`.
 - Approvals-row count: `0`.
 
 ## Teardown

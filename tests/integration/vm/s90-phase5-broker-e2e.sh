@@ -8,9 +8,9 @@
 
 set -u
 
-BUS=com.qdistro.AdminBroker1
-PATH_=/com/qdistro/AdminBroker1
-IFACE=com.qdistro.AdminBroker1
+BUS=org.qdistro.AdminBroker1
+PATH_=/org/qdistro/AdminBroker1
+IFACE=org.qdistro.AdminBroker1
 
 PASSCOUNT=0
 FAILCOUNT=0

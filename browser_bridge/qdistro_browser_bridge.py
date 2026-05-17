@@ -751,22 +751,22 @@ def _strip_identity(reply: dict) -> dict:
 # ---- 9a: pwd.fill / pwd.save -------------------------------------
 #
 # CANONICAL NAMES — must match ``qdistro/pwd/qdistro_pwd_daemon.py``:
-#   well-known name : ``com.qdistro.Pwd1`` on the SYSTEM bus
-#   object path     : ``/com/qdistro/Pwd1``
-#   interface       : ``com.qdistro.Pwd1``
+#   well-known name : ``org.qdistro.Pwd1`` on the SYSTEM bus
+#   object path     : ``/org/qdistro/Pwd1``
+#   interface       : ``org.qdistro.Pwd1``
 # Three previous review angles flagged the same bus-name drift; we
 # now keep one set of constants and import them everywhere.
 
 _PWD_BUS_KIND = "SYSTEM"
-_PWD_BUS = "com.qdistro.Pwd1"
-_PWD_PATH = "/com/qdistro/Pwd1"
-_PWD_IFACE = "com.qdistro.Pwd1"
+_PWD_BUS = "org.qdistro.Pwd1"
+_PWD_PATH = "/org/qdistro/Pwd1"
+_PWD_IFACE = "org.qdistro.Pwd1"
 
 
 def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
     """pwd.fill — fetch credentials for a URL.
 
-    Forwards to ``qdistro-pwd`` (com.qdistro.Pwd1 / Pwd1.Fill on the
+    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd1 / Pwd1.Fill on the
     SYSTEM bus). Requires an intent token (see
     :data:`INTENT_TOKEN_REQUIRED_OPS`).
     """
@@ -796,7 +796,7 @@ def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
 def _handle_pwd_save(msg: dict, identity: dict) -> dict:
     """pwd.save — persist credentials for a URL.
 
-    Forwards to ``qdistro-pwd`` (com.qdistro.Pwd1 / Pwd1.Save on the
+    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd1 / Pwd1.Save on the
     SYSTEM bus).
     """
     gate = _identity_gate(identity)
@@ -895,16 +895,16 @@ def _handle_heartbeat_ack(msg: dict, identity: dict) -> dict:
 # ---- 9c: page.extract --------------------------------------------
 
 _BROKER_BUS_KIND = "SYSTEM"
-_BROKER_BUS = "com.qdistro.AdminBroker1"
-_BROKER_PATH = "/com/qdistro/AdminBroker1"
-_BROKER_IFACE = "com.qdistro.AdminBroker1"
+_BROKER_BUS = "org.qdistro.AdminBroker1"
+_BROKER_PATH = "/org/qdistro/AdminBroker1"
+_BROKER_IFACE = "org.qdistro.AdminBroker1"
 
 
 def _handle_page_extract(msg: dict, identity: dict) -> dict:
     """page.extract — share a page snippet via the qbus-admin broker.
 
     The broker lives on the SYSTEM bus
-    (``com.qdistro.AdminBroker1``).
+    (``org.qdistro.AdminBroker1``).
     """
     gate = _identity_gate(identity)
     if gate is not None:
@@ -1016,16 +1016,16 @@ def _lookup_extension_secret(extension_id: str) -> bytes | None:
 
 
 _COOKIES_BUS_KIND = "SYSTEM"
-_COOKIES_BUS = "com.qdistro.Pwd1"  # cookies live with pwd daemon (SYSTEM)
-_COOKIES_PATH = "/com/qdistro/Pwd1"
-_COOKIES_IFACE = "com.qdistro.Pwd1"
+_COOKIES_BUS = "org.qdistro.Pwd1"  # cookies live with pwd daemon (SYSTEM)
+_COOKIES_PATH = "/org/qdistro/Pwd1"
+_COOKIES_IFACE = "org.qdistro.Pwd1"
 
 
 def _handle_cookies_export(msg: dict, identity: dict) -> dict:
     """cookies.export — audit-logged TTL-limited cookie export.
 
     Cookies live with the pwd daemon at
-    ``com.qdistro.Pwd1`` (SYSTEM bus).
+    ``org.qdistro.Pwd1`` (SYSTEM bus).
     """
     gate = _identity_gate(identity)
     if gate is not None:

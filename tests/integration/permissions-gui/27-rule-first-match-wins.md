@@ -60,9 +60,9 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ReloadRules'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ReloadRules'
 sleep 1
 ```
 
@@ -102,9 +102,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 $VMEXEC "$VM" 'mv /etc/qdistro/rules.d/27a-allow.yaml /etc/qdistro/rules.d/27c-allow.yaml'
 $VMEXEC "$VM" 'mv /etc/qdistro/rules.d/27b-deny.yaml /etc/qdistro/rules.d/27a-deny.yaml'
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.ReloadRules'
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ReloadRules'
 sleep 1
 ```
 

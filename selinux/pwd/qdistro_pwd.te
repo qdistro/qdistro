@@ -65,7 +65,7 @@ files_type(qdistro_pwd_audit_t)
 # Allow set
 #
 
-# D-Bus client + name claim. com.qdistro.Pwd1 on the system bus.
+# D-Bus client + name claim. org.qdistro.Pwd1 on the system bus.
 # Tumbleweed's dbus_system_bus_client doesn't include acquire_svc,
 # matching the qdistro_broker workaround at 0.3.1 — same fix here.
 dbus_system_bus_client(qdistro_pwd_t)

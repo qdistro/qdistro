@@ -60,7 +60,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```bash
 $VMEXEC "$VM" 'rm -f /tmp/23-signals.log; \
   setsid dbus-monitor --system \
-    "type=signal,interface=com.qdistro.AdminBroker1,member=ApprovalRevoked" \
+    "type=signal,interface=org.qdistro.AdminBroker1,member=ApprovalRevoked" \
     >/tmp/23-signals.log 2>&1 </dev/null &
   echo $! >/tmp/23-monitor.pid'
 sleep 1
@@ -80,9 +80,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 
 ```bash
 $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.RevokeAllForUid \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RevokeAllForUid \
   int32:2000'
 sleep 1
 ```

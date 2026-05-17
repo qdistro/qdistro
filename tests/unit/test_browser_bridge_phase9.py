@@ -150,10 +150,10 @@ class TestPwdFill:
         assert resp["op"] == "pwd.fill"
         assert resp["credentials"][0]["username"] == "alice"
         # D-Bus body must NOT include parent_selinux / ppid leaks.
-        # SYSTEM bus + canonical com.qdistro.Pwd1 name (P04 fix-pass H3).
+        # SYSTEM bus + canonical org.qdistro.Pwd1 name (P04 fix-pass H3).
         call = bb._dbus_client.calls[0]
         assert call["bus"] == "SYSTEM"
-        assert call["service"] == "com.qdistro.Pwd1"
+        assert call["service"] == "org.qdistro.Pwd1"
         assert call["method"] == "Fill"
         body = json.loads(call["body"][0])
         assert body["url"] == "https://example.com/login"
@@ -682,10 +682,10 @@ class TestPageExtract:
             ALLOWED)
         assert resp["ok"] is True
         call = bb._dbus_client.calls[0]
-        # Broker lives on the SYSTEM bus as ``com.qdistro.AdminBroker1``
+        # Broker lives on the SYSTEM bus as ``org.qdistro.AdminBroker1``
         # (P04 fix-pass H3).
         assert call["bus"] == "SYSTEM"
-        assert call["service"] == "com.qdistro.AdminBroker1"
+        assert call["service"] == "org.qdistro.AdminBroker1"
         assert call["method"] == "PageExtract"
         body = json.loads(call["body"][0])
         assert body["dest_uid"] == "dev-user"

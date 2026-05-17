@@ -81,7 +81,7 @@ work.
 ### Broker gate and spawn-on-demand
 
 Before opening the backend, the proxy calls
-`com.qdistro.AdminBroker1.CheckPermission(action, details)` with
+`org.qdistro.AdminBroker1.CheckPermission(action, details)` with
 `action=print.access` and details `{peer_uid, peer_pid, peer_exe}`. Gate
 decisions: allow → forward, deny → close, unknown → forward + log
 (default-allow during bring-up while admin authors `print.*` rules),
@@ -106,7 +106,7 @@ boot via a vsock probe, then retries the connect.
 - Admin identifies the printer's USB bus/device in the admin panel.
 - `qdistro-print-attach-usb --vendor-product VVVV:PPPP` (or `--bus-addr
  BUS.ADDR`) attaches it to the CUPS VM via USB passthrough (qemu-xhci).
- Polkit-gated through `com.qdistro.print.attach-usb` (auth_admin
+ Polkit-gated through `org.qdistro.print.attach-usb` (auth_admin
  defaults).
 - No other user session or container can claim that USB device.
 - If the printer is unplugged, the VM sees the disconnect; reconnection
@@ -140,9 +140,9 @@ printers only.
 
 ## Per-user printing policy
 
-polkit namespace `com.qdistro.print.*`:
+polkit namespace `org.qdistro.print.*`:
 
-- `com.qdistro.print.submit_job` — parameterized by user, printer, page
+- `org.qdistro.print.submit_job` — parameterized by user, printer, page
  count.
 - Rules can gate by `(user, printer)`: "dev-user can print to office-bw,
  not to color-printer."

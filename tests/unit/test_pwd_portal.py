@@ -77,7 +77,7 @@ def test_retrieve_secret_writes_key_bytes_to_fd(backend):
 def test_retrieve_secret_pwd_dbus_error_returns_other_error(backend):
     fake_iface = MagicMock()
     fake_iface.GetPortalKey.side_effect = dbus.DBusException(
-        "vault locked", name="com.qdistro.Pwd1.NotUnlocked")
+        "vault locked", name="org.qdistro.Pwd1.NotUnlocked")
     with patch.object(backend, "_pwd_iface", return_value=fake_iface):
         r, w = os.pipe()
         resp, _ = backend.RetrieveSecret(
@@ -93,7 +93,7 @@ def test_retrieve_secret_pwd_dbus_error_returns_other_error(backend):
 def test_retrieve_secret_invalid_app_id_propagates_dbus_error(backend):
     fake_iface = MagicMock()
     fake_iface.GetPortalKey.side_effect = dbus.DBusException(
-        "invalid app_id", name="com.qdistro.Pwd1.PolicyError")
+        "invalid app_id", name="org.qdistro.Pwd1.PolicyError")
     with patch.object(backend, "_pwd_iface", return_value=fake_iface):
         r, w = os.pipe()
         resp, _ = backend.RetrieveSecret(

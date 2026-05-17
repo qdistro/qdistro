@@ -9,7 +9,7 @@ Two entry points:
   process.
 
 - :func:`call_via_relay` — cross-uid path. Calls
-  ``com.qdistro.UserRelay.uid<NNNN>.ForwardBrowserBridgeOp`` on the
+  ``org.qdistro.UserRelay.uid<NNNN>.ForwardBrowserBridgeOp`` on the
   system bus; the relay (running as the target user) turns around
   and calls the bridge on the user's session bus. See
   :mod:`qdistro_user_relay` and ``doc/firefox-containers.md`` for
@@ -34,9 +34,9 @@ BRIDGE_NAME_PREFIX = "org.qdistro.BrowserBridge."
 BRIDGE_OBJ_PATH = "/org/qdistro/BrowserBridge"
 BRIDGE_IFACE = "org.qdistro.BrowserBridge"
 
-RELAY_SYSTEM_NAME_FMT = "com.qdistro.UserRelay.uid{uid}"
-RELAY_OBJ_PATH = "/com/qdistro/UserRelay"
-RELAY_IFACE = "com.qdistro.UserRelay"
+RELAY_SYSTEM_NAME_FMT = "org.qdistro.UserRelay.uid{uid}"
+RELAY_OBJ_PATH = "/org/qdistro/UserRelay"
+RELAY_IFACE = "org.qdistro.UserRelay"
 
 
 # ---------------------------------------------------------------------------

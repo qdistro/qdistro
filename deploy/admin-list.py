@@ -2,8 +2,8 @@
 """Print pending requests as id|uid|action|details (one per line)."""
 import dbus
 
-BUS = "com.qdistro.AdminBroker1"
-PATH = "/com/qdistro/AdminBroker1"
+BUS = "org.qdistro.AdminBroker1"
+PATH = "/org/qdistro/AdminBroker1"
 
 
 def main():

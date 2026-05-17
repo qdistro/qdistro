@@ -90,16 +90,19 @@ def _write_handoff_rule(rules_dir: Path, *, decision: str,
 
 
 class TestSameSilo:
-    def test_admin_to_admin(self, broker):
-        assert broker.CheckHandoffActivation(
-            "admin", "admin", "src.app", "dst.app") == "allow"
+    # Option-B contract: same-silo allow requires identity_verified=True.
+    # See todo/decisions/secctx-identity-contract.md.
 
-    def test_user1_to_user1(self, broker):
+    def test_admin_to_admin_when_verified(self, broker):
         assert broker.CheckHandoffActivation(
-            "user1", "user1", "x", "y") == "allow"
+            "admin", "admin", "src.app", "dst.app", "", True) == "allow"
+
+    def test_user1_to_user1_when_verified(self, broker):
+        assert broker.CheckHandoffActivation(
+            "user1", "user1", "x", "y", "", True) == "allow"
 
     def test_same_silo_writes_audit(self, broker):
-        broker.CheckHandoffActivation("user2", "user2", "a", "b")
+        broker.CheckHandoffActivation("user2", "user2", "a", "b", "", True)
         rows = broker.audit.recent(10)
         assert len(rows) == 1
         assert rows[0]["decision"] is True
@@ -108,12 +111,18 @@ class TestSameSilo:
         assert "src_app=a" in rows[0]["source"]
         assert "dst_app=b" in rows[0]["source"]
 
-    def test_same_silo_ignores_rules(self, broker, rules_dir):
+    def test_same_silo_ignores_rules_when_verified(self, broker, rules_dir):
         _write_handoff_rule(rules_dir, decision="deny",
                             source="user1", dest="user1")
         broker.rules.reload()
         assert broker.CheckHandoffActivation(
-            "user1", "user1", "x", "y") == "allow"
+            "user1", "user1", "x", "y", "", True) == "allow"
+
+    def test_same_silo_unverified_falls_through_to_deny(self, broker):
+        # Same-silo without identity_verified now goes through the
+        # cross-silo policy path. With no rule, that's default-deny.
+        assert broker.CheckHandoffActivation(
+            "user1", "user1", "x", "y") == "deny"
 
 
 class TestCrossSilo:
@@ -231,7 +240,8 @@ class TestInputValidation:
     def test_long_app_id_capped(self, broker):
         # App-ids over 128 chars are silently truncated, not rejected.
         broker.CheckHandoffActivation("user1", "user1",
-                                      "x" * 1000, "y" * 1000)
+                                      "x" * 1000, "y" * 1000,
+                                      "", True)
         rows = broker.audit.recent(1)
         # Audit row stays bounded.
         assert len(rows[0]["source"]) < 4096
@@ -246,8 +256,11 @@ class TestRateLimit:
             ratelimit_limit=2,
             ratelimit_window_s=10.0,
         )
-        assert b.CheckHandoffActivation("user1", "user1", "a", "b") == "allow"
-        assert b.CheckHandoffActivation("user1", "user1", "a", "b") == "allow"
+        assert b.CheckHandoffActivation(
+            "user1", "user1", "a", "b", "", True) == "allow"
+        assert b.CheckHandoffActivation(
+            "user1", "user1", "a", "b", "", True) == "allow"
         import dbus
         with pytest.raises(dbus.DBusException):
-            b.CheckHandoffActivation("user1", "user1", "a", "b")
+            b.CheckHandoffActivation(
+                "user1", "user1", "a", "b", "", True)

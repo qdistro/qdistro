@@ -29,7 +29,7 @@ per app that hooks its host into the SDK.
 
 Each per-app plugin does three things:
 
-1. Subclasses `AppReceiver`, claims `com.qdistro.<AppName>.uid<N>` on the
+1. Subclasses `AppReceiver`, claims `org.qdistro.<AppName>.uid<N>` on the
  host's session bus, and wires `Receive(kind, payload)` onto host-specific
  state (a terminal pane's PTY for qterminator; the current page's cursor
  for qnotebook).
@@ -45,7 +45,7 @@ each app's qdistro plugin — that's the only piece that understands the host.
 
 ## Standard D-Bus interface
 
-Each SDK-using app exposes `com.qdistro.App1` on its session bus.
+Each SDK-using app exposes `org.qdistro.App1` on its session bus.
 
 ### Methods
 

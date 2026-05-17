@@ -2,7 +2,7 @@
 
 **What**: same RelayMessage as scenario 12, but admin clicks
 **Deny**. Assert notepad never received the payload, sender sees
-a `com.qdistro.AdminBroker1.Denied` DBusException, audit row
+a `org.qdistro.AdminBroker1.Denied` DBusException, audit row
 records decision=0.
 
 **Why**: scenario 12 covers approve. A silent downgrade to allow
@@ -32,11 +32,11 @@ sleep 3
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.StubNotepad.uid3000 \
+ string:org.qdistro.StubNotepad.uid3000 \
  string:text/plain \
  string:deny_me_please \
  >/tmp/13-relay.out 2>&1 &
@@ -79,9 +79,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.StubNotepad.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetDocument' > /tmp/13-doc.out 2>&1
+ --dest=org.qdistro.StubNotepad.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetDocument' > /tmp/13-doc.out 2>&1
 cat /tmp/13-doc.out
 
 # Sender observed a Denied error.
@@ -99,7 +99,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 **Assert**:
 - `/tmp/13-doc.out` does NOT contain `deny_me_please`.
 - `/tmp/13-relay.out` contains the substring
- `com.qdistro.AdminBroker1.Denied` in the error name. (A NoReply
+ `org.qdistro.AdminBroker1.Denied` in the error name. (A NoReply
  instead is acceptable only if the admin click came after
  dbus-send's 25s timeout — the notepad assertion above is the
  ground-truth suppression check.)

@@ -24,9 +24,9 @@
  caller acts on response
 ```
 
-Every qdistro action is polkit-namespaced: `com.qdistro.device.camera.claim`,
-`com.qdistro.clipboard.send`, `com.qdistro.window.handoff`,
-`com.qdistro.network.join_interactive`, etc. polkit rules route them all to
+Every qdistro action is polkit-namespaced: `org.qdistro.device.camera.claim`,
+`org.qdistro.clipboard.send`, `org.qdistro.window.handoff`,
+`org.qdistro.network.join_interactive`, etc. polkit rules route them all to
 the admin PyQt agent by default.
 
 ## Two broker entry points — synchronous check vs long-term ask
@@ -103,20 +103,20 @@ Rule shape:
 
 ```yaml
 - match:
- action: com.qdistro.clipboard.send
+ action: org.qdistro.clipboard.send
  source_user: work-user
  target_user: dev-user
  mime: text/plain
  action: allow
 
 - match:
- action: com.qdistro.device.camera.claim
+ action: org.qdistro.device.camera.claim
  user: work-user
  app: /usr/bin/notebook
  action: allow_session
 
 - match:
- action: com.qdistro.device.microphone.claim
+ action: org.qdistro.device.microphone.claim
  action: prompt
 ```
 

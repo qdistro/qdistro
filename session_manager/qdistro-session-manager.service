@@ -10,7 +10,7 @@ Wants=qdistro-dbus-reload.service
 
 [Service]
 Type=dbus
-BusName=com.qdistro.SessionManager1
+BusName=org.qdistro.SessionManager1
 ExecStart=/usr/libexec/qdistro/qdistro_session_manager.py
 Restart=on-failure
 RestartSec=2

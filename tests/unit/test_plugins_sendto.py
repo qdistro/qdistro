@@ -136,7 +136,7 @@ class TestQterminatorPlugin:
             _PLUGINS / "qdistro_sendto_qterminator.py",
             "qdistro_sendto_qterminator_test3",
         )
-        assert mod.SERVICE_FMT.startswith("com.qdistro.Qterminator.uid")
+        assert mod.SERVICE_FMT.startswith("org.qdistro.Qterminator.uid")
         assert "{uid}" in mod.SERVICE_FMT
 
 
@@ -161,7 +161,7 @@ class TestQnotebookPlugin:
             _PLUGINS / "qdistro_sendto_qnotebook.py",
             "qdistro_sendto_qnotebook_test2",
         )
-        assert mod.SERVICE_FMT.startswith("com.qdistro.Qnotebook.uid")
+        assert mod.SERVICE_FMT.startswith("org.qdistro.Qnotebook.uid")
         assert "{uid}" in mod.SERVICE_FMT
 
     def test_setup_without_qdistro_ok_is_noop(self, monkeypatch):

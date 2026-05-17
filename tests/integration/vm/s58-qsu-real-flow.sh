@@ -36,9 +36,9 @@ cleanup() {
 import dbus
 try:
     bus = dbus.SystemBus()
-    obj = bus.get_object("com.qdistro.AdminBroker1",
-                          "/com/qdistro/AdminBroker1")
-    iface = dbus.Interface(obj, "com.qdistro.AdminBroker1")
+    obj = bus.get_object("org.qdistro.AdminBroker1",
+                          "/org/qdistro/AdminBroker1")
+    iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
     for r in iface.GetPending():
         try:
             iface.DecideRequest(int(r["id"]), "deny", "once")
@@ -63,8 +63,8 @@ pass "qsu installed at /usr/local/bin/qsu"
 systemctl start qdistro-admin-broker.service 2>/dev/null || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if dbus-send --system --print-reply \
-        --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
         org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
         break
     fi
@@ -111,9 +111,9 @@ pass "non-admin caller present: $WORK_USER (uid=$WORK_UID)"
 runuser -u admin -- python3 -c "
 import dbus
 bus = dbus.SystemBus()
-obj = bus.get_object('com.qdistro.AdminBroker1',
-                     '/com/qdistro/AdminBroker1')
-iface = dbus.Interface(obj, 'com.qdistro.AdminBroker1')
+obj = bus.get_object('org.qdistro.AdminBroker1',
+                     '/org/qdistro/AdminBroker1')
+iface = dbus.Interface(obj, 'org.qdistro.AdminBroker1')
 try: iface.RevokeAllForUid(${WORK_UID})
 except Exception: pass
 for r in iface.GetPending():
@@ -134,9 +134,9 @@ want_argv = sys.argv[2]
 timeout = float(sys.argv[3])
 deadline = time.monotonic() + timeout
 bus = dbus.SystemBus()
-obj = bus.get_object('com.qdistro.AdminBroker1',
-                     '/com/qdistro/AdminBroker1')
-iface = dbus.Interface(obj, 'com.qdistro.AdminBroker1')
+obj = bus.get_object('org.qdistro.AdminBroker1',
+                     '/org/qdistro/AdminBroker1')
+iface = dbus.Interface(obj, 'org.qdistro.AdminBroker1')
 found_rid = None
 while time.monotonic() < deadline:
     for r in iface.GetPending():
@@ -162,9 +162,9 @@ decide_as_admin() {
     runuser -u admin -- python3 -c "
 import dbus, sys
 bus = dbus.SystemBus()
-obj = bus.get_object('com.qdistro.AdminBroker1',
-                     '/com/qdistro/AdminBroker1')
-iface = dbus.Interface(obj, 'com.qdistro.AdminBroker1')
+obj = bus.get_object('org.qdistro.AdminBroker1',
+                     '/org/qdistro/AdminBroker1')
+iface = dbus.Interface(obj, 'org.qdistro.AdminBroker1')
 iface.DecideRequest(${rid}, '${decision}', '${scope}')
 "
 }
@@ -233,9 +233,9 @@ done
 PENDING_AT_CACHE_HIT=$(runuser -u admin -- python3 -c "
 import dbus, json
 bus = dbus.SystemBus()
-obj = bus.get_object('com.qdistro.AdminBroker1',
-                     '/com/qdistro/AdminBroker1')
-iface = dbus.Interface(obj, 'com.qdistro.AdminBroker1')
+obj = bus.get_object('org.qdistro.AdminBroker1',
+                     '/org/qdistro/AdminBroker1')
+iface = dbus.Interface(obj, 'org.qdistro.AdminBroker1')
 rows = iface.GetPending()
 print(json.dumps([
     {'id': int(r['id']), 'uid': int(r['uid']),

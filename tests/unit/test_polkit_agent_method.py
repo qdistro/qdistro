@@ -53,20 +53,20 @@ class TestSelectMethod:
 
     def test_first_glob_wins(self):
         cfg = [
-            ("com.qdistro.pwd.*", "pam"),
-            ("com.qdistro.*",     "broker"),
+            ("org.qdistro.pwd.*", "pam"),
+            ("org.qdistro.*",     "broker"),
         ]
-        assert select_method("com.qdistro.pwd.unlock", cfg, env={}) == "pam"
-        assert select_method("com.qdistro.print.add",  cfg, env={}) == "broker"
+        assert select_method("org.qdistro.pwd.unlock", cfg, env={}) == "pam"
+        assert select_method("org.qdistro.print.add",  cfg, env={}) == "broker"
 
     def test_no_match_falls_to_default(self):
-        cfg = [("com.qdistro.pwd.*", "pam")]
+        cfg = [("org.qdistro.pwd.*", "pam")]
         assert select_method("org.freedesktop.NetworkManager.settings.modify",
                              cfg, env={}) == "broker"
 
     def test_glob_matches_dot_pattern(self):
         cfg = [("*pwd*", "fprint")]
-        assert select_method("com.qdistro.pwd.unlock", cfg, env={}) == "fprint"
+        assert select_method("org.qdistro.pwd.unlock", cfg, env={}) == "fprint"
 
 
 # -- load_method_config ------------------------------------------------
@@ -80,15 +80,15 @@ class TestLoadMethodConfig:
         p = tmp_path / "cfg"
         p.write_text(
             "# comment\n"
-            "com.qdistro.pwd.* = pam\n"
-            "com.qdistro.print.* = broker\n"
+            "org.qdistro.pwd.* = pam\n"
+            "org.qdistro.print.* = broker\n"
             "\n"
             "* = fprint\n"
         )
         out = load_method_config(str(p))
         assert out == [
-            ("com.qdistro.pwd.*",   "pam"),
-            ("com.qdistro.print.*", "broker"),
+            ("org.qdistro.pwd.*",   "pam"),
+            ("org.qdistro.print.*", "broker"),
             ("*",                   "fprint"),
         ]
 

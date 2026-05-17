@@ -1,5 +1,5 @@
 """qdistro_app.app_receiver — high-level helper that wires an app
-into the ``com.qdistro.App1`` contract with one call.
+into the ``org.qdistro.App1`` contract with one call.
 
 Apps that want to participate in the P03 launcher / send-to flow
 import ``register_app`` from here rather than instantiating
@@ -9,7 +9,7 @@ import ``register_app`` from here rather than instantiating
   receiver actually wakes up on incoming method calls (Qt's own
   event loop coexists — they wake on fds via the qt-platform
   plugin's internal integration).
-- builds the canonical service name ``com.qdistro.<Name>.uid<NNNN>``
+- builds the canonical service name ``org.qdistro.<Name>.uid<NNNN>``
   unless the caller hands in a fully-qualified one. The ``uid``
   suffix is what UserRelay.ListLocalReceivers uses to disambiguate
   one user's instances from another's in the broker's ListReceivers
@@ -52,19 +52,19 @@ __all__ = [
 
 
 def _canonical_service_name(name: str) -> str:
-    """Return ``com.qdistro.<Name>.uid<NNNN>`` from a short app name.
+    """Return ``org.qdistro.<Name>.uid<NNNN>`` from a short app name.
 
     Accepts a bare app name (``"QTerminator"``) or a partial path
-    (``"com.qdistro.QTerminator"``) or a fully qualified name; the
+    (``"org.qdistro.QTerminator"``) or a fully qualified name; the
     last form passes through unchanged.
     """
     s = str(name)
     uid = os.geteuid()
-    if s.startswith("com.qdistro.") and ".uid" in s:
+    if s.startswith("org.qdistro.") and ".uid" in s:
         return s
-    if s.startswith("com.qdistro."):
+    if s.startswith("org.qdistro."):
         return f"{s}.uid{uid}"
-    return f"com.qdistro.{s}.uid{uid}"
+    return f"org.qdistro.{s}.uid{uid}"
 
 
 def is_session_bus_available() -> bool:
@@ -94,7 +94,7 @@ def register_app(
     install_glib_mainloop: bool = True,
     log: Callable[[str], None] | None = None,
 ) -> AppReceiver | None:
-    """Claim ``com.qdistro.<name>.uid<NNNN>`` on the session bus and
+    """Claim ``org.qdistro.<name>.uid<NNNN>`` on the session bus and
     return the registered :class:`AppReceiver`.
 
     ``on_receive`` is called once per delivery (both ``Receive`` and
@@ -156,7 +156,7 @@ def send_to_menu_targets(*, self_service: str | None = None,
                          kind: str | None = None) -> list[dict]:
     """Build the Send-To menu rows for the current process.
 
-    Asks the broker for every registered ``com.qdistro.App1`` receiver,
+    Asks the broker for every registered ``org.qdistro.App1`` receiver,
     excludes ``self_service`` (so an app doesn't list itself), and —
     when ``kind`` is given — drops rows whose receiver returns
     ``CanReceive(kind) == False``. The kind probe is best-effort:

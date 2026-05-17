@@ -102,6 +102,6 @@ backing file for per-VM overlay clones.
 ## Control script
 
 `tier4_control.py` runs alongside the waypipe-client and provides:
-- D-Bus App1 receiver claim (`com.qdistro.Tier4VM.uid<NNNN>`)
-- Close() RPC (`com.qdistro.Tier4VM.Control`) — ACPI shutdown → destroy
+- D-Bus App1 receiver claim (`org.qdistro.Tier4VM.uid<NNNN>`)
+- Close() RPC (`org.qdistro.Tier4VM.Control`) — ACPI shutdown → destroy
   → orphan reap, then SIGTERMs the waypipe-client

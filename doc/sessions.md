@@ -138,8 +138,8 @@ A PyQt app in admin's session:
 
 ### D-Bus surface
 
-Bus name `com.qdistro.SessionManager1` on the system bus; object path
-`/com/qdistro/SessionManager1`.
+Bus name `org.qdistro.SessionManager1` on the system bus; object path
+`/org/qdistro/SessionManager1`.
 
 ```
 method  CreateSilo(s name, i uid)        → ()
@@ -159,7 +159,7 @@ transient `Stopping` / `Deleting` states followed by the resting
 `Stopped` / row-deletion; treat unknown state strings as "transient,
 wait."
 
-Error names live under `com.qdistro.SessionManager1.*`:
+Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
 `NotAuthorized`, plus a `Generic` fallback for unexpected
 side-effect failures.

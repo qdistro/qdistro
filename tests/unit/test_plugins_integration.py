@@ -301,8 +301,8 @@ class TestQnotebookPluginSend:
         plugin.setup(win)
 
         fake_broker.list_receivers_response = [
-            (2000, "com.qdistro.Qterminator.uid2000", "Qterminator"),
-            (3000, "com.qdistro.Qnotebook.uid3000", "Qnotebook"),
+            (2000, "org.qdistro.Qterminator.uid2000", "Qterminator"),
+            (3000, "org.qdistro.Qnotebook.uid3000", "Qnotebook"),
         ]
 
         # Stub QMenu.exec so the menu doesn't try to enter a nested
@@ -314,7 +314,7 @@ class TestQnotebookPluginSend:
         monkeypatch.setattr(mod.QMenu, "exec", _fake_exec)
 
         plugin._open_send_menu()
-        assert ("ListReceivers", (), {"dbus_interface": "com.qdistro.AdminBroker1"}) \
+        assert ("ListReceivers", (), {"dbus_interface": "org.qdistro.AdminBroker1"}) \
             in fake_broker.calls
         assert any("Qterminator" in a for a in captured.get("actions", []))
         assert any("Qnotebook" in a for a in captured.get("actions", []))
@@ -336,7 +336,7 @@ class TestQnotebookPluginSend:
         # List contains self + a peer; we should only see peer.
         fake_broker.list_receivers_response = [
             (3000, my_svc, "Qnotebook"),  # self
-            (2000, "com.qdistro.Qterminator.uid2000", "Qterminator"),
+            (2000, "org.qdistro.Qterminator.uid2000", "Qterminator"),
         ]
         captured: dict = {}
         monkeypatch.setattr(mod.QMenu, "exec",
@@ -352,7 +352,7 @@ class TestQnotebookPluginRelayWorker:
     def test_relay_worker_calls_send_to(self, fake_broker):
         mod = _load_qnotebook_plugin()
         import qdistro_app
-        w = mod._RelayWorker(3000, "com.qdistro.Qnotebook.uid3000",
+        w = mod._RelayWorker(3000, "org.qdistro.Qnotebook.uid3000",
                              "text/plain", "payload")
         w.run()  # sync: don't spin Qt thread machinery
         # The SDK's send_to dispatches a RelayMessage on the system bus.
@@ -362,7 +362,7 @@ class TestQnotebookPluginRelayWorker:
         _name, args, _ = [c for c in fake_broker.calls
                           if c[0] == "RelayMessage"][0]
         assert int(args[0]) == 3000
-        assert str(args[1]) == "com.qdistro.Qnotebook.uid3000"
+        assert str(args[1]) == "org.qdistro.Qnotebook.uid3000"
         assert str(args[2]) == "text/plain"
         assert str(args[3]) == "payload"
 
@@ -370,8 +370,8 @@ class TestQnotebookPluginRelayWorker:
         mod = _load_qnotebook_plugin()
         import dbus
         fake_broker.relay_message_effect = dbus.DBusException(
-            "denied", name="com.qdistro.AdminBroker1.Denied")
-        w = mod._RelayWorker(3000, "com.qdistro.Qnotebook.uid3000",
+            "denied", name="org.qdistro.AdminBroker1.Denied")
+        w = mod._RelayWorker(3000, "org.qdistro.Qnotebook.uid3000",
                              "text/plain", "payload")
         results: list[tuple[bool, str]] = []
         w.done.connect(lambda ok, msg: results.append((ok, msg)))
@@ -476,7 +476,7 @@ class TestQterminatorPluginMenu:
         plugin = mod.QdistroSendToPlugin()
         plugin.activate(_make_fake_terminator_window())
         fake_broker.list_receivers_response = [
-            (3000, "com.qdistro.Qnotebook.uid3000", "Qnotebook"),
+            (3000, "org.qdistro.Qnotebook.uid3000", "Qnotebook"),
         ]
         captured: dict = {}
         monkeypatch.setattr(mod.QMenu, "exec",
@@ -486,7 +486,7 @@ class TestQterminatorPluginMenu:
         term._selection = "some selected text"
         plugin._open_send_menu(term)
         assert ("ListReceivers", (),
-                {"dbus_interface": "com.qdistro.AdminBroker1"}) \
+                {"dbus_interface": "org.qdistro.AdminBroker1"}) \
             in fake_broker.calls
         assert any("Qnotebook" in a for a in captured.get("actions", []))
 
@@ -494,7 +494,7 @@ class TestQterminatorPluginMenu:
 class TestQterminatorPluginRelayWorker:
     def test_relay_worker_calls_send_to(self, fake_broker):
         mod = _load_qterminator_plugin()
-        w = mod._RelayWorker(3000, "com.qdistro.Qnotebook.uid3000",
+        w = mod._RelayWorker(3000, "org.qdistro.Qnotebook.uid3000",
                              "text/plain", "payload")
         w.run()
         assert any(c[0] == "RelayMessage" for c in fake_broker.calls)

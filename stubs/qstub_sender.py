@@ -25,9 +25,9 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QMessageBox, QMenu, QPushButton,
 )
 
-BROKER_BUS = "com.qdistro.AdminBroker1"
-BROKER_PATH = "/com/qdistro/AdminBroker1"
-BROKER_IFACE = "com.qdistro.AdminBroker1"
+BROKER_BUS = "org.qdistro.AdminBroker1"
+BROKER_PATH = "/org/qdistro/AdminBroker1"
+BROKER_IFACE = "org.qdistro.AdminBroker1"
 
 # WaitForDecision's default is 10 minutes (matches SDK). A sender
 # that locks its UI for that long isn't usable; Phase 3 picks 120s
@@ -106,7 +106,7 @@ class Sender(QMainWindow):
         me_uid = os.geteuid()
         visible = [r for r in receivers
                    if not (r[0] == me_uid and r[1].startswith(
-                       "com.qdistro.StubSender"))]
+                       "org.qdistro.StubSender"))]
         if not visible:
             a = QAction("(no receivers running)", menu)
             a.setEnabled(False)

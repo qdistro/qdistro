@@ -64,7 +64,7 @@ def _set_fake_relay(replies):
 class TestContainersSubcommand:
     def test_text_output(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True,
                 "containers": [
@@ -87,7 +87,7 @@ class TestContainersSubcommand:
 
     def test_json_output(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "containers": [],
             }),
@@ -101,7 +101,7 @@ class TestContainersSubcommand:
 
     def test_relay_failure_nonzero_exit(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid9999",
+            ("SYSTEM", "org.qdistro.UserRelay.uid9999",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False, "error": "no_bridge_found",
             }),
@@ -113,7 +113,7 @@ class TestContainersSubcommand:
 
     def test_empty_list_prints_placeholder(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "containers": [],
             }),
@@ -127,7 +127,7 @@ class TestContainersSubcommand:
 class TestTabsSubcommand:
     def test_text_output_marks_active(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True,
                 "tabs": [
@@ -148,7 +148,7 @@ class TestTabsSubcommand:
 
     def test_empty_tabs_placeholder(self, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "tabs": [],
             }),
@@ -158,7 +158,7 @@ class TestTabsSubcommand:
 
     def test_calls_tabs_list_op(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps(
                 {"ok": True, "tabs": []}),
         })
@@ -197,7 +197,7 @@ def populated_recall_db(tmp_path):
 class TestSearchSubcommand:
     def test_search_with_live_join(self, populated_recall_db, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True,
                 "tabs": [
@@ -227,7 +227,7 @@ class TestSearchSubcommand:
         """U3 fix: search text output prints the URL — that's what an
         admin grepping for 'is this URL open?' actually wants."""
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "tabs": [],
             }),
@@ -246,7 +246,7 @@ class TestSearchSubcommand:
         with ok/error/detail so consumers can programmatically detect
         relay failures."""
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "tabs": [
                     {"id": 7, "url": "https://a.example/article",
@@ -277,7 +277,7 @@ class TestSearchSubcommand:
         rc=0 (full success). Recall results still print. JSON shape
         carries live.ok=false + error code."""
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False, "error": "relay_call_failed",
                 "detail": "no relay for uid 2000",
@@ -295,7 +295,7 @@ class TestSearchSubcommand:
     def test_search_relay_failure_json_carries_error(
             self, populated_recall_db, capsys):
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": False, "error": "no_bridge_found",
             }),
@@ -358,7 +358,7 @@ class TestSearchSubcommand:
         monkeypatch.setattr(eng, "search", _broken_search)
 
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps(
                  {"ok": True, "tabs": []}),
         })
@@ -418,7 +418,7 @@ class TestRootCheck:
         monkeypatch.setattr(CLI, "_require_root", _REAL_REQUIRE_ROOT)
         monkeypatch.setattr(CLI.os, "geteuid", lambda: 0)
         _set_fake_relay({
-            ("SYSTEM", "com.qdistro.UserRelay.uid2000",
+            ("SYSTEM", "org.qdistro.UserRelay.uid2000",
              "ForwardBrowserBridgeOp"): json.dumps({
                 "ok": True, "containers": [],
             }),
@@ -440,28 +440,28 @@ class TestRootCheck:
 
 class TestCallsRelayWithCorrectUid:
     """Pin that --uid N actually drives a call to
-    com.qdistro.UserRelay.uidN — surprisingly absent from the
+    org.qdistro.UserRelay.uidN — surprisingly absent from the
     initial test set."""
 
     def test_containers_routes_to_uid_specific_relay(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid4242",
+            ("SYSTEM", "org.qdistro.UserRelay.uid4242",
              "ForwardBrowserBridgeOp"): json.dumps(
                  {"ok": True, "containers": []}),
         })
         _client.set_dbus_client(fake)
         CLI.main(["containers", "--uid", "4242"])
-        assert fake.calls[0]["service"] == "com.qdistro.UserRelay.uid4242"
+        assert fake.calls[0]["service"] == "org.qdistro.UserRelay.uid4242"
 
     def test_tabs_routes_to_uid_specific_relay(self):
         fake = _FakeDBus(replies={
-            ("SYSTEM", "com.qdistro.UserRelay.uid7777",
+            ("SYSTEM", "org.qdistro.UserRelay.uid7777",
              "ForwardBrowserBridgeOp"): json.dumps(
                  {"ok": True, "tabs": []}),
         })
         _client.set_dbus_client(fake)
         CLI.main(["tabs", "--uid", "7777"])
-        assert fake.calls[0]["service"] == "com.qdistro.UserRelay.uid7777"
+        assert fake.calls[0]["service"] == "org.qdistro.UserRelay.uid7777"
 
 
 class TestWalkDbsValidation:

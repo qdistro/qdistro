@@ -148,9 +148,9 @@ EOF
 # Give inotify + RulesReloaded a moment.
 for _ in $(seq 1 25); do
     REPLY=$(dbus-send --system --print-reply=literal \
-        --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.CheckPermission \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
         "string:qdistro.tier1.spawn:sleep" \
         "dict:string:string:" 2>/dev/null \
         | tr -d ' \t\n')

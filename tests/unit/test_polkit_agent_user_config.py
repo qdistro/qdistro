@@ -48,12 +48,12 @@ class TestLayered:
 
     def test_user_override_wins_in_select(self, tmp_path):
         u = tmp_path / "user.conf"
-        u.write_text("com.qdistro.pwd.* = fprint\n")
+        u.write_text("org.qdistro.pwd.* = fprint\n")
         s = tmp_path / "system.conf"
-        s.write_text("com.qdistro.pwd.* = pam\n")
+        s.write_text("org.qdistro.pwd.* = pam\n")
         out = load_method_config_layered(
             user_path=str(u), system_path=str(s))
-        assert select_method("com.qdistro.pwd.unlock", out) == "fprint"
+        assert select_method("org.qdistro.pwd.unlock", out) == "fprint"
 
     def test_default_user_path_expands_home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))

@@ -81,7 +81,7 @@ Runs as root (or with the necessary capabilities).
 - For each request:
  1. Peer credentials + `/proc/<pid>/exe` + SELinux label identify the
  caller — layered identity.
- 2. Constructs a polkit action `com.qdistro.sudo.exec` with detail
+ 2. Constructs a polkit action `org.qdistro.sudo.exec` with detail
  annotations (target_user, argv, caller details).
  3. Polkit consults `qbus-admin` rules and the approval cache.
  4. If cache miss and no auto-allow rule: polkit agent prompts (tty3 or
@@ -178,14 +178,14 @@ prompt:
 
 ```yaml
 - match:
- action: com.qdistro.sudo.exec
+ action: org.qdistro.sudo.exec
  caller_user: admin
  argv_prefix: ["/usr/bin/systemctl"]
  action: allow
  scope: session
 
 - match:
- action: com.qdistro.sudo.exec
+ action: org.qdistro.sudo.exec
  caller_user: dev-user
  target_user: root
  argv_exact: ["/usr/bin/apt-get", "update"]
@@ -283,7 +283,7 @@ loudly — encourages migrating scripts to `qsu`.
 
 qsu is **one more caller** on the qbus-admin broker. It reuses:
 
-- The polkit namespace (`com.qdistro.*`).
+- The polkit namespace (`org.qdistro.*`).
 - The policy rules engine.
 - The admin polkit agent UI (extended with the scope picker).
 - Phone approval routing.
@@ -326,4 +326,4 @@ realistic abuse.
 | `--keep-env VAR` policy-gated env passthrough | PLANNED |
 | Sudo compat wrapper (`/usr/bin/sudo` → `qsu`) | PLANNED (Phase-2 per qsu.py docstring) |
 | Phone approval routing for qsu prompts | PLANNED |
-| Polkit action namespace (`com.qdistro.sudo.exec`) | PARTIAL — the broker uses `qsu.exec:<target>` natively; polkit-action shim is not wired |
+| Polkit action namespace (`org.qdistro.sudo.exec`) | PARTIAL — the broker uses `qsu.exec:<target>` natively; polkit-action shim is not wired |

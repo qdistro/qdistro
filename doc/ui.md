@@ -323,7 +323,7 @@ states. Conventions:
 
 ### qdistro UIModel D-Bus interface
 
-`com.qdistro.App1.UIModel` (extends the SDK interface):
+`org.qdistro.App1.UIModel` (extends the SDK interface):
 
 ```
 GetDialogTree() -> json # if a dialog is currently open

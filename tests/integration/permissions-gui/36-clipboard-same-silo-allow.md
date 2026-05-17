@@ -39,9 +39,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardTransfer \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardTransfer \
   string:"user1" \
   string:"user1" \
   array:string:"text/plain" \
@@ -88,9 +88,9 @@ YAML='- name: scenario-36-deny-user1
   rationale: should never fire — broker short-circuits same-silo
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"36-rule.yaml" \
   string:"$YAML"
 EOF
@@ -100,9 +100,9 @@ sleep 1
 
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckClipboardTransfer \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckClipboardTransfer \
   string:"user1" \
   string:"user1" \
   array:string:"text/plain" \

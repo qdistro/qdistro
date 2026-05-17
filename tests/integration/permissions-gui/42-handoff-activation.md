@@ -46,9 +46,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckHandoffActivation \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckHandoffActivation \
   string:"user1" \
   string:"user1" \
   string:"org.mozilla.firefox" \
@@ -76,9 +76,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckHandoffActivation \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckHandoffActivation \
   string:"user1" \
   string:"admin" \
   string:"org.mozilla.firefox" \
@@ -113,9 +113,9 @@ YAML='- name: allow-firefox-handoff-user1-to-admin
   rationale: scenario 42 — per-app handoff opt-in
 '
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.SaveRule \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.SaveRule \
   string:"42-allow-firefox.yaml" \
   string:"$YAML"
 EOF
@@ -126,9 +126,9 @@ sleep 1
 # Same call as S2: now allows because app_id matches.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckHandoffActivation \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckHandoffActivation \
   string:"user1" \
   string:"admin" \
   string:"org.mozilla.firefox" \
@@ -141,9 +141,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # Different source app_id: rule does NOT match, default-deny applies.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- dbus-send --system --print-reply \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckHandoffActivation \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckHandoffActivation \
   string:"user1" \
   string:"admin" \
   string:"com.google.Chrome" \
@@ -179,9 +179,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u work -- dbus-send --system --print-reply --reply-timeout=2000 \
-  --dest=com.qdistro.AdminBroker1 \
-  /com/qdistro/AdminBroker1 \
-  com.qdistro.AdminBroker1.CheckHandoffActivation \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.CheckHandoffActivation \
   string:"user1" string:"admin" string:"x" string:"" string:"" 2>&1
 EOF
 )
@@ -189,7 +189,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 **Assert**: output contains `org.freedesktop.DBus.Error.AccessDenied`
-or `com.qdistro.AdminBroker1.AccessDenied` — handoff activation is
+or `org.qdistro.AdminBroker1.AccessDenied` — handoff activation is
 admin-only by both bus policy and broker code.
 
 ## Teardown

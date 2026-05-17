@@ -53,11 +53,11 @@ $VMGUI "$VM" screenshot /tmp/12-s1-empty.png
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.StubNotepad.uid3000 \
+ string:org.qdistro.StubNotepad.uid3000 \
  string:text/plain \
  string:hello_visual \
  >/tmp/12-relay.out 2>&1 &
@@ -74,9 +74,9 @@ a substring that must be visible somewhere on screen. OCR
 whitespace can be flaky, so match on the core words, not
 character-perfect alignment:
 - `uid=2000` (detail pane header).
-- `app.send-to:3000:com.qdistro.StubNotepad.uid3000` (action line).
+- `app.send-to:3000:org.qdistro.StubNotepad.uid3000` (action line).
 - `kind=text/plain`, `payload=hello_visual`, `target_uid=3000`,
- `target_service=com.qdistro.StubNotepad.uid3000` (all four keys
+ `target_service=org.qdistro.StubNotepad.uid3000` (all four keys
  in the details line — the broker detail sanitiser may join them
  with `,` and the font may wrap, but each key=value substring
  must be present).
@@ -113,9 +113,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.StubNotepad.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetDocument'
+ --dest=org.qdistro.StubNotepad.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetDocument'
 
 SQL_AUDIT_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT caller_uid, action, decision, scope, source, approver_uid
@@ -133,7 +133,7 @@ $VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approv
 **Assert**:
 - GetDocument output contains the substring `[text/plain] hello_visual`.
 - Audit row equals
- `2000|app.send-to:3000:com.qdistro.StubNotepad.uid3000|1|once|prompt|1000`.
+ `2000|app.send-to:3000:org.qdistro.StubNotepad.uid3000|1|once|prompt|1000`.
 - Approvals-row count is `0` — one_shot actions never cache.
 
 ## Teardown

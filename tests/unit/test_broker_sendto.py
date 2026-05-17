@@ -139,28 +139,28 @@ class TestRelayActionFormat:
     def test_action_encodes_target_uid_and_service(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.StubNotepad.uid3000",
+            3000, "org.qdistro.StubNotepad.uid3000",
             "text/plain", "hi", cb.reply, cb.error)
         assert len(broker._pending) == 1
         req = next(iter(broker._pending.values()))
-        assert req.action == "app.send-to:3000:com.qdistro.StubNotepad.uid3000"
+        assert req.action == "app.send-to:3000:org.qdistro.StubNotepad.uid3000"
 
     def test_details_contains_payload_and_kind(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.StubNotepad.uid3000",
+            3000, "org.qdistro.StubNotepad.uid3000",
             "text/plain", "the payload",
             cb.reply, cb.error)
         req = next(iter(broker._pending.values()))
         assert req.details["kind"] == "text/plain"
         assert req.details["payload"] == "the payload"
         assert req.details["target_uid"] == "3000"
-        assert req.details["target_service"] == "com.qdistro.StubNotepad.uid3000"
+        assert req.details["target_service"] == "org.qdistro.StubNotepad.uid3000"
 
     def test_request_is_one_shot(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.StubNotepad", "k", "v",
+            3000, "org.qdistro.StubNotepad", "k", "v",
             cb.reply, cb.error)
         req = next(iter(broker._pending.values()))
         assert req.one_shot is True
@@ -172,7 +172,7 @@ class TestRelayActionFormat:
 class TestRelayMessageValidation:
     def test_negative_target_uid_errors(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(-1, "com.qdistro.A", "k", "v",
+        broker.RelayMessage(-1, "org.qdistro.A", "k", "v",
                             cb.reply, cb.error)
         assert cb.replies == []
         assert len(cb.errors) == 1
@@ -187,10 +187,10 @@ class TestRelayMessageValidation:
 
     @pytest.mark.parametrize("bad_service", [
         "",
-        "com.qdistro.",
-        "com.qdistro..Nope",
-        "com.qdistro.Bad-Name",
-        "com.qdistro.Name\nInjected",
+        "org.qdistro.",
+        "org.qdistro..Nope",
+        "org.qdistro.Bad-Name",
+        "org.qdistro.Name\nInjected",
         "com.other.Thing",
     ])
     def test_rejects_malformed_service_names(self, broker, cb, bad_service):
@@ -203,7 +203,7 @@ class TestRelayMessageValidation:
 
     def test_valid_request_enqueues_and_signals(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "text/plain", "hi",
                             cb.reply, cb.error)
         assert cb.errors == []
@@ -220,10 +220,10 @@ class TestOneShotBypassesCache:
         # Seed a permissive cache row for the exact (uid, action, exe).
         broker.cache.store(
             2000,
-            "app.send-to:3000:com.qdistro.StubNotepad.uid3000",
+            "app.send-to:3000:org.qdistro.StubNotepad.uid3000",
             "/usr/bin/peer", "forever", True, ADMIN_UID)
         broker.set_peer(uid=2000, exe="/usr/bin/peer")
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "k", "v", cb.reply, cb.error)
         req = next(iter(broker._pending.values()))
         # Decision not short-circuited — admin must still approve.
@@ -238,14 +238,14 @@ class TestOneShotBypassesCache:
   decision: allow
   match:
     uid: 2000
-    action: "app.send-to:3000:com.qdistro.StubNotepad.uid3000"
+    action: "app.send-to:3000:org.qdistro.StubNotepad.uid3000"
 """)
         br = _StubBroker(
             str(tmp_path / "a.sqlite"),
             str(tmp_path / "b.sqlite"),
             str(rules_dir))
         br.set_peer(uid=2000)
-        br.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        br.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                         "k", "v", cb.reply, cb.error)
         req = next(iter(br._pending.values()))
         assert req.decision is None, (
@@ -257,7 +257,7 @@ class TestOneShotBypassesCache:
 class TestDecideOneShotScope:
     def _enqueue(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "text/plain", "hi",
                             cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
@@ -283,7 +283,7 @@ class TestDecideOneShotScope:
         broker.DecideRequest(rid, "allow", "once")
         # Forward invoked once with the right args.
         assert broker.forwards == [
-            (3000, "com.qdistro.StubNotepad.uid3000", "text/plain", "hi"),
+            (3000, "org.qdistro.StubNotepad.uid3000", "text/plain", "hi"),
         ]
         # Reply delivered, no error.
         assert cb.replies == [()]
@@ -311,7 +311,7 @@ class TestDecideOneShotScope:
         import dbus
         rid = self._enqueue(broker, cb)
         broker.forward_exc = dbus.DBusException(
-            "relay not running", name="com.qdistro.AdminBroker1.TargetNotReady")
+            "relay not running", name="org.qdistro.AdminBroker1.TargetNotReady")
         broker.DecideRequest(rid, "allow", "once")
         assert cb.replies == []
         assert len(cb.errors) == 1
@@ -335,7 +335,7 @@ class TestAuditTrail:
 
     def test_approve_writes_prompt_row(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "text/plain", "hi",
                             cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
@@ -345,7 +345,7 @@ class TestAuditTrail:
         assert len(rows) == 1
         r = rows[0]
         assert r["caller_uid"] == 2000
-        assert r["action"] == "app.send-to:3000:com.qdistro.StubNotepad.uid3000"
+        assert r["action"] == "app.send-to:3000:org.qdistro.StubNotepad.uid3000"
         assert r["decision"] == 1
         assert r["scope"] == "once"
         assert r["source"] == "prompt"
@@ -353,7 +353,7 @@ class TestAuditTrail:
 
     def test_deny_writes_prompt_row_decision_zero(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "text/plain", "hi",
                             cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
@@ -365,7 +365,7 @@ class TestAuditTrail:
 
     def test_forbidden_scope_does_not_write_allow(self, broker, cb):
         broker.set_peer(uid=2000)
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad.uid3000",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad.uid3000",
                             "k", "v", cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
         broker.set_peer(uid=ADMIN_UID)

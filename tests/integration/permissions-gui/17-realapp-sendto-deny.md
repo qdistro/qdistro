@@ -53,9 +53,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.Qnotebook.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetLastReceived' > /tmp/17-baseline.out 2>&1
+ --dest=org.qdistro.Qnotebook.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetLastReceived' > /tmp/17-baseline.out 2>&1
 echo "=== pre-deny baseline ==="
 cat /tmp/17-baseline.out
 ```
@@ -68,11 +68,11 @@ cat /tmp/17-baseline.out
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.Qnotebook.uid3000 \
+ string:org.qdistro.Qnotebook.uid3000 \
  string:text/plain \
  string:please_deny_me \
  >/tmp/17-relay.out 2>&1 &
@@ -112,9 +112,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.Qnotebook.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetLastReceived' > /tmp/17-after.out 2>&1
+ --dest=org.qdistro.Qnotebook.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetLastReceived' > /tmp/17-after.out 2>&1
 cat /tmp/17-after.out
 
 $VMEXEC "$VM" 'cat /tmp/17-relay.out'
@@ -133,7 +133,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
  (It may equal the baseline captured in Setup, or be empty if
  work2's qnotebook had no prior Receive this session.)
 - `/tmp/17-relay.out` contains EITHER
- `com.qdistro.AdminBroker1.Denied` in its error-name line OR
+ `org.qdistro.AdminBroker1.Denied` in its error-name line OR
  `org.freedesktop.DBus.Error.NoReply`. Both indicate the sender
  did not get a successful `method return`; the ground-truth
  suppression check is the GetLastReceived assertion above +
@@ -145,7 +145,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
  dbus-send is no longer listening for. What must NOT happen
  is a `method return` with no error — that would indicate
  success was reported to the caller.
-- Audit row: `2000|app.send-to:3000:com.qdistro.Qnotebook.uid3000|0|once|prompt`.
+- Audit row: `2000|app.send-to:3000:org.qdistro.Qnotebook.uid3000|0|once|prompt`.
 
 ## Teardown
 

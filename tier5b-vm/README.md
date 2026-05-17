@@ -22,7 +22,7 @@ polish on a shipping foundation.
 | `spawn-tier5b.sh` | host receiver: spawns the VM, waits for qga, runs `qdistro-secctx-exec --silo <silo> waypipe --vsock client -- ...` so the outer wl_client carries the secctx triple |
 | `qdistro-tier5b-cleanup.sh` | idempotent destroy + undefine + overlay-unlink |
 | `domain-template.xml` | libvirt domain XML; vsock CID in 100..N range to avoid colliding with tier-5's 3..N |
-| `qdistro_integration.py` | App1 launcher entry — claims `com.qdistro.Tier5bVM.uidNNNN` |
+| `qdistro_integration.py` | App1 launcher entry — claims `org.qdistro.Tier5bVM.uidNNNN` |
 
 ## Secctx — why it's stamped host-side
 
@@ -51,7 +51,7 @@ inside the guest as a separate task.
 | publisher | session launches arbitrary apps | publisher hard-codes one binary at build time |
 | guest RAM default | 512 MiB | 1 GiB |
 | CID range | 3..N | 100..N |
-| App1 bus name | (no entry) | `com.qdistro.Tier5bVM.uidNNNN` |
+| App1 bus name | (no entry) | `org.qdistro.Tier5bVM.uidNNNN` |
 | secctx engine | `qdistro.tier5` | `qdistro.tier5b` |
 
 ## Build + run

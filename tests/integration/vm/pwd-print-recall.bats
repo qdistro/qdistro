@@ -69,7 +69,7 @@ setup() {
     assert_output_contains "PASS: install-print-vm --remove on absent domain"
     assert_output_contains "PASS: domain-template.xml structure"
     assert_output_contains "PASS: attach/detach --help"
-    assert_output_contains "PASS: com.qdistro.print.policy ships all 5 actions"
+    assert_output_contains "PASS: org.qdistro.print.policy ships all 5 actions"
     assert_output_contains "PASS: §spec/20 Phase-9 §step 2 print-VM helpers probe"
 }
 

@@ -52,11 +52,11 @@ def close(id: str):
  ...
 ```
 
-D-Bus interface: `com.qdistro.App1.Subunits` on the app's session bus.
+D-Bus interface: `org.qdistro.App1.Subunits` on the app's session bus.
 
 ## WM consumption
 
-The compositor listens on `com.qdistro.App1.Subunits` for each client window
+The compositor listens on `org.qdistro.App1.Subunits` for each client window
 whose app registers as a provider. For those windows the WM shows a
 collapsible sub-list:
 
@@ -84,7 +84,7 @@ Browsers don't import `qdistro_app`. Instead, the existing bridge plumbing
 
 1. The extension tracks tabs per browser-window.
 2. The bridge forwards tab-list updates.
-3. `qdistro-browser` **impersonates** `com.qdistro.App1.Subunits` on behalf
+3. `qdistro-browser` **impersonates** `org.qdistro.App1.Subunits` on behalf
  of each browser top-level — it registers a virtual subunit provider keyed
  to each browser window's Wayland surface.
 4. The WM treats it identically to a first-party provider.
@@ -111,7 +111,7 @@ Prefer nested-in-container for browsers.
 
 The WM wants to activate tab T in browser B's subunit list:
 
-1. The WM calls `com.qdistro.App1.Subunits.Activate("tab:T")` on B's
+1. The WM calls `org.qdistro.App1.Subunits.Activate("tab:T")` on B's
  virtual provider.
 2. The virtual provider (`qdistro-browser`) converts to a bridge call:
  `tabs.activate(T)`.

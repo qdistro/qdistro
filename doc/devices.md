@@ -11,7 +11,7 @@ device nodes for sensitive hardware. Enforcement is layered:
  device nodes not on the whitelist.
 3. **D-Bus policy** — system services (NetworkManager, bluez, fprintd) only
  accept calls from admin's uid.
-4. **polkit rules** — qdistro actions namespaced `com.qdistro.*` always
+4. **polkit rules** — qdistro actions namespaced `org.qdistro.*` always
  route to admin's approval agent.
 
 Users access devices only via **virtualized endpoints** surfaced by

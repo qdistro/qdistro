@@ -105,7 +105,7 @@ class TestRelayGate:
         broker = broker_factory({3000: "Stopped"})
         broker.set_peer(uid=2000)
         cb = _CB()
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad",
                             "text/plain", "hi", cb.reply, cb.error)
         assert cb.replies == []
         assert len(cb.errors) == 1
@@ -117,7 +117,7 @@ class TestRelayGate:
         broker = broker_factory({3000: "Frozen"})
         broker.set_peer(uid=2000)
         cb = _CB()
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad",
                             "text/plain", "hi", cb.reply, cb.error)
         assert len(cb.errors) == 1
         assert "SiloNotActive" in cb.errors[0].get_dbus_name()
@@ -126,7 +126,7 @@ class TestRelayGate:
         broker = broker_factory({3000: "Active"})
         broker.set_peer(uid=2000)
         cb = _CB()
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad",
                             "text/plain", "hi", cb.reply, cb.error)
         # Enqueued for admin approval — no immediate error.
         assert len(cb.errors) == 0
@@ -138,7 +138,7 @@ class TestRelayGate:
         broker = broker_factory({})
         broker.set_peer(uid=2000)
         cb = _CB()
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad",
                             "text/plain", "hi", cb.reply, cb.error)
         assert len(cb.errors) == 0
         assert len(broker._pending) == 1
@@ -151,7 +151,7 @@ class TestRelayGate:
         broker = broker_factory({3000: "Unreachable"})
         broker.set_peer(uid=2000)
         cb = _CB()
-        broker.RelayMessage(3000, "com.qdistro.StubNotepad",
+        broker.RelayMessage(3000, "org.qdistro.StubNotepad",
                             "text/plain", "hi", cb.reply, cb.error)
         assert cb.replies == []
         assert len(cb.errors) == 1

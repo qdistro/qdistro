@@ -95,7 +95,7 @@ init_daemon_domain(qdistro_broker_t, qdistro_broker_exec_t)
 #
 
 # D-Bus client. The broker claims a well-known name on the SYSTEM
-# bus (com.qdistro.AdminBroker1) and dispatches both inbound calls
+# bus (org.qdistro.AdminBroker1) and dispatches both inbound calls
 # from qdshell / admin-app and outbound RulesReloaded / Decided /
 # RequestPending broadcasts. The interface here covers the connectto
 # + sock_file write + bus message forwarding leg.
@@ -104,7 +104,7 @@ dbus_system_bus_client(qdistro_broker_t)
 # that does NOT include `acquire_svc` (unlike upstream refpolicy
 # which lumps both into one interface). Without this explicit rule
 # the broker can talk on the bus but cannot
-# RequestName('com.qdistro.AdminBroker1') — dbus-broker rejects the
+# RequestName('org.qdistro.AdminBroker1') — dbus-broker rejects the
 # request with `org.freedesktop.DBus.Error.AccessDenied: Request to
 # own name refused by policy` and the broker dies on startup. The
 # policy XML's `<allow own="...">` doesn't help: the SELinux dbus

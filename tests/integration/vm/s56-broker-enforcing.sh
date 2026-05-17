@@ -65,7 +65,7 @@ fi
 systemctl restart qdistro-admin-broker.service 2>/dev/null || true
 # Give the unit a moment to bind its bus name.
 for _ in $(seq 1 20); do
-    if dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
+    if dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
             / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
         break
     fi
@@ -86,9 +86,9 @@ probe_ok=1
 
 # CheckClipboardTransfer signature: ss as(...)ssss → s
 # Use a cross-silo synthetic pair so it hits the rules engine.
-if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.CheckClipboardTransfer \
+if ! dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckClipboardTransfer \
         string:user1 string:admin \
         array:string:"text/plain" \
         string: string: string: \
@@ -99,9 +99,9 @@ if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
 fi
 
 # ListRules — admin/root-only; root caller here so it should succeed.
-if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.ListRules \
+if ! dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.ListRules \
         >/tmp/s56-lr.log 2>&1; then
     cat /tmp/s56-lr.log >&2
     probe_ok=0
@@ -109,9 +109,9 @@ if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
 fi
 
 # GetPending — what the bats prose calls 'ListPending'. No args.
-if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.GetPending \
+if ! dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.GetPending \
         >/tmp/s56-gp.log 2>&1; then
     cat /tmp/s56-gp.log >&2
     probe_ok=0
@@ -119,9 +119,9 @@ if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
 fi
 
 # ListHistory takes one int32 (limit).
-if ! dbus-send --system --print-reply --dest=com.qdistro.AdminBroker1 \
-        /com/qdistro/AdminBroker1 \
-        com.qdistro.AdminBroker1.ListHistory \
+if ! dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.ListHistory \
         int32:25 >/tmp/s56-lh.log 2>&1; then
     cat /tmp/s56-lh.log >&2
     probe_ok=0

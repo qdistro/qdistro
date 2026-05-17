@@ -134,14 +134,14 @@ class TestSameSiloBypass:
     def test_same_uid_delivers_without_pending_request(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            2000, "com.qdistro.QNotebook.uid2000",
+            2000, "org.qdistro.QNotebook.uid2000",
             "text/plain", "hi self", cb.reply, cb.error)
         # No pending request (admin not involved).
         assert broker._pending == {}
         assert broker.pending_signals == []
         # Delivered exactly once.
         assert broker.forwards == [
-            (2000, "com.qdistro.QNotebook.uid2000", "text/plain", "hi self"),
+            (2000, "org.qdistro.QNotebook.uid2000", "text/plain", "hi self"),
         ]
         # Reply (no error) on the async callback.
         assert cb.replies == [()]
@@ -150,18 +150,18 @@ class TestSameSiloBypass:
     def test_same_uid_writes_audit_row(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            2000, "com.qdistro.QNotebook.uid2000",
+            2000, "org.qdistro.QNotebook.uid2000",
             "text/plain", "auditable", cb.reply, cb.error)
         rows = _audit_rows(broker)
         assert len(rows) == 1
         r = rows[0]
         assert r["caller_uid"] == 2000
-        assert r["action"] == "app.send-to:2000:com.qdistro.QNotebook.uid2000"
+        assert r["action"] == "app.send-to:2000:org.qdistro.QNotebook.uid2000"
         assert r["decision"] == 1
         assert r["scope"] == "once"
         assert r["source"].startswith("same_silo ")
         assert "kind=text/plain" in r["source"]
-        assert "target=com.qdistro.QNotebook.uid2000" in r["source"]
+        assert "target=org.qdistro.QNotebook.uid2000" in r["source"]
         assert r["approver_uid"] is None
 
     def test_same_uid_skips_silo_state_probe(self, broker, cb):
@@ -171,20 +171,20 @@ class TestSameSiloBypass:
         broker._silo_state_override = lambda _u: "Frozen"
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            2000, "com.qdistro.QNotebook.uid2000",
+            2000, "org.qdistro.QNotebook.uid2000",
             "text/plain", "x", cb.reply, cb.error)
         assert cb.errors == []
         assert broker.forwards == [
-            (2000, "com.qdistro.QNotebook.uid2000", "text/plain", "x"),
+            (2000, "org.qdistro.QNotebook.uid2000", "text/plain", "x"),
         ]
 
     def test_same_uid_relay_failure_surfaces_error(self, broker, cb):
         import dbus
         broker.forward_exc = dbus.DBusException(
-            "boom", name="com.qdistro.AdminBroker1.RelayFailed")
+            "boom", name="org.qdistro.AdminBroker1.RelayFailed")
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            2000, "com.qdistro.QNotebook.uid2000",
+            2000, "org.qdistro.QNotebook.uid2000",
             "k", "v", cb.reply, cb.error)
         assert cb.replies == []
         assert len(cb.errors) == 1
@@ -199,13 +199,13 @@ class TestCrossSiloStillPrompts:
     def test_cross_uid_enqueues_request(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.QNotebook.uid3000",
+            3000, "org.qdistro.QNotebook.uid3000",
             "text/plain", "cross", cb.reply, cb.error)
         # No immediate delivery — pending until admin decides.
         assert broker.forwards == []
         assert len(broker._pending) == 1
         req = next(iter(broker._pending.values()))
-        assert req.action == "app.send-to:3000:com.qdistro.QNotebook.uid3000"
+        assert req.action == "app.send-to:3000:org.qdistro.QNotebook.uid3000"
         assert req.one_shot is True
         assert broker.pending_signals == [next(iter(broker._pending.keys()))]
         # No reply / no error yet — admin must approve.
@@ -216,7 +216,7 @@ class TestCrossSiloStillPrompts:
         broker._silo_state_override = lambda _u: "Frozen"
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.X.uid3000",
+            3000, "org.qdistro.X.uid3000",
             "k", "v", cb.reply, cb.error)
         assert cb.replies == []
         assert len(cb.errors) == 1
@@ -225,13 +225,13 @@ class TestCrossSiloStillPrompts:
     def test_cross_uid_admin_approve_delivers(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.QNotebook.uid3000",
+            3000, "org.qdistro.QNotebook.uid3000",
             "text/plain", "approve me", cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
         broker.set_peer(uid=ADMIN_UID)
         broker.DecideRequest(rid, "allow", "once")
         assert broker.forwards == [
-            (3000, "com.qdistro.QNotebook.uid3000", "text/plain", "approve me"),
+            (3000, "org.qdistro.QNotebook.uid3000", "text/plain", "approve me"),
         ]
         assert cb.replies == [()]
         assert cb.errors == []
@@ -239,7 +239,7 @@ class TestCrossSiloStillPrompts:
     def test_cross_uid_admin_deny_errors(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.QNotebook.uid3000",
+            3000, "org.qdistro.QNotebook.uid3000",
             "k", "v", cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
         broker.set_peer(uid=ADMIN_UID)
@@ -256,7 +256,7 @@ class TestAuditTrailDistinguishesPaths:
     def test_same_silo_source_marker(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            2000, "com.qdistro.QFileMan.uid2000",
+            2000, "org.qdistro.QFileMan.uid2000",
             "text/plain", "x", cb.reply, cb.error)
         rows = _audit_rows(broker)
         assert any(r["source"].startswith("same_silo ")
@@ -265,7 +265,7 @@ class TestAuditTrailDistinguishesPaths:
     def test_cross_silo_source_marker(self, broker, cb):
         broker.set_peer(uid=2000)
         broker.RelayMessage(
-            3000, "com.qdistro.QFileMan.uid3000",
+            3000, "org.qdistro.QFileMan.uid3000",
             "k", "v", cb.reply, cb.error)
         rid = next(iter(broker._pending.keys()))
         broker.set_peer(uid=ADMIN_UID)

@@ -110,7 +110,7 @@ echo "[run-enforcing] SSH sanity OK; running phase7 enforcing bats..."
 # We also reload dbus-broker so the AdminBroker1.conf policy is
 # fresh in dbus-broker's memory. Without this, qdistro-admin-broker
 # under the qdistro_broker_t domain fails its first
-# `RequestName('com.qdistro.AdminBroker1')` with
+# `RequestName('org.qdistro.AdminBroker1')` with
 # `org.freedesktop.DBus.Error.AccessDenied: Request to own name
 # refused by policy` even though the XML grants user="root" the
 # `<allow own="...">`.

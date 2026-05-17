@@ -3,7 +3,7 @@
 **What**: two real qnotebook processes, one running as `work`
 (uid 2000) on `/home/work/testnb`, one as `work2` (uid 3000) on
 `/home/work2/testnb`. Each hosts the `qdistro_sendto` plugin and
-claims `com.qdistro.Qnotebook.uid<N>` on its session bus.
+claims `org.qdistro.Qnotebook.uid<N>` on its session bus.
 Broker's `ListReceivers` returns both entries. `work` asks the
 broker to relay text to `work2`'s instance via `RelayMessage`;
 admin approves via `dbus-send`; we assert:
@@ -85,15 +85,15 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 ```bash
 $VMEXEC "$VM" 'dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.ListReceivers'
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.ListReceivers'
 ```
 
 **Assert**:
-- `int32 2000` paired with `"com.qdistro.Qnotebook.uid2000"` +
+- `int32 2000` paired with `"org.qdistro.Qnotebook.uid2000"` +
  friendly `"Qnotebook"`.
-- `int32 3000` paired with `"com.qdistro.Qnotebook.uid3000"` +
+- `int32 3000` paired with `"org.qdistro.Qnotebook.uid3000"` +
  friendly `"Qnotebook"`.
 
 ### S2 — work sends to work2, admin approves
@@ -102,11 +102,11 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:3000 \
- string:com.qdistro.Qnotebook.uid3000 \
+ string:org.qdistro.Qnotebook.uid3000 \
  string:text/plain \
  string:phase4_real_to_real \
  > /tmp/15-s2-relay.out 2>&1 &
@@ -114,15 +114,15 @@ echo $! > /tmp/15-s2-relay.pid
 sleep 1
 
 RID=$(dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.GetPending 2>&1 \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.GetPending 2>&1 \
  | grep -A1 '"id"' | grep int32 | head -1 | awk '{print $NF}')
 echo "request_id=$RID"
 runuser -u admin -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.DecideRequest \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.DecideRequest \
  int32:$RID string:allow string:once >/tmp/15-s2-decide.out 2>&1
 wait $(cat /tmp/15-s2-relay.pid) || true
 echo "=== relay.out ==="
@@ -143,9 +143,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  XDG_RUNTIME_DIR=/run/user/3000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/3000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.Qnotebook.uid3000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetLastReceived'
+ --dest=org.qdistro.Qnotebook.uid3000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetLastReceived'
 ```
 
 **Assert**: output includes `string "[text/plain] phase4_real_to_real"`.
@@ -156,11 +156,11 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
 B64=$(base64 -w0 <<'EOF'
 set -e
 runuser -u work2 -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.RelayMessage \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.RelayMessage \
  int32:2000 \
- string:com.qdistro.Qnotebook.uid2000 \
+ string:org.qdistro.Qnotebook.uid2000 \
  string:text/plain \
  string:echo_reverse \
  > /tmp/15-s4-relay.out 2>&1 &
@@ -168,14 +168,14 @@ echo $! > /tmp/15-s4-relay.pid
 sleep 1
 
 RID=$(dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.GetPending 2>&1 \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.GetPending 2>&1 \
  | grep -A1 '"id"' | grep int32 | head -1 | awk '{print $NF}')
 runuser -u admin -- dbus-send --system --print-reply \
- --dest=com.qdistro.AdminBroker1 \
- /com/qdistro/AdminBroker1 \
- com.qdistro.AdminBroker1.DecideRequest \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.DecideRequest \
  int32:$RID string:allow string:once >/tmp/15-s4-decide.out 2>&1
 wait $(cat /tmp/15-s4-relay.pid) || true
 EOF
@@ -186,9 +186,9 @@ $VMEXEC "$VM" 'runuser -u work -- env \
  XDG_RUNTIME_DIR=/run/user/2000 \
  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/2000/bus \
  dbus-send --session --print-reply \
- --dest=com.qdistro.Qnotebook.uid2000 \
- /com/qdistro/App1 \
- com.qdistro.App1.GetLastReceived'
+ --dest=org.qdistro.Qnotebook.uid2000 \
+ /org/qdistro/App1 \
+ org.qdistro.App1.GetLastReceived'
 ```
 
 **Assert**: output includes `string "[text/plain] echo_reverse"`.
@@ -208,8 +208,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 **Assert**:
 - Two rows (most recent first):
- - `3000|app.send-to:2000:com.qdistro.Qnotebook.uid2000|1|once|prompt|1000`
- - `2000|app.send-to:3000:com.qdistro.Qnotebook.uid3000|1|once|prompt|1000`
+ - `3000|app.send-to:2000:org.qdistro.Qnotebook.uid2000|1|once|prompt|1000`
+ - `2000|app.send-to:3000:org.qdistro.Qnotebook.uid3000|1|once|prompt|1000`
 
 ### S6 — cache never persisted
 
