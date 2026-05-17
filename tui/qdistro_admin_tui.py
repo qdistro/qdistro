@@ -89,9 +89,14 @@ class HelpScreen(ModalScreen):
     HELP = """\
 [b]qdistro admin TUI[/b]
 
-[b]Decide:[/b]
-  a / Ctrl+Y      Approve current request (with active scope)
-  d / Ctrl+N      Deny current request
+[b]Decide current:[/b]
+  a / Ctrl+Y / Alt+A   Approve current request (with active scope)
+  d / Ctrl+N / Alt+D   Deny current request
+  Ctrl+R               Create rule from current request
+
+[b]Bulk decide (with confirmation):[/b]
+  Ctrl+Shift+A         Approve ALL pending (scope=once)
+  Ctrl+Shift+D         Deny ALL pending
 
 [b]Scope:[/b]
   1               Just this once   (default; no cache write)
@@ -99,6 +104,10 @@ class HelpScreen(ModalScreen):
   3               24 hours
   4               Forever, any command from this user
   5               Forever, only this exact program
+  6               Forever, only this exact argv tuple
+  7               Forever, this argv basename anywhere
+  8               Forever, this argv prefix + any trailing args
+  Ctrl+Shift+1..8 Same as above (matches GUI shortcuts)
 
 [b]Navigation:[/b]
   ↑ / ↓           Move between pending requests
@@ -115,6 +124,33 @@ RequestDecided signal. Both surfaces stay in sync.
 
     def action_dismiss(self) -> None:
         self.app.pop_screen()
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """Modal yes/no confirmation. Used for bulk-decide and TUI rule
+    creation. Returns True if the user pressed y/Y/Enter, False on
+    n/N/Esc."""
+
+    BINDINGS = [
+        Binding("y,Y,enter", "confirm", "Yes", show=True),
+        Binding("n,N,escape,q", "deny", "No", show=True),
+    ]
+
+    def __init__(self, prompt: str):
+        super().__init__()
+        self._prompt = prompt
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            f"[b]{self._prompt}[/b]\n\n[dim](y) yes   (n) no[/dim]",
+            classes="help_body",
+        )
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
 
 
 class DetailPane(Static):
@@ -180,11 +216,15 @@ class AdminTuiApp(App):
     BINDINGS = [
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
-        Binding("a,ctrl+y", "approve", "Approve"),
-        Binding("d,ctrl+n", "deny", "Deny"),
+        # doc/admin-approval.md: Ctrl+Y / Alt+A approve CURRENT.
+        Binding("a,ctrl+y,alt+a", "approve", "Approve"),
+        Binding("d,ctrl+n,alt+d", "deny", "Deny"),
         Binding("ctrl+r", "create_rule_from_current", "Create Rule"),
-        Binding("alt+a", "approve_all", "Approve All"),
-        Binding("alt+d", "deny_all", "Deny All"),
+        # Bulk decide moved to Ctrl+Shift to avoid the single-keystroke
+        # blast radius the old Alt+A binding had. Both prompt for
+        # explicit confirmation.
+        Binding("ctrl+shift+a", "approve_all", "Approve All"),
+        Binding("ctrl+shift+d", "deny_all", "Deny All"),
         Binding("1", "scope('once')", "1:once"),
         Binding("2", "scope('1h')", "2:1h"),
         Binding("3", "scope('24h')", "3:24h"),
@@ -432,49 +472,157 @@ class AdminTuiApp(App):
         self.push_screen(HelpScreen())
 
     def action_create_rule_from_current(self) -> None:
-        """Create a rule from the currently selected request."""
+        """Create an allow rule from the currently selected request.
+
+        The TUI can't easily render a free-form YAML editor; we build a
+        sensible default-template rule from the request fields and
+        write it via the broker's SaveRule. Same broker validation +
+        audit trail as the GUI's Rule Editor.
+        """
         req = self._selected_request()
         if req is None:
             self.notify("No request selected", severity="warning", timeout=3)
             return
-        # In TUI, we can't easily create rules, so just notify
-        self.notify(
-            f"Would create rule for uid={req.uid} action={req.action}",
-            severity="information",
-            timeout=5,
+        # Filename: action-name with non-alphanumeric chars folded to
+        # '-'. Falls back to a timestamp suffix to avoid collisions.
+        import re
+        import time
+        slug = re.sub(r"[^A-Za-z0-9]+", "-",
+                      f"{req.action}-{req.uid}").strip("-")
+        if not slug:
+            slug = f"tui-rule-{int(time.time())}"
+        filename = f"tui-{slug}.yaml"
+
+        # Build a tight match (uid + action + exe) — exactly the
+        # selectors the request carries. Don't fall through to a
+        # match-anything rule (H1 security parity with the GUI fix).
+        yaml_body = (
+            f"- name: \"TUI rule for {req.action} from uid {req.uid}\"\n"
+            f"  decision: allow\n"
+            f"  match:\n"
+            f"    uid: {int(req.uid)}\n"
+            f"    action: {req.action!r}\n"
+            f"    exe: {req.exe!r}\n"
+            f"  scope: once\n"
+            f"  rationale: \"Auto-generated rule from request "
+            f"{int(req.id)}\"\n"
+        )
+
+        def _after_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            save = getattr(self._broker, "save_rule", None)
+            if save is None:
+                self.notify("broker has no save_rule method",
+                            severity="error", timeout=6)
+                return
+            try:
+                path = save(filename, yaml_body)
+            except Exception as e:  # noqa: BLE001
+                self.notify(f"SaveRule failed: {e}", severity="error",
+                            timeout=8)
+                return
+            self.notify(f"Rule saved to {path}",
+                        severity="information", timeout=6)
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Save rule for uid={req.uid} action={req.action} as "
+                f"{filename}?"),
+            _after_confirm,
         )
 
     def action_approve_all(self) -> None:
-        """Approve all pending requests."""
+        """Approve all pending requests with explicit confirmation.
+
+        Forces scope='once' for the bulk path regardless of the active
+        scope picker. The single-row approve action still honours
+        `self._scope`; bulk approve narrows to the safest scope to
+        avoid the forever-any-command-on-50-rows hazard the previous
+        implementation enabled (H2/H3).
+        """
         try:
             pending = self._broker.get_pending()
-            approved_count = 0
-            for req in pending:
-                self._broker.decide_request(req.id, "allow", self._scope)
-                approved_count += 1
-            self.notify(
-                f"Approved {approved_count} requests (scope: {SCOPES[self._scope]})",
-                severity="information",
-                timeout=5,
-            )
         except Exception as e:  # noqa: BLE001
-            self.notify(f"Error approving all: {e}", severity="error", timeout=8)
+            self.notify(f"broker error: {e}", severity="error", timeout=8)
+            return
+        if not pending:
+            self.notify("No pending requests", severity="information",
+                        timeout=3)
+            return
+        n = len(pending)
+
+        def _after_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            ok_count = 0
+            failures: list[tuple[int, str]] = []
+            for req in pending:
+                try:
+                    self._broker.decide_request(req.id, "allow", "once")
+                    ok_count += 1
+                except Exception as e:  # noqa: BLE001
+                    failures.append((req.id, str(e)))
+            if failures:
+                self.notify(
+                    f"Approved {ok_count} of {n}; "
+                    f"{len(failures)} failure(s) — first: "
+                    f"rid={failures[0][0]} {failures[0][1]}",
+                    severity="warning", timeout=8,
+                )
+            else:
+                self.notify(
+                    f"Approved {ok_count} requests (scope: once)",
+                    severity="information", timeout=5,
+                )
+
+        self.push_screen(
+            ConfirmScreen(
+                f"Approve all {n} pending requests (scope=once)?"),
+            _after_confirm,
+        )
 
     def action_deny_all(self) -> None:
-        """Deny all pending requests."""
+        """Deny all pending requests with explicit confirmation."""
         try:
             pending = self._broker.get_pending()
-            denied_count = 0
-            for req in pending:
-                self._broker.decide_request(req.id, "deny", self._scope)
-                denied_count += 1
-            self.notify(
-                f"Denied {denied_count} requests",
-                severity="information",
-                timeout=5,
-            )
         except Exception as e:  # noqa: BLE001
-            self.notify(f"Error denying all: {e}", severity="error", timeout=8)
+            self.notify(f"broker error: {e}", severity="error", timeout=8)
+            return
+        if not pending:
+            self.notify("No pending requests", severity="information",
+                        timeout=3)
+            return
+        n = len(pending)
+
+        def _after_confirm(ok: bool | None) -> None:
+            if not ok:
+                return
+            ok_count = 0
+            failures: list[tuple[int, str]] = []
+            for req in pending:
+                try:
+                    self._broker.decide_request(req.id, "deny", "once")
+                    ok_count += 1
+                except Exception as e:  # noqa: BLE001
+                    failures.append((req.id, str(e)))
+            if failures:
+                self.notify(
+                    f"Denied {ok_count} of {n}; "
+                    f"{len(failures)} failure(s) — first: "
+                    f"rid={failures[0][0]} {failures[0][1]}",
+                    severity="warning", timeout=8,
+                )
+            else:
+                self.notify(
+                    f"Denied {ok_count} requests",
+                    severity="information", timeout=5,
+                )
+
+        self.push_screen(
+            ConfirmScreen(f"Deny all {n} pending requests?"),
+            _after_confirm,
+        )
 
     def _decide(self, decision: str) -> None:
         req = self._selected_request()
