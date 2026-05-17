@@ -154,13 +154,29 @@ chmod 0755 "$WORK/qdistro-tier4-publisher.sh"
 cat >"$WORK/qdwin-guest-session.service" <<'UNIT'
 [Unit]
 Description=qdistro tier-4-guest nested qdwin session
-After=user@.service
-Wants=user@.service
+# §P10 fix-pass H-B: depend on the *instance* user@1000.service, not
+# the bare template `user@.service` (which is unresolvable). The
+# guest's admin user is uid 1000 (fixed by build-guest-image.sh's
+# `useradd -m -u 1000 admin`).
+After=user@1000.service
+Wants=user@1000.service
 
 [Service]
 Type=simple
 User=admin
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+# §P10 fix-pass H-B (operator-mandated simplest fix): /run is tmpfs and
+# is empty on every boot. systemd-logind would normally create
+# /run/user/1000 via pam_systemd at the first interactive login, but
+# this is a headless system unit with no PAM session. mkdir at unit
+# start guarantees the dir exists before weston tries to bind
+# wayland-0 under it.
+# TODO: loginctl enable-linger admin (proper fix — lets user@1000.service
+#       start at boot and own /run/user/1000 the systemd way). Deferred
+#       to keep the P10 prototype's startup path minimal.
+ExecStartPre=/usr/bin/mkdir -p /run/user/1000
+ExecStartPre=/usr/bin/chown admin:admin /run/user/1000
+ExecStartPre=/usr/bin/chmod 0700 /run/user/1000
 ExecStart=/usr/bin/weston --backend=headless-backend.so \
     --shell=/usr/lib64/weston/qdwin-shell.so \
     --socket=wayland-0
@@ -186,6 +202,11 @@ Type=simple
 User=admin
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 EnvironmentFile=-/etc/qdistro/tier4.env
+# §P10 fix-pass H-B: paired with qdwin-guest-session.service — ensure
+# /run/user/1000 exists for the admin user before the publisher tries
+# to use it as XDG_RUNTIME_DIR for its $SOCK_DIR resolution.
+# TODO: loginctl enable-linger admin (proper fix; see qdwin-guest-session.service).
+ExecStartPre=/usr/bin/mkdir -p /run/user/1000
 ExecStart=/bin/sh -c '/usr/local/bin/qdistro-tier4-publisher.sh "${TIER4_PORT:-7777}"'
 Restart=on-failure
 RestartSec=2
@@ -208,11 +229,31 @@ cat >"$WORK/fstab.host-mount" <<'EOF'
 qdistro-host /host virtiofs nofail,_netdev 0 0
 EOF
 
+# §P10 fix-pass SF3: write the root password to a mode-0600 temp file
+# and pass it to virt-customize as `--root-password file:<path>`.
+# Avoids leaking the plaintext via argv → /proc/PID/cmdline AND, more
+# importantly, avoids leaking it into virt-customize stderr (which
+# s109 tees to /tmp/s109-bake.log and dumps to stderr on bake failure;
+# CI logs would otherwise capture `--root-password password:<value>`).
+PW_FILE="$WORK/root-pw"
+(umask 077 && printf '%s\n' "${QDISTRO_VM_PASSWORD:?}" >"$PW_FILE")
+chmod 0600 "$PW_FILE"
+# trap already covers $WORK, but be explicit: scrub the password file
+# on exit even if the trap is somehow bypassed.
+trap 'shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"; rm -rf "$WORK"' EXIT
+
 echo "[tier4-guest-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable; zypper install works
 # directly via virt-customize. Package set per task §Phase D.
+#
+# §P10 fix-pass SF4 (correctness): virtiofsd-client is the spec'd
+# package per P10-task §Phase D. The kernel virtiofs driver alone
+# handles `mount -t virtiofs`, but virtiofsd-client ships diagnostic
+# helpers (e.g. virtiofsd-list-mounts) that the operator runbook
+# expects. Adding it now to match the spec's explicit list and avoid
+# silent divergence.
 virt-customize -a "$BASE_QCOW" \
-    --install "weston,libweston-14,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal" \
+    --install "weston,libweston-14,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal,virtiofsd-client" \
     --copy-in "$QDWIN_SO:/usr/lib64/weston/" \
     --copy-in "$QDWIN_BYSTANDER:/usr/bin/" \
     --run-command 'chmod +x /usr/bin/qdwin-bystander' \
@@ -223,7 +264,7 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'mkdir -p /etc/qdistro' \
     --copy-in "$WORK/tier4.env:/etc/qdistro/" \
     --run-command 'mkdir -p /host' \
-    --run-command "sh -c 'cat /etc/fstab >/tmp/old-fstab; cat /tmp/old-fstab >/etc/fstab; cat /etc/fstab >/tmp/check; chmod 0644 /etc/fstab'" \
+    --run-command 'chmod 0644 /etc/fstab' \
     --append-line "/etc/fstab:$(cat "$WORK/fstab.host-mount")" \
     --run-command 'useradd -m -u 1000 admin || true' \
     --run-command 'mkdir -p /run/user/1000 && chown admin:admin /run/user/1000' \
@@ -232,9 +273,14 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'systemctl enable qdwin-guest-session.service' \
     --run-command 'systemctl enable qdistro-tier4-publisher.service' \
     --run-command 'echo "qdistro-tier4-guest" >/etc/hostname' \
-    --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
+    --root-password "file:$PW_FILE" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
+
+# Scrub the password file immediately after virt-customize finishes
+# (in addition to the EXIT trap). Defence-in-depth against the file
+# being readable to any concurrent process during the bake window.
+shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"
 
 # Sparsify the result so the published base disk stays small.
 echo "[tier4-guest-build] sparsifying..."

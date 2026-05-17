@@ -138,14 +138,25 @@ if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
         echo "sock_name=$SOCK_NAME"
         echo "bystander_bin=$BYSTANDER_BIN"
         echo "xdg_runtime_dir=$XDG_RUNTIME_DIR"
-        echo "argv=waypipe --vsock -s 2:$PORT server -- $BYSTANDER_BIN --connect $SOCK_NAME --forward-all-toplevels"
+        echo "argv=waypipe --vsock -s 2:$PORT server -- $BYSTANDER_BIN --inner-display $SOCK_NAME --forward-session"
     } >"$DRY_OUT"
     exit 0
 fi
 
 # Real path: connect out to host CID=2 on $PORT via waypipe-server,
 # which exec's the bystander as its only wl_client. The bystander
-# binds inner qdwin via $SOCK_NAME and emits FORWARD lines for every
-# inner xdg_toplevel.
+# binds inner qdwin via --inner-display (a SEPARATE wl_display from
+# the ambient $WAYLAND_DISPLAY which waypipe-server has set to its
+# own intercept socket); waypipe-server then ferries the bystander's
+# outer xdg_toplevel allocation over vsock to the host.
+#
+# Shape A: --forward-session asks the bystander to create exactly one
+# outer xdg_toplevel for the whole VM session (one window per VM on
+# the host compositor), regardless of how many inner toplevels exist.
+# Inner enumeration is still logged as structured FORWARD lines on
+# stdout (so P11 / the host-side parser can correlate), but each inner
+# toplevel does NOT spawn its own outer window. Pixel-perfect mirroring
+# of inner surfaces onto the outer toplevel is P11's job; for P10 the
+# outer toplevel attaches a placeholder SHM buffer.
 exec waypipe --vsock -s "2:$PORT" server -- \
-    "$BYSTANDER_BIN" --connect "$SOCK_NAME" --forward-all-toplevels
+    "$BYSTANDER_BIN" --inner-display "$SOCK_NAME" --forward-session

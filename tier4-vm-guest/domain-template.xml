@@ -106,7 +106,15 @@
     </disk>
     <!-- virtio-snd: guest ALSA card enumerated by `aplay -l`. Drives
          the s109 PASS "virtio-snd device enumerates in guest as ALSA
-         card". P11 attaches -audiodev pipewire,id=pw0 host-side. -->
+         card". P11 attaches -audiodev pipewire,id=pw0 host-side.
+         TODO P11: add <audio> backend, e.g.
+             <audio id='1' type='pipewire'/>
+         at the <devices>-level, and reference it from this sound
+         element as
+             <sound model='virtio'><audio id='1'/></sound>.
+         For P10 the audiodev defaults to `none` (silent); the s109
+         PASS only proves the guest enumerates the virtio-snd ALSA
+         card, not that any actual audio plays back. -->
     <sound model='virtio'/>
     <video>
       <model type='virtio' heads='1'/>
