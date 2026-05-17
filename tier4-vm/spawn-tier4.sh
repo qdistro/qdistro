@@ -167,7 +167,10 @@ build_secctx_wrap() {
 resolve_template() {
     local display="$1"
     local script_dir="$2"
-    local override="${TIER4_DOMAIN_TEMPLATE:-}"
+    local override=""
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        override="${TIER4_DOMAIN_TEMPLATE:-}"
+    fi
     if [ -n "$override" ]; then
         if [ ! -f "$override" ]; then
             echo "[tier4] FAIL: TIER4_DOMAIN_TEMPLATE=$override not readable" >&2
@@ -294,7 +297,11 @@ else
         }
     done
     # Base disk: P10's qdistro-tier4-guest.qcow2.
-    TIER4_GUEST_DISK="${TIER4_GUEST_DISK:-/var/lib/libvirt/images/qdistro-tier4-guest.qcow2}"
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        TIER4_GUEST_DISK="${TIER4_GUEST_DISK:-/var/lib/libvirt/images/qdistro-tier4-guest.qcow2}"
+    else
+        TIER4_GUEST_DISK="/var/lib/libvirt/images/qdistro-tier4-guest.qcow2"
+    fi
     if [ "$DEFINE_ONLY" != "1" ] && [ ! -f "$TIER4_GUEST_DISK" ]; then
         echo "[tier4] FAIL: guest disk $TIER4_GUEST_DISK missing — bake via qdistro/tier4-vm-guest/build-guest-image.sh" >&2
         exit 3
@@ -390,6 +397,7 @@ cleanup() {
     fi
     CLEANUP_DONE=1
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
+    CLIENT_PID=
     if [ "$DOMAIN_DEFINED" = "1" ] && [ "${TIER4_KEEP_DOMAIN:-0}" != "1" ]; then
         run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
         run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
@@ -624,13 +632,14 @@ fi
 
 if [ -n "${TIER4_CID:-}" ]; then
     CID="$TIER4_CID"
+    [[ "$TIER4_CID" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: CID='$TIER4_CID' not numeric" >&2; exit 1; }
 else
     TAKEN=$(run_as_admin sh -c '
         for d in $(virsh list --all --name); do
             [ -z "$d" ] && continue
             virsh dumpxml "$d" 2>/dev/null
         done' | \
-        grep -oE "cid[[:space:]]+address='[0-9]+'" | \
+        grep -oE "<cid[^>]*address='[0-9]+'" | \
         grep -oE "[0-9]+" | sort -un || true)
     CID="$TIER4_CID_MIN"
     while echo "$TAKEN" | grep -qx "$CID"; do
@@ -643,6 +652,9 @@ else
 fi
 
 PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: PORT='$PORT' not numeric" >&2; exit 1; }
+
+maybe_overwrite_existing
 
 # --- per-VM overlay (linked clone of P10 guest disk) ------------------
 DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
@@ -663,7 +675,11 @@ if [ "$DEFINE_ONLY" != "1" ]; then
 fi
 
 # --- virtiofs share ---------------------------------------------------
-VIRTIOFS_DIR="${TIER4_VIRTIOFS_DIR:-/var/lib/qdistro/tier4/$VM_NAME/host}"
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+    VIRTIOFS_DIR="${TIER4_VIRTIOFS_DIR:-/var/lib/qdistro/tier4/$VM_NAME/host}"
+else
+    VIRTIOFS_DIR="/var/lib/qdistro/tier4/$VM_NAME/host"
+fi
 if [ ! -d "$VIRTIOFS_DIR" ]; then
     install -d -m 0755 "$VIRTIOFS_DIR"
     VIRTIOFS_OWNED=1
@@ -697,7 +713,7 @@ fi
 # Verify no SPICE elements leaked into the waypipe template — if a
 # stale tier4-vm/ template was wired in via TIER4_DOMAIN_TEMPLATE,
 # fail loud rather than silently boot SPICE under the waypipe branch.
-if grep -qE "type='spice'|spicevmc" "$TMP_XML"; then
+if grep -qE "<graphics[^>]+type='spice'|<channel[^>]+type='spicevmc'" "$TMP_XML"; then
     echo "[tier4] FAIL: waypipe template at $TEMPLATE contains SPICE elements; refusing to define" >&2
     rm -f "$TMP_XML"
     exit 4
@@ -756,6 +772,7 @@ echo "[tier4] qga ready" >&2
 # script started (banner-grepping a log file is the anti-pattern P10
 # fix-pass corrected).
 VSOCK_OK=0
+echo "[tier4] waiting for publisher on vsock://$CID:$PORT (up to 30s) ..." >&2
 if command -v socat >/dev/null 2>&1; then
     deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -830,6 +847,7 @@ chown "$ADMIN_USER" "$CLIENT_LOG" 2>/dev/null || true
 # waypipe inside tier4_control to keep RPC dispatch alive for the full
 # session.
 WAYPIPE_ARGV=(waypipe --vsock client "vsock://$CID:$PORT")
+[ "${TIER4_DEBUG:-0}" = "1" ] && WAYPIPE_ARGV+=(--debug)
 
 if [ -n "$CONTROL_SCRIPT" ] && [ -f "$CONTROL_SCRIPT" ] \
         && command -v python3 >/dev/null 2>&1; then
@@ -853,6 +871,7 @@ if [ "$USE_SECCTX" = "1" ]; then
 else
     echo "[tier4] launching waypipe-client for '$VM_NAME' (un-tagged)" >&2
 fi
+echo "[tier4] waypipe-client log: $CLIENT_LOG" >&2
 
 # setsid: a qdshell crash (the parent of this script in production)
 # must not propagate SIGHUP to waypipe-client. The client outlives the
