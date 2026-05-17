@@ -51,6 +51,8 @@ def auth():
 def test_pam_ready_emitted_on_construction(qapp, auth):
     ctrl = LockController(auth)
     auth.probe_pam.assert_called_once()
+    # ready signal is queued — pump the loop so _on_auth_ready fires
+    QCoreApplication.processEvents()
     assert ctrl.pamReady is True
 
 
@@ -114,6 +116,7 @@ def test_overlay_key_return_triggers_unlock(qapp, auth):
     from qdlocker.keysyms import XKB_Return
 
     ctrl = LockController(auth)
+    QCoreApplication.processEvents()  # let queued ready signal land
     ctrl._current_text = "pw"
     ctrl.handle_overlay_key(XKB_Return, "")
     auth.start_pam.assert_called_once()
