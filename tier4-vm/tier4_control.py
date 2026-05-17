@@ -253,6 +253,11 @@ def _install_control(vm_name: str) -> tuple[Any, Any] | tuple[None, None]:
     return receiver, ctrl
 
 
+# Module-level handle to the viewer/client process so Close() RPC can
+# signal it after destroying the VM domain (correctness S2).
+_viewer_proc = None
+
+
 def _default_close(vm_name: str) -> dict:
     """ACPI→destroy lifecycle invoked from the Close() RPC."""
     if _tier4_chrome is None:
@@ -260,6 +265,14 @@ def _default_close(vm_name: str) -> dict:
                 "stderr": "tier4_chrome not importable",
                 "orphans_reaped": 0}
     result = _tier4_chrome.close_vm(str(vm_name))
+    # After the domain is destroyed, signal the client process
+    # so it exits promptly instead of waiting for vsock kernel timeout.
+    global _viewer_proc
+    if _viewer_proc is not None and result.ok:
+        try:
+            _viewer_proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "ok": bool(result.ok),
         "method": result.method,
@@ -271,7 +284,7 @@ def _default_close(vm_name: str) -> dict:
 def _start_glib_mainloop_in_thread():
     """Spin a GLib mainloop on a daemon thread so dbus methods dispatch.
 
-    virt-viewer runs in the main thread (we wait on its subprocess). The
+    The display client runs in the main thread (we wait on its subprocess). The
     bus needs an active mainloop to deliver Close() requests; we mark
     the thread daemon so process exit doesn't hang on the loop.
     """
@@ -303,11 +316,11 @@ def _start_glib_mainloop_in_thread():
 
 
 def _drain_orphans_after_viewer_exit(vm_name: str) -> int:
-    """Best-effort: reap qdistro-forward orphans after virt-viewer exits.
+    """Best-effort: reap qdistro-forward orphans after the display client exits.
 
     The original spawn-tier4.sh trap-EXIT already runs `virsh destroy`
     + `virsh undefine`; this only reaps user-side helpers that linger
-    past the viewer.
+    past the client.
     """
     if _tier4_chrome is None:
         return 0
@@ -317,20 +330,23 @@ def _drain_orphans_after_viewer_exit(vm_name: str) -> int:
         return 0
 
 
-def _exec_or_fork_viewer(viewer_argv: list[str]) -> int:
-    """Run virt-viewer; return its exit code.
+def _exec_or_fork_client(viewer_argv: list[str]) -> int:
+    """Run the display client; return its exit code.
 
     Uses subprocess.Popen + .wait rather than os.execvp so the dbus
     mainloop on the side-thread continues to dispatch Close() RPCs
-    while the viewer is open.
+    while the client is open.
     """
-    _log(f"launching viewer argv={viewer_argv!r}")
+    _log(f"launching client argv={viewer_argv!r}")
     try:
         proc = subprocess.Popen(viewer_argv)  # noqa: S603 — argv list, no shell
     except FileNotFoundError as e:
         _log(f"viewer exec failed: {e!r}")
         return 127
-    # Forward SIGINT / SIGTERM to the viewer.
+    # Store process handle so Close() RPC can signal it.
+    global _viewer_proc
+    _viewer_proc = proc
+    # Forward SIGINT / SIGTERM to the client.
     def _forward(signum, _frame):
         try:
             proc.send_signal(signum)
@@ -342,7 +358,7 @@ def _exec_or_fork_viewer(viewer_argv: list[str]) -> int:
         except (OSError, ValueError):
             pass
     rc = proc.wait()
-    _log(f"viewer exited rc={rc}")
+    _log(f"client exited rc={rc}")
     return rc
 
 
@@ -350,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tier4_control",
         description="Tier-4 VM control wrapper: claims App1 bus name, "
-                    "exposes Close() RPC, runs virt-viewer.")
+                    "exposes Close() RPC, runs the display client.")
     parser.add_argument("--vm-name", required=True,
                         help="Libvirt domain name (== secctx silo tag).")
     parser.add_argument("viewer_argv", nargs=argparse.REMAINDER,
@@ -376,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     loop = _start_glib_mainloop_in_thread()
 
     try:
-        rc = _exec_or_fork_viewer(viewer_argv)
+        rc = _exec_or_fork_client(viewer_argv)
     finally:
         reaped = _drain_orphans_after_viewer_exit(vm_name)
         if reaped:

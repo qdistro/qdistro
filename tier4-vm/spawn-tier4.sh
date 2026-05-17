@@ -39,9 +39,9 @@
 #                        or launch the display. Used by tests that just
 #                        validate the XML substitution.
 #   TIER4_NO_VIEWER=1    Define + start the domain, skip the display
-#                        client launch. SPICE branch only — for the
-#                        waypipe branch this is implicit (we still probe
-#                        vsock readiness but don't park forever).
+#                        client launch. Works in both SPICE and waypipe
+#                        branches (probes vsock readiness, then parks
+#                        without launching any viewer/client).
 #   TIER4_DEBUG=1        Verbose viewer / client.
 #   TIER4_DOMAIN_TEMPLATE
 #                        Path override for the domain template XML.
@@ -430,7 +430,12 @@ if [ "$TIER4_DISPLAY" = "spice" ]; then
 
     # Optional bootable disk via per-VM linked clone of a base qcow2.
     DISK_BASE="${TIER4_DISK_BASE:-}"
-    DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+    # Only honor TIER4_DISK_DIR override in dry-run mode.
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+    else
+        DISK_DIR="/var/lib/libvirt/images"
+    fi
     DISK_XML=""
     if [ -n "$DISK_BASE" ]; then
         if [ ! -r "$DISK_BASE" ]; then
@@ -657,7 +662,12 @@ PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
 maybe_overwrite_existing
 
 # --- per-VM overlay (linked clone of P10 guest disk) ------------------
-DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+# --- disk dir (waypipe) — only honor override in dry-run mode ---
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+    DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+else
+    DISK_DIR="/var/lib/libvirt/images"
+fi
 DISK_PATH="$DISK_DIR/$VM_NAME.qcow2"
 install -d -m 0755 "$DISK_DIR"
 
