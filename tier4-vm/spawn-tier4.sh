@@ -1,66 +1,219 @@
 #!/bin/bash
 # §Phase-7 tier-4 — bring up a libvirt+QEMU guest VM and attach it to
-# the admin compositor as one chromed peer toplevel via virt-viewer.
+# the admin compositor as one chromed peer toplevel.
 #
-# spec/02 row 4: "VM, whole-window — KVM + libvirt + virt-viewer".
-# spec/29 §2: picked path. Linux-only per spec/00.
+# P11 (2026-05-17) added the TIER4_DISPLAY={spice,waypipe} knob:
+#
+#   - TIER4_DISPLAY=spice  (legacy, kept for fall-back until P13):
+#       SPICE display via virt-viewer. Uses
+#       qdistro/tier4-vm/domain-template.xml (the SPICE-era template).
+#   - TIER4_DISPLAY=waypipe (default after P11):
+#       Boots qdistro-tier4-guest.qcow2 (P10 artifact) and connects
+#       host-side `waypipe --vsock client vsock://$CID:$PORT` against
+#       the in-guest qdistro-tier4-publisher (a systemd service that
+#       auto-starts at boot, binds vsock port 7879). The outer
+#       xdg_toplevel rides waypipe-server; qdistro-secctx-exec stamps
+#       it with engine=qdistro.tier4, app_id=qdistro.tier4.<vm>, so
+#       P05a chrome + ClipboardGate light up unchanged.
+#
+# Spec/reference:
+#   plan2/tasks/P11-tier4-waypipe-migration.md
+#   plan2/research/spice-retirement/00-overview.md §"Phase 2"
+#   plan2/tasks/P05b-tier5b-vm-app-windowed.md (canonical waypipe-vsock
+#     pattern; mirrored here for tier-4)
 #
 # Usage:
 #   spawn-tier4.sh <vm_name>
-#
-# Architecture:
-#
-#   [QEMU + libvirt-managed guest, qemu:///session uri]
-#         │ SPICE listen=127.0.0.1, autoport
-#         ▼
-#   [virt-viewer (admin uid, Wayland client)]
-#         │ wayland-1 (admin compositor)
-#         ▼
-#   [admin compositor]
-#
-# virt-viewer connects to the spice port allocated by libvirt and
-# renders the guest framebuffer in a single Wayland toplevel. qdwin's
-# nested-passthrough chrome wraps it like any other peer toplevel
-# (title-prefixed for visual differentiation).
+#   spawn-tier4.sh --source-only   (test mode — load helpers, no launch)
 #
 # Env knobs:
-#   TIER4_ADMIN_USER     Admin uid for libvirt + virt-viewer (default "admin").
-#   TIER4_MEM_MIB        Guest RAM in MiB (default 256).
+#   TIER4_DISPLAY        spice | waypipe — display backend.
+#                        Default 'waypipe' (P11 flip). Set to 'spice'
+#                        to fall back to virt-viewer for legacy debug.
+#   TIER4_ADMIN_USER     Admin uid for libvirt + waypipe-client (default "admin").
+#   TIER4_MEM_MIB        Guest RAM in MiB (default 256 for spice; 1024 for
+#                        waypipe, since the guest runs nested qdwin).
 #   TIER4_TITLE_PREFIX   Window title prefix (default "[VM:<vm_name>] ").
 #   TIER4_DOMAIN_DEFINE_ONLY=1
 #                        Define the libvirt domain but don't start it
-#                        or launch virt-viewer. Used by tests that just
+#                        or launch the display. Used by tests that just
 #                        validate the XML substitution.
-#   TIER4_NO_VIEWER=1    Define + start the domain, skip virt-viewer.
-#                        Used by tests that observe the libvirt side
-#                        without the wayland integration.
-#   TIER4_DEBUG=1        Pass --verbose to virt-viewer.
+#   TIER4_NO_VIEWER=1    Define + start the domain, skip the display
+#                        client launch. Works in both SPICE and waypipe
+#                        branches (probes vsock readiness, then parks
+#                        without launching any viewer/client).
+#   TIER4_DEBUG=1        Verbose viewer / client.
 #   TIER4_DOMAIN_TEMPLATE
 #                        Path override for the domain template XML.
-#                        Defaults to <script_dir>/domain-template.xml.
-#   TIER4_USE_SECCTX     Default 1 — wrap virt-viewer via qdistro-secctx-exec
-#                        so the resulting Wayland client carries
-#                        sandbox_engine=qdistro.tier4, app_id=qdistro.tier4.<vm>.
-#                        Set to 0 to run virt-viewer un-tagged (e.g. when
-#                        debugging).
+#                        Branch-aware: defaults to tier4-vm/domain-template.xml
+#                        for spice, tier4-vm-guest/domain-template.xml for
+#                        waypipe.
+#   TIER4_GUEST_DISK     Path to the base qcow2 image (waypipe branch only).
+#                        Default /var/lib/libvirt/images/qdistro-tier4-guest.qcow2.
+#   TIER4_VIRTIOFS_DIR   Host dir exported as /host inside guest (waypipe).
+#                        Default /var/lib/qdistro/tier4/<vm_name>/host.
+#   TIER4_USE_SECCTX     Default 1 — wrap the display client via
+#                        qdistro-secctx-exec so the resulting Wayland
+#                        client carries sandbox_engine=qdistro.tier4,
+#                        app_id=qdistro.tier4.<vm>.
+#   QDISTRO_ALLOW_NO_SECCTX
+#                        Set to 1 to allow USE_SECCTX=1 + missing
+#                        qdistro-secctx-exec to fall back to a no-op
+#                        wrap (dev-only opt-out; production must keep
+#                        the default hard-fail). Mirrors tier5b.
 #   TIER4_SECCTX_ENGINE  Override sandbox_engine (default qdistro.tier4).
 #   TIER4_SECCTX_APPID   Override app_id (default qdistro.tier4.<vm_name>).
+#   TIER4_CID            Override allocated CID (waypipe branch).
+#   TIER4_PORT           Override vsock port (waypipe branch; default 7879).
+#   TIER4_KEEP_DOMAIN=1  Skip destroy+undefine on exit (debug, waypipe).
+#
+# SPICE-only knobs (legacy, kept for the spice branch):
+#   TIER4_DISK_BASE      Linked-clone source for the SPICE branch.
+#   TIER4_DISK_DIR       Per-VM disk dir for the SPICE branch.
+#   TIER4_SPICE_PASSWD   Per-launch SPICE ticket (default random).
+#   TIER4_SPICE_CLIPBOARD allowed|disabled (default disabled).
+#   TIER4_ALLOW_OVERWRITE_RUNNING=1  silence the WARN on double-launch.
 #
 # Lifecycle:
-#   - Defines + starts a domain named <vm_name>. If a domain with
-#     that name already exists it is destroyed + undefined first
-#     (idempotent for test re-runs). A running domain triggers a
-#     WARN line so an accidental double-launch is visible in the
-#     journal — set TIER4_ALLOW_OVERWRITE_RUNNING=1 to suppress.
-#   - Launches virt-viewer in the foreground; viewer exit triggers
-#     domain destroy + undefine (matches tier-2/3 oneshot pattern).
-#   - SIGTERM / SIGINT propagate cleanly.
+#   - Defines + starts a domain named <vm_name>. Idempotent: an existing
+#     domain is destroyed + undefined first.
+#   - SPICE branch: launches virt-viewer in foreground.
+#   - Waypipe branch: launches host-side waypipe-client (wrapped by
+#     qdistro-secctx-exec, wrapped by tier4_control.py so Close() RPC
+#     stays registered). The publisher is a systemd unit in the guest
+#     (auto-started by P10's image bake); the host probes vsock
+#     readiness via socat before declaring readiness.
+#   - On viewer/client exit: domain destroy + undefine + overlay rm.
+#   - SIGTERM / SIGINT propagate cleanly via the cleanup() trap.
 #
-# Exit code: virt-viewer's exit code, or non-zero on bring-up failure.
+# Exit code: viewer/client exit code, or non-zero on bring-up failure.
+#
+# TODO P13: remove the TIER4_DISPLAY=spice branch and collapse to
+# waypipe-only after the SPICE retirement task lands.
 set -uo pipefail
 
+# ---------------------------------------------------------------------
+# Constants (waypipe branch)
+# ---------------------------------------------------------------------
+# CID allocation ceiling shared with tier5b. AF_VSOCK CIDs are uint32
+# but a bounded ceiling makes ops debugging tractable and prevents a
+# corrupt TAKEN list from spinning forever.
+CID_MAX=4095
+
+# Tier-4 CID range starts at 200, well clear of tier-5 (3..99) and
+# tier-5b (100..199). The per-task flock file keeps the two tiers
+# from competing for the same CID even though they use disjoint ranges
+# (defense in depth + clearer ops trace).
+TIER4_CID_MIN=200
+
+# Fixed vsock port for tier-4 publishers. Each VM has a unique CID,
+# so port collision within a host is impossible; tier-5b uses 7877+
+# which is also clear.
+# TODO P11-followup: if two concurrent tier-4 VMs ever need to coexist
+# AND the publisher's listener semantics ever become per-port (vs
+# per-CID-and-port), switch to PORT=7879+CID-200 to keep clear of
+# tier5b.
+TIER4_FIXED_PORT=7879
+
+# Lock file for atomic CID pick + virsh define (separate from tier5b's).
+DOMAIN_LOCK_DIR="/run/qdistro"
+if ! mkdir -p "$DOMAIN_LOCK_DIR" 2>/dev/null; then
+    DOMAIN_LOCK_DIR="/tmp"
+fi
+DOMAIN_LOCK_FILE="$DOMAIN_LOCK_DIR/tier4.lock"
+
+# ---------------------------------------------------------------------
+# Helper: JSON-encode an arbitrary string via python3 json.dumps.
+# Replicates tier5b's helper so any qga arg path is shell-injection-safe.
+# Stdin = raw value; stdout = JSON-encoded literal (including quotes).
+# ---------------------------------------------------------------------
+json_encode_stdin() {
+    python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))'
+}
+
+# ---------------------------------------------------------------------
+# build_secctx_wrap USE_SECCTX ENGINE APPID INSTANCE
+#
+# Populates SECCTX_WRAP bash array with either:
+#   (qdistro-secctx-exec --sandbox-engine E --app-id A --instance-id I --)
+# or empty (when USE_SECCTX != 1). Mirrored from tier5b; exported so the
+# unit test suite (--source-only) can verify the composition without
+# launching a VM.
+# ---------------------------------------------------------------------
+build_secctx_wrap() {
+    local use_secctx="$1"
+    local engine="$2"
+    local appid="$3"
+    local instance="$4"
+    SECCTX_WRAP=()
+    if [ "$use_secctx" = "1" ]; then
+        SECCTX_WRAP=(qdistro-secctx-exec
+            --sandbox-engine "$engine"
+            --app-id         "$appid"
+            --instance-id    "$instance"
+            --)
+    fi
+}
+
+# ---------------------------------------------------------------------
+# resolve_template DISPLAY SCRIPT_DIR
+#
+# Resolves the libvirt domain template path for the given display
+# backend. Honours $TIER4_DOMAIN_TEMPLATE when set; otherwise searches
+# branch-appropriate defaults. Echoes the path on stdout, exits non-
+# zero on missing. Pure function so the unit tests can exercise the
+# selection logic via --source-only without running anything.
+# ---------------------------------------------------------------------
+resolve_template() {
+    local display="$1"
+    local script_dir="$2"
+    local override=""
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        override="${TIER4_DOMAIN_TEMPLATE:-}"
+    fi
+    if [ -n "$override" ]; then
+        if [ ! -f "$override" ]; then
+            echo "[tier4] FAIL: TIER4_DOMAIN_TEMPLATE=$override not readable" >&2
+            return 4
+        fi
+        echo "$override"
+        return 0
+    fi
+    if [ "$display" = "waypipe" ]; then
+        # P10's guest-image template (no SPICE, has vsock + virtio-snd
+        # + virtiofs). Stored alongside tier4-vm-guest, not tier4-vm/.
+        local guest_dir
+        guest_dir="$(dirname "$script_dir")/tier4-vm-guest"
+        if   [ -f "$guest_dir/domain-template.xml" ]; then
+            echo "$guest_dir/domain-template.xml"; return 0
+        elif [ -f /usr/share/qdistro/tier4-vm-guest/domain-template.xml ]; then
+            echo /usr/share/qdistro/tier4-vm-guest/domain-template.xml; return 0
+        else
+            echo "[tier4] FAIL: tier4-vm-guest domain template not found (looked in $guest_dir and /usr/share/qdistro/tier4-vm-guest/)" >&2
+            return 4
+        fi
+    fi
+    # SPICE branch — script-local default, then installed path.
+    if   [ -f "$script_dir/domain-template.xml" ]; then
+        echo "$script_dir/domain-template.xml"; return 0
+    elif [ -f /usr/share/qdistro/tier4/domain-template.xml ]; then
+        echo /usr/share/qdistro/tier4/domain-template.xml; return 0
+    fi
+    echo "[tier4] FAIL: SPICE domain template not found" >&2
+    return 4
+}
+
+# ---------------------------------------------------------------------
+# --source-only short-circuit. Unit tests source the script to exercise
+# build_secctx_wrap / resolve_template / constants without executing
+# the launch logic (no virsh, no waypipe, no root required).
+# ---------------------------------------------------------------------
+if [ "${1:-}" = "--source-only" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 usage() {
-    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
@@ -72,31 +225,27 @@ fi
 
 VM_NAME="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Resolution order for the domain template:
-#   1. TIER4_DOMAIN_TEMPLATE env override (full path).
-#   2. Script-local file (when running from tier4-vm/).
-#   3. /usr/share/qdistro/tier4/domain-template.xml (installed by
-#      fresh-vm-bootstrap.sh; what /usr/local/bin/qdistro-tier4-spawn uses).
-TEMPLATE="${TIER4_DOMAIN_TEMPLATE:-}"
-if [ -z "$TEMPLATE" ]; then
-    if [ -f "$SCRIPT_DIR/domain-template.xml" ]; then
-        TEMPLATE="$SCRIPT_DIR/domain-template.xml"
-    elif [ -f /usr/share/qdistro/tier4/domain-template.xml ]; then
-        TEMPLATE=/usr/share/qdistro/tier4/domain-template.xml
-    else
-        TEMPLATE="$SCRIPT_DIR/domain-template.xml"  # report the missing-script-local path
-    fi
-fi
+
+# TIER4_DISPLAY default — P11 flip: waypipe is the default after this
+# task. Set TIER4_DISPLAY=spice for the legacy virt-viewer path.
+# TODO P13: remove the spice branch entirely.
+TIER4_DISPLAY="${TIER4_DISPLAY:-waypipe}"
+case "$TIER4_DISPLAY" in
+    spice|waypipe) ;;
+    *)
+        echo "[tier4] FAIL: TIER4_DISPLAY='$TIER4_DISPLAY' invalid (expected: spice or waypipe)" >&2
+        exit 1
+        ;;
+esac
 
 # Validate vm_name shape.
 if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
     echo "[tier4] FAIL: invalid vm_name '$VM_NAME' (alnum + - + _, 1-63 chars)" >&2
     exit 1
 fi
-if [ ! -f "$TEMPLATE" ]; then
-    echo "[tier4] FAIL: template $TEMPLATE not found" >&2
-    exit 1
-fi
+
+# Resolve template (branch-aware).
+TEMPLATE=$(resolve_template "$TIER4_DISPLAY" "$SCRIPT_DIR") || exit $?
 
 # --- preflight --------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
@@ -124,89 +273,66 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "[tier4] FAIL: qemu-system-x86_64 not installed (zypper install qemu-x86)" >&2
     exit 2
 fi
-# virt-viewer needed unless caller suppresses it.
-NO_VIEWER="${TIER4_NO_VIEWER:-0}"
-if [ "$NO_VIEWER" != "1" ] && ! command -v virt-viewer >/dev/null 2>&1; then
-    echo "[tier4] FAIL: virt-viewer not installed (zypper install virt-viewer)" >&2
-    exit 2
-fi
 
+# Branch-specific preflight.
+NO_VIEWER="${TIER4_NO_VIEWER:-0}"
 DEFINE_ONLY="${TIER4_DOMAIN_DEFINE_ONLY:-0}"
-if [ "$DEFINE_ONLY" != "1" ] && [ "$NO_VIEWER" != "1" ]; then
-    if [ ! -S "$ADMIN_RUNTIME/$WAYLAND_DISPLAY" ]; then
-        echo "[tier4] FAIL: admin compositor socket $ADMIN_RUNTIME/$WAYLAND_DISPLAY not present" >&2
+
+if [ "$TIER4_DISPLAY" = "spice" ]; then
+    # virt-viewer needed unless caller suppresses it.
+    if [ "$NO_VIEWER" != "1" ] && ! command -v virt-viewer >/dev/null 2>&1; then
+        echo "[tier4] FAIL: virt-viewer not installed (zypper install virt-viewer)" >&2
+        exit 2
+    fi
+else
+    # waypipe branch — needs waypipe + flock + qemu-img.
+    if ! command -v waypipe >/dev/null 2>&1; then
+        echo "[tier4] FAIL: waypipe not installed (zypper install waypipe)" >&2
+        exit 2
+    fi
+    for tool in flock qemu-img; do
+        command -v "$tool" >/dev/null || {
+            echo "[tier4] FAIL: TIER4_DISPLAY=waypipe needs $tool installed" >&2
+            exit 2
+        }
+    done
+    # Base disk: P10's qdistro-tier4-guest.qcow2.
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        TIER4_GUEST_DISK="${TIER4_GUEST_DISK:-/var/lib/libvirt/images/qdistro-tier4-guest.qcow2}"
+    else
+        TIER4_GUEST_DISK="/var/lib/libvirt/images/qdistro-tier4-guest.qcow2"
+    fi
+    if [ "$DEFINE_ONLY" != "1" ] && [ ! -f "$TIER4_GUEST_DISK" ]; then
+        echo "[tier4] FAIL: guest disk $TIER4_GUEST_DISK missing — bake via qdistro/tier4-vm-guest/build-guest-image.sh" >&2
         exit 3
     fi
 fi
 
-MEM_MIB="${TIER4_MEM_MIB:-256}"
+need_compositor=1
+if [ "$DEFINE_ONLY" = "1" ] || [ "$NO_VIEWER" = "1" ]; then
+    need_compositor=0
+fi
+if [ "${TIER4_TEST_NO_COMPOSITOR:-0}" = "1" ]; then
+    need_compositor=0
+fi
+if [ "$need_compositor" = "1" ] && [ ! -S "$ADMIN_RUNTIME/$WAYLAND_DISPLAY" ]; then
+    # Both display branches spawn a wl_client into the admin compositor
+    # (virt-viewer for SPICE, waypipe-client for waypipe). The socket
+    # must exist before we can launch.
+    echo "[tier4] FAIL: admin compositor socket $ADMIN_RUNTIME/$WAYLAND_DISPLAY not present" >&2
+    exit 3
+fi
+
+# Default memory: waypipe branch needs more (nested qdwin + apps).
+if [ "$TIER4_DISPLAY" = "waypipe" ]; then
+    MEM_MIB="${TIER4_MEM_MIB:-1024}"
+else
+    MEM_MIB="${TIER4_MEM_MIB:-256}"
+fi
 MEM_KIB=$((MEM_MIB * 1024))
 TITLE_PREFIX="${TIER4_TITLE_PREFIX:-[VM:$VM_NAME] }"
 
-# spec/10 §"SPICE main-channel clipboard": disable cliprdr / spice-
-# vdagent clipboard channel by default. All host ↔ guest clipboard
-# traffic flows through wayland selection (gated by tasks 034 + 037).
-# Admin opts in via TIER4_SPICE_CLIPBOARD=allowed for legacy guests
-# that need raw SPICE clipboard sync.
-case "${TIER4_SPICE_CLIPBOARD:-disabled}" in
-    allowed|enabled|yes|on|1) SPICE_CLIPBOARD="yes";;
-    *)                         SPICE_CLIPBOARD="no";;
-esac
-
-# Optional bootable disk via per-VM linked clone of a base qcow2.
-# When TIER4_DISK_BASE is set + readable, we create
-#   $TIER4_DISK_DIR/<vm_name>.qcow2
-# as a qemu-img linked clone (overlay) and substitute a <disk>
-# element into the domain XML. Default unset → no disk → guest boots
-# to "no bootable device" (sufficient for XML-shape tests but not for
-# real spec/10 SPICE clipboard validation; that needs the SPICE-
-# capable guest qcow2 from tier4-vm/build-guest-
-# image.sh).
-DISK_BASE="${TIER4_DISK_BASE:-}"
-DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
-DISK_PATH=""
-DISK_XML=""
-if [ -n "$DISK_BASE" ]; then
-    if [ ! -r "$DISK_BASE" ]; then
-        echo "[tier4] FAIL: TIER4_DISK_BASE=$DISK_BASE not readable" >&2
-        exit 4
-    fi
-    DISK_PATH="$DISK_DIR/$VM_NAME.qcow2"
-    install -d -m 0755 "$DISK_DIR"
-    rm -f "$DISK_PATH"
-    if ! qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK_PATH" \
-            >/dev/null 2>&1; then
-        echo "[tier4] FAIL: qemu-img create linked clone failed" >&2
-        exit 4
-    fi
-    chmod 0644 "$DISK_PATH"
-    chown "${TIER4_ADMIN_USER:-admin}":root "$DISK_PATH" 2>/dev/null || true
-    DISK_XML="<disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='$DISK_PATH'/><target dev='vda' bus='virtio'/></disk>"
-    echo "[tier4] linked clone $DISK_PATH from base $DISK_BASE" >&2
-fi
-
-# spec/10 §"SPICE main-channel clipboard": per-launch SPICE password
-# (16 hex chars from /dev/urandom). virt-viewer reads it from the
-# domdisplay --include-password URI. Re-spawning the VM rotates the
-# value so an attacker who learns one ticket can't re-attach later.
-# Admin can disable via TIER4_SPICE_PASSWD="" (not recommended).
-if [ -z "${TIER4_SPICE_PASSWD+x}" ]; then
-    SPICE_PASSWD=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')
-elif [ -z "$TIER4_SPICE_PASSWD" ]; then
-    # Caller explicitly disabled — keep XML intact but use a "" attr.
-    # libvirt accepts empty passwd as "no auth" but SPICE then accepts
-    # any client. Logged for audit.
-    SPICE_PASSWD=""
-    echo "[tier4] WARN: TIER4_SPICE_PASSWD='' — SPICE auth disabled" >&2
-else
-    # Caller-supplied password (test fixtures pass a known value).
-    SPICE_PASSWD="$TIER4_SPICE_PASSWD"
-fi
-
-# qemu:///session lets the admin user manage their own libvirt domains
-# without needing libvirtd running as root or polkit rules. Each
-# `runuser -u admin -- virsh ...` re-resolves XDG_RUNTIME_DIR + opens a
-# new session-uri connection.
+# qemu:///session lets the admin user manage their own libvirt domains.
 LIBVIRT_URI="qemu:///session"
 
 run_as_admin() {
@@ -219,64 +345,405 @@ run_as_admin() {
         "$@"
 }
 
-# --- 1. domain XML substitution --------------------------------------
+# qga wrapper with bounded timeout — mirrors tier5b's helper. Used by
+# the waypipe branch to probe publisher health post-vsock-bind.
+qga_cmd() {
+    # $1 = vm, $2 = JSON request
+    run_as_admin virsh qemu-agent-command --timeout 5 "$1" "$2"
+}
+
+# ---------------------------------------------------------------------
+# Branch fork: SPICE vs waypipe.
+#
+# The two branches share idempotent domain-replacement + cleanup() trap
+# but diverge on disk, XML markers, display launch, and teardown.
+# ---------------------------------------------------------------------
+
+# Common: idempotent destroy/undefine of any pre-existing same-named
+# domain (so re-runs in tests don't trip on stale state).
+maybe_overwrite_existing() {
+    if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+        local existing_state
+        existing_state="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
+        case "$existing_state" in
+            running|paused)
+                if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
+                    echo "[tier4] WARN: domain '$VM_NAME' is $existing_state; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
+                fi
+                ;;
+            *)
+                echo "[tier4] domain '$VM_NAME' already exists ($existing_state) — destroying + undefining" >&2
+                ;;
+        esac
+        run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+    fi
+}
+
+# State for cleanup() trap. Set per-branch.
+DOMAIN_DEFINED=0
+DISK_PATH=""
+DISK_CREATED=0
+VIRTIOFS_DIR=""
+VIRTIOFS_OWNED=0
+CLIENT_PID=
+CLEANUP_DONE=0
+
+cleanup() {
+    # Re-entrancy guard (mirrors tier5b correctness fix): a chained
+    # INT→TERM must not rerun teardown twice.
+    if [ "$CLEANUP_DONE" = "1" ]; then
+        return 0
+    fi
+    CLEANUP_DONE=1
+    [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
+    CLIENT_PID=
+    if [ "$DOMAIN_DEFINED" = "1" ] && [ "${TIER4_KEEP_DOMAIN:-0}" != "1" ]; then
+        run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+    fi
+    if [ "$DISK_CREATED" = "1" ] && [ -n "$DISK_PATH" ] && [ -f "$DISK_PATH" ] \
+       && [ "${TIER4_KEEP_DOMAIN:-0}" != "1" ]; then
+        rm -f "$DISK_PATH" 2>/dev/null || true
+    fi
+    if [ "$VIRTIOFS_OWNED" = "1" ] && [ -n "$VIRTIOFS_DIR" ] \
+       && [ -d "$VIRTIOFS_DIR" ] && [ "${TIER4_KEEP_DOMAIN:-0}" != "1" ]; then
+        rm -rf "$VIRTIOFS_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+if [ "$TIER4_DISPLAY" = "spice" ]; then
+    # =================================================================
+    # SPICE branch (legacy; retained until P13).
+    # =================================================================
+
+    # spec/10 §"SPICE main-channel clipboard": disable cliprdr / spice-
+    # vdagent clipboard channel by default. Admin opts in via
+    # TIER4_SPICE_CLIPBOARD=allowed for legacy guests.
+    case "${TIER4_SPICE_CLIPBOARD:-disabled}" in
+        allowed|enabled|yes|on|1) SPICE_CLIPBOARD="yes";;
+        *)                         SPICE_CLIPBOARD="no";;
+    esac
+
+    # Optional bootable disk via per-VM linked clone of a base qcow2.
+    DISK_BASE="${TIER4_DISK_BASE:-}"
+    # Only honor TIER4_DISK_DIR override in dry-run mode.
+    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+        DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+    else
+        DISK_DIR="/var/lib/libvirt/images"
+    fi
+    DISK_XML=""
+    if [ -n "$DISK_BASE" ]; then
+        if [ ! -r "$DISK_BASE" ]; then
+            echo "[tier4] FAIL: TIER4_DISK_BASE=$DISK_BASE not readable" >&2
+            exit 4
+        fi
+        DISK_PATH="$DISK_DIR/$VM_NAME.qcow2"
+        install -d -m 0755 "$DISK_DIR"
+        rm -f "$DISK_PATH"
+        if ! qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK_PATH" \
+                >/dev/null 2>&1; then
+            echo "[tier4] FAIL: qemu-img create linked clone failed" >&2
+            exit 4
+        fi
+        chmod 0644 "$DISK_PATH"
+        chown "${TIER4_ADMIN_USER:-admin}":root "$DISK_PATH" 2>/dev/null || true
+        DISK_CREATED=1
+        DISK_XML="<disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='$DISK_PATH'/><target dev='vda' bus='virtio'/></disk>"
+        echo "[tier4] linked clone $DISK_PATH from base $DISK_BASE" >&2
+    fi
+
+    # spec/10: per-launch SPICE ticket (16 hex chars).
+    if [ -z "${TIER4_SPICE_PASSWD+x}" ]; then
+        SPICE_PASSWD=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    elif [ -z "$TIER4_SPICE_PASSWD" ]; then
+        SPICE_PASSWD=""
+        echo "[tier4] WARN: TIER4_SPICE_PASSWD='' — SPICE auth disabled" >&2
+    else
+        SPICE_PASSWD="$TIER4_SPICE_PASSWD"
+    fi
+
+    NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
+        $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
+
+    XML=$(sed \
+        -e "s|__VM_NAME__|$VM_NAME|g" \
+        -e "s|__MAC__|$NEW_MAC|g" \
+        -e "s|__MEM_KIB__|$MEM_KIB|g" \
+        -e "s|__SPICE_PASSWD__|$SPICE_PASSWD|g" \
+        -e "s|__SPICE_CLIPBOARD__|$SPICE_CLIPBOARD|g" \
+        -e "s|__DISK_XML__|$DISK_XML|g" \
+        "$TEMPLATE")
+
+    if printf '%s' "$XML" | grep -q '__[A-Z_]*__'; then
+        echo "[tier4] FAIL: unsubstituted markers in domain XML:" >&2
+        printf '%s' "$XML" | grep -o '__[A-Z_]*__' | sort -u >&2
+        exit 4
+    fi
+
+    maybe_overwrite_existing
+
+    echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC, display=spice)" >&2
+    TMP_XML="/tmp/qdistro-tier4-${VM_NAME}-$$.xml"
+    printf '%s' "$XML" >"$TMP_XML"
+    chown "$ADMIN_USER" "$TMP_XML" 2>/dev/null || true
+    chmod 0644 "$TMP_XML" 2>/dev/null || true
+    if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
+        echo "[tier4] FAIL: virsh define failed" >&2
+        rm -f "$TMP_XML"
+        exit 5
+    fi
+    rm -f "$TMP_XML"
+    DOMAIN_DEFINED=1
+
+    if [ "$DEFINE_ONLY" = "1" ]; then
+        echo "[tier4] TIER4_DOMAIN_DEFINE_ONLY=1 — domain defined; not starting" >&2
+        echo "[tier4] OK"
+        exit 0
+    fi
+
+    echo "[tier4] starting domain '$VM_NAME'" >&2
+    if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
+        echo "[tier4] FAIL: virsh start failed" >&2
+        exit 6
+    fi
+
+    SPICE_URI=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        SPICE_URI=$(run_as_admin virsh domdisplay --include-password \
+            "$VM_NAME" 2>/dev/null || true)
+        [ -n "$SPICE_URI" ] && break
+        sleep 0.5
+    done
+    if [ -z "$SPICE_URI" ]; then
+        echo "[tier4] FAIL: virsh domdisplay returned no URI within 5s" >&2
+        exit 7
+    fi
+    SPICE_URI_REDACTED="${SPICE_URI//$SPICE_PASSWD/REDACTED}"
+    echo "[tier4] domain display: $SPICE_URI_REDACTED (clipboard=$SPICE_CLIPBOARD)" >&2
+
+    if [ "$NO_VIEWER" = "1" ]; then
+        echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching viewer" >&2
+        echo "[tier4] OK ($SPICE_URI)"
+        while sleep 60; do :; done
+    fi
+
+    VIEWER_OPTS=(
+        --connect "$LIBVIRT_URI"
+        --wait
+        --title "${TITLE_PREFIX}${VM_NAME}"
+        --hotkeys=toggle-fullscreen=shift+f11,release-cursor=shift+f12
+    )
+    [ "${TIER4_DEBUG:-0}" = "1" ] && VIEWER_OPTS=(--verbose "${VIEWER_OPTS[@]}")
+
+    USE_SECCTX="${TIER4_USE_SECCTX:-1}"
+    SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
+    SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
+
+    CONTROL_SCRIPT="${TIER4_CONTROL_SCRIPT:-}"
+    if [ -z "$CONTROL_SCRIPT" ]; then
+        if [ -f "$SCRIPT_DIR/tier4_control.py" ]; then
+            CONTROL_SCRIPT="$SCRIPT_DIR/tier4_control.py"
+        elif [ -f /usr/share/qdistro/tier4-vm/tier4_control.py ]; then
+            CONTROL_SCRIPT=/usr/share/qdistro/tier4-vm/tier4_control.py
+        fi
+    fi
+
+    if [ -n "$CONTROL_SCRIPT" ] && [ -f "$CONTROL_SCRIPT" ] \
+            && command -v python3 >/dev/null 2>&1; then
+        VIEWER_CMD=(python3 "$CONTROL_SCRIPT"
+                    --vm-name "$VM_NAME"
+                    -- virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+    else
+        if [ -n "$CONTROL_SCRIPT" ]; then
+            echo "[tier4] WARN: control script $CONTROL_SCRIPT or python3 unavailable; close button will not destroy the domain (degraded)" >&2
+        else
+            echo "[tier4] WARN: tier4_control.py not found; close button will not destroy the domain (degraded)" >&2
+        fi
+        VIEWER_CMD=(virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+    fi
+
+    if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
+        echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX', secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
+        run_as_admin qdistro-secctx-exec \
+            --sandbox-engine "$SECCTX_ENGINE" \
+            --app-id "$SECCTX_APPID" \
+            --instance-id "$VM_NAME-$$" \
+            -- "${VIEWER_CMD[@]}"
+        EXIT=$?
+    else
+        if [ "$USE_SECCTX" = "1" ]; then
+            echo "[tier4] WARN: TIER4_USE_SECCTX=1 but qdistro-secctx-exec not found; running un-tagged" >&2
+        fi
+        echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX')" >&2
+        run_as_admin "${VIEWER_CMD[@]}"
+        EXIT=$?
+    fi
+    echo "[tier4] virt-viewer exited rc=$EXIT" >&2
+    exit "$EXIT"
+
+fi
+
+# =====================================================================
+# Waypipe branch.
+# =====================================================================
+
+# Secctx triple (shared with SPICE branch — same engine/appid prefix so
+# P05a chrome wire fires unchanged).
+USE_SECCTX="${TIER4_USE_SECCTX:-1}"
+SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
+SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
+
+# Hard-fail by default if USE_SECCTX=1 but the tagger is missing. Dev
+# workflows can opt out via QDISTRO_ALLOW_NO_SECCTX=1 (mirrors tier5b).
+if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
+    if [ "${QDISTRO_ALLOW_NO_SECCTX:-0}" = "1" ]; then
+        echo "[tier4] WARN: qdistro-secctx-exec not in PATH; QDISTRO_ALLOW_NO_SECCTX=1, continuing without stamp" >&2
+        USE_SECCTX=0
+    else
+        echo "[tier4] FAIL: qdistro-secctx-exec not in PATH" >&2
+        echo "        Set QDISTRO_ALLOW_NO_SECCTX=1 for dev-only opt-out." >&2
+        exit 2
+    fi
+fi
+
+# Per-spawn instance token (loud and unique).
+LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
+    echo "[tier4] FAIL: could not generate launch token from /dev/urandom" >&2
+    exit 5
+fi
+SECCTX_INSTANCE="${TIER4_SECCTX_INSTANCE:-$VM_NAME-$LAUNCH_TOKEN}"
+
+# Echo the resolved triple BEFORE the vsock dance so s107's chrome
+# probe (and any future placeholder correlator) can grep stderr for
+# the actual triple, not just for evidence that the spawn script ran.
+# Mirrors tier5b's stdout SECCTX_APPID=... line and the SPICE branch's
+# "secctx engine=… app_id=…" stderr line.
+echo "[tier4] waypipe-branch resolved (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID instance=$SECCTX_INSTANCE)" >&2
+
+# --- atomic CID pick under tier4.lock ---------------------------------
+touch "$DOMAIN_LOCK_FILE" 2>/dev/null || true
+chmod 0644 "$DOMAIN_LOCK_FILE" 2>/dev/null || true
+exec 9>"$DOMAIN_LOCK_FILE"
+if ! flock -w 30 9; then
+    echo "[tier4] FAIL: could not acquire $DOMAIN_LOCK_FILE within 30s" >&2
+    exit 5
+fi
+
+if [ -n "${TIER4_CID:-}" ]; then
+    CID="$TIER4_CID"
+    [[ "$TIER4_CID" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: CID='$TIER4_CID' not numeric" >&2; exit 1; }
+else
+    TAKEN=$(run_as_admin sh -c '
+        for d in $(virsh list --all --name); do
+            [ -z "$d" ] && continue
+            virsh dumpxml "$d" 2>/dev/null
+        done' | \
+        grep -oE "<cid[^>]*address='[0-9]+'" | \
+        grep -oE "[0-9]+" | sort -un || true)
+    CID="$TIER4_CID_MIN"
+    while echo "$TAKEN" | grep -qx "$CID"; do
+        CID=$((CID + 1))
+        if [ "$CID" -gt "$CID_MAX" ]; then
+            echo "[tier4] FAIL: CID range exhausted (next=$CID > CID_MAX=$CID_MAX)" >&2
+            exit 5
+        fi
+    done
+fi
+
+PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: PORT='$PORT' not numeric" >&2; exit 1; }
+
+maybe_overwrite_existing
+
+# --- per-VM overlay (linked clone of P10 guest disk) ------------------
+# --- disk dir (waypipe) — only honor override in dry-run mode ---
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+    DISK_DIR="${TIER4_DISK_DIR:-/var/lib/libvirt/images}"
+else
+    DISK_DIR="/var/lib/libvirt/images"
+fi
+DISK_PATH="$DISK_DIR/$VM_NAME.qcow2"
+install -d -m 0755 "$DISK_DIR"
+
+if [ "$DEFINE_ONLY" != "1" ]; then
+    rm -f "$DISK_PATH"
+    if ! qemu-img create -f qcow2 -F qcow2 -b "$TIER4_GUEST_DISK" "$DISK_PATH" \
+            >/dev/null 2>&1; then
+        echo "[tier4] FAIL: qemu-img create linked clone from $TIER4_GUEST_DISK failed" >&2
+        exit 4
+    fi
+    chmod 0644 "$DISK_PATH"
+    chown "$ADMIN_USER":root "$DISK_PATH" 2>/dev/null || true
+    DISK_CREATED=1
+    echo "[tier4] linked clone $DISK_PATH from base $TIER4_GUEST_DISK" >&2
+fi
+
+# --- virtiofs share ---------------------------------------------------
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
+    VIRTIOFS_DIR="${TIER4_VIRTIOFS_DIR:-/var/lib/qdistro/tier4/$VM_NAME/host}"
+else
+    VIRTIOFS_DIR="/var/lib/qdistro/tier4/$VM_NAME/host"
+fi
+if [ ! -d "$VIRTIOFS_DIR" ]; then
+    install -d -m 0755 "$VIRTIOFS_DIR"
+    VIRTIOFS_OWNED=1
+fi
+
+# --- domain XML substitution -----------------------------------------
 NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
     $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
-XML=$(sed \
+# P10's tier4-vm-guest template uses: __VM_NAME__, __MEM_KIB__, __CID__,
+# __DISK_PATH__, __VIRTIOFS_DIR__. (__MAC__ is documented but the actual
+# P10 template doesn't currently carry a NIC, so __MAC__ may be absent;
+# substituting it as a no-op is harmless.)
+TMP_XML="/tmp/qdistro-tier4-${VM_NAME}-$$.xml"
+sed \
     -e "s|__VM_NAME__|$VM_NAME|g" \
     -e "s|__MAC__|$NEW_MAC|g" \
     -e "s|__MEM_KIB__|$MEM_KIB|g" \
-    -e "s|__SPICE_PASSWD__|$SPICE_PASSWD|g" \
-    -e "s|__SPICE_CLIPBOARD__|$SPICE_CLIPBOARD|g" \
-    -e "s|__DISK_XML__|$DISK_XML|g" \
-    "$TEMPLATE")
+    -e "s|__CID__|$CID|g" \
+    -e "s|__DISK_PATH__|$DISK_PATH|g" \
+    -e "s|__VIRTIOFS_DIR__|$VIRTIOFS_DIR|g" \
+    "$TEMPLATE" >"$TMP_XML"
 
-# Sanity check: every marker substituted.
-if printf '%s' "$XML" | grep -q '__[A-Z_]*__'; then
+if grep -q '__[A-Z_]*__' "$TMP_XML"; then
     echo "[tier4] FAIL: unsubstituted markers in domain XML:" >&2
-    printf '%s' "$XML" | grep -o '__[A-Z_]*__' | sort -u >&2
+    grep -o '__[A-Z_]*__' "$TMP_XML" | sort -u >&2
+    rm -f "$TMP_XML"
     exit 4
 fi
 
-# --- 2. define + (optional) start ------------------------------------
-# If a domain with this name already exists, undefine it first to make
-# spawn-tier4.sh idempotent for re-runs in tests. If the existing
-# domain is currently RUNNING we emit a WARN line so a user-launched
-# double-click (which would silently kill the running guest) is visible
-# in the journal. TIER4_ALLOW_OVERWRITE_RUNNING=1 suppresses the warning.
-if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    EXISTING_STATE="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
-    case "$EXISTING_STATE" in
-        running|paused)
-            if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
-                echo "[tier4] WARN: domain '$VM_NAME' is $EXISTING_STATE; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
-            fi
-            ;;
-        *)
-            echo "[tier4] domain '$VM_NAME' already exists ($EXISTING_STATE) — destroying + undefining" >&2
-            ;;
-    esac
-    run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+# Verify no SPICE elements leaked into the waypipe template — if a
+# stale tier4-vm/ template was wired in via TIER4_DOMAIN_TEMPLATE,
+# fail loud rather than silently boot SPICE under the waypipe branch.
+if grep -qE "<graphics[^>]+type='spice'|<channel[^>]+type='spicevmc'" "$TMP_XML"; then
+    echo "[tier4] FAIL: waypipe template at $TEMPLATE contains SPICE elements; refusing to define" >&2
+    rm -f "$TMP_XML"
+    exit 4
 fi
 
-echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC)" >&2
-# Stage XML in a tempfile that the admin user can read. virsh define
-# can't reliably read /dev/stdin across runuser because the inherited
-# pipe inode is owned by the parent (root) and re-opening it as the
-# dropped user fails with EACCES (kernel re-checks pipe ownership on
-# open(), even when the fd is already inherited).
-TMP_XML="/tmp/qdistro-tier4-${VM_NAME}-$$.xml"
-printf '%s' "$XML" >"$TMP_XML"
-chown "$ADMIN_USER" "$TMP_XML" 2>/dev/null || true
-chmod 0644 "$TMP_XML" 2>/dev/null || true
+maybe_overwrite_existing
+
+echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC, display=waypipe, cid=$CID, port=$PORT)" >&2
+chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
 if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
     echo "[tier4] FAIL: virsh define failed" >&2
     rm -f "$TMP_XML"
     exit 5
 fi
 rm -f "$TMP_XML"
+DOMAIN_DEFINED=1
+
+# Release flock now that CID is committed to libvirt's XML.
+flock -u 9 2>/dev/null || true
+exec 9>&- 2>/dev/null || true
 
 if [ "$DEFINE_ONLY" = "1" ]; then
     echo "[tier4] TIER4_DOMAIN_DEFINE_ONLY=1 — domain defined; not starting" >&2
@@ -284,83 +751,90 @@ if [ "$DEFINE_ONLY" = "1" ]; then
     exit 0
 fi
 
-cleanup() {
-    run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-    if [ -n "$DISK_PATH" ] && [ -f "$DISK_PATH" ]; then
-        rm -f "$DISK_PATH" 2>/dev/null || true
+# --- start domain -----------------------------------------------------
+if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
+    if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
+        echo "[tier4] FAIL: virsh start failed" >&2
+        exit 6
     fi
-}
-# EXIT runs cleanup once on natural exit. INT/TERM additionally exit
-# the script explicitly — bash's default behaviour on a signal-trapped
-# `sleep` is to resume the surrounding loop after the trap returns,
-# so without an explicit exit the `while sleep` park below would
-# continue forever in NO_VIEWER mode. Caught during s42 fresh-VM
-# validation.
-trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
-
-echo "[tier4] starting domain '$VM_NAME'" >&2
-if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
-    echo "[tier4] FAIL: virsh start failed (libvirtd may need to be reachable as $ADMIN_USER)" >&2
-    exit 6
 fi
+echo "[tier4] domain $VM_NAME running (cid=$CID port=$PORT)" >&2
 
-# Wait briefly for spice port allocation. Up to 5s; the typical case
-# is sub-second. --include-password embeds the per-launch SPICE
-# ticket in the URI so virt-viewer can authenticate without prompting
-# (spec/10 §"SPICE main-channel clipboard"). The URI is logged at the
-# host syslog level only — script stderr just prints the host:port,
-# scrubbing the password to keep it out of journals and pytest tee.
-SPICE_URI=""
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    SPICE_URI=$(run_as_admin virsh domdisplay --include-password \
-        "$VM_NAME" 2>/dev/null || true)
-    [ -n "$SPICE_URI" ] && break
-    sleep 0.5
+# --- wait for qga (publisher startup signal proxy) -------------------
+QGA_OK=0
+for i in $(seq 1 90); do
+    if qga_cmd "$VM_NAME" \
+        '{"execute":"guest-ping"}' >/dev/null 2>&1; then
+        QGA_OK=1; break
+    fi
+    sleep 1
 done
-if [ -z "$SPICE_URI" ]; then
-    echo "[tier4] FAIL: virsh domdisplay returned no URI within 5s" >&2
+if [ "$QGA_OK" != "1" ]; then
+    echo "[tier4] FAIL: qemu-guest-agent never responded after 90s" >&2
     exit 7
 fi
-SPICE_URI_REDACTED="${SPICE_URI//$SPICE_PASSWD/REDACTED}"
-echo "[tier4] domain display: $SPICE_URI_REDACTED (clipboard=$SPICE_CLIPBOARD)" >&2
+echo "[tier4] qga ready" >&2
+
+# --- probe in-guest publisher vsock readiness ------------------------
+# The publisher is a systemd service auto-started at boot (P10's image
+# bake); we don't trigger it via qga. We probe vsock CONNECT until it
+# accepts — proves waypipe-server has bound, not merely that the
+# script started (banner-grepping a log file is the anti-pattern P10
+# fix-pass corrected).
+VSOCK_OK=0
+echo "[tier4] waiting for publisher on vsock://$CID:$PORT (up to 30s) ..." >&2
+if command -v socat >/dev/null 2>&1; then
+    deadline=$(( $(date +%s) + 30 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if timeout 2 socat -T1 - "VSOCK-CONNECT:$CID:$PORT" </dev/null \
+                >/dev/null 2>&1; then
+            VSOCK_OK=1
+            break
+        fi
+        sleep 1
+    done
+elif command -v python3 >/dev/null 2>&1; then
+    # plan-too-thin fallback: probe via python3 socket.AF_VSOCK.
+    deadline=$(( $(date +%s) + 30 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if python3 -c "
+import socket, sys
+try:
+    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(($CID, $PORT))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+            VSOCK_OK=1
+            break
+        fi
+        sleep 1
+    done
+else
+    echo "[tier4] WARN: neither socat nor python3 available for vsock probe; assuming publisher is ready (degraded)" >&2
+    VSOCK_OK=1
+fi
+if [ "$VSOCK_OK" != "1" ]; then
+    echo "[tier4] FAIL: publisher never bound vsock://$CID:$PORT within 30s" >&2
+    # Diagnostic dump.
+    if command -v socat >/dev/null 2>&1; then
+        echo "[tier4] last vsock probe stderr:" >&2
+        timeout 2 socat -T1 - "VSOCK-CONNECT:$CID:$PORT" </dev/null 2>&1 | head -5 >&2 || true
+    fi
+    exit 7
+fi
+echo "[tier4] publisher vsock bind confirmed on vsock://$CID:$PORT" >&2
 
 if [ "$NO_VIEWER" = "1" ]; then
-    echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching viewer" >&2
-    echo "[tier4] OK ($SPICE_URI)"
-    # Park: the trap will clean up on signal.
+    echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching waypipe-client" >&2
+    echo "[tier4] OK (vsock://$CID:$PORT)"
     while sleep 60; do :; done
 fi
 
-# --- 3. virt-viewer (admin-side Wayland client) ----------------------
-VIEWER_OPTS=(
-    --connect "$LIBVIRT_URI"
-    --wait
-    --title "${TITLE_PREFIX}${VM_NAME}"
-    --hotkeys=toggle-fullscreen=shift+f11,release-cursor=shift+f12
-)
-[ "${TIER4_DEBUG:-0}" = "1" ] && VIEWER_OPTS=(--verbose "${VIEWER_OPTS[@]}")
-
-USE_SECCTX="${TIER4_USE_SECCTX:-1}"
-SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
-SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
-
-# P05a fix-pass: the viewer must be launched via tier4_control.py so the
-# App1 receiver claims com.qdistro.Tier4VM.uid<NNNN> AND the
-# com.qdistro.Tier4VM.Control bus name owns a Close() method qdshell
-# invokes when the chrome close button is pressed. Pre-fix-pass the
-# script exec'd virt-viewer directly, which left no Close hook — the
-# close button signalled xdg_toplevel.close → virt-viewer exited but
-# the qemu domain stayed running ("zombie qemu" from the task spec).
-#
-# Resolution order:
-#   1. TIER4_CONTROL_SCRIPT override (full path; tests set this).
-#   2. <script_dir>/tier4_control.py (running from source tree).
-#   3. /usr/share/qdistro/tier4-vm/tier4_control.py (installed).
-# When none exist we fall back to the pre-fix-pass behaviour with a
-# warning — the VM still launches, the close button just degrades.
+# --- host-side waypipe-client (wrapped by tier4_control + secctx) -----
 CONTROL_SCRIPT="${TIER4_CONTROL_SCRIPT:-}"
 if [ -z "$CONTROL_SCRIPT" ]; then
     if [ -f "$SCRIPT_DIR/tier4_control.py" ]; then
@@ -370,38 +844,73 @@ if [ -z "$CONTROL_SCRIPT" ]; then
     fi
 fi
 
-# When the control script is reachable, exec via python3; otherwise
-# fall back to the direct virt-viewer path with a stderr warning so
-# bake regressions are visible in the journal.
+build_secctx_wrap "$USE_SECCTX" "$SECCTX_ENGINE" "$SECCTX_APPID" "$SECCTX_INSTANCE"
+
+CLIENT_LOG="$ADMIN_RUNTIME/tier4-${VM_NAME}-client.log"
+: >"$CLIENT_LOG"
+chown "$ADMIN_USER" "$CLIENT_LOG" 2>/dev/null || true
+
+# Argv shape mirrors tier5b's `waypipe --vsock client vsock://CID:PORT
+# -- <wrap-cmd>` pattern. The control script (when reachable) wraps the
+# whole thing so Close() RPC stays bound regardless of display backend.
+# Since waypipe forks the child only when a wl_client connects, we wrap
+# waypipe inside tier4_control to keep RPC dispatch alive for the full
+# session.
+WAYPIPE_ARGV=(waypipe --vsock client "vsock://$CID:$PORT")
+[ "${TIER4_DEBUG:-0}" = "1" ] && WAYPIPE_ARGV+=(--debug)
+
 if [ -n "$CONTROL_SCRIPT" ] && [ -f "$CONTROL_SCRIPT" ] \
         && command -v python3 >/dev/null 2>&1; then
-    VIEWER_CMD=(python3 "$CONTROL_SCRIPT"
+    # The control script exec's the rest of argv as the child process.
+    # With waypipe as the child, control's Close() RPC kills the
+    # waypipe process tree on close-button (then cleanup() reaps virsh).
+    CLIENT_CMD=(python3 "$CONTROL_SCRIPT"
                 --vm-name "$VM_NAME"
-                -- virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+                -- "${WAYPIPE_ARGV[@]}")
 else
     if [ -n "$CONTROL_SCRIPT" ]; then
         echo "[tier4] WARN: control script $CONTROL_SCRIPT or python3 unavailable; close button will not destroy the domain (degraded)" >&2
     else
         echo "[tier4] WARN: tier4_control.py not found; close button will not destroy the domain (degraded)" >&2
     fi
-    VIEWER_CMD=(virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+    CLIENT_CMD=("${WAYPIPE_ARGV[@]}")
 fi
 
-if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX', secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
-    run_as_admin qdistro-secctx-exec \
-        --sandbox-engine "$SECCTX_ENGINE" \
-        --app-id "$SECCTX_APPID" \
-        --instance-id "$VM_NAME-$$" \
-        -- "${VIEWER_CMD[@]}"
-    EXIT=$?
+if [ "$USE_SECCTX" = "1" ]; then
+    echo "[tier4] launching waypipe-client for '$VM_NAME' (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
 else
-    if [ "$USE_SECCTX" = "1" ]; then
-        echo "[tier4] WARN: TIER4_USE_SECCTX=1 but qdistro-secctx-exec not found; running un-tagged" >&2
-    fi
-    echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX')" >&2
-    run_as_admin "${VIEWER_CMD[@]}"
-    EXIT=$?
+    echo "[tier4] launching waypipe-client for '$VM_NAME' (un-tagged)" >&2
 fi
-echo "[tier4] virt-viewer exited rc=$EXIT" >&2
+echo "[tier4] waypipe-client log: $CLIENT_LOG" >&2
+
+# setsid: a qdshell crash (the parent of this script in production)
+# must not propagate SIGHUP to waypipe-client. The client outlives the
+# shell for the duration of the VM session.
+setsid runuser -u "$ADMIN_USER" -- env \
+    XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+    HOME="$ADMIN_HOME" \
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$ADMIN_RUNTIME/bus" \
+    "${SECCTX_WRAP[@]}" "${CLIENT_CMD[@]}" >>"$CLIENT_LOG" 2>&1 &
+CLIENT_PID=$!
+
+# Poll the client log for readiness banner; bail loud if the client
+# crashed during startup (so the operator doesn't wait for the cleanup
+# trap to fire on a zombie session).
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if grep -q 'Starting client main process\|Setting up vsock' "$CLIENT_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
+
+if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    echo "[tier4] FAIL: waypipe-client died during readiness poll" >&2
+    cat "$CLIENT_LOG" >&2 || true
+    exit 6
+fi
+
+wait "$CLIENT_PID" 2>/dev/null
+EXIT=$?
+echo "[tier4] waypipe-client exited rc=$EXIT" >&2
 exit "$EXIT"
