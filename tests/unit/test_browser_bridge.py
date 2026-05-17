@@ -86,15 +86,18 @@ class TestVerifyParent:
         assert ident["extension_id"] == "qdistro@qdistro.local"
 
     def test_allowed_chromium(self):
+        # Valid Chrome extension id = 32 lowercase a-p chars (P04
+        # fix-pass S4: parse_extension_id_from_argv tightened).
+        valid_id = "a" * 32
         ident = bb.verify_parent(
             ppid_fn=lambda: 1,
             exe_reader=lambda _p: "/usr/bin/chromium",
             selinux_reader=lambda _p: "",
             argv=["/usr/lib/qdistro/browser-bridge",
-                  "chrome-extension://abcdef123/"],
+                  f"chrome-extension://{valid_id}/"],
         )
         assert ident["allowed"] is True
-        assert ident["extension_id"] == "abcdef123"
+        assert ident["extension_id"] == valid_id
 
     def test_denied_unknown_parent(self):
         ident = bb.verify_parent(
@@ -190,31 +193,67 @@ class TestAllowlistEnvBypass:
 # ---- argv-derived extension identity (P0-1) ----
 
 class TestParseExtensionIdFromArgv:
+    """Per P04 fix-pass S4, the parser enforces the format gate:
+
+    - Chrome / Chromium-family: exactly 32 lowercase a-p chars.
+    - Firefox: ``{UUID-IN-BRACES}`` or ``name@host`` syntax.
+
+    Anything else returns "" rather than echoing back arbitrary
+    content. Future code that interpolates the id into a path / URL
+    inherits the strict grammar.
+    """
+
+    _VALID_CHROME = "a" * 32
+
     def test_chrome_origin(self):
         eid = bb.parse_extension_id_from_argv(
             ["/usr/lib/qdistro/browser-bridge",
-             "chrome-extension://abcdef123/"],
+             f"chrome-extension://{self._VALID_CHROME}/"],
             parent_exe="/usr/bin/chromium")
-        assert eid == "abcdef123"
+        assert eid == self._VALID_CHROME
 
     def test_chrome_origin_chromium_browser(self):
         eid = bb.parse_extension_id_from_argv(
-            ["bridge", "chrome-extension://aaa-bbb-ccc/"],
+            ["bridge", f"chrome-extension://{self._VALID_CHROME}/"],
             parent_exe="/usr/bin/chromium-browser")
-        assert eid == "aaa-bbb-ccc"
+        assert eid == self._VALID_CHROME
 
     def test_chrome_origin_google_chrome(self):
+        # Real Chrome IDs are 32 a-p chars; non-conforming ids are
+        # rejected (S4 hardening).
         eid = bb.parse_extension_id_from_argv(
             ["bridge", "chrome-extension://google-id/"],
             parent_exe="/usr/bin/google-chrome")
-        assert eid == "google-id"
+        assert eid == ""
 
-    def test_firefox_argv2(self):
+    def test_chrome_origin_path_escape_rejected(self):
+        # Hardening: pre-S4, this returned "aaa/../bbb"; now empty.
+        eid = bb.parse_extension_id_from_argv(
+            ["bridge",
+             "chrome-extension://aaa/../bbb/"],
+            parent_exe="/usr/bin/chromium")
+        assert eid == ""
+
+    def test_firefox_argv2_name_at_host(self):
         eid = bb.parse_extension_id_from_argv(
             ["bridge", "/path/to/manifest.json",
              "qdistro@qdistro.local"],
             parent_exe="/usr/lib64/firefox/firefox")
         assert eid == "qdistro@qdistro.local"
+
+    def test_firefox_argv2_uuid_in_braces(self):
+        eid = bb.parse_extension_id_from_argv(
+            ["bridge", "/path/to/manifest.json",
+             "{12345678-1234-1234-1234-1234567890ab}"],
+            parent_exe="/usr/lib64/firefox/firefox")
+        assert eid == "{12345678-1234-1234-1234-1234567890ab}"
+
+    def test_firefox_argv2_garbage_rejected(self):
+        eid = bb.parse_extension_id_from_argv(
+            ["bridge", "/path/to/manifest.json",
+             "not-an-id-at-all"],
+            parent_exe="/usr/lib64/firefox/firefox")
+        assert eid == ""
 
     def test_firefox_missing_argv2_empty(self):
         # Firefox bridge with no extension ID in argv (shouldn't happen
@@ -438,15 +477,17 @@ class TestSubprocessEndToEnd:
                 self._resolved_python_exe(),
             "QDISTRO_TEST_MODE": "1",
         }
+        # Valid Chrome id = 32 lowercase a-p chars (S4 hardening).
+        chrome_id = "abcdefghijklmnopabcdefghijklmnop"
         proc = self._spawn_bridge(
-            ["chrome-extension://e2e-test-id/"], env)
+            [f"chrome-extension://{chrome_id}/"], env)
         body = self._ping(proc,
                           {"op": "qdistro.ping", "echo": "e2e",
                            # Ignored — bridge trusts argv only.
                            "extension_id": "spoof-attempt"})
         assert body["pong"] is True
         assert body["echo"] == "e2e"
-        assert body["extension_id"] == "e2e-test-id"
+        assert body["extension_id"] == chrome_id
 
     def test_firefox_argv_extension_id_round_trip(self):
         env = {
@@ -456,13 +497,12 @@ class TestSubprocessEndToEnd:
         }
         # We can't pretend to be Firefox by parent_exe (python3 is the
         # real parent), so argv parsing falls into the Chrome branch.
-        # The Firefox argv shape is exercised by the unit test above;
-        # this confirms the Chrome path round-trips through a real
-        # subprocess.
+        # Use a valid 32-char a-p id (S4).
+        chrome_id = "ponmlkjihgfedcbaponmlkjihgfedcba"
         proc = self._spawn_bridge(
-            ["chrome-extension://firefox-shape-test/"], env)
+            [f"chrome-extension://{chrome_id}/"], env)
         body = self._ping(proc, {"op": "qdistro.ping"})
-        assert body["extension_id"] == "firefox-shape-test"
+        assert body["extension_id"] == chrome_id
 
     def test_legacy_env_var_aborts_subprocess(self):
         # If anything in production accidentally sets the old name,

@@ -198,15 +198,28 @@ def parse_extension_id_from_argv(
     bridge no longer accepts a stdio-supplied extension_id field; only
     this argv-derived value is authoritative.
     """
+    import re
     if not argv or len(argv) < 2:
         return ""
     exe = (parent_exe or "").lower()
     if "firefox" in exe:
-        return argv[2].strip() if len(argv) >= 3 else ""
+        if len(argv) < 3:
+            return ""
+        ext_id = argv[2].strip()
+        # Firefox: UUID-in-braces ``{...}`` or ``name@host`` style.
+        if re.fullmatch(
+                r"\{[0-9a-fA-F-]+\}|[A-Za-z0-9_.+-]+@[A-Za-z0-9_.-]+",
+                ext_id):
+            return ext_id
+        return ""
     chrome_origin = argv[1].strip()
     if chrome_origin.startswith("chrome-extension://"):
         rest = chrome_origin[len("chrome-extension://"):]
-        return rest.rstrip("/").strip()
+        rest = rest.rstrip("/").strip()
+        # Chrome / Chromium: extension IDs are exactly 32 a-p chars.
+        if re.fullmatch(r"[a-p]{32}", rest):
+            return rest
+        return ""
     return ""
 
 
@@ -415,25 +428,40 @@ class _BaseDBusClient:
     """Outbound D-Bus client surface used by Phase-9 handlers.
 
     A single ``call`` entry point — daemons named here are
-    ``qdistro-pwd``, ``qbus-admin``, ``qdistro-downloads``,
-    ``qdistro-notifications``, ``qdistro-mpris``, ``qdistro-compositor``.
-    Any of them may not yet exist; in that case the default jeepney
+    ``qdistro-pwd`` (SYSTEM bus), ``qbus-admin`` (SYSTEM bus),
+    ``qdistro-downloads``, ``qdistro-notifications``, ``qdistro-mpris``,
+    ``qdistro-compositor`` (SESSION bus). The ``bus`` argument
+    (``"SESSION"`` or ``"SYSTEM"``) is REQUIRED — there is no implicit
+    default — because mismatched-bus drift between the bridge and the
+    daemon it's supposed to reach silently breaks production
+    (see plan2/reviews/P04 H3 / HIGH-1 review findings).
+
+    Any daemon may not yet exist; in that case the default jeepney
     client returns ``{"ok": False, "error": "daemon_missing"}`` and
     the handler propagates it.
     """
 
-    def call(self, service: str, object_path: str, interface: str,
-             method: str, signature: str, body: tuple) -> dict:
+    def call(self, bus: str, service: str, object_path: str,
+             interface: str, method: str, signature: str,
+             body: tuple) -> dict:
         raise NotImplementedError
 
 
 class _JeepneyDBusClient(_BaseDBusClient):
     """Default production client. jeepney is pure-Python so it never
     pulls a C extension into the bridge process.
+
+    The ``bus`` argument selects ``"SESSION"`` or ``"SYSTEM"``. The
+    pwd / broker daemons live on SYSTEM; mpris / compositor / downloads
+    on SESSION. See module docstring on `_BaseDBusClient` for the
+    rationale.
     """
 
-    def call(self, service: str, object_path: str, interface: str,
-             method: str, signature: str, body: tuple) -> dict:
+    def call(self, bus: str, service: str, object_path: str,
+             interface: str, method: str, signature: str,
+             body: tuple) -> dict:
+        if bus not in ("SESSION", "SYSTEM"):
+            return {"ok": False, "error": "bad_bus", "bus": bus}
         try:
             from jeepney import DBusAddress, new_method_call
             from jeepney.io.blocking import open_dbus_connection
@@ -445,7 +473,7 @@ class _JeepneyDBusClient(_BaseDBusClient):
                 bus_name=service,
                 interface=interface)
             msg = new_method_call(addr, method, signature, body)
-            conn = open_dbus_connection(bus="SESSION")
+            conn = open_dbus_connection(bus=bus)
             try:
                 reply = conn.send_and_get_reply(msg, timeout=5.0)
             finally:
@@ -491,18 +519,31 @@ _TOKEN_LOCK = threading.Lock()
 
 def reset_session_secret() -> bytes:
     """Rotate the per-session HMAC secret. Called on bridge startup
-    and exposed for tests."""
+    and exposed for tests.
+
+    Also clears the per-extension secret registry — a master rotation
+    invalidates every previously-handed-out derived secret.
+    """
     global _SESSION_SECRET, _USED_TOKENS
     with _TOKEN_LOCK:
         _SESSION_SECRET = secrets.token_bytes(32)
         _USED_TOKENS = {}
+    with _EXT_SECRETS_LOCK:
+        _EXT_SECRETS.clear()
     return _SESSION_SECRET
 
 
 def _compute_token_hmac(request_id: str, ts: float, op: str,
                         secret: bytes | None = None) -> str:
-    """Compute the canonical HMAC for an intent token. Exposed so
-    tests can mint valid tokens against the live session secret."""
+    """Compute the canonical HMAC for an intent token.
+
+    Pass ``secret`` to compute against an explicit derived per-extension
+    secret. With ``secret=None`` the bridge's master is used — this is
+    only correct for the no-extension test path; production handshakes
+    return :func:`derive_extension_session_secret(master, extension_id)`
+    so an attacker who steals one extension's secret can't forge tokens
+    for another extension.
+    """
     s = secret if secret is not None else _SESSION_SECRET
     msg = f"{request_id}|{ts}|{op}".encode("utf-8")
     return hmac.new(s, msg, hashlib.sha256).hexdigest()
@@ -518,10 +559,17 @@ def _sweep_used_tokens(now: float | None = None) -> None:
 
 
 def verify_intent_token(token: dict | None, op: str,
-                        now_fn: Callable[[], float] = time.time
+                        now_fn: Callable[[], float] = time.time,
+                        *,
+                        extension_id: str | None = None,
                         ) -> tuple[bool, str]:
     """Return ``(ok, error)``. Single-use: a successful verify marks
     the request_id as consumed.
+
+    ``extension_id`` selects the per-extension derived secret recorded
+    on the prior :func:`_handle_handshake` call. When ``None`` (legacy
+    path / direct tests), the master secret is used so the existing
+    unit suite keeps working unchanged.
 
     Rejects:
       * missing / malformed token → ``"missing_intent_token"``
@@ -549,7 +597,16 @@ def verify_intent_token(token: dict | None, op: str,
         return False, "intent_token_future"
     if now - ts > INTENT_TOKEN_TTL_S:
         return False, "intent_token_expired"
-    expected = _compute_token_hmac(request_id, ts, tok_op)
+    if extension_id is not None:
+        secret = _lookup_extension_secret(extension_id)
+        if secret is None:
+            # No handshake on record for this extension — fall back
+            # to master so the legacy stdio test path still works,
+            # but production callers MUST handshake first.
+            secret = _SESSION_SECRET
+    else:
+        secret = _SESSION_SECRET
+    expected = _compute_token_hmac(request_id, ts, tok_op, secret=secret)
     if not hmac.compare_digest(expected, mac):
         return False, "intent_token_bad_hmac"
     with _TOKEN_LOCK:
@@ -663,35 +720,62 @@ def _identity_gate(identity: dict) -> dict | None:
 # Phase-9 handlers
 # =====================================================================
 
+_IDENTITY_FIELDS = frozenset({
+    "ppid", "parent_exe", "parent_selinux", "extension_id", "allowed",
+})
+
+# Ops whose reply intentionally surfaces (a subset of) identity
+# fields. Dispatch strips identity universally and then re-stamps
+# these specific fields from the bridge's view of the caller.
+# Adding a new op here requires a security review.
+_IDENTITY_REFLECTING_OPS = frozenset({
+    "qdistro.ping",
+    "qdistro.handshake",
+})
+
+
 def _strip_identity(reply: dict) -> dict:
     """Defensive: handlers must never leak identity fields back to
     the extension on the stdio reply path. Kernel-attested fields
     on the identity dict (parent_exe, ppid, parent_selinux,
     extension_id) belong to the bridge, not to the daemon's reply.
+
+    This is now applied centrally by :func:`dispatch` so handlers
+    don't need to remember; kept exposed for tests + back-compat.
     """
-    for k in ("ppid", "parent_exe", "parent_selinux",
-              "extension_id", "allowed"):
+    for k in _IDENTITY_FIELDS:
         reply.pop(k, None)
     return reply
 
 
 # ---- 9a: pwd.fill / pwd.save -------------------------------------
+#
+# CANONICAL NAMES — must match ``qdistro/pwd/qdistro_pwd_daemon.py``:
+#   well-known name : ``com.qdistro.Pwd1`` on the SYSTEM bus
+#   object path     : ``/com/qdistro/Pwd1``
+#   interface       : ``com.qdistro.Pwd1``
+# Three previous review angles flagged the same bus-name drift; we
+# now keep one set of constants and import them everywhere.
 
-_PWD_BUS = "org.qdistro.Pwd"
-_PWD_PATH = "/org/qdistro/Pwd"
-_PWD_IFACE = "org.qdistro.Pwd1"
+_PWD_BUS_KIND = "SYSTEM"
+_PWD_BUS = "com.qdistro.Pwd1"
+_PWD_PATH = "/com/qdistro/Pwd1"
+_PWD_IFACE = "com.qdistro.Pwd1"
 
 
 def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
     """pwd.fill — fetch credentials for a URL.
 
-    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd / Pwd.Fill).
-    Requires an intent token (see :data:`INTENT_TOKEN_REQUIRED_OPS`).
+    Forwards to ``qdistro-pwd`` (com.qdistro.Pwd1 / Pwd1.Fill on the
+    SYSTEM bus). Requires an intent token (see
+    :data:`INTENT_TOKEN_REQUIRED_OPS`).
     """
     gate = _identity_gate(identity)
     if gate is not None:
         return gate
-    ok, err = verify_intent_token(msg.get("intent_token"), "pwd.fill")
+    ok, err = verify_intent_token(
+        msg.get("intent_token"), "pwd.fill",
+        extension_id=identity.get("extension_id"))
     if not ok:
         return {"ok": False, "error": err}
     url = msg.get("url")
@@ -704,19 +788,23 @@ def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
         "parent_exe": identity.get("parent_exe") or "",
     })
     reply = _get_dbus_client().call(
-        _PWD_BUS, _PWD_PATH, _PWD_IFACE, "Fill", "s", (body,))
-    return _strip_identity(dict(reply))
+        _PWD_BUS_KIND, _PWD_BUS, _PWD_PATH, _PWD_IFACE,
+        "Fill", "s", (body,))
+    return dict(reply)
 
 
 def _handle_pwd_save(msg: dict, identity: dict) -> dict:
     """pwd.save — persist credentials for a URL.
 
-    Forwards to ``qdistro-pwd`` (org.qdistro.Pwd / Pwd.Save).
+    Forwards to ``qdistro-pwd`` (com.qdistro.Pwd1 / Pwd1.Save on the
+    SYSTEM bus).
     """
     gate = _identity_gate(identity)
     if gate is not None:
         return gate
-    ok, err = verify_intent_token(msg.get("intent_token"), "pwd.save")
+    ok, err = verify_intent_token(
+        msg.get("intent_token"), "pwd.save",
+        extension_id=identity.get("extension_id"))
     if not ok:
         return {"ok": False, "error": err}
     url = msg.get("url")
@@ -732,8 +820,9 @@ def _handle_pwd_save(msg: dict, identity: dict) -> dict:
         "parent_exe": identity.get("parent_exe") or "",
     })
     reply = _get_dbus_client().call(
-        _PWD_BUS, _PWD_PATH, _PWD_IFACE, "Save", "s", (body,))
-    return _strip_identity(dict(reply))
+        _PWD_BUS_KIND, _PWD_BUS, _PWD_PATH, _PWD_IFACE,
+        "Save", "s", (body,))
+    return dict(reply)
 
 
 # ---- 9b: tabs.* (extension-side replies) -------------------------
@@ -805,18 +894,24 @@ def _handle_heartbeat_ack(msg: dict, identity: dict) -> dict:
 
 # ---- 9c: page.extract --------------------------------------------
 
-_BROKER_BUS = "org.qdistro.BrokerAdmin"
-_BROKER_PATH = "/org/qdistro/BrokerAdmin"
-_BROKER_IFACE = "org.qdistro.BrokerAdmin1"
+_BROKER_BUS_KIND = "SYSTEM"
+_BROKER_BUS = "com.qdistro.AdminBroker1"
+_BROKER_PATH = "/com/qdistro/AdminBroker1"
+_BROKER_IFACE = "com.qdistro.AdminBroker1"
 
 
 def _handle_page_extract(msg: dict, identity: dict) -> dict:
-    """page.extract — share a page snippet via the qbus-admin broker."""
+    """page.extract — share a page snippet via the qbus-admin broker.
+
+    The broker lives on the SYSTEM bus
+    (``com.qdistro.AdminBroker1``).
+    """
     gate = _identity_gate(identity)
     if gate is not None:
         return gate
-    ok, err = verify_intent_token(msg.get("intent_token"),
-                                  "page.extract")
+    ok, err = verify_intent_token(
+        msg.get("intent_token"), "page.extract",
+        extension_id=identity.get("extension_id"))
     if not ok:
         return {"ok": False, "error": err}
     url = msg.get("url")
@@ -832,51 +927,112 @@ def _handle_page_extract(msg: dict, identity: dict) -> dict:
         "extension_id": identity.get("extension_id") or "",
     })
     reply = _get_dbus_client().call(
-        _BROKER_BUS, _BROKER_PATH, _BROKER_IFACE,
+        _BROKER_BUS_KIND, _BROKER_BUS, _BROKER_PATH, _BROKER_IFACE,
         "PageExtract", "s", (body,))
-    return _strip_identity(dict(reply))
+    return dict(reply)
 
 
 # ---- 9d: handshake + cookies.export ------------------------------
 
+def derive_extension_session_secret(master: bytes,
+                                    extension_id: str) -> bytes:
+    """Derive a per-extension session secret from the bridge's master.
+
+    The bridge process keeps a single per-launch master secret in
+    :data:`_SESSION_SECRET`. Each connecting extension gets a derived
+    secret bound to its kernel-attested ``extension_id`` (from the
+    browser's exec-time argv, NOT from stdio) so that:
+
+      * a captured secret only forges tokens for ONE extension_id;
+      * two extensions sharing the same bridge process can't replay
+        each other's intent tokens even if one is compromised;
+      * an extension whose argv-attested id is ``""`` (e.g. someone
+        running the bridge manually for development) gets an
+        unforgeable but un-shareable derived value.
+
+    Tests can drive the derivation directly to assert that
+    handshake-reply secrets for two different extension_ids differ.
+    """
+    msg = ("extension|" + (extension_id or "")).encode("utf-8")
+    return hmac.new(master, msg, hashlib.sha256).digest()
+
+
 def _handle_handshake(msg: dict, identity: dict) -> dict:
-    """qdistro.handshake — return the per-session HMAC secret.
+    """qdistro.handshake — return a per-extension session HMAC secret.
 
-    The extension uses this to mint intent tokens. The secret rotates
-    each bridge launch, so a captured token is useless after a browser
-    restart. The secret is returned as hex; the extension uses it
-    directly for HMAC-SHA256.
+    The extension uses the returned secret to mint intent tokens.
+    The bridge derives it from the per-launch master secret bound
+    to the caller's kernel-attested ``extension_id`` (from argv at
+    browser exec time, not from the stdio payload). This means:
 
-    Trust model: the extension is trusted (it lives in the browser
-    process). A compromised extension can forge any token — intent
-    tokens defend against web-page-triggered calls and replays, not
-    against extension compromise (see todo/browser/01-bridge-phase9.md
-    §9d Threat scope).
+    * Two extensions reaching the same bridge process get distinct
+      secrets — even if one leaks, the other's intent-token chain is
+      not forged.
+    * The bridge process restarts → new master → new derived secret;
+      any previously-stored secret in a qdbrowser orchestrator
+      becomes invalid and the orchestrator must re-handshake.
+
+    Trust model: the extension is trusted within the browser
+    sandbox. A compromised extension can still mint valid intent
+    tokens for itself — intent tokens defend against
+    web-page-triggered calls and replays, not against extension
+    compromise (see todo/browser/01-bridge-phase9.md §9d).
     """
     gate = _identity_gate(identity)
     if gate is not None:
         return gate
+    extension_id = str(identity.get("extension_id") or "")
+    derived = derive_extension_session_secret(
+        _SESSION_SECRET, extension_id)
+    # Also pin verify_intent_token to expect the derived secret for
+    # subsequent calls from this extension. The verifier looks up
+    # the per-extension secret by extension_id; see _per_ext_secret.
+    _remember_extension_secret(extension_id, derived)
     return {
         "ok": True,
-        "session_secret_hex": _SESSION_SECRET.hex(),
+        "session_secret_hex": derived.hex(),
         "token_ttl_s": INTENT_TOKEN_TTL_S,
         "hmac_algo": "sha256",
         "token_canonical": "request_id|ts|op",
+        "extension_id": extension_id,
     }
 
 
-_COOKIES_BUS = "org.qdistro.Pwd"  # cookies live with pwd daemon
-_COOKIES_PATH = "/org/qdistro/Pwd"
-_COOKIES_IFACE = "org.qdistro.Pwd1"
+# Per-extension secret registry. Populated by `_handle_handshake`.
+# verify_intent_token() consults this so a token minted by extension A
+# can't be replayed by extension B (different derived secret).
+_EXT_SECRETS: dict[str, bytes] = {}
+_EXT_SECRETS_LOCK = threading.Lock()
+
+
+def _remember_extension_secret(extension_id: str, secret: bytes) -> None:
+    with _EXT_SECRETS_LOCK:
+        _EXT_SECRETS[extension_id] = secret
+
+
+def _lookup_extension_secret(extension_id: str) -> bytes | None:
+    with _EXT_SECRETS_LOCK:
+        return _EXT_SECRETS.get(extension_id)
+
+
+_COOKIES_BUS_KIND = "SYSTEM"
+_COOKIES_BUS = "com.qdistro.Pwd1"  # cookies live with pwd daemon (SYSTEM)
+_COOKIES_PATH = "/com/qdistro/Pwd1"
+_COOKIES_IFACE = "com.qdistro.Pwd1"
 
 
 def _handle_cookies_export(msg: dict, identity: dict) -> dict:
-    """cookies.export — audit-logged TTL-limited cookie export."""
+    """cookies.export — audit-logged TTL-limited cookie export.
+
+    Cookies live with the pwd daemon at
+    ``com.qdistro.Pwd1`` (SYSTEM bus).
+    """
     gate = _identity_gate(identity)
     if gate is not None:
         return gate
     ok, err = verify_intent_token(msg.get("intent_token"),
-                                  "cookies.export")
+                                  "cookies.export",
+                                  extension_id=identity.get("extension_id"))
     if not ok:
         return {"ok": False, "error": err}
     domain = msg.get("domain") or msg.get("url")
@@ -892,39 +1048,44 @@ def _handle_cookies_export(msg: dict, identity: dict) -> dict:
         "parent_exe": identity.get("parent_exe") or "",
     })
     reply = _get_dbus_client().call(
-        _COOKIES_BUS, _COOKIES_PATH, _COOKIES_IFACE,
+        _COOKIES_BUS_KIND, _COOKIES_BUS, _COOKIES_PATH, _COOKIES_IFACE,
         "ExportCookies", "s", (body,))
-    return _strip_identity(dict(reply))
+    return dict(reply)
 
 
 # ---- 9e: MPRIS / downloads / notifications / screenlock ----------
 
+_MPRIS_BUS_KIND = "SESSION"
 _MPRIS_BUS = "org.qdistro.Mpris"
 _MPRIS_PATH = "/org/qdistro/Mpris"
 _MPRIS_IFACE = "org.qdistro.Mpris1"
 
+_DOWNLOADS_BUS_KIND = "SESSION"
 _DOWNLOADS_BUS = "org.qdistro.Downloads"
 _DOWNLOADS_PATH = "/org/qdistro/Downloads"
 _DOWNLOADS_IFACE = "org.qdistro.Downloads1"
 
+_NOTIF_BUS_KIND = "SESSION"
 _NOTIF_BUS = "org.qdistro.Notifications"
 _NOTIF_PATH = "/org/qdistro/Notifications"
 _NOTIF_IFACE = "org.qdistro.Notifications1"
 
+_COMPOSITOR_BUS_KIND = "SESSION"
 _COMPOSITOR_BUS = "org.qdistro.Compositor"
 _COMPOSITOR_PATH = "/org/qdistro/Compositor"
 _COMPOSITOR_IFACE = "org.qdistro.Compositor1"
 
 
 def _forward(msg: dict, identity: dict,
-             bus: str, path: str, iface: str, method: str,
+             bus_kind: str, bus: str, path: str, iface: str, method: str,
              fields: tuple[str, ...]) -> dict:
     body = {f: msg.get(f) for f in fields}
     body["extension_id"] = identity.get("extension_id") or ""
     body["parent_exe"] = identity.get("parent_exe") or ""
     reply = _get_dbus_client().call(
-        bus, path, iface, method, "s", (json.dumps(body),))
-    return _strip_identity(dict(reply))
+        bus_kind, bus, path, iface, method, "s",
+        (json.dumps(body),))
+    return dict(reply)
 
 
 def _handle_mpris_publish(msg: dict, identity: dict) -> dict:
@@ -932,7 +1093,8 @@ def _handle_mpris_publish(msg: dict, identity: dict) -> dict:
     if gate is not None:
         return gate
     return _forward(msg, identity,
-                    _MPRIS_BUS, _MPRIS_PATH, _MPRIS_IFACE, "Publish",
+                    _MPRIS_BUS_KIND, _MPRIS_BUS, _MPRIS_PATH,
+                    _MPRIS_IFACE, "Publish",
                     ("title", "artist", "album", "playback_status",
                      "position_us", "tab_id"))
 
@@ -942,7 +1104,8 @@ def _handle_downloads_notify(msg: dict, identity: dict) -> dict:
     if gate is not None:
         return gate
     return _forward(msg, identity,
-                    _DOWNLOADS_BUS, _DOWNLOADS_PATH, _DOWNLOADS_IFACE,
+                    _DOWNLOADS_BUS_KIND, _DOWNLOADS_BUS,
+                    _DOWNLOADS_PATH, _DOWNLOADS_IFACE,
                     "Notify",
                     ("download_id", "filename", "state",
                      "bytes_received", "total_bytes", "url", "mime"))
@@ -953,7 +1116,8 @@ def _handle_notifications_show(msg: dict, identity: dict) -> dict:
     if gate is not None:
         return gate
     return _forward(msg, identity,
-                    _NOTIF_BUS, _NOTIF_PATH, _NOTIF_IFACE, "Show",
+                    _NOTIF_BUS_KIND, _NOTIF_BUS, _NOTIF_PATH,
+                    _NOTIF_IFACE, "Show",
                     ("title", "body", "icon_url", "origin", "tag"))
 
 
@@ -962,7 +1126,8 @@ def _handle_screenlock_inhibit(msg: dict, identity: dict) -> dict:
     if gate is not None:
         return gate
     return _forward(msg, identity,
-                    _COMPOSITOR_BUS, _COMPOSITOR_PATH,
+                    _COMPOSITOR_BUS_KIND, _COMPOSITOR_BUS,
+                    _COMPOSITOR_PATH,
                     _COMPOSITOR_IFACE, "ScreenlockInhibit",
                     ("reason", "tab_id", "url"))
 
@@ -972,7 +1137,8 @@ def _handle_screenlock_release(msg: dict, identity: dict) -> dict:
     if gate is not None:
         return gate
     return _forward(msg, identity,
-                    _COMPOSITOR_BUS, _COMPOSITOR_PATH,
+                    _COMPOSITOR_BUS_KIND, _COMPOSITOR_BUS,
+                    _COMPOSITOR_PATH,
                     _COMPOSITOR_IFACE, "ScreenlockRelease",
                     ("tab_id", "url"))
 
@@ -1060,14 +1226,25 @@ def inbound_dbus_serve(ppid: int, out_stream,
             f"qdistro-browser-bridge: SESSION bus unavailable: {e}\n")
         return
     try:
+        # Flags: 0x04 = DO_NOT_QUEUE; without it the bridge silently
+        # queues behind a same-uid impostor (M2 review finding).
         reply = conn.send_and_get_reply(
-            message_bus.RequestName(bus_name, 4))  # DO_NOT_QUEUE
-        # Best-effort: even if the name is already taken we keep
-        # serving — co-resident daemons can fall back to the alt
-        # name. Tests skip this path entirely.
+            message_bus.RequestName(bus_name, 4))
+        # 1 = PRIMARY_OWNER, the only acceptable outcome. Anything
+        # else (EXISTS / ALREADY_OWNER / IN_QUEUE) is fatal — a
+        # same-uid attacker may already own the name and would
+        # otherwise harvest the intent-token chain.
+        request_name_result = (reply.body[0]
+                               if reply.body else 0)
         sys.stderr.write(
             f"qdistro-browser-bridge: requested name {bus_name} "
-            f"reply={reply.body}\n")
+            f"result={request_name_result}\n")
+        if request_name_result != 1:
+            sys.stderr.write(
+                f"qdistro-browser-bridge: refusing to serve — "
+                f"RequestName({bus_name}) returned "
+                f"{request_name_result} (1=PRIMARY_OWNER required)\n")
+            return
         while not stop_event.is_set():
             # jeepney blocking receive with a short timeout so we can
             # check stop_event regularly.
@@ -1171,6 +1348,20 @@ def dispatch(
     except Exception as e:
         return {"ok": False, "error": "handler_raised",
                 "op": op, "detail": str(e)[:200]}
+    # Central identity-strip — handlers don't have to remember (L4
+    # review). Any new field a future op adds is automatically
+    # guarded. Handlers that deliberately reflect identity back to
+    # the extension (currently only ``qdistro.ping`` and
+    # ``qdistro.handshake``) annotate themselves on
+    # :data:`_IDENTITY_REFLECTING_OPS` and run a re-stamp pass
+    # after the strip.
+    _strip_identity(body)
+    if op in _IDENTITY_REFLECTING_OPS:
+        body["extension_id"] = str(identity.get("extension_id") or "")
+        if op == "qdistro.ping":
+            body["ppid"] = identity.get("ppid")
+            body["parent_exe"] = identity.get("parent_exe", "")
+            body["parent_selinux"] = identity.get("parent_selinux", "")
     body.setdefault("ok", True)
     body["op"] = op
     return body

@@ -102,10 +102,11 @@ class FakeDBus(bb._BaseDBusClient):
         self._reply = reply or {"ok": True}
         self._by_method = by_method or {}
 
-    def call(self, service, object_path, interface, method,
+    def call(self, bus, service, object_path, interface, method,
              signature, body):
         self.calls.append({
-            "service": service, "object_path": object_path,
+            "bus": bus, "service": service,
+            "object_path": object_path,
             "interface": interface, "method": method,
             "signature": signature, "body": body,
         })
@@ -149,8 +150,10 @@ class TestPwdFill:
         assert resp["op"] == "pwd.fill"
         assert resp["credentials"][0]["username"] == "alice"
         # D-Bus body must NOT include parent_selinux / ppid leaks.
+        # SYSTEM bus + canonical com.qdistro.Pwd1 name (P04 fix-pass H3).
         call = bb._dbus_client.calls[0]
-        assert call["service"] == "org.qdistro.Pwd"
+        assert call["bus"] == "SYSTEM"
+        assert call["service"] == "com.qdistro.Pwd1"
         assert call["method"] == "Fill"
         body = json.loads(call["body"][0])
         assert body["url"] == "https://example.com/login"
@@ -679,7 +682,10 @@ class TestPageExtract:
             ALLOWED)
         assert resp["ok"] is True
         call = bb._dbus_client.calls[0]
-        assert call["service"] == "org.qdistro.BrokerAdmin"
+        # Broker lives on the SYSTEM bus as ``com.qdistro.AdminBroker1``
+        # (P04 fix-pass H3).
+        assert call["bus"] == "SYSTEM"
+        assert call["service"] == "com.qdistro.AdminBroker1"
         assert call["method"] == "PageExtract"
         body = json.loads(call["body"][0])
         assert body["dest_uid"] == "dev-user"
@@ -714,7 +720,12 @@ class TestHandshake:
         assert resp["token_ttl_s"] == bb.INTENT_TOKEN_TTL_S
         secret_hex = resp["session_secret_hex"]
         assert len(secret_hex) == 64
-        assert bytes.fromhex(secret_hex) == bb._SESSION_SECRET
+        # P04 fix-pass H2: handshake returns a per-extension derived
+        # secret rather than the bare master. The reply is bound to
+        # the caller's argv-attested extension_id.
+        expected = bb.derive_extension_session_secret(
+            bb._SESSION_SECRET, ALLOWED["extension_id"])
+        assert bytes.fromhex(secret_hex) == expected
 
     def test_rotation_on_reset(self):
         a = bb.dispatch({"op": "qdistro.handshake"}, ALLOWED)
