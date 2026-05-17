@@ -21,7 +21,14 @@ The desktop shell (a Noctalia QML fork) lives in
 
 **1. Install Tumbleweed** from [get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or Server (no desktop needed).
 
-**2. Clone and bootstrap** (as root):
+**2. Install git** (not pre-installed on Tumbleweed Minimal/Server):
+
+```sh
+sudo zypper install -y git
+```
+
+**3. Clone and bootstrap** (as a regular user in the `wheel` group; `sudo` is
+available by default for wheel members on Tumbleweed):
 
 ```sh
 git clone https://codeberg.org/qdistro/qdistro.git
@@ -35,7 +42,7 @@ The bootstrap installs all dependencies, builds the compositor and daemons,
 clones the remaining components (qdgreeter, qdlocker, qdbrowser), and
 configures greetd. Takes 10–20 minutes. Idempotent — re-running is safe.
 
-**3. Reboot:**
+**4. Reboot:**
 
 ```sh
 sudo systemctl reboot
@@ -43,7 +50,7 @@ sudo systemctl reboot
 
 On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
 
-**4. Try the isolation tiers:**
+**5. Try the isolation tiers:**
 
 | Tier | How to try |
 |------|-----------|
@@ -53,7 +60,7 @@ On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
 
 The admin app (tray icon) shows active silos, pending approvals, and audit history.
 
-**5. Report back:**
+**6. Report back:**
 File issues at [codeberg.org/qdistro/qdistro/issues](https://codeberg.org/qdistro/qdistro/issues).
 Most useful: "I ran step X and Y was unclear / broken."
 
