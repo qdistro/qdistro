@@ -239,7 +239,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: §Phase-7 v13 toplevel_security_context end-to-end"
 }
 
-@test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + spice display" {
+@test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + waypipe display" {
     # §Phase-7 tier-4 — libvirt + virt-viewer wrapper smoke. Linux-only
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
     # define-only and no-viewer modes; full virt-viewer-on-wayland-1
