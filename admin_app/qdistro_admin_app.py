@@ -12,11 +12,9 @@ Ctrl+Shift+1..8 scope picker.
 """
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import sys
-import time as _time_mod
 from datetime import datetime
 
 import dbus
