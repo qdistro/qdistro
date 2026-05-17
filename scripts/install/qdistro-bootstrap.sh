@@ -242,8 +242,14 @@ prompt_inputs() {
 # ---------------------------------------------------------------------------
 install_packages_tumbleweed() {
     log "refreshing zypper repositories..."
-    zypper -n --no-gpg-checks refresh 2>&1 | grep -v "^$" | sed 's/^/  /' \
-        || warn "zypper refresh failed; proceeding with cached metadata (install may fail)"
+    local _zypper_rc=0
+    zypper -n --no-gpg-checks refresh 2>&1 \
+        | sed '/^[[:space:]]*$/d' \
+        | sed 's/^/  /' \
+        || _zypper_rc="${PIPESTATUS[0]}"
+    if [ "${_zypper_rc}" -ne 0 ]; then
+        warn "zypper refresh failed (exit ${_zypper_rc}); proceeding with cached metadata (install may fail)"
+    fi
 
     # Reuse the canonical Tumbleweed list from install-deps.sh.
     # shellcheck disable=SC1091
@@ -603,6 +609,14 @@ install_qdlocker_service() {
     install -d -m 0755 /home/admin/.config/systemd/user
     install -m 0644 "$locker_src/systemd/qdlocker.service" \
         /home/admin/.config/systemd/user/qdlocker.service
+
+    # Patch ExecStart from /usr/local/bin to /usr/bin (pip --prefix=/usr installs there)
+    local unit_file="/home/admin/.config/systemd/user/qdlocker.service"
+    if grep -q "ExecStart=/usr/local/bin/qdlocker" "$unit_file" 2>/dev/null; then
+        sed -i 's|ExecStart=/usr/local/bin/qdlocker|ExecStart=/usr/bin/qdlocker|g' "$unit_file"
+        log "  patched qdlocker.service ExecStart: /usr/local/bin → /usr/bin"
+    fi
+
     chown -R admin:users /home/admin/.config/systemd
     install -d -m 0755 /etc/systemd/user/qdlocker.service.d
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<'EOF'
@@ -829,15 +843,19 @@ main() {
 
     log "DONE."
     log ""
-    log "Reboot to start qdistro:"
-    log "  systemctl reboot"
+    if [ -z "$SKIP_GREETD" ]; then
+        log "Reboot to start qdistro:"
+        log "  systemctl reboot"
+        log ""
+        log "On next boot: qdgreeter login appears on tty3."
+        log "  Admin account: admin (uid 1000)"
+        log "  Regular user:  $REGULAR_USER (uid 1001)"
+    else
+        log "Bootstrap complete (greetd not configured — use --skip-greetd was set)."
+        log "Configure greetd manually or re-run without --skip-greetd to enable the login screen."
+    fi
     log ""
-    log "On next boot: qdgreeter login appears on tty3."
-    log "  Admin account: admin (uid 1000)"
-    log "  Regular user:  $REGULAR_USER (uid 1001)"
-    log ""
-    log "To test before rebooting (requires a running user session):"
-    log "  loginctl enable-linger admin"
+    log "To test the session before rebooting (requires loginctl enable-linger admin):"
     log "  runuser -l admin -c 'systemctl --user start qdwin-compositor.service'"
 }
 
