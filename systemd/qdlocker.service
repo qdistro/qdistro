@@ -8,11 +8,14 @@ Documentation=https://codeberg.org/qdistro/qdlocker
 # --user unit is silently ignored by systemd, so we don't bother.
 # Wants= makes systemd actually try to start us when the session
 # target is activated; PartOf= propagates stop/restart so we go
-# down cleanly on logout. Without Wants=, PartOf alone is a one-way
-# "follow you down" relationship — we'd never start.
+# down cleanly on logout.
 Wants=graphical-session.target
 PartOf=graphical-session.target
-After=graphical-session.target
+# Ordering: come up after qdwin's compositor unit has advertised the
+# qdwin_locker_v1 global. The Requires= form is intentionally NOT
+# used — qdlocker has Restart=always and will re-attempt the
+# connection if qdwin isn't ready, which is the documented fail-safe.
+After=graphical-session.target qdwin-compositor.service
 
 [Service]
 # Type=simple — we don't sd_notify until a later iteration wires the
@@ -23,14 +26,18 @@ Type=simple
 ExecStart=/usr/bin/qdlocker
 Environment=QT_QPA_PLATFORM=wayland
 Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
+# PYTHONNOUSERSITE=1: refuse to load user-site shims (a malicious
+# ~/.local/.../site-packages/pam.py would otherwise shadow the system
+# python-pam at import time). PYTHONPATH override removed — the
+# packaged qdlocker is installed at a system-Python-discoverable
+# location; hardcoding /usr/lib/python3.11 broke on Python 3.13.
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 # WAYLAND_DISPLAY / XDG_RUNTIME_DIR are inherited from the systemd
 # --user environment; the session manager imports them after qdwin
 # advertises the socket.
 Restart=always
 RestartSec=2
-# If the locker dies, the compositor stays locked and the screen
-# goes black until systemd brings us back. That's the fail-safe
-# documented in qdwin/doc/locker.md §Lifecycle invariants.
 
 [Install]
 # default.target for the user manager is the right target for an

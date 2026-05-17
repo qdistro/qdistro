@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import sys
+import tomllib
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -28,23 +30,41 @@ from .auth import AuthBackend
 from .controller import LockController
 from .ctrl import CtrlSocket
 from .idle import IdleWatcher
+from .logind import LogindWatcher
 from .wayland import LockerClient, LockerEvents
 
 log = logging.getLogger("qdlocker.app")
 
-# Package layout: this module lives at <pkg>/qdlocker/app.py. QML
-# ships at <pkg>/qdlocker/qml/ (inside the package — not at the repo
-# root — so setuptools' package_data globs pick it up).
 PACKAGE_ROOT = Path(__file__).resolve().parent
 QML_ROOT = PACKAGE_ROOT / "qml"
 
+REASON_NAMES = {
+    0: "idle",
+    1: "lid",
+    2: "suspend",
+    3: "manual",
+}
+
+
+# Schema for /etc/qdistro/locker.conf. Each entry: (type, validator).
+_CONFIG_SCHEMA = {
+    "idle_timeout_s": (int, lambda v: 0 < v <= 86400),
+    "lid_action": (str, lambda v: v in ("lock", "ignore")),
+    "fprintd_enabled": (bool, lambda v: True),
+    "fprintd_max_failures": (int, lambda v: 1 <= v <= 100),
+    "fprintd_timeout_s": (int, lambda v: 1 <= v <= 600),
+}
+
+_DEFAULT_CONFIG: dict = {
+    "idle_timeout_s": 300,
+    "lid_action": "lock",
+    "fprintd_enabled": True,
+    "fprintd_max_failures": 3,
+    "fprintd_timeout_s": 10,
+}
+
 
 def _qdshell_import_path() -> Path | None:
-    """qdshell is a sibling repo with its top-level Commons/ and
-    Widgets/ directories. The actual styling reuse requires
-    Quickshell at runtime — we add the path here for future use but
-    LockUI.qml does NOT import qdshell directly until the
-    Quickshell-free shim lands (see README §Status)."""
     explicit = os.environ.get("QDLOCKER_QDSHELL_PATH")
     if explicit:
         return Path(explicit)
@@ -74,17 +94,121 @@ def _notify_ready() -> None:
         log.exception("sd_notify failed")
 
 
+def _validate_config(file_config: dict, source: str) -> dict:
+    """Filter file_config through the schema. Unknown keys are
+    logged at WARNING and discarded. Type/range errors are logged
+    and the offending key is dropped (defaults stay in place)."""
+    cleaned: dict = {}
+    for key, value in file_config.items():
+        if key not in _CONFIG_SCHEMA:
+            log.warning("%s: ignoring unknown config key '%s'", source, key)
+            continue
+        expected_type, validator = _CONFIG_SCHEMA[key]
+        if not isinstance(value, expected_type) or isinstance(value, bool) != (expected_type is bool):
+            log.error(
+                "%s: key '%s' has wrong type %s (expected %s); ignoring",
+                source, key, type(value).__name__, expected_type.__name__,
+            )
+            continue
+        if not validator(value):
+            log.error("%s: key '%s' value %r out of range; ignoring",
+                      source, key, value)
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _system_config_is_trusted(path: str) -> bool:
+    """Reject the system config path unless it is a regular file owned
+    by root with no group/world write bits."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        log.warning("config path %s is not a regular file; refusing", path)
+        return False
+    if st.st_uid != 0:
+        log.warning("config path %s not owned by root (uid=%d); refusing",
+                    path, st.st_uid)
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        log.warning("config path %s is group/world-writable; refusing", path)
+        return False
+    return True
+
+
+def _read_toml_no_follow(path: str) -> dict:
+    """Open with O_NOFOLLOW so a symlink swap fails closed."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        with os.fdopen(fd, "rb") as f:
+            return tomllib.load(f)
+    except Exception:  # noqa: BLE001 - re-raised after explicit close
+        raise
+
+
+def load_config() -> dict:
+    """Load /etc/qdistro/locker.conf (preferred) or
+    ~/.config/qdistro/locker.conf (only if no system config exists at all)."""
+    config = dict(_DEFAULT_CONFIG)
+
+    system_path = "/etc/qdistro/locker.conf"
+    user_path = os.path.expanduser("~/.config/qdistro/locker.conf")
+
+    system_exists = os.path.exists(system_path)
+    chosen: tuple[str, bool] | None = None  # (path, is_system)
+    if system_exists:
+        if _system_config_is_trusted(system_path):
+            chosen = (system_path, True)
+        else:
+            log.warning(
+                "system config %s exists but is not trustworthy; "
+                "refusing to fall back to user config", system_path
+            )
+            chosen = None
+    elif os.path.exists(user_path):
+        # Per-user override only allowed when no system config exists.
+        try:
+            st = os.lstat(user_path)
+            if not stat.S_ISREG(st.st_mode):
+                log.warning("user config %s is not a regular file; ignoring",
+                            user_path)
+            elif st.st_uid != os.getuid():
+                log.warning("user config %s not owned by current uid; ignoring",
+                            user_path)
+            else:
+                chosen = (user_path, False)
+        except OSError:
+            log.debug("user config stat failed", exc_info=True)
+
+    if chosen is None:
+        log.info("using built-in defaults (no trusted config file found)")
+        return config
+
+    path, _is_system = chosen
+    try:
+        file_config = _read_toml_no_follow(path)
+    except FileNotFoundError:
+        return config
+    except tomllib.TOMLDecodeError as e:
+        # Log only exception class name to avoid leaking file contents.
+        log.error("config %s: parse failed (%s); using defaults",
+                  path, e.__class__.__name__)
+        return config
+    except OSError as e:
+        log.error("config %s: open failed (%s)", path, e.__class__.__name__)
+        return config
+
+    cleaned = _validate_config(file_config, path)
+    config.update(cleaned)
+    log.info("loaded config from %s (%d keys)", path, len(cleaned))
+    return config
+
+
 class WaylandBridge(QObject):
     """Cross-thread bridge between the pywayland worker and the Qt
-    main thread.
-
-    The LockerClient invokes our `_thread_*` methods on the worker
-    thread; each emits a Signal that's connected with
-    `Qt.QueuedConnection` so the corresponding `_on_*` slot runs on
-    the main thread. Properties (`locked`, `initially_locked`) live
-    here so ctrl.py can introspect live state without reaching into
-    private fields.
-    """
+    main thread."""
 
     _readySignal = Signal(bool)
     _lockedChangedSignal = Signal(bool)
@@ -92,16 +216,18 @@ class WaylandBridge(QObject):
     _overlayKeySignal = Signal(int, str)
 
     def __init__(
-        self, controller: LockController, parent: QObject | None = None
+        self,
+        controller: LockController,
+        idle_watcher: IdleWatcher | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._client: LockerClient | None = None
+        self._idle_watcher = idle_watcher
         self._initially_locked = False
         self._locked = False
         controller.unlocked.connect(self._on_unlocked)
-        # Wire worker→main with explicit QueuedConnection so this stays
-        # safe even if QObject thread-affinity ever changes.
         self._readySignal.connect(self._on_ready, Qt.QueuedConnection)
         self._lockedChangedSignal.connect(self._on_locked_changed, Qt.QueuedConnection)
         self._lockRequestedSignal.connect(self._on_lock_requested, Qt.QueuedConnection)
@@ -117,6 +243,9 @@ class WaylandBridge(QObject):
 
     def attach(self, client: LockerClient) -> None:
         self._client = client
+
+    def set_idle_watcher(self, watcher: IdleWatcher) -> None:
+        self._idle_watcher = watcher
 
     # ---- worker-thread entry points (must be re-entrant-safe) ----
 
@@ -147,7 +276,28 @@ class WaylandBridge(QObject):
 
     @Slot(int)
     def _on_lock_requested(self, reason: int) -> None:
-        log.info("lock_requested reason=%d", reason)
+        reason_name = REASON_NAMES.get(reason, f"unknown({reason})")
+        # Idempotency: if we're already locked (per the bridge's
+        # mirror of compositor state), don't re-send set_locked or
+        # lock_acknowledged — the compositor may treat duplicate acks
+        # as a protocol error and kill the locker.
+        if self._locked:
+            log.info("lock_requested reason=%s (already locked; ignoring)",
+                     reason_name)
+            return
+        # Notify the controller so it can reset per-lock-session state
+        # (e.g. fprintd failure counter).
+        try:
+            self._controller.notify_lock_begin()
+        except Exception:
+            log.exception("controller.notify_lock_begin raised")
+        log.info("lock_requested reason=%s", reason_name)
+        # Mirror intent locally BEFORE issuing the requests so a
+        # second lock_requested arriving on the same event-loop tick
+        # (compositor + client-side idle racing) gets caught by the
+        # `if self._locked` guard above. The compositor will follow
+        # up with a locked_changed=true event that confirms it.
+        self._locked = True
         if self._client:
             self._client.set_locked(True)
             self._client.lock_acknowledged(reason)
@@ -164,6 +314,12 @@ class WaylandBridge(QObject):
     def _on_unlocked(self) -> None:
         if self._client:
             self._client.set_locked(False)
+        # Re-arm idle notification so the next idle period fires again.
+        if self._idle_watcher is not None:
+            try:
+                self._idle_watcher.rearm()
+            except Exception:
+                log.exception("idle rearm failed")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,19 +332,19 @@ def main(argv: list[str] | None = None) -> int:
     QCoreApplication.setApplicationName("qdlocker")
     app = QGuiApplication(argv)
 
-    # `qmlRegisterType` would let QML instantiate `LockController` via
-    # `LockController { }`, which calls the default constructor and
-    # crashes because the controller's `__init__` requires an
-    # `AuthBackend`. We expose the live instance via a context
-    # property (see below) and register the *type* as uncreatable
-    # only so QML can type-check property bindings.
+    config = load_config()
+
     qmlRegisterUncreatableType(
         LockController, "Qdistro.Locker", 1, 0, "LockController",
         "LockController is provided as the `controller` context property; "
         "do not instantiate from QML."
     )
 
-    auth = AuthBackend()
+    auth = AuthBackend(
+        max_fprintd_failures=int(config["fprintd_max_failures"]),
+        fprintd_timeout_s=float(config["fprintd_timeout_s"]),
+        fprintd_enabled=bool(config["fprintd_enabled"]),
+    )
     controller = LockController(auth)
     bridge = WaylandBridge(controller)
 
@@ -214,19 +370,37 @@ def main(argv: list[str] | None = None) -> int:
         log.error("QML failed to load")
         return 2
 
-    # Connect to qdwin AFTER QML loaded so the controller is wired.
     if os.environ.get("QDLOCKER_NO_WAYLAND") != "1":
         if not client.connect():
             log.error("Wayland connect failed; running in detached mode")
     else:
         log.info("QDLOCKER_NO_WAYLAND=1: skipping compositor binding (dev mode)")
 
-    # Idle path runs via qdwin's lock_requested(reason=0=idle) for now;
-    # see qdlocker/idle.py for the local-subscription plan. The
-    # IdleWatcher is intentionally NOT started here.
-    _idle = IdleWatcher(
-        timeout_ms=int(os.environ.get("QDLOCKER_IDLE_MS", str(10 * 60 * 1000)))
-    )
+    # Idle watcher — bind ext-idle-notify-v1 on the locker's shared
+    # display, serialized with the poll thread via _display_lock.
+    idle_timeout_s = int(config["idle_timeout_s"])
+    idle_timeout_ms = int(os.environ.get(
+        "QDLOCKER_IDLE_MS", str(idle_timeout_s * 1000)
+    ))
+    _idle = IdleWatcher(timeout_ms=idle_timeout_ms)
+    _idle.on_idle(lambda: bridge.inject_lock_requested(0))
+    bridge.set_idle_watcher(_idle)
+    if os.environ.get("QDLOCKER_NO_WAYLAND") != "1" and client._display is not None:
+        try:
+            _idle.start(client._display, display_lock=client._display_lock)
+        except Exception:
+            log.exception("idle watcher start failed; idle auto-lock disabled")
+
+    # Logind subscription — covers HandleLidSwitch=lock (Session.Lock)
+    # and PrepareForSleep(start=True) (suspend pre-lock).
+    _logind: LogindWatcher | None = None
+    if config.get("lid_action", "lock") == "lock":
+        _logind = LogindWatcher(
+            on_lock=bridge.inject_lock_requested,
+        )
+        _logind.start()
+    else:
+        log.info("lid_action=ignore: skipping logind subscription")
 
     # Keep a strong ref so the ctrl socket isn't GC'd while
     # app.exec() runs. Parented on `app` for cleanup on quit.
@@ -237,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
     app.aboutToQuit.connect(client.disconnect)
     if ctrl is not None:
         app.aboutToQuit.connect(ctrl.close)
+    if _logind is not None:
+        app.aboutToQuit.connect(_logind.stop)
+    app.aboutToQuit.connect(_idle.stop)
 
     _notify_ready()
     return app.exec()
