@@ -163,18 +163,20 @@ elif [ -d /root/pwd-policy ] && [ -f /root/pwd-policy/install-policy.sh ]; then
         echo "[install-pwd] WARN: pwd-policy install failed (non-fatal)" >&2
 fi
 
-# Reload + enable. Reuse qdistro-dbus-reload.service if present so the
-# Pwd1.conf policy lands on first activation (same install-time
-# dbus-broker behaviour the admin broker hits — see spec/30 §"dbus-
-# broker policy-reload mystery").
+# Reload + enable. The qdistro-dbus-reload.service oneshot has
+# RemainAfterExit=yes so a `systemctl start` when it's already active
+# is a no-op — it won't re-run ReloadConfig.  Since the pwd policy
+# file lands here, after the broker's oneshot may have already fired,
+# call ReloadConfig unconditionally via busctl (the mechanism that
+# actually works on dbus-broker 35.x — see spec/30 §"dbus-broker
+# policy-reload mystery").
 systemctl daemon-reload
-if [ -f "$DEST_SYSD/qdistro-dbus-reload.service" ]; then
-    systemctl enable --now qdistro-dbus-reload.service >/dev/null 2>&1 || true
-    systemctl start qdistro-dbus-reload.service >/dev/null 2>&1 || true
-else
-    systemctl reload dbus-broker.service 2>/dev/null \
-        || systemctl reload dbus.service 2>/dev/null || true
-fi
+busctl --system --quiet call \
+    org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus ReloadConfig 2>/dev/null \
+    || systemctl reload dbus-broker.service 2>/dev/null \
+    || systemctl reload dbus.service 2>/dev/null \
+    || true
 # `--now` may fail on a fresh VM if the dbus policy hasn't fully
 # propagated yet, or if a TPM/keyring dependency is missing. The
 # sanity-probe block below handles a delayed start with a warning;

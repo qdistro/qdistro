@@ -214,20 +214,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3 — History tab: ListHistory(100) returns the bounded slice.
+# Step 3 — History tab: ListHistory(100) returns an audit row after a
+#          real approve/deny round-trip.
+#
+# SaveRule does NOT write to the audit log — only DecideRequest does.
+# Enqueue a request, approve it, then assert ListHistory returns at
+# least one entry (the newly-written row).  This exercises the real
+# History-tab code path that the admin app drives on every refresh.
 # ---------------------------------------------------------------------------
 
-note "Step 3: ListHistory(100) returns the bounded slice"
+note "Step 3: enqueue + approve request, then assert ListHistory returns the audit row"
 
-# Both prior SaveRule calls produce audit-table rows; ListHistory must
-# now return at least one. Confirm both: the call succeeds AND the
-# returned slice is non-empty (vacuous PASS guard from review F4).
+HIST_CORR="p07-hist-$$"
+HIST_RID=$(enqueue "test.p07.history" "$HIST_CORR")
+if ! [ "$HIST_RID" -ge 0 ] 2>/dev/null; then
+    err "RequestPermission for history test failed: got '$HIST_RID'"
+fi
+hist_decide=$(decide "$HIST_RID" allow once)
+[ "$hist_decide" = "ok" ] || err "DecideRequest(allow) for history row failed"
+sleep 0.5   # give the broker time to write the audit row
+
 hist_out=$(busctl call "$BUS" "$OBJ" "$BUS" ListHistory i 100 2>&1) \
     || err "ListHistory(100) call failed"
 if [ -n "$hist_out" ] && [ "$hist_out" != "aa{sv} 0" ]; then
     echo "PASS: History tab shows last 100 entries"
 else
-    err "ListHistory(100) returned empty — no history entries recorded"
+    err "ListHistory(100) returned empty after approve round-trip (rid=$HIST_RID)"
 fi
 
 # ---------------------------------------------------------------------------
