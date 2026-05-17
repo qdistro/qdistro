@@ -1,0 +1,76 @@
+<!-- Tier-5b per-app libvirt domain template. spec/29 §3 picked path,
+     probe verdict plan2/research/qdwin-nested-over-vsock/12-verdict.md.
+
+     Substituted by spawn-tier5b.sh in vm mode:
+       __VM_NAME__       domain name
+       __MAC__           virtio-net MAC (only used when TIER5B_NETWORK=user)
+       __MEM_KIB__       memory in KiB (default 1048576 = 1 GiB; larger
+                         than tier-5's 512 MiB because per-app VMs
+                         typically host Firefox + content + GPU process)
+       __CID__           guest vsock CID (>=100; per-app range to avoid
+                         collisions with tier-5's 3..N range)
+       __DISK_PATH__     per-VM qcow2 overlay (linked clone of the
+                         per-app base image)
+       NIC_XML marker    network configuration. Default empty (no NIC —
+                         TIER5B_NETWORK=none, matches tier-5 hardening).
+                         TIER5B_NETWORK=user substitutes a user-mode
+                         interface for debug.
+     Notes:
+       Tier-5b VMs are per-app, not per-session, so domains are
+       extremely short-lived (one app launch = one domain). The
+       reaper-on-startup in spawn-tier5b.sh handles orphans from
+       crash-on-exit, mirroring tier-5.
+-->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='usb' model='qemu-xhci'/>
+    <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    __NIC_XML__
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <vsock model='virtio'>
+      <cid auto='no' address='__CID__'/>
+    </vsock>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <video>
+      <model type='virtio' heads='1'/>
+    </video>
+    <sound model='ich9'>
+      <audio id='1'/>
+    </sound>
+    <audio id='1' type='pipewire'>
+      <input name='qdistro-tier5b-in'/>
+      <output name='qdistro-tier5b-out'/>
+    </audio>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>
