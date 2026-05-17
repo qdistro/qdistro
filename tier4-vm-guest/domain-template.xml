@@ -1,0 +1,135 @@
+<!-- §P10 tier-4-guest libvirt domain template.
+     Forked from qdistro/tier4-vm/domain-template.xml; the SPICE-era
+     tier4-vm/ stays in place untouched (it's still the shipped path
+     until P11 swaps the default).
+
+     Substitution markers (replaced by P11's spawn-tier4 wrapper, or
+     by the s109 smoke driver):
+       __VM_NAME__       domain name
+       __MAC__           MAC address (virtio NIC, only present in
+                         debug builds; default has no NIC for
+                         hardening parity with tier5b)
+       __MEM_KIB__       memory in KiB (default 1048576 = 1 GiB — the
+                         nested compositor + weston-terminal sit
+                         comfortably under that; bump per-VM via
+                         spawn-tier4 if a heavier app needs more)
+       __CID__           guest vsock CID (>=200; per-task allocator
+                         flock'd via the same CID_MAX=4095 ceiling
+                         tier5b uses, partitioned at 200..3999 to
+                         leave clean separation from tier-5 (3..99)
+                         and tier-5b (100..199))
+       __DISK_PATH__     per-VM qcow2 overlay (linked clone of
+                         qdistro-tier4-guest.qcow2)
+       __VIRTIOFS_DIR__  host directory exported as /host inside the
+                         guest. The mount tag `qdistro-host` matches
+                         build-guest-image.sh's fstab line.
+
+     Differences from tier4-vm/domain-template.xml (SPICE-era):
+       - REMOVED <graphics type='spice'/>.  The host reaches the VM
+         via waypipe over vsock; there is no in-band SPICE display.
+       - REMOVED <channel type='spicevmc' ... 'com.redhat.spice.0'/>.
+         No spice-vdagent in the guest; clipboard rides waypipe.
+       - REMOVED <clipboard copypaste=…/>.  Selection bridging is
+         the host's ClipboardGate, not SPICE-level cliprdr.
+       - REMOVED <sound model='ich9'/>.  Replaced by virtio-snd; ALSA
+         in the guest enumerates a virtio-snd card. P11 wires the
+         host -audiodev pipewire backend.
+       - ADDED <vsock> device.  Required for the waypipe vsock
+         transport between host and guest publisher.
+       - ADDED <sound model='virtio'/>.  Drives the in-guest ALSA
+         card (PASS string "virtio-snd device enumerates in guest as
+         ALSA card" depends on this).
+       - ADDED <filesystem type='mount' accessmode='passthrough'
+                          driver type='virtiofs'>.  Tag
+         `qdistro-host`; guest fstab mounts at /host.
+       - <disk> is now mandatory (bootable qcow2 overlay), not an
+         empty placeholder.
+
+     Spec: plan2/research/spice-retirement/00-overview.md §"Phase 1 —
+     Build the stripped guest image (P10)"; plan2/tasks/P10-tier4-
+     guest-image-nested-qdwin.md §Phase E.
+-->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <!-- shared memory required by virtio-fs vhost-user backend. -->
+  <memoryBacking>
+    <source type='memfd'/>
+    <access mode='shared'/>
+  </memoryBacking>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='usb' model='qemu-xhci'/>
+    <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <!-- qemu-guest-agent: drives smoke-test guest-exec (aplay -l,
+         ls /host, virsh qemu-agent-command launching weston-terminal).
+         Same path as tier-5 / tier-5b. -->
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <!-- vsock: the waypipe transport. CID assigned per-VM by the
+         host-side allocator (P11 spawn-tier4); s109 picks a fixed
+         test CID. The guest end runs qdistro-tier4-publisher with
+         waypipe-server `-s 2:$PORT` (host CID=2). -->
+    <vsock model='virtio'>
+      <cid auto='no' address='__CID__'/>
+    </vsock>
+    <!-- Disk: linked clone of qdistro-tier4-guest.qcow2. Unlike the
+         pre-P10 tier4-vm template (which had no <disk>), the guest
+         image MUST boot for the nested qdwin to come up. -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <!-- virtio-snd: guest ALSA card enumerated by `aplay -l`. Drives
+         the s109 PASS "virtio-snd device enumerates in guest as ALSA
+         card". P11 attaches -audiodev pipewire,id=pw0 host-side.
+         TODO P11: add <audio> backend, e.g.
+             <audio id='1' type='pipewire'/>
+         at the <devices>-level, and reference it from this sound
+         element as
+             <sound model='virtio'><audio id='1'/></sound>.
+         For P10 the audiodev defaults to `none` (silent); the s109
+         PASS only proves the guest enumerates the virtio-snd ALSA
+         card, not that any actual audio plays back. -->
+    <sound model='virtio'/>
+    <video>
+      <model type='virtio' heads='1'/>
+    </video>
+    <!-- virtiofs share: host dir exported as /host inside the guest.
+         Tag qdistro-host matches the fstab line baked into the
+         image. -->
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs'/>
+      <source dir='__VIRTIOFS_DIR__'/>
+      <target dir='qdistro-host'/>
+    </filesystem>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>
