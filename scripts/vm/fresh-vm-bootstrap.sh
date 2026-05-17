@@ -86,6 +86,7 @@ cd "$SRC/qdistro"
 QD="$SRC/qdistro"
 INSTALLERS=(
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
+    "scripts/install/install-session-manager.sh        $QD/session_manager"
     "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
@@ -127,6 +128,22 @@ for pol in selinux/broker selinux/pwd selinux/tier1; do
         (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
     fi
 done
+
+# ---- 5b. Build qdshell QML plugin (libqdistro-qdwin.so) ------------------
+# The Qdistro.Qdwin QML plugin lives in qdshell/qml-plugin/ and reads
+# the qdwin_shell_v1 protocol XML from the sibling qdwin repo via a
+# relative path (../../qdwin/qdwin/qdwin-shell-v1.xml). Both repos are
+# unpacked side-by-side under $SRC so the relative path resolves.
+# Without this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
+# `import Qdistro.Qdwin 1.0` and `qs` exits with rc=255 on startup.
+log "building qdshell QML plugin (libqdistro-qdwin.so)..."
+cd "$SRC/qdshell"
+meson setup build --wipe --prefix=/usr \
+    || { log "  ERROR: qdshell meson setup failed"; exit 3; }
+meson compile -C build \
+    || { log "  ERROR: qdshell meson compile failed"; exit 3; }
+meson install -C build \
+    || { log "  ERROR: qdshell meson install failed"; exit 3; }
 
 # ---- 6. Install qdwin session (weston + qdshell user units) -------------
 log "installing qdwin session (noctalia-session + noctalia-shell user units)..."
