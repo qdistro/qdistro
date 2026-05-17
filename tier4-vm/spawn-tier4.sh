@@ -48,8 +48,10 @@
 #
 # Lifecycle:
 #   - Defines + starts a domain named <vm_name>. If a domain with
-#     that name already exists and is running, attach to it instead
-#     of recreating.
+#     that name already exists it is destroyed + undefined first
+#     (idempotent for test re-runs). A running domain triggers a
+#     WARN line so an accidental double-launch is visible in the
+#     journal — set TIER4_ALLOW_OVERWRITE_RUNNING=1 to suppress.
 #   - Launches virt-viewer in the foreground; viewer exit triggers
 #     domain destroy + undefine (matches tier-2/3 oneshot pattern).
 #   - SIGTERM / SIGINT propagate cleanly.
@@ -239,9 +241,22 @@ fi
 
 # --- 2. define + (optional) start ------------------------------------
 # If a domain with this name already exists, undefine it first to make
-# spawn-tier4.sh idempotent for re-runs in tests.
+# spawn-tier4.sh idempotent for re-runs in tests. If the existing
+# domain is currently RUNNING we emit a WARN line so a user-launched
+# double-click (which would silently kill the running guest) is visible
+# in the journal. TIER4_ALLOW_OVERWRITE_RUNNING=1 suppresses the warning.
 if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    echo "[tier4] domain '$VM_NAME' already exists — destroying + undefining" >&2
+    EXISTING_STATE="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
+    case "$EXISTING_STATE" in
+        running|paused)
+            if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
+                echo "[tier4] WARN: domain '$VM_NAME' is $EXISTING_STATE; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
+            fi
+            ;;
+        *)
+            echo "[tier4] domain '$VM_NAME' already exists ($EXISTING_STATE) — destroying + undefining" >&2
+            ;;
+    esac
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
 fi

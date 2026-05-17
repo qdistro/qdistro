@@ -125,22 +125,28 @@ def _build_tier4_dbus_object(vm_name: str, owner_uid: int,
             self._vm_name = str(vm_name)
             self._owner_uid = int(owner_uid)
             self._on_close = on_close
+            # Serialise concurrent Close() invocations so a
+            # double-click doesn't race two ACPI→destroy lifecycles
+            # against each other.
+            self._close_lock = threading.Lock()
+            self._closed = False
 
         def _caller_uid(self, sender: str) -> int | None:
             """Resolve the dbus sender's unix uid via the bus daemon.
 
             Same pattern P02's broker uses (``GetConnectionUnixUser``).
-            Returns ``None`` on any failure so the gate stays open in
-            the rare case the lookup itself errors — the same-uid
-            session bus is the load-bearing isolation; this is
-            defence-in-depth.
+            Returns ``None`` on any failure. P05a fix-pass: callers
+            MUST treat ``None`` as "deny" rather than "fall through to
+            owner-uid" — a uid-lookup failure on a destructive RPC must
+            fail closed. (P05a security S3 / SS-3.)
             """
             try:
                 bus_obj = self._bus.get_object(
                     "org.freedesktop.DBus", "/org/freedesktop/DBus")
                 iface = dbus.Interface(bus_obj, "org.freedesktop.DBus")
                 return int(iface.GetConnectionUnixUser(sender))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                _log(f"GetConnectionUnixUser failed for sender={sender!r}: {e!r}")
                 return None
 
         # signature: (b method:s stderr:s orphans:u)
@@ -149,17 +155,35 @@ def _build_tier4_dbus_object(vm_name: str, owner_uid: int,
                              sender_keyword="sender")
         def Close(self, sender=None):  # noqa: N802 — dbus method name
             caller_uid = self._caller_uid(sender) if sender else None
-            if caller_uid is not None and caller_uid != self._owner_uid:
+            # FAIL-CLOSED: when caller_uid is None (uid lookup failed OR
+            # no sender was attested by the bus), deny rather than fall
+            # through. The same-uid session bus is the first line of
+            # defence but a destructive RPC must not bypass its uid gate
+            # just because the lookup transient-failed. (P05a S3 / SS-3.)
+            if caller_uid is None:
+                _log(f"Close() denied: caller uid unattested "
+                     f"(sender={sender!r} vm={self._vm_name!r})")
+                return (False, "denied", "caller-uid-unattested", 0)
+            if caller_uid != self._owner_uid:
                 _log(f"Close() denied: caller uid={caller_uid} "
                      f"!= owner uid={self._owner_uid} (vm={self._vm_name!r})")
                 return (False, "denied", "caller-uid-mismatch", 0)
             _log(f"Close() invoked for vm={self._vm_name!r} "
                  f"(caller uid={caller_uid})")
-            try:
-                result = self._on_close()
-            except Exception as e:  # noqa: BLE001
-                _log(f"Close() handler raised: {e!r}")
-                return (False, "exception", repr(e), 0)
+            # Lock ensures concurrent Close() calls run serially. If a
+            # close already completed, return a synthetic ok=True so
+            # the caller doesn't see a misleading failure.
+            with self._close_lock:
+                if self._closed:
+                    _log(f"Close() idempotent — vm={self._vm_name!r} "
+                         "already closed earlier")
+                    return (True, "missing", "already-closed", 0)
+                try:
+                    result = self._on_close()
+                except Exception as e:  # noqa: BLE001
+                    _log(f"Close() handler raised: {e!r}")
+                    return (False, "exception", repr(e), 0)
+                self._closed = True
             return (bool(result.get("ok", False)),
                     str(result.get("method", "unknown")),
                     str(result.get("stderr", "")),
@@ -258,7 +282,12 @@ def _start_glib_mainloop_in_thread():
     except ImportError:  # pragma: no cover
         _log("python3-gobject (gi) missing; bus methods will not dispatch")
         return None
-    import dbus.mainloop.glib
+    # Use importlib so ruff doesn't treat the bare `import` as a
+    # function-local binding of `dbus` (which would shadow the
+    # module-global and trigger F823 on the `if dbus is None` check
+    # above).
+    import importlib
+    importlib.import_module("dbus.mainloop.glib")
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     loop = GLib.MainLoop()
 

@@ -65,7 +65,12 @@ except ImportError:  # pragma: no cover — flat-layout fallback
 
 
 APP_FRIENDLY_NAME = "Tier4VM"
-APP_SUPPORTED_KINDS = ()  # tier-4 doesn't accept Send-To today
+# TODO(P05b): populate APP_SUPPORTED_KINDS once the inbound payload
+# path lands (clipboard seed-from-host into the guest). Today the empty
+# tuple means CanReceive returns false and tier-4 never appears in
+# Send-To menus, which is the desired conservative default but worth
+# flagging for the P05b implementer. (P05a integration SHOULD-FIX-3.)
+APP_SUPPORTED_KINDS = ()
 
 
 def maybe_install(vm_name: str, *, on_close=None) -> Any | None:
@@ -104,16 +109,14 @@ def maybe_install(vm_name: str, *, on_close=None) -> Any | None:
     if receiver is None:
         return None
 
-    # Attach the close-button handler. We don't sub-class AppReceiver
-    # because App1's surface is intentionally narrow (Receive only) —
-    # the Close() RPC is a side-channel the launcher invokes by
-    # method-name on the same bus name. dbus-python's method-call
-    # interception via _dbus_method_overrides is fragile; the simpler
-    # path is "expose Close on a separate iface on the same object"
-    # via the SDK's add_method when available, else log + warn.
-    if hasattr(receiver, "add_close_handler"):
-        receiver.add_close_handler(
-            on_close or (lambda: _default_close(vm_name)))
+    # NOTE: the Close() RPC is registered by tier4_control.py on a
+    # separate bus name (com.qdistro.Tier4VM.Control.uid<N>). The
+    # AppReceiver SDK has no add_close_handler hook; the pre-fix-pass
+    # `hasattr(receiver, "add_close_handler")` branch here was dead
+    # code — removed. ``on_close`` is now used only by the standalone
+    # tier4_control entry point. (P05a operational LOW-4 / correctness
+    # MEDIUM-4.)
+    _ = on_close  # documented unused; tier4_control owns the close path
     print(f"[tier4-vm/qdistro] App1 receiver registered as "
           f"{receiver.service_name} (silo={silo!r})",
           flush=True)
