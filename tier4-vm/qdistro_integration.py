@@ -121,11 +121,26 @@ def maybe_install(vm_name: str, *, on_close=None) -> Any | None:
 
 
 def _default_close(vm_name: str) -> dict:
-    """Run the ACPI→destroy lifecycle and return a JSON-shaped result."""
+    """Run the ACPI→destroy lifecycle and return a JSON-shaped result.
+
+    Structured log lines bracket the call so the systemd journal carries
+    a trace even when the caller doesn't surface ``result`` to the user
+    (e.g. when invoked over the App1 Close() RPC — the launcher process
+    is the only consumer of the return value).
+    """
+    print(f"[tier4-vm/qdistro] close_vm start vm={vm_name!r}",
+          file=sys.stderr, flush=True)
     if _tier4_chrome is None:
+        print(f"[tier4-vm/qdistro] close_vm done vm={vm_name!r} "
+              f"outcome=not-ok reason=tier4_chrome-unimportable",
+              file=sys.stderr, flush=True)
         return {"ok": False, "method": "missing",
                 "stderr": "tier4_chrome not importable"}
     result = _tier4_chrome.close_vm(str(vm_name))
+    print(f"[tier4-vm/qdistro] close_vm done vm={vm_name!r} "
+          f"ok={result.ok} method={result.method} "
+          f"orphans={result.orphans_reaped} stderr={result.stderr!r:.120}",
+          file=sys.stderr, flush=True)
     return {
         "ok": bool(result.ok),
         "method": result.method,
