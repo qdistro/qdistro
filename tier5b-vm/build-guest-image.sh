@@ -129,56 +129,28 @@ wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
 # arbitrary argv), tier-5b's publisher hard-codes the allowed app
 # binary at image-build time so guest-exec from the host cannot be
 # coerced into running a different binary.
+#
+# Correctness HIGH-3 (P05b): we cp the in-tree source-of-truth
+# publisher and sed-patch the APP_BIN default in place. The prior
+# inline here-doc baked a separate copy that silently diverged from
+# the canonical script under qdistro-tier5b-publisher.sh.
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC_PUBLISHER="$SRC_DIR/qdistro-tier5b-publisher.sh"
 PUBLISHER="$WORK/qdistro-tier5b-publisher.sh"
-cat >"$PUBLISHER" <<PUBEOF
-#!/bin/bash
-# qdistro-tier5b-publisher — runs inside the tier-5b per-app guest VM.
-# Invoked by the host via qemu-guest-agent guest-exec:
-#
-#   qdistro-tier5b-publisher.sh <vsock_port> [extra_args...]
-#
-# Unlike tier-5's session-grain publisher, tier-5b is pinned to a
-# single binary at image-build time. The first guest-exec arg is the
-# vsock port; the rest are appended to the baked binary's argv. This
-# means a compromised host cannot ask the guest to run an arbitrary
-# command — the guest publisher refuses anything but a port + extra
-# args for the one binary it was built for.
-#
-# Per \`waypipe(1)\`: when --vsock is set with \`-s [s]CID:port\`, the
-# guest-side waypipe-server connects out to vsock CID=2 (the host)
-# on \$PORT. Symmetry: host-side \`client -s s<host_cid>:port\` listens,
-# guest-side \`server -s 2:port\` connects.
-set -uo pipefail
-PORT="\${1:?usage: \$0 <port> [extra args...]}"
-shift
-
-# Hard-coded by build-guest-image.sh:
-APP_BIN="$APP_BIN"
-
-LOG=/var/log/qdistro-tier5b-publisher.log
-exec >>"\$LOG" 2>&1
-echo "=== \$(date -Iseconds): tier5b-publisher port=\$PORT bin=\$APP_BIN extra='\$*' ==="
-
-# Wait briefly for vsock module to be live.
-modprobe vhost_vsock 2>/dev/null || true
-modprobe vsock 2>/dev/null || true
-for _ in 1 2 3 4 5; do
-    [ -e /dev/vsock ] && break
-    sleep 0.5
-done
-
-# MOZ_ENABLE_WAYLAND=1 — Firefox: native Wayland, no XWayland needed.
-# Per probe verdict §"When direct is not sufficient", X11-needing apps
-# are out of scope for the MVP.
-if [ "\$APP_BIN" = "firefox" ]; then
-    export MOZ_ENABLE_WAYLAND=1
+if [ ! -f "$SRC_PUBLISHER" ]; then
+    echo "[tier5b-build] FAIL: in-tree publisher source not found at $SRC_PUBLISHER" >&2
+    exit 4
 fi
-
-# guest-side waypipe-server: connects out to host CID=2 on \$PORT and
-# execs the baked binary. Single-app discipline: extra args are
-# appended to the baked binary, never substitute it.
-exec waypipe --vsock -s "2:\$PORT" server -- "\$APP_BIN" "\$@"
-PUBEOF
+cp "$SRC_PUBLISHER" "$PUBLISHER"
+# Patch the APP_BIN default: replace the `${QDISTRO_TIER5B_APP_BIN:-firefox}`
+# fallback with the build-time literal so the baked image can't be
+# coerced into running a different binary via env.
+sed -i -E "s|^APP_BIN=\"\\\$\\{QDISTRO_TIER5B_APP_BIN:-[^}]*\\}\"|APP_BIN=\"$APP_BIN\"|" "$PUBLISHER"
+if ! grep -qE "^APP_BIN=\"$APP_BIN\"\$" "$PUBLISHER"; then
+    echo "[tier5b-build] FAIL: APP_BIN substitution missed in baked publisher (expected APP_BIN=\"$APP_BIN\")" >&2
+    grep -nE '^APP_BIN=' "$PUBLISHER" >&2 || true
+    exit 4
+fi
 chmod 0755 "$PUBLISHER"
 
 echo "[tier5b-build] customizing for app=$APP pkg=$PKG..."

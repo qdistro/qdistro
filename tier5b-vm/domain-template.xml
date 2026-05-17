@@ -61,13 +61,11 @@
     <video>
       <model type='virtio' heads='1'/>
     </video>
-    <sound model='ich9'>
-      <audio id='1'/>
-    </sound>
-    <audio id='1' type='pipewire'>
-      <input name='qdistro-tier5b-in'/>
-      <output name='qdistro-tier5b-out'/>
-    </audio>
+    <!-- Security HIGH-3 (P05b): no <sound> / <audio>. Task §"audio
+         deferred" — shipping pipewire passthrough is a mic-leak vector
+         (any tier-5b VM could eavesdrop on the host pipewire graph
+         once the audio backend is wired). When audio comes back it
+         will be a separate task with its own broker/gate plumbing. -->
     <memballoon model='virtio'/>
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
