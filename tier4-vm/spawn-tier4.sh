@@ -48,8 +48,10 @@
 #
 # Lifecycle:
 #   - Defines + starts a domain named <vm_name>. If a domain with
-#     that name already exists and is running, attach to it instead
-#     of recreating.
+#     that name already exists it is destroyed + undefined first
+#     (idempotent for test re-runs). A running domain triggers a
+#     WARN line so an accidental double-launch is visible in the
+#     journal — set TIER4_ALLOW_OVERWRITE_RUNNING=1 to suppress.
 #   - Launches virt-viewer in the foreground; viewer exit triggers
 #     domain destroy + undefine (matches tier-2/3 oneshot pattern).
 #   - SIGTERM / SIGINT propagate cleanly.
@@ -239,9 +241,22 @@ fi
 
 # --- 2. define + (optional) start ------------------------------------
 # If a domain with this name already exists, undefine it first to make
-# spawn-tier4.sh idempotent for re-runs in tests.
+# spawn-tier4.sh idempotent for re-runs in tests. If the existing
+# domain is currently RUNNING we emit a WARN line so a user-launched
+# double-click (which would silently kill the running guest) is visible
+# in the journal. TIER4_ALLOW_OVERWRITE_RUNNING=1 suppresses the warning.
 if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-    echo "[tier4] domain '$VM_NAME' already exists — destroying + undefining" >&2
+    EXISTING_STATE="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
+    case "$EXISTING_STATE" in
+        running|paused)
+            if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
+                echo "[tier4] WARN: domain '$VM_NAME' is $EXISTING_STATE; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
+            fi
+            ;;
+        *)
+            echo "[tier4] domain '$VM_NAME' already exists ($EXISTING_STATE) — destroying + undefining" >&2
+            ;;
+    esac
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
     run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
 fi
@@ -332,20 +347,60 @@ USE_SECCTX="${TIER4_USE_SECCTX:-1}"
 SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
 SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
 
+# P05a fix-pass: the viewer must be launched via tier4_control.py so the
+# App1 receiver claims com.qdistro.Tier4VM.uid<NNNN> AND the
+# com.qdistro.Tier4VM.Control bus name owns a Close() method qdshell
+# invokes when the chrome close button is pressed. Pre-fix-pass the
+# script exec'd virt-viewer directly, which left no Close hook — the
+# close button signalled xdg_toplevel.close → virt-viewer exited but
+# the qemu domain stayed running ("zombie qemu" from the task spec).
+#
+# Resolution order:
+#   1. TIER4_CONTROL_SCRIPT override (full path; tests set this).
+#   2. <script_dir>/tier4_control.py (running from source tree).
+#   3. /usr/share/qdistro/tier4-vm/tier4_control.py (installed).
+# When none exist we fall back to the pre-fix-pass behaviour with a
+# warning — the VM still launches, the close button just degrades.
+CONTROL_SCRIPT="${TIER4_CONTROL_SCRIPT:-}"
+if [ -z "$CONTROL_SCRIPT" ]; then
+    if [ -f "$SCRIPT_DIR/tier4_control.py" ]; then
+        CONTROL_SCRIPT="$SCRIPT_DIR/tier4_control.py"
+    elif [ -f /usr/share/qdistro/tier4-vm/tier4_control.py ]; then
+        CONTROL_SCRIPT=/usr/share/qdistro/tier4-vm/tier4_control.py
+    fi
+fi
+
+# When the control script is reachable, exec via python3; otherwise
+# fall back to the direct virt-viewer path with a stderr warning so
+# bake regressions are visible in the journal.
+if [ -n "$CONTROL_SCRIPT" ] && [ -f "$CONTROL_SCRIPT" ] \
+        && command -v python3 >/dev/null 2>&1; then
+    VIEWER_CMD=(python3 "$CONTROL_SCRIPT"
+                --vm-name "$VM_NAME"
+                -- virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+else
+    if [ -n "$CONTROL_SCRIPT" ]; then
+        echo "[tier4] WARN: control script $CONTROL_SCRIPT or python3 unavailable; close button will not destroy the domain (degraded)" >&2
+    else
+        echo "[tier4] WARN: tier4_control.py not found; close button will not destroy the domain (degraded)" >&2
+    fi
+    VIEWER_CMD=(virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME")
+fi
+
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
     echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX', secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
     run_as_admin qdistro-secctx-exec \
         --sandbox-engine "$SECCTX_ENGINE" \
         --app-id "$SECCTX_APPID" \
         --instance-id "$VM_NAME-$$" \
-        -- virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME"
+        -- "${VIEWER_CMD[@]}"
     EXIT=$?
 else
     if [ "$USE_SECCTX" = "1" ]; then
         echo "[tier4] WARN: TIER4_USE_SECCTX=1 but qdistro-secctx-exec not found; running un-tagged" >&2
     fi
     echo "[tier4] launching virt-viewer for '$VM_NAME' (title-prefix='$TITLE_PREFIX')" >&2
-    run_as_admin virt-viewer "${VIEWER_OPTS[@]}" "$VM_NAME"
+    run_as_admin "${VIEWER_CMD[@]}"
     EXIT=$?
 fi
 echo "[tier4] virt-viewer exited rc=$EXIT" >&2
