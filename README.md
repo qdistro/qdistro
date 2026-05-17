@@ -13,11 +13,56 @@ The compositor lives in a separate repo:
 The desktop shell (a Noctalia QML fork) lives in
 [codeberg.org/qdistro/qdshell](https://codeberg.org/qdistro/qdshell).
 
-## Status
+## Try qdistro
 
-Pre-release. The design is settled; implementation is a moving
-target. No installable image yet — the repos build and run inside
-test VMs driven by the scripts in `scripts/vm/`.
+**Status:** v0.1 — first public test release.
+
+> **Hardware:** spare laptop, ≥16 GB RAM, ≥100 GB free disk, fingerprint reader optional but recommended. Fresh openSUSE Tumbleweed terminal-only install.
+
+**1. Install Tumbleweed** from [get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or Server (no desktop needed).
+
+**2. Install git** (not pre-installed on Tumbleweed Minimal/Server):
+
+```sh
+sudo zypper install -y git
+```
+
+**3. Clone and bootstrap** (as a regular user in the `wheel` group; `sudo` is
+available by default for wheel members on Tumbleweed):
+
+```sh
+git clone https://codeberg.org/qdistro/qdistro.git
+git clone https://codeberg.org/qdistro/qdwin.git
+git clone https://codeberg.org/qdistro/qdshell.git
+cd qdistro
+sudo bash scripts/install/qdistro-bootstrap.sh
+```
+
+The bootstrap installs all dependencies, builds the compositor and daemons,
+clones the remaining components (qdgreeter, qdlocker, qdbrowser), and
+configures greetd. Takes 10–20 minutes. Idempotent — re-running is safe.
+
+**4. Reboot:**
+
+```sh
+sudo systemctl reboot
+```
+
+On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
+
+**5. Try the isolation tiers:**
+
+| Tier | How to try |
+|------|-----------|
+| Tier 1 — native SELinux silo | Open qterminator. Run `id`. Each app launch starts in a silo. |
+| Tier 3 — container | Admin app → Silos → New → Container. Launch an app inside it. |
+| Tier 4 — VM (waypipe) | Admin app → Silos → New → VM. Open Chrome. |
+
+The admin app (tray icon) shows active silos, pending approvals, and audit history.
+
+**6. Report back:**
+File issues at [codeberg.org/qdistro/qdistro/issues](https://codeberg.org/qdistro/qdistro/issues).
+Most useful: "I ran step X and Y was unclear / broken."
 
 ## Repository layout (sibling checkout required)
 
