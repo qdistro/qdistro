@@ -12,7 +12,9 @@ dependencies = [
     "PySide6>=6.6",
     "dbus-next>=0.2.3",
     "python-pam>=2.0",
-    "toml>=0.10.0",
+    # TOML is read via the 3.11+ stdlib `tomllib` — no third-party
+    # dependency needed (and avoiding `toml>=0.10.0`, which is
+    # unmaintained on PyPI).
     # Pin <0.5 — pywayland's pre-1.0 API has changed between minor
     # releases (e.g. dispatcher signature, registry binding). The
     # scanner output we ship under qdlocker/protocol/ targets the

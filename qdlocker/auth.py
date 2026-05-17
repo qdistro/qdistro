@@ -4,9 +4,8 @@ Mirrors the LockContext.qml flow: fingerprint runs in parallel with
 password entry; either path can succeed. fprintd is reached over the
 system bus at `net.reactivated.Fprint`; PAM uses python-pam.
 
-Per qdistro/doc/sessions.md:39-40 the locker uses fprintd over D-Bus
-directly (no PAM on the fingerprint path) and PAM only as the password
-fallback.
+The fprintd failure counter is reset at the start of each lock session
+(via `reset_session()` called from the controller on lock_requested).
 """
 
 from __future__ import annotations
@@ -29,48 +28,61 @@ class AuthOutcome(enum.Enum):
 
 
 class AuthBackend(QObject):
-    """Coordinates fprintd + PAM. Owned by the main thread; the bus and
-    PAM calls run on a worker thread / asyncio loop to keep the UI
-    responsive."""
+    """Coordinates fprintd + PAM."""
 
-    ready = Signal()  # PAM service path detected
-    message = Signal(str, bool, bool)  # text, is_error, response_required
-    outcome = Signal(object)  # AuthOutcome
+    ready = Signal()
+    message = Signal(str, bool, bool)
+    outcome = Signal(object)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        max_fprintd_failures: int = 3,
+        fprintd_timeout_s: float = 10.0,
+        fprintd_enabled: bool = True,
+    ) -> None:
         super().__init__(parent)
         self._pam_service = os.environ.get("QDLOCKER_PAM_SERVICE")
         self._pam_user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
         if not self._pam_user:
-            # An empty username silently makes every PAM auth fail
-            # with a confusing 'failed' outcome. Hard-fail loudly so
-            # operators can see the config bug.
             raise RuntimeError(
                 "qdlocker: cannot determine admin username "
                 "(neither $USER nor $LOGNAME set)"
             )
-        # _state_lock guards _pam_pending_password and _fprintd_busy
-        # against the worker/main thread interleaving.
         self._state_lock = threading.Lock()
         self._fprintd_busy = False
         self._pam_thread: threading.Thread | None = None
         self._pam_pending_password: str | None = None
-        # _pam_abort.set() makes the worker thread bail out of its
-        # conversation poll loop on the next 50ms tick. Used by
-        # abort_pam() and by the fprintd-match path (which beats PAM
-        # to a successful auth).
         self._pam_abort = threading.Event()
-        
-        # Track fprintd attempts and manage timeout
-        self._fprintd_attempts = 0
+
+        # Configuration (overridable via constructor kwargs).
+        self._max_fprintd_failures = max(1, int(max_fprintd_failures))
+        self._fprintd_timeout = float(fprintd_timeout_s)
+        self._fprintd_enabled = bool(fprintd_enabled)
+
+        # Per-lock-session state. Reset by `reset_session()` whenever the
+        # locker transitions from unlocked → locked.
         self._fprintd_failures = 0
-        self._max_fprintd_failures = 3  # Maximum allowed fprintd failures before fallback
-        self._fprintd_timeout = 10.0   # Timeout in seconds for fprintd verification
-        self._fprintd_timer = None
+        # _fprintd_unavailable: sticky once fprintd is determined to be
+        # environmentally absent (no dbus-next, fprintd off the bus,
+        # listener API missing). Avoids re-paying the discovery cost on
+        # every keystroke and immediately routes to PAM.
+        self._fprintd_unavailable = not fprintd_enabled
+        # Suppress duplicate fallback dispatch when multiple workers
+        # cross the threshold simultaneously.
+        self._falling_back_to_pam = False
+
+    # ---- session-boundary hooks (called by LockController) ----
+
+    def reset_session(self) -> None:
+        """Reset per-lock-session counters. Call when a new lock begins."""
+        with self._state_lock:
+            self._fprintd_failures = 0
+            self._falling_back_to_pam = False
+        log.debug("auth session reset")
 
     def probe_pam(self) -> None:
-        """Pick the PAM service file (env override → login → system-auth
-        → common-auth). Synchronous, fast; emits `ready` when done."""
         if self._pam_service:
             log.info("PAM service from env: %s", self._pam_service)
             self.ready.emit()
@@ -86,10 +98,12 @@ class AuthBackend(QObject):
         self.ready.emit()
 
     def start_pam(self) -> None:
-        """Begin a PAM auth attempt for the admin user. Runs on a worker
-        thread because PAM's API is blocking."""
         if self._pam_thread and self._pam_thread.is_alive():
-            log.debug("PAM already in flight; ignoring duplicate start")
+            log.warning(
+                "PAM start suppressed: previous worker is still alive. "
+                "If the user has waited >10s on a stuck conversation this "
+                "is the cause."
+            )
             return
         self._pam_abort.clear()
         self._pam_thread = threading.Thread(
@@ -98,22 +112,20 @@ class AuthBackend(QObject):
         self._pam_thread.start()
 
     def respond_pam(self, password: str) -> None:
-        """Provide the password requested by the most recent PAM
-        challenge. Guarded by _state_lock because the conversation
-        callback reads `_pam_pending_password` on the worker thread."""
         with self._state_lock:
             self._pam_pending_password = password
 
     def abort_pam(self) -> None:
-        """Cancel an in-flight PAM attempt (e.g. user kept typing)."""
         self._pam_abort.set()
 
     def occupy_fingerprint_sensor(self, on: bool) -> None:
-        """While the user is typing a password, run a parallel fprintd
-        verify so a fingerprint also unlocks. Guarded by _state_lock
-        because the check-and-set on `_fprintd_busy` is otherwise a
-        race window where two rapid `currentText` flips can launch
-        two workers."""
+        if not self._fprintd_enabled:
+            return
+        if self._fprintd_unavailable:
+            # Hardware/env permanently absent; start PAM directly on first ask.
+            if on:
+                self.start_pam()
+            return
         with self._state_lock:
             if on and not self._fprintd_busy:
                 self._fprintd_busy = True
@@ -124,13 +136,33 @@ class AuthBackend(QObject):
             threading.Thread(
                 target=self._fprint_worker, name="qdlocker-fprintd", daemon=True
             ).start()
-        # `on=False` is best-effort; the worker self-completes within
-        # ~30s once VerifyStart is queued, and the cancellation API
-        # (VerifyStop) is documented as racy with in-flight matches.
+
+    # ---- failure accounting helpers ----
+
+    def _record_fprintd_failure(self, *, environmental: bool) -> None:
+        """Increment the failure counter and start PAM fallback when
+        the threshold is crossed. Holds _state_lock around both the
+        increment and the should-fallback dispatch decision so two
+        concurrent workers can't both fire start_pam after both cross
+        the threshold."""
+        with self._state_lock:
+            if environmental:
+                self._fprintd_unavailable = True
+            self._fprintd_failures += 1
+            count = self._fprintd_failures
+            crossed = (count >= self._max_fprintd_failures
+                       and not self._falling_back_to_pam)
+            if crossed:
+                self._falling_back_to_pam = True
+        log.info("fprintd failure recorded (count=%d, threshold=%d, env=%s)",
+                 count, self._max_fprintd_failures, environmental)
+        if crossed:
+            log.info("fprintd threshold reached; starting PAM fallback")
+            self.start_pam()
 
     def _pam_worker(self) -> None:
         try:
-            import pam  # python-pam
+            import pam
         except ImportError:
             log.error("python-pam not installed; PAM auth unavailable")
             self.outcome.emit(AuthOutcome.FAILED)
@@ -141,8 +173,6 @@ class AuthBackend(QObject):
         def conversation(messages):
             replies = []
             for style, msg in messages:
-                # style: 1=PROMPT_ECHO_OFF (password), 2=PROMPT_ECHO_ON,
-                # 3=ERROR_MSG, 4=TEXT_INFO
                 is_error = style == 3
                 response_required = style in (1, 2)
                 self.message.emit(msg, is_error, response_required)
@@ -179,15 +209,6 @@ class AuthBackend(QObject):
         self.outcome.emit(AuthOutcome.SUCCESS if ok else AuthOutcome.FAILED)
 
     def _fprint_worker(self) -> None:
-        """Verify against admin's enrolled prints via fprintd D-Bus.
-
-        Flow (per sessions.md:63-64):
-          1. net.reactivated.Fprint.Manager.GetDefaultDevice
-          2. Device.Claim(username)
-          3. Device.VerifyStart("any")
-          4. wait for VerifyStatus signal with result="verify-match"
-          5. Device.VerifyStop + Device.Release
-        """
         try:
             asyncio.run(self._fprint_async())
         except Exception:
@@ -202,107 +223,101 @@ class AuthBackend(QObject):
             from dbus_next import BusType
         except ImportError:
             log.warning("dbus-next not installed; fingerprint disabled")
-            # Fallback to PAM after incrementing failure count
-            with self._state_lock:
-                self._fprintd_failures += 1
-                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
-            if should_fallback:
-                self.start_pam()
+            self._record_fprintd_failure(environmental=True)
             return
 
-        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         try:
-            mgr_intro = await bus.introspect(
-                "net.reactivated.Fprint", "/net/reactivated/Fprint/Manager"
-            )
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         except Exception:
-            log.info("fprintd not available on system bus; skipping")
-            with self._state_lock:
-                self._fprintd_failures += 1
-                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
-            if should_fallback:
-                self.start_pam()
-            await bus.disconnect()
+            log.exception("could not connect to system bus")
+            self._record_fprintd_failure(environmental=True)
             return
 
-        mgr_obj = bus.get_proxy_object(
-            "net.reactivated.Fprint", "/net/reactivated/Fprint/Manager", mgr_intro
-        )
-        mgr = mgr_obj.get_interface("net.reactivated.Fprint.Manager")
-        dev_path = await mgr.call_get_default_device()  # type: ignore[attr-defined]
-
-        dev_intro = await bus.introspect("net.reactivated.Fprint", dev_path)
-        dev_obj = bus.get_proxy_object("net.reactivated.Fprint", dev_path, dev_intro)
-        dev = dev_obj.get_interface("net.reactivated.Fprint.Device")
-
-        result_future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-
-        def on_status(result: str, done: bool) -> None:
-            log.info("fprintd VerifyStatus: %s done=%s", result, done)
-            if result_future.done():
+        try:
+            try:
+                mgr_intro = await bus.introspect(
+                    "net.reactivated.Fprint", "/net/reactivated/Fprint/Manager"
+                )
+            except Exception:
+                log.info("fprintd not available on system bus; skipping")
+                self._record_fprintd_failure(environmental=True)
                 return
-            if result == "verify-match":
-                result_future.set_result(True)
-            elif done:
-                result_future.set_result(False)
 
-        # Register the listener BEFORE VerifyStart. If we register
-        # after, dbus-next may have already processed the first
-        # verify-match signal and the future is never resolved.
-        try:
-            dev.on_verify_status(on_status)  # type: ignore[attr-defined]
-        except Exception:
-            log.exception("could not register VerifyStatus listener")
-            with self._state_lock:
-                self._fprintd_failures += 1
-                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
-            if should_fallback:
-                self.start_pam()
-            await bus.disconnect()
-            return
+            mgr_obj = bus.get_proxy_object(
+                "net.reactivated.Fprint", "/net/reactivated/Fprint/Manager",
+                mgr_intro,
+            )
+            mgr = mgr_obj.get_interface("net.reactivated.Fprint.Manager")
+            dev_path = await mgr.call_get_default_device()  # type: ignore[attr-defined]
 
-        matched = False
-        try:
-            await dev.call_claim(self._pam_user)  # type: ignore[attr-defined]
-            await dev.call_verify_start("any")  # type: ignore[attr-defined]
-            # Use the configured timeout instead of 30s
-            matched = await asyncio.wait_for(result_future, timeout=self._fprintd_timeout)
-        except asyncio.TimeoutError:
-            log.info("fprintd verify timeout")
-            with self._state_lock:
-                self._fprintd_failures += 1
-                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
-            if should_fallback:
-                self.start_pam()
-        except Exception:
-            log.exception("fprintd verify failed")
-            with self._state_lock:
-                self._fprintd_failures += 1
-                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
-            if should_fallback:
-                self.start_pam()
+            dev_intro = await bus.introspect("net.reactivated.Fprint", dev_path)
+            dev_obj = bus.get_proxy_object(
+                "net.reactivated.Fprint", dev_path, dev_intro
+            )
+            dev = dev_obj.get_interface("net.reactivated.Fprint.Device")
+
+            loop = asyncio.get_running_loop()
+            result_future: asyncio.Future[bool] = loop.create_future()
+
+            def on_status(result: str, done: bool) -> None:
+                log.info("fprintd VerifyStatus: %s done=%s", result, done)
+                if result_future.done():
+                    return
+                if result == "verify-match":
+                    result_future.set_result(True)
+                elif done:
+                    result_future.set_result(False)
+
+            try:
+                dev.on_verify_status(on_status)  # type: ignore[attr-defined]
+            except Exception:
+                log.exception("could not register VerifyStatus listener")
+                self._record_fprintd_failure(environmental=True)
+                return
+
+            matched = False
+            try:
+                await dev.call_claim(self._pam_user)  # type: ignore[attr-defined]
+                await dev.call_verify_start("any")  # type: ignore[attr-defined]
+                matched = await asyncio.wait_for(
+                    result_future, timeout=self._fprintd_timeout
+                )
+            except asyncio.TimeoutError:
+                log.info("fprintd verify timeout")
+                self._record_fprintd_failure(environmental=False)
+            except Exception:
+                log.exception("fprintd verify failed")
+                self._record_fprintd_failure(environmental=False)
+            finally:
+                for cleanup in (
+                    lambda: dev.call_verify_stop(),  # type: ignore[attr-defined]
+                    lambda: dev.call_release(),  # type: ignore[attr-defined]
+                ):
+                    try:
+                        await cleanup()
+                    except Exception:
+                        pass
+                try:
+                    dev.off_verify_status(on_status)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+            if matched:
+                # Per-session reset of failure tally happens on the next
+                # lock; for now just zero so a later parallel attempt
+                # doesn't trip the fallback inappropriately.
+                with self._state_lock:
+                    self._fprintd_failures = 0
+                self._pam_abort.set()
+                self.outcome.emit(AuthOutcome.SUCCESS)
+            else:
+                # Real verify-no-match path — the fprintd state machine
+                # told us "wrong finger" via the `done=True` signal.
+                # Count this toward the 3-strike threshold so the PAM
+                # fallback eventually fires for a determined attacker.
+                self._record_fprintd_failure(environmental=False)
         finally:
             try:
-                await dev.call_verify_stop()  # type: ignore[attr-defined]
+                await bus.disconnect()
             except Exception:
                 pass
-            try:
-                await dev.call_release()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                dev.off_verify_status(on_status)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            await bus.disconnect()
-
-        if matched:
-            # Reset failure counter on success
-            with self._state_lock:
-                self._fprintd_failures = 0
-            # Abort any in-flight PAM attempt — otherwise the worker
-            # thread parks forever waiting for `_pam_pending_password`,
-            # and the next `start_pam` is suppressed by the
-            # `is_alive()` guard for the rest of the process lifetime.
-            self._pam_abort.set()
-            self.outcome.emit(AuthOutcome.SUCCESS)

@@ -100,6 +100,12 @@ class LockController(QObject):
     def pamReady(self) -> bool:
         return self._pam_ready
 
+    def notify_lock_begin(self) -> None:
+        """Called by WaylandBridge on every fresh lock_requested. Resets
+        per-session auth state so the next lock cycle has a clean
+        fprintd-failure counter."""
+        self._auth.reset_session()
+
     @Slot()
     def tryUnlock(self) -> None:
         if not self._pam_ready:
