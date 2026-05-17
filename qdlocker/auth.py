@@ -60,6 +60,13 @@ class AuthBackend(QObject):
         # abort_pam() and by the fprintd-match path (which beats PAM
         # to a successful auth).
         self._pam_abort = threading.Event()
+        
+        # Track fprintd attempts and manage timeout
+        self._fprintd_attempts = 0
+        self._fprintd_failures = 0
+        self._max_fprintd_failures = 3  # Maximum allowed fprintd failures before fallback
+        self._fprintd_timeout = 10.0   # Timeout in seconds for fprintd verification
+        self._fprintd_timer = None
 
     def probe_pam(self) -> None:
         """Pick the PAM service file (env override → login → system-auth
@@ -195,6 +202,12 @@ class AuthBackend(QObject):
             from dbus_next import BusType
         except ImportError:
             log.warning("dbus-next not installed; fingerprint disabled")
+            # Fallback to PAM after incrementing failure count
+            with self._state_lock:
+                self._fprintd_failures += 1
+                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
+            if should_fallback:
+                self.start_pam()
             return
 
         bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
@@ -204,6 +217,11 @@ class AuthBackend(QObject):
             )
         except Exception:
             log.info("fprintd not available on system bus; skipping")
+            with self._state_lock:
+                self._fprintd_failures += 1
+                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
+            if should_fallback:
+                self.start_pam()
             await bus.disconnect()
             return
 
@@ -235,6 +253,11 @@ class AuthBackend(QObject):
             dev.on_verify_status(on_status)  # type: ignore[attr-defined]
         except Exception:
             log.exception("could not register VerifyStatus listener")
+            with self._state_lock:
+                self._fprintd_failures += 1
+                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
+            if should_fallback:
+                self.start_pam()
             await bus.disconnect()
             return
 
@@ -242,11 +265,22 @@ class AuthBackend(QObject):
         try:
             await dev.call_claim(self._pam_user)  # type: ignore[attr-defined]
             await dev.call_verify_start("any")  # type: ignore[attr-defined]
-            matched = await asyncio.wait_for(result_future, timeout=30.0)
+            # Use the configured timeout instead of 30s
+            matched = await asyncio.wait_for(result_future, timeout=self._fprintd_timeout)
         except asyncio.TimeoutError:
             log.info("fprintd verify timeout")
+            with self._state_lock:
+                self._fprintd_failures += 1
+                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
+            if should_fallback:
+                self.start_pam()
         except Exception:
             log.exception("fprintd verify failed")
+            with self._state_lock:
+                self._fprintd_failures += 1
+                should_fallback = self._fprintd_failures >= self._max_fprintd_failures
+            if should_fallback:
+                self.start_pam()
         finally:
             try:
                 await dev.call_verify_stop()  # type: ignore[attr-defined]
@@ -263,6 +297,9 @@ class AuthBackend(QObject):
             await bus.disconnect()
 
         if matched:
+            # Reset failure counter on success
+            with self._state_lock:
+                self._fprintd_failures = 0
             # Abort any in-flight PAM attempt — otherwise the worker
             # thread parks forever waiting for `_pam_pending_password`,
             # and the next `start_pam` is suppressed by the

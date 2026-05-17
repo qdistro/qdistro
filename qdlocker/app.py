@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+import toml
 
 from PySide6.QtCore import (
     QCoreApplication,
@@ -166,6 +167,38 @@ class WaylandBridge(QObject):
             self._client.set_locked(False)
 
 
+def load_config() -> dict:
+    """Load configuration from TOML file."""
+    config_paths = [
+        "/etc/qdistro/locker.conf",  # System-wide config
+        os.path.expanduser("~/.config/qdistro/locker.conf"),  # User config
+        os.path.join(os.path.dirname(__file__), "../etc/qdistro/locker.conf"),  # Dev config
+    ]
+    
+    # Default config values
+    config = {
+        "idle_timeout_s": 300,  # 5 minutes
+        "lid_action": "lock",
+        "fprintd_enabled": True,
+        "fprintd_max_failures": 3,
+        "fprintd_timeout_s": 10,
+    }
+    
+    for config_path in config_paths:
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    file_config = toml.load(f)
+                    # Update defaults with file config
+                    config.update(file_config)
+                log.info(f"Loaded config from {config_path}")
+                break
+            except Exception as e:
+                log.error(f"Failed to load config from {config_path}: {e}")
+    
+    return config
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=os.environ.get("QDLOCKER_LOG", "INFO"),
@@ -175,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     QCoreApplication.setOrganizationName("qdistro")
     QCoreApplication.setApplicationName("qdlocker")
     app = QGuiApplication(argv)
+    
+    # Load configuration
+    config = load_config()
 
     # `qmlRegisterType` would let QML instantiate `LockController` via
     # `LockController { }`, which calls the default constructor and
@@ -221,12 +257,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         log.info("QDLOCKER_NO_WAYLAND=1: skipping compositor binding (dev mode)")
 
-    # Idle path runs via qdwin's lock_requested(reason=0=idle) for now;
-    # see qdlocker/idle.py for the local-subscription plan. The
-    # IdleWatcher is intentionally NOT started here.
-    _idle = IdleWatcher(
-        timeout_ms=int(os.environ.get("QDLOCKER_IDLE_MS", str(10 * 60 * 1000)))
-    )
+    # Start the idle watcher to handle idle timeouts
+    # Use configured timeout or default to 5 minutes (300,000 ms) as per task requirements
+    idle_timeout_s = config["idle_timeout_s"]
+    idle_timeout_ms = int(os.environ.get("QDLOCKER_IDLE_MS", str(idle_timeout_s * 1000)))
+    _idle = IdleWatcher(timeout_ms=idle_timeout_ms)
+    _idle.on_idle(lambda: bridge.inject_lock_requested(0))  # reason=0 is idle
+    if os.environ.get("QDLOCKER_NO_WAYLAND") != "1":
+        _idle.start(client._display)
 
     # Keep a strong ref so the ctrl socket isn't GC'd while
     # app.exec() runs. Parented on `app` for cleanup on quit.

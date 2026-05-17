@@ -23,6 +23,7 @@ Type=simple
 ExecStart=/usr/bin/qdlocker
 Environment=QT_QPA_PLATFORM=wayland
 Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
+Environment=PYTHONPATH=/usr/lib/python3.11/site-packages
 # WAYLAND_DISPLAY / XDG_RUNTIME_DIR are inherited from the systemd
 # --user environment; the session manager imports them after qdwin
 # advertises the socket.
