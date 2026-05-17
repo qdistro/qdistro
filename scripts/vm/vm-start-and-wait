@@ -1,0 +1,36 @@
+#!/bin/bash
+# Usage: ./vm-start-and-wait <vm_name>
+# Starts VM if not running and waits for QEMU guest agent
+
+set -euo pipefail
+
+VM_NAME=$1
+
+# Check if VM is running
+VM_STATE=$(virsh -c qemu:///session domstate "$VM_NAME" 2>/dev/null || echo "")
+
+if [ "$VM_STATE" != "running" ]; then
+    echo "VM '$VM_NAME' is not running (state: ${VM_STATE:-unknown}). Starting..."
+    virsh -c qemu:///session start "$VM_NAME"
+else
+    echo "VM '$VM_NAME' is already running"
+fi
+
+# Wait for QEMU guest agent
+echo "Waiting for QEMU guest agent..."
+MAX_WAIT=120
+WAITED=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    if virsh -c qemu:///session qemu-agent-command "$VM_NAME" '{"execute":"guest-info"}' >/dev/null 2>&1; then
+        echo "Guest agent ready after ${WAITED}s"
+        exit 0
+    fi
+    sleep 1
+    WAITED=$((WAITED + 1))
+    if [ $WAITED -gt 0 ] && [ $((WAITED % 30)) -eq 0 ]; then
+        echo "  Waiting... (${WAITED}s/${MAX_WAIT}s)"
+    fi
+done
+
+echo "ERROR: Timeout waiting for guest agent"
+exit 1

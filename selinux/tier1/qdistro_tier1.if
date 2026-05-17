@@ -1,0 +1,54 @@
+## <summary>qdistro Tier-1 SELinux sandbox interfaces.</summary>
+
+########################################
+## <summary>
+##	Execute a Tier-1 sandboxed app in its own domain.
+## </summary>
+## <param name="domain">
+##	<summary>Domain allowed to spawn the sandbox.</summary>
+## </param>
+#
+interface(`qdistro_tier1_domtrans',`
+	gen_require(`
+		type qdistro_tier1_t, qdistro_tier1_exec_t;
+	')
+	corecmd_search_bin($1)
+	domtrans_pattern($1, qdistro_tier1_exec_t, qdistro_tier1_t)
+')
+
+########################################
+## <summary>
+##	Execute a Tier-1 sandboxed app, with role transition to the
+##	sandbox domain.
+## </summary>
+## <param name="domain">
+##	<summary>Domain allowed to spawn the sandbox.</summary>
+## </param>
+## <param name="role">
+##	<summary>Role allowed in qdistro_tier1_t.</summary>
+## </param>
+#
+interface(`qdistro_tier1_run',`
+	gen_require(`
+		type qdistro_tier1_t;
+	')
+	qdistro_tier1_domtrans($1)
+	role $2 types qdistro_tier1_t;
+')
+
+########################################
+## <summary>
+##	Read per-app Tier-1 config files. Used by helpers that
+##	render config snapshots for admin's UIs.
+## </summary>
+## <param name="domain">
+##	<summary>Domain allowed to read the config.</summary>
+## </param>
+#
+interface(`qdistro_tier1_read_config',`
+	gen_require(`
+		type qdistro_tier1_config_t;
+	')
+	allow $1 qdistro_tier1_config_t:dir list_dir_perms;
+	allow $1 qdistro_tier1_config_t:file read_file_perms;
+')

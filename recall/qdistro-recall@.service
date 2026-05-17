@@ -1,0 +1,20 @@
+[Unit]
+Description=qdistro recall — TTL reaper for user %i
+# Phase-8 §step 0 MVP — runs once per timer firing (default daily).
+# Phase-9 grows real ingest workloads; this stays as the retention
+# arm. System-instance (under /etc/systemd/system/) so a single
+# privileged dropper provisions the per-user dirs and one service
+# loop owns the retention path. ``%i`` is the silo name (uid login).
+ConditionPathIsDirectory=/var/lib/qdistro/recall/%i
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_recall_daemon.py --user %i
+# Reaper only deletes; safe under tight sandboxing.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/qdistro/recall/%i
+PrivateTmp=true

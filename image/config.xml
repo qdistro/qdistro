@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  qdistro kiwi description.
+  Builds a Tumbleweed-derived OEM disk image that lays itself onto
+  internal storage on first boot. See build.sh.
+-->
+
+<image schemaversion="8.4" name="qdistro">
+  <description type="system">
+    <author>qdistro contributors</author>
+    <contact>kjan80@gmail.com</contact>
+    <specification>qdistro desktop (Tumbleweed remix)</specification>
+  </description>
+
+  <preferences>
+    <version>0.1.0</version>
+    <packagemanager>zypper</packagemanager>
+    <bootsplash-theme>bgrt</bootsplash-theme>
+    <locale>en_US</locale>
+    <keytable>us</keytable>
+    <timezone>UTC</timezone>
+    <rpm-excludedocs>true</rpm-excludedocs>
+
+    <type image="oem"
+          filesystem="btrfs"
+          firmware="uefi"
+          installiso="true"
+          installboot="harddisk"
+          kernelcmdline="quiet systemd.default_vt=3"
+          efipartsize="512">
+      <!-- timeout=30 gives a human time to read the menu; the install
+           ISO's default entry is "Boot from Hard Disk" (installboot=
+           harddisk), so a timeout expiry never auto-installs. kiwi-
+           oem-dump *additionally* asks "Destroying ALL data on
+           /dev/vda? <Yes>/<No>" before writing — that prompt is
+           unconditional unless oem-unattended is set (we don't). -->
+      <bootloader name="grub2" timeout="30" timeout_style="menu"/>
+      <oemconfig>
+        <oem-systemsize>20480</oem-systemsize>
+        <oem-swap>true</oem-swap>
+        <oem-swapsize>2048</oem-swapsize>
+        <oem-skip-verify>true</oem-skip-verify>
+      </oemconfig>
+      <size unit="M">20480</size>
+      <systemdisk name="qdistro">
+        <volume name="home"/>
+        <volume name="root" copy_on_write="false"/>
+        <volume name="opt"/>
+        <volume name="srv"/>
+        <volume name="tmp"/>
+        <volume name="usr/local"/>
+        <volume name="var" copy_on_write="false"/>
+      </systemdisk>
+    </type>
+  </preferences>
+
+  <users>
+    <user name="root"  password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted" home="/root"/>
+    <user name="admin" password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted"
+          home="/home/admin" id="1000" groups="users,wheel,video,audio,input,kvm,libvirt"/>
+    <user name="user"  password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted"
+          home="/home/user"  id="1001" groups="users,video,audio,input"/>
+  </users>
+
+  <repository type="rpm-md" alias="Tumbleweed-OSS">
+    <source path="http://download.opensuse.org/tumbleweed/repo/oss/"/>
+  </repository>
+  <repository type="rpm-md" alias="Tumbleweed-NonOSS">
+    <source path="http://download.opensuse.org/tumbleweed/repo/non-oss/"/>
+  </repository>
+
+  <packages type="image">
+    <!-- base system -->
+    <package name="patterns-base-minimal_base"/>
+    <package name="patterns-base-base"/>
+    <package name="kernel-default"/>
+    <package name="grub2"/>
+    <package name="grub2-x86_64-efi"/>
+    <package name="shim"/>
+    <package name="btrfsprogs"/>
+    <package name="dosfstools"/>
+    <package name="dracut"/>
+    <package name="systemd"/>
+    <package name="dracut-kiwi-oem-repart"/>
+    <package name="dracut-kiwi-oem-dump"/>
+    <package name="NetworkManager"/>
+    <package name="hostname"/>
+    <package name="iputils"/>
+    <package name="kernel-firmware-iwlwifi"/>
+    <package name="kernel-firmware-network"/>
+    <package name="kernel-firmware-all"/>
+    <package name="zypper"/>
+    <package name="openssh"/>
+    <package name="openssh-server"/>
+    <package name="sudo"/>
+    <package name="vim"/>
+    <package name="git-core"/>
+    <package name="wget"/>
+    <package name="curl"/>
+    <package name="tar"/>
+    <package name="gzip"/>
+    <package name="xz"/>
+    <package name="snapper"/>
+    <package name="plymouth"/>
+    <package name="noctalia-qs"/>
+
+    <!-- qdistro userspace runtime deps (mirrors qdistro/scripts/install/install-deps.sh) -->
+    <package name="weston"/>
+    <package name="libweston-14"/>
+    <package name="libweston-14-0"/>
+    <package name="freerdp"/>
+    <package name="freerdp-sdl"/>
+    <package name="freerdp-server"/>
+    <package name="pipewire"/>
+    <package name="wireplumber"/>
+    <package name="pipewire-tools"/>
+    <package name="libpipewire-0_3-0"/>
+    <package name="gstreamer"/>
+    <package name="gstreamer-plugin-pipewire"/>
+    <package name="gstreamer-plugins-good"/>
+    <package name="gstreamer-utils"/>
+    <package name="libxkbcommon0"/>
+    <package name="libinput10"/>
+    <package name="seatd"/>
+    <package name="libXcursor1"/>
+    <package name="adwaita-icon-theme"/>
+    <package name="xcursor-themes"/>
+    <package name="python313"/>
+    <package name="python313-pywayland"/>
+    <package name="python313-cffi"/>
+    <package name="python313-PyQt6"/>
+    <package name="qt6-wayland"/>
+    <package name="python313-setuptools"/>
+    <package name="python313-python-pam"/>
+    <package name="python313-dbus-python"/>
+    <package name="python313-gobject"/>
+    <package name="python313-gobject-Gdk"/>
+    <package name="python313-PyYAML"/>
+    <package name="python313-cryptography"/>
+    <package name="Mesa"/>
+    <package name="Mesa-libEGL1"/>
+    <package name="Mesa-libGL1"/>
+    <package name="Mesa-dri"/>
+    <package name="wayland-utils"/>
+    <package name="fprintd"/>
+    <package name="tpm2.0-tools"/>
+    <package name="sqlite3"/>
+    <package name="audit"/>
+    <package name="libnotify-tools"/>
+    <package name="greetd"/>
+    <package name="podman"/>
+    <package name="slirp4netns"/>
+    <package name="fuse-overlayfs"/>
+    <package name="crun"/>
+    <package name="waypipe"/>
+    <package name="wl-clipboard"/>
+    <package name="libvirt"/>
+    <package name="libvirt-daemon-qemu"/>
+    <package name="libvirt-client"/>
+    <package name="virt-install"/>
+    <package name="virt-viewer"/>
+    <package name="qemu-x86"/>
+    <package name="qemu-tools"/>
+    <package name="qemu-ui-spice-core"/>
+    <package name="qemu-ui-spice-app"/>
+    <package name="spice-vdagent"/>
+    <package name="qemu-audio-pipewire"/>
+    <package name="qemu-audio-alsa"/>
+    <package name="socat"/>
+    <package name="selinux-policy"/>
+    <package name="selinux-policy-targeted"/>
+
+    <!-- build-time deps so config.sh can compile qdwin/qdshell in-image.
+         Once qdwin/qdshell move to RPMs (next milestone), strip these. -->
+    <package name="meson"/>
+    <package name="ninja"/>
+    <package name="gcc"/>
+    <package name="gcc-c++"/>
+    <package name="pkgconf-pkg-config"/>
+    <package name="weston-devel"/>
+    <package name="wayland-devel"/>
+    <package name="wayland-protocols-devel"/>
+    <package name="libxkbcommon-devel"/>
+    <package name="libevdev-devel"/>
+    <package name="libinput-devel"/>
+    <package name="libgbm-devel"/>
+    <package name="libdrm-devel"/>
+    <package name="seatd-devel"/>
+    <package name="libpixman-1-0-devel"/>
+    <package name="libXcursor-devel"/>
+    <package name="freerdp-devel"/>
+    <package name="winpr-devel"/>
+    <package name="pipewire-devel"/>
+    <package name="libselinux-devel"/>
+    <package name="selinux-policy-devel"/>
+    <package name="qt6-core-devel"/>
+    <package name="qt6-qml-devel"/>
+    <package name="qt6-quick-devel"/>
+    <package name="qt6-declarative-devel"/>
+  </packages>
+
+  <packages type="bootstrap">
+    <package name="filesystem"/>
+    <package name="glibc-locale"/>
+    <package name="ca-certificates"/>
+    <package name="ca-certificates-mozilla"/>
+  </packages>
+</image>

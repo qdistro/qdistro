@@ -1,0 +1,40 @@
+## <summary>qdistro password manager policy interfaces.</summary>
+
+########################################
+## <summary>
+##	Authorise a domain to make D-Bus calls against qdistro-pwd.
+##	Mirrors qdistro_broker_dbus_chat — caller-to-daemon plus the
+##	dbus daemon proxy edge in both directions.
+## </summary>
+## <param name="domain">
+##	<summary>Domain calling pwd methods.</summary>
+## </param>
+#
+interface(`qdistro_pwd_dbus_chat',`
+	gen_require(`
+		type system_dbusd_t;
+		type qdistro_pwd_t;
+	')
+	allow $1 qdistro_pwd_t:dbus send_msg;
+	allow qdistro_pwd_t $1:dbus send_msg;
+	allow system_dbusd_t qdistro_pwd_t:dbus send_msg;
+	allow qdistro_pwd_t system_dbusd_t:dbus send_msg;
+')
+
+########################################
+## <summary>
+##	Allow a domain to read the qdistro-pwd audit log files.
+##	Used by future admin-app code that surfaces the pwd audit
+##	trail in the same panel as the broker audit.
+## </summary>
+## <param name="domain">
+##	<summary>Domain reading the audit log.</summary>
+## </param>
+#
+interface(`qdistro_pwd_read_audit',`
+	gen_require(`
+		type qdistro_pwd_audit_t;
+	')
+	allow $1 qdistro_pwd_audit_t:dir list_dir_perms;
+	allow $1 qdistro_pwd_audit_t:file read_file_perms;
+')

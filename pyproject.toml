@@ -1,0 +1,34 @@
+# Minimal pyproject for pytest config. qdistro's Python modules are
+# installed as flat .py files on target machines (each module lives
+# next to its companions on the VM); this file exists purely so pytest
+# can discover the unit tests + populate sys.path.
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+python_files = ["test_*.py"]
+# Promote module directories onto sys.path so tests can import
+# qdistro_admin_*, qdistro_polkit_*, qdistro_pwd_*, etc. directly.
+pythonpath = [
+  "broker",
+  "cli",
+  "tui",
+  "qsu",
+  "polkit",
+  "user_relay",
+  "pwd",
+  "print",
+  "phone",
+  "recall",
+  "browser_bridge",
+  "snapshots",
+  "sdk",
+  "admin_app",
+  "session_manager",
+]
+
+# Linter config — house style across qdistro favours stacking trivial
+# Qt setup statements with semicolons (admin_app/qdistro_admin_app.py
+# is the reference); E702 is therefore explicitly off. Anything else
+# the default ruff rule set flags is a real bug — leave the defaults.
+[tool.ruff.lint]
+ignore = ["E702"]

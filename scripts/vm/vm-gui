@@ -1,0 +1,160 @@
+#!/bin/bash
+#
+# vm-gui — GUI automation for VMs via xdotool + virsh screenshot.
+#
+# Usage:
+#   vm-gui <vm> screenshot [file]        Take screenshot (default: /tmp/vm-screenshot.png)
+#   vm-gui <vm> start <command>          Launch a GUI app
+#   vm-gui <vm> activate <title>         Focus window by title (wildcard match)
+#   vm-gui <vm> click <x> <y>           Left-click at coordinates
+#   vm-gui <vm> rightclick <x> <y>      Right-click at coordinates
+#   vm-gui <vm> doubleclick <x> <y>     Double-click at coordinates
+#   vm-gui <vm> drag <x1> <y1> <x2> <y2>  Drag from (x1,y1) to (x2,y2)
+#   vm-gui <vm> scroll <up|down> [n]    Scroll mouse wheel (default: 3 clicks)
+#   vm-gui <vm> type <text>             Type text (100ms delay between keys)
+#   vm-gui <vm> key <key> [key...]      Send key(s): Return, Tab, ctrl+c, alt+F4, ...
+#   vm-gui <vm> windowsize <title> <w> <h>   Resize window
+#   vm-gui <vm> windowmove <title> <x> <y>   Move window
+#   vm-gui <vm> wait [seconds]          Wait (default: 2)
+#
+set -euo pipefail
+
+VM="${1:?Usage: $0 <vm> <command> [args...]}"
+CMD="${2:?Usage: $0 <vm> <command> [args...]}"
+shift 2
+
+VM_EXEC="$(dirname "$0")/vm-exec"
+DELAY=100
+
+run_as_jan() {
+    "$VM_EXEC" "$VM" "su - admin -c 'DISPLAY=:0 $1'"
+}
+
+case "$CMD" in
+    screenshot)
+        OUT="${1:-/tmp/vm-screenshot.png}"
+        virsh screenshot "$VM" "$OUT" >/dev/null
+        echo "$OUT"
+        ;;
+    start)
+        APP="$*"
+        "$VM_EXEC" "$VM" "su - admin -c 'DISPLAY=:0 $APP &'"
+        sleep 2
+        ;;
+    activate)
+        TITLE="$*"
+        run_as_jan "xdotool search --name '.*${TITLE}.*' windowactivate --sync"
+        sleep 0.5
+        ;;
+    click)
+        X="${1:?Usage: vm-gui <vm> click <x> <y>}"
+        Y="${2:?Usage: vm-gui <vm> click <x> <y>}"
+        run_as_jan "xdotool mousemove $X $Y click 1"
+        sleep 0.3
+        ;;
+    rightclick)
+        X="${1:?Usage: vm-gui <vm> rightclick <x> <y>}"
+        Y="${2:?Usage: vm-gui <vm> rightclick <x> <y>}"
+        run_as_jan "xdotool mousemove $X $Y click 3"
+        sleep 0.3
+        ;;
+    doubleclick)
+        X="${1:?Usage: vm-gui <vm> doubleclick <x> <y>}"
+        Y="${2:?Usage: vm-gui <vm> doubleclick <x> <y>}"
+        run_as_jan "xdotool mousemove $X $Y click --repeat 2 --delay 100 1"
+        sleep 0.3
+        ;;
+    drag)
+        X1="${1:?Usage: vm-gui <vm> drag <x1> <y1> <x2> <y2>}"
+        Y1="${2:?}"
+        X2="${3:?}"
+        Y2="${4:?}"
+        run_as_jan "xdotool mousemove $X1 $Y1 mousedown 1 mousemove --delay 200 $X2 $Y2 mouseup 1"
+        sleep 0.3
+        ;;
+    scroll)
+        DIR="${1:?Usage: vm-gui <vm> scroll <up|down> [clicks]}"
+        CLICKS="${2:-3}"
+        case "$DIR" in
+            up)   BUTTON=4 ;;
+            down) BUTTON=5 ;;
+            *) echo "scroll direction: up or down" >&2; exit 1 ;;
+        esac
+        run_as_jan "xdotool click --repeat $CLICKS --delay 50 $BUTTON"
+        sleep 0.3
+        ;;
+    windowsize)
+        TITLE="${1:?Usage: vm-gui <vm> windowsize <title> <w> <h>}"
+        W="${2:?}"
+        H="${3:?}"
+        run_as_jan "xdotool search --name '.*${TITLE}.*' windowsize $W $H"
+        sleep 0.3
+        ;;
+    windowmove)
+        TITLE="${1:?Usage: vm-gui <vm> windowmove <title> <x> <y>}"
+        X="${2:?}"
+        Y="${3:?}"
+        run_as_jan "xdotool search --name '.*${TITLE}.*' windowmove $X $Y"
+        sleep 0.3
+        ;;
+    type)
+        TEXT="$*"
+        # Send each character as a key event to handle spaces properly
+        for (( i=0; i<${#TEXT}; i++ )); do
+            char="${TEXT:$i:1}"
+            case "$char" in
+                ' ') KEY="space" ;;
+                '.')  KEY="period" ;;
+                ',')  KEY="comma" ;;
+                '/')  KEY="slash" ;;
+                '-')  KEY="minus" ;;
+                '=')  KEY="equal" ;;
+                ';')  KEY="semicolon" ;;
+                "'")  KEY="apostrophe" ;;
+                '[')  KEY="bracketleft" ;;
+                ']')  KEY="bracketright" ;;
+                '!')  KEY="shift+1" ;;
+                '@')  KEY="shift+2" ;;
+                '#')  KEY="shift+3" ;;
+                '$')  KEY="shift+4" ;;
+                '%')  KEY="shift+5" ;;
+                '^')  KEY="shift+6" ;;
+                '&')  KEY="shift+7" ;;
+                '*')  KEY="shift+8" ;;
+                '(')  KEY="shift+9" ;;
+                ')')  KEY="shift+0" ;;
+                '_')  KEY="shift+minus" ;;
+                '+')  KEY="shift+equal" ;;
+                ':')  KEY="shift+semicolon" ;;
+                '"')  KEY="shift+apostrophe" ;;
+                '<')  KEY="shift+comma" ;;
+                '>')  KEY="shift+period" ;;
+                '?')  KEY="shift+slash" ;;
+                '~')  KEY="shift+grave" ;;
+                '`')  KEY="grave" ;;
+                *)
+                    if [[ "$char" =~ [A-Z] ]]; then
+                        KEY="shift+${char,,}"
+                    else
+                        KEY="$char"
+                    fi
+                    ;;
+            esac
+            run_as_jan "xdotool key $KEY" 2>/dev/null
+            sleep "0.$(printf '%03d' $DELAY)"
+        done
+        ;;
+    key)
+        run_as_jan "xdotool key $*"
+        sleep 0.3
+        ;;
+    wait)
+        SECS="${1:-2}"
+        sleep "$SECS"
+        ;;
+    *)
+        echo "Unknown command: $CMD" >&2
+        echo "Commands: screenshot, start, activate, click, rightclick, doubleclick, drag, scroll, type, key, windowsize, windowmove, wait" >&2
+        exit 1
+        ;;
+esac

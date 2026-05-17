@@ -1,0 +1,26 @@
+[Unit]
+Description=Auto-unlock the qdistro portal-keys vault at login
+Documentation=https://qdistro.invalid/spec/13
+# Needs the per-user session bus and the system pwd daemon.
+After=qdistro-pwd-portal.service
+Wants=qdistro-pwd-portal.service
+PartOf=graphical-session.target
+# SKIP cleanly if the admin hasn't sealed a PIN yet — the daemon
+# returns NotFound which the CLI exits non-zero on. We keep the
+# unit Type=oneshot RemainAfterExit=no so the failure doesn't
+# wedge the session.
+ConditionPathExists=/var/lib/qdistro/vaults/portal-keys-pin.tpm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qdistro-pwd-admin auto-unlock-portal-keys
+# Don't restart on failure — admin will see the error in
+# `systemctl --user status qdistro-portal-keys-unlock.service`
+# and either re-stash the PIN or fall back to the manual
+# unlock-on-first-portal-secret-request flow.
+RemainAfterExit=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

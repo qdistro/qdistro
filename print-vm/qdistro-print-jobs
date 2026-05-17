@@ -1,0 +1,116 @@
+#!/bin/bash
+# qdistro-print-jobs — host-side wrapper for the qdistro-print VM's
+# qdistro-print-job-control helper, invoked over qemu-guest-agent.
+#
+# Subcommands:
+#   list              — print active jobs (lpstat -o output) on stdout.
+#   cancel <jobid>    — cancel one print job by ID.
+#   purge             — purge all jobs.
+#
+# All operations target the libvirt domain named via $QDISTRO_PRINT_VM
+# (default: ``qdistro-print``); the VM must be running with qga active.
+#
+# Used by the admin-approval-app's Printing tab Jobs sub-pane (task 109)
+# and by direct admin invocation. Returns the in-VM helper's stdout
+# verbatim so the caller can render it; rc mirrors the helper's rc.
+set -euo pipefail
+
+VM="${QDISTRO_PRINT_VM:-qdistro-print}"
+URI="${QDISTRO_LIBVIRT_URI:-qemu:///system}"
+
+usage() {
+    sed -n '2,17p' "$0"
+}
+
+if [ $# -lt 1 ]; then
+    usage >&2; exit 2
+fi
+sub="$1"; shift
+
+# Build the guest-exec argv. Each subcommand maps to a qdistro-print-
+# job-control invocation; we pass the path + args as a JSON list.
+case "$sub" in
+    -h|--help) usage; exit 0 ;;
+    list)
+        ARGS_JSON='["list"]'
+        ;;
+    cancel)
+        if [ $# -lt 1 ]; then
+            echo "usage: $0 cancel <jobid>" >&2; exit 2
+        fi
+        # Restrict job-id charset so the JSON injection surface is nil.
+        jobid="$1"
+        if ! [[ "$jobid" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "[qdistro-print-jobs] refusing job id with non-ascii / special chars: $jobid" >&2
+            exit 2
+        fi
+        ARGS_JSON='["cancel","'"$jobid"'"]'
+        ;;
+    purge)
+        ARGS_JSON='["purge"]'
+        ;;
+    *)
+        echo "[qdistro-print-jobs] unknown subcommand: $sub" >&2
+        usage >&2; exit 2
+        ;;
+esac
+
+# Step 1: spawn the in-VM helper via guest-exec, capture the pid.
+START_REQ=$(python3 - "$ARGS_JSON" <<'PY'
+import json, sys
+args = json.loads(sys.argv[1])
+req = {
+    "execute": "guest-exec",
+    "arguments": {
+        "path": "/usr/local/bin/qdistro-print-job-control",
+        "arg":  args,
+        "capture-output": True,
+    },
+}
+print(json.dumps(req))
+PY
+)
+
+START_RESP=$(virsh -c "$URI" qemu-agent-command "$VM" "$START_REQ" 2>&1) || {
+    echo "[qdistro-print-jobs] qemu-agent-command (start) failed: $START_RESP" >&2
+    exit 3
+}
+PID=$(python3 - "$START_RESP" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])["return"]["pid"])
+PY
+) || {
+    echo "[qdistro-print-jobs] could not parse start response: $START_RESP" >&2
+    exit 3
+}
+
+# Step 2: poll guest-exec-status until exited=true or timeout.
+DEADLINE=$(( SECONDS + 30 ))
+STATUS_REQ=$(printf '{"execute":"guest-exec-status","arguments":{"pid":%d}}' "$PID")
+while :; do
+    STATUS_RESP=$(virsh -c "$URI" qemu-agent-command "$VM" "$STATUS_REQ" 2>&1) || {
+        echo "[qdistro-print-jobs] qemu-agent-command (status) failed: $STATUS_RESP" >&2
+        exit 3
+    }
+    if echo "$STATUS_RESP" | grep -q '"exited":true'; then
+        break
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        echo "[qdistro-print-jobs] in-VM helper did not exit within 30s" >&2
+        exit 4
+    fi
+    sleep 1
+done
+
+# Step 3: decode base64 stdout/stderr from the status response.
+python3 - "$STATUS_RESP" <<'PY'
+import base64, json, sys
+resp = json.loads(sys.argv[1])
+ret = resp.get("return", {})
+ec = int(ret.get("exitcode", 0))
+out = base64.b64decode(ret.get("out-data", "")).decode("utf-8", "replace")
+err = base64.b64decode(ret.get("err-data", "")).decode("utf-8", "replace")
+sys.stdout.write(out)
+sys.stderr.write(err)
+sys.exit(ec)
+PY

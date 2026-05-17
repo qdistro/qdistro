@@ -1,0 +1,56 @@
+[Unit]
+Description=qdistro password-manager daemon (spec/13 Phase-8 MVP)
+After=dbus.service qdistro-dbus-reload.service
+Requires=dbus.service
+# Same dbus-broker policy-reload mitigation as the admin broker —
+# Phase-8 MVP installs Pwd1.conf at install time, so on first boot
+# dbus-broker needs the SIGHUP to land the new policy.
+Wants=qdistro-dbus-reload.service
+
+[Service]
+Type=dbus
+BusName=com.qdistro.Pwd1
+ExecStart=/usr/libexec/qdistro/qdistro_pwd_daemon.py
+Restart=on-failure
+RestartSec=2
+# Phase-8.4: dedicated qdistro-pwd system uid. install-pwd-for-vm.sh
+# creates the user + group on first install. SELinux module
+# qdistro_pwd.{te,fc,if} (selinux/pwd/) labels
+# the daemon exec qdistro_pwd_exec_t and transitions the daemon into
+# qdistro_pwd_t (permissive in 0.1.0; enforcing in Phase 2 follow-up).
+User=qdistro-pwd
+Group=qdistro-pwd
+SupplementaryGroups=tss
+# CAP_SYS_PTRACE lets the daemon readlink /proc/<other-uid>/exe for
+# the per-item pin gate. Without it, qdistro-pwd's process can't
+# inspect the kernel-attested exe of a non-admin caller — the pin
+# gate then fails closed with "caller exe unreadable" on every
+# legitimate non-admin GetItem. The cap is bounded + ambient (no
+# escalation beyond the daemon) and balanced by the rest of the
+# sandbox (PrivateNetwork, MemoryDenyWriteExecute, syscall filter).
+AmbientCapabilities=CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_PTRACE
+StandardOutput=journal
+StandardError=journal
+# Sandbox: no network, no /home, /var/lib/qdistro/vaults read-write,
+# everything else readonly via systemd's lockdown options.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/qdistro
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @file-system @network-io
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

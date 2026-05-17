@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>qdistro browser bridge</title>
+  <style>
+    body { font-family: sans-serif; min-width: 320px; margin: 8px; }
+    h1 { font-size: 14px; margin: 0 0 6px 0; }
+    button { padding: 4px 10px; }
+    pre { font-size: 11px; background: #f4f4f4; padding: 6px; white-space: pre-wrap; word-break: break-all; }
+    .ok { color: #0a6; }
+    .err { color: #a00; }
+  </style>
+</head>
+<body>
+  <h1>qdistro browser bridge</h1>
+  <button id="ping">qdistro.ping</button>
+  <span id="status">idle</span>
+  <pre id="out">(no response yet)</pre>
+  <script src="popup.js"></script>
+</body>
+</html>

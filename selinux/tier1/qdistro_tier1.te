@@ -1,0 +1,287 @@
+## <summary>qdistro Tier-1 SELinux sandbox.</summary>
+## <desc>
+##   Lightest containment for user-silo apps that don't opt up to
+##   Tier-2 (podman) or higher. Custom policy module — Fedora's
+##   sandbox(1) launcher isn't packaged on Tumbleweed and the
+##   selinux-policy-sandbox package only adds dead-weight types.
+##
+##   Designed to coexist with wp_security_context_v1: the wrapper
+##   sets BOTH a SELinux type (this domain) and a Wayland secctx tag
+##   (via qdistro-secctx-exec). Two independent attestations of the
+##   same identity.
+##
+##   See doc/selinux.md for the full architectural
+##   rationale and  for
+##   the spike results that pinned the interface choices below.
+## </desc>
+policy_module(qdistro_tier1, 0.4.0)
+
+########################################
+#
+# Declarations
+#
+
+require {
+	type user_tmp_t;            # /run/user/<uid>/* on Tumbleweed
+	type session_dbusd_tmp_t;   # /run/user/<uid>/bus socket
+	type user_home_t;
+	type user_home_dir_t;
+	type dri_device_t;
+	role staff_r;
+	role unconfined_r;
+}
+
+# The Tier-1 sandbox domain. Apps run here.
+type qdistro_tier1_t;
+
+# The launcher binary that triggers the type transition. Labelled
+# in the .fc file.
+type qdistro_tier1_exec_t;
+
+# Per-app private state under ~/.local/share/qdistro/tier1/<app>.
+# Labelled by restorecon at first launch.
+type qdistro_tier1_config_t;
+
+# Application-domain attribute pulls in the standard application
+# allow-rules (read libraries, exec /lib/ld-linux*, etc.) without
+# us having to enumerate them.
+application_domain(qdistro_tier1_t, qdistro_tier1_exec_t)
+files_type(qdistro_tier1_config_t)
+
+# Allow staff and unconfined users to enter the domain. Each
+# qdistro deployment picks one or the other depending on whether
+# `semanage login` has migrated the admin user from unconfined_u to
+# staff_u (Spike 2 in spike-checklist.md). Tumbleweed default is
+# unconfined_u via the __default__ mapping; spike confirmed admin
+# inherits that.
+role staff_r types qdistro_tier1_t;
+role unconfined_r types qdistro_tier1_t;
+
+########################################
+#
+# Wayland + PipeWire connectivity
+#
+# Spike 1 finding: Tumbleweed labels /run/user/<uid>/* as user_tmp_t,
+# NOT user_runtime_t (the latter doesn't exist in this policy variant
+# at all). userdom_stream_connect picks this up via
+# stream_connect_pattern($1, user_tmp_t, user_tmp_t, userdomain).
+
+userdom_stream_connect(qdistro_tier1_t)
+files_search_tmp(qdistro_tier1_t)
+
+# Some Tumbleweed configurations relabel /run/user/<uid> entries
+# created post-policy-load to user_runtime_t (refpolicy modernisation
+# in flight). Hedge by allowing read-on-discovery to both — if the
+# distro shifts under us, the app still binds Wayland.
+optional_policy(`
+	gen_require(`
+		type user_runtime_t;
+	')
+	allow qdistro_tier1_t user_runtime_t:dir { search getattr };
+	allow qdistro_tier1_t user_runtime_t:sock_file { rw_sock_file_perms };
+	allow qdistro_tier1_t self:unix_stream_socket { create connect };
+')
+
+########################################
+#
+# Filesystem access
+#
+# Per spec/30 §"Filesystem labelling strategy" the design picks
+# type-not-mount: $HOME stays user_home_t, only ~/.local/share/
+# qdistro/tier1/<app> gets relabelled to qdistro_tier1_config_t and
+# is read/writable from this domain.
+
+# Read-only: home directory entries (so the app can list ~ but not
+# write to anything outside qdistro_tier1_config_t).
+allow qdistro_tier1_t user_home_dir_t:dir { read getattr search open };
+allow qdistro_tier1_t user_home_t:dir { read getattr search open };
+allow qdistro_tier1_t user_home_t:file { read getattr open };
+
+# Read+write: per-app config under ~/.local/share/qdistro/tier1.
+allow qdistro_tier1_t qdistro_tier1_config_t:dir manage_dir_perms;
+allow qdistro_tier1_t qdistro_tier1_config_t:file manage_file_perms;
+files_search_home(qdistro_tier1_t)
+
+# Fonts + locale. Tumbleweed exposes the fonts interface under the
+# `miscfiles_*` namespace, not `fonts_*` (Spike 3 finding); the
+# Fedora-style `fonts_read_fonts` is unavailable here.
+miscfiles_read_fonts(qdistro_tier1_t)
+miscfiles_read_localization(qdistro_tier1_t)
+
+########################################
+#
+# Devices
+#
+
+# GPU access. Wayland clients reach /dev/dri for hardware buffers;
+# the alternative (SHM-only) is too slow for non-trivial apps.
+dev_rw_dri(qdistro_tier1_t)
+dev_read_urand(qdistro_tier1_t)
+
+# /dev/shm — wl_shm uses it for SHM buffer sharing. Use the
+# non-deprecated interface (`userdom_manage_user_tmpfs_files` is
+# soft-deprecated on this policy variant).
+userdom_manage_user_tmp_files(qdistro_tier1_t)
+
+########################################
+#
+# Process / exec
+#
+
+corecmd_exec_bin(qdistro_tier1_t)
+corecmd_exec_shell(qdistro_tier1_t)
+
+# Domain transition: launcher → tier1 domain. Both staff_t and
+# unconfined_t paths are wrapped in optional_policy so the module
+# loads on Tumbleweed installs that ship only one user-domain (the
+# default __default__ → unconfined_u maps everyone to unconfined_t,
+# and staff_u isn't created until `semanage login -a -s staff_u`).
+optional_policy(`
+	gen_require(`
+		type staff_t;
+	')
+	domain_auto_trans(staff_t, qdistro_tier1_exec_t, qdistro_tier1_t)
+')
+optional_policy(`
+	gen_require(`
+		type unconfined_t;
+	')
+	domain_auto_trans(unconfined_t, qdistro_tier1_exec_t, qdistro_tier1_t)
+')
+
+########################################
+#
+# qdistro broker (per-uid system bus)
+#
+# Apps call broker.RequestPermission for clipboard / handoff /
+# spawn-time gates. The broker.if module exports
+# qdistro_broker_dbus_chat() which authorises send_msg against the
+# broker's bus name; Phase 1 of broker-policy/qdistro_broker.te
+# routes this to system_dbusd_t (the broker today runs as a
+# dbus-activated service under that domain). Phase 2 will switch
+# the interface body to send_msg against qdistro_broker_t once the
+# broker exec is labelled — no caller-side change needed.
+#
+# The dbus session bus socket lives at /run/user/<uid>/bus and is
+# labelled session_dbusd_tmp_t (Spike 1 finding); the connect
+# permission piggybacks on dbus_session_bus_client which already
+# allows the right socket and file ops.
+
+dbus_session_bus_client(qdistro_tier1_t)
+dbus_system_bus_client(qdistro_tier1_t)
+allow qdistro_tier1_t session_dbusd_tmp_t:sock_file { read write getattr setattr append open };
+allow qdistro_tier1_t session_dbusd_tmp_t:dir { search getattr };
+
+qdistro_broker_dbus_chat(qdistro_tier1_t)
+
+########################################
+#
+# Pre-emptive enforcing-mode hardening (task 045)
+#
+# These interfaces unblock the workloads exercised by
+# scripts/vm/s55-tier1-enforcing.sh: a Tier-1 process
+# that exec'd via qdistro-tier1-spawn must be able to find its own
+# libraries, read user/group databases for name resolution, look
+# up its own process state, and reach DNS resolver config — all of
+# which the spike .te missed. Each block is the smallest interface
+# that closes one class of AVC.
+#
+# When iterating after a real enforcing-mode pass:
+#   1. Run s55-tier1-enforcing.sh; capture new AVCs.
+#   2. Pipe through `audit2allow` for the canonical fix.
+#   3. Prefer named refpolicy interfaces over raw `allow` rules so
+#      future Tumbleweed policy bumps don't silently break us.
+
+# Self introspection — /proc/<self>/{stat,status,cmdline,maps,fd}.
+# Apps that link against glibc's malloc + tcmalloc both walk
+# /proc/<self>/maps on first allocation.
+domain_read_all_domains_state(qdistro_tier1_t)
+
+# Name-resolution: nsswitch + /etc/passwd + /etc/group + locale
+# files. Required for getpwnam / getgrnam / locale_t setup which
+# basically every libc function eventually reaches.
+auth_read_passwd(qdistro_tier1_t)
+miscfiles_read_generic_certs(qdistro_tier1_t)
+sysnet_dns_name_resolve(qdistro_tier1_t)
+sysnet_read_config(qdistro_tier1_t)
+
+# Locale + zoneinfo (read-only). Already covered by
+# miscfiles_read_localization above; this block is harmless duplication
+# but documents the expected interfaces if the upstream interface
+# names shift.
+miscfiles_read_localization(qdistro_tier1_t)
+
+# /sys read for renderD-related introspection (Mesa probes
+# /sys/class/drm/renderD128/device on init). Distinct from
+# dev_rw_dri above which covers the device node, not the sysfs tree.
+dev_read_sysfs(qdistro_tier1_t)
+
+# Broker writes its bus socket under /run/dbus/system_bus_socket.
+# dbus_system_bus_client above pulls in the bus client, but the
+# socket connect permission needs the system_dbusd_var_run_t entry
+# explicitly on this policy variant.
+optional_policy(`
+	gen_require(`
+		type system_dbusd_var_run_t;
+	')
+	allow qdistro_tier1_t system_dbusd_var_run_t:sock_file { write };
+	allow qdistro_tier1_t system_dbusd_var_run_t:dir { search };
+')
+
+# Apps may legitimately need to read their argv0 binary's actual
+# path for self-reflection (Qt's setApplicationFilePath, Python's
+# sys.executable). Reading /proc/<self>/exe is covered by
+# domain_read_all_domains_state above.
+files_read_etc_files(qdistro_tier1_t)
+
+# Pseudo-tty access for shell-launched apps (sh -c '…' inherits
+# the parent's tty). qdistro-tier1-spawn typically forks under a
+# launcher that has /dev/null on stdin/stdout, but interactive
+# debugging workflows want the tty path.
+term_use_all_terms(qdistro_tier1_t)
+
+# /dev/null /dev/zero /dev/full — universal harmless devices.
+dev_read_rand(qdistro_tier1_t)
+files_read_var_files(qdistro_tier1_t)
+files_read_var_lib_files(qdistro_tier1_t)
+
+########################################
+#
+# Enforcing-mode iteration findings (task 048)
+#
+# Empirically observed AVCs on a dedicated tier1-enforcing VM after
+# fixing the qdistro-tier1-exec wrapper to skip the
+# selinux_t:context_validate probe (which qdistro_tier1_t isn't
+# allowed to perform after the auto_trans landed it in this domain).
+# Each block is the smallest interface that closes one observed AVC
+# class.
+
+# id(1) and other libc consumers of getpwnam reach systemd-userdbd
+# via /run/systemd/userdb. Without this, every libc call that walks
+# the passwd database AVC-fails (id, who, finger, anything via
+# nss-systemd). systemd_userdbd_stream_connect pulls in dir-list +
+# socket-write + connectto in one interface.
+optional_policy(`
+	gen_require(`
+		type systemd_userdbd_t;
+		type systemd_userdbd_runtime_t;
+	')
+	systemd_userdbd_stream_connect(qdistro_tier1_t)
+')
+
+# nss-systemd / nss-mymachines also reach systemd-machined over
+# /run/systemd/machine.  Required when an app does any user/group
+# lookup that may resolve a container/machine identity.
+optional_policy(`
+	gen_require(`
+		type systemd_machined_t;
+	')
+	systemd_machined_stream_connect(qdistro_tier1_t)
+')
+
+# init_stream_connect — getpwuid_r → systemd-resolved/init private
+# socket (/run/systemd/private). Without it, glibc's nss-systemd
+# falls through to passwd-file with no AVC, but the connectto attempt
+# itself fires an AVC noisy enough that we'd rather allow-and-stay-
+# silent.
+init_stream_connect(qdistro_tier1_t)

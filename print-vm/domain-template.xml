@@ -1,0 +1,81 @@
+<!-- spec/20 Phase-9 §step 2 — qdistro-print libvirt domain template.
+     Substituted by install-print-vm.sh:
+       __VM_NAME__       domain name (default: qdistro-print)
+       __MAC__           virtio-net MAC
+       __MEM_KIB__       memory in KiB (default 524288 = 512 MiB)
+       __CID__           guest vsock CID (greater than 2 — fixed at 4
+                         by default so QDISTRO_PRINT_VSOCK_CID=4 just
+                         works; the value lives next to the proxy env
+                         settings).
+       __DISK_PATH__     guest disk image (qcow2). Linux-only per spec/00.
+
+     Architecture notes:
+       - Headless VM. No video / sound / spice — cupsd is a network
+         daemon spoken to over IPP, not a UI surface.
+       - vsock model='virtio' carries IPP. cupsd inside the guest binds
+         on AF_VSOCK CID-any port 631; the host-side qdistro-print-proxy
+         connects in via QDISTRO_PRINT_BACKEND=vsock.
+       - virtio-net is `user`-mode (SLIRP) so cups-browsed inside the
+         guest can hit network printers when admin rules allow. No
+         port forwards — IPP enters the VM via vsock only.
+       - USB controllers: a qemu-xhci is present for hot-plug. The
+         host's qdistro-print-attach-usb wrapper performs `virsh
+         attach-device <usb-hostdev.xml>` after a polkit gate
+         (com.qdistro.print.attach-usb).
+       - qemu-guest-agent enabled so the host can run job-control
+         commands (cancel, purge) by guest-exec'ing cupsd CLIs.
+     -->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <!-- USB controller for printer hot-plug. qemu-xhci supports hot
+         attach-device of type='hostdev' subsystem='usb' for arbitrary
+         USB devices admin allows via polkit. -->
+    <controller type='usb' model='qemu-xhci' index='0'/>
+    <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    <!-- SLIRP outbound network for cups-browsed → real network printers
+         (admin rules can pin per-IP, broker has the gate). No inbound
+         forwards. -->
+    <interface type='user'>
+      <mac address='__MAC__'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <!-- vsock carries IPP. Default CID 4 lines up with
+         QDISTRO_PRINT_VSOCK_CID. -->
+    <vsock model='virtio'>
+      <cid auto='no' address='__CID__'/>
+    </vsock>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>

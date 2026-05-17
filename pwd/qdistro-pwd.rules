@@ -1,0 +1,24 @@
+// spec/13 Phase-8.2 — polkit rule for qdistro-pwd unlock.
+//
+// Loaded by polkitd from /usr/share/polkit-1/rules.d/. Lower-numbered
+// files take precedence; we use 50- so admin overrides can land at
+// 10-. The rule routes the unlock action through admin auth for
+// non-admin callers, and auto-allows admin-uid (1000 / admin) callers
+// so the admin's own CLI doesn't trigger a popup loop.
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "com.qdistro.pwd.unlock") {
+        return undefined;
+    }
+    // Admin uid 1000 (admin) is implicitly authorised — the daemon's
+    // _check_polkit_unlock helper short-circuits before calling
+    // CheckAuthorization for this uid, but the rule mirrors that
+    // policy here so a third-party tool that triggers the action
+    // directly (e.g. via pkexec) gets the same behaviour.
+    if (subject.user === "admin" || subject.user === "root") {
+        return polkit.Result.YES;
+    }
+    // Active session (logged-in admin can unlock with PAM / fprintd
+    // through the polkit agent), keep the auth for the session.
+    return polkit.Result.AUTH_ADMIN_KEEP;
+});

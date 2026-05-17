@@ -1,0 +1,45 @@
+[Unit]
+Description=qdistro privileged-exec service (qsu backend)
+# Paired with qdistro-root-exec.socket; the socket owns the fd and
+# activates us on demand.
+Requires=qdistro-root-exec.socket
+After=qdistro-root-exec.socket qdistro-admin-broker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_root_exec.py
+User=root
+
+# Supervisor — if the handler process dies in-flight, pick it back up
+# so the next connect gets a live service. Socket activation already
+# covers cold start; this covers mid-life crashes.
+Restart=on-failure
+RestartSec=2s
+
+# Sandboxing. The service's job is to exec arbitrary commands as the
+# target user, so NoNewPrivileges and most capability bounds would
+# break legitimate tools (e.g. `ping`, `passwd`, `systemctl`). We
+# keep this intentionally permissive on caps but tighten everything
+# the handler *itself* doesn't need:
+NoNewPrivileges=false
+# Config dirs read-only, /var /etc writable only via explicit paths.
+ProtectSystem=full
+# Never read/write user homes from the service itself. Spawned
+# child processes (which reset to target_user's uid) open afresh
+# via the kernel's DAC, so their access is independent of this.
+ProtectHome=read-only
+# Don't expose the service to per-user /run/user or private IPC.
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+# SystemCallFilter is deliberately NOT set: the service execs
+# arbitrary target-user commands which inherit the filter, and a
+# too-tight set would break surprising tools (common causes: kernel
+# keyring, iopl, obscure mount options). Reintroduce with a wide
+# allowlist once the set of qsu'd commands stabilises.
+
+[Install]
+WantedBy=multi-user.target

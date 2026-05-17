@@ -1,0 +1,30 @@
+[Unit]
+Description=greetd (tty4 fallback — legacy LXQt+labwc escape hatch)
+Documentation=man:greetd(1)
+Documentation=https://codeberg.org/qdistro/qdistro/src/branch/main/plan2/tasks/P01-greeter-boot-path.md
+# Loaded alongside the main greetd.service (which owns tty3). If the
+# main greetd fails to enable, this fallback still gives the
+# developer a way in via Ctrl+Alt+F4.
+ConditionPathExists=/etc/greetd/config-fallback.toml
+After=systemd-user-sessions.service plymouth-quit.service systemd-logind.service
+After=getty@tty4.service
+Conflicts=getty@tty4.service
+
+[Service]
+Type=idle
+ExecStart=/usr/bin/greetd --config /etc/greetd/config-fallback.toml
+Restart=always
+RestartSec=2
+# Same TTY hand-off semantics as the main greetd unit.
+TTYPath=/dev/tty4
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=true
+StandardInput=tty
+StandardOutput=tty
+KeyringMode=shared
+UtmpIdentifier=tty4
+UtmpMode=user
+
+[Install]
+WantedBy=graphical.target

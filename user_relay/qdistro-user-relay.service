@@ -1,0 +1,18 @@
+[Unit]
+Description=qdistro per-user session-bus relay
+Documentation=file:///usr/share/doc/qdistro/user_relay/README.md
+# Only meaningful once a session bus exists.
+After=dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_user_relay.py
+Restart=on-failure
+RestartSec=2
+# No private /tmp — we want to share the session bus socket under
+# /run/user/<uid>/bus which needs the user's runtime dir layout
+# intact.
+
+[Install]
+WantedBy=default.target

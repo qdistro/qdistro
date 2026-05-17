@@ -1,0 +1,28 @@
+// spec/13 Phase-8.x — polkit rule allowing qdistro-pwd uid to invoke
+// fprintd verify on behalf of the admin user.
+//
+// Background: AutoUnlockPortalKeys (and the upcoming UnlockVaultFprint)
+// runs as the qdistro-pwd system uid. fprintd's net.reactivated.fprint.
+// device.verify action defaults to auth_admin_keep, which would prompt
+// for the admin's password — defeating the whole point of fingerprint-
+// gated unseal. This rule grants qdistro-pwd implicit YES for
+// the verify and enroll-list actions only; everything else stays
+// gated.
+//
+// Loaded by polkitd from /usr/share/polkit-1/rules.d/. 50- prefix so
+// admin overrides at 10- still win.
+
+polkit.addRule(function(action, subject) {
+    var fprintActions = [
+        "net.reactivated.fprint.device.verify",
+        "net.reactivated.fprint.device.setusername",
+        "net.reactivated.fprint.device.enroll-list"
+    ];
+    if (fprintActions.indexOf(action.id) < 0) {
+        return undefined;
+    }
+    if (subject.user === "qdistro-pwd") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

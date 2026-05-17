@@ -1,0 +1,173 @@
+#!/bin/bash
+# qdistro-tier1-spawn — launch a sandboxed app under SELinux Tier-1.
+# Skeleton (spec/30). Implementation pass fills in the TODO blocks.
+#
+# Architecture:
+#
+#   admin uid                                       <- caller, e.g. admin
+#     │
+#     ▼ qdistro-tier1-spawn <silo> -- <app...>
+#     │
+#     ▼ qdistro-secctx-exec --sandbox-engine qdistro.tier1
+#     │                     --app-id qdistro.tier1.<silo>
+#     │                     --instance-id tier1-<silo>-<pid>
+#     │
+#     ▼ qdistro-tier1-exec  (setexeccon staff_u:staff_r:qdistro_tier1_t)
+#     │
+#     ▼ <app...>            (running in qdistro_tier1_t)
+#
+# Two attestations: SELinux type for enforcement, secctx tag for
+# routing (qdshell silo resolution).
+#
+# Usage:
+#   qdistro-tier1-spawn <silo> -- <app...>
+#
+# Environment:
+#   TIER1_TITLE_PREFIX     window title prefix (default "[tier1:<silo>] ")
+#   TIER1_USE_SECCTX       1 (default) wraps via qdistro-secctx-exec.
+#                          0 runs without a Wayland secctx tag (qdshell
+#                          falls back to title-prefix silo resolution).
+#   TIER1_SECCTX_ENGINE    override sandbox_engine (default qdistro.tier1)
+#   TIER1_SECCTX_APPID     override app_id (default qdistro.tier1.<silo>)
+#   TIER1_DEBUG=1          print resolved command before exec
+#
+# Exit code: app's natural exit code, or non-zero on bring-up failure.
+#
+# SPDX-License-Identifier: MIT
+set -eo pipefail
+
+if [ "$#" -lt 3 ] || [ "$2" != "--" ]; then
+    cat >&2 <<EOF
+usage: $0 <silo> -- <app...>
+
+  <silo>  Free-form silo identifier (e.g. work, scratch).
+          Must match qdshell's --silo-colors keys for chrome
+          differentiation; see spec/30 §"Compatibility with
+          wp_security_context_v1".
+  <app>   The command + arguments to run inside the sandbox.
+
+example:
+  qdistro-tier1-spawn scratch -- /usr/bin/firefox --safe-mode
+EOF
+    exit 64
+fi
+
+SILO="$1"; shift
+shift  # eat the literal "--"
+
+if ! [[ "$SILO" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]]; then
+    echo "[tier1] FAIL: silo '$SILO' violates [A-Za-z0-9][A-Za-z0-9_-]{0,62}" >&2
+    exit 1
+fi
+
+USE_SECCTX="${TIER1_USE_SECCTX:-1}"
+ENGINE="${TIER1_SECCTX_ENGINE:-qdistro.tier1}"
+APPID="${TIER1_SECCTX_APPID:-qdistro.tier1.$SILO}"
+TITLE_PREFIX="${TIER1_TITLE_PREFIX:-[tier1:$SILO] }"
+
+# Per-app private state directory, relabelled to qdistro_tier1_config_t
+# by restorecon (spec/30 §"Filesystem labelling strategy" type-not-mount).
+APP_STATE_DIR="$HOME/.local/share/qdistro/tier1/$SILO"
+mkdir -p "$APP_STATE_DIR"
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$APP_STATE_DIR" 2>/dev/null || true
+fi
+
+# Sanity: warn if SELinux is not in enforcing mode. Tier-1 still works
+# in permissive (denials are logged but not enforced) which matches
+# the fresh-clone bootstrap state — spec/30 §"Decision-blocking spikes"
+# lists this as Spike 1 to verify on Tumbleweed.
+# getenforce lives in /usr/sbin which isn't in non-admin users' default
+# PATH on Tumbleweed; the absolute path makes the warning honest.
+SE_MODE=$(/usr/sbin/getenforce 2>/dev/null || getenforce 2>/dev/null \
+    || echo "Disabled")
+if [ "$SE_MODE" = "Disabled" ]; then
+    echo "[tier1] WARN: SELinux is Disabled — Tier-1 is no-op" >&2
+elif [ "$SE_MODE" = "Permissive" ]; then
+    echo "[tier1] WARN: SELinux is Permissive — denials logged not enforced" >&2
+fi
+
+# Verify the policy module is loaded.
+if command -v semodule >/dev/null 2>&1; then
+    if ! semodule -l 2>/dev/null | grep -q '^qdistro_tier1\b'; then
+        echo "[tier1] WARN: qdistro_tier1 policy module not loaded;" \
+             "spawning in inherited type" >&2
+    fi
+fi
+
+# Broker spawn-action gate (spec/30 §"Phase plan" step 6). Admin can
+# author rules in /etc/qdistro/rules.d/ keyed on
+# `qdistro.tier1.spawn:<app_basename>` to allow / deny specific apps
+# at spawn time. CheckPermission returns "allow" / "deny" / "unknown";
+# we treat "unknown" as allow (consistent with the rest of the qdistro
+# default-allow posture for unconfigured surfaces — the SELinux .te
+# is the floor that catches actual abuse; admin uses spawn rules for
+# extra discrimination, e.g. "deny qdistro.tier1.spawn:gdb"). When
+# the broker is absent (TIER1_BROKER_OPTIONAL=1, dbus-send missing,
+# or systemd-not-running) the spawn proceeds unguarded with a warning.
+APP_BASENAME=$(basename -- "$1")
+if command -v dbus-send >/dev/null 2>&1 && \
+   [ "${TIER1_BROKER_OPTIONAL:-0}" != "1" ]; then
+    BROKER_REPLY=$(dbus-send --system --print-reply=literal \
+        --dest=com.qdistro.AdminBroker1 \
+        /com/qdistro/AdminBroker1 \
+        com.qdistro.AdminBroker1.CheckPermission \
+        "string:qdistro.tier1.spawn:$APP_BASENAME" \
+        "dict:string:string:" 2>/dev/null \
+        | tr -d ' \t\n' || true)
+    case "$BROKER_REPLY" in
+        deny|*deny*)
+            echo "[tier1] FAIL: broker denied spawn of '$APP_BASENAME'" \
+                "(rule action='qdistro.tier1.spawn:$APP_BASENAME' decision=deny)" >&2
+            exit 1
+            ;;
+        allow|*allow*)
+            [ "${TIER1_DEBUG:-0}" = "1" ] && \
+                echo "[tier1] broker allowed spawn of '$APP_BASENAME'" >&2
+            ;;
+        *)
+            # "unknown" or empty (broker down). Default-allow.
+            [ "${TIER1_DEBUG:-0}" = "1" ] && \
+                echo "[tier1] broker decision unknown for '$APP_BASENAME'; " \
+                     "default-allow" >&2
+            ;;
+    esac
+fi
+
+# qdistro-tier1-exec installs to libexecdir (meson default
+# /usr/libexec), which isn't on $PATH for ordinary users. Resolve
+# absolutely so the wrapper works regardless of who's invoking us.
+TIER1_EXEC=""
+for cand in \
+    "${QDISTRO_TIER1_EXEC:-}" \
+    "$(command -v qdistro-tier1-exec 2>/dev/null)" \
+    /usr/libexec/qdistro-tier1-exec \
+    /usr/local/libexec/qdistro-tier1-exec; do
+    [ -n "$cand" ] && [ -x "$cand" ] && TIER1_EXEC="$cand" && break
+done
+if [ -z "$TIER1_EXEC" ]; then
+    echo "[tier1] FAIL: qdistro-tier1-exec not found (PATH or libexec)" >&2
+    exit 1
+fi
+
+CMD=("$TIER1_EXEC" --)
+CMD+=("$@")
+
+if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
+    SECCTX_CMD=(
+        qdistro-secctx-exec
+        --sandbox-engine "$ENGINE"
+        --app-id "$APPID"
+        --instance-id "tier1-$SILO-$$"
+        --
+    )
+    CMD=("${SECCTX_CMD[@]}" "${CMD[@]}")
+fi
+
+[ "${TIER1_DEBUG:-0}" = "1" ] && printf '[tier1] exec: %q ' "${CMD[@]}" >&2 \
+    && echo >&2
+
+# Title prefix for chrome differentiation when secctx isn't used or
+# qdshell hasn't been extended with the tier-1 silo regex yet.
+# qdshell parse_silo_from_title fallback consumes "[<silo>] " prefix.
+exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"

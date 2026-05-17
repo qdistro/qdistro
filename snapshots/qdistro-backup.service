@@ -1,0 +1,31 @@
+[Unit]
+Description=qdistro encrypted snapshot export (spec/19 Phase-8 MVP)
+# Triggered by qdistro-backup.timer (daily). Reads its inputs
+# from /etc/qdistro/backup.conf:
+#   QDISTRO_BACKUP_SNAP=/.snapshots/<num>/snapshot
+#   QDISTRO_BACKUP_PARENT=/.snapshots/<prev>/snapshot     # optional
+#   QDISTRO_BACKUP_RECIPIENTS=/etc/qdistro/backup-recipients.txt
+#   QDISTRO_BACKUP_SSH=user@backup-host
+#   QDISTRO_BACKUP_REMOTE=snap.btrfs.age
+#
+# When backup.conf is absent the unit ConditionPathExists-skips,
+# so a vanilla install doesn't fail.
+ConditionPathExists=/etc/qdistro/backup.conf
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/qdistro/backup.conf
+ExecStart=/usr/local/bin/qdistro-snap-export run \
+    --snap ${QDISTRO_BACKUP_SNAP} \
+    ${QDISTRO_BACKUP_PARENT:+--parent ${QDISTRO_BACKUP_PARENT}} \
+    --recipients ${QDISTRO_BACKUP_RECIPIENTS} \
+    --ssh ${QDISTRO_BACKUP_SSH} \
+    --remote ${QDISTRO_BACKUP_REMOTE}
+# Sandbox: read-only access to all of /, except /.snapshots which
+# we read; /etc/qdistro for the env file; ssh key under
+# /root/.ssh; and stdout for journal.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/.snapshots
+PrivateTmp=true

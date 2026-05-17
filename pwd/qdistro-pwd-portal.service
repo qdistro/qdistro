@@ -1,0 +1,29 @@
+[Unit]
+Description=qdistro pwd XDG portal Secret backend (spec/13 Phase-8.3)
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.qdistro.PortalSecret
+ExecStart=/usr/libexec/qdistro/qdistro_pwd_portal.py
+Restart=on-failure
+RestartSec=2
+
+# Per-user session daemon. Sandbox is light — backend only needs
+# system bus to talk to qdistro-pwd plus a session-bus name.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=graphical-session.target

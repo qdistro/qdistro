@@ -1,0 +1,11 @@
+[Unit]
+Description=qdistro encrypted snapshot export — daily timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=qdistro-backup.service
+
+[Install]
+WantedBy=timers.target

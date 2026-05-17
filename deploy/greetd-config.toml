@@ -1,0 +1,27 @@
+# greetd config for tty3 — qdistro production session.
+#
+# Boot path:
+#   greetd → qdgreeter (graphical PAM via greetd JSON-IPC) → qdwin-session.target
+#
+# Closes the P01 finding: greetd no longer launches LXQt+labwc as the
+# default. LXQt+labwc is preserved as the tty4 escape hatch
+# (see deploy/greetd-config-fallback.toml).
+
+[terminal]
+vt = 3
+
+# Greeter: qdgreeter renders the boot login chrome and round-trips
+# greetd's JSON-IPC for PAM. Runs as the unprivileged `_greeter`
+# user; $GREETD_SOCK is inherited from greetd.
+[default_session]
+command = "/usr/bin/qdgreeter"
+user = "_greeter"
+
+# Optional auto-login (disabled by default — keeps the boot greeter
+# in the path). Enable by setting [initial_session].user and
+# [initial_session].command if you want passwordless boot for a
+# kiosk / developer VM. Intentionally left commented to make the
+# password-required default obvious to anyone reading the config.
+# [initial_session]
+# user = "admin"
+# command = "/usr/local/bin/qdwin-session-launcher"

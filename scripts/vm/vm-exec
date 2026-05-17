@@ -1,0 +1,93 @@
+#!/bin/bash
+# Usage: ./vm-exec <vm_name> <command> [args...]
+# Both quoted and unquoted commands work:
+#   ./vm-exec vm echo hello world
+#   ./vm-exec vm "echo hello world"
+
+set -euo pipefail
+
+VM_NAME=$1
+shift
+CMD="$*"
+
+if [ -z "$VM_NAME" ] || [ -z "$CMD" ]; then
+    echo "Usage: $0 <vm_name> <command> [args...]" >&2
+    exit 1
+fi
+
+# 1. Send the command
+RESPONSE=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" \
+  "{\"execute\": \"guest-exec\", \"arguments\": { \"path\": \"/bin/sh\", \"arg\": [ \"-c\", \"$CMD\" ], \"capture-output\": true }}")
+
+if echo "$RESPONSE" | grep -q "error"; then
+    echo "[vm-exec] ERROR: Failed to start command: $RESPONSE" >&2
+    exit 1
+fi
+
+# 2. Extract the PID
+PID=$(echo $RESPONSE | grep -oP '(?<="pid":)\d+' || true)
+if [ -z "$PID" ] || ! [[ "$PID" =~ ^[0-9]+$ ]]; then
+    echo "[vm-exec] ERROR: Could not extract valid PID from response: $RESPONSE" >&2
+    exit 1
+fi
+
+# 3. Wait until command completes (exitcode is set)
+WAIT_COUNT=0
+ERROR_COUNT=0
+while true; do
+    set +e
+    RESULT=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" \
+      "{\"execute\": \"guest-exec-status\", \"arguments\": { \"pid\": $PID }}")
+    VIRSH_EXIT=$?
+    set -e
+
+    if [ $VIRSH_EXIT -ne 0 ]; then
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        if [ $ERROR_COUNT -lt 5 ]; then
+            sleep 2
+            continue
+        fi
+        echo "[vm-exec] ERROR: Guest agent not responding after $ERROR_COUNT attempts" >&2
+        exit 1
+    fi
+
+    if echo "$RESULT" | grep -q "error"; then
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        if [ $ERROR_COUNT -lt 5 ]; then
+            sleep 2
+            continue
+        fi
+        echo "[vm-exec] ERROR: Guest agent returned error" >&2
+        exit 1
+    fi
+    ERROR_COUNT=0
+
+    EXITCODE=$(echo "$RESULT" | jq -r '.return.exitcode')
+    if [ "$EXITCODE" != "null" ]; then
+        break
+    fi
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    if [ $WAIT_COUNT -gt 0 ] && [ $((WAIT_COUNT % 30)) -eq 0 ]; then
+        echo "[vm-exec] Waiting... (${WAIT_COUNT}s)" >&2
+    fi
+    sleep 1
+done
+
+# 4. Decode and print stdout
+OUT_DATA=$(echo "$RESULT" | jq -r '.return."out-data"')
+if [ "$OUT_DATA" != "null" ] && [ -n "$OUT_DATA" ]; then
+    echo "$OUT_DATA" | base64 -d || true
+fi
+
+# 5. Decode and print stderr (always try, even if it fails)
+ERR_DATA=$(echo "$RESULT" | jq -r '.return."err-data"')
+if [ "$ERR_DATA" != "null" ] && [ -n "$ERR_DATA" ]; then
+    echo "[vm-exec] --- stderr ---" >&2
+    echo "$ERR_DATA" | base64 -d >&2 || true
+    echo "[vm-exec] --- end stderr ---" >&2
+fi
+
+# 6. Return the command's exit code
+if [ "$EXITCODE" -ne 0 ]; then
+    exit "$EXITCODE"
+fi
