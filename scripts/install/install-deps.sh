@@ -41,6 +41,14 @@ QDISTRO_PKGS=(
   qemu-x86 qemu-tools
   qemu-audio-pipewire qemu-audio-alsa
   libguestfs guestfs-tools
+  snapper            # btrfs snapshot management
+  btrfs-progs        # btrfs subvolume commands
+  quickshell         # qdshell runtime
+  python313-dbus_next  # qdlocker runtime dep
+  # NOTE: python313-PyQt6-WebEngine (qdbrowser WebEngine) is intentionally
+  # omitted here because its exact package name is uncertain on Tumbleweed.
+  # qdistro-bootstrap.sh tries multiple candidate names with a best-effort
+  # (non-fatal) install. To check: zypper search qt6 webengine python
 )
 
 # When sourced, return without running zypper. Sourceable detection:
