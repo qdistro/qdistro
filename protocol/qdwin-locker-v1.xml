@@ -7,10 +7,14 @@
 
   <description summary="qdwin compositor locker attach protocol">
     Private protocol between the qdwin compositor and the qdistro
-    PyQt locker (qdlocker). Same trust model as qdwin_shell_v1: qdwin
-    only advertises this global to clients whose peer credentials
-    (uid, exe, SELinux label) match the admin-configured locker
-    identity. Regular app clients never see it; the shell client
+    PyQt locker (qdlocker). Trust model: qdwin currently filters by
+    uid only — the bind handler rejects clients whose peer uid does
+    not match the admin-configured locker uid. Production deployments
+    rely on systemd unit confinement and SELinux service policy to
+    keep this compositor socket reachable only to the locker process;
+    exe-path and SELinux-label checks are intentionally out of scope
+    for the in-compositor bind path. Regular app clients never see it
+    because they run as a different uid; the shell client
     (qdwin_shell_v1) does not see it either — the locker is a
     separate peer process from the shell.
 
