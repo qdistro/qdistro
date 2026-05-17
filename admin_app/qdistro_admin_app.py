@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
-"""qdistro admin approval app — Phase 1 prototype.
+"""qdistro admin approval app — Phase 2.
 
 PyQt6 master/detail UI. Subscribes to broker's RequestPending signal;
-shows queue on the left, detail+Approve/Deny on the right. Keyboard:
-↑/↓ navigate, Ctrl+Y approve, Ctrl+N deny. No tray; window stays open.
+shows queue on the left, detail+Approve/Deny on the right. Tabs:
+Pending, Cache, Rules, History, Silos (optional). System tray icon
+with pending-count overlay + pulse animation. Keyboard shortcuts per
+doc/admin-approval.md: ↑/↓ navigate; Ctrl+Y/Alt+A approve current;
+Ctrl+N/Alt+D deny current; Ctrl+Shift+A approve-all-with-confirm;
+Ctrl+Shift+D deny-all-with-confirm; Ctrl+R rule-from-this;
+Ctrl+Shift+1..8 scope picker.
 """
 from __future__ import annotations
 
+import json
+import os
+import shlex
 import sys
+import time as _time_mod
 from datetime import datetime
 
 import dbus
 import dbus.mainloop.glib
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import (
+    QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
+    QStandardItem, QStandardItemModel,
+)
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox,
-    QSplitter, QStackedWidget, QTableView, QTabWidget, QTextEdit,
+    QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
+    QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
+    QMainWindow, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
+    QSpinBox, QSplitter, QStackedWidget, QTableView, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
@@ -29,8 +41,18 @@ OBJ_PATH = "/com/qdistro/AdminBroker1"
 SESSION_MANAGER_BUS_NAME = "com.qdistro.SessionManager1"
 SESSION_MANAGER_OBJ_PATH = "/com/qdistro/SessionManager1"
 
+# NOTE: HISTORY_FILE is an aspirational path documented in the task spec.
+# Current history is served from the broker's sqlite audit DB via
+# ListHistory(); this constant exists as a stable reference for future
+# work that may mirror history rows to JSONL. Not read or written today.
 HISTORY_FILE = "/var/lib/qdistro/admin-history.jsonl"
 MAX_HISTORY_ENTRIES = 100
+
+# Rules.d directory the admin app may delete YAML files from. Anchored
+# here so the delete path can validate `source_path` stays inside it
+# (no symlinks, no ../, no /etc/passwd surprises). Matches the broker's
+# default `RulesEngine` directory.
+RULES_DIR = "/etc/qdistro/rules.d"
 
 
 class BrokerBridge(QObject):
@@ -706,52 +728,101 @@ class MainWindow(QMainWindow):
         self.broker.approvalRevoked.connect(
             lambda _uid, _action, _exe: self._cache_refresh_timer.start())
 
-        # System tray icon
+        # System tray icon — only if the platform actually has a tray.
+        # On Wayland compositors without StatusNotifier, the constructor
+        # succeeds but show() is a noop and signals fire pointlessly.
+        # We still construct the object so _update_tray_icon doesn't
+        # AttributeError, but we gate show() + closeEvent behavior on
+        # isSystemTrayAvailable. The base pixmap is cached so the badge
+        # painter can redraw without re-fetching the system icon on
+        # every refresh.
         from PyQt6.QtGui import QStyle
+        self._tray_base_pixmap: QPixmap = QApplication.style().standardIcon(
+            QStyle.StandardPixmap.SP_ComputerIcon).pixmap(32, 32)
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QApplication.style().standardIcon(
-            QStyle.StandardPixmap.SP_ComputerIcon))  # Using computer icon as placeholder
+        self.tray_icon.setIcon(QIcon(self._tray_base_pixmap))
         self.tray_icon.setToolTip("qdistro admin approvals")
-        
-        # Create tray menu
+
+        # Create tray menu — Quit gated by a confirmation so a stray
+        # right-click+enter doesn't silently kill the only approval
+        # surface on the desktop.
         tray_menu = QMenu()
         show_action = tray_menu.addAction("Show")
         quit_action = tray_menu.addAction("Quit")
-        show_action.triggered.connect(self.show)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        show_action.triggered.connect(self._show_from_tray)
+        quit_action.triggered.connect(self._confirm_quit_from_tray)
         self.tray_icon.setContextMenu(tray_menu)
-        
-        # Connect tray icon click to show window
+
+        # Connect tray icon click to show window.
         self.tray_icon.activated.connect(self._tray_icon_clicked)
-        self.tray_icon.show()
-        
-        # PyQt6's QShortcut constructor does not accept `activated=` as a
-        # keyword arg — the signal must be connected after construction.
-        sc_approve = QShortcut(QKeySequence("Ctrl+Y"), self)
-        sc_approve.activated.connect(lambda: self.detail._emit("allow"))
-        sc_deny = QShortcut(QKeySequence("Ctrl+N"), self)
-        sc_deny.activated.connect(lambda: self.detail._emit("deny"))
-        
-        # Additional keyboard shortcuts
-        sc_create_rule = QShortcut(QKeySequence("Ctrl+R"), self)
-        sc_create_rule.activated.connect(self._create_rule_from_current)
-        
-        sc_approve_all = QShortcut(QKeySequence("Alt+A"), self)
-        sc_approve_all.activated.connect(self._approve_all_pending)
-        
-        sc_deny_all = QShortcut(QKeySequence("Alt+D"), self)
-        sc_deny_all.activated.connect(self._deny_all_pending)
-        
-        # Scope shortcuts (Ctrl+Shift+1..8)
-        for i, scope_key in enumerate(["once", "1h", "24h", "forever", "forever_exe", "forever_argv", "forever_basename", "forever_prefix"]):
-            if i < 8:  # Only bind first 8 scopes
-                sc_scope = QShortcut(QKeySequence(f"Ctrl+Shift+{i+1}"), self)
-                sc_scope.activated.connect(lambda s=scope_key: self._set_scope(s))
-        
-        # Update tray icon with pending count
-        self.broker.requestPending.connect(self._update_tray_icon)
-        self.broker.requestDecided.connect(self._update_tray_icon)
-        
+
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon.show()
+            # Close-button minimises to tray instead of quitting; user
+            # must invoke Quit from the tray menu (which is confirmed).
+            QApplication.instance().setQuitOnLastWindowClosed(False)
+            self._tray_available = True
+        else:
+            self._tray_available = False
+
+        # Pulse-animation state for the tray badge. _tray_pulse_timer
+        # toggles between two badge tints for ~3s after a new pending
+        # request arrives, then settles back to the steady badge.
+        self._tray_pulse_timer = QTimer(self)
+        self._tray_pulse_timer.setInterval(300)
+        self._tray_pulse_phase = False
+        self._tray_pulse_remaining = 0
+        self._tray_pulse_timer.timeout.connect(self._tray_pulse_tick)
+        self._tray_last_count = 0
+
+        # Shortcuts. ApplicationShortcut context so Ctrl+Y/N/R and
+        # Ctrl+Shift+A/D fire from any tab — the admin can be reading
+        # the Rules tab when a request arrives and approve without
+        # switching focus.
+        def _mk_shortcut(seq: str, slot):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(slot)
+            return sc
+
+        # doc/admin-approval.md: Ctrl+Y or Alt+A approves CURRENT.
+        # We honour the doc here: Alt+A is an alias for Ctrl+Y.
+        # Bulk approve-all moves to Ctrl+Shift+A (with confirmation).
+        # Alt+Shift+A approves all in the currently-selected silo
+        # (uid filter on pending) — also with confirmation.
+        _mk_shortcut("Ctrl+Y", lambda: self.detail._emit("allow"))
+        _mk_shortcut("Alt+A", lambda: self.detail._emit("allow"))
+        _mk_shortcut("Ctrl+N", lambda: self.detail._emit("deny"))
+        _mk_shortcut("Alt+D", lambda: self.detail._emit("deny"))
+        _mk_shortcut("Ctrl+R", self._create_rule_from_current)
+        _mk_shortcut("Ctrl+Shift+A", self._approve_all_pending)
+        _mk_shortcut("Ctrl+Shift+D", self._deny_all_pending)
+        _mk_shortcut("Alt+Shift+A",
+                     lambda: self._approve_all_in_selected_silo("allow"))
+        _mk_shortcut("Alt+Shift+D",
+                     lambda: self._approve_all_in_selected_silo("deny"))
+
+        # Scope shortcuts (Ctrl+Shift+1..8).
+        for i, scope_key in enumerate(["once", "1h", "24h", "forever",
+                                       "forever_exe", "forever_argv",
+                                       "forever_basename", "forever_prefix"]):
+            _mk_shortcut(f"Ctrl+Shift+{i+1}",
+                         lambda s=scope_key: self._set_scope(s))
+
+        # Help menu surfacing the documented shortcuts.
+        self._install_help_menu()
+
+        # Tray-icon refresh on signals. Lambda wraps drop the signal
+        # args; signature drift in BrokerBridge won't silently break
+        # the slot. requestPending also kicks off the pulse animation
+        # so the admin sees a visual cue when a new request lands.
+        self.broker.requestPending.connect(
+            lambda _rid: self._on_new_pending())
+        self.broker.requestDecided.connect(
+            lambda _rid, _dec: self._update_tray_icon())
+        self.broker.approvalRevoked.connect(
+            lambda _u, _a, _e: self._update_tray_icon())
+
         # Initial tray update
         QTimer.singleShot(0, self._update_tray_icon)
 
@@ -854,80 +925,372 @@ class MainWindow(QMainWindow):
 
     def _tray_icon_clicked(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.show()
-            self.raise_()
-            self.activateWindow()
+            self._show_from_tray()
+
+    def _show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _confirm_quit_from_tray(self) -> None:
+        """Quit is destructive — every queued approval blocks until the
+        admin app comes back. Ask first."""
+        confirm = QMessageBox.question(
+            self, "Quit admin app?",
+            "Quit the admin approval app?\n\n"
+            "Pending permission requests will queue with no admin "
+            "surface to decide them until you restart the app.")
+        if confirm == QMessageBox.StandardButton.Yes:
+            QApplication.instance().quit()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 — Qt API
+        """Close → minimise to tray when a tray is available; otherwise
+        accept the close (preserves previous behavior on tray-less
+        hosts)."""
+        if self._tray_available and self.tray_icon.isVisible():
+            event.ignore()
+            self.hide()
+        else:
+            event.accept()
+
+    def _on_new_pending(self) -> None:
+        """RequestPending arrived — kick off the pulse animation and
+        refresh the tray badge."""
+        self._tray_pulse_remaining = 10  # ~3 seconds at 300ms ticks
+        if not self._tray_pulse_timer.isActive():
+            self._tray_pulse_timer.start()
+        self._update_tray_icon()
+
+    def _tray_pulse_tick(self) -> None:
+        self._tray_pulse_phase = not self._tray_pulse_phase
+        self._tray_pulse_remaining -= 1
+        if self._tray_pulse_remaining <= 0:
+            self._tray_pulse_phase = False
+            self._tray_pulse_timer.stop()
+        self._render_tray_badge(self._tray_last_count)
+
+    def _render_tray_badge(self, count: int) -> None:
+        """Composite the pending count over the base tray pixmap.
+
+        Draws a small circle in the bottom-right corner with the count
+        rendered in bold white. Pulse phase toggles the badge fill color
+        between red and orange so the admin sees motion. Zero count
+        renders the bare base pixmap (no overlay).
+        """
+        pm = QPixmap(self._tray_base_pixmap)
+        if count > 0:
+            painter = QPainter(pm)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                w, h = pm.width(), pm.height()
+                # Badge in bottom-right corner; ~45% the icon side.
+                d = int(min(w, h) * 0.55)
+                x = w - d
+                y = h - d
+                fill = QColor("#e04040")
+                if self._tray_pulse_phase:
+                    fill = QColor("#ff8c1a")
+                painter.setBrush(fill)
+                painter.setPen(QPen(QColor("white"), 1))
+                painter.drawEllipse(x, y, d, d)
+                painter.setPen(QPen(QColor("white")))
+                f = QFont()
+                f.setBold(True)
+                # Tune font size to badge diameter so 1–2 digits fit.
+                f.setPixelSize(max(8, int(d * 0.7)))
+                painter.setFont(f)
+                label = str(count) if count < 100 else "99+"
+                painter.drawText(x, y, d, d,
+                                 Qt.AlignmentFlag.AlignCenter, label)
+            finally:
+                painter.end()
+        self.tray_icon.setIcon(QIcon(pm))
 
     def _update_tray_icon(self):
         # Get the current pending count
         try:
             pending = self.broker.get_pending()
             count = len(pending)
-            if count > 0:
-                # Show icon with badge
-                self.tray_icon.setToolTip(f"qdistro admin approvals ({count} pending)")
-            else:
-                self.tray_icon.setToolTip("qdistro admin approvals")
         except dbus.DBusException:
-            # If broker is unavailable, just show the basic tooltip
-            self.tray_icon.setToolTip("qdistro admin approvals (broker unavailable)")
+            # If broker is unavailable, just show the basic tooltip and
+            # don't redraw the badge — keep the last-known count.
+            self.tray_icon.setToolTip(
+                "qdistro admin approvals (broker unavailable)")
+            return
+        self._tray_last_count = count
+        if count > 0:
+            self.tray_icon.setToolTip(
+                f"qdistro admin approvals ({count} pending)")
+        else:
+            self.tray_icon.setToolTip("qdistro admin approvals")
+            # No pending → drop any in-flight pulse and clear the badge.
+            self._tray_pulse_remaining = 0
+            self._tray_pulse_timer.stop()
+        self._render_tray_badge(count)
+
+    def _install_help_menu(self) -> None:
+        """Surface the documented shortcuts in a Help menu so admins
+        discover them without grepping the docs."""
+        from PyQt6.QtGui import QAction
+        bar = self.menuBar()
+        help_menu = bar.addMenu("&Help")
+        act_keys = QAction("Keyboard &shortcuts…", self)
+        act_keys.triggered.connect(self._show_keyboard_shortcuts)
+        help_menu.addAction(act_keys)
+
+    def _show_keyboard_shortcuts(self) -> None:
+        text = (
+            "Approve current request:\n"
+            "  Ctrl+Y   or   Alt+A\n\n"
+            "Deny current request:\n"
+            "  Ctrl+N   or   Alt+D\n\n"
+            "Rule from this request:\n"
+            "  Ctrl+R\n\n"
+            "Approve ALL pending (with confirmation):\n"
+            "  Ctrl+Shift+A\n"
+            "Deny ALL pending (with confirmation):\n"
+            "  Ctrl+Shift+D\n\n"
+            "Approve all pending in current silo only (with confirmation):\n"
+            "  Alt+Shift+A\n"
+            "Deny all pending in current silo only (with confirmation):\n"
+            "  Alt+Shift+D\n\n"
+            "Scope picker (sets DetailPane scope radio):\n"
+            "  Ctrl+Shift+1  once\n"
+            "  Ctrl+Shift+2  1 hour\n"
+            "  Ctrl+Shift+3  24 hours\n"
+            "  Ctrl+Shift+4  forever (any command)\n"
+            "  Ctrl+Shift+5  forever (this exact program)\n"
+            "  Ctrl+Shift+6  forever (this exact argv tuple)\n"
+            "  Ctrl+Shift+7  forever (argv basename anywhere)\n"
+            "  Ctrl+Shift+8  forever (argv prefix + any trailing args)\n"
+        )
+        QMessageBox.information(self, "Keyboard shortcuts", text)
+
+    def _get_active_scope(self) -> str:
+        """Read the currently-checked scope radio button. Falls back to
+        "once" when nothing is checked (shouldn't happen, but the
+        default-deny posture wants the safest scope)."""
+        for key, rb in self.detail._scope_buttons:
+            if rb.isChecked():
+                return key
+        return "once"
 
     def _create_rule_from_current(self):
-        # Create a rule based on the currently selected request
+        # Create a rule based on the currently selected request.
         sel = self.list.selectionModel().currentIndex()
         if not sel.isValid():
-            QMessageBox.information(self, "No selection", "Please select a request first.")
+            QMessageBox.information(
+                self, "No selection", "Please select a request first.")
             return
-        req = self.model.itemFromIndex(sel).data(Qt.ItemDataRole.UserRole + 1)
-        
-        # Prepare rule data
+        req = self.model.itemFromIndex(sel).data(
+            Qt.ItemDataRole.UserRole + 1)
+
+        # H1 security fix: rule_data uses the FLAT schema
+        # _generate_yaml_from_rule expects (uid/action/exe at top
+        # level). Previously the producer nested these under "match"
+        # and the consumer never found them, generating an allow-all
+        # `match: {}` rule — an admin-app side-channel for blanket
+        # approvals. Use the scope picker's current value rather than
+        # hard-coding "once".
         rule_data = {
             "name": f"Rule for {req['action']} from uid {req['uid']}",
             "decision": "allow",
-            "match": {
-                "uid": req['uid'],
-                "action": req['action'],
-                "exe": req['exe'],
-            },
-            "scope": "once",
-            "rationale": f"Auto-generated rule from request {req['id']}"
+            "uid": req["uid"],
+            "action": req["action"],
+            "exe": req["exe"],
+            "scope": self._get_active_scope(),
+            "rationale": f"Auto-generated rule from request {req['id']}",
         }
-        
+
         # Show rule editor dialog
         dialog = RuleEditorDialog(self.broker, rule_data, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            filename = dialog.filename_line.text().strip()
+            if not filename.endswith(".yaml"):
+                filename += ".yaml"
+            yaml_content = dialog.yaml_editor.toPlainText()
+            # Defensive: reject an allow rule with empty match before
+            # the broker even sees it. Belt-and-braces against H1
+            # regressions — a future refactor that drops uid/action/
+            # exe from the flat dict would otherwise regress to the
+            # allow-all path.
+            if self._yaml_is_allow_all(yaml_content):
+                QMessageBox.warning(
+                    self, "Refused (overly broad)",
+                    "This rule has no match selectors and would apply "
+                    "to every uid + action + exe. Add at least one of "
+                    "uid / action / exe to the match block before "
+                    "saving.")
+                return
+            result = self.broker.save_rule(filename, yaml_content)
+            QMessageBox.information(
+                self, "Success", f"Rule saved to {result}")
+            if hasattr(self, "rules_tab"):
+                self.rules_tab.refresh()
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Error saving rule", str(e))
+
+    @staticmethod
+    def _yaml_is_allow_all(yaml_body: str) -> bool:
+        """Return True iff parsing the rule body yields an `allow`
+        decision with an empty / absent match block. Used as a
+        client-side guardrail; broker's `_rule_from_dict` allows empty
+        match so this is the only place to catch it before commit."""
+        try:
+            import yaml
+        except ImportError:
+            return False
+        try:
+            entries = yaml.safe_load(yaml_body) or []
+        except Exception:  # noqa: BLE001
+            # Let the broker surface YAML errors with its own message.
+            return False
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("decision") != "allow":
+                continue
+            match = entry.get("match") or {}
+            if not isinstance(match, dict):
+                continue
+            # Any selector counts — uid, action, exe, app_id,
+            # sandbox_engine, mime_type, argv_*.
+            if not any(v not in (None, "", []) for v in match.values()):
+                return True
+        return False
+
+    # ----- bulk decide -----------------------------------------------------
+    #
+    # H2 correctness fix: snapshot pending IDs once, decide per-ID with
+    # try/except so a single broker failure doesn't strand the rest of
+    # the queue, drive the loop off QTimer.singleShot(0, ...) so the
+    # Qt main thread stays responsive, surface a QProgressDialog for
+    # batches larger than 10, and report a summary at the end.
+    # Scope honors the active radio button (H3 correctness / S3 ops).
+    # Both bulk actions require explicit confirmation.
+
+    def _approve_all_pending(self) -> None:
+        self._bulk_decide("allow", scope_filter=None)
+
+    def _deny_all_pending(self) -> None:
+        self._bulk_decide("deny", scope_filter=None)
+
+    def _approve_all_in_selected_silo(self, decision: str) -> None:
+        sel = self.list.selectionModel().currentIndex()
+        if not sel.isValid():
+            QMessageBox.information(
+                self, "No selection",
+                "Select a request to pick the silo first.")
+            return
+        req = self.model.itemFromIndex(sel).data(
+            Qt.ItemDataRole.UserRole + 1)
+        uid = int(req["uid"])
+        self._bulk_decide(decision, scope_filter=("uid", uid))
+
+    def _bulk_decide(self, decision: str,
+                     scope_filter: tuple | None) -> None:
+        try:
+            pending = self.broker.get_pending()
+        except dbus.DBusException as e:
+            QMessageBox.critical(
+                self, "Broker unavailable",
+                f"Couldn't fetch pending requests:\n\n{e}")
+            return
+        if scope_filter is not None:
+            kind, val = scope_filter
+            pending = [r for r in pending if r.get(kind) == val]
+        if not pending:
+            QMessageBox.information(
+                self, "Nothing to do",
+                "No pending requests match the bulk-decide filter.")
+            return
+        scope = self._get_active_scope()
+        verb = "Approve" if decision == "allow" else "Deny"
+        scope_warn = ""
+        if scope != "once":
+            scope_warn = (
+                f"\n\nWARNING: scope is '{scope}' — these decisions "
+                f"may persist beyond the current request.")
+        filter_chunk = ""
+        if scope_filter is not None:
+            kind, val = scope_filter
+            filter_chunk = f"\nFilter: {kind}={val}"
+        confirm = QMessageBox.question(
+            self, f"{verb} all?",
+            f"{verb} {len(pending)} pending request"
+            f"{'s' if len(pending) != 1 else ''}?\n"
+            f"Scope: {scope}{filter_chunk}{scope_warn}",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        rids = [int(r["id"]) for r in pending]
+        total = len(rids)
+        progress: QProgressDialog | None = None
+        if total > 10:
+            progress = QProgressDialog(
+                f"{verb}ing {total} requests…", "Cancel", 0, total, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+
+        state = {
+            "i": 0,
+            "ok": 0,
+            "failures": [],   # list of (rid, error_str)
+            "cancelled": False,
+        }
+
+        def _step() -> None:
+            if state["cancelled"] or state["i"] >= total:
+                _finalize()
+                return
+            if progress is not None and progress.wasCanceled():
+                state["cancelled"] = True
+                _finalize()
+                return
+            rid = rids[state["i"]]
             try:
-                filename = dialog.filename_line.text().strip()
-                if not filename.endswith('.yaml'):
-                    filename += '.yaml'
-                yaml_content = dialog.yaml_editor.toPlainText()
-                result = self.broker.save_rule(filename, yaml_content)
-                QMessageBox.information(self, "Success", f"Rule saved to {result}")
-                # Refresh rules tab
-                if hasattr(self, 'rules_tab'):
-                    self.rules_tab.refresh()
+                self.broker.decide(rid, decision, scope)
+                state["ok"] += 1
             except dbus.DBusException as e:
-                QMessageBox.critical(self, "Error saving rule", str(e))
+                state["failures"].append((rid, str(e)))
+                print(
+                    f"[admin_app] bulk-{decision} rid={rid} failed: {e}",
+                    file=sys.stderr,
+                )
+            state["i"] += 1
+            if progress is not None:
+                progress.setValue(state["i"])
+            QTimer.singleShot(0, _step)
 
-    def _approve_all_pending(self):
-        try:
-            pending = self.broker.get_pending()
-            for req in pending:
-                self.broker.decide(req['id'], "allow", "once")
+        def _finalize() -> None:
+            if progress is not None:
+                progress.close()
             self.refresh()
-            QMessageBox.information(self, "Approve All", f"Approved {len(pending)} requests")
-        except dbus.DBusException as e:
-            QMessageBox.critical(self, "Error approving all", str(e))
+            ok = state["ok"]
+            fail = len(state["failures"])
+            if state["cancelled"]:
+                title = f"{verb} all — cancelled"
+            else:
+                title = f"{verb} all"
+            msg = f"{verb}ed {ok} of {total} requests."
+            if fail:
+                # Summarize first few failures inline; full detail goes
+                # to stderr above.
+                preview = "\n".join(
+                    f"  rid={rid}: {err}"
+                    for rid, err in state["failures"][:3])
+                more = (f"\n  …and {fail - 3} more"
+                        if fail > 3 else "")
+                msg += f"\nFailures ({fail}):\n{preview}{more}"
+            QMessageBox.information(self, title, msg)
 
-    def _deny_all_pending(self):
-        try:
-            pending = self.broker.get_pending()
-            for req in pending:
-                self.broker.decide(req['id'], "deny", "once")
-            self.refresh()
-            QMessageBox.information(self, "Deny All", f"Denied {len(pending)} requests")
-        except dbus.DBusException as e:
-            QMessageBox.critical(self, "Error denying all", str(e))
+        QTimer.singleShot(0, _step)
 
     def _set_scope(self, scope: str):
         # Find the radio button for the given scope and select it
@@ -1049,7 +1412,8 @@ class RulesTab(QWidget):
     def _on_delete_rule(self) -> None:
         row = self._selected_row()
         if row is None:
-            QMessageBox.warning(self, "No selection", "Please select a rule to delete.")
+            QMessageBox.warning(
+                self, "No selection", "Please select a rule to delete.")
             return
         name = str(row.get("name", ""))
         confirm = QMessageBox.question(
@@ -1057,20 +1421,86 @@ class RulesTab(QWidget):
             f"Delete rule {name!r}? This action cannot be undone.")
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        # For deletion, we need to delete the file and reload
+        # The broker does not yet expose a DeleteRule RPC (tracked as
+        # SHOULD-FIX). Until it does, the admin app deletes the YAML
+        # file directly. Validate the path is inside the rules.d
+        # directory and is not a symlink before unlinking; refuse any
+        # path that escapes. Audit the deletion to stderr so a
+        # post-hoc journalctl pass can see who deleted which rule.
+        filepath = str(row.get("source_path", ""))
+        if not filepath:
+            QMessageBox.warning(
+                self, "No source path",
+                "Broker did not return a source_path for this rule; "
+                "cannot delete from the admin app.")
+            return
         try:
-            import os
-            filepath = row.get("source_path", "")
-            if filepath and os.path.exists(filepath):
-                os.remove(filepath)
-                # Reload rules after deletion
-                self.broker.reload_rules()
-                QMessageBox.information(self, "Success", f"Rule {name} deleted")
+            real = os.path.realpath(filepath)
+            rules_real = os.path.realpath(RULES_DIR)
+            # The file's *containing directory* must be the rules dir
+            # (rejects /etc/qdistro/rules.d/../passwd) and the file
+            # itself must not be a symlink (rejects ln -s).
+            if os.path.islink(filepath):
+                QMessageBox.warning(
+                    self, "Refused",
+                    f"Refusing to delete a symlink: {filepath}")
+                return
+            if os.path.dirname(real) != rules_real:
+                QMessageBox.warning(
+                    self, "Refused",
+                    f"Refusing to delete a file outside {RULES_DIR}: "
+                    f"{real}")
+                return
+            if not os.path.exists(filepath):
+                QMessageBox.warning(
+                    self, "File not found",
+                    f"Rule file {filepath} not found")
+                return
+            os.remove(filepath)
+            # Local audit trail — broker doesn't see this delete so
+            # there's no broker-side audit row. Stderr → journalctl
+            # gives ops a forensic record at least.
+            print(
+                f"[admin_app] deleted rule file {real} "
+                f"(name={name!r}, uid={os.getuid()})",
+                file=sys.stderr,
+            )
+            # Reload rules; the broker returns (count, errors). Surface
+            # any errors so a typo'd YAML elsewhere isn't masked.
+            errors: list[str] = []
+            try:
+                ret = self.broker.reload_rules()
+                if isinstance(ret, (tuple, list)) and len(ret) == 2:
+                    _count, errors = ret
+                    errors = [str(e) for e in (errors or [])]
+            except dbus.DBusException as e:
+                QMessageBox.warning(
+                    self, "Deleted but reload failed",
+                    f"Rule {name} deleted from disk but "
+                    f"ReloadRules failed:\n\n{e}")
                 self.refresh()
+                return
+            if errors:
+                QMessageBox.warning(
+                    self, "Deleted with reload warnings",
+                    f"Rule {name} deleted. ReloadRules reported:\n\n"
+                    + "\n".join(errors))
             else:
-                QMessageBox.warning(self, "File not found", f"Rule file {filepath} not found")
-        except Exception as e:
-            QMessageBox.critical(self, "Error deleting rule", str(e))
+                QMessageBox.information(
+                    self, "Success", f"Rule {name} deleted")
+            self.refresh()
+        except PermissionError as e:
+            QMessageBox.critical(
+                self, "Permission denied",
+                f"Cannot delete {filepath!r} as uid {os.getuid()}. "
+                f"The rules.d directory is typically root-owned; "
+                f"run the admin app as the admin user, or add a "
+                f"DeleteRule RPC to the broker.\n\n"
+                f"{e.__class__.__name__}")
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Error deleting rule",
+                f"{e.__class__.__name__}: {e.strerror or ''}")
 
 
 class RuleEditorDialog(QDialog):
@@ -1134,31 +1564,47 @@ class RuleEditorDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
     
     def _generate_yaml_from_rule(self, rule_data: dict) -> str:
-        """Generate YAML string from rule data dictionary."""
+        """Generate YAML string from rule data dictionary.
+
+        Accepts the rule_data in either of two shapes:
+          - flat:   {"uid": ..., "action": ..., "exe": ...} (the shape
+            ListRules returns and the shape `_create_rule_from_current`
+            now produces after H1 fix)
+          - nested: {"match": {"uid": ..., "action": ..., "exe": ...}}
+            (legacy producers).
+        Reading from both prevents the H1 regression where the
+        producer wrote `match: {uid, action, exe}` but this consumer
+        read those keys at top level and silently dropped them,
+        yielding `match: {}` (allow-anything).
+        """
         # Build the rule object
-        rule_obj = {
+        rule_obj: dict = {
             "name": rule_data.get("name", ""),
             "decision": rule_data.get("decision", ""),
             "match": {},
         }
-        
+
         if rule_data.get("rationale"):
             rule_obj["rationale"] = rule_data["rationale"]
-        
         if rule_data.get("scope"):
             rule_obj["scope"] = rule_data["scope"]
-        
-        # Add match conditions
-        if rule_data.get("uid") and rule_data["uid"] != -1:
-            rule_obj["match"]["uid"] = rule_data["uid"]
-        if rule_data.get("action"):
-            rule_obj["match"]["action"] = rule_data["action"]
-        if rule_data.get("exe"):
-            rule_obj["match"]["exe"] = rule_data["exe"]
-        
+
+        # Read match selectors from either shape. The nested form wins
+        # if both are present (admin-app-internal callers that set
+        # match explicitly are signaling intent).
+        match_src = rule_data.get("match") if isinstance(
+            rule_data.get("match"), dict) else rule_data
+
+        if match_src.get("uid") is not None and match_src.get("uid") != -1:
+            rule_obj["match"]["uid"] = match_src["uid"]
+        if match_src.get("action"):
+            rule_obj["match"]["action"] = match_src["action"]
+        if match_src.get("exe"):
+            rule_obj["match"]["exe"] = match_src["exe"]
+
         # Convert to YAML string
-        import yaml
         try:
+            import yaml
             return yaml.dump([rule_obj], default_flow_style=False, indent=2)
         except ImportError:
             # If PyYAML is not available, create basic YAML manually
@@ -1173,9 +1619,30 @@ class RuleEditorDialog(QDialog):
             if rule_obj.get("rationale"):
                 yaml_lines.append(f"  rationale: {rule_obj['rationale']!r}")
             return "\n".join(yaml_lines) + "\n"
-    
+
     def get_rule_data(self) -> dict:
-        return {}
+        """Return the edited rule as a dict by parsing the YAML buffer.
+
+        Returns {} if the buffer can't be parsed (keep callers from
+        racing the broker's validation pass — they get an empty dict
+        and surface the error from the broker's SaveRule reply).
+        """
+        body = self.yaml_editor.toPlainText()
+        filename = self.filename_line.text().strip()
+        try:
+            import yaml
+            entries = yaml.safe_load(body) or []
+        except ImportError:
+            return {"filename": filename, "yaml_body": body}
+        except Exception:  # noqa: BLE001
+            return {"filename": filename, "yaml_body": body}
+        if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+            return {
+                "filename": filename,
+                "yaml_body": body,
+                "entry": entries[0],
+            }
+        return {"filename": filename, "yaml_body": body}
 
 
 class HistoryTab(QWidget):
@@ -1185,6 +1652,10 @@ class HistoryTab(QWidget):
     def __init__(self, broker: BrokerBridge):
         super().__init__()
         self.broker = broker
+        # Local mirror so client-side filtering doesn't have to re-fetch.
+        # Populated on every refresh; _apply_filter slices this in
+        # memory rather than round-tripping through the broker.
+        self._all_history: list[dict] = []
 
         self.table = QTableView(self); self.table.setObjectName("history_table")
         self.table.setSelectionBehavior(
@@ -1241,12 +1712,26 @@ class HistoryTab(QWidget):
             QMessageBox.warning(self, "Broker unavailable",
                                 f"Couldn't list history:\n\n{e}")
             return
+        self._all_history = list(history)
+        # Refresh UID dropdown from live rows (S2 operational) — keeps
+        # the deployment-actual uids visible instead of the hardcoded
+        # 2000/2001/2002 list.
+        self._refresh_uid_dropdown()
+        self._populate_model(self._filtered_rows())
+
+    def _populate_model(self, rows: list[dict]) -> None:
         self.model.removeRows(0, self.model.rowCount())
-        for h in history:
+        for h in rows:
             # Format timestamp
-            ts = datetime.fromtimestamp(h.get("ts", 0)).strftime('%Y-%m-%d %H:%M:%S')
+            ts = datetime.fromtimestamp(
+                h.get("ts", 0)).strftime("%Y-%m-%d %H:%M:%S")
             decision_str = "Allow" if h.get("decision", False) else "Deny"
-            argv_str = " ".join(h.get("argv", [])) if h.get("argv") else "-"
+            # shlex.join so quoted/escaped argv elements render
+            # visibly distinct (S1 security) — a silo can't make argv
+            # impersonate a multi-command shell line in the history
+            # display.
+            argv = h.get("argv") or []
+            argv_str = shlex.join(argv) if argv else "-"
             items = [
                 QStandardItem(ts),
                 QStandardItem(str(h.get("caller_uid", "-"))),
@@ -1264,18 +1749,65 @@ class HistoryTab(QWidget):
             self.model.appendRow(items)
         self.table.resizeColumnsToContents()
 
+    def _refresh_uid_dropdown(self) -> None:
+        """Replace the uid dropdown's contents with All + the uids
+        actually present in history."""
+        current = self.filter_silo_combo.currentText()
+        uids = sorted({str(h.get("caller_uid"))
+                       for h in self._all_history
+                       if h.get("caller_uid") is not None})
+        # Block signals so changing contents doesn't trigger an apply.
+        self.filter_silo_combo.blockSignals(True)
+        self.filter_silo_combo.clear()
+        self.filter_silo_combo.addItem("All UIDs")
+        for u in uids:
+            self.filter_silo_combo.addItem(u)
+        # Restore selection if still valid.
+        idx = self.filter_silo_combo.findText(current)
+        if idx >= 0:
+            self.filter_silo_combo.setCurrentIndex(idx)
+        self.filter_silo_combo.blockSignals(False)
+
+    def _filtered_rows(self) -> list[dict]:
+        rows = list(self._all_history)
+        uid_sel = self.filter_silo_combo.currentText()
+        outcome_sel = self.filter_outcome_combo.currentText()
+        action_filter = self.filter_action_combo.currentText()
+        if uid_sel and uid_sel != "All UIDs":
+            try:
+                target = int(uid_sel)
+            except ValueError:
+                target = None
+            if target is not None:
+                rows = [r for r in rows if int(r.get("caller_uid", -1)) == target]
+        if outcome_sel and outcome_sel != "All Outcomes":
+            want_allow = outcome_sel.lower() == "allow"
+            rows = [r for r in rows if bool(r.get("decision")) == want_allow]
+        if action_filter and action_filter not in ("All Actions", "Allow", "Deny"):
+            # Free-form substring match on action.
+            needle = action_filter.lower()
+            rows = [r for r in rows
+                    if needle in str(r.get("action", "")).lower()]
+        return rows
+
     def _apply_filter(self) -> None:
-        # For now, just refresh the data
-        self.refresh()
+        # If we never refreshed yet (broker offline at init time),
+        # `_all_history` is empty — re-fetch.
+        if not hasattr(self, "_all_history"):
+            self.refresh()
+            return
+        self._populate_model(self._filtered_rows())
 
     def _clear_history(self) -> None:
-        confirm = QMessageBox.question(
-            self, "Clear history",
-            "Clear history? This will delete all history entries.")
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        # Currently we can't clear history via broker, so warn user
-        QMessageBox.information(self, "Info", "History clearing requires broker support")
+        # Broker has no ClearHistory RPC. Rather than show a confirm
+        # dialog and then a "nothing happened" info popup, keep the
+        # button visible but explicit about the limitation so admins
+        # don't mistake the confirm-then-noop for a successful purge.
+        QMessageBox.information(
+            self, "Clear history not available",
+            "The broker does not currently expose a ClearHistory RPC. "
+            "History is read from the audit sqlite DB and rotates "
+            "based on AUDIT_RETENTION_DAYS (default 90).")
 
 
 class ErrorDetailsWidget(QWidget):
