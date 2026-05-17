@@ -25,9 +25,7 @@
 #     session is up
 #   - /etc/fstab line for the host-shared virtiofs mount on /host
 #
-# Spec: plan2/research/spice-retirement/00-overview.md §"Build the
-# stripped guest image (P10)"; plan2/tasks/P10-tier4-guest-image-
-# nested-qdwin.md §Phase D.
+# Spec: plan2/tasks/P10-tier4-guest-image-nested-qdwin.md §Phase D.
 #
 # Linux-only per spec/00.
 #

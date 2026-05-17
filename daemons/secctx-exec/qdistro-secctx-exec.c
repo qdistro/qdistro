@@ -19,8 +19,8 @@
  *      down the security context, revoking it for any straggling
  *      grand-children that might still be holding a Wayland connection.
  *
- * Designed for tier-4: virt-viewer doesn't natively support
- * wp_security_context_v1, but launching it via this wrapper
+ * Designed for tier-4: waypipe-client and other regular Wayland clients
+ * do not natively support wp_security_context_v1, but launching them via this wrapper
  * gives the resulting Wayland client a `qdistro.tier4.<vm>` tag
  * that qdwin's secctx machinery + the broker rules engine can match
  * on. Equally usable for tier-3, tier-5, or any other "non-secctx-aware

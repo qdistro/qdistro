@@ -35,7 +35,7 @@ making the guest's application windows appear as native host toplevels.
   clipboard, input, and surfaces ride the same socket.
 - **Security context:** Each waypipe-client process is wrapped in
   `qdistro-secctx-exec`, stamping the toplevel with a silo tag.
-- **No legacy dependencies:** No SPICE, no virt-viewer — just libvirt,
+- **No legacy viewer stack:** Just libvirt,
   QEMU, and waypipe (all on Tumbleweed).
 
 ## How it works

@@ -48,8 +48,8 @@ fi
 usermod -aG video,input,render admin
 loginctl enable-linger admin
 
-# 2. weston.ini: qdwin-shell.so + drm backend so SPICE sees the
-# framebuffer in a VM.
+# 2. weston.ini: qdwin-shell.so + drm backend so the VM console sees
+# the framebuffer.
 #
 # Path resolution: qdwin was built with `meson setup build` (no
 # --prefix) which defaults to /usr/local. fresh-vm-bootstrap.sh

@@ -18,7 +18,7 @@
 ##   Phase 3 (0.3.0): dropped the permissive tag and added the allow
 ##   rules audit2allow harvested from a representative workload
 ##   (bats phase6.5 + phase6.6 + phase7 clipboard / handoff / qsu /
-##   SPICE clipboard probe paths) on val-260428-end. The broker
+##   legacy clipboard probe paths) on val-260428-end. The broker
 ##   became properly confined.
 ##
 ##   0.3.1 (2026-04-29 late): added `dbus { acquire_svc }` against

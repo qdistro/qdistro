@@ -130,7 +130,7 @@ working regardless of the compositor.
 - **Report for debugging** — same primitives (screenshot, exec, UI-tree
  dump) but running *inside* the user's session, not host → VM.
 - **Window projection to phone** — conceptually similar export-of-a-
- display, but uses full remote-output pipeline (RDP/SPICE), not `virsh
+ display, but uses full remote-output pipeline (RDP), not `virsh
  screenshot` + input injection.
 - **AI-authored workflows** — an AI agent could use these tools to
  validate that a generated workflow actually works, closing the loop on

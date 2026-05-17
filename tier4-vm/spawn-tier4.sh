@@ -14,7 +14,7 @@
 #
 # Spec/reference:
 #   plan2/tasks/P11-tier4-waypipe-migration.md
-#   plan2/research/spice-retirement/00-overview.md §"Phase 2"
+#   plan2/tasks/P11-tier4-waypipe-migration.md
 #   plan2/tasks/P05b-tier5b-vm-app-windowed.md (canonical waypipe-vsock
 #     pattern; mirrored here for tier-4)
 #
@@ -24,7 +24,7 @@
 #
 # Env knobs:
 #   TIER4_DISPLAY        waypipe — display backend (only option now).
-#                        Default 'waypipe' (P11 flip). SPICE path removed in P13.
+#                        Default 'waypipe' (P11 flip). Legacy viewer path removed in P13.
 #   TIER4_ADMIN_USER     Admin uid for libvirt + waypipe-client (default "admin").
 #   TIER4_MEM_MIB        Guest RAM in MiB (default 1024 for waypipe,
 #                        since the guest runs nested qdwin).
@@ -150,10 +150,7 @@ build_secctx_wrap() {
 resolve_template() {
     local display="$1"
     local script_dir="$2"
-    local override=""
-    if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
-        override="${TIER4_DOMAIN_TEMPLATE:-}"
-    fi
+    local override="${TIER4_DOMAIN_TEMPLATE:-}"
     if [ -n "$override" ]; then
         if [ ! -f "$override" ]; then
             echo "[tier4] FAIL: TIER4_DOMAIN_TEMPLATE=$override not readable" >&2
@@ -205,7 +202,7 @@ VM_NAME="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # TIER4_DISPLAY default — P11 flip: waypipe is the default after this
-# task. SPICE path removed in P13.
+# task. Legacy viewer path removed in P13.
 TIER4_DISPLAY="${TIER4_DISPLAY:-waypipe}"
 case "$TIER4_DISPLAY" in
     waypipe) ;;

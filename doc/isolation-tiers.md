@@ -187,9 +187,8 @@ Stack:
 
 - libvirt driving QEMU. Both packaged on Tumbleweed.
 - Display: waypipe server in guest → host waypipe-client over AF_VSOCK as a
- Wayland toplevel. Or `-display gtk,gl=on` for a direct Wayland toplevel
- without SPICE round-trip. SPICE is the documented default; `-display
- gtk` is the fallback if SPICE bit-rots.
+ Wayland toplevel. The host wraps the waypipe client with
+ `qdistro-secctx-exec` so the compositor sees the VM silo tag.
 - The outer wraps the viewer toplevel via `qdwin_nested_manager_v1`
  exactly like tier 2 today.
 - Clipboard: Wayland data-device over waypipe (same `ClipboardGate.qml` as tier-3),
@@ -206,10 +205,9 @@ Stack:
 
 ### Risks accepted
 
-- **SPICE upstream is in maintenance mode.** If it bit-rots: switch to
- qemu's `-display gtk,gl=on` direct Wayland-toplevel, which sidesteps
- SPICE entirely.
-- **No GPU passthrough** in SPICE; use `virtio-gpu-gl` with virgl when 3D
+- **Nested compositor cost.** The guest runs qdwin plus app workloads, so
+ default memory is higher than tier 5b.
+- **No GPU passthrough by default.** Use `virtio-gpu-gl` with virgl when 3D
  matters. VFIO + Looking-Glass is rejected as the tier-4 default because
  it's gaming-niche and requires two GPUs.
 
@@ -246,7 +244,7 @@ tier-3 wrapper.
 
 | Option | Why rejected |
 |----------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **SPICE seamless** | Listed as "future features" since 2010-2011; abandoned; no maintainer. 15-year roadmap stall. |
+| **Legacy VM seamless display** | Listed as "future features" since 2010-2011; abandoned; no maintainer. 15-year roadmap stall. |
 | **weston-rdprail-shell + VAIL** (WSLg for Linux) | Lives in Microsoft's `Weston-mirror` fork. Upstream rebase MR not merged. Adopting means carrying Microsoft's downstream weston build forever. |
 | **DIY FreeRDP RAIL server** | ~10-16k LOC of bespoke compositor↔FreeRDP glue with no upstream landing path. Doesn't reuse `qdwin_nested_manager_v1`. |
 | **Qubes `qubes-gui-agent`** | Fixed-header binary stream over Xen's libvchan. Wrong substrate (qdistro is KVM, not Xen). |

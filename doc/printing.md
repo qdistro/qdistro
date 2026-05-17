@@ -56,7 +56,7 @@ This is the same reasoning as the isolation ladder: the CUPS tier is tier 5
 - **Configuration** (printer list, drivers, defaults) lives in a separate
  subvolume mounted read-only except during admin-triggered reconfig.
 
-The domain is headless: no video / sound / SPICE; just `qemu-xhci` for USB
+The domain is headless: no video or sound channels; just `qemu-xhci` for USB
 hot-plug, virtio-net (SLIRP) for cups-browsed outbound, vsock for IPP, and
 `qemu-guest-agent` for host-driven job control.
 

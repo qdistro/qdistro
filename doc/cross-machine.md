@@ -43,12 +43,11 @@ authorizes per-remote connections via the broker.
 | Transport | Codec | Notes |
 |------------------------------------------|----------------------|--------------------------------------------------------------------------------------------------------------------|
 | **RDP** (FreeRDP) | H.264 / RemoteFX | Best codec; mature; matches Mutter / KDE screen-share and WSL2's `wslg`. **Primary.** |
-| **SPICE** | SPICE codec | Strong VM ecosystem; built-in audio / cursor / clipboard channels. Secondary, VM-scoped. |
 | Custom PipeWire + waypipe-over-TCP | — | Reinventing codecs. Don't. |
 
 RDP is the primary transport across the board (cross-machine, per-view
-forwarding, remote display); SPICE stays available for VM-framed cases.
-Control plane (auth, session setup, output geometry negotiation) is PyQt;
+forwarding, remote display). Control plane (auth, session setup,
+output geometry negotiation) is PyQt;
 transport is FreeRDP — don't write codecs.
 
 ## Thin client on the secondary machine
@@ -107,7 +106,7 @@ Implications:
 From the broker's perspective, the remote session is "another agent in the
 system." The same policy framework applies:
 
-- **Audio** — SPICE / RDP route audio natively; policy decides which audio
+- **Audio** — RDP routes audio natively; policy decides which audio
  streams follow the window.
 - **Clipboard** — the remote session has its own clipboard state; treated
  as a peer in the cross-compositor transfer model.

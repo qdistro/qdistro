@@ -19,11 +19,13 @@
 #   5.  Provisions system btrfs subvolumes: /var/lib/qdistro/vaults,
 #       /var/lib/libvirt/images, /var/lib/containers.
 #   6.  Fetches all qdistro repos (qdistro, qdwin, qdshell, qdlocker,
-#       qdbrowser, qdgreeter) — uses sibling checkouts under $REPO_ROOT
-#       if present, otherwise clones from codeberg.org/qdistro.
+#       qdbrowser, qdgreeter, qterminator, qnotebook, qfileman) — uses
+#       sibling checkouts under $REPO_ROOT if present, otherwise clones
+#       from Codeberg.
 #   7.  Builds qdwin (libweston shell plugin) and the qdistro C daemons.
 #   8.  Builds the qdshell QML plugin (libqdistro-qdwin.so).
-#   9.  pip-installs qdgreeter, qdlocker, qdbrowser.
+#   9.  pip-installs qdgreeter, qdlocker, qdbrowser, qterminator,
+#       qnotebook, qfileman.
 #  10.  Runs the existing scripts/install/install-*.sh installer chain
 #       (broker, session-manager, polkit, pwd, qsu, browser-bridge, phone,
 #       print, recall, snapshots, tier3, tier5).
@@ -436,12 +438,52 @@ create_user_subvolume() {
 # ---------------------------------------------------------------------------
 # 5. Users
 # ---------------------------------------------------------------------------
+user_for_uid() {
+    local uid="$1"
+    getent passwd | awk -F: -v uid="$uid" '$3 == uid { print $1; exit }'
+}
+
+ensure_admin_account() {
+    local existing
+
+    if getent passwd admin >/dev/null; then
+        if [ "$(id -u admin)" != "1000" ]; then
+            die "user 'admin' exists but is not uid 1000 (found uid $(id -u admin))"
+        fi
+        return 0
+    fi
+
+    existing="$(user_for_uid 1000 || true)"
+    if [ -n "$existing" ]; then
+        die "uid 1000 already belongs to '$existing'; qdistro requires an 'admin' user at uid 1000"
+    fi
+
+    # Do not use -m; we handle home creation via create_user_subvolume.
+    useradd -M -u 1000 -U -s /bin/bash admin
+}
+
+ensure_regular_account() {
+    local existing
+
+    if getent passwd "$REGULAR_USER" >/dev/null; then
+        if [ "$(id -u "$REGULAR_USER")" != "1001" ]; then
+            die "user '$REGULAR_USER' exists but is not uid 1001 (found uid $(id -u "$REGULAR_USER"))"
+        fi
+        return 0
+    fi
+
+    existing="$(user_for_uid 1001 || true)"
+    if [ -n "$existing" ]; then
+        die "uid 1001 already belongs to '$existing'; choose a fresh qdistro user or free uid 1001"
+    fi
+
+    # Do not use -m; we handle home creation via create_user_subvolume.
+    useradd -M -u 1001 -U -s /bin/bash "$REGULAR_USER"
+}
+
 create_users() {
     log "creating admin user (uid 1000)..."
-    if ! getent passwd admin >/dev/null; then
-        # Do not use -m; we handle home creation via create_user_subvolume
-        useradd -M -u 1000 -U -s /bin/bash admin
-    fi
+    ensure_admin_account
     create_user_subvolume admin 1000
     echo "admin:${ADMIN_PASSWORD}" | chpasswd
     # wheel group on Tumbleweed, sudo on Ubuntu
@@ -450,10 +492,7 @@ create_users() {
     install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
 
     log "creating regular user '$REGULAR_USER' (uid 1001)..."
-    if ! getent passwd "$REGULAR_USER" >/dev/null; then
-        # Do not use -m; we handle home creation via create_user_subvolume
-        useradd -M -u 1001 -U -s /bin/bash "$REGULAR_USER"
-    fi
+    ensure_regular_account
     create_user_subvolume "$REGULAR_USER" 1001
     echo "${REGULAR_USER}:${REGULAR_PASSWORD}" | chpasswd
     # regular user gets no sudo; cross-uid actions go through the broker.
@@ -469,6 +508,46 @@ create_users() {
 # ---------------------------------------------------------------------------
 # 6. Source acquisition
 # ---------------------------------------------------------------------------
+repo_url() {
+    case "$1" in
+        qnotebook)  echo "https://codeberg.org/qnotebook/qnotebook.git" ;;
+        qterminator) echo "https://codeberg.org/qterminator/qterminator.git" ;;
+        *)          echo "https://codeberg.org/qdistro/$1.git" ;;
+    esac
+}
+
+repo_present() {
+    local repo="$1"
+    [ -d "$REPO_ROOT/$repo/.git" ] && return 0
+    case "$repo" in
+        qdistro) [ -d "$REPO_ROOT/$repo/daemons" ] ;;
+        qdwin|qdshell) [ -f "$REPO_ROOT/$repo/meson.build" ] ;;
+        *) [ -f "$REPO_ROOT/$repo/pyproject.toml" ] ;;
+    esac
+}
+
+fetch_repo() {
+    local repo="$1"
+    local fatal="${2:-fatal}"
+    local url
+
+    if repo_present "$repo"; then
+        log "  $repo: using existing checkout at $REPO_ROOT/$repo"
+        return 0
+    fi
+
+    url="$(repo_url "$repo")"
+    log "  $repo: cloning $url (branch=$BRANCH)..."
+    if git clone --depth 1 --branch "$BRANCH" "$url" "$REPO_ROOT/$repo"; then
+        return 0
+    fi
+
+    if [ "$fatal" = "fatal" ]; then
+        die "$repo: clone failed"
+    fi
+    warn "  $repo: clone failed (non-fatal; install will be skipped)"
+}
+
 fetch_sources() {
     if [ -n "$SKIP_SOURCES" ]; then
         log "skipping source acquisition (--skip-sources)"
@@ -477,28 +556,12 @@ fetch_sources() {
     install -d -m 0755 "$REPO_ROOT"
     cd "$REPO_ROOT"
 
-    # Core repos: detect by .git dir, meson.build, or daemons/ subdir.
     for repo in qdistro qdwin qdshell; do
-        if [ -d "$REPO_ROOT/$repo/.git" ] || [ -d "$REPO_ROOT/$repo/daemons" ] \
-           || [ -f "$REPO_ROOT/$repo/meson.build" ]; then
-            log "  $repo: using existing checkout at $REPO_ROOT/$repo"
-            continue
-        fi
-        log "  $repo: cloning from codeberg.org/qdistro/$repo (branch=$BRANCH)..."
-        git clone --depth 1 --branch "$BRANCH" \
-            "https://codeberg.org/qdistro/$repo.git" "$REPO_ROOT/$repo"
+        fetch_repo "$repo" fatal
     done
 
-    # Python app repos: detect by pyproject.toml as existence sentinel.
-    for repo in qdlocker qdbrowser qdgreeter; do
-        if [ -f "$REPO_ROOT/$repo/pyproject.toml" ]; then
-            log "  $repo: using existing checkout at $REPO_ROOT/$repo"
-            continue
-        fi
-        log "  $repo: cloning from codeberg.org/qdistro/$repo (branch=$BRANCH)..."
-        git clone --depth 1 --branch "$BRANCH" \
-            "https://codeberg.org/qdistro/$repo.git" "$REPO_ROOT/$repo" \
-            || warn "  $repo: clone failed (non-fatal; pip install will be skipped)"
+    for repo in qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
+        fetch_repo "$repo" optional
     done
 
     [ -f "$REPO_ROOT/qdwin/meson.build" ]   || die "qdwin tree missing meson.build"
@@ -552,8 +615,8 @@ pip_install_apps() {
         log "skipping pip install of apps (--skip-build)"
         return 0
     fi
-    log "installing Python apps (qdgreeter, qdlocker, qdbrowser)..."
-    for app in qdgreeter qdlocker qdbrowser; do
+    log "installing Python apps (qdgreeter, qdlocker, qdbrowser, qterminator, qnotebook, qfileman)..."
+    for app in qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman; do
         if [ -f "$REPO_ROOT/$app/pyproject.toml" ]; then
             log "  pip install $app..."
             python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \

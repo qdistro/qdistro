@@ -240,15 +240,15 @@ stage_vm_driver() {
 }
 
 @test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + waypipe display" {
-    # §Phase-7 tier-4 — libvirt + virt-viewer wrapper smoke. Linux-only
+    # §Phase-7 tier-4 — libvirt + waypipe wrapper smoke. Linux-only
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
-    # define-only and no-viewer modes; full virt-viewer-on-wayland-1
+    # define-only and no-viewer modes; full waypipe-on-wayland-1
     # integration is exercised manually until the chrome path is stable.
     stage_vm_driver "s42-tier4-spawn.sh"
     vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-4 stack (libvirt/qemu/virt-viewer) not installed on this VM"
+        fail_loud "tier-4 stack (libvirt/qemu/waypipe) not installed on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: define-only mode created domain"
@@ -275,9 +275,9 @@ stage_vm_driver() {
 
 @test "phase7-tier4-secctx-exec: qdistro-secctx-exec wraps a Wayland client with wp_security_context_v1" {
     # §Phase-7 tier-4 secctx — the wrapper is reusable for any non-secctx-
-    # aware client (virt-viewer being the motivating case). Tests the
+    # aware client. Tests the
     # wrapper end-to-end with qdistro-test-window as a stand-in for
-    # virt-viewer to avoid dragging libvirt+qemu into the test.
+    # waypipe to avoid dragging libvirt+qemu into the test.
     stage_vm_driver "s44-tier4-secctx-exec.sh"
     vm_run "curl -s -o /tmp/s44.sh http://10.0.2.2:8768/s44-tier4-secctx-exec.sh && chmod +x /tmp/s44.sh && bash /tmp/s44.sh 2>/dev/null"
     assert_success
@@ -354,7 +354,7 @@ stage_vm_driver() {
     # is identical to tier-3's s39 except the source toplevel is wrapped
     # by qdistro-secctx-exec (no waypipe). With v14 inject-focus (task
     # 037) the test runs end-to-end on sdl-freerdp /v: dummy as well —
-    # the focus state that real virt-viewer would deliver naturally is
+    # the focus state that the real waypipe path would deliver naturally is
     # injected via qdshell's ctrl-socket.
     stage_vm_driver "s46-tier4-clipboard-gate.sh"
     vm_run "curl -s -o /tmp/s46.sh http://10.0.2.2:8768/s46-tier4-clipboard-gate.sh && chmod +x /tmp/s46.sh && bash /tmp/s46.sh 2>/dev/null"

@@ -23,7 +23,7 @@ Tier 2 lands before tier 4 and tier 5 because:
   shell plugin, and the three bats drivers (s32/s33/s34) referenced
   from `tests/integration/vm/tiered-isolation.bats`.
 - Podman is cheap to start (sub-second), no virtualization, no qga,
-  no vsock, no SPICE — the entire isolation pipeline fits in two
+  no vsock, no VM display channel — the entire isolation pipeline fits in two
   bash scripts plus a Containerfile.
 - The qdshell launcher integration ("PodApps") it unlocks shares
   the **UI surface** (placeholder cold-start entries, silo badge

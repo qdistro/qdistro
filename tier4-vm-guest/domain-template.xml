@@ -1,7 +1,5 @@
 <!-- §P10 tier-4-guest libvirt domain template.
-     Forked from qdistro/tier4-vm/domain-template.xml; the SPICE-era
-     tier4-vm/ stays in place untouched (it's still the shipped path
-     until P11 swaps the default).
+     Current tier-4 guest domain template for the waypipe-over-vsock path.
 
      Substitution markers (replaced by P11's spawn-tier4 wrapper, or
      by the s109 smoke driver):
@@ -24,13 +22,12 @@
                          guest. The mount tag `qdistro-host` matches
                          build-guest-image.sh's fstab line.
 
-     Differences from tier4-vm/domain-template.xml (SPICE-era):
-       - REMOVED <graphics type='spice'/>.  The host reaches the VM
-         via waypipe over vsock; there is no in-band SPICE display.
-       - REMOVED <channel type='spicevmc' ... 'com.redhat.spice.0'/>.
-         No spice-vdagent in the guest; clipboard rides waypipe.
+     Transport shape:
+       - No in-band guest display protocol. The host reaches the VM via
+         waypipe over vsock.
+       - No guest display-agent clipboard channel. Clipboard rides waypipe.
        - REMOVED <clipboard copypaste=…/>.  Selection bridging is
-         the host's ClipboardGate, not SPICE-level cliprdr.
+         the host's ClipboardGate, not protocol-level cliprdr.
        - REMOVED <sound model='ich9'/>.  Replaced by virtio-snd; ALSA
          in the guest enumerates a virtio-snd card. P11 wires the
          host -audiodev pipewire backend.
@@ -45,9 +42,7 @@
        - <disk> is now mandatory (bootable qcow2 overlay), not an
          empty placeholder.
 
-     Spec: plan2/research/spice-retirement/00-overview.md §"Phase 1 —
-     Build the stripped guest image (P10)"; plan2/tasks/P10-tier4-
-     guest-image-nested-qdwin.md §Phase E.
+     Spec: plan2/tasks/P10-tier4-guest-image-nested-qdwin.md §Phase E.
 -->
 <domain type='kvm'>
   <name>__VM_NAME__</name>

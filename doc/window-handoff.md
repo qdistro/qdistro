@@ -26,9 +26,9 @@ different user from the start).
 | Isolation tier | Handoff mechanism | Seamlessness |
 |-------------------------------------------------|------------------------------|------------------------------------------------------------------------------------|
 | 0 none / 1 SELinux / 2 podman / 3 different user| **waypipe** | Fully seamless; native window in target compositor, GPU-accelerated via DMA-BUF. |
-| 4 VM SPICE | **SPICE seamless mode** | Mostly seamless (guest Wayland support varies). |
+| 4 VM whole-guest | **waypipe over AF_VSOCK** | Seamless host toplevels from nested qdwin. |
 | 5 VM per-app (Linux guest) | **waypipe over AF_VSOCK** | Fully seamless; per-app Wayland over vsock. |
-| 6 remote machine | **RDP / framed SPICE** | Not seamless; framed window. |
+| 6 remote machine | **RDP** | Not seamless; framed window. |
 
 waypipe is a Wayland-protocol proxy. The app's `wl_display` connection,
 normally local to admin's compositor, is bridged through waypipe to the

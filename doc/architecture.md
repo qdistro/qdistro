@@ -83,7 +83,7 @@ A user session can be promoted to a **fullscreen TTY session**:
  fullscreen context; VT-switch back to tty3 when done.
 
 Primary users of this mechanism are games and VR (see [games](games.md)),
-multi-monitor SPICE VM viewers, and GPU-heavy creative workloads.
+multi-monitor VM viewers, and GPU-heavy creative workloads.
 
 ## Components
 

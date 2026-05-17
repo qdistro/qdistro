@@ -19,7 +19,7 @@ The desktop shell (a Noctalia QML fork) lives in
 
 > **Hardware:** spare laptop, ≥16 GB RAM, ≥100 GB free disk, fingerprint reader optional but recommended. Fresh openSUSE Tumbleweed terminal-only install.
 
-**1. Install Tumbleweed** from [get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or Server (no desktop needed).
+**1. Install Tumbleweed** from [get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or Server (no desktop needed). Create the first user as `admin`; qdistro reserves `admin` at uid 1000.
 
 **2. Install git** (not pre-installed on Tumbleweed Minimal/Server):
 
@@ -27,8 +27,8 @@ The desktop shell (a Noctalia QML fork) lives in
 sudo zypper install -y git
 ```
 
-**3. Clone and bootstrap** (as a regular user in the `wheel` group; `sudo` is
-available by default for wheel members on Tumbleweed):
+**3. Clone and bootstrap** (as `admin`, which is in the `wheel` group; `sudo`
+is available by default for wheel members on Tumbleweed):
 
 ```sh
 git clone https://codeberg.org/qdistro/qdistro.git
@@ -39,7 +39,8 @@ sudo bash scripts/install/qdistro-bootstrap.sh
 ```
 
 The bootstrap installs all dependencies, builds the compositor and daemons,
-clones the remaining components (qdgreeter, qdlocker, qdbrowser), and
+clones the remaining components (qdgreeter, qdlocker, qdbrowser, qterminator,
+qnotebook, qfileman), and
 configures greetd. Takes 10–20 minutes. Idempotent — re-running is safe.
 
 **4. Reboot:**
@@ -106,7 +107,7 @@ setup.
    admin-spawned uid sandboxes.
 4. **Mainstream Linux primitives over custom infrastructure.**
    D-Bus, polkit, systemd, PipeWire, libweston, xdg-desktop-portal,
-   waypipe, SPICE, RDP — lean on existing standards.
+   waypipe, RDP — lean on existing standards.
 5. **Seamless UX at lower isolation tiers, framed UX at higher ones.**
    The isolation ladder trades seamlessness for containment;
    per-context choice via admin policy.

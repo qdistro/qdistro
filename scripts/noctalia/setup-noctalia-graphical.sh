@@ -1,7 +1,7 @@
 #!/bin/bash
 # Set up the graphical Noctalia visual-test session on a VM:
 # - admin added to video + input groups
-# - weston.ini switched to drm-backend so SPICE shows real output
+# - weston.ini switched to drm-backend so the VM console shows real output
 # - systemd unit auto-launches `weston + qs noctalia` on graphical.target
 # - lingering enabled so user services run after autologin completes
 #
@@ -22,8 +22,8 @@ modules=
 locking=false
 client=
 
-# Use the drm backend so qdwin renders to virtio-gpu and SPICE shows
-# the framebuffer. seat0/tty1 pinned so systemd doesn't fight us.
+# Use the drm backend so qdwin renders to virtio-gpu and exposes a
+# framebuffer. seat0/tty1 pinned so systemd doesn't fight us.
 [output]
 name=Virtual-1
 mode=1920x1080@60

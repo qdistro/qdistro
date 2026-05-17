@@ -1,8 +1,8 @@
 # tier4-vm-guest — nested-qdwin guest image (P10)
 
-This directory ships the **guest-side** half of the SPICE-retirement
-migration for tier-4 VMs. Sibling `tier4-vm/` (the SPICE path) stays
-in place until P11 swaps the default; P10 is purely additive.
+This directory ships the **guest-side** half of the nested-qdwin
+waypipe migration for tier-4 VMs. `tier4-vm/` now consumes this image
+and template by default.
 
 ## Files
 
@@ -16,14 +16,14 @@ in place until P11 swaps the default; P10 is purely additive.
   + waypipe + weston-terminal + alsa-utils + qemu-guest-agent +
   systemd units for qdwin-guest-session and qdistro-tier4-publisher
   + /etc/fstab line for the virtiofs `/host` mount.
-- `domain-template.xml` — libvirt domain XML forked from
-  `tier4-vm/domain-template.xml`. SPICE channels removed; vsock,
-  virtio-snd, virtiofs added.
+- `domain-template.xml` — libvirt domain XML for the waypipe guest:
+  vsock, virtio-snd, virtiofs, and no guest display-agent channel.
 
 ## Architecture
 
-See `plan2/research/spice-retirement/00-overview.md`. tl;dr: a
-stripped-down qdwin runs inside the guest VM, presenting a normal
+See `plan2/tasks/P10-tier4-guest-image-nested-qdwin.md` and
+`plan2/tasks/P11-tier4-waypipe-migration.md`. tl;dr: a stripped-down
+qdwin runs inside the guest VM, presenting a normal
 `wayland-0` socket for in-guest clients (weston-terminal in the smoke
 test). The publisher wraps the bystander with waypipe-server over
 vsock, and the host's waypipe-client receives the toplevel stream and

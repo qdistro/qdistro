@@ -15,9 +15,8 @@
 # waypipe-server ferries the bystander's outbound Wayland connection
 # across vsock to the host waypipe-client.
 #
-# Architecture: plan2/research/spice-retirement/00-overview.md §"nested
-# qdwin in the guest". Phase: plan2/tasks/P10-tier4-guest-image-nested-
-# qdwin.md §Phase C.
+# Architecture: plan2/tasks/P10-tier4-guest-image-nested-qdwin.md
+# §Phase C and plan2/tasks/P11-tier4-waypipe-migration.md.
 #
 # Invoked by the in-guest systemd unit qdistro-tier4-publisher.service
 # *or* by the host via qemu-guest-agent guest-exec:

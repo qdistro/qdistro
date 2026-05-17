@@ -35,7 +35,7 @@ mirrors tier-3 (`scripts/vm/tier3/`).
 
 ## Why waypipe-over-vsock
 
-Picked over weston-rdprail-shell / SPICE-seamless / xpra / DIY-RAIL
+Picked over weston-rdprail-shell / legacy seamless-VM display / xpra / DIY-RAIL
 in `spec/29` . Reasons:
 
 - **Wayland-native both sides**: no XWayland; no remote-protocol re-encoding.
