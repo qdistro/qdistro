@@ -46,6 +46,8 @@ class BrokerClient(Protocol):
 
     def decide_request(self, rid: int, decision: str, scope: str) -> None: ...
 
+    def save_rule(self, filename: str, yaml_body: str) -> str: ...
+
     def start(self, on_pending: PendingCallback,
               on_decided: DecidedCallback) -> None: ...
 
@@ -86,6 +88,13 @@ class FakeBrokerClient:
             self._pending.pop(rid, None)
             if self._on_decided is not None:
                 self._on_decided(rid, decision)
+
+    def save_rule(self, filename: str, yaml_body: str) -> str:
+        """Record the save_rule call; return the would-be path."""
+        if not hasattr(self, "saved_rules"):
+            self.saved_rules = []
+        self.saved_rules.append((filename, yaml_body))
+        return f"/etc/qdistro/rules.d/{filename}"
 
     def start(self, on_pending: PendingCallback,
               on_decided: DecidedCallback) -> None:
@@ -186,6 +195,11 @@ class DBusBrokerClient:
 
     def decide_request(self, rid: int, decision: str, scope: str) -> None:
         self._call("DecideRequest", int(rid), str(decision), str(scope))
+
+    def save_rule(self, filename: str, yaml_body: str) -> str:
+        """SaveRule on the broker. Returns the absolute path of the
+        saved YAML."""
+        return str(self._call("SaveRule", str(filename), str(yaml_body)))
 
     def start(self, on_pending: PendingCallback,
               on_decided: DecidedCallback) -> None:

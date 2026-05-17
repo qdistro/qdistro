@@ -115,9 +115,22 @@ Admin should triage without touching the mouse.
 | Ctrl+Y or Alt+A | Approve current item. |
 | Ctrl+N or Alt+D | Deny current item. |
 | Ctrl+R | "Rule from this..." |
+| Ctrl+Shift+A | Approve **all** pending — confirmation required, scope forced to `once` in the TUI. |
+| Ctrl+Shift+D | Deny **all** pending — confirmation required. |
+| Alt+Shift+A | Approve all pending in the currently-selected silo (uid filter on the queue) — confirmation required. |
+| Alt+Shift+D | Deny all pending in the currently-selected silo — confirmation required. |
 | Ctrl+Shift+1..8 | Set scope (once / 1h / 24h / forever / forever-exe / forever-argv / forever-basename / forever-prefix). |
 | Escape | Return focus to queue list. |
 | Delete | Defer (mark read, keep in queue). |
+
+The bulk-decide shortcuts (`Ctrl+Shift+A` / `Ctrl+Shift+D`) and
+silo-scoped variants (`Alt+Shift+A` / `Alt+Shift+D`) are
+intentionally guarded behind a confirmation modal in both the GUI
+and the TUI — a single keystroke shouldn't be able to approve or
+deny dozens of queued requests. The TUI also forces scope=`once`
+for `Ctrl+Shift+A` regardless of the active scope picker, so a
+fatigued admin who left scope on "Forever" can't accidentally pin
+a long-lived grant on every queued row.
 
 ## Urgency levels
 
