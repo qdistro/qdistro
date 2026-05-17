@@ -23,7 +23,7 @@ After=graphical-session.target qdwin-compositor.service
 # process never notified, so systemd held the unit `activating` until
 # TimeoutStartSec.
 Type=simple
-ExecStart=/usr/bin/qdlocker
+ExecStart=/usr/local/bin/qdlocker
 Environment=QT_QPA_PLATFORM=wayland
 Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
 # PYTHONNOUSERSITE=1: refuse to load user-site shims (a malicious
