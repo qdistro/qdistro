@@ -3,12 +3,8 @@
 #
 # Produces /var/lib/libvirt/images/qdistro-tier4-base.qcow2 with:
 #   - openSUSE Tumbleweed Minimal-VM Cloud base
-#   - spice-vdagent + a minimal labwc + wl-clipboard preinstalled
-#     (spice-vdagent under Wayland uses wl-clipboard rather than xclip
 #     for selection sync; labwc is a tiny Wayland compositor that
-#     gives spice-vdagent a wl_seat to glue clipboard events to).
 #   - qemu-guest-agent service enabled (so the host can drive guest-
-#     exec to introspect spice-vdagent service state without needing
 #     interactive console access).
 #   - root password from $QDISTRO_VM_PASSWORD, so
 #     interactive console attach for manual clipboard verification is
@@ -20,7 +16,6 @@
 # Linux-only per spec/00 (memory qdistro_linux_only.md).
 #
 # Run this once on the host. The bats coverage in
-# phase7-tier4-spice-clipboard-live skips gracefully when the base
 # image is absent so this isn't a hard prereq for the rest of the
 # suite.
 #
@@ -97,7 +92,6 @@ wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
 # Stage the in-guest helper that pushes a string into the guest
 # clipboard via wl-copy. The host invokes this via qga guest-exec
 # during the clipboard live test. The script waits briefly for
-# spice-vdagent + wl-copy's compositor connection to be ready since
 # first-boot timing can race the test invocation.
 HELPER="$WORK/qdistro-tier4-clip-set.sh"
 cat >"$HELPER" <<'HELPEOF'
@@ -107,7 +101,7 @@ cat >"$HELPER" <<'HELPEOF'
 #
 #   qdistro-tier4-clip-set.sh <payload>
 #
-# Spice-vdagent must be running (its .service file is enabled at
+# The guest compositor must be running (its .service file is enabled at
 # image build); without it the host can never observe a sync.
 # wl-copy needs a running compositor with a wl_seat; we start a
 # detached labwc instance if none is up (idempotent — labwc exits
@@ -119,8 +113,6 @@ LOG=/var/log/qdistro-tier4-clip-set.log
 exec >>"$LOG" 2>&1
 echo "=== $(date -Iseconds): tier4-clip-set ==="
 
-# Ensure spice-vdagent is alive (service should be enabled by build).
-systemctl restart spice-vdagentd 2>/dev/null || true
 
 # Need a Wayland compositor for wl-copy. Use labwc against a tty
 # session; it'll die silently if we already have one bound.
@@ -137,8 +129,6 @@ for _ in 1 2 3 4 5; do
     sleep 0.5
 done
 
-# Now spawn spice-vdagent (the user-mode component, not the daemon).
-nohup spice-vdagent >>"$LOG" 2>&1 </dev/null &
 sleep 1
 
 printf '%s' "$PAYLOAD" | wl-copy
@@ -150,13 +140,10 @@ echo "[tier4-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable (not transactional), so
 # zypper install works directly via virt-customize.
 virt-customize -a "$BASE_QCOW" \
-    --install spice-vdagent,labwc,wl-clipboard,wayland-utils,qemu-guest-agent,kbd \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
-    --run-command 'systemctl enable spice-vdagentd.service' \
     --mkdir /etc/systemd/system/multi-user.target.wants \
     --link /usr/lib/systemd/system/qemu-guest-agent.service:/etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service \
-    --link /usr/lib/systemd/system/spice-vdagentd.service:/etc/systemd/system/multi-user.target.wants/spice-vdagentd.service \
     --copy-in "$HELPER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier4-clip-set.sh' \
     --run-command 'echo "qdistro-tier4-base" >/etc/hostname' \
@@ -164,7 +151,6 @@ virt-customize -a "$BASE_QCOW" \
     >/dev/null
 
 # Belt-and-braces: openSUSE Tumbleweed-Minimal-VM-Cloud's systemd
-# presets disable qemu-guest-agent + spice-vdagentd by default, so
 # `systemctl enable` above silently no-ops (it respects the preset
 # unless --force is passed). Explicit --link below forces the
 # multi-user.target.wants symlinks regardless of preset state.

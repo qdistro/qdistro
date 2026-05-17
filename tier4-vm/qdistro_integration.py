@@ -10,10 +10,10 @@ method that drives the ACPI→destroy lifecycle in
 The launcher (qdshell PodApps) spawns the App1 receiver via
 ``spawn-tier4.sh <vm>`` with the secctx triple
 ``(qdistro.tier4, qdistro.tier4.<vm>, <launch-token>)``. The receiver
-process is a thin wrapper around ``virt-viewer``; when the user clicks
+process is a thin wrapper around the display client (waypipe or legacy virt-viewer); when the user clicks
 the chrome close button qdshell calls ``Close()`` and we hand off to
 ``close_vm`` so the qemu / libvirt teardown runs in-process rather
-than racing virt-viewer's own signal handling.
+than racing the display client's own signal handling.
 
 Layering:
 
@@ -80,7 +80,7 @@ def maybe_install(vm_name: str, *, on_close=None) -> Any | None:
     used as the GetSilo() return so PodApps groups multiple tier-4
     windows under one silo badge. ``on_close`` is an optional callback
     invoked on a Close() RPC — pass a function that propagates the
-    close into your virt-viewer wrapper. When None, the default
+    close into your display client wrapper. When None, the default
     handler calls :func:`tier4_chrome.close_vm` directly.
     """
     if _app_receiver is None:

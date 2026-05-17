@@ -248,8 +248,8 @@ install_packages_ubuntu() {
         waypipe wl-clipboard libnotify-bin
         greetd
         # virtualization (kept; some qdistro components launch nested VMs)
-        libvirt-daemon-system libvirt-clients virtinst virt-viewer
-        qemu-system-x86 qemu-utils spice-vdagent
+        libvirt-daemon-system libvirt-clients virtinst
+        qemu-system-x86 qemu-utils
         libguestfs-tools
         # storage
         sqlite3 socat

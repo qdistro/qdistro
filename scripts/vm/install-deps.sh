@@ -35,8 +35,8 @@ QDISTRO_PKGS=(
   podman slirp4netns fuse-overlayfs crun
   waypipe
   wl-clipboard
-  libvirt libvirt-daemon-qemu libvirt-client virt-install virt-viewer
-  qemu-x86 qemu-tools qemu-ui-spice-core qemu-ui-spice-app spice-vdagent
+  libvirt libvirt-daemon-qemu libvirt-client virt-install
+  qemu-x86 qemu-tools
   qemu-audio-pipewire qemu-audio-alsa
   libguestfs guestfs-tools
   # qdshell QML stack: noctalia-qs is Tumbleweed's quickshell package

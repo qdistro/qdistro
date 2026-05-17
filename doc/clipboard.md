@@ -133,23 +133,3 @@ friction.
 First-party apps can register per-window `on_copy` hooks. These run *before*
 the copy leaves the app — useful for redaction, tagged fields, etc.
 App-level filtering stacks on top of compositor-level policy.
-
-## SPICE main-channel clipboard (tier-4)
-
-Tier-4 (whole-VM via libvirt + virt-viewer) has a second clipboard pathway
-outside the Wayland selection bridge: the SPICE main channel between
-virt-viewer and qemu's spice-server, which forwards cliprdr-style messages
-to and from the in-guest `spice-vdagent`.
-
-The fix is defence-in-depth at domain-definition time:
-
-- `<graphics> <clipboard copypaste='no'/>` is the **default**. qemu's
- spice-server refuses cliprdr negotiation on the main channel. All
- host ↔ guest clipboard traffic flows through Wayland selection in
- virt-viewer's spice-gtk — gated by `wp_security_context_v1` and
- focus-aware-clear.
-- `<graphics passwd='...'>` is a one-shot 16-hex-char ticket generated per
- spawn from `/dev/urandom`. virt-viewer fetches it transparently;
- re-spawning rotates it.
-- Admin opts in to the SPICE clipboard channel per VM via `TIER4_SPICE_
- CLIPBOARD=allowed` when legacy guests need it.

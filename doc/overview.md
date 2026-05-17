@@ -51,7 +51,7 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
 - **greetd** — session launcher.
 - **fprintd** — fingerprint reader access.
 - **waypipe** — Wayland forwarding for cross-user / container view handoff.
-- **SPICE / spice-gtk**, **FreeRDP** — remote-output transports.
+- **waypipe**, **FreeRDP** — remote-output transports.
 - **qemu / libvirt** — VMs for the highest isolation tiers.
 - **xdg-desktop-portal** — standard permission gating for sandboxed apps.
 - **Tailscale** — mesh VPN providing phone ↔ laptop transport

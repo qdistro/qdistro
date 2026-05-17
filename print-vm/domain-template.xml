@@ -10,7 +10,7 @@
        __DISK_PATH__     guest disk image (qcow2). Linux-only per spec/00.
 
      Architecture notes:
-       - Headless VM. No video / sound / spice — cupsd is a network
+       - Headless VM. No video / sound — cupsd is a network
          daemon spoken to over IPP, not a UI surface.
        - vsock model='virtio' carries IPP. cupsd inside the guest binds
          on AF_VSOCK CID-any port 631; the host-side qdistro-print-proxy
