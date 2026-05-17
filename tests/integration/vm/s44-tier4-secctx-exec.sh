@@ -11,7 +11,7 @@
 #     interface, commits a secctx, and the inner wl_client is
 #     accepted on the secctx listener.
 #
-# Uses qdistro-test-window as a stand-in for virt-viewer to avoid
+# Uses qdistro-test-window as a stand-in for the waypipe-client to avoid
 # pulling libvirt+qemu into the test surface (those have their own
 # bats slot).
 #

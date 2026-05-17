@@ -17,23 +17,23 @@ shell script and the SDK:
    surface to the user. Caller-uid attestation gates the destructive
    verb to the bound shell's uid (mitigates security MEDIUM-2).
 
-3. **virt-viewer lifecycle** — exec's virt-viewer (the same argv the
+3. **Display client lifecycle** — exec's the display client (the same argv the
    pre-P05a shell builds) as a child process, then runs a GLib
-   mainloop to dispatch the bus methods. When virt-viewer exits OR a
+   mainloop to dispatch the bus methods. When the client exits OR a
    Close() RPC fires the destroy lifecycle, the control process tears
    down its bus name and exits.
 
 This module is invoked by ``spawn-tier4.sh`` (as the admin uid)
-*instead of* the pre-fix-pass direct ``virt-viewer`` exec. The shell
+*instead of* the pre-fix-pass direct display-client exec. The shell
 still does the libvirt domain define/start; this module owns the
 view + close half.
 
 Run from CLI for tests:
-    python3 tier4_control.py --vm-name <vm> -- virt-viewer …
+    python3 tier4_control.py --vm-name <vm> -- <display-client> …
 
-Degrades to a plain virt-viewer exec when dbus-python /
+Degrades to a plain display-client exec when dbus-python /
 ``qdistro_app.app_receiver`` is missing so a minimal image still
-brings up the VM (close button then falls back to virt-viewer's own
+brings up the VM (close button then falls back to the client's own
 xdg_toplevel.close semantics — the documented degraded mode).
 """
 from __future__ import annotations
@@ -210,7 +210,7 @@ def _install_control(vm_name: str) -> tuple[Any, Any] | tuple[None, None]:
     if dbus is None or _app_receiver is None:
         _log("dbus-python or qdistro_app SDK not importable; "
              "running with no App1 + no Close RPC. The chrome close "
-             "button will fall back to virt-viewer's xdg_toplevel.close, "
+             "button will fall back to the client's own xdg_toplevel.close, "
              "which exits the viewer but leaves the qemu domain "
              "running. Install python3-dbus + the qdistro SDK to enable "
              "ACPI→destroy on close-button.")
@@ -370,8 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vm-name", required=True,
                         help="Libvirt domain name (== secctx silo tag).")
     parser.add_argument("viewer_argv", nargs=argparse.REMAINDER,
-                        help="Viewer command + args (e.g. virt-viewer …). "
-                             "Pass via `-- virt-viewer --connect …`.")
+                        help="Display client command + args (e.g. waypipe …). "
+                             "Pass via `-- <client-cmd> ...`.")
     ns = parser.parse_args(argv)
 
     vm_name = ns.vm_name
@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
 
     viewer_argv = list(ns.viewer_argv or [])
     # argparse stuffs the literal `--` separator at the head of REMAINDER
-    # when invoked as `... -- virt-viewer ...`; strip it.
+    # when invoked as `... -- <display-client> ...`; strip it.
     while viewer_argv and viewer_argv[0] == "--":
         viewer_argv.pop(0)
     if not viewer_argv:

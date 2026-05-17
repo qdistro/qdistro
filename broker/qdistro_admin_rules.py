@@ -162,7 +162,7 @@ class Rule:
           - `app_id` is a wp_security_context_v1 tag, reverse-DNS
             convention.
           - `sandbox_engine` is a short identifier ("podman",
-            "waypipe", "spice", "qdistro-secctx").
+            "waypipe", "qdistro-secctx").
           - `mime_type` per IANA never contains `*`.
         """
         if "*" in rule_value:

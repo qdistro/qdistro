@@ -14,11 +14,8 @@
 #
 # Flags:
 #   --keep                 leave the VM running after success
-#   --graphics=none|spice  display backend (default: none = headless,
-#                          uses qemu-guest-agent for verification.
-#                          Pass --graphics=spice if you'll follow up
-#                          with ui-agent-test.sh which needs
-#                          'virsh screenshot' to work.)
+#   --graphics=none        display backend (default: none = headless,
+#                          uses qemu-guest-agent for verification.)
 #
 # Requirements on the host:
 #   - libvirt + qemu + virt-install + virt-customize (libguestfs)
@@ -45,9 +42,7 @@ USER_NAME="${BAREMETAL_USER_NAME:-alice}"
 USER_PW="${BAREMETAL_USER_PW:-userpass}"
 KEEP=0
 GRAPHICS="${BAREMETAL_GRAPHICS:-none}"   # 'none' = headless (default,
-                                         # works with vm-exec); 'spice'
-                                         # = needed for ui-agent-test.sh
-                                         # screenshot driving.
+                                         # works with vm-exec).
 DISTROS=()
 
 usage() {

@@ -191,24 +191,18 @@ sys.stdout.write("".join(out))
 ')
 
 if [ "$GPU" = 1 ]; then
-    # virtio-gpu accel3d=yes + spice gl=enable. Outer weston picks up
+    # virtio-gpu accel3d=yes. Outer weston picks up
     # gl-renderer when started with `renderer=gl` and zwp_linux_dmabuf_v1
     # advertises real format/modifier tables. The sed assumes the
     # template carries `<image compression='off'/>` verbatim — verify
-    # both substitutions actually fired so a future template format
+    # the substitution actually fired so a future template format
     # change doesn't silently land accel3d=yes WITHOUT the matching
     # `<gl>` element (qemu would refuse with no useful error).
     XML=$(printf '%s' "$XML" \
-        | sed -e "s|<acceleration accel3d='no'/>|<acceleration accel3d='yes'/>|" \
-              -e "s|<image compression='off'/>|<image compression='off'/><gl enable='yes' rendernode='/dev/dri/renderD128'/>|")
+        | sed -e "s|<acceleration accel3d='no'/>|<acceleration accel3d='yes'/>|")
     if ! grep -q "<acceleration accel3d='yes'/>" <<<"$XML"; then
         echo "ERROR: --gpu requested but accel3d substitution didn't fire" >&2
         echo "       (template '$TEMPLATE' may have a different XML format)" >&2
-        exit 1
-    fi
-    if ! grep -q "<gl enable='yes'" <<<"$XML"; then
-        echo "ERROR: --gpu requested but spice <gl> insertion didn't fire" >&2
-        echo "       (template lacks the expected <image compression='off'/> anchor)" >&2
         exit 1
     fi
 fi

@@ -6,7 +6,7 @@
 #     domain-template.xml, then exit without starting it. Confirms
 #     XML substitution + virsh define work.
 #   - TIER4_NO_VIEWER=1 — define + start the domain, skip
-#     virt-viewer launch. Confirms qemu/libvirt actually boots the
+#     waypipe-client launch. Confirms qemu/libvirt actually boots the
 #     domain (it'll halt at "no bootable device" — that's expected
 #     since the template has no disk).
 #

@@ -102,7 +102,6 @@ DOMAIN_XML=$(cat <<XML
     </interface>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
-    <graphics type='spice' autoport='yes' listen='127.0.0.1'/>
     <video><model type='virtio' heads='1'/></video>
   </devices>
 </domain>

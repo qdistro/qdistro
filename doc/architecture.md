@@ -45,7 +45,7 @@ compositor directly. Full detail is in [isolation-tiers](isolation-tiers.md).
 | 1. SELinux | LSM restrictions, same Wayland connection | Yes |
 | 2. podman | User namespace; container has a nested compositor| Yes |
 | 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes |
-| 4. VM, whole-window | KVM + libvirt + `virt-viewer` (SPICE) | Yes |
+| 4. VM, whole-window | KVM + libvirt + waypipe (nested qdwin) | Yes |
 | 5. VM, per-app | KVM + libvirt + waypipe over AF_VSOCK (Linux guest) | Yes |
 | 6. Remote machine | Separate physical machine; remote-output | No |
 

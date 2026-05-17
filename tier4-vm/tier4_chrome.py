@@ -85,7 +85,7 @@ SILO_PALETTE_HEX: tuple[str, ...] = (
 
 
 # Tier-4 secctx app_ids carry the ``qdistro.tier4.`` prefix; the silo
-# tag follows. spawn-tier4.sh wraps virt-viewer via qdistro-secctx-exec
+# tag follows. spawn-tier4.sh wraps the display client via qdistro-secctx-exec
 # with --app-id qdistro.tier4.<vm_name>, so the silo == the vm name
 # unless the launcher overrides it with TIER4_SECCTX_APPID.
 TIER4_SECCTX_PREFIX = "qdistro.tier4."

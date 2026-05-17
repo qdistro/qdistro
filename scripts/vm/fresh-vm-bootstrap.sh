@@ -230,7 +230,6 @@ if [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = "1" ]; then
     if [ -x "$SRC/qdistro/tier4-vm/build-guest-image.sh" ]; then
         log "building tier-4 base disk (QDISTRO_BUILD_TIER4_BASE=1)..."
         bash "$SRC/qdistro/tier4-vm/build-guest-image.sh" \
-            || log "  WARN: tier-4 base build failed; phase7-tier4-spice-clipboard-live will SKIP"
     else
         log "  WARN: tier4-vm/build-guest-image.sh not staged; skipping"
     fi

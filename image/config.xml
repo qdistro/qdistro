@@ -159,12 +159,8 @@
     <package name="libvirt-daemon-qemu"/>
     <package name="libvirt-client"/>
     <package name="virt-install"/>
-    <package name="virt-viewer"/>
     <package name="qemu-x86"/>
     <package name="qemu-tools"/>
-    <package name="qemu-ui-spice-core"/>
-    <package name="qemu-ui-spice-app"/>
-    <package name="spice-vdagent"/>
     <package name="qemu-audio-pipewire"/>
     <package name="qemu-audio-alsa"/>
     <package name="socat"/>

@@ -239,7 +239,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: §Phase-7 v13 toplevel_security_context end-to-end"
 }
 
-@test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + spice display" {
+@test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + waypipe display" {
     # §Phase-7 tier-4 — libvirt + virt-viewer wrapper smoke. Linux-only
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
     # define-only and no-viewer modes; full virt-viewer-on-wayland-1
@@ -393,24 +393,6 @@ stage_vm_driver() {
     assert_output_contains "PASS: spec/30 Tier-1 design + skeleton present"
 }
 
-@test "phase7-tier4-spice-clipboard: spec/10 SPICE main-channel clipboard defense-in-depth" {
-    # Defense-in-depth around the SPICE main channel: tier-4 domains
-    # ship with <clipboard copypaste='no'/> by default (forcing all
-    # host ↔ guest clipboard via wayland selection, which qdistro
-    # already gates) and a per-launch 16-hex SPICE ticket. Admin
-    # opts in to the SPICE clipboard via TIER4_SPICE_CLIPBOARD=allowed.
-    stage_vm_driver "s49-tier4-spice-clipboard.sh"
-    vm_run "curl -s -o /tmp/s49.sh http://10.0.2.2:8768/s49-tier4-spice-clipboard.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "qdistro-tier4-spawn / virsh absent on this VM"
-    fi
-    assert_output_contains "PASS: default XML disables SPICE clipboard channel"
-    assert_output_contains "PASS: default XML carries 16-hex SPICE password"
-    assert_output_contains "PASS: opt-in TIER4_SPICE_CLIPBOARD=allowed enables clipboard channel"
-    assert_output_contains "PASS: SPICE password rotates per spawn"
-    assert_output_contains "PASS: spec/10 SPICE clipboard gate (tier-4 defense-in-depth) end-to-end"
-}
 
 @test "phase7-focus-aware-clear: spec/10 v14 admin clipboard cleared on cross-silo focus (Q1a)" {
     # qdwin_shell_v1@v14 set_keyboard_focus + seat_focus_changed close
@@ -535,24 +517,6 @@ stage_vm_driver() {
     assert_output_contains "PASS: 0 new denials — qdistro_broker.te 0.3.0 covers the enforcing workload"
 }
 
-@test "phase7-tier4-spice-clipboard-live: spec/10 SPICE clipboard live guest validation" {
-    # Boots a tier-4 guest from the SPICE-capable base image, polls
-    # qga, asserts spice-vdagentd is active inside the guest, and
-    # verifies running domain XML carries the configured copypaste
-    # value (default 'no', opt-in 'yes'). Skips when the base image
-    # isn't built (qdistro-tier4-base.qcow2 absent).
-    stage_vm_driver "s54-tier4-spice-clipboard-live.sh"
-    vm_run "curl -s -o /tmp/s54.sh http://10.0.2.2:8768/s54-tier4-spice-clipboard-live.sh && chmod +x /tmp/s54.sh && bash /tmp/s54.sh 2>/dev/null"
-    assert_success
-    if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-4 SPICE base image absent (run build-guest-image.sh) or virsh missing"
-    fi
-    assert_output_contains "PASS: running domain XML carries copypaste='no'"
-    assert_output_contains "PASS: qga reachable inside"
-    assert_output_contains "PASS: spice-vdagentd.service active inside"
-    assert_output_contains "PASS: opt-in running domain XML carries copypaste='yes'"
-    assert_output_contains "PASS: spec/10 SPICE clipboard live guest validation end-to-end"
-}
 
 @test "phase7-qsu-argv-scopes: tasks(069/072) — argv-aware scopes round-trip end-to-end" {
     # Closes the qsu argv-aware approval flow: cache backend (task 069)

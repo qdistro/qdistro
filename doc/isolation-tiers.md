@@ -17,7 +17,7 @@ the outer renders them.
 | 1. SELinux | LSM restrictions, same Wayland connection | Yes |
 | 2. podman | User namespace; container has a nested compositor | Yes |
 | 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes |
-| 4. VM whole-window| KVM + libvirt + `virt-viewer` (SPICE) | Yes |
+| 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes |
 | 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes |
 | 6. Remote machine | Separate physical machine; remote-output | No |
 
@@ -180,21 +180,21 @@ security/correctness/operational review.
 
 ## Tier 4 — whole-VM windowed
 
-**libvirt + QEMU + `virt-viewer`** as one chromed peer toplevel,
+**libvirt + QEMU + waypipe** (nested qdwin in the guest) as one chromed peer toplevel,
 mirroring tier 2's container pattern.
 
 Stack:
 
 - libvirt driving QEMU. Both packaged on Tumbleweed.
-- Display: `-display spice-app` → `remote-viewer spice://...` as a
+- Display: waypipe server in guest → host waypipe-client over AF_VSOCK as a
  Wayland toplevel. Or `-display gtk,gl=on` for a direct Wayland toplevel
  without SPICE round-trip. SPICE is the documented default; `-display
  gtk` is the fallback if SPICE bit-rots.
 - The outer wraps the viewer toplevel via `qdwin_nested_manager_v1`
  exactly like tier 2 today.
-- Clipboard: routes `spice-vdagent` through the broker's
+- Clipboard: Wayland data-device over waypipe (same `ClipboardGate.qml` as tier-3),
  `CheckClipboardTransfer` gate.
-- Audio: SPICE bidirectional audio channel; routes to host PipeWire via
+- Audio: `-audiodev pipewire` + `virtio-snd`; routes to host PipeWire via
  the existing per-uid bridge.
 
 ### Why this is the right tier-4 default
