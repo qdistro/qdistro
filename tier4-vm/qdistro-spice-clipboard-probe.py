@@ -45,7 +45,6 @@ Spec refs:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -180,8 +179,8 @@ def _run_probe(host: str, port: int, password: str | None,
 
     if expect_silent:
         if state["saw_grab"]:
-            print(f"FAIL: expected silent SPICE clipboard but saw "
-                  f"a grab from the guest", file=sys.stderr)
+            print("FAIL: expected silent SPICE clipboard but saw "
+                  "a grab from the guest", file=sys.stderr)
             return 2
         print("OK: SPICE clipboard silent (no grab observed within "
               f"{timeout_s:.1f}s)")
