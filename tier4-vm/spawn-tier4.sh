@@ -429,6 +429,9 @@ fi
 if [ -n "${TIER4_CID:-}" ]; then
     CID="$TIER4_CID"
     [[ "$TIER4_CID" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: CID='$TIER4_CID' not numeric" >&2; exit 1; }
+    if [ "$TIER4_CID" -lt "$TIER4_CID_MIN" ] || [ "$TIER4_CID" -gt "$CID_MAX" ]; then
+        echo "[tier4] FAIL: CID '$TIER4_CID' out of valid range $TIER4_CID_MIN-$CID_MAX" >&2; exit 1
+    fi
 else
     TAKEN=$(run_as_admin sh -c '
         for d in $(virsh list --all --name); do

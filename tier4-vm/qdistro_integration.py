@@ -10,7 +10,7 @@ method that drives the ACPI→destroy lifecycle in
 The launcher (qdshell PodApps) spawns the App1 receiver via
 ``spawn-tier4.sh <vm>`` with the secctx triple
 ``(qdistro.tier4, qdistro.tier4.<vm>, <launch-token>)``. The receiver
-process is a thin wrapper around the display client (waypipe or legacy virt-viewer); when the user clicks
+process is a thin wrapper around the display client (waypipe); when the user clicks
 the chrome close button qdshell calls ``Close()`` and we hand off to
 ``close_vm`` so the qemu / libvirt teardown runs in-process rather
 than racing the display client's own signal handling.
