@@ -25,15 +25,9 @@ setup() {
 
     # Stage on host http server (port 8765 by convention — matches
     # broker-e2e.bats / app-launcher.bats so we don't fight for a port).
+    # See stage_http_8765 in helpers.bash for the kill-and-respawn rationale.
     cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-
-    if ! ss -tln 2>/dev/null | grep -q ":8765 "; then
-        local stage_dir
-        stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
-        (cd "$stage_dir" && nohup python3 -m http.server 8765 \
-            >/tmp/qdistro-bats-http.log 2>&1 &)
-        sleep 1
-    fi
+    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
 
     vm_run 'curl -s -o /tmp/s104.sh http://10.0.2.2:8765/s104-admin-app-polish.sh && chmod +x /tmp/s104.sh && bash /tmp/s104.sh'
     assert_success
