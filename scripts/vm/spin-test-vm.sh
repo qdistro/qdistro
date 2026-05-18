@@ -105,6 +105,17 @@ if [ -d "$PARENT/qdlocker" ]; then
         --exclude='.git' --exclude='build' --exclude='build-host*' \
         -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
 fi
+# qdbrowser ships the outer ``qdbrowser/qdbrowser/`` python package
+# that install-browser-bridge-for-vm.sh stages to
+# /usr/local/lib/qdistro/qdbrowser/ (so probes can
+# ``from qdbrowser.pwd_autofill import ...``). Without staging the
+# tarball here the bridge installer auto-search misses the package
+# and the bake-time python313-jeepney is wasted.
+if [ -d "$PARENT/qdbrowser" ]; then
+    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
+        --exclude='.git' --exclude='build' --exclude='build-host*' \
+        -czf "$STAGE/qdbrowser.tar.gz" -C "$PARENT/qdbrowser" .
+fi
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.
