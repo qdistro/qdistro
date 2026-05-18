@@ -209,6 +209,30 @@ EOF
 
 chown -R admin:users /home/admin/.config/systemd
 
+# 4c. Polkit rule: let `admin` lock its own logind session without
+# prompting for an admin password.
+#
+# org.freedesktop.login1.Session.Lock is gated by
+# org.freedesktop.login1.lock-sessions, whose default policy on
+# Tumbleweed is auth_admin (full root password). qdistro's locker
+# integration (s103-locker-idle.sh Test 4) drives this method to
+# simulate HandleLidSwitch=lock — without the rule below the call
+# fails with PolicyKit "Not authorized" and the lid-close PASS string
+# never fires. 50- prefix so a 10-* rule in /etc/polkit-1/rules.d/
+# can still override per-site.
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-qdistro-locker-idle.rules <<'EOF'
+// qdistro: admin may Lock its own logind session without auth.
+// Mirrors HandleLidSwitch=lock semantics for headless test VMs.
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.login1.lock-sessions" &&
+        subject.user === "admin") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});
+EOF
+
 # 5. Enable (but don't start — caller decides).
 runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service' \
     2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
