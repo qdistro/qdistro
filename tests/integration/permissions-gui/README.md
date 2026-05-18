@@ -47,6 +47,8 @@ Numbering is roughly chronological; each scenario stands on its own.
   cap at 4), 54 (sanitized env strips LD_* / PYTHONPATH), 55
   (qsu end-to-end under SELinux Enforcing — zero new AVCs;
   requires SSH transport, qga cannot setenforce).
+- **56–57** — tier-4 RDP transport visual acceptance: single guest
+  window visible over FreeRDP/vsock and close-cleanup of the RDP path.
 
 ## Running
 

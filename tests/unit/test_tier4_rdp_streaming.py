@@ -61,6 +61,31 @@ def test_spawn_contains_rdp_transport_pipeline():
     assert "find_rdp_client" in text
 
 
+def test_spawn_rdp_password_stays_out_of_viewer_argv():
+    text = SPAWN.read_text()
+    assert 'RDP_PASSWORD_FILE="$ADMIN_RUNTIME/tier4-${VM_NAME}-rdp-password"' in text
+    assert 'QDISTRO_TIER4_RDP_PASSWORD_FILE="${RDP_PASSWORD_FILE:-}"' in text
+    assert 'RDP_ARGV=("$RDP_CLIENT" "/v:127.0.0.1:$RDP_LOCAL_PORT" "/u:qdistro" "/cert:ignore" "/from-stdin")' in text
+    assert "/p:" not in text
+
+
+def test_tier4_control_uses_process_group_and_redacts_password_args():
+    text = (REPO_ROOT / "tier4-vm" / "tier4_control.py").read_text()
+    assert "_terminate_viewer_process_group" in text
+    assert "start_new_session=True" in text
+    assert "os.killpg(proc.pid, signum)" in text
+    assert 'arg.startswith("/p:")' in text
+    assert 'arg.startswith("--rdp-password")' in text
+    assert "QDISTRO_TIER4_RDP_PASSWORD_FILE" in text
+
+
+def test_spawn_trust_checks_apply_to_privileged_config_and_template():
+    text = SPAWN.read_text()
+    assert "require_trusted_root_file_if_privileged" in text
+    assert 'require_trusted_root_file_if_privileged "$cfg" "config file"' in text
+    assert 'require_trusted_root_file_if_privileged "$override" "domain template"' in text
+
+
 def test_guest_image_bake_contains_rdp_runtime_and_forwarder():
     text = BUILD_GUEST_IMAGE.read_text()
     assert "socat" in text
@@ -111,6 +136,81 @@ def test_guest_publisher_rdp_dry_run_writes_subscription_and_bridge(tmp_path: Pa
     assert "TCP:127.0.0.1:$RDP_PORT" in out
 
 
+def test_guest_publisher_env_overrides_config_alias(tmp_path: Path):
+    cfg = tmp_path / "publisher.conf"
+    dry = tmp_path / "dry.log"
+    sock_dir = tmp_path / "run"
+    sock_dir.mkdir()
+    (sock_dir / "wayland-0").touch()
+    cfg.write_text(
+        "QDISTRO_TIER4_STREAMING_METHOD=rdp\n"
+        "QDISTRO_TIER4_RDP_SUBSCRIBE=1234\n"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "QDISTRO_TIER4_DRY_RUN": "1",
+            "QDISTRO_TIER4_DRY_OUT": str(dry),
+            "QDISTRO_TIER4_CONFIG": str(cfg),
+            "QDISTRO_TIER4_RDP_SUBSCRIBE": "last",
+            "XDG_RUNTIME_DIR": str(sock_dir),
+        }
+    )
+    cp = subprocess.run(
+        ["bash", str(PUBLISHER), "7880"],
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+    assert cp.returncode == 0, cp.stderr
+    out = dry.read_text()
+    assert "rdp_subscribe=last" in out
+    assert "--subscribe last" in out
+    assert "--subscribe 1234" not in out
+
+
+def test_guest_publisher_rejects_bad_rdp_subscribe_even_in_dry_run(tmp_path: Path):
+    dry = tmp_path / "dry.log"
+    sock_dir = tmp_path / "run"
+    sock_dir.mkdir()
+    (sock_dir / "wayland-0").touch()
+    env = os.environ.copy()
+    env.update(
+        {
+            "QDISTRO_TIER4_DRY_RUN": "1",
+            "QDISTRO_TIER4_DRY_OUT": str(dry),
+            "QDISTRO_TIER4_DISPLAY": "rdp",
+            "QDISTRO_TIER4_RDP_SUBSCRIBE": "last;touch-bad",
+            "XDG_RUNTIME_DIR": str(sock_dir),
+        }
+    )
+    cp = subprocess.run(
+        ["bash", str(PUBLISHER), "7880"],
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+    assert cp.returncode == 2
+    assert "QDISTRO_TIER4_RDP_SUBSCRIBE must be 'last' or a numeric" in cp.stderr
+    assert not dry.exists()
+
+
+def test_guest_publisher_rejects_bad_wayland_socket_even_in_dry_run(tmp_path: Path):
+    dry = tmp_path / "dry.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "QDISTRO_TIER4_DRY_RUN": "1",
+            "QDISTRO_TIER4_DRY_OUT": str(dry),
+            "QDISTRO_TIER4_DISPLAY": "rdp",
+            "QDISTRO_TIER4_WAYLAND_SOCKET": "wayland-0;bad",
+        }
+    )
+    cp = subprocess.run(
+        ["bash", str(PUBLISHER), "7880"],
+        env=env, text=True, capture_output=True, timeout=10,
+    )
+    assert cp.returncode == 2
+    assert "contains forbidden chars" in cp.stderr
+    assert not dry.exists()
+
+
 def test_guest_publisher_waits_for_rdp_tcp_before_publishing_creds():
     text = PUBLISHER.read_text()
     assert "tcp_loopback_accepts \"$RDP_PORT\"" in text
@@ -143,3 +243,15 @@ def test_guest_publisher_streaming_method_config_alias(tmp_path: Path):
     )
     assert cp.returncode == 0, cp.stderr
     assert "display=rdp" in dry.read_text()
+
+
+def test_qdistro_forward_supports_fd_secrets_and_strict_args():
+    text = (REPO_ROOT / "daemons" / "forward" / "qdistro-forward.c").read_text()
+    assert "--access-token-fd" in text
+    assert "--rdp-password-fd" in text
+    assert "read_access_token_fd" in text
+    assert "read_password_fd" in text
+    assert "parse_int_range(optarg, 1, 65535, \"rdp-port\"" in text
+    assert "rdp password must be non-empty" in text
+    assert "clear_owned_access_token()" in text
+    assert "clear_owned_password()" in text
