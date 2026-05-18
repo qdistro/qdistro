@@ -71,11 +71,19 @@ loginctl enable-linger admin
 # cmdline takes a single plugin name, so the sub-backend is wired here
 # in weston.ini rather than appended to the unit's ExecStart.
 # num-outputs=2 gives headroom for concurrent forwards.
+# idle-time=0 disables weston's built-in idle timer and flips qdwin
+# into its internal-idle mode so ext-idle-notify-v1 subscribers
+# (qdlocker — see qdlocker/qdlocker/idle.py) receive `idled` events
+# at their requested timeout rather than only after weston's 300s
+# default. The s103-locker-idle.sh Test 3 sets QDLOCKER_IDLE_MS=2000
+# and expects the lock to fire within 10s; that path only works when
+# qdwin is running in internal-idle mode.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
 renderer=pixman
 modules=
+idle-time=0
 
 [shell]
 locking=false
