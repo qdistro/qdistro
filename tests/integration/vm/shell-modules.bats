@@ -5,6 +5,20 @@
 
 load helpers
 
+# Round 6 Phase 3 (2026-05-18): §6.6 and §6.8 probes that drive the
+# legacy interactive Python qdshell (qdshell.py + ctrl-socket + panel
+# /notifications/launcher/locker modules) are archived under
+# qdistro-old-plan/compositor/{qdshell,spike-6.5}/. The current
+# production qdshell is QML/Quickshell and does not expose a ctrl
+# socket; rewriting these probes against QML qdshell belongs to a
+# separate Phase-3 ticket. Probes whose deploy-stage src files are
+# also archived (bootstrap-qdwin-in-vm.sh, com.qdistro.Notifications1
+# .conf, qdistro-admin-approval-app.py) are skipped for the same
+# reason.
+SKIP_LEGACY_QDSHELL_PY="legacy §6.6 qdshell.py interactive probe (panel/notifications/launcher/locker/ctrl-socket) — current qdshell is QML-based; needs Phase-3 rewrite ticket"
+SKIP_LEGACY_DEPLOY_FILES="legacy §6.6 deploy files (bootstrap-qdwin-in-vm.sh / com.qdistro.Notifications1.conf / qdistro-admin-approval-app.py) archived under qdistro-old-plan/compositor/; needs Phase-3 rewrite ticket"
+SKIP_LEGACY_NESTED_QDSHELL="legacy §6.8 nested probe drives qdshell.py for broker/pixel/dmabuf path — needs Phase-3 rewrite ticket"
+
 setup() {
     vm_run "pgrep -x pipewire >/dev/null"
     assert_success
@@ -12,6 +26,7 @@ setup() {
 }
 
 @test "s6.6-s1-panel: attach_panel places view + reserves work-area" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s10-panel.sh"
     assert_success
     assert_output_contains "PASS: attach_panel wired end-to-end"
@@ -21,6 +36,7 @@ setup() {
 }
 
 @test "s6.6-s2-notifications: Notify bubble round-trip + tray watcher" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s11-notifications.sh"
     assert_success
     assert_output_contains "PASS: notifications daemon claimed org.freedesktop.Notifications"
@@ -32,6 +48,7 @@ setup() {
 }
 
 @test "s6.6-s3-s4-launcher-switcher: toggle + filter + cycle + commit" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s12-launcher.sh"
     assert_success
     assert_output_contains "PASS: launcher module installed"
@@ -45,6 +62,7 @@ setup() {
 }
 
 @test "s6.6-s5-locker: lock + unlock drives set_locked round-trip" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s13-locker.sh"
     assert_success
     assert_output_contains "PASS: locker module installed"
@@ -56,6 +74,7 @@ setup() {
 }
 
 @test "s6.6-s5-locker-auth: PAM + fprint + no-auth refusal" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s14-locker-auth.sh"
     assert_success
     assert_output_contains "PASS: locker module installed (auth mode)"
@@ -67,6 +86,7 @@ setup() {
 }
 
 @test "s6.6-s6-nested-hosting: nested weston registers as outer toplevel" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s15-nested-hosting.sh"
     assert_success
     assert_output_contains "PASS: qdshell reachable; baseline toplevel count="
@@ -76,6 +96,7 @@ setup() {
 }
 
 @test "s6.6-s7-greetd-cutover: unit deploys on tty3 + qdshell installed" {
+    skip "$SKIP_LEGACY_DEPLOY_FILES"
     vm_run "bash /root/s16-greetd-cutover.sh"
     assert_success
     assert_output_contains "PASS: deploy bootstrap completed"
@@ -89,6 +110,7 @@ setup() {
 }
 
 @test "s6.6-notify-relay: cross-uid notification via system-bus relay" {
+    skip "$SKIP_LEGACY_DEPLOY_FILES"
     vm_run "bash /root/s17-notify-relay.sh"
     assert_success
     assert_output_contains "PASS: notifications module installed"
@@ -98,6 +120,7 @@ setup() {
 }
 
 @test "s6.6-approval-app: app installed + broker round-trip" {
+    skip "$SKIP_LEGACY_DEPLOY_FILES"
     vm_run "bash /root/s18-approval-app.sh"
     assert_success
     assert_output_contains "PASS: approval app installed at"
@@ -120,6 +143,7 @@ setup() {
 }
 
 @test "s6.6-cursor-sprite-install: solid-colour sprite assignment no-crash" {
+    skip "$SKIP_LEGACY_QDSHELL_PY"
     vm_run "bash /root/s20-cursor-sprite-install.sh"
     assert_success
     assert_output_contains "PASS: weston + qdwin started (cursor-solid enabled)"
@@ -162,6 +186,7 @@ setup() {
 }
 
 @test "s6.8-s4-nested-broker-gate: allow + deny verdicts gate the proxy lifecycle" {
+    skip "$SKIP_LEGACY_NESTED_QDSHELL"
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s24-nested-broker-gate.sh 2>/dev/null"
     assert_success
     assert_output_contains "PASS: outer qdwin + qdshell up"
@@ -173,6 +198,7 @@ setup() {
 }
 
 @test "s6.8-s2b-nested-pixel-bind: pixelfeed consumer binds proxy pixels" {
+    skip "$SKIP_LEGACY_NESTED_QDSHELL"
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s26-nested-pixel-bind.sh 2>/dev/null"
     assert_success
     assert_output_contains "PASS: §6.8 S2b qdshell received nested_proxy_pixel_source"
@@ -203,6 +229,7 @@ setup() {
 }
 
 @test "s6.8-s2c-nested-pw-pixels: pixelfeed pulls real PipeWire frames" {
+    skip "$SKIP_LEGACY_NESTED_QDSHELL"
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s27-nested-pw-pixels.sh 2>/dev/null"
     assert_success
     assert_output_contains "PASS: §6.8 S2c qdshell spawned pixelfeed"
@@ -212,6 +239,7 @@ setup() {
 }
 
 @test "s6.8-pixelfeed-dmabuf: dmabuf zero-copy plumbing bound + outer dmabuf advertised" {
+    skip "$SKIP_LEGACY_NESTED_QDSHELL"
     # Skips cleanly on no-GPU VMs (s31 emits "SKIP:" and exits 0 in that path).
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s31-pixelfeed-dmabuf.sh 2>/dev/null"
     assert_success
@@ -224,6 +252,7 @@ setup() {
 }
 
 @test "spec25-phase2-layered-identity-urgent-banner: GetPending exposes layered fields + banner shown/cleared" {
+    skip "$SKIP_LEGACY_DEPLOY_FILES"
     vm_run "bash /root/s30-approval-app-phase2.sh"
     assert_success
     assert_output_contains "PASS: GetPending exposes layered identity (sha256 + selinux + cgroup)"
@@ -234,6 +263,7 @@ setup() {
 }
 
 @test "s6.6-approval-app-tray: SNI item + badge + ListHistory" {
+    skip "$SKIP_LEGACY_DEPLOY_FILES"
     vm_run "bash /root/s19-approval-app-tray.sh"
     assert_success
     assert_output_contains "PASS: broker active"
