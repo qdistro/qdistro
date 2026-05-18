@@ -20,6 +20,23 @@ if [ ! -d "$SRC" ]; then
     exit 2
 fi
 
+# Print-VM helpers (install-print-vm.sh, attach/detach-usb,
+# domain-template.xml, qdistro-print-allowlist, qdistro-print-jobs,
+# build-print-image.sh) historically live in a sibling `print-vm/`
+# directory rather than the proxy's $SRC. Probe a sibling path so a
+# single install invocation covers both halves.
+SRC_VM=""
+case "$SRC" in
+    */print)
+        if [ -d "${SRC%/print}/print-vm" ]; then
+            SRC_VM="${SRC%/print}/print-vm"
+        fi
+        ;;
+esac
+if [ -z "$SRC_VM" ] && [ -d "$SRC/../print-vm" ]; then
+    SRC_VM="$(cd "$SRC/../print-vm" && pwd)"
+fi
+
 DEST_BIN=/usr/local/bin
 DEST_SYSD=/etc/systemd/system
 DEST_LIB=/usr/libexec/qdistro
@@ -48,15 +65,27 @@ if [ -f "$SRC/qdistro_print_browse.py" ]; then
 fi
 # Host CLI (qdistro-print-allowlist). On the test VM it just sits
 # unused; on the admin host it's the entry point for `apply --vm`.
+allowlist_src=""
 if [ -f "$SRC/qdistro-print-allowlist" ]; then
-    install -m 0755 "$SRC/qdistro-print-allowlist" \
+    allowlist_src="$SRC/qdistro-print-allowlist"
+elif [ -n "$SRC_VM" ] && [ -f "$SRC_VM/qdistro-print-allowlist" ]; then
+    allowlist_src="$SRC_VM/qdistro-print-allowlist"
+fi
+if [ -n "$allowlist_src" ]; then
+    install -m 0755 "$allowlist_src" \
         "$DEST_BIN/qdistro-print-allowlist"
 fi
 # Host CLI (qdistro-print-jobs) — task(109): wrapper that drives the
 # in-VM qdistro-print-job-control via qemu-guest-agent. Used by the
 # admin-app's Printing > Jobs sub-pane and direct admin invocation.
+jobs_src=""
 if [ -f "$SRC/qdistro-print-jobs" ]; then
-    install -m 0755 "$SRC/qdistro-print-jobs" \
+    jobs_src="$SRC/qdistro-print-jobs"
+elif [ -n "$SRC_VM" ] && [ -f "$SRC_VM/qdistro-print-jobs" ]; then
+    jobs_src="$SRC_VM/qdistro-print-jobs"
+fi
+if [ -n "$jobs_src" ]; then
+    install -m 0755 "$jobs_src" \
         "$DEST_BIN/qdistro-print-jobs"
 fi
 # Phase-9 §step 1: spawn helper. Lands as a sibling so the proxy's
@@ -70,14 +99,20 @@ fi
 # source-of-truth for printer attach/detach.
 for helper in qdistro-print-attach-usb.sh qdistro-print-detach-usb.sh \
               install-print-vm.sh; do
+    helper_src=""
     if [ -f "$SRC/$helper" ]; then
+        helper_src="$SRC/$helper"
+    elif [ -n "$SRC_VM" ] && [ -f "$SRC_VM/$helper" ]; then
+        helper_src="$SRC_VM/$helper"
+    fi
+    if [ -n "$helper_src" ]; then
         # Strip .sh suffix on the user-facing CLI entries; keep
         # install-print-vm.sh as-is (it's an admin sysadmin tool).
         case "$helper" in
             install-print-vm.sh)
-                install -m 0755 "$SRC/$helper" "$DEST_BIN/$helper" ;;
+                install -m 0755 "$helper_src" "$DEST_BIN/$helper" ;;
             *)
-                install -m 0755 "$SRC/$helper" \
+                install -m 0755 "$helper_src" \
                     "$DEST_BIN/${helper%.sh}" ;;
         esac
     fi
@@ -85,9 +120,15 @@ done
 # domain-template.xml lives under /usr/share/qdistro/print-vm so the
 # install-print-vm CLI finds it at the standard system path.
 DEST_TEMPLATE_DIR=/usr/share/qdistro/print-vm
+template_src=""
 if [ -f "$SRC/domain-template.xml" ]; then
+    template_src="$SRC/domain-template.xml"
+elif [ -n "$SRC_VM" ] && [ -f "$SRC_VM/domain-template.xml" ]; then
+    template_src="$SRC_VM/domain-template.xml"
+fi
+if [ -n "$template_src" ]; then
     install -d -m 0755 "$DEST_TEMPLATE_DIR"
-    install -m 0644 "$SRC/domain-template.xml" \
+    install -m 0644 "$template_src" \
         "$DEST_TEMPLATE_DIR/domain-template.xml"
 fi
 # polkit actions for org.qdistro.print.* — safe to install even when

@@ -5,7 +5,7 @@
 # admin uid (admin) and from a non-admin uid (a fresh `pwduser` silo).
 #
 # Asserts:
-#   1. Daemon is up and reachable on com.qdistro.Pwd1.
+#   1. Daemon is up and reachable on org.qdistro.Pwd1.
 #   2. Admin can CreateVault + AddItem with an exe-pin.
 #   3. Admin GetItemAdmin reads the value (bypasses pin gate).
 #   4. Non-admin uid that DOESN'T match the pin gets PolicyError.
@@ -103,8 +103,8 @@ fi
 # ALLOWED. The pin is on /usr/bin/dbus-send; pwduser invokes dbus-send
 # to call GetItem on the Pwd1 bus. /proc/<pid>/exe matches the pin.
 DBUS_OUT=$(runuser -u pwduser -- "$DBUS_SEND" --system --print-reply \
-    --dest=com.qdistro.Pwd1 /com/qdistro/Pwd1 \
-    com.qdistro.Pwd1.GetItem "string:$VAULT" "string:$ITEM" \
+    --dest=org.qdistro.Pwd1 /org/qdistro/Pwd1 \
+    org.qdistro.Pwd1.GetItem "string:$VAULT" "string:$ITEM" \
     2>/tmp/pwd-step6.log) || {
     cat /tmp/pwd-step6.log
     echo "FAIL: dbus-send (pinned exe) should have been allowed"; exit 6; }
