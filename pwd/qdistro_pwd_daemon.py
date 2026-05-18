@@ -927,9 +927,19 @@ class PwdDaemon(dbus.service.Object):
         pass
 
 
-def _on_term(signum, frame):
-    print(f"[qdistro-pwd] caught signal {signum}, shutting down", flush=True)
-    GLib.MainLoop.quit(_LOOP)
+def _on_term(*_user_data):
+    # ``GLib.unix_signal_add(priority, signum, handler, *user_data)`` invokes
+    # the handler with ``*user_data`` — NOT with the Python ``signal``-module
+    # ``(signum, frame)`` convention. The pre-fix signature
+    # ``def _on_term(signum, frame)`` raised ``TypeError: _on_term() missing
+    # 1 required positional argument: 'frame'`` on SIGTERM/SIGINT, leaving
+    # the daemon hanging in ``stop-sigterm`` after ``systemctl restart``
+    # (Round-7 fix-pass review). Accept ``*user_data`` and return ``False``
+    # so GLib removes the source after the loop quits.
+    print("[qdistro-pwd] caught signal, shutting down", flush=True)
+    if _LOOP is not None:
+        GLib.MainLoop.quit(_LOOP)
+    return False
 
 
 _LOOP: GLib.MainLoop | None = None
