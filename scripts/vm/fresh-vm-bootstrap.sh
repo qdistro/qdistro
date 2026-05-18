@@ -130,6 +130,30 @@ if [ -d "$PROBE_SRC" ]; then
     done
 fi
 
+# ---- 4c. Generate RDP TLS cert/key for §6.8 nested probes ---------------
+# The s21/s23/s25/s28 nested probes start weston with the RDP backend,
+# which requires /home/admin/qdwin-rdp/{rdp.crt,rdp.key}. winpr-makecert
+# emits these idempotently; without them the RDP listener refuses
+# incoming peers ("BIO_new failed for certificate") and probes time
+# out waiting for nested_manager binds and seat creation.
+if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.key ]; then
+    if command -v winpr-makecert >/dev/null 2>&1; then
+        log "generating RDP TLS cert/key (winpr-makecert)..."
+        install -d -o admin -g admin /home/admin/qdwin-rdp
+        runuser -u admin -- winpr-makecert -rdp -path /home/admin/qdwin-rdp \
+            >/dev/null 2>&1 || log "  WARN: winpr-makecert failed"
+        # winpr-makecert names files <hostname>.{crt,key}; rename.
+        (cd /home/admin/qdwin-rdp \
+            && for f in *.crt; do [ "$f" = rdp.crt ] && continue; \
+                 mv "$f" rdp.crt 2>/dev/null; break; done \
+            && for f in *.key; do [ "$f" = rdp.key ] && continue; \
+                 mv "$f" rdp.key 2>/dev/null; break; done)
+        chown -R admin:admin /home/admin/qdwin-rdp 2>/dev/null || true
+    else
+        log "  WARN: winpr-makecert missing — §6.8 nested probes will fail"
+    fi
+fi
+
 # ---- 5. Install SELinux policy modules (permissive by default) ----------
 log "installing SELinux policy modules (permissive)..."
 for pol in selinux/broker selinux/pwd selinux/tier1; do
