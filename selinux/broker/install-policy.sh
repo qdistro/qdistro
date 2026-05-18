@@ -35,6 +35,24 @@ if ! command -v semodule >/dev/null 2>&1; then
     exit 1
 fi
 
+# Dependency: qdistro_broker.te's 0.4.0 gen_require pulls in
+# qdistro_pwd_audit_t (declared in the pwd module's .te). semodule's
+# AST resolution at install time requires that type to be present in
+# the active policy store — gen_require alone doesn't define it, it
+# only references it. If qdistro_pwd isn't loaded yet, semodule fails
+# with `Failed to resolve typeattributeset statement at ...cil:54` /
+# `Failed to resolve AST`. Install pwd first when its installer is
+# present and the module is not already active. Idempotent re-run is
+# safe (the pwd installer itself is idempotent).
+if ! semodule -l 2>/dev/null | grep -q '^qdistro_pwd\b'; then
+    PWD_INSTALLER="$DIR/../pwd/install-policy.sh"
+    if [ -x "$PWD_INSTALLER" ]; then
+        echo "[broker-policy-install] qdistro_pwd not loaded — installing it first"
+        (cd "$(dirname "$PWD_INSTALLER")" && bash install-policy.sh) \
+            || { echo "[broker-policy-install] FAIL: prereq qdistro_pwd install failed" >&2; exit 3; }
+    fi
+fi
+
 # Drop the latest .if into the contrib include dir BEFORE building
 # our own .pp. checkmodule glob-includes every .if from
 # $DEVEL/include/contrib/ when expanding any module — including
