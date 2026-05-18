@@ -152,6 +152,38 @@ require() {
     fi
 }
 
+# stage_http_8765 <stage_dir> — idempotently (re)start the host-side
+# python3 http.server on port 8765 rooted at <stage_dir>, so VM tests
+# can fetch driver scripts via http://10.0.2.2:8765/<name>.
+#
+# Round-6 root cause: spin-test-vm leaves an http.server bound to 8765
+# whose cwd is a tempdir that gets deleted on spin exit. The kernel
+# then reports the process cwd as "(deleted)" and python serves an
+# HTML 404 page for every request, which makes the VM-side
+# `curl … | bash` choke on `<!DOCTYPE HTML>`. Detecting a stale server
+# (port-bound but serving wrong root) by content-sniff is fragile, so
+# we always kill anything on 8765 and spawn fresh — costs ~200ms but
+# is deterministic. PID is written to /tmp/qdistro-bats-http.pid for
+# teardown / debugging.
+stage_http_8765() {
+    local stage_dir="$1"
+    [[ -d "$stage_dir" ]] || { echo "stage_http_8765: not a dir: $stage_dir" >&2; return 1; }
+    pkill -f "python3 -m http.server 8765" 2>/dev/null || true
+    local i
+    for ((i=0; i<20; i++)); do
+        ss -tln 2>/dev/null | grep -q ":8765 " || break
+        sleep 0.1
+    done
+    (cd "$stage_dir" && nohup python3 -m http.server 8765 \
+        >/tmp/qdistro-bats-http.log 2>&1 & echo $! >/tmp/qdistro-bats-http.pid)
+    for ((i=0; i<30; i++)); do
+        curl -sf -o /dev/null "http://127.0.0.1:8765/" && return 0
+        sleep 0.1
+    done
+    echo "stage_http_8765: server on 8765 did not become reachable" >&2
+    return 1
+}
+
 # fail_loud <description> — alias for `require` when the test wants
 # to fail unconditionally on a control-flow branch (e.g. after the
 # helper script emits "SKIP:" in its output). Same shape as the
