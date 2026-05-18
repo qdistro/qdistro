@@ -21,7 +21,7 @@
 # show zwp_linux_dmabuf_v1.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s31-weston-outer.log
 NLOG=/home/admin/s31-weston-nested.log

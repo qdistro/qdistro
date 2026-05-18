@@ -14,7 +14,7 @@
 # see tasks/014-phase6.8-nested-passthrough.md.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s21-weston.log
 PLOG=/home/admin/s21-probe.log

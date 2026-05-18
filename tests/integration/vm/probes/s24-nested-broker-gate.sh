@@ -28,7 +28,7 @@
 # RequestPermission + verifying the proxy stays held).
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s24-weston-outer.log
 NLOG=/home/admin/s24-weston-nested.log

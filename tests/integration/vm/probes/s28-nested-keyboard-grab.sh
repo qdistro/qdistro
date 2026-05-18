@@ -23,7 +23,7 @@
 # QDNI packet → nested decoder → notify_key on inner seat.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s28-weston-outer.log
 NLOG=/home/admin/s28-weston-nested.log

@@ -8,7 +8,7 @@
 # into a headless RDP session isn't practical).
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s12-weston.log
 SHLOG=/home/admin/s12-qdshell.log

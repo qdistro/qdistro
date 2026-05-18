@@ -13,7 +13,7 @@
 # the probe.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 # s9-primary-selection.c is staged to /root/ by fresh-vm-bootstrap.sh,
 # not into the qdwin-src tree — use that copy. Fall back to the
 # qdwin-src/spike-6.5 location if a newer sync has populated it.

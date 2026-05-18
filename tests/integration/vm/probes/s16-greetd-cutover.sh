@@ -12,7 +12,7 @@
 # tests ongoing; actually claiming tty3 would disrupt the session.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 
 # Run (or re-run) the deploy bootstrap.
 if [ -x "$QDWIN_SRC/deploy/bootstrap-qdwin-in-vm.sh" ]; then

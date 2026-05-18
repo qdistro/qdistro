@@ -10,7 +10,7 @@
 #      one item for the app to decode.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 
 # 1. App present.
 APP_PATH=""

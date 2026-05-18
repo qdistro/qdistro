@@ -9,7 +9,7 @@ SLOG=/home/admin/gate-qdshell.log
 SOCK=/tmp/qdshell-gate.sock
 INI=/home/admin/.config/weston.ini
 CERTDIR=/home/admin/qdwin-rdp
-QDWIN_SRC=/root/qdwin-src
+QDWIN_SRC=/root/qdistro-src
 
 pgrep -x pipewire >/dev/null
 pkill -9 -x weston 2>/dev/null || true

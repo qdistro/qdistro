@@ -4,7 +4,7 @@
 # claim(token). Verify qdwin logs `claim OK` and inject stubs fire.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 WLOG=/home/admin/s5a-weston.log
 SLOG=/home/admin/s5a-qdshell.log
 SOCK=/tmp/qdshell-s5a.sock

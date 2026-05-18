@@ -14,7 +14,7 @@
 #      RequestPermission injection.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 
 # 1. Broker up (we need it for both GetPending and the "inject pending"
 # path).

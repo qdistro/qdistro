@@ -14,7 +14,7 @@ FLOG=/home/admin/sdl-probe-freerdp.log
 SOCK=/tmp/qdshell-sdl-probe.sock
 INI=/home/admin/.config/weston.ini
 CERTDIR=/home/admin/qdwin-rdp
-QDWIN_SRC=/root/qdwin-src
+QDWIN_SRC=/root/qdistro-src
 
 pgrep -x pipewire >/dev/null
 pkill -9 -x weston 2>/dev/null || true

@@ -2,13 +2,13 @@
 # §6.6 follow-up — per-uid notification relay.
 # Admin's qdshell claims com.qdistro.Notifications1 on the system bus;
 # any uid can call Notify. This test:
-#   1. Installs the policy file + helper from /root/qdwin-src/deploy.
+#   1. Installs the policy file + helper from /root/qdistro-src/deploy.
 #   2. Starts qdwin + qdshell under admin (admin uid).
 #   3. As root, calls qdistro-notify-send → expects bubble in admin's
 #      compositor (seen via ctrl-socket `notifications`).
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s17-weston.log
 SHLOG=/home/admin/s17-qdshell.log

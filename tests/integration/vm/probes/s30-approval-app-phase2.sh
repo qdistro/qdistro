@@ -12,7 +12,7 @@
 #      "urgent banner cleared".
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 
 systemctl is-active --quiet qdistro-admin-broker.service || {
     systemctl start qdistro-admin-broker.service

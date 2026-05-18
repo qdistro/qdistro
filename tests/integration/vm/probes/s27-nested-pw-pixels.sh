@@ -12,7 +12,7 @@
 # Acceptance: at least one tick frame plus a streaming state, no crash.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s27-weston-outer.log
 NLOG=/home/admin/s27-weston-nested.log

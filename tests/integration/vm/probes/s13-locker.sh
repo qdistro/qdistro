@@ -8,7 +8,7 @@
 #   3. `unlock` command: set_locked=0 lands; locked_changed(0) logged.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s13-weston.log
 SHLOG=/home/admin/s13-qdshell.log

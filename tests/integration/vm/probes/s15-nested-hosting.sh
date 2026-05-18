@@ -16,7 +16,7 @@
 # S6 research note at the end of this script.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s15-weston-outer.log
 NLOG=/home/admin/s15-weston-nested.log

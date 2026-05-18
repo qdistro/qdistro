@@ -17,7 +17,7 @@
 #   - key handle=N key=30 state=1 + state=0 (KEY_A down/up)
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s25-weston-outer.log
 NLOG=/home/admin/s25-weston-nested.log

@@ -18,7 +18,7 @@
 set -eo pipefail
 
 MODE=${MODE:-optional_allow}
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s4-weston.log
 SLOG=/home/admin/s4-qdshell.log

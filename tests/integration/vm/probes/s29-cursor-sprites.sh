@@ -19,7 +19,7 @@
 # scope for this smoke.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s29-weston-outer.log
 HLOG=/home/admin/s29-helper.log

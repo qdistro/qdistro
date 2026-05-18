@@ -9,7 +9,7 @@
 # Run from inside the VM (path pattern matches other spike-6.5 probes).
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s10-weston.log
 SHLOG=/home/admin/s10-qdshell.log

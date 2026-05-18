@@ -30,7 +30,7 @@
 #   6 — nested side failed to log advertised
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s23-weston-outer.log
 NLOG=/home/admin/s23-weston-nested.log

@@ -20,7 +20,7 @@
 # any step.
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s4-revoke-weston.log
 SLOG=/home/admin/s4-revoke-qdshell.log

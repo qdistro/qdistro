@@ -12,7 +12,7 @@ set -eo pipefail
 
 WORD=${WORD:-hello}
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 WLOG=/home/admin/s5c-weston.log
 SLOG=/home/admin/s5c-qdshell.log
 PLOG=/home/admin/s5c-probe.log

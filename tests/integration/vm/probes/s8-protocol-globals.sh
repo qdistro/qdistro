@@ -4,7 +4,7 @@
 # (idle-inhibit / ext-idle-notify / cursor-shape / fractional-scale).
 set -eo pipefail
 
-QDWIN_SRC=${QDWIN_SRC:-/root/qdwin-src}
+QDWIN_SRC=${QDWIN_SRC:-/root/qdistro-src}
 CERTDIR=/home/admin/qdwin-rdp
 WLOG=/home/admin/s8-weston.log
 PLOG=/home/admin/s8-probe.log
