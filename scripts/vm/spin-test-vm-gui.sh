@@ -6,6 +6,7 @@
 #   - /usr/local/bin/qdistro-test-permission helper.
 #   - /usr/local/bin/qdistro-start-admin-app and -tui launchers.
 #   - PyQt admin app source under /home/admin/qdistro/admin_app/.
+#   - Textual admin TUI source under /home/admin/qdistro/tui/.
 #   - qterminal.ini pinned to 1200×700 so TUI scenarios don't truncate.
 #   - The admin user's qdwin/qdshell session started so DISPLAY=:0
 #     XWayland is reachable for `vm-gui screenshot` / `xdotool`.
@@ -77,12 +78,32 @@ install -m 0755 "$SRC/deploy/start-admin-app.sh" \
 install -m 0755 "$SRC/deploy/start-admin-tui.sh" \
                 /usr/local/bin/qdistro-start-admin-tui
 
-# 4. PyQt admin app source at /home/admin/qdistro/admin_app/.
+# 4. PyQt admin app and Textual TUI sources under /home/admin/qdistro/.
 install -d -o admin -g users -m 0755 /home/admin/qdistro
 install -d -o admin -g users -m 0755 /home/admin/qdistro/admin_app
 install -m 0644 -o admin -g users \
         "$SRC/admin_app/qdistro_admin_app.py" \
         /home/admin/qdistro/admin_app/qdistro_admin_app.py
+install -d -o admin -g users -m 0755 /home/admin/qdistro/tui
+# Explicit file list — adding a new module to tui/ requires updating this
+# script. Globbing was previously used but masked missing modules silently
+# (nullglob would have installed nothing); naming each file makes the
+# install loudly fail if a source file goes missing.
+for _tui_src in __init__.py broker_client.py silo_colors.py qdistro_admin_tui.py; do
+    install -m 0644 -o admin -g users \
+            "$SRC/tui/$_tui_src" \
+            "/home/admin/qdistro/tui/$_tui_src"
+done
+# Wrapper hard-codes the install location instead of using getent — the
+# script always installs to /home/admin/qdistro/tui/ in this VM, and the
+# getent dance only obscured the contract.
+cat > /usr/local/bin/qdistro-admin-tui <<'TUIWRAP'
+#!/bin/bash
+TUI_DIR=/home/admin/qdistro/tui
+export PYTHONPATH="$TUI_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 "$TUI_DIR/qdistro_admin_tui.py" "$@"
+TUIWRAP
+chmod 0755 /usr/local/bin/qdistro-admin-tui
 
 # 5. qterminal.ini geometry pinned to 1200×700 — AGENTS.md  notes
 #    this is required so the TUI's header subtitle and full footer
@@ -179,8 +200,10 @@ echo "--- post-install state ---"
 id work
 id work2
 ls -l /usr/local/bin/qdistro-{test-permission,start-admin-app,start-admin-tui}
+ls -l /usr/local/bin/qdistro-admin-tui
 ls -l /usr/local/bin/startlxqtwayland /usr/local/bin/qdistro-lxqt-session-wrap
 ls -l /home/admin/qdistro/admin_app/qdistro_admin_app.py
+ls -l /home/admin/qdistro/tui/qdistro_admin_tui.py
 ls -l /home/admin/.config/qterminal.org/qterminal.ini
 ls -l /run/user/1000/wayland-0 2>&1 || echo "WARN: wayland-0 not up"
 ps -ef | grep -E "labwc|lxqt|Xwayland" | grep -v grep | head -5

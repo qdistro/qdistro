@@ -28,8 +28,8 @@ from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
     QMainWindow, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
-    QSpinBox, QSplitter, QStackedWidget, QTableView, QTabWidget, QTextEdit,
-    QVBoxLayout, QWidget,
+    QSpinBox, QSplitter, QStackedWidget, QStyle, QTableView, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 
@@ -734,7 +734,6 @@ class MainWindow(QMainWindow):
         # isSystemTrayAvailable. The base pixmap is cached so the badge
         # painter can redraw without re-fetching the system icon on
         # every refresh.
-        from PyQt6.QtGui import QStyle
         self._tray_base_pixmap: QPixmap = QApplication.style().standardIcon(
             QStyle.StandardPixmap.SP_ComputerIcon).pixmap(32, 32)
         self.tray_icon = QSystemTrayIcon(self)
