@@ -165,6 +165,7 @@ cat > /etc/systemd/system/seatd.service <<'EOF'
 Description=Seat management daemon
 Documentation=man:seatd(1)
 After=systemd-user-sessions.service
+Before=user@.service
 
 [Service]
 Type=simple
@@ -269,15 +270,26 @@ fi
 # default.target once the user manager comes up.
 log "starting admin user session..."
 loginctl terminate-user admin 2>/dev/null || true
-sleep 1
+# Wait for the user manager to actually go away before re-lingering.
+for i in 1 2 3 4 5; do
+    systemctl is-active --quiet user@1000.service || break
+    sleep 1
+done
 loginctl enable-linger admin
 for i in 1 2 3 4 5; do
     systemctl is-active --quiet user@1000.service && break
     sleep 1
 done
+if ! systemctl is-active --quiet user@1000.service; then
+    log "  WARN: user@1000.service did not become active within 5s; user-session start may fail"
+fi
 
 runuser -l admin -c 'systemctl --user daemon-reload' || true
 runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+
+log "  enabling pipewire user socket..."
+runuser -l admin -c 'systemctl --user enable --now pipewire.socket pipewire.service' \
+    || log "  WARN: pipewire enable failed"
 
 log "  waiting for /run/user/1000/wayland-1..."
 for i in $(seq 1 30); do
