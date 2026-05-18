@@ -20,6 +20,17 @@ SKIP_LEGACY_DEPLOY_FILES="legacy §6.6 deploy files (bootstrap-qdwin-in-vm.sh / 
 SKIP_LEGACY_NESTED_QDSHELL="legacy §6.8 nested probe drives qdshell.py for broker/pixel/dmabuf path — needs Phase-3 rewrite ticket"
 
 setup() {
+    # pipewire runs in admin's user session; if the linger session is
+    # cold (or pipewire crashed), kick the socket-activated unit before
+    # gating on the daemon being up. Idempotent.
+    vm_run "loginctl enable-linger admin >/dev/null 2>&1 || true"
+    vm_run_admin "systemctl --user start pipewire.socket pipewire.service" || true
+    local i
+    for ((i=0; i<10; i++)); do
+        run vm_run "pgrep -x pipewire >/dev/null"
+        [[ "$status" -eq 0 ]] && break
+        sleep 1
+    done
     vm_run "pgrep -x pipewire >/dev/null"
     assert_success
     vm_run "systemctl stop qdistro-admin-broker.service 2>/dev/null || true"
