@@ -213,7 +213,13 @@ class LockerClient:
                     with self._display_lock:
                         if self._display is None:
                             return
-                        self._display.dispatch(block=False)
+                        # select() guarantees the fd is readable, so
+                        # dispatch(block=True) reads the kernel buffer
+                        # and dispatches in one shot. dispatch(block=False)
+                        # only drains the already-queued event ring —
+                        # it does NOT read the fd, leaving wire bytes
+                        # buffered forever and `idled` never delivered.
+                        self._display.dispatch(block=True)
             except Exception:
                 log.exception("wayland poll loop error")
                 break
