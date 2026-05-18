@@ -1,0 +1,23 @@
+[Unit]
+Description=qdistro per-uid session-bus relay (uid=%i)
+Documentation=file:///usr/share/doc/qdistro/user_relay/README.md
+# Needs the system bus to claim org.qdistro.UserRelay.uid<%i> AND
+# the user's session bus at /run/user/%i/bus to scan local receivers.
+After=dbus.socket user@%i.service
+Requires=dbus.socket
+
+[Service]
+Type=simple
+User=%i
+# user@%i.service exposes /run/user/%i; ensure XDG + DBUS env so the
+# relay's dbus.SessionBus() resolves the right socket. SystemBus()
+# uses the well-known /run/dbus/system_bus_socket which is fine for
+# any uid that has a policy granting `own` for the per-uid name.
+Environment=XDG_RUNTIME_DIR=/run/user/%i
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus
+ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_user_relay.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

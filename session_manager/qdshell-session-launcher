@@ -76,6 +76,25 @@ echo $$ > "$CGROUP_DIR/cgroup.procs" || {
 
 echo "qdshell-session-launcher: silo=$NAME uid=$UID_ARG cgroup=$CGROUP_DIR pid=$$"
 
+# Bring up the per-uid UserRelay so the broker can ListReceivers /
+# RelayMessage for this silo. The unit is a template
+# (qdistro-user-relay@<uid>.service) installed by
+# install-user-relay-for-vm.sh; it depends on user@<uid>.service so
+# we make sure linger is enabled first. Best-effort — if the unit
+# template isn't installed yet (older bake), don't fail the silo
+# launch over it; the s102 driver will surface the missing relay
+# loudly via its own assertions.
+if [ -f /etc/systemd/system/qdistro-user-relay@.service ]; then
+    if command -v loginctl >/dev/null 2>&1; then
+        # enable-linger is idempotent and required for user@<uid> to
+        # auto-start outside an interactive login.
+        loginctl enable-linger "$UID_ARG" >/dev/null 2>&1 || true
+    fi
+    systemctl start "qdistro-user-relay@${UID_ARG}.service" \
+        >/dev/null 2>&1 \
+        || echo "qdshell-session-launcher: WARN: could not start qdistro-user-relay@${UID_ARG}.service" >&2
+fi
+
 # Drop privileges to the silo uid and keep the bus session alive.
 # setpriv keeps us in the cgroup we just joined; runuser/su would
 # spawn a login shell which reparents through PAM and may reset
