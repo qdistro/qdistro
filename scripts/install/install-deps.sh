@@ -24,7 +24,7 @@ QDISTRO_PKGS=(
   tesseract-ocr grim
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
   Mesa-demo-egl wayland-utils
-  python313-python-pam fprintd
+  python313-python-pam python313-six fprintd
   python313-dbus-python python313-gobject python313-gobject-Gdk
   python313-PyYAML
   python313-cryptography
