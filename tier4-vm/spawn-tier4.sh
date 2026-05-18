@@ -319,6 +319,17 @@ if ! [[ "$VM_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$ ]]; then
     exit 1
 fi
 
+# Echo the resolved secctx triple as early as possible — BEFORE any
+# template/preflight/qdistro-secctx-exec check that might exit non-zero.
+# s107-tier4-chrome.sh greps the spawn log file for this exact line, so
+# it must fire even when the bake is missing tier4-vm-guest/ or the
+# secctx tagger isn't installed.
+_E_SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
+_E_SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
+_E_LAUNCH_TOKEN="$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+_E_SECCTX_INSTANCE="${TIER4_SECCTX_INSTANCE:-$VM_NAME-${_E_LAUNCH_TOKEN:-noop}}"
+echo "[tier4] waypipe-branch resolved (secctx engine=$_E_SECCTX_ENGINE app_id=$_E_SECCTX_APPID instance=$_E_SECCTX_INSTANCE)" >&2
+
 # Resolve template (branch-aware).
 TEMPLATE=$(resolve_template "$TIER4_DISPLAY" "$SCRIPT_DIR") || exit $?
 
