@@ -116,9 +116,14 @@ PROBE_SRC="$QD/tests/integration/vm/probes"
 if [ -d "$PROBE_SRC" ]; then
     log "staging bats probes from $PROBE_SRC -> /root/"
     install -d -m 0755 /root
+    # .sh probes are exec'd; .py / .c siblings are read by the probes.
     for probe in "$PROBE_SRC"/*.sh; do
         [ -e "$probe" ] || continue
         install -m 0755 "$probe" "/root/$(basename "$probe")"
+    done
+    for aux in "$PROBE_SRC"/*.py "$PROBE_SRC"/*.c; do
+        [ -e "$aux" ] || continue
+        install -m 0644 "$aux" "/root/$(basename "$aux")"
     done
 fi
 
