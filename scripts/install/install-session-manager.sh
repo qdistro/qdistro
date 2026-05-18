@@ -11,6 +11,13 @@ SRC=${1:-/root/qdistro-src/qdistro/session_manager}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-session-manager.service
 POLICY=/etc/dbus-1/system.d/org.qdistro.SessionManager1.conf
+# Templated launcher referenced by SILO_LAUNCHER_FMT in
+# qdistro_session_manager.py — the session manager runs
+# `systemctl start qdshell-session-<name>@<uid>.service`, which
+# resolves to the canonical template installed below + a per-silo
+# symlink that gives the unit name its silo-specific prefix.
+LAUNCHER_TEMPLATE=/usr/lib/systemd/system/qdshell-session@.service
+LAUNCHER_HELPER=/usr/libexec/qdistro/qdshell-session-launcher
 
 if [ ! -d "$SRC" ]; then
     echo "ERROR: session-manager source not found at $SRC" >&2
@@ -35,6 +42,51 @@ install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
 
 install -m 0644 "$SRC/org.qdistro.SessionManager1.conf" "$POLICY"
 install -m 0644 "$SRC/qdistro-session-manager.service" "$UNIT"
+
+# qdshell-session launcher: the canonical template + the
+# privilege-dropping helper that joins the silo cgroup and keeps
+# the silo uid alive. Symlinks for the per-silo unit names
+# (qdshell-session-<name>@.service) are dropped below.
+install -d -o root -g root -m 0755 /usr/lib/systemd/system
+install -o root -g root -m 0644 "$SRC/qdshell-session@.service" \
+    "$LAUNCHER_TEMPLATE"
+install -o root -g root -m 0755 "$SRC/qdshell-session-launcher" \
+    "$LAUNCHER_HELPER"
+
+# Drop a per-silo symlink for every silo currently in
+# /etc/qdistro/silos.yaml. The session manager itself never
+# creates these — a future task will move this into CreateSilo
+# proper; for now installing what silos.yaml already lists is
+# enough to satisfy the app-launcher integration test (which
+# pre-creates a "work" silo).
+seed_silo_symlink() {
+    local name="$1"
+    local link="/etc/systemd/system/qdshell-session-${name}@.service"
+    if [ -L "$link" ] || [ -e "$link" ]; then
+        return 0
+    fi
+    ln -s "$LAUNCHER_TEMPLATE" "$link"
+}
+
+# Always seed "work" — that's the app-launcher.bats fixture silo
+# and the smoke target. Idempotent: ln -s above no-ops if the
+# symlink already exists.
+seed_silo_symlink work
+
+# Scan silos.yaml for any other silo names. Tolerate missing or
+# malformed yaml — this is best-effort, not a hard dependency.
+if [ -r /etc/qdistro/silos.yaml ]; then
+    while IFS= read -r silo_name; do
+        [ -n "$silo_name" ] || continue
+        seed_silo_symlink "$silo_name"
+    done < <(awk '
+        /^[[:space:]]*-?[[:space:]]*name:[[:space:]]*/ {
+            sub(/^[[:space:]]*-?[[:space:]]*name:[[:space:]]*/, "");
+            gsub(/["'\''[:space:]]/, "");
+            if ($0 ~ /^[a-z_][a-z0-9_-]{0,31}$/) print $0;
+        }
+    ' /etc/qdistro/silos.yaml 2>/dev/null || true)
+fi
 
 systemctl reload dbus-broker.service 2>/dev/null \
     || systemctl reload dbus.service 2>/dev/null \

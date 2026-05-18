@@ -1,0 +1,38 @@
+[Unit]
+Description=qdshell silo session launcher (name=%p uid=%i)
+# This is the templated launcher unit referenced by
+# qdistro_session_manager.SILO_LAUNCHER_FMT
+# (qdshell-session-<name>@<uid>.service). systemd resolves
+#   qdshell-session-<name>@<uid>.service
+# by looking up the template:
+#   qdshell-session-<name>@.service
+# which we ship as a symlink to this canonical file. %p (the
+# "prefix") therefore expands to "qdshell-session-<name>", and we
+# strip the literal "qdshell-session-" prefix in the launcher
+# helper to recover the silo name. %i is the instance, i.e. uid.
+#
+# The unit's sole job is to keep the silo's uid alive in the
+# /sys/fs/cgroup/qdistro-silos/<name>/ cgroup so the session
+# manager's cgroup.events:populated check sees the silo as live.
+# Real qdshell wiring layers on top of this in a follow-up task.
+After=qdistro-session-manager.service
+PartOf=qdistro-session-manager.service
+
+[Service]
+Type=simple
+# %p = "qdshell-session-<name>", %i = uid. The helper script
+# strips the literal "qdshell-session-" prefix off %p to get the
+# silo name, joins the silo's cgroup, drops privs to %i, and
+# parks a dbus-run-session keeping the uid alive.
+ExecStart=/usr/libexec/qdistro/qdshell-session-launcher %p %i
+Restart=on-failure
+RestartSec=2
+# Run as root so we can write the silo cgroup.procs and setuid
+# down to the silo uid. The helper drops privileges itself before
+# exec'ing the payload (dbus-run-session sleep infinity).
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

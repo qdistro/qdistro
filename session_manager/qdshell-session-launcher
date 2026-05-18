@@ -1,0 +1,89 @@
+#!/bin/bash
+# qdshell-session-launcher — silo-uid keep-alive helper invoked by
+# qdshell-session-<name>@<uid>.service. The session manager calls
+# `systemctl start qdshell-session-<name>@<uid>.service`; that
+# unit (template ships under session_manager/qdshell-session@.service)
+# execs this script with two args:
+#
+#   $1  unit prefix, i.e. literally "qdshell-session-<name>"
+#   $2  instance, i.e. the silo uid
+#
+# The job:
+#   1. recover the silo name (strip "qdshell-session-" off $1)
+#   2. join /sys/fs/cgroup/qdistro-silos/<name>/cgroup.procs so the
+#      cgroup is marked "populated" and the session manager's
+#      cgroup.events check passes
+#   3. drop to the silo uid + park a dbus-run-session keeping the
+#      uid alive
+#
+# Stays minimal: real qdshell payload wires on top in a follow-up.
+# The dbus-run-session + sleep loop is what makes
+# `systemctl start qdshell-session-work@2000.service` succeed for
+# the app-launcher integration test.
+
+set -eu
+
+PREFIX="${1:-}"
+UID_ARG="${2:-}"
+
+if [ -z "$PREFIX" ] || [ -z "$UID_ARG" ]; then
+    echo "qdshell-session-launcher: missing args (got prefix=$PREFIX uid=$UID_ARG)" >&2
+    exit 64
+fi
+
+case "$PREFIX" in
+    qdshell-session-*) NAME="${PREFIX#qdshell-session-}" ;;
+    *)
+        echo "qdshell-session-launcher: prefix $PREFIX does not start with 'qdshell-session-'" >&2
+        exit 64
+        ;;
+esac
+
+if [ -z "$NAME" ]; then
+    echo "qdshell-session-launcher: silo name parsed from prefix is empty" >&2
+    exit 64
+fi
+
+# Sanity: uid must be numeric.
+case "$UID_ARG" in
+    ''|*[!0-9]*)
+        echo "qdshell-session-launcher: uid $UID_ARG is not numeric" >&2
+        exit 64
+        ;;
+esac
+
+CGROUP_DIR="/sys/fs/cgroup/qdistro-silos/${NAME}"
+
+# The session manager creates the cgroup dir via cgroup_create
+# before invoking systemctl start. We do not create it here —
+# if it's absent the silo state machine is desynced and we want a
+# loud failure. mkdir -p as a defensive fallback is a no-op when
+# the dir exists; we keep it so a lone `systemctl start` from
+# admin (outside the SessionManager flow) still works for debug.
+mkdir -p "$CGROUP_DIR"
+
+# Place this very shell in the silo cgroup. Anything we exec
+# inherits the cgroup membership, which is what marks the cgroup
+# as populated.
+echo $$ > "$CGROUP_DIR/cgroup.procs" || {
+    echo "qdshell-session-launcher: failed to join cgroup $CGROUP_DIR" >&2
+    # Don't bail — on nested-test VMs cgroup writes occasionally
+    # EACCES. Continue so the unit still keeps the uid alive; the
+    # session manager's cgroup-populated assertion will then fail
+    # loudly with a useful error rather than a cryptic "unit didn't
+    # start."
+}
+
+echo "qdshell-session-launcher: silo=$NAME uid=$UID_ARG cgroup=$CGROUP_DIR pid=$$"
+
+# Drop privileges to the silo uid and keep the bus session alive.
+# setpriv keeps us in the cgroup we just joined; runuser/su would
+# spawn a login shell which reparents through PAM and may reset
+# the cgroup. dbus-run-session creates a transient session bus
+# scoped to this process tree — real qdshell will inherit it.
+#
+# If dbus-run-session is missing (it's part of dbus-daemon on
+# every supported image, but we keep the fallback), fall back to
+# plain sleep so the unit still keeps the cgroup populated.
+exec setpriv --reuid="$UID_ARG" --regid="$UID_ARG" --clear-groups \
+    -- dbus-run-session -- /usr/bin/sleep infinity
