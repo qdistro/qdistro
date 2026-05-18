@@ -73,18 +73,23 @@ PASS "qdistro-browser-install writes all six per-browser manifests"
 # QDISTRO_TEST_MODE=1.
 #
 # P0-1 (same commit): the bridge derives extension_id from argv, not
-# from the stdio payload. We pass `chrome-extension://probe@s66/` so
-# the bridge sees a well-formed Chrome origin.
-RESP=$(python3 - "$BRIDGE" <<'PY'
+# from the stdio payload. Chrome-format extension IDs are exactly 32
+# `[a-p]` chars (a kernel-attested invariant the bridge enforces).
+# The earlier probe used `probe@s66` (a Firefox-format id), which the
+# Chrome branch rejected to "" because the parent-exe heuristic falls
+# to the chrome branch here (parent is python3, not firefox).
+PROBE_EXT_ID="abcdefghijklmnopabcdefghijklmnop"
+RESP=$(python3 - "$BRIDGE" "$PROBE_EXT_ID" <<'PY'
 import json, struct, subprocess, sys, os
 bridge = sys.argv[1]
+ext_id = sys.argv[2]
 env = dict(os.environ)
 env.pop("QDISTRO_BROWSER_BRIDGE_ALLOWLIST", None)
 env["QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST"] = os.readlink(
     "/proc/self/exe")
 env["QDISTRO_TEST_MODE"] = "1"
 proc = subprocess.Popen(
-    [bridge, "chrome-extension://probe@s66/"],
+    [bridge, f"chrome-extension://{ext_id}/"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
     stderr=subprocess.PIPE, env=env)
 # stdio extension_id is now ignored — bridge trusts argv only.
@@ -101,14 +106,14 @@ proc.wait(timeout=5)
 print(resp.decode())
 PY
 )
-echo "$RESP" | python3 -c "
-import json, sys
+echo "$RESP" | PROBE_EXT_ID="$PROBE_EXT_ID" python3 -c "
+import json, os, sys
 body = json.loads(sys.stdin.read())
 assert body.get('pong') is True, body
 assert body.get('op') == 'qdistro.ping', body
 assert body.get('echo') == 's66', body
 # extension_id MUST be the argv-derived value, not anything stdio.
-assert body.get('extension_id') == 'probe@s66', body
+assert body.get('extension_id') == os.environ['PROBE_EXT_ID'], body
 # parent_exe resolves to the python interpreter that spawned the
 # bridge. Just confirm it ends in 'python3' (the test driver's
 # launcher).
