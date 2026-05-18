@@ -189,10 +189,10 @@ def cmd_add(args, ifc: dbus.Interface) -> int:
     if not value:
         print("value must be non-empty", file=sys.stderr)
         return 2
-    pin_uid = int(args.pin_uid) if args.pin_uid is not None else -1
+    pin_uid_s = str(int(args.pin_uid)) if args.pin_uid is not None else ""
     ok = ifc.AddItem(args.vault, args.tag, value,
                      args.pin_exe or "", args.pin_selinux or "",
-                     pin_uid, "")
+                     pin_uid_s)
     return 0 if ok else 3
 
 

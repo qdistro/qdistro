@@ -518,26 +518,36 @@ class PwdDaemon(dbus.service.Object):
     # -- item management (admin) ---------------------------------------
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="sssssis",
+                         in_signature="ssssss",
                          out_signature="b",
                          sender_keyword="sender")
     def AddItem(self, vault: str, tag: str, value: str,
-                pin_app_exe: str, pin_selinux: str, pin_uid: int,
-                _reserved: str = "",
+                pin_app_exe: str, pin_selinux: str, pin_uid: str = "",
                 sender=None) -> bool:
+        # Signature note: pin_uid is wire-typed as a string (D-Bus 's'),
+        # not an int32 ('i'), because every documented caller passes
+        # six strings (qdistro/pwd/README.md §"AddItem"). The empty
+        # string is treated as "no uid pin" (-1 internally); any
+        # non-empty value is parsed as a decimal int. A previous
+        # iteration declared ``sssssis`` with a trailing reserved
+        # string, which made the busctl/test call paths impossible to
+        # write without a mid-signature int — see s105 in qdistro2
+        # tests/integration/vm/.
         self._require_admin(sender)
         vault = str(vault)
         tag = str(tag)
         if vault not in self._unlocked:
             raise PwdNotUnlocked(f"vault {vault!r} is locked")
         self._touch(vault)
+        pin_uid_s = str(pin_uid).strip()
+        pin_uid_i = int(pin_uid_s) if pin_uid_s else -1
         try:
             add_item(VAULT_DIR, vault,
                      bytes(self._unlocked[vault]["key"]),
                      tag, str(value).encode("utf-8"),
                      pin_app_exe=str(pin_app_exe),
                      pin_selinux=str(pin_selinux),
-                     pin_uid=(int(pin_uid) if int(pin_uid) >= 0 else None),
+                     pin_uid=(pin_uid_i if pin_uid_i >= 0 else None),
                      replace=True)
         except (VaultDuplicate, VaultNotFound, ValueError) as e:
             self._audit.record("add", vault, item_tag=tag,
