@@ -57,17 +57,31 @@ busctl --system list 2>/dev/null | grep -q org.qdistro.SessionManager1 \
 # Step 1 — ensure the 'work' silo exists and is Active.
 # ---------------------------------------------------------------------------
 
-busctl --system call \
-    org.qdistro.SessionManager1 \
-    /org/qdistro/SessionManager1 \
-    org.qdistro.SessionManager1 \
-    CreateSilo si "work" 2000 >/dev/null 2>&1 || true
+# Runtime scratch dir used from Step 1 onward (createsilo/startsilo
+# stdout capture, receiver pids, etc.).
+mkdir -p /tmp/s102
 
-busctl --system call \
+# The session manager enforces ADMIN_UID=1000 in-process AND via D-Bus
+# policy; vm_run lands as root, so we hop to admin for both lifecycle
+# calls. CreateSilo is idempotent (returns AlreadyExists once the silo
+# is on disk) so it's safe to call on every run, but we capture its
+# stderr so a real failure (e.g. session manager refusing because the
+# admin policy regressed) is loud rather than swallowed by `|| true`.
+runuser -u admin -- busctl --system call \
     org.qdistro.SessionManager1 \
     /org/qdistro/SessionManager1 \
     org.qdistro.SessionManager1 \
-    StartSilo s "work" >/dev/null 2>&1 || true
+    CreateSilo si "work" 2000 >/tmp/s102/createsilo.out 2>&1 \
+    || grep -qi "already" /tmp/s102/createsilo.out \
+    || err "CreateSilo work uid=2000 failed: $(cat /tmp/s102/createsilo.out)"
+
+runuser -u admin -- busctl --system call \
+    org.qdistro.SessionManager1 \
+    /org/qdistro/SessionManager1 \
+    org.qdistro.SessionManager1 \
+    StartSilo s "work" >/tmp/s102/startsilo.out 2>&1 \
+    || grep -qiE "already|active" /tmp/s102/startsilo.out \
+    || err "StartSilo work failed: $(cat /tmp/s102/startsilo.out)"
 
 # ---------------------------------------------------------------------------
 # Step 2 — boot three org.qdistro.App1 receivers as uid 2000.
@@ -76,7 +90,6 @@ busctl --system call \
 # Each receiver runs the SDK's AppReceiver against a tiny in-process
 # GLib main loop. The script writes its own runtime payload file so
 # the harness can spot a stuck receiver immediately.
-mkdir -p /tmp/s102
 cat >/tmp/s102/receiver.py <<'PYEOF'
 """s102 in-VM receiver bootstrap.
 

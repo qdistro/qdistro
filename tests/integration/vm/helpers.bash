@@ -81,6 +81,39 @@ vm_run() {
     fi
 }
 
+# vm_run_admin <cmd> — run a command inside the VM as the admin user
+# (uid 1000) with a real PAM session and admin's --user systemd.
+# Routes through the same transport as vm_run (qga or ssh) but wraps
+# the command in `runuser -l admin -c '...'`. Use this for any test
+# step that needs admin's user manager (systemctl --user, qdlocker.sock,
+# qdshell.sock, noctalia-shell.service, etc).
+vm_run_admin() {
+    local cmd="$1"
+    # Escape single quotes for runuser's outer 'cmd' string.
+    local escaped="${cmd//\'/\'\\\'\'}"
+    vm_run "runuser -l admin -c '$escaped'"
+}
+
+# start_user_session — idempotent: ensure admin's user manager is
+# running and noctalia-shell + qdlocker are active. Tests that need
+# the qdshell GUI alive call this in their setup_file().
+# Returns 0 on success; non-zero if /run/user/1000/wayland-1 didn't
+# appear within 30s (caller should fail_loud).
+_user_session_started=""
+start_user_session() {
+    [[ -n "$_user_session_started" ]] && return 0
+    vm_run "loginctl enable-linger admin >/dev/null 2>&1 || true"
+    vm_run_admin "systemctl --user start noctalia-shell.service" || true
+    # Wait up to 30s for the wayland socket.
+    local i
+    for ((i=0; i<30; i++)); do
+        run vm_run "test -S /run/user/1000/wayland-1"
+        [[ "$status" -eq 0 ]] && { _user_session_started=1; break; }
+        sleep 1
+    done
+    [[ -n "$_user_session_started" ]]
+}
+
 # assert_success — bats-assert-like tiny shim (don't want the dep).
 assert_success() {
     if [[ "$status" -ne 0 ]]; then
