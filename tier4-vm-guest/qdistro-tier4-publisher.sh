@@ -8,12 +8,19 @@
 # booting a VM.
 #
 # Unlike tier-5 / tier-5b (which publish a single guest *app* via
-# waypipe-server), tier-4-guest publishes the *nested qdwin's whole
-# toplevel set* via qdwin-bystander --forward-all-toplevels wrapped by
-# waypipe-server. The bystander binds inner qdwin's qdwin_shell_v1 on
-# the in-guest wayland-0 socket and walks every inner xdg_toplevel;
-# waypipe-server ferries the bystander's outbound Wayland connection
-# across vsock to the host waypipe-client.
+# waypipe-server), tier-4-guest supports two qdwin-to-qdwin display
+# publishers:
+#
+#   QDISTRO_TIER4_DISPLAY=waypipe (default):
+#     Publish the nested qdwin's whole session as one outer toplevel
+#     via waypipe-server.
+#
+#   QDISTRO_TIER4_DISPLAY=rdp:
+#     Ask inner qdwin to subscribe one guest toplevel as a per-view RDP
+#     stream, then bridge that guest-local RDP TCP port to the host over
+#     AF_VSOCK. The host spawn-tier4.sh side connects a FreeRDP wl_client
+#     to a local loopback forward, so the resulting host window is a
+#     normal qdwin client with host-side chrome/secctx.
 #
 # Architecture: plan2/tasks/P10-tier4-guest-image-nested-qdwin.md
 # §Phase C and plan2/tasks/P11-tier4-waypipe-migration.md.
@@ -23,8 +30,8 @@
 #
 #   qdistro-tier4-publisher.sh <vsock_port>
 #
-# vsock_port is allocated by the host-side spawn-tier4 (P11) via the
-# same flock+CID range mechanism tier5b uses.
+# vsock_port is allocated by the host-side spawn-tier4 via the same
+# flock+CID range mechanism tier5b uses.
 
 set -uo pipefail
 
@@ -36,10 +43,56 @@ WAYLAND_SOCKET="${QDISTRO_TIER4_WAYLAND_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/100
 # via the qdwin-guest package; tests override.
 BYSTANDER_BIN="${QDISTRO_TIER4_BYSTANDER_BIN:-/usr/bin/qdwin-bystander}"
 
+load_guest_config() {
+    local cfg="${QDISTRO_TIER4_CONFIG:-/etc/qdistro/tier4-publisher.conf}"
+    local line key value
+    [ -f "$cfg" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|\#*) continue ;; esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key%%[[:space:]]*}"
+        case "$key" in
+            QDISTRO_TIER4_STREAMING_METHOD|QDISTRO_TIER4_DISPLAY|\
+            QDISTRO_TIER4_RDP_SUBSCRIBE|QDISTRO_TIER4_RDP_PEER_LABEL|\
+            QDISTRO_TIER4_RDP_CREDS|QDISTRO_TIER4_WAYLAND_SOCKET|\
+            QDISTRO_TIER4_BYSTANDER_BIN)
+                if [ -z "${!key+x}" ]; then
+                    printf -v "$key" '%s' "$value"
+                    export "$key"
+                fi
+                ;;
+            *)
+                echo "[tier4-publisher] WARN: ignoring unknown config key '$key' in $cfg" >&2
+                ;;
+        esac
+    done <"$cfg"
+}
+
+load_guest_config
+WAYLAND_SOCKET="${QDISTRO_TIER4_WAYLAND_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/1000}/wayland-0}"
+BYSTANDER_BIN="${QDISTRO_TIER4_BYSTANDER_BIN:-/usr/bin/qdwin-bystander}"
+if [ -n "${QDISTRO_TIER4_STREAMING_METHOD:-}" ] && [ -z "${QDISTRO_TIER4_DISPLAY:-}" ]; then
+    QDISTRO_TIER4_DISPLAY="$QDISTRO_TIER4_STREAMING_METHOD"
+fi
+DISPLAY_MODE="${QDISTRO_TIER4_DISPLAY:-waypipe}"
+RDP_SUBSCRIBE="${QDISTRO_TIER4_RDP_SUBSCRIBE:-last}"
+RDP_PEER_LABEL="${QDISTRO_TIER4_RDP_PEER_LABEL:-tier4-rdp}"
+RDP_CREDS_PATH="${QDISTRO_TIER4_RDP_CREDS:-/run/qdistro-tier4-rdp.env}"
+case "$RDP_SUBSCRIBE" in
+    last|''|*[!0-9]*)
+        if [ "$RDP_SUBSCRIBE" != "last" ]; then
+            echo "[tier4-publisher] FAIL: QDISTRO_TIER4_RDP_SUBSCRIBE must be 'last' or a numeric qdwin toplevel handle" >&2
+            exit 2
+        fi
+        ;;
+esac
+
 usage() {
     echo "usage: $0 <vsock_port>" >&2
     echo "  env: QDISTRO_TIER4_WAYLAND_SOCKET (default \$XDG_RUNTIME_DIR/wayland-0)" >&2
     echo "       QDISTRO_TIER4_BYSTANDER_BIN  (default /usr/bin/qdwin-bystander)" >&2
+    echo "       QDISTRO_TIER4_DISPLAY        (waypipe|rdp; default waypipe)" >&2
 }
 
 if [ $# -lt 1 ]; then
@@ -49,6 +102,14 @@ fi
 
 PORT="$1"
 shift
+
+case "$DISPLAY_MODE" in
+    waypipe|rdp) ;;
+    *)
+        echo "[tier4-publisher] FAIL: QDISTRO_TIER4_DISPLAY='$DISPLAY_MODE' invalid (expected waypipe or rdp)" >&2
+        exit 2
+        ;;
+esac
 
 # Port sanity. 1..65535. Reject everything else loudly. (Same rule as
 # tier5b-publisher; the lock-and-pick discipline lives in spawn-tier4,
@@ -113,18 +174,25 @@ done
 # but bring-up isn't synchronous on the Wayland-socket-ready event; a
 # bounded poll plugs the race.
 WAIT_BUDGET="${QDISTRO_TIER4_WAYLAND_WAIT:-30}"
-for _ in $(seq 1 "$WAIT_BUDGET"); do
-    [ -S "$SOCK_DIR/$SOCK_NAME" ] && break
-    sleep 1
-done
-if [ ! -S "$SOCK_DIR/$SOCK_NAME" ]; then
-    echo "[tier4-publisher] FAIL: inner Wayland socket $SOCK_DIR/$SOCK_NAME never appeared (waited ${WAIT_BUDGET}s)" >&2
-    exit 3
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" != "1" ]; then
+    for _ in $(seq 1 "$WAIT_BUDGET"); do
+        [ -S "$SOCK_DIR/$SOCK_NAME" ] && break
+        sleep 1
+    done
+    if [ ! -S "$SOCK_DIR/$SOCK_NAME" ]; then
+        echo "[tier4-publisher] FAIL: inner Wayland socket $SOCK_DIR/$SOCK_NAME never appeared (waited ${WAIT_BUDGET}s)" >&2
+        exit 3
+    fi
 fi
 
 # qdwin-bystander needs XDG_RUNTIME_DIR to point at the socket dir
 # (libwayland resolves wayland-0 under $XDG_RUNTIME_DIR).
 export XDG_RUNTIME_DIR="$SOCK_DIR"
+
+tcp_loopback_accepts() {
+    local port="$1"
+    timeout 1 bash -c ":</dev/tcp/127.0.0.1/$port" >/dev/null 2>&1
+}
 
 # Dry-run hook for unit tests: write the resolved argv to a tmpfile
 # and exit 0 instead of execing waypipe (which isn't installed in the
@@ -132,14 +200,115 @@ export XDG_RUNTIME_DIR="$SOCK_DIR"
 if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
     DRY_OUT="${QDISTRO_TIER4_DRY_OUT:-/tmp/qdistro-tier4-dry.log}"
     {
+        echo "display=$DISPLAY_MODE"
         echo "port=$PORT"
         echo "sock_dir=$SOCK_DIR"
         echo "sock_name=$SOCK_NAME"
         echo "bystander_bin=$BYSTANDER_BIN"
         echo "xdg_runtime_dir=$XDG_RUNTIME_DIR"
-        echo "argv=waypipe --vsock -s 2:$PORT server -- $BYSTANDER_BIN --inner-display $SOCK_NAME --forward-session"
+        if [ "$DISPLAY_MODE" = "rdp" ]; then
+            echo "rdp_subscribe=$RDP_SUBSCRIBE"
+            echo "rdp_creds_path=$RDP_CREDS_PATH"
+            echo "argv=$BYSTANDER_BIN --inner-display $SOCK_NAME --subscribe $RDP_SUBSCRIBE --peer-label $RDP_PEER_LABEL"
+            echo "bridge=socat VSOCK-LISTEN:$PORT,reuseaddr,fork TCP:127.0.0.1:\$RDP_PORT"
+        else
+            echo "argv=waypipe --vsock -s 2:$PORT server -- $BYSTANDER_BIN --inner-display $SOCK_NAME --forward-session"
+        fi
     } >"$DRY_OUT"
     exit 0
+fi
+
+if [ "$DISPLAY_MODE" = "rdp" ]; then
+    command -v socat >/dev/null 2>&1 || {
+        echo "[tier4-publisher] FAIL: QDISTRO_TIER4_DISPLAY=rdp needs socat in the guest" >&2
+        exit 2
+    }
+
+    CREDS_TMP="$(mktemp -t qdistro-tier4-rdp.XXXXXX.env)"
+    BYSTANDER_OUT="$(mktemp -t qdistro-tier4-rdp-bystander.XXXXXX.out)"
+    BYSTANDER_PID=
+    SOCAT_PID=
+    cleanup_rdp() {
+        if [ -n "$SOCAT_PID" ]; then
+            kill -- "-$SOCAT_PID" 2>/dev/null || kill "$SOCAT_PID" 2>/dev/null || true
+            wait "$SOCAT_PID" 2>/dev/null || true
+        fi
+        [ -n "$BYSTANDER_PID" ] && kill "$BYSTANDER_PID" 2>/dev/null || true
+        rm -f "$CREDS_TMP" "$BYSTANDER_OUT" 2>/dev/null || true
+    }
+    trap cleanup_rdp EXIT INT TERM
+
+    "$BYSTANDER_BIN" --inner-display "$SOCK_NAME" \
+        --subscribe "$RDP_SUBSCRIBE" \
+        --peer-label "$RDP_PEER_LABEL" >"$BYSTANDER_OUT" 2>>"$LOG" &
+    BYSTANDER_PID=$!
+
+    RDP_PORT=""
+    RDP_PASSWORD=""
+    RDP_CERT_PATH=""
+    for _ in $(seq 1 "${QDISTRO_TIER4_RDP_WAIT:-45}"); do
+        if ! kill -0 "$BYSTANDER_PID" 2>/dev/null; then
+            echo "[tier4-publisher] FAIL: qdwin-bystander exited before RDP approval" >&2
+            cat "$BYSTANDER_OUT" >&2 || true
+            exit 4
+        fi
+        RDP_PORT="$(awk -F= '/^RDP_PORT=/{print $2; exit}' "$BYSTANDER_OUT" 2>/dev/null || true)"
+        if [ -n "$RDP_PORT" ] && [ "$RDP_PORT" != "0" ]; then
+            RDP_PASSWORD="$(awk -F= '/^RDP_PASSWORD=/{print $2; exit}' "$BYSTANDER_OUT" 2>/dev/null || true)"
+            RDP_CERT_PATH="$(awk -F= '/^RDP_CERT_PATH=/{print $2; exit}' "$BYSTANDER_OUT" 2>/dev/null || true)"
+            break
+        fi
+        sleep 1
+    done
+    case "$RDP_PORT" in
+        ''|*[!0-9]*|0)
+            echo "[tier4-publisher] FAIL: no usable RDP_PORT from subscribe_view_stream" >&2
+            cat "$BYSTANDER_OUT" >&2 || true
+            exit 4
+            ;;
+    esac
+    if [ "$RDP_PORT" -lt 1 ] || [ "$RDP_PORT" -gt 65535 ]; then
+        echo "[tier4-publisher] FAIL: RDP_PORT '$RDP_PORT' out of range 1..65535" >&2
+        exit 4
+    fi
+    case "$RDP_PASSWORD$RDP_CERT_PATH" in
+        *$'\n'*|*$'\r'*|*[[:cntrl:]]*)
+            echo "[tier4-publisher] FAIL: RDP credentials contain control characters" >&2
+            exit 4
+            ;;
+    esac
+    if [ -z "$RDP_PASSWORD" ]; then
+        echo "[tier4-publisher] FAIL: qdwin returned an empty RDP password" >&2
+        exit 4
+    fi
+
+    RDP_READY=0
+    for _ in $(seq 1 "${QDISTRO_TIER4_RDP_READY_WAIT:-20}"); do
+        if tcp_loopback_accepts "$RDP_PORT" >/dev/null 2>&1; then
+            RDP_READY=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$RDP_READY" != "1" ]; then
+        echo "[tier4-publisher] FAIL: qdistro-forward did not accept TCP on 127.0.0.1:$RDP_PORT" >&2
+        cat "$BYSTANDER_OUT" >&2 || true
+        exit 4
+    fi
+
+    {
+        echo "RDP_PORT=$RDP_PORT"
+        echo "RDP_PASSWORD=$RDP_PASSWORD"
+        echo "RDP_CERT_PATH=$RDP_CERT_PATH"
+        echo "RDP_VSOCK_PORT=$PORT"
+    } >"$CREDS_TMP"
+    install -m 0600 "$CREDS_TMP" "$RDP_CREDS_PATH"
+
+    echo "[tier4-publisher] RDP stream ready tcp=127.0.0.1:$RDP_PORT vsock=2:$PORT creds=$RDP_CREDS_PATH"
+    setsid socat "VSOCK-LISTEN:$PORT,reuseaddr,fork" "TCP:127.0.0.1:$RDP_PORT" &
+    SOCAT_PID=$!
+    wait "$SOCAT_PID"
+    exit $?
 fi
 
 # Real path: connect out to host CID=2 on $PORT via waypipe-server,

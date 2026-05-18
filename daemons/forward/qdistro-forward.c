@@ -31,6 +31,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -59,16 +60,21 @@
 #define TAG "qdistro-forward"
 #define LOGI(fmt, ...) fprintf(stderr, "[qfwd %d] " fmt "\n", (int)getpid(), ##__VA_ARGS__)
 #define LOGE(fmt, ...) fprintf(stderr, "[qfwd %d ERR] " fmt "\n", (int)getpid(), ##__VA_ARGS__)
+#define QFWD_MAX_TOKEN_LEN 4096
+#define QFWD_MAX_PASSWORD_LEN 4096
 
 /* ---------- argv ---------- */
 
 struct qfwd_args {
 	const char *pipewire_node;
 	const char *access_token;
+	char *access_token_owned;
 	int rdp_port;
 	const char *cert_path;
 	const char *key_path;
 	const char *password;
+	char *password_owned;
+	int password_seen;
 	int width;
 	int height;
 	const char *wayland_display;  /* defaults to $WAYLAND_DISPLAY */
@@ -85,10 +91,145 @@ static struct qfwd_args g_args = {
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s --pipewire-node NAME --access-token TOK "
+		"Usage: %s --pipewire-node NAME "
+		"(--access-token TOK | --access-token-fd FD) "
 		"--rdp-port N [--rdp-cert-path P] [--rdp-key-path P] "
-		"[--rdp-password PW] [--width W] [--height H]\n",
+		"(--rdp-password PW | --rdp-password-fd FD) "
+		"[--width W] [--height H]\n",
 		prog);
+}
+
+static int parse_int_range(const char *s, int min, int max, const char *name, int *out)
+{
+	char *end = NULL;
+	long v;
+
+	if (!s || !*s) {
+		LOGE("invalid %s: empty", name);
+		return -1;
+	}
+	errno = 0;
+	v = strtol(s, &end, 10);
+	if (errno || end == s || *end || v < min || v > max) {
+		LOGE("invalid %s: %s", name, s);
+		return -1;
+	}
+	*out = (int)v;
+	return 0;
+}
+
+static int read_password_fd(const char *fd_arg)
+{
+	int fd = -1;
+	char *buf = NULL;
+	size_t len = 0;
+
+	if (parse_int_range(fd_arg, 0, INT_MAX, "rdp-password-fd", &fd) < 0)
+		return -1;
+
+	buf = calloc(1, QFWD_MAX_PASSWORD_LEN + 1);
+	if (!buf) {
+		LOGE("password-fd: allocation failed");
+		return -1;
+	}
+
+	for (;;) {
+		ssize_t n;
+		if (len == QFWD_MAX_PASSWORD_LEN) {
+			LOGE("password-fd: password too long");
+			free(buf);
+			return -1;
+		}
+		n = read(fd, buf + len, QFWD_MAX_PASSWORD_LEN - len);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			LOGE("password-fd: read failed: %m");
+			free(buf);
+			return -1;
+		}
+		if (n == 0)
+			break;
+		len += (size_t)n;
+	}
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+		buf[--len] = '\0';
+
+	g_args.password_owned = buf;
+	g_args.password = buf;
+	return 0;
+}
+
+static int read_access_token_fd(const char *fd_arg)
+{
+	int fd = -1;
+	char *buf = NULL;
+	size_t len = 0;
+
+	if (parse_int_range(fd_arg, 0, INT_MAX, "access-token-fd", &fd) < 0)
+		return -1;
+
+	buf = calloc(1, QFWD_MAX_TOKEN_LEN + 1);
+	if (!buf) {
+		LOGE("access-token-fd: allocation failed");
+		return -1;
+	}
+
+	for (;;) {
+		ssize_t n;
+		if (len == QFWD_MAX_TOKEN_LEN) {
+			LOGE("access-token-fd: token too long");
+			free(buf);
+			return -1;
+		}
+		n = read(fd, buf + len, QFWD_MAX_TOKEN_LEN - len);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			LOGE("access-token-fd: read failed: %m");
+			free(buf);
+			return -1;
+		}
+		if (n == 0)
+			break;
+		len += (size_t)n;
+	}
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+		buf[--len] = '\0';
+
+	g_args.access_token_owned = buf;
+	g_args.access_token = buf;
+	return 0;
+}
+
+static void clear_owned_password(void)
+{
+	if (!g_args.password_owned)
+		return;
+
+	volatile char *p = g_args.password_owned;
+	size_t n = strlen(g_args.password_owned);
+	while (n--)
+		*p++ = '\0';
+	free(g_args.password_owned);
+	g_args.password_owned = NULL;
+	g_args.password = "";
+}
+
+static void clear_owned_access_token(void)
+{
+	if (!g_args.access_token_owned)
+		return;
+
+	volatile char *p = g_args.access_token_owned;
+	size_t n = strlen(g_args.access_token_owned);
+	while (n--)
+		*p++ = '\0';
+	free(g_args.access_token_owned);
+	g_args.access_token_owned = NULL;
+	g_args.access_token = NULL;
 }
 
 static int parse_args(int argc, char **argv)
@@ -96,10 +237,12 @@ static int parse_args(int argc, char **argv)
 	static const struct option opts[] = {
 		{ "pipewire-node",  required_argument, NULL, 'n' },
 		{ "access-token",   required_argument, NULL, 't' },
+		{ "access-token-fd",required_argument, NULL, 'T' },
 		{ "rdp-port",       required_argument, NULL, 'p' },
 		{ "rdp-cert-path",  required_argument, NULL, 'c' },
 		{ "rdp-key-path",   required_argument, NULL, 'k' },
 		{ "rdp-password",   required_argument, NULL, 'P' },
+		{ "rdp-password-fd",required_argument, NULL, 'F' },
 		{ "width",          required_argument, NULL, 'w' },
 		{ "height",         required_argument, NULL, 'h' },
 		{ "log-path",       required_argument, NULL, 'L' },
@@ -111,13 +254,52 @@ static int parse_args(int argc, char **argv)
 	while ((c = getopt_long(argc, argv, "", opts, NULL)) != -1) {
 		switch (c) {
 		case 'n': g_args.pipewire_node = optarg; break;
-		case 't': g_args.access_token = optarg; break;
-		case 'p': g_args.rdp_port = atoi(optarg); break;
+		case 't':
+			if (g_args.access_token_owned) {
+				LOGE("use only one of --access-token and --access-token-fd");
+				return -1;
+			}
+			g_args.access_token = optarg;
+			break;
+		case 'T':
+			if (g_args.access_token) {
+				LOGE("use only one of --access-token and --access-token-fd");
+				return -1;
+			}
+			if (read_access_token_fd(optarg) < 0)
+				return -1;
+			break;
+		case 'p':
+			if (parse_int_range(optarg, 1, 65535, "rdp-port", &g_args.rdp_port) < 0)
+				return -1;
+			break;
 		case 'c': g_args.cert_path = optarg; break;
 		case 'k': g_args.key_path = optarg; break;
-		case 'P': g_args.password = optarg; break;
-		case 'w': g_args.width = atoi(optarg); break;
-		case 'h': g_args.height = atoi(optarg); break;
+		case 'P':
+			if (g_args.password_seen) {
+				LOGE("use only one of --rdp-password and --rdp-password-fd");
+				return -1;
+			}
+			g_args.password_seen = 1;
+			g_args.password = optarg;
+			break;
+		case 'F':
+			if (g_args.password_seen) {
+				LOGE("use only one of --rdp-password and --rdp-password-fd");
+				return -1;
+			}
+			g_args.password_seen = 1;
+			if (read_password_fd(optarg) < 0)
+				return -1;
+			break;
+		case 'w':
+			if (parse_int_range(optarg, 1, 4096, "width", &g_args.width) < 0)
+				return -1;
+			break;
+		case 'h':
+			if (parse_int_range(optarg, 1, 4096, "height", &g_args.height) < 0)
+				return -1;
+			break;
 		case 'L': /* honored by python scaffold; ignored here, stderr is the log */ break;
 		case 'R': /* same */ break;
 		case 'W': g_args.wayland_display = optarg; break;
@@ -133,6 +315,11 @@ static int parse_args(int argc, char **argv)
 	if (!g_args.wayland_display || !*g_args.wayland_display)
 		g_args.wayland_display = "wayland-1";
 	if (!g_args.pipewire_node || !g_args.access_token || g_args.rdp_port <= 0) {
+		usage(argv[0]);
+		return -1;
+	}
+	if (!g_args.password || !g_args.password[0]) {
+		LOGE("rdp password must be non-empty");
 		usage(argv[0]);
 		return -1;
 	}
@@ -217,6 +404,77 @@ static UINT32 spa_to_freerdp_format(uint32_t spa)
 	}
 }
 
+struct qfwd_frame_view {
+	const uint8_t *src;
+	uint32_t stride;
+	uint32_t size;
+	uint32_t offset;
+};
+
+static int qfwd_validate_frame(struct spa_buffer *buf,
+			       const struct spa_video_info_raw *fmt,
+			       uint32_t copy_w, uint32_t copy_h,
+			       struct qfwd_frame_view *out)
+{
+	struct spa_data *d;
+	const struct spa_chunk *chunk;
+	int32_t chunk_stride;
+	uint32_t stride;
+	uint32_t size;
+	uint32_t offset;
+	uint64_t row_bytes;
+	uint64_t required;
+	uint64_t available;
+
+	if (!buf || buf->n_datas == 0)
+		return -1;
+
+	d = &buf->datas[0];
+	chunk = d->chunk;
+	if (!d->data || !chunk)
+		return -1;
+	if (d->maxsize == 0)
+		return -1;
+	if (fmt->size.width == 0 || fmt->size.height == 0 ||
+	    fmt->size.width > 16384 || fmt->size.height > 16384)
+		return -1;
+
+	chunk_stride = chunk->stride;
+	if (chunk_stride == 0)
+		chunk_stride = (int32_t)fmt->size.width * 4;
+	if (chunk_stride <= 0)
+		return -1;
+
+	stride = (uint32_t)chunk_stride;
+	offset = chunk->offset;
+	size = chunk->size;
+	if (offset > d->maxsize)
+		return -1;
+
+	available = (uint64_t)d->maxsize - offset;
+	if (size == 0) {
+		uint64_t full_size = (uint64_t)stride * fmt->size.height;
+		if (full_size > UINT32_MAX)
+			return -1;
+		size = (uint32_t)full_size;
+	}
+	if ((uint64_t)size > available)
+		return -1;
+
+	row_bytes = (uint64_t)copy_w * 4;
+	if (copy_w == 0 || copy_h == 0 || row_bytes > stride)
+		return -1;
+	required = (uint64_t)(copy_h - 1) * stride + row_bytes;
+	if (required > size)
+		return -1;
+
+	out->src = (const uint8_t *)d->data + offset;
+	out->stride = stride;
+	out->size = size;
+	out->offset = offset;
+	return 0;
+}
+
 static void on_stream_process(void *data)
 {
 	qfwd_subsystem *s = data;
@@ -233,28 +491,9 @@ static void on_stream_process(void *data)
 	}
 
 	struct spa_buffer *buf = b->buffer;
-	if (buf->n_datas == 0 || !buf->datas[0].data) {
+	if (!buf) {
 		pw_stream_queue_buffer(s->stream, b);
 		return;
-	}
-
-	const uint8_t *src = buf->datas[0].data;
-	uint32_t src_stride = buf->datas[0].chunk->stride;
-	if (src_stride == 0)
-		src_stride = s->format.size.width * 4;
-	uint32_t src_size = buf->datas[0].chunk->size;
-	if (src_size == 0)
-		src_size = src_stride * s->format.size.height;
-	if (frame_count <= 3) {
-		LOGI("buf: type=%u flags=0x%x size=%u stride=%u offset=%u "
-		     "first8=%02x%02x%02x%02x%02x%02x%02x%02x",
-		     buf->datas[0].type,
-		     buf->datas[0].chunk->flags,
-		     buf->datas[0].chunk->size,
-		     buf->datas[0].chunk->stride,
-		     buf->datas[0].chunk->offset,
-		     src[0], src[1], src[2], src[3],
-		     src[4], src[5], src[6], src[7]);
 	}
 
 	rdpShadowServer *server = s->base.server;
@@ -273,6 +512,22 @@ static void on_stream_process(void *data)
 		? s->format.size.width  : surface->width;
 	const uint32_t fh = (s->format.size.height < surface->height)
 		? s->format.size.height : surface->height;
+	struct qfwd_frame_view frame;
+	if (qfwd_validate_frame(buf, &s->format, fw, fh, &frame) < 0) {
+		LOGE("dropping invalid PipeWire frame");
+		pw_stream_queue_buffer(s->stream, b);
+		return;
+	}
+	const uint8_t *src = frame.src;
+	uint32_t src_stride = frame.stride;
+	if (frame_count <= 3 && frame.size >= 8) {
+		uint32_t flags = buf->datas[0].chunk ? buf->datas[0].chunk->flags : 0;
+		LOGI("buf: type=%u flags=0x%x size=%u stride=%u offset=%u "
+		     "first8=%02x%02x%02x%02x%02x%02x%02x%02x",
+		     buf->datas[0].type, flags, frame.size, frame.stride, frame.offset,
+		     src[0], src[1], src[2], src[3],
+		     src[4], src[5], src[6], src[7]);
+	}
 
 	EnterCriticalSection(&surface->lock);
 
@@ -283,9 +538,10 @@ static void on_stream_process(void *data)
 			src, src_format, src_stride,
 			0, 0, NULL, FREERDP_FLIP_NONE);
 	} else {
-		/* Unknown format: best-effort raw memcpy if strides match. */
-		uint32_t copy_stride = (src_stride < surface->scanline)
-			? src_stride : surface->scanline;
+		/* Unknown format: best-effort raw row copy within visible width. */
+		uint32_t copy_stride = fw * 4;
+		if (copy_stride > surface->scanline)
+			copy_stride = surface->scanline;
 		for (uint32_t y = 0; y < fh; y++) {
 			memcpy(surface->data + y * surface->scanline,
 			       src + y * src_stride,
@@ -923,8 +1179,6 @@ static void on_signal(int sig)
 		return;
 	}
 	g_stop_flag = 1;
-	if (g_server)
-		shadow_server_stop(g_server);
 }
 
 /* Write surface->data as a PPM (BGRX32 → RGB) to /tmp/qfwd-dump.ppm.
@@ -983,8 +1237,15 @@ int main(int argc, char **argv)
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);
 
-	if (parse_args(argc, argv) < 0)
+	if (parse_args(argc, argv) < 0) {
+		clear_owned_password();
+		clear_owned_access_token();
 		return 2;
+	}
+	if (!g_args.password || !g_args.password[0]) {
+		LOGE("rdp password must be non-empty at startup");
+		return 2;
+	}
 
 	pw_init(&argc, &argv);
 
@@ -1026,7 +1287,7 @@ int main(int argc, char **argv)
 
 	/* Auth wiring: enable framework's auth path; subsystem->Authenticate
 	 * (set after New) compares against g_args.password. */
-	g_server->authentication = (g_args.password && g_args.password[0]) ? TRUE : FALSE;
+	g_server->authentication = TRUE;
 
 	if (shadow_server_init(g_server) < 0) {
 		LOGE("shadow_server_init failed");
@@ -1060,11 +1321,22 @@ int main(int argc, char **argv)
 	LOGI("shadow_server running, port=%d, target=%s",
 	     g_args.rdp_port, g_args.pipewire_node);
 
+	for (;;) {
+		DWORD wr = WaitForSingleObject(g_server->thread, 250);
+		if (wr != WAIT_TIMEOUT)
+			break;
+		if (g_stop_flag) {
+			shadow_server_stop(g_server);
+			break;
+		}
+	}
 	WaitForSingleObject(g_server->thread, INFINITE);
 
 	qfwd_wl_stop();
 	shadow_server_uninit(g_server);
 	shadow_server_free(g_server);
+	clear_owned_password();
+	clear_owned_access_token();
 	pw_deinit();
 	return 0;
 }

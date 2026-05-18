@@ -7,6 +7,8 @@
 #     nested-manager; keeps qdwin_shell_v1 so the bystander can
 #     enumerate inner toplevels)
 #   - waypipe (guest end of the vsock display path)
+#   - RDP publisher runtime: socat, PipeWire/FreeRDP runtime libraries,
+#     and qdistro-forward (guest per-view RDP proxy)
 #   - virtiofs guest-mount tooling (the kernel virtiofs driver ships
 #     with the stock Tumbleweed kernel; user-space tools live in the
 #     `virtiofsd` host pkg, none needed on the guest)
@@ -41,7 +43,7 @@ qdistro tier-4-guest image builder.
 
 Usage:
   build-guest-image.sh [--force] [--mirror URL] [--dest PATH]
-                       [--qdwin-src PATH]
+                       [--qdwin-src PATH] [--qdistro-src PATH]
 
 Options:
   --force        Rebuild even if dest already exists.
@@ -52,10 +54,14 @@ Options:
                  (default /var/lib/libvirt/images/qdistro-tier4-guest.qcow2).
   --qdwin-src P  Path to the qdwin source checkout to compile with
                  role=guest. Default: ../../qdwin relative to this script.
+  --qdistro-src P
+                 Path to the qdistro source checkout used to compile
+                 qdistro-forward. Default: this repository root.
 
 Reqs:
   virt-customize, qemu-img, wget, meson, ninja, libweston-devel,
-  wayland-protocols-devel, wayland-devel, libxcursor-devel.
+  wayland-protocols-devel, wayland-devel, libxcursor-devel,
+  freerdp-devel, winpr-devel, pipewire-devel.
 
 Env:
   QDISTRO_VM_PASSWORD  Root password baked into the image (mandatory).
@@ -67,6 +73,7 @@ DEST=/var/lib/libvirt/images/qdistro-tier4-guest.qcow2
 MIRROR=https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QDWIN_SRC="$(cd "$SCRIPT_DIR/../../qdwin" 2>/dev/null && pwd || echo '')"
+QDISTRO_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -75,6 +82,7 @@ while [ $# -gt 0 ]; do
         --mirror)       shift; MIRROR="${1:?--mirror requires URL}"; shift;;
         --dest)         shift; DEST="${1:?--dest requires PATH}"; shift;;
         --qdwin-src)    shift; QDWIN_SRC="${1:?--qdwin-src requires PATH}"; shift;;
+        --qdistro-src)  shift; QDISTRO_SRC="${1:?--qdistro-src requires PATH}"; shift;;
         *) echo "unknown arg: $1" >&2; usage >&2; exit 2;;
     esac
 done
@@ -95,6 +103,10 @@ if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
 fi
 if [ -z "$QDWIN_SRC" ] || [ ! -f "$QDWIN_SRC/meson.build" ]; then
     echo "[tier4-guest-build] FAIL: --qdwin-src '$QDWIN_SRC' does not contain a meson.build" >&2
+    exit 2
+fi
+if [ -z "$QDISTRO_SRC" ] || [ ! -f "$QDISTRO_SRC/daemons/meson.build" ]; then
+    echo "[tier4-guest-build] FAIL: --qdistro-src '$QDISTRO_SRC' does not contain daemons/meson.build" >&2
     exit 2
 fi
 
@@ -128,6 +140,29 @@ QDWIN_BYSTANDER="$QDWIN_BUILD/qdwin-bystander"
 [ -f "$QDWIN_SO" ] || { echo "[tier4-guest-build] FAIL: qdwin-shell.so missing post-compile" >&2; exit 3; }
 [ -x "$QDWIN_BYSTANDER" ] || { echo "[tier4-guest-build] FAIL: qdwin-bystander missing post-compile" >&2; exit 3; }
 
+# qdistro-forward is the RDP-mode per-view proxy. Build it on the host
+# and copy the binary into the image so the guest does not need a
+# compiler toolchain.
+QDISTRO_DAEMONS_BUILD="$WORK/qdistro-daemons-build"
+echo "[tier4-guest-build] compiling qdistro-forward..."
+meson setup "$QDISTRO_DAEMONS_BUILD" "$QDISTRO_SRC/daemons" --prefix=/usr --buildtype=release \
+    >"$WORK/daemons-meson-setup.log" 2>&1 || {
+    echo "[tier4-guest-build] FAIL: meson setup for qdistro-forward failed (see $WORK/daemons-meson-setup.log)" >&2
+    cat "$WORK/daemons-meson-setup.log" >&2
+    exit 3
+}
+meson compile -C "$QDISTRO_DAEMONS_BUILD" qdistro-forward \
+    >"$WORK/daemons-meson-compile.log" 2>&1 || {
+    echo "[tier4-guest-build] FAIL: meson compile qdistro-forward failed (see $WORK/daemons-meson-compile.log)" >&2
+    cat "$WORK/daemons-meson-compile.log" >&2
+    exit 3
+}
+QDISTRO_FORWARD="$QDISTRO_DAEMONS_BUILD/qdistro-forward"
+[ -x "$QDISTRO_FORWARD" ] || {
+    echo "[tier4-guest-build] FAIL: qdistro-forward missing post-compile; install FreeRDP3, WinPR3, PipeWire, and Wayland development packages" >&2
+    exit 3
+}
+
 # --- Step 2: download base
 BASE_QCOW="$WORK/base.qcow2"
 echo "[tier4-guest-build] downloading base image..."
@@ -145,6 +180,39 @@ PUBLISHER_SRC="$SCRIPT_DIR/qdistro-tier4-publisher.sh"
 cp "$PUBLISHER_SRC" "$WORK/qdistro-tier4-publisher.sh"
 chmod 0755 "$WORK/qdistro-tier4-publisher.sh"
 
+cat >"$WORK/tier4-weston.ini" <<'EOF'
+[core]
+shell=qdwin-shell.so
+backend=headless-backend.so,pipewire-backend.so
+
+[pipewire]
+num-outputs=8
+
+[shell]
+locking=false
+EOF
+
+cat >"$WORK/qdistro-pipewire-admin.service" <<'UNIT'
+[Unit]
+Description=qdistro tier-4 admin PipeWire daemon
+After=user@1000.service
+Wants=user@1000.service
+
+[Service]
+Type=simple
+User=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/usr/bin/mkdir -p /run/user/1000
+ExecStartPre=/usr/bin/chown admin:admin /run/user/1000
+ExecStartPre=/usr/bin/chmod 0700 /run/user/1000
+ExecStart=/usr/bin/pipewire
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 # qdwin-guest-session.service — runs weston with role=guest qdwin
 # plugin under the admin user. headless-backend is what lets weston
 # come up without a real DRM device; the bystander wraps inner
@@ -156,8 +224,8 @@ Description=qdistro tier-4-guest nested qdwin session
 # the bare template `user@.service` (which is unresolvable). The
 # guest's admin user is uid 1000 (fixed by build-guest-image.sh's
 # `useradd -m -u 1000 admin`).
-After=user@1000.service
-Wants=user@1000.service
+After=user@1000.service qdistro-pipewire-admin.service
+Wants=user@1000.service qdistro-pipewire-admin.service
 
 [Service]
 Type=simple
@@ -175,8 +243,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStartPre=/usr/bin/mkdir -p /run/user/1000
 ExecStartPre=/usr/bin/chown admin:admin /run/user/1000
 ExecStartPre=/usr/bin/chmod 0700 /run/user/1000
-ExecStart=/usr/bin/weston --backend=headless-backend.so \
-    --shell=/usr/lib64/weston/qdwin-shell.so \
+ExecStart=/usr/bin/weston --config=/etc/qdistro/tier4-weston.ini \
     --socket=wayland-0
 Restart=on-failure
 RestartSec=2
@@ -220,6 +287,16 @@ cat >"$WORK/tier4.env" <<'EOF'
 TIER4_PORT=7777
 EOF
 
+cat >"$WORK/tier4-publisher.conf" <<'EOF'
+# qdistro tier-4 guest publisher config.
+# The default path remains waypipe. Set the alias below to rdp for the
+# guest RDP publisher path.
+# QDISTRO_TIER4_STREAMING_METHOD=rdp
+# QDISTRO_TIER4_RDP_SUBSCRIBE=last
+# QDISTRO_TIER4_RDP_PEER_LABEL=tier4-rdp
+# QDISTRO_TIER4_RDP_CREDS=/run/qdistro-tier4-rdp.env
+EOF
+
 # /etc/fstab line for the virtiofs host-share. The mount tag
 # `qdistro-host` must match the <filesystem> source in
 # domain-template.xml.
@@ -251,16 +328,23 @@ echo "[tier4-guest-build] customizing..."
 # expects. Adding it now to match the spec's explicit list and avoid
 # silent divergence.
 virt-customize -a "$BASE_QCOW" \
-    --install "weston,libweston-14,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal,virtiofsd-client" \
+    --install "weston,libweston-14,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal,virtiofsd-client,socat,pipewire,freerdp,freerdp-server" \
     --copy-in "$QDWIN_SO:/usr/lib64/weston/" \
     --copy-in "$QDWIN_BYSTANDER:/usr/bin/" \
     --run-command 'chmod +x /usr/bin/qdwin-bystander' \
+    --copy-in "$QDISTRO_FORWARD:/usr/bin/" \
+    --run-command 'chmod +x /usr/bin/qdistro-forward' \
     --copy-in "$WORK/qdistro-tier4-publisher.sh:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier4-publisher.sh' \
     --copy-in "$WORK/qdwin-guest-session.service:/etc/systemd/system/" \
+    --copy-in "$WORK/qdistro-pipewire-admin.service:/etc/systemd/system/" \
     --copy-in "$WORK/qdistro-tier4-publisher.service:/etc/systemd/system/" \
     --run-command 'mkdir -p /etc/qdistro' \
     --copy-in "$WORK/tier4.env:/etc/qdistro/" \
+    --copy-in "$WORK/tier4-weston.ini:/etc/qdistro/" \
+    --copy-in "$WORK/tier4-publisher.conf:/etc/qdistro/" \
+    --run-command 'test -x /usr/bin/socat || test -x /usr/local/bin/socat' \
+    --run-command 'test -x /usr/bin/qdistro-forward' \
     --run-command 'mkdir -p /host' \
     --run-command 'chmod 0644 /etc/fstab' \
     --append-line "/etc/fstab:$(cat "$WORK/fstab.host-mount")" \
@@ -268,6 +352,7 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'mkdir -p /run/user/1000 && chown admin:admin /run/user/1000' \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
+    --run-command 'systemctl enable qdistro-pipewire-admin.service' \
     --run-command 'systemctl enable qdwin-guest-session.service' \
     --run-command 'systemctl enable qdistro-tier4-publisher.service' \
     --run-command 'echo "qdistro-tier4-guest" >/etc/hostname' \
