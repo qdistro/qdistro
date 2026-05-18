@@ -124,19 +124,35 @@ class CtrlSocket(QObject):
             conn.setblocking(False)
             data = b""
             # Read up to MAX_COMMAND_LEN or a newline. Non-blocking
-            # so a misbehaving client can't hang the GUI thread; we
-            # bail after a short budget.
+            # so a misbehaving client can't hang the GUI thread, but
+            # we wait briefly between recv attempts via select() so a
+            # well-behaved client that pipes "<cmd>\n" through socat
+            # has time to land its bytes after connect()-but-before-
+            # first-recv. The previous tight 64-iteration spin closed
+            # the socket before socat's payload arrived ~3% of runs,
+            # producing the s103-locker-idle Test 1 "broken pipe on
+            # write" symptom. Total ceiling: 64 * 50ms = 3.2 s.
+            import select as _select
             for _ in range(64):
                 try:
                     chunk = conn.recv(MAX_COMMAND_LEN - len(data))
                 except BlockingIOError:
-                    break
+                    chunk = None
                 except OSError:
                     return
-                if not chunk:
-                    break
-                data += chunk
-                if b"\n" in data or len(data) >= MAX_COMMAND_LEN:
+                if chunk:
+                    data += chunk
+                    if b"\n" in data or len(data) >= MAX_COMMAND_LEN:
+                        break
+                    continue
+                if chunk == b"":
+                    break  # peer closed cleanly
+                # BlockingIOError: wait up to 50ms for the client to
+                # push its first/next chunk. If nothing arrives across
+                # the full 64-iteration budget the client is wedged
+                # and we bail with whatever we have (likely "").
+                r, _, _ = _select.select([conn], [], [], 0.05)
+                if not r and data:
                     break
             line = data.decode("utf-8", errors="replace").strip()
             reply = self._handle(line)
