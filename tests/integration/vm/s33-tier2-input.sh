@@ -94,7 +94,14 @@ PING_LINE=""
 # host so we read it directly. Container stderr-into-journald is
 # unreliable across podman versions, so the file is the canonical
 # source of inner-weston output.
-INNER_LOG_GLOB="/run/user/1000/tier2-weston-*.log"
+#
+# spawn-tier2.sh binds the per-container runtime dir at
+# /run/user/<uid>/qdistro-tier2/<token>/ — that's the host-visible
+# location of the inner $XDG_RUNTIME_DIR. The earlier glob
+# /run/user/1000/tier2-weston-*.log only matches if the inner
+# XDG_RUNTIME_DIR == outer XDG_RUNTIME_DIR (no bind-mount), which
+# isn't the tier-2 case.
+INNER_LOG_GLOB="/run/user/1000/qdistro-tier2/*/tier2-weston-*.log"
 while [ "$(date +%s)" -lt "$deadline" ]; do
     PING_LINE=$(runuser -u admin -- bash -c "grep -h 'qdwin/nested: input-sink PING handle=' $INNER_LOG_GLOB 2>/dev/null" | tail -1 || true)
     [ -n "$PING_LINE" ] && break
@@ -104,6 +111,10 @@ done
 if [ -n "$PING_LINE" ]; then
     pass "in-container nested compositor decoded QDNI events"
 else
+    # Diagnostic: dump the inner weston log tail so a regression
+    # in the input-sink fallback (qdwin-nested-client.c
+    # qdistro-tier2 glob fallback) is visible at log-read time.
+    runuser -u admin -- bash -c "for f in $INNER_LOG_GLOB; do echo --- \$f ---; tail -20 \"\$f\" 2>/dev/null; done" >&2 || true
     fail "PING not decoded inside container within 15s (checked $INNER_LOG_GLOB)"
 fi
 
