@@ -50,9 +50,16 @@ def _parse_argv(argv: list[str]) -> tuple[str, list[str]]:
     ap.add_argument("command", nargs=argparse.REMAINDER,
                     help="command + args")
     args = ap.parse_args(argv)
-    if not args.command:
+    cmd = args.command
+    # argparse.REMAINDER keeps the literal `--` separator (if present)
+    # at the head of the captured list. Drop it so callers that follow
+    # the conventional `qsu -u root -- id -u` shape don't end up trying
+    # to exec "--" as the target program.
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
         ap.error("command required")
-    return args.user, args.command
+    return args.user, cmd
 
 
 def _stream(sock: socket.socket) -> int:
