@@ -565,6 +565,23 @@ USE_SECCTX="${TIER4_USE_SECCTX:-1}"
 SECCTX_ENGINE="${TIER4_SECCTX_ENGINE:-qdistro.tier4}"
 SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
 
+# Per-spawn instance token (loud and unique). Computed BEFORE the
+# qdistro-secctx-exec preflight so the resolved-triple log line below
+# always fires, even when the tagger is missing (s107 probe greps the
+# log file, not the exit code).
+LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
+    echo "[tier4] FAIL: could not generate launch token from /dev/urandom" >&2
+    exit 5
+fi
+SECCTX_INSTANCE="${TIER4_SECCTX_INSTANCE:-$VM_NAME-$LAUNCH_TOKEN}"
+
+# Echo the resolved triple BEFORE the vsock dance (and before the
+# qdistro-secctx-exec preflight) so s107's chrome probe can grep stderr
+# for the actual triple, not just for evidence that the spawn script
+# ran. Mirrors tier5b's stdout SECCTX_APPID=... line.
+echo "[tier4] waypipe-branch resolved (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID instance=$SECCTX_INSTANCE)" >&2
+
 # Hard-fail by default if USE_SECCTX=1 but the tagger is missing. Dev
 # workflows can opt out via QDISTRO_ALLOW_NO_SECCTX=1 (mirrors tier5b).
 if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
@@ -577,20 +594,6 @@ if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; 
         exit 2
     fi
 fi
-
-# Per-spawn instance token (loud and unique).
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
-    echo "[tier4] FAIL: could not generate launch token from /dev/urandom" >&2
-    exit 5
-fi
-SECCTX_INSTANCE="${TIER4_SECCTX_INSTANCE:-$VM_NAME-$LAUNCH_TOKEN}"
-
-# Echo the resolved triple BEFORE the vsock dance so s107's chrome
-# probe (and any future placeholder correlator) can grep stderr for
-# the actual triple, not just for evidence that the spawn script ran.
-# Mirrors tier5b's stdout SECCTX_APPID=... line.
-echo "[tier4] waypipe-branch resolved (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID instance=$SECCTX_INSTANCE)" >&2
 
 # --- atomic CID pick under tier4.lock ---------------------------------
 touch "$DOMAIN_LOCK_FILE" 2>/dev/null || true
