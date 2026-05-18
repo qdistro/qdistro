@@ -2,7 +2,9 @@
 # §Phase-7 tier-4 — bring up a libvirt+QEMU guest VM and attach it to
 # the admin compositor as one chromed peer toplevel.
 #
-# P11 (2026-05-17) introduced TIER4_DISPLAY=waypipe:
+# P11 (2026-05-17) introduced TIER4_DISPLAY=waypipe.
+# P12 adds TIER4_DISPLAY=rdp as an explicit qdwin-to-qdwin per-window
+# stream path:
 #   - TIER4_DISPLAY=waypipe (default after P11):
 #       Boots qdistro-tier4-guest.qcow2 (P10 artifact) and connects
 #       host-side `waypipe --vsock client vsock://$CID:$PORT` against
@@ -11,6 +13,12 @@
 #       xdg_toplevel rides waypipe-server; qdistro-secctx-exec stamps
 #       it with engine=qdistro.tier4, app_id=qdistro.tier4.<vm>, so
 #       P05a chrome + ClipboardGate light up unchanged.
+#   - TIER4_DISPLAY=rdp:
+#       Boots the same qdwin guest, starts the in-guest publisher in
+#       RDP mode via qemu-guest-agent, subscribes one guest toplevel via
+#       qdwin_shell_v1.subscribe_view_stream, bridges the guest-local
+#       qdistro-forward RDP TCP endpoint over AF_VSOCK, and launches a
+#       host FreeRDP wl_client through a local loopback bridge.
 #
 # Spec/reference:
 #   plan2/tasks/P11-tier4-waypipe-migration.md
@@ -23,7 +31,12 @@
 #   spawn-tier4.sh --source-only   (test mode — load helpers, no launch)
 #
 # Env knobs:
-#   TIER4_DISPLAY        waypipe — display backend (only option now).
+#   TIER4_CONFIG         Optional config file. Defaults load from
+#                        /etc/qdistro/tier4.conf when present. Env vars
+#                        override config-file values.
+#   TIER4_STREAMING_METHOD
+#                        Human-readable alias for TIER4_DISPLAY.
+#   TIER4_DISPLAY        waypipe|rdp — display/streaming backend.
 #                        Default 'waypipe' (P11 flip). Legacy viewer path removed in P13.
 #   TIER4_ADMIN_USER     Admin uid for libvirt + waypipe-client (default "admin").
 #   TIER4_MEM_MIB        Guest RAM in MiB (default 1024 for waypipe,
@@ -57,7 +70,15 @@
 #   TIER4_SECCTX_ENGINE  Override sandbox_engine (default qdistro.tier4).
 #   TIER4_SECCTX_APPID   Override app_id (default qdistro.tier4.<vm_name>).
 #   TIER4_CID            Override allocated CID (waypipe branch).
-#   TIER4_PORT           Override vsock port (waypipe branch; default 7879).
+#   TIER4_PORT           Override vsock port. Defaults 7879 for waypipe,
+#                        7880 for rdp.
+#   TIER4_RDP_SUBSCRIBE  Guest toplevel handle to subscribe, or "last"
+#                        (default). This is the per-window selector.
+#   TIER4_RDP_LOCAL_PORT Host loopback port for FreeRDP. Default is
+#                        33000 + (CID - TIER4_CID_MIN).
+#   TIER4_RDP_CLIENT     FreeRDP client binary override.
+#   TIER4_RDP_GUEST_APP  Guest app launched before subscribing.
+#                        Currently only weston-terminal is accepted.
 #   TIER4_KEEP_DOMAIN=1  Skip destroy+undefine on exit (debug, waypipe).
 #
 # Lifecycle:
@@ -97,6 +118,7 @@ TIER4_CID_MIN=200
 # per-CID-and-port), switch to PORT=7879+CID-200 to keep clear of
 # tier5b.
 TIER4_FIXED_PORT=7879
+TIER4_RDP_FIXED_PORT=7880
 
 # Lock file for atomic CID pick + virsh define (separate from tier5b's).
 DOMAIN_LOCK_DIR="/run/qdistro"
@@ -104,6 +126,75 @@ if ! mkdir -p "$DOMAIN_LOCK_DIR" 2>/dev/null; then
     DOMAIN_LOCK_DIR="/tmp"
 fi
 DOMAIN_LOCK_FILE="$DOMAIN_LOCK_DIR/tier4.lock"
+
+# ---------------------------------------------------------------------
+# Configuration loader.
+#
+# /etc/qdistro/tier4.conf and $TIER4_CONFIG are simple KEY=VALUE files.
+# Only known tier-4 keys are accepted, and existing environment values
+# win over config-file defaults. This keeps operator config explicit
+# while preserving one-shot env overrides in tests and launchers.
+# ---------------------------------------------------------------------
+tier4_config_key_allowed() {
+    case "$1" in
+        TIER4_STREAMING_METHOD|TIER4_DISPLAY|TIER4_ADMIN_USER|TIER4_MEM_MIB|\
+        TIER4_TITLE_PREFIX|TIER4_DOMAIN_TEMPLATE|TIER4_GUEST_DISK|\
+        TIER4_VIRTIOFS_DIR|TIER4_USE_SECCTX|TIER4_SECCTX_ENGINE|\
+        TIER4_SECCTX_APPID|TIER4_SECCTX_INSTANCE|TIER4_CID|TIER4_PORT|\
+        TIER4_RDP_SUBSCRIBE|TIER4_RDP_LOCAL_PORT|TIER4_RDP_CLIENT|\
+        TIER4_RDP_GUEST_APP|TIER4_KEEP_DOMAIN|TIER4_DEBUG)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+root_owned_not_writable_by_others() {
+    local path="$1" uid mode
+    uid="$(stat -c '%u' "$path" 2>/dev/null)" || return 1
+    mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
+    [ "$uid" = "0" ] || return 1
+    # Last two octal digits must not have write bits.
+    [ $(( 8#${mode: -2:1} & 2 )) -eq 0 ] || return 1
+    [ $(( 8#${mode: -1:1} & 2 )) -eq 0 ] || return 1
+}
+
+require_trusted_root_file_if_privileged() {
+    local path="$1" label="$2"
+    if [ "$(id -u)" = "0" ] && [ "${QDISTRO_TIER4_DRY_RUN:-0}" != "1" ]; then
+        root_owned_not_writable_by_others "$path" || {
+            echo "[tier4] FAIL: $label '$path' must be root-owned and not group/world-writable" >&2
+            return 1
+        }
+    fi
+}
+
+load_tier4_config_file() {
+    local cfg="$1" line key value
+    [ -n "$cfg" ] && [ -f "$cfg" ] || return 0
+    require_trusted_root_file_if_privileged "$cfg" "config file" || return 4
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|\#*) continue ;; esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key%%[[:space:]]*}"
+        tier4_config_key_allowed "$key" || {
+            echo "[tier4] WARN: ignoring unknown config key '$key' in $cfg" >&2
+            continue
+        }
+        if [ -z "${!key+x}" ]; then
+            printf -v "$key" '%s' "$value"
+            export "$key"
+        fi
+    done <"$cfg"
+}
+
+load_tier4_config() {
+    if [ -n "${TIER4_CONFIG:-}" ]; then
+        load_tier4_config_file "$TIER4_CONFIG"
+    else
+        load_tier4_config_file /etc/qdistro/tier4.conf
+    fi
+}
 
 # ---------------------------------------------------------------------
 # Helper: JSON-encode an arbitrary string via python3 json.dumps.
@@ -156,10 +247,11 @@ resolve_template() {
             echo "[tier4] FAIL: TIER4_DOMAIN_TEMPLATE=$override not readable" >&2
             return 4
         fi
+        require_trusted_root_file_if_privileged "$override" "domain template" || return 4
         echo "$override"
         return 0
     fi
-    if [ "$display" = "waypipe" ]; then
+    if [ "$display" = "waypipe" ] || [ "$display" = "rdp" ]; then
         # P10's guest-image template (has vsock + virtio-snd
         # + virtiofs). Stored alongside tier4-vm-guest, not tier4-vm/.
         local guest_dir
@@ -173,8 +265,7 @@ resolve_template() {
             return 4
         fi
     fi
-    # This point should not be reached as only waypipe is supported now
-    echo "[tier4] FAIL: waypipe domain template not found" >&2
+    echo "[tier4] FAIL: tier4-vm-guest domain template not found" >&2
     return 4
 }
 
@@ -201,13 +292,23 @@ fi
 VM_NAME="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# TIER4_DISPLAY default — P11 flip: waypipe is the default after this
-# task. Legacy viewer path removed in P13.
+# Load operator defaults before resolving the streaming method. Existing
+# environment variables keep precedence over config-file values.
+load_tier4_config
+
+# TIER4_STREAMING_METHOD is the readable config-file alias. TIER4_DISPLAY
+# remains the historical env/API name used by tests and launchers.
+if [ -n "${TIER4_STREAMING_METHOD:-}" ] && [ -z "${TIER4_DISPLAY:-}" ]; then
+    TIER4_DISPLAY="$TIER4_STREAMING_METHOD"
+fi
+
+# TIER4_DISPLAY default — P11 flip: waypipe remains default. RDP is an
+# explicit opt-in streaming method.
 TIER4_DISPLAY="${TIER4_DISPLAY:-waypipe}"
 case "$TIER4_DISPLAY" in
-    waypipe) ;;
+    waypipe|rdp) ;;
     *)
-        echo "[tier4] FAIL: TIER4_DISPLAY='$TIER4_DISPLAY' invalid (expected: waypipe)" >&2
+        echo "[tier4] FAIL: TIER4_DISPLAY='$TIER4_DISPLAY' invalid (expected: waypipe or rdp)" >&2
         exit 1
         ;;
 esac
@@ -252,23 +353,25 @@ fi
 NO_VIEWER="${TIER4_NO_VIEWER:-0}"
 DEFINE_ONLY="${TIER4_DOMAIN_DEFINE_ONLY:-0}"
 
-# waypipe branch — needs waypipe + flock + qemu-img.
-if ! command -v waypipe >/dev/null 2>&1; then
-    echo "[tier4] FAIL: waypipe not installed (zypper install waypipe)" >&2
-    exit 2
-fi
 for tool in flock qemu-img; do
     command -v "$tool" >/dev/null || {
-        echo "[tier4] FAIL: TIER4_DISPLAY=waypipe needs $tool installed" >&2
+        echo "[tier4] FAIL: TIER4_DISPLAY=$TIER4_DISPLAY needs $tool installed" >&2
         exit 2
     }
 done
-# Base disk: P10's qdistro-tier4-guest.qcow2.
-if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
-    TIER4_GUEST_DISK="${TIER4_GUEST_DISK:-/var/lib/libvirt/images/qdistro-tier4-guest.qcow2}"
+if [ "$TIER4_DISPLAY" = "waypipe" ]; then
+    if ! command -v waypipe >/dev/null 2>&1; then
+        echo "[tier4] FAIL: waypipe not installed (zypper install waypipe)" >&2
+        exit 2
+    fi
 else
-    TIER4_GUEST_DISK="/var/lib/libvirt/images/qdistro-tier4-guest.qcow2"
+    command -v socat >/dev/null 2>&1 || {
+        echo "[tier4] FAIL: TIER4_DISPLAY=rdp needs socat installed" >&2
+        exit 2
+    }
 fi
+# Base disk: P10's qdistro-tier4-guest.qcow2.
+TIER4_GUEST_DISK="${TIER4_GUEST_DISK:-/var/lib/libvirt/images/qdistro-tier4-guest.qcow2}"
 if [ "$DEFINE_ONLY" != "1" ] && [ ! -f "$TIER4_GUEST_DISK" ]; then
     echo "[tier4] FAIL: guest disk $TIER4_GUEST_DISK missing — bake via qdistro/tier4-vm-guest/build-guest-image.sh" >&2
     exit 3
@@ -314,6 +417,71 @@ qga_cmd() {
     run_as_admin virsh qemu-agent-command --timeout 5 "$1" "$2"
 }
 
+qga_exec_shell_bg() {
+    # $1 = shell command. Starts it through qemu-guest-agent and does
+    # not wait for the child; command must background its long-lived
+    # process if it should survive guest-exec's shell.
+    local cmd_json
+    cmd_json="$(printf '%s' "$1" | json_encode_stdin)"
+    qga_cmd "$VM_NAME" "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-lc\",$cmd_json],\"capture-output\":true}}" >/dev/null
+}
+
+qga_exec_capture() {
+    # $1 = shell command. Prints captured stdout, returns non-zero if
+    # guest-exec itself fails or the guest command exits non-zero.
+    local cmd_json start pid status
+    cmd_json="$(printf '%s' "$1" | json_encode_stdin)"
+    start="$(qga_cmd "$VM_NAME" "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-lc\",$cmd_json],\"capture-output\":true}}")" || return 1
+    pid="$(printf '%s' "$start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["return"]["pid"])')" || return 1
+    for _ in $(seq 1 15); do
+        status="$(qga_cmd "$VM_NAME" "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}")" || return 1
+        if printf '%s' "$status" | python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin)["return"].get("exited") else 1)' >/dev/null 2>&1; then
+            printf '%s' "$status" | python3 -c '
+import base64, json, sys
+r = json.load(sys.stdin)["return"]
+if r.get("exitcode", 1) != 0:
+    sys.exit(r.get("exitcode", 1))
+data = r.get("out-data") or ""
+if data:
+    sys.stdout.write(base64.b64decode(data).decode("utf-8", "replace"))
+'
+            return $?
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+qga_exec_capture_quiet() {
+    # Same as qga_exec_capture, but preserves stderr for caller handling.
+    qga_exec_capture "$1" 2>/dev/null
+}
+
+find_rdp_client() {
+    if [ -n "${TIER4_RDP_CLIENT:-}" ]; then
+        command -v "$TIER4_RDP_CLIENT" >/dev/null 2>&1 || return 1
+        echo "$TIER4_RDP_CLIENT"; return 0
+    fi
+    for c in wlfreerdp xfreerdp3 xfreerdp sdl-freerdp; do
+        if command -v "$c" >/dev/null 2>&1; then
+            echo "$c"; return 0
+        fi
+    done
+    return 1
+}
+
+tcp_loopback_accepts() {
+    local port="$1"
+    python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.create_connection(("127.0.0.1", port), timeout=1):
+    pass
+PY
+}
+
 # ---------------------------------------------------------------------
 # Waypipe branch.
 #
@@ -349,6 +517,7 @@ DISK_CREATED=0
 VIRTIOFS_DIR=""
 VIRTIOFS_OWNED=0
 CLIENT_PID=
+RDP_BRIDGE_PID=
 CLEANUP_DONE=0
 
 cleanup() {
@@ -358,8 +527,17 @@ cleanup() {
         return 0
     fi
     CLEANUP_DONE=1
-    [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
+    if [ -n "$CLIENT_PID" ]; then
+        kill -- "-$CLIENT_PID" 2>/dev/null || kill "$CLIENT_PID" 2>/dev/null || true
+        wait "$CLIENT_PID" 2>/dev/null || true
+    fi
     CLIENT_PID=
+    if [ -n "$RDP_BRIDGE_PID" ]; then
+        kill -- "-$RDP_BRIDGE_PID" 2>/dev/null || kill "$RDP_BRIDGE_PID" 2>/dev/null || true
+        wait "$RDP_BRIDGE_PID" 2>/dev/null || true
+    fi
+    RDP_BRIDGE_PID=
+    [ -n "${RDP_PASSWORD_FILE:-}" ] && rm -f "$RDP_PASSWORD_FILE" 2>/dev/null || true
     if [ "$DOMAIN_DEFINED" = "1" ] && [ "${TIER4_KEEP_DOMAIN:-0}" != "1" ]; then
         run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
         run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
@@ -447,7 +625,11 @@ else
     done
 fi
 
-PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
+if [ "$TIER4_DISPLAY" = "rdp" ]; then
+    PORT="${TIER4_PORT:-$TIER4_RDP_FIXED_PORT}"
+else
+    PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
+fi
 [[ "$PORT" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: PORT='$PORT' not numeric" >&2; exit 1; }
 
 maybe_overwrite_existing
@@ -476,11 +658,7 @@ if [ "$DEFINE_ONLY" != "1" ]; then
 fi
 
 # --- virtiofs share ---------------------------------------------------
-if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
-    VIRTIOFS_DIR="${TIER4_VIRTIOFS_DIR:-/var/lib/qdistro/tier4/$VM_NAME/host}"
-else
-    VIRTIOFS_DIR="/var/lib/qdistro/tier4/$VM_NAME/host"
-fi
+VIRTIOFS_DIR="${TIER4_VIRTIOFS_DIR:-/var/lib/qdistro/tier4/$VM_NAME/host}"
 if [ ! -d "$VIRTIOFS_DIR" ]; then
     install -d -m 0755 "$VIRTIOFS_DIR"
     VIRTIOFS_OWNED=1
@@ -516,7 +694,7 @@ fi
 
 maybe_overwrite_existing
 
-echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC, display=waypipe, cid=$CID, port=$PORT)" >&2
+echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC, display=$TIER4_DISPLAY, cid=$CID, port=$PORT)" >&2
 chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
 if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
     echo "[tier4] FAIL: virsh define failed" >&2
@@ -559,6 +737,51 @@ if [ "$QGA_OK" != "1" ]; then
     exit 7
 fi
 echo "[tier4] qga ready" >&2
+
+if [ "$TIER4_DISPLAY" = "rdp" ]; then
+    RDP_SUBSCRIBE="${TIER4_RDP_SUBSCRIBE:-last}"
+    RDP_GUEST_APP="${TIER4_RDP_GUEST_APP:-weston-terminal}"
+    case "$RDP_GUEST_APP" in
+        weston-terminal) ;;
+        *)
+            echo "[tier4] FAIL: TIER4_RDP_GUEST_APP='$RDP_GUEST_APP' unsupported (expected: weston-terminal)" >&2
+            exit 1
+            ;;
+    esac
+    case "$RDP_SUBSCRIBE" in
+        last|''|*[!0-9]*)
+            if [ "$RDP_SUBSCRIBE" != "last" ]; then
+                echo "[tier4] FAIL: TIER4_RDP_SUBSCRIBE must be 'last' or a numeric qdwin toplevel handle" >&2
+                exit 1
+            fi
+            ;;
+    esac
+    RDP_CREDS_PATH="/run/qdistro-tier4-rdp.env"
+    RDP_GUEST_PREFLIGHT='
+set -eu
+command -v socat >/dev/null
+command -v qdistro-forward >/dev/null
+test -x /usr/bin/qdwin-bystander
+test -x /usr/local/bin/qdistro-tier4-publisher.sh
+test -S /run/user/1000/wayland-0
+'
+    if ! qga_exec_capture "$RDP_GUEST_PREFLIGHT" >/dev/null; then
+        echo "[tier4] FAIL: guest RDP preflight failed (need socat, qdistro-forward, qdwin-bystander, publisher, and /run/user/1000/wayland-0)" >&2
+        exit 7
+    fi
+
+    # The baked waypipe publisher owns qdwin_shell_v1 by default. RDP
+    # mode needs its own bystander subscriber, so stop the default unit.
+    qga_exec_capture "systemctl stop qdistro-tier4-publisher.service 2>/dev/null || true" >/dev/null || true
+    qga_exec_capture "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 $RDP_GUEST_APP >/tmp/qdistro-tier4-rdp-app.log 2>&1 &" >/dev/null || true
+
+    RDP_PUBLISHER_CMD="rm -f '$RDP_CREDS_PATH'; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 QDISTRO_TIER4_DISPLAY=rdp QDISTRO_TIER4_RDP_SUBSCRIBE='$RDP_SUBSCRIBE' QDISTRO_TIER4_RDP_CREDS='$RDP_CREDS_PATH' /usr/local/bin/qdistro-tier4-publisher.sh '$PORT' >/var/log/qdistro-tier4-rdp-publisher.launch.log 2>&1 &"
+    echo "[tier4] starting guest RDP publisher (subscribe=$RDP_SUBSCRIBE vsock=$PORT)" >&2
+    if ! qga_exec_shell_bg "$RDP_PUBLISHER_CMD"; then
+        echo "[tier4] FAIL: qga failed to start RDP publisher" >&2
+        exit 7
+    fi
+fi
 
 # --- probe in-guest publisher vsock readiness ------------------------
 # The publisher is a systemd service auto-started at boot (P10's image
@@ -614,7 +837,7 @@ fi
 echo "[tier4] publisher vsock bind confirmed on vsock://$CID:$PORT" >&2
 
 if [ "$NO_VIEWER" = "1" ]; then
-    echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching waypipe-client" >&2
+    echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching display client" >&2
     echo "[tier4] OK (vsock://$CID:$PORT)"
     while sleep 60; do :; done
 fi
@@ -635,38 +858,112 @@ CLIENT_LOG="$ADMIN_RUNTIME/tier4-${VM_NAME}-client.log"
 : >"$CLIENT_LOG"
 chown "$ADMIN_USER" "$CLIENT_LOG" 2>/dev/null || true
 
-# Argv shape mirrors tier5b's `waypipe --vsock client vsock://CID:PORT
-# -- <wrap-cmd>` pattern. The control script (when reachable) wraps the
-# whole thing so Close() RPC stays bound regardless of display backend.
-# Since waypipe forks the child only when a wl_client connects, we wrap
-# waypipe inside tier4_control to keep RPC dispatch alive for the full
-# session.
-WAYPIPE_ARGV=(waypipe --vsock client "vsock://$CID:$PORT")
-[ "${TIER4_DEBUG:-0}" = "1" ] && WAYPIPE_ARGV+=(--debug)
+if [ "$TIER4_DISPLAY" = "rdp" ]; then
+    RDP_CREDS=""
+    for _ in $(seq 1 30); do
+        RDP_CREDS="$(qga_exec_capture "cat /run/qdistro-tier4-rdp.env 2>/dev/null" 2>/dev/null || true)"
+        if printf '%s\n' "$RDP_CREDS" | grep -q '^RDP_PORT='; then
+            break
+        fi
+        sleep 1
+    done
+    if ! printf '%s\n' "$RDP_CREDS" | grep -q '^RDP_PORT='; then
+        echo "[tier4] FAIL: guest RDP publisher did not write /run/qdistro-tier4-rdp.env" >&2
+        echo "[tier4] guest publisher log:" >&2
+        qga_exec_capture_quiet "cat /var/log/qdistro-tier4-rdp-publisher.launch.log 2>/dev/null || true" >&2 || true
+        exit 7
+    fi
+    RDP_PASSWORD="$(printf '%s\n' "$RDP_CREDS" | awk -F= '/^RDP_PASSWORD=/{print $2; exit}')"
+    case "$RDP_PASSWORD" in
+        *$'\n'*|*$'\r'*|*[[:cntrl:]]*)
+            echo "[tier4] FAIL: guest RDP password contains control characters" >&2
+            exit 7
+            ;;
+    esac
+    if [ -z "$RDP_PASSWORD" ]; then
+        echo "[tier4] FAIL: guest RDP publisher returned an empty password" >&2
+        exit 7
+    fi
+    RDP_CLIENT="$(find_rdp_client)" || {
+        echo "[tier4] FAIL: no FreeRDP client found (tried wlfreerdp, xfreerdp3, xfreerdp, sdl-freerdp)" >&2
+        exit 2
+    }
+    if [ -n "${TIER4_RDP_LOCAL_PORT:-}" ]; then
+        RDP_LOCAL_PORT="$TIER4_RDP_LOCAL_PORT"
+    else
+        RDP_LOCAL_PORT=$((33000 + CID - TIER4_CID_MIN))
+    fi
+    [[ "$RDP_LOCAL_PORT" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: TIER4_RDP_LOCAL_PORT='$RDP_LOCAL_PORT' not numeric" >&2; exit 1; }
+    if [ "$RDP_LOCAL_PORT" -lt 1 ] || [ "$RDP_LOCAL_PORT" -gt 65535 ]; then
+        echo "[tier4] FAIL: TIER4_RDP_LOCAL_PORT '$RDP_LOCAL_PORT' out of range 1..65535" >&2
+        exit 1
+    fi
+    RDP_BRIDGE_LOG="$ADMIN_RUNTIME/tier4-${VM_NAME}-rdp-bridge.log"
+    : >"$RDP_BRIDGE_LOG"
+    chown "$ADMIN_USER" "$RDP_BRIDGE_LOG" 2>/dev/null || true
+    setsid runuser -u "$ADMIN_USER" -- env \
+        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" HOME="$ADMIN_HOME" \
+        socat "TCP-LISTEN:$RDP_LOCAL_PORT,bind=127.0.0.1,reuseaddr,fork" \
+              "VSOCK-CONNECT:$CID:$PORT" >>"$RDP_BRIDGE_LOG" 2>&1 &
+    RDP_BRIDGE_PID=$!
+    RDP_BRIDGE_READY=0
+    for _ in $(seq 1 20); do
+        if ! kill -0 "$RDP_BRIDGE_PID" 2>/dev/null; then
+            break
+        fi
+        if tcp_loopback_accepts "$RDP_LOCAL_PORT" >/dev/null 2>&1; then
+            RDP_BRIDGE_READY=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$RDP_BRIDGE_READY" != "1" ]; then
+        echo "[tier4] FAIL: RDP vsock bridge died during startup" >&2
+        cat "$RDP_BRIDGE_LOG" >&2 || true
+        exit 6
+    fi
+
+    RDP_PASSWORD_FILE="$ADMIN_RUNTIME/tier4-${VM_NAME}-rdp-password"
+    (umask 077 && printf '%s\n' "$RDP_PASSWORD" >"$RDP_PASSWORD_FILE")
+    chown "$ADMIN_USER" "$RDP_PASSWORD_FILE" 2>/dev/null || true
+    RDP_ARGV=("$RDP_CLIENT" "/v:127.0.0.1:$RDP_LOCAL_PORT" "/u:qdistro" "/cert:ignore" "/from-stdin")
+    [ "${TIER4_DEBUG:-0}" = "1" ] && RDP_ARGV+=("/log-level:DEBUG")
+    DISPLAY_ARGV=("${RDP_ARGV[@]}")
+else
+    # Argv shape mirrors tier5b's `waypipe --vsock client vsock://CID:PORT`
+    # pattern.
+    WAYPIPE_ARGV=(waypipe --vsock client "vsock://$CID:$PORT")
+    [ "${TIER4_DEBUG:-0}" = "1" ] && WAYPIPE_ARGV+=(--debug)
+    DISPLAY_ARGV=("${WAYPIPE_ARGV[@]}")
+fi
 
 if [ -n "$CONTROL_SCRIPT" ] && [ -f "$CONTROL_SCRIPT" ] \
         && command -v python3 >/dev/null 2>&1; then
     # The control script exec's the rest of argv as the child process.
-    # With waypipe as the child, control's Close() RPC kills the
-    # waypipe process tree on close-button (then cleanup() reaps virsh).
+    # With the display client as the child, control's Close() RPC kills
+    # the client process tree on close-button (then cleanup() reaps virsh).
     CLIENT_CMD=(python3 "$CONTROL_SCRIPT"
                 --vm-name "$VM_NAME"
-                -- "${WAYPIPE_ARGV[@]}")
+                -- "${DISPLAY_ARGV[@]}")
 else
+    if [ "$TIER4_DISPLAY" = "rdp" ]; then
+        echo "[tier4] FAIL: TIER4_DISPLAY=rdp requires tier4_control.py so the RDP password can be passed over stdin, not argv" >&2
+        exit 2
+    fi
     if [ -n "$CONTROL_SCRIPT" ]; then
         echo "[tier4] WARN: control script $CONTROL_SCRIPT or python3 unavailable; close button will not destroy the domain (degraded)" >&2
     else
         echo "[tier4] WARN: tier4_control.py not found; close button will not destroy the domain (degraded)" >&2
     fi
-    CLIENT_CMD=("${WAYPIPE_ARGV[@]}")
+    CLIENT_CMD=("${DISPLAY_ARGV[@]}")
 fi
 
 if [ "$USE_SECCTX" = "1" ]; then
-    echo "[tier4] launching waypipe-client for '$VM_NAME' (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
+    echo "[tier4] launching $TIER4_DISPLAY client for '$VM_NAME' (secctx engine=$SECCTX_ENGINE app_id=$SECCTX_APPID)" >&2
 else
-    echo "[tier4] launching waypipe-client for '$VM_NAME' (un-tagged)" >&2
+    echo "[tier4] launching $TIER4_DISPLAY client for '$VM_NAME' (un-tagged)" >&2
 fi
-echo "[tier4] waypipe-client log: $CLIENT_LOG" >&2
+echo "[tier4] display-client log: $CLIENT_LOG" >&2
 
 # setsid: a qdshell crash (the parent of this script in production)
 # must not propagate SIGHUP to waypipe-client. The client outlives the
@@ -676,6 +973,7 @@ setsid runuser -u "$ADMIN_USER" -- env \
     HOME="$ADMIN_HOME" \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=$ADMIN_RUNTIME/bus" \
+    QDISTRO_TIER4_RDP_PASSWORD_FILE="${RDP_PASSWORD_FILE:-}" \
     "${SECCTX_WRAP[@]}" "${CLIENT_CMD[@]}" >>"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
 
@@ -683,19 +981,23 @@ CLIENT_PID=$!
 # crashed during startup (so the operator doesn't wait for the cleanup
 # trap to fire on a zombie session).
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if grep -q 'Starting client main process\|Setting up vsock' "$CLIENT_LOG" 2>/dev/null; then
+    if [ "$TIER4_DISPLAY" = "rdp" ]; then
+        if kill -0 "$CLIENT_PID" 2>/dev/null; then
+            break
+        fi
+    elif grep -q 'Starting client main process\|Setting up vsock' "$CLIENT_LOG" 2>/dev/null; then
         break
     fi
     sleep 0.2
 done
 
 if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
-    echo "[tier4] FAIL: waypipe-client died during readiness poll" >&2
+    echo "[tier4] FAIL: $TIER4_DISPLAY client died during readiness poll" >&2
     cat "$CLIENT_LOG" >&2 || true
     exit 6
 fi
 
 wait "$CLIENT_PID" 2>/dev/null
 EXIT=$?
-echo "[tier4] waypipe-client exited rc=$EXIT" >&2
+echo "[tier4] $TIER4_DISPLAY client exited rc=$EXIT" >&2
 exit "$EXIT"

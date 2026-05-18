@@ -258,6 +258,21 @@ def _install_control(vm_name: str) -> tuple[Any, Any] | tuple[None, None]:
 _viewer_proc = None
 
 
+def _terminate_viewer_process_group(proc: subprocess.Popen | None,
+                                    signum: int = signal.SIGTERM) -> None:
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signum)
+    except ProcessLookupError:
+        pass
+    except Exception:  # noqa: BLE001
+        try:
+            proc.send_signal(signum)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _default_close(vm_name: str) -> dict:
     """ACPI→destroy lifecycle invoked from the Close() RPC."""
     if _tier4_chrome is None:
@@ -269,10 +284,7 @@ def _default_close(vm_name: str) -> dict:
     # so it exits promptly instead of waiting for vsock kernel timeout.
     global _viewer_proc
     if _viewer_proc is not None and result.ok:
-        try:
-            _viewer_proc.terminate()
-        except Exception:  # noqa: BLE001
-            pass
+        _terminate_viewer_process_group(_viewer_proc)
     return {
         "ok": bool(result.ok),
         "method": result.method,
@@ -337,21 +349,46 @@ def _exec_or_fork_client(viewer_argv: list[str]) -> int:
     mainloop on the side-thread continues to dispatch Close() RPCs
     while the client is open.
     """
-    _log(f"launching client argv={viewer_argv!r}")
+    redacted_argv = []
+    for arg in viewer_argv:
+        if arg.startswith("/p:") or arg.startswith("--rdp-password"):
+            redacted_argv.append(arg.split("=", 1)[0] + "=<redacted>"
+                                 if "=" in arg else arg[:3] + "<redacted>")
+        else:
+            redacted_argv.append(arg)
+    _log(f"launching client argv={redacted_argv!r}")
+    password_file = os.environ.get("QDISTRO_TIER4_RDP_PASSWORD_FILE", "")
+    password = None
+    if password_file:
+        try:
+            with open(password_file, "r", encoding="utf-8") as f:
+                password = f.readline()
+        except OSError as e:
+            _log(f"viewer password file read failed: {e!r}")
+            return 126
     try:
-        proc = subprocess.Popen(viewer_argv)  # noqa: S603 — argv list, no shell
+        stdin = subprocess.PIPE if password is not None else None
+        proc = subprocess.Popen(  # noqa: S603 — argv list, no shell
+            viewer_argv,
+            stdin=stdin,
+            start_new_session=True,
+        )
     except FileNotFoundError as e:
         _log(f"viewer exec failed: {e!r}")
         return 127
+    if password is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(password.encode("utf-8"))
+            proc.stdin.flush()
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
     # Store process handle so Close() RPC can signal it.
     global _viewer_proc
     _viewer_proc = proc
     # Forward SIGINT / SIGTERM to the client.
     def _forward(signum, _frame):
-        try:
-            proc.send_signal(signum)
-        except Exception:  # noqa: BLE001
-            pass
+        _terminate_viewer_process_group(proc, signum)
     for s in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(s, _forward)
