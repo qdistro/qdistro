@@ -48,14 +48,17 @@ systemctl mask greetd.service 2>/dev/null || true
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
-mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker}
-for repo in qdistro qdwin qdshell qdlocker; do
+mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser}
+for repo in qdistro qdwin qdshell qdlocker qdbrowser; do
     if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
-        # qdlocker is optional during the rollout; older spin scripts
-        # don't stage it. Don't fail the whole bootstrap if it's absent.
-        if [ "$repo" = "qdlocker" ]; then
-            log "qdlocker tarball not staged; skipping (no peer locker installed)"
-            rmdir "$SRC/qdlocker" 2>/dev/null || true
+        # qdlocker + qdbrowser are optional during the rollout; older
+        # spin scripts don't stage them. Don't fail the whole bootstrap
+        # if they're absent — the bridge installer will WARN and the
+        # qdbrowser pwd_autofill probes will then ModuleNotFoundError,
+        # but the broker / pwd / session-manager paths still come up.
+        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ]; then
+            log "$repo tarball not staged; skipping"
+            rmdir "$SRC/$repo" 2>/dev/null || true
             continue
         fi
         echo "[bootstrap] failed to fetch $HOST/$repo.tar.gz"; exit 2
@@ -91,7 +94,7 @@ INSTALLERS=(
     "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
-    "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge"
+    "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge  $SRC/qdbrowser/qdbrowser"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
     "scripts/install/install-recall-for-vm.sh          $QD"

@@ -23,6 +23,21 @@
 set -euo pipefail
 
 SRC=${1:-/root/browser-bridge-src}
+# $2: optional path to the outer ``qdbrowser/qdbrowser/`` python
+# package. If present (or auto-located next to $SRC), its .py files
+# are staged to /usr/local/lib/qdistro/qdbrowser/ so probes can
+# ``from qdbrowser.pwd_autofill import ...`` (see s105 in
+# tests/integration/vm/, search-path lines 432-434).
+QDBROWSER_PKG="${2:-}"
+if [ -z "$QDBROWSER_PKG" ]; then
+    for cand in \
+        "$SRC/../../qdbrowser/qdbrowser" \
+        "$SRC/../qdbrowser/qdbrowser" \
+        "/root/qdistro-src/qdbrowser/qdbrowser" \
+        "/root/qdbrowser-src/qdbrowser"; do
+        if [ -f "$cand/__init__.py" ]; then QDBROWSER_PKG="$cand"; break; fi
+    done
+fi
 if [ ! -d "$SRC" ]; then
     echo "[install-browser-bridge] missing source dir $SRC" >&2
     exit 2
@@ -32,6 +47,7 @@ DEST_LIB_QDISTRO=/usr/libexec/qdistro
 DEST_LIB_BIN=/usr/lib/qdistro
 DEST_BIN=/usr/local/bin
 DEST_SHARE=/usr/share/qdistro/browser-extension
+DEST_QDBROWSER=/usr/local/lib/qdistro/qdbrowser
 
 install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_LIB_BIN" "$DEST_BIN" "$DEST_SHARE"
 
@@ -66,6 +82,24 @@ if [ -d "$SRC/extension" ]; then
     cp -r "$SRC/extension/." "$DEST_SHARE/"
     [ -f "$DEST_SHARE/build-extension.sh" ] && \
         chmod 0755 "$DEST_SHARE/build-extension.sh"
+fi
+
+# Stage the outer qdbrowser python package, so probes (and the bridge
+# orchestrator) can ``import qdbrowser.pwd_autofill`` even when the
+# qdbrowser pip-install path didn't run on this VM. Mirrors the
+# sys.path search in tests/integration/vm/s105-browser-pwd-autofill.sh.
+if [ -n "$QDBROWSER_PKG" ] && [ -d "$QDBROWSER_PKG" ]; then
+    install -d -m 0755 "$DEST_QDBROWSER"
+    find "$QDBROWSER_PKG" -maxdepth 1 -name '*.py' -print0 \
+        | xargs -0 -I{} install -m 0644 {} "$DEST_QDBROWSER/"
+    if [ -d "$QDBROWSER_PKG/plugins" ]; then
+        install -d -m 0755 "$DEST_QDBROWSER/plugins"
+        find "$QDBROWSER_PKG/plugins" -maxdepth 1 -name '*.py' -print0 \
+            | xargs -0 -I{} install -m 0644 {} "$DEST_QDBROWSER/plugins/"
+    fi
+    echo "[install-browser-bridge] staged qdbrowser python pkg -> $DEST_QDBROWSER"
+else
+    echo "[install-browser-bridge] WARN: outer qdbrowser pkg not found; pwd_autofill probes will ModuleNotFoundError"
 fi
 
 echo "[install-browser-bridge] OK"
