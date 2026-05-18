@@ -44,6 +44,12 @@ QDISTRO_PKGS=(
   # noctalia-qs after the Noctalia project that ships it).
   noctalia-qs
   qt6-declarative-imports qt6-svg qt6-shadertools
+  # Qt6 devel headers — required so fresh-vm-bootstrap.sh's in-VM
+  # `meson setup` of qdshell/qml-plugin/ can find Qt6Core / Qt6Qml /
+  # Qt6QmlIntegration via pkg-config. Without these, meson aborts with
+  # `Dependency "Qt6Core" not found`, which cascades to ~80 bats failures
+  # because the QML plugin is a hard prereq for the shell session.
+  qt6-base-devel qt6-declarative-devel qt6-qmlintegration-devel
   # bats for in-VM integration tests
   bats
 )
