@@ -16,6 +16,20 @@ PartOf=graphical-session.target
 # used — qdlocker has Restart=always and will re-attempt the
 # connection if qdwin isn't ready, which is the documented fail-safe.
 After=graphical-session.target qdwin-compositor.service
+# Disable systemd's start-limit-hit gate. Qt's wayland platform plugin
+# qFatals (SIGABRT) when $WAYLAND_DISPLAY isn't accepting connections
+# at QGuiApplication() construction — a transient condition during
+# session bring-up and any restart that races qdwin/weston. With the
+# default StartLimitBurst=5 / StartLimitIntervalSec=10s, five such
+# crashes within 10 s permanently park the unit in `failed
+# (start-limit-hit)` until a manual `systemctl reset-failed`, which
+# silently breaks the "Restart=always re-attempts forever" contract
+# the [Service] block below relies on. Setting
+# StartLimitIntervalSec=0 disables the gate entirely; the unit will
+# keep retrying every RestartSec=2s indefinitely, which matches the
+# stated fail-safe and prevents s103-locker-idle from observing a
+# stale ctrl socket after Test 1's restart hop.
+StartLimitIntervalSec=0
 
 [Service]
 # Type=simple — we don't sd_notify until a later iteration wires the
