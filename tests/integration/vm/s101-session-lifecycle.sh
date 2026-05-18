@@ -23,11 +23,23 @@ note() { printf 'INFO: %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
 # Step 0 — ensure daemon is up.
+#
+# SessionManager1 rejects callers whose uid != ADMIN_UID, so the bats
+# wrapper invokes this script via runuser -u admin. systemd refuses
+# unprivileged 'systemctl restart' without polkit interactive auth,
+# so we only restart when we have the privilege (root) and otherwise
+# just probe is-active. The bats wrapper already does the privileged
+# restart before runuser, so by the time we reach here the unit is
+# either freshly restarted or has been running across prior tests.
 # ---------------------------------------------------------------------------
 
-systemctl restart qdistro-session-manager.service \
-    || err "qdistro-session-manager.service failed to start"
-sleep 1
+if [ "$(id -u)" = "0" ]; then
+    systemctl restart qdistro-session-manager.service \
+        || err "qdistro-session-manager.service failed to start"
+    sleep 1
+fi
+systemctl is-active --quiet qdistro-session-manager.service \
+    || err "qdistro-session-manager.service is not active"
 busctl --system list 2>/dev/null | grep -q org.qdistro.SessionManager1 \
     || err "org.qdistro.SessionManager1 not on system bus"
 
