@@ -270,11 +270,16 @@ if echo "$PENDING" | grep -q "app.send-to:$CROSS_TARGET_UID"; then
     note "cross-silo RelayMessage enqueued — admin approval required"
 fi
 
-# Approve from admin (the broker's process runs as root; DecideRequest
-# enforces uid 1000 as approver, so we just have to call as admin).
-RID=$(echo "$PENDING" | grep -oE '"id"[ :]+[0-9]+' | head -1 | grep -oE '[0-9]+')
+# Approve from admin (DecideRequest enforces uid 1000 as approver).
+# busctl serialises GetPending's aa{sv} as `"id" i <N>` (space-
+# separated, not "id":N), so the RID extractor matches "id" + the
+# variant type tag + the integer.
+RID=$(echo "$PENDING" \
+    | grep -oE '"id"[[:space:]]+i[[:space:]]+[0-9]+' \
+    | head -1 \
+    | grep -oE '[0-9]+$')
 if [ -n "$RID" ]; then
-    busctl --system call \
+    runuser -u admin -- busctl --system call \
         org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1 \
@@ -283,8 +288,11 @@ fi
 wait $CROSS_PID 2>/dev/null || true
 
 # Audit log inspection — the prompt row should be present even on
-# deny. We grep the broker's audit DB directly.
-AUDIT_DB=/var/lib/qdistro/audit.sqlite
+# deny. We grep the broker's audit DB directly. The DB lives at
+# /var/lib/qdistro/audit/audit.sqlite on real bakes; older layouts
+# put it directly under /var/lib/qdistro/ or .../broker/.
+AUDIT_DB=/var/lib/qdistro/audit/audit.sqlite
+[ -f "$AUDIT_DB" ] || AUDIT_DB=/var/lib/qdistro/audit.sqlite
 [ -f "$AUDIT_DB" ] || AUDIT_DB=/var/lib/qdistro/broker/audit.sqlite
 if sqlite3 "$AUDIT_DB" \
         "SELECT action, source FROM audit WHERE action LIKE 'app.send-to:%' \
@@ -312,8 +320,30 @@ fi
 # ---------------------------------------------------------------------------
 # qterminator's qdistro_integration uses qsu externally; here we just
 # exercise the wrapper directly from the work uid and assert id reports
-# uid=0. The bake pre-approves qsu's id/whoami so the prompt fires
-# silently for the harness.
+# uid=0. The harness pre-approves the narrow `id -u` argv so the
+# broker's prompt fires silently — there's no GUI agent in this
+# headless test, so without the rule the call would hang on the
+# pending approval. The rule is uid 2000 + action `qsu.exec:root` +
+# argv_exact `/usr/bin/id -u` — minimal surface, single test
+# binary.
+install -d -o root -g root -m 0755 /etc/qdistro/rules.d
+cat >/etc/qdistro/rules.d/s102-qsu-id.yaml <<'YAMLEOF'
+- name: s102-qsu-id-uid2000
+  decision: allow
+  match:
+    uid: 2000
+    action: qsu.exec:root
+    exe: /usr/bin/python3.13
+    argv_exact: ["/usr/bin/id", "-u"]
+  rationale: "s102 send-to-roundtrip: pre-approve `id -u` for the qsu test"
+YAMLEOF
+# Reload the broker rules without bouncing the daemon (avoids
+# tearing down the pending receivers / silo state we just set up).
+runuser -u admin -- busctl --system call \
+    org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1 \
+    ReloadRules >/dev/null 2>&1 || true
 
 QSU_OUT=$(runuser -u work -- env \
     XDG_RUNTIME_DIR=/run/user/2000 \
