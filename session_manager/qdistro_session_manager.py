@@ -219,6 +219,15 @@ class _SystemOps:
             ["useradd", "-m", "-u", str(int(uid)), "-U",
              "-s", "/bin/bash", str(name)],
             check=True)
+        # Reload dbus so policy files referencing `<policy user="<name>">`
+        # pick up the freshly-created user. Without this, dbus rejects
+        # the silo's qdistro-user-relay@<uid>.service from claiming
+        # org.qdistro.UserRelay.uid<N> with "Request to own name refused
+        # by policy" — the policy file (org.qdistro.UserRelay.conf) was
+        # parsed at bootstrap before the silo user existed.
+        subprocess.run(
+            ["systemctl", "reload", "dbus.service"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Replace the plain /home/<name> dir useradd created with a
         # fresh btrfs subvolume so each silo has its own snapshot
         # boundary + per-quota target. Falls through (warning only)
