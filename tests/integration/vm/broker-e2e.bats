@@ -33,16 +33,10 @@ setup() {
     script_path="$(dirname "$BATS_TEST_FILENAME")/s90-phase5-broker-e2e.sh"
     [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
 
-    # Stage on host http server (port 8765 by convention).
+    # Stage on host http server (port 8765 by convention). See
+    # stage_http_8765 in helpers.bash for the kill-and-respawn rationale.
     cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-
-    if ! ss -tln 2>/dev/null | grep -q ":8765 "; then
-        local stage_dir
-        stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
-        (cd "$stage_dir" && nohup python3 -m http.server 8765 \
-            >/tmp/qdistro-bats-http.log 2>&1 &)
-        sleep 1
-    fi
+    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
 
     vm_run 'curl -s -o /tmp/s90.sh http://10.0.2.2:8765/s90-phase5-broker-e2e.sh && chmod +x /tmp/s90.sh && bash /tmp/s90.sh'
     assert_success
