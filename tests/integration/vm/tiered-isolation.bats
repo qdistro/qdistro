@@ -244,11 +244,18 @@ stage_vm_driver() {
     # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
     # define-only and no-viewer modes; full waypipe-on-wayland-1
     # integration is exercised manually until the chrome path is stable.
+    #
+    # The tier-4 stack (libvirt/qemu/waypipe) is an opt-in bake asset.
+    # Skip cleanly when absent so CI doesn't fail on minimal bakes.
+    vm_run "command -v virsh >/dev/null && command -v qemu-system-x86_64 >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-4 stack (libvirt/qemu/kvm) not installed on this VM (opt-in bake)"
+    fi
     stage_vm_driver "s42-tier4-spawn.sh"
     vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-4 stack (libvirt/qemu/waypipe) not installed on this VM"
+        skip "tier-4 stack (libvirt/qemu/waypipe) not installed on this VM (opt-in bake)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: define-only mode created domain"
@@ -297,11 +304,17 @@ stage_vm_driver() {
     # §Phase-7 tier-5 --vm — full per-app guest VM path. Skips when
     # /var/lib/libvirt/images/qdistro-tier5-base.qcow2 is absent (build
     # is opt-in: ~400MB Tumbleweed-Minimal-VM cloud download).
+    # tier-5 base disk is an opt-in bake asset (~400MB download). Skip
+    # cleanly when absent so CI doesn't fail on minimal bakes.
+    vm_run "[ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ] && command -v virsh >/dev/null && command -v qemu-img >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-5 base disk / virsh / qemu-img / kvm absent (opt-in bake; set QDISTRO_BUILD_TIER5_BASE=1)"
+    fi
     stage_vm_driver "s45-tier5-vm.sh"
     vm_run "curl -s -o /tmp/s45.sh http://10.0.2.2:8768/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1, or invoke qdistro-tier5-build-guest-image manually)"
+        skip "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: host-side waypipe-client vsock listener ready"
@@ -316,11 +329,17 @@ stage_vm_driver() {
     # Anything left after SIGTERM is a leak; the bats variant catches
     # the regression class the user-facing close button can't see.
     # Pairs with permissions-gui/21-tier5-close-cleanup.md (visual).
+    # tier-5 base disk + virsh/kvm — opt-in bake. Same skip surface as
+    # phase7-tier5-vm; skip cleanly when absent.
+    vm_run "[ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ] && command -v virsh >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
+    fi
     stage_vm_driver "s48-tier5-close-cleanup.sh"
     vm_run "curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
+        skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
     fi
     assert_output_contains "PASS: domain"
     assert_output_contains "PASS: libvirt domain"
@@ -332,11 +351,17 @@ stage_vm_driver() {
     # §Phase-7 tier-5 audio — spec/29 §3 picked path. Skips when the
     # tier-5 base disk is absent OR pipewire-tools / qemu-audio-pipewire
     # are missing.
+    # tier-5 base disk / pw-cli / qemu-audio-pipewire — opt-in bake.
+    # Skip cleanly when absent.
+    vm_run "[ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ] && command -v virsh >/dev/null && command -v qemu-img >/dev/null && command -v pw-cli >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-5 base disk / pw-cli / qemu-audio-pipewire absent (opt-in bake)"
+    fi
     stage_vm_driver "s47-tier5-audio.sh"
     vm_run "curl -s -o /tmp/s47.sh http://10.0.2.2:8768/s47-tier5-audio.sh && chmod +x /tmp/s47.sh && bash /tmp/s47.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
+        skip "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
     fi
     assert_output_contains "PASS: host preconditions met"
     assert_output_contains "PASS: domain template carries <audio type='pipewire'>"
