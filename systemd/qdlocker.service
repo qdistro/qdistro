@@ -33,9 +33,11 @@ Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
 # location; hardcoding /usr/lib/python3.11 broke on Python 3.13.
 Environment=PYTHONNOUSERSITE=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-# WAYLAND_DISPLAY / XDG_RUNTIME_DIR are inherited from the systemd
-# --user environment; the session manager imports them after qdwin
-# advertises the socket.
+# Pin WAYLAND_DISPLAY + XDG_RUNTIME_DIR explicitly: the test-VM linger
+# session doesn't import them into the user manager environment, so we
+# set them here, mirroring noctalia-shell.service.
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 Restart=always
 RestartSec=2
 
