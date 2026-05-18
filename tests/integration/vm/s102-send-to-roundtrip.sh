@@ -58,8 +58,12 @@ busctl --system list 2>/dev/null | grep -q org.qdistro.SessionManager1 \
 # ---------------------------------------------------------------------------
 
 # Runtime scratch dir used from Step 1 onward (createsilo/startsilo
-# stdout capture, receiver pids, etc.).
+# stdout capture, receiver pids, etc.). The driver runs as root
+# (vm-exec/qga) but the silo's `work` uid (2000) writes ready-*.txt /
+# recv-*.txt from receivers spawned under `runuser -u work`. chmod
+# sticky-world so any uid can write.
 mkdir -p /tmp/s102
+chmod 1777 /tmp/s102
 
 # The session manager enforces ADMIN_UID=1000 in-process AND via D-Bus
 # policy; vm_run lands as root, so we hop to admin for both lifecycle
