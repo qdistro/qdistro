@@ -24,6 +24,10 @@ QDISTRO_PKGS=(
   Mesa-demo-egl wayland-utils
   python313-python-pam fprintd
   python313-dbus-python python313-gobject python313-gobject-Gdk
+  # jeepney: pure-Python D-Bus used by qdbrowser/pwd_autofill.py +
+  # qdistro/browser_bridge/. Without it, the autofill prompt RPC
+  # short-circuits to {"ok": false, "reason": "jeepney_missing"}.
+  python313-jeepney
   python313-PyYAML
   python313-cryptography
   tpm2.0-tools
