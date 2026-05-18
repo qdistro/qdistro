@@ -679,7 +679,15 @@ stage_vm_driver() {
     # the whole script as the admin user. systemctl restart of the
     # daemon still works (the user has polkit auth via the
     # qdistro-admin group, and the unit's PolicyKit rules permit it).
-    vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && runuser -u admin -- bash /tmp/s101.sh 2>/dev/null"
+    #
+    # Stage isolation: drop any stale "work" silo state left by a prior
+    # interrupted run BEFORE restarting the daemon so the cleanup
+    # busctl call inside s101 has a known-clean baseline (R9 fixer:
+    # the empty-diagnostic flake in R11/R12 was traced to an err()
+    # exit whose stderr was swallowed by 2>/dev/null below; the
+    # redirect is now 2>&1 so future flakes are diagnosable).
+    vm_run "busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StopSilo si work 2 >/dev/null 2>&1 || true; busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 DeleteSilo s work >/dev/null 2>&1 || true; userdel -r work 2>/dev/null || true; rm -rf /var/lib/qdistro/silos/work 2>/dev/null || true"
+    vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
     assert_success
     if [[ "$output" == *"FAIL: qdistro-session-manager.service failed to start"* ]]; then
         fail_loud "qdistro-session-manager not installed on this VM (older bootstrap)"
