@@ -28,7 +28,7 @@ sleep 1
 rm -rf /home/admin/qdshell
 install -d -o admin -g admin /home/admin/qdshell
 cp -r "$QDWIN_SRC/qdshell/." /home/admin/qdshell/
-install -m 0644 "$QDWIN_SRC/qdwin/qdwin-shell-v1.xml" \
+install -m 0644 "$QDWIN_SRC/qdwin/qdwin/qdwin-shell-v1.xml" \
     /home/admin/qdshell/qdwin-shell-v1.xml
 chown -R admin:admin /home/admin/qdshell
 runuser -u admin -- env QDWIN_PROTO_XML=/home/admin/qdshell/qdwin-shell-v1.xml \
