@@ -15,9 +15,15 @@ if [ -z "$VM_NAME" ] || [ -z "$CMD" ]; then
     exit 1
 fi
 
-# 1. Send the command
-RESPONSE=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" \
-  "{\"execute\": \"guest-exec\", \"arguments\": { \"path\": \"/bin/sh\", \"arg\": [ \"-c\", \"$CMD\" ], \"capture-output\": true }}")
+# 1. Send the command. Build the qga JSON with jq so embedded quotes,
+#    backslashes, and newlines in $CMD survive a round-trip through
+#    virsh -> qemu-guest-agent -> /bin/sh -c. The previous form
+#    interpolated $CMD into a JSON literal with bash, which corrupted
+#    on any `"` or `\` in the command body (see locker-idle.bats
+#    failure with `invalid string sequence`).
+EXEC_JSON=$(jq -nc --arg cmd "$CMD" \
+    '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":true}}')
+RESPONSE=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$EXEC_JSON")
 
 if echo "$RESPONSE" | grep -q "error"; then
     echo "[vm-exec] ERROR: Failed to start command: $RESPONSE" >&2
@@ -36,8 +42,9 @@ WAIT_COUNT=0
 ERROR_COUNT=0
 while true; do
     set +e
-    RESULT=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" \
-      "{\"execute\": \"guest-exec-status\", \"arguments\": { \"pid\": $PID }}")
+    STATUS_JSON=$(jq -nc --argjson pid "$PID" \
+        '{execute:"guest-exec-status",arguments:{pid:$pid}}')
+    RESULT=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$STATUS_JSON")
     VIRSH_EXIT=$?
     set -e
 
