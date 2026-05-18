@@ -39,3 +39,7 @@ qdlocker = [
     "qml/qmldir",
     "protocol/qdwin_locker_v1/*.py",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+pythonpath = ["."]
