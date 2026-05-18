@@ -395,7 +395,19 @@ CLIENT_OPTS=(-s "$HOST_LISTEN_CID:$PORT" --vsock -o)
 # keep it for tools that inspect the waypipe client's own secctx, but
 # the *load-bearing* secctx (full engine/app_id/instance_id triple)
 # comes from qdistro-secctx-exec wrapping waypipe-client below.
-[ -n "$SECCTX" ] && CLIENT_OPTS+=(--secctx "$SECCTX")
+#
+# When USE_SECCTX=1 we wrap waypipe-client with qdistro-secctx-exec
+# (below). That wrap already tags the outer Wayland connection with
+# wp_security_context_v1; per the spec wp_security_context_manager_v1
+# is hidden inside a secctx-tagged connection, so waypipe's own
+# --secctx (which re-binds the manager to set app_id) would fail with
+# "Compositor did not provide wp_security_context_manager_v1 global"
+# (waypipe src/secctx.rs:56). Only pass --secctx when we're NOT also
+# wrapping — i.e. when the operator opted out of the engine/app_id/
+# instance_id triple by setting TIER5_USE_SECCTX=0.
+if [ -n "$SECCTX" ] && [ "$USE_SECCTX" != "1" ]; then
+    CLIENT_OPTS+=(--secctx "$SECCTX")
+fi
 
 # Build the secctx-exec wrap if enabled.
 SECCTX_WRAP=()
