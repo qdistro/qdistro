@@ -66,9 +66,14 @@ if ! systemctl is-active --quiet qdistro-pwd.service; then
     echo "SKIP: qdistro-pwd.service not running"
     exit 0
 fi
-out=$(busctl --system introspect com.qdistro.Pwd1 /com/qdistro/Pwd1 2>/dev/null \
+# Daemon registers as `org.qdistro.Pwd1` on the system bus (see
+# qdistro/pwd/qdistro_pwd_daemon.py BUS_NAME). Earlier copies of this
+# probe used the `com.qdistro.*` prefix from the spec draft, which
+# never matched the live name and made every run print "method not
+# advertised" even when registration was correct.
+out=$(busctl --system introspect org.qdistro.Pwd1 /org/qdistro/Pwd1 2>/dev/null \
       || dbus-send --system --print-reply \
-            --dest=com.qdistro.Pwd1 /com/qdistro/Pwd1 \
+            --dest=org.qdistro.Pwd1 /org/qdistro/Pwd1 \
             org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null)
 if ! echo "$out" | grep -q 'UnlockVaultFprint'; then
     echo "FAIL: Pwd1.UnlockVaultFprint not advertised in introspection"
