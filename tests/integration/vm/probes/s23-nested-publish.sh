@@ -40,9 +40,26 @@ NESTED_INI=/home/admin/.config/weston-nested-pub.ini
 pgrep -x pipewire >/dev/null || { echo "ERROR: pipewire not running"; exit 1; }
 loginctl enable-linger admin 2>/dev/null || true
 
+# Stop the admin user's production qdwin session first; otherwise
+# Restart=on-failure relaunches weston between our pkill and our own
+# outer's startup, racing the wayland-1 lockfile.
+systemctl --machine=admin@.host --user stop \
+    noctalia-shell.service noctalia-session.service qdlocker.service \
+    2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 pkill -9 -f "sdl-freerdp.*:3389" 2>/dev/null || true
 pkill -9 -f "weston-terminal" 2>/dev/null || true
+# Poll up to 10s until weston is gone *and* the lockfile (if present)
+# is no longer flocked, then unlink stale on-disk artifacts.
+for _ in $(seq 1 20); do
+    pgrep -x weston >/dev/null 2>&1 && { sleep 0.5; continue; }
+    if [ ! -e /run/user/1000/wayland-1.lock ] || \
+       flock -n -x /run/user/1000/wayland-1.lock -c true 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+rm -f /run/user/1000/wayland-1.lock /run/user/1000/wayland-1 2>/dev/null || true
 sleep 1
 
 # --- stage qdshell + protocol XMLs ----------------------------------
