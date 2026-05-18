@@ -85,19 +85,24 @@ STAGE="$(mktemp -d -t qdistro-stage.XXXXXX)"
 trap 'rm -rf "$STAGE"; [ -n "${HTTP_PID:-}" ] && kill "$HTTP_PID" 2>/dev/null || true' EXIT
 
 log "stage 4a: tarballing qdistro, qdwin, qdshell..."
+# `build-*` excludes match by basename anywhere in the tree; the
+# old `--exclude='build-*'` ate `print-vm/build-print-image.sh`
+# (spec/20 priority #5 source-of-truth probed by s64). Restrict the
+# exclude to the known meson-host build dirs in sibling repos so
+# regular scripts named `build-*` survive into the staged tarballs.
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-*' \
+    --exclude='.git' --exclude='build' --exclude='build-host*' \
     -czf "$STAGE/qdistro.tar.gz" -C "$PARENT/qdistro" .
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-*' \
+    --exclude='.git' --exclude='build' --exclude='build-host*' \
     --exclude='libweston-vendored/src/build' \
     -czf "$STAGE/qdwin.tar.gz" -C "$PARENT/qdwin" .
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-    --exclude='.git' --exclude='build' --exclude='build-*' \
+    --exclude='.git' --exclude='build' --exclude='build-host*' \
     -czf "$STAGE/qdshell.tar.gz" -C "$PARENT/qdshell" .
 if [ -d "$PARENT/qdlocker" ]; then
     tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-        --exclude='.git' --exclude='build' --exclude='build-*' \
+        --exclude='.git' --exclude='build' --exclude='build-host*' \
         -czf "$STAGE/qdlocker.tar.gz" -C "$PARENT/qdlocker" .
 fi
 

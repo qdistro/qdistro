@@ -17,7 +17,13 @@ ALLOWLIST_BIN=/usr/local/bin/qdistro-print-allowlist
 # matching the broker / pwd / polkit-agent split. The earlier draft
 # of this probe checked /usr/lib/qdistro/print which was wrong.
 BROWSE_MOD=/usr/libexec/qdistro/qdistro_print_browse.py
-BUILD_SCRIPT=/root/print-src/build-print-image.sh
+# fresh-vm-bootstrap.sh unpacks tarballs to /root/qdistro-src/qdistro/,
+# so build-print-image.sh lands at qdistro-src/qdistro/print-vm/, not
+# the legacy /root/print-src/ path the first draft of this probe used.
+BUILD_SCRIPT=/root/qdistro-src/qdistro/print-vm/build-print-image.sh
+if [ ! -f "$BUILD_SCRIPT" ] && [ -f /root/print-src/build-print-image.sh ]; then
+    BUILD_SCRIPT=/root/print-src/build-print-image.sh
+fi
 
 if [ ! -x "$ALLOWLIST_BIN" ]; then
     echo "SKIP: qdistro-print-allowlist not installed (rerun bootstrap after task 105)"
@@ -68,7 +74,8 @@ echo "PASS: qdistro_print_browse module shape"
 # separate disk), but the file is staged under /root/print-src/ by
 # install-print-proxy-for-vm.sh, so the SoT lives there.
 if [ ! -f "$BUILD_SCRIPT" ]; then
-    echo "SKIP: build-print-image.sh not staged (run from outside the print-VM context)"
+    echo "FAIL: build-print-image.sh not staged at $BUILD_SCRIPT (spin-test-vm.sh tar exclude regressed?)"
+    exit 3
 else
     grep -q 'MaxJobs               500' "$BUILD_SCRIPT" || {
         echo "FAIL: build script missing MaxJobs cap"
