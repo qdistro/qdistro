@@ -6,7 +6,8 @@
   "minimum_chrome_version": "126",
   "permissions": [
     "nativeMessaging",
-    "activeTab"
+    "activeTab",
+    "webNavigation"
   ],
   "action": {
     "default_title": "qdistro: ping bridge",

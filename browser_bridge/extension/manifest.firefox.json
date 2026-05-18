@@ -11,7 +11,8 @@
   },
   "permissions": [
     "nativeMessaging",
-    "activeTab"
+    "activeTab",
+    "webNavigation"
   ],
   "browser_action": {
     "default_title": "qdistro: ping bridge",
