@@ -132,13 +132,31 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 # Bootstrap fetches the three tarballs and runs the build.
 "$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_VM_PASSWORD='$QDISTRO_VM_PASSWORD' bash /root/fresh-vm-bootstrap.sh" >&2
 
-# Stage 6: verify ctrl-socket responds.
+# Stage 6: verify the session came up.
+# wayland-1 is the core "compositor came up" signal — fatal on miss.
+# qdshell ctrl-socket + qdlocker.sock are warn-only (the qdlocker bug
+# is still in flight in the qdlocker repo and qdshell may not have
+# bound the ctrl-socket yet at this exact moment).
 sleep 3
+WAYLAND_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/wayland-1 ] && echo yes || echo no" 2>/dev/null | tail -1)
+if [ "${WAYLAND_OK:-no}" != "yes" ]; then
+    log "FAIL: /run/user/1000/wayland-1 missing — compositor did not come up"
+    exit 4
+fi
+log "PASS: /run/user/1000/wayland-1 present (compositor up)"
+
 REPLY=$("$SCRIPT_DIR/vm-exec" "$VM" "echo list | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>&1 | head -1" 2>/dev/null | tail -1)
 if [ "${REPLY:-}" = "ok list" ]; then
     log "PASS: qdshell ctrl-socket responsive"
 else
-    log "WARN: ctrl-socket not ready (reply was: ${REPLY:-empty})"
+    log "WARN: qdshell ctrl-socket not ready (reply was: ${REPLY:-empty})"
+fi
+
+LOCKER_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/qdlocker.sock ] && echo yes || echo no" 2>/dev/null | tail -1)
+if [ "${LOCKER_OK:-no}" = "yes" ]; then
+    log "PASS: qdlocker.sock present"
+else
+    log "WARN: qdlocker.sock missing (known qdlocker env bug; fix in flight)"
 fi
 
 log "ready. VM:"

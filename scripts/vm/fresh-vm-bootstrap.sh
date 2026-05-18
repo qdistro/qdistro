@@ -145,6 +145,47 @@ meson compile -C build \
 meson install -C build \
     || { log "  ERROR: qdshell meson install failed"; exit 3; }
 
+# ---- 5c. Install + enable seatd (system service) ------------------------
+# admin's lingering user@1000.service is a "manager" session that does
+# NOT own a logind seat, so libseat's logind backend fails inside
+# noctalia-session.service (weston) with:
+#   libseat/backend/logind.c: Could not get primary session for user
+#   libseat/backend/seatd.c:  Could not connect to socket /run/seatd.sock
+#   libseat: could not open seat
+#   fatal: failed to create compositor backend
+# Running seatd as a system service exposes /run/seatd.sock (root:seat
+# 0660) so the seatd backend works for any user in the `seat` group.
+# install-qdwin-session-for-vm.sh adds admin to that group.
+log "installing + enabling seatd (system service)..."
+zypper -n install --no-recommends seatd >/dev/null 2>&1 \
+    || { log "  ERROR: zypper install seatd failed"; exit 3; }
+groupadd -f seat
+cat > /etc/systemd/system/seatd.service <<'EOF'
+[Unit]
+Description=Seat management daemon
+Documentation=man:seatd(1)
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/seatd -g seat
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now seatd.service \
+    || { log "  ERROR: failed to enable+start seatd.service"; exit 3; }
+for i in 1 2 3 4 5; do
+    [ -S /run/seatd.sock ] && break
+    sleep 1
+done
+if [ ! -S /run/seatd.sock ]; then
+    log "  WARN: /run/seatd.sock did not appear within 5s"
+fi
+
 # ---- 6. Install qdwin session (weston + qdshell user units) -------------
 log "installing qdwin session (noctalia-session + noctalia-shell user units)..."
 bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
@@ -218,6 +259,49 @@ if [ -x "$SRC/qdistro/scripts/install/install-tier3-for-vm.sh" ]; then
         || log "  WARN: tier-3 launcher install failed; phase7-tier3-* bats will fail loud"
 fi
 
+# ---- 7d. Start the user session ----------------------------------------
+# install-qdwin-session-for-vm.sh adds admin to the `seat` group; the
+# new group membership only takes effect on a fresh session, so we
+# terminate any existing user manager and re-enable linger to get a
+# clean user@1000.service with the right supplementary groups, then
+# start noctalia-shell.service (which pulls noctalia-session.service
+# in via Requires=). qdlocker.service was enabled in §7 and starts via
+# default.target once the user manager comes up.
+log "starting admin user session..."
+loginctl terminate-user admin 2>/dev/null || true
+sleep 1
+loginctl enable-linger admin
+for i in 1 2 3 4 5; do
+    systemctl is-active --quiet user@1000.service && break
+    sleep 1
+done
+
+runuser -l admin -c 'systemctl --user daemon-reload' || true
+runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+
+log "  waiting for /run/user/1000/wayland-1..."
+for i in $(seq 1 30); do
+    [ -S /run/user/1000/wayland-1 ] && break
+    sleep 1
+done
+if [ ! -S /run/user/1000/wayland-1 ]; then
+    log "  WARN: /run/user/1000/wayland-1 did not appear within 30s"
+    log "  weston logs:"
+    runuser -l admin -c 'journalctl --user -u noctalia-session.service --no-pager -n 30' || true
+fi
+
+# qdlocker has a known WAYLAND_DISPLAY env-propagation bug being fixed
+# in the qdlocker repo by another agent; the socket may not appear yet.
+# Warn-and-continue — do NOT fail the bootstrap on this.
+log "  waiting for /run/user/1000/qdlocker.sock (best-effort)..."
+for i in $(seq 1 30); do
+    [ -S /run/user/1000/qdlocker.sock ] && break
+    sleep 1
+done
+if [ ! -S /run/user/1000/qdlocker.sock ]; then
+    log "  WARN: /run/user/1000/qdlocker.sock did not appear within 30s (known qdlocker env bug)"
+fi
+
 # ---- 8. Opt-in: build tier-4 / tier-5 guest base images ----------------
 # These produce the qcow2 base images that spawn-tier4.sh / spawn-tier5.sh
 # linked-clone from. ~400-500 MB upstream Tumbleweed Minimal-VM Cloud
@@ -245,6 +329,6 @@ if [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = "1" ]; then
 fi
 
 log "bootstrap complete."
-log "start the session now with:"
-log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
-log "  runuser -l admin -c 'systemctl --user start qdlocker.service'"
+log "session was started by §7d; if it failed, restart with:"
+log "  runuser -l admin -c 'systemctl --user restart noctalia-shell.service'"
+log "  runuser -l admin -c 'systemctl --user restart qdlocker.service'"

@@ -45,7 +45,11 @@ if [ ! -d "$QDSHELL_SRC" ]; then
 fi
 
 # 1. Groups + linger.
-usermod -aG video,input,render admin
+# `seat` is required so libseat's seatd backend can open a seat for
+# weston when the compositor runs under admin's lingering user manager
+# (which has no logind seat of its own). The group is created by
+# fresh-vm-bootstrap.sh's seatd setup step.
+usermod -aG video,input,render,seat admin
 loginctl enable-linger admin
 
 # 2. weston.ini: qdwin-shell.so + drm backend so the VM console sees
