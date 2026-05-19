@@ -686,7 +686,13 @@ stage_vm_driver() {
     # the empty-diagnostic flake in R11/R12 was traced to an err()
     # exit whose stderr was swallowed by 2>/dev/null below; the
     # redirect is now 2>&1 so future flakes are diagnosable).
-    vm_run "busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StopSilo si work 2 >/dev/null 2>&1 || true; busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 DeleteSilo s work >/dev/null 2>&1 || true; userdel -r work 2>/dev/null || true; rm -rf /var/lib/qdistro/silos/work 2>/dev/null || true"
+    # SessionManager1's StopSilo/DeleteSilo enforce _require_admin
+    # (uid==1000), so the cleanup busctl calls must run via
+    # `runuser -u admin --`. Running them as root is silently rejected
+    # by the daemon (the prior cleanup left silo 'work' present, and
+    # CreateSilo inside s101 then failed with "silo 'work' already
+    # exists"). `userdel` and `rm -rf` of /var/lib stay as root.
+    vm_run "runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StopSilo si work 2 >/dev/null 2>&1 || true; runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 DeleteSilo s work >/dev/null 2>&1 || true; userdel -r work 2>/dev/null || true; rm -rf /var/lib/qdistro/silos/work 2>/dev/null || true"
     vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
     assert_success
     if [[ "$output" == *"FAIL: qdistro-session-manager.service failed to start"* ]]; then
