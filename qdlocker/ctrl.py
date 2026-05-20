@@ -20,9 +20,10 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSocketNotifier, Slot
+from PySide6.QtCore import QObject, Slot
 
 from .auth import AuthOutcome
 from .controller import LockController
@@ -39,6 +40,55 @@ def default_socket_path() -> Path:
     return Path(runtime) / "qdlocker.sock"
 
 
+class CtrlState:
+    def __init__(self, controller: LockController, locked: bool) -> None:
+        self._lock = threading.Lock()
+        self._locked = locked
+        self._prompt_len = len(controller.currentText)
+        self._pam_ready = controller.pamReady
+        self._unlock_in_progress = controller.unlockInProgress
+        self._last_outcome: AuthOutcome | None = None
+
+    def set_locked(self, value: bool) -> None:
+        with self._lock:
+            self._locked = value
+
+    def set_prompt_len(self, value: int) -> None:
+        with self._lock:
+            self._prompt_len = value
+
+    def set_pam_ready(self, value: bool) -> None:
+        with self._lock:
+            self._pam_ready = value
+
+    def set_unlock_in_progress(self, value: bool) -> None:
+        with self._lock:
+            self._unlock_in_progress = value
+
+    def set_last_outcome(self, value: AuthOutcome) -> None:
+        with self._lock:
+            self._last_outcome = value
+
+    def status(self) -> str:
+        with self._lock:
+            return (
+                f"locked={self._locked} "
+                f"prompt-len={self._prompt_len} "
+                f"pam-ready={self._pam_ready} "
+                f"unlock-in-progress={self._unlock_in_progress}"
+            )
+
+    def unlock_result(self) -> str:
+        with self._lock:
+            last = self._last_outcome.value if self._last_outcome else "none"
+        return f"last={last}"
+
+    def prompt_text(self) -> str:
+        with self._lock:
+            n = self._prompt_len
+        return f"masked={'*' * n} len={n}"
+
+
 class CtrlSocket(QObject):
     def __init__(
         self,
@@ -51,9 +101,15 @@ class CtrlSocket(QObject):
         self._controller = controller
         self._bridge = bridge
         self._path = path or default_socket_path()
-        self._last_outcome: AuthOutcome | None = None
+        self._state = CtrlState(controller, bridge.locked)
+        self._stop = threading.Event()
         controller.unlocked.connect(self._on_unlocked)
         controller.failed.connect(self._on_failed)
+        controller._currentTextChanged.connect(self._on_current_text_changed)
+        controller._pamReadyChanged.connect(self._on_pam_ready_changed)
+        controller._unlockInProgressChanged.connect(self._on_unlock_in_progress_changed)
+        if hasattr(bridge, "lockedChangedForCtrl"):
+            bridge.lockedChangedForCtrl.connect(self._on_locked_changed)
 
         # Tighten umask so the bind creates the socket with 0o600
         # regardless of the inherited umask. The chmod afterwards is
@@ -74,21 +130,20 @@ class CtrlSocket(QObject):
             os.chmod(self._path, 0o600)
         except OSError:
             log.warning("could not chmod %s", self._path)
-        self._notifier = QSocketNotifier(
-            self._sock.fileno(), QSocketNotifier.Type.Read, self
+        self._thread = threading.Thread(
+            target=self._serve, name="qdlocker-ctrl", daemon=True
         )
-        self._notifier.activated.connect(self._on_accept)
+        self._thread.start()
         log.info("ctrl socket at %s", self._path)
 
     def close(self) -> None:
-        try:
-            self._notifier.setEnabled(False)
-        except Exception:
-            pass
+        self._stop.set()
         try:
             self._sock.close()
         except Exception:
             pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
         try:
             self._path.unlink()
         except FileNotFoundError:
@@ -98,24 +153,38 @@ class CtrlSocket(QObject):
 
     @Slot()
     def _on_unlocked(self) -> None:
-        self._last_outcome = AuthOutcome.SUCCESS
+        self._state.set_last_outcome(AuthOutcome.SUCCESS)
 
     @Slot()
     def _on_failed(self) -> None:
-        self._last_outcome = AuthOutcome.FAILED
+        self._state.set_last_outcome(AuthOutcome.FAILED)
 
     @Slot()
-    def _on_accept(self) -> None:
-        # Loop to drain the accept backlog — QSocketNotifier is
-        # level-triggered but we'd rather avoid relying on a second
-        # wake when two clients arrive simultaneously.
-        while True:
+    def _on_current_text_changed(self) -> None:
+        self._state.set_prompt_len(len(self._controller.currentText))
+
+    @Slot()
+    def _on_pam_ready_changed(self) -> None:
+        self._state.set_pam_ready(self._controller.pamReady)
+
+    @Slot()
+    def _on_unlock_in_progress_changed(self) -> None:
+        self._state.set_unlock_in_progress(self._controller.unlockInProgress)
+
+    @Slot(bool)
+    def _on_locked_changed(self, locked: bool) -> None:
+        self._state.set_locked(locked)
+
+    def _serve(self) -> None:
+        self._sock.settimeout(0.2)
+        while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
-            except BlockingIOError:
-                return
+            except socket.timeout:
+                continue
             except OSError:
-                log.exception("accept failed")
+                if not self._stop.is_set():
+                    log.exception("accept failed")
                 return
             self._handle_connection(conn)
 
@@ -171,12 +240,7 @@ class CtrlSocket(QObject):
             return "error: empty command"
         cmd, _, _rest = line.partition(" ")
         if cmd == "status":
-            return (
-                f"locked={self._bridge.locked} "
-                f"prompt-len={len(self._controller.currentText)} "
-                f"pam-ready={self._controller.pamReady} "
-                f"unlock-in-progress={self._controller.unlockInProgress}"
-            )
+            return self._state.status()
         if cmd == "lock":
             # 3 = manual per qdwin-locker-v1.xml. Routed through the
             # bridge so it goes through the same QueuedConnection
@@ -184,11 +248,9 @@ class CtrlSocket(QObject):
             self._bridge.inject_lock_requested(3)
             return "ok"
         if cmd == "unlock-result":
-            last = self._last_outcome.value if self._last_outcome else "none"
-            return f"last={last}"
+            return self._state.unlock_result()
         if cmd == "prompt-text":
             # Never return plaintext — only a length-revealing mask.
             # Scenario 05 asserts on this exact form.
-            n = len(self._controller.currentText)
-            return f"masked={'*' * n} len={n}"
+            return self._state.prompt_text()
         return f"error: unknown command '{cmd}'"

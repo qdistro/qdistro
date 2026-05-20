@@ -214,6 +214,7 @@ class WaylandBridge(QObject):
     _lockedChangedSignal = Signal(bool)
     _lockRequestedSignal = Signal(int)
     _overlayKeySignal = Signal(int, str)
+    lockedChangedForCtrl = Signal(bool)
 
     def __init__(
         self,
@@ -268,11 +269,13 @@ class WaylandBridge(QObject):
         log.info("locker bound; initially_locked=%s", initially_locked)
         self._initially_locked = initially_locked
         self._locked = initially_locked
+        self.lockedChangedForCtrl.emit(initially_locked)
 
     @Slot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
         log.info("compositor locked_changed=%s", locked)
         self._locked = locked
+        self.lockedChangedForCtrl.emit(locked)
 
     @Slot(int)
     def _on_lock_requested(self, reason: int) -> None:
@@ -298,6 +301,7 @@ class WaylandBridge(QObject):
         # `if self._locked` guard above. The compositor will follow
         # up with a locked_changed=true event that confirms it.
         self._locked = True
+        self.lockedChangedForCtrl.emit(True)
         if self._client:
             self._client.set_locked(True)
             self._client.lock_acknowledged(reason)
@@ -312,6 +316,8 @@ class WaylandBridge(QObject):
 
     @Slot()
     def _on_unlocked(self) -> None:
+        self._locked = False
+        self.lockedChangedForCtrl.emit(False)
         if self._client:
             self._client.set_locked(False)
         # Re-arm idle notification so the next idle period fires again.
