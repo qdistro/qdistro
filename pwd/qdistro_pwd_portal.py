@@ -136,11 +136,11 @@ class PortalSecretBackend(dbus.service.Object):
 _LOOP: GLib.MainLoop | None = None
 
 
-def _on_term(signum, _frame):
-    print(f"[qdistro-pwd-portal] caught signal {signum}, shutting down",
-          flush=True)
+def _on_term(*_user_data):
+    print("[qdistro-pwd-portal] caught signal, shutting down", flush=True)
     if _LOOP is not None:
         _LOOP.quit()
+    return False
 
 
 def main() -> int:
