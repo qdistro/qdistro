@@ -1,12 +1,13 @@
 [Unit]
 Description=qdistro cursor sprite supplier for qdwin
-Documentation=https://github.com/qdistro
-After=noctalia-shell.service
-PartOf=noctalia-shell.service
+Documentation=https://codeberg.org/qdistro/qdistro
+After=qdshell.service
+PartOf=qdshell.service
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/qdistro-cursor-sprites
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XCURSOR_THEME=Adwaita
 Environment=XCURSOR_SIZE=24
@@ -16,4 +17,4 @@ KillSignal=SIGTERM
 TimeoutStopSec=5
 
 [Install]
-WantedBy=noctalia-shell.service
+WantedBy=qdshell.service

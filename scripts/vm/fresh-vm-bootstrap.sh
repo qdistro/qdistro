@@ -226,6 +226,20 @@ bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
     "$SRC/qdshell" \
     || { echo "[bootstrap] qdwin-session install failed"; exit 3; }
 
+# qdwin does not own cursor image buffers itself. Keep the helper alive
+# as part of the qdshell session so it can register wl_shm cursor
+# surfaces through qdwin_shell_v1.set_cursor_sprite.
+if [ -f "$SRC/qdistro/daemons/cursor-sprites/qdistro-cursor-sprites.service" ]; then
+    log "installing qdwin cursor sprite helper user unit..."
+    install -d -m 0755 /etc/systemd/user
+    install -m 0644 \
+        "$SRC/qdistro/daemons/cursor-sprites/qdistro-cursor-sprites.service" \
+        /etc/systemd/user/qdistro-cursor-sprites.service
+    runuser -l admin -c \
+        'systemctl --user enable qdistro-cursor-sprites.service' \
+        || log "  WARN: qdistro-cursor-sprites.service enable failed"
+fi
+
 # ---- 7. Install qdlocker (peer screen-locker process) -------------------
 # Optional: skipped when the qdlocker tarball was not staged (see §1).
 #
