@@ -4,7 +4,7 @@ Documentation=https://codeberg.org/qdistro/qdwin
 PartOf=qdwin-session.target
 
 [Service]
-Type=notify
+Type=simple
 # Pixman renderer is required for the VM target (virtio-gpu without
 # accel3d). On bare-metal with a real GPU drop renderer=pixman from
 # weston.ini and let weston pick the GL renderer.
@@ -22,8 +22,3 @@ ExecStart=/usr/bin/weston \
     --socket=wayland-1
 Restart=on-failure
 RestartSec=2
-# If the compositor fails 3 times in 30s, stop trying and let the
-# tty3 session fall through to the greeter again. Without this a
-# wedged libweston could loop the user out of the box.
-StartLimitBurst=3
-StartLimitIntervalSec=30s
