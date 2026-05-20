@@ -60,7 +60,7 @@ cat > "$TMPXML" <<EOF
     </channel>
     <input type='tablet' bus='usb'/>
     <input type='keyboard' bus='usb'/>
-    <video><model type='cirrus' ram='16384' vram='16384' vgamem='16384'/></video>
+    <video><model type='virtio' heads='1' primary='yes'/></video>
     <memballoon model='virtio'/>
   </devices>
 </domain>
