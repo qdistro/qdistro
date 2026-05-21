@@ -5,7 +5,7 @@
 #
 # What it adds:
 #   - /opt/qdlocker (working copy of this repo)
-#   - PySide6 / dbus-next / python-pam / pywayland via pip
+#   - PyQt6 / dbus-next / python-pam / pywayland via pip
 #   - systemd --user qdlocker.service enabled for the admin user
 #   - /usr/libexec/qdistro-fprintd-fake stub used by tests/gui/02
 #
@@ -126,13 +126,13 @@ asyncio.run(main())
 FAKE
 chmod 0755 "$TMPDIR/qdistro-fprintd-fake"
 
-# PySide6, python-pam, dbus-next, pywayland: zypper-shipped versions
+# PyQt6, python-pam, dbus-next, pywayland: zypper-shipped versions
 # on openSUSE Tumbleweed work, and using them avoids pulling the full
 # build toolchain (gcc + python-devel + wayland-devel) for pip-built
 # wheels. `--no-deps` on the qdlocker install relies on these being
 # present.
 virt-customize -a "$IMG" \
-    --install python313-pip,python313-pyside6,python313-python-pam,python313-dbus_next,python313-pywayland \
+    --install python313-pip,python313-PyQt6,python313-python-pam,python313-dbus_next,python313-pywayland \
     --copy-in "$TMPDIR/qdlocker.tgz:/tmp/" \
     --run-command 'tar -C /opt -xzf /tmp/qdlocker.tgz && rm /tmp/qdlocker.tgz' \
     --run-command 'python3 -m pip install --break-system-packages --no-deps /opt/qdlocker' \

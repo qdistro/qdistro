@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 
-from PySide6.QtCore import QObject, Signal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 log = logging.getLogger("qdlocker.auth")
 
@@ -30,9 +30,9 @@ class AuthOutcome(enum.Enum):
 class AuthBackend(QObject):
     """Coordinates fprintd + PAM."""
 
-    ready = Signal()
-    message = Signal(str, bool, bool)
-    outcome = Signal(object)
+    ready = pyqtSignal()
+    message = pyqtSignal(str, bool, bool)
+    outcome = pyqtSignal(object)
 
     def __init__(
         self,

@@ -3,8 +3,8 @@
 Pure pywayland — the locker holds its OWN wl_display connection,
 separate from Qt's. Earlier drafts tried to share Qt's display so the
 Qt-owned wl_surface could be passed to `attach_lock_surface`, but the
-PySide6 native-interface bridge for raw `wl_display*` extraction is
-brittle (relies on `sip` which is PyQt-only and a nonexistent
+Qt-native-interface bridge for raw `wl_display*` extraction is
+brittle even under PyQt6/sip (and there is no
 `pywayland.WlSurface.from_native`). The pragmatic shape: pywayland
 handles all protocol traffic + the lock surface (shm-backed), and the
 Qt QML surface is a separate render that is NOT the LOCK-layer

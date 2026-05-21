@@ -1,6 +1,6 @@
 """qdlocker entry point.
 
-PySide6 QGuiApplication + QML engine, with the qdwin_locker_v1
+PyQt6 QGuiApplication + QML engine, with the qdwin_locker_v1
 binding running on a worker thread. Wayland events are funneled into
 the main thread via Qt's QueuedConnection signals so the controller
 stays single-threaded.
@@ -15,16 +15,16 @@ import sys
 import tomllib
 from pathlib import Path
 
-from PySide6.QtCore import (
+from PyQt6.QtCore import (
     QCoreApplication,
     QObject,
     Qt,
     QUrl,
-    Signal,
-    Slot,
+    pyqtSignal,
+    pyqtSlot,
 )
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterUncreatableType
+from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtQml import QQmlApplicationEngine, qmlRegisterUncreatableType
 
 from .auth import AuthBackend
 from .controller import LockController
@@ -210,11 +210,11 @@ class WaylandBridge(QObject):
     """Cross-thread bridge between the pywayland worker and the Qt
     main thread."""
 
-    _readySignal = Signal(bool)
-    _lockedChangedSignal = Signal(bool)
-    _lockRequestedSignal = Signal(int)
-    _overlayKeySignal = Signal(int, str)
-    lockedChangedForCtrl = Signal(bool)
+    _readySignal = pyqtSignal(bool)
+    _lockedChangedSignal = pyqtSignal(bool)
+    _lockRequestedSignal = pyqtSignal(int)
+    _overlayKeySignal = pyqtSignal(int, str)
+    lockedChangedForCtrl = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -229,10 +229,10 @@ class WaylandBridge(QObject):
         self._initially_locked = False
         self._locked = False
         controller.unlocked.connect(self._on_unlocked)
-        self._readySignal.connect(self._on_ready, Qt.QueuedConnection)
-        self._lockedChangedSignal.connect(self._on_locked_changed, Qt.QueuedConnection)
-        self._lockRequestedSignal.connect(self._on_lock_requested, Qt.QueuedConnection)
-        self._overlayKeySignal.connect(self._on_overlay_key, Qt.QueuedConnection)
+        self._readySignal.connect(self._on_ready, Qt.ConnectionType.QueuedConnection)
+        self._lockedChangedSignal.connect(self._on_locked_changed, Qt.ConnectionType.QueuedConnection)
+        self._lockRequestedSignal.connect(self._on_lock_requested, Qt.ConnectionType.QueuedConnection)
+        self._overlayKeySignal.connect(self._on_overlay_key, Qt.ConnectionType.QueuedConnection)
 
     @property
     def locked(self) -> bool:
@@ -264,20 +264,20 @@ class WaylandBridge(QObject):
 
     # ---- main-thread slots ----
 
-    @Slot(bool)
+    @pyqtSlot(bool)
     def _on_ready(self, initially_locked: bool) -> None:
         log.info("locker bound; initially_locked=%s", initially_locked)
         self._initially_locked = initially_locked
         self._locked = initially_locked
         self.lockedChangedForCtrl.emit(initially_locked)
 
-    @Slot(bool)
+    @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
         log.info("compositor locked_changed=%s", locked)
         self._locked = locked
         self.lockedChangedForCtrl.emit(locked)
 
-    @Slot(int)
+    @pyqtSlot(int)
     def _on_lock_requested(self, reason: int) -> None:
         reason_name = REASON_NAMES.get(reason, f"unknown({reason})")
         # Idempotency: if we're already locked (per the bridge's
@@ -306,7 +306,7 @@ class WaylandBridge(QObject):
             self._client.set_locked(True)
             self._client.lock_acknowledged(reason)
 
-    @Slot(int, str)
+    @pyqtSlot(int, str)
     def _on_overlay_key(self, sym: int, utf8: str) -> None:
         self._controller.handle_overlay_key(sym, utf8)
 
@@ -314,7 +314,7 @@ class WaylandBridge(QObject):
     def inject_lock_requested(self, reason: int) -> None:
         self._lockRequestedSignal.emit(reason)
 
-    @Slot()
+    @pyqtSlot()
     def _on_unlocked(self) -> None:
         self._locked = False
         self.lockedChangedForCtrl.emit(False)

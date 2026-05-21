@@ -23,7 +23,7 @@ import socket
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Slot
+from PyQt6.QtCore import QObject, pyqtSlot
 
 from .auth import AuthOutcome
 from .controller import LockController
@@ -151,27 +151,27 @@ class CtrlSocket(QObject):
         except OSError:
             log.warning("could not unlink %s", self._path)
 
-    @Slot()
+    @pyqtSlot()
     def _on_unlocked(self) -> None:
         self._state.set_last_outcome(AuthOutcome.SUCCESS)
 
-    @Slot()
+    @pyqtSlot()
     def _on_failed(self) -> None:
         self._state.set_last_outcome(AuthOutcome.FAILED)
 
-    @Slot()
+    @pyqtSlot()
     def _on_current_text_changed(self) -> None:
         self._state.set_prompt_len(len(self._controller.currentText))
 
-    @Slot()
+    @pyqtSlot()
     def _on_pam_ready_changed(self) -> None:
         self._state.set_pam_ready(self._controller.pamReady)
 
-    @Slot()
+    @pyqtSlot()
     def _on_unlock_in_progress_changed(self) -> None:
         self._state.set_unlock_in_progress(self._controller.unlockInProgress)
 
-    @Slot(bool)
+    @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
         self._state.set_locked(locked)
 

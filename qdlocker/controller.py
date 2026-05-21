@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Property, QObject, Qt, Signal, Slot
+from PyQt6.QtCore import QObject, Qt, pyqtProperty, pyqtSignal, pyqtSlot
 
 from .auth import AuthBackend, AuthOutcome
 from .keysyms import XKB_BackSpace, XKB_Escape, XKB_Return, XKB_Tab
@@ -21,16 +21,16 @@ class LockController(QObject):
     """State + auth coordinator. QML-facing surface intentionally matches
     qdshell's LockContext.qml so styling/widgets port 1:1."""
 
-    unlocked = Signal()
-    failed = Signal()
-    _currentTextChanged = Signal()
-    _waitingForPasswordChanged = Signal()
-    _unlockInProgressChanged = Signal()
-    _showFailureChanged = Signal()
-    _showInfoChanged = Signal()
-    _errorMessageChanged = Signal()
-    _infoMessageChanged = Signal()
-    _pamReadyChanged = Signal()
+    unlocked = pyqtSignal()
+    failed = pyqtSignal()
+    _currentTextChanged = pyqtSignal()
+    _waitingForPasswordChanged = pyqtSignal()
+    _unlockInProgressChanged = pyqtSignal()
+    _showFailureChanged = pyqtSignal()
+    _showInfoChanged = pyqtSignal()
+    _errorMessageChanged = pyqtSignal()
+    _infoMessageChanged = pyqtSignal()
+    _pamReadyChanged = pyqtSignal()
 
     def __init__(self, auth: AuthBackend, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -48,12 +48,12 @@ class LockController(QObject):
         # QueuedConnection routes them through the main thread's
         # event loop so the controller's mutators don't race with
         # the QML render thread.
-        self._auth.outcome.connect(self._on_auth_outcome, Qt.QueuedConnection)
-        self._auth.message.connect(self._on_auth_message, Qt.QueuedConnection)
-        self._auth.ready.connect(self._on_auth_ready, Qt.QueuedConnection)
+        self._auth.outcome.connect(self._on_auth_outcome, Qt.ConnectionType.QueuedConnection)
+        self._auth.message.connect(self._on_auth_message, Qt.ConnectionType.QueuedConnection)
+        self._auth.ready.connect(self._on_auth_ready, Qt.ConnectionType.QueuedConnection)
         self._auth.probe_pam()
 
-    @Property(str, notify=_currentTextChanged)
+    @pyqtProperty(str, notify=_currentTextChanged)
     def currentText(self) -> str:
         return self._current_text
 
@@ -72,31 +72,31 @@ class LockController(QObject):
         else:
             self._auth.occupy_fingerprint_sensor(False)
 
-    @Property(bool, notify=_waitingForPasswordChanged)
+    @pyqtProperty(bool, notify=_waitingForPasswordChanged)
     def waitingForPassword(self) -> bool:
         return self._waiting_for_password
 
-    @Property(bool, notify=_unlockInProgressChanged)
+    @pyqtProperty(bool, notify=_unlockInProgressChanged)
     def unlockInProgress(self) -> bool:
         return self._unlock_in_progress
 
-    @Property(bool, notify=_showFailureChanged)
+    @pyqtProperty(bool, notify=_showFailureChanged)
     def showFailure(self) -> bool:
         return self._show_failure
 
-    @Property(bool, notify=_showInfoChanged)
+    @pyqtProperty(bool, notify=_showInfoChanged)
     def showInfo(self) -> bool:
         return self._show_info
 
-    @Property(str, notify=_errorMessageChanged)
+    @pyqtProperty(str, notify=_errorMessageChanged)
     def errorMessage(self) -> str:
         return self._error_message
 
-    @Property(str, notify=_infoMessageChanged)
+    @pyqtProperty(str, notify=_infoMessageChanged)
     def infoMessage(self) -> str:
         return self._info_message
 
-    @Property(bool, notify=_pamReadyChanged)
+    @pyqtProperty(bool, notify=_pamReadyChanged)
     def pamReady(self) -> bool:
         return self._pam_ready
 
@@ -106,7 +106,7 @@ class LockController(QObject):
         fprintd-failure counter."""
         self._auth.reset_session()
 
-    @Slot()
+    @pyqtSlot()
     def tryUnlock(self) -> None:
         if not self._pam_ready:
             log.warning("PAM not ready yet, ignoring unlock attempt")

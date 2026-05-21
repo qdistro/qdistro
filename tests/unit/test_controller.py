@@ -14,8 +14,8 @@ from unittest.mock import MagicMock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QCoreApplication
-from PySide6.QtGui import QGuiApplication
+from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtGui import QGuiApplication
 
 from qdlocker.auth import AuthOutcome
 from qdlocker.controller import LockController
@@ -30,12 +30,12 @@ def qapp():
 @pytest.fixture
 def auth():
     """Auth backend stub with the same Signal surface as the real one."""
-    from PySide6.QtCore import QObject, Signal
+    from PyQt6.QtCore import QObject, pyqtSignal
 
     class StubAuth(QObject):
-        ready = Signal()
-        message = Signal(str, bool, bool)
-        outcome = Signal(object)
+        ready = pyqtSignal()
+        message = pyqtSignal(str, bool, bool)
+        outcome = pyqtSignal(object)
 
         def __init__(self):
             super().__init__()
