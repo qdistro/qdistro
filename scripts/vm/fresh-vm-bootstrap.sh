@@ -253,7 +253,7 @@ fi
 if [ -d "$SRC/qdlocker/qdlocker" ]; then
     log "installing qdlocker (Python+QML peer locker via qdwin_locker_v1)..."
     zypper -n install --no-recommends \
-        python313-pip python313-pyside6 python313-python-pam \
+        python313-pip python313-PyQt6 python313-python-pam \
         python313-dbus_next python313-pywayland \
         >/dev/null 2>&1 || \
         { log "  ERROR: zypper install of qdlocker deps failed"; exit 3; }
