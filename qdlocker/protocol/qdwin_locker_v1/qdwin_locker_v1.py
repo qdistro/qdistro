@@ -48,6 +48,7 @@ class QdwinLockerV1(Interface):
         already_bound = 1
         no_surface = 2
         invalid_reason = 3
+        not_bound = 4
 
 
 class QdwinLockerV1Proxy(Proxy[QdwinLockerV1]):
