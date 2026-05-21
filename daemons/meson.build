@@ -8,30 +8,28 @@ project('qdistro-daemons', 'c',
   ],
 )
 
-# Sibling-checkout: qdwin's protocol XML is expected at
-# ../../qdwin/qdwin/*.xml relative to this meson.build file
-# (qdistro/daemons/meson.build → ../../qdwin/...). See the qdistro
-# umbrella README for the 3-repo layout.
-qdwin_dir = meson.current_source_dir() / '..' / '..' / 'qdwin' / 'qdwin'
-fs = import('fs')
-if not fs.is_dir(qdwin_dir)
-  error('qdwin sibling checkout not found at ' + qdwin_dir +
-        ' — clone codeberg.org/qdistro/qdwin next to qdistro/')
-endif
+# qdistro-protocols: qdwin's installed pkg-config package supplies the
+# private XMLs (qdwin-shell-v1, qdwin-locker-v1, qdwin-nested-v1, plus
+# vendored wlr-layer-shell). Same shape as upstream wayland-protocols.
+# Replaces the prior `../../qdwin/qdwin/*.xml` sibling-checkout path.
+# qdwin must be built+installed (or its `qdistro-protocols.pc` reachable
+# via PKG_CONFIG_PATH) before this builds.
 
 # Common deps.
 cc = meson.get_compiler('c')
 dep_wayland_client   = dependency('wayland-client')
 dep_wayland_scanner  = dependency('wayland-scanner', native: true)
 dep_wayland_protocols = dependency('wayland-protocols', native: true)
+dep_qdistro_protocols = dependency('qdistro-protocols')
 wayland_scanner = find_program(
   dep_wayland_scanner.get_variable(pkgconfig: 'wayland_scanner'),
   native: true,
 )
-wayland_protocols_dir = dep_wayland_protocols.get_variable(pkgconfig: 'pkgdatadir')
+wayland_protocols_dir  = dep_wayland_protocols.get_variable(pkgconfig: 'pkgdatadir')
+qdistro_protocols_dir  = dep_qdistro_protocols.get_variable(pkgconfig: 'pkgdatadir')
 
-# qdwin_shell_v1 client header + protocol code (from qdwin sibling).
-qdwin_shell_xml = files(qdwin_dir / 'qdwin-shell-v1.xml')
+# qdwin_shell_v1 client header + protocol code (from qdistro-protocols).
+qdwin_shell_xml = files(qdistro_protocols_dir / 'qdwin-shell-v1.xml')
 qdwin_shell_client_header = custom_target(
   'qdwin-shell-v1-client-header',
   input: qdwin_shell_xml,
