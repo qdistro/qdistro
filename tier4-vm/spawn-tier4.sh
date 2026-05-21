@@ -580,11 +580,9 @@ SECCTX_APPID="${TIER4_SECCTX_APPID:-qdistro.tier4.$VM_NAME}"
 # qdistro-secctx-exec preflight so the resolved-triple log line below
 # always fires, even when the tagger is missing (s107 probe greps the
 # log file, not the exit code).
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
-    echo "[tier4] FAIL: could not generate launch token from /dev/urandom" >&2
-    exit 5
-fi
+# shellcheck source=../lib/spawn-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+LAUNCH_TOKEN="$(gen_launch_token "[tier4] FAIL")"
 SECCTX_INSTANCE="${TIER4_SECCTX_INSTANCE:-$VM_NAME-$LAUNCH_TOKEN}"
 
 # Echo the resolved triple BEFORE the vsock dance (and before the

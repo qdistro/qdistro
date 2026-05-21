@@ -224,11 +224,9 @@ if [ "$SILO_UID" = "$ADMIN_UID" ]; then
 fi
 
 # --- LAUNCH_TOKEN + correlation ---------------------------------------
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if ! [[ "$LAUNCH_TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
-    echo "[tier3] FAIL: could not generate launch token from /dev/urandom" >&2
-    exit 5
-fi
+# shellcheck source=../lib/spawn-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+LAUNCH_TOKEN="$(gen_launch_token "[tier3] FAIL")"
 APP_BASENAME=$(basename "$1")
 # Emit correlation lines that qdshell's PodApps-style placeholder
 # correlator reads. Always before any waypipe start so the

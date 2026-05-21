@@ -143,11 +143,9 @@ TIER2_ALLOW_PRIVESC_VAL="${TIER2_ALLOW_PRIVESC:-0}"
 # Always 32 lowercase hex chars — the orphan-dir reaper filters on
 # `^[0-9a-f]{32}$` to ignore podman's "<no value>" sentinel and any
 # other label noise.
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
-    echo "spawn-tier2: failed to generate launch token from /dev/urandom" >&2
-    exit 5
-fi
+# shellcheck source=../lib/spawn-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
 
 # --- pre-flight ---------------------------------------------------------
 fail() { echo "spawn-tier2: $*" >&2; exit 2; }

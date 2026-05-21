@@ -329,11 +329,9 @@ APP_BASENAME=$(basename "$1")
 # and matches against the inner toplevel's instance_id (which we plant
 # below via qdistro-secctx-exec) to resolve it. Mirrors spawn-tier2.sh
 # correlation. Cheap entropy is fine; this is correlation, not auth.
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
-    echo "[tier5] FAIL: could not generate launch token from /dev/urandom" >&2
-    exit 5
-fi
+# shellcheck source=../lib/spawn-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+LAUNCH_TOKEN="$(gen_launch_token "[tier5] FAIL")"
 # Emit correlation lines that qdshell's PodApps-style placeholder
 # correlator reads. Always before any waypipe start so the
 # token-watcher in qdshell catches it on stdout.

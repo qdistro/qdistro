@@ -371,11 +371,9 @@ fi
 
 TITLE_PREFIX="${TIER5B_TITLE_PREFIX:-[tier5b:$APP_NAME:$SILO_TAG] }"
 
-LAUNCH_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-if [ "${#LAUNCH_TOKEN}" -ne 32 ]; then
-    echo "[tier5b] FAIL: could not generate launch token from /dev/urandom" >&2
-    exit 5
-fi
+# shellcheck source=../lib/spawn-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+LAUNCH_TOKEN="$(gen_launch_token "[tier5b] FAIL")"
 echo "LAUNCH_TOKEN=$LAUNCH_TOKEN"
 echo "VM_NAME=$VM_NAME"
 echo "APP_ID=$APP_NAME"
