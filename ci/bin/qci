@@ -486,7 +486,7 @@ gate_host() {
     run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    c="rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
+    c="export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
     run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, lint, format check"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
