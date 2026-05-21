@@ -33,6 +33,7 @@ test-output/
 screenshots/
 test-screenshots/
 **/screenshots/
+ci/runs/
 *.screenshot.png
 shot-*.png
 shot-*.jpg

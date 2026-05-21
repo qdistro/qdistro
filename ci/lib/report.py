@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""Generate qdistro local-CI Markdown and HTML reports."""
+
+from __future__ import annotations
+
+import html
+import json
+import re
+import sys
+from pathlib import Path
+
+
+KEY_RE = re.compile(
+    r"(FAIL|FAIL_LOUD|ERROR|FAILED|Traceback|AssertionError|not found|missing|"
+    r"denied|refused|timed out|timeout|No module named|protocol error|inactive|failed)",
+    re.IGNORECASE,
+)
+
+
+def read_kv(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" not in line or line.startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip()] = value.strip()
+    return out
+
+
+def read_tsv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    lines = path.read_text(errors="replace").splitlines()
+    if not lines:
+        return []
+    header = lines[0].split("\t")
+    rows: list[dict[str, str]] = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        cols = line.split("\t")
+        cols.extend([""] * (len(header) - len(cols)))
+        rows.append(dict(zip(header, cols, strict=False)))
+    return rows
+
+
+def rel_link(run_dir: Path, value: str) -> str:
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            return path.relative_to(run_dir).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return value
+
+
+def md_link(run_dir: Path, value: str, label: str | None = None) -> str:
+    href = rel_link(run_dir, value)
+    if not href:
+        return ""
+    label = label or href
+    safe_href = href.replace(" ", "%20")
+    return f"[{label}]({safe_href})"
+
+
+def html_link(run_dir: Path, value: str, label: str | None = None) -> str:
+    href = rel_link(run_dir, value)
+    if not href:
+        return ""
+    label = label or href
+    return f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>'
+
+
+def excerpt(path: Path, max_lines: int = 20) -> list[str]:
+    if not path.exists() or not path.is_file():
+        return []
+    lines = path.read_text(errors="replace").splitlines()
+    hits = [line for line in lines if KEY_RE.search(line)]
+    if hits:
+        return hits[:max_lines]
+    return lines[-max_lines:]
+
+
+def recommendation(row: dict[str, str], run_dir: Path) -> str:
+    notes = row.get("notes", "")
+    text = notes
+    log = row.get("log", "")
+    if log:
+        log_path = run_dir / log
+        if log_path.exists():
+            text += "\n" + "\n".join(excerpt(log_path, 12))
+    lower = text.lower()
+    if "qci_agent_cmd" in lower or "agent runner" in lower:
+        return (
+            "Run this gate with a real visual-agent command or have an agent "
+            "complete the generated prompt files under agent-notes/."
+        )
+    if "qdistRO_vm_password".lower() in lower:
+        return "Export QDISTRO_VM_PASSWORD with the password baked into the VM image."
+    if "baseweed-baked" in lower:
+        return "Build or repair the prebaked VM image with qdistro/scripts/vm/build-baked-baseweed.sh."
+    if "no module named" in lower:
+        return "Install the missing Python dependency or add it to the project test extras."
+    if "npm" in lower and ("not found" in lower or "missing" in lower):
+        return "Install node dependencies for that extension repo, then rerun the host gate."
+    if row.get("kind") == "zola" or "broken external link" in lower:
+        return (
+            "Fix or remove the broken links in the listed content files, then "
+            "rerun `zola check` in qdistro-site."
+        )
+    if "protocol error" in lower or "qdwin_shell" in lower or "wayland" in lower:
+        return "Inspect qdwin/qdshell protocol logs first; avoid qdshell workarounds for compositor protocol bugs."
+    if "inactive" in lower or "systemctl" in lower:
+        return "Start with the collected user/system journals and the systemctl status artifact for the failed VM."
+    if row.get("gate", "").startswith("gui"):
+        return "Open the scenario log, adjacent screenshots, and journal delta; rerun only this scenario on the preserved VM."
+    if row.get("gate", "").startswith("bats") or row.get("kind") == "bats":
+        return "Rerun the single bats file against the preserved VM before broadening the search."
+    return "Inspect the linked log excerpt and rerun the smallest failing command."
+
+
+def source_links(row: dict[str, str], run_dir: Path, manifest: dict[str, str]) -> list[str]:
+    """Return Markdown links to source files mentioned by a result log."""
+    log = row.get("log", "")
+    if not log:
+        return []
+    log_path = run_dir / log
+    if not log_path.exists():
+        return []
+    workspace = Path(manifest.get("workspace", "/"))
+    text = log_path.read_text(errors="replace")
+    links: list[str] = []
+    seen: set[Path] = set()
+
+    def path_exists(path: Path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
+    # Zola's useful shape: "Broken link in /abs/file.md to URL".
+    zola_pat = re.compile(r"Broken link in\s+(\S+)\s+to\s+(\S+)")
+    for match in zola_pat.finditer(text):
+        path = Path(match.group(1).rstrip(":,.)"))
+        url = match.group(2).rstrip(":,.)")
+        if not path_exists(path) or path in seen:
+            continue
+        seen.add(path)
+        line_no = first_line_containing(path, url)
+        label = display_path(path, workspace, line_no)
+        target = f"{path.as_posix()}:{line_no}" if line_no else path.as_posix()
+        links.append(f"[{label}]({target})")
+
+    # Generic fallback for absolute source paths.
+    for raw in re.findall(r"(/[A-Za-z0-9_./+@-]+\.[A-Za-z0-9_+-]+)", text):
+        path = Path(raw.rstrip(":,.)"))
+        if not path_exists(path) or path in seen:
+            continue
+        try:
+            path.relative_to(workspace)
+        except ValueError:
+            continue
+        seen.add(path)
+        links.append(f"[{display_path(path, workspace, None)}]({path.as_posix()})")
+    return links
+
+
+def first_line_containing(path: Path, needle: str) -> int | None:
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for idx, line in enumerate(lines, 1):
+        if needle in line:
+            return idx
+    # Try without anchor/fragment if a checker reports the expanded URL.
+    base = needle.split("#", 1)[0]
+    if base != needle:
+        for idx, line in enumerate(lines, 1):
+            if base in line:
+                return idx
+    return None
+
+
+def display_path(path: Path, workspace: Path, line_no: int | None) -> str:
+    try:
+        label = path.relative_to(workspace).as_posix()
+    except ValueError:
+        label = path.as_posix()
+    if line_no:
+        label = f"{label}:{line_no}"
+    return label
+
+
+def status_counts(rows: list[dict[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row.get("status", "unknown") or "unknown"
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def generate_md(run_dir: Path) -> str:
+    manifest = read_kv(run_dir / "manifest.txt")
+    rows = read_tsv(run_dir / "results.tsv")
+    repos = read_tsv(run_dir / "repo-state.tsv")
+    counts = status_counts(rows)
+    failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
+    skips = [r for r in rows if r.get("status") == "skip"]
+
+    title = manifest.get("run_id", run_dir.name)
+    lines: list[str] = [f"# qdistro CI report: {title}", ""]
+    lines.append("## Summary")
+    for key in ("gate", "started_utc", "finished_utc", "exit_code", "exit_class", "workspace", "command"):
+        if manifest.get(key):
+            lines.append(f"- **{key}**: `{manifest[key]}`")
+    if counts:
+        lines.append("- **results**: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    lines.append("")
+
+    if failures:
+        lines.append("## Failures and blocked work")
+        for row in failures:
+            subject = row.get("subject", "?")
+            gate = row.get("gate", "?")
+            status = row.get("status", "?").upper()
+            log = md_link(run_dir, row.get("log", ""), "log")
+            lines.append(f"### {status}: {gate} / {subject}")
+            lines.append(f"- exit: `{row.get('exit_code', '')}` class: `{row.get('exit_class', '')}` kind: `{row.get('kind', '')}`")
+            if log:
+                lines.append(f"- evidence: {log}")
+            sources = source_links(row, run_dir, manifest)
+            if sources:
+                lines.append("- source: " + ", ".join(sources))
+            if row.get("notes"):
+                lines.append(f"- notes: {row['notes']}")
+            lines.append(f"- recommendation: {recommendation(row, run_dir)}")
+            log_path = run_dir / row.get("log", "")
+            ex = excerpt(log_path)
+            if ex:
+                lines.append("")
+                lines.append("```text")
+                lines.extend(ex)
+                lines.append("```")
+            lines.append("")
+    else:
+        lines.append("## Failures and blocked work")
+        lines.append("No failing or blocked result rows were recorded.")
+        lines.append("")
+
+    if skips:
+        lines.append("## Skips")
+        for row in skips:
+            log = md_link(run_dir, row.get("log", ""), "log")
+            suffix = f" ({log})" if log else ""
+            lines.append(f"- {row.get('gate', '?')} / {row.get('subject', '?')}: {row.get('notes', '')}{suffix}")
+        lines.append("")
+
+    lines.append("## All Results")
+    lines.append("| status | gate | subject | kind | exit | log | notes |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows:
+        log = md_link(run_dir, row.get("log", ""), "log")
+        cols = [
+            row.get("status", ""),
+            row.get("gate", ""),
+            row.get("subject", ""),
+            row.get("kind", ""),
+            row.get("exit_code", ""),
+            log,
+            row.get("notes", ""),
+        ]
+        lines.append("| " + " | ".join(c.replace("|", "\\|") for c in cols) + " |")
+    lines.append("")
+
+    if repos:
+        lines.append("## Repo State")
+        lines.append("| repo | branch | head | dirty | status |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for row in repos:
+            status = md_link(run_dir, row.get("status_log", ""), "status")
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        row.get("repo", ""),
+                        row.get("branch", ""),
+                        row.get("head", ""),
+                        row.get("dirty_files", ""),
+                        status,
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+
+    lines.append("## Artifact Index")
+    for child in sorted(run_dir.iterdir()):
+        if child.name in {"report.md", "report.html"}:
+            continue
+        if child.is_dir():
+            lines.append(f"- {md_link(run_dir, child.as_posix(), child.name + '/')}")
+        else:
+            lines.append(f"- {md_link(run_dir, child.as_posix(), child.name)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate_summary(run_dir: Path) -> dict[str, object]:
+    manifest = read_kv(run_dir / "manifest.txt")
+    rows = read_tsv(run_dir / "results.tsv")
+    failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
+    return {
+        "run_id": manifest.get("run_id", run_dir.name),
+        "gate": manifest.get("gate", ""),
+        "started_utc": manifest.get("started_utc", ""),
+        "finished_utc": manifest.get("finished_utc", ""),
+        "exit_code": int(manifest.get("exit_code", "0") or 0),
+        "exit_class": manifest.get("exit_class", ""),
+        "workspace": manifest.get("workspace", ""),
+        "counts": status_counts(rows),
+        "first_failure": failures[0] if failures else None,
+        "report_md": "report.md",
+        "report_html": "report.html",
+    }
+
+
+def generate_html(run_dir: Path, markdown: str) -> str:
+    # Keep this dependency-free. It is intentionally simple but readable.
+    body_lines: list[str] = []
+    in_code = False
+    in_table = False
+    for raw in markdown.splitlines():
+        line = raw.rstrip()
+        if line.startswith("```"):
+            if in_code:
+                body_lines.append("</code></pre>")
+                in_code = False
+            else:
+                body_lines.append("<pre><code>")
+                in_code = True
+            continue
+        if in_code:
+            body_lines.append(html.escape(line))
+            continue
+        if line.startswith("# "):
+            body_lines.append(f"<h1>{html.escape(line[2:])}</h1>")
+        elif line.startswith("## "):
+            if in_table:
+                body_lines.append("</tbody></table>")
+                in_table = False
+            body_lines.append(f"<h2>{html.escape(line[3:])}</h2>")
+        elif line.startswith("### "):
+            if in_table:
+                body_lines.append("</tbody></table>")
+                in_table = False
+            body_lines.append(f"<h3>{html.escape(line[4:])}</h3>")
+        elif line.startswith("| ") and line.endswith(" |"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if set(cells) == {"---"}:
+                continue
+            if not in_table:
+                body_lines.append("<table><tbody>")
+                in_table = True
+            tag = "th" if all(c in {"status", "gate", "subject", "kind", "exit", "log", "notes", "repo", "branch", "head", "dirty"} for c in cells) else "td"
+            body_lines.append("<tr>" + "".join(f"<{tag}>{linkify(c)}</{tag}>" for c in cells) + "</tr>")
+        else:
+            if in_table:
+                body_lines.append("</tbody></table>")
+                in_table = False
+            if not line:
+                body_lines.append("")
+            elif line.startswith("- "):
+                body_lines.append(f"<p>{linkify(line)}</p>")
+            else:
+                body_lines.append(f"<p>{linkify(line)}</p>")
+    if in_table:
+        body_lines.append("</tbody></table>")
+    style = """
+body { font-family: system-ui, sans-serif; max-width: 1120px; margin: 32px auto; line-height: 1.45; padding: 0 24px; }
+h1, h2, h3 { line-height: 1.15; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 14px; }
+th, td { border: 1px solid #ccc; padding: 6px 8px; vertical-align: top; }
+th { background: #f2f2f2; text-align: left; }
+pre { background: #111; color: #eee; padding: 12px; overflow-x: auto; border-radius: 6px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+a { color: #0757a8; }
+"""
+    return "<!doctype html><html><head><meta charset='utf-8'><title>qdistro CI report</title><style>" + style + "</style></head><body>" + "\n".join(body_lines) + "</body></html>"
+
+
+def linkify(text: str) -> str:
+    # Convert Markdown links to HTML links while escaping non-link text once.
+    out: list[str] = []
+    pos = 0
+    pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    for match in pattern.finditer(text):
+        out.append(html.escape(text[pos : match.start()]))
+        out.append(
+            f'<a href="{html.escape(match.group(2), quote=True)}">'
+            f'{html.escape(match.group(1))}</a>'
+        )
+        pos = match.end()
+    out.append(html.escape(text[pos:]))
+    return "".join(out)
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print("usage: report.py <run-dir>", file=sys.stderr)
+        return 2
+    run_dir = Path(argv[1]).resolve()
+    if not run_dir.is_dir():
+        print(f"not a directory: {run_dir}", file=sys.stderr)
+        return 2
+    markdown = generate_md(run_dir)
+    (run_dir / "report.md").write_text(markdown, encoding="utf-8")
+    (run_dir / "report.html").write_text(generate_html(run_dir, markdown), encoding="utf-8")
+    (run_dir / "summary.json").write_text(
+        json.dumps(generate_summary(run_dir), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(run_dir / "report.md")
+    print(run_dir / "report.html")
+    print(run_dir / "summary.json")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

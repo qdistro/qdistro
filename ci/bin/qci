@@ -1,0 +1,1018 @@
+#!/usr/bin/env bash
+# qci - qdistro local CI runner.
+#
+# This is intentionally local-first CI: it runs sibling-repo host tests,
+# disposable VM gates, bats integration tests, and agent-assisted GUI
+# scenarios, then writes Markdown and HTML reports into qdistro/ci/runs/.
+
+set -uo pipefail
+
+export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///session}"
+
+SELF=$(readlink -f "$0")
+QCI_BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
+QCI_DIR=$(cd "$QCI_BIN_DIR/.." && pwd)
+QDISTRO_REPO=$(cd "$QCI_DIR/.." && pwd)
+WORKSPACE=$(cd "$QDISTRO_REPO/.." && pwd)
+RUNS_DIR=${QCI_RUNS_DIR:-$QCI_DIR/runs}
+REPORT_PY="$QCI_DIR/lib/report.py"
+VM_TOOLS="$QDISTRO_REPO/scripts/vm"
+VIRSH=(virsh -c qemu:///session)
+
+PROJECTS=(
+    qdistro
+    qdwin
+    qdshell
+    qdbrowser
+    qdchrome-extension
+    qdfirefox-extension
+    qdgreeter
+    qdistro-site
+    qdlocker
+    qfileman
+    qnotebook
+    qterminator
+)
+
+EXIT_OK=0
+EXIT_USAGE=2
+EXIT_PREFLIGHT=10
+EXIT_BUILD=20
+EXIT_HOST=30
+EXIT_BATS=35
+EXIT_VM_PROVISION=40
+EXIT_VM_BOOT=50
+EXIT_SERVICE=60
+EXIT_GUI=70
+EXIT_VISUAL=80
+EXIT_RUNNER=90
+
+RDIR=""
+GATE=""
+EXPLICIT_VM=""
+KEEP_FAILED_DEFAULT=1
+CREATED_VMS=()
+FINALIZING=0
+
+usage() {
+    cat <<'EOF'
+Usage:
+  qci preflight
+  qci host
+  qci vm-smoke [--vm <name>]
+  qci bats [--vm <name>] [--file <file.bats> ...]
+  qci gui [--vm <name>] [--scenario <path.md> ...]
+  qci full [--keep-on-fail|--delete-failed-vm]
+  qci snapshot-daily [--date YYYY-MM-DD] [--name <vm-name>]
+  qci cleanup [--dry-run] [--age-hours N]
+  qci report [--latest|--run <run-dir>]
+  qci triage [--latest|--run <run-dir>]
+  qci list-runs
+
+Environment:
+  QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs.
+  QCI_RUNS_DIR             Artifact directory, default qdistro/ci/runs.
+  QCI_AGENT_CMD            Command used for markdown GUI scenarios.
+                            It receives the generated prompt file as argv[1],
+                            unless the value contains {prompt}.
+  QCI_KEEP_FAILED_VM=1      Preserve failed disposable VMs (default).
+  QCI_DELETE_FAILED_VM=1    Destroy failed disposable VMs after artifacts.
+  QCI_FORCE_PROTECTED_VM=1  Permit explicit qdistro-daily* VM targets.
+  QCI_REQUIRE_AGENT_GUI=1   Make missing QCI_AGENT_CMD fail the gui gate
+                            (default for qci gui/full).
+  QDWIN_IMG_DIR             libvirt image directory, default
+                            ~/.local/share/libvirt/images.
+  QCI_ZOLA_SKIP_EXTERNAL=1  Run zola check with --skip-external-links.
+EOF
+}
+
+now_utc() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
+stamp() { date -u +'%Y%m%dT%H%M%SZ'; }
+log() { printf '[qci] %s\n' "$*" >&2; }
+
+safe_name() {
+    printf '%s' "$1" | tr '/: @' '____' | tr -cd 'A-Za-z0-9._-'
+}
+
+exit_class_name() {
+    case "$1" in
+        0) echo pass ;;
+        10) echo preflight ;;
+        20) echo build ;;
+        30) echo host ;;
+        35) echo bats ;;
+        40) echo vm_provision ;;
+        50) echo vm_boot ;;
+        60) echo service ;;
+        70) echo gui ;;
+        80) echo visual ;;
+        90) echo runner ;;
+        *) echo "unknown($1)" ;;
+    esac
+}
+
+map_rc() {
+    local rc=$1 default=$2
+    case "$rc" in
+        0|10|20|30|35|40|50|60|70|80|90) echo "$rc" ;;
+        *) echo "$default" ;;
+    esac
+}
+
+rel_path() {
+    local path=${1:-}
+    [ -n "$path" ] || return 0
+    case "$path" in
+        "$RDIR"/*) printf '%s' "${path#$RDIR/}" ;;
+        *) printf '%s' "$path" ;;
+    esac
+}
+
+kv() {
+    printf '%s=%s\n' "$1" "$2" >> "$RDIR/manifest.txt"
+}
+
+init_run() {
+    GATE=$1
+    shift || true
+    mkdir -p "$RUNS_DIR"
+    local rid="${GATE}-$(stamp)-$$"
+    RDIR="$RUNS_DIR/$rid"
+    mkdir -p "$RDIR"/{agent-notes,preflight,host,vm,gui,bats,repos,screenshots,journals,reports}
+    {
+        printf 'run_id=%s\n' "$rid"
+        printf 'gate=%s\n' "$GATE"
+        printf 'started_utc=%s\n' "$(now_utc)"
+        printf 'host=%s\n' "$(hostname -s 2>/dev/null || hostname)"
+        printf 'user=%s\n' "$(id -un)"
+        printf 'workspace=%s\n' "$WORKSPACE"
+        printf 'qci=%s\n' "$SELF"
+        printf 'command=%q %q' "$SELF" "$GATE"
+        local arg
+        for arg in "$@"; do
+            printf ' %q' "$arg"
+        done
+        printf '\n'
+    } > "$RDIR/manifest.txt"
+    printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\n' > "$RDIR/results.tsv"
+    printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
+    : > "$RDIR/vm/created-vms.txt"
+    collect_repo_state
+    log "artifacts -> $RDIR"
+}
+
+finish_run() {
+    local rc=$1
+    FINALIZING=1
+    [ -n "$RDIR" ] || exit "$rc"
+    kv finished_utc "$(now_utc)"
+    kv exit_code "$rc"
+    kv exit_class "$(exit_class_name "$rc")"
+    printf '%s\n' "$rc" > "$RDIR/exit-code.txt"
+    if [ -x "$REPORT_PY" ] || [ -f "$REPORT_PY" ]; then
+        python3 "$REPORT_PY" "$RDIR" > "$RDIR/reports/report-generator.log" 2>&1 || {
+            log "report generation failed; see $RDIR/reports/report-generator.log"
+        }
+    fi
+    log "run $(basename "$RDIR") exit=$rc class=$(exit_class_name "$rc")"
+    if [ -f "$RDIR/report.md" ]; then
+        log "report: $RDIR/report.md"
+    fi
+    if [ -f "$RDIR/report.html" ]; then
+        log "html:   $RDIR/report.html"
+    fi
+    exit "$rc"
+}
+
+abort_run() {
+    local sig=$1
+    [ "$FINALIZING" = 1 ] && exit "$EXIT_RUNNER"
+    log "received $sig; preserving created VMs and finalizing run"
+    local vm
+    if [ -n "$RDIR" ] && [ -f "$RDIR/vm/created-vms.txt" ]; then
+        while IFS= read -r vm; do
+            [ -n "$vm" ] && release_vm "$vm" "$EXIT_RUNNER"
+        done < "$RDIR/vm/created-vms.txt"
+        record_result lifecycle "$sig" fail "$EXIT_RUNNER" runner signal "" "run interrupted"
+        finish_run "$EXIT_RUNNER"
+    fi
+    exit "$EXIT_RUNNER"
+}
+
+trap 'abort_run INT' INT
+trap 'abort_run TERM' TERM
+
+record_result() {
+    local gate=$1 subject=$2 status=$3 exit_code=$4 exit_class=$5 kind=$6 log_path=${7:-} notes=${8:-}
+    notes=${notes//$'\t'/ }
+    notes=${notes//$'\n'/ }
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$gate" "$subject" "$status" "$exit_code" "$exit_class" "$kind" \
+        "$(rel_path "$log_path")" "$notes" >> "$RDIR/results.tsv"
+}
+
+collect_repo_state() {
+    local project repo branch head dirty status_log
+    for project in "${PROJECTS[@]}"; do
+        repo="$WORKSPACE/$project"
+        [ -d "$repo/.git" ] || continue
+        status_log="$RDIR/repos/$project.status.txt"
+        branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+        head=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo "?")
+        dirty=$(git -C "$repo" status --short 2>/dev/null | wc -l | tr -d ' ')
+        {
+            git -C "$repo" status --short --branch 2>/dev/null || true
+            echo
+            git -C "$repo" log -1 --oneline 2>/dev/null || true
+        } > "$status_log"
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "$project" "$branch" "$head" "$dirty" "$(rel_path "$status_log")" >> "$RDIR/repo-state.tsv"
+    done
+}
+
+run_logged() {
+    local gate=$1 subject=$2 default_class=$3 kind=$4 workdir=$5 cmd=$6 notes=${7:-}
+    local safe log_path rc mapped status
+    safe=$(safe_name "$subject")
+    log_path="$RDIR/$gate/$safe.log"
+    mkdir -p "$(dirname "$log_path")"
+    {
+        printf 'cwd=%s\n' "$workdir"
+        printf 'cmd=%s\n' "$cmd"
+        printf 'started_utc=%s\n' "$(now_utc)"
+        echo
+    } > "$log_path"
+    log "$gate/$subject"
+    (
+        cd "$workdir" || exit 2
+        QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" bash -lc "$cmd"
+    ) >> "$log_path" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ] && awk '
+        body && /^(FAIL|FAIL_LOUD):/ { found=1 }
+        /^$/ { body=1 }
+        END { exit found ? 0 : 1 }
+    ' "$log_path"; then
+        rc=$default_class
+        notes="${notes:+$notes; }printed FAIL with rc=0"
+    fi
+    mapped=$(map_rc "$rc" "$default_class")
+    if [ "$mapped" -eq 0 ]; then
+        status=pass
+    else
+        status=fail
+    fi
+    {
+        echo
+        printf 'finished_utc=%s\n' "$(now_utc)"
+        printf 'raw_exit_code=%s\n' "$rc"
+        printf 'qci_exit_code=%s\n' "$mapped"
+    } >> "$log_path"
+    record_result "$gate" "$subject" "$status" "$mapped" "$(exit_class_name "$mapped")" "$kind" "$log_path" "$notes"
+    return "$mapped"
+}
+
+record_skip() {
+    local gate=$1 subject=$2 kind=$3 notes=$4
+    record_result "$gate" "$subject" skip 0 pass "$kind" "" "$notes"
+}
+
+record_blocked() {
+    local gate=$1 subject=$2 class=$3 kind=$4 notes=$5 log_path=${6:-}
+    record_result "$gate" "$subject" blocked "$class" "$(exit_class_name "$class")" "$kind" "$log_path" "$notes"
+}
+
+is_protected_vm() {
+    case "$1" in
+        qdistro-daily|qdistro-daily-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_vm() {
+    local gate=$1 vm=$2
+    if [ -z "$vm" ]; then
+        log "empty VM name"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if is_protected_vm "$vm" && [ "${QCI_FORCE_PROTECTED_VM:-0}" != 1 ]; then
+        log "refusing protected VM '$vm' for $gate; set QCI_FORCE_PROTECTED_VM=1 to override"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if ! "${VIRSH[@]}" dominfo "$vm" >/dev/null 2>&1; then
+        log "VM '$vm' not found"
+        return "$EXIT_VM_PROVISION"
+    fi
+    return 0
+}
+
+acquire_vm() {
+    local gate=$1 explicit=${2:-} log_path vm
+    if [ -n "$explicit" ]; then
+        validate_vm "$gate" "$explicit" || return "$EXIT_VM_PROVISION"
+        printf '%s\n' "$explicit"
+        return 0
+    fi
+    if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
+        log "QDISTRO_VM_PASSWORD is required to create a disposable VM"
+        return "$EXIT_VM_PROVISION"
+    fi
+    log_path="$RDIR/vm/spin-$gate.log"
+    log "creating disposable VM for $gate"
+    QDISTRO_VM_PASSWORD="$QDISTRO_VM_PASSWORD" \
+        QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+        "$VM_TOOLS/spin-test-vm.sh" "qci-$gate" > "$log_path" 2>&1
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        record_result "$gate" "spin-test-vm" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM creation failed"
+        return "$EXIT_VM_PROVISION"
+    fi
+    vm=$(grep -E "^qci-[A-Za-z0-9._-]+$" "$log_path" | tail -n 1 | tr -d '[:space:]')
+    [ -n "$vm" ] || vm=$(tail -n 1 "$log_path" | tr -d '[:space:]')
+    if [ -z "$vm" ]; then
+        record_result "$gate" "spin-test-vm" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "spin-test-vm produced no VM name"
+        return "$EXIT_VM_PROVISION"
+    fi
+    CREATED_VMS+=("$vm")
+    printf '%s\n' "$vm" >> "$RDIR/vm/created-vms.txt"
+    kv "vm_${gate}" "$vm"
+    printf '%s\n' "$vm"
+}
+
+release_vm() {
+    local vm=$1 rc=$2
+    [ -n "$vm" ] || return 0
+    if is_protected_vm "$vm"; then
+        log "preserving protected VM $vm"
+        return 0
+    fi
+    local created=0 v
+    for v in "${CREATED_VMS[@]:-}"; do
+        [ "$v" = "$vm" ] && created=1
+    done
+    if [ "$created" = 0 ] && [ -f "$RDIR/vm/created-vms.txt" ]; then
+        grep -Fxq "$vm" "$RDIR/vm/created-vms.txt" && created=1
+    fi
+    [ "$created" = 1 ] || {
+        log "preserving pre-existing VM $vm"
+        return 0
+    }
+    if [ "$rc" -ne 0 ] && [ "${QCI_DELETE_FAILED_VM:-0}" != 1 ] && [ "${QCI_KEEP_FAILED_VM:-$KEEP_FAILED_DEFAULT}" = 1 ]; then
+        log "preserving failed VM $vm"
+        printf 'preserved_failed_vm=%s\n' "$vm" >> "$RDIR/manifest.txt"
+        record_result lifecycle "$vm" skip 0 pass vm "" "failed VM preserved for debugging"
+        return 0
+    fi
+    log "destroying VM $vm"
+    local disk
+    disk=$(vm_disk_path "$vm" || true)
+    "${VIRSH[@]}" destroy "$vm" >/dev/null 2>&1 || true
+    "${VIRSH[@]}" undefine "$vm" --remove-all-storage >/dev/null 2>&1 || {
+        "${VIRSH[@]}" undefine "$vm" --nvram >/dev/null 2>&1 || true
+        if [ -n "$disk" ] && [ -f "$disk" ]; then
+            rm -f "$disk" 2>/dev/null || true
+        fi
+    }
+}
+
+vm_disk_path() {
+    local vm=$1 disk
+    disk=$("${VIRSH[@]}" domblklist "$vm" --details 2>/dev/null \
+        | awk '$2=="disk" && $4 ~ /^\// {print $4; exit}')
+    if [ -z "$disk" ]; then
+        disk=$("${VIRSH[@]}" domblklist "$vm" --details --inactive 2>/dev/null \
+            | awk '$2=="disk" && $4 ~ /^\// {print $4; exit}')
+    fi
+    [ -n "$disk" ] || return 1
+    printf '%s\n' "$disk"
+}
+
+collect_vm_artifacts() {
+    local vm=$1 label=${2:-vm} outdir vmx
+    [ -n "$vm" ] || return 0
+    outdir="$RDIR/vm/$label"
+    mkdir -p "$outdir" "$RDIR/journals" "$RDIR/screenshots"
+    "${VIRSH[@]}" dumpxml "$vm" > "$outdir/domain.xml" 2>&1 || true
+    "${VIRSH[@]}" domblklist "$vm" --details > "$outdir/domblklist.txt" 2>&1 || true
+    "${VIRSH[@]}" dominfo "$vm" > "$outdir/dominfo.txt" 2>&1 || true
+    "${VIRSH[@]}" screenshot "$vm" "$RDIR/screenshots/$label-final.ppm" >/dev/null 2>&1 || true
+    vmx="$VM_TOOLS/vm-exec"
+    [ -x "$vmx" ] || return 0
+    "$vmx" "$vm" "journalctl -b --no-pager 2>/dev/null | tail -400" > "$RDIR/journals/$label-system.log" 2>&1 || true
+    "$vmx" "$vm" "journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -400" > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
+    "$vmx" "$vm" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status qdwin-compositor.service qdshell.service noctalia-session.service noctalia-shell.service qdlocker.service qdistro-cursor-sprites.service --no-pager 2>/dev/null || true" > "$outdir/systemctl-user-status.txt" 2>&1 || true
+    "$vmx" "$vm" "WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 runuser -u admin -- wayland-info 2>/dev/null | head -240 || true" > "$outdir/wayland-info.txt" 2>&1 || true
+    "$vmx" "$vm" "echo list | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>&1 | head -200 || true" > "$outdir/qdshell-list.txt" 2>&1 || true
+}
+
+gate_preflight() {
+    local rc=$EXIT_OK report="$RDIR/preflight/preflight.txt"
+    : > "$report"
+    check_required() {
+        local label=$1 cmd=$2
+        if bash -lc "$cmd" >/dev/null 2>&1; then
+            printf 'OK\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" pass 0 pass tool "$report" ""
+        else
+            printf 'MISS\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" fail "$EXIT_PREFLIGHT" preflight tool "$report" "missing required preflight item"
+            rc=$EXIT_PREFLIGHT
+        fi
+    }
+    check_optional() {
+        local label=$1 cmd=$2
+        if bash -lc "$cmd" >/dev/null 2>&1; then
+            printf 'OK\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" pass 0 pass tool "$report" ""
+        else
+            printf 'WARN\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" skip 0 pass tool "$report" "optional tool missing; related gate will fail or skip"
+        fi
+    }
+
+    local p
+    for p in "${PROJECTS[@]}"; do
+        check_required "repo $p" "[ -d '$WORKSPACE/$p' ]"
+    done
+    check_required "python3" "command -v python3"
+    check_required "git" "command -v git"
+    check_required "bash" "command -v bash"
+    check_required "virsh" "command -v virsh"
+    check_required "libvirt session" "virsh -c qemu:///session list >/dev/null"
+    check_required "vm-exec" "[ -x '$VM_TOOLS/vm-exec' ]"
+    check_required "vm-start-and-wait" "[ -x '$VM_TOOLS/vm-start-and-wait' ]"
+    check_required "spin-test-vm.sh" "[ -x '$VM_TOOLS/spin-test-vm.sh' ]"
+    check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
+    check_required "QDISTRO_VM_PASSWORD" "test -n \"\${QDISTRO_VM_PASSWORD:-}\""
+    check_optional "bats" "command -v bats"
+    check_optional "meson" "command -v meson"
+    check_optional "ninja" "command -v ninja"
+    check_optional "npm" "command -v npm"
+    check_optional "zola" "command -v zola"
+    check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
+    {
+        echo
+        echo "## libvirt domains"
+        "${VIRSH[@]}" list --all || true
+        echo
+        echo "## qci overlays"
+        ls -1 "${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"/qci-*.qcow2 2>/dev/null || true
+    } >> "$report"
+    return "$rc"
+}
+
+host_pytest_loop() {
+    cat <<'EOF'
+rc=0
+for t in tests/test_*.py; do
+    [ -e "$t" ] || continue
+    python3 -m pytest "$t" || rc=1
+done
+exit "$rc"
+EOF
+}
+
+gate_host() {
+    local rc=$EXIT_OK c step_rc
+    c="python3 -m pytest tests/unit"
+    run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    c="rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
+    run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    c="find tests -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
+    run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    c="rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
+    run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, lint, format check"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_loop)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qdgreeter-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdgreeter" "python3 -m pytest tests" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "python3 -m pytest tests/unit" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qfileman" "python3 -m pytest" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "python3 -m pytest" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qterminator-pytest "$EXIT_HOST" pytest "$WORKSPACE/qterminator" "python3 -m pytest" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    c="npm test && npm run build"
+    run_logged host qdchrome-extension "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    run_logged host qdfirefox-extension "$EXIT_HOST" npm "$WORKSPACE/qdfirefox-extension" "$c" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    if [ "${QCI_ZOLA_SKIP_EXTERNAL:-0}" = 1 ]; then
+        c="zola check --skip-external-links && zola build"
+    else
+        c="zola check && zola build"
+    fi
+    run_logged host qdistro-site "$EXIT_HOST" zola "$WORKSPACE/qdistro-site" "$c" ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    return "$rc"
+}
+
+gate_vm_smoke() {
+    local explicit=${1:-} vm rc=$EXIT_OK out cmd
+    vm=$(acquire_vm vm-smoke "$explicit") || return "$EXIT_VM_PROVISION"
+    kv vm "$vm"
+    out="$RDIR/vm/vm-smoke.log"
+    : > "$out"
+    cmd="test -S /run/user/1000/wayland-1"
+    "$VM_TOOLS/vm-exec" "$vm" "$cmd" >> "$out" 2>&1 || rc=$EXIT_VM_BOOT
+    if [ "$rc" -eq 0 ]; then
+        cmd=$(cat <<'EOF'
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
+set -u
+check_unit() {
+    unit=$1
+    state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+    printf "%s %s\n" "$unit" "${state:-unknown}"
+    [ "$state" = active ]
+}
+if systemctl --user list-unit-files qdwin-compositor.service >/dev/null 2>&1; then
+    ok=0
+    check_unit qdwin-compositor.service || ok=1
+    check_unit qdshell.service || ok=1
+    check_unit qdistro-cursor-sprites.service || ok=1
+    exit "$ok"
+elif systemctl --user list-unit-files noctalia-session.service >/dev/null 2>&1; then
+    ok=0
+    check_unit noctalia-session.service || ok=1
+    check_unit noctalia-shell.service || ok=1
+    check_unit qdistro-cursor-sprites.service || ok=1
+    exit "$ok"
+else
+    echo NO_QDWIN_UNITS
+    exit 1
+fi
+'
+EOF
+)
+        "$VM_TOOLS/vm-exec" "$vm" "$cmd" >> "$out" 2>&1 || rc=$EXIT_SERVICE
+        if grep -qE ' (inactive|failed|unknown)$|^NO_QDWIN_UNITS' "$out"; then
+            rc=$EXIT_SERVICE
+        fi
+    fi
+    collect_vm_artifacts "$vm" vm-smoke
+    if [ "$rc" -eq 0 ]; then
+        record_result vm-smoke "$vm" pass 0 pass vm "$out" "session smoke passed"
+    else
+        record_result vm-smoke "$vm" fail "$rc" "$(exit_class_name "$rc")" vm "$out" "session smoke failed"
+    fi
+    release_vm "$vm" "$rc"
+    return "$rc"
+}
+
+run_qdwin_executable_gui_smokes() {
+    local vm=$1 rc=$EXIT_OK scenario file step_rc
+    export VMNAME="$vm"
+    for scenario in \
+        agent-mvp-session-smoke.sh \
+        agent-protocol-audit.sh \
+        agent-cursor-clickthrough-smoke.sh \
+        agent-click-smoke.sh
+    do
+        file="$WORKSPACE/qdwin/tests/gui/$scenario"
+        [ -x "$file" ] || {
+            record_blocked gui "$scenario" "$EXIT_GUI" gui "scenario script missing or not executable"
+            [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+            continue
+        }
+        run_logged gui "qdwin-$scenario" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$file'" ""; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    done
+    return "$rc"
+}
+
+agent_scenarios() {
+    local f
+    for f in \
+        "$WORKSPACE"/qdwin/tests/gui/[0-9][0-9]-*.md \
+        "$WORKSPACE"/qdwin/tests/apps/[0-9][0-9]-*.md \
+        "$WORKSPACE"/qdistro/tests/integration/permissions-gui/[0-9][0-9]-*.md \
+        "$WORKSPACE"/qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md \
+        "$WORKSPACE"/qdlocker/tests/gui/[0-9][0-9]-*.md
+    do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+write_agent_prompt() {
+    local vm=$1 scenario=$2 prompt=$3 rel
+    rel=${scenario#$WORKSPACE/}
+    cat > "$prompt" <<EOF
+# qdistro CI GUI scenario runner
+
+Run this scenario against VM \`$vm\` and write a PASS/FAIL/ERROR report.
+
+Scenario file:
+\`$scenario\`
+
+Artifact directory:
+\`$RDIR\`
+
+Rules:
+- Read the nearest AGENTS.md before executing the scenario.
+- Do not edit source files.
+- Save screenshots, OCR output, command logs, and notes under:
+  \`$RDIR/gui/$(safe_name "$rel")/\`
+- Use VMNAME=$vm.
+- Execute setup, steps, assertions, and cleanup serially.
+- Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
+- If the failure is a missing qdwin/Wayland protocol, point at qdwin or libweston integration, not a qdshell workaround.
+
+Start by reading:
+- \`$scenario\`
+- \`$(dirname "$scenario")/AGENTS.md\` if present, otherwise the closest parent AGENTS.md.
+EOF
+}
+
+run_agent_command() {
+    local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded
+    if [ -z "$cmd" ]; then
+        return 127
+    fi
+    if [[ "$cmd" == *"{prompt}"* ]]; then
+        expanded=${cmd//\{prompt\}/$prompt}
+        bash -lc "$expanded" > "$log_path" 2>&1
+    else
+        # shellcheck disable=SC2086
+        $cmd "$prompt" > "$log_path" 2>&1
+    fi
+}
+
+gate_qdshell_ui_agent() {
+    local rc=$EXIT_OK
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        record_result gui qdshell-ui skip 0 pass vision "" "ANTHROPIC_API_KEY not set; qdshell vision pytest would skip"
+        return 0
+    fi
+    local cmd="QDSHELL_UI_TESTS=1 python3 -m pytest tests/ui -v"
+    run_logged gui qdshell-ui "$EXIT_VISUAL" vision "$WORKSPACE/qdshell" "$cmd" "qdshell agent-assisted UI pytest" || rc=$?
+    if [ -d "$WORKSPACE/qdshell/tests/ui/artifacts" ]; then
+        mkdir -p "$RDIR/gui/qdshell-ui-artifacts"
+        cp -a "$WORKSPACE/qdshell/tests/ui/artifacts/." "$RDIR/gui/qdshell-ui-artifacts/" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
+gate_gui() {
+    local explicit=${1:-} vm rc=$EXIT_OK scenario prompt log_path rel status agent_rc require step_rc
+    require=${QCI_REQUIRE_AGENT_GUI:-1}
+    vm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
+    kv vm "$vm"
+
+    run_qdwin_executable_gui_smokes "$vm"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_qdshell_ui_agent; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    while IFS= read -r scenario; do
+        rel=${scenario#$WORKSPACE/}
+        prompt="$RDIR/agent-notes/$(safe_name "$rel").prompt.md"
+        log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
+        mkdir -p "$(dirname "$log_path")"
+        write_agent_prompt "$vm" "$scenario" "$prompt"
+        if [ -z "${QCI_AGENT_CMD:-}" ]; then
+            status=blocked
+            {
+                echo "QCI_AGENT_CMD is not set."
+                echo "Prompt: $prompt"
+                echo "Scenario: $scenario"
+            } > "$log_path"
+            if [ "$require" = 1 ]; then
+                record_blocked gui "$rel" "$EXIT_GUI" agent "agent runner not configured" "$log_path"
+                [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+            else
+                record_result gui "$rel" skip 0 pass agent "$log_path" "agent runner not configured"
+            fi
+            continue
+        fi
+        log "agent scenario $rel"
+        run_agent_command "$prompt" "$log_path"
+        agent_rc=$?
+        if [ "$agent_rc" -eq 0 ]; then
+            record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed"
+        else
+            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc"
+            [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+        fi
+    done < <(agent_scenarios)
+
+    collect_vm_artifacts "$vm" gui
+    release_vm "$vm" "$rc"
+    return "$rc"
+}
+
+gate_bats() {
+    local explicit=${1:-}; shift || true
+    local files=("$@")
+    local rc=$EXIT_OK file base vm gate_rc log_path
+    if [ "${#files[@]}" -eq 0 ]; then
+        while IFS= read -r file; do files+=("$file"); done < <(find "$WORKSPACE/qdistro/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+    fi
+    if ! command -v bats >/dev/null 2>&1; then
+        record_blocked bats bats "$EXIT_PREFLIGHT" bats "bats executable not found"
+        return "$EXIT_PREFLIGHT"
+    fi
+    for file in "${files[@]}"; do
+        base=$(basename "$file")
+        if [ -n "$explicit" ]; then
+            vm="$explicit"
+            validate_vm bats "$vm" || return "$EXIT_VM_PROVISION"
+        else
+            vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
+                [ "$rc" -eq 0 ] && rc=$EXIT_VM_PROVISION
+                continue
+            }
+        fi
+        log_path="$RDIR/bats/$base.log"
+        mkdir -p "$(dirname "$log_path")"
+        log "bats $base on $vm"
+        (
+            cd "$WORKSPACE/qdistro" || exit 2
+            VM_NAME="$vm" bats "$file"
+        ) > "$log_path" 2>&1
+        gate_rc=$?
+        collect_vm_artifacts "$vm" "bats-${base%.bats}"
+        if [ "$gate_rc" -eq 0 ]; then
+            record_result bats "$base" pass 0 pass bats "$log_path" "VM=$vm"
+        else
+            record_result bats "$base" fail "$EXIT_BATS" bats bats "$log_path" "VM=$vm raw_rc=$gate_rc"
+            [ "$rc" -eq 0 ] && rc=$EXIT_BATS
+        fi
+        [ -z "$explicit" ] && release_vm "$vm" "$gate_rc"
+    done
+    return "$rc"
+}
+
+gate_snapshot_daily() {
+    local date_arg=$1 name_arg=$2 rc vm tmp old_disk new_name new_disk xml
+    date_arg=${date_arg:-$(date -u +%F)}
+    new_name=${name_arg:-qdistro-daily-$date_arg}
+    if "${VIRSH[@]}" dominfo "$new_name" >/dev/null 2>&1; then
+        record_blocked snapshot-daily "$new_name" "$EXIT_VM_PROVISION" vm "target VM already exists"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if [ -f "${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/$new_name.qcow2" ]; then
+        record_blocked snapshot-daily "$new_name" "$EXIT_VM_PROVISION" vm "target disk already exists"
+        return "$EXIT_VM_PROVISION"
+    fi
+    vm=$(acquire_vm snapshot-daily "") || return "$EXIT_VM_PROVISION"
+    tmp=$vm
+    collect_vm_artifacts "$tmp" snapshot-source
+    "${VIRSH[@]}" destroy "$tmp" >/dev/null 2>&1 || true
+    old_disk=$(vm_disk_path "$tmp" || true)
+    new_disk="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/$new_name.qcow2"
+    xml=$("${VIRSH[@]}" dumpxml "$tmp" --inactive 2>/dev/null)
+    if [ -z "$xml" ] || [ ! -f "$old_disk" ]; then
+        record_blocked snapshot-daily "$new_name" "$EXIT_VM_PROVISION" vm "could not read temporary VM XML or disk"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if ! "${VIRSH[@]}" undefine "$tmp" --nvram >/dev/null 2>&1 \
+        && ! "${VIRSH[@]}" undefine "$tmp" >/dev/null 2>&1; then
+        record_blocked snapshot-daily "$new_name" "$EXIT_VM_PROVISION" vm "could not undefine temporary VM $tmp"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if ! mv "$old_disk" "$new_disk"; then
+        record_blocked snapshot-daily "$new_name" "$EXIT_VM_PROVISION" vm "could not move $old_disk to $new_disk"
+        return "$EXIT_VM_PROVISION"
+    fi
+    xml=$(printf '%s\n' "$xml" \
+        | sed -e "s|<name>$tmp</name>|<name>$new_name</name>|" \
+              -e '/<uuid>/d' \
+              -e "s|$old_disk|$new_disk|g" \
+              -e "s|$tmp.qcow2|$new_name.qcow2|g")
+    printf '%s\n' "$xml" | "${VIRSH[@]}" define /dev/stdin > "$RDIR/vm/snapshot-define.log" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_PROVISION" vm_provision vm "$RDIR/vm/snapshot-define.log" "virsh define failed"
+        return "$EXIT_VM_PROVISION"
+    fi
+    if ! "${VIRSH[@]}" start "$new_name" >> "$RDIR/vm/snapshot-define.log" 2>&1; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_BOOT" vm_boot vm "$RDIR/vm/snapshot-define.log" "virsh start failed"
+        return "$EXIT_VM_BOOT"
+    fi
+    if ! "$VM_TOOLS/vm-start-and-wait" "$new_name" >> "$RDIR/vm/snapshot-define.log" 2>&1; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_BOOT" vm_boot vm "$RDIR/vm/snapshot-define.log" "daily VM did not become ready"
+        return "$EXIT_VM_BOOT"
+    fi
+    kv daily_vm "$new_name"
+    kv daily_vm_date "$date_arg"
+    collect_vm_artifacts "$new_name" snapshot-daily
+    record_result snapshot-daily "$new_name" pass 0 pass vm "$RDIR/vm/snapshot-define.log" "daily VM captures current source state"
+    return 0
+}
+
+gate_cleanup() {
+    local dry=0 age_hours=24 rc=$EXIT_OK log_path="$RDIR/host/cleanup.log"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry=1 ;;
+            --age-hours) shift; age_hours=${1:-24} ;;
+            *) record_blocked cleanup "$1" "$EXIT_USAGE" args "unknown cleanup flag"; return "$EXIT_USAGE" ;;
+        esac
+        shift
+    done
+    : > "$log_path"
+    local now cutoff name disk mtime
+    now=$(date +%s)
+    cutoff=$((now - age_hours * 3600))
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case "$name" in qci-*) ;; *) continue ;; esac
+        if is_protected_vm "$name"; then
+            echo "skip protected $name" >> "$log_path"
+            continue
+        fi
+        disk=$(vm_disk_path "$name" || true)
+        if [ -z "$disk" ] || [ ! -f "$disk" ]; then
+            echo "keep $name (disk path unknown)" >> "$log_path"
+            continue
+        fi
+        mtime=$(stat -c %Y "$disk" 2>/dev/null || echo 0)
+        if [ "$mtime" = 0 ]; then
+            echo "keep $name (could not stat disk $disk)" >> "$log_path"
+            continue
+        fi
+        if [ "$mtime" -ge "$cutoff" ]; then
+            echo "keep recent $name mtime=$mtime" >> "$log_path"
+            continue
+        fi
+        if [ "$dry" = 1 ]; then
+            echo "would destroy $name disk=$disk" >> "$log_path"
+        else
+            "${VIRSH[@]}" destroy "$name" >/dev/null 2>&1 || true
+            "${VIRSH[@]}" undefine "$name" --remove-all-storage >> "$log_path" 2>&1 || {
+                echo "FAIL undefine $name" >> "$log_path"
+                rc=$EXIT_RUNNER
+            }
+        fi
+    done < <("${VIRSH[@]}" list --all --name 2>/dev/null)
+    if [ "$rc" -eq 0 ]; then
+        record_result cleanup qci-vms pass "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry"
+    else
+        record_result cleanup qci-vms fail "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry"
+    fi
+    return "$rc"
+}
+
+gate_full() {
+    local rc=$EXIT_OK step_rc
+    gate_preflight || return $?
+    gate_host; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_vm_smoke ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_bats ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_gui ""; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    return "$rc"
+}
+
+latest_run() {
+    find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {print $2}'
+}
+
+print_triage() {
+    local dir=$1
+    [ -d "$dir" ] || { echo "no such run: $dir" >&2; return 2; }
+    if [ ! -f "$dir/report.md" ]; then
+        python3 "$REPORT_PY" "$dir" >/dev/null 2>&1 || true
+    fi
+    sed -n '1,220p' "$dir/report.md"
+    echo
+    echo "Artifacts: $dir"
+}
+
+main() {
+    local cmd=${1:-}
+    shift || true
+    case "$cmd" in
+        -h|--help|help|"") usage; exit "$EXIT_USAGE" ;;
+    esac
+
+    case "$cmd" in
+        report|triage|list-runs)
+            ;;
+        *)
+            init_run "$cmd" "$@"
+            ;;
+    esac
+
+    local rc=$EXIT_OK date_arg="" name_arg="" files=() scenarios=() run_dir="" latest=0
+    case "$cmd" in
+        preflight)
+            gate_preflight; rc=$?; finish_run "$rc" ;;
+        host)
+            gate_host; rc=$?; finish_run "$rc" ;;
+        vm-smoke)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --vm) shift; EXPLICIT_VM=${1:-} ;;
+                    *) record_blocked vm-smoke "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            gate_vm_smoke "$EXPLICIT_VM"; rc=$?; finish_run "$rc" ;;
+        bats)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --vm) shift; EXPLICIT_VM=${1:-} ;;
+                    --file)
+                        shift
+                        if [ -z "${1:-}" ] || [ ! -f "${1:-}" ]; then
+                            record_blocked bats "${1:-<missing>}" "$EXIT_USAGE" args "--file requires an existing .bats file"
+                            finish_run "$EXIT_USAGE"
+                        fi
+                        files+=("$1")
+                        ;;
+                    *) files+=("$1") ;;
+                esac
+                shift
+            done
+            gate_bats "$EXPLICIT_VM" "${files[@]}"; rc=$?; finish_run "$rc" ;;
+        gui)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --vm) shift; EXPLICIT_VM=${1:-} ;;
+                    --scenario) shift; scenarios+=("${1:-}") ;;
+                    --no-require-agent) export QCI_REQUIRE_AGENT_GUI=0 ;;
+                    *) record_blocked gui "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            if [ "${#scenarios[@]}" -gt 0 ]; then
+                agent_scenarios() { printf '%s\n' "${scenarios[@]}"; }
+            fi
+            gate_gui "$EXPLICIT_VM"; rc=$?; finish_run "$rc" ;;
+        full)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --keep-on-fail) export QCI_KEEP_FAILED_VM=1 ;;
+                    --delete-failed-vm) export QCI_DELETE_FAILED_VM=1 ;;
+                    --no-require-agent) export QCI_REQUIRE_AGENT_GUI=0 ;;
+                    *) record_blocked full "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            gate_full; rc=$?; finish_run "$rc" ;;
+        snapshot-daily)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --date) shift; date_arg=${1:-} ;;
+                    --name) shift; name_arg=${1:-} ;;
+                    *) record_blocked snapshot-daily "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            gate_snapshot_daily "$date_arg" "$name_arg"; rc=$?; finish_run "$rc" ;;
+        cleanup)
+            gate_cleanup "$@"; rc=$?; finish_run "$rc" ;;
+        report)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --latest) latest=1 ;;
+                    --run) shift; run_dir=${1:-} ;;
+                    *) echo "unknown arg: $1" >&2; exit "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            [ "$latest" = 1 ] && run_dir=$(latest_run)
+            [ -n "$run_dir" ] || { echo "set --latest or --run" >&2; exit "$EXIT_USAGE"; }
+            python3 "$REPORT_PY" "$run_dir"
+            ;;
+        triage)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --latest) latest=1 ;;
+                    --run) shift; run_dir=${1:-} ;;
+                    *) run_dir=$1 ;;
+                esac
+                shift
+            done
+            [ "$latest" = 1 ] && run_dir=$(latest_run)
+            [ -n "$run_dir" ] || { echo "set --latest or --run" >&2; exit "$EXIT_USAGE"; }
+            print_triage "$run_dir"
+            ;;
+        list-runs)
+            find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%TY-%Tm-%Td %TH:%TM %p\n' 2>/dev/null | sort
+            ;;
+        *)
+            echo "unknown command: $cmd" >&2
+            usage >&2
+            exit "$EXIT_USAGE"
+            ;;
+    esac
+}
+
+main "$@"
