@@ -12,12 +12,11 @@ import QtQuick.Window
 
 Window {
   id: root
-  visible: true
   width: Screen.width
   height: Screen.height
   // Fullscreen + opaque so the first frame after attach can't show
   // through to whatever toplevel was focused before the lock.
-  visibility: Window.FullScreen
+  visibility: bridge.locked ? Window.FullScreen : Window.Hidden
   color: "#101015"
   flags: Qt.FramelessWindowHint
 

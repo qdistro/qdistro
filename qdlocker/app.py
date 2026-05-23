@@ -20,6 +20,7 @@ from PyQt6.QtCore import (
     QObject,
     Qt,
     QUrl,
+    pyqtProperty,
     pyqtSignal,
     pyqtSlot,
 )
@@ -214,6 +215,8 @@ class WaylandBridge(QObject):
     _lockedChangedSignal = pyqtSignal(bool)
     _lockRequestedSignal = pyqtSignal(int)
     _overlayKeySignal = pyqtSignal(int, str)
+    lockedChanged = pyqtSignal(bool)
+    initiallyLockedChanged = pyqtSignal(bool)
     lockedChangedForCtrl = pyqtSignal(bool)
 
     def __init__(
@@ -234,12 +237,16 @@ class WaylandBridge(QObject):
         self._lockRequestedSignal.connect(self._on_lock_requested, Qt.ConnectionType.QueuedConnection)
         self._overlayKeySignal.connect(self._on_overlay_key, Qt.ConnectionType.QueuedConnection)
 
-    @property
+    @pyqtProperty(bool, notify=lockedChanged)
     def locked(self) -> bool:
         return self._locked
 
     @property
     def initially_locked(self) -> bool:
+        return self._initially_locked
+
+    @pyqtProperty(bool, notify=initiallyLockedChanged)
+    def initiallyLocked(self) -> bool:
         return self._initially_locked
 
     def attach(self, client: LockerClient) -> None:
@@ -267,14 +274,20 @@ class WaylandBridge(QObject):
     @pyqtSlot(bool)
     def _on_ready(self, initially_locked: bool) -> None:
         log.info("locker bound; initially_locked=%s", initially_locked)
-        self._initially_locked = initially_locked
-        self._locked = initially_locked
+        if self._initially_locked != initially_locked:
+            self._initially_locked = initially_locked
+            self.initiallyLockedChanged.emit(initially_locked)
+        if self._locked != initially_locked:
+            self._locked = initially_locked
+            self.lockedChanged.emit(initially_locked)
         self.lockedChangedForCtrl.emit(initially_locked)
 
     @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
         log.info("compositor locked_changed=%s", locked)
-        self._locked = locked
+        if self._locked != locked:
+            self._locked = locked
+            self.lockedChanged.emit(locked)
         self.lockedChangedForCtrl.emit(locked)
 
     @pyqtSlot(int)
@@ -301,6 +314,7 @@ class WaylandBridge(QObject):
         # `if self._locked` guard above. The compositor will follow
         # up with a locked_changed=true event that confirms it.
         self._locked = True
+        self.lockedChanged.emit(True)
         self.lockedChangedForCtrl.emit(True)
         if self._client:
             self._client.set_locked(True)
@@ -316,7 +330,9 @@ class WaylandBridge(QObject):
 
     @pyqtSlot()
     def _on_unlocked(self) -> None:
-        self._locked = False
+        if self._locked:
+            self._locked = False
+            self.lockedChanged.emit(False)
         self.lockedChangedForCtrl.emit(False)
         if self._client:
             self._client.set_locked(False)
