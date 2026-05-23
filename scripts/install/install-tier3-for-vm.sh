@@ -155,6 +155,10 @@ fi
 
 # --- 4. symlinks ------------------------------------------------------
 install -d /usr/local/bin
+install -d /usr/local/lib/qdistro
+install -m 0644 -o root -g root \
+    "$SRC_ROOT/lib/spawn-common.sh" \
+    /usr/local/lib/qdistro/spawn-common.sh
 for pair in spawn-tier3.sh:qdistro-tier3-spawn \
             qdistro-tier3-cleanup.sh:qdistro-tier3-cleanup; do
     src_basename="${pair%%:*}"

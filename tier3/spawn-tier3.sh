@@ -225,7 +225,19 @@ fi
 
 # --- LAUNCH_TOKEN + correlation ---------------------------------------
 # shellcheck source=../lib/spawn-common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+SPAWN_COMMON="$SCRIPT_DIR/../lib/spawn-common.sh"
+if [ ! -r "$SPAWN_COMMON" ] && [ -r /usr/local/lib/qdistro/spawn-common.sh ]; then
+    SPAWN_COMMON=/usr/local/lib/qdistro/spawn-common.sh
+elif [ ! -r "$SPAWN_COMMON" ] && [ -r /usr/lib/qdistro/spawn-common.sh ]; then
+    SPAWN_COMMON=/usr/lib/qdistro/spawn-common.sh
+fi
+if [ ! -r "$SPAWN_COMMON" ]; then
+    echo "[tier3] FAIL: spawn-common.sh not found (looked near $SCRIPT_DIR, /usr/local/lib/qdistro, and /usr/lib/qdistro)" >&2
+    exit 5
+fi
+. "$SPAWN_COMMON"
 LAUNCH_TOKEN="$(gen_launch_token "[tier3] FAIL")"
 APP_BASENAME=$(basename "$1")
 # Emit correlation lines that qdshell's PodApps-style placeholder

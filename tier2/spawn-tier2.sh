@@ -144,7 +144,17 @@ TIER2_ALLOW_PRIVESC_VAL="${TIER2_ALLOW_PRIVESC:-0}"
 # `^[0-9a-f]{32}$` to ignore podman's "<no value>" sentinel and any
 # other label noise.
 # shellcheck source=../lib/spawn-common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/spawn-common.sh"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+SPAWN_COMMON="$SCRIPT_DIR/../lib/spawn-common.sh"
+if [ ! -r "$SPAWN_COMMON" ] && [ -r /usr/lib/qdistro/spawn-common.sh ]; then
+    SPAWN_COMMON=/usr/lib/qdistro/spawn-common.sh
+fi
+if [ ! -r "$SPAWN_COMMON" ]; then
+    echo "spawn-tier2: spawn-common.sh not found (looked near $SCRIPT_DIR and /usr/lib/qdistro)" >&2
+    exit 5
+fi
+. "$SPAWN_COMMON"
 LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
 
 # --- pre-flight ---------------------------------------------------------

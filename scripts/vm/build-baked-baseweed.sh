@@ -55,6 +55,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSITOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMG="${IMG_DIR_OVERRIDE:-${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}}"
+TIER5_BUILD_GUEST="$SCRIPT_DIR/../../tier5-vm/build-guest-image.sh"
 
 BASE="$IMG/baseweed-admin.qcow2"
 BAKED="$IMG/baseweed-baked.qcow2"
@@ -166,12 +167,18 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             echo "[bake] customizing tier-5 base on host (waypipe + qga + publisher)..."
             cp --reflink=auto "$CLOUD_CACHE" "$BAKED_CACHE.partial"
             PUBLISHER_TMP="$(mktemp /tmp/qd-pub-XXXXXX.sh)"
+            if [ ! -f "$TIER5_BUILD_GUEST" ]; then
+                echo "[bake] FAIL: tier-5 builder not found at $TIER5_BUILD_GUEST" >&2
+                rm -f "$PUBLISHER_TMP" "$BAKED_CACHE.partial"
+                exit 5
+            fi
             sed -n '/cat >"\$PUBLISHER" <<'\''PUBEOF'\''/,/^PUBEOF$/p' \
-                "$SCRIPT_DIR/tier5/build-guest-image.sh" \
+                "$TIER5_BUILD_GUEST" \
                 | sed '1d;$d' >"$PUBLISHER_TMP"
             chmod +x "$PUBLISHER_TMP"
             virt-customize -a "$BAKED_CACHE.partial" \
-                --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils \
+                --run-command 'zypper -n --no-gpg-checks refresh' \
+                --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils' \
                 --run-command 'systemctl enable qemu-guest-agent.service' \
                 --run-command 'systemctl enable serial-getty@ttyS0.service' \
                 --copy-in "$PUBLISHER_TMP:/usr/local/bin/" \
@@ -180,6 +187,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
                 --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
                 --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
+                --run-command 'zypper clean -a' \
                 >/dev/null
             rm -f "$PUBLISHER_TMP"
             virt-sparsify --in-place "$BAKED_CACHE.partial" 2>/dev/null || true

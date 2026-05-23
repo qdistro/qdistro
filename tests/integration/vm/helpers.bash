@@ -174,8 +174,13 @@ stage_http_8765() {
         ss -tln 2>/dev/null | grep -q ":8765 " || break
         sleep 0.1
     done
-    (cd "$stage_dir" && nohup python3 -m http.server 8765 \
-        >/tmp/qdistro-bats-http.log 2>&1 & echo $! >/tmp/qdistro-bats-http.pid)
+    (
+        cd "$stage_dir" || exit 1
+        nohup python3 -m http.server 8765 \
+            >/tmp/qdistro-bats-http.log 2>&1 </dev/null 3>&- 4>&- 5>&- &
+        echo $! >/tmp/qdistro-bats-http.pid
+        disown "$!" 2>/dev/null || true
+    )
     for ((i=0; i<30; i++)); do
         curl -sf -o /dev/null "http://127.0.0.1:8765/" && return 0
         sleep 0.1

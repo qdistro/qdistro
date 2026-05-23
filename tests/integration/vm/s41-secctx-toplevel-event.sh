@@ -52,13 +52,20 @@ trap cleanup EXIT INT TERM
 # --- 1. stage tier3 source -------------------------------------------
 SRC=/root/qdistro-src/qdistro
 TIER3_DIR=/tmp/qdistro-tier3-src
+COMMON_LIB_DIR=/tmp/lib
 if [ -d "$SRC/tier3" ]; then
     rm -rf "$TIER3_DIR" 2>/dev/null || true
     cp -r "$SRC/tier3" "$TIER3_DIR"
     chmod -R a+rX "$TIER3_DIR"
     find "$TIER3_DIR" -name '*.sh' -exec chmod a+rx {} +
 fi
+if [ -d "$SRC/lib" ]; then
+    rm -rf "$COMMON_LIB_DIR" 2>/dev/null || true
+    cp -r "$SRC/lib" "$COMMON_LIB_DIR"
+    chmod -R a+rX "$COMMON_LIB_DIR"
+fi
 [ -d "$TIER3_DIR" ] || skip "tier3 source not unpacked at $TIER3_DIR"
+[ -f "$COMMON_LIB_DIR/spawn-common.sh" ] || skip "spawn-common library not unpacked at $COMMON_LIB_DIR"
 
 command -v waypipe        >/dev/null 2>&1 || skip "waypipe not installed in this VM"
 command -v wayland-info   >/dev/null 2>&1 || skip "wayland-info not installed in this VM"

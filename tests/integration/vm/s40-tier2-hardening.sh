@@ -33,11 +33,17 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SRC=/root/qdistro-src/qdistro
 TIER2_DIR=/tmp/qdistro-tier2
+COMMON_LIB_DIR=/tmp/lib
 if [ -d "$SRC/tier2" ]; then
     rm -rf "$TIER2_DIR" 2>/dev/null || true
     cp -r "$SRC/tier2" "$TIER2_DIR"
     chmod -R a+rX "$TIER2_DIR"
     find "$TIER2_DIR" -name '*.sh' -exec chmod a+rx {} +
+fi
+if [ -d "$SRC/lib" ]; then
+    rm -rf "$COMMON_LIB_DIR" 2>/dev/null || true
+    cp -r "$SRC/lib" "$COMMON_LIB_DIR"
+    chmod -R a+rX "$COMMON_LIB_DIR"
 fi
 CONTAINER=tier2-c-harden
 WORKLOAD=weston-terminal
@@ -45,6 +51,7 @@ IMAGE="qdistro/tier2-${WORKLOAD}:latest"
 
 command -v podman >/dev/null 2>&1 || skip "podman not installed in this VM"
 [ -d "$TIER2_DIR" ] || skip "tier2 source not unpacked at $TIER2_DIR"
+[ -f "$COMMON_LIB_DIR/spawn-common.sh" ] || skip "spawn-common library not unpacked at $COMMON_LIB_DIR"
 runuser -u admin -- podman image exists "$IMAGE" 2>/dev/null \
     || skip "image $IMAGE not built (run s32 first)"
 

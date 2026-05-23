@@ -133,6 +133,10 @@ fi
 # and the rest live inside the container image, not on the host.
 QDISTRO_SRC="${QDISTRO_SRC:-/root/qdistro-src/qdistro}"
 if [ -f "$QDISTRO_SRC/tier2/spawn-tier2.sh" ]; then
+    install -d /usr/lib/qdistro
+    install -m 0644 -o root -g root \
+        "$QDISTRO_SRC/lib/spawn-common.sh" \
+        /usr/lib/qdistro/spawn-common.sh
     install -m 0755 -o root -g root \
         "$QDISTRO_SRC/tier2/spawn-tier2.sh" \
         /usr/bin/qdistro-tier2-spawn

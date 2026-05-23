@@ -30,8 +30,12 @@ stage_vm_driver() {
     if ! ss -tln 2>/dev/null | grep -q ":8768 "; then
         local stage_dir
         stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
-        (cd "$stage_dir" && nohup python3 -m http.server 8768 \
-            >/tmp/qdistro-bats-http.log 2>&1 &)
+        (
+            cd "$stage_dir" || exit 1
+            nohup python3 -m http.server 8768 \
+                >/tmp/qdistro-bats-http.log 2>&1 </dev/null 3>&- 4>&- 5>&- &
+            disown "$!" 2>/dev/null || true
+        )
         sleep 1
     fi
 }
