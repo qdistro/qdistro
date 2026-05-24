@@ -116,6 +116,33 @@ qdistro/ci/bin/qci cleanup --dry-run --age-hours 24
 Cleanup asks libvirt for each VM's real disk path and skips domains whose disk
 cannot be located. It does not guess paths outside libvirt metadata.
 
+## Host test dependencies
+
+The `host` gate runs tests across all sibling projects. Two projects need
+dependencies that are not part of the base qdistro install:
+
+**qdshell QML tests** require the `QtQml.WorkerScript` QML module:
+
+```bash
+# Ubuntu
+sudo apt install qml6-module-qtqml-workerscript
+
+# openSUSE Tumbleweed
+sudo zypper install qt6-declarative-imports
+```
+
+**qterminator tests** require the `QTermWidget` Python binding, which is
+built from source as part of the qterminator install (it is not packaged
+by any distro). Build it from the `qtermwidget-pyqt/` directory in the
+qterminator repo:
+
+```bash
+cd qterminator/qtermwidget-pyqt && pip install .
+```
+
+See `qterminator/README.md` for full build prerequisites (qtermwidget-devel,
+sip, pyqt-builder).
+
 ## Host Link Checks
 
 The host gate runs `zola check` for `qdistro-site`, including external links.

@@ -305,6 +305,7 @@ install_packages_ubuntu() {
         python3-pyqt6 python3-dbus python3-gi python3-yaml python3-cryptography
         python3-pam python3-pywayland
         qt6-wayland-dev
+        qml6-module-qtqml-workerscript
         # mesa
         libegl1 libgl1 mesa-utils libglx-mesa0
         # wayland utils
