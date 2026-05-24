@@ -82,8 +82,8 @@ floor under the non-adversarial threat model.
 The `qdistro_tier1_t` domain needs allow rules for:
 
 ```
-userdom_stream_connect_user_runtime(qdistro_tier1_t) # /run/user/<uid>/wayland-1
-userdom_search_user_runtime_root(qdistro_tier1_t) # /run/user/<uid>
+userdom_stream_connect(qdistro_tier1_t) # /run/user/<uid>/wayland-1
+files_search_tmp(qdistro_tier1_t) # /run/user ancestry on Tumbleweed
 fonts_read_fonts(qdistro_tier1_t) # /usr/share/fonts
 miscfiles_read_localization(qdistro_tier1_t) # /usr/share/locale
 corecmd_exec_bin(qdistro_tier1_t) # /usr/bin/<app>
@@ -92,7 +92,14 @@ dev_rw_dri(qdistro_tier1_t) # /dev/dri/* for GPU
 dev_read_urand(qdistro_tier1_t) # /dev/urandom
 userdom_manage_user_tmpfs_files(qdistro_tier1_t) # /dev/shm
 optional_policy(`qdistro_broker_dbus_chat(qdistro_tier1_t)')
+# optional user_runtime_t discovery allows hedge for refpolicy variants
 ```
+
+The Tumbleweed spike found `/run/user/<uid>/*` labelled `user_tmp_t`, not
+`user_runtime_t`. The live policy therefore uses `userdom_stream_connect(...)`,
+which expands to the `user_tmp_t` socket pattern on this policy variant, and
+keeps optional `user_runtime_t` discovery allows for systems that relabel
+runtime entries after policy load.
 
 Plus a custom interface `qdistro_broker_dbus_chat` defined in the broker's
 own policy module so tier-1 apps can call `broker.RequestPermission` for
