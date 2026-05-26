@@ -27,13 +27,41 @@ VM_EXEC="$(dirname "$0")/vm-exec"
 DELAY=100
 
 run_as_jan() {
-    "$VM_EXEC" "$VM" "su - admin -c 'DISPLAY=:0 $1'"
+    "$VM_EXEC" "$VM" "su - admin -c 'export DISPLAY=:0; $1'"
+}
+
+qmp_mouse_move() {
+    local x="$1" y="$2"
+    local w="${QDWIN_SCREEN_W:-1280}" h="${QDWIN_SCREEN_H:-800}"
+    local ax=$(( x * 32767 / w ))
+    local ay=$(( y * 32767 / h ))
+    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" qemu-monitor-command "$VM" \
+        "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$ax}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$ay}}]}}" \
+        >/dev/null
+}
+
+qmp_mouse_button() {
+    local button="$1" state="$2"
+    local down=true
+    [ "$state" = up ] && down=false
+    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" qemu-monitor-command "$VM" \
+        "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"btn\",\"data\":{\"button\":\"$button\",\"down\":$down}}]}}" \
+        >/dev/null
+}
+
+qmp_click() {
+    local x="$1" y="$2" button="${3:-left}"
+    qmp_mouse_move "$x" "$y"
+    sleep 0.05
+    qmp_mouse_button "$button" down
+    sleep 0.05
+    qmp_mouse_button "$button" up
 }
 
 case "$CMD" in
     screenshot)
         OUT="${1:-/tmp/vm-screenshot.png}"
-        virsh screenshot "$VM" "$OUT" >/dev/null
+        virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$OUT" >/dev/null
         echo "$OUT"
         ;;
     start)
@@ -43,25 +71,27 @@ case "$CMD" in
         ;;
     activate)
         TITLE="$*"
-        run_as_jan "xdotool search --name '.*${TITLE}.*' windowactivate --sync"
+        run_as_jan "wid=\$(xdotool search --onlyvisible --name \".*${TITLE}.*\" | head -n1); [ -n \"\$wid\" ] && xdotool windowactivate --sync \"\$wid\" windowraise \"\$wid\""
         sleep 0.5
         ;;
     click)
         X="${1:?Usage: vm-gui <vm> click <x> <y>}"
         Y="${2:?Usage: vm-gui <vm> click <x> <y>}"
-        run_as_jan "xdotool mousemove $X $Y click 1"
+        qmp_click "$X" "$Y" left
         sleep 0.3
         ;;
     rightclick)
         X="${1:?Usage: vm-gui <vm> rightclick <x> <y>}"
         Y="${2:?Usage: vm-gui <vm> rightclick <x> <y>}"
-        run_as_jan "xdotool mousemove $X $Y click 3"
+        qmp_click "$X" "$Y" right
         sleep 0.3
         ;;
     doubleclick)
         X="${1:?Usage: vm-gui <vm> doubleclick <x> <y>}"
         Y="${2:?Usage: vm-gui <vm> doubleclick <x> <y>}"
-        run_as_jan "xdotool mousemove $X $Y click --repeat 2 --delay 100 1"
+        qmp_click "$X" "$Y" left
+        sleep 0.1
+        qmp_click "$X" "$Y" left
         sleep 0.3
         ;;
     drag)
@@ -69,7 +99,15 @@ case "$CMD" in
         Y1="${2:?}"
         X2="${3:?}"
         Y2="${4:?}"
-        run_as_jan "xdotool mousemove $X1 $Y1 mousedown 1 mousemove --delay 200 $X2 $Y2 mouseup 1"
+        qmp_mouse_move "$X1" "$Y1"
+        sleep 0.08
+        qmp_mouse_button left down
+        for i in 1 2 3 4 5 6 7 8; do
+            qmp_mouse_move "$(( X1 + (X2 - X1) * i / 8 ))" \
+                           "$(( Y1 + (Y2 - Y1) * i / 8 ))"
+            sleep 0.03
+        done
+        qmp_mouse_button left up
         sleep 0.3
         ;;
     scroll)

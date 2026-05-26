@@ -91,15 +91,16 @@ $VMEXEC "$VM" 'wait $(cat /tmp/45-py1.pid) 2>/dev/null; cat /tmp/45-py1.log'
 - Cache row:
   ```bash
   SQL_B64=$(base64 -w0 <<'SQL_EOF'
-  SELECT match_kind, match_value, scope FROM approvals
+  SELECT match_kind, match_value, argv, scope FROM approvals
     WHERE action='qsu.exec:root';
   SQL_EOF
   )
   $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
   ```
-  Output: `basename|python3|forever_basename`. The match_value
-  is the basename only (NOT the full argv[0] path) — the cache
-  layer extracts `basename(argv[0])` at decide time.
+  Output: `basename||python3|forever_basename`. For basename
+  rows the basename pattern is stored in the `argv` column and
+  `match_value` is intentionally empty; the cache layer extracts
+  `basename(argv[0])` at decide time.
 
 ### S3 — same exact argv → cache hit
 

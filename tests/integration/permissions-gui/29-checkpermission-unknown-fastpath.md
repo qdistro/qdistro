@@ -28,13 +28,16 @@ $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE action='test.action';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
 ## Steps
@@ -68,17 +71,22 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
   /org/qdistro/AdminBroker1 \
   org.qdistro.AdminBroker1.GetPending'
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT count(*) FROM audit WHERE action='test.action';
+SQL_EOF
+)
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 SELECT count(*) FROM approvals WHERE action='test.action';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
 ```
 
 **Assert**:
-- `GetPending` output is `array []`.
+- `GetPending` output is an empty D-Bus array. `dbus-send` commonly
+  prints this across multiple lines as `array [` followed by `]`, not
+  necessarily as one literal `array []` line.
 - Audit count is `0`.
 - Approvals count is `0`.
 
@@ -136,7 +144,7 @@ import sys
 sys.path.insert(0, "/usr/libexec/qdistro")
 from qdistro_admin_cache import ApprovalCache
 c = ApprovalCache("/var/lib/qdistro/approvals/approvals.sqlite")
-c.store(2000, "test.action", "/usr/bin/python3.13", "forever_exe", False, 1000)
+c.store(2000, "test.action", "/usr/bin/dbus-send", "forever_exe", False, 1000)
 print("seeded one DENY cache row")
 PY
 EOF
@@ -165,13 +173,16 @@ the default `"unknown"`.
 ```bash
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE action='test.action';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
 ## Notes for the runner

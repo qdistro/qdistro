@@ -95,7 +95,7 @@ proxy = bus.get_object("org.qdistro.AdminBroker1",
 result = proxy.CheckPermission(
     "test.other-action", {"i": "0"},
     dbus_interface="org.qdistro.AdminBroker1")
-print(f"other-action verdict={result!r}")
+print(f"other-action verdict={str(result)!r}")
 PY
 cat /tmp/30-s2.out
 EOF
@@ -121,7 +121,7 @@ proxy = bus.get_object("org.qdistro.AdminBroker1",
 result = proxy.CheckPermission(
     "test.action", {"i": "postwindow"},
     dbus_interface="org.qdistro.AdminBroker1")
-print(f"postwindow verdict={result!r}")
+print(f"postwindow verdict={str(result)!r}")
 PY
 cat /tmp/30-s3.out
 EOF

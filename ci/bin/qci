@@ -307,7 +307,7 @@ validate_vm() {
 }
 
 acquire_vm() {
-    local gate=$1 explicit=${2:-} log_path vm
+    local gate=$1 explicit=${2:-} log_path vm spinner
     if [ -n "$explicit" ]; then
         validate_vm "$gate" "$explicit" || return "$EXIT_VM_PROVISION"
         printf '%s\n' "$explicit"
@@ -319,18 +319,22 @@ acquire_vm() {
     fi
     log_path="$RDIR/vm/spin-$gate.log"
     log "creating disposable VM for $gate"
+    spinner=spin-test-vm.sh
+    if [ "$gate" = gui ]; then
+        spinner=spin-test-vm-gui.sh
+    fi
     QDISTRO_VM_PASSWORD="$QDISTRO_VM_PASSWORD" \
         QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
-        "$VM_TOOLS/spin-test-vm.sh" "qci-$gate" > "$log_path" 2>&1
+        "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ]; then
-        record_result "$gate" "spin-test-vm" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM creation failed"
+        record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM creation failed"
         return "$EXIT_VM_PROVISION"
     fi
     vm=$(grep -E "^qci-[A-Za-z0-9._-]+$" "$log_path" | tail -n 1 | tr -d '[:space:]')
     [ -n "$vm" ] || vm=$(tail -n 1 "$log_path" | tr -d '[:space:]')
     if [ -z "$vm" ]; then
-        record_result "$gate" "spin-test-vm" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "spin-test-vm produced no VM name"
+        record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "$spinner produced no VM name"
         return "$EXIT_VM_PROVISION"
     fi
     CREATED_VMS+=("$vm")
@@ -574,6 +578,17 @@ EOF
 run_qdwin_executable_gui_smokes() {
     local vm=$1 rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
+    if ! "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && ! pgrep -x labwc >/dev/null && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-compositor.service qdshell.service qdistro-cursor-sprites.service >/dev/null" >/dev/null 2>&1; then
+        for scenario in \
+            agent-mvp-session-smoke.sh \
+            agent-protocol-audit.sh \
+            agent-cursor-clickthrough-smoke.sh \
+            agent-click-smoke.sh
+        do
+            record_result gui "qdwin-$scenario" skip 0 pass gui "" "qdwin production session not active in this VM profile"
+        done
+        return 0
+    fi
     for scenario in \
         agent-mvp-session-smoke.sh \
         agent-protocol-audit.sh \
@@ -624,6 +639,8 @@ Rules:
 - Do not edit source files.
 - Save screenshots, OCR output, command logs, and notes under:
   \`$RDIR/gui/$(safe_name "$rel")/\`
+- Before returning, write \`$RDIR/gui/$(safe_name "$rel")/status.txt\`
+  containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - Use VMNAME=$vm.
 - Execute setup, steps, assertions, and cleanup serially.
 - Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
@@ -633,6 +650,28 @@ Start by reading:
 - \`$scenario\`
 - \`$(dirname "$scenario")/AGENTS.md\` if present, otherwise the closest parent AGENTS.md.
 EOF
+}
+
+agent_artifact_status() {
+    local artifact_dir=$1 log_path=$2 raw=""
+    if [ -f "$artifact_dir/status.txt" ]; then
+        raw=$(tr -d '\r' < "$artifact_dir/status.txt" | awk 'NF {print toupper($1); exit}')
+    elif [ -f "$artifact_dir/report.md" ]; then
+        raw=$(awk '
+            NR > 30 { exit }
+            /(^# .*(FAIL|ERROR|SKIP|PASS))|([[:space:]]-[[:space:]](FAIL|ERROR|SKIP|PASS))|([—-][[:space:]]*(FAIL|ERROR|SKIP|PASS)[[:space:]]*$)/ {
+                line=toupper($0)
+                if (line ~ /ERROR/) { print "ERROR"; exit }
+                if (line ~ /FAIL/) { print "FAIL"; exit }
+                if (line ~ /SKIP/) { print "SKIP"; exit }
+                if (line ~ /PASS/) { print "PASS"; exit }
+            }
+        ' "$artifact_dir/report.md")
+    fi
+    case "$raw" in
+        PASS|FAIL|ERROR|SKIP) printf '%s\n' "$raw" ;;
+        *) printf 'UNKNOWN\n' ;;
+    esac
 }
 
 run_agent_command() {
@@ -651,10 +690,6 @@ run_agent_command() {
 
 gate_qdshell_ui_agent() {
     local rc=$EXIT_OK
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        record_result gui qdshell-ui skip 0 pass vision "" "ANTHROPIC_API_KEY not set; qdshell vision pytest would skip"
-        return 0
-    fi
     local cmd="QDSHELL_UI_TESTS=1 python3 -m pytest tests/ui -v"
     run_logged gui qdshell-ui "$EXIT_VISUAL" vision "$WORKSPACE/qdshell" "$cmd" "qdshell agent-assisted UI pytest" || rc=$?
     if [ -d "$WORKSPACE/qdshell/tests/ui/artifacts" ]; then
@@ -665,10 +700,19 @@ gate_qdshell_ui_agent() {
 }
 
 gate_gui() {
-    local explicit=${1:-} vm rc=$EXIT_OK scenario prompt log_path rel status agent_rc require step_rc
+    local explicit=${1:-} vm rc=$EXIT_OK scenario prompt log_path rel status agent_rc require step_rc legacy_ctrl=0 nested_kvm=0 noctalia_shell=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
     vm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
     kv vm "$vm"
+    if "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/qdshell.sock" >/dev/null 2>&1; then
+        legacy_ctrl=1
+    fi
+    if "$VM_TOOLS/vm-exec" "$vm" "test -e /dev/kvm" >/dev/null 2>&1; then
+        nested_kvm=1
+    fi
+    if "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && pgrep -a noctalia-shell >/dev/null" >/dev/null 2>&1; then
+        noctalia_shell=1
+    fi
 
     run_qdwin_executable_gui_smokes "$vm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
@@ -681,6 +725,85 @@ gate_gui() {
         log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
         mkdir -p "$(dirname "$log_path")"
         write_agent_prompt "$vm" "$scenario" "$prompt"
+        case "$rel" in
+            qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
+                if [ "$legacy_ctrl" != 1 ]; then
+                    {
+                        echo "Skipped legacy qdwin markdown scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: /run/user/1000/qdshell.sock is absent; current qdistro GUI session is Quickshell/noctalia based."
+                        echo "Use executable qdwin agent smokes and qdistro/tests/integration/qdwin-noctalia/*.md until these legacy scenarios are ported off the qdshell ctrl-socket."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "legacy qdshell ctrl-socket not available"
+                    continue
+                fi
+                ;;
+            qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
+            qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
+            qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
+            qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+                if [ "$nested_kvm" != 1 ]; then
+                    {
+                        echo "Skipped nested-VM GUI scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: /dev/kvm is absent inside the session VM; this scenario requires nested KVM."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "nested KVM not available in VM"
+                    continue
+                fi
+                ;;
+            qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
+            qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md)
+                if [ "$noctalia_shell" != 1 ]; then
+                    {
+                        echo "Skipped qdshell/noctalia GUI scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    continue
+                fi
+                ;;
+            qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md)
+                if [ "$noctalia_shell" != 1 ]; then
+                    {
+                        echo "Skipped qdwin/noctalia GUI scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    continue
+                fi
+                ;;
+            qdlocker/tests/gui/[0-9][0-9]-*.md)
+                if [ "$noctalia_shell" != 1 ]; then
+                    {
+                        echo "Skipped qdlocker GUI scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; qdlocker GUI tests require the qdwin/noctalia session, while this VM profile runs labwc for permissions-gui admin app scenarios."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    continue
+                fi
+                ;;
+            qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md)
+                if [ -z "${VM_SSH_PORT:-}" ]; then
+                    {
+                        echo "Skipped SSH-only SELinux GUI scenario."
+                        echo "VM: $vm"
+                        echo "Scenario: $scenario"
+                        echo "Reason: VM_SSH_PORT is not set; this scenario explicitly requires SSH transport because qemu-guest-agent cannot set SELinux enforcing mode."
+                    } > "$log_path"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "VM_SSH_PORT not set for SSH-only SELinux scenario"
+                    continue
+                fi
+                ;;
+        esac
         if [ -z "${QCI_AGENT_CMD:-}" ]; then
             status=blocked
             {
@@ -699,12 +822,23 @@ gate_gui() {
         log "agent scenario $rel"
         run_agent_command "$prompt" "$log_path"
         agent_rc=$?
-        if [ "$agent_rc" -eq 0 ]; then
-            record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed"
-        else
-            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc"
-            [ "$rc" -eq 0 ] && rc=$EXIT_GUI
-        fi
+        status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
+        case "$status:$agent_rc" in
+            PASS:0|UNKNOWN:0)
+                record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed"
+                ;;
+            SKIP:*)
+                record_result gui "$rel" skip 0 pass agent "$log_path" "agent scenario skipped"
+                ;;
+            FAIL:*|ERROR:*)
+                record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent status=$status rc=$agent_rc"
+                [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+                ;;
+            *)
+                record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc status=$status"
+                [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+                ;;
+        esac
     done < <(agent_scenarios)
 
     collect_vm_artifacts "$vm" gui

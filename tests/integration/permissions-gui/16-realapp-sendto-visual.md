@@ -39,18 +39,37 @@ SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
 
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
-
 # Launch both qnotebook instances on admin's labwc via the helper.
 $VMEXEC "$VM" '
- pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
- pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+ pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+ pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  sleep 1
  rm -f /home/work/testnb/.zim-qt/lock /home/work2/testnb/.zim-qt/lock
  /usr/local/bin/qdistro-start-user-app work /usr/local/bin/qnotebook /home/work/testnb
  /usr/local/bin/qdistro-start-user-app work2 /usr/local/bin/qnotebook /home/work2/testnb
 '
 sleep 6
+
+# Start and raise the admin app after qnotebook so approval UI is not
+# hidden behind the notebook windows. Keep the qnotebooks visible at
+# the bottom of the display for the S1 visual smoke, but leave the
+# admin app in front for OCR and the Approve click.
+$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
+sleep 2
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 sh -c '"'"'
+  i=0
+  for w in $(xdotool search --onlyvisible --name ".*qnotebook.*" 2>/dev/null || true); do
+    if [ "$i" -eq 0 ]; then xdotool windowsize "$w" 420 170 windowmove "$w" 20 610
+    else xdotool windowsize "$w" 420 170 windowmove "$w" 840 610
+    fi
+    i=$((i + 1))
+  done
+  w=$(xdotool search --onlyvisible --name ".*admin approvals.*" 2>/dev/null | head -1 || true)
+  if [ -n "$w" ]; then
+    xdotool windowsize "$w" 900 560 windowmove "$w" 190 70
+    xdotool windowactivate --sync "$w" windowraise "$w"
+  fi
+'"'"''
 ```
 
 ## Steps
@@ -58,14 +77,16 @@ sleep 6
 ### S1 — all three windows on screen
 
 ```bash
+$VMGUI "$VM" activate "admin approvals"
 $VMGUI "$VM" screenshot /tmp/16-s1-layout.png
 ```
 
 **Assert (OCR /tmp/16-s1-layout.png)**:
 - `admin approvals` text visible (admin app titlebar).
-- Some content from the seeded Home.md pages (e.g. `Home`,
- `Payloads`, `Test notebook`) visible — at least one qnotebook
- window is rendering.
+- Some qnotebook/editor chrome visible, for example `Backlinks`,
+ `NewPage`, `Bold`, `Italic`, or seeded page text such as `Home`,
+ `Payloads`, `Test notebook` — at least one qnotebook window is
+ rendering.
 
 Layout is not prescribed. If a qnotebook instance collapsed
 without drawing (e.g. compositor didn't map both), S2 still
@@ -105,18 +126,24 @@ sleep 1
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+$VMGUI "$VM" activate "admin approvals"
 $VMGUI "$VM" screenshot /tmp/16-s3-pending.png
 ```
 
 **Assert (OCR /tmp/16-s3-pending.png)**:
 - `uid=2000` in the detail pane header.
-- `app.send-to:3000:org.qdistro.Qnotebook.uid3000` on the action line.
-- `kind=text/plain`, `payload=visual_phase4_hello`, `target_uid=3000`,
- `target_service=org.qdistro.Qnotebook.uid3000` — all four
- `key=value` substrings present (OCR whitespace may wrap).
+- The action line is visibly an `app.send-to` request for qnotebook.
+ OCR commonly reads `to` as `t0` and `org` as `0rg`, so do not require
+ the full exact action string from OCR. The exact action is asserted by
+ the S6 audit row.
+- `kind=text/plain`, recognizable `visual_phase4_hello` payload text,
+ `target_uid=3000`, and recognizable qnotebook target service text are
+ present. OCR may wrap or confuse punctuation (`=` as `-`, `org` as
+ `0rg`), so accept stable fragments rather than exact `key=value`
+ strings. S2 and S6 assert the exact DBus service and action.
 - `Just this once` scope label with radio in filled state (or, if
  OCR can't reliably detect the glyph, `Just this once`,
- `1 hour`, `24 hours`, `Forever` labels present in order).
+ `hour`, `24 hours`, and at least one `Forever` label present in order).
 - `Approve` and `Deny` buttons present.
 
 ### S4 — click Approve via OCR targeting
@@ -174,8 +201,8 @@ $VMEXEC "$VM" "echo $SQL_COUNT_B64 | base64 -d | sqlite3 /var/lib/qdistro/approv
 ```bash
 $VMEXEC "$VM" '
  pkill -u admin -f qdistro_admin_app 2>/dev/null || true
- pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
- pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+ pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+ pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  rm -f /tmp/16-*.out /tmp/16-*.pid
 '
 ```

@@ -57,7 +57,7 @@ sleep 4
 $VMGUI "$VM" screenshot /tmp/48-s1-tui-launched.png
 ```
 
-**Assert** (`/tmp/48-s1-tui-launched.png`): qterminal window
+**Assert** (`/tmp/48-s1-tui-launched.png`): terminal window
 visible with TUI content showing `qdistro admin approvals (TUI)`
 title and an empty queue table.
 
@@ -80,23 +80,27 @@ $VMGUI "$VM" screenshot /tmp/48-s2-tui-pending.png
 - TUI's right detail pane contains, on separate lines:
   - `uid=2000  pid=…` (chip-coloured).
   - `Action: qsu.exec:root`.
-  - exe path ending in `/usr/local/bin/qsu` in dim text.
+  - exe path for the qsu client process in dim text. In the
+    current Python-installed qsu path this is expected to be
+    `/usr/bin/python` or `/usr/bin/python3.13`; the requested
+    command itself is verified through the Argv line below.
   - **`Argv: /bin/sh -c 'echo hi'`** — bold, on its OWN line.
     The argument `echo hi` must appear quoted (`'echo hi'`)
     because shlex.join handles the embedded space.
-  - **`Details: target_user=root`** — the `argv[NN]` keys are
-    NOT in this line.
+  - **`Details: target_user=root`** — neither the aggregate
+    `argv=` key nor the `argv[NN]` keys are in this line.
 
-  If the runner sees `Details:` containing `argv[00]=/bin/sh,
-  argv[01]=-c, argv[02]=echo hi`, that's the regression to flag —
-  `_split_argv_from_details` is not consuming the keys correctly.
+  If the runner sees `Details:` containing `argv=/bin/sh -c ...`
+  or `argv[00]=/bin/sh, argv[01]=-c, argv[02]=echo hi`, that's the
+  regression to flag — `_split_argv_from_details` is not consuming
+  the argv keys correctly.
 
 ### S3 — press `6` for forever_argv
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
-  --name "qterminal" windowactivate --sync
+  --name "Shell No. 1" windowactivate --sync
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -156,10 +160,10 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   `virsh send-key --codeset linux KEY_…`, NOT `vm-gui key`. See
   AGENTS.md pitfall 3b — qterminal under labwc swallows plain
   keystrokes through xdotool inconsistently.
-- The qterminal window must have keyboard focus when `6` is
+- The TUI terminal window must have keyboard focus when `6` is
   injected — that's what `windowactivate --sync` is for. If S3
   shows the scope unchanged, the focus didn't transfer; retry
-  after `wmctrl -a qterminal` or click the qterminal title bar.
+  after `wmctrl -a "Shell No. 1"` or click the terminal title bar.
 - This scenario covers only the qsu argv-detail case. The
   generic scope-picker keys are covered by scenario 02
   (`tui-scope-picker.md`).

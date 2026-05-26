@@ -57,10 +57,12 @@ points:
 ```bash
 B64=$(base64 -w0 <<EOF
 rm -rf /tmp/qdistro-tier5
-cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5
+mkdir -p /tmp/qdistro-tier5
+cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
+cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-setsid bash /tmp/qdistro-tier5/spawn-tier5.sh --vm "$VM5" \
+setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s20-spawn.log 2>&1 &
 disown
 EOF

@@ -113,7 +113,7 @@ client (qsu.py)'s `_stream` consumes the `error` JSON frame and
 writes it to stderr prefixed with `qsu:`; the message includes
 `too many in-flight qsu requests for uid=2000`.
 
-### S4 — the rejected qsu exited promptly (rc=1, no hang)
+### S4 — the rejected qsu exited promptly (nonzero rc, no hang)
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
@@ -125,8 +125,11 @@ for i in 1 2 3 4 5; do
     if kill -0 "$pid" 2>/dev/null; then
       echo "REJECTED_$i:still_running pid=$pid"
     else
-      wait "$pid" 2>/dev/null
-      echo "REJECTED_$i:exited rc=$?"
+      # This check runs from a fresh vm-exec shell, so wait(1) cannot
+      # recover the original child exit status and may report 127 for a
+      # non-child pid. The load-bearing assertion is that the process is
+      # gone and did not hang after the server sent the in-flight error.
+      echo "REJECTED_$i:exited"
     fi
   fi
 done
@@ -136,22 +139,33 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
 **Assert**: the line for the rejected invocation is
-`REJECTED_N:exited rc=1`. NOT `still_running` — that would mean
-the qsu client is hanging on the socket after the server already
-sent an error+exit frame.
+`REJECTED_N:exited` and the corresponding stderr contains the
+`too many in-flight` message. NOT `still_running` — that would
+mean the qsu client is hanging on the socket after the server
+already sent an error+exit frame.
 
-### S5 — kill the 4 surviving pending qsu clients to clean up
+### S5 — kill the surviving pending qsu clients and drain broker state
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
+pkill -u work -f qsu 2>/dev/null || true
+pkill -u work -f sleep 2>/dev/null || true
+systemctl restart qdistro-admin-broker.service
+sleep 1
 runuser -u admin -- python3 - <<'PYEOF'
 import dbus
 bus = dbus.SystemBus()
 obj = bus.get_object("org.qdistro.AdminBroker1",
                      "/org/qdistro/AdminBroker1")
 iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
-for r in iface.GetPending():
-    if str(r.get("action", "")).startswith("qsu.exec:"):
+for _ in range(10):
+    qsu_rows = [
+        r for r in iface.GetPending()
+        if str(r.get("action", "")).startswith("qsu.exec:")
+    ]
+    if not qsu_rows:
+        break
+    for r in qsu_rows:
         try:
             iface.DecideRequest(int(r["id"]), "deny", "once")
         except Exception as e:
@@ -160,10 +174,14 @@ PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; pkill -u work -f sleep 2>/dev/null; true'
 ```
 
 **Assert**: post-cleanup `GetPending` returns no `qsu.exec:` rows.
+If a new pending qsu row appears after the first deny, keep denying
+until the broker queue is drained; the root-exec side can surface a
+previously queued request after one pending request is resolved. A
+broker restart during cleanup is acceptable because S5 is not testing
+approval semantics; it only restores a clean VM for the next scenario.
 
 ## Teardown
 

@@ -77,6 +77,7 @@ def _split_argv_from_details(
         return (None, other)
     indexed.sort(key=lambda kv: kv[0])
     argv_list = [v for _, v in indexed]
+    other.pop("argv", None)
     return (_shlex.join(argv_list), other)
 
 

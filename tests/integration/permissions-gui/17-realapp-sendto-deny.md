@@ -37,8 +37,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 $VMEXEC "$VM" '
- pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
- pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+ pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+ pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  sleep 1
  rm -f /home/work/testnb/.zim-qt/lock /home/work2/testnb/.zim-qt/lock
  /usr/local/bin/qdistro-start-user-app work /usr/local/bin/qnotebook /home/work/testnb
@@ -152,8 +152,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 $VMEXEC "$VM" '
  pkill -u admin -f qdistro_admin_app 2>/dev/null || true
- pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
- pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+ pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+ pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  rm -f /tmp/17-*.out /tmp/17-*.pid
 '
 ```

@@ -55,8 +55,8 @@ $VMEXEC "$VM" 'systemctl --machine=work2@.host --user stop qstub-notepad.service
 # dirs and QSettings where plugins_enabled=[qdistro_sendto].
 B64=$(base64 -w0 <<'EOF'
 set -e
-pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
-pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
 sleep 1
 rm -f /home/work/testnb/.zim-qt/lock /home/work2/testnb/.zim-qt/lock
 setsid runuser -u work -- env \
@@ -227,8 +227,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/ap
 
 ```bash
 $VMEXEC "$VM" '
- pkill -u work -f "python3 -m zim_qt" 2>/dev/null || true
- pkill -u work2 -f "python3 -m zim_qt" 2>/dev/null || true
+ pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
+ pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  rm -f /tmp/15-*.out /tmp/15-*.pid /tmp/15-qnb-*.log
 '
 ```

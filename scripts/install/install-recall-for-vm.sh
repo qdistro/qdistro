@@ -61,14 +61,12 @@ install -m 0644 "$RECALL_SRC/qdistro-recall@.timer"   "$DEST_SYSD/"
 # tomorrow.
 PY_SITE=$(/usr/bin/python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 install -d -m 0755 "$PY_SITE/qdistro_app"
-# Don't clobber the existing __init__.py if the SDK is already
-# installed (e.g. from a future qdistro_app RPM); just drop the
-# recall submodule.
-install -m 0644 "$SDK_SRC/recall.py" "$PY_SITE/qdistro_app/"
-if [ ! -f "$PY_SITE/qdistro_app/__init__.py" ]; then
-    install -m 0644 "$SDK_SRC/__init__.py" \
-        "$PY_SITE/qdistro_app/__init__.py"
-fi
+# Install the full SDK package. Recall only uses recall.py, but GUI
+# scenarios launch real apps that need app_receiver.py to claim App1
+# session-bus names.
+for _sdk_py in "$SDK_SRC"/*.py; do
+    install -m 0644 "$_sdk_py" "$PY_SITE/qdistro_app/"
+done
 
 # Per-user recall dirs. /var/lib/qdistro/recall is 0755 root:root
 # (created above). Per-user subdirs are 0700 owned by each user.

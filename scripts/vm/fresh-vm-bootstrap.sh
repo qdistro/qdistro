@@ -48,15 +48,15 @@ systemctl mask greetd.service 2>/dev/null || true
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
-mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser}
-for repo in qdistro qdwin qdshell qdlocker qdbrowser; do
+mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser,qnotebook}
+for repo in qdistro qdwin qdshell qdlocker qdbrowser qnotebook; do
     if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
-        # qdlocker + qdbrowser are optional during the rollout; older
+        # qdlocker + qdbrowser + qnotebook are optional during the rollout; older
         # spin scripts don't stage them. Don't fail the whole bootstrap
         # if they're absent — the bridge installer will WARN and the
         # qdbrowser pwd_autofill probes will then ModuleNotFoundError,
         # but the broker / pwd / session-manager paths still come up.
-        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ]; then
+        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ] || [ "$repo" = "qnotebook" ]; then
             log "$repo tarball not staged; skipping"
             rmdir "$SRC/$repo" 2>/dev/null || true
             continue
@@ -66,6 +66,26 @@ for repo in qdistro qdwin qdshell qdlocker qdbrowser; do
     tar -xzf "/tmp/$repo.tar.gz" -C "$SRC/$repo"
     rm -f "/tmp/$repo.tar.gz"
 done
+
+if [ -f "$SRC/qnotebook/pyproject.toml" ]; then
+    log "installing qnotebook..."
+    zypper -n install --no-recommends python313-PyQt6 python313-mistune git \
+        >/dev/null 2>&1 || \
+        { log "  ERROR: zypper install of qnotebook deps failed"; exit 3; }
+    PY_SITE=$(python3 - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"].replace("/usr/lib/", "/usr/local/lib/", 1))
+PY
+)
+    rm -rf "$PY_SITE/qnotebook"
+    install -d -m 0755 "$PY_SITE"
+    cp -a "$SRC/qnotebook/qnotebook" "$PY_SITE/qnotebook"
+    cat > /usr/local/bin/qnotebook <<'EOF'
+#!/bin/sh
+exec python3 -m qnotebook "$@"
+EOF
+    chmod 0755 /usr/local/bin/qnotebook
+fi
 
 # ---- 2. Build qdwin ------------------------------------------------------
 log "building qdwin (libweston shell plugin)..."

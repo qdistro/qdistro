@@ -77,6 +77,28 @@ install -m 0755 "$SRC/deploy/start-admin-app.sh" \
                 /usr/local/bin/qdistro-start-admin-app
 install -m 0755 "$SRC/deploy/start-admin-tui.sh" \
                 /usr/local/bin/qdistro-start-admin-tui
+install -m 0755 "$SRC/deploy/start-user-app.sh" \
+                /usr/local/bin/qdistro-start-user-app
+install -m 0755 "$SRC/cli/qdistro_approvals.py" \
+                /usr/local/sbin/qdistro-approvals
+install -d -o root -g root -m 0755 /usr/local/lib/qdistro/stubs
+install -m 0644 "$SRC/user_relay/qdistro_user_relay.py" \
+                /usr/local/lib/qdistro/qdistro_user_relay.py
+install -m 0644 "$SRC/user_relay/org.qdistro.UserRelay.conf" \
+                /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
+install -m 0644 "$SRC/user_relay/qdistro-user-relay@.service" \
+                /etc/systemd/system/qdistro-user-relay@.service
+install -d -o root -g root -m 0755 /etc/systemd/user
+install -m 0644 "$SRC/user_relay/qdistro-user-relay.service" \
+                /etc/systemd/user/qdistro-user-relay.service
+install -m 0644 "$SRC/stubs/qstub_notepad.py" \
+                /usr/local/lib/qdistro/stubs/qstub_notepad.py
+install -m 0644 "$SRC/stubs/qstub-notepad.service" \
+                /etc/systemd/user/qstub-notepad.service
+systemctl reload dbus-broker.service 2>/dev/null \
+    || systemctl reload dbus.service 2>/dev/null \
+    || true
+systemctl daemon-reload
 
 # 4. PyQt admin app and Textual TUI sources under /home/admin/qdistro/.
 install -d -o admin -g users -m 0755 /home/admin/qdistro
@@ -128,7 +150,8 @@ chown admin:users /home/admin/.config/qterminal.org/qterminal.ini
 #      - xwayland (provides /usr/bin/Xwayland)
 #      - dejavu-fonts noto-sans-fonts (labwc aborts on no fonts)
 zypper -n install labwc lxqt-session lxqt-labwc-session \
-    qterminal xdotool xwayland \
+    qterminal xdotool xhost xwayland git \
+    python313-rich python313-textual python313-mistune \
     dejavu-fonts google-noto-sans-fonts \
     perl-Net-DBus \
     >/dev/null 2>&1 || \

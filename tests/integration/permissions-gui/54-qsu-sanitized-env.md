@@ -127,10 +127,14 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ### S3 — qsu process exited cleanly
 
 ```bash
-$VMEXEC "$VM" 'wait $(cat /tmp/54-env.pid) 2>/dev/null; echo rc=$?'
+$VMEXEC "$VM" 'pid=$(cat /tmp/54-env.pid 2>/dev/null); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo still_running; else echo exited; fi'
 ```
 
-**Assert**: rc=0 (env exits 0 after listing).
+**Assert**: output is `exited`, and S2 already showed the complete
+sanitized `/usr/bin/env` output. This check runs from a fresh
+vm-exec shell, so `wait` cannot recover the original child exit
+status and may report 127 for a non-child pid after the qsu process
+has already exited.
 
 ## Teardown
 

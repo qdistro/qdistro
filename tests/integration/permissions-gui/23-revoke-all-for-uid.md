@@ -21,17 +21,23 @@ This is a headless scenario; no GUI interaction.
 VM=${VMNAME:-qdistro-dev-260421-1336}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
-$VMEXEC "$VM" 'pkill -f "dbus-monitor.*ApprovalRevoked" 2>/dev/null; true'
+# Best-effort cleanup only. A stale dbus-monitor is harmless after the
+# log file is removed below, and qemu-guest-agent can occasionally lose
+# the exit status for very short cleanup commands.
+$VMEXEC "$VM" 'pkill -f "[d]bus-monitor.*ApprovalRevoked" 2>/dev/null; true' || true
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals;
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE source='revoke';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 
 B64=$(base64 -w0 <<'EOF'
 python3 - <<'PY'
@@ -131,15 +137,18 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ## Teardown
 
 ```bash
-$VMEXEC "$VM" 'kill $(cat /tmp/23-monitor.pid) 2>/dev/null; true'
+$VMEXEC "$VM" 'kill $(cat /tmp/23-monitor.pid) 2>/dev/null; true' || true
 $VMEXEC "$VM" 'rm -f /tmp/23-signals.log /tmp/23-monitor.pid'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals;
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE source='revoke';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
 ## Notes for the runner

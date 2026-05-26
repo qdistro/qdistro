@@ -114,8 +114,10 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
-**Assert**: both replies are `string "allow"`. Audit rows both
-carry `source='clipboard_receive_rule mime=...'`.
+**Assert**: both replies are `string "allow"`. The newest two
+audit rows both carry `source='clipboard_receive_rule mime=...'`,
+with the concrete MIME preserved, for example `mime=text/plain`
+and `mime=image/png`.
 
 ### S3 — replace with mime-glob rule (`text/*` only)
 
@@ -203,8 +205,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**: four most-recent rows are (reverse chronological)
-`0|clipboard_receive_default_de`, `0|clipboard_receive_default_de`,
-`1|clipboard_receive_rule mime=`, `1|clipboard_receive_rule mime=`.
+`0|clipboard_receive_default_deny`, `0|clipboard_receive_default_deny`,
+`1|clipboard_receive_rule mime=te`, `1|clipboard_receive_rule mime=te`.
 
 ### S4 — rate-limit: 51st call on same `(uid, action)` raises
 
@@ -220,6 +222,7 @@ for i in range(60):
     try:
         proxy.CheckClipboardReceive(
             "user1", "admin", "text/plain", "", "", "",
+            dbus.Boolean(True),
             dbus_interface="org.qdistro.AdminBroker1")
         ok += 1
     except dbus.DBusException as e:
@@ -233,8 +236,9 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
-**Assert**: output contains `ok_before_raise=49` (or `50` depending
-on whether prior S3 calls consumed bucket slots) and
+**Assert**: output contains `ok_before_raise` in the high forties
+(roughly `45` through `50`, depending on how many earlier scenario
+calls consumed bucket slots in the same rate-limit window) and
 `org.qdistro.AdminBroker1.RateLimited`.
 
 ## Teardown

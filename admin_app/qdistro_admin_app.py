@@ -19,7 +19,7 @@ from datetime import datetime
 
 import dbus
 import dbus.mainloop.glib
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import (
     QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
     QStandardItem, QStandardItemModel,
@@ -663,6 +663,7 @@ class MainWindow(QMainWindow):
 
         # Pending approvals pane (existing splitter layout).
         pending = QWidget(); pending.setObjectName("pending_tab")
+        self.pending_tab = pending
         psplit = QSplitter(Qt.Orientation.Horizontal, pending)
         self.list = QListView(); self.list.setObjectName("queue_list")
         self.model = QStandardItemModel(self)
@@ -870,6 +871,20 @@ class MainWindow(QMainWindow):
         # removed item used to occupy. Force-rebind so the detail pane
         # never stays stale after a decide-removes-row transition.
         self._on_selection(idx, idx)
+        if self.tabs.currentWidget() is self.pending_tab:
+            self.list.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def event(self, event):  # noqa: D102,N802 - Qt API
+        handled = super().event(event)
+        if event.type() == QEvent.Type.WindowActivate:
+            self._focus_pending_list_after_activation()
+        return handled
+
+    def _focus_pending_list_after_activation(self) -> None:
+        if self.tabs.currentWidget() is not self.pending_tab:
+            return
+        QTimer.singleShot(
+            0, lambda: self.list.setFocus(Qt.FocusReason.ActiveWindowFocusReason))
 
     def _on_selection(self, current, _previous):
         if not current.isValid():
@@ -882,29 +897,16 @@ class MainWindow(QMainWindow):
         try:
             self.broker.decide(rid, decision, scope)
         except dbus.DBusException as e:
-            # Broker fail-closed on audit failure surfaces here. The
-            # request is already denied on the broker side; show the
-            # admin why their Approve didn't take.
-            # Also check if this is a ScopeNotPermitted error and show inline
-            error_msg = str(e)
-            if "ScopeNotPermitted" in error_msg:
-                # Find the corresponding row in the list and show error inline
-                for row in range(self.model.rowCount()):
-                    item = self.model.item(row)
-                    req = item.data(Qt.ItemDataRole.UserRole + 1)
-                    if req["id"] == rid:
-                        # Update the item to indicate error
-                        item.setText(f"uid={req['uid']}  {req['action']} [ERROR]")
-                        # Show error in detail pane if this is the selected item
-                        if self.detail._rid == rid:
-                            self.detail._show_error(error_msg)
-                        break
-            else:
-                QMessageBox.critical(
-                    self, "Decision not recorded",
-                    f"The broker could not record this decision and denied "
-                    f"the request as a safety measure.\n\n{e}",
-                )
+            # The broker refused to record this decision. For
+            # ScopeNotPermitted the pending request is still retryable;
+            # for audit failures it has already failed closed. In both
+            # cases the admin must get an explicit modal instead of a
+            # silent no-op or an easy-to-miss inline detail.
+            QMessageBox.critical(
+                self, "Decision not recorded",
+                f"The broker could not record this decision and denied "
+                f"the request as a safety measure.\n\n{e}",
+            )
         self.refresh()
 
     def _on_tab_changed(self, index: int) -> None:

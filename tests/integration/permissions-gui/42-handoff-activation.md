@@ -3,7 +3,7 @@
 **What**: as `admin`, exercise `CheckHandoffActivation` in three
 configurations:
 1. Same-silo activation → unconditional `"allow"` + audit source
-   `handoff_same_silo`.
+   starting with `handoff_same_silo_verified src_app=`.
 2. Cross-silo with no rule → `"deny"` + audit source
    `handoff_default_deny`.
 3. Cross-silo with a rule that names `app_id` matching the source's
@@ -53,13 +53,14 @@ runuser -u admin -- dbus-send --system --print-reply \
   string:"user1" \
   string:"org.mozilla.firefox" \
   string:"org.mozilla.firefox" \
-  string:""
+  string:"" \
+  boolean:true
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT action, decision, substr(source, 1, 25) FROM audit
+SELECT action, decision, source FROM audit
   WHERE action='qdistro.handoff.activate:user1:user1'
   ORDER BY id DESC LIMIT 1;
 SQL_EOF
@@ -69,7 +70,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 **Assert**:
 - Reply: `string "allow"`.
-- Audit row: `qdistro.handoff.activate:user1:user1|1|handoff_same_silo src_app=or`.
+- Audit row starts with `qdistro.handoff.activate:user1:user1|1|handoff_same_silo_verified src_app=org.mozilla.firefox`.
 
 ### S2 — cross-silo, no rule: default deny
 
@@ -89,7 +90,7 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT decision, substr(source, 1, 25) FROM audit
+SELECT decision, substr(source, 1, 32) FROM audit
   WHERE action='qdistro.handoff.activate:user1:admin'
   ORDER BY id DESC LIMIT 1;
 SQL_EOF
@@ -99,7 +100,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 **Assert**:
 - Reply: `string "deny"`.
-- Audit row: `0|handoff_default_deny src_a`.
+- Audit row starts with `0|handoff_default_deny src_app=`.
 
 ### S3 — install a rule with `app_id: org.mozilla.firefox`, retest
 
@@ -162,7 +163,7 @@ Audit cross-check:
 
 ```bash
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
-SELECT decision, substr(source, 1, 25), rule_path FROM audit
+SELECT decision, substr(source, 1, 32), rule_path FROM audit
   WHERE action='qdistro.handoff.activate:user1:admin'
   ORDER BY id DESC LIMIT 2;
 SQL_EOF
@@ -171,8 +172,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**: two newest rows (reverse chrono):
-- `0|handoff_default_deny src_a|` (chrome, no rule match).
-- `1|handoff_rule src_app=org.m|/etc/qdistro/rules.d/42-allow-firefox.yaml` (firefox, rule match with rule_path).
+- `0|handoff_default_deny src_app=com|` (chrome, no rule match;
+  prefix is truncated by `substr(source, 1, 32)`).
+- `1|handoff_rule src_app=org.mozilla|/etc/qdistro/rules.d/42-allow-firefox.yaml` (firefox, rule match with rule_path).
 
 ### S4 — non-admin caller is denied at bus-policy level
 
@@ -206,7 +208,8 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 ## Notes for the runner
 
-- `CheckHandoffActivation` signature is `sssss` (5 strings):
+- `CheckHandoffActivation` signature is `sssssb` (5 strings plus
+  `identity_verified` boolean):
   source_silo, dest_silo, source_app_id, dest_app_id,
   source_sandbox_engine. dbus-send order matters.
 - The `dest_app_id` is recorded in the audit row but NOT used by

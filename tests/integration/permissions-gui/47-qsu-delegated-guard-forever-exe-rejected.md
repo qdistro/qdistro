@@ -142,15 +142,17 @@ $VMEXEC "$VM" 'wait $(cat /tmp/47-qsu.pid) 2>/dev/null; cat /tmp/47-qsu.log; ech
 - Cache table:
   ```bash
   SQL_B64=$(base64 -w0 <<'SQL_EOF'
-  SELECT caller_uid, action, match_kind, match_value, scope
+  SELECT caller_uid, action, match_kind, match_value, argv, scope
     FROM approvals WHERE action LIKE 'qsu.exec:%';
   SQL_EOF
   )
   $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
   ```
-  Output: one row `2000|qsu.exec:root|argv_exact|...|forever_argv`.
+  Output: one row
+  `2000|qsu.exec:root|argv_exact|...|["/bin/true"]|forever_argv`.
   The match_kind is `argv_exact` (forever_argv → argv_exact in
-  `_VALID_SCOPES`), match_value carries the argv JSON.
+  `_VALID_SCOPES`); `match_value` carries the executable path and
+  `argv` carries the pinned argv JSON.
 
 ### S5 — broker-side audit shows the rejected scope was not committed
 

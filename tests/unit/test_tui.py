@@ -573,14 +573,15 @@ class TestSplitArgvFromDetails:
         assert argv == "id -u"
         assert rest == {"target_user": "root"}
 
-    def test_human_argv_key_does_not_conflict(self):
+    def test_human_argv_key_is_suppressed_when_indexed_argv_exists(self):
         # qsu also ships a human-readable "argv" key (shlex.join of the
-        # full argv). The helper must NOT consume that as an argv[N]
-        # element — that key stays in `rest`.
+        # full argv). Once the helper renders an explicit Argv line from
+        # argv[N] keys, the aggregate key would be duplicate noise in
+        # Details and should be removed from `rest`.
         d = {"argv": "id -u", "argv[00]": "id", "argv[01]": "-u"}
         argv, rest = self._split(d)
         assert argv == "id -u"
-        assert rest == {"argv": "id -u"}
+        assert rest == {}
 
     def test_indices_above_cap_dropped(self):
         d = {"argv[00]": "ok", "argv[1025]": "ignored"}

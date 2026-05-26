@@ -47,7 +47,8 @@ runuser -u admin -- dbus-send --system --print-reply \
   string:"text/plain" \
   string:"" \
   string:"" \
-  string:""
+  string:"" \
+  boolean:true
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -104,7 +105,8 @@ runuser -u admin -- dbus-send --system --print-reply \
   string:"text/plain" \
   string:"" \
   string:"" \
-  string:""
+  string:"" \
+  boolean:true
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"

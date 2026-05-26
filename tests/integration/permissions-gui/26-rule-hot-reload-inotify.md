@@ -21,19 +21,22 @@ within a 5-second window.
 VM=${VMNAME:-qdistro-dev-260421-1336}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
-$VMEXEC "$VM" 'pkill -f "dbus-monitor.*Rules" 2>/dev/null; true'
+$VMEXEC "$VM" 'pkill -f "[d]bus-monitor.*Rules" 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
 
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE action='test.action';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
 ## Steps
@@ -129,13 +132,16 @@ $VMEXEC "$VM" 'rm -f /tmp/26-signals.log /tmp/26-monitor.pid'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/[0-9][0-9]*.yaml'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-SQL_B64=$(base64 -w0 <<'SQL_EOF'
+APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals WHERE action='test.action';
+SQL_EOF
+)
+AUDIT_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM audit WHERE action='test.action';
 SQL_EOF
 )
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
-$VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
+$VMEXEC "$VM" "echo $APPROVALS_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+$VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 $VMEXEC "$VM" 'rm -f /tmp/26-work.log /tmp/26-work.pid'
 ```
 

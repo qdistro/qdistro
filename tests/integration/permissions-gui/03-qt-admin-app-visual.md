@@ -54,10 +54,12 @@ $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s1-empty.png
  (empty — no items) and a right-side detail pane.
 - The detail pane's user label reads literally `(no selection)`.
 - The detail pane shows the scope group: a "Scope:" header followed
- by five radio buttons with labels, in order:
+ by eight radio buttons with labels, in order:
  `Just this once`, `1 hour`, `24 hours`, `Forever, any command`,
- `Forever, only this exact program`. The first radio (`Just this
- once`) is selected.
+ `Forever, only this exact program`, `Forever, only this exact argv
+ tuple`, `Forever, this argv basename anywhere`, `Forever, this argv
+ prefix + any trailing args`. The first radio (`Just this once`) is
+ selected.
 - Two buttons labeled `Approve` and `Deny` are visible below the
  scope group.
 

@@ -50,8 +50,12 @@ $VMGUI "$VM" screenshot /tmp/01-tui-approver-visual-s1-empty.png
  `exe` and no data rows.
 - The right pane shows the literal text `(no request selected)`.
 - The footer shows keybinding chips in order:
- `a Approve d Deny 1 1:once 2 2:1h 3 3:24h ^p palette`.
- `a`, `d`, and the digits are highlighted (brighter than the labels).
+ `a Approve d Deny ^r Create Rule shift+^a Approve All shift+^d Deny All
+ 1 1:once 2 2:1h 3 3:24h 4 ^p palette`.
+ OCR may render the modifier glyph as a curly quote or omit the caret;
+ assert the labels and ordering rather than exact glyph shape.
+ `a`, `d`, the modifier chips, and the digits are highlighted
+ (brighter than the labels).
 
 ### S2 — inject one pending request, populated state
 

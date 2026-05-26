@@ -93,8 +93,8 @@ The executable qdwin smokes run before the markdown assignments:
 - `qdwin/tests/gui/agent-cursor-clickthrough-smoke.sh`
 - `qdwin/tests/gui/agent-click-smoke.sh`
 
-The qdshell UI vision pytest is also wired into `gui`; it runs only when
-`ANTHROPIC_API_KEY` is set.
+The qdshell UI vision pytest is also wired into `gui`; it uses the same local
+Codex-backed settings as the rest of the GUI gate.
 
 Prefer a fresh disposable VM for normal GUI CI. Reusing a VM preserved from a
 failed smoke run is useful for debugging, but it can carry service restart

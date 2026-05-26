@@ -5,7 +5,7 @@ help overlay (a modal over the main view) renders with the expected
 text blocks; press Escape and verify the main view returns intact.
 
 **Why**: the help overlay is the only place the full scope vocabulary
-(`1`..`5`) and non-obvious keys (`Ctrl+P` palette, `r` refresh) are
+(`1`..`8`) and non-obvious keys (`Ctrl+P` palette, `r` refresh) are
 documented to the user at runtime. A regression where `?` opens a
 blank/broken modal silently reduces discoverability without breaking
 any functional test.
@@ -67,14 +67,17 @@ $VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s2-help-open.png
  outer main-view header/footer may still be partially visible
  around it; that's expected (Textual ModalScreen).
 - The modal's first line is bold `qdistro admin TUI`.
-- The modal contains sections labelled **Decide:**, **Scope:**,
- and **Navigation:** in that order.
-- Under "Scope:", all five numbered lines are present:
+- The modal contains sections labelled **Decide current:**, **Scope:**,
+and **Navigation:** in that order.
+- Under "Scope:", all eight numbered lines are present:
  `1 Just this once`, `2 1 hour`, `3 24 hours`,
  `4 Forever, any command from this user`,
- `5 Forever, only this exact program`.
-- Under "Decide:", both `a / Ctrl+Y` (Approve) and `d / Ctrl+N`
- (Deny) are listed.
+ `5 Forever, only this exact program`,
+ `6 Forever, only this exact argv tuple`,
+ `7 Forever, this argv basename anywhere`,
+ `8 Forever, this argv prefix + any trailing args`.
+- Under "Decide current:", both `a / Ctrl+Y` (Approve) and `d / Ctrl+N`
+(Deny) are listed.
 - The last paragraph mentions "mirrored to the GUI app instantly".
 
 ### S3 — Escape dismisses, main view returns intact

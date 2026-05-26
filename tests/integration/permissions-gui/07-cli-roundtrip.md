@@ -76,7 +76,7 @@ $VMEXEC "$VM" 'cat /tmp/07-list.txt'
 - Exit code `0`.
 - Output contains `test.action`, `other.action`, and `net.restart`
  as action names (one per row).
-- Output contains the scope labels `argv_exact` (for the 1h/24h
+- Output contains the match labels `exe_only` (for the 1h/24h
  rows) and `always` (for the forever row), plus a human-readable
  expiry or "never" column — exact format may vary with the CLI's
  `_fmt_expiry` choices, but at minimum the three action names

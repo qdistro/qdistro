@@ -5,10 +5,9 @@
 # Usage:
 #   qdistro-start-user-app <user> <command> [args...]
 #
-# Requires xhost SI allowlist to be active for <user> on DISPLAY=:0 —
-# bootstrap-vm.sh installs this into admin's labwc autostart. Runs the
-# target command with DISPLAY/XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS
-# set so a fresh Qt XWayland client as that uid can:
+# Ensures xhost SI allowlist is active for <user> on DISPLAY=:0, then
+# runs the target command with DISPLAY/XDG_RUNTIME_DIR/
+# DBUS_SESSION_BUS_ADDRESS set so a fresh Qt XWayland client as that uid can:
 #   1. reach the X server admin's XWayland is already running,
 #   2. find its own session bus at /run/user/<uid>/bus (needs linger),
 #   3. spawn detached (setsid + /dev/null redirection) so vm-exec
@@ -37,6 +36,13 @@ if [ ! -d "$XDG_DIR" ]; then
     echo "[qdistro-start-user-app] $XDG_DIR missing — enable-linger for $USER_NAME?" >&2
     exit 1
 fi
+
+if ! command -v xhost >/dev/null 2>&1; then
+    echo "[qdistro-start-user-app] xhost missing; install xhost package" >&2
+    exit 1
+fi
+
+runuser -u admin -- env DISPLAY=:0 xhost "+SI:localuser:${USER_NAME}" >/dev/null
 
 # setsid + </dev/null + detach: the GUI process outlives the vm-exec
 # guest-agent call. Same pattern the Phase-3 scenario launchers use.

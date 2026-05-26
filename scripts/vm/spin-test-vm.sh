@@ -16,6 +16,7 @@
 #   <parent>/qdistro/   (this repo)
 #   <parent>/qdwin/
 #   <parent>/qdshell/
+#   <parent>/qnotebook/
 #
 # Usage:
 #   QDISTRO_VM_PASSWORD=<pw> QDWIN_VM_TEMPLATE=<template-domain> \
@@ -47,7 +48,7 @@ IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 log() { echo "[spin-test-vm] $*" >&2; }
 
 # Sanity-check sibling checkout.
-for sib in qdwin qdshell; do
+for sib in qdwin qdshell qnotebook; do
     if [ ! -d "$PARENT/$sib" ]; then
         log "ERROR: sibling repo '$sib' not found at $PARENT/$sib"
         log "       Clone codeberg.org/qdistro/$sib next to qdistro/"
@@ -116,6 +117,9 @@ if [ -d "$PARENT/qdbrowser" ]; then
         --exclude='.git' --exclude='build' --exclude='build-host*' \
         -czf "$STAGE/qdbrowser.tar.gz" -C "$PARENT/qdbrowser" .
 fi
+tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
+    --exclude='.git' --exclude='build' --exclude='build-host*' \
+    -czf "$STAGE/qnotebook.tar.gz" -C "$PARENT/qnotebook" .
 
 # Also stage the bootstrap script next to the tarballs so the VM
 # can fetch it before unpacking anything.

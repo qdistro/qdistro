@@ -111,7 +111,7 @@ qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
 if [ "$FROM_ENFORCING" = 1 ]; then
     : # no-op: enforcing config is already baked in
 else
-    virt-customize -a "$IMG/${VM}.qcow2" \
+    virt-customize --no-network -a "$IMG/${VM}.qcow2" \
         --edit '/etc/selinux/config:s/SELINUX=enforcing/SELINUX=permissive/' \
         >/dev/null
 fi
