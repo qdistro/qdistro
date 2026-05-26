@@ -35,7 +35,7 @@ SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
 
-$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
+# Launch qnotebook instances first so the admin app ends up in front.
 $VMEXEC "$VM" '
  pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
@@ -45,6 +45,22 @@ $VMEXEC "$VM" '
  /usr/local/bin/qdistro-start-user-app work2 /usr/local/bin/qnotebook /home/work2/testnb
 '
 sleep 6
+
+# Start admin app after qnotebooks (matches scenario 16's stable
+# ordering) and wait for the window to become visible under
+# labwc/XWayland before proceeding.
+$VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
+sleep 2
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 sh -c '"'"'
+  for retry in 1 2 3 4 5 6; do
+    w=$(xdotool search --onlyvisible --name ".*admin approvals.*" 2>/dev/null | head -1 || true)
+    if [ -n "$w" ]; then
+      xdotool windowactivate --sync "$w" windowraise "$w"
+      break
+    fi
+    sleep 1
+  done
+'"'"''
 
 # Snapshot pre-deny state of work2's qnotebook — anything already
 # in GetLastReceived (from prior scenarios on this VM) is the
