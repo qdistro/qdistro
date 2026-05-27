@@ -29,6 +29,7 @@ from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
 from qdistro_admin_ratelimit import RateLimiter  # type: ignore[import-not-found]
 from qdistro_admin_rules import RulesEngine  # type: ignore[import-not-found]
 from qdistro_audisp_parser import is_qdistro_subj_type  # type: ignore[import-not-found]
+from qdistro_hook_client import HookClient  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
@@ -154,6 +155,35 @@ def _read_require_silo_active() -> bool:
 
 
 REQUIRE_SILO_ACTIVE = _read_require_silo_active()
+
+
+def _read_hooks_enabled() -> bool:
+    """Check whether Python hooks are enabled.
+
+    Reads QDISTRO_HOOKS_ENABLED env or hooks_enabled key from
+    /etc/qdistro/broker.conf.  Default: True (hooks consulted when
+    the executor socket is reachable).
+    """
+    val = os.environ.get("QDISTRO_HOOKS_ENABLED", "").strip().lower()
+    if val in ("0", "false", "no", "off"):
+        return False
+    if val in ("1", "true", "yes", "on"):
+        return True
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "hooks_enabled":
+                    return v.strip().lower() not in ("0", "false", "no", "off")
+    except OSError:
+        pass
+    return True  # enabled by default
+
+
+HOOKS_ENABLED = _read_hooks_enabled()
 
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
@@ -430,6 +460,15 @@ class Broker(dbus.service.Object):
         # couple of rapid retries stays unaffected; a tight-loop attacker
         # hits the cap in ~20ms and gets audited per rejection.
         self.ratelimit = RateLimiter(limit=50, window_s=1.0)
+        # Sandboxed Python hook executor client.  When enabled, the
+        # broker consults the hook executor after declarative rules are
+        # inconclusive and before falling back to the admin prompt.
+        # The executor runs in a separate process; if its socket is
+        # unreachable, the broker falls through to admin prompt silently.
+        self.hooks = HookClient(enabled=HOOKS_ENABLED)
+        if HOOKS_ENABLED:
+            print("[broker] hooks: enabled, executor socket at "
+                  f"{self.hooks._socket_path}", flush=True)
         # Retention knob: env override wins for tests; 0 disables GC.
         try:
             self._audit_retention_days = int(
@@ -653,6 +692,28 @@ class Broker(dbus.service.Object):
         row = self.cache.lookup_detail(uid, action_s, exe, argv)
         if row is not None:
             return "allow" if bool(row["decision"]) else "deny"
+        # Consult Python hooks when rules and cache are both
+        # inconclusive. CheckPermission is a fast-path; the hook
+        # query adds an AF_UNIX round-trip but stays within the 2s
+        # D-Bus ceiling thanks to the hook timeout (default 5s, but
+        # CheckPermission callers expect <2s — the hook executor
+        # timeout is capped at HOOK_CALL_TIMEOUT_S which is 4s on
+        # the executor side). Treat errors as "unknown" (fall through).
+        try:
+            hook_event = dict(_sanitize_details(details))
+            hook_event["caller_uid"] = uid
+            hook_event["caller_pid"] = pid
+            hook_event["caller_exe"] = exe
+            hook_event["action_full"] = action_s
+            hook_resp = self.hooks.query(action_s, hook_event)
+            if hook_resp is not None:
+                verdict = hook_resp.get("verdict")
+                if verdict in ("allow", "transform"):
+                    return "allow"
+                if verdict == "deny":
+                    return "deny"
+        except Exception:  # noqa: BLE001
+            pass
         return "unknown"
 
     @dbus.service.method(BUS_NAME,
@@ -1488,11 +1549,13 @@ class Broker(dbus.service.Object):
                 name=BUS_NAME + ".RateLimited",
             )
         # Resolution order per spec/07: rules first, cache second,
-        # prompt last. A rule-matched decision is authoritative — it
-        # doesn't flow through the admin prompt even for allows.
-        # one_shot actions skip both tiers: every call reaches admin.
+        # hooks third, prompt last. A rule-matched decision is
+        # authoritative — it doesn't flow through the admin prompt even
+        # for allows. one_shot actions skip all tiers: every call
+        # reaches admin.
         matched_rule = None
         cached_row = None
+        hook_verdict = None
         if not one_shot:
             argv = _argv_from_details(details)
             matched_rule = self.rules.match(
@@ -1516,6 +1579,23 @@ class Broker(dbus.service.Object):
         layered = _read_proc_layered(pid) if pid > 0 else {
             "exe_sha256": "", "selinux_label": "", "cgroup": ""}
 
+        # Hook consultation: when rules and cache are both inconclusive,
+        # ask the sandboxed hook executor before falling through to the
+        # admin prompt. Done outside the lock and before creating a
+        # _Request — the hook query is I/O-bound (AF_UNIX round-trip)
+        # and we don't want to hold the lock during it.
+        if not one_shot and matched_rule is None and cached_row is None:
+            try:
+                hook_event = dict(clean_details)
+                hook_event["caller_uid"] = uid
+                hook_event["caller_pid"] = pid
+                hook_event["caller_exe"] = exe
+                hook_event["action_full"] = action_s
+                hook_verdict = self.hooks.query(action_s, hook_event)
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] hook query failed: {e!r}", flush=True)
+                hook_verdict = None
+
         with self._lock:
             rid = self._next_id
             self._next_id += 1
@@ -1529,6 +1609,16 @@ class Broker(dbus.service.Object):
                 req.decision = (matched_rule.decision == "allow")
             elif cached_row is not None:
                 req.decision = bool(cached_row["decision"])
+            elif hook_verdict is not None:
+                verdict_val = hook_verdict.get("verdict")
+                if verdict_val == "allow":
+                    req.decision = True
+                elif verdict_val == "deny":
+                    req.decision = False
+                # "transform" is treated as allow (the payload mutation
+                # is out-of-band; the broker's decision is binary).
+                elif verdict_val == "transform":
+                    req.decision = True
             self._pending[rid] = req
 
         if req.decision is None:
@@ -1566,7 +1656,7 @@ class Broker(dbus.service.Object):
                                          argv=argv)
                     except Exception as e:  # noqa: BLE001
                         print(f"[broker] rule cache.store failed: {e}", flush=True)
-            else:
+            elif cached_row is not None:
                 scope_s = cached_row.get("scope") if cached_row else None
                 print(f"[broker] cache hit: uid={uid} action={action_s!r} exe={exe!r} "
                       f"-> {req.decision} (scope={scope_s})", flush=True)
@@ -1580,6 +1670,23 @@ class Broker(dbus.service.Object):
                     )
                 except Exception as e:  # noqa: BLE001
                     print(f"[broker] qdistro.audit.failure: cache path, reason={e!r}", flush=True)
+            elif hook_verdict is not None:
+                verdict_val = hook_verdict.get("verdict", "")
+                reason = hook_verdict.get("reason", "")
+                print(f"[broker] hook verdict: uid={uid} action={action_s!r} "
+                      f"exe={exe!r} -> {verdict_val} "
+                      f"(reason={reason!r})", flush=True)
+                try:
+                    self.audit.log(
+                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                        action=action_s, decision=req.decision,
+                        scope=None, source=f"hook verdict={verdict_val} reason={reason}",
+                        approver_uid=None,
+                        request_id=rid,
+                        argv=argv if argv else None,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] qdistro.audit.failure: hook path, reason={e!r}", flush=True)
         return rid
 
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="b",

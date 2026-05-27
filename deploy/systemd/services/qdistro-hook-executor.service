@@ -1,0 +1,70 @@
+[Unit]
+Description=qdistro sandboxed Python hook executor
+Documentation=man:qdistro-hook-executor(8)
+After=local-fs.target
+Before=qdistro-admin-broker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/qdistro/broker/qdistro_hook_executor.py
+RuntimeDirectory=qdistro
+RuntimeDirectoryPreserve=yes
+
+# --- Sandboxing ---
+
+# Run as a dedicated unprivileged user.  The system package creates
+# the qdistro-hooks user via sysusers.d; for dev/test the admin can
+# override via User= drop-in.
+User=qdistro-hooks
+Group=qdistro-hooks
+
+# Filesystem isolation.
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/qdistro/hooks/
+TemporaryFileSystem=/tmp:nosuid,nodev,size=16M
+PrivateTmp=true
+
+# Network isolation — hooks have no reason to reach the network.
+PrivateNetwork=true
+
+# Privilege escalation prevention.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System call filter — restrict to the @system-service set which
+# covers read/write/mmap/futex/clock_gettime and friends but blocks
+# mount, reboot, kexec, ptrace, etc.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Restrict address families to AF_UNIX only (the executor socket).
+RestrictAddressFamilies=AF_UNIX
+
+# Misc hardening.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+PrivateDevices=true
+ProtectHostname=true
+
+# Logging.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qdistro-hook-executor
+
+# Restart on crash so the broker can reconnect.
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

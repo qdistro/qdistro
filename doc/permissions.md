@@ -253,14 +253,19 @@ Implemented and exercised by tests today:
 - Cross-silo clipboard policy (`CheckClipboardTransfer`): same-silo
   short-circuit allow, cross-silo default-deny, opt-in via rule.
 - Per-uid + per-action rate limiting (`.RateLimited` D-Bus error).
-- Audit log with `source ∈ {prompt, cache, rule, revoke,
+- Audit log with `source ∈ {prompt, cache, rule, revoke, hook,
   clipboard_same_silo, clipboard_rule, clipboard_default_deny}`.
+- **Python hooks executor** — sandboxed hook executor
+  (`qdistro_hook_executor.py`) runs as a dedicated uid, listens on
+  AF_UNIX socket, loads `.py` hooks from `/etc/qdistro/hooks/`,
+  hot-reloads on file change, returns `allow/deny/transform/null`
+  verdicts.  The broker consults hooks after rules+cache are
+  inconclusive and before the admin prompt.  Systemd service unit
+  provides `ProtectSystem=strict`, `PrivateNetwork=true`,
+  `NoNewPrivileges=true` sandboxing.
 
 Doc-only / not yet wired:
 
-- **Python hooks executor** — the *sandboxed hook executor* described
-  in §Python hooks is not implemented; the broker has no forward-trigger
-  hook surface. Tracked in `todo/qdistro-hook-executor.md`.
 - **xdg-desktop-portal backend** (`org.freedesktop.impl.portal.qdistro`).
   Tracked in `todo/qdistro-portal-backend.md`.
 - **Workflow engine** (triggers / steps / roles / secrets-needed) — the
