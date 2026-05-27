@@ -273,11 +273,11 @@ for the new delegation to take effect.
 
 ### Verification
 
-After re-login, confirm the controllers are available in the user
-slice's cgroup:
+After re-login, confirm the controllers are delegated to the user
+manager's cgroup (this is the subtree rootless podman actually uses):
 
 ```bash
-cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.controllers
+cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers
 ```
 
 The output should include `memory cpu pids io`. Once confirmed,
