@@ -1689,13 +1689,19 @@ class Broker(dbus.service.Object):
         # Tier-2 admission security (audit 2026-05-27): when all four
         # tiers (rules, cache, hooks, prompt) are exhausted without a
         # pre-decision, the request stays pending in _pending until
-        # admin acts — this is operationally default-deny.  There is no
-        # hardcoded allow for sandbox_engine="qdistro.tier2" or any
+        # admin acts -- this is operationally default-deny.  There is
+        # no hardcoded allow for sandbox_engine="qdistro.tier2" or any
         # other sandbox_engine value.  The cross-silo gates
         # (CheckClipboardTransfer, CheckClipboardReceive,
         # CheckHandoffActivation) are even stricter: they return
         # "deny" when rules.match() returns None, without reaching the
         # prompt queue at all.
+        #
+        # Caveat: the cache is tier-blind -- keyed by (uid, action,
+        # exe, argv), not sandbox_engine/app_id.  A prior approval for
+        # a same-(uid, action, exe) request from a different tier can
+        # admit a tier-2 request.  Mitigated by cross-silo actions
+        # using tier-specific synthetic action strings.
         matched_rule = None
         cached_row = None
         hook_verdict = None

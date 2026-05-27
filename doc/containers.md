@@ -114,14 +114,15 @@ Every tier-2 spawn emits a `wp_security_context_v1` tag carrying:
 | `instance_id`    | A per-launch 32-hex token (LAUNCH_TOKEN) |
 
 The broker's rules engine (`broker/qdistro_admin_rules.py`) matches on
-all three. `instance_id` is the load-bearing field for the qdshell
-cold-start UX: qdshell reads LAUNCH_TOKEN from `spawn-tier2.sh`'s
-stdout and waits for a `toplevel_added` carrying the matching
-`instance_id` to swap its placeholder taskbar entry for the real one.
+`sandbox_engine` and `app_id`. The `Rule` dataclass intentionally has
+no `instance_id` field -- rules cannot select on it.
 
-`instance_id` is purely correlation, not auth. The auth boundaries are
-peer-uid filtering on `qdwin_nested_manager_v1`, the secctx listener,
-and the broker rules.
+`instance_id` is purely correlation, not auth. It is the load-bearing
+field for the qdshell cold-start UX: qdshell reads LAUNCH_TOKEN from
+`spawn-tier2.sh`'s stdout and waits for a `toplevel_added` carrying
+the matching `instance_id` to swap its placeholder taskbar entry for
+the real one. The auth boundaries are peer-uid filtering on
+`qdwin_nested_manager_v1`, the secctx listener, and the broker rules.
 
 ## Launcher UX (qdshell)
 

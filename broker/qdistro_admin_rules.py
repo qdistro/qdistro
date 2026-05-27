@@ -73,11 +73,11 @@ privileges), the broker is the sole remaining gateway between a
 compromised tier-2 workload and host-side sensitive ops. The following
 properties are verified:
 
-1. **Default-deny for tier-2.** There is no hardcoded allow rule for
-   ``sandbox_engine="qdistro.tier2"`` or any sandbox_engine value.
-   ``RulesEngine.match()`` returns ``None`` when no rule fires.
-   Callers handle None as:
-     - ``_enqueue``: falls through to cache → hooks → admin prompt.
+1. **Default-deny for tier-2 (rules tier).** There is no hardcoded
+   allow rule for ``sandbox_engine="qdistro.tier2"`` or any
+   sandbox_engine value. ``RulesEngine.match()`` returns ``None`` when
+   no rule fires. Callers handle None as:
+     - ``_enqueue``: falls through to cache -> hooks -> admin prompt.
        A tier-2 request with no pre-existing cache row and no hook
        verdict reaches the admin approval queue (default-prompt, which
        is operationally default-deny until admin acts).
@@ -85,6 +85,16 @@ properties are verified:
        ``CheckHandoffActivation``: explicit ``decision = "deny"``
        when ``match()`` returns None. These are the three gates a
        tier-2 workload's cross-silo traffic actually traverses.
+   **Caveat (cache tier):** the approval cache is keyed by
+   ``(uid, action, exe, argv)`` and does NOT carry ``sandbox_engine``
+   or ``app_id``. A prior admin approval for a non-tier-2 request
+   with the same ``(uid, action, exe)`` tuple will also match a
+   subsequent tier-2 request. In practice this is rare because
+   tier-2 cross-silo actions use synthetic action strings
+   (``qdistro.clipboard.transfer:<src>:<dst>``) that differ from
+   tier-1 actions — but auditors should be aware the cache is
+   tier-blind. A future ``sandbox_engine`` column on the cache
+   schema would close this gap.
 
 2. **instance_id is correlation-only, never authentication.**
    The ``Rule`` dataclass has no ``instance_id`` field; rules cannot
@@ -92,35 +102,49 @@ properties are verified:
    uses it only in the audit action string — identity verification
    is anchored on (pid, starttime, uid, exe, selinux_label), not on
    the self-asserted ``instance_id``. See also ``doc/containers.md``
-   §"Secctx contract".
+   §"Secctx contract" (which documents that the rules engine matches
+   on ``sandbox_engine`` and ``app_id`` only, not ``instance_id``).
 
-3. **Cross-tier isolation.** Tier-2 containers cannot make direct
-   D-Bus calls to the broker (network=none, no host bus socket
-   mounted). All host-side policy gates for tier-2 traffic are
-   mediated by qdshell, which calls ``CheckClipboardTransfer``,
-   ``CheckClipboardReceive``, and ``CheckHandoffActivation`` on their
-   behalf. These methods are pinned to the admin uid by the D-Bus
-   policy file; even if a tier-2 workload escapes the container, it
-   cannot impersonate qdshell on the system bus.
+3. **Cross-tier isolation (container side).** Tier-2 containers
+   cannot make direct D-Bus calls to the broker (network=none, no
+   host bus socket mounted). All host-side policy gates for tier-2
+   traffic are mediated by qdshell, which calls
+   ``CheckClipboardTransfer``, ``CheckClipboardReceive``, and
+   ``CheckHandoffActivation`` on their behalf. These methods are
+   pinned to the admin uid by the D-Bus policy file.
+   **Residual risk (post-escape):** if a tier-2 workload escapes
+   the container namespace onto the host, it runs as uid 1000
+   (``--userns=keep-id``) which is the admin uid. The D-Bus policy
+   grants the full admin uid broker access; it does not distinguish
+   qdshell from other uid-1000 processes. A post-escape attacker as
+   uid 1000 could call ``CheckClipboardTransfer`` or
+   ``CheckHandoffActivation`` with ``identity_verified=True``.  The
+   primary defense is the container boundary itself (userns, caps=0,
+   seccomp, no-new-privileges); the D-Bus policy is defense-in-depth
+   at the network-access tier, not at the uid-impersonation tier.
 
-4. **Wildcard-rule safeguard.** Rules with empty selectors (all None)
-   match everything — by design, for admin-authored blanket defaults.
-   ``SaveRule`` (the D-Bus path for programmatic rule creation)
-   rejects ``decision=allow`` rules with no non-empty selectors.
-   File-authored rules are not similarly gated (admin is trusted to
-   author YAML correctly), but auditors should verify that no YAML
-   file in ``/etc/qdistro/rules.d/`` contains a blanket
-   ``decision: allow`` with an empty or missing ``match:`` block.
+4. **Empty-selector safeguard.** Rules with all selectors set to
+   None match everything — by design, for admin-authored blanket
+   defaults. ``SaveRule`` (the D-Bus path for programmatic rule
+   creation) rejects ``decision=allow`` rules with no non-empty
+   selectors. Note: ``SaveRule`` does NOT reject broad-wildcard
+   selectors such as ``action: "*"`` or ``sandbox_engine: "*"`` —
+   those pass the empty-selector check because they are non-empty
+   values. File-authored YAML rules are admin-trusted. Auditors
+   should verify that no file in ``/etc/qdistro/rules.d/`` contains
+   a ``decision: allow`` with an empty/missing ``match:`` block or
+   an overly broad ``"*"`` glob.
 
 5. **Selector-presence semantics prevent tier bleed.** When a rule
-   names ``app_id`` or ``sandbox_engine`` but the request doesn't
-   carry one (empty string default), the rule does NOT match. This
-   prevents an unsandboxed caller (tier-1, no secctx) from
-   accidentally hitting a rule authored for a specific sandbox tier.
-   Conversely, a tier-2 request carrying
-   ``sandbox_engine="qdistro.tier2"`` won't match a rule with
-   ``sandbox_engine: ""`` (the literal empty-string selector, rare but
-   valid).
+   names ``app_id`` or ``sandbox_engine`` with a *non-empty* value
+   but the request doesn't carry one (empty string default), the rule
+   does NOT match. This prevents an unsandboxed caller (tier-1, no
+   secctx) from accidentally hitting a rule authored for a specific
+   sandbox tier. Note: ``sandbox_engine: ""`` (the literal
+   empty-string selector) is a valid but rare value that DOES match
+   requests with an empty ``sandbox_engine``. The tier-bleed
+   prevention property relies on tier-specific rules using non-empty
+   selectors (e.g. ``sandbox_engine: "qdistro.tier2"``).
 """
 from __future__ import annotations
 
