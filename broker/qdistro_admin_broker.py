@@ -157,6 +157,42 @@ def _read_require_silo_active() -> bool:
 REQUIRE_SILO_ACTIVE = _read_require_silo_active()
 
 
+# Option A (secctx-identity-contract.md): when True the broker treats
+# secctx strings as launcher-attested because qdwin gates the
+# wp_security_context_manager_v1 bind to the shell/allowed-uid.  Audit
+# entries include the provenance tag so admins can distinguish
+# "launcher-gated" from "self-asserted" when reviewing same-silo
+# decisions.  When False the secctx is treated as advisory-only and a
+# warning is logged on every same-silo gate that relies on it.
+# Read from $QDISTRO_SECCTX_LAUNCHER_GATED or broker.conf key
+# secctx_launcher_gated.  Default: True (Option A is the production
+# posture once qdwin ships the bind gate).
+_SECCTX_LAUNCHER_GATED_ENV = "QDISTRO_SECCTX_LAUNCHER_GATED"
+
+
+def _read_secctx_launcher_gated() -> bool:
+    val = os.environ.get(_SECCTX_LAUNCHER_GATED_ENV, "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "secctx_launcher_gated":
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+    except OSError:
+        pass
+    return True  # default on — Option A is the production posture
+
+
+SECCTX_LAUNCHER_GATED = _read_secctx_launcher_gated()
+
+
 def _read_hooks_enabled() -> bool:
     """Check whether Python hooks are enabled.
 
@@ -469,6 +505,10 @@ class Broker(dbus.service.Object):
         if HOOKS_ENABLED:
             print("[broker] hooks: enabled, executor socket at "
                   f"{self.hooks._socket_path}", flush=True)
+        # Option A: log the secctx provenance posture so admins see it
+        # in journalctl at broker start.
+        print(f"[broker] secctx_launcher_gated="
+              f"{SECCTX_LAUNCHER_GATED}", flush=True)
         # Retention knob: env override wins for tests; 0 disables GC.
         try:
             self._audit_retention_days = int(
@@ -893,6 +933,12 @@ class Broker(dbus.service.Object):
         audit_id = (f" src_app={sapp or '(unknown)'}"
                     f" dst_app={dapp or '(unknown)'}"
                     f" src_engine={seng or '(unknown)'}")
+        # Option A provenance tag: when the qdwin bind gate is active
+        # (SECCTX_LAUNCHER_GATED), secctx strings are launcher-attested
+        # by construction.  Include the provenance in every audit row so
+        # admins can filter "launcher_gated" vs "advisory" decisions.
+        provenance = ("launcher_gated" if SECCTX_LAUNCHER_GATED
+                      else "advisory")
         # Same-silo: trivial allow IFF the caller (qdshell) has already
         # independently verified the source AND destination process
         # identity against the broker via VerifyClientIdentity. Without
@@ -906,6 +952,7 @@ class Broker(dbus.service.Object):
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
                     source=(f"clipboard_same_silo_verified "
+                            f"secctx_provenance={provenance} "
                             f"mime={mimes_joined}{audit_id}"),
                     approver_uid=None,
                 )
@@ -913,6 +960,15 @@ class Broker(dbus.service.Object):
                 print(f"[broker] qdistro.audit.failure: clipboard_same_silo,"
                       f" reason={e!r}", flush=True)
             return "allow"
+        # Option A: when secctx is advisory-only (launcher gate off) and
+        # a same-silo check arrives without identity verification, log a
+        # warning — the silo classification is unattested.
+        if src == dst and src and not bool(identity_verified):
+            if not SECCTX_LAUNCHER_GATED:
+                print(f"[broker] WARN secctx advisory: same-silo "
+                      f"clipboard transfer {src} without identity "
+                      f"verification; secctx is self-asserted",
+                      flush=True)
         # Cross-silo: rule lookup, then default-deny. The rule matcher
         # gets the source-side secctx attributes so admin can author
         # per-app / per-sandbox-engine rules. Dest-side identity is
@@ -932,7 +988,8 @@ class Broker(dbus.service.Object):
                 caller_uid=uid, caller_pid=pid, caller_exe=exe,
                 action=action_s, decision=(decision == "allow"),
                 scope=None,
-                source=f"{source_label} mime={mimes_joined}{audit_id}",
+                source=(f"{source_label} secctx_provenance={provenance} "
+                        f"mime={mimes_joined}{audit_id}"),
                 approver_uid=None, rule_path=rule_path,
             )
         except Exception as e:  # noqa: BLE001
@@ -1005,19 +1062,29 @@ class Broker(dbus.service.Object):
                     f"src_app={sapp or '(unknown)'} "
                     f"dst_app={dapp or '(unknown)'} "
                     f"src_engine={seng or '(unknown)'}")
+        provenance = ("launcher_gated" if SECCTX_LAUNCHER_GATED
+                      else "advisory")
         # Same-silo: same Option-B gate as CheckClipboardTransfer.
         if src == dst and src and bool(identity_verified):
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
-                    source=f"clipboard_receive_same_silo_verified{audit_id}",
+                    source=(f"clipboard_receive_same_silo_verified "
+                            f"secctx_provenance={provenance}"
+                            f"{audit_id}"),
                     approver_uid=None,
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] qdistro.audit.failure: clipboard_receive_same_silo,"
                       f" reason={e!r}", flush=True)
             return "allow"
+        if src == dst and src and not bool(identity_verified):
+            if not SECCTX_LAUNCHER_GATED:
+                print(f"[broker] WARN secctx advisory: same-silo "
+                      f"clipboard receive {src} without identity "
+                      f"verification; secctx is self-asserted",
+                      flush=True)
         rule = self.rules.match(uid=uid, action=action_s, exe=exe,
                                 app_id=sapp, sandbox_engine=seng,
                                 mime_type=mime_s)
@@ -1033,7 +1100,9 @@ class Broker(dbus.service.Object):
                 caller_uid=uid, caller_pid=pid, caller_exe=exe,
                 action=action_s, decision=(decision == "allow"),
                 scope=None,
-                source=f"{source_label}{audit_id}",
+                source=(f"{source_label} "
+                        f"secctx_provenance={provenance}"
+                        f"{audit_id}"),
                 approver_uid=None, rule_path=rule_path,
             )
         except Exception as e:  # noqa: BLE001
@@ -1090,13 +1159,17 @@ class Broker(dbus.service.Object):
                 f"{self.ratelimit.window_s}s). Activation rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
+        provenance = ("launcher_gated" if SECCTX_LAUNCHER_GATED
+                      else "advisory")
         # Same-silo: same Option-B gate as the clipboard methods.
         if src == dst and src and bool(identity_verified):
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
-                    source=(f"handoff_same_silo_verified src_app={sapp} "
+                    source=(f"handoff_same_silo_verified "
+                            f"secctx_provenance={provenance} "
+                            f"src_app={sapp} "
                             f"dst_app={dapp} src_engine={seng}"),
                     approver_uid=None,
                 )
@@ -1104,6 +1177,12 @@ class Broker(dbus.service.Object):
                 print(f"[broker] qdistro.audit.failure: handoff_same_silo,"
                       f" reason={e!r}", flush=True)
             return "allow"
+        if src == dst and src and not bool(identity_verified):
+            if not SECCTX_LAUNCHER_GATED:
+                print(f"[broker] WARN secctx advisory: same-silo "
+                      f"handoff activation {src} without identity "
+                      f"verification; secctx is self-asserted",
+                      flush=True)
         # Pass source app_id + sandbox_engine to the rule matcher; rules
         # naming app_id or sandbox_engine selectors only match when the
         # caller propagated those (via qdwin_shell_v1@v13 secctx).
@@ -1122,7 +1201,9 @@ class Broker(dbus.service.Object):
                 caller_uid=uid, caller_pid=pid, caller_exe=exe,
                 action=action_s, decision=(decision == "allow"),
                 scope=None,
-                source=(f"{source_label} src_app={sapp} dst_app={dapp} "
+                source=(f"{source_label} "
+                        f"secctx_provenance={provenance} "
+                        f"src_app={sapp} dst_app={dapp} "
                         f"src_engine={seng}"),
                 approver_uid=None, rule_path=rule_path,
             )

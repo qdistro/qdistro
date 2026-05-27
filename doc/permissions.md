@@ -264,6 +264,34 @@ Implemented and exercised by tests today:
   provides `ProtectSystem=strict`, `PrivateNetwork=true`,
   `NoNewPrivileges=true` sandboxing.
 
+## Security context (secctx) identity contract
+
+The `wp_security_context_manager_v1` protocol lets a launcher set
+`sandbox_engine`, `app_id`, and `instance_id` on behalf of the clients it
+spawns. These strings flow through qdwin to qdshell and the broker as the
+silo classifier for same-silo clipboard / handoff gates.
+
+**Option A (launcher-gated, active):** qdwin restricts the secctx manager
+bind to the trusted launcher:
+
+1. Only the bound shell (qdshell) or a client running as qdwin's
+   `allowed_uid` may bind `wp_security_context_manager_v1`. Other clients
+   receive a protocol error and a rejection log line.
+2. The broker annotates every clipboard / handoff audit entry with
+   `secctx_provenance=launcher_gated` (or `advisory` when the gate is
+   off), so admins can filter decisions by trust level.
+3. The env var `QDWIN_SECCTX_OPEN=1` disables the bind gate for developer
+   workflows. The broker-side config `QDISTRO_SECCTX_LAUNCHER_GATED=0` (or
+   `secctx_launcher_gated = false` in `/etc/qdistro/broker.conf`) switches
+   the provenance tag to `advisory` and emits warnings when same-silo
+   gates fire without identity verification.
+
+**Option B (broker-attested, planned):** qdwin forwards the peer's pidfd /
+identity tuple on the toplevel security-context event. qdshell and the
+broker re-verify the process at decision time via `VerifyClientIdentity`.
+The same-silo short-circuit only fires when `identity_verified=True`.
+See `todo/decisions/secctx-identity-contract.md`.
+
 Doc-only / not yet wired:
 
 - **xdg-desktop-portal backend** (`org.freedesktop.impl.portal.qdistro`).
