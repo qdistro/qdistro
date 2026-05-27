@@ -36,7 +36,12 @@ if [ ! -d "$TIER5_DIR" ]; then
     exit 3
 fi
 
-# --- symlinks for the spawn helpers ---
+# --- wrappers for the spawn helpers ---
+#
+# Do not symlink directly into the source tree: spawn-tier5.sh resolves
+# sibling files via dirname("$0")/../lib and dirname("$0")/domain-template.xml.
+# A /usr/local/bin symlink makes those relative lookups land under
+# /usr/local/lib and /usr/local/bin, which breaks the launcher path.
 install -d /usr/local/bin
 for tool in spawn-tier5.sh:qdistro-tier5-spawn \
             qdistro-tier5-cleanup.sh:qdistro-tier5-cleanup \
@@ -46,9 +51,17 @@ for tool in spawn-tier5.sh:qdistro-tier5-spawn \
     src="$TIER5_DIR/$src_basename"
     dst="/usr/local/bin/$dst_name"
     [ -x "$src" ] || { echo "[install-tier5] WARN: $src missing or not executable"; continue; }
-    ln -sf "$src" "$dst"
-    echo "[install-tier5] linked $dst → $src"
+    cat > "$dst" <<EOF
+#!/bin/bash
+exec "$src" "\$@"
+EOF
+    chmod 0755 "$dst"
+    echo "[install-tier5] installed wrapper $dst → $src"
 done
+
+install -d /usr/share/qdistro/tier5
+install -m 0644 "$TIER5_DIR/domain-template.xml" \
+    /usr/share/qdistro/tier5/domain-template.xml
 
 # --- polkit policy ---
 # Allow the active admin session to pkexec qdistro-tier5-spawn without

@@ -172,7 +172,7 @@ qdshell package (to be added in a follow-up task).
 
 1. fprintd verifies the print.
 2. The compositor transitions to `unlocked`.
-3. The session manager thaws all users in state `running`; their processes
+3. The session manager thaws all silos in state `Frozen`; their processes
  resume.
 4. The compositor starts rendering their surfaces.
 5. Input is dispatched normally.
@@ -187,7 +187,7 @@ crashes or admin logs out:
 1. greetd notices the session ended; systemd restarts it — a fresh admin
  compositor comes up in the locked state.
 2. As soon as admin's compositor is gone, `qdistro-session-manager`
- **cgroup-freezes all user sessions**. Processes remain alive; no data is
+ **cgroup-freezes all active silos**. Processes remain alive; no data is
  lost. Surfaces can't render anywhere because admin's compositor is their
  renderer.
 3. Admin authenticates again → the session manager thaws sessions → the

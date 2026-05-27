@@ -177,6 +177,8 @@ After=graphical.target
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
+Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64
+Environment=WESTON_MODULE_MAP=drm-backend.so=/usr/lib64/libweston-14/drm-backend.so;gl-renderer.so=/usr/lib64/libweston-14/gl-renderer.so;color-lcms.so=/usr/lib64/libweston-14/color-lcms.so;headless-backend.so=/usr/lib64/libweston-14/headless-backend.so;pipewire-backend.so=/usr/lib64/libweston-14/pipewire-backend.so;rdp-backend.so=/usr/lib64/libweston-14/rdp-backend.so;wayland-backend.so=/usr/lib64/libweston-14/wayland-backend.so;x11-backend.so=/usr/lib64/libweston-14/x11-backend.so;xwayland.so=/usr/lib64/libweston-14/xwayland.so
 ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2

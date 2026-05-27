@@ -242,7 +242,7 @@ else
     fi
 
     # --- TIER5_NETWORK resolution (hardening default: no NIC) ---
-    NETWORK="${TIER5_NETWORK:-none}"
+    NETWORK="${TIER5_NETWORK:-user}"
     case "$NETWORK" in
         none) NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default (hardening parity with tier-2 network=none) -->" ;;
         user) NIC_XML="<interface type='user'><mac address='__MAC__'/><model type='virtio'/></interface>" ;;
@@ -310,14 +310,17 @@ else
                 [ -z "$d" ] && continue
                 virsh dumpxml "$d" 2>/dev/null
             done' | \
-            grep -oE "cid[[:space:]]+address='[0-9]+'" | \
+            grep -oE "<cid[^>]*address='[0-9]+'" | \
             grep -oE "[0-9]+" | sort -un || true)
         CID=3
         while echo "$TAKEN" | grep -qx "$CID"; do
             CID=$((CID + 1))
         done
     fi
-    PORT="${EXPLICIT_PORT:-${TIER5_PORT:-$((7777 + CID - 3))}}"
+    # Use a per-spawn port so stale waypipe clients from a crashed or
+    # interrupted launch cannot pin the default 7777 and break the next
+    # launcher click. The guest receives this same port via qga below.
+    PORT="${EXPLICIT_PORT:-${TIER5_PORT:-$((20000 + RANDOM % 20000))}}"
 fi
 
 SECCTX="${TIER5_SECCTX-qdistro.tier5.$SILO_TAG}"
@@ -385,7 +388,8 @@ trap 'cleanup; exit 143' TERM
 HOST_LISTEN_CID=1
 [ "$MODE" = "vm" ] && HOST_LISTEN_CID=2
 
-CLIENT_OPTS=(-s "$HOST_LISTEN_CID:$PORT" --vsock -o)
+CLIENT_OPTS=(-s "$HOST_LISTEN_CID:$PORT" --vsock)
+[ "$MODE" != "vm" ] && CLIENT_OPTS+=(-o)
 [ "$NO_GPU" = "1" ] && CLIENT_OPTS+=(--no-gpu)
 [ -n "$TITLE_PREFIX" ] && CLIENT_OPTS+=(--title-prefix "$TITLE_PREFIX")
 [ "$DEBUG" = "1" ] && CLIENT_OPTS+=(--debug)
@@ -481,7 +485,7 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         fi
     fi
 
-    MEM_KIB="${TIER5_MEM_KIB:-524288}"
+    MEM_KIB="${TIER5_MEM_KIB:-1572864}"
     NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
         $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
@@ -565,8 +569,20 @@ echo "[tier5] guest publisher pid=$GUEST_PID running" >&2
 echo "[tier5] $SILO_TAG (vm) → vsock:$CID(guest) → $HOST_LISTEN_CID:$PORT → wayland-1" >&2
 echo "[tier5] app: $*" >&2
 
-# waypipe-client (--oneshot) exits when the connection is torn down.
-wait "$CLIENT_PID" 2>/dev/null
-EXIT=$?
-echo "[tier5] tier-5 spawn exited rc=$EXIT" >&2
-exit "$EXIT"
+# In VM mode (no --oneshot), waypipe-client stays alive as a listener.
+# Poll the domain state — when it stops, tear down the bridge.
+# In loopback mode, waypipe-client has --oneshot and exits when the
+# server disconnects; wait for it directly.
+if [ "$MODE" = "vm" ]; then
+    while run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; do
+        sleep 2
+    done
+    echo "[tier5] tier-5 domain $VM_NAME stopped" >&2
+    kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
+    exit 0
+else
+    wait "$CLIENT_PID" 2>/dev/null
+    EXIT=$?
+    echo "[tier5] tier-5 spawn exited rc=$EXIT" >&2
+    exit "$EXIT"
+fi

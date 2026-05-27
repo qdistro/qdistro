@@ -61,7 +61,7 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "[tier5-build] must run as root (writes /var/lib/libvirt/images/)" >&2
     exit 2
 fi
-for tool in virt-customize qemu-img wget; do
+for tool in virt-customize virt-resize qemu-img wget; do
     command -v "$tool" >/dev/null || { echo "[tier5-build] missing: $tool" >&2; exit 2; }
 done
 
@@ -74,11 +74,18 @@ WORK="$(mktemp -d /tmp/tier5-build.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 BASE_QCOW="$WORK/base.qcow2"
+RESIZED_QCOW="$WORK/base-resized.qcow2"
 echo "[tier5-build] downloading base image..."
 wget -q --show-progress -O "$BASE_QCOW" "$MIRROR" || {
     echo "[tier5-build] FAIL: download from $MIRROR" >&2
     exit 3
 }
+
+echo "[tier5-build] expanding base image..."
+qemu-img create -f qcow2 "$RESIZED_QCOW" "${TIER5_BASE_SIZE:-5G}" >/dev/null
+virt-resize --expand /dev/sda3 "$BASE_QCOW" "$RESIZED_QCOW" >/dev/null
+BASE_QCOW="$RESIZED_QCOW"
+virt-customize -a "$BASE_QCOW" --run-command 'xfs_growfs /' >/dev/null
 
 # Stage the publisher helper that the host triggers via qga.
 PUBLISHER="$WORK/qdistro-tier5-publisher.sh"
@@ -112,6 +119,11 @@ LOG=/var/log/qdistro-tier5-publisher.log
 exec >>"$LOG" 2>&1
 echo "=== $(date -Iseconds): tier5-publisher port=$PORT app='$*' ==="
 
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/qdistro-tier5-runtime}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
+setenforce 0 2>/dev/null || true
+
 # Wait briefly for vsock module to be live (modprobe is async on first
 # boot of cloud images). Idempotent.
 modprobe vhost_vsock 2>/dev/null || true
@@ -130,9 +142,12 @@ echo "[tier5-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable (not transactional), so
 # zypper install works directly via virt-customize.
 virt-customize -a "$BASE_QCOW" \
-    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,MozillaFirefox \
+    --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
+    --run-command 'fc-cache -f || true' \
+    --run-command 'if [ -f /etc/selinux/config ]; then sed -i "s/^SELINUX=.*/SELINUX=permissive/" /etc/selinux/config; fi' \
+    --run-command 'rm -f /.autorelabel' \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
     --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \

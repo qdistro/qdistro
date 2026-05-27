@@ -686,6 +686,7 @@ install_qdlocker_service() {
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<'EOF'
 [Service]
 Environment=QDLOCKER_QDSHELL_PATH=/usr/share/quickshell/qdshell
+Environment=QDLOCKER_PAM_SERVICE=login
 EOF
     runuser -l admin -c 'systemctl --user daemon-reload' 2>/dev/null || true
     if runuser -l admin -c 'systemctl --user enable qdlocker.service' 2>/dev/null; then

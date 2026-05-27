@@ -48,12 +48,25 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5
 done
 
-# --wait blocks until the target stops. If the compositor exits, the
-# whole target stops and we return — greetd then puts us back on the
-# greeter (a fresh qdgreeter invocation, not a respawn loop).
-if ! systemctl --user --wait start qdwin-session.target; then
+# Start the session target, then keep the greetd session process alive
+# for as long as the compositor is alive. `systemctl --wait start` on
+# a target only waits for the start job to finish on current systemd;
+# it does not provide session-lifetime semantics for greetd.
+if ! systemctl --user start qdwin-session.target; then
     log "qdwin-session.target start failed; exiting so greetd can recycle"
     exit 1
 fi
 
-exit 0
+while :; do
+    state="$(systemctl --user show --property=ActiveState --value qdwin-compositor.service 2>/dev/null || true)"
+    case "$state" in
+        active|activating|reloading)
+            sleep 1
+            ;;
+        *)
+            log "qdwin-compositor.service state is ${state:-unknown}; ending session"
+            systemctl --user stop qdwin-session.target >/dev/null 2>&1 || true
+            exit 0
+            ;;
+    esac
+done
