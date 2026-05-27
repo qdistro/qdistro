@@ -170,33 +170,23 @@ class AuthBackend(QObject):
 
         auth = pam.pam()
 
-        def conversation(messages):
-            replies = []
-            for style, msg in messages:
-                is_error = style == 3
-                response_required = style in (1, 2)
-                self.message.emit(msg, is_error, response_required)
-                if response_required:
-                    pw = None
-                    while pw is None:
-                        if self._pam_abort.wait(timeout=0.05):
-                            return [(None, 0) for _ in messages]
-                        with self._state_lock:
-                            pw = self._pam_pending_password
-                            if pw is not None:
-                                self._pam_pending_password = None
-                    replies.append((pw, 0))
-                else:
-                    replies.append(("", 0))
-            return replies
+        self.message.emit("Password", False, True)
+        password = None
+        while password is None:
+            if self._pam_abort.wait(timeout=0.05):
+                self.outcome.emit(AuthOutcome.ABORTED)
+                return
+            with self._state_lock:
+                password = self._pam_pending_password
+                if password is not None:
+                    self._pam_pending_password = None
 
         try:
             ok = auth.authenticate(
                 self._pam_user,
-                None,
+                password,
                 service=self._pam_service or "login",
                 call_end=True,
-                conv=conversation,
             )
         except Exception:
             log.exception("PAM authentication raised")

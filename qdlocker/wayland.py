@@ -213,13 +213,14 @@ class LockerClient:
                     with self._display_lock:
                         if self._display is None:
                             return
-                        # select() guarantees the fd is readable, so
-                        # dispatch(block=True) reads the kernel buffer
-                        # and dispatches in one shot. dispatch(block=False)
-                        # only drains the already-queued event ring —
-                        # it does NOT read the fd, leaving wire bytes
-                        # buffered forever and `idled` never delivered.
-                        self._display.dispatch(block=True)
+                        # Read the fd and drain pending events without
+                        # wl_display_dispatch()'s blocking path. Holding
+                        # _display_lock while dispatch(block=True) can
+                        # starve main-thread requests such as set_locked(1):
+                        # after a restart the locker would update its local
+                        # state but never flush the request to qdwin.
+                        self._display.read()
+                        self._display.dispatch(block=False)
             except Exception:
                 log.exception("wayland poll loop error")
                 break

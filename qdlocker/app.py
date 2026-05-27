@@ -357,9 +357,10 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config()
 
     qmlRegisterUncreatableType(
-        LockController, "Qdistro.Locker", 1, 0, "LockController",
+        LockController, "Qdistro.Locker", 1, 0,
         "LockController is provided as the `controller` context property; "
-        "do not instantiate from QML."
+        "do not instantiate from QML.",
+        "LockController",
     )
 
     auth = AuthBackend(

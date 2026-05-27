@@ -150,6 +150,7 @@ class LockController(QObject):
         self._set_unlock_in_progress(False)
         if outcome is AuthOutcome.SUCCESS:
             log.info("authentication successful")
+            self.currentText = ""
             self.unlocked.emit()
             return
         log.info("authentication failed: %s", outcome.name)
