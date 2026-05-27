@@ -717,6 +717,9 @@ MUTE_DURATION_S = 30 * 60
 ESCALATION_THRESHOLD_S = 60    # re-notify after 60s pending
 CRITICAL_THRESHOLD_S = 300     # critical-level after 5 min
 CROSS_UID_THRESHOLD_S = 30     # cross-uid / sensitive actions escalate faster
+# Maximum escalation notifications per age-tick to prevent burst spam
+# when many requests cross a threshold simultaneously.
+ESCALATION_MAX_PER_TICK = 3
 
 
 class NotificationManager(QObject):
@@ -732,6 +735,7 @@ class NotificationManager(QObject):
     ESCALATION_THRESHOLD_S = ESCALATION_THRESHOLD_S
     CRITICAL_THRESHOLD_S = CRITICAL_THRESHOLD_S
     CROSS_UID_THRESHOLD_S = CROSS_UID_THRESHOLD_S
+    ESCALATION_MAX_PER_TICK = ESCALATION_MAX_PER_TICK
 
     def __init__(self, tray_icon: QSystemTrayIcon, parent: QObject | None = None):
         super().__init__(parent)
@@ -798,13 +802,19 @@ class NotificationManager(QObject):
     def arrival_time(self, rid: int) -> float | None:
         return self._arrival_times.get(rid)
 
-    def sync_pending(self, pending_rids: set[int]) -> None:
+    def sync_pending(self, pending_rids: set[int],
+                     pending_requests: list[dict] | None = None) -> None:
         """Synchronize arrival-time map with the actual pending set.
 
         Called after a full refresh so stale entries (requests decided
         between signal and refresh) are cleaned up and new entries
         (requests that arrived before the app connected) get a synthetic
         'now' timestamp.
+
+        If *pending_requests* is provided (the full list of dicts from
+        the broker), metadata (action, uid) is backfilled for any
+        request that lacks it, so escalation logic works even for
+        requests discovered via refresh rather than the signal path.
         """
         # Remove entries no longer pending.
         stale = set(self._arrival_times) - pending_rids
@@ -817,6 +827,18 @@ class NotificationManager(QObject):
         now = _time.time()
         for rid in pending_rids - set(self._arrival_times):
             self._arrival_times[rid] = now
+        # Backfill metadata for requests that have arrival times but
+        # no action/uid metadata (e.g. discovered at startup via
+        # refresh rather than through the RequestPending signal).
+        if pending_requests is not None:
+            for req in pending_requests:
+                rid = int(req["id"])
+                if rid not in self._request_meta:
+                    action = req.get("action", "")
+                    uid = int(req.get("uid", 0))
+                    if action or uid:
+                        self._request_meta[rid] = {
+                            "action": action, "uid": uid}
 
     @property
     def pending_count(self) -> int:
@@ -841,11 +863,26 @@ class NotificationManager(QObject):
 
     # ---- escalation ---------------------------------------------------------
 
+    # Action prefixes that represent cross-uid / cross-silo operations
+    # in the broker. These match the real action strings constructed in
+    # qdistro_admin_broker.py (clipboard.transfer, clipboard.receive,
+    # app.send-to) as well as legacy/test names containing "cross"/"xuid".
+    _CROSS_UID_PREFIXES = (
+        "qdistro.clipboard.transfer:",
+        "qdistro.clipboard.receive:",
+        "app.send-to:",
+    )
+
     @staticmethod
     def _is_cross_uid_action(action: str) -> bool:
         """Return True if *action* looks like a cross-uid or sensitive op."""
         lower = action.lower()
-        return "cross" in lower or "xuid" in lower
+        if "cross" in lower or "xuid" in lower:
+            return True
+        for prefix in NotificationManager._CROSS_UID_PREFIXES:
+            if action.startswith(prefix):
+                return True
+        return False
 
     def _escalation_threshold(self, rid: int) -> int:
         """Return the escalation threshold (seconds) for *rid*.
@@ -871,13 +908,19 @@ class NotificationManager(QObject):
         * After ``CRITICAL_THRESHOLD_S``: upgrade to *Critical*-level.
 
         Each level fires at most once per request (tracked by
-        ``_escalated_rids`` / ``_critical_rids``).
+        ``_escalated_rids`` / ``_critical_rids``).  At most
+        ``ESCALATION_MAX_PER_TICK`` notifications are emitted per tick
+        to avoid burst spam when many requests cross a threshold
+        simultaneously; the remainder are deferred to the next tick.
         """
         if self._muted or window_active:
             return
 
         now = _time.time()
+        emitted = 0
         for rid, arrival in self._arrival_times.items():
+            if emitted >= self.ESCALATION_MAX_PER_TICK:
+                break
             elapsed = now - arrival
             meta = self._request_meta.get(rid, {})
             action = meta.get("action", "request")
@@ -897,6 +940,7 @@ class NotificationManager(QObject):
                     QSystemTrayIcon.MessageIcon.Critical,
                     10_000,
                 )
+                emitted += 1
                 continue
 
             # Standard escalation (>60s or >30s for cross-uid).
@@ -909,6 +953,7 @@ class NotificationManager(QObject):
                     QSystemTrayIcon.MessageIcon.Information,
                     7000,
                 )
+                emitted += 1
 
     def _on_age_tick(self) -> None:
         """Age-timer callback: emit the repaint signal and run escalation."""
@@ -1133,7 +1178,12 @@ class MainWindow(QMainWindow):
             return
 
         # Sync NotificationManager arrival-time map with actual pending set.
-        self.notifications.sync_pending({int(r["id"]) for r in pending})
+        # Pass the full request list so metadata is backfilled for
+        # requests discovered at startup / after missed signals.
+        self.notifications.sync_pending(
+            {int(r["id"]) for r in pending},
+            pending_requests=pending,
+        )
 
         self.model.clear()
         for req in pending:
@@ -1386,7 +1436,10 @@ class MainWindow(QMainWindow):
                 "qdistro admin approvals (broker unavailable)")
             return
         # Sync NotificationManager's arrival-time map with actual pending.
-        self.notifications.sync_pending({int(r["id"]) for r in pending})
+        self.notifications.sync_pending(
+            {int(r["id"]) for r in pending},
+            pending_requests=pending,
+        )
         self._tray_last_count = count
         if count > 0:
             self.tray_icon.setToolTip(

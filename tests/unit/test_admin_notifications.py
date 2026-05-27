@@ -38,6 +38,7 @@ from qdistro_admin_app import (  # noqa: E402
     ESCALATION_THRESHOLD_S,
     CRITICAL_THRESHOLD_S,
     CROSS_UID_THRESHOLD_S,
+    ESCALATION_MAX_PER_TICK,
     _format_age,
     _age_color,
 )
@@ -401,6 +402,21 @@ class TestEscalation:
         assert NotificationManager._is_cross_uid_action("qdistro.xuid_paste")
         assert NotificationManager._is_cross_uid_action("CROSS_UID_RW")
 
+    def test_is_cross_uid_action_real_broker_clipboard_transfer(self):
+        """Real broker action qdistro.clipboard.transfer:<src>:<dst>."""
+        assert NotificationManager._is_cross_uid_action(
+            "qdistro.clipboard.transfer:user1:user2")
+
+    def test_is_cross_uid_action_real_broker_clipboard_receive(self):
+        """Real broker action qdistro.clipboard.receive:<src>:<dst>."""
+        assert NotificationManager._is_cross_uid_action(
+            "qdistro.clipboard.receive:admin:user1")
+
+    def test_is_cross_uid_action_real_broker_app_send_to(self):
+        """Real broker action app.send-to:<uid>:<service>."""
+        assert NotificationManager._is_cross_uid_action(
+            "app.send-to:2001:org.example.Service")
+
     def test_is_cross_uid_action_negative(self):
         assert not NotificationManager._is_cross_uid_action("qdistro.exec.ls")
         assert not NotificationManager._is_cross_uid_action("")
@@ -414,11 +430,48 @@ class TestEscalation:
         mgr.on_request_decided(42)
         assert 42 not in mgr._request_meta
 
+    def test_sync_pending_backfills_metadata(self, mgr):
+        """sync_pending with request dicts backfills action/uid metadata."""
+        mgr.sync_pending(
+            {10, 20},
+            pending_requests=[
+                {"id": 10, "uid": 2000, "action": "qdistro.exec.ls"},
+                {"id": 20, "uid": 2001, "action": "qdistro.clipboard.transfer:a:b"},
+            ],
+        )
+        assert mgr._request_meta[10] == {"action": "qdistro.exec.ls", "uid": 2000}
+        assert mgr._request_meta[20] == {
+            "action": "qdistro.clipboard.transfer:a:b", "uid": 2001}
+
+    def test_sync_pending_does_not_overwrite_existing_metadata(self, mgr):
+        """Existing metadata should not be replaced by sync_pending."""
+        mgr.on_request_pending(10, action="original", uid=1000)
+        mgr.sync_pending(
+            {10},
+            pending_requests=[
+                {"id": 10, "uid": 2000, "action": "replaced"},
+            ],
+        )
+        assert mgr._request_meta[10] == {"action": "original", "uid": 1000}
+
+    def test_escalation_burst_cap(self, mgr, tray):
+        """At most ESCALATION_MAX_PER_TICK notifications per tick."""
+        # Create more requests than the per-tick cap, all past threshold.
+        for i in range(ESCALATION_MAX_PER_TICK + 3):
+            mgr.on_request_pending(i, action=f"qdistro.exec.{i}", uid=2000 + i)
+            mgr._arrival_times[i] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == ESCALATION_MAX_PER_TICK
+        # Next tick picks up the remaining.
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == ESCALATION_MAX_PER_TICK + 3
+
     def test_escalation_threshold_constants(self):
         """Verify the module-level threshold constants."""
         assert ESCALATION_THRESHOLD_S == 60
         assert CRITICAL_THRESHOLD_S == 300
         assert CROSS_UID_THRESHOLD_S == 30
+        assert ESCALATION_MAX_PER_TICK == 3
 
 
 # ---------------------------------------------------------------------------
