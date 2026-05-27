@@ -23,11 +23,16 @@ Phase 2 v1 scope — deliberately minimal:
   matches everything (useful for a blanket default at the end of
   the ordered list).
   When a rule names `app_id` (or `sandbox_engine`, `mime_type`) with
-  a *non-empty* value but the broker caller didn't pass one (empty
-  string default), the rule does NOT match — i.e. a non-empty
-  selector implies "the request must carry this attribute and it must
-  equal X." Note: a rule with `sandbox_engine: ""` (literal empty
-  string, rare) DOES match requests with an empty `sandbox_engine`.
+  a non-empty *exact* value (no glob) but the broker caller didn't
+  pass one (empty string default), the rule does NOT match — i.e. a
+  non-empty exact selector implies "the request must carry this
+  attribute and it must equal X."
+  Exceptions: `sandbox_engine: ""` (literal empty string) DOES match
+  requests with an empty `sandbox_engine`; `sandbox_engine: "*"` or
+  `app_id: "*"` also matches empty because `fnmatchcase("", "*")`
+  returns True. The tier-separation property relies on using
+  non-empty exact selectors or meaningful globs (e.g.
+  `sandbox_engine: "qdistro.*"`) that cannot match empty.
   This keeps unsandboxed callers from accidentally matching app_id
   rules authored for tier-3 silos, and keeps mime-typed rules from
   bleeding into transfer / handoff calls that don't carry a single
@@ -95,18 +100,22 @@ properties are verified:
        ``(uid, action)`` only — any exe/argv.
      - ``match_kind="exe_only"`` (scope ``forever_exe``): matches by
        ``(uid, action, exe)``.
-     - ``match_kind="argv_exact"`` / ``"basename"`` / ``"prefix"``
-       (scopes ``forever_argv`` / ``forever_basename`` /
-       ``forever_prefix`` / ``1h`` / ``24h``): match by
-       ``(uid, action, exe, argv-pattern)``.
+     - ``match_kind="argv_exact"`` (scopes ``forever_argv`` / ``1h``
+       / ``24h``): matches by ``(uid, action, exe, argv-tuple)``.
+     - ``match_kind="basename"`` (scope ``forever_basename``): matches
+       by ``(uid, action, basename(argv[0]))`` -- exe is NOT checked.
+     - ``match_kind="prefix"`` (scope ``forever_prefix``): matches by
+       ``(uid, action, argv[:N])`` -- exe is NOT checked.
    A prior admin approval for a non-tier-2 request with the same
    ``(uid, action)`` tuple (especially a ``forever``-scoped approval)
-   will also match a subsequent tier-2 request. In practice this is
-   rare because tier-2 cross-silo actions use synthetic action
-   strings (``qdistro.clipboard.transfer:<src>:<dst>``) that differ
-   from tier-1 actions -- but auditors should be aware the cache is
-   tier-blind. A future ``sandbox_engine`` column on the cache
-   schema would close this gap.
+   will also match a subsequent tier-2 request. This cache caveat
+   applies to ``_enqueue`` and ``CheckPermission`` -- NOT to the
+   cross-silo gates (``CheckClipboardTransfer`` / ``Receive`` /
+   ``HandoffActivation``), which do rules-only lookup then explicit
+   default-deny without consulting the cache. Auditors should be
+   aware the cache is tier-blind for general ``RequestPermission`` /
+   ``CheckPermission`` flows. A future ``sandbox_engine`` column on
+   the cache schema would close this gap.
    **Also affected:** ``CheckPermission`` (the synchronous fast-path
    method) follows the same rules -> cache -> hooks resolution order
    and can return ``"allow"`` from the tier-blind cache or hook path.
@@ -135,11 +144,14 @@ properties are verified:
    (``--userns=keep-id``) which is the admin uid. The D-Bus policy
    grants the full admin uid broker access; it does not distinguish
    qdshell from other uid-1000 processes. A post-escape attacker as
-   uid 1000 could call ``CheckClipboardTransfer`` or
-   ``CheckHandoffActivation`` with ``identity_verified=True``.  The
-   primary defense is the container boundary itself (userns, caps=0,
-   seccomp, no-new-privileges); the D-Bus policy is defense-in-depth
-   at the network-access tier, not at the uid-impersonation tier.
+   uid 1000 could call any admin-gated broker method, including
+   ``CheckClipboardTransfer`` / ``CheckClipboardReceive`` /
+   ``CheckHandoffActivation`` with ``identity_verified=True``, and
+   -- more critically -- ``DecideRequest`` (approve pending requests)
+   and ``SaveRule`` (author new allow rules). The primary defense is
+   the container boundary itself (userns, caps=0, seccomp,
+   no-new-privileges); the D-Bus policy is defense-in-depth at the
+   network-access tier, not at the uid-impersonation tier.
 
 4. **Empty-selector safeguard.** Rules with all selectors set to
    None match everything — by design, for admin-authored blanket
@@ -154,15 +166,22 @@ properties are verified:
    an overly broad ``"*"`` glob.
 
 5. **Selector-presence semantics prevent tier bleed.** When a rule
-   names ``app_id`` or ``sandbox_engine`` with a *non-empty* value
-   but the request doesn't carry one (empty string default), the rule
-   does NOT match. This prevents an unsandboxed caller (tier-1, no
-   secctx) from accidentally hitting a rule authored for a specific
-   sandbox tier. Note: ``sandbox_engine: ""`` (the literal
-   empty-string selector) is a valid but rare value that DOES match
-   requests with an empty ``sandbox_engine``. The tier-bleed
-   prevention property relies on tier-specific rules using non-empty
-   selectors (e.g. ``sandbox_engine: "qdistro.tier2"``).
+   names ``app_id`` or ``sandbox_engine`` with a non-empty *exact*
+   value (no glob) but the request doesn't carry one (empty string
+   default), the rule does NOT match. This prevents an unsandboxed
+   caller (tier-1, no secctx) from accidentally hitting a rule
+   authored for a specific sandbox tier.
+   **Exceptions that weaken this property:**
+     - ``sandbox_engine: ""`` (literal empty-string selector): DOES
+       match requests with an empty ``sandbox_engine``.
+     - ``sandbox_engine: "*"`` or ``app_id: "*"`` (glob selectors):
+       ``fnmatchcase("", "*")`` returns True, so a glob ``"*"``
+       matches the empty default. A rule with ``sandbox_engine: "*"``
+       would match both tier-2 and unsandboxed callers.
+   The tier-bleed prevention property holds when tier-specific rules
+   use non-empty exact selectors (e.g.
+   ``sandbox_engine: "qdistro.tier2"``) or meaningful globs that
+   cannot match empty (e.g. ``sandbox_engine: "qdistro.*"``).
 """
 from __future__ import annotations
 
