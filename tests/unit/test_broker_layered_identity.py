@@ -106,13 +106,13 @@ class TestReadProcLayered:
 class TestGetPendingSurfacesLayeredFields:
     def test_get_pending_returns_layered_keys(self, broker):
         # Enqueue a request as a non-admin caller using *our own pid*
-        # so /proc reads succeed during _enqueue. PEER_EXE points at
-        # qdshell which doesn't exist on the test host; what matters
-        # for this test is that GetPending surfaces the new keys with
-        # the right types — empty strings are acceptable when the
-        # path can't be hashed.
+        # so /proc reads succeed during _enqueue. Use the resolved
+        # /proc/<pid>/exe path (not sys.executable, which may be a
+        # symlink like python3 -> python3.13) so the deferred
+        # layered-identity checker recognizes the process as unchanged.
+        proc_exe = os.readlink(f"/proc/{os.getpid()}/exe")
         broker.set_peer(uid=NON_ADMIN_UID, pid=os.getpid(),
-                        exe=sys.executable, start=0)
+                        exe=proc_exe, start=0)
         rid = broker.RequestPermission("test.layered", {"k": "v"})
         # Layered IO is deferred to the thread pool; drain it so the
         # idle callback populates the layered fields before we assert.

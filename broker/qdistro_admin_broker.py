@@ -455,21 +455,37 @@ def _read_proc_layered(pid: int) -> dict[str, str]:
     return out
 
 
-def _read_proc_layered_checked(pid: int, expected_start_time: int
-                                ) -> dict[str, str]:
+def _read_proc_layered_checked(pid: int, expected_start_time: int,
+                                expected_exe: str) -> dict[str, str]:
     """Thread-pool wrapper around _read_proc_layered that verifies the
-    process hasn't changed identity (exec'd) between request time and
-    the deferred IO.
+    process identity hasn't changed between request time and the
+    deferred IO.
 
-    If start_time is 0 (unavailable at request time) or the current
-    start_time still matches, the read proceeds. Otherwise the process
-    may have exec'd into a different binary — return empty strings so
-    the admin doesn't see a misleading hash for req.exe.
+    Guards against two races:
+    1. PID reuse: start_time changes when a different process gets the
+       same pid slot. Detected by comparing expected_start_time.
+    2. exec: the process calls execve() into a different binary.
+       start_time does NOT change across exec; instead the exe path
+       (readlink /proc/<pid>/exe) changes. Detected by comparing
+       expected_exe.
+
+    When expected_start_time is 0 (unavailable at request time) the
+    verification is best-effort on exe path only.
+
+    Returns empty strings when verification fails or the process is
+    gone (st_now == 0), so the admin doesn't see a misleading hash.
     """
-    if expected_start_time != 0:
-        _exe_now, st_now = _read_proc_identity(pid)
-        if st_now != 0 and st_now != expected_start_time:
-            return {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
+    _empty = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
+    exe_now, st_now = _read_proc_identity(pid)
+    # Process gone (st_now == 0): fail closed — don't hash.
+    if st_now == 0:
+        return _empty
+    # PID-reuse check: start_time mismatch means different process.
+    if expected_start_time != 0 and st_now != expected_start_time:
+        return _empty
+    # Exec check: exe path changed means different binary.
+    if expected_exe and expected_exe != "?" and exe_now != expected_exe:
+        return _empty
     return _read_proc_layered(pid)
 
 
@@ -1821,32 +1837,35 @@ class Broker(dbus.service.Object):
             # mainloop thread via idle_add — the _pending dict is only
             # modified from the mainloop, preserving thread safety.
             #
-            # The worker captures start_time at submit time and verifies
-            # it on completion — if the process exec'd between request
-            # and hash, the layered data would describe a different
-            # binary than req.exe. In that case, results are discarded
+            # The worker captures (start_time, exe) at submit time and
+            # verifies the process identity on the pool thread before
+            # hashing. If the process was recycled (start_time changed)
+            # or exec'd (exe path changed), results are discarded
             # (empty strings) rather than displaying a misleading hash.
             io_pool = getattr(self, "_io_pool", None)
             if pid > 0 and io_pool is not None:
                 try:
                     fut = io_pool.submit(
-                        _read_proc_layered_checked, pid, start_time)
+                        _read_proc_layered_checked, pid, start_time, exe)
                     fut.add_done_callback(
                         lambda f, r=rid: GLib.idle_add(
                             self._apply_layered_identity, r, f))
                 except RuntimeError:
                     # Pool shut down (broker teardown) — leave fields empty.
-                    req.layered_pending = False
+                    with self._lock:
+                        req.layered_pending = False
             elif pid > 0:
                 # Fallback: no thread pool (e.g. test harness without
                 # _io_pool). Run synchronously to preserve correctness.
                 layered = _read_proc_layered(pid)
-                req.exe_sha256 = layered.get("exe_sha256", "")
-                req.selinux_label = layered.get("selinux_label", "")
-                req.cgroup = layered.get("cgroup", "")
-                req.layered_pending = False
+                with self._lock:
+                    req.exe_sha256 = layered.get("exe_sha256", "")
+                    req.selinux_label = layered.get("selinux_label", "")
+                    req.cgroup = layered.get("cgroup", "")
+                    req.layered_pending = False
             else:
-                req.layered_pending = False
+                with self._lock:
+                    req.layered_pending = False
             self.RequestPending(rid)
             return rid
 
