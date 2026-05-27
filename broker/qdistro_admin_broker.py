@@ -461,32 +461,56 @@ def _read_proc_layered_checked(pid: int, expected_start_time: int,
     process identity hasn't changed between request time and the
     deferred IO.
 
-    Guards against two races:
+    Guards against three races:
     1. PID reuse: start_time changes when a different process gets the
        same pid slot. Detected by comparing expected_start_time.
-    2. exec: the process calls execve() into a different binary.
-       start_time does NOT change across exec; instead the exe path
-       (readlink /proc/<pid>/exe) changes. Detected by comparing
-       expected_exe.
+    2. exec before hash: the process calls execve() into a different
+       binary before we read /proc. start_time does NOT change across
+       exec; instead the exe path changes. Detected pre-hash.
+    3. exec during hash: the process exec's between our pre-check and
+       _read_proc_layered's actual /proc/<pid>/exe open. Mitigated by
+       a post-hash revalidation — if the identity changed between the
+       pre-check and the post-check, discard the results.
 
-    When expected_start_time is 0 (unavailable at request time) the
-    verification is best-effort on exe path only.
+    When neither start_time nor exe is usable as an anchor
+    (expected_start_time == 0 AND expected_exe is empty/"?"), fail
+    closed: return empty strings rather than hashing an unverifiable
+    process.
 
     Returns empty strings when verification fails or the process is
-    gone (st_now == 0), so the admin doesn't see a misleading hash.
+    gone, so the admin doesn't see a misleading hash.
     """
     _empty = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
-    exe_now, st_now = _read_proc_identity(pid)
-    # Process gone (st_now == 0): fail closed — don't hash.
-    if st_now == 0:
+    has_start_anchor = (expected_start_time != 0)
+    has_exe_anchor = bool(expected_exe) and expected_exe != "?"
+
+    # Fail closed when neither anchor is usable — we can't verify
+    # the process identity at all.
+    if not has_start_anchor and not has_exe_anchor:
         return _empty
-    # PID-reuse check: start_time mismatch means different process.
-    if expected_start_time != 0 and st_now != expected_start_time:
-        return _empty
-    # Exec check: exe path changed means different binary.
-    if expected_exe and expected_exe != "?" and exe_now != expected_exe:
-        return _empty
-    return _read_proc_layered(pid)
+
+    # Pre-hash identity check.
+    exe_pre, st_pre = _read_proc_identity(pid)
+    if st_pre == 0:
+        return _empty  # process gone
+    if has_start_anchor and st_pre != expected_start_time:
+        return _empty  # PID reuse
+    if has_exe_anchor and exe_pre != expected_exe:
+        return _empty  # exec'd before we got here
+
+    # Do the expensive IO (hash, SELinux, cgroup).
+    out = _read_proc_layered(pid)
+
+    # Post-hash revalidation: catch exec-during-hash TOCTOU.
+    exe_post, st_post = _read_proc_identity(pid)
+    if st_post == 0:
+        return _empty  # process exited during hash
+    if has_start_anchor and st_post != expected_start_time:
+        return _empty  # PID recycled during hash
+    if exe_post != exe_pre:
+        return _empty  # exec'd during hash — discard
+
+    return out
 
 
 class _Request:
@@ -1856,8 +1880,9 @@ class Broker(dbus.service.Object):
                         req.layered_pending = False
             elif pid > 0:
                 # Fallback: no thread pool (e.g. test harness without
-                # _io_pool). Run synchronously to preserve correctness.
-                layered = _read_proc_layered(pid)
+                # _io_pool). Run synchronously with the same identity
+                # guard as the threaded path.
+                layered = _read_proc_layered_checked(pid, start_time, exe)
                 with self._lock:
                     req.exe_sha256 = layered.get("exe_sha256", "")
                     req.selinux_label = layered.get("selinux_label", "")
