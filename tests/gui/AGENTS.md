@@ -199,10 +199,11 @@ prefer the qdlocker helpers and direct VM commands when possible.
 | [05-keystroke-isolation.md](05-keystroke-isolation.md) | **Security boundary.** While locked, password keystrokes reach qdlocker's `prompt-len` but NOT qdshell's. If qdshell's ctrl-socket sees the typed chars, the protocol's `overlay_key` routing is broken and the locker's purpose is defeated. |
 | [06-shell-crash-survives.md](06-shell-crash-survives.md) | qdshell.service is killed while locked → the lock surface stays up → typing still reaches qdlocker → unlock still works. Confirms the lifecycle independence that motivated splitting qdlocker out of qdshell. |
 | [07-lock-occludes-desktop.md](07-lock-occludes-desktop.md) | **Visual security invariant.** A full-screen magenta normal toplevel is placed behind qdlocker; after lock, screenshot edge bands and the full screen must contain zero magenta pixels. Catches fullscreen/first-map offset bugs. |
+| [08-locker-crash-demotes.md](08-locker-crash-demotes.md) | **Resource cleanup.** qdlocker is killed while locked → qdwin demotes the lock toplevel (journal: `locker_disconnect`) → screen stays black (fail-safe) → fresh qdlocker binds and recovers → unlock works. |
 
 A full smoke pass is 01 → 05 → 07 (skip 04 until the lid-close C
-plumbing lands). 06 is regression-only — run after touching qdshell
-or qdwin's resource-destruction paths.
+plumbing lands). 06 and 08 are regression-only — run after touching
+qdshell/qdlocker or qdwin's resource-destruction paths.
 
 ## Running a scenario
 

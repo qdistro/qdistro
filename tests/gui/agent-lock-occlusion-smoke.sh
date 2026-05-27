@@ -29,18 +29,28 @@ trap cleanup EXIT
 
 qdlocker_drain_lock_state
 
-"$QDWIN_VM_EXEC" "$VMNAME" '
+# Query actual output resolution from a baseline screenshot rather than
+# hardcoding 1920x1080.  Crop geometry must match the real framebuffer
+# or asserts silently pass/fail at the wrong coordinates.
+qdwin_screenshot "$pre" >/dev/null
+read -r SW SH < <(qdlocker_screenshot_dimensions "$pre")
+if [ -z "$SW" ] || [ -z "$SH" ] || [ "$SW" -lt 640 ] || [ "$SH" -lt 480 ]; then
+    echo "FAIL: unexpected screenshot dimensions ${SW}x${SH}" >&2
+    exit 2
+fi
+
+"$QDWIN_VM_EXEC" "$VMNAME" "
   pkill -u admin -x qdistro-test-window 2>/dev/null || true
   pkill -u admin -x foot 2>/dev/null || true
   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
     qdistro-test-window --title qdlocker-sentinel \
-      --width 1920 --height 1080 --color 0xffff00ff \
+      --width ${SW} --height ${SH} --color 0xffff00ff \
       >/tmp/qdlocker-sentinel.log 2>&1 &
-'
+"
 sleep 1.5
 
 qdwin_screenshot "$pre" >/dev/null
-qdlocker_assert_color_present_in_crop "$pre" '#ff00ff' '1920x1080+0+0' whole-screen
+qdlocker_assert_color_present_in_crop "$pre" '#ff00ff' "${SW}x${SH}+0+0" whole-screen
 
 qdlocker_ctrl lock >/dev/null
 qdlocker_wait_for_lock 5
@@ -56,10 +66,13 @@ case "$status" in
         ;;
 esac
 
-qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' '1920x96+0+0' top-edge
-qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' '160x1080+0+0' left-edge
-qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' '160x160+0+0' top-left-corner
-qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' '1920x1080+0+0' whole-screen
+# Edge bands: top 96px, left 160px, top-left corner, and full screen.
+edge_h=$(( SH / 11 > 96 ? SH / 11 : 96 ))
+edge_w=$(( SW / 12 > 160 ? SW / 12 : 160 ))
+qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' "${SW}x${edge_h}+0+0" top-edge
+qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' "${edge_w}x${SH}+0+0" left-edge
+qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' "${edge_w}x${edge_h}+0+0" top-left-corner
+qdlocker_assert_color_absent_in_crop "$locked" '#ff00ff' "${SW}x${SH}+0+0" whole-screen
 
 echo "PASS: qdlocker fully occluded sentinel desktop"
 echo "pre=$pre"

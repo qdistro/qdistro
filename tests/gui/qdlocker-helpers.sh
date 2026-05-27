@@ -123,6 +123,15 @@ qdlocker_drain_lock_state() {
 # ImageMagick on the host screenshot, not agent vision, so "a thin strip
 # of desktop is visible" turns into a deterministic failure.
 
+qdlocker_screenshot_dimensions() {
+    local image="$1"
+    if ! command -v magick >/dev/null 2>&1; then
+        echo "qdlocker_screenshot_dimensions: ImageMagick 'magick' not found" >&2
+        return 2
+    fi
+    magick identify -format '%w %h' "$image"
+}
+
 qdlocker_count_color_in_crop() {
     local image="$1" color="$2" crop="$3"
     local hex

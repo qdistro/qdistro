@@ -22,17 +22,22 @@ qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 # Drain a stale locked state from a prior scenario.
 qdlocker_drain_lock_state
 
-# Make the desktop behind the locker unmistakable. A 1920x1080 normal
+# Detect actual output resolution from a baseline screenshot so this
+# scenario is not tied to 1920x1080.
+qdwin_screenshot /tmp/qdlocker-07-step0-baseline.png
+read -r SW SH < <(qdlocker_screenshot_dimensions /tmp/qdlocker-07-step0-baseline.png)
+
+# Make the desktop behind the locker unmistakable. A full-output normal
 # xdg_toplevel maps at output origin when it is the only app toplevel,
 # so any top/left lock-window offset exposes magenta immediately.
-"$QDWIN_VM_EXEC" "$VMNAME" '
+"$QDWIN_VM_EXEC" "$VMNAME" "
   pkill -u admin -x qdistro-test-window 2>/dev/null || true
   pkill -u admin -x foot 2>/dev/null || true
   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
     qdistro-test-window --title qdlocker-sentinel \
-      --width 1920 --height 1080 --color 0xffff00ff \
+      --width ${SW} --height ${SH} --color 0xffff00ff \
       >/tmp/qdlocker-sentinel.log 2>&1 &
-'
+"
 sleep 1.5
 ```
 
@@ -43,7 +48,7 @@ sleep 1.5
 ```bash
 qdwin_screenshot /tmp/qdlocker-07-step1-sentinel.png
 qdlocker_assert_color_present_in_crop \
-  /tmp/qdlocker-07-step1-sentinel.png '#ff00ff' '1920x1080+0+0' whole-screen
+  /tmp/qdlocker-07-step1-sentinel.png '#ff00ff' "${SW}x${SH}+0+0" whole-screen
 ```
 
 **Assert (1.1):** the screenshot contains magenta. If this fails,
@@ -65,14 +70,16 @@ qdlocker_ctrl status
 ### Step 3 — no sentinel pixels remain in edge bands
 
 ```bash
+edge_h=$(( SH / 11 > 96 ? SH / 11 : 96 ))
+edge_w=$(( SW / 12 > 160 ? SW / 12 : 160 ))
 qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-07-step2-locked.png '#ff00ff' '1920x96+0+0' top-edge
+  /tmp/qdlocker-07-step2-locked.png '#ff00ff' "${SW}x${edge_h}+0+0" top-edge
 qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-07-step2-locked.png '#ff00ff' '160x1080+0+0' left-edge
+  /tmp/qdlocker-07-step2-locked.png '#ff00ff' "${edge_w}x${SH}+0+0" left-edge
 qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-07-step2-locked.png '#ff00ff' '160x160+0+0' top-left-corner
+  /tmp/qdlocker-07-step2-locked.png '#ff00ff' "${edge_w}x${edge_h}+0+0" top-left-corner
 qdlocker_assert_color_absent_in_crop \
-  /tmp/qdlocker-07-step2-locked.png '#ff00ff' '1920x1080+0+0' whole-screen
+  /tmp/qdlocker-07-step2-locked.png '#ff00ff' "${SW}x${SH}+0+0" whole-screen
 ```
 
 **Assert (3.1):** all four commands exit zero. Any magenta pixel means
@@ -83,7 +90,7 @@ normal desktop content leaked through the lock screen.
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
   'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"1 minute ago\" --no-pager"' \
-  | grep -E 'set_fullscreen handle=.* outer=1920x1080 at \(0,0\)|promoted locker toplevel'
+  | grep -E "set_fullscreen handle=.* outer=${SW}x${SH} at \\(0,0\\)|promoted locker toplevel"
 ```
 
 **Assert (4.1):** journal contains both the locker promotion and a
