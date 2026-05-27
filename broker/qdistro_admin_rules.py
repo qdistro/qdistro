@@ -22,13 +22,16 @@ Phase 2 v1 scope — deliberately minimal:
   integer-eq. All selectors optional; a rule with no selectors
   matches everything (useful for a blanket default at the end of
   the ordered list).
-  When a rule names `app_id` (or `sandbox_engine`, `mime_type`) but
-  the broker caller didn't pass one, the rule does NOT match — i.e.
-  selector presence implies "the request must carry this attribute
-  and it must equal X." This keeps unsandboxed callers from
-  accidentally matching app_id rules authored for tier-3 silos, and
-  keeps mime-typed rules from bleeding into transfer / handoff calls
-  that don't carry a single mime.
+  When a rule names `app_id` (or `sandbox_engine`, `mime_type`) with
+  a *non-empty* value but the broker caller didn't pass one (empty
+  string default), the rule does NOT match — i.e. a non-empty
+  selector implies "the request must carry this attribute and it must
+  equal X." Note: a rule with `sandbox_engine: ""` (literal empty
+  string, rare) DOES match requests with an empty `sandbox_engine`.
+  This keeps unsandboxed callers from accidentally matching app_id
+  rules authored for tier-3 silos, and keeps mime-typed rules from
+  bleeding into transfer / handoff calls that don't carry a single
+  mime.
 - **Precedence**: first-match wins. Files are loaded in sorted order
   across the directory; within a file, list order. This is
   predictable and debuggable — most-specific-wins requires a
@@ -85,16 +88,31 @@ properties are verified:
        ``CheckHandoffActivation``: explicit ``decision = "deny"``
        when ``match()`` returns None. These are the three gates a
        tier-2 workload's cross-silo traffic actually traverses.
-   **Caveat (cache tier):** the approval cache is keyed by
-   ``(uid, action, exe, argv)`` and does NOT carry ``sandbox_engine``
-   or ``app_id``. A prior admin approval for a non-tier-2 request
-   with the same ``(uid, action, exe)`` tuple will also match a
-   subsequent tier-2 request. In practice this is rare because
-   tier-2 cross-silo actions use synthetic action strings
-   (``qdistro.clipboard.transfer:<src>:<dst>``) that differ from
-   tier-1 actions — but auditors should be aware the cache is
+   **Caveat (cache tier):** the approval cache does NOT carry
+   ``sandbox_engine`` or ``app_id``. Cache rows match with varying
+   specificity depending on scope/match_kind:
+     - ``match_kind="always"`` (scope ``forever``): matches by
+       ``(uid, action)`` only — any exe/argv.
+     - ``match_kind="exe_only"`` (scope ``forever_exe``): matches by
+       ``(uid, action, exe)``.
+     - ``match_kind="argv_exact"`` / ``"basename"`` / ``"prefix"``
+       (scopes ``forever_argv`` / ``forever_basename`` /
+       ``forever_prefix`` / ``1h`` / ``24h``): match by
+       ``(uid, action, exe, argv-pattern)``.
+   A prior admin approval for a non-tier-2 request with the same
+   ``(uid, action)`` tuple (especially a ``forever``-scoped approval)
+   will also match a subsequent tier-2 request. In practice this is
+   rare because tier-2 cross-silo actions use synthetic action
+   strings (``qdistro.clipboard.transfer:<src>:<dst>``) that differ
+   from tier-1 actions -- but auditors should be aware the cache is
    tier-blind. A future ``sandbox_engine`` column on the cache
    schema would close this gap.
+   **Also affected:** ``CheckPermission`` (the synchronous fast-path
+   method) follows the same rules -> cache -> hooks resolution order
+   and can return ``"allow"`` from the tier-blind cache or hook path.
+   D-Bus policy allows non-admin callers to call ``CheckPermission``,
+   so a tier-2 request routed through that path inherits the same
+   cache-blindness caveat.
 
 2. **instance_id is correlation-only, never authentication.**
    The ``Rule`` dataclass has no ``instance_id`` field; rules cannot
