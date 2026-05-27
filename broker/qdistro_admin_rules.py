@@ -64,6 +64,63 @@ Phase 2 v1 scope — deliberately minimal:
 Spec refs: `doc/permissions.md`, `doc/sudo.md`
 (rule examples). Related:  (open
 design questions captured before this landed).
+
+Tier-2 admission security properties (audit 2026-05-27)
+========================================================
+
+With tier-2 podman containers hardened (caps=0, network=none, no-new-
+privileges), the broker is the sole remaining gateway between a
+compromised tier-2 workload and host-side sensitive ops. The following
+properties are verified:
+
+1. **Default-deny for tier-2.** There is no hardcoded allow rule for
+   ``sandbox_engine="qdistro.tier2"`` or any sandbox_engine value.
+   ``RulesEngine.match()`` returns ``None`` when no rule fires.
+   Callers handle None as:
+     - ``_enqueue``: falls through to cache → hooks → admin prompt.
+       A tier-2 request with no pre-existing cache row and no hook
+       verdict reaches the admin approval queue (default-prompt, which
+       is operationally default-deny until admin acts).
+     - ``CheckClipboardTransfer`` / ``CheckClipboardReceive`` /
+       ``CheckHandoffActivation``: explicit ``decision = "deny"``
+       when ``match()`` returns None. These are the three gates a
+       tier-2 workload's cross-silo traffic actually traverses.
+
+2. **instance_id is correlation-only, never authentication.**
+   The ``Rule`` dataclass has no ``instance_id`` field; rules cannot
+   match on it. ``VerifyClientIdentity`` receives ``instance_id`` but
+   uses it only in the audit action string — identity verification
+   is anchored on (pid, starttime, uid, exe, selinux_label), not on
+   the self-asserted ``instance_id``. See also ``doc/containers.md``
+   §"Secctx contract".
+
+3. **Cross-tier isolation.** Tier-2 containers cannot make direct
+   D-Bus calls to the broker (network=none, no host bus socket
+   mounted). All host-side policy gates for tier-2 traffic are
+   mediated by qdshell, which calls ``CheckClipboardTransfer``,
+   ``CheckClipboardReceive``, and ``CheckHandoffActivation`` on their
+   behalf. These methods are pinned to the admin uid by the D-Bus
+   policy file; even if a tier-2 workload escapes the container, it
+   cannot impersonate qdshell on the system bus.
+
+4. **Wildcard-rule safeguard.** Rules with empty selectors (all None)
+   match everything — by design, for admin-authored blanket defaults.
+   ``SaveRule`` (the D-Bus path for programmatic rule creation)
+   rejects ``decision=allow`` rules with no non-empty selectors.
+   File-authored rules are not similarly gated (admin is trusted to
+   author YAML correctly), but auditors should verify that no YAML
+   file in ``/etc/qdistro/rules.d/`` contains a blanket
+   ``decision: allow`` with an empty or missing ``match:`` block.
+
+5. **Selector-presence semantics prevent tier bleed.** When a rule
+   names ``app_id`` or ``sandbox_engine`` but the request doesn't
+   carry one (empty string default), the rule does NOT match. This
+   prevents an unsandboxed caller (tier-1, no secctx) from
+   accidentally hitting a rule authored for a specific sandbox tier.
+   Conversely, a tier-2 request carrying
+   ``sandbox_engine="qdistro.tier2"`` won't match a rule with
+   ``sandbox_engine: ""`` (the literal empty-string selector, rare but
+   valid).
 """
 from __future__ import annotations
 
@@ -173,6 +230,12 @@ class Rule:
                 app_id: str = "", sandbox_engine: str = "",
                 mime_type: str = "",
                 argv: list[str] | tuple[str, ...] | None = None) -> bool:
+        # NOTE: instance_id is intentionally absent from the selector
+        # set.  It is a per-launch correlation token (see
+        # doc/containers.md §"Secctx contract"), not an authentication
+        # credential.  Matching on it would let a tier-2 workload that
+        # guesses its own token satisfy an identity-based rule — the
+        # auth boundaries are peer-uid, sandbox_engine, and app_id.
         if self.uid is not None and self.uid != int(uid):
             return False
         if self.action is not None and \

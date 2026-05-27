@@ -835,6 +835,11 @@ class Broker(dbus.service.Object):
         label_s = str(selinux_label or "")[:512]
         seng_s = str(claimed_sandbox_engine or "")[:128]
         sapp_s = str(claimed_app_id or "")[:128]
+        # instance_id is correlation-only (see doc/containers.md
+        # §"Secctx contract").  It is logged in the audit action string
+        # for traceability but never used as an identity assertion or
+        # auth credential — identity verification is anchored on
+        # (pid, starttime, uid, exe, selinux_label).
         sinst_s = str(claimed_instance_id or "")[:128]
 
         verdict = True
@@ -1005,6 +1010,12 @@ class Broker(dbus.service.Object):
         # per-app / per-sandbox-engine rules. Dest-side identity is
         # audited but not in the matcher today — most clipboard policies
         # are about who *gives*, not who *receives*.
+        #
+        # Tier-2 admission note (audit 2026-05-27): this is the primary
+        # gate for tier-2 clipboard exfil.  With caps=0 + network=none,
+        # clipboard transfer is the highest-bandwidth channel a
+        # compromised tier-2 workload has to the host.  The default is
+        # "deny" — tier-2 traffic requires an explicit allow rule.
         rule = self.rules.match(uid=uid, action=action_s, exe=exe,
                                 app_id=sapp, sandbox_engine=seng)
         decision = "deny"
@@ -1674,6 +1685,17 @@ class Broker(dbus.service.Object):
         # authoritative — it doesn't flow through the admin prompt even
         # for allows. one_shot actions skip all tiers: every call
         # reaches admin.
+        #
+        # Tier-2 admission security (audit 2026-05-27): when all four
+        # tiers (rules, cache, hooks, prompt) are exhausted without a
+        # pre-decision, the request stays pending in _pending until
+        # admin acts — this is operationally default-deny.  There is no
+        # hardcoded allow for sandbox_engine="qdistro.tier2" or any
+        # other sandbox_engine value.  The cross-silo gates
+        # (CheckClipboardTransfer, CheckClipboardReceive,
+        # CheckHandoffActivation) are even stricter: they return
+        # "deny" when rules.match() returns None, without reaching the
+        # prompt queue at all.
         matched_rule = None
         cached_row = None
         hook_verdict = None
