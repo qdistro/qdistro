@@ -143,6 +143,17 @@ if [ -f "$QDISTRO_SRC/tier2/spawn-tier2.sh" ]; then
     install -m 0755 -o root -g root \
         "$QDISTRO_SRC/tier2/podapps-scan.sh" \
         /usr/bin/qdistro-podapps-scan
+    # Custom seccomp profiles — deny-by-default allowlists for each
+    # tier-2 workload. spawn-tier2.sh looks here as a fallback when
+    # SCRIPT_DIR/seccomp/ (dev tree) is absent.
+    if [ -d "$QDISTRO_SRC/tier2/seccomp" ]; then
+        install -d /usr/lib/qdistro/seccomp
+        for _prof in "$QDISTRO_SRC"/tier2/seccomp/*.json; do
+            [ -f "$_prof" ] || continue
+            install -m 0644 -o root -g root "$_prof" /usr/lib/qdistro/seccomp/
+        done
+        echo "tier-2 seccomp profiles installed in /usr/lib/qdistro/seccomp/"
+    fi
     echo "qdistro-tier2-spawn + qdistro-podapps-scan installed in /usr/bin"
 else
     echo "WARN: $QDISTRO_SRC/tier2/spawn-tier2.sh not found —" \

@@ -13,6 +13,7 @@ within the scope's lifetime). See .
 """
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import pwd as _pwd_mod
 import re
@@ -458,14 +459,14 @@ class _Request:
     __slots__ = (
         "id", "uid", "pid", "exe", "start_time", "action", "details",
         "decision", "waiters", "delegated", "one_shot",
-        "exe_sha256", "selinux_label", "cgroup",
+        "exe_sha256", "selinux_label", "cgroup", "layered_pending",
     )
 
     def __init__(self, rid: int, uid: int, pid: int, exe: str,
                  start_time: int, action: str, details: dict,
                  delegated: bool = False, one_shot: bool = False,
                  exe_sha256: str = "", selinux_label: str = "",
-                 cgroup: str = ""):
+                 cgroup: str = "", layered_pending: bool = False):
         self.id = rid
         self.uid = uid
         self.pid = pid
@@ -495,9 +496,13 @@ class _Request:
         # time (best-effort; empty strings if process gone or kernel
         # interface absent). Surfaced via GetPending so the admin app
         # can render alongside uid/pid/exe in the request detail pane.
+        # When layered_pending is True, the IO thread hasn't delivered
+        # these fields yet; they will be empty until the idle callback
+        # applies the results.
         self.exe_sha256 = str(exe_sha256 or "")
         self.selinux_label = str(selinux_label or "")
         self.cgroup = str(cgroup or "")
+        self.layered_pending = bool(layered_pending)
 
 
 class Broker(dbus.service.Object):
@@ -521,6 +526,14 @@ class Broker(dbus.service.Object):
         # couple of rapid retries stays unaffected; a tight-loop attacker
         # hits the cap in ~20ms and gets audited per rejection.
         self.ratelimit = RateLimiter(limit=50, window_s=1.0)
+        # Thread pool for deferred IO (layered-identity reads). The
+        # _enqueue fast path returns the rid immediately; the slow
+        # _read_proc_layered IO runs here and delivers results via
+        # GLib.idle_add back to the mainloop thread. 4 workers handle
+        # the common burst of concurrent qsu clients without starving
+        # the system.
+        self._io_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="broker-io")
         # Sandboxed Python hook executor client.  When enabled, the
         # broker consults the hook executor after declarative rules are
         # inconclusive and before falling back to the admin prompt.
@@ -1680,6 +1693,8 @@ class Broker(dbus.service.Object):
                 "Request rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
+        # --- Phase 1 (synchronous, fast): rules / cache / hooks ------
+        #
         # Resolution order per spec/07: rules first, cache second,
         # hooks third, prompt last. A rule-matched decision is
         # authoritative — it doesn't flow through the admin prompt even
@@ -1724,15 +1739,6 @@ class Broker(dbus.service.Object):
         # draw fake approval banners inside the detail pane.
         clean_details = _sanitize_details(details)
 
-        # spec/25 §Phase-2: snapshot layered identity at request time
-        # (process may exit before admin clicks Approve, in which case
-        # the cached values are all admin gets). Done outside the lock
-        # — exe-hash IO can stretch into the tens of milliseconds and
-        # we don't want to serialise concurrent RequestPermission
-        # callers behind it.
-        layered = _read_proc_layered(pid) if pid > 0 else {
-            "exe_sha256": "", "selinux_label": "", "cgroup": ""}
-
         # Hook consultation: when rules and cache are both inconclusive,
         # ask the sandboxed hook executor before falling through to the
         # admin prompt. Done outside the lock and before creating a
@@ -1750,19 +1756,31 @@ class Broker(dbus.service.Object):
                 print(f"[broker] hook query failed: {e!r}", flush=True)
                 hook_verdict = None
 
+        # --- Phase 2 (synchronous, fast): allocate rid + _Request ----
+        #
+        # The layered-identity IO (_read_proc_layered) is deferred to
+        # Phase 3 (thread pool) so the D-Bus method reply returns in
+        # <1 ms even when N concurrent qsu clients hit the broker
+        # simultaneously. The _Request is created with
+        # layered_pending=True; the idle callback in Phase 3 fills in
+        # exe_sha256 / selinux_label / cgroup once the IO completes.
+        #
+        # Requests that are decided immediately (rule / cache / hook)
+        # skip the deferred IO — the layered fields are advisory only
+        # and not needed for the decision or its cache key.
         with self._lock:
             rid = self._next_id
             self._next_id += 1
             req = _Request(rid, uid, pid, exe, start_time, action_s,
                            clean_details, delegated=delegated,
                            one_shot=one_shot,
-                           exe_sha256=layered["exe_sha256"],
-                           selinux_label=layered["selinux_label"],
-                           cgroup=layered["cgroup"])
+                           layered_pending=True)
             if matched_rule is not None:
                 req.decision = (matched_rule.decision == "allow")
+                req.layered_pending = False  # no layered IO needed
             elif cached_row is not None:
                 req.decision = bool(cached_row["decision"])
+                req.layered_pending = False
             elif hook_verdict is not None:
                 verdict_val = hook_verdict.get("verdict")
                 if verdict_val == "allow":
@@ -1773,9 +1791,37 @@ class Broker(dbus.service.Object):
                 # is out-of-band; the broker's decision is binary).
                 elif verdict_val == "transform":
                     req.decision = True
+                if req.decision is not None:
+                    req.layered_pending = False
             self._pending[rid] = req
 
         if req.decision is None:
+            # --- Phase 3 (deferred, thread pool): layered IO ----------
+            #
+            # Submit _read_proc_layered to the broker's IO thread pool.
+            # On completion, _apply_layered_identity runs on the GLib
+            # mainloop thread via idle_add — the _pending dict is only
+            # modified from the mainloop, preserving thread safety.
+            io_pool = getattr(self, "_io_pool", None)
+            if pid > 0 and io_pool is not None:
+                try:
+                    fut = io_pool.submit(_read_proc_layered, pid)
+                    fut.add_done_callback(
+                        lambda f, r=rid: GLib.idle_add(
+                            self._apply_layered_identity, r, f))
+                except RuntimeError:
+                    # Pool shut down (broker teardown) — leave fields empty.
+                    req.layered_pending = False
+            elif pid > 0:
+                # Fallback: no thread pool (e.g. test harness without
+                # _io_pool). Run synchronously to preserve correctness.
+                layered = _read_proc_layered(pid)
+                req.exe_sha256 = layered.get("exe_sha256", "")
+                req.selinux_label = layered.get("selinux_label", "")
+                req.cgroup = layered.get("cgroup", "")
+                req.layered_pending = False
+            else:
+                req.layered_pending = False
             self.RequestPending(rid)
             return rid
 
@@ -1843,6 +1889,29 @@ class Broker(dbus.service.Object):
                     print(f"[broker] qdistro.audit.failure: hook path, reason={e!r}", flush=True)
         return rid
 
+    def _apply_layered_identity(self, rid: int, future) -> bool:
+        """GLib idle callback: apply layered-identity IO results.
+
+        Called on the mainloop thread (via GLib.idle_add) when the
+        _read_proc_layered future completes. All _pending mutations
+        happen here, preserving single-threaded access to broker state.
+        """
+        with self._lock:
+            req = self._pending.get(rid)
+        if req is None:
+            return False  # already decided + reaped
+        try:
+            layered = future.result()
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] layered-identity IO failed for rid={rid}: {e!r}",
+                  flush=True)
+            layered = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
+        req.exe_sha256 = layered.get("exe_sha256", "")
+        req.selinux_label = layered.get("selinux_label", "")
+        req.cgroup = layered.get("cgroup", "")
+        req.layered_pending = False
+        return False  # don't repeat
+
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="b",
                         async_callbacks=("_reply", "_error"))
     def WaitForDecision(self, request_id: int, _reply, _error):
@@ -1873,9 +1942,13 @@ class Broker(dbus.service.Object):
                     # spec/25 §Phase-2 layered identity (always present;
                     # empty string when /proc data wasn't available at
                     # request time — process gone, no SELinux, etc.).
-                    "exe_sha256":    dbus.String(r.exe_sha256),
-                    "selinux_label": dbus.String(r.selinux_label),
-                    "cgroup":        dbus.String(r.cgroup),
+                    # layered_pending=True means the IO thread hasn't
+                    # finished yet; admin app can show a spinner or
+                    # display the request with empty layered fields.
+                    "exe_sha256":      dbus.String(r.exe_sha256),
+                    "selinux_label":   dbus.String(r.selinux_label),
+                    "cgroup":          dbus.String(r.cgroup),
+                    "layered_pending": dbus.Boolean(r.layered_pending),
                 })
             return out
 
@@ -1918,6 +1991,18 @@ class Broker(dbus.service.Object):
                     f"use 'once'",
                     name=BUS_NAME + ".ScopeNotPermitted",
                 )
+            # Warn when admin decides with a scope that relies on the
+            # exe hash but the deferred layered-identity IO hasn't
+            # delivered it yet. The decision still proceeds — the cache
+            # key for forever_exe is (uid, action, exe_path) not
+            # exe_sha256, so correctness isn't affected. But audit
+            # completeness is: the admin saw empty exe_sha256 in the
+            # approval pane. Log so post-incident reviews notice.
+            if req.layered_pending and scope_s == "forever_exe":
+                print(f"[broker] WARN: DecideRequest rid={request_id} "
+                      f"scope=forever_exe decided before layered-identity "
+                      f"IO completed (exe_sha256 not yet available)",
+                      flush=True)
             # TOCTOU re-check: if the pid has been recycled between
             # RequestPermission and this DecideRequest, the admin's
             # click is about a different process than the UI showed.

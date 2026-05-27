@@ -13,6 +13,7 @@ directly.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 from pathlib import Path
 
@@ -54,6 +55,8 @@ class _StubBroker(Broker):
         self.ratelimit = RateLimiter(limit=ratelimit_limit,
                                      window_s=ratelimit_window_s)
         self._audit_retention_days = 0
+        self._io_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="stub-broker-io")
         self._peer_uid = NON_ADMIN_UID
         self._peer_pid = 1
         self._peer_exe = PEER_EXE

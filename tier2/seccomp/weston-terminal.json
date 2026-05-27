@@ -1,7 +1,7 @@
 {
 	"defaultAction": "SCMP_ACT_ERRNO",
 	"defaultErrnoRet": 1,
-	"comment": "Custom seccomp profile for the tier-2 weston-terminal container. Deny-by-default; allows only the ~130 syscalls needed by bash, weston, weston-terminal, wayland client libs, and basic coreutils (mkdir, chmod, rm, seq, sed). See tier2-podman-hardening-followups.md item 1.",
+	"comment": "Custom seccomp profile for the tier-2 weston-terminal container. Deny-by-default; allows only the ~140 syscalls needed by bash, weston, weston-terminal, wayland client libs, and basic coreutils (mkdir, chmod, rm, seq, sed). See tier2-podman-hardening-followups.md item 1.",
 	"archMap": [
 		{
 			"architecture": "SCMP_ARCH_X86_64",
@@ -19,7 +19,7 @@
 	],
 	"syscalls": [
 		{
-			"comment": "Process lifecycle",
+			"comment": "Process lifecycle and job control (setpgid/setsid needed by bash job control, set_robust_list/rseq by glibc/pthread init)",
 			"names": [
 				"clone",
 				"clone3",
@@ -32,8 +32,15 @@
 				"getppid",
 				"gettid",
 				"set_tid_address",
+				"set_robust_list",
+				"rseq",
 				"prctl",
 				"arch_prctl",
+				"setpgid",
+				"getpgid",
+				"getpgrp",
+				"setsid",
+				"getsid",
 				"sched_yield",
 				"sched_getaffinity",
 				"sched_setaffinity"
@@ -101,9 +108,10 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "Socket (wayland client/server, pipewire)",
+			"comment": "Socket (wayland client/server, pipewire). socketpair needed by weston for internal IPC. Network=none at the podman level prevents AF_INET/AF_INET6 even though the syscall is allowed.",
 			"names": [
 				"socket",
+				"socketpair",
 				"connect",
 				"bind",
 				"listen",
@@ -122,11 +130,13 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "Epoll/poll (weston event loop)",
+			"comment": "Epoll/poll (weston event loop). epoll_pwait/epoll_pwait2 used by glibc >= 2.35 and libwayland.",
 			"names": [
 				"epoll_create1",
 				"epoll_ctl",
 				"epoll_wait",
+				"epoll_pwait",
+				"epoll_pwait2",
 				"poll",
 				"ppoll",
 				"select",
@@ -135,11 +145,13 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "Signal handling",
+			"comment": "Signal handling (rt_sigsuspend needed by bash wait builtin, rt_sigpending by signal-safe cleanup paths)",
 			"names": [
 				"rt_sigaction",
 				"rt_sigprocmask",
 				"rt_sigreturn",
+				"rt_sigsuspend",
+				"rt_sigpending",
 				"kill",
 				"tgkill",
 				"sigaltstack"
@@ -161,7 +173,7 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "User/group IDs",
+			"comment": "User/group IDs. The set* variants are needed by podman's --userns=keep-id uid mapping; they are neutered by --cap-drop=ALL (no CAP_SETUID/SETGID) and --security-opt=no-new-privileges.",
 			"names": [
 				"getuid",
 				"geteuid",
@@ -177,7 +189,7 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "Misc: ioctl (terminal, DRM), futex (glibc threading), getrandom (weston), eventfd/signalfd (event loops), memfd/ftruncate/fallocate (wayland SHM), chmod/chown/umask (coreutils), inotify (weston config watch)",
+			"comment": "Misc: ioctl (terminal, DRM), futex (glibc threading), getrandom (weston), eventfd/signalfd (event loops), memfd/ftruncate/fallocate (wayland SHM), chmod/chown/umask (coreutils), inotify (weston config watch), prlimit64/getrlimit/setrlimit (glibc, bash ulimit). chown/fchown* neutered by --cap-drop=ALL (no CAP_CHOWN).",
 			"names": [
 				"ioctl",
 				"uname",
@@ -198,7 +210,10 @@
 				"umask",
 				"inotify_init1",
 				"inotify_add_watch",
-				"inotify_rm_watch"
+				"inotify_rm_watch",
+				"prlimit64",
+				"getrlimit",
+				"setrlimit"
 			],
 			"action": "SCMP_ACT_ALLOW"
 		},

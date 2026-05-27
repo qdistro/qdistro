@@ -10,6 +10,11 @@ uid / pid / exe in the request detail pane. Process death between
 RequestPermission and the read tolerated — empty string is acceptable
 (spec/25: advisory data, not a gate).
 
+Since the broker defers layered-identity IO to a thread pool (option e
+from broker-serialization-concurrent-qsu.md), the tests use
+_drain_layered_io() to wait for the pool and drain GLib idle callbacks
+before asserting on the layered fields.
+
 Mirrors test_broker_check_permission's _StubBroker harness shape so we
 don't need a live system bus.
 """
@@ -24,9 +29,27 @@ import pytest
 
 pytest.importorskip("dbus")
 
+from gi.repository import GLib  # noqa: E402
+
 import qdistro_admin_broker as B  # noqa: E402
 
 from test_broker_check_permission import _StubBroker, NON_ADMIN_UID  # noqa: E402
+
+
+def _drain_layered_io(broker: _StubBroker) -> None:
+    """Wait for the broker's IO thread pool to finish all pending work
+    and then drain GLib idle callbacks so _apply_layered_identity runs.
+    """
+    # Shut down the pool and wait for all futures to complete.
+    broker._io_pool.shutdown(wait=True)
+    # Re-create the pool for subsequent calls.
+    import concurrent.futures
+    broker._io_pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="stub-broker-io")
+    # Drain GLib idle callbacks (the done_callback scheduled idle_add).
+    ctx = GLib.MainContext.default()
+    while ctx.iteration(False):
+        pass
 
 
 @pytest.fixture
@@ -91,6 +114,9 @@ class TestGetPendingSurfacesLayeredFields:
         broker.set_peer(uid=NON_ADMIN_UID, pid=os.getpid(),
                         exe=sys.executable, start=0)
         rid = broker.RequestPermission("test.layered", {"k": "v"})
+        # Layered IO is deferred to the thread pool; drain it so the
+        # idle callback populates the layered fields before we assert.
+        _drain_layered_io(broker)
         # _StubBroker overrides set_peer to also drive _peer_info.
         # GetPending requires admin/root in production; the stub
         # bypasses authz so we can read the queue directly.
@@ -105,9 +131,29 @@ class TestGetPendingSurfacesLayeredFields:
         sha = str(row["exe_sha256"])
         assert len(sha) == 64
         assert all(c in "0123456789abcdef" for c in sha)
+        # layered_pending should be False after IO completes.
+        assert not bool(row["layered_pending"])
+
+    def test_get_pending_before_io_completes_shows_layered_pending(self, broker):
+        """Before the IO pool delivers, GetPending shows layered_pending=True
+        and empty layered fields. The admin app can render a spinner."""
+        broker.set_peer(uid=NON_ADMIN_UID, pid=os.getpid(),
+                        exe=sys.executable, start=0)
+        rid = broker.RequestPermission("test.layered.pending", {"k": "v"})
+        # Do NOT drain — check the immediate state.
+        # The request should be in _pending with layered_pending=True.
+        with broker._lock:
+            req = broker._pending[rid]
+            assert req.layered_pending is True
+        out = broker.GetPending()
+        assert len(out) == 1
+        assert bool(out[0]["layered_pending"]) is True
+        # Clean up the pool for subsequent tests.
+        _drain_layered_io(broker)
 
     def test_get_pending_when_pid_invalid_yields_empty_strings(self, broker):
         # pid=0 -> /proc paths absent -> all three strings empty.
+        # pid=0 is the no-IO fast path: layered_pending is False immediately.
         broker.set_peer(uid=NON_ADMIN_UID, pid=0, exe="?", start=0)
         rid = broker.RequestPermission("test.layered.missing", {})
         out = broker.GetPending()
@@ -117,6 +163,7 @@ class TestGetPendingSurfacesLayeredFields:
         assert str(row["exe_sha256"]) == ""
         assert str(row["selinux_label"]) == ""
         assert str(row["cgroup"]) == ""
+        assert not bool(row["layered_pending"])
 
     def test_layered_snapshot_survives_process_exit(self, broker, tmp_path):
         """The whole point of snapshotting at request time: even if the
@@ -138,6 +185,7 @@ class TestGetPendingSurfacesLayeredFields:
         broker.set_peer(uid=NON_ADMIN_UID, pid=dead_pid,
                         exe=str(helper), start=0)
         rid = broker.RequestPermission("test.layered.dead", {})
+        _drain_layered_io(broker)
         out = broker.GetPending()
         assert len(out) == 1
         # Either way: keys present, no exceptions raised.

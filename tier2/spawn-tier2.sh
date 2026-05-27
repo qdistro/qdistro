@@ -123,19 +123,6 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
 export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 OUTER_DISPLAY="${TIER2_OUTER_DISPLAY:-${WAYLAND_DISPLAY:-wayland-1}}"
 QDWIN_SHELL_SO="${TIER2_QDWIN_SHELL_SO:-/usr/lib64/weston/qdwin-shell.so}"
-# Custom seccomp profile — deny-by-default, allows only the ~130
-# syscalls needed by bash/weston/weston-terminal/coreutils. Falls back
-# to podman's default profile if the custom one is missing (e.g. dev
-# runs from a source checkout that hasn't been installed).
-TIER2_SECCOMP_PROFILE="${TIER2_SECCOMP_PROFILE:-}"
-if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
-    _seccomp_candidate="$SCRIPT_DIR/seccomp/${WORKLOAD}.json"
-    if [ -f "$_seccomp_candidate" ]; then
-        TIER2_SECCOMP_PROFILE="$_seccomp_candidate"
-    elif [ -f "/usr/local/share/qdistro/tier2/seccomp/${WORKLOAD}.json" ]; then
-        TIER2_SECCOMP_PROFILE="/usr/local/share/qdistro/tier2/seccomp/${WORKLOAD}.json"
-    fi
-fi
 IMAGE="qdistro/tier2-${WORKLOAD}:latest"
 USE_SECCTX="${TIER2_USE_SECCTX:-1}"
 ENGINE="${TIER2_SECCTX_ENGINE:-qdistro.tier2}"
@@ -169,6 +156,24 @@ if [ ! -r "$SPAWN_COMMON" ]; then
 fi
 . "$SPAWN_COMMON"
 LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
+
+# Custom seccomp profile — deny-by-default, allows only the ~130
+# syscalls needed by bash/weston/weston-terminal/coreutils. Falls back
+# to podman's default profile if the custom one is missing (e.g. dev
+# runs from a source checkout that hasn't been installed).
+TIER2_SECCOMP_PROFILE="${TIER2_SECCOMP_PROFILE:-}"
+if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
+    # Search order: dev-tree adjacent, installed /usr/lib, legacy /usr/local/share.
+    for _seccomp_dir in \
+        "$SCRIPT_DIR/seccomp" \
+        "/usr/lib/qdistro/seccomp" \
+        "/usr/local/share/qdistro/tier2/seccomp"; do
+        if [ -f "$_seccomp_dir/${WORKLOAD}.json" ]; then
+            TIER2_SECCOMP_PROFILE="$_seccomp_dir/${WORKLOAD}.json"
+            break
+        fi
+    done
+fi
 
 # --- pre-flight ---------------------------------------------------------
 fail() { echo "spawn-tier2: $*" >&2; exit 2; }
