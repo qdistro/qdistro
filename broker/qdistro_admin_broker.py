@@ -14,6 +14,7 @@ within the scope's lifetime). See .
 from __future__ import annotations
 
 import os
+import pwd as _pwd_mod
 import re
 import signal
 import threading
@@ -33,7 +34,15 @@ from qdistro_hook_client import HookClient  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
-ADMIN_UID = 1000
+# Discover the admin UID at startup. QDISTRO_ADMIN_USER overrides the
+# username for images where the admin account has a non-standard UID;
+# it does NOT rename the admin role (D-Bus policies still reference
+# user="admin", and changing that requires updating the .conf files).
+try:
+    ADMIN_UID = _pwd_mod.getpwnam(
+        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
+except KeyError:
+    ADMIN_UID = 1000
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
 
@@ -364,22 +373,29 @@ def _read_proc_identity(pid: int) -> tuple[str, int]:
 # pathological "200 MiB monolith with one hot-path mtime tick" case.
 _EXE_HASH_BYTES_MAX = 64 * 1024 * 1024
 
+_proc_layered_cache: dict[tuple[int, int, str], dict[str, str]] = {}
+_proc_layered_lock = threading.Lock()
+_PROC_LAYERED_CACHE_MAX = 256
+
 
 def _read_proc_layered(pid: int) -> dict[str, str]:
     """Snapshot the layered identity attributes spec/25 §Phase-2 wants
     surfaced on the admin pane: exe SHA-256, SELinux label, cgroup.
 
-    Cheapest path that still gives admin a meaningful sense of what
-    they're approving. Each lookup tolerates the process having vanished
-    between RequestPermission and the read — admin sees an empty string
-    and the prompt still goes through. Spec/25 explicitly says these
-    are advisory data, not gating signals; the broker doesn't refuse
-    requests where one or more values are absent.
-
-    Returned keys are always present (empty string on failure) so the
-    admin app can render a stable layout instead of branching on
-    "is the field absent or empty".
+    Results are cached by (pid, starttime, exe_path) so repeat
+    lookups for the same process skip the expensive exe-hash IO.
+    The exe_path is included so an exec into a different binary
+    invalidates the cache. Note: the cache does NOT help when N
+    different qsu clients arrive concurrently (each has a distinct
+    pid); the proper fix for that case is async D-Bus method
+    dispatch so exe hashing runs in parallel on a thread pool.
     """
+    exe_path, start_time = _read_proc_identity(pid)
+    key = (pid, start_time, exe_path)
+    with _proc_layered_lock:
+        cached = _proc_layered_cache.get(key)
+        if cached is not None:
+            return cached
     out = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
 
     # Hash via the kernel's /proc/<pid>/exe symlink. Reading through
@@ -431,6 +447,10 @@ def _read_proc_layered(pid: int) -> dict[str, str]:
     except OSError:
         pass
 
+    with _proc_layered_lock:
+        if len(_proc_layered_cache) >= _PROC_LAYERED_CACHE_MAX:
+            _proc_layered_cache.clear()
+        _proc_layered_cache[key] = out
     return out
 
 

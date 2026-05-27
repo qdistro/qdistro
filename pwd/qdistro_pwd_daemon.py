@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd as _pwd_mod
 import secrets
 import signal
 import sys
@@ -85,7 +86,11 @@ from qdistro_pwd_fprint import (  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.Pwd1"
 OBJ_PATH = "/org/qdistro/Pwd1"
-ADMIN_UID = 1000
+try:
+    ADMIN_UID = _pwd_mod.getpwnam(
+        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
+except KeyError:
+    ADMIN_UID = 1000
 
 VAULT_DIR = os.environ.get("QDISTRO_PWD_VAULT_DIR", DEFAULT_VAULT_DIR)
 AUDIT_DB = os.environ.get(

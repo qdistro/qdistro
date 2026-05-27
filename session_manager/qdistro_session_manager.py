@@ -39,7 +39,11 @@ from typing import Any, Iterable
 
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
-ADMIN_UID = 1000
+try:
+    ADMIN_UID = pwd.getpwnam(
+        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
+except KeyError:
+    ADMIN_UID = 1000
 
 # Where per-silo broker state lives. The dir for each silo is owned
 # by the silo's uid and is mode 0700 so other uids cannot peek.
@@ -442,8 +446,22 @@ class _SiloStore:
             text = _silos_yaml_render(rows)
             self._config_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
-            tmp.write_text(text)
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                data = text.encode()
+                mv = memoryview(data)
+                while mv:
+                    written = os.write(fd, mv)
+                    mv = mv[written:]
+                os.fdatasync(fd)
+            finally:
+                os.close(fd)
             os.replace(tmp, self._config_path)
+            dfd = os.open(str(self._config_path.parent), os.O_RDONLY)
+            try:
+                os.fdatasync(dfd)
+            finally:
+                os.close(dfd)
 
     # ---- lookup ---------------------------------------------------------
 

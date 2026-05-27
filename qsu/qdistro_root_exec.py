@@ -142,7 +142,8 @@ def _peer_start_time(pid: int) -> int:
 # -- Broker request --------------------------------------------------------
 
 def _ask_broker(target_user: str, argv: list[str],
-                 caller_uid: int, caller_pid: int, caller_exe: str) -> bool:
+                 caller_uid: int, caller_pid: int, caller_exe: str,
+                 *, client_claimed_name: str = "") -> bool:
     """Route through the broker's standard approval flow.
 
     Uses RequestPermissionAs so the broker records (and matches rules
@@ -175,6 +176,8 @@ def _ask_broker(target_user: str, argv: list[str],
         # admin app's detail pane renders them in order.
         **{f"argv[{i:02d}]": a for i, a in enumerate(argv)},
     }
+    if client_claimed_name:
+        details["client_claimed_name"] = client_claimed_name
     # 2026-05-16: bumped dbus reply timeouts. Two manifestations of
     # broker serialisation tripped over the dbus-python default 25s:
     #
@@ -368,6 +371,7 @@ def handle_one(sock: socket.socket) -> None:
 
         target_user = str(req.get("target_user") or "")
         argv = list(req.get("argv") or [])
+        client_claimed_name = str(req.get("caller_name") or "")
         if not target_user or not argv:
             _send(sock, {"type": "error", "message": "target_user and argv required"})
             _send(sock, {"type": "exit",  "code": 1})
@@ -394,6 +398,7 @@ def handle_one(sock: socket.socket) -> None:
             _resolve_target(target_user)
         except ValueError as e:
             _send(sock, {"type": "error", "message": str(e)})
+            _send(sock, {"type": "exit",  "code": 1})
             return
 
         # Step 5: resolve argv[0] to absolute *before* the broker call
@@ -423,7 +428,8 @@ def handle_one(sock: socket.socket) -> None:
         syslog.syslog(syslog.LOG_NOTICE,
                       f"qsu exec request: caller uid={uid} pid={pid} "
                       f"exe={exe_at_accept} target={target_user!r} argv={argv!r}")
-        allowed = _ask_broker(target_user, argv, uid, pid, exe_at_accept)
+        allowed = _ask_broker(target_user, argv, uid, pid, exe_at_accept,
+                              client_claimed_name=client_claimed_name)
         if not allowed:
             _send(sock, {"type": "error", "message": "request denied"})
             _send(sock, {"type": "exit",  "code": 1})

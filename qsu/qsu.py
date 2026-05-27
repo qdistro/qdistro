@@ -111,7 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        request = {"target_user": target_user, "argv": cmd}
+        request = {
+            "target_user": target_user,
+            "argv": cmd,
+            "caller_name": "qsu",
+        }
         sock.sendall((json.dumps(request) + "\n").encode())
         return _stream(sock)
     finally:

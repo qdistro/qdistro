@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import pwd as _pwd_mod
 import subprocess
 import sys
 import syslog
@@ -65,8 +66,11 @@ AGENT_BUS = "org.qdistro.PolkitAgent"
 QDISTRO_BROKER_BUS = "org.qdistro.AdminBroker1"
 QDISTRO_BROKER_OBJ = "/org/qdistro/AdminBroker1"
 
-ADMIN_UID = 1000  # admin; the uid the agent runs as and the identity
-                  # it presents to polkit as the authenticated admin.
+try:
+    ADMIN_UID = _pwd_mod.getpwnam(
+        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
+except KeyError:
+    ADMIN_UID = 1000
 
 DEFAULT_METHOD = "broker"
 DEFAULT_PAM_SERVICE = "login"

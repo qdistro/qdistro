@@ -32,6 +32,7 @@ Action details:
 from __future__ import annotations
 
 import os
+import pwd as _pwd_mod
 from typing import Any
 
 import dbus
@@ -41,7 +42,11 @@ POLKIT_BUS = "org.freedesktop.PolicyKit1"
 POLKIT_PATH = "/org/freedesktop/PolicyKit1/Authority"
 POLKIT_IFC = "org.freedesktop.PolicyKit1.Authority"
 
-ADMIN_UID = 1000
+try:
+    ADMIN_UID = _pwd_mod.getpwnam(
+        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
+except KeyError:
+    ADMIN_UID = 1000
 
 ACTION_UNLOCK = "org.qdistro.pwd.unlock"
 

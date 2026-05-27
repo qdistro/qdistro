@@ -36,13 +36,15 @@ install -o root -g root -m 0644 "$QSU_SRC/qdistro_root_exec.py" \
 
 # 2. User-facing wrapper. /usr/local/bin/qsu is what humans type; it
 #    just invokes qsu.py through python3 so we don't have to chase
-#    shebangs across distros.
+#    shebangs across distros. Note: /proc/<pid>/exe will show python3
+#    by the time the broker reads it; qsu.py sends caller_name="qsu"
+#    in the request frame so the admin app can display the real tool.
+install -o root -g root -m 0644 "$QSU_SRC/qsu.py" "$DEST_LIB/qsu.py"
 cat >"$DEST_BIN/qsu" <<'EOF'
 #!/bin/bash
 exec /usr/bin/python3 /usr/local/lib/qdistro/qsu.py "$@"
 EOF
 chmod 0755 "$DEST_BIN/qsu"
-install -o root -g root -m 0644 "$QSU_SRC/qsu.py" "$DEST_LIB/qsu.py"
 
 # 3. Systemd unit pair.
 install -m 0644 "$QSU_SRC/qdistro-root-exec.socket"  "$SOCKET_UNIT"

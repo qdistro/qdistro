@@ -579,7 +579,11 @@ build_qdwin() {
     fi
     log "building qdwin (libweston shell plugin)..."
     cd "$REPO_ROOT/qdwin"
-    meson setup build --wipe --prefix=/usr
+    if [ -f build/build.ninja ]; then
+        meson setup build --reconfigure --prefix=/usr
+    else
+        meson setup build --prefix=/usr
+    fi
     meson compile -C build
     meson install -C build
 }
@@ -591,7 +595,11 @@ build_qdistro_daemons() {
     fi
     log "building qdistro C daemons..."
     cd "$REPO_ROOT/qdistro/daemons"
-    meson setup build --wipe --prefix=/usr
+    if [ -f build/build.ninja ]; then
+        meson setup build --reconfigure --prefix=/usr
+    else
+        meson setup build --prefix=/usr
+    fi
     meson compile -C build
     meson install -C build
 }
@@ -603,8 +611,13 @@ build_qdshell_plugin() {
     fi
     log "building qdshell QML plugin (libqdistro-qdwin.so)..."
     cd "$REPO_ROOT/qdshell"
-    meson setup build --wipe --prefix=/usr \
-        || die "qdshell meson setup failed"
+    if [ -f build/build.ninja ]; then
+        meson setup build --reconfigure --prefix=/usr \
+            || die "qdshell meson setup failed"
+    else
+        meson setup build --prefix=/usr \
+            || die "qdshell meson setup failed"
+    fi
     meson compile -C build \
         || die "qdshell meson compile failed"
     meson install -C build \
@@ -682,7 +695,7 @@ install_qdlocker_service() {
         log "  patched qdlocker.service ExecStart: /usr/local/bin → /usr/bin"
     fi
 
-    chown -R admin:users /home/admin/.config/systemd
+    chown -R admin:"$(id -gn admin)" /home/admin/.config/systemd
     install -d -m 0755 /etc/systemd/user/qdlocker.service.d
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<'EOF'
 [Service]
@@ -917,7 +930,7 @@ main() {
         log "  Admin account: admin (uid 1000)"
         log "  Regular user:  $REGULAR_USER (uid 1001)"
     else
-        log "Bootstrap complete (greetd not configured — use --skip-greetd was set)."
+        log "Bootstrap complete (greetd not configured — --skip-greetd was set)."
         log "Configure greetd manually or re-run without --skip-greetd to enable the login screen."
     fi
     log ""
