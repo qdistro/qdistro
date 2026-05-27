@@ -1,16 +1,19 @@
 #!/usr/bin/env bats
 # Tier-2 hardening lock-in test.
 #
-# Asserts the five load-bearing isolation invariants inside a live
-# tier-2 container. Catches regressions from someone loosening a
-# flag during debugging and forgetting to revert.
+# Asserts the load-bearing isolation invariants inside a live tier-2
+# container. Catches regressions from someone loosening a flag during
+# debugging and forgetting to revert.
 #
-# Invariants:
+# Invariants (mirrors all s40 driver assertions):
 #   1. CapEff = 0                    (--cap-drop=ALL)
 #   2. NoNewPrivs = 1                (--security-opt=no-new-privileges)
 #   3. Only `lo` in /sys/class/net/  (--network=none)
 #   4. Root mount is read-only       (--read-only)
-#   5. No bus/pipewire-pulse/ssh-agent/gnupg sockets in /run/user/
+#   5. touch / blocked               (cross-check of read-only)
+#   6. /run/user/ contains only allowed sockets/logs
+#   7. No bus/pipewire-pulse/ssh-agent/gnupg sockets in /run/user/
+#   8. qdistro_tier2_token label set (orphan-dir reaper)
 #
 # Relies on the existing s40-tier2-hardening.sh driver which already
 # runs inside the VM. This bats file wraps it in the standard
@@ -68,9 +71,14 @@ setup() {
 
     # Invariant 4: read-only root filesystem
     assert_output_contains "PASS: rootfs mounted read-only"
+    assert_output_contains "PASS: touch / blocked by read-only"
 
     # Invariant 5: no host secrets leaked into container runtime dir
+    assert_output_contains "PASS: /run/user/1000/ contains only allowed sockets/logs"
     assert_output_contains "PASS: no host bus/pulse/gnupg/ssh-agent in /run/user/1000/"
+
+    # Container label (orphan-dir reaper depends on this)
+    assert_output_contains "PASS: qdistro_tier2_token label set"
 
     assert_output_contains "PASS: §Phase-7 tier-2 hardening invariants enforced"
 }
