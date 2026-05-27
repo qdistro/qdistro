@@ -19,6 +19,30 @@
 
 load helpers
 
+# Stage the in-VM driver script onto the host's bats http server
+# (port 8768 by convention) so the VM can fetch it. Mirrors the
+# self-staging pattern in tiered-isolation.bats.
+stage_vm_driver() {
+    local script_name="$1"
+    local script_path
+    script_path="$(dirname "$BATS_TEST_FILENAME")/$script_name"
+    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
+
+    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
+
+    if ! ss -tln 2>/dev/null | grep -q ":8768 "; then
+        local stage_dir
+        stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
+        (
+            cd "$stage_dir" || exit 1
+            nohup python3 -m http.server 8768 \
+                >/tmp/qdistro-bats-http.log 2>&1 </dev/null 3>&- 4>&- 5>&- &
+            disown "$!" 2>/dev/null || true
+        )
+        sleep 1
+    fi
+}
+
 setup() {
     # Ensure outer compositor is up.
     vm_run "test -S /run/user/1000/wayland-1"
