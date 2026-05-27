@@ -247,6 +247,48 @@ independently in phase 6.8.
   wired in `qml-plugin/qdwin-binding.{h,cpp}`; Qdwin.qml spawns
   `qdistro-nested-pixelfeed` on each event.
 
+## Cgroup v2 delegation for resource limits
+
+The `TIER2_MEMORY` and `TIER2_CPUS` knobs in `spawn-tier2.sh` require
+the corresponding cgroup v2 controllers (`memory`, `cpu`) to be
+**delegated** to the admin user's systemd slice. By default on
+openSUSE Tumbleweed only `pids` is delegated, so `--memory` and
+`--cpus` fail with an error on `memory.swap.max` or `cpu.max`.
+
+### Setup (one-time, requires root)
+
+```bash
+mkdir -p /etc/systemd/system/user@1000.service.d
+
+cat > /etc/systemd/system/user@1000.service.d/delegate.conf <<'EOF'
+[Service]
+Delegate=memory cpu pids io
+EOF
+
+systemctl daemon-reload
+```
+
+The admin user must re-login (or `systemctl restart user@1000.service`)
+for the new delegation to take effect.
+
+### Verification
+
+After re-login, confirm the controllers are available in the user
+slice's cgroup:
+
+```bash
+cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.controllers
+```
+
+The output should include `memory cpu pids io`. Once confirmed,
+`TIER2_MEMORY=512m` and `TIER2_CPUS=2` (or similar) can be passed to
+`spawn-tier2.sh` and the container will start with the requested
+limits.
+
+Without delegation, leave `TIER2_MEMORY` and `TIER2_CPUS` unset (the
+defaults). `TIER2_PIDS_LIMIT` works without extra setup because `pids`
+is delegated by default.
+
 ## Future work
 
 - **Delegate-side silo badge** ([ui.md](ui.md#silo-badges) — ring tint

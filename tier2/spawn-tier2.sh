@@ -309,8 +309,8 @@ PODMAN_HARDENING=(
     # is the security property we want.
     --read-only
     --tmpfs=/tmp:size=64m,mode=1777
-    --tmpfs=/var/cache:size=16m,mode=0755
-    --tmpfs=/home/admin/.cache:size=32m,mode=0700
+    --mount type=tmpfs,destination=/var/cache,tmpfs-size=16m,tmpfs-mode=0755,U
+    --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U
     --tmpfs=/run:size=4m,mode=0755
 )
 # --memory and --cpus only when explicitly requested — both require
