@@ -417,6 +417,16 @@ class TestEscalation:
         assert NotificationManager._is_cross_uid_action(
             "app.send-to:2001:org.example.Service")
 
+    def test_is_cross_uid_action_qsu_exec(self):
+        """qsu.exec:<target_user> is a sensitive delegated action."""
+        assert NotificationManager._is_cross_uid_action("qsu.exec:root")
+        assert NotificationManager._is_cross_uid_action("qsu.exec:nobody")
+
+    def test_is_cross_uid_action_handoff_activate(self):
+        """qdistro.handoff.activate:<src>:<dst> is cross-silo."""
+        assert NotificationManager._is_cross_uid_action(
+            "qdistro.handoff.activate:user1:user2")
+
     def test_is_cross_uid_action_negative(self):
         assert not NotificationManager._is_cross_uid_action("qdistro.exec.ls")
         assert not NotificationManager._is_cross_uid_action("")

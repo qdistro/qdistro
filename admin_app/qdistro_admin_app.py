@@ -863,14 +863,16 @@ class NotificationManager(QObject):
 
     # ---- escalation ---------------------------------------------------------
 
-    # Action prefixes that represent cross-uid / cross-silo operations
-    # in the broker. These match the real action strings constructed in
-    # qdistro_admin_broker.py (clipboard.transfer, clipboard.receive,
-    # app.send-to) as well as legacy/test names containing "cross"/"xuid".
+    # Action prefixes that represent cross-uid / cross-silo or otherwise
+    # sensitive operations in the broker. These match the real action
+    # strings constructed in qdistro_admin_broker.py and qsu, as well as
+    # legacy/test names containing "cross"/"xuid".
     _CROSS_UID_PREFIXES = (
         "qdistro.clipboard.transfer:",
         "qdistro.clipboard.receive:",
+        "qdistro.handoff.activate:",
         "app.send-to:",
+        "qsu.exec:",
     )
 
     @staticmethod
