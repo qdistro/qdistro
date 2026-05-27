@@ -53,6 +53,8 @@ def staged(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "VAULT_DIR", vd)
     monkeypatch.setattr(d, "AUDIT_DB", audit_path)
     monkeypatch.setattr(d, "BROWSER_PWD_VAULT", "passwords")
+    monkeypatch.setattr(d, "_browser_bridge_allowed",
+                        lambda _pid: (True, "test-bridge"))
     create_vault(vd, "passwords", b"vault-pass")
     daemon = d.PwdDaemon.__new__(d.PwdDaemon)
     daemon._unlocked = {}
@@ -175,6 +177,20 @@ class TestFillHappyPath:
 # ---------------------------------------------------------------------------
 
 class TestFillErrors:
+    def test_fill_rejects_non_bridge_caller(self, staged, monkeypatch):
+        daemon, vd, _ = staged
+        _unlock(daemon, vd)
+        monkeypatch.setattr(d, "_browser_bridge_allowed",
+                            lambda _pid: (False, "not-browser-bridge"))
+
+        with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
+             patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
+            result = json.loads(daemon.Fill(json.dumps({
+                "url": "https://example.com/",
+            }), sender=":1.42"))
+        assert result["ok"] is False
+        assert result["error"] == "policy_denied"
+
     def test_fill_vault_locked(self, staged):
         daemon, vd, _ = staged
         # Do NOT unlock
@@ -324,6 +340,24 @@ class TestSaveHappyPath:
 # ---------------------------------------------------------------------------
 
 class TestSaveErrors:
+    def test_save_rejects_non_bridge_caller(self, staged, monkeypatch):
+        daemon, vd, _ = staged
+        _unlock(daemon, vd)
+        monkeypatch.setattr(d, "_browser_bridge_allowed",
+                            lambda _pid: (False, "parent-not-browser"))
+
+        with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
+             patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
+            result = json.loads(daemon.Save(json.dumps({
+                "url": "https://example.com/",
+                "username": "alice",
+                "password": "pw",
+                "extension_id": "test@ext",
+                "parent_exe": BROWSER_EXE,
+            }), sender=":1.42"))
+        assert result["ok"] is False
+        assert result["error"] == "policy_denied"
+
     def test_save_vault_locked(self, staged):
         daemon, vd, _ = staged
         with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
@@ -455,6 +489,23 @@ class TestFillConfirmHappyPath:
 # ---------------------------------------------------------------------------
 
 class TestFillConfirmErrors:
+    def test_fill_confirm_rejects_non_bridge_caller(
+            self, staged, monkeypatch):
+        daemon, vd, _ = staged
+        key = _unlock(daemon, vd)
+        _add_credential(vd, key, "https://example.com", "alice", "pw")
+        monkeypatch.setattr(d, "_browser_bridge_allowed",
+                            lambda _pid: (False, "not-browser-bridge"))
+
+        with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
+             patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
+            result = json.loads(daemon.FillConfirm(json.dumps({
+                "url": "https://example.com/",
+                "username": "alice",
+            }), sender=":1.42"))
+        assert result["ok"] is False
+        assert result["error"] == "policy_denied"
+
     def test_fill_confirm_vault_locked(self, staged):
         daemon, vd, _ = staged
         with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \

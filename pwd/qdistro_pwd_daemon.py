@@ -109,6 +109,27 @@ PORTAL_KEY_BYTES = 32  # length of bytes returned to portal callers
 # Admin creates this vault before the browser bridge can store or retrieve
 # credentials. Defaults to "passwords".
 BROWSER_PWD_VAULT = os.environ.get("QDISTRO_PWD_BROWSER_VAULT", "passwords")
+BROWSER_BRIDGE_SCRIPT = os.environ.get(
+    "QDISTRO_PWD_BROWSER_BRIDGE_SCRIPT",
+    "/usr/libexec/qdistro/qdistro_browser_bridge.py")
+
+BROWSER_PARENT_EXES = tuple(
+    p for p in os.environ.get(
+        "QDISTRO_PWD_BROWSER_PARENT_EXES",
+        ":".join((
+            "/usr/lib64/firefox/firefox",
+            "/usr/lib/firefox/firefox",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/brave",
+            "/usr/bin/brave-browser",
+            "/usr/bin/vivaldi",
+            "/usr/bin/vivaldi-stable",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+        ))).split(":") if p)
 
 PORTAL_REQUIRE_FPRINT = os.environ.get(
     "QDISTRO_PORTAL_REQUIRE_FPRINT", "0").lower() in ("1", "true", "yes")
@@ -174,6 +195,56 @@ def _normalize_url_origin(url: str) -> str:
     ):
         return f"{scheme}://{host}:{port}"
     return f"{scheme}://{host}"
+
+
+def _read_proc_cmdline(pid: int) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read(16384)
+    except OSError:
+        return []
+    return [p.decode("utf-8", "replace") for p in raw.split(b"\x00") if p]
+
+
+def _read_proc_ppid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _read_proc_exe(pid: int) -> str:
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return ""
+
+
+def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
+    """Verify that a browser-password RPC came from the native bridge.
+
+    The system bus cannot restrict by executable. The bridge is installed
+    as ``python3 /usr/libexec/qdistro/qdistro_browser_bridge.py`` and is
+    launched by the browser's native-messaging host. Require both facts so
+    a random same-UID Python process cannot call FillConfirm directly and
+    satisfy the per-item pin stored by Save.
+    """
+    cmdline = _read_proc_cmdline(pid)
+    script_real = os.path.realpath(BROWSER_BRIDGE_SCRIPT)
+    if not any(os.path.realpath(arg) == script_real for arg in cmdline):
+        return False, "not-browser-bridge"
+    ppid = _read_proc_ppid(pid)
+    if ppid is None:
+        return False, "parent-unreadable"
+    parent_exe = _read_proc_exe(ppid)
+    allowed = {os.path.realpath(p) for p in BROWSER_PARENT_EXES}
+    if os.path.realpath(parent_exe) not in allowed:
+        return False, "parent-not-browser"
+    return True, "browser-bridge"
 
 
 class PwdDaemon(dbus.service.Object):
@@ -710,6 +781,12 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
+        if not bridge_ok:
+            self._audit.record("fill", vault, decision="deny",
+                               reason=f"bridge-caller:{bridge_reason}",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
@@ -787,6 +864,12 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
+        if not bridge_ok:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason=f"bridge-caller:{bridge_reason}",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
@@ -871,6 +954,12 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
+        if not bridge_ok:
+            self._audit.record("save", vault, decision="deny",
+                               reason=f"bridge-caller:{bridge_reason}",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
