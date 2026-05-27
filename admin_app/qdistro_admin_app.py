@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import time as _time
 from datetime import datetime
 
 import dbus
@@ -57,6 +58,7 @@ class BrokerBridge(QObject):
     requestPending = pyqtSignal(int)
     requestDecided = pyqtSignal(int, str)
     approvalRevoked = pyqtSignal(int, str, str)
+    rulesReloaded = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
@@ -82,6 +84,10 @@ class BrokerBridge(QObject):
             self._on_revoked, signal_name="ApprovalRevoked",
             dbus_interface=BUS_NAME,
         )
+        self.bus.add_signal_receiver(
+            self._on_rules_reloaded, signal_name="RulesReloaded",
+            dbus_interface=BUS_NAME,
+        )
 
     def _on_pending(self, rid):
         self.requestPending.emit(int(rid))
@@ -91,6 +97,9 @@ class BrokerBridge(QObject):
 
     def _on_revoked(self, uid, action, exe):
         self.approvalRevoked.emit(int(uid), str(action), str(exe))
+
+    def _on_rules_reloaded(self, rule_count):
+        self.rulesReloaded.emit(int(rule_count))
 
     def _reconnect(self) -> None:
         """Rebuild the proxy after the broker restarted.
@@ -191,6 +200,7 @@ class BrokerBridge(QObject):
 
 class DetailPane(QWidget):
     decided = pyqtSignal(int, str, str)
+    ruleFromThis = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -261,15 +271,22 @@ class DetailPane(QWidget):
         btns = QHBoxLayout()
         self.btn_approve = QPushButton("Approve"); self.btn_approve.setObjectName("btn_approve")
         self.btn_deny = QPushButton("Deny"); self.btn_deny.setObjectName("btn_deny")
+        self.btn_rule_from_this = QPushButton("Rule from this")
+        self.btn_rule_from_this.setObjectName("btn_rule_from_this")
+        self.btn_rule_from_this.setToolTip("Create a permanent rule from this request (Ctrl+R)")
         self.btn_approve.clicked.connect(lambda: self._emit("allow"))
         self.btn_deny.clicked.connect(lambda: self._emit("deny"))
-        btns.addWidget(self.btn_approve); btns.addWidget(self.btn_deny); btns.addStretch()
+        self.btn_rule_from_this.clicked.connect(self._emit_rule_from_this)
+        btns.addWidget(self.btn_approve); btns.addWidget(self.btn_deny)
+        btns.addWidget(self.btn_rule_from_this); btns.addStretch()
         lay.addLayout(btns)
 
         lay.addStretch()
+        self._current_req: dict | None = None
 
     def show_request(self, req: dict):
         self._rid = req["id"]
+        self._current_req = req
         self.lbl_user.setText(f"uid={req['uid']}  pid={req['pid']}")
         self.lbl_action.setText(f"Action: {req['action']}")
         self.lbl_exe.setText(req["exe"])
@@ -289,6 +306,7 @@ class DetailPane(QWidget):
 
     def clear(self):
         self._rid = None
+        self._current_req = None
         self.lbl_user.setText("(no selection)")
         self.lbl_action.setText(""); self.lbl_exe.setText(""); self.lbl_details.setText("")
 
@@ -301,6 +319,10 @@ class DetailPane(QWidget):
                 scope = key
                 break
         self.decided.emit(self._rid, decision, scope)
+
+    def _emit_rule_from_this(self):
+        if self._current_req is not None:
+            self.ruleFromThis.emit(self._current_req)
 
 
 class CacheTab(QWidget):
@@ -652,6 +674,138 @@ def _fmt_epoch(ts: int) -> str:
     return f"in {left // 86400}d"
 
 
+def _format_age(epoch_s: float) -> str:
+    """Return a short human-readable string for how long ago `epoch_s` was.
+
+    Examples: "3s", "45s", "2m10s", "7m", "1h2m".
+    """
+    elapsed = max(0, int(_time.time() - epoch_s))
+    if elapsed < 60:
+        return f"{elapsed}s"
+    mins, secs = divmod(elapsed, 60)
+    if mins < 60:
+        return f"{mins}m{secs}s" if secs else f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h{mins}m" if mins else f"{hours}h"
+
+
+def _age_color(epoch_s: float) -> QColor:
+    """Return a color for the age of a pending request.
+
+    green  <30s, yellow 30s-2m, orange 2m-5m, red >5m.
+    """
+    elapsed = max(0, _time.time() - epoch_s)
+    if elapsed < 30:
+        return QColor("#4caf50")   # green
+    if elapsed < 120:
+        return QColor("#ffeb3b")   # yellow
+    if elapsed < 300:
+        return QColor("#ff9800")   # orange
+    return QColor("#f44336")       # red
+
+
+# Default mute duration in seconds (30 minutes).
+MUTE_DURATION_S = 30 * 60
+
+
+class NotificationManager(QObject):
+    """Owns mute state, pending-request timestamps, desktop notifications,
+    and the age-display refresh timer.
+
+    Separated from MainWindow so the notification logic is testable
+    without constructing the full window hierarchy.
+    """
+    # Emitted every ~10 seconds so the UI can repaint age columns.
+    ageTickFired = pyqtSignal()
+
+    def __init__(self, tray_icon: QSystemTrayIcon, parent: QObject | None = None):
+        super().__init__(parent)
+        self._tray_icon = tray_icon
+        self._muted = False
+        self._mute_timer = QTimer(self)
+        self._mute_timer.setSingleShot(True)
+        self._mute_timer.timeout.connect(self._unmute)
+
+        # Map of request-id -> arrival epoch (float). Populated by
+        # on_request_pending(); removed by on_request_decided().
+        self._arrival_times: dict[int, float] = {}
+
+        # Age-display refresh: tick every 10 seconds.
+        self._age_timer = QTimer(self)
+        self._age_timer.setInterval(10_000)
+        self._age_timer.timeout.connect(self.ageTickFired.emit)
+        self._age_timer.start()
+
+    # ---- mute ---------------------------------------------------------------
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def mute(self, duration_s: int = MUTE_DURATION_S) -> None:
+        """Suppress desktop notification popups for `duration_s` seconds."""
+        self._muted = True
+        self._mute_timer.start(duration_s * 1000)
+
+    def unmute(self) -> None:
+        self._muted = False
+        self._mute_timer.stop()
+
+    def _unmute(self) -> None:
+        self._muted = False
+
+    # ---- pending tracking ---------------------------------------------------
+
+    def on_request_pending(self, rid: int) -> None:
+        """Record arrival time for a new pending request."""
+        self._arrival_times.setdefault(rid, _time.time())
+
+    def on_request_decided(self, rid: int) -> None:
+        """Remove arrival time for a decided request."""
+        self._arrival_times.pop(rid, None)
+
+    def arrival_time(self, rid: int) -> float | None:
+        return self._arrival_times.get(rid)
+
+    def sync_pending(self, pending_rids: set[int]) -> None:
+        """Synchronize arrival-time map with the actual pending set.
+
+        Called after a full refresh so stale entries (requests decided
+        between signal and refresh) are cleaned up and new entries
+        (requests that arrived before the app connected) get a synthetic
+        'now' timestamp.
+        """
+        # Remove entries no longer pending.
+        stale = set(self._arrival_times) - pending_rids
+        for rid in stale:
+            del self._arrival_times[rid]
+        # Add entries we haven't seen yet.
+        now = _time.time()
+        for rid in pending_rids - set(self._arrival_times):
+            self._arrival_times[rid] = now
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._arrival_times)
+
+    # ---- desktop notification -----------------------------------------------
+
+    def maybe_notify(self, action: str, uid: int,
+                     window_active: bool) -> None:
+        """Show a desktop notification if the window is not focused and
+        notifications are not muted."""
+        if self._muted:
+            return
+        if window_active:
+            return
+        self._tray_icon.showMessage(
+            "Pending approval request",
+            f"uid={uid}  {action}",
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, broker: BrokerBridge,
                  session: SessionManagerBridge | None = None):
@@ -702,6 +856,14 @@ class MainWindow(QMainWindow):
 
         self.list.selectionModel().currentChanged.connect(self._on_selection)
         self.detail.decided.connect(self._on_decided)
+        # "Rule from this" — DetailPane button and HistoryTab button
+        # both route into _create_rule_from_current (pending) or
+        # _create_rule_from_history (history entry). The Ctrl+R
+        # shortcut is already wired to _create_rule_from_current.
+        self.detail.ruleFromThis.connect(
+            lambda req: self._create_rule_from_current())
+        self.history_tab.ruleFromHistory.connect(
+            self._create_rule_from_history)
 
         # Coalesce rapid signal bursts into at most one refresh() per
         # ~250ms. A compromised uid calling RequestPermission in a tight
@@ -746,8 +908,10 @@ class MainWindow(QMainWindow):
         # surface on the desktop.
         tray_menu = QMenu()
         show_action = tray_menu.addAction("Show")
+        self._mute_action = tray_menu.addAction("Mute 30m")
         quit_action = tray_menu.addAction("Quit")
         show_action.triggered.connect(self._show_from_tray)
+        self._mute_action.triggered.connect(self._toggle_mute_from_tray)
         quit_action.triggered.connect(self._confirm_quit_from_tray)
         self.tray_icon.setContextMenu(tray_menu)
 
@@ -772,6 +936,11 @@ class MainWindow(QMainWindow):
         self._tray_pulse_remaining = 0
         self._tray_pulse_timer.timeout.connect(self._tray_pulse_tick)
         self._tray_last_count = 0
+
+        # Notification manager — owns mute state, arrival timestamps,
+        # desktop notifications, and the age-refresh timer.
+        self.notifications = NotificationManager(self.tray_icon, parent=self)
+        self.notifications.ageTickFired.connect(self._refresh_age_column)
 
         # Shortcuts. ApplicationShortcut context so Ctrl+Y/N/R and
         # Ctrl+Shift+A/D fire from any tab — the admin can be reading
@@ -815,9 +984,9 @@ class MainWindow(QMainWindow):
         # the slot. requestPending also kicks off the pulse animation
         # so the admin sees a visual cue when a new request lands.
         self.broker.requestPending.connect(
-            lambda _rid: self._on_new_pending())
+            lambda _rid: self._on_new_pending(_rid))
         self.broker.requestDecided.connect(
-            lambda _rid, _dec: self._update_tray_icon())
+            lambda _rid, _dec: self._on_request_decided(_rid))
         self.broker.approvalRevoked.connect(
             lambda _u, _a, _e: self._update_tray_icon())
 
@@ -846,12 +1015,24 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"broker unavailable: {e}", 8000)
             return
 
+        # Sync NotificationManager arrival-time map with actual pending set.
+        self.notifications.sync_pending({int(r["id"]) for r in pending})
+
         self.model.clear()
         for req in pending:
-            item = QStandardItem(f"uid={req['uid']}  {req['action']}")
+            rid = int(req["id"])
+            arrival = self.notifications.arrival_time(rid)
+            age_str = _format_age(arrival) if arrival else "?"
+            item = QStandardItem(f"uid={req['uid']}  {req['action']}  [{age_str}]")
             item.setData(req, Qt.ItemDataRole.UserRole + 1)
             item.setEditable(False)
+            # Color the age portion using foreground on a separate approach:
+            # set tooltip with the age so it's always visible on hover.
+            if arrival is not None:
+                item.setToolTip(f"Waiting: {age_str}")
             self.model.appendRow(item)
+
+        self._update_window_title()
 
         if self.model.rowCount() == 0:
             self.detail.clear()
@@ -952,13 +1133,71 @@ class MainWindow(QMainWindow):
         else:
             event.accept()
 
-    def _on_new_pending(self) -> None:
-        """RequestPending arrived — kick off the pulse animation and
-        refresh the tray badge."""
+    def _on_new_pending(self, rid: int = 0) -> None:
+        """RequestPending arrived — track it, kick off the pulse animation,
+        refresh the tray badge, show desktop notification if appropriate,
+        and update the window title."""
+        self.notifications.on_request_pending(rid)
         self._tray_pulse_remaining = 10  # ~3 seconds at 300ms ticks
         if not self._tray_pulse_timer.isActive():
             self._tray_pulse_timer.start()
         self._update_tray_icon()
+        # Desktop notification — fetch the request details so the popup
+        # includes the action name and requesting uid.
+        try:
+            pending = self.broker.get_pending()
+            for req in pending:
+                if int(req["id"]) == rid:
+                    self.notifications.maybe_notify(
+                        req["action"], int(req["uid"]),
+                        self.isActiveWindow(),
+                    )
+                    break
+        except dbus.DBusException:
+            pass
+
+    def _on_request_decided(self, rid: int) -> None:
+        """RequestDecided arrived — update tracking and tray."""
+        self.notifications.on_request_decided(rid)
+        self._update_tray_icon()
+
+    def _toggle_mute_from_tray(self) -> None:
+        """Toggle mute state from the tray context menu."""
+        if self.notifications.muted:
+            self.notifications.unmute()
+            self._mute_action.setText("Mute 30m")
+        else:
+            self.notifications.mute(MUTE_DURATION_S)
+            self._mute_action.setText("Unmute")
+
+    def _refresh_age_column(self) -> None:
+        """Repaint the Waiting column in the pending list with updated ages."""
+        for row in range(self.model.rowCount()):
+            item = self.model.item(row, 0)
+            if item is None:
+                continue
+            req = item.data(Qt.ItemDataRole.UserRole + 1)
+            if req is None:
+                continue
+            rid = int(req["id"])
+            arrival = self.notifications.arrival_time(rid)
+            if arrival is None:
+                continue
+            # Update the age text stored in column 0 display
+            age_str = _format_age(arrival)
+            color = _age_color(arrival)
+            # Update tooltip with age
+            item.setToolTip(f"Waiting: {age_str}")
+        # Also update window title with current count
+        self._update_window_title()
+
+    def _update_window_title(self) -> None:
+        """Set window title including pending count when > 0."""
+        count = self.notifications.pending_count
+        if count > 0:
+            self.setWindowTitle(f"admin approvals ({count} pending)")
+        else:
+            self.setWindowTitle("admin approvals")
 
     def _tray_pulse_tick(self) -> None:
         self._tray_pulse_phase = not self._tray_pulse_phase
@@ -1016,6 +1255,8 @@ class MainWindow(QMainWindow):
             self.tray_icon.setToolTip(
                 "qdistro admin approvals (broker unavailable)")
             return
+        # Sync NotificationManager's arrival-time map with actual pending.
+        self.notifications.sync_pending({int(r["id"]) for r in pending})
         self._tray_last_count = count
         if count > 0:
             self.tray_icon.setToolTip(
@@ -1026,6 +1267,7 @@ class MainWindow(QMainWindow):
             self._tray_pulse_remaining = 0
             self._tray_pulse_timer.stop()
         self._render_tray_badge(count)
+        self._update_window_title()
 
     def _install_help_menu(self) -> None:
         """Surface the documented shortcuts in a Help menu so admins
@@ -1161,6 +1403,47 @@ class MainWindow(QMainWindow):
             if not any(v not in (None, "", []) for v in match.values()):
                 return True
         return False
+
+    def _create_rule_from_history(self, entry: dict):
+        """Create a rule pre-populated from a history (audit) entry."""
+        uid = entry.get("caller_uid", -1)
+        action = entry.get("action", "")
+        exe = entry.get("caller_exe", "")
+        decision = "allow" if entry.get("decision") else "deny"
+
+        rule_data = {
+            "name": f"Rule for {action} from uid {uid}",
+            "decision": decision,
+            "uid": uid,
+            "action": action,
+            "exe": exe,
+            "scope": self._get_active_scope(),
+            "rationale": f"Auto-generated rule from history entry",
+        }
+
+        dialog = RuleEditorDialog(self.broker, rule_data, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            filename = dialog.filename_line.text().strip()
+            if not filename.endswith(".yaml"):
+                filename += ".yaml"
+            yaml_content = dialog.yaml_editor.toPlainText()
+            if self._yaml_is_allow_all(yaml_content):
+                QMessageBox.warning(
+                    self, "Refused (overly broad)",
+                    "This rule has no match selectors and would apply "
+                    "to every uid + action + exe. Add at least one of "
+                    "uid / action / exe to the match block before "
+                    "saving.")
+                return
+            result = self.broker.save_rule(filename, yaml_content)
+            QMessageBox.information(
+                self, "Success", f"Rule saved to {result}")
+            if hasattr(self, "rules_tab"):
+                self.rules_tab.refresh()
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Error saving rule", str(e))
 
     # ----- bulk decide -----------------------------------------------------
     #
@@ -1325,8 +1608,11 @@ class RulesTab(QWidget):
         self.btn_add_rule = QPushButton("Add Rule"); self.btn_add_rule.setObjectName("btn_add_rule")
         self.btn_edit_rule = QPushButton("Edit Rule"); self.btn_edit_rule.setObjectName("btn_edit_rule")
         self.btn_delete_rule = QPushButton("Delete Rule"); self.btn_delete_rule.setObjectName("btn_delete_rule")
+        self.btn_reload = QPushButton("Reload"); self.btn_reload.setObjectName("btn_reload_rules")
+        self.btn_reload.setToolTip("Force broker to re-walk /etc/qdistro/rules.d/")
         self.btn_refresh = QPushButton("Refresh"); self.btn_refresh.setObjectName("btn_refresh_rules")
-        for b in (self.btn_add_rule, self.btn_edit_rule, self.btn_delete_rule, self.btn_refresh):
+        for b in (self.btn_add_rule, self.btn_edit_rule, self.btn_delete_rule,
+                  self.btn_reload, self.btn_refresh):
             btns.addWidget(b)
         btns.addStretch()
 
@@ -1337,7 +1623,19 @@ class RulesTab(QWidget):
         self.btn_add_rule.clicked.connect(self._on_add_rule)
         self.btn_edit_rule.clicked.connect(self._on_edit_rule)
         self.btn_delete_rule.clicked.connect(self._on_delete_rule)
+        self.btn_reload.clicked.connect(self._on_reload)
         self.btn_refresh.clicked.connect(self.refresh)
+
+        # Live-update: subscribe to broker's RulesReloaded signal so
+        # the table re-populates when rules change on disk (inotify,
+        # SIGHUP, SaveRule, or another admin's ReloadRules call).
+        # Coalesce rapid bursts into one refresh per ~250ms.
+        self._reload_refresh_timer = QTimer(self)
+        self._reload_refresh_timer.setSingleShot(True)
+        self._reload_refresh_timer.setInterval(250)
+        self._reload_refresh_timer.timeout.connect(self.refresh)
+        self.broker.rulesReloaded.connect(
+            lambda _count: self._reload_refresh_timer.start())
 
     def refresh(self) -> None:
         try:
@@ -1375,6 +1673,20 @@ class RulesTab(QWidget):
             return None
         item = self.model.item(idx.row(), 0)
         return item.data(Qt.ItemDataRole.UserRole + 1)
+
+    def _on_reload(self) -> None:
+        """Force the broker to re-walk /etc/qdistro/rules.d/ and rebuild
+        its rule set. Useful after hand-editing files on disk."""
+        try:
+            self.broker.reload_rules()
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Reload failed",
+                                 f"ReloadRules failed:\n\n{e}")
+            return
+        # The RulesReloaded signal will trigger refresh() via the
+        # coalesced timer, but do an immediate refresh too so the
+        # admin sees instant feedback.
+        self.refresh()
 
     def _on_add_rule(self) -> None:
         dialog = RuleEditorDialog(self.broker, {}, self)
@@ -1647,6 +1959,7 @@ class RuleEditorDialog(QDialog):
 class HistoryTab(QWidget):
     """Tab showing historical approval/deny entries from admin-history.jsonl."""
     COLUMNS = ("timestamp", "uid", "action", "exe", "decision", "scope", "source", "argv")
+    ruleFromHistory = pyqtSignal(dict)
 
     def __init__(self, broker: BrokerBridge):
         super().__init__()
@@ -1686,9 +1999,14 @@ class HistoryTab(QWidget):
         filter_layout.addStretch()
 
         btns = QHBoxLayout()
+        self.btn_rule_from_history = QPushButton("Rule from this")
+        self.btn_rule_from_history.setObjectName("btn_rule_from_history")
+        self.btn_rule_from_history.setToolTip(
+            "Create a permanent rule from this history entry")
+        self.btn_rule_from_history.clicked.connect(self._on_rule_from_history)
         self.btn_refresh = QPushButton("Refresh"); self.btn_refresh.setObjectName("btn_refresh_history")
         self.btn_clear = QPushButton("Clear History"); self.btn_clear.setObjectName("btn_clear_history")
-        for b in (self.btn_refresh, self.btn_clear):
+        for b in (self.btn_rule_from_history, self.btn_refresh, self.btn_clear):
             btns.addWidget(b)
         btns.addStretch()
 
@@ -1699,7 +2017,7 @@ class HistoryTab(QWidget):
 
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_clear.clicked.connect(self._clear_history)
-        
+
         # Initialize with data
         self.refresh()
 
@@ -1796,6 +2114,20 @@ class HistoryTab(QWidget):
             self.refresh()
             return
         self._populate_model(self._filtered_rows())
+
+    def _on_rule_from_history(self) -> None:
+        """Pre-populate a rule editor from the selected history row."""
+        idx = self.table.currentIndex()
+        if not idx.isValid():
+            QMessageBox.information(
+                self, "No selection",
+                "Please select a history entry first.")
+            return
+        item = self.model.item(idx.row(), 0)
+        entry = item.data(Qt.ItemDataRole.UserRole + 1)
+        if entry is None:
+            return
+        self.ruleFromHistory.emit(entry)
 
     def _clear_history(self) -> None:
         # Broker has no ClearHistory RPC. Rather than show a confirm
