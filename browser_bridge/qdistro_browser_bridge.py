@@ -415,7 +415,8 @@ INTENT_TOKEN_TTL_S: float = 5.0
 # Anything not in this set bypasses token validation (e.g. ping,
 # recall.push, heartbeat ack).
 INTENT_TOKEN_REQUIRED_OPS: frozenset[str] = frozenset({
-    "pwd.fill", "pwd.save", "cookies.export", "page.extract",
+    "pwd.fill", "pwd.fill_confirm", "pwd.save", "cookies.export",
+    "page.extract",
 })
 
 
@@ -790,6 +791,34 @@ def _handle_pwd_fill(msg: dict, identity: dict) -> dict:
     reply = _get_dbus_client().call(
         _PWD_BUS_KIND, _PWD_BUS, _PWD_PATH, _PWD_IFACE,
         "Fill", "s", (body,))
+    return dict(reply)
+
+
+def _handle_pwd_fill_confirm(msg: dict, identity: dict) -> dict:
+    """pwd.fill_confirm — retrieve the actual password after the user
+    picks a credential from the Fill list.
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    ok, err = verify_intent_token(
+        msg.get("intent_token"), "pwd.fill_confirm",
+        extension_id=identity.get("extension_id"))
+    if not ok:
+        return {"ok": False, "error": err}
+    url = msg.get("url")
+    username = msg.get("username")
+    if not (isinstance(url, str) and url
+            and isinstance(username, str) and username):
+        return {"ok": False, "error": "missing_credentials"}
+    body = json.dumps({
+        "url": url, "username": username,
+        "extension_id": identity.get("extension_id") or "",
+        "parent_exe": identity.get("parent_exe") or "",
+    })
+    reply = _get_dbus_client().call(
+        _PWD_BUS_KIND, _PWD_BUS, _PWD_PATH, _PWD_IFACE,
+        "FillConfirm", "s", (body,))
     return dict(reply)
 
 
@@ -1286,6 +1315,7 @@ DEFAULT_HANDLERS: dict[str, Callable[[dict, dict], dict]] = {
     "recall.push": _handle_recall_push,
     # 9a
     "pwd.fill": _handle_pwd_fill,
+    "pwd.fill_confirm": _handle_pwd_fill_confirm,
     "pwd.save": _handle_pwd_save,
     # 9b — extension-initiated *.reply landings
     "tabs.list.reply": _handle_tabs_reply,

@@ -78,25 +78,23 @@ class _HookTimeout(Exception):
     pass
 
 
+_hook_call_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="hook-call")
+
+
 def _run_with_timeout(fn, args, timeout):
-    """Run fn(*args) in a thread with a timeout. Raises _HookTimeout."""
-    result_box = [None]
-    exc_box = [None]
+    """Run fn(*args) in a bounded thread pool with a timeout.
 
-    def _wrapper():
-        try:
-            result_box[0] = fn(*args)
-        except Exception as e:
-            exc_box[0] = e
-
-    t = threading.Thread(target=_wrapper, daemon=True)
-    t.start()
-    t.join(timeout=timeout)
-    if t.is_alive():
+    Uses a shared pool so timed-out hooks don't leak unbounded threads.
+    A hung hook occupies one pool slot until it finishes; with max_workers=4
+    this caps the damage to 4 stuck threads rather than unbounded growth.
+    """
+    future = _hook_call_pool.submit(fn, *args)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
         raise _HookTimeout(f"hook timed out after {timeout}s")
-    if exc_box[0] is not None:
-        raise exc_box[0]
-    return result_box[0]
 
 
 # ---------------------------------------------------------------------------
