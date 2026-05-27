@@ -40,10 +40,12 @@ Auto-lock: vaults relock after IDLE_TIMEOUT_S of no activity (default
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
 import time
+import urllib.parse
 from typing import Any
 
 import dbus
@@ -103,6 +105,11 @@ PORTAL_KEY_BYTES = 32  # length of bytes returned to portal callers
 # enroll a finger or unset the env to recover. Set
 # QDISTRO_PORTAL_FPRINT_OPTIONAL=1 alongside to soft-skip when fprintd
 # is unreachable (useful for mixed fleets).
+# Vault used for browser-managed passwords (Fill / Save / FillConfirm).
+# Admin creates this vault before the browser bridge can store or retrieve
+# credentials. Defaults to "passwords".
+BROWSER_PWD_VAULT = os.environ.get("QDISTRO_PWD_BROWSER_VAULT", "passwords")
+
 PORTAL_REQUIRE_FPRINT = os.environ.get(
     "QDISTRO_PORTAL_REQUIRE_FPRINT", "0").lower() in ("1", "true", "yes")
 PORTAL_FPRINT_OPTIONAL = os.environ.get(
@@ -144,6 +151,27 @@ def _wipe_bytearray(b: bytearray) -> None:
             b[i] = 0
     except Exception:
         pass
+
+
+def _normalize_url_origin(url: str) -> str:
+    """Extract the origin (scheme://host[:port]) from a URL.
+
+    Standard ports (80 for http, 443 for https) are omitted so that
+    ``https://example.com:443/path`` normalises to ``https://example.com``
+    and matches credentials stored without an explicit port.
+    """
+    parsed = urllib.parse.urlparse(url)
+    scheme = (parsed.scheme or "https").lower()
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+    port = parsed.port
+    if port and not (
+        (scheme == "https" and port == 443)
+        or (scheme == "http" and port == 80)
+    ):
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
 
 
 class PwdDaemon(dbus.service.Object):
@@ -659,6 +687,247 @@ class PwdDaemon(dbus.service.Object):
                            decision="allow", reason="admin-bypass",
                            caller=caller)
         return payload.decode("utf-8")
+
+    # -- browser-bridge Fill / Save / FillConfirm ----------------------
+    #
+    # These methods are called by qdistro-browser-bridge on behalf of the
+    # browser extension.  Fill returns credential metadata (no passwords)
+    # for a URL; FillConfirm retrieves the actual password after a user
+    # pick; Save stores or updates a credential.
+    #
+    # Items are stored in the BROWSER_PWD_VAULT vault with tag format
+    # ``pwd:<origin>/<username>`` so they're grep-able for admin tooling.
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender")
+    def Fill(self, creds_json: str, sender=None) -> str:
+        """Look up matching credentials for a URL. Returns JSON with
+        credential metadata (username, url) but NOT the password.
+        The extension must call FillConfirm to get the password after
+        the user picks a credential."""
+        uid, pid = self._peer_info(sender)
+        caller = snapshot_caller(pid, uid)
+        vault = BROWSER_PWD_VAULT
+        try:
+            req = json.loads(str(creds_json))
+        except (json.JSONDecodeError, TypeError) as e:
+            self._audit.record("fill", vault, decision="deny",
+                               reason=f"invalid-json:{e}", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        url = req.get("url")
+        if not isinstance(url, str) or not url:
+            self._audit.record("fill", vault, decision="deny",
+                               reason="missing-url", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        origin = _normalize_url_origin(url)
+        if not origin:
+            self._audit.record("fill", vault, decision="deny",
+                               reason="bad-url-origin", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        username_filter = req.get("username") or None
+
+        if vault not in self._unlocked:
+            self._audit.record("fill", vault, decision="deny",
+                               reason="vault-locked", caller=caller)
+            return json.dumps({"ok": False, "error": "vault_locked"})
+        self._touch(vault)
+
+        # Scan items for matching pwd:<origin>/* tags
+        try:
+            items = list_items(VAULT_DIR, vault)
+        except VaultNotFound:
+            self._audit.record("fill", vault, decision="deny",
+                               reason="vault-missing", caller=caller)
+            return json.dumps({"ok": False, "error": "vault_locked"})
+
+        tag_prefix = f"pwd:{origin}/"
+        matches = []
+        for it in items:
+            tag = it.get("tag", "")
+            if not tag.startswith(tag_prefix):
+                continue
+            item_username = tag[len(tag_prefix):]
+            if username_filter and item_username != username_filter:
+                continue
+            # Verify caller identity against item pins
+            pins = {
+                "pin_app_exe": it.get("pin_app_exe", ""),
+                "pin_selinux": it.get("pin_selinux", ""),
+                "pin_uid": it.get("pin_uid"),
+            }
+            # Items with no pins set are admin-only (pin_match returns
+            # False); skip them silently for the browser fill flow.
+            ok, reason = pin_match(pins, caller)
+            if not ok:
+                continue
+            matches.append({
+                "username": item_username,
+                "url": origin,
+            })
+
+        if not matches:
+            self._audit.record("fill", vault, decision="allow",
+                               reason="no-match", caller=caller)
+            return json.dumps({"ok": False, "error": "no_match"})
+
+        self._audit.record("fill", vault, decision="allow",
+                           reason=f"matched:{len(matches)}", caller=caller)
+        return json.dumps({"ok": True, "credentials": matches})
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender")
+    def FillConfirm(self, creds_json: str, sender=None) -> str:
+        """Second step of fill: retrieve the actual password for a
+        credential the user picked from the Fill list."""
+        uid, pid = self._peer_info(sender)
+        caller = snapshot_caller(pid, uid)
+        vault = BROWSER_PWD_VAULT
+        try:
+            req = json.loads(str(creds_json))
+        except (json.JSONDecodeError, TypeError) as e:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason=f"invalid-json:{e}", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        url = req.get("url")
+        username = req.get("username")
+        if not (isinstance(url, str) and url
+                and isinstance(username, str) and username):
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="missing-fields", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        origin = _normalize_url_origin(url)
+        if not origin:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="bad-url-origin", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        if vault not in self._unlocked:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="vault-locked", caller=caller)
+            return json.dumps({"ok": False, "error": "vault_locked"})
+        self._touch(vault)
+
+        tag = f"pwd:{origin}/{username}"
+        # Verify caller identity against item pins
+        try:
+            pins = get_item_pins(VAULT_DIR, vault, tag)
+        except VaultNotFound:
+            self._audit.record("fill-confirm", vault, item_tag=tag,
+                               decision="deny", reason="no-such-item",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "no_match"})
+
+        ok, reason = pin_match(pins, caller)
+        if not ok:
+            self._audit.record("fill-confirm", vault, item_tag=tag,
+                               decision="deny", reason=reason,
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "policy_denied"})
+
+        try:
+            payload = get_item_payload(
+                VAULT_DIR, vault, bytes(self._unlocked[vault]["key"]), tag)
+        except VaultIntegrityError as e:
+            self._audit.record("fill-confirm", vault, item_tag=tag,
+                               decision="deny", reason="integrity-fail",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "integrity_error"})
+        except VaultNotFound:
+            self._audit.record("fill-confirm", vault, item_tag=tag,
+                               decision="deny", reason="no-such-item",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "no_match"})
+
+        self._audit.record("fill-confirm", vault, item_tag=tag,
+                           decision="allow", reason=reason, caller=caller)
+        return json.dumps({
+            "ok": True,
+            "credentials": [{
+                "username": username,
+                "password": payload.decode("utf-8"),
+                "url": origin,
+            }],
+        })
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender")
+    def Save(self, creds_json: str, sender=None) -> str:
+        """Store or update a browser-managed credential."""
+        uid, pid = self._peer_info(sender)
+        caller = snapshot_caller(pid, uid)
+        vault = BROWSER_PWD_VAULT
+        try:
+            req = json.loads(str(creds_json))
+        except (json.JSONDecodeError, TypeError) as e:
+            self._audit.record("save", vault, decision="deny",
+                               reason=f"invalid-json:{e}", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        url = req.get("url")
+        username = req.get("username")
+        password = req.get("password")
+        extension_id = req.get("extension_id") or ""
+        parent_exe = req.get("parent_exe") or ""
+
+        if not (isinstance(url, str) and url
+                and isinstance(username, str) and username
+                and isinstance(password, str) and password):
+            self._audit.record("save", vault, decision="deny",
+                               reason="missing-fields", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        origin = _normalize_url_origin(url)
+        if not origin:
+            self._audit.record("save", vault, decision="deny",
+                               reason="bad-url-origin", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        if vault not in self._unlocked:
+            self._audit.record("save", vault, decision="deny",
+                               reason="vault-locked", caller=caller)
+            return json.dumps({"ok": False, "error": "vault_locked"})
+        self._touch(vault)
+
+        tag = f"pwd:{origin}/{username}"
+        master_key = bytes(self._unlocked[vault]["key"])
+
+        # Check if credential already exists — if so, verify caller
+        # identity against existing pins before allowing an update.
+        try:
+            existing_pins = get_item_pins(VAULT_DIR, vault, tag)
+            ok, reason = pin_match(existing_pins, caller)
+            if not ok:
+                self._audit.record("save", vault, item_tag=tag,
+                                   decision="deny", reason=reason,
+                                   caller=caller)
+                return json.dumps({"ok": False, "error": "policy_denied"})
+        except VaultNotFound:
+            pass  # new credential — no existing pins to check
+
+        # Store with app-identity pins derived from the caller so
+        # only the same browser/extension combination can retrieve it.
+        try:
+            add_item(VAULT_DIR, vault, master_key,
+                     tag, password.encode("utf-8"),
+                     pin_app_exe=parent_exe,
+                     pin_selinux="",
+                     pin_uid=None,
+                     replace=True)
+        except (VaultDuplicate, VaultNotFound, ValueError) as e:
+            self._audit.record("save", vault, item_tag=tag,
+                               decision="error", reason=str(e),
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        self._audit.record("save", vault, item_tag=tag,
+                           decision="allow", reason="saved",
+                           caller=caller)
+        return json.dumps({"ok": True})
 
     # -- portal-keys PIN stash + auto-unlock (spec/13 §"auto-unlock") ---
     #
