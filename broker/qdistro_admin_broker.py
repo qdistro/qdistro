@@ -455,6 +455,24 @@ def _read_proc_layered(pid: int) -> dict[str, str]:
     return out
 
 
+def _read_proc_layered_checked(pid: int, expected_start_time: int
+                                ) -> dict[str, str]:
+    """Thread-pool wrapper around _read_proc_layered that verifies the
+    process hasn't changed identity (exec'd) between request time and
+    the deferred IO.
+
+    If start_time is 0 (unavailable at request time) or the current
+    start_time still matches, the read proceeds. Otherwise the process
+    may have exec'd into a different binary — return empty strings so
+    the admin doesn't see a misleading hash for req.exe.
+    """
+    if expected_start_time != 0:
+        _exe_now, st_now = _read_proc_identity(pid)
+        if st_now != 0 and st_now != expected_start_time:
+            return {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
+    return _read_proc_layered(pid)
+
+
 class _Request:
     __slots__ = (
         "id", "uid", "pid", "exe", "start_time", "action", "details",
@@ -1802,10 +1820,17 @@ class Broker(dbus.service.Object):
             # On completion, _apply_layered_identity runs on the GLib
             # mainloop thread via idle_add — the _pending dict is only
             # modified from the mainloop, preserving thread safety.
+            #
+            # The worker captures start_time at submit time and verifies
+            # it on completion — if the process exec'd between request
+            # and hash, the layered data would describe a different
+            # binary than req.exe. In that case, results are discarded
+            # (empty strings) rather than displaying a misleading hash.
             io_pool = getattr(self, "_io_pool", None)
             if pid > 0 and io_pool is not None:
                 try:
-                    fut = io_pool.submit(_read_proc_layered, pid)
+                    fut = io_pool.submit(
+                        _read_proc_layered_checked, pid, start_time)
                     fut.add_done_callback(
                         lambda f, r=rid: GLib.idle_add(
                             self._apply_layered_identity, r, f))
@@ -1893,23 +1918,30 @@ class Broker(dbus.service.Object):
         """GLib idle callback: apply layered-identity IO results.
 
         Called on the mainloop thread (via GLib.idle_add) when the
-        _read_proc_layered future completes. All _pending mutations
-        happen here, preserving single-threaded access to broker state.
+        _read_proc_layered future completes on a worker thread.
+
+        Thread safety: this callback runs on the GLib mainloop thread,
+        which is the same thread that handles all D-Bus method calls
+        (GetPending, DecideRequest, etc.). The lock is taken for
+        consistency with the rest of the broker — even though mainloop
+        callbacks don't preempt each other, the lock makes the
+        single-writer invariant explicit and future-proofs against any
+        code path that might read _pending from outside the mainloop.
         """
-        with self._lock:
-            req = self._pending.get(rid)
-        if req is None:
-            return False  # already decided + reaped
         try:
             layered = future.result()
         except Exception as e:  # noqa: BLE001
             print(f"[broker] layered-identity IO failed for rid={rid}: {e!r}",
                   flush=True)
             layered = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
-        req.exe_sha256 = layered.get("exe_sha256", "")
-        req.selinux_label = layered.get("selinux_label", "")
-        req.cgroup = layered.get("cgroup", "")
-        req.layered_pending = False
+        with self._lock:
+            req = self._pending.get(rid)
+            if req is None:
+                return False  # already decided + reaped
+            req.exe_sha256 = layered.get("exe_sha256", "")
+            req.selinux_label = layered.get("selinux_label", "")
+            req.cgroup = layered.get("cgroup", "")
+            req.layered_pending = False
         return False  # don't repeat
 
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="b",
@@ -1991,13 +2023,18 @@ class Broker(dbus.service.Object):
                     f"use 'once'",
                     name=BUS_NAME + ".ScopeNotPermitted",
                 )
-            # Warn when admin decides with a scope that relies on the
-            # exe hash but the deferred layered-identity IO hasn't
-            # delivered it yet. The decision still proceeds — the cache
-            # key for forever_exe is (uid, action, exe_path) not
-            # exe_sha256, so correctness isn't affected. But audit
-            # completeness is: the admin saw empty exe_sha256 in the
-            # approval pane. Log so post-incident reviews notice.
+            # Layered identity (exe_sha256, selinux_label, cgroup) is
+            # advisory per spec/25 — it enriches the admin's view but
+            # does NOT gate the decision or the cache key. The cache
+            # key for forever_exe is (uid, action, exe_path), not
+            # exe_sha256; other scopes are even broader. So a decision
+            # made before layered IO completes is correct by design:
+            # the admin saw uid/pid/exe/action in the approval pane,
+            # which is the same data the cache row persists.
+            #
+            # We still log a warning for forever_exe (the scope most
+            # visually tied to exe identity) so audit reviewers know
+            # the exe_sha256 column was empty at approve time.
             if req.layered_pending and scope_s == "forever_exe":
                 print(f"[broker] WARN: DecideRequest rid={request_id} "
                       f"scope=forever_exe decided before layered-identity "
