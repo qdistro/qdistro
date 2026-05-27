@@ -14,12 +14,14 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 # Runtime deps. weston pulls libpipewire-0_3 + wayland-backend +
 # pipewire-backend transitively on Tumbleweed; we list them
 # explicitly so a future weston rebuild on a slimmer base still works.
+#
+# Debug packages (procps, wayland-utils) removed for attack surface
+# reduction. To debug, use: podman exec -it <ctr> zypper install procps
 RUN zypper --non-interactive --gpg-auto-import-keys refresh \
  && zypper --non-interactive install --no-recommends \
         weston \
         libweston-14 \
         libpipewire-0_3-0 \
-        wayland-utils \
         libwayland-client0 \
         libwayland-server0 \
         Mesa-libGL1 \
@@ -27,7 +29,6 @@ RUN zypper --non-interactive --gpg-auto-import-keys refresh \
         libxkbcommon0 \
         xkeyboard-config \
         coreutils \
-        procps \
  && zypper clean --all \
  && rm -rf /var/cache/zypp/* /var/log/*.log
 
