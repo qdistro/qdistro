@@ -17,7 +17,7 @@ work — see "Known gaps" below).
 |---|---|---|---|
 | 1 | `qdwin_locker_v1` global advertised by qdwin | PASS | probe registry listener |
 | 2 | `bind_as_locker` accepted from admin uid | PASS | probe `ready` event + qdwin journal `qdwin: locker bound (initially_locked=0)` |
-| 3 | `attach_lock_surface(wl_surface)` succeeds, no protocol error | PASS | probe step [4] |
+| 3 | `set_locked(1)` is accepted before an explicit lock surface exists | PASS | probe step [4] |
 | 4 | `set_locked(1)` → `locked_changed(1)` | PASS | probe + journal `locked_changed=1 cause=locker_set_locked` |
 | 5 | `set_locked(0)` → `locked_changed(0)` | PASS | probe + journal `locked_changed=0` |
 | 6 | Ctrl+Alt+L hotkey → `lock_requested(reason=3=manual)` reaches locker | PASS | probe `[('lock_requested', 3)]` + journal `qdwin: lock_requested` |
@@ -50,11 +50,9 @@ All edits in `qdwin/qdwin/qdwin.c` for the new protocol:
   registered and visible to clients (assertion 1)
 - `bind_qdwin_locker` — uid filter + resource setup (assertion 2)
 - `qdwin_handle_bind_as_locker` — emits `ready` (assertion 2)
-- `qdwin_handle_locker_attach_lock_surface` — installs the lock
-  surface state + starts overlay grab role=2 (assertions 3 + 7)
 - `qdwin_handle_locker_set_locked` — drives compositor lock state,
-  fans `locked_changed` to both shell and locker resources
-  (assertions 4 + 5)
+  hides normal layers, starts overlay grab role=2, and fans
+  `locked_changed` to both shell and locker resources (assertions 3-5 + 7)
 - Lock-key hotkey fan-out — `qdwin_locker_v1_send_lock_requested`
   on the locker resource (assertion 6)
 - Overlay-key router — `if (overlay_grab_role == 2 && locker_resource)`

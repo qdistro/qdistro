@@ -28,11 +28,10 @@ class QdwinLockerV1(Interface):
     comes up while the old one is still bound, qdwin destroys the old binding
     (the old process is considered dead — only one locker may exist at a time).
 
-    Bootstrap: until the locker has sent `bind_as_locker` and attached a lock
-    surface, qdwin treats `set_locked` requests as no-ops. The compositor
-    starts in locked state by default (see sessions.md §"Admin logout /
-    compositor crash") and waits for the locker to attach its surface before
-    showing anything.
+    Bootstrap: after `bind_as_locker`, qdwin accepts `set_locked(1)`
+    immediately. If the Qt lock toplevel has not mapped yet, qdwin hides the
+    normal desktop and shows a black screen until that toplevel appears, then
+    promotes it to the LOCK layer.
 
     If the locker process dies while the compositor is in locked state, qdwin
     keeps the screen black and refuses input until a replacement locker binds.
@@ -72,10 +71,10 @@ class QdwinLockerV1Proxy(Proxy[QdwinLockerV1]):
     def attach_lock_surface(self, surface: WlSurface) -> Proxy[QdwinLockerSurfaceV1]:
         """Install the lock overlay
 
-        Places `surface` on the compositor LOCK layer, covering every output.
-        The surface is not yet "live" — the lock state is still driven by
-        `set_locked`. Multiple lock surfaces are not allowed; a second attach
-        replaces the first and dismisses the prior surface.
+        Legacy explicit lock-surface attach. Current qdlocker does not use this
+        request; qdwin instead promotes qdlocker's real Qt xdg_toplevel to the
+        compositor LOCK layer. This request is retained for compatibility with
+        older lockers and tests.
 
         The surface must not have a role yet. After attach, it has the implicit
         "lock surface" role; any :func:`WlSurface.commit()
@@ -97,10 +96,11 @@ class QdwinLockerV1Proxy(Proxy[QdwinLockerV1]):
     def set_locked(self, locked: int) -> None:
         """Transition compositor lock state
 
-        `locked=1` → compositor enters the locked state: the lock surface (from
-        attach_lock_surface) is the only thing composited; user-session
-        surfaces stop rendering; input is delivered only to the locker via
-        `overlay_key`.
+        `locked=1` → compositor enters the locked state: normal desktop layers
+        are hidden, the lock layer remains visible, and input is delivered only
+        to the locker via `overlay_key`. qdwin promotes the authorized locker's
+        Qt toplevel to the lock layer when it maps. If it is not mapped yet,
+        the screen stays black.
 
         `locked=0` → unlocks; user surfaces resume rendering. The locker is
         expected to call this only after a successful authentication.
@@ -109,7 +109,9 @@ class QdwinLockerV1Proxy(Proxy[QdwinLockerV1]):
         qdwin_shell_v1 after the transition completes, and emits the equivalent
         `locked_changed` event on this interface to the locker.
 
-        Fails with `no_surface` if no lock surface is attached.
+        Older qdwin builds failed with `no_surface` if no explicit lock surface
+        was attached. Current qdwin accepts the request and waits for the real
+        locker toplevel.
 
         :param locked:
         :type locked:
@@ -145,9 +147,9 @@ class QdwinLockerV1Resource(Resource):
     def ready(self, initially_locked: int) -> None:
         """Locker binding accepted
 
-        Sent after `bind_as_locker` succeeds. The locker should now attach its
-        lock surface and (if the compositor is already locked) wait for the
-        user to authenticate.
+        Sent after `bind_as_locker` succeeds. If the compositor is already
+        locked, the locker should show its Qt lock window and wait for the user
+        to authenticate.
 
         :param initially_locked:
             1 if the compositor is currently locked, 0 otherwise
@@ -203,12 +205,12 @@ class QdwinLockerV1Resource(Resource):
     def overlay_key(self, sym: int, utf8: str) -> None:
         """Key forwarded while locked
 
-        While the lock surface is attached and the compositor is locked, qdwin
-        installs a keyboard grab and forwards each pressed key to the locker
-        here. Identical wire format to qdwin_shell_v1.overlay_key (since v17)
-        for the role=2 (locker) value, but delivered on the locker's connection
-        so the shell cannot observe lock-time keystrokes — i.e. the password
-        the user types never reaches the shell process.
+        While the compositor is locked, qdwin installs a keyboard grab and
+        forwards each pressed key to the locker here. Identical wire format to
+        qdwin_shell_v1.overlay_key (since v17) for the role=2 (locker) value,
+        but delivered on the locker's connection so the shell cannot observe
+        lock-time keystrokes — i.e. the password the user types never reaches
+        the shell process.
 
         `sym` is the xkb keysym; `utf8` is the printable character (or "" if
         non-printable). The locker prefers utf8 when non-empty and falls back

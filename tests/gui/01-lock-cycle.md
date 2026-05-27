@@ -68,10 +68,9 @@ qdlocker_ctrl status
 pam-ready=True`.
 **Assert (2.2):** _Optional — depends on `qdwin_ctrl "locker"` being
 implemented in qdshell, which it currently is not._ If implemented,
-verify the lock surface attribution is `qdlocker_uid` (not the
-shell's uid). Until then, skip 2.2 and rely on the qdwin journal
-line `qdwin: locker attach_lock_surface` as the equivalent proof
-(grep via the helper used in scenario 04).
+verify the promoted lock toplevel attribution is `qdlocker_uid` (not
+the shell's uid). Until then, skip 2.2 and rely on the qdwin journal
+line `qdwin: promoted locker toplevel` as the equivalent proof.
 **Assert (2.3):** screenshot shows the qdlocker UI: clock, date,
 password field, both rendered with qdshell styling
 (NText / NIcon / Color.mSurface palette — visually identical to the
@@ -145,12 +144,12 @@ qdwin_screenshot /tmp/qdlocker-01-step5-post.png
 
 All asserts 1.1 → 5.2 pass. Confirms:
 
-- The `qdwin_locker_v1` protocol is wired (binding accepted, lock
-  surface attached, set_locked round-trips).
+- The `qdwin_locker_v1` protocol is wired (binding accepted, locker
+  Qt toplevel promoted to the LOCK layer, set_locked round-trips).
 - Overlay keystrokes route to qdlocker — i.e. the security boundary
   from the spec is real, not just declared in the XML.
 - qdlocker's auth path (PAM) accepts a valid password.
-- Lock surface lifecycle is symmetric (attach on lock, destroy on
+- Lock surface lifecycle is symmetric (promote on lock, hide on
   unlock).
 
 ## Known-broken-if

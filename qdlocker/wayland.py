@@ -1,25 +1,18 @@
 """qdwin_locker_v1 client.
 
 Pure pywayland — the locker holds its OWN wl_display connection,
-separate from Qt's. Earlier drafts tried to share Qt's display so the
-Qt-owned wl_surface could be passed to `attach_lock_surface`, but the
-Qt-native-interface bridge for raw `wl_display*` extraction is
-brittle even under PyQt6/sip (and there is no
-`pywayland.WlSurface.from_native`). The pragmatic shape: pywayland
-handles all protocol traffic + the lock surface (shm-backed), and the
-Qt QML surface is a separate render that is NOT the LOCK-layer
-surface. See doc/wayland-bridge.md for the longer-term plan to
-unify.
+separate from Qt's. pywayland owns the private control protocol
+(`set_locked`, `overlay_key`, lock triggers); qdwin identifies the
+same process's Qt-owned xdg_toplevel and promotes that real visible
+surface to the compositor LOCK layer while locked.
 
 What this module owns:
 
 - The wl_display + wl_registry on the WAYLAND_DISPLAY socket.
 - The qdwin_locker_v1 global binding + bind_as_locker call.
-- A wl_compositor handle for creating the lock wl_surface.
-- The lock surface (currently a 1×1 placeholder, fully transparent;
-  the visible UI is rendered by Qt elsewhere). The compositor pins
-  this on the LOCK layer and refuses to render anything else while
-  set_locked(1) is in effect.
+- The real visible lock surface is the Qt/QML window, not a
+  pywayland-created placeholder. qdwin promotes the Qt toplevel based
+  on the authenticated locker process identity.
 - The pywayland fd poll loop, run on a worker thread so Qt's event
   loop is free for the QML.
 
@@ -56,10 +49,7 @@ class LockerClient:
         self._events = events
         self._display = None
         self._registry = None
-        self._compositor = None
         self._locker = None
-        self._lock_surface = None
-        self._lock_handle = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._globals: dict[str, tuple[int, int]] = {}
@@ -74,10 +64,8 @@ class LockerClient:
         self._display_lock = threading.Lock()
 
     def connect(self) -> bool:
-        """Connect, bind, attach a placeholder lock surface. Returns
-        True on success."""
+        """Connect and bind qdwin_locker_v1. Returns True on success."""
         from pywayland.client import Display
-        from pywayland.protocol.wayland import WlCompositor
 
         try:
             self._display = Display()
@@ -93,12 +81,6 @@ class LockerClient:
         if "qdwin_locker_v1" not in self._globals:
             log.error("qdwin_locker_v1 not advertised by compositor")
             return False
-        if "wl_compositor" not in self._globals:
-            log.error("wl_compositor not advertised")
-            return False
-
-        c_name, c_ver = self._globals["wl_compositor"]
-        self._compositor = self._registry.bind(c_name, WlCompositor, min(c_ver, 4))
 
         from .protocol.qdwin_locker_v1 import QdwinLockerV1
         l_name, l_ver = self._globals["qdwin_locker_v1"]
@@ -109,22 +91,14 @@ class LockerClient:
         self._locker.dispatcher["overlay_key"] = self._on_overlay_key
         self._locker.bind_as_locker()
         # Two roundtrips — first to flush bind_as_locker, second to
-        # observe the ready event. Without this, attach_lock_surface
-        # can fire before the compositor accepts the locker role and
-        # races against bind_qdwin_locker's uid filter.
+        # observe the ready event before the Qt side may request a lock.
         self._display.roundtrip()
         self._display.roundtrip()
         if not self._bound.is_set():
             log.error("locker bound but ready event never arrived")
             return False
 
-        # Placeholder lock surface — 1×1 transparent. Replace with
-        # the rendered UI surface once the Qt bridge is in place.
-        self._lock_surface = self._compositor.create_surface()
-        self._lock_handle = self._locker.attach_lock_surface(self._lock_surface)
-        self._lock_handle.dispatcher["configure"] = self._on_configure
-        self._display.roundtrip()
-        log.info("locker connected, surface attached")
+        log.info("locker connected")
 
         self._thread = threading.Thread(
             target=self._poll_loop, name="qdlocker-wayland", daemon=True
@@ -180,18 +154,6 @@ class LockerClient:
 
     def _on_overlay_key(self, _resource, sym: int, utf8: str) -> None:
         self._events.on_overlay_key(sym, utf8)
-
-    def _on_configure(self, resource, width: int, height: int, serial: int) -> None:
-        log.info("lock-surface configure %dx%d serial=%d", width, height, serial)
-        # We're already on the poll thread here; serialize anyway so
-        # a main-thread `set_locked` can't sneak in mid-emit.
-        with self._display_lock:
-            try:
-                resource.ack_configure(serial)
-                if self._display:
-                    self._display.flush()
-            except Exception:
-                log.exception("ack_configure failed")
 
     # ----- poll loop -----
 

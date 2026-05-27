@@ -27,9 +27,9 @@ crash doesn't take chrome down with it).
 The locker:
 
 - Binds `qdwin_locker_v1` as the sole locker client.
-- Renders the lock UI into a `QQuickWindow` whose `wl_surface` is
-  attached as the LOCK-layer surface via
-  `qdwin_locker_v1.attach_lock_surface`.
+- Renders the lock UI into a `QQuickWindow`; qdwin identifies that
+  Qt toplevel as belonging to the authorized locker process and
+  promotes it to the LOCK layer while locked.
 - Calls `set_locked(1)` on lock trigger, `set_locked(0)` after auth.
 - Receives keystrokes via `overlay_key` (qdwin grabs the keyboard
   while locked so the password text never reaches qdshell or any
@@ -139,11 +139,9 @@ This is the initial scaffold:
 - ✅ QML UI reusing qdshell styling
 - ✅ systemd unit + README
 - ✅ VM test scaffolding
-- ⏳ qdwin C-side `bind_qdwin_locker` + locker resource handlers
-      (see qdwin/doc/locker.md for the recipe — the existing
-      shell-side `attach_lock_surface` body is reusable)
-- ⏳ pywayland scanner output committed under `protocol/` (run
-      `pywayland-scanner` against `qdwin-locker-v1.xml`)
+- ✅ qdwin C-side `bind_qdwin_locker` + locker resource handlers
+      (see qdwin/doc/locker.md)
+- ✅ pywayland scanner output committed under `protocol/`
 - ⏳ Ctrl-socket implementation in app.py for test introspection
 
 See `tests/gui/01-lock-cycle.md` for the acceptance criterion.

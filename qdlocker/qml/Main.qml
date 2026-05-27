@@ -1,11 +1,9 @@
 // qdlocker root window.
 //
-// One full-screen QQuickWindow hosting LockUI.qml. The window's
-// wl_surface is currently NOT the LOCK-layer surface — pywayland in
-// wayland.py owns the lock surface on its own connection. Visual
-// rendering and the compositor's lock state live on separate planes
-// for now; unifying them needs a small Qt↔pywayland bridge (see
-// README §Status).
+// One full-screen QQuickWindow hosting LockUI.qml. qdwin recognizes
+// this process as the authorized locker and promotes this Qt toplevel
+// to the compositor LOCK layer while locked; pywayland owns only the
+// private control protocol.
 
 import QtQuick
 import QtQuick.Window
