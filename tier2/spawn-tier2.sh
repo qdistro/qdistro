@@ -355,8 +355,12 @@ fi
 if [ "$TIER2_ALLOW_PRIVESC_RESOLVED" != "1" ]; then
     PODMAN_HARDENING+=( --security-opt=no-new-privileges )
 fi
-if [ -n "$TIER2_SECCOMP_PROFILE_RESOLVED" ] && [ -f "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
-    PODMAN_HARDENING+=( "--security-opt=seccomp=$TIER2_SECCOMP_PROFILE_RESOLVED" )
+if [ -n "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
+    if [ -f "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
+        PODMAN_HARDENING+=( "--security-opt=seccomp=$TIER2_SECCOMP_PROFILE_RESOLVED" )
+    else
+        echo "spawn-tier2-wrapper: WARN: seccomp profile $TIER2_SECCOMP_PROFILE_RESOLVED disappeared; using podman default" >&2
+    fi
 fi
 if [ -n "$TIER2_KEEP_CAPS_RESOLVED" ]; then
     IFS="," read -ra _caps <<< "$TIER2_KEEP_CAPS_RESOLVED"

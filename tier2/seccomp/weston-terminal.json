@@ -1,6 +1,6 @@
 {
 	"defaultAction": "SCMP_ACT_ERRNO",
-	"defaultErrnoRet": 1,
+	"defaultErrnoRet": 38,
 	"comment": "Custom seccomp profile for the tier-2 weston-terminal container. Deny-by-default; allows only the ~140 syscalls needed by bash, weston, weston-terminal, wayland client libs, and basic coreutils (mkdir, chmod, rm, seq, sed). See tier2-podman-hardening-followups.md item 1.",
 	"archMap": [
 		{
@@ -19,7 +19,7 @@
 	],
 	"syscalls": [
 		{
-			"comment": "Process lifecycle and job control (setpgid/setsid needed by bash job control, set_robust_list/rseq by glibc/pthread init)",
+			"comment": "Process lifecycle and job control (setpgid/setsid needed by bash job control, set_robust_list/rseq by glibc/pthread init, pidfd_open/pidfd_send_signal by libudev via weston)",
 			"names": [
 				"clone",
 				"clone3",
@@ -41,6 +41,8 @@
 				"getpgrp",
 				"setsid",
 				"getsid",
+				"pidfd_open",
+				"pidfd_send_signal",
 				"sched_yield",
 				"sched_getaffinity",
 				"sched_setaffinity"
@@ -225,7 +227,7 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "Explicitly denied high-risk syscalls (return EPERM). Listed individually so auditors can see exactly what is blocked and why.",
+			"comment": "Explicitly denied high-risk syscalls (return EPERM, not ENOSYS like the default, so callers cannot mistake the deny for 'kernel too old'). Listed individually so auditors can see exactly what is blocked and why.",
 			"names": [
 				"ptrace",
 				"process_vm_readv",
