@@ -123,6 +123,19 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
 export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 OUTER_DISPLAY="${TIER2_OUTER_DISPLAY:-${WAYLAND_DISPLAY:-wayland-1}}"
 QDWIN_SHELL_SO="${TIER2_QDWIN_SHELL_SO:-/usr/lib64/weston/qdwin-shell.so}"
+# Custom seccomp profile — deny-by-default, allows only the ~130
+# syscalls needed by bash/weston/weston-terminal/coreutils. Falls back
+# to podman's default profile if the custom one is missing (e.g. dev
+# runs from a source checkout that hasn't been installed).
+TIER2_SECCOMP_PROFILE="${TIER2_SECCOMP_PROFILE:-}"
+if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
+    _seccomp_candidate="$SCRIPT_DIR/seccomp/${WORKLOAD}.json"
+    if [ -f "$_seccomp_candidate" ]; then
+        TIER2_SECCOMP_PROFILE="$_seccomp_candidate"
+    elif [ -f "/usr/local/share/qdistro/tier2/seccomp/${WORKLOAD}.json" ]; then
+        TIER2_SECCOMP_PROFILE="/usr/local/share/qdistro/tier2/seccomp/${WORKLOAD}.json"
+    fi
+fi
 IMAGE="qdistro/tier2-${WORKLOAD}:latest"
 USE_SECCTX="${TIER2_USE_SECCTX:-1}"
 ENGINE="${TIER2_SECCTX_ENGINE:-qdistro.tier2}"
@@ -241,6 +254,7 @@ export TIER2_MEMORY_RESOLVED="$TIER2_MEMORY_VAL"
 export TIER2_CPUS_RESOLVED="$TIER2_CPUS_VAL"
 export TIER2_KEEP_CAPS_RESOLVED="$TIER2_KEEP_CAPS_VAL"
 export TIER2_ALLOW_PRIVESC_RESOLVED="$TIER2_ALLOW_PRIVESC_VAL"
+export TIER2_SECCOMP_PROFILE_RESOLVED="$TIER2_SECCOMP_PROFILE"
 APP_ARGV_JOINED="$(printf '%q ' "${APP_ARGV[@]}")"
 export TIER2_APP_ARGV_JOINED="$APP_ARGV_JOINED"
 
@@ -326,6 +340,9 @@ if [ -n "$TIER2_CPUS_RESOLVED" ]; then
 fi
 if [ "$TIER2_ALLOW_PRIVESC_RESOLVED" != "1" ]; then
     PODMAN_HARDENING+=( --security-opt=no-new-privileges )
+fi
+if [ -n "$TIER2_SECCOMP_PROFILE_RESOLVED" ] && [ -f "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
+    PODMAN_HARDENING+=( "--security-opt=seccomp=$TIER2_SECCOMP_PROFILE_RESOLVED" )
 fi
 if [ -n "$TIER2_KEEP_CAPS_RESOLVED" ]; then
     IFS="," read -ra _caps <<< "$TIER2_KEEP_CAPS_RESOLVED"

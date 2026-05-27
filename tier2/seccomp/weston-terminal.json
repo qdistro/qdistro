@@ -1,0 +1,236 @@
+{
+	"defaultAction": "SCMP_ACT_ERRNO",
+	"defaultErrnoRet": 1,
+	"comment": "Custom seccomp profile for the tier-2 weston-terminal container. Deny-by-default; allows only the ~130 syscalls needed by bash, weston, weston-terminal, wayland client libs, and basic coreutils (mkdir, chmod, rm, seq, sed). See tier2-podman-hardening-followups.md item 1.",
+	"archMap": [
+		{
+			"architecture": "SCMP_ARCH_X86_64",
+			"subArchitectures": [
+				"SCMP_ARCH_X86",
+				"SCMP_ARCH_X32"
+			]
+		},
+		{
+			"architecture": "SCMP_ARCH_AARCH64",
+			"subArchitectures": [
+				"SCMP_ARCH_ARM"
+			]
+		}
+	],
+	"syscalls": [
+		{
+			"comment": "Process lifecycle",
+			"names": [
+				"clone",
+				"clone3",
+				"execve",
+				"exit",
+				"exit_group",
+				"wait4",
+				"waitid",
+				"getpid",
+				"getppid",
+				"gettid",
+				"set_tid_address",
+				"prctl",
+				"arch_prctl",
+				"sched_yield",
+				"sched_getaffinity",
+				"sched_setaffinity"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Memory management",
+			"names": [
+				"mmap",
+				"munmap",
+				"mprotect",
+				"mremap",
+				"brk",
+				"madvise"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "File I/O",
+			"names": [
+				"openat",
+				"close",
+				"read",
+				"write",
+				"readv",
+				"writev",
+				"lseek",
+				"pread64",
+				"pwrite64",
+				"fcntl",
+				"dup",
+				"dup2",
+				"dup3",
+				"pipe",
+				"pipe2",
+				"fstat",
+				"newfstatat",
+				"statx",
+				"fstatfs",
+				"access",
+				"faccessat",
+				"faccessat2",
+				"readlink",
+				"readlinkat",
+				"getcwd",
+				"chdir",
+				"fchdir"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Directory operations",
+			"names": [
+				"getdents64",
+				"mkdir",
+				"mkdirat",
+				"rmdir",
+				"unlink",
+				"unlinkat",
+				"rename",
+				"renameat",
+				"renameat2"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Socket (wayland client/server, pipewire)",
+			"names": [
+				"socket",
+				"connect",
+				"bind",
+				"listen",
+				"accept",
+				"accept4",
+				"sendmsg",
+				"recvmsg",
+				"sendto",
+				"recvfrom",
+				"getsockname",
+				"getpeername",
+				"getsockopt",
+				"setsockopt",
+				"shutdown"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Epoll/poll (weston event loop)",
+			"names": [
+				"epoll_create1",
+				"epoll_ctl",
+				"epoll_wait",
+				"poll",
+				"ppoll",
+				"select",
+				"pselect6"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Signal handling",
+			"names": [
+				"rt_sigaction",
+				"rt_sigprocmask",
+				"rt_sigreturn",
+				"kill",
+				"tgkill",
+				"sigaltstack"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Time and timers (weston event loop, animations)",
+			"names": [
+				"clock_gettime",
+				"clock_getres",
+				"gettimeofday",
+				"nanosleep",
+				"clock_nanosleep",
+				"timerfd_create",
+				"timerfd_settime",
+				"timerfd_gettime"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "User/group IDs",
+			"names": [
+				"getuid",
+				"geteuid",
+				"getgid",
+				"getegid",
+				"getgroups",
+				"setuid",
+				"setgid",
+				"setgroups",
+				"setreuid",
+				"setregid"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Misc: ioctl (terminal, DRM), futex (glibc threading), getrandom (weston), eventfd/signalfd (event loops), memfd/ftruncate/fallocate (wayland SHM), chmod/chown/umask (coreutils), inotify (weston config watch)",
+			"names": [
+				"ioctl",
+				"uname",
+				"futex",
+				"getrandom",
+				"eventfd",
+				"eventfd2",
+				"signalfd4",
+				"memfd_create",
+				"ftruncate",
+				"fallocate",
+				"chmod",
+				"fchmod",
+				"fchmodat",
+				"chown",
+				"fchown",
+				"fchownat",
+				"umask",
+				"inotify_init1",
+				"inotify_add_watch",
+				"inotify_rm_watch"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Explicitly denied high-risk syscalls (return EPERM). Listed individually so auditors can see exactly what is blocked and why.",
+			"names": [
+				"ptrace",
+				"process_vm_readv",
+				"process_vm_writev",
+				"keyctl",
+				"add_key",
+				"request_key",
+				"io_uring_setup",
+				"io_uring_enter",
+				"io_uring_register",
+				"userfaultfd",
+				"perf_event_open",
+				"bpf",
+				"kexec_load",
+				"kexec_file_load",
+				"mount",
+				"umount2",
+				"pivot_root",
+				"swapon",
+				"swapoff",
+				"reboot",
+				"init_module",
+				"finit_module",
+				"delete_module"
+			],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 1
+		}
+	]
+}
