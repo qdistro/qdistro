@@ -87,7 +87,9 @@ qdlocker_session_healthy || { echo "session not up"; exit 2; }
 `qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the qdwin
 sibling repo (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`,
 `qdwin_qmp_key`, `qdwin_ctrl` all work as documented in qdwin's
-AGENTS.md) and adds locker-specific accessors:
+AGENTS.md) and adds locker-specific accessors. `qdwin_ctrl` depends
+on qdshell's optional test ctrl-socket; qdlocker core scenarios should
+prefer the qdlocker helpers and direct VM commands when possible.
 
 - `qdlocker_ctrl <command>` — talks to `/run/user/1000/qdlocker.sock`
   via the guest's socat. Commands: `status`, `lock`,
@@ -98,8 +100,23 @@ AGENTS.md) and adds locker-specific accessors:
   unlock-result` until `last=success`.
 - `qdlocker_assert_prompt_len <N>` — fails non-zero if `prompt-len`
   isn't exactly N.
-- `qdlocker_session_healthy` — checks both `qdwin_session_healthy`
-  and that `qdlocker.service` (user unit) is active.
+- `qdlocker_unlock_with_password [password=$QDISTRO_VM_PASSWORD|kruger]`
+  and `qdlocker_drain_lock_state` — unlock through the real keyboard
+  overlay path. Prefer this for cleanup; restarting qdlocker while
+  qdwin is locked is fail-safe and may leave the compositor locked.
+  If password unlock cannot drain a stale locked state,
+  `qdlocker_drain_lock_state` restarts the qdwin user session as a
+  test-cleanup fallback.
+- `qdlocker_assert_color_present_in_crop <png> <#rrggbb> <WxH+X+Y> [label]`
+  and `qdlocker_assert_color_absent_in_crop ...` — host-side
+  ImageMagick screenshot checks for sentinel pixels. Use these for
+  lock-screen occlusion; do not rely on agent vision alone for "no
+  desktop pixels are visible."
+- `qdlocker_session_healthy` — checks that `qdwin-compositor.service`
+  and `qdlocker.service` are active and that qdlocker's ctrl-socket
+  responds. It intentionally does not require qdshell's optional
+  ctrl-socket; qdlocker is a peer process and several scenarios are
+  specifically about surviving without qdshell.
 
 ## Hard-learned pitfalls (locker-specific — read before commands)
 
@@ -112,18 +129,15 @@ AGENTS.md) and adds locker-specific accessors:
 
 2. **Resetting the locker between scenarios.** If a scenario fails
    mid-cycle leaving `locked=True`, the next scenario's setup will
-   inherit the locked state and try to type a password into the
-   wrong context. Every Setup block must include the drain:
+   inherit the locked state and try to type into the wrong context.
+   Every Setup block must include the drain:
 
    ```bash
-   case "$(qdlocker_ctrl status 2>/dev/null)" in
-       *locked=True*)
-           "$QDWIN_VM_EXEC" "$VMNAME" \
-             'runuser -u admin -- systemctl --user restart qdlocker.service; sleep 2' \
-             >/dev/null
-           ;;
-   esac
+   qdlocker_drain_lock_state
    ```
+
+   Do not use qdlocker service restart as the normal unlock path:
+   qdwin intentionally treats locker loss while locked as fail-safe.
 
 3. **The overlay-key path is silent on failure.** If qdwin's
    `bind_qdwin_locker` isn't wired and qdlocker isn't receiving
@@ -184,10 +198,11 @@ AGENTS.md) and adds locker-specific accessors:
 | [04-lid-close-lock.md](04-lid-close-lock.md) | systemd-logind lid-close event triggers `lock_requested(reason=lid_close)`. Currently TODO — see scenario text. |
 | [05-keystroke-isolation.md](05-keystroke-isolation.md) | **Security boundary.** While locked, password keystrokes reach qdlocker's `prompt-len` but NOT qdshell's. If qdshell's ctrl-socket sees the typed chars, the protocol's `overlay_key` routing is broken and the locker's purpose is defeated. |
 | [06-shell-crash-survives.md](06-shell-crash-survives.md) | qdshell.service is killed while locked → the lock surface stays up → typing still reaches qdlocker → unlock still works. Confirms the lifecycle independence that motivated splitting qdlocker out of qdshell. |
+| [07-lock-occludes-desktop.md](07-lock-occludes-desktop.md) | **Visual security invariant.** A full-screen magenta normal toplevel is placed behind qdlocker; after lock, screenshot edge bands and the full screen must contain zero magenta pixels. Catches fullscreen/first-map offset bugs. |
 
-A full smoke pass is 01 → 05 (skip 04 until the lid-close C plumbing
-lands). 06 is regression-only — run after touching qdshell or
-qdwin's resource-destruction paths.
+A full smoke pass is 01 → 05 → 07 (skip 04 until the lid-close C
+plumbing lands). 06 is regression-only — run after touching qdshell
+or qdwin's resource-destruction paths.
 
 ## Running a scenario
 

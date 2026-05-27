@@ -15,6 +15,7 @@
 
 : "${QDLOCKER_REPO:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 : "${QDWIN_REPO:=${QDLOCKER_REPO}/../qdwin}"
+: "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../qdistro/scripts/vm/vm-exec}"
 
 if [ -f "${QDWIN_REPO}/tests/gui/qdwin-helpers.sh" ]; then
     # shellcheck disable=SC1091
@@ -76,6 +77,91 @@ qdlocker_assert_prompt_len() {
     fi
 }
 
+qdlocker_unlock_with_password() {
+    local password="${1:-${QDISTRO_VM_PASSWORD:-kruger}}"
+    local i ch
+    for ((i = 0; i < ${#password}; i++)); do
+        ch="${password:i:1}"
+        case "$ch" in
+            [a-z0-9]) ;;
+            *)
+                echo "qdlocker_unlock_with_password: unsupported char '$ch'" >&2
+                return 2
+                ;;
+        esac
+        qdwin_qmp_key "$ch" down; sleep 0.05
+        qdwin_qmp_key "$ch" up;   sleep 0.05
+    done
+    qdwin_send_key KEY_ENTER
+    qdlocker_wait_for_unlock 5
+}
+
+qdlocker_drain_lock_state() {
+    case "$(qdlocker_ctrl status 2>/dev/null)" in
+        *locked=True*)
+            if qdlocker_unlock_with_password "${1:-${QDISTRO_VM_PASSWORD:-kruger}}"; then
+                return 0
+            fi
+            echo "qdlocker_drain_lock_state: password unlock failed; restarting qdwin session" >&2
+            "$QDWIN_VM_EXEC" "$VMNAME" \
+                'runuser -l admin -c "systemctl --user restart qdwin-compositor.service"; sleep 3; runuser -l admin -c "systemctl --user restart qdshell.service qdlocker.service"; sleep 3' \
+                >/dev/null
+            case "$(qdlocker_ctrl status 2>/dev/null)" in
+                *locked=False*) return 0 ;;
+                *)
+                    echo "qdlocker_drain_lock_state: still locked after session restart" >&2
+                    return 1
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------- pixels
+#
+# Sentinel-color assertions for lock-screen occlusion tests. These use
+# ImageMagick on the host screenshot, not agent vision, so "a thin strip
+# of desktop is visible" turns into a deterministic failure.
+
+qdlocker_count_color_in_crop() {
+    local image="$1" color="$2" crop="$3"
+    local hex
+    hex=$(printf "%s" "$color" | tr '[:lower:]' '[:upper:]' | sed 's/^#//')
+    if ! command -v magick >/dev/null 2>&1; then
+        echo "qdlocker_count_color_in_crop: ImageMagick 'magick' not found" >&2
+        return 2
+    fi
+    magick "$image" -alpha off -crop "$crop" \
+        -format %c histogram:info:- \
+        | awk -v hex="$hex" '
+            toupper($0) ~ ("#" hex) {
+                gsub(":", "", $1);
+                sum += $1;
+            }
+            END { print sum + 0 }
+        '
+}
+
+qdlocker_assert_color_absent_in_crop() {
+    local image="$1" color="$2" crop="$3" label="${4:-$crop}"
+    local count
+    count=$(qdlocker_count_color_in_crop "$image" "$color" "$crop") || return $?
+    if [ "$count" -ne 0 ]; then
+        echo "qdlocker_assert_color_absent_in_crop: $label has $count pixels of $color in $image" >&2
+        return 1
+    fi
+}
+
+qdlocker_assert_color_present_in_crop() {
+    local image="$1" color="$2" crop="$3" label="${4:-$crop}"
+    local count
+    count=$(qdlocker_count_color_in_crop "$image" "$color" "$crop") || return $?
+    if [ "$count" -eq 0 ]; then
+        echo "qdlocker_assert_color_present_in_crop: $label has no $color pixels in $image" >&2
+        return 1
+    fi
+}
+
 # ---------------------------------------------------------------- health
 #
 # Composite check: qdwin session healthy AND qdlocker user-unit active.
@@ -83,10 +169,17 @@ qdlocker_assert_prompt_len() {
 
 qdlocker_session_healthy() {
     qdwin_require_vm || return $?
-    if ! qdwin_session_healthy >/dev/null 2>&1; then
-        echo "qdlocker_session_healthy: qdwin session not up" >&2
-        return 1
-    fi
+    local compositor_state
+    compositor_state=$("$QDWIN_VM_EXEC" "$VMNAME" \
+        'runuser -l admin -c "systemctl --user is-active qdwin-compositor.service"' 2>/dev/null \
+        | tr -d '\r\n')
+    case "$compositor_state" in
+        active) ;;
+        *)
+            echo "qdlocker_session_healthy: qdwin-compositor.service is '$compositor_state' (want active)" >&2
+            return 1
+            ;;
+    esac
     # `runuser -l admin -c` runs a login shell — same env (XDG_RUNTIME_DIR,
     # DBUS_SESSION_BUS_ADDRESS) as an interactive admin login. Bare
     # `runuser -u admin -- systemctl --user` doesn't get these and

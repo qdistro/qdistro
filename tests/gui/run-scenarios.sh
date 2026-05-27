@@ -43,7 +43,7 @@ Examples:
 EOF
 }
 
-SMOKE=(01-lock-cycle.md 02-fprintd-fallback.md 05-keystroke-isolation.md)
+SMOKE=(01-lock-cycle.md 02-fprintd-fallback.md 05-keystroke-isolation.md 07-lock-occludes-desktop.md)
 
 scenarios=()
 case "${1:-}" in
