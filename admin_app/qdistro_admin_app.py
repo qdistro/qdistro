@@ -713,6 +713,11 @@ def _age_color(epoch_s: float) -> QColor:
 # Default mute duration in seconds (30 minutes).
 MUTE_DURATION_S = 30 * 60
 
+# Escalation thresholds (seconds).
+ESCALATION_THRESHOLD_S = 60    # re-notify after 60s pending
+CRITICAL_THRESHOLD_S = 300     # critical-level after 5 min
+CROSS_UID_THRESHOLD_S = 30     # cross-uid / sensitive actions escalate faster
+
 
 class NotificationManager(QObject):
     """Owns mute state, pending-request timestamps, desktop notifications,
@@ -723,6 +728,10 @@ class NotificationManager(QObject):
     """
     # Emitted every ~10 seconds so the UI can repaint age columns.
     ageTickFired = pyqtSignal()
+
+    ESCALATION_THRESHOLD_S = ESCALATION_THRESHOLD_S
+    CRITICAL_THRESHOLD_S = CRITICAL_THRESHOLD_S
+    CROSS_UID_THRESHOLD_S = CROSS_UID_THRESHOLD_S
 
     def __init__(self, tray_icon: QSystemTrayIcon, parent: QObject | None = None):
         super().__init__(parent)
@@ -736,10 +745,20 @@ class NotificationManager(QObject):
         # on_request_pending(); removed by on_request_decided().
         self._arrival_times: dict[int, float] = {}
 
+        # Per-request metadata for escalation decisions.
+        # Map of request-id -> {"action": str, "uid": int}.
+        self._request_meta: dict[int, dict] = {}
+
+        # Escalation tracking: rids that already received an escalation
+        # notification (avoids spamming every 10s tick).
+        self._escalated_rids: set[int] = set()
+        # Rids that already received a critical-level notification.
+        self._critical_rids: set[int] = set()
+
         # Age-display refresh: tick every 10 seconds.
         self._age_timer = QTimer(self)
         self._age_timer.setInterval(10_000)
-        self._age_timer.timeout.connect(self.ageTickFired.emit)
+        self._age_timer.timeout.connect(self._on_age_tick)
         self._age_timer.start()
 
     # ---- mute ---------------------------------------------------------------
@@ -762,13 +781,19 @@ class NotificationManager(QObject):
 
     # ---- pending tracking ---------------------------------------------------
 
-    def on_request_pending(self, rid: int) -> None:
-        """Record arrival time for a new pending request."""
+    def on_request_pending(self, rid: int, action: str = "",
+                           uid: int = 0) -> None:
+        """Record arrival time and metadata for a new pending request."""
         self._arrival_times.setdefault(rid, _time.time())
+        if rid not in self._request_meta and (action or uid):
+            self._request_meta[rid] = {"action": action, "uid": uid}
 
     def on_request_decided(self, rid: int) -> None:
-        """Remove arrival time for a decided request."""
+        """Remove arrival time and escalation state for a decided request."""
         self._arrival_times.pop(rid, None)
+        self._request_meta.pop(rid, None)
+        self._escalated_rids.discard(rid)
+        self._critical_rids.discard(rid)
 
     def arrival_time(self, rid: int) -> float | None:
         return self._arrival_times.get(rid)
@@ -785,6 +810,9 @@ class NotificationManager(QObject):
         stale = set(self._arrival_times) - pending_rids
         for rid in stale:
             del self._arrival_times[rid]
+            self._request_meta.pop(rid, None)
+            self._escalated_rids.discard(rid)
+            self._critical_rids.discard(rid)
         # Add entries we haven't seen yet.
         now = _time.time()
         for rid in pending_rids - set(self._arrival_times):
@@ -810,6 +838,89 @@ class NotificationManager(QObject):
             QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
+
+    # ---- escalation ---------------------------------------------------------
+
+    @staticmethod
+    def _is_cross_uid_action(action: str) -> bool:
+        """Return True if *action* looks like a cross-uid or sensitive op."""
+        lower = action.lower()
+        return "cross" in lower or "xuid" in lower
+
+    def _escalation_threshold(self, rid: int) -> int:
+        """Return the escalation threshold (seconds) for *rid*.
+
+        Cross-uid or sensitive actions use the shorter
+        ``CROSS_UID_THRESHOLD_S``; everything else uses
+        ``ESCALATION_THRESHOLD_S``.
+        """
+        meta = self._request_meta.get(rid, {})
+        if self._is_cross_uid_action(meta.get("action", "")):
+            return self.CROSS_UID_THRESHOLD_S
+        return self.ESCALATION_THRESHOLD_S
+
+    def _check_escalation(self, window_active: bool) -> None:
+        """Re-notify for stale pending requests.
+
+        Called from the age-tick timer (~every 10s). Walks all pending
+        requests and, if the admin window is still unfocused and
+        notifications are not muted, sends escalating re-notifications:
+
+        * After ``ESCALATION_THRESHOLD_S`` (or ``CROSS_UID_THRESHOLD_S``
+          for cross-uid actions): send an *Information*-level repeat.
+        * After ``CRITICAL_THRESHOLD_S``: upgrade to *Critical*-level.
+
+        Each level fires at most once per request (tracked by
+        ``_escalated_rids`` / ``_critical_rids``).
+        """
+        if self._muted or window_active:
+            return
+
+        now = _time.time()
+        for rid, arrival in self._arrival_times.items():
+            elapsed = now - arrival
+            meta = self._request_meta.get(rid, {})
+            action = meta.get("action", "request")
+            uid = meta.get("uid", 0)
+            threshold = self._escalation_threshold(rid)
+
+            # Critical escalation (>300s by default).
+            if elapsed >= self.CRITICAL_THRESHOLD_S \
+                    and rid not in self._critical_rids:
+                self._critical_rids.add(rid)
+                # Also mark as escalated so we don't double-fire below.
+                self._escalated_rids.add(rid)
+                self._tray_icon.showMessage(
+                    "CRITICAL — stale approval request",
+                    f"uid={uid}  {action}  "
+                    f"(waiting {_format_age(arrival)})",
+                    QSystemTrayIcon.MessageIcon.Critical,
+                    10_000,
+                )
+                continue
+
+            # Standard escalation (>60s or >30s for cross-uid).
+            if elapsed >= threshold and rid not in self._escalated_rids:
+                self._escalated_rids.add(rid)
+                self._tray_icon.showMessage(
+                    "Reminder — pending approval request",
+                    f"uid={uid}  {action}  "
+                    f"(waiting {_format_age(arrival)})",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    7000,
+                )
+
+    def _on_age_tick(self) -> None:
+        """Age-timer callback: emit the repaint signal and run escalation."""
+        self.ageTickFired.emit()
+        # Escalation needs to know whether the window is active.
+        # The parent is typically MainWindow; fall back to False (escalate)
+        # if not available.
+        window_active = False
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "isActiveWindow"):
+            window_active = parent.isActiveWindow()
+        self._check_escalation(window_active)
 
 
 class MainWindow(QMainWindow):
@@ -1150,14 +1261,20 @@ class MainWindow(QMainWindow):
             self._tray_pulse_timer.start()
         self._update_tray_icon()
         # Desktop notification — fetch the request details so the popup
-        # includes the action name and requesting uid.
+        # includes the action name and requesting uid. Also store the
+        # metadata on NotificationManager so escalation checks have
+        # access to it later.
         try:
             pending = self.broker.get_pending()
             for req in pending:
                 if int(req["id"]) == rid:
+                    action = req["action"]
+                    uid = int(req["uid"])
+                    # Update metadata for escalation tracking.
+                    self.notifications.on_request_pending(
+                        rid, action=action, uid=uid)
                     self.notifications.maybe_notify(
-                        req["action"], int(req["uid"]),
-                        self.isActiveWindow(),
+                        action, uid, self.isActiveWindow(),
                     )
                     break
         except dbus.DBusException:

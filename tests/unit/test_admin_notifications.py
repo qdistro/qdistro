@@ -35,6 +35,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qdistro_admin_app import (  # noqa: E402
     NotificationManager,
     MUTE_DURATION_S,
+    ESCALATION_THRESHOLD_S,
+    CRITICAL_THRESHOLD_S,
+    CROSS_UID_THRESHOLD_S,
     _format_age,
     _age_color,
 )
@@ -275,6 +278,147 @@ class TestAgeTimer:
         mgr.ageTickFired.connect(lambda: received.append(True))
         mgr.ageTickFired.emit()
         assert len(received) == 1
+
+
+# ---------------------------------------------------------------------------
+# NotificationManager — escalation
+# ---------------------------------------------------------------------------
+
+class TestEscalation:
+    """Threshold-based re-notification for stale pending requests."""
+
+    def test_no_escalation_before_threshold(self, mgr, tray):
+        """Requests younger than the threshold should not escalate."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_not_called()
+
+    def test_escalation_after_threshold(self, mgr, tray):
+        """Request pending >60s gets a re-notification."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        # Backdate arrival to trigger standard escalation.
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_called_once()
+        args = tray.showMessage.call_args
+        assert "Reminder" in args[0][0]
+        assert "uid=2000" in args[0][1]
+        assert args[0][2] == QSystemTrayIcon.MessageIcon.Information
+
+    def test_critical_escalation_after_300s(self, mgr, tray):
+        """Request pending >300s gets a critical-level notification."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 310
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_called_once()
+        args = tray.showMessage.call_args
+        assert "CRITICAL" in args[0][0]
+        assert args[0][2] == QSystemTrayIcon.MessageIcon.Critical
+
+    def test_cross_uid_escalates_faster(self, mgr, tray):
+        """Cross-uid actions escalate at CROSS_UID_THRESHOLD_S (30s)."""
+        mgr.on_request_pending(1, action="qdistro.cross_clipboard", uid=2000)
+        # 35s is past 30s cross-uid threshold but under 60s standard.
+        mgr._arrival_times[1] = time.time() - 35
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_called_once()
+        assert "Reminder" in tray.showMessage.call_args[0][0]
+
+    def test_xuid_action_also_escalates_faster(self, mgr, tray):
+        """Actions containing 'xuid' also use the cross-uid threshold."""
+        mgr.on_request_pending(1, action="qdistro.xuid_paste", uid=2000)
+        mgr._arrival_times[1] = time.time() - 35
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_called_once()
+
+    def test_no_double_escalation(self, mgr, tray):
+        """Once escalated, the same rid should not re-fire on the next tick."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == 1
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == 1  # still 1
+
+    def test_no_double_critical(self, mgr, tray):
+        """Critical notification fires at most once per rid."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 310
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == 1
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == 1
+
+    def test_escalation_suppressed_when_muted(self, mgr, tray):
+        """Muted state suppresses escalation too."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 70
+        mgr.mute(duration_s=600)
+        mgr._check_escalation(window_active=False)
+        tray.showMessage.assert_not_called()
+
+    def test_escalation_suppressed_when_window_active(self, mgr, tray):
+        """No escalation if the admin window is focused."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=True)
+        tray.showMessage.assert_not_called()
+
+    def test_decided_clears_escalation_state(self, mgr, tray):
+        """Deciding a request clears its escalation tracking."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        assert 1 in mgr._escalated_rids
+        mgr.on_request_decided(1)
+        assert 1 not in mgr._escalated_rids
+        assert 1 not in mgr._critical_rids
+
+    def test_sync_pending_clears_stale_escalation(self, mgr, tray):
+        """sync_pending removes escalation state for stale rids."""
+        mgr.on_request_pending(1, action="qdistro.exec", uid=2000)
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        assert 1 in mgr._escalated_rids
+        # Sync with empty set — request 1 is gone.
+        mgr.sync_pending(set())
+        assert 1 not in mgr._escalated_rids
+        assert mgr.pending_count == 0
+
+    def test_multiple_requests_escalate_independently(self, mgr, tray):
+        """Each pending request is tracked independently for escalation."""
+        mgr.on_request_pending(1, action="qdistro.exec.ls", uid=2000)
+        mgr.on_request_pending(2, action="qdistro.exec.cat", uid=2001)
+        # Only backdate request 1.
+        mgr._arrival_times[1] = time.time() - 70
+        mgr._check_escalation(window_active=False)
+        assert tray.showMessage.call_count == 1
+        assert 1 in mgr._escalated_rids
+        assert 2 not in mgr._escalated_rids
+
+    def test_is_cross_uid_action_positive(self):
+        assert NotificationManager._is_cross_uid_action("qdistro.cross_clipboard")
+        assert NotificationManager._is_cross_uid_action("qdistro.xuid_paste")
+        assert NotificationManager._is_cross_uid_action("CROSS_UID_RW")
+
+    def test_is_cross_uid_action_negative(self):
+        assert not NotificationManager._is_cross_uid_action("qdistro.exec.ls")
+        assert not NotificationManager._is_cross_uid_action("")
+
+    def test_on_request_pending_stores_metadata(self, mgr):
+        mgr.on_request_pending(42, action="qdistro.exec", uid=1000)
+        assert mgr._request_meta[42] == {"action": "qdistro.exec", "uid": 1000}
+
+    def test_on_request_decided_clears_metadata(self, mgr):
+        mgr.on_request_pending(42, action="qdistro.exec", uid=1000)
+        mgr.on_request_decided(42)
+        assert 42 not in mgr._request_meta
+
+    def test_escalation_threshold_constants(self):
+        """Verify the module-level threshold constants."""
+        assert ESCALATION_THRESHOLD_S == 60
+        assert CRITICAL_THRESHOLD_S == 300
+        assert CROSS_UID_THRESHOLD_S == 30
 
 
 # ---------------------------------------------------------------------------
