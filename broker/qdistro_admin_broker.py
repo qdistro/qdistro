@@ -293,6 +293,11 @@ def _argv_from_details(details: dict) -> list[str] | None:
     return [v for _, v in indexed]
 
 
+def _selector_from_details(details: dict, key: str) -> str:
+    value = dict(details or {}).get(key, "")
+    return str(value or "")[:128]
+
+
 def _read_proc_uid(pid: int) -> int | None:
     """Return the real uid of pid from /proc/<pid>/status, or None if the
     process is gone. Used by VerifyClientIdentity to cross-check the
@@ -726,7 +731,13 @@ class Broker(dbus.service.Object):
                 f"{self.ratelimit.window_s}s). Check rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
-        rule = self.rules.match(uid=uid, action=action_s, exe=exe, argv=argv)
+        rule = self.rules.match(
+            uid=uid, action=action_s, exe=exe,
+            app_id=_selector_from_details(details, "app_id"),
+            sandbox_engine=_selector_from_details(details, "sandbox_engine"),
+            mime_type=_selector_from_details(details, "mime_type"),
+            argv=argv,
+        )
         if rule is not None:
             return "allow" if rule.decision == "allow" else "deny"
         row = self.cache.lookup_detail(uid, action_s, exe, argv)
@@ -1649,7 +1660,12 @@ class Broker(dbus.service.Object):
         if not one_shot:
             argv = _argv_from_details(details)
             matched_rule = self.rules.match(
-                uid=uid, action=action_s, exe=exe, argv=argv,
+                uid=uid, action=action_s, exe=exe,
+                app_id=_selector_from_details(details, "app_id"),
+                sandbox_engine=_selector_from_details(
+                    details, "sandbox_engine"),
+                mime_type=_selector_from_details(details, "mime_type"),
+                argv=argv,
             )
             if matched_rule is None:
                 cached_row = self.cache.lookup_detail(uid, action_s, exe, argv)
@@ -2172,6 +2188,20 @@ class Broker(dbus.service.Object):
                 "uid":         dbus.Int32(r.uid if r.uid is not None else -1),
                 "action":      dbus.String(r.action if r.action is not None else ""),
                 "exe":         dbus.String(r.exe if r.exe is not None else ""),
+                "app_id":      dbus.String(
+                    r.app_id if r.app_id is not None else ""),
+                "sandbox_engine": dbus.String(
+                    r.sandbox_engine if r.sandbox_engine is not None else ""),
+                "mime_type":   dbus.String(
+                    r.mime_type if r.mime_type is not None else ""),
+                "argv_exact":  dbus.Array(
+                    [dbus.String(x) for x in (r.argv_exact or ())],
+                    signature="s"),
+                "argv_basename": dbus.String(
+                    r.argv_basename if r.argv_basename is not None else ""),
+                "argv_prefix": dbus.Array(
+                    [dbus.String(x) for x in (r.argv_prefix or ())],
+                    signature="s"),
                 "scope":       dbus.String(r.scope if r.scope is not None else ""),
                 "rationale":   dbus.String(r.rationale or ""),
             })

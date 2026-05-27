@@ -33,8 +33,10 @@ from qdistro_portal_backend import (  # type: ignore[import-not-found]
     NOTIFICATION_IFC,
     RESP_SUCCESS,
     RESP_CANCELLED,
+    RESP_OTHER,
     QdistroPortalBackend,
     _check_permission,
+    _portal_action,
     _request_permission,
     _run_file_picker,
 )
@@ -126,7 +128,7 @@ class TestAccessDialog:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == "portal.access"
+        assert args[0][1] == "portal.access:org.example.App"
         assert args[0][2]["app_id"] == "org.example.App"
         assert args[0][2]["title"] == "Title"
 
@@ -150,12 +152,19 @@ class TestAccessDialog:
 # -- FileChooser portal -------------------------------------------------
 
 class TestFileChooserOpenFile:
+    def test_open_save_signature_matches_impl_portal_xml(self):
+        for name in ("OpenFile", "SaveFile"):
+            method = getattr(QdistroPortalBackend, name)
+            assert method._dbus_in_signature == "osssa{sv}"
+            assert method._dbus_args == [
+                "handle", "app_id", "parent_window", "title", "options"]
+
     def test_open_denied(self, backend):
         """When broker denies, OpenFile returns cancelled."""
         with patch("qdistro_portal_backend._check_permission",
                    return_value="deny"):
             resp, results = backend.OpenFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Open document", {})
         assert int(resp) == RESP_CANCELLED
 
     def test_open_unknown_fires_request(self, backend):
@@ -164,7 +173,7 @@ class TestFileChooserOpenFile:
                    return_value="unknown"), \
              patch("qdistro_portal_backend._request_permission") as mock_req:
             resp, _ = backend.OpenFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Open document", {})
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
 
@@ -175,7 +184,7 @@ class TestFileChooserOpenFile:
              patch("qdistro_portal_backend._run_file_picker",
                    return_value=["/home/user/doc.txt"]):
             resp, results = backend.OpenFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Open document", {})
         assert int(resp) == RESP_SUCCESS
         results_d = dict(results)
         uris = list(results_d["uris"])
@@ -190,7 +199,7 @@ class TestFileChooserOpenFile:
              patch("qdistro_portal_backend._run_file_picker",
                    return_value=[]):
             resp, _ = backend.OpenFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Open document", {})
         assert int(resp) == RESP_CANCELLED
 
     def test_open_multiple_files(self, backend):
@@ -202,7 +211,7 @@ class TestFileChooserOpenFile:
                    return_value=paths):
             resp, results = backend.OpenFile(
                 "/handle", "org.example.App", "",
-                {"multiple": True})
+                "Open documents", {"multiple": True})
         assert int(resp) == RESP_SUCCESS
         uris = list(dict(results)["uris"])
         assert len(uris) == 2
@@ -215,7 +224,7 @@ class TestFileChooserSaveFile:
              patch("qdistro_portal_backend._run_file_picker",
                    return_value=["/home/user/output.pdf"]):
             resp, results = backend.SaveFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Save document", {})
         assert int(resp) == RESP_SUCCESS
         uris = list(dict(results)["uris"])
         assert len(uris) == 1
@@ -225,7 +234,7 @@ class TestFileChooserSaveFile:
         with patch("qdistro_portal_backend._check_permission",
                    return_value="deny"):
             resp, _ = backend.SaveFile(
-                "/handle", "org.example.App", "", {})
+                "/handle", "org.example.App", "", "Save document", {})
         assert int(resp) == RESP_CANCELLED
 
 
@@ -233,13 +242,13 @@ class TestFileChooserSaveFile:
 
 class TestScreenshot:
     def test_screenshot_allow(self, backend):
-        """When broker allows, Screenshot returns success."""
+        """Until screencopy is wired, allowed Screenshot returns error."""
         with patch("qdistro_portal_backend._check_permission",
                    return_value="allow"):
             resp, results = backend.Screenshot(
                 "/handle", "org.example.App", "", {})
-        assert int(resp) == RESP_SUCCESS
-        assert "uri" in dict(results)
+        assert int(resp) == RESP_OTHER
+        assert "uri" not in dict(results)
 
     def test_screenshot_deny(self, backend):
         """When broker denies, Screenshot returns cancelled."""
@@ -259,7 +268,7 @@ class TestScreenshot:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == "com.qdistro.screen.capture"
+        assert args[0][1] == "com.qdistro.screen.capture:org.example.App"
         assert args[0][2]["app_id"] == "org.example.App"
 
     def test_screenshot_action_string(self, backend):
@@ -274,7 +283,13 @@ class TestScreenshot:
         with patch("qdistro_portal_backend._check_permission",
                    side_effect=fake_check):
             backend.Screenshot("/handle", "org.example.App", "", {})
-        assert captured_action == "com.qdistro.screen.capture"
+        assert captured_action == "com.qdistro.screen.capture:org.example.App"
+
+    def test_portal_action_scopes_by_app_id(self):
+        assert _portal_action("com.qdistro.fs.open", "org.example.App") == \
+            "com.qdistro.fs.open:org.example.App"
+        assert _portal_action("com.qdistro.fs.open", "weird/app id") == \
+            "com.qdistro.fs.open:weird_app_id"
 
 
 # -- Notification portal ------------------------------------------------

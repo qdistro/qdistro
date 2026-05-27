@@ -115,6 +115,7 @@ INSTALLERS=(
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
     "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge  $SRC/qdbrowser/qdbrowser"
+    "scripts/install/install-portal-backend-for-vm.sh  $QD"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
     "scripts/install/install-recall-for-vm.sh          $QD"

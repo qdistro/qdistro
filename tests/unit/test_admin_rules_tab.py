@@ -326,6 +326,24 @@ class TestRuleEditorDialog:
         # should appear
         assert "some.action" in text
 
+    def test_generate_yaml_preserves_extended_selectors(self, qapp):
+        broker = _make_stub_broker()
+        rule_data = {
+            "name": "extended",
+            "decision": "allow",
+            "action": "com.qdistro.fs.open:*",
+            "app_id": "org.example.App",
+            "sandbox_engine": "flatpak",
+            "mime_type": "text/plain",
+            "argv_prefix": ["/usr/bin/foo", "--open"],
+        }
+        dlg = RuleEditorDialog(broker, rule_data)
+        text = dlg.yaml_editor.toPlainText()
+        assert "org.example.App" in text
+        assert "flatpak" in text
+        assert "text/plain" in text
+        assert "argv_prefix" in text
+
     def test_get_rule_data_returns_yaml_body(self, qapp):
         """get_rule_data() returns the YAML body as a dict."""
         broker = _make_stub_broker()
@@ -504,6 +522,46 @@ class TestSaveTriggersReload:
         broker.save_rule.assert_called_once()
         args = broker.save_rule.call_args
         assert args[0][0] == "test-rule.yaml"
+
+    def test_add_rule_rejects_allow_all(self, qapp):
+        broker = _make_stub_broker()
+        tab = RulesTab(broker)
+
+        with patch("qdistro_admin_app.RuleEditorDialog") as MockDlg, \
+             patch("qdistro_admin_app.QMessageBox.warning") as warn:
+            mock_dlg_inst = MagicMock()
+            mock_dlg_inst.exec.return_value = 1
+            mock_dlg_inst.filename_line.text.return_value = "bad.yaml"
+            mock_dlg_inst.yaml_editor.toPlainText.return_value = (
+                "- name: bad\n  decision: allow\n  match: {}\n"
+            )
+            MockDlg.return_value = mock_dlg_inst
+
+            tab._on_add_rule()
+
+        broker.save_rule.assert_not_called()
+        warn.assert_called_once()
+
+    def test_edit_rule_rejects_allow_all(self, qapp):
+        broker = _make_stub_broker()
+        tab = RulesTab(broker)
+        tab.refresh()
+        tab.table.setCurrentIndex(tab.model.index(0, 0))
+
+        with patch("qdistro_admin_app.RuleEditorDialog") as MockDlg, \
+             patch("qdistro_admin_app.QMessageBox.warning") as warn:
+            mock_dlg_inst = MagicMock()
+            mock_dlg_inst.exec.return_value = 1
+            mock_dlg_inst.filename_line.text.return_value = "bad.yaml"
+            mock_dlg_inst.yaml_editor.toPlainText.return_value = (
+                "- name: bad\n  decision: allow\n  match: {}\n"
+            )
+            MockDlg.return_value = mock_dlg_inst
+
+            tab._on_edit_rule()
+
+        broker.save_rule.assert_not_called()
+        warn.assert_called_once()
 
     def test_new_rule_appears_after_save(self, qapp):
         """After saving, refresh() re-queries the broker, and a newly added

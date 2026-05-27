@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.qdistro
+SystemdService=qdistro-portal-backend.service

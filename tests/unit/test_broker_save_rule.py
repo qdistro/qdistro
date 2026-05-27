@@ -161,6 +161,25 @@ class TestListRules:
         assert str(r["rationale"]) == "testing list"
         assert "list-test.yaml" in str(r["source_path"])
 
+    def test_preserves_extended_selectors(self, broker, rules_dir):
+        broker.set_peer(uid=ADMIN_UID)
+        broker.SaveRule(
+            "extended.yaml",
+            "- name: extended\n"
+            "  decision: allow\n"
+            "  match:\n"
+            "    action: 'com.qdistro.fs.open:*'\n"
+            "    app_id: 'org.example.App'\n"
+            "    sandbox_engine: flatpak\n"
+            "    mime_type: text/plain\n"
+            "    argv_prefix: ['/usr/bin/foo', '--open']\n",
+        )
+        r = broker.ListRules()[0]
+        assert str(r["app_id"]) == "org.example.App"
+        assert str(r["sandbox_engine"]) == "flatpak"
+        assert str(r["mime_type"]) == "text/plain"
+        assert list(r["argv_prefix"]) == ["/usr/bin/foo", "--open"]
+
     def test_dont_care_uid_renders_minus_one(self, broker, rules_dir):
         broker.set_peer(uid=ADMIN_UID)
         broker.SaveRule(

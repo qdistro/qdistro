@@ -1698,16 +1698,7 @@ class RulesTab(QWidget):
     def _on_add_rule(self) -> None:
         dialog = RuleEditorDialog(self.broker, {}, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            try:
-                filename = dialog.filename_line.text().strip()
-                if not filename.endswith('.yaml'):
-                    filename += '.yaml'
-                yaml_content = dialog.yaml_editor.toPlainText()
-                result = self.broker.save_rule(filename, yaml_content)
-                QMessageBox.information(self, "Success", f"Rule saved to {result}")
-                self.refresh()
-            except dbus.DBusException as e:
-                QMessageBox.critical(self, "Error saving rule", str(e))
+            self._save_dialog_rule(dialog, "Rule saved to")
 
     def _on_edit_rule(self) -> None:
         row = self._selected_row()
@@ -1716,16 +1707,27 @@ class RulesTab(QWidget):
             return
         dialog = RuleEditorDialog(self.broker, row, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            try:
-                filename = dialog.filename_line.text().strip()
-                if not filename.endswith('.yaml'):
-                    filename += '.yaml'
-                yaml_content = dialog.yaml_editor.toPlainText()
-                result = self.broker.save_rule(filename, yaml_content)
-                QMessageBox.information(self, "Success", f"Rule updated at {result}")
-                self.refresh()
-            except dbus.DBusException as e:
-                QMessageBox.critical(self, "Error updating rule", str(e))
+            self._save_dialog_rule(dialog, "Rule updated at")
+
+    def _save_dialog_rule(self, dialog, success_prefix: str) -> None:
+        try:
+            filename = dialog.filename_line.text().strip()
+            if not filename.endswith('.yaml'):
+                filename += '.yaml'
+            yaml_content = dialog.yaml_editor.toPlainText()
+            if MainWindow._yaml_is_allow_all(yaml_content):
+                QMessageBox.warning(
+                    self, "Refused (overly broad)",
+                    "This rule has no match selectors and would apply "
+                    "to every uid + action + exe. Add at least one "
+                    "selector to the match block before saving.")
+                return
+            result = self.broker.save_rule(filename, yaml_content)
+            QMessageBox.information(
+                self, "Success", f"{success_prefix} {result}")
+            self.refresh()
+        except dbus.DBusException as e:
+            QMessageBox.critical(self, "Error saving rule", str(e))
 
     def _on_delete_rule(self) -> None:
         row = self._selected_row()
@@ -1919,6 +1921,14 @@ class RuleEditorDialog(QDialog):
             rule_obj["match"]["action"] = match_src["action"]
         if match_src.get("exe"):
             rule_obj["match"]["exe"] = match_src["exe"]
+        for key in ("app_id", "sandbox_engine", "mime_type",
+                    "argv_basename"):
+            if match_src.get(key):
+                rule_obj["match"][key] = match_src[key]
+        for key in ("argv_exact", "argv_prefix"):
+            value = match_src.get(key)
+            if value:
+                rule_obj["match"][key] = list(value)
 
         # Convert to YAML string
         try:

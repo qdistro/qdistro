@@ -39,6 +39,7 @@ Backend selection is configured via ``qdistro-portals.conf``::
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -72,6 +73,13 @@ RESP_OTHER = 2
 # File-picker helper. Uses zenity by default; override with
 # QDISTRO_FILE_PICKER for testing or alternate UIs.
 _FILE_PICKER = os.environ.get("QDISTRO_FILE_PICKER", "zenity")
+
+
+def _portal_action(base: str, app_id: str) -> str:
+    """Scope portal approvals to the requesting portal app_id."""
+    app = str(app_id or "unknown")[:128]
+    app = re.sub(r"[^A-Za-z0-9_.-]+", "_", app).strip("._-") or "unknown"
+    return f"{base}:{app}"
 
 
 def _broker_iface(sys_bus: dbus.Bus) -> dbus.Interface:
@@ -175,7 +183,7 @@ class QdistroPortalBackend(dbus.service.Object):
         """
         app_id_s = str(app_id or "")
         title_s = str(title or "")
-        action = "portal.access"
+        action = _portal_action("portal.access", app_id_s)
         details = {"app_id": app_id_s, "title": title_s}
         verdict = _check_permission(self._sys_bus, action, details)
         if verdict == "allow":
@@ -195,28 +203,28 @@ class QdistroPortalBackend(dbus.service.Object):
 
     @dbus.service.method(
         FILECHOOSER_IFC,
-        in_signature="ossa{sv}",
+        in_signature="osssa{sv}",
         out_signature="ua{sv}",
     )
-    def OpenFile(self, handle, app_id, parent_window, options):
+    def OpenFile(self, handle, app_id, parent_window, title, options):
         """Open-file portal: broker gate then file picker."""
         return self._file_chooser(handle, app_id, parent_window,
-                                  options, save=False)
+                                  title, options, save=False)
 
     @dbus.service.method(
         FILECHOOSER_IFC,
-        in_signature="ossa{sv}",
+        in_signature="osssa{sv}",
         out_signature="ua{sv}",
     )
-    def SaveFile(self, handle, app_id, parent_window, options):
+    def SaveFile(self, handle, app_id, parent_window, title, options):
         """Save-file portal: broker gate then file picker."""
         return self._file_chooser(handle, app_id, parent_window,
-                                  options, save=True)
+                                  title, options, save=True)
 
     def _file_chooser(self, handle, app_id, parent_window,
-                      options, *, save: bool):
+                      title, options, *, save: bool):
         app_id_s = str(app_id or "")
-        action = "com.qdistro.fs.open"
+        action = _portal_action("com.qdistro.fs.open", app_id_s)
         details = {"app_id": app_id_s}
         verdict = _check_permission(self._sys_bus, action, details)
         if verdict == "deny":
@@ -228,7 +236,9 @@ class QdistroPortalBackend(dbus.service.Object):
                     dbus.Dictionary({}, signature="sv"))
         # verdict == "allow" -- show the picker
         opts = dict(options) if options else {}
-        title = str(opts.get("title", "Save File" if save else "Open File"))
+        title_s = str(title or "")
+        picker_title = title_s or str(opts.get(
+            "title", "Save File" if save else "Open File"))
         multiple = bool(opts.get("multiple", False)) and not save
         directory = bool(opts.get("directory", False))
         current_folder = ""
@@ -239,7 +249,7 @@ class QdistroPortalBackend(dbus.service.Object):
             except Exception:
                 pass
         paths = _run_file_picker(
-            title=title, save=save, multiple=multiple,
+            title=picker_title, save=save, multiple=multiple,
             directory=directory, current_folder=current_folder)
         if not paths:
             return (dbus.UInt32(RESP_CANCELLED),
@@ -271,17 +281,14 @@ class QdistroPortalBackend(dbus.service.Object):
         would invoke qdshell's screencopy interface after approval.
         """
         app_id_s = str(app_id or "")
-        action = "com.qdistro.screen.capture"
+        action = _portal_action("com.qdistro.screen.capture", app_id_s)
         details = {"app_id": app_id_s}
         verdict = _check_permission(self._sys_bus, action, details)
         if verdict == "allow":
-            # In a full implementation, invoke qdshell screencopy here
-            # and return the URI of the captured image.  For now, return
-            # success with an empty URI -- the compositor integration is
-            # a separate piece.
-            results: dict[str, Any] = {"uri": dbus.String("")}
-            return (dbus.UInt32(RESP_SUCCESS),
-                    dbus.Dictionary(results, signature="sv"))
+            # Do not advertise success until compositor screencopy is
+            # wired and a real file:// URI can be returned.
+            return (dbus.UInt32(RESP_OTHER),
+                    dbus.Dictionary({}, signature="sv"))
         if verdict == "deny":
             return (dbus.UInt32(RESP_CANCELLED),
                     dbus.Dictionary({}, signature="sv"))
@@ -307,7 +314,7 @@ class QdistroPortalBackend(dbus.service.Object):
         content).
         """
         app_id_s = str(app_id or "")
-        action = "portal.notification"
+        action = _portal_action("portal.notification", app_id_s)
         details = {"app_id": app_id_s, "notification_id": str(id_ or "")}
         verdict = _check_permission(self._sys_bus, action, details)
         if verdict == "allow":
@@ -331,7 +338,7 @@ class QdistroPortalBackend(dbus.service.Object):
         cannot remove notifications it did not create.
         """
         app_id_s = str(app_id or "")
-        action = "portal.notification"
+        action = _portal_action("portal.notification", app_id_s)
         details = {"app_id": app_id_s, "notification_id": str(id_ or "")}
         verdict = _check_permission(self._sys_bus, action, details)
         if verdict == "allow":

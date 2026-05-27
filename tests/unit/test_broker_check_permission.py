@@ -281,11 +281,7 @@ class TestCheckPermissionRateLimit:
 # --- details tolerance (shape-symmetric with RequestPermission) ----------
 
 class TestCheckPermissionDetails:
-    def test_non_empty_details_ignored_today(self, broker):
-        """details are accepted but not used yet — docstring says so,
-        and changing that contract needs a separate design pass. This
-        test nails the current behaviour so a future content-aware
-        rule change is a deliberate, visible break."""
+    def test_non_matching_details_remain_unknown(self, broker):
         broker.set_peer(uid=NON_ADMIN_UID)
         details = {
             "app_id": "qnotebook",
@@ -295,6 +291,26 @@ class TestCheckPermissionDetails:
             "desired_height": "480",
         }
         assert broker.CheckPermission(STREAM_ACTION, details) == "unknown"
+
+    def test_app_id_selector_matches_details(self, broker, rules_dir):
+        (rules_dir / "portal-app.yaml").write_text(
+            "- name: portal-app\n"
+            "  decision: allow\n"
+            "  match:\n"
+            "    action: 'com.qdistro.fs.open:*'\n"
+            "    uid: 2000\n"
+            "    app_id: 'org.example.Allowed'\n"
+        )
+        broker.rules.reload()
+        broker.set_peer(uid=NON_ADMIN_UID)
+        assert broker.CheckPermission(
+            "com.qdistro.fs.open:org.example.Allowed",
+            {"app_id": "org.example.Allowed"},
+        ) == "allow"
+        assert broker.CheckPermission(
+            "com.qdistro.fs.open:org.example.Other",
+            {"app_id": "org.example.Other"},
+        ) == "unknown"
 
     def test_stream_action_slug_roundtrip(self, broker, rules_dir):
         """qdshell slugs app_id into
