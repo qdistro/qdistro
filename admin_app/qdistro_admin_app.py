@@ -1026,9 +1026,10 @@ class MainWindow(QMainWindow):
             item = QStandardItem(f"uid={req['uid']}  {req['action']}  [{age_str}]")
             item.setData(req, Qt.ItemDataRole.UserRole + 1)
             item.setEditable(False)
-            # Color the age portion using foreground on a separate approach:
-            # set tooltip with the age so it's always visible on hover.
+            # Color the entire row foreground based on waiting-time
+            # escalation so the admin can triage by age at a glance.
             if arrival is not None:
+                item.setForeground(_age_color(arrival))
                 item.setToolTip(f"Waiting: {age_str}")
             self.model.appendRow(item)
 
@@ -1171,7 +1172,13 @@ class MainWindow(QMainWindow):
             self._mute_action.setText("Unmute")
 
     def _refresh_age_column(self) -> None:
-        """Repaint the Waiting column in the pending list with updated ages."""
+        """Repaint the Waiting column in the pending list with updated ages.
+
+        Called every ~10s by the NotificationManager.ageTickFired signal.
+        Updates both the display text (uid + action + [age]) and the
+        foreground color for age-based escalation so the admin can
+        triage stale requests at a glance.
+        """
         for row in range(self.model.rowCount()):
             item = self.model.item(row, 0)
             if item is None:
@@ -1183,10 +1190,10 @@ class MainWindow(QMainWindow):
             arrival = self.notifications.arrival_time(rid)
             if arrival is None:
                 continue
-            # Update the age text stored in column 0 display
             age_str = _format_age(arrival)
-            color = _age_color(arrival)
-            # Update tooltip with age
+            # Rebuild the display text with the refreshed age.
+            item.setText(f"uid={req['uid']}  {req['action']}  [{age_str}]")
+            item.setForeground(_age_color(arrival))
             item.setToolTip(f"Waiting: {age_str}")
         # Also update window title with current count
         self._update_window_title()
