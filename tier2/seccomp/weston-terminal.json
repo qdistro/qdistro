@@ -60,10 +60,11 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "File I/O",
+			"comment": "File I/O. flock needed by libwayland-server for socket lock files. fsync by libglib. close_range by glibc/libglib (modern close-on-exec). statfs by bash.",
 			"names": [
 				"openat",
 				"close",
+				"close_range",
 				"read",
 				"write",
 				"readv",
@@ -72,6 +73,8 @@
 				"pread64",
 				"pwrite64",
 				"fcntl",
+				"flock",
+				"fsync",
 				"dup",
 				"dup2",
 				"dup3",
@@ -81,6 +84,7 @@
 				"newfstatat",
 				"statx",
 				"fstatfs",
+				"statfs",
 				"access",
 				"faccessat",
 				"faccessat2",
@@ -173,13 +177,15 @@
 			"action": "SCMP_ACT_ALLOW"
 		},
 		{
-			"comment": "User/group IDs. The set* variants are needed by podman's --userns=keep-id uid mapping; they are neutered by --cap-drop=ALL (no CAP_SETUID/SETGID) and --security-opt=no-new-privileges.",
+			"comment": "User/group IDs. The set* variants are needed by podman's --userns=keep-id uid mapping; they are neutered by --cap-drop=ALL (no CAP_SETUID/SETGID) and --security-opt=no-new-privileges. getresuid/getresgid used by bash.",
 			"names": [
 				"getuid",
 				"geteuid",
 				"getgid",
 				"getegid",
 				"getgroups",
+				"getresuid",
+				"getresgid",
 				"setuid",
 				"setgid",
 				"setgroups",
@@ -213,7 +219,8 @@
 				"inotify_rm_watch",
 				"prlimit64",
 				"getrlimit",
-				"setrlimit"
+				"setrlimit",
+				"getrusage"
 			],
 			"action": "SCMP_ACT_ALLOW"
 		},

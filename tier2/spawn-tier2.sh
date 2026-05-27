@@ -157,10 +157,13 @@ fi
 . "$SPAWN_COMMON"
 LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
 
-# Custom seccomp profile — deny-by-default, allows only the ~130
+# Custom seccomp profile — deny-by-default, allows only the ~145
 # syscalls needed by bash/weston/weston-terminal/coreutils. Falls back
-# to podman's default profile if the custom one is missing (e.g. dev
-# runs from a source checkout that hasn't been installed).
+# to podman's default profile if no profile found on the auto-detection
+# path (e.g. dev runs from a checkout that hasn't been installed). If
+# TIER2_SECCOMP_PROFILE was explicitly set via env but the file is
+# missing, we fail closed rather than silently dropping to the default.
+_seccomp_explicit="${TIER2_SECCOMP_PROFILE:-}"
 TIER2_SECCOMP_PROFILE="${TIER2_SECCOMP_PROFILE:-}"
 if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
     # Search order: dev-tree adjacent, installed /usr/lib, legacy /usr/local/share.
@@ -173,6 +176,12 @@ if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
             break
         fi
     done
+    if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
+        echo "spawn-tier2: WARN: no seccomp profile found for workload '$WORKLOAD'; using podman default" >&2
+    fi
+elif [ ! -f "$TIER2_SECCOMP_PROFILE" ]; then
+    echo "spawn-tier2: FATAL: TIER2_SECCOMP_PROFILE=$_seccomp_explicit does not exist" >&2
+    exit 2
 fi
 
 # --- pre-flight ---------------------------------------------------------
