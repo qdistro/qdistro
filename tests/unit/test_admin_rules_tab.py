@@ -135,6 +135,34 @@ def _sample_history_entry():
 # RulesTab tests
 # ---------------------------------------------------------------------------
 
+class TestBrokerBridgeRules:
+    def test_list_rules_preserves_extended_selectors(self, qapp):
+        bridge = BrokerBridge.__new__(BrokerBridge)
+        bridge._call = MagicMock(return_value=[{
+            "name": "extended",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/extended.yaml",
+            "uid": 2000,
+            "action": "com.qdistro.fs.open:*",
+            "exe": "",
+            "app_id": "org.example.App",
+            "sandbox_engine": "flatpak",
+            "mime_type": "text/plain",
+            "argv_exact": [],
+            "argv_basename": "",
+            "argv_prefix": ["/usr/bin/foo", "--open"],
+            "scope": "once",
+            "rationale": "test",
+        }])
+
+        row = bridge.list_rules()[0]
+
+        assert row["app_id"] == "org.example.App"
+        assert row["sandbox_engine"] == "flatpak"
+        assert row["mime_type"] == "text/plain"
+        assert row["argv_prefix"] == ["/usr/bin/foo", "--open"]
+
+
 class TestRulesTab:
     """Exercises the RulesTab widget in isolation."""
 

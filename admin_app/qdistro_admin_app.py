@@ -165,6 +165,12 @@ class BrokerBridge(QObject):
                 "uid":          int(r["uid"]) if r["uid"] != -1 else -1,
                 "action":       str(r["action"]),
                 "exe":          str(r["exe"]),
+                "app_id":       str(r.get("app_id", "")),
+                "sandbox_engine": str(r.get("sandbox_engine", "")),
+                "mime_type":    str(r.get("mime_type", "")),
+                "argv_exact":   [str(x) for x in r.get("argv_exact", [])],
+                "argv_basename": str(r.get("argv_basename", "")),
+                "argv_prefix":  [str(x) for x in r.get("argv_prefix", [])],
                 "scope":        str(r["scope"]),
                 "rationale":    str(r["rationale"]),
             })
