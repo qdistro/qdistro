@@ -708,6 +708,15 @@ class Broker(dbus.service.Object):
             hook_resp = self.hooks.query(action_s, hook_event)
             if hook_resp is not None:
                 verdict = hook_resp.get("verdict")
+                reason = hook_resp.get("reason", "")[:256]
+                try:
+                    self.audit.log(
+                        action=action_s, uid=uid, pid=pid, exe=exe,
+                        decision=(verdict in ("allow", "transform")),
+                        scope=None,
+                        source=f"hook verdict={verdict} reason={reason}")
+                except Exception:  # noqa: BLE001
+                    pass
                 if verdict in ("allow", "transform"):
                     return "allow"
                 if verdict == "deny":

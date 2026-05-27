@@ -162,8 +162,10 @@ def _normalize_url_origin(url: str) -> str:
     """
     parsed = urllib.parse.urlparse(url)
     scheme = (parsed.scheme or "https").lower()
+    if scheme not in ("http", "https"):
+        return ""
     host = (parsed.hostname or "").lower()
-    if not host:
+    if not host or "\x00" in host:
         return ""
     port = parsed.port
     if port and not (
@@ -843,13 +845,21 @@ class PwdDaemon(dbus.service.Object):
                                caller=caller)
             return json.dumps({"ok": False, "error": "no_match"})
 
+        try:
+            password_str = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self._audit.record("fill-confirm", vault, item_tag=tag,
+                               decision="deny", reason="decode-error",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "integrity_error"})
+
         self._audit.record("fill-confirm", vault, item_tag=tag,
                            decision="allow", reason=reason, caller=caller)
         return json.dumps({
             "ok": True,
             "credentials": [{
                 "username": username,
-                "password": payload.decode("utf-8"),
+                "password": password_str,
                 "url": origin,
             }],
         })
@@ -909,14 +919,14 @@ class PwdDaemon(dbus.service.Object):
         except VaultNotFound:
             pass  # new credential — no existing pins to check
 
-        # Store with app-identity pins derived from the caller so
-        # only the same browser/extension combination can retrieve it.
+        # Store with app-identity pins derived from the kernel-attested
+        # caller identity, not the self-reported parent_exe from the request.
         try:
             add_item(VAULT_DIR, vault, master_key,
                      tag, password.encode("utf-8"),
-                     pin_app_exe=parent_exe,
-                     pin_selinux="",
-                     pin_uid=None,
+                     pin_app_exe=caller.get("exe", ""),
+                     pin_selinux=caller.get("selinux", ""),
+                     pin_uid=uid,
                      replace=True)
         except (VaultDuplicate, VaultNotFound, ValueError) as e:
             self._audit.record("save", vault, item_tag=tag,

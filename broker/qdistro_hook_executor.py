@@ -28,6 +28,7 @@ modules when files change.  Compiled bytecode is cached in-process.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import importlib
 import importlib.util
 import json
@@ -41,6 +42,9 @@ import traceback
 import types
 from pathlib import Path
 from typing import Any
+
+_MAX_HANDLER_THREADS = 8
+_CONN_TIMEOUT_S = 10.0
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -64,6 +68,36 @@ MAX_FRAME_SIZE = 4 * 1024 * 1024  # 4 MiB
 # Length-prefix format: 4-byte big-endian unsigned int.
 _LEN_FMT = "!I"
 _LEN_SIZE = struct.calcsize(_LEN_FMT)
+
+# ---------------------------------------------------------------------------
+# Hook call timeout
+# ---------------------------------------------------------------------------
+
+
+class _HookTimeout(Exception):
+    pass
+
+
+def _run_with_timeout(fn, args, timeout):
+    """Run fn(*args) in a thread with a timeout. Raises _HookTimeout."""
+    result_box = [None]
+    exc_box = [None]
+
+    def _wrapper():
+        try:
+            result_box[0] = fn(*args)
+        except Exception as e:
+            exc_box[0] = e
+
+    t = threading.Thread(target=_wrapper, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise _HookTimeout(f"hook timed out after {timeout}s")
+    if exc_box[0] is not None:
+        raise exc_box[0]
+    return result_box[0]
+
 
 # ---------------------------------------------------------------------------
 # Hook module loader
@@ -98,6 +132,9 @@ class HookLoader:
             return [f"hook directory {self._dir} does not exist"]
         seen_stems: set[str] = set()
         for py in sorted(hook_dir.glob("*.py")):
+            if py.is_symlink() or py.resolve().parent != hook_dir.resolve():
+                errors.append(f"{py}: skipped (symlink or escapes hook dir)")
+                continue
             stem = py.stem
             seen_stems.add(stem)
             try:
@@ -174,7 +211,11 @@ class HookLoader:
             if fn is None:
                 continue
             try:
-                result = fn(event)
+                result = self._call_with_timeout(fn, dict(event))
+            except _HookTimeout:
+                errors.append(f"{mod.__name__}.{fn_name}: "
+                              f"timed out after {HOOK_CALL_TIMEOUT_S}s")
+                continue
             except Exception:
                 errors.append(f"{mod.__name__}.{fn_name}: "
                               f"{traceback.format_exc()}")
@@ -189,6 +230,10 @@ class HookLoader:
         for err in errors:
             _log(f"[hook-executor] hook error: {err}")
         return None
+
+    @staticmethod
+    def _call_with_timeout(fn, event):
+        return _run_with_timeout(fn, (event,), HOOK_CALL_TIMEOUT_S)
 
     @staticmethod
     def _load_module(name: str, path: str) -> types.ModuleType:
@@ -429,12 +474,17 @@ def serve(hook_dir: str = HOOK_DIR,
         pass
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(socket_path)
-    os.chmod(socket_path, 0o660)
+    old_umask = os.umask(0o117)
+    try:
+        srv.bind(socket_path)
+    finally:
+        os.umask(old_umask)
     srv.listen(8)
-    srv.settimeout(2.0)  # so we can check stop_event
+    srv.settimeout(2.0)
 
     _log(f"[hook-executor] listening on {socket_path}")
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=_MAX_HANDLER_THREADS, thread_name_prefix="hook-conn")
 
     try:
         while not stop_event.is_set():
@@ -446,18 +496,24 @@ def serve(hook_dir: str = HOOK_DIR,
                 if stop_event.is_set():
                     break
                 raise
-            # Verify peer credentials.
+            conn.settimeout(_CONN_TIMEOUT_S)
             uid = _peer_uid(conn)
-            if uid is not None and broker_uid >= 0 and uid != broker_uid:
+            if uid is None:
+                _log("[hook-executor] rejecting connection: "
+                     "SO_PEERCRED unavailable")
+                conn.close()
+                continue
+            if broker_uid >= 0 and uid != broker_uid:
                 _log(f"[hook-executor] rejecting connection from uid={uid} "
                      f"(expected {broker_uid})")
                 conn.close()
                 continue
-            t = threading.Thread(target=_handle_connection,
-                                 args=(conn, loader),
-                                 daemon=True)
-            t.start()
+            try:
+                pool.submit(_handle_connection, conn, loader)
+            except RuntimeError:
+                conn.close()
     finally:
+        pool.shutdown(wait=False)
         srv.close()
         try:
             os.unlink(socket_path)
