@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import sys
 import time
@@ -253,6 +254,10 @@ class PwdDaemon(dbus.service.Object):
         # vault name → {"key": bytearray, "unlocked_at": ts, "last_use": ts}
         self._unlocked: dict[str, dict[str, Any]] = {}
         self._audit = PwdAuditLog(AUDIT_DB)
+        # Fill→FillConfirm binding: token → {origin, username, pid, expires}
+        self._fill_tokens: dict[str, dict[str, Any]] = {}
+        _FILL_TOKEN_TTL = 120  # seconds
+        self._fill_token_ttl = _FILL_TOKEN_TTL
         # Idle tick: every 30s, relock vaults that have been idle for
         # more than IDLE_TIMEOUT_S.
         GLib.timeout_add_seconds(30, self._idle_tick)
@@ -852,9 +857,30 @@ class PwdDaemon(dbus.service.Object):
                                reason="no-match", caller=caller)
             return json.dumps({"ok": False, "error": "no_match"})
 
+        fill_token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        if not hasattr(self, "_fill_tokens"):
+            self._fill_tokens = {}
+        self._fill_tokens = {
+            k: v for k, v in self._fill_tokens.items()
+            if v["expires"] > now
+        }
+        ttl = getattr(self, "_fill_token_ttl", 120)
+        for m in matches:
+            self._fill_tokens[fill_token + ":" + m["username"]] = {
+                "origin": origin,
+                "username": m["username"],
+                "pid": pid,
+                "expires": now + ttl,
+            }
+
         self._audit.record("fill", vault, decision="allow",
                            reason=f"matched:{len(matches)}", caller=caller)
-        return json.dumps({"ok": True, "credentials": matches})
+        return json.dumps({
+            "ok": True,
+            "credentials": matches,
+            "fill_token": fill_token,
+        })
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
                          sender_keyword="sender")
@@ -879,6 +905,7 @@ class PwdDaemon(dbus.service.Object):
 
         url = req.get("url")
         username = req.get("username")
+        fill_token = req.get("fill_token")
         if not (isinstance(url, str) and url
                 and isinstance(username, str) and username):
             self._audit.record("fill-confirm", vault, decision="deny",
@@ -896,6 +923,20 @@ class PwdDaemon(dbus.service.Object):
                                reason="vault-locked", caller=caller)
             return json.dumps({"ok": False, "error": "vault_locked"})
         self._touch(vault)
+
+        token_key = f"{fill_token}:{username}" if fill_token else ""
+        if not hasattr(self, "_fill_tokens"):
+            self._fill_tokens = {}
+        token_entry = self._fill_tokens.pop(token_key, None)
+        if not token_entry or token_entry["expires"] < int(time.time()):
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="invalid-or-expired-fill-token",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_token"})
+        if token_entry["origin"] != origin or token_entry["username"] != username:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="fill-token-mismatch", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_token"})
 
         tag = f"pwd:{origin}/{username}"
         # Verify caller identity against item pins

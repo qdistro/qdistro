@@ -811,8 +811,12 @@ def _handle_pwd_fill_confirm(msg: dict, identity: dict) -> dict:
     if not (isinstance(url, str) and url
             and isinstance(username, str) and username):
         return {"ok": False, "error": "missing_credentials"}
+    fill_token = msg.get("fill_token")
+    if not isinstance(fill_token, str) or not fill_token:
+        return {"ok": False, "error": "missing_fill_token"}
     body = json.dumps({
         "url": url, "username": username,
+        "fill_token": fill_token,
         "extension_id": identity.get("extension_id") or "",
         "parent_exe": identity.get("parent_exe") or "",
     })

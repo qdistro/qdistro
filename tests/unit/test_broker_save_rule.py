@@ -119,6 +119,37 @@ class TestSaveRuleValidation:
                 "    action: 'x'\n",
             )
 
+    def test_rejects_allow_all_empty_match(self, broker):
+        broker.set_peer(uid=ADMIN_UID)
+        with pytest.raises(dbus.DBusException) as ei:
+            broker.SaveRule(
+                "allow-all.yaml",
+                "- decision: allow\n"
+                "  match: {}\n",
+            )
+        assert "non-empty match" in str(ei.value).lower() or \
+               "RulesEngineRefused" in str(ei.value)
+
+    def test_rejects_allow_all_no_match(self, broker):
+        broker.set_peer(uid=ADMIN_UID)
+        with pytest.raises(dbus.DBusException) as ei:
+            broker.SaveRule(
+                "allow-all.yaml",
+                "- decision: allow\n",
+            )
+        assert "non-empty match" in str(ei.value).lower() or \
+               "RulesEngineRefused" in str(ei.value)
+
+    def test_allows_deny_all(self, broker, rules_dir):
+        """deny-all rules are allowed (they restrict, not widen)."""
+        broker.set_peer(uid=ADMIN_UID)
+        path = broker.SaveRule(
+            "deny-all.yaml",
+            "- decision: deny\n"
+            "  match: {}\n",
+        )
+        assert path
+
 
 class TestListRules:
     """ListRules — admin-only enumeration of loaded rules for the

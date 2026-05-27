@@ -2099,6 +2099,26 @@ class Broker(dbus.service.Object):
                 "[A-Za-z0-9_-]+.yaml",
                 name=BUS_NAME + ".RulesEngineRefused",
             )
+        # Reject allow-all rules (empty match + decision=allow) server-side.
+        import yaml as _yaml
+        try:
+            entries = _yaml.safe_load(yaml_body) or []
+        except Exception:
+            entries = []
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("decision") != "allow":
+                    continue
+                match = entry.get("match") or {}
+                if isinstance(match, dict) and not any(
+                        v not in (None, "", []) for v in match.values()):
+                    raise dbus.DBusException(
+                        "SaveRule: rule with decision=allow must have at "
+                        "least one non-empty match selector",
+                        name=BUS_NAME + ".RulesEngineRefused",
+                    )
         # Validate via a tempfile load through the same rules engine.
         from qdistro_admin_rules import RulesEngine  # type: ignore
         with tempfile.TemporaryDirectory(prefix="qd-rules-validate-") as td:

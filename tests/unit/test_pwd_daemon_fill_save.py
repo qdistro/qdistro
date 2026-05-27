@@ -458,6 +458,22 @@ class TestSaveErrors:
 
 
 # ---------------------------------------------------------------------------
+# FillConfirm — helpers
+# ---------------------------------------------------------------------------
+
+def _fill_token(daemon, url, username=None):
+    """Call Fill and return the fill_token for use in FillConfirm."""
+    with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
+         patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
+        result = json.loads(daemon.Fill(json.dumps({
+            "url": url,
+            "username": username,
+        }), sender=":1.42"))
+    assert result["ok"] is True, f"Fill failed: {result}"
+    return result["fill_token"]
+
+
+# ---------------------------------------------------------------------------
 # FillConfirm — happy path
 # ---------------------------------------------------------------------------
 
@@ -467,11 +483,13 @@ class TestFillConfirmHappyPath:
         key = _unlock(daemon, vd)
         _add_credential(vd, key, "https://example.com", "alice", "s3cret")
 
+        token = _fill_token(daemon, "https://example.com/login")
         with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
              patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
             result = json.loads(daemon.FillConfirm(json.dumps({
                 "url": "https://example.com/login",
                 "username": "alice",
+                "fill_token": token,
                 "extension_id": "test@ext",
                 "parent_exe": BROWSER_EXE,
             }), sender=":1.42"))
@@ -527,7 +545,22 @@ class TestFillConfirmErrors:
                 "username": "nonexistent",
             }), sender=":1.42"))
         assert result["ok"] is False
-        assert result["error"] == "no_match"
+        assert result["error"] == "invalid_token"
+
+    def test_fill_confirm_no_token(self, staged):
+        """FillConfirm without a fill_token is rejected."""
+        daemon, vd, _ = staged
+        key = _unlock(daemon, vd)
+        _add_credential(vd, key, "https://example.com", "alice", "pw")
+
+        with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
+             patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
+            result = json.loads(daemon.FillConfirm(json.dumps({
+                "url": "https://example.com/",
+                "username": "alice",
+            }), sender=":1.42"))
+        assert result["ok"] is False
+        assert result["error"] == "invalid_token"
 
     def test_fill_confirm_policy_denied(self, staged):
         """FillConfirm from wrong exe is denied even if the item exists."""
@@ -536,6 +569,7 @@ class TestFillConfirmErrors:
         _add_credential(vd, key, "https://example.com", "alice", "s3cret",
                         pin_app_exe=BROWSER_EXE)
 
+        token = _fill_token(daemon, "https://example.com/")
         wrong_caller = dict(CALLER, exe="/usr/bin/chromium")
         with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
              patch("qdistro_pwd_daemon.snapshot_caller",
@@ -543,6 +577,7 @@ class TestFillConfirmErrors:
             result = json.loads(daemon.FillConfirm(json.dumps({
                 "url": "https://example.com/",
                 "username": "alice",
+                "fill_token": token,
             }), sender=":1.42"))
         assert result["ok"] is False
         assert result["error"] == "policy_denied"
@@ -629,11 +664,13 @@ class TestAuditLogging:
         key = _unlock(daemon, vd)
         _add_credential(vd, key, "https://example.com", "alice", "pw")
 
+        token = _fill_token(daemon, "https://example.com/")
         with patch.object(daemon, "_peer_info", return_value=(1500, 12345)), \
              patch("qdistro_pwd_daemon.snapshot_caller", return_value=CALLER):
             daemon.FillConfirm(json.dumps({
                 "url": "https://example.com/",
                 "username": "alice",
+                "fill_token": token,
             }), sender=":1.42")
 
         rows = daemon._audit.tail(10)
@@ -690,11 +727,13 @@ class TestEndToEnd:
             cred = fill_result["credentials"][0]
             assert cred["username"] == "user@bank.com"
             assert "password" not in cred
+            assert "fill_token" in fill_result
 
             # Step 3: FillConfirm (password returned)
             confirm_result = json.loads(daemon.FillConfirm(json.dumps({
                 "url": "https://bank.com/",
                 "username": "user@bank.com",
+                "fill_token": fill_result["fill_token"],
             }), sender=":1.42"))
             assert confirm_result["ok"] is True
             assert confirm_result["credentials"][0]["password"] == "hunter2"
