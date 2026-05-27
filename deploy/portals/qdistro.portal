@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.qdistro
+Interfaces=org.freedesktop.impl.portal.Access;org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.Notification;
+UseIn=qdistro

@@ -27,6 +27,7 @@ sys.path.insert(0, str(_ROOT / "recall"))
 sys.path.insert(0, str(_ROOT / "phone"))
 sys.path.insert(0, str(_ROOT / "browser_bridge"))
 sys.path.insert(0, str(_ROOT / "games"))
+sys.path.insert(0, str(_ROOT / "daemons"))
 
 
 @pytest.fixture

@@ -1,0 +1,56 @@
+[Unit]
+Description=qdistro xdg-desktop-portal backend
+Documentation=man:qdistro-portal-backend(8)
+After=dbus.socket
+Wants=dbus.socket
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.qdistro
+ExecStart=/usr/lib/qdistro/daemons/qdistro_portal_backend.py
+
+# --- Sandboxing ---
+
+# Runs in the user session (session bus), not as root.
+# The systemd user instance activates this on first portal request.
+
+# Filesystem: read-only except /tmp for transient picker state.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+# No network needed -- all communication is D-Bus.
+RestrictAddressFamilies=AF_UNIX
+
+# Privilege escalation prevention.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System call filter.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Misc hardening.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+ProtectHostname=true
+
+# Logging.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qdistro-portal-backend
+
+# Restart on crash so portals keep working.
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
