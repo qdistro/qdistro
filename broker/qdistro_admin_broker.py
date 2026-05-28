@@ -2057,12 +2057,22 @@ class Broker(dbus.service.Object):
         return False  # don't repeat
 
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="b",
-                        async_callbacks=("_reply", "_error"))
-    def WaitForDecision(self, request_id: int, _reply, _error):
+                        async_callbacks=("_reply", "_error"),
+                        sender_keyword="sender", connection_keyword="conn")
+    def WaitForDecision(self, request_id: int, _reply, _error,
+                        sender=None, conn=None):
+        waiter_uid, _pid, _exe, _st = self._peer_info(sender, conn)
         with self._lock:
             req = self._pending.get(int(request_id))
             if req is None:
                 _reply(False)
+                return
+            if waiter_uid not in (0, ADMIN_UID, req.uid):
+                _error(dbus.DBusException(
+                    f"WaitForDecision request {int(request_id)} belongs "
+                    f"to uid {req.uid}; got uid {waiter_uid}",
+                    name=BUS_NAME + ".AccessDenied",
+                ))
                 return
             if req.decision is not None:
                 _reply(bool(req.decision))

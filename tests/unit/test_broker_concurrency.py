@@ -694,7 +694,76 @@ class TestDecisionIdempotency:
 
 
 # ===========================================================================
-# 7. Rate-limit behaviour under burst
+# 7. WaitForDecision requester binding
+# ===========================================================================
+
+class TestWaitForDecisionIdentity:
+    """Only the original requester, admin, or root may wait on a request id."""
+
+    def test_cross_uid_pending_request_is_rejected(self,
+                                                  broker: _StubBroker):
+        rid = broker._enqueue(NON_ADMIN_UID, 1, PEER_EXE, 0,
+                              "test.wait.crossuid", {}, delegated=False)
+        replies: list[bool] = []
+        errors: list[dbus.DBusException] = []
+
+        broker.set_peer(uid=NON_ADMIN_UID + 1)
+        broker.WaitForDecision(rid, replies.append, errors.append,
+                               sender=None, conn=None)
+
+        assert replies == []
+        assert len(errors) == 1
+        assert errors[0].get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+        with broker._lock:
+            assert broker._pending[rid].waiters == []
+
+    def test_cross_uid_decided_request_is_rejected(self,
+                                                  broker: _StubBroker):
+        rid = broker._enqueue(NON_ADMIN_UID, 1, PEER_EXE, 0,
+                              "test.wait.decided.crossuid", {},
+                              delegated=False)
+        broker.set_peer(uid=ADMIN_UID)
+        broker.DecideRequest(rid, "allow", "once",
+                             sender=None, conn=None)
+        replies: list[bool] = []
+        errors: list[dbus.DBusException] = []
+
+        broker.set_peer(uid=NON_ADMIN_UID + 1)
+        broker.WaitForDecision(rid, replies.append, errors.append,
+                               sender=None, conn=None)
+
+        assert replies == []
+        assert len(errors) == 1
+        assert errors[0].get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+
+    @pytest.mark.parametrize("waiter_uid", [NON_ADMIN_UID, ADMIN_UID, 0])
+    def test_requester_admin_and_root_can_wait(self, broker: _StubBroker,
+                                               waiter_uid: int):
+        rid = broker._enqueue(NON_ADMIN_UID, 1, PEER_EXE, 0,
+                              f"test.wait.allowed.{waiter_uid}", {},
+                              delegated=False)
+        replies: list[bool] = []
+        errors: list[dbus.DBusException] = []
+
+        broker.set_peer(uid=waiter_uid)
+        broker.WaitForDecision(rid, replies.append, errors.append,
+                               sender=None, conn=None)
+
+        assert replies == []
+        assert errors == []
+        with broker._lock:
+            assert len(broker._pending[rid].waiters) == 1
+
+        broker.set_peer(uid=ADMIN_UID)
+        broker.DecideRequest(rid, "deny", "once",
+                             sender=None, conn=None)
+
+        assert replies == [False]
+        assert errors == []
+
+
+# ===========================================================================
+# 8. Rate-limit behaviour under burst
 # ===========================================================================
 
 class TestRateLimitBurst:
