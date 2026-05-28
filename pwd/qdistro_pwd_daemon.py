@@ -203,6 +203,34 @@ def _normalize_url_origin(url: str) -> str:
     return f"{scheme}://{host}"
 
 
+def _normalize_cookie_origin(domain: str) -> str:
+    """Normalise a cookie-export target to an http(s) origin.
+
+    The browser bridge forwards either a full URL or a bare host as
+    ``domain``.  Accept both, but fail closed on anything that is not
+    plain http/https: an explicit non-http(s) scheme (``file:``,
+    ``data:``, ``about:``, ``javascript:`` …) or a value that cannot be
+    resolved to a hostname returns ``""`` so the caller rejects it.
+    """
+    if not isinstance(domain, str) or not domain or "\x00" in domain:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(domain)
+        scheme = parsed.scheme
+        if scheme:
+            # An explicit scheme must be http(s) — reject file:/data:/etc.
+            if scheme.lower() not in ("http", "https"):
+                return ""
+            return _normalize_url_origin(domain)
+        # No scheme: treat as a bare host. Re-parse with an https:// prefix
+        # so urlparse populates .hostname (a bare string lands in .path).
+        return _normalize_url_origin("https://" + domain)
+    except ValueError:
+        # urlparse / .port raise ValueError on malformed ports
+        # (e.g. "host:bad", "host:99999"); fail closed.
+        return ""
+
+
 def _read_proc_cmdline(pid: int) -> list[str]:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -1073,6 +1101,82 @@ class PwdDaemon(dbus.service.Object):
                            decision="allow", reason="saved",
                            caller=caller)
         return json.dumps({"ok": True})
+
+    # -- browser-bridge ExportCookies (Bridge Phase 9d) ----------------
+    #
+    # The browser bridge forwards a sensitive "Export session cookies"
+    # action here.  The cookies are the browser's own session cookies;
+    # the daemon does NOT mint or store them — its job is to be the
+    # kernel-attested, audited, fail-closed gate for the operation.
+    #
+    # Replay / web-triggered-call defense (the intent-token check) lives
+    # in the bridge (verify_intent_token in qdistro_browser_bridge.py):
+    # the token is consumed there and is NOT forwarded on the D-Bus call,
+    # so the daemon never sees it.  The daemon re-verifies the caller is
+    # the genuine native bridge (SO_PEERCRED uid/pid + /proc/<pid>/exe +
+    # parent-is-browser, same as Fill/Save) and audits every export with
+    # origin + cookie count — never cookie values.
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender")
+    def ExportCookies(self, req_json: str, sender=None) -> str:
+        """Audit-logged, kernel-attested gate for a browser session
+        cookie export.  Returns JSON ``{"ok": True, "exported": <n>}``
+        on success or ``{"ok": False, "error": <code>}`` on failure.
+
+        Cookie values are never logged; only the origin and the count.
+        """
+        uid, pid = self._peer_info(sender)
+        caller = snapshot_caller(pid, uid)
+        # Audit under the browser-pwd vault name so export rows live in
+        # the same audit stream as Fill/Save (no vault is read/written).
+        vault = BROWSER_PWD_VAULT
+        bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
+        if not bridge_ok:
+            self._audit.record("cookies-export", vault, decision="deny",
+                               reason=f"bridge-caller:{bridge_reason}",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "policy_denied"})
+        try:
+            req = json.loads(str(req_json))
+        except (json.JSONDecodeError, TypeError) as e:
+            self._audit.record("cookies-export", vault, decision="deny",
+                               reason=f"invalid-json:{e}", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+        if not isinstance(req, dict):
+            # json.loads accepts non-objects ([], "x", 123, null); a
+            # later req.get() would raise — fail closed and audit.
+            self._audit.record("cookies-export", vault, decision="deny",
+                               reason="non-object-json", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        domain = req.get("domain")
+        if not isinstance(domain, str) or not domain:
+            self._audit.record("cookies-export", vault, decision="deny",
+                               reason="missing-domain", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        origin = _normalize_cookie_origin(domain)
+        if not origin:
+            # Rejects file:/data:/about: and other non-http(s) schemes.
+            self._audit.record("cookies-export", vault, decision="deny",
+                               reason="bad-origin", caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        cookies = req.get("cookies")
+        if not isinstance(cookies, list):
+            self._audit.record("cookies-export", vault, item_tag=origin,
+                               decision="deny", reason="bad-cookies",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        count = len(cookies)
+        # Audit the export: who (caller), when (ts), origin, cookie count.
+        # Cookie names/values are deliberately NOT recorded.
+        self._audit.record("cookies-export", vault, item_tag=origin,
+                           decision="allow", reason=f"count:{count}",
+                           caller=caller)
+        return json.dumps({"ok": True, "exported": count})
 
     # -- portal-keys PIN stash + auto-unlock (spec/13 §"auto-unlock") ---
     #
