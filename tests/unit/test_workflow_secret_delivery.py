@@ -234,6 +234,25 @@ class TestSshAgentDelivery:
         assert s.wiped
         assert not os.path.exists(sock)
 
+    def test_key_without_trailing_newline_accepted(self, tmp_path):
+        # A vault that stores the PEM value rstrip()'d drops the trailing
+        # newline OpenSSH requires; the agent delivery must normalise it
+        # rather than fail with "ssh-add rejected the key". (Found during
+        # VM validation against a real pwd vault.)
+        key = self._gen_key(tmp_path).rstrip(b"\n")
+        assert not key.endswith(b"\n")
+        runtime = tmp_path / "rt"
+        s = SecretValue(key)
+        d = SshAgentDelivery(s, runtime_root=str(runtime), ttl=60)
+        d.deliver()  # must NOT raise
+        sock = d.auth_sock
+        listing = subprocess.run(
+            ["ssh-add", "-l"], env=dict(os.environ, SSH_AUTH_SOCK=sock),
+            capture_output=True, text=True)
+        assert listing.returncode == 0  # key really loaded
+        d.scrub()
+        assert not os.path.exists(sock)
+
 
 # ======================================================================
 # tmpfs-mount

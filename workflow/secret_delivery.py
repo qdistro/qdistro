@@ -357,12 +357,20 @@ class SshAgentDelivery(DeliveryHandle):
                     self._agent_pid = int(pid_s)
                 except ValueError:
                     pass
-        # Load the key from stdin with a TTL.
+        # Load the key from stdin with a TTL. OpenSSH rejects a private
+        # key whose final line lacks a trailing newline ("error in
+        # libcrypto" / "invalid format"); a vault that stores the value
+        # rstrip()'d is a realistic source of exactly that, so normalise
+        # to a single trailing newline before handing it to ssh-add.
+        key_bytes = self._secret.as_bytes()
+        if key_bytes and not key_bytes.endswith(b"\n"):
+            key_bytes = key_bytes + b"\n"
         env = dict(os.environ, SSH_AUTH_SOCK=self._sock)
         add = subprocess.run(  # noqa: S603
             [self._add_bin, "-t", str(self._ttl), "-"],
-            input=self._secret.as_bytes(), env=env,
+            input=key_bytes, env=env,
             capture_output=True, check=False)
+        del key_bytes
         if add.returncode != 0:
             # Fail closed: tear the agent down, surface no key material.
             self._revoke()
