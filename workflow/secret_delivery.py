@@ -361,16 +361,22 @@ class SshAgentDelivery(DeliveryHandle):
         # key whose final line lacks a trailing newline ("error in
         # libcrypto" / "invalid format"); a vault that stores the value
         # rstrip()'d is a realistic source of exactly that, so normalise
-        # to a single trailing newline before handing it to ssh-add.
-        key_bytes = self._secret.as_bytes()
-        if key_bytes and not key_bytes.endswith(b"\n"):
-            key_bytes = key_bytes + b"\n"
+        # to a single trailing newline before handing it to ssh-add. Hold
+        # the normalised copy in a wipeable bytearray and zero it after
+        # ssh-add so we don't leave an extra immutable plaintext copy.
+        key_buf = bytearray(self._secret.as_bytes())
+        if key_buf and key_buf[-1] != 0x0A:
+            key_buf.append(0x0A)
         env = dict(os.environ, SSH_AUTH_SOCK=self._sock)
-        add = subprocess.run(  # noqa: S603
-            [self._add_bin, "-t", str(self._ttl), "-"],
-            input=key_bytes, env=env,
-            capture_output=True, check=False)
-        del key_bytes
+        try:
+            add = subprocess.run(  # noqa: S603
+                [self._add_bin, "-t", str(self._ttl), "-"],
+                input=bytes(key_buf), env=env,
+                capture_output=True, check=False)
+        finally:
+            for i in range(len(key_buf)):
+                key_buf[i] = 0
+            del key_buf[:]
         if add.returncode != 0:
             # Fail closed: tear the agent down, surface no key material.
             self._revoke()
