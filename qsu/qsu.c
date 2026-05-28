@@ -23,6 +23,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <getopt.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,8 +38,12 @@
 #define RECV_BUF 8192
 
 /* Initial capacity for the dynamic line buffer that accumulates
- * partial reads between newlines. Grown as needed. */
+ * partial reads between newlines. Grown as needed up to LINE_BUF_MAX. */
 #define LINE_BUF_INIT 4096
+
+/* Hard cap on the line buffer to prevent a misbehaving server from
+ * exhausting client memory. Matches the server's MAX_REQUEST_BYTES. */
+#define LINE_BUF_MAX (1 * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
 /* JSON helpers — minimal, no library dependency.                      */
@@ -328,15 +333,24 @@ static int stream_response(int fd)
 
     while (!got_exit) {
         ssize_t nr = recv(fd, recv_buf, sizeof(recv_buf), 0);
-        if (nr <= 0) {
-            if (nr < 0)
-                fprintf(stderr, "qsu: recv: %s\n", strerror(errno));
+        if (nr < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "qsu: recv: %s\n", strerror(errno));
             break;
         }
+        if (nr == 0) break;  /* server closed connection */
+
         /* Append to line buffer, then process complete lines. */
         size_t needed = line_len + (size_t)nr;
+        if (needed > LINE_BUF_MAX) {
+            fprintf(stderr, "qsu: server frame too large (>%d bytes)\n",
+                    LINE_BUF_MAX);
+            free(line_buf);
+            return 1;
+        }
         if (needed > line_cap) {
             while (line_cap < needed) line_cap *= 2;
+            if (line_cap > LINE_BUF_MAX) line_cap = LINE_BUF_MAX;
             char *tmp = realloc(line_buf, line_cap);
             if (!tmp) {
                 fprintf(stderr, "qsu: out of memory\n");
@@ -387,6 +401,12 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    /* Ignore SIGPIPE so that writing to a broken stdout/stderr pipe
+     * (e.g. `qsu id | head -1`) returns an error instead of killing
+     * the process. Send-side SIGPIPE is already handled via
+     * MSG_NOSIGNAL on the socket. */
+    signal(SIGPIPE, SIG_IGN);
+
     /* Set the kernel task name so /proc/<pid>/comm reads "qsu". */
     prctl(PR_SET_NAME, "qsu", 0, 0, 0);
 
