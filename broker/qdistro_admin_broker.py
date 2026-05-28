@@ -2079,8 +2079,21 @@ class Broker(dbus.service.Object):
                 return
             req.waiters.append((_reply, _error))
 
-    @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}")
-    def GetPending(self) -> list[dict[str, Any]]:
+    @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetPending(self, sender=None, conn=None) -> list[dict[str, Any]]:
+        """Return undecided requests for the admin approvals UI.
+
+        Admin/root only. The D-Bus policy file is expected to enforce the
+        same boundary, but keep the in-process peer check so a policy
+        regression cannot expose pending request metadata to users.
+        """
+        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if admin_uid not in (0, ADMIN_UID):
+            raise dbus.DBusException(
+                f"GetPending restricted to admin/root; got uid {admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
         with self._lock:
             out = []
             for r in self._pending.values():

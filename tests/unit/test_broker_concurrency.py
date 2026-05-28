@@ -763,7 +763,43 @@ class TestWaitForDecisionIdentity:
 
 
 # ===========================================================================
-# 8. Rate-limit behaviour under burst
+# 8. GetPending admin/root guard
+# ===========================================================================
+
+class TestGetPendingIdentity:
+    """Only admin/root may enumerate pending request metadata."""
+
+    def test_non_admin_caller_rejected_even_if_bus_policy_allows_call(
+            self, broker: _StubBroker):
+        rid = broker._enqueue(NON_ADMIN_UID, 1, PEER_EXE, 0,
+                              "test.pending.hidden", {"secret": "value"},
+                              delegated=False)
+
+        broker.set_peer(uid=NON_ADMIN_UID + 1)
+        with pytest.raises(dbus.DBusException) as ei:
+            broker.GetPending(sender=None, conn=None)
+
+        assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+        with broker._lock:
+            assert rid in broker._pending
+
+    @pytest.mark.parametrize("viewer_uid", [ADMIN_UID, 0])
+    def test_admin_and_root_can_enumerate_pending(self, broker: _StubBroker,
+                                                  viewer_uid: int):
+        rid = broker._enqueue(NON_ADMIN_UID, 1, PEER_EXE, 0,
+                              "test.pending.visible", {"k": "v"},
+                              delegated=False)
+
+        broker.set_peer(uid=viewer_uid)
+        out = broker.GetPending(sender=None, conn=None)
+
+        assert len(out) == 1
+        assert int(out[0]["id"]) == rid
+        assert str(out[0]["action"]) == "test.pending.visible"
+
+
+# ===========================================================================
+# 9. Rate-limit behaviour under burst
 # ===========================================================================
 
 class TestRateLimitBurst:

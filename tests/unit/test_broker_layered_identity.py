@@ -117,9 +117,9 @@ class TestGetPendingSurfacesLayeredFields:
         # Layered IO is deferred to the thread pool; drain it so the
         # idle callback populates the layered fields before we assert.
         _drain_layered_io(broker)
-        # _StubBroker overrides set_peer to also drive _peer_info.
-        # GetPending requires admin/root in production; the stub
-        # bypasses authz so we can read the queue directly.
+        # GetPending requires admin/root. Switch to the admin identity
+        # after enqueueing the non-admin request.
+        broker.set_peer(uid=B.ADMIN_UID)
         out = broker.GetPending()
         assert len(out) == 1
         row = out[0]
@@ -145,6 +145,7 @@ class TestGetPendingSurfacesLayeredFields:
         with broker._lock:
             req = broker._pending[rid]
             assert req.layered_pending is True
+        broker.set_peer(uid=B.ADMIN_UID)
         out = broker.GetPending()
         assert len(out) == 1
         assert bool(out[0]["layered_pending"]) is True
@@ -156,6 +157,7 @@ class TestGetPendingSurfacesLayeredFields:
         # pid=0 is the no-IO fast path: layered_pending is False immediately.
         broker.set_peer(uid=NON_ADMIN_UID, pid=0, exe="?", start=0)
         rid = broker.RequestPermission("test.layered.missing", {})
+        broker.set_peer(uid=B.ADMIN_UID)
         out = broker.GetPending()
         assert len(out) == 1
         row = out[0]
@@ -186,6 +188,7 @@ class TestGetPendingSurfacesLayeredFields:
                         exe=str(helper), start=0)
         rid = broker.RequestPermission("test.layered.dead", {})
         _drain_layered_io(broker)
+        broker.set_peer(uid=B.ADMIN_UID)
         out = broker.GetPending()
         assert len(out) == 1
         # Either way: keys present, no exceptions raised.
