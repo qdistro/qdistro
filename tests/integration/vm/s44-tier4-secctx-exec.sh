@@ -15,8 +15,9 @@
 # pulling libvirt+qemu into the test surface (those have their own
 # bats slot).
 #
+# Expected PASS count on success: 7.
 # PASS strings here MUST match assert_output_contains in the bats
-# @test phase7-tier4-secctx-exec block.
+# @test phase7-tier4-secctx-exec block, including the final summary line.
 
 set -u
 

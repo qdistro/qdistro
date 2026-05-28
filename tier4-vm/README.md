@@ -44,6 +44,11 @@ viewer is the transport endpoint.
 - **Two display backends:** waypipe is the default Wayland-native path;
   RDP is explicitly selected with `TIER4_STREAMING_METHOD=rdp`.
 
+SPICE/`domdisplay` fallback is retired. The launcher no longer tries to
+recover through a libvirt SPICE viewer when waypipe cannot connect. Test
+coverage should treat waypipe and explicitly selected RDP as the
+supported display transports.
+
 ## How it works
 
 1. `spawn-tier4.sh` creates a per-VM overlay disk (linked clone of the
@@ -82,6 +87,7 @@ TIER4_VM_NAME=myapp TIER4_STREAMING_METHOD=rdp spawn-tier4.sh
    `TIER4_STREAMING_METHOD=rdp`, the guest publisher uses qdwin's RDP
    view-stream path and `socat` to expose it over AF_VSOCK; the host
    connects with `wlfreerdp`, `xfreerdp3`, `xfreerdp`, or `sdl-freerdp`.
+   There is no SPICE/`domdisplay` fallback path.
 2. **Clipboard:** Wayland data-device protocol rides the same waypipe
    socket. The host's `ClipboardGate.qml` gates cross-silo transfers
    to `text/plain` + `text/uri-list`.

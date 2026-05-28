@@ -59,3 +59,7 @@ QDISTRO_TIER4_RDP_CREDS=/run/qdistro-tier4-rdp.env
 P10 originally landed this directory for the waypipe guest image. Later
 Tier-4 work wires `spawn-tier4` to this image and adds the explicit RDP
 transport selected with `TIER4_STREAMING_METHOD=rdp`.
+
+The older SPICE/`domdisplay` fallback is intentionally retired. Guest
+image and integration-test updates should cover the default waypipe path
+or the explicit RDP transport, not an implicit libvirt viewer fallback.

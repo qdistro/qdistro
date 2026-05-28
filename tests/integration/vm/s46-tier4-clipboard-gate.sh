@@ -15,8 +15,9 @@
 # grep for ClipboardGate events. If the journal mark moves, those
 # asserts will FAIL with the journal output attached.
 #
+# Expected PASS count on success: 8.
 # PASS strings here MUST match assert_output_contains in the bats
-# @test phase7-tier4-clipboard-gate block.
+# @test phase7-tier4-clipboard-gate block, including the final summary line.
 
 set -u
 

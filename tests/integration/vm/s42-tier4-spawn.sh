@@ -10,8 +10,9 @@
 #     domain (it'll halt at "no bootable device" — that's expected
 #     since the template has no disk).
 #
+# Expected PASS count on success: 5.
 # PASS strings here MUST match assert_output_contains in the bats
-# @test phase7-tier4-spawn block.
+# @test phase7-tier4-spawn block, including the final summary line.
 
 set -u
 

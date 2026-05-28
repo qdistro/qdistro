@@ -243,11 +243,16 @@ stage_vm_driver() {
     assert_output_contains "PASS: §Phase-7 v13 toplevel_security_context end-to-end"
 }
 
-@test "phase7-tier4-spawn: qdistro-tier4-spawn brings up libvirt domain + waypipe display" {
-    # §Phase-7 tier-4 — libvirt + waypipe wrapper smoke. Linux-only
-    # per spec/00 (memory qdistro_linux_only.md). Tests the wrapper's
-    # define-only and no-viewer modes; full waypipe-on-wayland-1
-    # integration is exercised manually until the chrome path is stable.
+@test "phase7-tier4-spawn: qdistro-tier4-spawn defines and boots the tier-4 domain without launching a viewer" {
+    # §Phase-7 tier-4 — libvirt + selected-display publisher smoke.
+    # Linux-only per spec/00 (memory qdistro_linux_only.md). Tests the
+    # wrapper's define-only and no-viewer modes; s42 intentionally does
+    # not assert a visible waypipe/RDP window. Visual RDP coverage lives
+    # in permissions-gui scenarios 56 and 57.
+    #
+    # SPICE/domdisplay fallback coverage is intentionally retired. The
+    # supported display transports are waypipe (default) and explicitly
+    # selected RDP.
     #
     # The tier-4 stack (libvirt/qemu/waypipe) is an opt-in bake asset.
     # Skip cleanly when absent so CI doesn't fail on minimal bakes.
@@ -266,6 +271,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: tier-4 no-viewer mode brought up domain"
     assert_output_contains "PASS: virsh confirms domain is running"
     assert_output_contains "PASS: §Phase-7 tier-4 spawn smoke end-to-end"
+    assert_output_contains "[s42] 5 passes, 0 failures"
 }
 
 @test "phase7-tier5-loopback: qdistro-tier5-spawn --loopback bridges wayland-info via vsock" {
@@ -302,6 +308,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: secctx commit recorded with engine=qdistro.tier4 app_id=qdistro.tier4.s44vm"
     assert_output_contains "PASS: inner client accepted on the secctx listener"
     assert_output_contains "PASS: §Phase-7 tier-4 secctx-exec wrapper end-to-end"
+    assert_output_contains "[s44] 7 passes, 0 failures"
 }
 
 @test "phase7-tier5-vm: qdistro-tier5-spawn --vm boots a guest VM and bridges via vsock" {
@@ -400,6 +407,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: rule install flipped broker verdict to allow"
     assert_output_contains "PASS: qdshell observed RulesReloaded + ran live re-check"
     assert_output_contains "PASS: §Phase-7 tier-4 clipboard gate end-to-end"
+    assert_output_contains "[s46] 8 passes, 0 failures"
 }
 
 @test "phase7-tier1-skeleton: spec/30 Tier-1 SELinux design + spike skeleton present" {
