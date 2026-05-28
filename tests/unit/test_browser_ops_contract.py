@@ -14,14 +14,8 @@ qdistro package (same pattern as ``test_browser_bridge.py``).
 from __future__ import annotations
 
 import importlib.util
-import io
-import json
-import os
-import struct
 import sys
 from pathlib import Path
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Load modules by path (no package install required).
@@ -215,6 +209,11 @@ class TestResponseConformance:
         errors = ops.validate_response("qdistro.heartbeat.ack", resp)
         assert not errors, f"Validation errors: {errors}"
 
+    def test_clipboard_set_missing_source_url(self):
+        resp = self._dispatch("clipboard.set")
+        assert resp.get("ok") is False
+        assert resp.get("error") == "missing_source_url"
+
     def test_mpris_publish_response_shape(self):
         """mpris.publish forwards to D-Bus; with the mock client it
         returns a dbus error, but the response should still have 'ok'."""
@@ -311,6 +310,23 @@ class TestRequestValidation:
             "domain": "example.com",
             "cookie_store_id": "firefox-container-1",
             "cookies": [],
+        })
+        assert errors == []
+
+    def test_clipboard_set_requires_source_url(self):
+        errors = ops.validate_request("clipboard.set", {})
+        assert any("source_url" in e for e in errors)
+        assert any("intent_token" in e for e in errors)
+        errors = ops.validate_request("clipboard.set", {
+            "source_url": "https://example.com",
+            "intent_token": {"request_id": "r5", "ts": 1.0,
+                             "op": "clipboard.set", "hmac": "00"},
+            "operation": "copy",
+            "mime_types": ["text/plain"],
+            "content_tags": ["code"],
+            "sensitive_fields_nearby": False,
+            "element_context": {"is_code": True},
+            "selected_text_length": 12,
         })
         assert errors == []
 

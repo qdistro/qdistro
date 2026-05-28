@@ -20,7 +20,7 @@ Design constraints:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -336,6 +336,36 @@ SCREENLOCK_RELEASE = OpSchema(
     error_codes=_IDENTITY_GATE_ERRORS,
 )
 
+# -- clipboard.set -------------------------------------------------------
+
+CLIPBOARD_SET = OpSchema(
+    op="clipboard.set",
+    doc="Forward browser copy-context metadata to the compositor daemon.",
+    direction="stdio",
+    requires_intent_token=True,
+    request_fields=(
+        _f("source_url", "str"),
+        _f("intent_token", "dict"),
+    ),
+    optional_request_fields=(
+        _f("operation", "str", required=False),
+        _f("title", "str", required=False),
+        _f("tab_id", "any", required=False),
+        _f("mime_types", "list", required=False),
+        _f("content_tags", "list", required=False),
+        _f("sensitive_fields_nearby", "bool", required=False),
+        _f("element_context", "dict", required=False),
+        _f("selected_text_length", "int", required=False),
+    ),
+    response_fields=_COMMON_RESPONSE,
+    error_codes=_IDENTITY_GATE_ERRORS + (
+        "missing_source_url",
+        "missing_intent_token", "intent_token_op_mismatch",
+        "intent_token_expired", "intent_token_future",
+        "intent_token_bad_hmac", "intent_token_replay",
+    ),
+)
+
 # -- tabs.list / tabs.open / tabs.close (inbound: daemon -> bridge -> ext)
 
 TABS_LIST = OpSchema(
@@ -588,6 +618,7 @@ for _schema in (
     PAGE_EXTRACT, COOKIES_EXPORT,
     MPRIS_PUBLISH, DOWNLOADS_NOTIFY, NOTIFICATIONS_SHOW,
     SCREENLOCK_INHIBIT, SCREENLOCK_RELEASE,
+    CLIPBOARD_SET,
     HEARTBEAT_ACK,
     # Inbound ops (daemon -> bridge -> extension).
     TABS_LIST, TABS_OPEN, TABS_CLOSE,
@@ -624,6 +655,7 @@ BRIDGE_DISPATCH_OPS: frozenset[str] = frozenset({
     "qdistro.handshake",
     "mpris.publish", "downloads.notify", "notifications.show",
     "screenlock.inhibit", "screenlock.release",
+    "clipboard.set",
     "qdistro.heartbeat.ack",
     # Reply landings.
     "tabs.list.reply", "tabs.open.reply", "tabs.close.reply",

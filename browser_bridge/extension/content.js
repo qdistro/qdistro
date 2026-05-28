@@ -38,6 +38,128 @@ let _credentialsFetched = false;
 let _credentials = [];      // cached fill results for the current URL
 let _selectedCredential = null;
 
+// ---- clipboard metadata ----------------------------------------------
+// Capture context only. Clipboard contents are intentionally not sent
+// through the extension bridge.
+
+function nearestElement(node) {
+  if (!node) return null;
+  if (node.nodeType === Node.ELEMENT_NODE) return node;
+  return node.parentElement || null;
+}
+
+function elementLabel(el) {
+  if (!el || !el.tagName) return "";
+  const tag = el.tagName.toLowerCase();
+  if (tag === "input") {
+    return "input:" + String(el.type || "text").toLowerCase();
+  }
+  return tag;
+}
+
+function selectionElement() {
+  const sel = window.getSelection ? window.getSelection() : null;
+  if (!sel || sel.rangeCount < 1) return null;
+  return nearestElement(sel.anchorNode);
+}
+
+function selectedTextLength(targetEl) {
+  const activeEl = document.activeElement;
+  const field = (targetEl && typeof targetEl.selectionStart === "number")
+    ? targetEl
+    : ((activeEl && typeof activeEl.selectionStart === "number")
+      ? activeEl
+      : null);
+  if (field && typeof field.selectionEnd === "number") {
+    return Math.max(0, field.selectionEnd - field.selectionStart);
+  }
+  const sel = window.getSelection ? window.getSelection() : null;
+  return sel ? String(sel.toString() || "").length : 0;
+}
+
+function inferMimeTypes(event) {
+  const types = [];
+  if (event.clipboardData && event.clipboardData.types) {
+    for (const t of Array.from(event.clipboardData.types)) {
+      if (typeof t === "string" && t && !types.includes(t)) {
+        types.push(t);
+      }
+    }
+  }
+  if (!types.includes("text/plain")) {
+    types.push("text/plain");
+  }
+  const sel = window.getSelection ? window.getSelection() : null;
+  if (sel && sel.rangeCount > 0) {
+    const frag = sel.getRangeAt(0).cloneContents();
+    if (frag && frag.querySelector &&
+        frag.querySelector("a, br, div, p, span, pre, code, table, ul, ol, li")) {
+      types.push("text/html");
+    }
+  }
+  return types;
+}
+
+function buildClipboardTags(targetEl, contextEl) {
+  const tags = [];
+  const add = (tag) => {
+    if (tag && !tags.includes(tag)) tags.push(tag);
+  };
+  const el = targetEl || contextEl;
+  const tagName = el && el.tagName ? el.tagName.toLowerCase() : "";
+  if (tagName) add(tagName);
+  if (isPasswordField(el)) add("password_field");
+  if (tagName === "input") {
+    add("input");
+    const type = String(el.type || "text").toLowerCase();
+    add("input:" + type);
+    if (type === "email") add("email_field");
+    if (type === "url") add("url_field");
+  }
+  if (tagName === "textarea") add("textarea");
+  if (el && (el.isContentEditable || (el.closest && el.closest("[contenteditable=true], [contenteditable='']")))) {
+    add("contenteditable");
+  }
+  if ((contextEl && contextEl.closest && contextEl.closest("pre, code")) ||
+      (el && el.closest && el.closest("pre, code"))) {
+    add("code");
+  }
+  if ((contextEl && contextEl.closest && contextEl.closest("a[href]")) ||
+      (el && el.closest && el.closest("a[href]"))) {
+    add("link");
+  }
+  return tags;
+}
+
+function onCopy(event) {
+  if (event && event.isTrusted === false) return;
+  const targetEl = nearestElement(event.target);
+  const contextEl = selectionElement() || targetEl;
+  const tags = buildClipboardTags(targetEl, contextEl);
+  const activeEl = document.activeElement;
+  const isPassword = tags.includes("password_field") ||
+    isPasswordField(activeEl) ||
+    isPasswordField(targetEl);
+  sendMsg({
+    action: "clipboard.set",
+    operation: event.type === "cut" ? "cut" : "copy",
+    source_url: location.href,
+    title: document.title || "",
+    mime_types: inferMimeTypes(event),
+    content_tags: tags,
+    sensitive_fields_nearby: !!isPassword,
+    element_context: {
+      target: elementLabel(targetEl),
+      selection_anchor: elementLabel(contextEl),
+      active: elementLabel(activeEl),
+      is_password_field: !!isPassword,
+      is_contenteditable: tags.includes("contenteditable"),
+      is_code: tags.includes("code"),
+    },
+    selected_text_length: selectedTextLength(targetEl),
+  }, () => { /* best-effort metadata side channel */ });
+}
+
 // ---- password field detection ---------------------------------------
 
 function isPasswordField(el) {
@@ -276,6 +398,9 @@ document.addEventListener("focusout", (e) => {
 }, true);
 
 document.addEventListener("submit", onFormSubmit, true);
+
+document.addEventListener("copy", onCopy, true);
+document.addEventListener("cut", onCopy, true);
 
 // Listen for fill_credentials messages from the popup (when user picks
 // a credential from the popup UI rather than the inline banner).

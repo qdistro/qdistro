@@ -12,6 +12,7 @@ Test layers:
 * 9d — intent tokens: handshake exchanges secret; valid / expired /
   replay / wrong-op / future / bad-hmac rejection.
 * 9e — MPRIS / downloads / notifications / screenlock_inhibit/release.
+* clipboard.set — extension copy-context metadata forwarding.
 
 Every test mocks the D-Bus client by assigning a fake to
 ``bb._dbus_client``. No session bus is required.
@@ -230,6 +231,54 @@ class TestPwdSave:
              "intent_token": _mint_token("pwd.save")},
             ALLOWED)
         assert resp["error"] == "missing_credentials"
+        assert bb._dbus_client.calls == []
+
+
+class TestClipboardSet:
+    def test_forwards_metadata_to_compositor(self):
+        bb._dbus_client = FakeDBus(reply={"ok": True})
+        resp = bb.dispatch({
+            "op": "clipboard.set",
+            "operation": "cut",
+            "source_url": "https://github.com/example/repo",
+            "title": "repo",
+            "tab_id": 12,
+            "mime_types": ["text/plain", "text/html", "text/plain"],
+            "content_tags": ["code", "pre", "code"],
+            "sensitive_fields_nearby": False,
+            "element_context": {
+                "target": "pre",
+                "selection_anchor": "code",
+                "is_code": True,
+                "ignored": "nope",
+            },
+            "selected_text_length": 42,
+            "intent_token": _mint_token("clipboard.set"),
+        }, ALLOWED)
+        assert resp["ok"] is True
+        assert resp["op"] == "clipboard.set"
+        call = bb._dbus_client.calls[0]
+        assert call["bus"] == "SESSION"
+        assert call["service"] == "org.qdistro.Compositor"
+        assert call["method"] == "ClipboardSet"
+        body = json.loads(call["body"][0])
+        assert body["operation"] == "cut"
+        assert body["source_url"] == "https://github.com/example/repo"
+        assert body["mime_types"] == ["text/plain", "text/html"]
+        assert body["content_tags"] == ["code", "pre"]
+        assert body["element_context"] == {
+            "target": "pre",
+            "selection_anchor": "code",
+            "is_code": True,
+        }
+        assert body["extension_id"] == "qdistro@qdistro.local"
+        assert body["parent_exe"] == "/usr/lib64/firefox/firefox"
+
+    def test_missing_source_url_rejected(self):
+        bb._dbus_client = FakeDBus()
+        resp = bb.dispatch({"op": "clipboard.set"}, ALLOWED)
+        assert resp["ok"] is False
+        assert resp["error"] == "missing_source_url"
         assert bb._dbus_client.calls == []
 
 

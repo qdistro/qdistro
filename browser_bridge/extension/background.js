@@ -613,6 +613,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (action === "clipboard.set") {
+    handleClipboardSet(msg, sender).then(sendResponse);
+    return true;
+  }
+
   if (action === "pwd.save_offer") {
     // Content script detected a form submission with new credentials.
     // Store the offer so the popup can prompt the user.
@@ -791,6 +796,70 @@ async function handleCookiesExport(_msg, _sender) {
     });
   } catch (e) {
     return { ok: false, error: "cookies_export_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- clipboard metadata handler --------------------------------------
+
+function sanitizeStringList(value, limit) {
+  const out = [];
+  if (!Array.isArray(value)) return out;
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const s = item.trim().slice(0, limit || 120);
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= 32) break;
+  }
+  return out;
+}
+
+function sanitizeElementContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return {};
+  const out = {};
+  for (const key of [
+    "target", "selection_anchor", "active",
+    "is_password_field", "is_contenteditable", "is_code",
+  ]) {
+    const value = ctx[key];
+    if (typeof value === "boolean") {
+      out[key] = value;
+    } else if (typeof value === "string") {
+      out[key] = value.slice(0, 80);
+    }
+  }
+  return out;
+}
+
+async function handleClipboardSet(msg, sender) {
+  if (!_handshakeComplete) {
+    return { ok: false, error: "handshake_not_complete" };
+  }
+  const tab = sender && sender.tab ? sender.tab : null;
+  if (!tab || !isHttpUrl(tab.url || "")) {
+    return { ok: false, error: "tab_sender_required" };
+  }
+  const sourceUrl = String(tab.url || "").slice(0, 4096);
+  const title = String(tab.title || "").slice(0, 512);
+  const selectedTextLength = Number.isFinite(msg.selected_text_length)
+    ? Math.max(0, Math.min(1024 * 1024 * 1024, Math.floor(msg.selected_text_length)))
+    : 0;
+  try {
+    const token = await mintIntentToken("clipboard.set");
+    return await bridgeRequest({
+      op: "clipboard.set",
+      operation: msg.operation === "cut" ? "cut" : "copy",
+      source_url: sourceUrl,
+      title,
+      tab_id: tab ? tab.id : null,
+      mime_types: sanitizeStringList(msg.mime_types, 120),
+      content_tags: sanitizeStringList(msg.content_tags, 80),
+      sensitive_fields_nearby: !!msg.sensitive_fields_nearby,
+      element_context: sanitizeElementContext(msg.element_context),
+      selected_text_length: selectedTextLength,
+      intent_token: token,
+    });
+  } catch (e) {
+    return { ok: false, error: "clipboard_set_failed", detail: String(e).slice(0, 200) };
   }
 }
 

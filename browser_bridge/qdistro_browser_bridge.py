@@ -416,7 +416,7 @@ INTENT_TOKEN_TTL_S: float = 5.0
 # recall.push, heartbeat ack).
 INTENT_TOKEN_REQUIRED_OPS: frozenset[str] = frozenset({
     "pwd.fill", "pwd.fill_confirm", "pwd.save", "cookies.export",
-    "page.extract",
+    "page.extract", "clipboard.set",
 })
 
 
@@ -1180,6 +1180,81 @@ def _handle_screenlock_release(msg: dict, identity: dict) -> dict:
                     ("tab_id", "url"))
 
 
+def _string_list(value: Any, *, item_limit: int, char_limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()[:char_limit]
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= item_limit:
+            break
+    return out
+
+
+def _element_context(value: Any) -> dict[str, str | bool]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "target", "selection_anchor", "active",
+        "is_password_field", "is_contenteditable", "is_code",
+    }
+    out: dict[str, str | bool] = {}
+    for key in allowed:
+        v = value.get(key)
+        if isinstance(v, bool):
+            out[key] = v
+        elif isinstance(v, str):
+            out[key] = v[:80]
+    return out
+
+
+def _handle_clipboard_set(msg: dict, identity: dict) -> dict:
+    """clipboard.set — forward extension-captured copy metadata.
+
+    This is intentionally metadata-only. Clipboard bytes stay in the
+    browser/compositor clipboard path; enforcement and VM validation are
+    compositor-side follow-ups.
+    """
+    gate = _identity_gate(identity)
+    if gate is not None:
+        return gate
+    source_url = msg.get("source_url")
+    if not isinstance(source_url, str) or not source_url:
+        return {"ok": False, "error": "missing_source_url"}
+    ok, err = verify_intent_token(
+        msg.get("intent_token"), "clipboard.set",
+        extension_id=identity.get("extension_id"))
+    if not ok:
+        return {"ok": False, "error": err}
+    selected_len = msg.get("selected_text_length")
+    if isinstance(selected_len, bool) or not isinstance(selected_len, int):
+        selected_len = 0
+    body = json.dumps({
+        "operation": "cut" if msg.get("operation") == "cut" else "copy",
+        "source_url": source_url[:4096],
+        "title": str(msg.get("title") or "")[:512],
+        "tab_id": msg.get("tab_id"),
+        "mime_types": _string_list(
+            msg.get("mime_types"), item_limit=32, char_limit=120),
+        "content_tags": _string_list(
+            msg.get("content_tags"), item_limit=32, char_limit=80),
+        "sensitive_fields_nearby": bool(
+            msg.get("sensitive_fields_nearby")),
+        "element_context": _element_context(msg.get("element_context")),
+        "selected_text_length": max(0, selected_len),
+        "extension_id": identity.get("extension_id") or "",
+        "parent_exe": identity.get("parent_exe") or "",
+    })
+    reply = _get_dbus_client().call(
+        _COMPOSITOR_BUS_KIND, _COMPOSITOR_BUS, _COMPOSITOR_PATH,
+        _COMPOSITOR_IFACE, "ClipboardSet", "s", (body,))
+    return dict(reply)
+
+
 # =====================================================================
 # heartbeat loop (Phase-9b)
 # =====================================================================
@@ -1244,12 +1319,9 @@ def inbound_dbus_serve(ppid: int, out_stream,
       ``RequestTabs(s op, s args_json) -> s reply_json``
     """
     try:
-        from jeepney import (DBusAddress, MessageType,
-                             new_method_return, new_error,
-                             new_signal)
+        from jeepney import (MessageType, new_method_return, new_error)
         from jeepney.bus_messages import message_bus
         from jeepney.io.blocking import open_dbus_connection
-        from jeepney.wrappers import DBusErrorResponse
     except ImportError:
         sys.stderr.write(
             "qdistro-browser-bridge: jeepney missing; inbound "
@@ -1355,6 +1427,7 @@ DEFAULT_HANDLERS: dict[str, Callable[[dict, dict], dict]] = {
     "notifications.show": _handle_notifications_show,
     "screenlock.inhibit": _handle_screenlock_inhibit,
     "screenlock.release": _handle_screenlock_release,
+    "clipboard.set": _handle_clipboard_set,
 }
 
 
