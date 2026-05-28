@@ -19,8 +19,10 @@
 #   7. Container has the qdistro_tier2_token label
 #                            (orphan-dir reaper depends on this)
 #
-# Run after s32 / s33 / s34 so any flag-loosening regression also
-# surfaces here. Same SKIP semantics as the other drivers.
+# Builds the tier-2 image on demand, so this driver can run either
+# standalone or after s32 / s33 / s34 in the larger tiered suite.
+# Missing build/runtime dependencies are hard failures here because this
+# driver is the hardening regression guard for the tier-2 runtime.
 
 set -u
 
@@ -29,7 +31,7 @@ FAILCOUNT=0
 
 pass() { echo "PASS: $*"; PASSCOUNT=$((PASSCOUNT + 1)); }
 fail() { echo "FAIL: $*"; FAILCOUNT=$((FAILCOUNT + 1)); }
-skip() { echo "SKIP: $*"; exit 0; }
+die() { fail "$*"; exit 1; }
 
 SRC=/root/qdistro-src/qdistro
 TIER2_DIR=/tmp/qdistro-tier2
@@ -49,15 +51,21 @@ CONTAINER=tier2-c-harden
 WORKLOAD=weston-terminal
 IMAGE="qdistro/tier2-${WORKLOAD}:latest"
 
-command -v podman >/dev/null 2>&1 || skip "podman not installed in this VM"
-[ -d "$TIER2_DIR" ] || skip "tier2 source not unpacked at $TIER2_DIR"
-[ -f "$COMMON_LIB_DIR/spawn-common.sh" ] || skip "spawn-common library not unpacked at $COMMON_LIB_DIR"
-runuser -u admin -- podman image exists "$IMAGE" 2>/dev/null \
-    || skip "image $IMAGE not built (run s32 first)"
+command -v podman >/dev/null 2>&1 || die "podman not installed in this VM"
+[ -d "$TIER2_DIR" ] || die "tier2 source not unpacked at $TIER2_DIR"
+[ -f "$COMMON_LIB_DIR/spawn-common.sh" ] || die "spawn-common library not unpacked at $COMMON_LIB_DIR"
+if ! runuser -u admin -- podman image exists "$IMAGE" 2>/dev/null; then
+    echo "[s40] building $IMAGE (first run; cached afterwards)..."
+    if ! runuser -u admin -- bash "$TIER2_DIR/make-tier2-image.sh" "$WORKLOAD" >/tmp/s40-build.log 2>&1; then
+        echo "--- build log ---" >&2
+        cat /tmp/s40-build.log >&2
+        die "build failed for $IMAGE -- see /tmp/s40-build.log"
+    fi
+fi
 
 ADMIN_UID=1000
 runuser -u admin -- test -S "/run/user/$ADMIN_UID/wayland-1" \
-    || skip "outer compositor not running"
+    || die "outer compositor not running"
 
 # Cleanup any leftover container with the same name.
 runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -186,7 +194,7 @@ fi
 # --- Cleanup --------------------------------------------------------------
 runuser -u admin -- podman stop -t 2 "$CONTAINER" >/dev/null 2>&1 || true
 wait "$SPAWN_PID" 2>/dev/null || true
-rm -f "$SPAWN_OUT" /tmp/s40-spawn.log 2>/dev/null || true
+rm -f "$SPAWN_OUT" /tmp/s40-spawn.log /tmp/s40-build.log 2>/dev/null || true
 
 # --- Summary --------------------------------------------------------------
 if [ "$FAILCOUNT" -eq 0 ]; then

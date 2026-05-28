@@ -25,7 +25,8 @@
 
 set -euo pipefail
 
-: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD}"
+: "${QDISTRO_VM_PASSWORD:=admin}"
+export QDISTRO_VM_PASSWORD
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${1:-qd-gui}"
 

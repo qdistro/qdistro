@@ -25,6 +25,7 @@ dist/
 *.swp
 *.swo
 .obsidian/
+.qwen/
 
 # Local test artifacts
 *-credentials.txt

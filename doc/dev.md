@@ -37,10 +37,9 @@ qdistro/scripts/vm/build-baseweed-from-scratch.sh
 qdistro/scripts/vm/build-baked-baseweed.sh
 
 # 5. Spin a fresh test VM + run the integration suite.
-#    QDISTRO_VM_PASSWORD is the password baked into the cloned VM's
-#    user accounts. QDWIN_VM_TEMPLATE is optional — spin-test-vm.sh
-#    auto-creates a "qdistro-template" libvirt domain on first run.
-export QDISTRO_VM_PASSWORD="<test-password>"
+#    QDISTRO_VM_PASSWORD defaults to "admin". QDWIN_VM_TEMPLATE is
+#    optional — spin-test-vm.sh auto-creates a "qdistro-template"
+#    libvirt domain on first run.
 qdistro/scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 ```
 

@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Skip the entire module when PyQt6 is not importable.
-QtWidgets = pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
-QtCore = pytest.importorskip("PyQt6.QtCore", exc_type=ImportError)
+QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+QtCore = pytest.importorskip("PyQt6.QtCore")
 
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
@@ -535,7 +535,8 @@ class TestSaveTriggersReload:
         tab = RulesTab(broker)
 
         # Mock the dialog to auto-accept
-        with patch("qdistro_admin_app.RuleEditorDialog") as MockDlg:
+        with patch("qdistro_admin_app.RuleEditorDialog") as MockDlg, \
+             patch("qdistro_admin_app.QMessageBox.information") as info:
             mock_dlg_inst = MagicMock()
             mock_dlg_inst.exec.return_value = 1  # QDialog.DialogCode.Accepted
             mock_dlg_inst.filename_line.text.return_value = "test-rule.yaml"
@@ -550,6 +551,7 @@ class TestSaveTriggersReload:
         broker.save_rule.assert_called_once()
         args = broker.save_rule.call_args
         assert args[0][0] == "test-rule.yaml"
+        info.assert_called_once()
 
     def test_add_rule_rejects_allow_all(self, qapp):
         broker = _make_stub_broker()
