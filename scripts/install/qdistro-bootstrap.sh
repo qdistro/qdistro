@@ -48,6 +48,13 @@
 #   --admin-password=PW    set admin's password (uid 1000)
 #   --user=NAME            set the regular username (uid 1001)
 #   --user-password=PW     set the regular user's password
+#   --reset-passwords      re-apply the admin/regular passwords even for
+#                          accounts that already exist (state-rewriting).
+#                          Without this flag, a password is only set when
+#                          the account is created for the first time; on a
+#                          re-run, existing accounts' passwords are left
+#                          untouched (and the skip is logged), so bootstrap
+#                          never clobbers a password the operator changed.
 #   --repo-root=DIR        directory holding all qdistro sibling checkouts
 #                          (default: parent of this repo if found,
 #                           else /opt/qdistro-src)
@@ -67,7 +74,8 @@
 #   QDISTRO_BRANCH, QDISTRO_NONINTERACTIVE, QDISTRO_YES,
 #   QDISTRO_SKIP_PACKAGES, QDISTRO_SKIP_GREETD,
 #   QDISTRO_SKIP_SUBVOLUMES, QDISTRO_SKIP_SOURCES,
-#   QDISTRO_SKIP_BUILD, QDISTRO_BUILD_TIER4_BASE.
+#   QDISTRO_SKIP_BUILD, QDISTRO_BUILD_TIER4_BASE,
+#   QDISTRO_RESET_PASSWORDS.
 
 set -euo pipefail
 
@@ -94,6 +102,13 @@ SKIP_SUBVOLUMES="${QDISTRO_SKIP_SUBVOLUMES:-}"
 SKIP_SOURCES="${QDISTRO_SKIP_SOURCES:-}"
 SKIP_BUILD="${QDISTRO_SKIP_BUILD:-}"
 BUILD_TIER4_BASE="${QDISTRO_BUILD_TIER4_BASE:-}"
+RESET_PASSWORDS="${QDISTRO_RESET_PASSWORDS:-}"
+
+# Set by ensure_*_account: 1 if the account already existed before this run
+# (so its password must NOT be touched unless --reset-passwords is given),
+# empty if the account was just created by this bootstrap run.
+ADMIN_PREEXISTING=""
+REGULAR_PREEXISTING=""
 
 log()  { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install] WARN:\033[0m %s\n' "$*" >&2; }
@@ -104,7 +119,7 @@ require_root() {
 }
 
 print_help() {
-    sed -n '2,62p' "$SCRIPT_PATH"
+    sed -n '2,78p' "$SCRIPT_PATH"
 }
 
 parse_args() {
@@ -128,6 +143,7 @@ parse_args() {
             --skip-sources)      SKIP_SOURCES=1 ;;
             --skip-build)        SKIP_BUILD=1 ;;
             --tier4-base)        BUILD_TIER4_BASE=1 ;;
+            --reset-passwords)   RESET_PASSWORDS=1 ;;
             -h|--help)           print_help; exit 0 ;;
             *) die "unknown argument: $1 (try --help)" ;;
         esac
@@ -446,11 +462,13 @@ user_for_uid() {
 
 ensure_admin_account() {
     local existing
+    ADMIN_PREEXISTING=""
 
     if getent passwd admin >/dev/null; then
         if [ "$(id -u admin)" != "1000" ]; then
             die "user 'admin' exists but is not uid 1000 (found uid $(id -u admin))"
         fi
+        ADMIN_PREEXISTING=1
         return 0
     fi
 
@@ -465,11 +483,13 @@ ensure_admin_account() {
 
 ensure_regular_account() {
     local existing
+    REGULAR_PREEXISTING=""
 
     if getent passwd "$REGULAR_USER" >/dev/null; then
         if [ "$(id -u "$REGULAR_USER")" != "1001" ]; then
             die "user '$REGULAR_USER' exists but is not uid 1001 (found uid $(id -u "$REGULAR_USER"))"
         fi
+        REGULAR_PREEXISTING=1
         return 0
     fi
 
@@ -486,7 +506,14 @@ create_users() {
     log "creating admin user (uid 1000)..."
     ensure_admin_account
     create_user_subvolume admin 1000
-    echo "admin:${ADMIN_PASSWORD}" | chpasswd
+    # Setting a password is state-rewriting: only do it when the account was
+    # just created, or when --reset-passwords is given. This keeps re-runs
+    # idempotent and avoids clobbering a password the operator changed.
+    if [ -z "$ADMIN_PREEXISTING" ] || [ -n "$RESET_PASSWORDS" ]; then
+        echo "admin:${ADMIN_PASSWORD}" | chpasswd
+    else
+        log "  admin already exists; leaving its password unchanged (use --reset-passwords to override)"
+    fi
     # wheel group on Tumbleweed, sudo on Ubuntu
     if getent group wheel >/dev/null; then usermod -aG wheel admin; fi
     if getent group sudo  >/dev/null; then usermod -aG sudo  admin; fi
@@ -495,7 +522,11 @@ create_users() {
     log "creating regular user '$REGULAR_USER' (uid 1001)..."
     ensure_regular_account
     create_user_subvolume "$REGULAR_USER" 1001
-    echo "${REGULAR_USER}:${REGULAR_PASSWORD}" | chpasswd
+    if [ -z "$REGULAR_PREEXISTING" ] || [ -n "$RESET_PASSWORDS" ]; then
+        echo "${REGULAR_USER}:${REGULAR_PASSWORD}" | chpasswd
+    else
+        log "  $REGULAR_USER already exists; leaving its password unchanged (use --reset-passwords to override)"
+    fi
     # regular user gets no sudo; cross-uid actions go through the broker.
 
     # Both users need video/input/render for any compositor session.
