@@ -4,15 +4,31 @@
 #
 # Flow:
 #   process_spawn(git in the watched cgroup)
+#     -> conditions: uid==dev AND argv0==git  (ENFORCED, fail-closed: the
+#        key is delivered only if the firing process really is dev's git,
+#        not any process that lands in the cgroup)
 #     -> deliver_secret: unseal vault/dev/github-ssh-key into a per-run
 #        ssh-agent and publish SSH_AUTH_SOCK on the run context
 #     -> wait_for_process: block on the triggering git pid (PID-reuse
 #        anchored) until the commit finishes
 #     -> scrub on workflow_exit: kill the agent, remove its socket dir
 #
-# The triggering git process consumes the published SSH_AUTH_SOCK via the
-# broker/qsu launch environment (the engine exposes it on the run context;
-# a later in-engine step would pick it up from $run.SSH_AUTH_SOCK).
+# IMPORTANT — consumption is NOT yet wired for an EXTERNAL git.
+#   The agent socket is published on the *run context* (consumable by a
+#   LATER in-engine step via $run.SSH_AUTH_SOCK / consume_channels — see
+#   git-sign-inline.yaml, which works end-to-end today). An independently
+#   launched git process (e.g. via qsu) does NOT automatically inherit
+#   SSH_AUTH_SOCK: qsu/qdistro-root-exec is not workflow-aware yet, so it
+#   has no path to read the run context. Until that bridge exists (the
+#   root-exec daemon accepting a run_id and folding the run's channel_env
+#   into the child's environment at exec time), this workflow stands the
+#   agent up and tears it down around the commit window but the external
+#   git will not pick the socket up. Tracked in
+#   todo/issues/qdistro/qdistro-workflow-engine.md.
+#
+# auto_run is OMITTED, so this defaults to FALSE: each fire parks a
+# PENDING run for admin approval (ApproveWorkflowRun). Set `auto_run: true`
+# only after an admin has decided this workflow may run unattended.
 #
 # This file is an EXAMPLE — copy it to /etc/qdistro/workflows/ (system) or
 # ~/.config/qdistro/workflows/ (user) and adjust cgroup_pattern + the vault
@@ -28,6 +44,7 @@
     poll_interval: 0.25
   conditions:
     - uid: dev
+    - argv0: git
   needs:
     - vault/dev/github-ssh-key
   steps:

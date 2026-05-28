@@ -117,8 +117,27 @@ class WorkflowDef:
     conditions: list[dict[str, Any]] = field(default_factory=list)
     needs: list[str] = field(default_factory=list)
     roles: dict[str, str] = field(default_factory=dict)
+    # Human-in-the-loop is the default (permissions.md §Principles): a
+    # loaded workflow does NOT auto-execute on a trigger fire unless it
+    # explicitly opts in with ``auto_run: true``. Otherwise the fire
+    # creates a PENDING run that an admin must approve.
+    auto_run: bool = False
     source_path: str = ""
     description: str = ""
+
+    def invoker_identities(self) -> list[str]:
+        """Roles whose value is ``invoker`` — the identities allowed to
+        invoke this workflow. ``roles: {dev: invoker}`` -> ``["dev"]``.
+        Used to derive a fail-closed uid constraint when ``conditions``
+        does not pin one explicitly."""
+        return [k for k, v in self.roles.items()
+                if str(v).strip().lower() == "invoker"]
+
+    def approver_identities(self) -> list[str]:
+        """Roles whose value is ``approver`` — identities allowed to
+        approve a pending run of this workflow."""
+        return [k for k, v in self.roles.items()
+                if str(v).strip().lower() == "approver"]
 
     @staticmethod
     def from_dict(data: dict[str, Any], source_path: str = "") -> WorkflowDef:
@@ -181,9 +200,15 @@ class WorkflowDef:
                 f"got {type(roles_raw).__name__}"
             )
 
+        auto_run_raw = data.get("auto_run", False)
+        if not isinstance(auto_run_raw, bool):
+            raise ValueError(
+                f"auto_run must be a boolean, got {type(auto_run_raw).__name__}"
+            )
+
         unknown = set(data.keys()) - {
             "name", "trigger", "steps", "conditions",
-            "needs", "roles", "description",
+            "needs", "roles", "auto_run", "description",
         }
         if unknown:
             raise ValueError(f"unknown top-level keys: {sorted(unknown)}")
@@ -195,6 +220,7 @@ class WorkflowDef:
             conditions=conditions,
             needs=needs,
             roles=roles,
+            auto_run=bool(auto_run_raw),
             source_path=source_path,
             description=str(data.get("description") or ""),
         )

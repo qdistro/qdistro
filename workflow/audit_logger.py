@@ -87,14 +87,38 @@ class WorkflowAuditLogger:
         except OSError:
             pass
 
-    def log_run_start(self, run_id: str, workflow_name: str,
-                      trigger_context: dict[str, Any]) -> None:
-        """Record the start of a workflow run."""
+    def log_run_pending(self, run_id: str, workflow_name: str,
+                        trigger_context: dict[str, Any]) -> None:
+        """Record a run that fired but awaits admin approval (F3)."""
         now = time.time()
         self._conn.execute(
             """INSERT INTO workflow_runs
                (run_id, workflow_name, state, started_at, trigger_context)
-               VALUES (?, ?, 'running', ?, ?)""",
+               VALUES (?, ?, 'pending', ?, ?)""",
+            (run_id, workflow_name, now,
+             json.dumps(trigger_context, default=str)),
+        )
+        self._log_event(run_id, workflow_name, "run_pending",
+                        f"workflow {workflow_name} pending approval")
+        self._forward_to_broker(
+            action=f"qdistro.workflow.run_pending:{workflow_name}",
+            source=f"run_id={run_id}",
+        )
+
+    def log_run_start(self, run_id: str, workflow_name: str,
+                      trigger_context: dict[str, Any]) -> None:
+        """Record the start of a workflow run.
+
+        Upserts: a run that was previously PENDING (awaiting approval)
+        transitions to running on the same row rather than conflicting on
+        the primary key."""
+        now = time.time()
+        self._conn.execute(
+            """INSERT INTO workflow_runs
+               (run_id, workflow_name, state, started_at, trigger_context)
+               VALUES (?, ?, 'running', ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET
+                   state='running', started_at=excluded.started_at""",
             (run_id, workflow_name, now,
              json.dumps(trigger_context, default=str)),
         )

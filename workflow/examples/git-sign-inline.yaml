@@ -1,0 +1,64 @@
+# git-sign-inline — the END-TO-END-WORKING variant of git-sign.
+#
+# Unlike git-sign-commit.yaml (which watches for an EXTERNAL git and cannot
+# yet inject the socket into it), this workflow has the ENGINE launch the
+# signing command itself, so the published SSH_AUTH_SOCK is actually
+# consumed. This is the consumption path the unit tests exercise
+# (test_workflow_secret_delivery.py::test_published_socket_consumed_by_later_step).
+#
+# Flow:
+#   trigger (cron here; could be a qbus_event the dev raises)
+#     -> conditions: none needed — the engine, not an external caller, is
+#        the consumer, and `needs` already scopes which item may be unsealed
+#     -> deliver_secret(ssh-agent): unseal the key into a per-run agent and
+#        publish SSH_AUTH_SOCK on the run context (no command -> tracked)
+#     -> deliver_secret(env, command=...): run the actual signing command
+#        as a child, consume_channels: [SSH_AUTH_SOCK] folds the published
+#        socket into the child's environment (least privilege: only the
+#        channels it names). Here the "secret" item is a throwaway marker;
+#        the real secret the child uses is the agent reached via the socket.
+#     -> scrub on workflow_exit: kill the agent, remove the socket dir.
+#
+# auto_run defaults to FALSE -> each fire parks a PENDING run an admin must
+# approve. Flip to true only after that admin decision.
+#
+# EXAMPLE only — copy to /etc/qdistro/workflows/ and adapt the command +
+# vault items. Not installed/enabled by default.
+- name: git-sign-inline
+  description: >-
+    Engine-launched git signing: deliver the dev key to a child command
+    that signs, then scrub. End-to-end working today.
+  trigger:
+    type: cron
+    interval_seconds: 86400
+  needs:
+    - vault/dev/github-ssh-key
+    - vault/dev/sign-marker
+  steps:
+    - deliver_secret:
+        name: stand-up-agent
+        item: vault/dev/github-ssh-key
+        as: ssh-agent
+        expose_as: SSH_AUTH_SOCK
+        ttl: 120
+        scrub_on: workflow_exit
+    - deliver_secret:
+        name: run-signer
+        item: vault/dev/sign-marker
+        as: env
+        var: SIGN_MARKER
+        consume_channels:
+          - SSH_AUTH_SOCK
+        # Replace with the real signing command. It inherits SSH_AUTH_SOCK
+        # pointing at the per-run agent that holds the key.
+        command:
+          - /usr/bin/git
+          - -C
+          - /srv/repo
+          - commit
+          - --gpg-sign
+          - -m
+          - automated signed commit
+  roles:
+    - dev: invoker
+    - admin: approver

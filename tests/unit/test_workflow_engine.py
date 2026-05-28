@@ -607,6 +607,8 @@ class TestWorkflowEngineSteps:
             name: ordered
             trigger:
               type: cron
+            needs:
+              - vault/key
             steps:
               - type: deliver_secret
                 name: first
@@ -637,6 +639,8 @@ class TestWorkflowEngineSteps:
             name: all-types
             trigger:
               type: cron
+            needs:
+              - vault/secret
             steps:
               - type: deliver_secret
                 item: vault/secret
@@ -682,12 +686,12 @@ class _FailingEngine(WorkflowEngine):
         self._fail_step = fail_step
         self.scrubbed_secrets: list[str] = []
 
-    def _handle_run_hook(self, step, run, result):
+    def _handle_run_hook(self, step, run, result, wf=None):
         if step.config.get("hook") == self._fail_step:
             result.success = False
             result.error = f"simulated failure in {self._fail_step}"
             return
-        super()._handle_run_hook(step, run, result)
+        super()._handle_run_hook(step, run, result, wf)
 
     def _cleanup_secrets(self, run_id, workflow_name):
         # Track what would be scrubbed.
@@ -746,6 +750,9 @@ class TestFailureMidStep:
             name: secret-fail
             trigger:
               type: cron
+            needs:
+              - vault/dev/ssh-key
+              - vault/dev/api-token
             steps:
               - type: deliver_secret
                 item: vault/dev/ssh-key
@@ -850,6 +857,8 @@ class TestAuditTrailGeneration:
             name: fail-audit
             trigger:
               type: cron
+            needs:
+              - vault/key
             steps:
               - type: deliver_secret
                 item: vault/key
@@ -947,7 +956,7 @@ class TestEngineLifecycle:
         release = threading.Event()
 
         class _BlockingEngine(WorkflowEngine):
-            def _handle_run_hook(self, step, run, result):
+            def _handle_run_hook(self, step, run, result, wf=None):
                 started.set()
                 release.wait(2.0)
                 result.success = True
@@ -956,6 +965,7 @@ class TestEngineLifecycle:
         wf_dir.mkdir()
         (wf_dir / "test.yaml").write_text(textwrap.dedent("""\
             name: async-wf
+            auto_run: true
             trigger:
               type: cron
               interval_seconds: 9999
@@ -1030,6 +1040,8 @@ class TestCodexReviewFixes:
             name: secret-ok
             trigger:
               type: cron
+            needs:
+              - vault/dev/ssh-key
             steps:
               - type: deliver_secret
                 item: vault/dev/ssh-key

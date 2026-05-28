@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import pwd as _pwd_mod
+import re
 import secrets
 import signal
 import sys
@@ -833,6 +834,15 @@ class PwdDaemon(dbus.service.Object):
         vault = str(vault)
         tag = str(tag)
         run_id = str(run_id)
+        # Defense-in-depth: the broker stamps every delivery with the live
+        # WorkflowRun id. Reject a missing/over-long/garbage run_id so a
+        # forged, blank, or payload-bearing value can't be recorded in the
+        # audit chain as a legitimate release.
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", run_id):
+            self._audit.record("deliver-workflow", vault, item_tag=tag,
+                               decision="deny", reason="bad-run-id",
+                               caller=caller)
+            raise PwdPolicyError(f"invalid workflow run_id {run_id!r}")
         if vault not in self._unlocked:
             self._audit.record("deliver-workflow", vault, item_tag=tag,
                                decision="deny", reason="vault-locked",

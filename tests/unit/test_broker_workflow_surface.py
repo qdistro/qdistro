@@ -77,6 +77,7 @@ class TestListWorkflowRuns:
         engine = WorkflowEngine(audit_logger=audit)
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["v/d/k"],
             steps=[StepDef(type=StepType.DELIVER_SECRET,
                            config={"item": "v/d/k"})])
         run = engine.start_run("wf")

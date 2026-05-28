@@ -391,7 +391,8 @@ def _engine_with_secret(tmp_path, command, *, fail_after=False):
         steps.append(StepDef(type=StepType.RUN_HOOK, name="boom",
                              config={"hook": "explode"}))
     engine._workflows["wf"] = WorkflowDef(
-        name="wf", trigger=TriggerDef(type=TriggerType.CRON), steps=steps)
+        name="wf", trigger=TriggerDef(type=TriggerType.CRON), steps=steps,
+        needs=["vault/dev/key"])
     return engine, audit
 
 
@@ -436,7 +437,7 @@ class TestEngineDelivery:
         # Force the second step to fail.
         orig = engine._handle_run_hook
 
-        def boom(step, run, result):
+        def boom(step, run, result, wf=None):
             result.success = False
             result.error = "kaboom"
         engine._handle_run_hook = boom  # type: ignore[assignment]
@@ -454,6 +455,7 @@ class TestEngineDelivery:
                                 secret_source=_FakeSource(SECRET))
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[StepDef(type=StepType.DELIVER_SECRET, config={
                 "item": "vault/dev/key", "as": "fd-pass"})])
         run = engine.start_run("wf")
@@ -471,6 +473,7 @@ class TestEngineDelivery:
                                 secret_source=_FakeSource(SECRET))
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[
                 StepDef(type=StepType.DELIVER_SECRET, config={
                     "item": "vault/dev/key", "as": "env", "var": "THE_VAR",
@@ -493,6 +496,7 @@ class TestEngineDelivery:
                                 secret_source=_FakeSource(SECRET))
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[StepDef(type=StepType.DELIVER_SECRET, config={
                 "item": "vault/dev/key", "as": "env", "var": "X",
                 "command": [sys.executable, "-c", "import sys;sys.exit(2)"]})])
@@ -509,6 +513,7 @@ class TestEngineDelivery:
         engine._stopping = True
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[StepDef(type=StepType.DELIVER_SECRET, config={
                 "item": "vault/dev/key", "as": "fd-pass"})])
         run = engine.start_run("wf")
@@ -524,6 +529,7 @@ class TestEngineDelivery:
         engine = WorkflowEngine(audit_logger=audit)
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[StepDef(type=StepType.DELIVER_SECRET, config={
                 "item": "vault/dev/key", "as": "env"})])
         run = engine.start_run("wf")
@@ -554,6 +560,7 @@ class TestChannelPublication:
                                 secret_source=_FakeSource(SECRET))
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            needs=["vault/dev/key"],
             steps=[StepDef(type=StepType.DELIVER_SECRET, config={
                 "item": "vault/dev/key", "as": "env", "var": "X"})])
         run = engine.start_run("wf")
@@ -584,6 +591,8 @@ class TestSshAgentConsumptionLoop:
                                  config={"hook": "explode"}))
         return WorkflowDef(name="git-sign",
                            trigger=TriggerDef(type=TriggerType.PROCESS_SPAWN),
+                           needs=["vault/dev/github-ssh-key",
+                                  "vault/dev/marker"],
                            steps=steps)
 
     def _engine(self, tmp_path, key):
@@ -663,7 +672,7 @@ class TestSshAgentConsumptionLoop:
         engine._workflows["git-sign"] = self._wf(runtime, fail_after=True)
 
         # Force the trailing hook step to fail.
-        def boom(step, run, result):
+        def boom(step, run, result, wf=None):
             result.success = False
             result.error = "kaboom"
         engine._handle_run_hook = boom  # type: ignore[assignment]

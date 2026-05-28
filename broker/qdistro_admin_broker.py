@@ -2856,6 +2856,47 @@ class Broker(dbus.service.Object):
             })
         return out
 
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ApproveWorkflowRun(self, run_id: str, sender=None,
+                           conn=None) -> bool:
+        """Approve a PENDING workflow run so it executes (F3).
+
+        Human-in-the-loop gate: a workflow that did not opt into
+        ``auto_run`` parks each fire as a PENDING run; an admin approves it
+        here. Admin/root only at the bus level AND server-side. Returns
+        True if a pending run was found and scheduled (conditions are still
+        re-evaluated at execution, so approval never bypasses the identity
+        gate). False if no such pending run exists.
+        """
+        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if admin_uid not in (0, ADMIN_UID):
+            raise dbus.DBusException(
+                f"ApproveWorkflowRun restricted to admin/root; got uid "
+                f"{admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return False
+        try:
+            approved = bool(engine.approve_run(str(run_id)))
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] ApproveWorkflowRun failed: {e!r}", flush=True)
+            return False
+        if approved:
+            try:
+                self.audit.log(
+                    caller_uid=admin_uid, caller_pid=_pid,
+                    caller_exe=_exe or "qdistro-admin",
+                    action=f"qdistro.workflow.approve:{run_id}",
+                    decision=True, scope=None,
+                    source=f"run_id={run_id}", approver_uid=admin_uid,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return approved
+
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")
     def ListHistory(self, limit: int, sender=None, conn=None) -> list[dict]:
@@ -3221,6 +3262,15 @@ class Broker(dbus.service.Object):
         broker side; subscribers can call ListRules to refresh their
         view.
         """
+        pass
+
+    @dbus.service.signal(BUS_NAME, signature="ss")
+    def WorkflowRunPending(self, run_id: str, workflow_name: str):
+        """Emitted when a non-auto-run workflow fires and parks a run for
+        admin approval (F3). The admin Workflows tab refreshes its run
+        list so the new PENDING entry appears; an admin then calls
+        ApproveWorkflowRun(run_id). Carries only identifiers, never any
+        secret or trigger payload."""
         pass
 
 
