@@ -421,7 +421,7 @@ CONTAINERS_LIST = OpSchema(
     ),
     error_codes=(
         "request_timeout", "stdio_write_failed", "empty_reply",
-        "contextualIdentities_unavailable",
+        "contextualIdentities_unavailable", "containers_list_failed",
     ),
 )
 
@@ -436,10 +436,14 @@ CONTAINERS_CREATE = OpSchema(
         _f("color", "str", required=False),
         _f("icon", "str", required=False),
     ),
-    response_fields=_COMMON_RESPONSE,
+    response_fields=(
+        _f("ok", "bool"),
+        _f("container", "dict", required=False,
+           doc="Created container {cookie_store_id, name, color, icon, ...}"),
+    ),
     error_codes=(
         "request_timeout", "stdio_write_failed", "empty_reply",
-        "contextualIdentities_unavailable",
+        "contextualIdentities_unavailable", "containers_create_failed",
     ),
 )
 
@@ -448,12 +452,17 @@ CONTAINERS_REMOVE = OpSchema(
     doc="Remove a Firefox contextual identity (container). Inbound op.",
     direction="inbound",
     request_fields=(
-        _f("cookieStoreId", "str"),
+        _f("cookie_store_id", "str"),
     ),
-    response_fields=_COMMON_RESPONSE,
+    response_fields=(
+        _f("ok", "bool"),
+        _f("container", "dict", required=False,
+           doc="Removed container {cookie_store_id, name, color, icon, ...}"),
+    ),
     error_codes=(
         "request_timeout", "stdio_write_failed", "empty_reply",
         "contextualIdentities_unavailable", "missing_cookie_store_id",
+        "containers_remove_failed",
     ),
 )
 
@@ -655,7 +664,9 @@ def _check_type(value: Any, type_name: str) -> bool:
 def validate_request(op: str, msg: dict) -> list[str]:
     """Validate a request message against its op schema.
 
-    Returns a list of error strings (empty = valid).
+    Returns a list of error strings (empty = valid).  Checks both
+    required fields (must be present with correct type) and optional
+    fields (type-checked when present).
     """
     schema = OP_REGISTRY.get(op)
     if schema is None:
@@ -668,6 +679,13 @@ def validate_request(op: str, msg: dict) -> list[str]:
             errors.append(
                 f"field {f.name}: expected {f.type}, "
                 f"got {type(msg[f.name]).__name__}")
+    # Also type-check optional fields when they are present.
+    for f in schema.optional_request_fields:
+        if f.name in msg and f.type != "any":
+            if not _check_type(msg[f.name], f.type):
+                errors.append(
+                    f"field {f.name}: expected {f.type}, "
+                    f"got {type(msg[f.name]).__name__}")
     return errors
 
 

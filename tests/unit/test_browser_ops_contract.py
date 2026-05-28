@@ -335,11 +335,13 @@ class TestRequestValidation:
         errors = ops.validate_request("tabs.close", {"tab_id": True})
         assert any("expected int" in e for e in errors)
 
-    def test_bool_rejected_for_float_field(self):
+    def test_bool_rejected_for_optional_int_field(self):
+        """Optional fields are also type-checked when present."""
         errors = ops.validate_request("history.search", {
             "query": "test", "max_results": False})
-        # max_results is optional so validate_request won't check it,
-        # but we can test _check_type directly.
+        assert any("expected int" in e for e in errors)
+
+    def test_check_type_helper(self):
         assert not ops._check_type(True, "int")
         assert not ops._check_type(False, "float")
         assert ops._check_type(42, "int")
