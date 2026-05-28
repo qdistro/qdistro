@@ -249,6 +249,16 @@ def _read_hooks_enabled() -> bool:
 
 HOOKS_ENABLED = _read_hooks_enabled()
 
+# Workflow orchestration engine. Loaded inside the broker process so it
+# shares the GLib main loop, audit log, and lifecycle. Disabled with
+# QDISTRO_WORKFLOW_ENABLED=0; any init failure degrades silently to "no
+# workflows" so the core permission broker always starts.
+WORKFLOW_ENABLED = os.environ.get(
+    "QDISTRO_WORKFLOW_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+_WORKFLOW_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "workflow"))
+
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
 # the user relay.
@@ -754,6 +764,55 @@ class Broker(dbus.service.Object):
             print(f"[broker] inotify watch on {rules_dir} skipped: {e!r}",
                   flush=True)
 
+        # Workflow orchestration engine — shares this process + main loop.
+        self.workflow_engine = None
+        self._setup_workflow_engine()
+
+    def _setup_workflow_engine(self) -> None:
+        """Load the workflow engine inside the broker, sharing the GLib
+        main loop. Best-effort: any failure leaves workflow_engine None
+        and the core broker unaffected."""
+        if not WORKFLOW_ENABLED:
+            return
+        try:
+            if _WORKFLOW_DIR not in sys.path:
+                sys.path.insert(0, _WORKFLOW_DIR)
+            from workflow_engine import WorkflowEngine
+            from audit_logger import WorkflowAuditLogger
+            from pwd_secret_source import PwdSecretSource
+            wf_audit = WorkflowAuditLogger(broker_audit=self.audit)
+            engine = WorkflowEngine(
+                broker_proxy=self,
+                audit_logger=wf_audit,
+                secret_source=PwdSecretSource(),
+                # The broker owns the process main loop; D-Bus triggers
+                # must reuse it instead of starting their own.
+                own_dbus_loop=False,
+            )
+            for err in engine.load_workflows():
+                print(f"[broker] workflow load error: {err}", flush=True)
+            engine.register_triggers()
+            self.workflow_engine = engine
+            print(f"[broker] workflow engine: "
+                  f"{len(engine.list_workflow_defs())} workflow(s) loaded",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] workflow engine init skipped: {e!r}", flush=True)
+            self.workflow_engine = None
+
+    def _reload_workflows(self) -> None:
+        """Reload workflow definitions + re-register triggers. Guarded so
+        it's a no-op when the engine isn't running (e.g. in tests)."""
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return
+        try:
+            for err in engine.load_workflows():
+                print(f"[broker] workflow load error: {err}", flush=True)
+            engine.register_triggers()
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] workflow reload failed: {e!r}", flush=True)
+
     def _on_sighup(self, _unused) -> bool:
         # Always returns True — keep the handler installed across
         # repeated SIGHUPs.
@@ -826,6 +885,10 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] RulesReloaded signal emit failed ({source}): "
                   f"{e!r}", flush=True)
+        # A reload trigger (SIGHUP / ReloadRules / inotify) also refreshes
+        # workflow definitions so admins get one reload convention. No-op
+        # when the workflow engine isn't running.
+        self._reload_workflows()
         return n
 
     def _gc_tick(self) -> bool:
@@ -2709,6 +2772,70 @@ class Broker(dbus.service.Object):
             })
         return out
 
+    @dbus.service.method(BUS_NAME, in_signature="", out_signature="aa{sv}",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ListWorkflows(self, sender=None, conn=None) -> list[dict]:
+        """Return loaded workflow definitions for the admin Workflows tab.
+
+        Admin/root only. Read-only metadata (no secret values): name,
+        trigger_type, description, needs, step_count, source_path. Returns
+        an empty list when the workflow engine isn't running.
+        """
+        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if admin_uid not in (0, ADMIN_UID):
+            raise dbus.DBusException(
+                f"ListWorkflows restricted to admin/root; got uid {admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return []
+        out = []
+        for wf in engine.list_workflow_defs():
+            out.append({
+                "name":         dbus.String(wf.get("name", "")),
+                "trigger_type": dbus.String(wf.get("trigger_type", "")),
+                "description":  dbus.String(wf.get("description", "")),
+                "needs":        dbus.Array(
+                    [dbus.String(x) for x in wf.get("needs", ())],
+                    signature="s"),
+                "step_count":   dbus.Int32(int(wf.get("step_count", 0))),
+                "source_path":  dbus.String(wf.get("source_path", "")),
+            })
+        return out
+
+    @dbus.service.method(BUS_NAME, in_signature="i", out_signature="aa{sv}",
+                         sender_keyword="sender", connection_keyword="conn")
+    def ListWorkflowRuns(self, limit: int, sender=None,
+                         conn=None) -> list[dict]:
+        """Return the N most-recent workflow runs for the admin Workflows
+        tab. Admin/root only; read-only. `limit` <= 0 defaults to 200.
+        Empty list when the workflow engine isn't running.
+        """
+        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if admin_uid not in (0, ADMIN_UID):
+            raise dbus.DBusException(
+                f"ListWorkflowRuns restricted to admin/root; got uid "
+                f"{admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return []
+        n = int(limit) if int(limit) > 0 else 200
+        out = []
+        for r in engine.recent_runs(n):
+            out.append({
+                "run_id":        dbus.String(str(r.get("run_id", ""))),
+                "workflow_name": dbus.String(str(r.get("workflow_name", ""))),
+                "state":         dbus.String(str(r.get("state", ""))),
+                "started_at":    dbus.Double(float(r.get("started_at") or 0.0)),
+                "completed_at":  dbus.Double(
+                    float(r.get("completed_at") or 0.0)),
+                "error":         dbus.String(str(r.get("error") or "")),
+            })
+        return out
+
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")
     def ListHistory(self, limit: int, sender=None, conn=None) -> list[dict]:
@@ -3083,7 +3210,18 @@ def main():
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
     broker = Broker(bus)
     print(f"[qdistro-admin-broker] listening on {BUS_NAME} {OBJ_PATH}", flush=True)
-    GLib.MainLoop().run()
+    try:
+        GLib.MainLoop().run()
+    finally:
+        # Best-effort scrub of any outstanding workflow secrets on a clean
+        # main-loop exit (startup reap covers hard crashes).
+        engine = getattr(broker, "workflow_engine", None)
+        if engine is not None:
+            try:
+                engine.shutdown()
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] workflow engine shutdown failed: {e!r}",
+                      flush=True)
 
 
 if __name__ == "__main__":

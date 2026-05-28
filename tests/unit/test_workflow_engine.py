@@ -848,6 +848,53 @@ class TestEngineLifecycle:
         engine.shutdown()
         assert not triggers["trigger-wf"].active
 
+    def test_on_trigger_dispatches_async(self, tmp_path):
+        """A trigger fire must not block on the run — it dispatches to the
+        worker pool and returns immediately (so the broker main loop /
+        watcher threads stay free)."""
+        import threading
+        import time
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class _BlockingEngine(WorkflowEngine):
+            def _handle_run_hook(self, step, run, result):
+                started.set()
+                release.wait(2.0)
+                result.success = True
+
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "test.yaml").write_text(textwrap.dedent("""\
+            name: async-wf
+            trigger:
+              type: cron
+              interval_seconds: 9999
+            steps:
+              - type: run_hook
+                hook: slow
+        """), encoding="utf-8")
+        loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
+        engine = _BlockingEngine(broker_proxy=None, audit_logger=None,
+                                 loader=loader)
+        engine.load_workflows()
+
+        engine._on_trigger("async-wf", {"k": "v"})
+        # The fire returned promptly while the hook is still blocked.
+        assert started.wait(2.0)
+        assert not release.is_set()
+        # Run is in-flight, not yet complete.
+        assert all(r.state == RunState.RUNNING for r in engine.list_runs())
+        release.set()
+        for _ in range(100):
+            runs = engine.list_runs()
+            if runs and runs[0].state == RunState.COMPLETED:
+                break
+            time.sleep(0.02)
+        assert engine.list_runs()[0].state == RunState.COMPLETED
+        engine.shutdown()
+
     def test_list_runs(self, tmp_path):
         wf_dir = tmp_path / "workflows"
         wf_dir.mkdir()

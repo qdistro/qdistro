@@ -6,6 +6,7 @@ failure cleanup (secret scrubbing, run-state marking).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import threading
 import time
@@ -64,12 +65,21 @@ class WorkflowEngine:
         audit_logger: WorkflowAuditLogger | None = None,
         loader: WorkflowLoader | None = None,
         secret_source: Any | None = None,
+        own_dbus_loop: bool = True,
+        max_concurrent_runs: int = 4,
     ):
         self._broker = broker_proxy
         self._audit = audit_logger
         self._loader = loader or WorkflowLoader()
-        self._registry = TriggerRegistry()
+        self._registry = TriggerRegistry(dbus_run_own_loop=own_dbus_loop)
         self._secret_source = secret_source
+        # Runs execute on a worker pool, never on the firing thread, so a
+        # trigger fire (especially a D-Bus signal delivered on the broker's
+        # shared GLib main loop) returns immediately and a long-running
+        # workflow can't block the loop, other watchers, or reload.
+        self._run_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, int(max_concurrent_runs)),
+            thread_name_prefix="workflow-run")
         self._workflows: dict[str, WorkflowDef] = {}
         self._runs: dict[str, WorkflowRun] = {}
         self._runs_lock = threading.Lock()
@@ -132,8 +142,14 @@ class WorkflowEngine:
                 )
 
     def shutdown(self) -> None:
-        """Stop all triggers, scrub outstanding secrets, release resources."""
+        """Stop all triggers, drain runs, scrub outstanding secrets."""
         self._registry.unregister_all()
+        # Stop accepting new runs and cancel any not-yet-started ones;
+        # in-flight runs finish (and self-scrub) on their worker threads.
+        try:
+            self._run_pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:  # pragma: no cover - py<3.9
+            self._run_pool.shutdown(wait=False)
         self.scrub_all_runs()
         logger.info("workflow engine shut down")
 
@@ -209,6 +225,37 @@ class WorkflowEngine:
     def list_runs(self) -> list[WorkflowRun]:
         with self._runs_lock:
             return list(self._runs.values())
+
+    def list_workflow_defs(self) -> list[dict[str, Any]]:
+        """Secret-free metadata for each loaded workflow (for the admin
+        D-Bus list surface)."""
+        out: list[dict[str, Any]] = []
+        for wf in self._workflows.values():
+            out.append({
+                "name": wf.name,
+                "trigger_type": wf.trigger.type.value,
+                "description": wf.description,
+                "needs": list(wf.needs),
+                "step_count": len(wf.steps),
+                "source_path": wf.source_path,
+            })
+        return out
+
+    def recent_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Recent run records from the audit DB (durable across restarts).
+        Falls back to in-memory runs when no audit logger is configured."""
+        if self._audit is not None:
+            return self._audit.recent_runs(limit)
+        runs = sorted(self.list_runs(), key=lambda r: r.started_at,
+                      reverse=True)[:limit]
+        return [
+            {
+                "run_id": r.run_id, "workflow_name": r.workflow_name,
+                "state": r.state.value, "started_at": r.started_at,
+                "completed_at": r.completed_at, "error": r.error,
+            }
+            for r in runs
+        ]
 
     # ------------------------------------------------------------------
     # Step execution
@@ -486,18 +533,28 @@ class WorkflowEngine:
 
     def _on_trigger(self, workflow_name: str,
                     trigger_context: dict[str, Any]) -> None:
-        """Called by the trigger registry when a trigger fires."""
-        logger.info(
-            "trigger fired for workflow %s, starting run",
-            workflow_name,
-        )
+        """Called by the trigger registry when a trigger fires.
+
+        Dispatches the run to the worker pool and returns immediately so
+        the firing thread (a watcher thread, or the broker main loop for
+        D-Bus triggers) is never occupied by workflow execution.
+        """
+        logger.info("trigger fired for workflow %s, dispatching run",
+                    workflow_name)
+        try:
+            self._run_pool.submit(self._run_from_trigger,
+                                  workflow_name, trigger_context)
+        except RuntimeError as e:
+            # Pool already shut down (engine stopping) — drop the fire.
+            logger.warning("dropping trigger for %s: %r", workflow_name, e)
+
+    def _run_from_trigger(self, workflow_name: str,
+                          trigger_context: dict[str, Any]) -> None:
         try:
             self.start_run(workflow_name, trigger_context)
         except Exception as e:  # noqa: BLE001
-            logger.error(
-                "failed to start run for workflow %s: %s",
-                workflow_name, e,
-            )
+            logger.error("failed to start run for workflow %s: %s",
+                         workflow_name, e)
 
 
 # Step handler dispatch table — maps step types to method names.

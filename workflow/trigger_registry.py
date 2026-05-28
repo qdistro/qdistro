@@ -518,9 +518,15 @@ TRIGGER_CLASSES: dict[TriggerType, type[BaseTrigger]] = {
 class TriggerRegistry:
     """Registry that creates and manages trigger instances for workflows."""
 
-    def __init__(self) -> None:
+    def __init__(self, dbus_run_own_loop: bool = True,
+                 dbus_bus: Any | None = None) -> None:
         self._triggers: dict[str, BaseTrigger] = {}  # workflow_name -> trigger
         self._lock = threading.Lock()
+        # When embedded in a process that already runs a GLib main loop
+        # (the broker), D-Bus triggers must reuse it rather than spin
+        # their own — two loops on the default context can't both run.
+        self._dbus_run_own_loop = dbus_run_own_loop
+        self._dbus_bus = dbus_bus
 
     def register(self, workflow: WorkflowDef,
                  callback: TriggerCallback) -> BaseTrigger:
@@ -531,7 +537,12 @@ class TriggerRegistry:
                 f"no trigger implementation for type "
                 f"{workflow.trigger.type.value!r}"
             )
-        trigger = trigger_cls(workflow.name, workflow.trigger, callback)
+        if issubclass(trigger_cls, DBusSignalTrigger):
+            trigger = trigger_cls(
+                workflow.name, workflow.trigger, callback,
+                bus=self._dbus_bus, run_own_loop=self._dbus_run_own_loop)
+        else:
+            trigger = trigger_cls(workflow.name, workflow.trigger, callback)
         with self._lock:
             # Stop any existing trigger for this workflow.
             old = self._triggers.pop(workflow.name, None)
