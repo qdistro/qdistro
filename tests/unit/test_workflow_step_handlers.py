@@ -142,7 +142,11 @@ class TestCallBroker:
             _run(), r)
         assert r.success
         assert broker.calls == ["ListRules"]
-        assert r.details["returned"] == [{"name": "r1"}]
+        # Shape only — the payload is never copied into audit details.
+        assert r.details["returned"] is True
+        assert r.details["returned_type"] == "list"
+        assert r.details["returned_len"] == 1
+        assert "r1" not in str(r.details)
 
     def test_method_with_args(self):
         broker = _FakeBroker()
@@ -153,7 +157,8 @@ class TestCallBroker:
                     config={"method": "RunCacheGc", "args": []}),
             _run(), r)
         assert r.success
-        assert r.details["returned"] == 3
+        assert r.details["returned"] is True
+        assert r.details["returned_type"] == "int"
 
     def test_non_whitelisted_rejected(self):
         broker = _FakeBroker()
@@ -200,8 +205,9 @@ def _install_fake_dbus(monkeypatch, return_value="ok", raises=None):
             return _Method(name, dbus_interface)
 
     class _Bus:
-        def get_object(self, bus_name, obj_path):
-            recorder["calls"].append(("get_object", bus_name, obj_path))
+        def get_object(self, bus_name, obj_path, introspect=True):
+            recorder["calls"].append(
+                ("get_object", bus_name, obj_path, introspect))
             return _Obj()
 
     fake = types.ModuleType("dbus")
@@ -224,7 +230,11 @@ class TestCallDbus:
         r = _result()
         eng._handle_call_dbus(self._step(args=["x", 1]), _run(), r)
         assert r.success
-        assert r.details["returned"] == "pong"
+        # Shape only — the returned string is never persisted.
+        assert r.details["returned"] is True
+        assert r.details["returned_type"] == "str"
+        assert r.details["returned_len"] == 4
+        assert "pong" not in str(r.details)
         # method call recorded with a bounded timeout kwarg
         call = [c for c in rec["calls"] if c[0] == "Ping"][0]
         assert call[2] == ("x", 1)
@@ -338,3 +348,46 @@ class TestWaitForProcess:
             _run(), r)
         assert not r.success
         assert "invalid pid" in r.error
+
+    def test_starttime_anchor_detects_pid_reuse(self, monkeypatch):
+        """Fallback path: a stale starttime anchor means the original
+        process is gone even if the pid is now reused (and alive)."""
+        import workflow_engine as we
+        # Force the polling fallback (no pidfd).
+        monkeypatch.setattr(we.os, "pidfd_open", None, raising=False)
+        p = subprocess.Popen(["sleep", "30"])  # a live, foreign pid stand-in
+        try:
+            eng = _engine()
+            r = _result()
+            # Anchor to a starttime that does NOT match the live process.
+            real = we._proc_starttime(p.pid)
+            assert real is not None
+            eng._handle_wait_for_process(
+                StepDef(type=StepType.WAIT_FOR_PROCESS,
+                        config={"pid": p.pid, "timeout": 5}),
+                _run({"pid": p.pid, "pid_starttime": real + 1}), r)
+            assert r.success  # mismatch => treated as exited
+            assert r.details["exited"] is True
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_starttime_anchor_match_still_waits(self, monkeypatch):
+        """A matching anchor must NOT short-circuit: a live process with
+        the right starttime should still time out."""
+        import workflow_engine as we
+        monkeypatch.setattr(we.os, "pidfd_open", None, raising=False)
+        p = subprocess.Popen(["sleep", "30"])
+        try:
+            eng = _engine()
+            r = _result()
+            real = we._proc_starttime(p.pid)
+            eng._handle_wait_for_process(
+                StepDef(type=StepType.WAIT_FOR_PROCESS,
+                        config={"pid": p.pid, "timeout": 0.5}),
+                _run({"pid": p.pid, "pid_starttime": real}), r)
+            assert not r.success
+            assert "still alive" in r.error
+        finally:
+            p.kill()
+            p.wait()

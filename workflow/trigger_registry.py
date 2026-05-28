@@ -41,6 +41,22 @@ from cron_parser import CronExpr, CronParseError  # type: ignore[import-not-foun
 
 logger = logging.getLogger("qdistro.workflow.triggers")
 
+
+def _proc_starttime(pid: int) -> int | None:
+    """Read /proc/<pid>/stat field 22 (starttime). None if unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    try:
+        rparen = data.rfind(b")")
+        fields = data[rparen + 2:].split()
+        return int(fields[19])
+    except (ValueError, IndexError):
+        return None
+
+
 # Type for the callback the engine passes to triggers.
 # Called with (workflow_name, trigger_context_dict).
 TriggerCallback = Callable[[str, dict[str, Any]], None]
@@ -200,6 +216,11 @@ class ProcessSpawnTrigger(BaseTrigger):
             for pid in sorted(new_pids):
                 ctx = {"cgroup": rel, "pid": pid,
                        "cgroup_path": cgroup_dir}
+                # Capture the starttime now so a downstream wait can detect
+                # PID reuse even after this exact process exits.
+                start = _proc_starttime(pid)
+                if start is not None:
+                    ctx["pid_starttime"] = start
                 fired.append(ctx)
                 self.fire(ctx)
 

@@ -75,36 +75,47 @@ def _clamp_timeout(raw: Any, default: float, ceiling: float) -> float:
     return min(val, ceiling)
 
 
-def _coerce_dbus(value: Any, _depth: int = 0) -> Any:
-    """Convert a D-Bus / broker return into plain, JSON-able, bounded data.
+def _proc_starttime(pid: int) -> int | None:
+    """Read /proc/<pid>/stat field 22 (starttime, clock ticks since boot).
 
-    Keeps the audit detail small and serialisable: dbus numeric/string
-    types become Python builtins, containers are capped, and over-long
-    strings are truncated. Never raises.
+    Used as an anti-PID-reuse anchor. Returns None if unreadable (the
+    process is gone or /proc is unavailable).
     """
     try:
-        if _depth > 4:
-            return "..."
-        if isinstance(value, bool):
-            return bool(value)
-        if isinstance(value, int):
-            return int(value)
-        if isinstance(value, float):
-            return float(value)
-        if isinstance(value, (bytes, bytearray)):
-            return f"<{len(value)} bytes>"
-        if isinstance(value, str):
-            return value if len(value) <= 512 else value[:512] + "...[truncated]"
-        if isinstance(value, dict):
-            return {str(_coerce_dbus(k, _depth + 1)): _coerce_dbus(v, _depth + 1)
-                    for k, v in list(value.items())[:50]}
-        if isinstance(value, (list, tuple)):
-            return [_coerce_dbus(v, _depth + 1) for v in list(value)[:50]]
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    try:
+        # comm (field 2) is parenthesised and may contain spaces/')':
+        # split on the LAST ')' so field offsets after it are stable.
+        rparen = data.rfind(b")")
+        fields = data[rparen + 2:].split()
+        # After comm, fields[0] is state (field 3); starttime is field 22,
+        # i.e. index 22 - 3 = 19 in this tail slice.
+        return int(fields[19])
+    except (ValueError, IndexError):
+        return None
+
+
+def _return_shape(value: Any) -> dict[str, Any]:
+    """Describe a call's return *without* copying its payload.
+
+    Step details are persisted to the audit DB and a broker/D-Bus method
+    can return secret text or byte data, so we record only the type and,
+    where meaningful, a length — never the value itself.
+    """
+    shape: dict[str, Any] = {"returned_type": type(value).__name__}
+    try:
         if value is None:
-            return None
-        return str(value)
+            shape["returned"] = False
+        else:
+            shape["returned"] = True
+            if isinstance(value, (str, bytes, bytearray, list, tuple, dict)):
+                shape["returned_len"] = len(value)
     except Exception:  # noqa: BLE001
-        return "<uncoercible>"
+        pass
+    return shape
 
 
 def _resolve_ref(value: Any, trigger_context: dict[str, Any]) -> Any:
@@ -548,9 +559,17 @@ class WorkflowEngine:
         timeout = _clamp_timeout(step.config.get("timeout"),
                                  _DEFAULT_WAIT_TIMEOUT_S,
                                  _MAX_WAIT_TIMEOUT_S)
+        # Anchor against PID reuse: prefer the starttime the trigger
+        # captured at spawn, else read it now. If the live process no
+        # longer matches this anchor, the original has exited (and the PID
+        # was recycled) — we must not keep waiting (and keep the secret
+        # alive) on an unrelated process.
+        expected_start = run.trigger_context.get("pid_starttime")
+        if expected_start is None:
+            expected_start = _proc_starttime(pid)
         logger.info("wait_for_process: waiting for pid=%s (<=%.0fs) run %s",
                     pid, timeout, run.run_id)
-        exited = self._wait_pid(pid, timeout)
+        exited = self._wait_pid(pid, timeout, expected_start)
         result.details = {"pid": pid, "timeout_s": timeout, "exited": exited}
         if exited:
             result.success = True
@@ -558,8 +577,15 @@ class WorkflowEngine:
             result.error = f"wait_for_process: pid {pid} still alive after {timeout}s"
 
     @staticmethod
-    def _wait_pid(pid: int, timeout: float) -> bool:
-        """Return True if ``pid`` exits within ``timeout`` seconds."""
+    def _wait_pid(pid: int, timeout: float,
+                  expected_start: int | None = None) -> bool:
+        """Return True if ``pid`` (the *original* process) exits in time.
+
+        ``expected_start`` is the process's /proc starttime, used as an
+        anti-PID-reuse anchor on the polling fallback: if the live pid's
+        starttime ever differs, the original is gone and the pid was
+        recycled, so we report exit rather than wait on a stranger.
+        """
         deadline = time.monotonic() + timeout
         pidfd_open = getattr(os, "pidfd_open", None)
         if pidfd_open is not None:
@@ -582,23 +608,26 @@ class WorkflowEngine:
                             return True
                 finally:
                     os.close(fd)
-        # Fallback: poll /proc liveness via signal 0.
-        while time.monotonic() < deadline:
+        # Fallback: poll /proc liveness, re-checking the starttime anchor
+        # so a recycled pid is treated as "original exited".
+        def _original_gone() -> bool:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return True
             except PermissionError:
-                # Exists but owned by another uid — still "alive".
-                pass
+                pass  # exists, foreign uid
+            if expected_start is not None:
+                now_start = _proc_starttime(pid)
+                if now_start is not None and now_start != expected_start:
+                    return True
+            return False
+
+        while time.monotonic() < deadline:
+            if _original_gone():
+                return True
             time.sleep(0.1)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            pass
-        return False
+        return _original_gone()
 
     def _handle_run_hook(self, step: StepDef, run: WorkflowRun,
                          result: StepResult) -> None:
@@ -670,7 +699,12 @@ class WorkflowEngine:
             import dbus  # lazy
             bus = (dbus.SessionBus() if bus_kind == "session"
                    else dbus.SystemBus())
-            obj = bus.get_object(bus_name, obj_path)
+            # introspect=False keeps name resolution/introspection from
+            # running an unbounded round-trip outside the call timeout: a
+            # broken/hostile service can't stall the worker before the
+            # bounded method call. Activation on first call is still
+            # bounded by the same timeout.
+            obj = bus.get_object(bus_name, obj_path, introspect=False)
             fn = obj.get_dbus_method(method, dbus_interface=interface)
             ret = fn(*args, timeout=timeout)
         except Exception as e:  # noqa: BLE001
@@ -681,10 +715,13 @@ class WorkflowEngine:
             }
             return
         result.success = True
+        # Never persist the return payload: an arbitrary D-Bus method may
+        # return secret text or byte data, and step details are written to
+        # the audit DB. Record only its shape.
         result.details = {
             "bus_name": bus_name, "object_path": obj_path,
             "interface": interface or "", "method": method,
-            "returned": _coerce_dbus(ret),
+            **_return_shape(ret),
         }
 
     def _handle_call_broker(self, step: StepDef, run: WorkflowRun,
@@ -717,7 +754,9 @@ class WorkflowEngine:
             result.details = {"method": method}
             return
         result.success = True
-        result.details = {"method": method, "returned": _coerce_dbus(ret)}
+        # Shape only — broker list methods can surface action details we
+        # don't want copied into the workflow audit trail.
+        result.details = {"method": method, **_return_shape(ret)}
 
     # ------------------------------------------------------------------
     # Cleanup

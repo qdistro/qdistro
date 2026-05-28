@@ -107,8 +107,9 @@ def _install_fake_dbus(monkeypatch, return_value="ok", raises=None):
             return _Method(name, dbus_interface)
 
     class _Bus:
-        def get_object(self, bus_name, obj_path):
-            recorder["calls"].append(("get_object", bus_name, obj_path))
+        def get_object(self, bus_name, obj_path, introspect=True):
+            recorder["calls"].append(
+                ("get_object", bus_name, obj_path, introspect))
             return _Obj()
 
     fake = types.ModuleType("dbus")
