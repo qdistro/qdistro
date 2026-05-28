@@ -671,6 +671,22 @@ pip_install_apps() {
             warn "  $app source not found at $REPO_ROOT/$app"
         fi
     done
+
+    # Because the installs above use --no-deps, a missing *runtime* dependency
+    # is not caught here — it only surfaces when the app first launches. Run a
+    # lightweight import smoke check per app so a broken dependency closure is
+    # flagged loudly now instead of at first use. Maps each pip package to its
+    # importable top-level module (verified against each repo's package dir /
+    # pyproject [tool.setuptools.packages.find]). Non-fatal: WARN, same as the
+    # install step above.
+    log "  import smoke check (qdgreeter, qdlocker, qdbrowser)..."
+    local smoke
+    for smoke in qdgreeter qdlocker qdbrowser; do
+        if [ -f "$REPO_ROOT/$smoke/pyproject.toml" ]; then
+            python3 -c "import $smoke" \
+                || warn "  import smoke check failed: \"import $smoke\" — $smoke installed but a runtime dependency is missing (--no-deps skips dep resolution); the app may fail to launch"
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -963,9 +979,20 @@ main() {
 
     # Step 20 (opt-in): tier-4 guest base image bake
     if [ -n "$BUILD_TIER4_BASE" ]; then
-        log "building tier-4 guest base image (--tier4-base)..."
-        bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
-            || warn "tier-4 base build failed; tier-4 VM apps will not work"
+        # build-guest-image.sh requires QDISTRO_VM_PASSWORD (the root password
+        # baked into the tier-4 guest image). If it is unset the helper fails
+        # deep inside, surfacing as an opaque non-fatal warning. Precheck it
+        # here and skip early with a clear, actionable message — consistent with
+        # this opt-in step's warn-and-continue behavior (a missing prerequisite
+        # for an opt-in build should not abort the whole bootstrap).
+        if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
+            warn "skipping tier-4 base build (--tier4-base): QDISTRO_VM_PASSWORD is unset"
+            warn "  set QDISTRO_VM_PASSWORD (the root password for the tier-4 guest image) and re-run with --tier4-base"
+        else
+            log "building tier-4 guest base image (--tier4-base)..."
+            bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
+                || warn "tier-4 base build failed; tier-4 VM apps will not work"
+        fi
     fi
 
     # Step 21: Smoke check
