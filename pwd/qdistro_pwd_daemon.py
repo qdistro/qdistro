@@ -312,6 +312,14 @@ class PwdDaemon(dbus.service.Object):
             raise PwdPolicyError(
                 f"operation requires admin uid {ADMIN_UID}, got {uid}")
 
+    def _require_root(self, sender: str) -> None:
+        """Gate for broker-only methods (the workflow engine runs as root
+        inside the qbus-admin broker)."""
+        uid, _ = self._peer_info(sender)
+        if uid != 0:
+            raise PwdPolicyError(
+                f"operation requires root (broker), got uid {uid}")
+
     def _touch(self, vault: str) -> None:
         if vault in self._unlocked:
             self._unlocked[vault]["last_use"] = int(time.time())
@@ -797,6 +805,57 @@ class PwdDaemon(dbus.service.Object):
         self._audit.record("get-admin", vault, item_tag=tag,
                            decision="allow", reason="admin-bypass",
                            caller=caller)
+        return payload.decode("utf-8")
+
+    @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s",
+                         sender_keyword="sender")
+    def DeliverToWorkflow(self, vault: str, tag: str, run_id: str,
+                          sender=None) -> str:
+        """Release an unsealed item to the workflow engine for a run.
+
+        The caller is the qbus-admin broker (running as root), which then
+        hands the secret to the consuming task through a narrow,
+        scrubbed channel (ssh-agent / env / fd-pass / tmpfs). Restricted
+        to uid 0 server-side AND at the bus level so a non-root uid can't
+        invoke it. The per-item app-pin gate is intentionally bypassed:
+        the broker — not the ultimate consumer — is the D-Bus peer, and
+        the broker owns the delivery + scrub lifecycle (see
+        permissions.md §"Secret delivery to privileged tasks").
+
+        The secret transits only this private system-bus reply. Only
+        delivery *metadata* (vault, tag, run_id) is audited — never the
+        secret value — and a SecretDeliveredToWorkflow signal is emitted
+        for the workflow audit chain.
+        """
+        self._require_root(sender)
+        uid, pid = self._peer_info(sender)
+        caller = snapshot_caller(pid, uid)
+        vault = str(vault)
+        tag = str(tag)
+        run_id = str(run_id)
+        if vault not in self._unlocked:
+            self._audit.record("deliver-workflow", vault, item_tag=tag,
+                               decision="deny", reason="vault-locked",
+                               caller=caller)
+            raise PwdNotUnlocked(f"vault {vault!r} is locked")
+        self._touch(vault)
+        try:
+            payload = get_item_payload(
+                VAULT_DIR, vault, bytes(self._unlocked[vault]["key"]), tag)
+        except VaultNotFound as e:
+            self._audit.record("deliver-workflow", vault, item_tag=tag,
+                               decision="deny", reason="no-such-item",
+                               caller=caller)
+            raise PwdNotFound(str(e))
+        except VaultIntegrityError as e:
+            self._audit.record("deliver-workflow", vault, item_tag=tag,
+                               decision="deny", reason="integrity-fail",
+                               caller=caller)
+            raise PwdIntegrityError(str(e))
+        self._audit.record("deliver-workflow", vault, item_tag=tag,
+                           decision="allow", reason=f"run={run_id}",
+                           caller=caller)
+        self.SecretDeliveredToWorkflow(run_id, vault, tag)
         return payload.decode("utf-8")
 
     # -- browser-bridge Fill / Save / FillConfirm ----------------------
@@ -1442,6 +1501,13 @@ class PwdDaemon(dbus.service.Object):
 
     @dbus.service.signal(BUS_NAME, signature="ss")
     def VaultLocked(self, name: str, reason: str):
+        pass
+
+    @dbus.service.signal(BUS_NAME, signature="sss")
+    def SecretDeliveredToWorkflow(self, run_id: str, vault: str, tag: str):
+        """Emitted when an item is released to a workflow run. Carries
+        only metadata (run_id, vault, tag) — never the secret value — so
+        the broker/workflow audit chain can record the delivery."""
         pass
 
 

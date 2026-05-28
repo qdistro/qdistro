@@ -22,8 +22,19 @@ from workflow_schema import (  # type: ignore[import-not-found]
 from workflow_loader import WorkflowLoader  # type: ignore[import-not-found]
 from trigger_registry import TriggerRegistry  # type: ignore[import-not-found]
 from audit_logger import WorkflowAuditLogger  # type: ignore[import-not-found]
+from secret_delivery import (  # type: ignore[import-not-found]
+    DeliveryError,
+    DeliveryHandle,
+    SecretValue,
+    make_delivery,
+    reap_runtime_root,
+)
 
 logger = logging.getLogger("qdistro.workflow.engine")
+
+# scrub_on values whose secret lifetime ends with the deliver step
+# itself (the channel is revoked immediately rather than at run exit).
+_STEP_SCRUB_LIFETIMES = frozenset({"step", "step_exit", "immediate", "now"})
 
 
 class WorkflowEngine:
@@ -39,6 +50,12 @@ class WorkflowEngine:
         WorkflowAuditLogger instance for recording run audit trails.
     loader:
         WorkflowLoader instance. If None, a default loader is created.
+    secret_source:
+        Callable ``fetch(item: str) -> bytes`` that unseals a vault item
+        for delivery (e.g. the pwd daemon's DeliverToWorkflow client).
+        When None, ``deliver_secret`` runs in tracking-only mode (no real
+        secret is fetched or delivered) so the engine can be exercised
+        without a vault backend.
     """
 
     def __init__(
@@ -46,17 +63,32 @@ class WorkflowEngine:
         broker_proxy: Any | None = None,
         audit_logger: WorkflowAuditLogger | None = None,
         loader: WorkflowLoader | None = None,
+        secret_source: Any | None = None,
     ):
         self._broker = broker_proxy
         self._audit = audit_logger
         self._loader = loader or WorkflowLoader()
         self._registry = TriggerRegistry()
+        self._secret_source = secret_source
         self._workflows: dict[str, WorkflowDef] = {}
         self._runs: dict[str, WorkflowRun] = {}
         self._runs_lock = threading.Lock()
-        # Secrets delivered during runs, keyed by run_id.
-        # Used for cleanup on failure.
+        # Secret item names delivered during runs, keyed by run_id.
+        # Kept for audit/scrub bookkeeping (never holds secret values).
         self._delivered_secrets: dict[str, list[str]] = {}
+        # Live delivery handles per run_id; scrub() actually revokes.
+        self._delivery_handles: dict[str, list[DeliveryHandle]] = {}
+        # When a real vault backend is wired up, sweep any secret dirs a
+        # previously-crashed engine left mounted/on tmpfs before we start.
+        if secret_source is not None:
+            try:
+                reaped = reap_runtime_root()
+                if reaped:
+                    logger.warning(
+                        "reaped %d stale secret dir(s) from a prior run",
+                        reaped)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("startup secret reap failed: %r", e)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -100,8 +132,9 @@ class WorkflowEngine:
                 )
 
     def shutdown(self) -> None:
-        """Stop all triggers and release resources."""
+        """Stop all triggers, scrub outstanding secrets, release resources."""
         self._registry.unregister_all()
+        self.scrub_all_runs()
         logger.info("workflow engine shut down")
 
     # ------------------------------------------------------------------
@@ -244,11 +277,17 @@ class WorkflowEngine:
 
     def _handle_deliver_secret(self, step: StepDef, run: WorkflowRun,
                                result: StepResult) -> None:
-        """Deliver a secret to the workflow context.
+        """Deliver a vault secret to the workflow via a narrow channel.
 
-        Skeleton: records that the secret would be delivered and
-        tracks it for cleanup. Production would call the vault/pwd
-        daemon's delivery API.
+        With a ``secret_source`` configured, the item is unsealed, handed
+        to the chosen delivery mechanism (env/ssh-agent/fd-pass/
+        tmpfs-mount), and the live handle is tracked so cleanup can
+        actually revoke it. The plaintext is never logged or stored in
+        the audit trail — only metadata (item name, method) is recorded.
+
+        Without a ``secret_source`` the step runs in tracking-only mode
+        (no fetch, no delivery) so the engine remains usable in tests and
+        standalone smoke runs.
         """
         item = step.config.get("item", "")
         delivery_method = step.config.get("as", "env")
@@ -258,21 +297,80 @@ class WorkflowEngine:
             result.error = "deliver_secret: missing 'item' in config"
             return
 
-        logger.info(
-            "deliver_secret: would deliver %r as %s (scrub_on=%s) "
-            "for run %s",
-            item, delivery_method, scrub_on, run.run_id,
-        )
-
-        # Track for cleanup.
+        # Track the item name for audit/scrub bookkeeping regardless of
+        # whether a real backend is wired up.
         self._delivered_secrets.setdefault(run.run_id, []).append(item)
 
+        if self._secret_source is None:
+            logger.info(
+                "deliver_secret: tracking-only (no secret_source) for %r "
+                "as %s (scrub_on=%s) run %s",
+                item, delivery_method, scrub_on, run.run_id,
+            )
+            result.success = True
+            result.details = {
+                "item": item,
+                "delivery_method": delivery_method,
+                "scrub_on": scrub_on,
+                "delivered": False,
+            }
+            return
+
+        # Real delivery. Keep the plaintext lifetime minimal.
+        secret = SecretValue(self._fetch_secret(item, run))
+        handle = None
+        try:
+            handle = make_delivery(delivery_method, secret, dict(step.config))
+            handle.deliver()
+        except Exception as e:  # noqa: BLE001
+            # Scrub any partial channel state (open fd, mounted tmpfs,
+            # started agent) AND wipe the buffer — never leave a
+            # half-delivered secret behind on a failed step.
+            if handle is not None:
+                handle.scrub()
+            else:
+                secret.wipe()
+            msg = e if isinstance(e, DeliveryError) else repr(e)
+            result.error = f"deliver_secret: {msg}"
+            return
+
+        # Enforce scrub_on. Step-level lifetimes are revoked immediately
+        # (the spawned command, if any, already ran inside deliver());
+        # everything else is tracked and scrubbed at workflow exit.
+        if scrub_on in _STEP_SCRUB_LIFETIMES:
+            handle.scrub()
+        else:
+            self._delivery_handles.setdefault(run.run_id, []).append(handle)
+        logger.info(
+            "deliver_secret: delivered %r via %s (scrub_on=%s) run %s",
+            item, handle.method, scrub_on, run.run_id,
+        )
         result.success = True
+        # metadata() is the only loggable surface — no secret value.
         result.details = {
             "item": item,
-            "delivery_method": delivery_method,
             "scrub_on": scrub_on,
+            "delivered": True,
+            **handle.metadata(),
         }
+
+    def _fetch_secret(self, item: str, run: WorkflowRun) -> bytes:
+        """Unseal an item via the configured secret source.
+
+        Accepts either a callable ``fetch(item, run_id)``/``fetch(item)``
+        or an object exposing ``.fetch(...)``. Returns raw bytes.
+        """
+        src = self._secret_source
+        fetch = getattr(src, "fetch", src)
+        try:
+            value = fetch(item, run.run_id)
+        except TypeError:
+            value = fetch(item)
+        if isinstance(value, str):
+            return value.encode("utf-8")
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        raise DeliveryError(f"secret source returned {type(value).__name__}")
 
     def _handle_wait_for_process(self, step: StepDef,
                                  run: WorkflowRun,
@@ -350,21 +448,37 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
 
     def _cleanup_secrets(self, run_id: str, workflow_name: str) -> None:
-        """Scrub any secrets delivered during this run.
+        """Scrub every secret delivered during this run.
 
-        On failure mid-step, all delivered secrets are scrubbed to
-        prevent leakage. Each scrub is audited.
+        Called on both success and failure (including mid-step failure).
+        Each live delivery handle is revoked (agent killed, fds closed,
+        tmpfs unmounted, buffer wiped); the scrub is audited by item name
+        only — never the secret value.
         """
+        handles = self._delivery_handles.pop(run_id, [])
+        for handle in handles:
+            try:
+                handle.scrub()
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "secret scrub failed for run %s (%s): %r",
+                    run_id, handle.method, e,
+                )
         secrets = self._delivered_secrets.pop(run_id, [])
         for item in secrets:
-            logger.info(
-                "scrubbing secret %r from failed run %s",
-                item, run_id,
-            )
-            # Skeleton: just log. Production would call the vault
-            # daemon's scrub API.
+            logger.info("scrubbed secret %r from run %s", item, run_id)
             if self._audit:
                 self._audit.log_secret_scrub(run_id, workflow_name, item)
+
+    def scrub_all_runs(self) -> None:
+        """Revoke every outstanding delivery across all runs.
+
+        Best-effort safety net for shutdown so a secret never outlives
+        the engine process when a clean per-run scrub was missed.
+        """
+        for run_id in list(self._delivery_handles.keys()):
+            self._cleanup_secrets(run_id, self._runs.get(
+                run_id, WorkflowRun()).workflow_name)
 
     # ------------------------------------------------------------------
     # Trigger callback
