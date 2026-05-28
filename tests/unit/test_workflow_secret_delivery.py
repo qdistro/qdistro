@@ -546,16 +546,20 @@ class TestChannelPublication:
 
 @pytest.mark.skipif(not _HAVE_SSH, reason="ssh tooling not available")
 class TestSshAgentConsumptionLoop:
-    def _wf(self, runtime, *, consumer_cmd=None, fail_after=False):
+    def _wf(self, runtime, *, consumer_cmd=None, consume=True,
+            fail_after=False):
         deliver = StepDef(type=StepType.DELIVER_SECRET, name="deliver", config={
             "item": "vault/dev/github-ssh-key", "as": "ssh-agent",
             "runtime_root": str(runtime), "ttl": 60,
             "expose_as": "SSH_AUTH_SOCK", "scrub_on": "workflow_exit"})
         steps = [deliver]
         if consumer_cmd is not None:
+            cfg = {"item": "vault/dev/marker", "as": "env",
+                   "var": "MARKER", "command": consumer_cmd}
+            if consume:
+                cfg["consume_channels"] = ["SSH_AUTH_SOCK"]
             steps.append(StepDef(type=StepType.DELIVER_SECRET, name="consume",
-                                 config={"item": "vault/dev/marker", "as": "env",
-                                         "var": "MARKER", "command": consumer_cmd}))
+                                 config=cfg))
         if fail_after:
             steps.append(StepDef(type=StepType.RUN_HOOK, name="boom",
                                  config={"hook": "explode"}))
@@ -612,6 +616,26 @@ class TestSshAgentConsumptionLoop:
         assert lines[1] == "OK"
         # ...and after the run the socket is gone (scrubbed).
         assert not os.path.exists(lines[0])
+
+    def test_channel_not_inherited_without_opt_in(self, tmp_path):
+        # Least privilege: a later command-bearing step that does NOT list
+        # consume_channels must not inherit an earlier SSH_AUTH_SOCK.
+        key = _gen_ssh_key(tmp_path)
+        runtime = tmp_path / "rt"
+        proof = tmp_path / "proof"
+        consumer = [sys.executable, "-c",
+                    f"import os;open({str(proof)!r},'w').write("
+                    "os.environ.get('SSH_AUTH_SOCK','<unset>'))"]
+        engine, _audit = self._engine(tmp_path, key)
+        engine._workflows["git-sign"] = self._wf(
+            runtime, consumer_cmd=consumer, consume=False)
+
+        run = engine.start_run("git-sign")
+        assert run.state == RunState.COMPLETED, run.error
+        # The opt-out child never received the run's published channel
+        # (it may see the host's own SSH_AUTH_SOCK, but never this run's).
+        published = run.context["channel_env"]["SSH_AUTH_SOCK"]
+        assert proof.read_text() != published
 
     def test_failure_after_publish_scrubs_socket(self, tmp_path):
         key = _gen_ssh_key(tmp_path)

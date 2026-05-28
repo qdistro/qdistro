@@ -486,11 +486,20 @@ class WorkflowEngine:
         # into the command's environment. This is how a later step
         # actually *uses* a previously-delivered secret.
         delivery_config = dict(step.config)
-        channel_env = run.context.get("channel_env")
-        if channel_env and delivery_config.get("command"):
-            base = dict(delivery_config.get("base_env") or os.environ)
-            base.update(channel_env)
-            delivery_config["base_env"] = base
+        consume = step.config.get("consume_channels")
+        if isinstance(consume, str):
+            consume = [consume]
+        channel_env = run.context.get("channel_env") or {}
+        if consume and channel_env and delivery_config.get("command"):
+            # Least privilege: a step only inherits the channels it
+            # explicitly names, never every channel published so far — a
+            # helper meant to read MARKER must not silently also receive an
+            # earlier step's SSH_AUTH_SOCK.
+            selected = {k: channel_env[k] for k in consume if k in channel_env}
+            if selected:
+                base = dict(delivery_config.get("base_env") or os.environ)
+                base.update(selected)
+                delivery_config["base_env"] = base
         try:
             handle = make_delivery(delivery_method, secret, delivery_config)
             handle.deliver()
@@ -552,6 +561,11 @@ class WorkflowEngine:
         """
         env: dict[str, str] = {}
         method = handle.method
+        # Only filesystem-namespace references are publishable: a socket
+        # path or file path can be opened by any process granted access.
+        # An fd is process-local — a later step's child can't reach an fd
+        # held in the engine — so fd-pass is NOT published; it only works
+        # with its own inline command.
         if method == "ssh-agent":
             sock = getattr(handle, "auth_sock", None)
             if sock:
@@ -560,10 +574,6 @@ class WorkflowEngine:
             path = getattr(handle, "path", None)
             if path:
                 env[step.config.get("expose_as", "SECRET_PATH")] = str(path)
-        elif method == "fd-pass":
-            fd = getattr(handle, "read_fd", None)
-            if fd is not None:
-                env[step.config.get("expose_as", "SECRET_FD")] = str(fd)
         if not env:
             return []
         # Steps for a single run execute sequentially on one worker thread,
