@@ -5,11 +5,11 @@ todo/codex-testing/under-tested-areas.md §8: invalid signatures,
 replayed decisions, and clock skew.
 
 These complement (do not duplicate) test_phone.py /
-test_phone_daemon.py. Where the code does NOT enforce a protection
-(future-dated timestamps; replay rejection at the HTTP layer), the
-test is clearly labelled and pins the *current* behaviour rather than
-asserting a guard that does not exist — see the module docstring notes
-on each class.
+test_phone_daemon.py. Two protections that were previously missing are
+now enforced and asserted here: a max-future clock-skew cap in
+verify_callback_signature (a far-future expiry is rejected even with a
+valid HMAC) and a 409 Conflict response when a replayed callback hits
+the HTTP handler — see the per-class docstrings.
 
 Module-loading mirrors the existing phone tests so the same on-disk
 ``phone/qdistro_phone*.py`` is exercised.
@@ -138,18 +138,17 @@ class TestInvalidSignature:
 # ---- clock skew / expiry -----------------------------------------
 
 class TestClockSkew:
-    """verify_callback_signature checks expiry as ``expires_at < now``.
+    """verify_callback_signature bounds expiry on BOTH sides of now.
 
     What the code enforces:
       * a decision whose expires_at is in the past is rejected (already
         covered by test_phone.test_callback_signature_rejects_expired;
         here we pin the exact boundary).
-
-    What the code does NOT enforce (pinned, clearly labelled):
-      * there is no lower bound / max-future-skew check, so a sig whose
-        expires_at sits absurdly far in the future still verifies. A
-        compromised signer could mint a near-immortal token. See the
-        FINDING note in the test below.
+      * a decision whose expires_at sits more than
+        MAX_FUTURE_SKEW_SECONDS beyond now is rejected even with a
+        valid HMAC — a compromised signer can no longer mint a
+        near-immortal token. An expiry just inside the cap still
+        verifies (boundary pinned below).
     """
 
     def test_expiry_boundary_now_equals_expires_accepts(self):
@@ -172,12 +171,17 @@ class TestClockSkew:
             callback_secret=SECRET, now_ts=1121.0)
         assert ok is False
 
-    def test_far_future_expiry_NOT_rejected_current_behavior(self):
-        # FINDING / pinned current behaviour: there is no max-future
-        # skew guard. A token expiring in the year ~2065 verifies fine
-        # today, so a leaked/forged-by-the-signer far-future token is
-        # effectively long-lived. This asserts the CURRENT (unguarded)
-        # behaviour, not a desired one.
+    def test_max_future_skew_is_24h(self):
+        # Pin the policy value itself: callbacks are short-lived and
+        # never valid beyond one day. A change here is a deliberate
+        # policy change, not an accident.
+        assert ph.MAX_FUTURE_SKEW_SECONDS == 86400
+
+    def test_far_future_expiry_rejected(self):
+        # Max-future-skew guard: a token expiring in the year ~2065 is
+        # rejected even though its HMAC is valid, so a
+        # leaked/forged-by-the-signer far-future token can no longer be
+        # used as a near-immortal approval.
         far = 3_000_000_000  # ~year 2065
         sig = _valid_sig(request_id="req-A", decision="allow",
                          expires_at=far)
@@ -185,7 +189,33 @@ class TestClockSkew:
             request_id="req-A", decision="allow",
             expires_at=far, sig=sig,
             callback_secret=SECRET, now_ts=1000.0)
+        assert ok is False
+
+    def test_expiry_just_within_cap_accepts(self):
+        # An expiry exactly at now + MAX_FUTURE_SKEW_SECONDS is still
+        # inside the allowed window (the reject condition is strictly
+        # greater-than), pinning the upper boundary.
+        now = 1000.0
+        exp = int(now) + ph.MAX_FUTURE_SKEW_SECONDS
+        sig = _valid_sig(request_id="req-A", decision="allow",
+                         expires_at=exp)
+        ok = ph.verify_callback_signature(
+            request_id="req-A", decision="allow",
+            expires_at=exp, sig=sig,
+            callback_secret=SECRET, now_ts=now)
         assert ok is True
+
+    def test_expiry_one_second_past_cap_rejected(self):
+        # One second beyond the cap is rejected.
+        now = 1000.0
+        exp = int(now) + ph.MAX_FUTURE_SKEW_SECONDS + 1
+        sig = _valid_sig(request_id="req-A", decision="allow",
+                         expires_at=exp)
+        ok = ph.verify_callback_signature(
+            request_id="req-A", decision="allow",
+            expires_at=exp, sig=sig,
+            callback_secret=SECRET, now_ts=now)
+        assert ok is False
 
 
 # ---- replay ------------------------------------------------------
@@ -233,12 +263,11 @@ class TestReplayQueueLayer:
 class TestReplayHttpLayer:
     """End-to-end replay against the live HTTP handler.
 
-    FINDING / pinned behaviour: a replayed callback is de-duplicated at
-    the queue (row_id -1) but the handler still returns HTTP 200 — it
-    does NOT signal the replay to the caller with a 4xx. The decision
-    is correctly not double-recorded, but the phone/ntfy side cannot
-    tell an accepted decision from a swallowed replay. This asserts the
-    CURRENT behaviour.
+    A replayed callback is de-duplicated at the queue (row_id -1) AND
+    the handler now signals the replay to the caller with a 409
+    Conflict instead of a misleading 200. The decision is still not
+    double-recorded (UNIQUE constraint), so the phone/ntfy side can
+    distinguish an accepted decision from a swallowed replay.
     """
 
     def _start(self, tmp_path, secret: bytes):
@@ -282,11 +311,20 @@ class TestReplayHttpLayer:
 
             # Replay the identical signed callback.
             s2, d2 = self._post(host, port, path_q)
-            # Pinned current behaviour: still 200, but row_id == -1
-            # (dedup) — NOT double-recorded, but no replay signal.
-            assert s2 == 200
-            assert d2["ok"] is True
+            # The replay is now signalled with 409 Conflict and a
+            # duplicate marker, not a misleading 200.
+            assert s2 == 409
+            assert d2["ok"] is False
+            assert d2["error"] == "duplicate"
             assert d2["row_id"] == -1
+
+            # And the decision was NOT double-recorded: the first
+            # POST's row is the only inserted row for this tuple.
+            rows = srv.queue_conn.execute(
+                "SELECT id FROM phone_decisions "
+                "WHERE request_id='rep-1' AND decision='allow'"
+            ).fetchall()
+            assert [r[0] for r in rows] == [first_row]
         finally:
             srv.shutdown()
             srv.server_close()
