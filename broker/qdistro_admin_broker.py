@@ -14,6 +14,7 @@ within the scope's lifetime). See .
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import pwd as _pwd_mod
 import re
@@ -46,6 +47,16 @@ except KeyError:
     ADMIN_UID = 1000
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
+
+
+def _username_for_uid(uid: int) -> str:
+    """Resolve a uid to its silo username for use in share-to rule
+    actions. Falls back to ``uid:<n>`` when no passwd entry exists so
+    the synthetic action stays well-formed and rule-addressable."""
+    try:
+        return _pwd_mod.getpwuid(int(uid)).pw_name
+    except (KeyError, ValueError, OverflowError):
+        return f"uid:{int(uid)}"
 
 # Audit rows older than this are deleted by a daily timer (and on
 # demand via RunAuditGc). 90 days is long enough for "what happened
@@ -1172,6 +1183,139 @@ class Broker(dbus.service.Object):
             print(f"[broker] qdistro.audit.failure: clipboard, "
                   f"reason={e!r}", flush=True)
         return decision
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def PageExtract(self, body: str, sender=None, conn=None) -> str:
+        """Browser "Send to…" share-to gate (Bridge Phase 9c).
+
+        The browser bridge (running as the browser's uid) forwards a
+        page-extract share-to action here. `body` is a JSON object with
+        the fields the bridge sends in `_handle_page_extract`:
+
+            url, title, selected_text, dest_uid, content_type,
+            parent_exe, extension_id
+
+        The reply is a JSON object the bridge decodes verbatim into a
+        dict: ``{"ok": true}`` on allow, or
+        ``{"ok": false, "error": "<reason>"}`` on refusal. The bridge
+        has a synchronous 5 s D-Bus deadline, so this gate is
+        synchronous (rules-engine lookup), mirroring
+        ``CheckClipboardTransfer`` rather than the async admin-prompt
+        path of ``RelayMessage``.
+
+        Trust model: the *source* identity is the authenticated D-Bus
+        caller resolved to its silo name (``_peer_info`` uid → username),
+        NOT any value in the JSON body — a compromised bridge cannot
+        claim to be a different source user. Only the *destination*
+        (``dest_uid``) is taken from the body, since the caller is
+        legitimately naming where to send. ``dest_uid`` is treated as an
+        opaque destination silo identifier (a username / silo name such
+        as ``dev-user`` or a numeric-uid string), mirroring how the
+        clipboard gates key on silo names — the bridge / extension
+        schema declares it a free-form string.
+
+        Policy:
+          * Same-user (source silo == dest silo): allowed without a rule
+            (the data never leaves the user's own silo). Audited.
+          * Cross-user: rules-engine lookup on the synthetic action
+            ``qdistro.share_to:<source>:<dest>`` with the
+            ``content_type`` exposed as the ``mime_type`` selector so
+            admins can author per-content-type ``share_to`` rules
+            (todo/browser/01-bridge-phase9.md §9c). Default-DENY when no
+            rule matches — cross-user data movement is opt-in.
+
+        Every decision (allow or deny, same- or cross-user) writes one
+        audit row carrying the synthetic action, the destination, the
+        content type, and the originating extension/exe.
+        """
+        uid, pid, exe, _st = self._peer_info(sender, conn)
+
+        # --- parse + validate the request body --------------------------
+        try:
+            req = json.loads(body)
+        except (TypeError, ValueError):
+            return json.dumps({"ok": False, "error": "malformed_body"})
+        if not isinstance(req, dict):
+            return json.dumps({"ok": False, "error": "malformed_body"})
+
+        url = req.get("url")
+        if not isinstance(url, str) or not url:
+            return json.dumps({"ok": False, "error": "missing_url"})
+
+        # Destination is an opaque silo identifier supplied by the
+        # caller. Sanitize (strip + cap) the same way the clipboard gates
+        # cap silo names; an empty destination is unroutable.
+        dst = str(req.get("dest_uid") or "").strip()
+        if not dst:
+            return json.dumps({"ok": False, "error": "missing_dest"})
+        if len(dst) > 80:
+            return json.dumps({"ok": False, "error": "bad_dest"})
+
+        # Content type drives a per-type rule selector; cap + default it.
+        content_type = str(req.get("content_type") or "url")[:64]
+        ext_id = str(req.get("extension_id") or "")[:128]
+        parent_exe = str(req.get("parent_exe") or "")[:256]
+
+        # Source silo = the AUTHENTICATED caller, resolved to its
+        # username. Falls back to ``uid:<n>`` if the uid has no passwd
+        # entry (e.g. a freshly-provisioned silo) so the action is still
+        # well-formed and rule-addressable.
+        src = _username_for_uid(int(uid))
+        action_s = f"qdistro.share_to:{src}:{dst}"
+
+        if not self.ratelimit.check(uid, action_s):
+            raise dbus.DBusException(
+                f"Rate limit exceeded for uid={uid} "
+                f"action={action_s!r} (>{self.ratelimit.limit}/"
+                f"{self.ratelimit.window_s}s). Share rejected.",
+                name=BUS_NAME + ".RateLimited",
+            )
+
+        # Audit context shared by every path; never carry the page body
+        # (selected_text / full text) into the audit row — it can be
+        # arbitrary page content. URL + title host are enough for review.
+        audit_ctx = (f"content_type={content_type} dest={dst} "
+                     f"ext={ext_id or '(unknown)'} "
+                     f"parent_exe={parent_exe or '(unknown)'}")
+
+        # --- same-user: data never leaves the source silo --------------
+        if src == dst:
+            try:
+                self.audit.log(
+                    caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                    action=action_s, decision=True, scope=None,
+                    source=f"share_to_same_user {audit_ctx}",
+                    approver_uid=None,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] qdistro.audit.failure: share_to_same_user,"
+                      f" reason={e!r}", flush=True)
+            return json.dumps({"ok": True})
+
+        # --- cross-user: rules lookup, default-deny --------------------
+        rule = self.rules.match(uid=uid, action=action_s, exe=exe,
+                                mime_type=content_type)
+        decision = "deny"
+        rule_path = None
+        source_label = "share_to_default_deny"
+        if rule is not None:
+            decision = "allow" if rule.decision == "allow" else "deny"
+            rule_path = rule.source_path
+            source_label = "share_to_rule"
+        try:
+            self.audit.log(
+                caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                action=action_s, decision=(decision == "allow"),
+                scope=None, source=f"{source_label} {audit_ctx}",
+                approver_uid=None, rule_path=rule_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: share_to, "
+                  f"reason={e!r}", flush=True)
+        if decision == "allow":
+            return json.dumps({"ok": True})
+        return json.dumps({"ok": False, "error": "policy_denied"})
 
     @dbus.service.method(BUS_NAME,
                          in_signature="ssssssb", out_signature="s",
