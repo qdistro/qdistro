@@ -1251,6 +1251,14 @@ class Broker(dbus.service.Object):
             return json.dumps({"ok": False, "error": "missing_dest"})
         if len(dst) > 80:
             return json.dumps({"ok": False, "error": "bad_dest"})
+        # Normalize a uid-shaped destination ("1001") to its username so
+        # it shares the namespace with the resolved source below: the
+        # same-user bypass and the rule action shape must compare like
+        # with like, whether the caller sent a numeric uid or a
+        # silo/username string. Non-numeric destinations (the documented
+        # share-to case, e.g. "dev-user") pass through unchanged.
+        if dst.isdigit():
+            dst = _username_for_uid(int(dst))
 
         # Content type drives a per-type rule selector; cap + default it.
         content_type = str(req.get("content_type") or "url")[:64]

@@ -158,6 +158,18 @@ class TestSameUser:
         assert rows[0]["action"] == f"qdistro.share_to:{SRC_SILO}:{SRC_SILO}"
         assert "share_to_same_user" in rows[0]["source"]
 
+    def test_uid_shaped_dest_normalizes_to_username(self, broker):
+        # A caller that sends the destination as a numeric uid string
+        # ("2001") rather than the username must still be recognised as
+        # same-user: the broker normalizes a uid-shaped dest into the
+        # same namespace as the resolved source, so the bypass and the
+        # rule-action shape compare like with like.
+        reply = json.loads(broker.PageExtract(_body(dest_uid=str(SRC_UID))))
+        assert reply == {"ok": True}
+        rows = broker.audit.recent(10)
+        assert rows[0]["action"] == f"qdistro.share_to:{SRC_SILO}:{SRC_SILO}"
+        assert "share_to_same_user" in rows[0]["source"]
+
 
 # --- cross-user: rule lookup, default deny ------------------------------
 
