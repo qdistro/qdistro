@@ -115,6 +115,42 @@ class TestMatching:
             assert broker.VerifyClientIdentity(
                 100, 42, 1000, "", "", "", "", "") is True
 
+    def test_all_empty_tuple_still_gated_by_starttime(self, broker):
+        # The minimum-pass "floor" (Phase-1 Q4): a caller that sends both
+        # empty exe AND empty label skips those two axes, so verification
+        # then rests on (pid, starttime) plus uid-when-readable. The dbus
+        # policy restricts VerifyClientIdentity to the admin uid, so a
+        # non-admin sandboxed client cannot invoke it directly; starttime
+        # is kernel-attested and not attacker-forgeable for a live process.
+        # A matching live starttime (+uid) → True (the floor passes),...
+        with _patch_proc(exe="/usr/bin/python3", starttime=555,
+                          uid=1000, label=""):
+            assert broker.VerifyClientIdentity(
+                200, 555, 1000, "", "", "", "", "") is True
+        # ...but a mismatched starttime under the same all-empty tuple
+        # MUST still fail closed — the empty axes can't be abused to
+        # bypass the anti-PID-reuse anchor.
+        with _patch_proc(exe="/usr/bin/python3", starttime=556,
+                          uid=1000, label=""):
+            assert broker.VerifyClientIdentity(
+                200, 555, 1000, "", "", "", "", "") is False
+
+    def test_unreadable_uid_skips_uid_axis(self, broker):
+        # Documents the true verification floor: when /proc/<pid>/status is
+        # unreadable (_read_proc_uid → None) the uid axis is SKIPPED, so a
+        # live, starttime-matching process passes even though the claimed
+        # uid can't be cross-checked. The hard floor is thus (pid,
+        # starttime), not (pid, starttime, uid). starttime mismatch still
+        # fails closed regardless.
+        with _patch_proc(exe="/usr/bin/python3", starttime=777,
+                          uid=None, label=""):
+            assert broker.VerifyClientIdentity(
+                300, 777, 4242, "", "", "", "", "") is True
+        with _patch_proc(exe="/usr/bin/python3", starttime=778,
+                          uid=None, label=""):
+            assert broker.VerifyClientIdentity(
+                300, 777, 4242, "", "", "", "", "") is False
+
 
 # --- mismatches → False ---------------------------------------------------
 

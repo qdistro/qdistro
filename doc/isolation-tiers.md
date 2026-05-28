@@ -100,15 +100,53 @@ The broker independently verifies via `/proc/<pid>/attr/current` that the
 process is actually in `qdistro_tier1_t`. If the two disagree, broker's
 `CheckPermission` denies (defence in depth).
 
-Scope of "independent verification": this holds for **direct broker
-authorization**, where the broker resolves the D-Bus caller's pid and
-checks its SELinux context itself. It does **not** currently hold for
-**qdshell-mediated decisions** (e.g. clipboard / handoff gates), where
-qdshell forwards `(app_id, instance_id, secctx)` strings to the broker
-but the broker has no source/destination application pid to re-verify
-per call. Treat secctx-only decisions on that path as advisory until
-the protocol carries process identity end-to-end. See
-`todo/qdistro-qdwin-wider-codex-review.md` finding #2.
+Scope of "independent verification" — both broker paths now re-verify
+process identity, via two mechanisms:
+
+- **Direct broker authorization**: the broker resolves the D-Bus caller's
+  pid and checks its SELinux context (`/proc/<pid>/attr/current`) itself.
+- **qdshell-mediated gates** (clipboard set/receive, handoff activation):
+  Option B closes the former gap. qdwin captures the source/destination
+  client's `(pid, starttime, uid, exe, selinux_label)` at secctx-bind time
+  (via `SO_PEERCRED` + `/proc`) and forwards it on the
+  `qdwin_shell_v1.toplevel_peer_identity` event (since protocol v22).
+  qdshell forwards that tuple to the broker's `VerifyClientIdentity`, which
+  re-resolves the *live* process against `/proc` and returns true only when
+  the live process still matches — anchored on the field-22 starttime, with
+  the uid, exe, and SELinux-label axes additionally enforced when available
+  (see the next paragraph for exactly when each axis is skipped vs. failed).
+  The clipboard/handoff "same-silo → allow" short-circuit fires **only**
+  when qdshell has verified **both** the source and destination endpoints
+  this way (`identity_verified=true`); otherwise the decision falls through
+  to the cross-silo rule path, which is default-deny.
+
+What is and isn't verified on the qdshell-mediated path: the live process
+must exist and its `/proc/<pid>/stat` field-22 starttime must equal the
+forwarded value — this is the always-enforced anti-PID-reuse anchor. The
+remaining axes are each enforced only when both sides can supply a value,
+otherwise that axis is skipped (not failed):
+
+- uid: enforced unless `/proc/<pid>/status` is unreadable (`_read_proc_uid`
+  returns `None`);
+- exe: enforced unless the forwarded exe OR the live `/proc/<pid>/exe`
+  read is empty/`?`;
+- SELinux label: enforced only when both the forwarded label and the live
+  `/proc/<pid>/attr/current` are non-empty — i.e. skipped when SELinux is
+  off / unconfined.
+
+The hard verification floor is therefore `(pid, starttime)`; in practice
+uid is also present (the broker can almost always read
+`/proc/<pid>/status`). Note the broker trusts qdshell's
+`identity_verified` boolean per gate call — it is qdshell that requires
+BOTH the source and destination endpoints to verify before passing
+`identity_verified=true`. This is acceptable because `VerifyClientIdentity`
+and the three gate methods are denied to non-admin / default-context users
+by D-Bus policy (`org.qdistro.AdminBroker1.conf`) — only the admin uid and
+root may call them — so a non-admin same-uid sandboxed client cannot invoke
+them, and starttime is kernel-attested.
+
+See `todo/decisions/secctx-identity-contract.md` (Option B) and
+`todo/gpt-review/wider-codex-review.md` finding #2 (resolved).
 
 ## Tier 2 — podman / container
 

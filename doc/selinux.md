@@ -259,10 +259,28 @@ approval-cache rows and hook verdicts do not authorize launch.
 
 This independent verification applies to **direct broker authorization**
 (the broker resolves the D-Bus caller pid and reads its SELinux context
-itself). For **qdshell-mediated decisions** — clipboard receive gates,
-handoff requests, and other paths where qdshell forwards
-`(app_id, instance_id, secctx)` strings on behalf of an application —
-the broker only sees qdshell's process identity, not the source/
-destination application's. There is no per-call SELinux re-verification
-of the underlying app on that path yet. See
-`todo/qdistro-qdwin-wider-codex-review.md` finding #2.
+itself). For **qdshell-mediated decisions** — clipboard set/receive gates
+and handoff activation — Option B now re-verifies the underlying
+application identity per call: qdwin captures each client's
+`(pid, starttime, uid, exe, selinux_label)` at secctx-bind time and
+forwards it on `qdwin_shell_v1.toplevel_peer_identity` (protocol v22);
+qdshell relays it to broker `VerifyClientIdentity`, which re-resolves the
+live process against `/proc` (`/proc/<pid>/stat` field-22 starttime,
+`/proc/<pid>/status` uid, `/proc/<pid>/exe`, `/proc/<pid>/attr/current`).
+The same-silo allow short-circuit fires only when **both** endpoints
+verify; any mismatch or missing endpoint falls through to default-deny.
+
+Caveat specific to the SELinux axis: it is checked only when both the
+forwarded label and the live `/proc/<pid>/attr/current` are non-empty, so
+on a kernel with SELinux off / unconfined the label axis is *skipped*
+(not failed). The uid and exe axes are likewise enforced only when both
+sides supply a value; the always-enforced anchor is the `/proc` field-22
+starttime (anti-PID-reuse), so the hard verification floor is
+`(pid, starttime)`. This is sufficient because `VerifyClientIdentity` and
+the three gate methods are denied to non-admin / default-context users by
+D-Bus policy (`org.qdistro.AdminBroker1.conf`) — only the admin uid and
+root may call them — and starttime is kernel-attested. The
+broker trusts qdshell's per-call `identity_verified` flag; it is qdshell
+that requires BOTH endpoints to verify before setting it. See
+`todo/decisions/secctx-identity-contract.md` (Option B) and
+`todo/gpt-review/wider-codex-review.md` finding #2 (resolved).

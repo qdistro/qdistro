@@ -294,11 +294,27 @@ bind to the trusted launcher:
    the provenance tag to `advisory` and emits warnings when same-silo
    gates fire without identity verification.
 
-**Option B (broker-attested, planned):** qdwin forwards the peer's pidfd /
-identity tuple on the toplevel security-context event. qdshell and the
-broker re-verify the process at decision time via `VerifyClientIdentity`.
-The same-silo short-circuit only fires when `identity_verified=True`.
-See `todo/decisions/secctx-identity-contract.md`.
+**Option B (broker-attested, implemented):** qdwin snapshots each tagged
+client's `(pid, starttime, uid, exe, selinux_label)` at secctx-bind time
+(`SO_PEERCRED` + `/proc`) and forwards it on the
+`qdwin_shell_v1.toplevel_peer_identity` event (protocol v22). qdshell
+caches the tuple per toplevel handle and, on each clipboard / handoff
+decision, calls broker `VerifyClientIdentity`, which re-resolves the live
+process against `/proc` and returns true only if the field-22 starttime
+(the always-enforced anti-PID-reuse anchor) matches; the uid, exe, and
+SELinux-label axes are each additionally enforced only when both the
+forwarded and the live value are present (skipped, not failed, when
+unreadable / SELinux off), giving a hard floor of `(pid, starttime)`. The
+same-silo short-circuit in `CheckClipboardTransfer`,
+`CheckClipboardReceive`, and `CheckHandoffActivation` trusts qdshell's
+per-call `identity_verified` flag; qdshell sets it only after verifying
+**both** the source and destination endpoints, otherwise the decision
+falls through to the default-deny cross-silo rule path.
+`VerifyClientIdentity` and the three gate methods are denied to non-admin
+/ default-context users by D-Bus policy (`org.qdistro.AdminBroker1.conf`);
+only the admin uid and root may call them.
+See `todo/decisions/secctx-identity-contract.md` and
+`todo/gpt-review/wider-codex-review.md` findings #1 and #2 (resolved).
 
 Doc-only / not yet wired:
 
