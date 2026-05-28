@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Skip the entire module when PyQt6 is not importable.
-QtWidgets = pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
-QtCore = pytest.importorskip("PyQt6.QtCore", exc_type=ImportError)
+QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+QtCore = pytest.importorskip("PyQt6.QtCore")
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 from PyQt6.QtCore import QTimer  # noqa: E402
