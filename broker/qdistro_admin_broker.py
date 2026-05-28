@@ -256,8 +256,21 @@ HOOKS_ENABLED = _read_hooks_enabled()
 WORKFLOW_ENABLED = os.environ.get(
     "QDISTRO_WORKFLOW_ENABLED", "1").strip().lower() not in (
         "0", "false", "no", "off")
-_WORKFLOW_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "workflow"))
+
+
+def _workflow_dir_candidates() -> list[str]:
+    """Where the workflow package may live, repo vs. installed layout.
+
+    In the source tree ``broker/`` and ``workflow/`` are siblings
+    (``../workflow``). The VM installer flattens the broker into
+    ``/usr/libexec/qdistro/`` and drops the workflow modules in a
+    ``workflow/`` subdir beside it. Try both; first existing wins.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(here, "workflow"),                       # installed
+        os.path.normpath(os.path.join(here, "..", "workflow")),  # repo
+    ]
 
 # Receiver service names must match this shape. Used by RelayMessage
 # to reject obviously hostile target_service strings before they hit
@@ -775,8 +788,14 @@ class Broker(dbus.service.Object):
         if not WORKFLOW_ENABLED:
             return
         try:
-            if _WORKFLOW_DIR not in sys.path:
-                sys.path.insert(0, _WORKFLOW_DIR)
+            wf_dir = next((d for d in _workflow_dir_candidates()
+                           if os.path.isdir(d)), None)
+            if wf_dir is None:
+                print("[broker] workflow engine: package dir not found; "
+                      "skipping", flush=True)
+                return
+            if wf_dir not in sys.path:
+                sys.path.insert(0, wf_dir)
             from workflow_engine import WorkflowEngine
             from audit_logger import WorkflowAuditLogger
             from pwd_secret_source import PwdSecretSource

@@ -48,6 +48,23 @@ for f in qdistro_admin_cache.py qdistro_admin_audit.py \
     install -o root -g root -m 0644 "$BROKER_SRC/$f" "$DEST/$f"
 done
 
+# 2b. Workflow orchestration package. The broker loads it in-process
+# and resolves a "workflow/" subdir beside itself (see
+# _workflow_dir_candidates). In the source tree it's a sibling of
+# broker/; here it's flattened into $DEST/workflow/. Best-effort: a
+# missing source dir just leaves the broker without workflows.
+WORKFLOW_SRC="$(dirname "$BROKER_SRC")/workflow"
+if [ -d "$WORKFLOW_SRC" ]; then
+    install -d -o root -g root -m 0755 "$DEST/workflow"
+    for f in __init__.py workflow_schema.py workflow_loader.py \
+             trigger_registry.py cron_parser.py audit_logger.py \
+             secret_delivery.py workflow_engine.py pwd_secret_source.py; do
+        [ -f "$WORKFLOW_SRC/$f" ] && \
+            install -o root -g root -m 0644 "$WORKFLOW_SRC/$f" \
+                "$DEST/workflow/$f"
+    done
+fi
+
 # Apply qdistro_broker_exec_t label if the broker-policy module is
 # loaded. Best-effort: fresh-vm-bootstrap.sh runs broker-policy
 # install-policy.sh before this script in the canonical bootstrap
