@@ -65,7 +65,35 @@
 #   --skip-greetd          skip the autologin / boot-to-session step
 #   --skip-subvolumes      skip btrfs subvolume provisioning
 #   --skip-sources         skip git clone / source acquisition step
-#   --skip-build           skip all build steps (qdwin, daemons, qdshell, pip)
+#   --skip-build           skip all build steps (qdwin, daemons, qdshell, pip).
+#                          REQUIRES the build outputs to be already installed
+#                          on the target (e.g. from an RPM/staged image). The
+#                          runtime-required minimum (the build functions also
+#                          install test helpers + protocol XML/pkg-config, not
+#                          listed here) that must be present and importable
+#                          (paths assume meson/pip --prefix=/usr; $libdir is
+#                          /usr/lib64 on Tumbleweed, /usr/lib/<triplet> on
+#                          Ubuntu):
+#                            - qdwin nested-shell plugin:
+#                                $libdir/weston/qdwin-shell.so
+#                            - qdshell QML plugin (+ its qmldir):
+#                                /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
+#                                /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir
+#                            - compiled qdistro daemons in /usr/bin:
+#                                qdistro-secctx-exec, qdistro-cursor-sprites,
+#                                and (when freerdp3/winpr3/pipewire present)
+#                                qdistro-forward, qdistro-nested-pixelfeed;
+#                                plus $libexecdir/qdistro-tier1-exec (SELinux)
+#                            - pip apps installed under /usr (modules in
+#                                /usr/lib/pythonX.Y/site-packages, launchers in
+#                                /usr/bin): qdgreeter, qdlocker, qdbrowser,
+#                                qterminator, qnotebook, qfileman
+#   --strict               make genuinely-core install failures FATAL: zypper
+#                          refresh, package install, the qdwin/daemons/qdshell
+#                          builds, and the installer-chain steps abort instead
+#                          of warning. Optional bring-up / smoke checks stay
+#                          non-fatal. Default OFF (warn-and-continue) — opt in
+#                          for unattended daily-driver installs.
 #   --tier4-base           opt-in: build the tier-4 guest base qcow2 image
 #   -h, --help             show help and exit
 #
@@ -75,7 +103,7 @@
 #   QDISTRO_SKIP_PACKAGES, QDISTRO_SKIP_GREETD,
 #   QDISTRO_SKIP_SUBVOLUMES, QDISTRO_SKIP_SOURCES,
 #   QDISTRO_SKIP_BUILD, QDISTRO_BUILD_TIER4_BASE,
-#   QDISTRO_RESET_PASSWORDS.
+#   QDISTRO_RESET_PASSWORDS, QDISTRO_STRICT.
 
 set -euo pipefail
 
@@ -103,6 +131,13 @@ SKIP_SOURCES="${QDISTRO_SKIP_SOURCES:-}"
 SKIP_BUILD="${QDISTRO_SKIP_BUILD:-}"
 BUILD_TIER4_BASE="${QDISTRO_BUILD_TIER4_BASE:-}"
 RESET_PASSWORDS="${QDISTRO_RESET_PASSWORDS:-}"
+# Strict mode (default OFF — preserves today's behavior). When set, the
+# genuinely-core install operations (zypper refresh, package install, the
+# three meson/ninja build functions, and the installer-chain invocations)
+# become FATAL on failure instead of merely warning, so a daily-driver
+# install fails loudly rather than producing a half-installed system.
+# Optional bring-up / smoke checks stay non-fatal even under strict.
+STRICT="${QDISTRO_STRICT:-}"
 
 # Set by ensure_*_account: 1 if the account already existed before this run
 # (so its password must NOT be touched unless --reset-passwords is given),
@@ -114,12 +149,25 @@ log()  { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install] WARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[install] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# fail_or_warn — classify a core-install operation failure. Under strict mode
+# ($STRICT set, via --strict / QDISTRO_STRICT) this is FATAL (die); otherwise
+# it is a non-fatal WARN, preserving the default warn-and-continue behavior.
+# Use ONLY for genuinely-core operations (refresh, package install, builds,
+# installer chain). Optional bring-up / smoke checks must stay on warn().
+fail_or_warn() {
+    if [ -n "$STRICT" ]; then
+        die "$*"
+    else
+        warn "$*"
+    fi
+}
+
 require_root() {
     [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0)"
 }
 
 print_help() {
-    sed -n '2,78p' "$SCRIPT_PATH"
+    sed -n '2,106p' "$SCRIPT_PATH"
 }
 
 parse_args() {
@@ -143,6 +191,7 @@ parse_args() {
             --skip-sources)      SKIP_SOURCES=1 ;;
             --skip-build)        SKIP_BUILD=1 ;;
             --tier4-base)        BUILD_TIER4_BASE=1 ;;
+            --strict)            STRICT=1 ;;
             --reset-passwords)   RESET_PASSWORDS=1 ;;
             -h|--help)           print_help; exit 0 ;;
             *) die "unknown argument: $1 (try --help)" ;;
@@ -266,7 +315,11 @@ install_packages_tumbleweed() {
         | sed 's/^/  /' \
         || _zypper_rc="${PIPESTATUS[0]}"
     if [ "${_zypper_rc}" -ne 0 ]; then
-        warn "zypper refresh failed (exit ${_zypper_rc}); proceeding with cached metadata (install may fail)"
+        # Core op: non-fatal by default (proceed on cached metadata), but
+        # fatal under --strict so unattended installs don't build on stale
+        # repo data. (Under --strict this aborts; the "proceed" path only
+        # applies in default mode.)
+        fail_or_warn "zypper refresh failed (exit ${_zypper_rc}); default mode proceeds with cached metadata (install may fail), --strict aborts"
     fi
 
     # Reuse the canonical Tumbleweed list from install-deps.sh.
@@ -274,7 +327,10 @@ install_packages_tumbleweed() {
     . "$SCRIPT_DIR/install-deps.sh"
     local extra=( git wget curl openssh tar gzip xz )
     log "installing ${#QDISTRO_PKGS[@]} build/runtime packages + ${#extra[@]} extras..."
-    zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" "${extra[@]}"
+    # Core op: already fatal by default via `set -e`. Guarded explicitly so the
+    # failure carries a clear message in both modes (behavior unchanged: fatal).
+    zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" "${extra[@]}" \
+        || die "package install failed (zypper -n install); cannot continue"
 
     # qdbrowser WebEngine — best-effort; pdf/video degrades without it.
     # Try both known package names and warn (not die) on failure.
@@ -297,7 +353,9 @@ install_packages_tumbleweed() {
 install_packages_ubuntu() {
     log "updating apt..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
+    # Core op: already fatal by default via `set -e`; explicit message keeps
+    # behavior unchanged (fatal) while making the failure legible.
+    apt-get update -qq || die "apt-get update failed; cannot continue"
 
     # Ubuntu equivalents of QDISTRO_PKGS. Ubuntu ships single -dev
     # packages rather than versioned runtime libs, so this list is
@@ -361,7 +419,10 @@ install_packages_ubuntu() {
         fi
     done
 
-    apt-get install -y --no-install-recommends "${available[@]}"
+    # Core op: already fatal by default via `set -e`; explicit message keeps
+    # behavior unchanged (fatal).
+    apt-get install -y --no-install-recommends "${available[@]}" \
+        || die "package install failed (apt-get install); cannot continue"
 
     if [ ${#missing[@]} -gt 0 ]; then
         warn "the following packages were NOT found in apt and were skipped:"
@@ -414,11 +475,42 @@ provision_subvolumes() {
         fi
     done
 
-    # Snapper config for vaults subvolume
+    # Snapper config for vaults subvolume.
+    #
+    # Config name MUST match the snapshots daemon's default
+    # (snapshots/qdistro_snapshots.py vault_snapshot(config="qdistro_vaults"))
+    # so the retention we set here actually governs the per-change vault
+    # snapshots the daemon creates. The daemon uses CreateSingleSnapshot with
+    # the "number" cleanup algorithm (not timeline), so the documented vault
+    # retention (doc/filesystem.md "Retention policy": snapshot every change,
+    # keep ~90 days) maps onto NUMBER cleanup, not the timeline knobs:
+    #   - NUMBER_CLEANUP=yes  enable number-algorithm cleanup
+    #   - NUMBER_MIN_AGE=7776000  protect anything younger than 90 days
+    #       (90*24*3600 s) from cleanup — establishes the 90-day FLOOR
+    #   - NUMBER_LIMIT=10000  high absolute-count cap.
+    #       NOTE: Snapper number-cleanup has no pure time-based deletion; it
+    #       only deletes once the count exceeds NUMBER_LIMIT (and never below
+    #       NUMBER_MIN_AGE). So this guarantees ">= 90 days retained" exactly
+    #       (the documented intent) and caps unbounded growth; snapshots older
+    #       than 90 days may linger until the 10000 cap is hit. For a small,
+    #       cheap, security-sensitive vault, erring toward retention is the
+    #       safe default.
+    #   - TIMELINE_CREATE=no  the daemon snapshots per-change, so we do not
+    #       also want Snapper's timer creating timeline snapshots here
     if command -v snapper >/dev/null 2>&1; then
-        if ! snapper list-configs 2>/dev/null | grep -q "qdistro-vaults"; then
-            snapper -c qdistro-vaults create-config /var/lib/qdistro/vaults 2>/dev/null \
-                || warn "  snapper vault config failed (non-fatal)"
+        if ! snapper list-configs 2>/dev/null | grep -qw "qdistro_vaults"; then
+            if snapper -c qdistro_vaults create-config /var/lib/qdistro/vaults 2>/dev/null; then
+                # Non-fatal like create-config above: only runs inside this
+                # just-created branch so an operator's hand-tuned existing
+                # config is never clobbered.
+                snapper -c qdistro_vaults set-config \
+                    NUMBER_CLEANUP=yes NUMBER_MIN_AGE=7776000 NUMBER_LIMIT=10000 \
+                    TIMELINE_CREATE=no TIMELINE_CLEANUP=yes \
+                    TIMELINE_LIMIT_YEARLY=0 2>/dev/null \
+                    || warn "  snapper vault set-config (retention) failed (non-fatal)"
+            else
+                warn "  snapper vault config failed (non-fatal)"
+            fi
         fi
     fi
 }
@@ -446,8 +538,22 @@ create_user_subvolume() {
     # Snapper config for per-user home
     if command -v snapper >/dev/null 2>&1; then
         if ! snapper list-configs 2>/dev/null | grep -q "home-${user}"; then
-            snapper -c "home-${user}" create-config "$home" 2>/dev/null \
-                || warn "  snapper config for $user failed (non-fatal)"
+            if snapper -c "home-${user}" create-config "$home" 2>/dev/null; then
+                # Apply the documented per-user-home retention
+                # (doc/filesystem.md "Retention policy"): hourly 24, daily 30,
+                # weekly 12, monthly 6, yearly 0. Enable timeline create+cleanup
+                # so the limits are actually enforced. Non-fatal like
+                # create-config above; only runs inside this just-created branch
+                # so an operator's hand-tuned existing config is never clobbered.
+                snapper -c "home-${user}" set-config \
+                    TIMELINE_CREATE=yes TIMELINE_CLEANUP=yes \
+                    TIMELINE_LIMIT_HOURLY=24 TIMELINE_LIMIT_DAILY=30 \
+                    TIMELINE_LIMIT_WEEKLY=12 TIMELINE_LIMIT_MONTHLY=6 \
+                    TIMELINE_LIMIT_YEARLY=0 2>/dev/null \
+                    || warn "  snapper set-config (retention) for $user failed (non-fatal)"
+            else
+                warn "  snapper config for $user failed (non-fatal)"
+            fi
         fi
     fi
 }
@@ -603,6 +709,31 @@ fetch_sources() {
 # ---------------------------------------------------------------------------
 # 7. Build qdwin + qdistro daemons
 # ---------------------------------------------------------------------------
+#
+# --skip-build contract: the four build_* / pip steps below are skipped when
+# SKIP_BUILD is set, so the artifacts they would normally `meson install` /
+# `pip install` MUST already be present on the target (staged image / RPM).
+# Derived from the meson.build / pyproject.toml of each repo; paths assume
+# --prefix=/usr ($libdir = /usr/lib64 on Tumbleweed, /usr/lib/<triplet> on
+# Ubuntu):
+#   build_qdwin           -> $libdir/weston/qdwin-shell.so
+#                            (shared_library 'qdwin-shell', name_prefix '',
+#                             install_dir libdir/weston — the nested weston
+#                             shell plugin weston dlopens via --shell)
+#   build_qdistro_daemons -> /usr/bin/qdistro-secctx-exec
+#                            /usr/bin/qdistro-cursor-sprites
+#                            /usr/bin/qdistro-forward         (if freerdp3/winpr3/pipewire)
+#                            /usr/bin/qdistro-nested-pixelfeed(if libpipewire-0.3)
+#                            $libexecdir/qdistro-tier1-exec   (if libselinux)
+#   build_qdshell_plugin  -> /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so
+#                            /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir
+#                            (QML plugin; reached via QML_IMPORT_PATH=/usr/share/qdistro/qml)
+#   pip_install_apps      -> /usr/bin/<app> launchers + Python modules under
+#                            /usr/lib/pythonX.Y/site-packages for:
+#                            qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman
+# If any of the above is absent on a --skip-build run, the corresponding
+# session/app component will fail at runtime (e.g. weston cannot load
+# qdwin-shell.so → no compositor).
 build_qdwin() {
     if [ -n "$SKIP_BUILD" ]; then
         log "skipping qdwin build (--skip-build)"
@@ -610,13 +741,17 @@ build_qdwin() {
     fi
     log "building qdwin (libweston shell plugin)..."
     cd "$REPO_ROOT/qdwin"
+    # Core build: already fatal by default via `set -e`; explicit messages
+    # mirror build_qdshell_plugin and keep behavior unchanged (fatal).
     if [ -f build/build.ninja ]; then
-        meson setup build --reconfigure --prefix=/usr
+        meson setup build --reconfigure --prefix=/usr \
+            || die "qdwin meson setup failed"
     else
-        meson setup build --prefix=/usr
+        meson setup build --prefix=/usr \
+            || die "qdwin meson setup failed"
     fi
-    meson compile -C build
-    meson install -C build
+    meson compile -C build || die "qdwin meson compile failed"
+    meson install -C build || die "qdwin meson install failed"
 }
 
 build_qdistro_daemons() {
@@ -626,13 +761,17 @@ build_qdistro_daemons() {
     fi
     log "building qdistro C daemons..."
     cd "$REPO_ROOT/qdistro/daemons"
+    # Core build: already fatal by default via `set -e`; explicit messages
+    # keep behavior unchanged (fatal).
     if [ -f build/build.ninja ]; then
-        meson setup build --reconfigure --prefix=/usr
+        meson setup build --reconfigure --prefix=/usr \
+            || die "qdistro daemons meson setup failed"
     else
-        meson setup build --prefix=/usr
+        meson setup build --prefix=/usr \
+            || die "qdistro daemons meson setup failed"
     fi
-    meson compile -C build
-    meson install -C build
+    meson compile -C build || die "qdistro daemons meson compile failed"
+    meson install -C build || die "qdistro daemons meson install failed"
 }
 
 build_qdshell_plugin() {
@@ -719,10 +858,13 @@ install_python_modules() {
         local installer="$1" src_dir="$2"
         if [ -x "$installer" ]; then
             log "  -> $(basename "$installer")"
+            # Core op: installer-chain step. Non-fatal by default
+            # (warn-and-continue), fatal under --strict.
             bash "$installer" "$src_dir" \
-                || warn "$installer failed; continuing"
+                || fail_or_warn "$installer failed (default mode continues, --strict aborts)"
         else
-            warn "  installer not found or not executable: $installer"
+            # A missing/unexecutable core installer is also a core failure.
+            fail_or_warn "  installer not found or not executable: $installer"
         fi
     done
 }
