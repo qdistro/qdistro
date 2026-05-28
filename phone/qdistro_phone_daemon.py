@@ -224,6 +224,18 @@ class _DecisionHandler(http.server.BaseHTTPRequestHandler):
             request_id=request_id, decision=decision,
             expires_at=exp,
             phone_id=self.headers.get("X-Qdistro-Phone-Id"))
+        if rid == -1:
+            # Duplicate (request_id, decision) — a replayed callback.
+            # The decision is NOT double-recorded (UNIQUE constraint);
+            # signal the replay with 409 so the caller can distinguish
+            # a fresh acceptance from a swallowed duplicate.
+            self.send_response(409)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {"ok": False, "error": "duplicate", "row_id": -1}
+            ).encode())
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

@@ -43,6 +43,12 @@ DEFAULT_BLE_SERVICE_UUID = (
     "1864198a-3a83-4d9d-b5f2-2e5f4b9c1c3e"
 )
 
+# Upper bound on how far past `now` an approval token's expires_at may
+# sit. Legit TTLs cap at minutes (default 120s), so 24h comfortably
+# covers any sane TTL plus real clock skew while killing far-future
+# (e.g. year-2065) tokens a compromised signer could otherwise mint.
+MAX_FUTURE_SKEW_SECONDS = 86400  # 24h
+
 
 # ---- presence smoother ------------------------------------------
 
@@ -199,9 +205,9 @@ def verify_callback_signature(
 ) -> bool:
     """Verify the HMAC-signed approve/deny callback the phone fires.
 
-    Returns False on signature mismatch, expiry, or any malformed
-    input — the daemon refuses the action on False, no exception
-    surfaced.
+    Returns False on signature mismatch, expiry, an expiry too far in
+    the future (max-skew guard), or any malformed input — the daemon
+    refuses the action on False, no exception surfaced.
     """
     if not all((request_id, decision, sig, callback_secret)):
         return False
@@ -209,6 +215,11 @@ def verify_callback_signature(
         return False
     now = float(now_ts if now_ts is not None else time.time())
     if int(expires_at) < int(now):
+        return False
+    # Upper-bound the expiry: a token claiming to be valid absurdly far
+    # in the future is rejected even if its HMAC checks out, so a
+    # signer-side compromise can't mint an effectively immortal token.
+    if int(expires_at) > int(now) + MAX_FUTURE_SKEW_SECONDS:
         return False
     msg = f"{request_id}|{decision}|{int(expires_at)}".encode()
     expected = hmac.new(callback_secret, msg,
