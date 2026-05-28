@@ -96,6 +96,17 @@ class TestArgvFromDetails:
         d = {"argv[05]": "x", "argv[06]": "y"}
         assert _argv_from_details(d) is None
 
+    def test_empty_argv00_treated_as_not_captured(self):
+        # An explicitly-empty program element ("argv[00]": "") is not a
+        # captured program — collapsing to [""] (or ["", "update"]) would
+        # let an argv-pinned scope match a program-blind tuple, so it must
+        # read as "no argv captured" (None) exactly like a missing
+        # argv[00]. (The qsu path rejects empty argv strings; this guards
+        # the broker API / cache path.)
+        assert _argv_from_details({"argv[00]": ""}) is None
+        assert _argv_from_details(
+            {"argv[00]": "", "argv[01]": "update"}) is None
+
     def test_argv00_present_with_interior_gap_still_returns_list(self):
         # Once argv[00] is captured, an interior gap collapses to
         # "what was actually passed" — unchanged from prior behavior.

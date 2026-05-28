@@ -315,7 +315,7 @@ def _argv_from_details(details: dict) -> list[str] | None:
         idx = int(m.group(1))
         if idx > 1024:
             continue
-        if idx == 0:
+        if idx == 0 and str(v) != "":
             have_zero = True
         indexed.append((idx, str(v)))
     if not indexed or not have_zero:
