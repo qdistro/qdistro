@@ -29,7 +29,8 @@ def populated(cache_db, audit_db, monkeypatch):
     monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
 
     c = ApprovalCache(cache_db)
-    c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000)
+    c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000,
+            argv=["/usr/bin/python3"])
     c.store(2001, "other.action", "", "forever", True, 1000)
 
     a = AuditLog(audit_db)
@@ -122,9 +123,7 @@ def test_list_shows_cached_rows(populated, capsys):
     assert rc == 0
     assert "test.action" in out
     assert "other.action" in out
-    # task(069): cache.store("1h", ...) without argv now writes
-    # 'exe_only' (degrades from argv_exact when no argv supplied).
-    assert "exe_only" in out
+    assert "argv_exact" in out
     assert "always" in out
 
 

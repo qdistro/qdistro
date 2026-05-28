@@ -40,8 +40,8 @@ class TestListAll:
 
     def test_returns_rows_newest_first(self, cache_db):
         c = ApprovalCache(cache_db)
-        c.store(2000, "a", "/p1", "1h", True, 1000)
-        c.store(3000, "b", "/p2", "24h", True, 1000)
+        c.store(2000, "a", "/p1", "1h", True, 1000, argv=["/p1"])
+        c.store(3000, "b", "/p2", "24h", True, 1000, argv=["/p2"])
         rows = c.list_all()
         assert len(rows) == 2
         # id DESC -> most recently-inserted first
@@ -50,7 +50,7 @@ class TestListAll:
 
     def test_row_fields_complete(self, cache_db):
         c = ApprovalCache(cache_db)
-        c.store(2000, "act", "/p", "1h", True, 1000)
+        c.store(2000, "act", "/p", "1h", True, 1000, argv=["/p"])
         row = c.list_all()[0]
         for k in ("id", "caller_uid", "action", "match_kind",
                   "match_value", "argv", "decision", "scope",
@@ -61,8 +61,10 @@ class TestListAll:
 class TestRevoke:
     def test_delete_by_id_returns_row_and_removes(self, cache_db):
         c = ApprovalCache(cache_db)
-        c.store(2000, "act", "/usr/bin/p", "1h", True, 1000)
-        row = c.lookup_detail(2000, "act", "/usr/bin/p")
+        c.store(2000, "act", "/usr/bin/p", "1h", True, 1000,
+                argv=["/usr/bin/p"])
+        row = c.lookup_detail(2000, "act", "/usr/bin/p",
+                              argv=["/usr/bin/p"])
         assert row is not None
         deleted = c.delete_by_id(row["id"])
         assert deleted is not None
@@ -76,14 +78,15 @@ class TestRevoke:
 
     def test_delete_by_uid_removes_all_and_returns_rows(self, cache_db):
         c = ApprovalCache(cache_db)
-        c.store(2000, "a", "/p1", "1h", True, 1000)
-        c.store(2000, "b", "/p2", "24h", True, 1000)
-        c.store(3000, "a", "/p1", "1h", True, 1000)  # different uid
+        c.store(2000, "a", "/p1", "1h", True, 1000, argv=["/p1"])
+        c.store(2000, "b", "/p2", "24h", True, 1000, argv=["/p2"])
+        c.store(3000, "a", "/p1", "1h", True, 1000,
+                argv=["/p1"])  # different uid
         rows = c.delete_by_uid(2000)
         assert len(rows) == 2
         assert {r["action"] for r in rows} == {"a", "b"}
         # uid 3000's row untouched
-        assert c.lookup_detail(3000, "a", "/p1") is not None
+        assert c.lookup_detail(3000, "a", "/p1", argv=["/p1"]) is not None
         assert c.lookup_detail(2000, "a", "/p1") is None
 
     def test_delete_by_uid_empty_returns_empty_list(self, cache_db):
@@ -109,9 +112,11 @@ class TestApprovalCache:
 
     def test_store_then_lookup_roundtrip_argv_exact(self, cache_db):
         c = ApprovalCache(cache_db)
-        wrote = c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000)
+        wrote = c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000,
+                        argv=["/usr/bin/python3"])
         assert wrote is True
-        assert c.lookup(2000, "test.action", "/usr/bin/python3") is True
+        assert c.lookup(2000, "test.action", "/usr/bin/python3",
+                        argv=["/usr/bin/python3"]) is True
 
     def test_store_once_writes_no_row(self, cache_db):
         c = ApprovalCache(cache_db)
@@ -121,8 +126,10 @@ class TestApprovalCache:
 
     def test_argv_exact_does_not_match_other_exe(self, cache_db):
         c = ApprovalCache(cache_db)
-        c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000)
-        assert c.lookup(2000, "test.action", "/usr/bin/curl") is None
+        c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000,
+                argv=["/usr/bin/python3"])
+        assert c.lookup(2000, "test.action", "/usr/bin/curl",
+                        argv=["/usr/bin/python3"]) is None
 
     def test_always_matches_any_exe(self, cache_db):
         c = ApprovalCache(cache_db)
@@ -156,23 +163,25 @@ class TestApprovalCache:
     def test_expired_row_not_returned(self, cache_db, monkeypatch):
         c = ApprovalCache(cache_db)
         # Use real wall clock to write, then advance via monkeypatch
-        c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000)
+        c.store(2000, "test.action", "/usr/bin/python3", "1h", True, 1000,
+                argv=["/usr/bin/python3"])
         future = int(time.time()) + 7200  # 2h later
         monkeypatch.setattr("qdistro_admin_cache.time.time", lambda: future)
-        assert c.lookup(2000, "test.action", "/usr/bin/python3") is None
+        assert c.lookup(2000, "test.action", "/usr/bin/python3",
+                        argv=["/usr/bin/python3"]) is None
 
     def test_gc_deletes_only_expired(self, cache_db, monkeypatch):
         c = ApprovalCache(cache_db)
-        c.store(2000, "a", "/p", "1h", True, 1000)
+        c.store(2000, "a", "/p", "1h", True, 1000, argv=["/p"])
         c.store(2000, "b", "/p", "forever", True, 1000)
-        c.store(2000, "c", "/p", "24h", True, 1000)
+        c.store(2000, "c", "/p", "24h", True, 1000, argv=["/p"])
         future = int(time.time()) + 7200  # 2h later
         monkeypatch.setattr("qdistro_admin_cache.time.time", lambda: future)
         deleted = c.gc()
         assert deleted == 1  # only the 1h row
         # remaining ones still present
         assert c.lookup(2000, "b", "/p") is True
-        assert c.lookup(2000, "c", "/p") is True
+        assert c.lookup(2000, "c", "/p", argv=["/p"]) is True
 
     def test_gc_with_no_expired_returns_zero(self, cache_db):
         c = ApprovalCache(cache_db)
@@ -220,8 +229,8 @@ class TestApprovalCache:
     def test_lookup_detail_returns_original_scope(self, cache_db):
         """Cache stores the UI scope verbatim — no ambiguous TTL heuristic."""
         c = ApprovalCache(cache_db)
-        c.store(2000, "a", "/p", "1h", True, 1000)
-        row = c.lookup_detail(2000, "a", "/p")
+        c.store(2000, "a", "/p", "1h", True, 1000, argv=["/p"])
+        row = c.lookup_detail(2000, "a", "/p", argv=["/p"])
         assert row["scope"] == "1h"
 
     def test_scope_persisted_for_each_kind(self, cache_db):
@@ -261,6 +270,10 @@ class TestArgvAware:
         # Different argv under same exe — must miss.
         assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/apt-get",
                         argv=["/usr/bin/apt-get", "install", "evil"]) is None
+        # Missing argv must not match argv-aware rows.
+        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/apt-get") is None
+        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/apt-get",
+                        argv=[]) is None
 
     def test_exe_only_matches_any_argv_under_same_exe(self, cache_db):
         c = ApprovalCache(cache_db)
@@ -290,6 +303,7 @@ class TestArgvAware:
         # Different basename — miss.
         assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/python3.13",
                         argv=["/usr/bin/python3.13"]) is None
+        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/python3") is None
 
     def test_prefix_matches_argv_prefix(self, cache_db):
         c = ApprovalCache(cache_db)
@@ -307,6 +321,7 @@ class TestArgvAware:
         # Empty argv — miss (no program even).
         assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/systemctl",
                         argv=[]) is None
+        assert c.lookup(2000, "qdistro.sudo.exec", "/usr/bin/systemctl") is None
 
     def test_argv_exact_beats_exe_only_beats_always(self, cache_db):
         """Most-specific match wins, even when stored newest-first.
@@ -331,22 +346,24 @@ class TestArgvAware:
         assert row3["match_kind"] == "always"
         assert row3["decision"] == 1
 
-    def test_argv_exact_without_argv_falls_back_to_exe_only(self, cache_db):
-        """store() with argv_exact-style scope but argv=None degrades
-        gracefully: writes an exe_only row instead so we never silently
-        store an unmatchable argv_exact row."""
+    def test_timed_scope_without_argv_falls_back_to_exe_only(self, cache_db):
         c = ApprovalCache(cache_db)
         c.store(2000, "act", "/p", "1h", True, 1000)  # no argv
         row = c.lookup_detail(2000, "act", "/p")
         assert row is not None
         assert row["match_kind"] == "exe_only"
+        assert row["scope"] == "1h"
 
-    def test_prefix_without_argv_falls_back_to_exe_only(self, cache_db):
+    def test_forever_argv_without_argv_writes_no_row(self, cache_db):
+        """Explicit argv-pinned scopes with argv=None fail closed."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever_argv", True, 1000)
+        assert c.lookup_detail(2000, "act", "/p") is None
+
+    def test_prefix_without_argv_writes_no_row(self, cache_db):
         c = ApprovalCache(cache_db)
         c.store(2000, "act", "/p", "forever_prefix", True, 1000)
-        row = c.lookup_detail(2000, "act", "/p")
-        assert row is not None
-        assert row["match_kind"] == "exe_only"
+        assert c.lookup_detail(2000, "act", "/p") is None
 
     def test_legacy_argv_exact_rows_migrate_to_exe_only(self, tmp_path):
         """In-place migration: pre-69 dbs had match_kind='argv_exact' with

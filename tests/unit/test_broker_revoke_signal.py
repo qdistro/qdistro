@@ -93,7 +93,9 @@ def broker(tmp_path: Path) -> _StubBroker:
 def _seed(broker, *, uid: int, action: str, exe: str,
           scope: str = "forever", decision: bool = True) -> int:
     """Seed a cache row; return its id so we can revoke by it."""
-    broker.cache.store(uid, action, exe, scope, decision, ADMIN_UID)
+    argv = [exe] if scope in ("1h", "24h") else None
+    broker.cache.store(uid, action, exe, scope, decision, ADMIN_UID,
+                       argv=argv)
     return broker.cache.list_all()[0]["id"]
 
 

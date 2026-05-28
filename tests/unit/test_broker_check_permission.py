@@ -172,15 +172,16 @@ class TestCheckPermissionResolution:
 class TestCheckPermissionExeKey:
     def test_cache_row_scoped_to_exe(self, broker):
         """forever scope stores as match_kind='always' (exe-agnostic);
-        1h / 24h / forever_exe store as argv_exact (exe-specific).
-        Pinning argv_exact here — a 1h grant must NOT cover a
-        different exe."""
+        1h with argv stores as argv_exact. Pinning argv_exact here
+        means a 1h grant must NOT cover a different exe."""
         broker.cache.store(NON_ADMIN_UID, STREAM_ACTION, PEER_EXE,
-                           "1h", True, ADMIN_UID)
+                           "1h", True, ADMIN_UID, argv=[PEER_EXE])
         broker.set_peer(uid=NON_ADMIN_UID, exe=PEER_EXE)
-        assert broker.CheckPermission(STREAM_ACTION, {}) == "allow"
+        assert broker.CheckPermission(
+            STREAM_ACTION, {"argv[00]": PEER_EXE}) == "allow"
         broker.set_peer(uid=NON_ADMIN_UID, exe="/usr/bin/other")
-        assert broker.CheckPermission(STREAM_ACTION, {}) == "unknown"
+        assert broker.CheckPermission(
+            STREAM_ACTION, {"argv[00]": PEER_EXE}) == "unknown"
 
     def test_forever_is_exe_agnostic(self, broker):
         """forever scope uses match_kind='always' — exe doesn't matter."""

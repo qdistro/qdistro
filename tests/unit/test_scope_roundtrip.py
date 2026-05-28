@@ -34,8 +34,10 @@ def test_scope_roundtrip_via_cache(cache_db, scope):
     """Storing then looking up should reconstruct the original scope."""
     c = ApprovalCache(cache_db)
     exe = "/usr/bin/python3" if scope != "forever" else ""
-    c.store(2000, "act", exe, scope, True, 1000)
-    row = c.lookup_detail(2000, "act", exe or "/usr/bin/python3")
+    argv = [exe] if scope in ("1h", "24h") else None
+    c.store(2000, "act", exe, scope, True, 1000, argv=argv)
+    row = c.lookup_detail(2000, "act", exe or "/usr/bin/python3",
+                          argv=argv)
     assert row is not None
     assert scope_from_row(row) == scope
 

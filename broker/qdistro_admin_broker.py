@@ -83,11 +83,10 @@ _VALID_SCOPES = frozenset((
 # broker can't re-authenticate that identity on future calls (a
 # different process as the same uid could be asking). For scopes
 # that DON'T pin argv (`forever`, `forever_exe`, plus the timed
-# variants `1h`/`24h` which currently store as argv_exact-with-empty
-# argv when the caller doesn't pass one), one approval becomes a
-# wildcard for the (uid, action) pair: a `1h` approval of `qsu id`
-# would implicitly approve `qsu anything-else` at root for the next
-# hour.
+# variants `1h`/`24h` when argv capture is absent), one approval
+# becomes a wildcard for the (uid, action) pair: a `1h` approval of
+# `qsu id` would implicitly approve `qsu anything-else` at root for
+# the next hour.
 #
 # task(078): the argv-aware scopes (forever_argv / forever_basename /
 # forever_prefix) ARE permitted for delegated requests because they
@@ -103,6 +102,14 @@ _VALID_SCOPES = frozenset((
 _DELEGATED_FORBIDDEN_SCOPES = frozenset((
     "1h", "24h",
     "forever", "forever_exe",
+))
+
+_ARGV_AWARE_DELEGATED_SCOPES = frozenset((
+    "forever_argv", "forever_basename", "forever_prefix",
+))
+
+_ARGV_REQUIRED_SCOPES = frozenset((
+    "forever_argv", "forever_basename", "forever_prefix",
 ))
 
 # One-shot actions are gated to scope='once' regardless of delegation.
@@ -2067,6 +2074,14 @@ class Broker(dbus.service.Object):
                     f"use 'once'",
                     name=BUS_NAME + ".ScopeNotPermitted",
                 )
+            cache_argv = _argv_from_details(req.details)
+            if (decision_s == "allow" and scope_s in _ARGV_REQUIRED_SCOPES
+                    and not cache_argv):
+                context = "delegated requests" if req.delegated else "this request"
+                raise dbus.DBusException(
+                    f"scope {scope_s!r} requires captured argv for {context}",
+                    name=BUS_NAME + ".ScopeNotPermitted",
+                )
             # Layered identity (exe_sha256, selinux_label, cgroup) is
             # advisory per spec/25 — it enriches the admin's view but
             # does NOT gate the decision or the cache key. The cache
@@ -2110,10 +2125,9 @@ class Broker(dbus.service.Object):
             req.waiters.clear()
             cache_uid, cache_pid, cache_action, cache_exe = req.uid, req.pid, req.action, req.exe
             # task(069): argv comes from the cached details (qsu's
-            # per-element argv[NN] keys). Empty list when the request
-            # carried no argv (clipboard / handoff / qdistro.test.* —
-            # those use exe_only / always scopes anyway).
-            cache_argv = _argv_from_details(req.details)
+            # per-element argv[NN] keys). None when the request carried
+            # no argv (clipboard / handoff / qdistro.test.* — those use
+            # exe_only / always scopes anyway).
 
         # Audit first — if it fails and AUDIT_REQUIRED, force-deny before
         # we touch the cache or release waiters. Otherwise an admin's

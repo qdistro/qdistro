@@ -96,6 +96,17 @@ def _enqueue_delegated(broker: _StubBroker, *, claim_uid: int,
         action, details, delegated=True)
 
 
+def _enqueue_direct(broker: _StubBroker, *, uid: int = NON_ADMIN_UID,
+                    pid: int = 1234, exe: str = "/usr/bin/app",
+                    action: str = "test.action",
+                    argv: list[str] | None = None) -> int:
+    details = {}
+    for i, a in enumerate(argv or []):
+        details[f"argv[{i:02d}]"] = a
+    return broker._enqueue(uid, pid, exe, 0, action, details,
+                           delegated=False)
+
+
 # --- argv-blind scopes still rejected for delegated --------------------
 
 class TestArgvBlindScopesStillForbidden:
@@ -126,6 +137,55 @@ class TestArgvAwareScopesPermitted:
             ["/usr/bin/apt-get", "update"])
         assert rows is not None, \
             f"cache row missing after delegated DecideRequest scope={scope!r}"
+
+    @pytest.mark.parametrize("scope", [
+        "forever_argv", "forever_basename", "forever_prefix",
+    ])
+    def test_argv_aware_scope_rejected_without_argv(self, broker, scope):
+        broker.set_peer(uid=ADMIN_UID)
+        rid = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                  argv=None)
+        with pytest.raises(Exception) as ei:
+            broker.DecideRequest(rid, "allow", scope)
+        assert "requires captured argv" in str(ei.value)
+        assert broker.cache.list_all() == []
+
+    @pytest.mark.parametrize("scope", [
+        "forever_argv", "forever_basename", "forever_prefix",
+    ])
+    def test_argv_required_scope_rejected_without_argv_direct(self, broker,
+                                                              scope):
+        broker.set_peer(uid=ADMIN_UID)
+        rid = _enqueue_direct(broker)
+        with pytest.raises(Exception) as ei:
+            broker.DecideRequest(rid, "allow", scope)
+        assert "requires captured argv" in str(ei.value)
+        assert broker.cache.list_all() == []
+
+    @pytest.mark.parametrize("scope", [
+        "forever_argv", "forever_basename", "forever_prefix",
+    ])
+    def test_argv_required_scope_without_argv_still_allows_deny(self,
+                                                                broker,
+                                                                scope):
+        broker.set_peer(uid=ADMIN_UID)
+        rid = _enqueue_direct(broker)
+        broker.DecideRequest(rid, "deny", scope)
+        req = broker._pending[rid]
+        assert req.decision is False
+        assert broker.cache.list_all() == []
+
+    @pytest.mark.parametrize("scope", ["1h", "24h"])
+    def test_timed_scope_without_argv_direct_remains_exe_timed(self, broker,
+                                                               scope):
+        broker.set_peer(uid=ADMIN_UID)
+        rid = _enqueue_direct(broker, exe="/usr/bin/app")
+        broker.DecideRequest(rid, "allow", scope)
+        row = broker.cache.lookup_detail(NON_ADMIN_UID, "test.action",
+                                         "/usr/bin/app")
+        assert row is not None
+        assert row["match_kind"] == "exe_only"
+        assert row["scope"] == scope
 
     def test_forever_argv_pins_argv(self, broker):
         """The whole point of un-forbidding forever_argv: a delegated

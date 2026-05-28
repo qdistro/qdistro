@@ -96,10 +96,9 @@ def _migrate(conn) -> None:
 #
 # task(069): new vocabulary. Old `forever_exe` semantic preserved as
 # `exe_only` match_kind. New scopes (forever_argv / forever_basename /
-# forever_prefix) tighten the gate by fixing argv. 1h / 24h move from
-# the broken legacy 'argv_exact' (== exe-only) to the new argv-tracked
-# 'argv_exact' so a 1-hour grant for `apt-get update` no longer leaks
-# into `apt-get install <anything>`.
+# forever_prefix) tighten the gate by fixing argv. 1h / 24h use the
+# new argv-tracked `argv_exact` when argv is present; non-argv callers
+# keep the UI's longstanding timed exe-only behavior.
 _SCOPE_MAP: dict[str, tuple[str, int | None] | None] = {
     "once":             None,
     "1h":               ("argv_exact", 3600),
@@ -160,17 +159,19 @@ def _match_row_argv(row_kind: str, row_value: str, row_argv: str,
         return True
     if row_kind == "exe_only":
         return row_value == exe
+    if row_kind in ("argv_exact", "basename", "prefix") and not argv:
+        return False
     if row_kind == "argv_exact":
         if row_value != exe:
             return False
-        return list(argv or []) == _decode_pattern(row_argv)
+        return list(argv) == _decode_pattern(row_argv)
     if row_kind == "basename":
         return row_argv == _argv_basename(argv)
     if row_kind == "prefix":
         prefix = _decode_pattern(row_argv)
         if not prefix:
             return False
-        actual = list(argv or [])
+        actual = list(argv)
         return actual[: len(prefix)] == prefix
     return False
 
@@ -244,43 +245,33 @@ class ApprovalCache:
               argv: list | tuple | None = None) -> bool:
         """Persist if scope warrants. Returns True if a row was written.
 
-        argv is required for argv_exact / basename / prefix scopes.
-        Passing argv=None for those scopes degrades the row to
-        'exe_only' rather than crash — the broker may not always have
-        argv (rule-decision cache-store path) and the safer fallback
-        is the broader exe-only match.
+        argv is required for forever_argv / forever_basename /
+        forever_prefix. Passing argv=None or an empty list for those
+        scopes writes no row: silently broadening an argv-pinned
+        decision to exe_only would turn it into argv-blind trust.
+        Timed 1h / 24h approvals keep non-argv UI compatibility by
+        storing a time-limited exe_only row when argv is absent.
         """
         mapped = scope_to_row(scope)
         if mapped is None:
             return False
         match_kind, ttl = mapped
-        # argv-tracked kinds need an argv list; if missing, fall back
-        # to 'exe_only' so we never silently store an unmatchable row.
         argv_list = list(argv) if argv else []
-        if match_kind == "argv_exact":
-            if not argv_list:
+        if match_kind in ("argv_exact", "basename", "prefix") and not argv_list:
+            if scope in ("1h", "24h"):
                 match_kind = "exe_only"
-                argv_text = ""
             else:
-                argv_text = json.dumps(argv_list)
+                return False
+        if match_kind == "argv_exact":
+            argv_text = json.dumps(argv_list)
             match_value = exe
         elif match_kind == "basename":
-            if not argv_list:
-                match_kind = "exe_only"
-                argv_text = ""
-                match_value = exe
-            else:
-                match_kind = "basename"
-                argv_text = _argv_basename(argv_list)
-                match_value = ""
+            match_kind = "basename"
+            argv_text = _argv_basename(argv_list)
+            match_value = ""
         elif match_kind == "prefix":
-            if not argv_list:
-                match_kind = "exe_only"
-                argv_text = ""
-                match_value = exe
-            else:
-                argv_text = json.dumps(argv_list)
-                match_value = ""
+            argv_text = json.dumps(argv_list)
+            match_value = ""
         elif match_kind == "exe_only":
             argv_text = ""
             match_value = exe
