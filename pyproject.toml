@@ -25,6 +25,7 @@ pythonpath = [
   "admin_app",
   "session_manager",
   "tier4-vm",
+  "workflow",
 ]
 
 # Linter config — house style across qdistro favours stacking trivial
