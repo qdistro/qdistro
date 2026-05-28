@@ -510,3 +510,124 @@ class TestEngineDelivery:
         run = engine.start_run("wf")
         assert run.state == RunState.COMPLETED
         assert run.steps_completed[0].details["delivered"] is False
+
+
+# ======================================================================
+# Phase 2 — channel publication + consumption loop
+# ======================================================================
+
+_HAVE_SSH = all(shutil.which(b) for b in ("ssh-agent", "ssh-add", "ssh-keygen"))
+
+
+def _gen_ssh_key(tmp_path) -> bytes:
+    kp = tmp_path / "id_ed25519"
+    subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q",
+                    "-f", str(kp)], check=True)
+    return kp.read_bytes()
+
+
+class TestChannelPublication:
+    def test_env_without_command_publishes_nothing(self, tmp_path):
+        # The env method's only reference is the plaintext value, so it
+        # must never be published into the run context.
+        audit = WorkflowAuditLogger(db_path=str(tmp_path / "a.sqlite"))
+        engine = WorkflowEngine(audit_logger=audit,
+                                secret_source=_FakeSource(SECRET))
+        engine._workflows["wf"] = WorkflowDef(
+            name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            steps=[StepDef(type=StepType.DELIVER_SECRET, config={
+                "item": "vault/dev/key", "as": "env", "var": "X"})])
+        run = engine.start_run("wf")
+        assert run.state == RunState.COMPLETED
+        assert "channel_env" not in run.context
+        assert SECRET.decode() not in str(run.context)
+        assert "published" not in run.steps_completed[0].details
+
+
+@pytest.mark.skipif(not _HAVE_SSH, reason="ssh tooling not available")
+class TestSshAgentConsumptionLoop:
+    def _wf(self, runtime, *, consumer_cmd=None, fail_after=False):
+        deliver = StepDef(type=StepType.DELIVER_SECRET, name="deliver", config={
+            "item": "vault/dev/github-ssh-key", "as": "ssh-agent",
+            "runtime_root": str(runtime), "ttl": 60,
+            "expose_as": "SSH_AUTH_SOCK", "scrub_on": "workflow_exit"})
+        steps = [deliver]
+        if consumer_cmd is not None:
+            steps.append(StepDef(type=StepType.DELIVER_SECRET, name="consume",
+                                 config={"item": "vault/dev/marker", "as": "env",
+                                         "var": "MARKER", "command": consumer_cmd}))
+        if fail_after:
+            steps.append(StepDef(type=StepType.RUN_HOOK, name="boom",
+                                 config={"hook": "explode"}))
+        return WorkflowDef(name="git-sign",
+                           trigger=TriggerDef(type=TriggerType.PROCESS_SPAWN),
+                           steps=steps)
+
+    def _engine(self, tmp_path, key):
+        audit = WorkflowAuditLogger(db_path=str(tmp_path / "a.sqlite"))
+        return WorkflowEngine(audit_logger=audit, broker_proxy=_AllowBroker(),
+                              secret_source=_FakeSource(key)), audit
+
+    def test_socket_published_then_scrubbed(self, tmp_path):
+        key = _gen_ssh_key(tmp_path)
+        runtime = tmp_path / "rt"
+        engine, _audit = self._engine(tmp_path, key)
+        engine._workflows["git-sign"] = self._wf(runtime)
+
+        run = engine.start_run("git-sign")
+        assert run.state == RunState.COMPLETED, run.error
+        # The deliver step published the agent socket reference...
+        assert run.steps_completed[0].details["published"] == ["SSH_AUTH_SOCK"]
+        # ...but never the key material.
+        assert key.decode("latin1", "ignore")[:20] not in str(run.context)
+        # After workflow exit the socket is scrubbed (gone) and the agent
+        # dir was removed, leaving no per-run state behind.
+        sock = run.context["channel_env"]["SSH_AUTH_SOCK"]
+        assert not os.path.exists(sock)
+        assert not os.path.isdir(runtime) or os.listdir(runtime) == []
+
+    def test_published_socket_consumed_by_later_step(self, tmp_path):
+        key = _gen_ssh_key(tmp_path)
+        runtime = tmp_path / "rt"
+        proof = tmp_path / "proof"
+        # A consumer command that proves it inherited the published
+        # SSH_AUTH_SOCK and the agent really holds the key.
+        consumer = [sys.executable, "-c",
+                    "import os,subprocess,sys;"
+                    "sock=os.environ.get('SSH_AUTH_SOCK','');"
+                    "r=subprocess.run(['ssh-add','-l'],"
+                    "  env=dict(os.environ,SSH_AUTH_SOCK=sock),"
+                    "  capture_output=True);"
+                    f"open({str(proof)!r},'w').write("
+                    "sock+'\\n'+('OK' if r.returncode==0 else 'NOKEY'))"]
+        engine, _audit = self._engine(tmp_path, key)
+        engine._workflows["git-sign"] = self._wf(runtime, consumer_cmd=consumer)
+
+        run = engine.start_run("git-sign")
+        assert run.state == RunState.COMPLETED, run.error
+        lines = proof.read_text().splitlines()
+        # The consumer saw a non-empty socket path and the agent had a key
+        # loaded (proving real end-to-end delivery + consumption).
+        assert lines[0]  # SSH_AUTH_SOCK was set in the child env
+        assert lines[1] == "OK"
+        # ...and after the run the socket is gone (scrubbed).
+        assert not os.path.exists(lines[0])
+
+    def test_failure_after_publish_scrubs_socket(self, tmp_path):
+        key = _gen_ssh_key(tmp_path)
+        runtime = tmp_path / "rt"
+        engine, _audit = self._engine(tmp_path, key)
+        engine._workflows["git-sign"] = self._wf(runtime, fail_after=True)
+
+        # Force the trailing hook step to fail.
+        def boom(step, run, result):
+            result.success = False
+            result.error = "kaboom"
+        engine._handle_run_hook = boom  # type: ignore[assignment]
+
+        run = engine.start_run("git-sign")
+        assert run.state == RunState.FAILED
+        sock = run.context["channel_env"]["SSH_AUTH_SOCK"]
+        # Mid-step failure still scrubs the published channel.
+        assert not os.path.exists(sock)
+        assert run.run_id not in engine._delivery_handles

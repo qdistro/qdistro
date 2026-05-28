@@ -222,6 +222,11 @@ class WorkflowRun:
     completed_at: float = 0.0
     steps_completed: list[StepResult] = field(default_factory=list)
     trigger_context: dict[str, Any] = field(default_factory=dict)
+    # Non-secret channel references published by deliver_secret steps for
+    # later steps / the triggering process to consume (e.g.
+    # {"channel_env": {"SSH_AUTH_SOCK": "/run/.../agent.sock"}}). Never
+    # holds plaintext secret values, and is not written to the audit DB.
+    context: dict[str, Any] = field(default_factory=dict)
     audit_entries: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
 

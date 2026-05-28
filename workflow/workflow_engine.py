@@ -118,16 +118,25 @@ def _return_shape(value: Any) -> dict[str, Any]:
     return shape
 
 
-def _resolve_ref(value: Any, trigger_context: dict[str, Any]) -> Any:
-    """Resolve a ``$trigger.<key>`` reference against the trigger context.
+def _resolve_ref(value: Any, run: WorkflowRun) -> Any:
+    """Resolve a ``$trigger.<key>`` / ``$run.<key>`` reference.
 
-    A plain (non-string, or non-``$trigger.``) value is returned as-is, so
-    a step can pass a literal pid as easily as ``$trigger.pid``.
+    ``$trigger.*`` reads the firing trigger's context; ``$run.*`` reads
+    the run's published channel context (a deliver_secret step may publish
+    e.g. ``SSH_AUTH_SOCK`` for a later step to reference). A plain value is
+    returned as-is.
     """
     if isinstance(value, str):
         for prefix in ("$trigger.", "trigger."):
             if value.startswith(prefix):
-                return trigger_context.get(value[len(prefix):])
+                return run.trigger_context.get(value[len(prefix):])
+        for prefix in ("$run.", "run."):
+            if value.startswith(prefix):
+                key = value[len(prefix):]
+                chan = run.context.get("channel_env", {})
+                if key in chan:
+                    return chan[key]
+                return run.context.get(key)
     return value
 
 
@@ -471,8 +480,19 @@ class WorkflowEngine:
         # Real delivery. Keep the plaintext lifetime minimal.
         secret = SecretValue(self._fetch_secret(item, run))
         handle = None
+        # Consumption: if an earlier step published a channel (e.g. an
+        # SSH_AUTH_SOCK from a prior ssh-agent delivery) and this step
+        # spawns a command, expose that channel to the child by folding it
+        # into the command's environment. This is how a later step
+        # actually *uses* a previously-delivered secret.
+        delivery_config = dict(step.config)
+        channel_env = run.context.get("channel_env")
+        if channel_env and delivery_config.get("command"):
+            base = dict(delivery_config.get("base_env") or os.environ)
+            base.update(channel_env)
+            delivery_config["base_env"] = base
         try:
-            handle = make_delivery(delivery_method, secret, dict(step.config))
+            handle = make_delivery(delivery_method, secret, delivery_config)
             handle.deliver()
         except Exception as e:  # noqa: BLE001
             # Scrub any partial channel state (open fd, mounted tmpfs,
@@ -503,6 +523,14 @@ class WorkflowEngine:
             "deliver_secret: delivered %r via %s (scrub_on=%s) run %s",
             item, handle.method, scrub_on, run.run_id,
         )
+        # Publish the live channel's *reference* (socket path / file path /
+        # fd number — never the secret value) so a later step or the
+        # triggering process can consume it. Only for tracked, command-less
+        # deliveries: a step-scoped channel is already revoked, and a
+        # delivery that ran its own command has nothing left to expose.
+        published: list[str] = []
+        if track and not step.config.get("command"):
+            published = self._publish_channel(handle, step, run)
         result.success = True
         # metadata() is the only loggable surface — no secret value.
         result.details = {
@@ -511,6 +539,39 @@ class WorkflowEngine:
             "delivered": True,
             **handle.metadata(),
         }
+        if published:
+            result.details["published"] = published
+
+    def _publish_channel(self, handle: DeliveryHandle, step: StepDef,
+                         run: WorkflowRun) -> list[str]:
+        """Expose a delivered channel's non-secret reference on the run.
+
+        Returns the published env-var names (for audit detail). The
+        plaintext ``env`` method is never published — its only reference
+        *is* the secret value — so it must use an inline ``command``.
+        """
+        env: dict[str, str] = {}
+        method = handle.method
+        if method == "ssh-agent":
+            sock = getattr(handle, "auth_sock", None)
+            if sock:
+                env[step.config.get("expose_as", "SSH_AUTH_SOCK")] = str(sock)
+        elif method == "tmpfs-mount":
+            path = getattr(handle, "path", None)
+            if path:
+                env[step.config.get("expose_as", "SECRET_PATH")] = str(path)
+        elif method == "fd-pass":
+            fd = getattr(handle, "read_fd", None)
+            if fd is not None:
+                env[step.config.get("expose_as", "SECRET_FD")] = str(fd)
+        if not env:
+            return []
+        # Steps for a single run execute sequentially on one worker thread,
+        # so run.context needs no lock.
+        run.context.setdefault("channel_env", {}).update(env)
+        logger.info("deliver_secret: published channel %s for run %s",
+                    sorted(env.keys()), run.run_id)
+        return sorted(env.keys())
 
     def _fetch_secret(self, item: str, run: WorkflowRun) -> bytes:
         """Unseal an item via the configured secret source.
@@ -544,7 +605,7 @@ class WorkflowEngine:
         for git-sign this keeps the secret alive no longer than the bound).
         """
         raw_pid = step.config.get("pid", step.config.get("value", ""))
-        resolved = _resolve_ref(raw_pid, run.trigger_context)
+        resolved = _resolve_ref(raw_pid, run)
         try:
             pid = int(resolved)
         except (TypeError, ValueError):

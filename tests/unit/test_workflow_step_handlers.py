@@ -23,7 +23,32 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "workflow"))
 
 from workflow_schema import StepDef, StepResult, StepType, WorkflowRun  # noqa: E402
-from workflow_engine import WorkflowEngine  # noqa: E402
+from workflow_engine import WorkflowEngine, _resolve_ref  # noqa: E402
+
+
+class TestResolveRef:
+    def test_trigger_ref(self):
+        run = WorkflowRun(workflow_name="w", trigger_context={"pid": 42})
+        assert _resolve_ref("$trigger.pid", run) == 42
+
+    def test_run_channel_ref(self):
+        run = WorkflowRun(workflow_name="w")
+        run.context["channel_env"] = {"SSH_AUTH_SOCK": "/run/x/agent.sock"}
+        assert _resolve_ref("$run.SSH_AUTH_SOCK", run) == "/run/x/agent.sock"
+
+    def test_run_plain_context_ref(self):
+        run = WorkflowRun(workflow_name="w")
+        run.context["foo"] = "bar"
+        assert _resolve_ref("$run.foo", run) == "bar"
+
+    def test_literal_passthrough(self):
+        run = WorkflowRun(workflow_name="w")
+        assert _resolve_ref(123, run) == 123
+        assert _resolve_ref("plain", run) == "plain"
+
+    def test_missing_ref_is_none(self):
+        run = WorkflowRun(workflow_name="w")
+        assert _resolve_ref("$trigger.nope", run) is None
 
 
 def _result() -> StepResult:

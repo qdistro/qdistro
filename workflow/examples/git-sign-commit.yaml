@@ -1,0 +1,43 @@
+# git-sign-commit — grant an SSH signing key to a git invocation for the
+# duration of one commit, then scrub it. (permissions.md §"Secret delivery
+# to privileged tasks".)
+#
+# Flow:
+#   process_spawn(git in the watched cgroup)
+#     -> deliver_secret: unseal vault/dev/github-ssh-key into a per-run
+#        ssh-agent and publish SSH_AUTH_SOCK on the run context
+#     -> wait_for_process: block on the triggering git pid (PID-reuse
+#        anchored) until the commit finishes
+#     -> scrub on workflow_exit: kill the agent, remove its socket dir
+#
+# The triggering git process consumes the published SSH_AUTH_SOCK via the
+# broker/qsu launch environment (the engine exposes it on the run context;
+# a later in-engine step would pick it up from $run.SSH_AUTH_SOCK).
+#
+# This file is an EXAMPLE — copy it to /etc/qdistro/workflows/ (system) or
+# ~/.config/qdistro/workflows/ (user) and adjust cgroup_pattern + the vault
+# item to enable it. It is not installed/enabled by default.
+- name: git-sign-commit
+  description: >-
+    Release the dev SSH signing key to a single git commit, then scrub.
+  trigger:
+    type: process_spawn
+    # Match the cgroup git is launched into (e.g. via `qsu` / a wrapper
+    # that drops git into a dedicated scope). Adjust to your launcher.
+    cgroup_pattern: "system.slice/qdistro-git-sign-*.scope"
+    poll_interval: 0.25
+  conditions:
+    - uid: dev
+  needs:
+    - vault/dev/github-ssh-key
+  steps:
+    - deliver_secret:
+        item: vault/dev/github-ssh-key
+        as: ssh-agent
+        expose_as: SSH_AUTH_SOCK
+        ttl: 120
+        scrub_on: workflow_exit
+    - wait_for_process: $trigger.pid
+  roles:
+    - dev: invoker
+    - admin: approver
