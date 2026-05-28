@@ -54,6 +54,84 @@ QDISTRO_TIER4_RDP_PEER_LABEL=tier4-rdp
 QDISTRO_TIER4_RDP_CREDS=/run/qdistro-tier4-rdp.env
 ```
 
+## Troubleshooting: guest window not visible
+
+If `spawn-tier4` brings the VM up but no guest toplevel ever appears on
+the host compositor, the failure is almost always in one of the two
+in-guest systemd units below. Both are *system* units (baked into
+`/etc/systemd/system/` by `build-guest-image.sh`), so query them with
+plain `journalctl -u` (no `--user`):
+
+1. **Nested qdwin session.** Confirm the in-guest compositor came up:
+
+   ```sh
+   journalctl -u qdwin-guest-session.service
+   ```
+
+   This unit runs `weston` with the role=guest qdwin plugin and binds
+   the inner `wayland-0`. If it never reaches a steady state, the
+   publisher has no inner socket to attach to and nothing reaches the
+   host.
+
+2. **Publisher.** Confirm the vsock publisher started and what it did:
+
+   ```sh
+   journalctl -u qdistro-tier4-publisher.service
+   ```
+
+   ```sh
+   cat /var/log/qdistro-tier4-publisher.log
+   ```
+
+   The publisher (`/usr/local/bin/qdistro-tier4-publisher.sh`) redirects
+   its own stdout/stderr to `/var/log/qdistro-tier4-publisher.log` once
+   it has passed its startup checks. In the default waypipe path the log
+   gets the startup banner
+   (`=== ... tier4-publisher port=... ===`) and then the `waypipe`/qdwin
+   output; in RDP mode it also gets the `RDP stream ready ...` line.
+
+   **Caveat — early failures never reach that log.** The publisher
+   validates its arguments and environment *before* it redirects output
+   to the log file: the `<vsock_port>` argument, `QDISTRO_TIER4_DISPLAY`
+   (`waypipe`/`rdp`), the Wayland-socket path, and the RDP-subscribe
+   value are all checked first, and any of those failures (`exit 2`)
+   print to **stderr** and exit before the redirect happens. So a log
+   file that is empty, missing, or stale does **not** mean "nothing ran"
+   — it can mean the publisher died during early validation (or the
+   service never started). Look at the `qdistro-tier4-publisher.service`
+   journal (which captures that pre-redirect stderr), not the log file.
+
+   Note also that if the publisher cannot create
+   `/var/log/qdistro-tier4-publisher.log` it falls back to a `mktemp`
+   file under `/tmp`, so an empty `/var/log` copy can also mean the runtime
+   log went elsewhere — the journal is the reliable source.
+
+### Other first checks
+
+Check these in the guest when the journals point that way:
+
+- **Inner Wayland socket.** The publisher waits up to ~30s for inner
+  qdwin's `wayland-0` to appear and exits (`exit 3`,
+  `inner Wayland socket ... never appeared`) if it does not. That points
+  back at `qdwin-guest-session.service` (step 1) rather than the
+  publisher itself.
+- **vsock device.** The publisher modprobes `vhost_vsock`/`vsock` and
+  briefly polls for `/dev/vsock` (it does not hard-fail if absent — it
+  proceeds and `waypipe`/`socat` fail later instead). If the AF_VSOCK
+  transport never comes up, confirm the libvirt domain actually has the
+  vsock device (see `domain-template.xml`).
+- **virtiofs `/host` mount.** The image ships an `/etc/fstab` line
+  (`qdistro-host /host virtiofs nofail,_netdev 0 0`). Confirm `/host` is
+  mounted if host-shared files are expected; the `nofail` option means a
+  missing mount does not block boot, so it can fail silently.
+- **RDP mode only.** With `QDISTRO_TIER4_DISPLAY=rdp` the publisher also
+  requires `socat` in the guest (`exit 2` if absent), waits for
+  `qdwin-bystander` to report an `RDP_PORT`, and waits for
+  `qdistro-forward` to accept on `127.0.0.1:<RDP_PORT>` before bridging
+  it to vsock (`exit 4` on any of those). Those failures are logged to
+  `/var/log/qdistro-tier4-publisher.log` (they happen after the
+  redirect), with the captured `qdwin-bystander` output appended.
+
 ## Historical scope
 
 P10 originally landed this directory for the waypipe guest image. Later
