@@ -102,16 +102,17 @@ optionally `require` the new types.
 ## Spike 5 — broker spawn-action gate (added 2026-04-27 night)
 
 Not strictly blocking, but if we want admin to gate Tier-1 spawns
-per-app via a rule like `qdistro.tier1.spawn:firefox`, the broker
-needs to know the action namespace. Verify:
+per-app via a rule like `qdistro.tier1.spawn:/usr/bin/firefox`, the
+broker needs to know the action namespace. Verify:
 
 ```
 ~/.local/share/qdistro-test-venv2/bin/pytest \
  broker/test_broker_rules.py -k spawn -v
 ```
 
-**Expected:** no existing spawn-action tests. Implementation pass
-adds them under `qdistro.tier1.spawn:<app>` shape in line with the
+**Expected:** implementation tests cover the mandatory allow path and
+fail-closed unknown/error paths under
+`qdistro.tier1.spawn:<canonical-app-path>` shape, in line with the
 existing `qdistro.clipboard.transfer:` and
 `qdistro.handoff.activate:` patterns.
 

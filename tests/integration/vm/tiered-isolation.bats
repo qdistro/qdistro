@@ -471,7 +471,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: qdistro_tier1 policy module loaded"
     assert_output_contains "PASS: type_transition unconfined_t -> qdistro_tier1_t exists"
     assert_output_contains "PASS: sleep runs in qdistro_tier1_t"
-    assert_output_contains "PASS: broker denied qdistro.tier1.spawn:sleep before exec"
+    assert_output_contains "PASS: broker denied qdistro.tier1.spawn:/usr/bin/sleep before exec"
     assert_output_contains "PASS: spec/30 Tier-1 SELinux end-to-end"
 }
 

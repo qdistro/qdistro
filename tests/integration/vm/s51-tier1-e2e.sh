@@ -10,7 +10,7 @@
 #      rule installed (sesearch -T).
 #   4. spawn-tier1.sh routes the inner command into qdistro_tier1_t
 #      (observed via `ps -eo pid,label`).
-#   5. broker.CheckPermission denies `qdistro.tier1.spawn:sleep` when
+#   5. broker.CheckPermission denies `qdistro.tier1.spawn:/usr/bin/sleep` when
 #      an authored rule with decision=deny is in place — the spec/30
 #      step 6 broker gate.
 #
@@ -90,15 +90,45 @@ TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
 # Run spawn-tier1.sh sleep 0.5 in the background; while it sleeps,
 # `ps -eo pid,label` should show the sleep PID under qdistro_tier1_t.
 SPAWN_LOG=/tmp/s51-spawn.log
-# Default-allow when no rule — but if a prior s51 run left a deny rule,
-# spawn will exit 1 here. Clean any stale rule first.
+# Tier-1 launch authorization is mandatory: seed an explicit allow for
+# the happy path before spawn-tier1.sh reaches qdistro-tier1-exec.
 RULE_DIR=/etc/qdistro/rules.d
 mkdir -p "$RULE_DIR"
 rm -f "$RULE_DIR"/s51-*.yaml 2>/dev/null || true
-# Bounce the broker's inotify so it picks up the removal.
+cleanup_rules() {
+    rm -f "$RULE_DIR"/s51-*.yaml 2>/dev/null || true
+}
+trap cleanup_rules EXIT
+if ! command -v dbus-send >/dev/null 2>&1; then
+    skip "dbus-send absent"
+fi
+if ! systemctl is-active --quiet qdistro-admin-broker.service \
+        && ! systemctl start qdistro-admin-broker.service 2>/dev/null; then
+    skip "qdistro-admin-broker.service not active"
+fi
+cat >"$RULE_DIR/s51-allow-sleep.yaml" <<'EOF'
+- decision: allow
+  match:
+    action: qdistro.tier1.spawn:/usr/bin/sleep
+  rationale: s51 Tier-1 happy-path launch authorization
+EOF
 systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
 
-env TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
+for _ in $(seq 1 25); do
+    REPLY=$(dbus-send --system --print-reply=literal \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
+        "string:qdistro.tier1.spawn:/usr/bin/sleep" \
+        "dict:string:string:" 2>/dev/null \
+        | tr -d ' \t\n')
+    case "$REPLY" in
+        allow|*allow*) break ;;
+    esac
+    sleep 0.2
+done
+
+env $TIER1_USE_SECCTX_FLAG \
     bash "$SPAWN" s51silo -- /usr/bin/sleep 2 \
     >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
@@ -126,22 +156,16 @@ kill -TERM "$SPAWN_PID" 2>/dev/null || true
 pkill -P "$SPAWN_PID" 2>/dev/null || true
 wait "$SPAWN_PID" 2>/dev/null || true
 
-# 5. broker spawn-action gate denies `qdistro.tier1.spawn:sleep` --------
-if ! command -v dbus-send >/dev/null 2>&1; then
-    skip "dbus-send absent"
-fi
-if ! systemctl is-active --quiet qdistro-admin-broker.service \
-        && ! systemctl start qdistro-admin-broker.service 2>/dev/null; then
-    skip "qdistro-admin-broker.service not active"
-fi
+# 5. broker spawn-action gate denies `qdistro.tier1.spawn:/usr/bin/sleep` ---
+rm -f "$RULE_DIR/s51-allow-sleep.yaml"
 
-# Author a deny rule for qdistro.tier1.spawn:sleep, wait for inotify
+# Author a deny rule for qdistro.tier1.spawn:/usr/bin/sleep, wait for inotify
 # reload, probe CheckPermission, then drop the rule.
 DENY_RULE="$RULE_DIR/s51-deny-sleep.yaml"
 cat >"$DENY_RULE" <<'EOF'
 - decision: deny
   match:
-    action: qdistro.tier1.spawn:sleep
+    action: qdistro.tier1.spawn:/usr/bin/sleep
   rationale: s51 broker spawn-action gate probe
 EOF
 
@@ -151,7 +175,7 @@ for _ in $(seq 1 25); do
         --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1.CheckPermission \
-        "string:qdistro.tier1.spawn:sleep" \
+        "string:qdistro.tier1.spawn:/usr/bin/sleep" \
         "dict:string:string:" 2>/dev/null \
         | tr -d ' \t\n')
     case "$REPLY" in
@@ -162,10 +186,10 @@ done
 
 case "$REPLY" in
     deny|*deny*)
-        pass "broker denied qdistro.tier1.spawn:sleep before exec"
+        pass "broker denied qdistro.tier1.spawn:/usr/bin/sleep before exec"
         ;;
     *)
-        fail "broker CheckPermission(qdistro.tier1.spawn:sleep) returned '$REPLY', expected deny"
+        fail "broker CheckPermission(qdistro.tier1.spawn:/usr/bin/sleep) returned '$REPLY', expected deny"
         ;;
 esac
 

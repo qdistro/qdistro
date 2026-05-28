@@ -98,12 +98,47 @@ if [ -x "$SPAWN" ] && command -v qdistro-tier1-exec >/dev/null 2>&1; then
     TIER1_USE_SECCTX_FLAG=""
     command -v qdistro-secctx-exec >/dev/null 2>&1 \
         || TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
+    RULE_DIR=/etc/qdistro/rules.d
+    mkdir -p "$RULE_DIR"
+    cleanup_rules() {
+        rm -f "$RULE_DIR/s52-allow-cat.yaml" 2>/dev/null || true
+    }
+    trap cleanup_rules EXIT
+    cat >"$RULE_DIR/s52-allow-cat.yaml" <<'EOF'
+- decision: allow
+  match:
+    action: qdistro.tier1.spawn:/usr/bin/cat
+  rationale: s52 Tier-1 AVC probe launch authorization
+EOF
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    REPLY=""
+    for _ in $(seq 1 25); do
+        REPLY=$(dbus-send --system --print-reply=literal \
+            --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 \
+            org.qdistro.AdminBroker1.CheckPermission \
+            "string:qdistro.tier1.spawn:/usr/bin/cat" \
+            "dict:string:string:" 2>/dev/null \
+            | tr -d ' \t\n')
+        case "$REPLY" in
+            allow|string\"allow\") break ;;
+        esac
+        sleep 0.2
+    done
+    case "$REPLY" in
+        allow|string\"allow\") ;;
+        *) fail "broker did not load s52 Tier-1 cat allow rule; reply='$REPLY'" ;;
+    esac
     # Drive the AVC. We don't care about the exit code — only that the
     # kernel logs the denial to /var/log/audit/audit.log → audisp → broker.
     # shellcheck disable=SC2086
-    TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
-        bash "$SPAWN" s52silo -- /bin/cat /etc/shadow \
+    env $TIER1_USE_SECCTX_FLAG \
+        bash "$SPAWN" s52silo -- /usr/bin/cat /etc/shadow \
         >/tmp/s52-spawn.log 2>&1 || true
+    if grep -q '^\[tier1\] FAIL:' /tmp/s52-spawn.log; then
+        fail "cat did not enter Tier-1; spawn wrapper failed"
+    fi
+    cleanup_rules
 else
     echo "INFO: spawn-tier1.sh / qdistro-tier1-exec unavailable; relying on historical AVC rows" >&2
 fi

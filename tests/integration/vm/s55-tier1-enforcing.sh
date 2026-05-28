@@ -55,12 +55,67 @@ if ! command -v qdistro-tier1-exec >/dev/null 2>&1 \
    && [ ! -x /usr/local/libexec/qdistro-tier1-exec ]; then
     skip "qdistro-tier1-exec not installed"
 fi
+command -v dbus-send >/dev/null 2>&1 || skip "dbus-send absent"
+if ! systemctl is-active --quiet qdistro-admin-broker.service \
+        && ! systemctl start qdistro-admin-broker.service 2>/dev/null; then
+    skip "qdistro-admin-broker.service not active"
+fi
+
+# Tier-1 launch authorization is mandatory. The enforcing workload is
+# allowed explicitly so any failure below is about SELinux AVC budget,
+# not an absent broker rule.
+RULE_DIR=/etc/qdistro/rules.d
+mkdir -p "$RULE_DIR"
+rm -f "$RULE_DIR"/s55-allow-*.yaml 2>/dev/null || true
+cat >"$RULE_DIR/s55-allow-id.yaml" <<'EOF'
+- decision: allow
+  match:
+    action: qdistro.tier1.spawn:/usr/bin/id
+  rationale: s55 Tier-1 enforcing workload
+EOF
+cat >"$RULE_DIR/s55-allow-cat.yaml" <<'EOF'
+- decision: allow
+  match:
+    action: qdistro.tier1.spawn:/usr/bin/cat
+  rationale: s55 Tier-1 enforcing workload
+EOF
+cat >"$RULE_DIR/s55-allow-dbus-send.yaml" <<'EOF'
+- decision: allow
+  match:
+    action: qdistro.tier1.spawn:/usr/bin/dbus-send
+  rationale: s55 Tier-1 enforcing workload
+EOF
+systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+
+wait_allow_rule() {
+    local action="$1"
+    local reply=""
+    for _ in $(seq 1 25); do
+        reply=$(dbus-send --system --print-reply=literal \
+            --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 \
+            org.qdistro.AdminBroker1.CheckPermission \
+            "string:$action" \
+            "dict:string:string:" 2>/dev/null \
+            | tr -d ' \t\n')
+        case "$reply" in
+            allow|string\"allow\") return 0 ;;
+        esac
+        sleep 0.2
+    done
+    fail "broker did not load Tier-1 allow rule for $action; reply='$reply'"
+    return 1
+}
+wait_allow_rule "qdistro.tier1.spawn:/usr/bin/id" || true
+wait_allow_rule "qdistro.tier1.spawn:/usr/bin/cat" || true
+wait_allow_rule "qdistro.tier1.spawn:/usr/bin/dbus-send" || true
 
 # --- restore-on-exit trap ----------------------------------------------
-restore_permissive() {
+cleanup() {
     /usr/sbin/setenforce 0 2>/dev/null || setenforce 0 2>/dev/null || true
+    rm -f "$RULE_DIR"/s55-allow-*.yaml 2>/dev/null || true
 }
-trap restore_permissive EXIT INT TERM
+trap cleanup EXIT INT TERM
 
 # --- baseline cursor ---------------------------------------------------
 # ausearch wants a checkpoint file; we use --start <epoch> instead, which
@@ -94,13 +149,16 @@ TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
 run_step() {
     local label="$1"; shift
     echo "--- $label ---" >>"$WORKLOAD_LOG"
-    env TIER1_BROKER_OPTIONAL=1 $TIER1_USE_SECCTX_FLAG \
+    env $TIER1_USE_SECCTX_FLAG \
         bash "$SPAWN" s55silo -- "$@" \
         >>"$WORKLOAD_LOG" 2>&1 || true
+    if grep -q '^\[tier1\] FAIL:' "$WORKLOAD_LOG"; then
+        fail "$label did not enter Tier-1; spawn wrapper failed"
+    fi
 }
 
 run_step "id"           /usr/bin/id
-run_step "cat-passwd"   /bin/cat /etc/passwd
+run_step "cat-passwd"   /usr/bin/cat /etc/passwd
 # Session-bus access from a sandboxed domain needs DBUS_SESSION_BUS_ADDRESS
 # resolvable. Skip the dbus step if the env can't reach a session bus
 # (root-shell context usually can't).

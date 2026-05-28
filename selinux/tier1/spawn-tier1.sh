@@ -95,44 +95,71 @@ if command -v semodule >/dev/null 2>&1; then
     fi
 fi
 
-# Broker spawn-action gate (spec/30 §"Phase plan" step 6). Admin can
-# author rules in /etc/qdistro/rules.d/ keyed on
-# `qdistro.tier1.spawn:<app_basename>` to allow / deny specific apps
-# at spawn time. CheckPermission returns "allow" / "deny" / "unknown";
-# we treat "unknown" as allow (consistent with the rest of the qdistro
-# default-allow posture for unconfigured surfaces — the SELinux .te
-# is the floor that catches actual abuse; admin uses spawn rules for
-# extra discrimination, e.g. "deny qdistro.tier1.spawn:gdb"). When
-# the broker is absent (TIER1_BROKER_OPTIONAL=1, dbus-send missing,
-# or systemd-not-running) the spawn proceeds unguarded with a warning.
-APP_BASENAME=$(basename -- "$1")
-if command -v dbus-send >/dev/null 2>&1 && \
-   [ "${TIER1_BROKER_OPTIONAL:-0}" != "1" ]; then
-    BROKER_REPLY=$(dbus-send --system --print-reply=literal \
-        --dest=org.qdistro.AdminBroker1 \
-        /org/qdistro/AdminBroker1 \
-        org.qdistro.AdminBroker1.CheckPermission \
-        "string:qdistro.tier1.spawn:$APP_BASENAME" \
-        "dict:string:string:" 2>/dev/null \
-        | tr -d ' \t\n' || true)
-    case "$BROKER_REPLY" in
-        deny|*deny*)
-            echo "[tier1] FAIL: broker denied spawn of '$APP_BASENAME'" \
-                "(rule action='qdistro.tier1.spawn:$APP_BASENAME' decision=deny)" >&2
-            exit 1
-            ;;
-        allow|*allow*)
-            [ "${TIER1_DEBUG:-0}" = "1" ] && \
-                echo "[tier1] broker allowed spawn of '$APP_BASENAME'" >&2
-            ;;
-        *)
-            # "unknown" or empty (broker down). Default-allow.
-            [ "${TIER1_DEBUG:-0}" = "1" ] && \
-                echo "[tier1] broker decision unknown for '$APP_BASENAME'; " \
-                     "default-allow" >&2
-            ;;
-    esac
+# Mandatory broker spawn-action gate (spec/30 §"Phase plan" step 6).
+# Admin must author explicit allow rules in /etc/qdistro/rules.d/ keyed
+# on `qdistro.tier1.spawn:<canonical-app-path>`. Tier-1 launch is a
+# security boundary: broker errors, empty replies, "unknown", or any
+# verdict other than "allow" fail closed before qdistro-tier1-exec is
+# reached. Resolve the executable before asking so an allow for
+# /usr/bin/firefox does not also cover ./firefox or /tmp/firefox.
+ORIG_APP="$1"
+if [[ "$ORIG_APP" == */* ]]; then
+    APP_CANDIDATE="$ORIG_APP"
+else
+    APP_CANDIDATE=$(command -v -- "$ORIG_APP" 2>/dev/null || true)
 fi
+if [ -z "$APP_CANDIDATE" ] || [ ! -x "$APP_CANDIDATE" ]; then
+    echo "[tier1] FAIL: target executable not found or not executable: '$ORIG_APP'" >&2
+    exit 1
+fi
+APP_PATH=$(readlink -f -- "$APP_CANDIDATE" 2>/dev/null || true)
+if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH" ] || [ ! -x "$APP_PATH" ]; then
+    echo "[tier1] FAIL: target executable could not be canonicalized: '$ORIG_APP'" >&2
+    exit 1
+fi
+APP_BASENAME=$(basename -- "$APP_PATH")
+SPAWN_ACTION="qdistro.tier1.spawn:$APP_PATH"
+if ! command -v dbus-send >/dev/null 2>&1; then
+    echo "[tier1] FAIL: dbus-send not found; broker authorization required" >&2
+    exit 1
+fi
+set +e
+BROKER_OUTPUT=$(dbus-send --system --print-reply=literal \
+    --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1.CheckPermission \
+    "string:$SPAWN_ACTION" \
+    "dict:string:string:" 2>&1)
+BROKER_STATUS=$?
+set -e
+BROKER_REPLY=$(printf '%s' "$BROKER_OUTPUT" | tr -d ' \t\n')
+if [ "$BROKER_STATUS" -ne 0 ]; then
+    echo "[tier1] FAIL: broker authorization failed for '$APP_BASENAME'" \
+        "(action='$SPAWN_ACTION')" >&2
+    [ "${TIER1_DEBUG:-0}" = "1" ] && printf '%s\n' "$BROKER_OUTPUT" >&2
+    exit 1
+fi
+case "$BROKER_REPLY" in
+    allow|string\"allow\")
+        [ "${TIER1_DEBUG:-0}" = "1" ] && \
+            echo "[tier1] broker allowed spawn of '$APP_BASENAME'" >&2
+        ;;
+    deny|string\"deny\")
+        echo "[tier1] FAIL: broker denied spawn of '$APP_BASENAME'" \
+            "(action='$SPAWN_ACTION' decision=deny)" >&2
+        exit 1
+        ;;
+    unknown|string\"unknown\"|"")
+        echo "[tier1] FAIL: broker has no allow rule for '$APP_BASENAME'" \
+            "(action='$SPAWN_ACTION' decision=unknown)" >&2
+        exit 1
+        ;;
+    *)
+        echo "[tier1] FAIL: broker returned unsupported verdict for '$APP_BASENAME'" \
+            "(action='$SPAWN_ACTION' reply='$BROKER_REPLY')" >&2
+        exit 1
+        ;;
+esac
 
 # qdistro-tier1-exec installs to libexecdir (meson default
 # /usr/libexec), which isn't on $PATH for ordinary users. Resolve

@@ -241,6 +241,16 @@ actually in `qdistro_tier1_t`. If they disagree, broker's
 `CheckPermission` denies — defence in depth against a process that
 managed to get the secctx tag without the SELinux transition.
 
+Tier-1 spawn authorization is mandatory. Before the wrapper enters
+`qdistro-tier1-exec`, it calls broker `CheckPermission` with action
+`qdistro.tier1.spawn:<canonical-app-path>` and fails closed unless the
+reply is an explicit `allow`. Broker errors, missing D-Bus tooling,
+empty replies, `unknown`, and `deny` all block launch. Expected Tier-1
+apps therefore need admin-authored allow rules in
+`/etc/qdistro/rules.d/`.
+For this action namespace, broker `CheckPermission` is rules-only:
+approval-cache rows and hook verdicts do not authorize launch.
+
 This independent verification applies to **direct broker authorization**
 (the broker resolves the D-Bus caller pid and reads its SELinux context
 itself). For **qdshell-mediated decisions** — clipboard receive gates,

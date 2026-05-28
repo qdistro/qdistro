@@ -60,8 +60,13 @@ wraps `qdistro-secctx-exec` with a `setexeccon()` call on the exec edge —
 two independent attestations of the same identity: SELinux type for
 enforcement, `wp_security_context_v1` tag for routing.
 
-A spawn helper `qdistro-tier1-spawn` takes `(silo_user, app...)` and
-calls the wrapper.
+A spawn helper `qdistro-tier1-spawn` takes `(silo_user, app...)`, asks
+the broker for `qdistro.tier1.spawn:<canonical-app-path>`, and calls
+the wrapper only on an explicit `allow`. `unknown`, broker errors, and
+missing broker tooling fail closed; Tier-1 launch authorization is part
+of the security boundary, not advisory logging. This action namespace is
+rules-only; approval-cache rows and hook verdicts do not authorize
+launch.
 
 ### Filesystem labelling strategy
 

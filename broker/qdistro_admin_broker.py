@@ -890,6 +890,10 @@ class Broker(dbus.service.Object):
         )
         if rule is not None:
             return "allow" if rule.decision == "allow" else "deny"
+        # Tier-1 launch is rules-only: a stale approval cache row or hook
+        # verdict must not mint a new sandboxed process.
+        if action_s.startswith("qdistro.tier1.spawn:"):
+            return "unknown"
         row = self.cache.lookup_detail(uid, action_s, exe, argv)
         if row is not None:
             return "allow" if bool(row["decision"]) else "deny"
