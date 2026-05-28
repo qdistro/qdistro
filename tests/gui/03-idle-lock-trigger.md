@@ -25,7 +25,7 @@ case "$(qdlocker_ctrl status 2>/dev/null)" in
 esac
 
 # Shorten the idle threshold to 3s so the scenario doesn't wall-clock
-# wait for the default 10min. Set the env in the user-unit dropin and
+# wait for the default 5min (QDLOCKER_IDLE_MS=300000). Set the env in the user-unit dropin and
 # restart qdlocker so it re-reads.
 "$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- bash -lc '
   mkdir -p ~/.config/systemd/user/qdlocker.service.d

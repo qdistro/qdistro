@@ -56,7 +56,7 @@ wall-clock parallelism, clone the base VM per
 | Forcing an unlock for cleanup | restart the user unit: `systemctl --user restart qdlocker.service` from inside the VM | tears the lock surface down, recreates it in the unlocked state |
 | Lock-state introspection | `qdlocker_ctrl status` → `locked=<bool> prompt-len=<n> pam-ready=<bool>` | always-on; the load-bearing assertion in every scenario |
 | Last-auth-result | `qdlocker_ctrl unlock-result` → `last=success\|failed\|none` | survives until the next lock cycle |
-| Idle-trigger | wall-clock wait for `QDLOCKER_IDLE_MS` (default 10 min) — scenarios shorten via `systemctl --user set-environment QDLOCKER_IDLE_MS=3000` + restart | watches `ext-idle-notify-v1`; scenario 03 |
+| Idle-trigger | wall-clock wait for `QDLOCKER_IDLE_MS` (default 300000 ms = 5 min) — scenarios shorten via `systemctl --user set-environment QDLOCKER_IDLE_MS=3000` + restart | watches `ext-idle-notify-v1`; scenario 03 |
 | Lid close | `virsh qemu-monitor-command --hmp $VM 'sendkey lid_close'` — VMs don't model a real lid; the guest's logind path is exercised via a fake hint instead. Use `qdlocker_ctrl lock` and assert reason=lid-close after wiring | scenario 04, currently a TODO until qdwin's `lock_requested(reason=1)` plumbing lands |
 | Fingerprint match | `busctl --system call ... qdistro.FprintFake EmitMatch` (requires `qdistro-fprintd-fake.service`) | scenario 02 |
 | Visual assertion | `qdwin_screenshot <file.png>` — wraps `virsh screenshot` | qdlocker UI renders on the LOCK layer; screenshot captures it. Cursor visibility depends on renderer (see qdwin pitfall #6) — never assert on cursor presence |
