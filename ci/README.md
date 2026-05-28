@@ -118,8 +118,19 @@ cannot be located. It does not guess paths outside libvirt metadata.
 
 ## Host test dependencies
 
-The `host` gate runs tests across all sibling projects. Two projects need
+The `host` gate runs tests across all sibling projects. Three projects need
 dependencies that are not part of the base qdistro install:
+
+**qdbrowser tests** require `jeepney` (D-Bus bridge client, already a
+runtime dependency in `qdbrowser/pyproject.toml`):
+
+```bash
+# Ubuntu
+sudo apt install python3-jeepney
+
+# openSUSE Tumbleweed
+sudo zypper install python3-jeepney
+```
 
 **qdshell QML tests** require the `QtQml.WorkerScript` QML module:
 
