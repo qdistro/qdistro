@@ -89,7 +89,7 @@ connection. We `os.setresuid` to admin only for the DecideRequest
 call by spawning a subprocess that does so — see _decide_as_admin.
 """
 from __future__ import annotations
-import json, os, subprocess, sys, time
+import atexit, json, os, pwd, subprocess, sys, time
 
 try:
     import dbus
@@ -104,10 +104,51 @@ BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
 
 ADMIN_UID = 1000
-CLAIM_UID = 2050  # arbitrary non-admin uid we claim is the qsu caller
-CLAIM_PID = 1                 # init: always alive, start_time is stable
-CLAIM_EXE = "/usr/bin/qsu"
 ACTION    = "qsu.exec:root"
+
+try:
+    _claim_pw = pwd.getpwnam("nobody")
+except KeyError:
+    _claim_pw = pwd.getpwnam("admin")
+CLAIM_UID = int(_claim_pw.pw_uid)
+CLAIM_GID = int(_claim_pw.pw_gid)
+
+
+def _drop_claim_uid():
+    os.setgroups([])
+    os.setgid(CLAIM_GID)
+    os.setuid(CLAIM_UID)
+
+
+_claim_proc = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(600)"],
+    preexec_fn=_drop_claim_uid,
+)
+CLAIM_PID = int(_claim_proc.pid)
+time.sleep(0.05)
+CLAIM_EXE = os.readlink(f"/proc/{CLAIM_PID}/exe")
+
+
+def _proc_start_time(pid):
+    data = open(f"/proc/{pid}/stat", "rb").read()
+    rparen = data.rfind(b")")
+    return int(data[rparen + 2:].split()[19])
+
+
+CLAIM_START_TIME = _proc_start_time(CLAIM_PID)
+
+
+def _cleanup_claim_proc():
+    if _claim_proc.poll() is None:
+        _claim_proc.terminate()
+        try:
+            _claim_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            _claim_proc.kill()
+            _claim_proc.wait(timeout=2)
+
+
+atexit.register(_cleanup_claim_proc)
 
 
 def _make_iface():
@@ -117,7 +158,11 @@ def _make_iface():
 
 
 def _details_for(argv):
-    d = {"target_user": "root", "argv": " ".join(argv)}
+    d = {
+        "target_user": "root",
+        "argv": " ".join(argv),
+        "caller_start_time": CLAIM_START_TIME,
+    }
     for i, a in enumerate(argv):
         d[f"argv[{i:02d}]"] = a
     return d
@@ -166,8 +211,7 @@ def _decide_as_admin(rid, decision, scope):
 
 def _revoke_cache_for_uid(uid):
     """Drain every cache row this driver wrote. RevokeAllForUid wipes
-    everything we put in (and only what this probe put in, since
-    CLAIM_UID 2050 is otherwise untouched)."""
+    everything we put in for the live claim uid."""
     subprocess.run(
         ["runuser", "-u", "admin", "--",
          "python3", "-c",

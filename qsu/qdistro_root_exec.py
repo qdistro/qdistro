@@ -123,9 +123,8 @@ def _peer_exe(pid: int) -> str:
 def _peer_start_time(pid: int) -> int:
     """Read /proc/<pid>/stat field 22 (starttime in clock ticks).
 
-    Paired with a later re-read to detect exec/exit races between
-    accept() and the broker call. Zero means "couldn't read" — the
-    re-check later still fails closed if both reads give zero.
+    Paired with a later re-read to detect PID reuse between accept()
+    and the broker call. Zero means "couldn't read".
     """
     try:
         with open(f"/proc/{pid}/stat", "rb") as f:
@@ -143,7 +142,8 @@ def _peer_start_time(pid: int) -> int:
 
 def _ask_broker(target_user: str, argv: list[str],
                  caller_uid: int, caller_pid: int, caller_exe: str,
-                 *, client_claimed_name: str = "") -> bool:
+                 *, caller_start_time: int = 0,
+                 client_claimed_name: str = "") -> bool:
     """Route through the broker's standard approval flow.
 
     Uses RequestPermissionAs so the broker records (and matches rules
@@ -176,6 +176,8 @@ def _ask_broker(target_user: str, argv: list[str],
         # admin app's detail pane renders them in order.
         **{f"argv[{i:02d}]": a for i, a in enumerate(argv)},
     }
+    if caller_start_time:
+        details["caller_start_time"] = dbus.UInt64(int(caller_start_time))
     if client_claimed_name:
         details["client_claimed_name"] = client_claimed_name
     # 2026-05-16: bumped dbus reply timeouts. Two manifestations of
@@ -410,25 +412,35 @@ def handle_one(sock: socket.socket) -> None:
             return
         argv = resolved
 
-        # Step 6: re-verify pid identity. If the caller exited or
-        # exec'd between accept and here, the admin should not approve
-        # under the original exe. A starttime mismatch means the pid
-        # has been recycled to a different process — force deny.
+        # Step 6: re-verify pid identity. If the caller exited, exec'd,
+        # or the pid was recycled between accept and here, the admin
+        # should not approve under the original exe.
         start_now = _peer_start_time(pid)
-        if start_at_accept != 0 and start_now != 0 and start_at_accept != start_now:
+        if start_at_accept != 0 and start_now != start_at_accept:
             _send(sock, {"type": "error",
-                         "message": "caller exec'd or exited between connect "
+                         "message": "caller exited between connect "
                                     "and request; refusing"})
             _send(sock, {"type": "exit", "code": 1})
             syslog.syslog(syslog.LOG_WARNING,
                           f"qsu pid-race: uid={uid} pid={pid} "
                           f"start_accept={start_at_accept} start_now={start_now}")
             return
+        exe_now = _peer_exe(pid)
+        if exe_at_accept and exe_at_accept != "?" and exe_now != exe_at_accept:
+            _send(sock, {"type": "error",
+                         "message": "caller executable changed between connect "
+                                    "and request; refusing"})
+            _send(sock, {"type": "exit", "code": 1})
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"qsu exe-race: uid={uid} pid={pid} "
+                          f"exe_accept={exe_at_accept!r} exe_now={exe_now!r}")
+            return
 
         syslog.syslog(syslog.LOG_NOTICE,
                       f"qsu exec request: caller uid={uid} pid={pid} "
                       f"exe={exe_at_accept} target={target_user!r} argv={argv!r}")
         allowed = _ask_broker(target_user, argv, uid, pid, exe_at_accept,
+                              caller_start_time=start_at_accept,
                               client_claimed_name=client_claimed_name)
         if not allowed:
             _send(sock, {"type": "error", "message": "request denied"})

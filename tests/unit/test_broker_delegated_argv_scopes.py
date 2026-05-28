@@ -107,6 +107,119 @@ def _enqueue_direct(broker: _StubBroker, *, uid: int = NON_ADMIN_UID,
                            delegated=False)
 
 
+class TestRequestPermissionAsIdentityVerification:
+    def test_rejects_claimed_exe_that_changed_after_qsu_connect(self, broker,
+                                                                 monkeypatch):
+        broker.set_peer(uid=0)
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/changed", 777))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: NON_ADMIN_UID)
+
+        with pytest.raises(Exception) as ei:
+            broker.RequestPermissionAs(
+                NON_ADMIN_UID, 1234, "/usr/bin/original",
+                "qsu.exec:root", {"target_user": "root"})
+
+        assert "executable changed" in str(ei.value)
+
+    def test_rejects_claimed_uid_that_no_longer_matches_pid(self, broker,
+                                                            monkeypatch):
+        broker.set_peer(uid=0)
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/qsu", 777))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: NON_ADMIN_UID + 1)
+
+        with pytest.raises(Exception) as ei:
+            broker.RequestPermissionAs(
+                NON_ADMIN_UID, 1234, "/usr/bin/qsu",
+                "qsu.exec:root", {"target_user": "root"})
+
+        assert "uid mismatch" in str(ei.value)
+
+    def test_rejects_when_claimed_uid_cannot_be_verified(self, broker,
+                                                         monkeypatch):
+        broker.set_peer(uid=0)
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/qsu", 777))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: None)
+
+        with pytest.raises(Exception) as ei:
+            broker.RequestPermissionAs(
+                NON_ADMIN_UID, 1234, "/usr/bin/qsu",
+                "qsu.exec:root", {"target_user": "root"})
+
+        assert "uid could not be verified" in str(ei.value)
+
+    def test_rejects_claimed_start_time_that_no_longer_matches_pid(
+            self, broker, monkeypatch):
+        broker.set_peer(uid=0)
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/qsu", 888))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: NON_ADMIN_UID)
+
+        with pytest.raises(Exception) as ei:
+            broker.RequestPermissionAs(
+                NON_ADMIN_UID, 1234, "/usr/bin/qsu",
+                "qsu.exec:root",
+                {"target_user": "root", "caller_start_time": 777})
+
+        assert "start time mismatch" in str(ei.value)
+
+    def test_matching_claim_uses_live_start_time_for_request(self, broker,
+                                                             monkeypatch):
+        broker.set_peer(uid=0)
+        captured = {}
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/qsu", 777))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: NON_ADMIN_UID)
+
+        def fake_enqueue(uid, pid, exe, start_time, action, details, *,
+                         delegated, one_shot=False):
+            captured.update(
+                uid=uid, pid=pid, exe=exe, start_time=start_time,
+                action=action, delegated=delegated, one_shot=one_shot)
+            return 99
+
+        monkeypatch.setattr(broker, "_enqueue", fake_enqueue)
+
+        rid = broker.RequestPermissionAs(
+            NON_ADMIN_UID, 1234, "/usr/bin/qsu",
+            "qsu.exec:root",
+            {"target_user": "root", "caller_start_time": 777})
+
+        assert rid == 99
+        assert captured == {
+            "uid": NON_ADMIN_UID,
+            "pid": 1234,
+            "exe": "/usr/bin/qsu",
+            "start_time": 777,
+            "action": "qsu.exec:root",
+            "delegated": True,
+            "one_shot": False,
+        }
+
+    def test_empty_claimed_exe_enqueues_verified_live_exe(self, broker,
+                                                          monkeypatch):
+        broker.set_peer(uid=0)
+        captured = {}
+        monkeypatch.setattr(B, "_read_proc_identity",
+                            lambda pid: ("/usr/bin/qsu", 777))
+        monkeypatch.setattr(B, "_read_proc_uid", lambda pid: NON_ADMIN_UID)
+
+        def fake_enqueue(uid, pid, exe, start_time, action, details, *,
+                         delegated, one_shot=False):
+            captured["exe"] = exe
+            return 99
+
+        monkeypatch.setattr(broker, "_enqueue", fake_enqueue)
+
+        broker.RequestPermissionAs(
+            NON_ADMIN_UID, 1234, "",
+            "qsu.exec:root", {"target_user": "root"})
+
+        assert captured["exe"] == "/usr/bin/qsu"
+
+
 # --- argv-blind scopes still rejected for delegated --------------------
 
 class TestArgvBlindScopesStillForbidden:

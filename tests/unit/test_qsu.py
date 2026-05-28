@@ -11,6 +11,7 @@ import socket
 
 import pytest
 
+import qdistro_root_exec as Q
 from qdistro_root_exec import _recv_request, _send, _resolve_target
 
 
@@ -78,3 +79,59 @@ class TestResolveTarget:
     def test_unknown_user_raises(self):
         with pytest.raises(ValueError):
             _resolve_target("definitely-not-a-real-user-" + "x" * 32)
+
+
+class TestHandleOneIdentity:
+    def test_rejects_same_pid_exec_between_connect_and_broker(self, pair,
+                                                               monkeypatch):
+        sent: list[dict] = []
+
+        monkeypatch.setattr(Q, "_peer_cred", lambda sock: (4242, 2000, 2000))
+        monkeypatch.setattr(Q, "_peer_start_time", lambda pid: 12345)
+        exe_reads = iter(["/usr/bin/original", "/usr/bin/changed"])
+        monkeypatch.setattr(Q, "_peer_exe", lambda pid: next(exe_reads))
+        monkeypatch.setattr(Q, "_resolve_target",
+                            lambda target: (0, 0, "/root", "/bin/sh"))
+        monkeypatch.setattr(Q, "_resolve_argv", lambda argv: ["/usr/bin/id"])
+        monkeypatch.setattr(Q, "_send",
+                            lambda sock, obj: sent.append(dict(obj)))
+        monkeypatch.setattr(Q, "_ask_broker",
+                            lambda *args, **kwargs:
+                            pytest.fail("stale executable reached broker"))
+
+        _send(pair.a, {"target_user": "root", "argv": ["id"]})
+        Q.handle_one(pair.b)
+
+        assert sent == [
+            {
+                "type": "error",
+                "message": "caller executable changed between connect "
+                           "and request; refusing",
+            },
+            {"type": "exit", "code": 1},
+        ]
+
+    def test_passes_accept_start_time_to_broker(self, pair, monkeypatch):
+        sent: list[dict] = []
+        broker_kwargs: dict = {}
+
+        monkeypatch.setattr(Q, "_peer_cred", lambda sock: (4242, 2000, 2000))
+        monkeypatch.setattr(Q, "_peer_start_time", lambda pid: 12345)
+        monkeypatch.setattr(Q, "_peer_exe", lambda pid: "/usr/bin/qsu")
+        monkeypatch.setattr(Q, "_resolve_target",
+                            lambda target: (0, 0, "/root", "/bin/sh"))
+        monkeypatch.setattr(Q, "_resolve_argv", lambda argv: ["/usr/bin/id"])
+        monkeypatch.setattr(Q, "_send",
+                            lambda sock, obj: sent.append(dict(obj)))
+
+        def fake_ask_broker(*args, **kwargs):
+            broker_kwargs.update(kwargs)
+            return False
+
+        monkeypatch.setattr(Q, "_ask_broker", fake_ask_broker)
+
+        _send(pair.a, {"target_user": "root", "argv": ["id"]})
+        Q.handle_one(pair.b)
+
+        assert broker_kwargs["caller_start_time"] == 12345
+        assert sent[-1] == {"type": "exit", "code": 1}

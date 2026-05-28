@@ -520,6 +520,58 @@ def _read_proc_layered_checked(pid: int, expected_start_time: int,
     return out
 
 
+def _verify_delegated_claim(caller_uid: int, caller_pid: int,
+                            caller_exe: str,
+                            expected_start_time: int = 0) -> tuple[str, int]:
+    """Verify a RequestPermissionAs caller identity claim against /proc.
+
+    qsu captures uid/pid/exe via SO_PEERCRED immediately after accept.
+    The broker is a second line of defense: before accepting the
+    delegated tuple, re-read the claimed pid and reject stale claims
+    when the process disappeared, changed executable, or no longer has
+    the claimed uid. Returns the live (exe, start_time) for enqueueing.
+    """
+    pid_i = int(caller_pid)
+    uid_i = int(caller_uid)
+    exe_s = str(caller_exe or "")
+    if pid_i <= 0:
+        raise dbus.DBusException(
+            f"invalid delegated caller pid {pid_i}",
+            name=BUS_NAME + ".BadArgument",
+        )
+
+    live_exe, live_start = _read_proc_identity(pid_i)
+    if live_start == 0:
+        raise dbus.DBusException(
+            f"delegated caller pid {pid_i} is not a live process",
+            name=BUS_NAME + ".CallerGone",
+        )
+    if expected_start_time and live_start != int(expected_start_time):
+        raise dbus.DBusException(
+            f"delegated caller pid {pid_i} start time mismatch",
+            name=BUS_NAME + ".CallerIdentityMismatch",
+        )
+    if exe_s and exe_s != "?" and live_exe != exe_s:
+        raise dbus.DBusException(
+            f"delegated caller pid {pid_i} executable changed",
+            name=BUS_NAME + ".CallerIdentityMismatch",
+        )
+
+    live_uid = _read_proc_uid(pid_i)
+    if live_uid is None:
+        raise dbus.DBusException(
+            f"delegated caller pid {pid_i} uid could not be verified",
+            name=BUS_NAME + ".CallerGone",
+        )
+    if int(live_uid) != uid_i:
+        raise dbus.DBusException(
+            f"delegated caller pid {pid_i} uid mismatch",
+            name=BUS_NAME + ".CallerIdentityMismatch",
+        )
+
+    return live_exe, live_start
+
+
 class _Request:
     __slots__ = (
         "id", "uid", "pid", "exe", "start_time", "action", "details",
@@ -1449,11 +1501,20 @@ class Broker(dbus.service.Object):
                 f"got uid {delegator_uid}",
                 name=BUS_NAME + ".AccessDenied",
             )
-        # Capture the claimed pid's current start_time so TOCTOU checks
-        # at decide-time still work for delegated requests.
-        _exe2, start_time = _read_proc_identity(int(caller_pid))
+        # Verify the delegated tuple is still true immediately before
+        # accepting it. qsu also rechecks after socket connect; keeping
+        # the broker check here prevents stale or hand-written
+        # RequestPermissionAs calls from enqueueing misleading identity.
+        try:
+            expected_start_time = int(
+                dict(details or {}).get("caller_start_time") or 0)
+        except (TypeError, ValueError):
+            expected_start_time = 0
+        live_exe, start_time = _verify_delegated_claim(
+            int(caller_uid), int(caller_pid), str(caller_exe),
+            expected_start_time)
         return self._enqueue(int(caller_uid), int(caller_pid),
-                             str(caller_exe), start_time,
+                             live_exe, start_time,
                              str(action), details, delegated=True)
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="a(iss)",
