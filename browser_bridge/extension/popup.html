@@ -4,19 +4,95 @@
   <meta charset="utf-8">
   <title>qdistro browser bridge</title>
   <style>
-    body { font-family: sans-serif; min-width: 320px; margin: 8px; }
+    body { font-family: sans-serif; min-width: 320px; max-width: 360px; margin: 0; padding: 8px; }
     h1 { font-size: 14px; margin: 0 0 6px 0; }
-    button { padding: 4px 10px; }
-    pre { font-size: 11px; background: #f4f4f4; padding: 6px; white-space: pre-wrap; word-break: break-all; }
-    .ok { color: #0a6; }
-    .err { color: #a00; }
+    .section { margin-bottom: 10px; padding: 6px 0; border-bottom: 1px solid #eee; }
+    .section:last-child { border-bottom: none; }
+    .section-title { font-size: 11px; font-weight: bold; color: #555; margin-bottom: 4px; text-transform: uppercase; }
+
+    /* Status indicator */
+    .status-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .status-dot.ok { background: #0a6; }
+    .status-dot.err { background: #a00; }
+    .status-dot.pending { background: #fa0; }
+    .status-text { font-size: 12px; }
+
+    /* Buttons */
+    button { padding: 4px 10px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 3px; background: #f8f8f8; }
+    button:hover { background: #e8e8e8; }
+    button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+    button.primary:hover { background: #1557b0; }
+
+    /* Credential list */
+    .cred-list { max-height: 200px; overflow-y: auto; margin: 4px 0; }
+    .cred-item { padding: 6px 8px; cursor: pointer; border: 1px solid #eee; border-radius: 3px; margin-bottom: 3px; font-size: 12px; }
+    .cred-item:hover { background: #e8f0fe; border-color: #1a73e8; }
+    .cred-item .username { font-weight: bold; }
+    .cred-item .domain { color: #666; font-size: 11px; }
+
+    /* Messages */
+    .msg { font-size: 12px; padding: 4px 6px; border-radius: 3px; margin: 4px 0; }
+    .msg.ok { background: #e6f4ea; color: #137333; }
+    .msg.err { background: #fce8e6; color: #c5221f; }
+    .msg.info { background: #e8f0fe; color: #1a73e8; }
+
+    /* JSON output (debug) */
+    pre { font-size: 10px; background: #f4f4f4; padding: 6px; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto; display: none; }
+    pre.show { display: block; }
+
+    /* Hidden sections */
+    .hidden { display: none; }
   </style>
 </head>
 <body>
   <h1>qdistro browser bridge</h1>
-  <button id="ping">qdistro.ping</button>
-  <span id="status">idle</span>
+
+  <!-- Connection status -->
+  <div class="section" id="status-section">
+    <div class="status-row">
+      <span class="status-dot pending" id="status-dot"></span>
+      <span class="status-text" id="status-text">checking...</span>
+    </div>
+  </div>
+
+  <!-- Credentials section (shown when on a page with password fields) -->
+  <div class="section hidden" id="cred-section">
+    <div class="section-title">Credentials</div>
+    <div id="cred-msg"></div>
+    <div class="cred-list" id="cred-list"></div>
+  </div>
+
+  <!-- Save credential prompt (shown after manual save from popup) -->
+  <div class="section hidden" id="save-section">
+    <div class="section-title">Save credential</div>
+    <div style="margin-bottom:6px;">
+      <label style="font-size:11px;display:block;margin-bottom:2px;">URL</label>
+      <input type="text" id="save-url" style="width:100%;box-sizing:border-box;font-size:12px;padding:3px;" readonly>
+    </div>
+    <div style="margin-bottom:6px;">
+      <label style="font-size:11px;display:block;margin-bottom:2px;">Username</label>
+      <input type="text" id="save-username" style="width:100%;box-sizing:border-box;font-size:12px;padding:3px;">
+    </div>
+    <div style="margin-bottom:6px;">
+      <label style="font-size:11px;display:block;margin-bottom:2px;">Password</label>
+      <input type="password" id="save-password" style="width:100%;box-sizing:border-box;font-size:12px;padding:3px;">
+    </div>
+    <button class="primary" id="save-btn">Save</button>
+    <span id="save-msg" class="msg hidden"></span>
+  </div>
+
+  <!-- Actions -->
+  <div class="section">
+    <button id="ping">Ping bridge</button>
+    <button id="fill-btn">Fill passwords</button>
+    <button id="show-save">Save new...</button>
+    <button id="toggle-debug" style="float:right;font-size:10px;">debug</button>
+  </div>
+
+  <!-- Debug output -->
   <pre id="out">(no response yet)</pre>
+
   <script src="popup.js"></script>
 </body>
 </html>

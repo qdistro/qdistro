@@ -1,16 +1,22 @@
 {
   "manifest_version": 3,
   "name": "qdistro browser bridge",
-  "version": "0.1.0",
-  "description": "Round-trips qdistro.ping through the qdistro native-messaging bridge.",
+  "version": "0.2.0",
+  "description": "qdistro desktop integration: password fill, tab management, and native messaging bridge.",
   "minimum_chrome_version": "126",
   "permissions": [
     "nativeMessaging",
     "activeTab",
-    "webNavigation"
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "action": {
-    "default_title": "qdistro: ping bridge",
+    "default_title": "qdistro browser bridge",
     "default_popup": "popup.html",
     "default_icon": {
       "48": "icons/icon-48.png"
@@ -21,5 +27,12 @@
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

@@ -1,13 +1,597 @@
-// qdistro browser-bridge MV3 service-worker stub.
+// qdistro browser-bridge MV3 service-worker — Phase 9a/9b.
 //
-// MV3 mandates a service worker; for the Phase-8 MVP we don't keep
-// a persistent port (no streaming ops). Service worker is empty
-// modulo a no-op install handler so Chromium's installer accepts
-// the manifest. Persistent-port + 25s heartbeat per spec/14
-// §"Heartbeat for persistent ports" lands in Phase-9 with the
-// first streaming op (e.g. tabs.list).
+// Persistent native-messaging port with:
+// - qdistro.handshake on connect (receives per-extension session secret)
+// - Heartbeat ack (qdistro.heartbeat -> qdistro.heartbeat.ack)
+// - Inbound request dispatch (tabs.list/open/close, page.extract.request,
+//   cookies.export, containers.*, mpris/downloads/notifications/screenlock)
+// - pwd.fill / pwd.save message forwarding from content script / popup
+// - Intent-token minting (HMAC-SHA256 over "request_id|ts|op")
+//
+// Cross-browser: chrome.* with `browser` fallback so the same source
+// runs under both Chromium MV3 and Firefox MV2.
 
+const api = (typeof browser !== "undefined") ? browser : chrome;
+const HOST = "qdistro";
+
+// ---- session state --------------------------------------------------
+
+let _port = null;           // persistent native-messaging port
+let _sessionSecret = null;  // hex string from handshake, converted to Uint8Array for HMAC
+let _tokenTtlS = 5.0;      // from handshake reply
+let _requestSeq = 0;        // monotonic counter for intent-token request_ids
+let _handshakeComplete = false;
+
+// Pending responses from the bridge keyed by request_id.  Used by
+// popup / content-script message forwarding: they send a request,
+// background.js forwards to bridge, parks a resolver, and fulfills it
+// when the bridge replies.
+//
+// Note: the bridge does NOT echo request_id in its dispatch replies
+// for extension-initiated ops (pwd.fill, pwd.save, ping, etc.).
+// It only includes request_id for bridge-initiated inbound requests
+// (tabs.list, heartbeat, etc.). For extension-initiated ops we
+// fall back to matching by op using _pendingByOp.
+const _pendingCallbacks = {};  // keyed by request_id (for bridge-initiated flows)
+const _pendingByOp = {};       // keyed by op (FIFO queue per op for extension-initiated)
+
+// ---- helpers --------------------------------------------------------
+
+function nextRequestId() {
+  _requestSeq++;
+  const rand = Math.random().toString(36).slice(2, 10);
+  return "ext-" + _requestSeq + "-" + rand;
+}
+
+// Convert hex string to Uint8Array
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+// HMAC-SHA256 using SubtleCrypto (available in service workers).
+// Returns hex digest.
+async function hmacSha256(keyBytes, message) {
+  const key = await crypto.subtle.importKey(
+    "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(message));
+  return Array.from(new Uint8Array(sig))
+    .map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Mint an intent token for the given op. Returns a promise resolving
+// to {request_id, ts, op, hmac}.
+async function mintIntentToken(op) {
+  if (!_sessionSecret) {
+    throw new Error("no session secret — handshake not complete");
+  }
+  const request_id = nextRequestId();
+  const ts = Date.now() / 1000;  // seconds, matching Python time.time()
+  const canonical = request_id + "|" + ts + "|" + op;
+  const mac = await hmacSha256(_sessionSecret, canonical);
+  return { request_id, ts, op, hmac: mac };
+}
+
+// Send a message to the bridge and return a promise for the reply.
+// The bridge's dispatch() sets body["op"] on replies but does NOT
+// echo request_id for extension-initiated ops. We track pending
+// requests both by request_id (in case the bridge adds one) and by
+// op (FIFO queue) so that when the reply arrives we can match it.
+function bridgeRequest(msg) {
+  return new Promise((resolve, reject) => {
+    if (!_port) {
+      reject(new Error("bridge port not connected"));
+      return;
+    }
+    const op = msg.op || "";
+    const rid = msg.request_id || nextRequestId();
+    msg.request_id = rid;
+    const entry = { resolve, reject, ts: Date.now(), op, rid };
+
+    // Track by request_id (for bridge-initiated replies that echo it)
+    _pendingCallbacks[rid] = entry;
+    // Also track by op in a FIFO queue (for extension-initiated replies)
+    if (!_pendingByOp[op]) _pendingByOp[op] = [];
+    _pendingByOp[op].push(entry);
+
+    try {
+      _port.postMessage(msg);
+    } catch (e) {
+      delete _pendingCallbacks[rid];
+      _removePendingByOp(op, rid);
+      reject(e);
+    }
+    // Timeout after 70 seconds (bridge's inbound timeout is 75s).
+    setTimeout(() => {
+      if (_pendingCallbacks[rid]) {
+        delete _pendingCallbacks[rid];
+        _removePendingByOp(op, rid);
+        resolve({ ok: false, error: "extension_timeout" });
+      }
+    }, 70000);
+  });
+}
+
+function _removePendingByOp(op, rid) {
+  const q = _pendingByOp[op];
+  if (!q) return;
+  const idx = q.findIndex(e => e.rid === rid);
+  if (idx >= 0) q.splice(idx, 1);
+  if (!q.length) delete _pendingByOp[op];
+}
+
+// ---- inbound dispatch (bridge -> extension) -------------------------
+// The bridge pushes requests like {op: "tabs.list", request_id: "r3-..."}
+// down the pipe. We execute the browser API call and reply with
+// {op: "<op>.reply", request_id, ...result}.
+
+async function handleInboundRequest(msg) {
+  const op = msg.op;
+  const rid = msg.request_id || "";
+  let result;
+
+  try {
+    switch (op) {
+      case "tabs.list":
+        result = await handleTabsList(msg);
+        break;
+      case "tabs.open":
+        result = await handleTabsOpen(msg);
+        break;
+      case "tabs.close":
+        result = await handleTabsClose(msg);
+        break;
+      case "page.extract.request":
+        result = await handlePageExtractRequest(msg);
+        break;
+      case "cookies.export":
+        result = await handleCookiesExportInbound(msg);
+        break;
+      case "containers.list":
+        result = await handleContainersList(msg);
+        break;
+      case "containers.create":
+        result = await handleContainersCreate(msg);
+        break;
+      case "containers.remove":
+        result = await handleContainersRemove(msg);
+        break;
+      default:
+        result = { ok: false, error: "unknown_inbound_op", op: op };
+        break;
+    }
+  } catch (e) {
+    result = { ok: false, error: "handler_error", detail: String(e).slice(0, 200) };
+  }
+
+  // Send reply back to bridge
+  if (_port && rid) {
+    try {
+      _port.postMessage({
+        op: op + ".reply",
+        request_id: rid,
+        ...result
+      });
+    } catch (e) {
+      // Port closed — nothing we can do.
+    }
+  }
+}
+
+// ---- tabs handlers --------------------------------------------------
+
+async function handleTabsList(_msg) {
+  const tabs = await api.tabs.query({});
+  return {
+    ok: true,
+    tabs: tabs.map(t => ({
+      id: t.id,
+      url: t.url || "",
+      title: t.title || "",
+      active: !!t.active,
+      windowId: t.windowId,
+      status: t.status || "complete",
+      pinned: !!t.pinned,
+      incognito: !!t.incognito,
+    }))
+  };
+}
+
+async function handleTabsOpen(msg) {
+  const url = msg.url || "about:blank";
+  const active = msg.active !== false;
+  const tab = await api.tabs.create({ url, active });
+  return { ok: true, id: tab.id, url: tab.url || url };
+}
+
+async function handleTabsClose(msg) {
+  const tabId = msg.tab_id || msg.tabId;
+  if (typeof tabId !== "number") {
+    return { ok: false, error: "missing_tab_id" };
+  }
+  await api.tabs.remove(tabId);
+  return { ok: true, tab_id: tabId };
+}
+
+// ---- page.extract.request handler -----------------------------------
+// Bridge sends {op: "page.extract.request", mode: "...", selector: "..."}
+// Extension injects a content script to extract the requested content
+// from the active tab.
+
+async function handlePageExtractRequest(msg) {
+  const mode = msg.mode || "visible_text";
+  const tabs = await api.tabs.query({ active: true, currentWindow: true });
+  if (!tabs.length) {
+    return { ok: false, error: "no_active_tab" };
+  }
+  const tab = tabs[0];
+  // Use scripting API (MV3) or tabs.executeScript (MV2) to extract content.
+  const extractFn = `(function() {
+    var mode = ${JSON.stringify(mode)};
+    var selector = ${JSON.stringify(msg.selector || "")};
+    if (mode === "selection") return window.getSelection().toString();
+    if (mode === "title") return document.title;
+    if (mode === "visible_text") return document.body ? document.body.innerText : "";
+    if (mode === "full_text") return document.body ? document.body.textContent : "";
+    if (mode === "outer_html") return document.documentElement.outerHTML;
+    if (mode === "by_selector" && selector) {
+      var el = document.querySelector(selector);
+      return el ? el.outerHTML : "";
+    }
+    return "";
+  })()`;
+  let content = "";
+  try {
+    if (api.scripting && api.scripting.executeScript) {
+      // MV3 path
+      const results = await api.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: function(m, s) {
+          if (m === "selection") return window.getSelection().toString();
+          if (m === "title") return document.title;
+          if (m === "visible_text") return document.body ? document.body.innerText : "";
+          if (m === "full_text") return document.body ? document.body.textContent : "";
+          if (m === "outer_html") return document.documentElement.outerHTML;
+          if (m === "by_selector" && s) {
+            var el = document.querySelector(s);
+            return el ? el.outerHTML : "";
+          }
+          return "";
+        },
+        args: [mode, msg.selector || ""]
+      });
+      if (results && results[0]) {
+        content = results[0].result || "";
+      }
+    } else {
+      // MV2 / Firefox fallback
+      const results = await api.tabs.executeScript(tab.id, { code: extractFn });
+      content = (results && results[0]) || "";
+    }
+  } catch (e) {
+    return { ok: false, error: "extract_failed", detail: String(e).slice(0, 200) };
+  }
+  return { ok: true, content, url: tab.url || "", title: tab.title || "" };
+}
+
+// ---- cookies.export inbound handler ---------------------------------
+// Bridge requests cookie export for a domain from extension side.
+
+async function handleCookiesExportInbound(msg) {
+  const domain = msg.domain || msg.url || "";
+  if (!domain) {
+    return { ok: false, error: "missing_domain" };
+  }
+  if (!api.cookies) {
+    return { ok: false, error: "cookies_api_unavailable" };
+  }
+  try {
+    const cookies = await api.cookies.getAll({ url: domain });
+    return {
+      ok: true,
+      cookies: cookies.map(c => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        expirationDate: c.expirationDate || null,
+      }))
+    };
+  } catch (e) {
+    return { ok: false, error: "cookies_get_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- Firefox containers (contextualIdentities) ----------------------
+
+async function handleContainersList(_msg) {
+  if (!api.contextualIdentities) {
+    return { ok: false, error: "contextualIdentities_unavailable" };
+  }
+  try {
+    const ids = await api.contextualIdentities.query({});
+    return {
+      ok: true,
+      containers: ids.map(c => ({
+        cookieStoreId: c.cookieStoreId,
+        name: c.name,
+        color: c.color,
+        icon: c.icon,
+      }))
+    };
+  } catch (e) {
+    return { ok: false, error: "containers_list_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+async function handleContainersCreate(msg) {
+  if (!api.contextualIdentities) {
+    return { ok: false, error: "contextualIdentities_unavailable" };
+  }
+  try {
+    const c = await api.contextualIdentities.create({
+      name: msg.name || "qdistro",
+      color: msg.color || "blue",
+      icon: msg.icon || "circle",
+    });
+    return { ok: true, cookieStoreId: c.cookieStoreId, name: c.name };
+  } catch (e) {
+    return { ok: false, error: "containers_create_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+async function handleContainersRemove(msg) {
+  if (!api.contextualIdentities) {
+    return { ok: false, error: "contextualIdentities_unavailable" };
+  }
+  const csid = msg.cookieStoreId;
+  if (!csid) {
+    return { ok: false, error: "missing_cookieStoreId" };
+  }
+  try {
+    await api.contextualIdentities.remove(csid);
+    return { ok: true, cookieStoreId: csid };
+  } catch (e) {
+    return { ok: false, error: "containers_remove_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- persistent port management -------------------------------------
+
+function connectBridge() {
+  if (_port) {
+    try { _port.disconnect(); } catch (_e) { /* ignore */ }
+  }
+  _port = null;
+  _handshakeComplete = false;
+  _sessionSecret = null;
+
+  try {
+    _port = api.runtime.connectNative(HOST);
+  } catch (e) {
+    console.error("qdistro: connectNative failed:", e);
+    // Retry after a delay
+    setTimeout(connectBridge, 5000);
+    return;
+  }
+
+  _port.onMessage.addListener(onBridgeMessage);
+  _port.onDisconnect.addListener(onBridgeDisconnect);
+
+  // Initiate handshake immediately
+  _port.postMessage({ op: "qdistro.handshake" });
+}
+
+function onBridgeDisconnect() {
+  const err = api.runtime.lastError;
+  console.warn("qdistro: bridge disconnected",
+    err ? err.message : "(no error)");
+  _port = null;
+  _handshakeComplete = false;
+  _sessionSecret = null;
+  // Clear all pending callbacks with an error
+  for (const rid of Object.keys(_pendingCallbacks)) {
+    const cb = _pendingCallbacks[rid];
+    delete _pendingCallbacks[rid];
+    if (cb && cb.resolve) {
+      cb.resolve({ ok: false, error: "bridge_disconnected" });
+    }
+  }
+  for (const op of Object.keys(_pendingByOp)) {
+    delete _pendingByOp[op];
+  }
+  // Attempt reconnect after a delay. MV3 service worker may be
+  // suspended — the alarm or next event will re-trigger connect.
+  setTimeout(connectBridge, 3000);
+}
+
+function onBridgeMessage(msg) {
+  if (!msg || typeof msg !== "object") return;
+
+  const op = msg.op || "";
+
+  // 1. Heartbeat: reply immediately
+  if (op === "qdistro.heartbeat") {
+    if (_port) {
+      try {
+        _port.postMessage({
+          op: "qdistro.heartbeat.ack",
+          request_id: msg.request_id || "",
+        });
+      } catch (_e) { /* port closed */ }
+    }
+    return;
+  }
+
+  // 2. Handshake reply: store session secret
+  if (op === "qdistro.handshake" && msg.session_secret_hex) {
+    _sessionSecret = hexToBytes(msg.session_secret_hex);
+    _tokenTtlS = msg.token_ttl_s || 5.0;
+    _handshakeComplete = true;
+    console.log("qdistro: handshake complete, extension_id:", msg.extension_id || "(none)");
+    return;
+  }
+
+  // 3. Response to a pending request — match by request_id first
+  const rid = msg.request_id || "";
+  if (rid && _pendingCallbacks[rid]) {
+    const cb = _pendingCallbacks[rid];
+    delete _pendingCallbacks[rid];
+    _removePendingByOp(cb.op, rid);
+    if (cb.resolve) cb.resolve(msg);
+    return;
+  }
+
+  // 4. Response to a pending request — match by op (FIFO).
+  //    The bridge's dispatch() does NOT echo request_id for
+  //    extension-initiated ops, so we fall back to op-based matching.
+  if (op && _pendingByOp[op] && _pendingByOp[op].length) {
+    const entry = _pendingByOp[op].shift();
+    if (!_pendingByOp[op].length) delete _pendingByOp[op];
+    delete _pendingCallbacks[entry.rid];
+    if (entry.resolve) entry.resolve(msg);
+    return;
+  }
+
+  // 5. Inbound request from bridge (daemon-initiated)
+  //    These have an op without ".reply" suffix and a request_id that
+  //    doesn't match any pending callback — the bridge wants us to
+  //    execute a browser API call and reply.
+  if (rid && !op.endsWith(".reply")) {
+    handleInboundRequest(msg);
+    return;
+  }
+
+  // 6. Unmatched message — log for debugging
+  console.warn("qdistro: unmatched bridge message", op, rid);
+}
+
+// ---- message listener (from popup / content scripts) ----------------
+// The popup and content scripts communicate with the background via
+// chrome.runtime.sendMessage / onMessage.
+
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg !== "object") return false;
+  const action = msg.action;
+
+  if (action === "pwd.fill") {
+    handlePwdFill(msg, sender).then(sendResponse);
+    return true;  // async response
+  }
+
+  if (action === "pwd.fill_confirm") {
+    handlePwdFillConfirm(msg, sender).then(sendResponse);
+    return true;
+  }
+
+  if (action === "pwd.save") {
+    handlePwdSave(msg, sender).then(sendResponse);
+    return true;
+  }
+
+  if (action === "get_status") {
+    sendResponse({
+      connected: !!_port,
+      handshakeComplete: _handshakeComplete,
+    });
+    return false;
+  }
+
+  if (action === "ping") {
+    handlePing().then(sendResponse);
+    return true;
+  }
+
+  return false;
+});
+
+// ---- pwd.fill handler -----------------------------------------------
+
+async function handlePwdFill(msg, _sender) {
+  if (!_handshakeComplete) {
+    return { ok: false, error: "handshake_not_complete" };
+  }
+  try {
+    const token = await mintIntentToken("pwd.fill");
+    return await bridgeRequest({
+      op: "pwd.fill",
+      url: msg.url || "",
+      username: msg.username || "",
+      intent_token: token,
+    });
+  } catch (e) {
+    return { ok: false, error: "pwd_fill_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- pwd.fill_confirm handler ---------------------------------------
+
+async function handlePwdFillConfirm(msg, _sender) {
+  if (!_handshakeComplete) {
+    return { ok: false, error: "handshake_not_complete" };
+  }
+  try {
+    const token = await mintIntentToken("pwd.fill_confirm");
+    return await bridgeRequest({
+      op: "pwd.fill_confirm",
+      url: msg.url || "",
+      username: msg.username || "",
+      fill_token: msg.fill_token || "",
+      intent_token: token,
+    });
+  } catch (e) {
+    return { ok: false, error: "pwd_fill_confirm_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- pwd.save handler -----------------------------------------------
+
+async function handlePwdSave(msg, _sender) {
+  if (!_handshakeComplete) {
+    return { ok: false, error: "handshake_not_complete" };
+  }
+  try {
+    const token = await mintIntentToken("pwd.save");
+    return await bridgeRequest({
+      op: "pwd.save",
+      url: msg.url || "",
+      username: msg.username || "",
+      password: msg.password || "",
+      intent_token: token,
+    });
+  } catch (e) {
+    return { ok: false, error: "pwd_save_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- ping handler (popup "test connection" button) ------------------
+
+async function handlePing() {
+  try {
+    return await bridgeRequest({
+      op: "qdistro.ping",
+      echo: String(Date.now()),
+    });
+  } catch (e) {
+    return { ok: false, error: "ping_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- startup --------------------------------------------------------
+
+// Connect immediately on service worker load. On MV3, the service
+// worker is killed after 30s of idle — the heartbeat at 25s intervals
+// keeps it alive. If the SW is killed and restarted (e.g. by a popup
+// open or content-script message), connectBridge() re-establishes.
+connectBridge();
+
+// MV3 install / activate handlers
 self.addEventListener("install", () => {
-  // No-op. The service worker has nothing to do in MVP — the popup
-  // owns the connectNative round-trip directly.
+  // No-op — connectBridge() runs at top level on every SW start.
 });
