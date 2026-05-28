@@ -163,6 +163,16 @@ class DBusBrokerClient:
             return
         self._proxy = self._bus.get_object(BUS_NAME, OBJ_PATH)
 
+    # D-Bus error names that indicate the broker restarted or the bus
+    # lost the name owner — retrying with a fresh proxy is appropriate.
+    # Application-level errors (broker raised a typed DBusException)
+    # must NOT be retried: they reflect real business logic rejections.
+    _RETRIABLE_DBUS_ERRORS = frozenset((
+        "org.freedesktop.DBus.Error.ServiceUnknown",
+        "org.freedesktop.DBus.Error.NameHasNoOwner",
+        "org.freedesktop.DBus.Error.NoReply",
+    ))
+
     def _call(self, name: str, *args):
         if self._proxy is None:
             raise RuntimeError(f"DBusBrokerClient.{name} called before start()")
@@ -170,10 +180,11 @@ class DBusBrokerClient:
         method = getattr(self._proxy, name)
         try:
             return method(*args, dbus_interface=BUS_NAME)
-        except dbus.DBusException:
-            # Broker may have restarted; rebuild the proxy and retry
-            # once. Second failure propagates — refresh_queue's except
-            # clause will set the sticky BROKER OFFLINE banner.
+        except dbus.DBusException as exc:
+            # Only retry on bus-level / owner-loss errors that signal a
+            # broker restart. Application errors propagate immediately.
+            if exc.get_dbus_name() not in self._RETRIABLE_DBUS_ERRORS:
+                raise
             self._reconnect()
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=BUS_NAME)

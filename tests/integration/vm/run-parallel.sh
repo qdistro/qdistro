@@ -59,7 +59,6 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSITOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$COMPOSITOR_DIR/.." && pwd)"
-SPIKE_DIR="$COMPOSITOR_DIR/spike-6.5"
 VM_TOOLS="$REPO_ROOT/scripts/vm"
 
 if [ ${#FILES[@]} -eq 0 ]; then
@@ -77,8 +76,8 @@ if [ "$JOBS" -le 0 ]; then
     [ "$JOBS" -gt 3 ] && JOBS=3
 fi
 
-if [ ! -x "$SPIKE_DIR/clone-baseweed.sh" ]; then
-    echo "ERROR: $SPIKE_DIR/clone-baseweed.sh not found / not executable" >&2
+if [ ! -x "$VM_TOOLS/clone-baseweed.sh" ]; then
+    echo "ERROR: $VM_TOOLS/clone-baseweed.sh not found / not executable" >&2
     exit 1
 fi
 if ! command -v bats >/dev/null; then
@@ -117,7 +116,7 @@ run_one() {
     {
         echo "=== $(date -Is) [$file] cloning VM ==="
         local vm
-        vm=$("$SPIKE_DIR/clone-baseweed.sh" "${clone_args[@]}" 2>>"$boot")
+        vm=$("$VM_TOOLS/clone-baseweed.sh" "${clone_args[@]}" 2>>"$boot")
         if [ -z "$vm" ]; then
             echo "FAIL: clone-baseweed produced no VM name"
             return 5
@@ -162,7 +161,7 @@ run_one() {
     } >>"$boot" 2>&1
 }
 export -f run_one
-export SPIKE_DIR VM_TOOLS SCRIPT_DIR LOG_DIR PREFIX_BASE NO_BAKED KEEP \
+export VM_TOOLS SCRIPT_DIR LOG_DIR PREFIX_BASE NO_BAKED KEEP \
        QDWIN_IMG_DIR QDWIN_VM_TEMPLATE
 
 # Spawn workers up to JOBS concurrency.

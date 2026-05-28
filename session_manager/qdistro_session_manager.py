@@ -486,9 +486,17 @@ class _SiloStore:
             raise BadState(
                 f"silo {silo.name!r} cannot move {silo.state} → "
                 f"{new_state} (allowed: {sorted(allowed) or 'none'})")
+        prev_state = silo.state
+        prev_last_change = silo.last_change
         silo.state = new_state
         silo.last_change = int(time.time())
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            # Roll back in-memory state so it matches what is on disk.
+            silo.state = prev_state
+            silo.last_change = prev_last_change
+            raise
         self._emit_change(silo.name, silo.state)
 
     def _force_state(self, silo: Silo, new_state: str) -> None:
@@ -599,6 +607,7 @@ class _SiloStore:
                     f"start of silo {silo.name!r} failed: {e}") from e
 
     def stop(self, name: str, grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
+        # Phase 1: validate state and transition to STOPPING under the lock.
         with self._lock:
             silo = self.get(name)
             if silo.state == State.STOPPED:
@@ -615,71 +624,81 @@ class _SiloStore:
                                 "stop pre-thaw: %s — continuing",
                                 silo.name, e)
             self._transition(silo, State.STOPPING)
+            # Snapshot the immutable identifiers we need outside the lock.
+            silo_name = silo.name
+            silo_uid = silo.uid
+
+        # Phase 2: grace-period polling WITHOUT holding the store lock.
+        # Other callers (ListSilos, signal handlers) can proceed while we
+        # wait for processes to exit.
+        try:
+            unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
+            self._ops.systemctl_stop(unit)
+            # Capture pids defensively — cgroup_pids may raise on a
+            # corrupted procfs entry. Treat any read failure as
+            # "assume populated; SIGKILL anything we can find".
             try:
-                unit = SILO_LAUNCHER_FMT.format(name=silo.name,
-                                                uid=silo.uid)
-                self._ops.systemctl_stop(unit)
-                # Capture pids defensively — cgroup_pids may raise on a
-                # corrupted procfs entry. Treat any read failure as
-                # "assume populated; SIGKILL anything we can find".
-                try:
-                    pids = self._ops.cgroup_pids(silo.name)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("cgroup_pids for %r raised %s; assuming "
-                                "empty", silo.name, e)
-                    pids = []
-                if pids:
-                    self._ops.kill_pids(pids, signal.SIGTERM)
-                    deadline = time.monotonic() + max(0, int(grace_s))
-                    while time.monotonic() < deadline:
-                        try:
-                            if not self._ops.cgroup_pids(silo.name):
-                                break
-                        except Exception:  # noqa: BLE001
-                            break
-                        time.sleep(0.1)
+                pids = self._ops.cgroup_pids(silo_name)
+            except Exception as e:  # noqa: BLE001
+                log.warning("cgroup_pids for %r raised %s; assuming "
+                            "empty", silo_name, e)
+                pids = []
+            if pids:
+                self._ops.kill_pids(pids, signal.SIGTERM)
+                deadline = time.monotonic() + max(0, int(grace_s))
+                while time.monotonic() < deadline:
                     try:
-                        remaining = self._ops.cgroup_pids(silo.name)
-                    except Exception:  # noqa: BLE001
-                        remaining = []
-                    if remaining:
-                        self._ops.kill_pids(remaining, signal.SIGKILL)
-                # After SIGKILL the kernel needs a moment to reap the
-                # task and drop it from cgroup.procs. Without this poll
-                # the rmdir below races EBUSY and the cgroup dir leaks.
-                reap_deadline = time.monotonic() + 1.0
-                while time.monotonic() < reap_deadline:
-                    try:
-                        if not self._ops.cgroup_pids(silo.name):
+                        if not self._ops.cgroup_pids(silo_name):
                             break
                     except Exception:  # noqa: BLE001
                         break
-                    time.sleep(0.05)
+                    time.sleep(0.1)
                 try:
-                    self._ops.cgroup_remove(silo.name)
-                except OSError as e:
-                    # The cgroup is still populated — kernel didn't reap
-                    # in time, or one of the processes is stuck in D.
-                    # Log loudly so the leak is visible; transition to
-                    # STOPPED anyway so the admin can retry stop or
-                    # delete (the autostart sweep will paper over the
-                    # leftover dir on next daemon start).
-                    log.error("cgroup rmdir for silo %r failed: %s "
-                              "(cgroup may have leaked)", silo.name, e)
-                self._transition(silo, State.STOPPED)
-            except SessionError:
-                # Already-typed errors propagate; the silo is wedged
-                # in STOPPING but the caller can retry stop() once
-                # because STOPPING is now forced back to STOPPED below.
+                    remaining = self._ops.cgroup_pids(silo_name)
+                except Exception:  # noqa: BLE001
+                    remaining = []
+                if remaining:
+                    self._ops.kill_pids(remaining, signal.SIGKILL)
+            # After SIGKILL the kernel needs a moment to reap the
+            # task and drop it from cgroup.procs. Without this poll
+            # the rmdir below races EBUSY and the cgroup dir leaks.
+            reap_deadline = time.monotonic() + 1.0
+            while time.monotonic() < reap_deadline:
+                try:
+                    if not self._ops.cgroup_pids(silo_name):
+                        break
+                except Exception:  # noqa: BLE001
+                    break
+                time.sleep(0.05)
+            try:
+                self._ops.cgroup_remove(silo_name)
+            except OSError as e:
+                # The cgroup is still populated — kernel didn't reap
+                # in time, or one of the processes is stuck in D.
+                # Log loudly so the leak is visible; transition to
+                # STOPPED anyway so the admin can retry stop or
+                # delete (the autostart sweep will paper over the
+                # leftover dir on next daemon start).
+                log.error("cgroup rmdir for silo %r failed: %s "
+                          "(cgroup may have leaked)", silo_name, e)
+        except SessionError:
+            # Already-typed errors propagate; force back to STOPPED
+            # so the silo isn't wedged in STOPPING.
+            with self._lock:
                 self._force_state(silo, State.STOPPED)
-                raise
-            except Exception as e:  # noqa: BLE001
-                log.error("stop of silo %r failed mid-teardown: %s — "
-                          "forcing STOPPED so the silo isn't wedged",
-                          silo.name, e)
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.error("stop of silo %r failed mid-teardown: %s — "
+                      "forcing STOPPED so the silo isn't wedged",
+                      silo_name, e)
+            with self._lock:
                 self._force_state(silo, State.STOPPED)
-                raise SessionError(
-                    f"stop of silo {silo.name!r} failed: {e}") from e
+            raise SessionError(
+                f"stop of silo {silo_name!r} failed: {e}") from e
+
+        # Phase 3: re-acquire the lock for the final state transition.
+        with self._lock:
+            self._transition(silo, State.STOPPED)
 
     def freeze(self, name: str) -> None:
         with self._lock:

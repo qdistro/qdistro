@@ -596,13 +596,25 @@ class BrokerBridge(QObject):
         """
         self._proxy = self.bus.get_object(BUS_NAME, OBJ_PATH)
 
+    # D-Bus error names that indicate the broker/service restarted or the
+    # bus lost the name owner — retrying with a fresh proxy is appropriate.
+    # Application-level errors (the service raised a typed DBusException)
+    # must NOT be retried: they reflect real business logic rejections.
+    _RETRIABLE_DBUS_ERRORS = frozenset((
+        "org.freedesktop.DBus.Error.ServiceUnknown",
+        "org.freedesktop.DBus.Error.NameHasNoOwner",
+        "org.freedesktop.DBus.Error.NoReply",
+    ))
+
     def _call(self, name, *args):
         method = getattr(self._proxy, name)
         try:
             return method(*args, dbus_interface=BUS_NAME)
-        except dbus.DBusException:
-            # Broker may have restarted — rebuild the proxy and retry
-            # once. A second failure is the caller's problem (propagate).
+        except dbus.DBusException as exc:
+            # Only retry on bus-level / owner-loss errors that signal a
+            # broker restart. Application errors propagate immediately.
+            if exc.get_dbus_name() not in self._RETRIABLE_DBUS_ERRORS:
+                raise
             self._reconnect()
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=BUS_NAME)
@@ -931,11 +943,17 @@ class SessionManagerBridge(QObject):
         self._proxy = self.bus.get_object(
             SESSION_MANAGER_BUS_NAME, SESSION_MANAGER_OBJ_PATH)
 
+    # Same retriable set as BrokerBridge — only retry on owner-loss /
+    # restart errors, never on application-level DBusExceptions.
+    _RETRIABLE_DBUS_ERRORS = BrokerBridge._RETRIABLE_DBUS_ERRORS
+
     def _call(self, name, *args):
         method = getattr(self._proxy, name)
         try:
             return method(*args, dbus_interface=SESSION_MANAGER_BUS_NAME)
-        except dbus.DBusException:
+        except dbus.DBusException as exc:
+            if exc.get_dbus_name() not in self._RETRIABLE_DBUS_ERRORS:
+                raise
             self._reconnect()
             method = getattr(self._proxy, name)
             return method(*args, dbus_interface=SESSION_MANAGER_BUS_NAME)

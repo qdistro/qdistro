@@ -438,6 +438,11 @@ def strip_mimes(mimes: Sequence[str]) -> list[str]:
     joined string; we keep this as a plain Python list so the bats
     driver can shell it through ``python3 -c`` without serialisation
     drama. Pure function — no side effects.
+
+    MIME types are case-insensitive per RFC 2045 sec 5.1, so we
+    normalize to lowercase before deduplication. This prevents case
+    variants like ``TEXT/PLAIN`` and ``text/plain`` from both
+    surviving the filter.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -445,11 +450,15 @@ def strip_mimes(mimes: Sequence[str]) -> list[str]:
         s = str(m or "").strip()
         if not s:
             continue
+        # Normalize the full MIME string to lowercase for both
+        # allow-list matching and deduplication (RFC 2045: MIME types
+        # are case-insensitive).
+        s_lower = s.lower()
         # text/plain;charset=utf-8 etc. — match on the base type.
-        base = s.split(";", 1)[0].strip().lower()
-        if base in ALLOWED_MIMES and s not in seen:
-            out.append(s)
-            seen.add(s)
+        base = s_lower.split(";", 1)[0].strip()
+        if base in ALLOWED_MIMES and s_lower not in seen:
+            out.append(s_lower)
+            seen.add(s_lower)
     return out
 
 
