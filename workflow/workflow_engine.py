@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
+import select
 import threading
 import time
 from typing import Any
@@ -36,6 +38,86 @@ logger = logging.getLogger("qdistro.workflow.engine")
 # scrub_on values whose secret lifetime ends with the deliver step
 # itself (the channel is revoked immediately rather than at run exit).
 _STEP_SCRUB_LIFETIMES = frozenset({"step", "step_exit", "immediate", "now"})
+
+# Broker methods a ``call_broker`` step is allowed to invoke. Restricted
+# to read-only / maintenance surface so a workflow can never drive the
+# broker's decision or secret machinery (RequestPermission, DecideRequest,
+# SaveRule, etc. are deliberately excluded — fail closed on anything else).
+_BROKER_METHOD_WHITELIST = frozenset({
+    "ListRules",
+    "ListCache",
+    "ListHistory",
+    "ListWorkflows",
+    "ListWorkflowRuns",
+    "GetPending",
+    "RunCacheGc",
+    "RunAuditGc",
+    "ReloadRules",
+})
+
+# Default + ceiling for step-level bounded waits/calls (seconds). A step
+# config may lower these but never raise above the ceiling, so a typo in
+# YAML can't pin a worker thread forever.
+_DEFAULT_WAIT_TIMEOUT_S = 300.0
+_MAX_WAIT_TIMEOUT_S = 3600.0
+_DEFAULT_DBUS_TIMEOUT_S = 10.0
+_MAX_DBUS_TIMEOUT_S = 120.0
+
+
+def _clamp_timeout(raw: Any, default: float, ceiling: float) -> float:
+    """Coerce a config timeout to a positive float within [.., ceiling]."""
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if val <= 0:
+        return default
+    return min(val, ceiling)
+
+
+def _coerce_dbus(value: Any, _depth: int = 0) -> Any:
+    """Convert a D-Bus / broker return into plain, JSON-able, bounded data.
+
+    Keeps the audit detail small and serialisable: dbus numeric/string
+    types become Python builtins, containers are capped, and over-long
+    strings are truncated. Never raises.
+    """
+    try:
+        if _depth > 4:
+            return "..."
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, float):
+            return float(value)
+        if isinstance(value, (bytes, bytearray)):
+            return f"<{len(value)} bytes>"
+        if isinstance(value, str):
+            return value if len(value) <= 512 else value[:512] + "...[truncated]"
+        if isinstance(value, dict):
+            return {str(_coerce_dbus(k, _depth + 1)): _coerce_dbus(v, _depth + 1)
+                    for k, v in list(value.items())[:50]}
+        if isinstance(value, (list, tuple)):
+            return [_coerce_dbus(v, _depth + 1) for v in list(value)[:50]]
+        if value is None:
+            return None
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return "<uncoercible>"
+
+
+def _resolve_ref(value: Any, trigger_context: dict[str, Any]) -> Any:
+    """Resolve a ``$trigger.<key>`` reference against the trigger context.
+
+    A plain (non-string, or non-``$trigger.``) value is returned as-is, so
+    a step can pass a literal pid as easily as ``$trigger.pid``.
+    """
+    if isinstance(value, str):
+        for prefix in ("$trigger.", "trigger."):
+            if value.startswith(prefix):
+                return trigger_context.get(value[len(prefix):])
+    return value
 
 
 class WorkflowEngine:
@@ -440,73 +522,202 @@ class WorkflowEngine:
     def _handle_wait_for_process(self, step: StepDef,
                                  run: WorkflowRun,
                                  result: StepResult) -> None:
-        """Wait for a process to exit.
+        """Block until a (non-child) process exits, bounded by a timeout.
 
-        Skeleton: logs and succeeds immediately. Production would
-        poll /proc/<pid> or use waitid/pidfd.
+        The pid is taken from ``pid``/``value`` and may be a literal or a
+        ``$trigger.pid`` reference into the firing trigger's context (the
+        process_spawn watcher puts the spawned pid there). Uses
+        ``pidfd_open`` + ``select`` so we can wait on a process we did not
+        fork; falls back to ``/proc`` polling where pidfd is unavailable.
+        A timeout is a *failure* (the run shouldn't quietly proceed — and
+        for git-sign this keeps the secret alive no longer than the bound).
         """
-        pid_ref = step.config.get("pid", step.config.get("value", ""))
-        logger.info(
-            "wait_for_process: would wait for pid=%s in run %s",
-            pid_ref, run.run_id,
-        )
-        result.success = True
-        result.details = {"pid_ref": str(pid_ref)}
+        raw_pid = step.config.get("pid", step.config.get("value", ""))
+        resolved = _resolve_ref(raw_pid, run.trigger_context)
+        try:
+            pid = int(resolved)
+        except (TypeError, ValueError):
+            result.error = (
+                f"wait_for_process: unresolved/invalid pid {raw_pid!r} "
+                f"(resolved={resolved!r})")
+            return
+        if pid <= 0:
+            result.error = f"wait_for_process: invalid pid {pid}"
+            return
+
+        timeout = _clamp_timeout(step.config.get("timeout"),
+                                 _DEFAULT_WAIT_TIMEOUT_S,
+                                 _MAX_WAIT_TIMEOUT_S)
+        logger.info("wait_for_process: waiting for pid=%s (<=%.0fs) run %s",
+                    pid, timeout, run.run_id)
+        exited = self._wait_pid(pid, timeout)
+        result.details = {"pid": pid, "timeout_s": timeout, "exited": exited}
+        if exited:
+            result.success = True
+        else:
+            result.error = f"wait_for_process: pid {pid} still alive after {timeout}s"
+
+    @staticmethod
+    def _wait_pid(pid: int, timeout: float) -> bool:
+        """Return True if ``pid`` exits within ``timeout`` seconds."""
+        deadline = time.monotonic() + timeout
+        pidfd_open = getattr(os, "pidfd_open", None)
+        if pidfd_open is not None:
+            try:
+                fd = pidfd_open(pid)
+            except ProcessLookupError:
+                return True  # already gone
+            except OSError:
+                fd = None
+            if fd is not None:
+                try:
+                    poller = select.poll()
+                    poller.register(fd, select.POLLIN)
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        # poll() takes milliseconds.
+                        if poller.poll(min(remaining, 1.0) * 1000.0):
+                            return True
+                finally:
+                    os.close(fd)
+        # Fallback: poll /proc liveness via signal 0.
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                # Exists but owned by another uid — still "alive".
+                pass
+            time.sleep(0.1)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        return False
 
     def _handle_run_hook(self, step: StepDef, run: WorkflowRun,
                          result: StepResult) -> None:
-        """Run a broker hook.
+        """Execute a sandboxed broker hook and map its verdict to outcome.
 
-        Skeleton: logs the hook name. Production would call through
-        HookClient or the hook executor directly.
+        The step's ``hook`` names the action and ``event`` carries the
+        payload dict handed to the executor. Verdict mapping:
+        ``allow``/``transform`` → success, ``deny`` → failure, a missing
+        verdict / unreachable executor (``null``) → failure (fail closed:
+        a step that can't confirm its hook ran must not report success).
         """
-        hook_name = step.config.get("hook", step.config.get("name", ""))
-        hook_event = step.config.get("event", {})
-        logger.info(
-            "run_hook: would execute hook %r for run %s",
-            hook_name, run.run_id,
-        )
-        result.success = True
-        result.details = {"hook": hook_name}
+        hook_name = str(step.config.get("hook",
+                                        step.config.get("name", ""))).strip()
+        if not hook_name:
+            result.error = "run_hook: missing 'hook' name in config"
+            return
+        event = step.config.get("event", {})
+        if not isinstance(event, dict):
+            event = {"value": event}
+
+        client = getattr(self._broker, "hooks", None)
+        if client is None:
+            result.error = "run_hook: no hook client available"
+            return
+
+        verdict = client.query(hook_name, dict(event))
+        if not isinstance(verdict, dict):
+            # None == null/unreachable/timeout/protocol error.
+            result.error = f"run_hook: hook {hook_name!r} returned no verdict"
+            result.details = {"hook": hook_name, "verdict": None}
+            return
+        decision = str(verdict.get("verdict", "")).lower()
+        result.details = {"hook": hook_name, "verdict": decision}
+        if "reason" in verdict:
+            result.details["reason"] = str(verdict["reason"])
+        if decision in ("allow", "transform"):
+            result.success = True
+        else:
+            result.error = (
+                f"run_hook: hook {hook_name!r} verdict={decision or 'unknown'}")
 
     def _handle_call_dbus(self, step: StepDef, run: WorkflowRun,
                           result: StepResult) -> None:
-        """Call a D-Bus method.
+        """Call an arbitrary D-Bus method via a proxy, bounded + isolated.
 
-        Skeleton: logs the method details. Production would call the
-        method via the D-Bus proxy.
+        Config: ``bus`` (system|session, default system), ``bus_name``,
+        ``object_path``, ``interface``, ``method``, ``args`` (list),
+        ``timeout``. Any exception is contained as a step failure.
         """
-        bus_name = step.config.get("bus_name", "")
-        obj_path = step.config.get("object_path", "")
-        interface = step.config.get("interface", "")
-        method = step.config.get("method", "")
-        logger.info(
-            "call_dbus: would call %s.%s on %s%s for run %s",
-            interface, method, bus_name, obj_path, run.run_id,
-        )
+        bus_kind = str(step.config.get("bus", "system"))
+        bus_name = str(step.config.get("bus_name", ""))
+        obj_path = str(step.config.get("object_path", ""))
+        interface = str(step.config.get("interface", "")) or None
+        method = str(step.config.get("method", ""))
+        args = step.config.get("args", [])
+        if isinstance(args, dict) or not isinstance(args, (list, tuple)):
+            args = [args] if args != {} and args != [] else []
+        if not (bus_name and obj_path and method):
+            result.error = ("call_dbus: bus_name, object_path and method "
+                            "are all required")
+            return
+        if method.startswith("_"):
+            result.error = f"call_dbus: refusing private method {method!r}"
+            return
+        timeout = _clamp_timeout(step.config.get("timeout"),
+                                 _DEFAULT_DBUS_TIMEOUT_S, _MAX_DBUS_TIMEOUT_S)
+
+        try:
+            import dbus  # lazy
+            bus = (dbus.SessionBus() if bus_kind == "session"
+                   else dbus.SystemBus())
+            obj = bus.get_object(bus_name, obj_path)
+            fn = obj.get_dbus_method(method, dbus_interface=interface)
+            ret = fn(*args, timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            result.error = f"call_dbus: {e!r}"
+            result.details = {
+                "bus_name": bus_name, "object_path": obj_path,
+                "interface": interface or "", "method": method,
+            }
+            return
         result.success = True
         result.details = {
-            "bus_name": bus_name,
-            "object_path": obj_path,
-            "interface": interface,
-            "method": method,
+            "bus_name": bus_name, "object_path": obj_path,
+            "interface": interface or "", "method": method,
+            "returned": _coerce_dbus(ret),
         }
 
     def _handle_call_broker(self, step: StepDef, run: WorkflowRun,
                             result: StepResult) -> None:
-        """Call a broker method.
+        """Invoke a whitelisted method on the in-process broker proxy.
 
-        Skeleton: logs the method name. Production would call via
-        the broker D-Bus proxy.
+        Only side-effect-light read/maintenance methods are permitted
+        (see ``_BROKER_METHOD_WHITELIST``); anything else fails closed.
         """
-        method = step.config.get("method", "")
-        args = step.config.get("args", {})
-        logger.info(
-            "call_broker: would call broker method %r for run %s",
-            method, run.run_id,
-        )
+        method = str(step.config.get("method", ""))
+        args = step.config.get("args", [])
+        if not isinstance(args, (list, tuple)):
+            args = [args]
+        if self._broker is None:
+            result.error = "call_broker: no broker proxy available"
+            return
+        if method not in _BROKER_METHOD_WHITELIST:
+            result.error = (
+                f"call_broker: method {method!r} not in whitelist "
+                f"{sorted(_BROKER_METHOD_WHITELIST)}")
+            return
+        fn = getattr(self._broker, method, None)
+        if not callable(fn):
+            result.error = f"call_broker: method {method!r} not callable"
+            return
+        try:
+            ret = fn(*args)
+        except Exception as e:  # noqa: BLE001
+            result.error = f"call_broker: {method} raised {e!r}"
+            result.details = {"method": method}
+            return
         result.success = True
-        result.details = {"method": method, "args": args}
+        result.details = {"method": method, "returned": _coerce_dbus(ret)}
 
     # ------------------------------------------------------------------
     # Cleanup

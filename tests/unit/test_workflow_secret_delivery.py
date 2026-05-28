@@ -350,6 +350,16 @@ class _FakeSource:
         return self.secret
 
 
+class _AllowHooks:
+    def query(self, action, event):
+        return {"verdict": "allow"}
+
+
+class _AllowBroker:
+    """Broker proxy whose hooks always allow (so run_hook steps succeed)."""
+    hooks = _AllowHooks()
+
+
 def _engine_with_secret(tmp_path, command, *, fail_after=False):
     audit = WorkflowAuditLogger(db_path=str(tmp_path / "audit.sqlite"))
     engine = WorkflowEngine(audit_logger=audit,
@@ -438,7 +448,7 @@ class TestEngineDelivery:
         cmd = [sys.executable, "-c",
                f"import os;open({str(out)!r},'w').write(os.environ['THE_VAR'])"]
         audit = WorkflowAuditLogger(db_path=str(tmp_path / "audit.sqlite"))
-        engine = WorkflowEngine(audit_logger=audit,
+        engine = WorkflowEngine(audit_logger=audit, broker_proxy=_AllowBroker(),
                                 secret_source=_FakeSource(SECRET))
         engine._workflows["wf"] = WorkflowDef(
             name="wf", trigger=TriggerDef(type=TriggerType.CRON),

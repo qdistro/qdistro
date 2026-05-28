@@ -41,6 +41,84 @@ from workflow_engine import WorkflowEngine  # noqa: E402
 
 
 # ======================================================================
+# Test doubles for step-handler backends (faked at the boundary)
+# ======================================================================
+
+
+class _FakeHooks:
+    """Stand-in for broker.hooks (HookClient)."""
+
+    enabled = True
+
+    def __init__(self, verdict="allow"):
+        self._verdict = verdict
+        self.calls = []
+
+    def query(self, action, event):
+        self.calls.append((action, dict(event)))
+        if self._verdict is None:
+            return None
+        return {"verdict": self._verdict}
+
+
+class _FakeBroker:
+    """Minimal broker proxy exposing hooks + a few whitelisted methods."""
+
+    def __init__(self, verdict="allow"):
+        self.hooks = _FakeHooks(verdict)
+        self.calls = []
+
+    def ListRules(self):
+        self.calls.append("ListRules")
+        return [{"name": "r1"}]
+
+    def ListCache(self):
+        self.calls.append("ListCache")
+        return []
+
+    def RunCacheGc(self):
+        self.calls.append("RunCacheGc")
+        return 0
+
+
+def _install_fake_dbus(monkeypatch, return_value="ok", raises=None):
+    """Install a fake ``dbus`` module so call_dbus runs without a real bus.
+
+    Records the last call on the returned recorder for assertions.
+    """
+    import types
+
+    recorder = {"calls": []}
+
+    class _Method:
+        def __init__(self, name, interface):
+            self._name = name
+            self._interface = interface
+
+        def __call__(self, *args, **kwargs):
+            recorder["calls"].append(
+                (self._name, self._interface, args, kwargs))
+            if raises is not None:
+                raise raises
+            return return_value
+
+    class _Obj:
+        def get_dbus_method(self, name, dbus_interface=None):
+            return _Method(name, dbus_interface)
+
+    class _Bus:
+        def get_object(self, bus_name, obj_path):
+            recorder["calls"].append(("get_object", bus_name, obj_path))
+            return _Obj()
+
+    fake = types.ModuleType("dbus")
+    fake.SystemBus = lambda: _Bus()
+    fake.SessionBus = lambda: _Bus()
+    monkeypatch.setitem(sys.modules, "dbus", fake)
+    return recorder
+
+
+# ======================================================================
 # Schema tests
 # ======================================================================
 
@@ -493,7 +571,7 @@ class TestWorkflowEngineSteps:
         audit = WorkflowAuditLogger(db_path=audit_db)
         loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
         engine = WorkflowEngine(
-            broker_proxy=None,
+            broker_proxy=_FakeBroker(),
             audit_logger=audit,
             loader=loader,
         )
@@ -537,7 +615,7 @@ class TestWorkflowEngineSteps:
                 hook: my_hook
               - type: call_broker
                 name: third
-                method: CheckPermission
+                method: ListRules
         """)
         run = engine.start_run("ordered")
         assert run.state == RunState.COMPLETED
@@ -546,8 +624,15 @@ class TestWorkflowEngineSteps:
         types = [s.step_type for s in run.steps_completed]
         assert types == ["deliver_secret", "run_hook", "call_broker"]
 
-    def test_all_step_types(self, tmp_path):
-        engine, _audit = self._make_engine(tmp_path, """\
+    def test_all_step_types(self, tmp_path, monkeypatch):
+        _install_fake_dbus(monkeypatch, return_value="pong")
+        # A reaped pid: pidfd_open/kill(0) report it gone immediately.
+        import subprocess
+        p = subprocess.Popen(["true"])
+        p.wait()
+        dead_pid = p.pid
+
+        engine, _audit = self._make_engine(tmp_path, f"""\
             name: all-types
             trigger:
               type: cron
@@ -555,17 +640,19 @@ class TestWorkflowEngineSteps:
               - type: deliver_secret
                 item: vault/secret
               - type: wait_for_process
-                pid: 12345
+                pid: {dead_pid}
               - type: run_hook
                 hook: example
               - type: call_dbus
                 bus_name: org.example
+                object_path: /org/example
+                interface: org.example.Iface
                 method: Ping
               - type: call_broker
-                method: CheckPermission
+                method: ListRules
         """)
         run = engine.start_run("all-types")
-        assert run.state == RunState.COMPLETED
+        assert run.state == RunState.COMPLETED, run.error
         assert len(run.steps_completed) == 5
         assert all(s.success for s in run.steps_completed)
 
@@ -633,7 +720,7 @@ class TestFailureMidStep:
         loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
         engine = _FailingEngine(
             fail_step="exploding_hook",
-            broker_proxy=None,
+            broker_proxy=_FakeBroker(),
             audit_logger=audit,
             loader=loader,
         )
@@ -726,14 +813,14 @@ class TestAuditTrailGeneration:
                 hook: a
               - type: call_broker
                 name: step-b
-                method: Ping
+                method: ListRules
         """), encoding="utf-8")
 
         audit_db = str(tmp_path / "audit.sqlite")
         audit = WorkflowAuditLogger(db_path=audit_db)
         loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
         engine = WorkflowEngine(
-            broker_proxy=None, audit_logger=audit, loader=loader,
+            broker_proxy=_FakeBroker(), audit_logger=audit, loader=loader,
         )
         engine.load_workflows()
         run = engine.start_run("audited-wf")
@@ -953,7 +1040,7 @@ class TestCodexReviewFixes:
         audit = WorkflowAuditLogger(db_path=audit_db)
         loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
         engine = WorkflowEngine(
-            broker_proxy=None, audit_logger=audit, loader=loader,
+            broker_proxy=_FakeBroker(), audit_logger=audit, loader=loader,
         )
         engine.load_workflows()
         run = engine.start_run("secret-ok")
