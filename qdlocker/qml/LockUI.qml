@@ -1,10 +1,8 @@
 // LockUI — pure-QtQuick lock screen, no Quickshell dependency.
 //
-// The qdshell widgets (NText, NIcon, NIconButton, NBusyIndicator)
-// transitively require Quickshell.* imports and Settings/Service
-// singletons that don't exist outside a Quickshell process. Until
-// those land in a Quickshell-free shim, qdlocker renders its own
-// minimal chrome with the same colour intent and font scale.
+// Uses the local styling shim (shim/Color.qml, shim/Style.qml) which
+// mirrors qdshell's Commons palette and metrics with hardcoded values.
+// No Quickshell, Settings, or Service imports required.
 //
 // Property naming: `lockController` (not `controller`) so context-
 // property shadowing in Main.qml doesn't surprise the reader. The
@@ -17,12 +15,13 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import shim
 
 Item {
   id: root
   property var lockController
 
-  Rectangle { anchors.fill: parent; color: "#101015" }
+  Rectangle { anchors.fill: parent; color: Color.mSurface }
 
   // Clock — updated by a Timer (`new Date()` in a binding is not
   // reactive).
@@ -39,20 +38,20 @@ Item {
 
   ColumnLayout {
     anchors.centerIn: parent
-    spacing: 24
+    spacing: Style.fontSizeXXXL
     width: Math.min(parent.width * 0.5, 480)
 
     Text {
       Layout.alignment: Qt.AlignHCenter
       text: root.clockText
       font.pointSize: 56
-      color: "white"
+      color: Color.mOnSurface
     }
     Text {
       Layout.alignment: Qt.AlignHCenter
       text: root.dateText
-      font.pointSize: 18
-      color: "#a8a8b0"
+      font.pointSize: Style.fontSizeXXL
+      color: Color.mOnSurfaceVariant
     }
 
     // Combined info/failure banner — one Rectangle, switch role on
@@ -61,12 +60,14 @@ Item {
     Rectangle {
       Layout.fillWidth: true
       height: 44
-      radius: 6
+      radius: Style.radiusXS
       visible: lockController
                && (lockController.showInfo || lockController.showFailure)
                && (lockController.infoMessage.length > 0
                    || lockController.errorMessage.length > 0)
-      color: lockController && lockController.showFailure ? "#3a1a1a" : "#1a2a3a"
+      color: lockController && lockController.showFailure
+             ? Qt.alpha(Color.mError, 0.15)
+             : Qt.alpha(Color.mPrimary, 0.10)
 
       Text {
         anchors.centerIn: parent
@@ -75,8 +76,10 @@ Item {
                  ? lockController.errorMessage
                  : lockController.infoMessage)
               : ""
-        color: lockController && lockController.showFailure ? "#ff8080" : "#80c0ff"
-        font.pointSize: 14
+        color: lockController && lockController.showFailure
+               ? Color.mError
+               : Color.mPrimary
+        font.pointSize: Style.fontSizeL
       }
     }
 
@@ -96,10 +99,10 @@ Item {
       id: passwordField
       Layout.fillWidth: true
       height: 48
-      radius: 6
-      color: "#202028"
-      border.color: "#80c0ff"
-      border.width: 2
+      radius: Style.radiusXS
+      color: Color.mSurfaceVariant
+      border.color: Color.mPrimary
+      border.width: Style.borderM
       opacity: lockController && lockController.unlockInProgress ? 0.6 : 1.0
       Text {
         anchors.centerIn: parent
@@ -107,7 +110,7 @@ Item {
               ? "•".repeat(lockController.currentText.length)
               : ""
         font.pointSize: 22
-        color: "white"
+        color: Color.mOnSurface
       }
     }
 

@@ -7,6 +7,7 @@
 
 import QtQuick
 import QtQuick.Window
+import shim
 
 Window {
   id: root
@@ -15,7 +16,7 @@ Window {
   // Fullscreen + opaque so the first frame after attach can't show
   // through to whatever toplevel was focused before the lock.
   visibility: bridge.locked ? Window.FullScreen : Window.Hidden
-  color: "#101015"
+  color: Color.mSurface
   flags: Qt.FramelessWindowHint
 
   // contextProperty: see app.py's setContextProperty("controller", ...).
