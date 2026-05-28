@@ -862,16 +862,30 @@ smoke_check() {
         warn "  /etc/greetd/config.toml not found"
         ok=0
     fi
-    # D-Bus name checks — services may not be up without reboot
-    if busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1; then
-        log "  broker: ONLINE"
+    # D-Bus name checks — services may not be up without reboot.
+    # First decide whether the system bus is reachable at all: if busctl
+    # produces no output we cannot distinguish "bus down" from "name not
+    # registered", so report the bus as unreachable and skip name checks.
+    # --acquired: only names with a live owner (a reachable bus still lists
+    # many system names here, so non-empty output == bus reachable). Without
+    # it busctl also lists activatable-but-not-running names, which would be
+    # misreported as ONLINE. --no-legend drops the header row.
+    local bus_names
+    if bus_names="$(busctl --acquired list --no-pager --no-legend 2>/dev/null)" && [ -n "$bus_names" ]; then
+        # Match the bus-name column exactly (busctl's first field) so the
+        # dotted names are not treated as regex wildcards / substring matches.
+        if printf '%s\n' "$bus_names" | awk '$1=="org.qdistro.AdminBroker1"{f=1} END{exit !f}'; then
+            log "  broker: ONLINE"
+        else
+            warn "  broker registered but not owning its bus name yet (normal before reboot)"
+        fi
+        if printf '%s\n' "$bus_names" | awk '$1=="org.qdistro.SessionManager1"{f=1} END{exit !f}'; then
+            log "  session-manager: ONLINE"
+        else
+            warn "  session-manager registered but not owning its bus name yet (normal before reboot)"
+        fi
     else
-        warn "  broker not on bus (normal before reboot)"
-    fi
-    if busctl list --no-pager 2>/dev/null | grep -q org.qdistro.SessionManager1; then
-        log "  session-manager: ONLINE"
-    else
-        warn "  session-manager not on bus (normal before reboot)"
+        warn "  D-Bus system bus not reachable; skipping broker/session-manager name checks (normal before reboot)"
     fi
     [ "$ok" -eq 1 ] && log "smoke check OK" || warn "smoke check: some checks failed (see above)"
     return 0  # never exit non-zero from smoke_check
@@ -960,13 +974,20 @@ main() {
         log "On next boot: qdgreeter login appears on tty3."
         log "  Admin account: admin (uid 1000)"
         log "  Regular user:  $REGULAR_USER (uid 1001)"
+        log ""
+        log "To test the session before rebooting (requires loginctl enable-linger admin):"
+        log "  runuser -l admin -c 'systemctl --user start qdwin-compositor.service'"
     else
         log "Bootstrap complete (greetd not configured — --skip-greetd was set)."
         log "Configure greetd manually or re-run without --skip-greetd to enable the login screen."
+        log ""
+        # On the skip-greetd path the system-wide qdwin-compositor.service /
+        # qdwin-session.target units (installed by configure_greetd) are NOT
+        # present. Only the per-user units from install_qdwin_session exist for
+        # admin, so the valid test command targets noctalia-shell.service.
+        log "To test the session before rebooting (requires loginctl enable-linger admin):"
+        log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
     fi
-    log ""
-    log "To test the session before rebooting (requires loginctl enable-linger admin):"
-    log "  runuser -l admin -c 'systemctl --user start qdwin-compositor.service'"
 }
 
 main "$@"
