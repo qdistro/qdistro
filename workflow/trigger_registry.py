@@ -393,12 +393,7 @@ class DBusSignalTrigger(BaseTrigger):
     def _get_bus(self) -> Any:
         if self._bus is not None:
             return self._bus
-        import dbus  # lazy
-        from dbus.mainloop.glib import DBusGMainLoop
-        DBusGMainLoop(set_as_default=True)
-        if self._bus_kind == "session":
-            return dbus.SessionBus()
-        return dbus.SystemBus()
+        return _get_private_bus(self._bus_kind)
 
     def start(self) -> None:
         try:
@@ -476,8 +471,38 @@ class DBusSignalTrigger(BaseTrigger):
             self._loop_thread.join(timeout=2.0)
             self._loop_thread = None
         self._loop = None
+        # The bus is a shared, process-lived private connection — do not
+        # close it (other triggers reuse it, and closing a loop-attached
+        # connection is crash-prone). Dropping the signal receiver above
+        # is the full teardown for this trigger.
         logger.info("DBusSignalTrigger: stopped for workflow %s",
                     self.workflow_name)
+
+
+# One private D-Bus connection per bus kind, shared across all D-Bus
+# triggers in the process. A private connection (vs. the shared
+# dbus.SystemBus() cache) guarantees the GLib main loop is attached so
+# signals are delivered, regardless of what other code created first.
+# It is created once and never closed: closing a GLib-integrated
+# connection while a loop is dispatching it can crash the interpreter,
+# and reusing one connection avoids leaking an fd on every reload.
+_PRIVATE_BUSES: dict[str, Any] = {}
+_PRIVATE_BUS_LOCK = threading.Lock()
+
+
+def _get_private_bus(kind: str) -> Any:
+    import dbus  # lazy
+    from dbus.mainloop.glib import DBusGMainLoop
+    with _PRIVATE_BUS_LOCK:
+        bus = _PRIVATE_BUSES.get(kind)
+        if bus is None:
+            loop = DBusGMainLoop(set_as_default=True)
+            if kind == "session":
+                bus = dbus.SessionBus(private=True, mainloop=loop)
+            else:
+                bus = dbus.SystemBus(private=True, mainloop=loop)
+            _PRIVATE_BUSES[kind] = bus
+        return bus
 
 
 # Default qbus/admin broker endpoint the QbusEventTrigger aims at.
