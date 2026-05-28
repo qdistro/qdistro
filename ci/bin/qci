@@ -70,7 +70,8 @@ Usage:
   qci list-runs
 
 Environment:
-  QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs.
+  QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs
+                            (default: admin).
   QCI_RUNS_DIR             Artifact directory, default qdistro/ci/runs.
   QCI_AGENT_CMD            Command used for markdown GUI scenarios.
                             It receives the generated prompt file as argv[1],
@@ -313,10 +314,8 @@ acquire_vm() {
         printf '%s\n' "$explicit"
         return 0
     fi
-    if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
-        log "QDISTRO_VM_PASSWORD is required to create a disposable VM"
-        return "$EXIT_VM_PROVISION"
-    fi
+    : "${QDISTRO_VM_PASSWORD:=admin}"
+    export QDISTRO_VM_PASSWORD
     log_path="$RDIR/vm/spin-$gate.log"
     log "creating disposable VM for $gate"
     spinner=spin-test-vm.sh
@@ -447,7 +446,7 @@ gate_preflight() {
     check_required "vm-start-and-wait" "[ -x '$VM_TOOLS/vm-start-and-wait' ]"
     check_required "spin-test-vm.sh" "[ -x '$VM_TOOLS/spin-test-vm.sh' ]"
     check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
-    check_required "QDISTRO_VM_PASSWORD" "test -n \"\${QDISTRO_VM_PASSWORD:-}\""
+    check_optional "QDISTRO_VM_PASSWORD" "test -n \"\${QDISTRO_VM_PASSWORD:-}\""
     check_optional "bats" "command -v bats"
     check_optional "meson" "command -v meson"
     check_optional "ninja" "command -v ninja"
@@ -681,10 +680,10 @@ run_agent_command() {
     fi
     if [[ "$cmd" == *"{prompt}"* ]]; then
         expanded=${cmd//\{prompt\}/$prompt}
-        bash -lc "$expanded" > "$log_path" 2>&1
+        bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
     else
         # shellcheck disable=SC2086
-        $cmd "$prompt" > "$log_path" 2>&1
+        $cmd "$prompt" < /dev/null > "$log_path" 2>&1
     fi
 }
 
@@ -704,7 +703,7 @@ gate_gui() {
     require=${QCI_REQUIRE_AGENT_GUI:-1}
     vm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
     kv vm "$vm"
-    if "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/qdshell.sock" >/dev/null 2>&1; then
+    if "$VM_TOOLS/vm-exec" "$vm" "runuser -u admin -- sh -c 'echo list | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | head -1 | grep -qx \"ok list\"'" >/dev/null 2>&1; then
         legacy_ctrl=1
     fi
     if "$VM_TOOLS/vm-exec" "$vm" "test -e /dev/kvm" >/dev/null 2>&1; then

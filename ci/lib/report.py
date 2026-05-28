@@ -100,7 +100,7 @@ def recommendation(row: dict[str, str], run_dir: Path) -> str:
             "complete the generated prompt files under agent-notes/."
         )
     if "qdistRO_vm_password".lower() in lower:
-        return "Export QDISTRO_VM_PASSWORD with the password baked into the VM image."
+        return "QDISTRO_VM_PASSWORD defaults to 'admin'. Override it if the VM image uses a different password."
     if "baseweed-baked" in lower:
         return "Build or repair the prebaked VM image with qdistro/scripts/vm/build-baked-baseweed.sh."
     if "no module named" in lower:
