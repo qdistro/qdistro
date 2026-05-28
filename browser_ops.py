@@ -236,6 +236,7 @@ COOKIES_EXPORT = OpSchema(
     optional_request_fields=(
         _f("domain", "str", required=False),
         _f("url", "str", required=False),
+        _f("cookie_store_id", "str", required=False),
         _f("cookies", "list", required=False),
     ),
     response_fields=_COMMON_RESPONSE,

@@ -876,6 +876,7 @@ class TestCookiesExport:
         resp = bb.dispatch(
             {"op": "cookies.export",
              "domain": "example.com",
+             "cookie_store_id": "firefox-container-1",
              "cookies": [{"name": "sid", "value": "abc"}],
              "intent_token": _mint_token("cookies.export")},
             ALLOWED)
@@ -884,6 +885,7 @@ class TestCookiesExport:
         assert call["method"] == "ExportCookies"
         body = json.loads(call["body"][0])
         assert body["domain"] == "example.com"
+        assert body["cookie_store_id"] == "firefox-container-1"
         assert body["cookies"][0]["name"] == "sid"
 
     def test_replayed_token_rejected(self):

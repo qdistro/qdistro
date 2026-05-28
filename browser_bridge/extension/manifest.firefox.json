@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "qdistro browser bridge",
   "version": "0.2.0",
-  "description": "qdistro desktop integration: password fill, tab management, and native messaging bridge.",
+  "description": "qdistro desktop integration: password fill, tab management, session export, and native messaging bridge.",
   "browser_specific_settings": {
     "gecko": {
       "id": "qdistro@qdistro.local",

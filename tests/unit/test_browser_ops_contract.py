@@ -304,6 +304,15 @@ class TestRequestValidation:
     def test_cookies_export_requires_token(self):
         errors = ops.validate_request("cookies.export", {})
         assert any("intent_token" in e for e in errors)
+        token = {"request_id": "r3", "ts": 1.0, "op": "cookies.export",
+                 "hmac": "00"}
+        errors = ops.validate_request("cookies.export", {
+            "intent_token": token,
+            "domain": "example.com",
+            "cookie_store_id": "firefox-container-1",
+            "cookies": [],
+        })
+        assert errors == []
 
     def test_tabs_open_requires_url(self):
         errors = ops.validate_request("tabs.open", {})

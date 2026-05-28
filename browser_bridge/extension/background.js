@@ -608,6 +608,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (action === "cookies.export") {
+    handleCookiesExport(msg, sender).then(sendResponse);
+    return true;
+  }
+
   if (action === "pwd.save_offer") {
     // Content script detected a form submission with new credentials.
     // Store the offer so the popup can prompt the user.
@@ -720,6 +725,72 @@ async function handlePwdSave(msg, _sender) {
     });
   } catch (e) {
     return { ok: false, error: "pwd_save_failed", detail: String(e).slice(0, 200) };
+  }
+}
+
+// ---- cookies.export handler ----------------------------------------
+
+function isHttpUrl(url) {
+  return typeof url === "string" &&
+    (url.startsWith("http://") || url.startsWith("https://"));
+}
+
+function normalizeCookie(cookie) {
+  return {
+    name: cookie.name || "",
+    value: cookie.value || "",
+    domain: cookie.domain || "",
+    path: cookie.path || "",
+    secure: !!cookie.secure,
+    httpOnly: !!cookie.httpOnly,
+    sameSite: cookie.sameSite || "unspecified",
+    session: !!cookie.session,
+    expirationDate: cookie.expirationDate || null,
+    storeId: cookie.storeId || null,
+  };
+}
+
+async function handleCookiesExport(_msg, _sender) {
+  if (!_handshakeComplete) {
+    return { ok: false, error: "handshake_not_complete" };
+  }
+  if (!api.cookies || !api.cookies.getAll) {
+    return { ok: false, error: "cookies_api_unavailable" };
+  }
+
+  if (_sender && _sender.tab) {
+    return { ok: false, error: "popup_required" };
+  }
+  const popupUrl = api.runtime.getURL("popup.html");
+  if (!_sender || _sender.url !== popupUrl) {
+    return { ok: false, error: "popup_required" };
+  }
+
+  const tabs = await api.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs && tabs.length ? tabs[0] : null;
+  const url = tab ? (tab.url || "") : "";
+  if (!isHttpUrl(url)) {
+    return { ok: false, error: "unsupported_url" };
+  }
+
+  try {
+    const host = (new URL(url)).hostname;
+    const query = { domain: host };
+    const cookieStoreId = tab.cookieStoreId || "";
+    if (cookieStoreId) query.storeId = cookieStoreId;
+
+    const cookies = await api.cookies.getAll(query);
+    const token = await mintIntentToken("cookies.export");
+    return await bridgeRequest({
+      op: "cookies.export",
+      url,
+      domain: host,
+      cookie_store_id: cookieStoreId,
+      cookies: cookies.map(normalizeCookie),
+      intent_token: token,
+    });
+  } catch (e) {
+    return { ok: false, error: "cookies_export_failed", detail: String(e).slice(0, 200) };
   }
 }
 

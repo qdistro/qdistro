@@ -1074,12 +1074,16 @@ def _handle_cookies_export(msg: dict, identity: dict) -> dict:
     cookies = msg.get("cookies") or []
     if not isinstance(cookies, list):
         return {"ok": False, "error": "bad_cookies"}
-    body = json.dumps({
+    body_obj = {
         "domain": domain,
         "cookies": cookies,
         "extension_id": identity.get("extension_id") or "",
         "parent_exe": identity.get("parent_exe") or "",
-    })
+    }
+    cookie_store_id = msg.get("cookie_store_id")
+    if isinstance(cookie_store_id, str) and cookie_store_id:
+        body_obj["cookie_store_id"] = cookie_store_id
+    body = json.dumps(body_obj)
     reply = _get_dbus_client().call(
         _COOKIES_BUS_KIND, _COOKIES_BUS, _COOKIES_PATH, _COOKIES_IFACE,
         "ExportCookies", "s", (body,))

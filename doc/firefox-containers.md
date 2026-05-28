@@ -298,10 +298,9 @@ forward-compatible regardless of which routing option above wins:
   named container. Already implemented end-to-end (extension +
   bridge).
 - **`cookies.export({url, cookie_store_id})`** — scopes the export to
-  cookies in the named container. The bridge's
-  `_handle_cookies_export` ignores unknown fields today; the field is
-  forward-compatible and lands as a behavioural change as soon as the
-  bridge starts honouring it.
+  cookies in the named container. The extension passes the
+  `cookie_store_id` through and the bridge preserves it in the
+  `ExportCookies` payload.
 
 ## Status
 
@@ -309,7 +308,7 @@ forward-compatible regardless of which routing option above wins:
 |-------|-------|
 | qdfirefox-extension | `containers.list/.create/.remove` dispatcher handlers implemented + tested (`tests/containers.test.js`). Module is currently dead — no inbound caller. |
 | qdfirefox-extension `tabs.open` | Accepts `cookie_store_id` end-to-end. |
-| qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge ignores it. |
+| qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge preserves it in the export payload. |
 | Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
 | Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (17 cases). |
 | Daemon client helper | **Landed 2026-05-16** as `qdistro_browser_bridge_client.call_bridge` (own-uid) / `call_via_relay` (cross-uid). Tests: `tests/unit/test_browser_bridge_client.py` (23 cases). |

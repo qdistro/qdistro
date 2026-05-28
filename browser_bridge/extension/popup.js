@@ -1,8 +1,8 @@
-// qdistro browser-bridge popup — Phase 9a/9b.
+// qdistro browser-bridge popup — Phase 9a/9b/9d.
 //
 // Communicates with background.js via chrome.runtime.sendMessage.
 // Shows bridge connection status, credential picker for the current
-// tab's URL, and a manual save-credential form.
+// tab's URL, a manual save-credential form, and current-tab cookie export.
 //
 // Cross-browser: chrome.* with `browser` fallback.
 
@@ -23,6 +23,10 @@ const saveUsernameInput = document.getElementById("save-username");
 const savePasswordInput = document.getElementById("save-password");
 const saveBtn = document.getElementById("save-btn");
 const saveMsg = document.getElementById("save-msg");
+
+const cookieSection = document.getElementById("cookie-section");
+const exportCookiesBtn = document.getElementById("export-cookies");
+const cookieMsg = document.getElementById("cookie-msg");
 
 const outPre = document.getElementById("out");
 const pingBtn = document.getElementById("ping");
@@ -199,6 +203,28 @@ async function doSave() {
   }
 }
 
+// ---- cookie export --------------------------------------------------
+
+async function exportCookiesForCurrentTab() {
+  hideMsg(cookieMsg);
+  exportCookiesBtn.disabled = true;
+  showMsg(cookieMsg, "exporting...", "info");
+
+  const resp = await sendToBackground({
+    action: "cookies.export",
+  });
+  render(resp);
+
+  if (resp.ok) {
+    const count = resp.exported || resp.count || "";
+    showMsg(cookieMsg, count ? ("exported " + count + " cookies") : "export complete", "ok");
+  } else {
+    showMsg(cookieMsg, resp.error || "export failed", "err");
+  }
+
+  exportCookiesBtn.disabled = false;
+}
+
 async function checkPendingSave() {
   const resp = await sendToBackground({ action: "get_pending_save" });
   if (resp.offer && resp.offer.url) {
@@ -264,9 +290,11 @@ async function init() {
   if (_currentTabUrl.startsWith("http://") || _currentTabUrl.startsWith("https://")) {
     fillBtn.style.display = "";
     showSaveBtn.style.display = "";
+    cookieSection.classList.remove("hidden");
   } else {
     fillBtn.style.display = "none";
     showSaveBtn.style.display = "none";
+    cookieSection.classList.add("hidden");
   }
 }
 
@@ -276,6 +304,7 @@ pingBtn.addEventListener("click", doPing);
 fillBtn.addEventListener("click", fillForCurrentTab);
 showSaveBtn.addEventListener("click", showSaveForm);
 saveBtn.addEventListener("click", doSave);
+exportCookiesBtn.addEventListener("click", exportCookiesForCurrentTab);
 toggleDebugBtn.addEventListener("click", toggleDebug);
 
 init();
