@@ -642,7 +642,10 @@ if [ "$TIER4_DISPLAY" = "rdp" ]; then
 else
     PORT="${TIER4_PORT:-$TIER4_FIXED_PORT}"
 fi
-[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "[tier4] FAIL: PORT='$PORT' not numeric" >&2; exit 1; }
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] || { echo "[tier4] FAIL: PORT='$PORT' not numeric" >&2; exit 1; }
+if [ "$((10#$PORT))" -lt 1 ] || [ "$((10#$PORT))" -gt 65535 ]; then
+    echo "[tier4] FAIL: PORT '$PORT' out of valid range 1-65535" >&2; exit 1
+fi
 
 maybe_overwrite_existing
 
@@ -663,7 +666,7 @@ if [ "$DEFINE_ONLY" != "1" ]; then
         echo "[tier4] FAIL: qemu-img create linked clone from $TIER4_GUEST_DISK failed" >&2
         exit 4
     fi
-    chmod 0644 "$DISK_PATH"
+    chmod 0640 "$DISK_PATH"
     chown "$ADMIN_USER":root "$DISK_PATH" 2>/dev/null || true
     DISK_CREATED=1
     echo "[tier4] linked clone $DISK_PATH from base $TIER4_GUEST_DISK" >&2
