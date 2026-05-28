@@ -166,7 +166,8 @@ class QdwinLockerV1Resource(Resource):
 
         Mirror of qdwin_shell_v1.locked_changed for the locker. Fires on every
         transition, including transitions the locker did not request (e.g. the
-        lid-close path inside the compositor).
+        compositor's fail-safe black screen when the bound locker process dies
+        while locked).
 
         :param locked:
         :type locked:
@@ -178,15 +179,23 @@ class QdwinLockerV1Resource(Resource):
         Argument(ArgumentType.Uint),
     )
     def lock_requested(self, reason: int) -> None:
-        """User pressed the manual-lock keybinding or lid closed
+        """Compositor relays a lock trigger to the locker
 
-        Aggregates the triggers in sessions.md §"Lock triggers" that the
-        compositor observes directly:
+        The compositor relays a lock trigger to the locker. `reason` names
+        which of the sessions.md §"Lock triggers" caused it:
 
           reason = 0  idle     — ext-idle-notify-v1 timeout   reason = 1  lid
         — systemd-logind lid close   reason = 2  suspend  — prepare-for-sleep
         reason = 3  manual   — Ctrl+Alt+L global hotkey or admin
         panel "Lock now"
+
+        Implementation note (current qdwin): the compositor only observes and
+        emits `reason = 3` (the Ctrl+Alt+L hotkey). The locker sources the
+        other triggers itself, NOT via this event: idle from its own idle
+        timer, and lid/suspend by subscribing directly to systemd-logind
+        (`Session.Lock` for lid, `PrepareForSleep` for suspend). Reasons 0/1/2
+        are reserved here so the wire format stays stable if a future qdwin
+        observes them directly; today they are not sent.
 
         The locker decides whether to call `set_locked(1)` (it usually does
         immediately, but may delay if a fingerprint verification is already in
