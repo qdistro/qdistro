@@ -242,6 +242,14 @@ Implemented and exercised by tests today:
   `RequestPermission` (no waiter).
 - `DecideRequest` from admin TUI / Qt admin app, `ListCache`, `ListHistory`,
   `RevokeApproval`, `RevokeAllForUid`, `RunCacheGc`, `RunAuditGc`.
+- **Admin-app Rules tab + "Rule from this" button** — the Qt admin app
+  has a `RulesTab` that lists existing rules via `ListRules`, adds/edits
+  them via `SaveRule`, reloads via `ReloadRules`, and refreshes live on
+  the `RulesReloaded` signal (delete removes the rule file directly, as
+  there is no `DeleteRule` RPC yet). A "Rule from this" action opens a
+  `RuleEditorDialog` pre-populated from the selected pending request or
+  history entry and saves through `SaveRule`, with a client-side
+  guardrail refusing empty-match allow-all rules.
 - Declarative rules in `/etc/qdistro/rules.d/*.yaml`: `allow`/`deny`
   decisions, fnmatch globs on string selectors, first-match-wins
   ordering, hot-reload via inotify and SIGHUP, `SaveRule` validation,
@@ -299,9 +307,6 @@ Doc-only / not yet wired:
 - **Workflow engine** (triggers / steps / roles / secrets-needed) — the
   rule engine is the seed; the full orchestration framework is future.
   Tracked in `todo/qdistro-workflow-engine.md`.
-- **Admin-app Rules tab + "Rule from this" button** — `SaveRule` /
-  `ListRules` are exposed on D-Bus, no UI surface yet. Tracked in
-  `todo/qdistro-admin-rules-tab.md`.
 - **Notification surface / tray-counter / mobile admin** — current Qt
   admin app is an always-on window with no badge. Tracked in
   `todo/qdistro-admin-notifications.md`.
