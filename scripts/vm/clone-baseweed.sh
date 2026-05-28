@@ -75,7 +75,7 @@ else
     BACKING_NAME=baseweed
 fi
 
-if ! virsh dominfo "$TEMPLATE" >/dev/null 2>&1; then
+if ! virsh -c qemu:///session dominfo "$TEMPLATE" >/dev/null 2>&1; then
     echo "ERROR: template VM '$TEMPLATE' not found." >&2
     echo "       This script clones an existing libvirt domain's XML" >&2
     echo "       (NIC/video/serial config) onto the new disk. Set" >&2
@@ -93,7 +93,7 @@ if [ ! -f "$BACKING" ]; then
     fi
     exit 1
 fi
-if [ -f "$IMG/${VM}.qcow2" ] || virsh dominfo "$VM" >/dev/null 2>&1; then
+if [ -f "$IMG/${VM}.qcow2" ] || virsh -c qemu:///session dominfo "$VM" >/dev/null 2>&1; then
     echo "ERROR: VM '$VM' already exists" >&2
     exit 1
 fi
@@ -120,7 +120,7 @@ fi
 NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
     $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
-XML=$(virsh dumpxml "$TEMPLATE" --inactive)
+XML=$(virsh -c qemu:///session dumpxml "$TEMPLATE" --inactive)
 XML=$(printf '%s' "$XML" \
     | sed -e "s|<name>$TEMPLATE</name>|<name>$VM</name>|" \
           -e '/<uuid>/d' \
@@ -274,8 +274,8 @@ sys.stdout.write(src[:m.end()] + inject + src[m.end():])
     fi
 fi
 
-printf '%s' "$XML" | virsh define /dev/stdin >/dev/null
-virsh start "$VM" >/dev/null
+printf '%s' "$XML" | virsh -c qemu:///session define /dev/stdin >/dev/null
+virsh -c qemu:///session start "$VM" >/dev/null
 
 # 4. Wait for the qemu-guest-agent so subsequent vm-exec works.
 #    Under --from-enforcing-baked, qga is denied by SELinux; the wait
