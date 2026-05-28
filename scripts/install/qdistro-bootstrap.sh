@@ -692,7 +692,9 @@ install_python_modules() {
         "scripts/install/install-recall-for-vm.sh          $QD"
         "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
         "scripts/install/install-tier3-for-vm.sh           $QD"
+        "scripts/install/install-tier4-host-for-vm.sh      $QD"
         "scripts/install/install-tier5-for-vm.sh           $QD"
+        "scripts/install/install-tier5b-for-vm.sh          $QD"
     )
     cd "$QD"
     for entry in "${installers[@]}"; do
@@ -779,6 +781,10 @@ install_selinux_policies() {
 # ---------------------------------------------------------------------------
 install_qdwin_session() {
     log "installing qdwin user session for admin..."
+    # Pass QDISTRO_SRC so the helper can locate tier2/spawn-tier2.sh; otherwise it
+    # defaults to /root/qdistro-src/qdistro and silently skips Tier-2 helper install
+    # on non-/root source trees (e.g. /opt/qdistro-src).
+    QDISTRO_SRC="$REPO_ROOT/qdistro" \
     bash "$REPO_ROOT/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
         "$REPO_ROOT/qdshell"
 }
