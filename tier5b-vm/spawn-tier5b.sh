@@ -352,7 +352,7 @@ else
                 [ -z "$d" ] && continue
                 virsh dumpxml "$d" 2>/dev/null
             done' | \
-            grep -oE "cid[[:space:]]+address='[0-9]+'" | \
+            grep -oE "<cid[^>]*address='[0-9]+'" | \
             grep -oE "[0-9]+" | sort -un || true)
         # Pick a per-app CID range that doesn't collide with tier-5 (3..).
         # Tier-5b starts at 100 to keep allocations cleanly separated in
