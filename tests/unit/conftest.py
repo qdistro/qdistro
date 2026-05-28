@@ -7,6 +7,7 @@ under tasks/.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,21 @@ import pytest
 # test_permission.py is the in-VM acceptance script (deployed to
 # /usr/local/bin/qdistro-test-permission); not a unit test.
 collect_ignore = ["test_permission.py"]
+
+# CI hardening (Phase 4): the admin-app Qt tests use
+# `pytest.importorskip("PyQt6.QtWidgets")`, so an environment where
+# PySide6's libQt6Core shadows PyQt6 would SILENTLY skip ~150 tests
+# instead of failing. When QDISTRO_REQUIRE_PYQT6=1 (set by qci) make an
+# unimportable PyQt6 a hard collection error so the regression is loud.
+if os.environ.get("QDISTRO_REQUIRE_PYQT6") == "1":
+    try:
+        import PyQt6.QtWidgets  # noqa: F401
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            "QDISTRO_REQUIRE_PYQT6=1 but PyQt6.QtWidgets is unimportable "
+            f"({e!r}). PySide6 likely shadows PyQt6 here; set "
+            "PYTEST_QT_API=pyqt6 or remove PySide6 from this image."
+        ) from e
 
 # Make broker + cli + pwd + print modules importable as top-level for the tests.
 _ROOT = Path(__file__).resolve().parents[1]

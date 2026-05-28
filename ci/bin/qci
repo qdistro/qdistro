@@ -477,7 +477,12 @@ EOF
 
 gate_host() {
     local rc=$EXIT_OK c step_rc
-    c="python3 -m pytest tests/unit"
+    # Pin the Qt binding to PyQt6 so a CI image that also has PySide6
+    # installed (qdgreeter uses it) can't let pytest-qt load PySide6 first
+    # and shadow PyQt6, which would silently SKIP the ~150 admin-app Qt
+    # tests. QDISTRO_REQUIRE_PYQT6=1 makes the conftest turn that shadow
+    # into a hard failure instead of a quiet skip.
+    c="PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest tests/unit"
     run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
