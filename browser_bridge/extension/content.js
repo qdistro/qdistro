@@ -122,6 +122,9 @@ function createFillBanner(credentials, pwdField) {
     item.addEventListener("mouseenter", () => { item.style.background = "#e8f0fe"; });
     item.addEventListener("mouseleave", () => { item.style.background = ""; });
     item.addEventListener("mousedown", (e) => {
+      // Only accept real user clicks — reject synthetic events from
+      // page scripts to prevent web-page-triggered credential fill.
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
       selectCredential(cred, pwdField);

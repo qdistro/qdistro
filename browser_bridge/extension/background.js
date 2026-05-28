@@ -149,9 +149,10 @@ async function handleInboundRequest(msg) {
       case "page.extract.request":
         result = await handlePageExtractRequest(msg);
         break;
-      case "cookies.export":
-        result = await handleCookiesExportInbound(msg);
-        break;
+      // cookies.export is NOT handled inbound — it must be extension-
+      // initiated with intent-token validation through the bridge's
+      // own _handle_cookies_export handler. The inbound D-Bus surface
+      // must not bypass intent tokens and audit logging.
       case "containers.list":
         result = await handleContainersList(msg);
         break;
@@ -194,7 +195,7 @@ async function handleTabsList(_msg) {
       url: t.url || "",
       title: t.title || "",
       active: !!t.active,
-      windowId: t.windowId,
+      window_id: t.windowId,
       status: t.status || "complete",
       pinned: !!t.pinned,
       incognito: !!t.incognito,
