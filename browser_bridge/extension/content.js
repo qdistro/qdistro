@@ -33,7 +33,6 @@ function sendMsg(msg, callback) {
 
 let _currentPasswordField = null;
 let _fillBannerEl = null;
-let _saveBannerEl = null;
 let _lastFillUrl = null;    // avoid duplicate fill requests for the same page
 let _credentialsFetched = false;
 let _credentials = [];      // cached fill results for the current URL
@@ -222,65 +221,9 @@ function onPasswordFieldBlur(_e) {
 }
 
 // ---- form submission detection (save prompt) ------------------------
-
-function removeSaveBanner() {
-  if (_saveBannerEl && _saveBannerEl.parentNode) {
-    _saveBannerEl.parentNode.removeChild(_saveBannerEl);
-  }
-  _saveBannerEl = null;
-}
-
-function showSaveBanner(url, username, password) {
-  removeSaveBanner();
-
-  const banner = document.createElement("div");
-  banner.id = "qdistro-save-banner";
-  banner.style.cssText = [
-    "position:fixed", "top:0", "left:0", "right:0",
-    "z-index:2147483647",
-    "background:#1a73e8", "color:#fff",
-    "font-family:sans-serif", "font-size:14px",
-    "padding:10px 16px",
-    "display:flex", "align-items:center", "justify-content:space-between",
-    "box-shadow:0 2px 8px rgba(0,0,0,0.3)",
-  ].join(";");
-
-  const text = document.createElement("span");
-  text.textContent = "Save password for " + (username || "(unknown)") + "?";
-  banner.appendChild(text);
-
-  const btnContainer = document.createElement("span");
-
-  const saveBtn = document.createElement("button");
-  saveBtn.textContent = "Save";
-  saveBtn.style.cssText = "margin-left:12px;padding:5px 14px;background:#fff;color:#1a73e8;border:none;border-radius:3px;cursor:pointer;font-weight:bold;";
-  saveBtn.addEventListener("click", () => {
-    removeSaveBanner();
-    sendMsg({
-      action: "pwd.save",
-      url: url,
-      username: username,
-      password: password,
-    }, (_resp) => {
-      // Save result is silent — the pwd daemon handles storage.
-    });
-  });
-
-  const dismissBtn = document.createElement("button");
-  dismissBtn.textContent = "Dismiss";
-  dismissBtn.style.cssText = "margin-left:8px;padding:5px 14px;background:transparent;color:#fff;border:1px solid #fff;border-radius:3px;cursor:pointer;";
-  dismissBtn.addEventListener("click", removeSaveBanner);
-
-  btnContainer.appendChild(saveBtn);
-  btnContainer.appendChild(dismissBtn);
-  banner.appendChild(btnContainer);
-
-  document.body.appendChild(banner);
-  _saveBannerEl = banner;
-
-  // Auto-dismiss after 15 seconds
-  setTimeout(removeSaveBanner, 15000);
-}
+// On form submit, we send the credentials to the background script
+// (which persists the offer and shows a badge) rather than showing
+// an in-page banner that would be lost on navigation.
 
 function onFormSubmit(e) {
   const form = e.target;
@@ -303,7 +246,16 @@ function onFormSubmit(e) {
     return;
   }
 
-  showSaveBanner(location.href, username, password);
+  // Send the pending credential to the background script. The page
+  // may navigate immediately on form submit, so we cannot rely on
+  // an in-page banner. The background persists the offer and shows
+  // a notification / popup prompt on the next page load.
+  sendMsg({
+    action: "pwd.save_offer",
+    url: location.href,
+    username: username,
+    password: password,
+  }, () => { /* fire and forget */ });
 }
 
 // ---- event listeners ------------------------------------------------

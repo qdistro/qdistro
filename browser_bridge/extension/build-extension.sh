@@ -18,7 +18,9 @@ mkdir -p "$DIST/firefox" "$DIST/chromium"
 # Firefox MV2 layout.
 cp "$HERE/manifest.firefox.json"  "$DIST/firefox/manifest.json"
 cp "$HERE/popup.html"             "$DIST/firefox/"
-cp "$HERE/popup.js"                "$DIST/firefox/"
+cp "$HERE/popup.js"               "$DIST/firefox/"
+cp "$HERE/background.js"          "$DIST/firefox/"
+cp "$HERE/content.js"             "$DIST/firefox/"
 [ -d "$HERE/icons" ] && cp -r "$HERE/icons" "$DIST/firefox/"
 
 # Chromium MV3 layout.
@@ -26,6 +28,7 @@ cp "$HERE/manifest.chromium.json" "$DIST/chromium/manifest.json"
 cp "$HERE/popup.html"             "$DIST/chromium/"
 cp "$HERE/popup.js"               "$DIST/chromium/"
 cp "$HERE/background.js"          "$DIST/chromium/"
+cp "$HERE/content.js"             "$DIST/chromium/"
 [ -d "$HERE/icons" ] && cp -r "$HERE/icons" "$DIST/chromium/"
 
 # Zip both up. zip is in the standard Tumbleweed image; bail if

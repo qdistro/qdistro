@@ -21,6 +21,7 @@ let _sessionSecret = null;  // hex string from handshake, converted to Uint8Arra
 let _tokenTtlS = 5.0;      // from handshake reply
 let _requestSeq = 0;        // monotonic counter for intent-token request_ids
 let _handshakeComplete = false;
+let _pendingSaveOffer = null; // {url, username, password} from form submit
 
 // Pending responses from the bridge keyed by request_id.  Used by
 // popup / content-script message forwarding: they send a request,
@@ -204,7 +205,11 @@ async function handleTabsList(_msg) {
 async function handleTabsOpen(msg) {
   const url = msg.url || "about:blank";
   const active = msg.active !== false;
-  const tab = await api.tabs.create({ url, active });
+  const opts = { url, active };
+  // Firefox containers: open in a specific container if requested
+  const csid = msg.cookie_store_id || msg.cookieStoreId;
+  if (csid) opts.cookieStoreId = csid;
+  const tab = await api.tabs.create(opts);
   return { ok: true, id: tab.id, url: tab.url || url };
 }
 
@@ -218,44 +223,38 @@ async function handleTabsClose(msg) {
 }
 
 // ---- page.extract.request handler -----------------------------------
-// Bridge sends {op: "page.extract.request", mode: "...", selector: "..."}
-// Extension injects a content script to extract the requested content
-// from the active tab.
+// Bridge sends {op: "page.extract.request", tab_id, mode, selector?}
+// Extension extracts content from the specified tab.
+// Wire contract: see todo/browser/02-page-extract-request-usage.md
+
+const PAGE_EXTRACT_MODES = new Set([
+  "selection", "visible_text", "full_text", "outer_html", "by_selector", "title"
+]);
+const PAGE_EXTRACT_SIZE_CAP = 256 * 1024;  // 256 KB
 
 async function handlePageExtractRequest(msg) {
   const mode = msg.mode || "visible_text";
-  // Use the specified tab_id if provided; otherwise fall back to the active tab.
-  let tab;
-  const requestedTabId = msg.tab_id || msg.tabId;
-  if (typeof requestedTabId === "number") {
-    try {
-      tab = await api.tabs.get(requestedTabId);
-    } catch (e) {
-      return { ok: false, error: "tab_not_found", tab_id: requestedTabId };
-    }
-  } else {
-    const tabs = await api.tabs.query({ active: true, currentWindow: true });
-    if (!tabs.length) {
-      return { ok: false, error: "no_active_tab" };
-    }
-    tab = tabs[0];
+  if (!PAGE_EXTRACT_MODES.has(mode)) {
+    return { ok: false, error: "unknown_mode", mode };
   }
-  // Use scripting API (MV3) or tabs.executeScript (MV2) to extract content.
-  const extractFn = `(function() {
-    var mode = ${JSON.stringify(mode)};
-    var selector = ${JSON.stringify(msg.selector || "")};
-    if (mode === "selection") return window.getSelection().toString();
-    if (mode === "title") return document.title;
-    if (mode === "visible_text") return document.body ? document.body.innerText : "";
-    if (mode === "full_text") return document.body ? document.body.textContent : "";
-    if (mode === "outer_html") return document.documentElement.outerHTML;
-    if (mode === "by_selector" && selector) {
-      var el = document.querySelector(selector);
-      return el ? el.outerHTML : "";
-    }
-    return "";
-  })()`;
+  const selector = msg.selector || "";
+  if (mode === "by_selector" && !selector) {
+    return { ok: false, error: "missing_selector" };
+  }
+  // tab_id is required per the documented contract
+  const requestedTabId = msg.tab_id;
+  if (typeof requestedTabId !== "number") {
+    return { ok: false, error: "missing_tab_id" };
+  }
+  let tab;
+  try {
+    tab = await api.tabs.get(requestedTabId);
+  } catch (e) {
+    return { ok: false, error: "executeScript_failed", detail: "tab not found: " + String(e).slice(0, 150) };
+  }
+
   let content = "";
+  let matched = undefined;  // only set for by_selector mode
   try {
     if (api.scripting && api.scripting.executeScript) {
       // MV3 path
@@ -265,43 +264,121 @@ async function handlePageExtractRequest(msg) {
           if (m === "selection") return window.getSelection().toString();
           if (m === "title") return document.title;
           if (m === "visible_text") return document.body ? document.body.innerText : "";
-          if (m === "full_text") return document.body ? document.body.textContent : "";
-          if (m === "outer_html") return document.documentElement.outerHTML;
+          if (m === "full_text") return document.documentElement ? document.documentElement.textContent : "";
+          if (m === "outer_html") return document.documentElement ? document.documentElement.outerHTML : "";
           if (m === "by_selector" && s) {
-            var el = document.querySelector(s);
-            return el ? el.outerHTML : "";
+            try {
+              var el = document.querySelector(s);
+              return el ? { text: el.innerText, matched: true } : { text: "", matched: false };
+            } catch (e) {
+              return { error: "bad_selector", detail: e.message };
+            }
           }
           return "";
         },
-        args: [mode, msg.selector || ""]
+        args: [mode, selector]
       });
       if (results && results[0]) {
-        content = results[0].result || "";
+        const r = results[0].result;
+        if (r && typeof r === "object" && r.error) {
+          return { ok: false, error: r.error, detail: r.detail || "" };
+        }
+        if (r && typeof r === "object" && "matched" in r) {
+          content = r.text || "";
+          matched = !!r.matched;
+        } else {
+          content = r || "";
+        }
       }
     } else {
       // MV2 / Firefox fallback
+      const extractFn = `(function() {
+        var mode = ${JSON.stringify(mode)};
+        var selector = ${JSON.stringify(selector)};
+        if (mode === "selection") return window.getSelection().toString();
+        if (mode === "title") return document.title;
+        if (mode === "visible_text") return document.body ? document.body.innerText : "";
+        if (mode === "full_text") return document.documentElement ? document.documentElement.textContent : "";
+        if (mode === "outer_html") return document.documentElement ? document.documentElement.outerHTML : "";
+        if (mode === "by_selector" && selector) {
+          try {
+            var el = document.querySelector(selector);
+            return JSON.stringify(el ? { text: el.innerText, matched: true } : { text: "", matched: false });
+          } catch (e) {
+            return JSON.stringify({ error: "bad_selector", detail: e.message });
+          }
+        }
+        return "";
+      })()`;
       const results = await api.tabs.executeScript(tab.id, { code: extractFn });
-      content = (results && results[0]) || "";
+      let r = (results && results[0]) || "";
+      if (mode === "by_selector" && typeof r === "string") {
+        try {
+          const parsed = JSON.parse(r);
+          if (parsed.error) return { ok: false, error: parsed.error, detail: parsed.detail || "" };
+          content = parsed.text || "";
+          matched = !!parsed.matched;
+        } catch (_e) {
+          content = r;
+        }
+      } else {
+        content = r || "";
+      }
     }
   } catch (e) {
-    return { ok: false, error: "extract_failed", detail: String(e).slice(0, 200) };
+    return { ok: false, error: "executeScript_failed", detail: String(e).slice(0, 200) };
   }
-  return { ok: true, content, url: tab.url || "", title: tab.title || "" };
+  if (content === undefined || content === null) {
+    return { ok: false, error: "capture_returned_empty" };
+  }
+  content = String(content);
+  // Enforce 256 KB size cap
+  let truncated = false;
+  if (content.length > PAGE_EXTRACT_SIZE_CAP) {
+    content = content.slice(0, PAGE_EXTRACT_SIZE_CAP);
+    truncated = true;
+  }
+  const reply = {
+    ok: true,
+    mode,
+    url: tab.url || "",
+    title: tab.title || "",
+    content,
+    truncated,
+  };
+  if (mode === "by_selector") {
+    reply.matched = matched !== undefined ? matched : false;
+  }
+  return reply;
 }
 
 // ---- cookies.export inbound handler ---------------------------------
 // Bridge requests cookie export for a domain from extension side.
+// The domain may be a bare domain like "example.com" or a full URL.
+// The cookies.getAll API requires either `url` or `domain` params.
 
 async function handleCookiesExportInbound(msg) {
-  const domain = msg.domain || msg.url || "";
-  if (!domain) {
+  const rawDomain = msg.domain || msg.url || "";
+  if (!rawDomain) {
     return { ok: false, error: "missing_domain" };
   }
   if (!api.cookies) {
     return { ok: false, error: "cookies_api_unavailable" };
   }
   try {
-    const cookies = await api.cookies.getAll({ url: domain });
+    // Build the query: if it looks like a URL use `url`, otherwise
+    // use `domain` to handle bare domain names like "example.com".
+    const query = {};
+    if (/^https?:\/\//.test(rawDomain)) {
+      query.url = rawDomain;
+    } else {
+      query.domain = rawDomain;
+    }
+    // Support Firefox container-scoped export
+    const storeId = msg.cookie_store_id || msg.storeId || msg.cookieStoreId;
+    if (storeId) query.storeId = storeId;
+
+    const cookies = await api.cookies.getAll(query);
     return {
       ok: true,
       cookies: cookies.map(c => ({
@@ -312,6 +389,7 @@ async function handleCookiesExportInbound(msg) {
         secure: c.secure,
         httpOnly: c.httpOnly,
         expirationDate: c.expirationDate || null,
+        storeId: c.storeId || null,
       }))
     };
   } catch (e) {
@@ -529,10 +607,50 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (action === "pwd.save_offer") {
+    // Content script detected a form submission with new credentials.
+    // Store the offer so the popup can prompt the user.
+    _pendingSaveOffer = {
+      url: msg.url || "",
+      username: msg.username || "",
+      password: msg.password || "",
+      ts: Date.now(),
+    };
+    // Set badge to signal a pending save (Chromium MV3 / Firefox)
+    try {
+      const badgeApi = api.action || api.browserAction;
+      if (badgeApi && badgeApi.setBadgeText) {
+        badgeApi.setBadgeText({ text: "!" });
+        badgeApi.setBadgeBackgroundColor({ color: "#1a73e8" });
+      }
+    } catch (_e) { /* ignore */ }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (action === "get_pending_save") {
+    // Popup retrieves the pending save offer
+    sendResponse({ offer: _pendingSaveOffer });
+    return false;
+  }
+
+  if (action === "dismiss_pending_save") {
+    _pendingSaveOffer = null;
+    try {
+      const badgeApi = api.action || api.browserAction;
+      if (badgeApi && badgeApi.setBadgeText) {
+        badgeApi.setBadgeText({ text: "" });
+      }
+    } catch (_e) { /* ignore */ }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (action === "get_status") {
     sendResponse({
       connected: !!_port,
       handshakeComplete: _handshakeComplete,
+      pendingSave: !!_pendingSaveOffer,
     });
     return false;
   }

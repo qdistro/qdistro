@@ -15,6 +15,7 @@
     "tabs",
     "webNavigation",
     "cookies",
+    "contextualIdentities",
     "<all_urls>"
   ],
   "browser_action": {

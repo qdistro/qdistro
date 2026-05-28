@@ -192,8 +192,21 @@ async function doSave() {
   if (resp.ok) {
     showMsg(saveMsg, "saved!", "ok");
     savePasswordInput.value = "";
+    // Dismiss the pending save offer if we just saved it
+    await sendToBackground({ action: "dismiss_pending_save" });
   } else {
     showMsg(saveMsg, resp.error || "save failed", "err");
+  }
+}
+
+async function checkPendingSave() {
+  const resp = await sendToBackground({ action: "get_pending_save" });
+  if (resp.offer && resp.offer.url) {
+    saveSection.classList.remove("hidden");
+    saveUrlInput.value = resp.offer.url;
+    saveUsernameInput.value = resp.offer.username || "";
+    savePasswordInput.value = resp.offer.password || "";
+    showMsg(saveMsg, "new credentials detected — save to vault?", "info");
   }
 }
 
@@ -245,6 +258,7 @@ async function init() {
   }
 
   checkStatus();
+  checkPendingSave();
 
   // If we're on an http/https page, show the fill button prominently
   if (_currentTabUrl.startsWith("http://") || _currentTabUrl.startsWith("https://")) {
