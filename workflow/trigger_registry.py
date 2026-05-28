@@ -100,8 +100,21 @@ class CronTrigger(BaseTrigger):
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    # Minimum interval to prevent a zero/negative value from spinning
+    # the thread in a tight loop and creating a CPU/run storm.
+    _MIN_INTERVAL_S = 1.0
+
     def start(self) -> None:
-        interval = float(self.trigger_def.config.get("interval_seconds", 3600))
+        raw_interval = float(
+            self.trigger_def.config.get("interval_seconds", 3600))
+        interval = max(raw_interval, self._MIN_INTERVAL_S)
+        if raw_interval < self._MIN_INTERVAL_S:
+            logger.warning(
+                "CronTrigger: interval_seconds=%s is below minimum "
+                "%s for workflow %s; clamped to %s",
+                raw_interval, self._MIN_INTERVAL_S,
+                self.workflow_name, interval,
+            )
         schedule = self.trigger_def.config.get("schedule", "")
         logger.info(
             "CronTrigger: schedule=%r interval=%ss for workflow %s",

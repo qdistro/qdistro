@@ -73,7 +73,19 @@ class WorkflowEngine:
         return errors
 
     def register_triggers(self) -> None:
-        """Register triggers for all loaded workflows."""
+        """Register triggers for all loaded workflows.
+
+        Also unregisters triggers for workflows that are no longer
+        loaded (e.g. after a reload removed a YAML file).
+        """
+        # Unregister triggers for workflows that were removed.
+        current_names = set(self._workflows.keys())
+        stale_names = set(self._registry.active_triggers().keys()) - current_names
+        for name in stale_names:
+            self._registry.unregister(name)
+            logger.info("unregistered stale trigger for removed workflow %s",
+                        name)
+
         for wf in self._workflows.values():
             try:
                 self._registry.register(wf, self._on_trigger)
@@ -146,6 +158,10 @@ class WorkflowEngine:
 
         if run.state == RunState.RUNNING:
             run.mark_completed()
+            # Scrub secrets delivered with scrub_on="workflow_exit"
+            # (the default). A real backend would revoke the secret;
+            # the skeleton just removes the tracking entry.
+            self._cleanup_secrets(run.run_id, workflow_name)
             if self._audit:
                 self._audit.log_run_complete(run.run_id, workflow_name)
             logger.info("workflow %s run %s completed",

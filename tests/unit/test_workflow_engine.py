@@ -389,7 +389,7 @@ class TestTriggerRegistry:
         registry.unregister_all()
 
     def test_cron_trigger_fires(self):
-        """CronTrigger with a very short interval should fire."""
+        """CronTrigger with minimum interval should fire."""
         calls = []
 
         def cb(name, ctx):
@@ -398,14 +398,14 @@ class TestTriggerRegistry:
         trigger = CronTrigger(
             "test-cron",
             TriggerDef(type=TriggerType.CRON,
-                       config={"interval_seconds": 0.1}),
+                       config={"interval_seconds": 1.0}),
             cb,
         )
         trigger.start()
         assert trigger.active
 
         import time
-        time.sleep(0.3)
+        time.sleep(1.5)
         trigger.stop()
         assert not trigger.active
         # Should have fired at least once.
@@ -877,3 +877,151 @@ class TestEngineLifecycle:
         fetched = engine.get_run(run1.run_id)
         assert fetched is not None
         assert fetched.run_id == run1.run_id
+
+
+# ======================================================================
+# Regression tests for codex review findings
+# ======================================================================
+
+
+class TestCodexReviewFixes:
+    """Tests for issues found during codex review."""
+
+    def test_successful_run_scrubs_secrets(self, tmp_path):
+        """P1: successful runs must scrub delivered secrets too."""
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "test.yaml").write_text(textwrap.dedent("""\
+            name: secret-ok
+            trigger:
+              type: cron
+            steps:
+              - type: deliver_secret
+                item: vault/dev/ssh-key
+              - type: run_hook
+                hook: safe_hook
+        """), encoding="utf-8")
+
+        audit_db = str(tmp_path / "audit.sqlite")
+        audit = WorkflowAuditLogger(db_path=audit_db)
+        loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
+        engine = WorkflowEngine(
+            broker_proxy=None, audit_logger=audit, loader=loader,
+        )
+        engine.load_workflows()
+        run = engine.start_run("secret-ok")
+
+        assert run.state == RunState.COMPLETED
+        # After successful completion, the delivered secrets tracking
+        # should be cleaned up.
+        assert run.run_id not in engine._delivered_secrets
+
+    def test_cron_trigger_clamps_zero_interval(self):
+        """P1: CronTrigger must clamp zero/negative intervals."""
+        calls = []
+        trigger = CronTrigger(
+            "test-zero",
+            TriggerDef(type=TriggerType.CRON,
+                       config={"interval_seconds": 0}),
+            lambda n, c: calls.append(1),
+        )
+        trigger.start()
+        assert trigger.active
+        import time
+        # With the clamp, a 0-second interval becomes 1s minimum.
+        # Sleep briefly and verify we don't get a flood of calls.
+        time.sleep(0.3)
+        trigger.stop()
+        # With clamping to 1s, zero calls in 0.3s is expected.
+        assert len(calls) == 0
+
+    def test_cron_trigger_clamps_negative_interval(self):
+        """P1: CronTrigger must clamp negative intervals."""
+        calls = []
+        trigger = CronTrigger(
+            "test-neg",
+            TriggerDef(type=TriggerType.CRON,
+                       config={"interval_seconds": -10}),
+            lambda n, c: calls.append(1),
+        )
+        trigger.start()
+        assert trigger.active
+        import time
+        time.sleep(0.3)
+        trigger.stop()
+        assert len(calls) == 0
+
+    def test_register_triggers_removes_stale(self, tmp_path):
+        """P2: reload + register must remove triggers for deleted workflows."""
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "test.yaml").write_text(textwrap.dedent("""\
+            - name: wf-a
+              trigger:
+                type: cron
+                interval_seconds: 9999
+              steps:
+                - type: run_hook
+            - name: wf-b
+              trigger:
+                type: cron
+                interval_seconds: 9999
+              steps:
+                - type: run_hook
+        """), encoding="utf-8")
+
+        loader = WorkflowLoader(system_dir=str(wf_dir), user_dir="")
+        engine = WorkflowEngine(
+            broker_proxy=None, audit_logger=None, loader=loader,
+        )
+        engine.load_workflows()
+        engine.register_triggers()
+        assert "wf-a" in engine._registry.active_triggers()
+        assert "wf-b" in engine._registry.active_triggers()
+
+        # Remove wf-b from YAML and reload.
+        (wf_dir / "test.yaml").write_text(textwrap.dedent("""\
+            - name: wf-a
+              trigger:
+                type: cron
+                interval_seconds: 9999
+              steps:
+                - type: run_hook
+        """), encoding="utf-8")
+        engine.load_workflows()
+        engine.register_triggers()
+
+        assert "wf-a" in engine._registry.active_triggers()
+        assert "wf-b" not in engine._registry.active_triggers()
+
+        engine.shutdown()
+
+    def test_scalar_needs_becomes_list(self):
+        """P2: scalar needs value must not split into characters."""
+        wf = WorkflowDef.from_dict({
+            "name": "scalar-needs",
+            "trigger": {"type": "cron"},
+            "steps": [{"type": "run_hook"}],
+            "needs": "vault/dev/key",
+        })
+        assert wf.needs == ["vault/dev/key"]
+
+    def test_list_needs_still_works(self):
+        """Ensure list needs still work after the scalar fix."""
+        wf = WorkflowDef.from_dict({
+            "name": "list-needs",
+            "trigger": {"type": "cron"},
+            "steps": [{"type": "run_hook"}],
+            "needs": ["vault/a", "vault/b"],
+        })
+        assert wf.needs == ["vault/a", "vault/b"]
+
+    def test_needs_bad_type_rejected(self):
+        """Ensure non-string/non-list needs is rejected."""
+        with pytest.raises(ValueError, match="needs must be a list or string"):
+            WorkflowDef.from_dict({
+                "name": "bad-needs",
+                "trigger": {"type": "cron"},
+                "steps": [{"type": "run_hook"}],
+                "needs": 42,
+            })

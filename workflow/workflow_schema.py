@@ -147,7 +147,16 @@ class WorkflowDef:
                     f"got {type(c).__name__}"
                 )
 
-        needs = list(data.get("needs") or [])
+        needs_raw = data.get("needs") or []
+        # Support scalar shorthand: `needs: vault/dev/key` -> ["vault/dev/key"]
+        if isinstance(needs_raw, str):
+            needs_raw = [needs_raw]
+        if not isinstance(needs_raw, list):
+            raise ValueError(
+                f"needs must be a list or string, "
+                f"got {type(needs_raw).__name__}"
+            )
+        needs = list(needs_raw)
         for i, n in enumerate(needs):
             if not isinstance(n, str):
                 raise ValueError(
