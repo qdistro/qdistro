@@ -23,6 +23,11 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_tui 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
+# Clear any cached approvals / rules for test.action so S3 always
+# produces a fresh pending row. Without this, a leftover "forever"
+# rule would short-circuit the prompt and S3 would never see the row.
+$VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/*test.action* 2>/dev/null; true'
+$VMEXEC "$VM" 'rm -f /var/lib/qdistro/cache/*.db 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
 ```

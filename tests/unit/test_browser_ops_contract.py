@@ -329,6 +329,22 @@ class TestRequestValidation:
         errors = ops.validate_request("recall.push", {"text": 42})
         assert any("expected str" in e for e in errors)
 
+    def test_bool_rejected_for_int_field(self):
+        """bool is a subclass of int in Python; the validator must
+        reject True/False for int-typed fields like tab_id."""
+        errors = ops.validate_request("tabs.close", {"tab_id": True})
+        assert any("expected int" in e for e in errors)
+
+    def test_bool_rejected_for_float_field(self):
+        errors = ops.validate_request("history.search", {
+            "query": "test", "max_results": False})
+        # max_results is optional so validate_request won't check it,
+        # but we can test _check_type directly.
+        assert not ops._check_type(True, "int")
+        assert not ops._check_type(False, "float")
+        assert ops._check_type(42, "int")
+        assert ops._check_type(3.14, "float")
+
 
 # ---------------------------------------------------------------------------
 # 4. Response validation helper

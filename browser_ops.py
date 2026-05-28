@@ -375,6 +375,88 @@ TABS_CLOSE = OpSchema(
     error_codes=("request_timeout", "stdio_write_failed", "empty_reply"),
 )
 
+# -- page.extract.request (inbound: bridge -> ext, read page content) ----
+
+PAGE_EXTRACT_REQUEST = OpSchema(
+    op="page.extract.request",
+    doc="Read page content from a tab. Inbound op: bridge -> extension.",
+    direction="inbound",
+    request_fields=(
+        _f("tab_id", "int"),
+        _f("mode", "str",
+           doc="One of: selection, visible_text, full_text, "
+               "outer_html, by_selector, title"),
+    ),
+    optional_request_fields=(
+        _f("selector", "str", required=False,
+           doc="CSS selector, required for by_selector mode"),
+    ),
+    response_fields=(
+        _f("ok", "bool"),
+        _f("mode", "str", required=False),
+        _f("url", "str", required=False),
+        _f("title", "str", required=False),
+        _f("content", "str", required=False),
+        _f("truncated", "bool", required=False),
+        _f("matched", "bool", required=False),
+    ),
+    error_codes=(
+        "request_timeout", "stdio_write_failed", "empty_reply",
+        "missing_tab_id", "missing_selector", "unknown_mode",
+        "bad_selector", "executeScript_failed",
+        "capture_returned_empty",
+    ),
+)
+
+# -- containers.list / containers.create / containers.remove (inbound) ---
+
+CONTAINERS_LIST = OpSchema(
+    op="containers.list",
+    doc="List Firefox contextual identities (containers). Inbound op.",
+    direction="inbound",
+    request_fields=(),
+    response_fields=(
+        _f("ok", "bool"),
+        _f("containers", "list", required=False),
+    ),
+    error_codes=(
+        "request_timeout", "stdio_write_failed", "empty_reply",
+        "contextualIdentities_unavailable",
+    ),
+)
+
+CONTAINERS_CREATE = OpSchema(
+    op="containers.create",
+    doc="Create a Firefox contextual identity (container). Inbound op.",
+    direction="inbound",
+    request_fields=(
+        _f("name", "str"),
+    ),
+    optional_request_fields=(
+        _f("color", "str", required=False),
+        _f("icon", "str", required=False),
+    ),
+    response_fields=_COMMON_RESPONSE,
+    error_codes=(
+        "request_timeout", "stdio_write_failed", "empty_reply",
+        "contextualIdentities_unavailable",
+    ),
+)
+
+CONTAINERS_REMOVE = OpSchema(
+    op="containers.remove",
+    doc="Remove a Firefox contextual identity (container). Inbound op.",
+    direction="inbound",
+    request_fields=(
+        _f("cookieStoreId", "str"),
+    ),
+    response_fields=_COMMON_RESPONSE,
+    error_codes=(
+        "request_timeout", "stdio_write_failed", "empty_reply",
+        "contextualIdentities_unavailable", "missing_cookie_store_id",
+    ),
+)
+
 # -- history.search (planned, not yet wired in bridge) -------------------
 
 HISTORY_SEARCH = OpSchema(
@@ -499,6 +581,8 @@ for _schema in (
     HEARTBEAT_ACK,
     # Inbound ops (daemon -> bridge -> extension).
     TABS_LIST, TABS_OPEN, TABS_CLOSE,
+    PAGE_EXTRACT_REQUEST,
+    CONTAINERS_LIST, CONTAINERS_CREATE, CONTAINERS_REMOVE,
     HISTORY_SEARCH, BOOKMARKS_SEARCH, MEDIA_STATUS,
 ):
     OP_REGISTRY[_schema.op] = _schema
@@ -544,15 +628,28 @@ BRIDGE_DISPATCH_OPS: frozenset[str] = frozenset({
 
 # Validation helpers used by contract tests.
 
-_TYPE_MAP = {
+_TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "str": str,
-    "int": (int, float),
-    "float": (int, float),
+    "int": int,      # bool excluded — see _check_type()
+    "float": (int, float),  # int is accepted as numeric; bool excluded
     "bool": bool,
     "list": list,
     "dict": dict,
     "any": object,
 }
+
+
+def _check_type(value: Any, type_name: str) -> bool:
+    """Return True if *value* matches *type_name*.
+
+    Python's ``bool`` is a subclass of ``int`` so ``isinstance(True, int)``
+    is ``True``.  We explicitly reject ``bool`` for the ``"int"`` and
+    ``"float"`` type names to catch protocol errors like ``tab_id=True``.
+    """
+    if type_name in ("int", "float") and isinstance(value, bool):
+        return False
+    expected = _TYPE_MAP.get(type_name, object)
+    return isinstance(value, expected)
 
 
 def validate_request(op: str, msg: dict) -> list[str]:
@@ -567,12 +664,10 @@ def validate_request(op: str, msg: dict) -> list[str]:
     for f in schema.request_fields:
         if f.name not in msg:
             errors.append(f"missing required field: {f.name}")
-        elif f.type != "any":
-            expected = _TYPE_MAP.get(f.type, object)
-            if not isinstance(msg[f.name], expected):
-                errors.append(
-                    f"field {f.name}: expected {f.type}, "
-                    f"got {type(msg[f.name]).__name__}")
+        elif f.type != "any" and not _check_type(msg[f.name], f.type):
+            errors.append(
+                f"field {f.name}: expected {f.type}, "
+                f"got {type(msg[f.name]).__name__}")
     return errors
 
 
@@ -589,8 +684,7 @@ def validate_response(op: str, resp: dict) -> list[str]:
         if f.required and f.name not in resp:
             errors.append(f"missing required response field: {f.name}")
         elif f.name in resp and f.type != "any":
-            expected = _TYPE_MAP.get(f.type, object)
-            if not isinstance(resp[f.name], expected):
+            if not _check_type(resp[f.name], f.type):
                 errors.append(
                     f"response field {f.name}: expected {f.type}, "
                     f"got {type(resp[f.name]).__name__}")
