@@ -757,7 +757,11 @@ class TestDBusMenuService:
         menu.set_mute_label("Unmute")
         assert menu._mute_label == "Unmute"
         assert menu._revision == rev_before + 1
+        # LayoutUpdated(revision, parent) per DBusMenu spec.
         menu.LayoutUpdated.assert_called_once()
+        args = menu.LayoutUpdated.call_args[0]
+        assert int(args[0]) == rev_before + 1
+        assert int(args[1]) == _MENU_ROOT_ID
 
     def test_about_to_show_returns_false(self):
         menu = self._make_stub_menu()
@@ -795,6 +799,21 @@ class TestTryStatusNotifier:
         with patch("dbus.SessionBus", side_effect=Exception("no bus")):
             result = _try_status_notifier({"activate": lambda: None})
             assert result is None
+
+    def test_returns_none_when_no_host_registered(self):
+        """Watcher exists but no host registered → returns None."""
+        import dbus as _dbus
+        with patch("dbus.SessionBus") as mock_bus_cls:
+            bus = MagicMock()
+            mock_bus_cls.return_value = bus
+            watcher_obj = MagicMock()
+            bus.get_object.return_value = watcher_obj
+            # Set up the properties interface to return False
+            props_iface = MagicMock()
+            props_iface.Get.return_value = _dbus.Boolean(False)
+            with patch("dbus.Interface", return_value=props_iface):
+                result = _try_status_notifier({"activate": lambda: None})
+                assert result is None
 
 
 class TestMainWindowSNIIntegration:

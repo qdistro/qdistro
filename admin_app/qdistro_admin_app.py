@@ -170,8 +170,8 @@ class _DBusMenuService(dbus.service.Object):
         return dbus.UInt32(self._revision), root
 
     @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
-                         in_signature="i", out_signature="a{sv}")
-    def GetGroupProperties(self, ids):
+                         in_signature="aias", out_signature="a(ia{sv})")
+    def GetGroupProperties(self, ids, property_names):
         return dbus.Array([], signature="(ia{sv})")
 
     @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
@@ -201,8 +201,8 @@ class _DBusMenuService(dbus.service.Object):
     # -- signals --------------------------------------------------------------
 
     @dbus.service.signal(dbus_interface=DBUSMENU_IFACE,
-                         signature="u")
-    def LayoutUpdated(self, revision):
+                         signature="ui")
+    def LayoutUpdated(self, revision, parent):
         pass
 
     @dbus.service.signal(dbus_interface=DBUSMENU_IFACE,
@@ -216,7 +216,8 @@ class _DBusMenuService(dbus.service.Object):
         """Update the mute menu label and bump the layout revision."""
         self._mute_label = label
         self._revision += 1
-        self.LayoutUpdated(dbus.UInt32(self._revision))
+        self.LayoutUpdated(dbus.UInt32(self._revision),
+                           dbus.Int32(_MENU_ROOT_ID))
 
 
 def _variant(value):
@@ -266,6 +267,10 @@ class StatusNotifierItemService(dbus.service.Object):
         self._pending_count = 0
         self._icon_name = "computer"
         self._attention_icon_name = "dialog-warning"
+        # Mutable icon pixmap data (SNI IconPixmap property).
+        # Updated by set_icon_pixmap() when the badge overlay changes.
+        # Format: list of (width, height, ARGB_bytes) tuples.
+        self._icon_pixmap_data: list[tuple[int, int, bytes]] = []
 
         # DBusMenu service for context menu
         self._menu_path = f"{self._object_path}/menu"
@@ -313,8 +318,8 @@ class StatusNotifierItemService(dbus.service.Object):
             return dbus.Dictionary({}, signature="sv")
         props = {}
         for name in ("Category", "Id", "Title", "Status", "IconName",
-                     "AttentionIconName", "ToolTip", "Menu",
-                     "ItemIsMenu", "IconThemePath"):
+                     "IconPixmap", "AttentionIconName", "ToolTip",
+                     "Menu", "ItemIsMenu", "IconThemePath"):
             try:
                 props[name] = self._get_property(name)
             except dbus.DBusException:
@@ -332,6 +337,15 @@ class StatusNotifierItemService(dbus.service.Object):
             return dbus.String(self._status, variant_level=1)
         if name == "IconName":
             return dbus.String(self._icon_name, variant_level=1)
+        if name == "IconPixmap":
+            pixmaps = dbus.Array([], signature="(iiay)")
+            for w, h, data in self._icon_pixmap_data:
+                pixmaps.append(dbus.Struct(
+                    (dbus.Int32(w), dbus.Int32(h),
+                     dbus.ByteArray(data)),
+                    signature=None))
+            return dbus.Array(pixmaps, signature="(iiay)",
+                              variant_level=1)
         if name == "AttentionIconName":
             return dbus.String(self._attention_icon_name, variant_level=1)
         if name == "ToolTip":
@@ -427,6 +441,37 @@ class StatusNotifierItemService(dbus.service.Object):
         # The host should re-read the icon (badge may have changed).
         self.NewIcon()
 
+    def set_icon_pixmap(self, pixmap) -> None:
+        """Update IconPixmap from a QPixmap with the badge overlay.
+
+        Converts the QPixmap to ARGB32 format and stores it for the
+        host to retrieve via the IconPixmap D-Bus property.
+        """
+        try:
+            from PyQt6.QtGui import QImage
+            img = pixmap.toImage().convertToFormat(
+                QImage.Format.Format_ARGB32)
+            w, h = img.width(), img.height()
+            # SNI expects network byte order (big-endian) ARGB per pixel.
+            # QImage ARGB32 is already 0xAARRGGBB per 32-bit word in
+            # native byte order; on little-endian hosts we need to
+            # byte-swap each pixel.
+            import struct
+            raw = img.bits()
+            if raw is None:
+                self._icon_pixmap_data = []
+                return
+            raw.setsize(w * h * 4)
+            pixels = bytes(raw)
+            if sys.byteorder == "little":
+                # Byte-swap each 4-byte ARGB word to network order.
+                words = struct.unpack(f"<{w * h}I", pixels)
+                pixels = struct.pack(f">{w * h}I", *words)
+            self._icon_pixmap_data = [(w, h, pixels)]
+        except Exception:  # noqa: BLE001
+            # If conversion fails, keep the old data.
+            pass
+
     def set_mute_label(self, label: str) -> None:
         """Forward mute label change to the DBusMenu service."""
         if self._menu is not None:
@@ -442,7 +487,25 @@ def _try_status_notifier(callbacks: dict) -> StatusNotifierItemService | None:
     try:
         session_bus = dbus.SessionBus()
         # Probe whether the watcher exists before committing.
-        session_bus.get_object(SNI_WATCHER_BUS, SNI_WATCHER_PATH)
+        watcher_obj = session_bus.get_object(SNI_WATCHER_BUS,
+                                             SNI_WATCHER_PATH)
+        # The SNI spec says clients should also check whether a host
+        # (panel / tray) has registered with the watcher. If
+        # IsStatusNotifierHostRegistered is false the watcher is running
+        # but no panel is listening — the icon would be invisible.
+        try:
+            props = dbus.Interface(watcher_obj, PROPERTIES_IFACE)
+            host_registered = bool(
+                props.Get(SNI_WATCHER_BUS, "IsStatusNotifierHostRegistered"))
+            if not host_registered:
+                _log.info("StatusNotifierWatcher found but no host "
+                          "registered; falling back to QSystemTrayIcon")
+                return None
+        except dbus.DBusException:
+            # Watcher exists but doesn't support the property query —
+            # proceed optimistically (some older watchers omit the
+            # property interface and always act as a host).
+            pass
     except dbus.DBusException:
         _log.info("StatusNotifierWatcher not found on session bus; "
                   "falling back to QSystemTrayIcon")
@@ -1867,6 +1930,10 @@ class MainWindow(QMainWindow):
             finally:
                 painter.end()
         self.tray_icon.setIcon(QIcon(pm))
+        # Push the composited pixmap to the SNI so hosts that use
+        # IconPixmap (instead of / in addition to IconName) see the badge.
+        if self._sni is not None:
+            self._sni.set_icon_pixmap(pm)
 
     def _update_tray_icon(self):
         # Get the current pending count
