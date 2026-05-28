@@ -138,7 +138,63 @@ def _peer_start_time(pid: int) -> int:
         return 0
 
 
+def _recheck_caller_identity(pid: int, exe_at_accept: str,
+                              start_at_accept: int) -> None:
+    """Re-read the caller's /proc identity and fail closed if it no
+    longer matches the value captured at accept time.
+
+    Called immediately before the privileged broker request to shrink
+    the connect→request TOCTOU window to a minimum. Two anchors:
+
+    - starttime: detects PID reuse (a different process took the slot
+      after the original exited). Does NOT change across exec().
+    - exe: detects an in-place exec() into a different binary — the
+      attack starttime cannot see.
+
+    Raises CallerIdentityChanged on any mismatch or if /proc can no
+    longer be read (process gone). When the accept-time exe was
+    unreadable ("?") we can't anchor on it, but the starttime check
+    still applies.
+
+    Matching is by resolved /proc/<pid>/exe path-string equality, the
+    same notion used by the broker's _verify_delegated_claim and the
+    rest of this service. A same-path inode swap (rename a binary then
+    re-exec it) is NOT caught here; the broker's layered exe_sha256
+    capture is the content-level anchor for that and is what
+    forever_exe rules persist against.
+    """
+    has_exe_anchor = bool(exe_at_accept) and exe_at_accept != "?"
+    has_start_anchor = start_at_accept != 0
+    # Fail closed when neither anchor is usable — we cannot verify the
+    # caller identity at all, so we must not let the request proceed
+    # under an unverifiable (possibly pid-reused) process. Mirrors the
+    # broker's _read_proc_layered_checked no-anchor policy.
+    if not has_exe_anchor and not has_start_anchor:
+        raise CallerIdentityChanged(
+            f"caller pid={pid} identity unverifiable "
+            f"(no starttime or exe anchor at accept)")
+    start_now = _peer_start_time(pid)
+    if has_start_anchor and start_now != start_at_accept:
+        raise CallerIdentityChanged(
+            f"caller starttime changed pid={pid} "
+            f"accept={start_at_accept} now={start_now}")
+    # Process gone: starttime read failed where it previously succeeded.
+    if has_start_anchor and start_now == 0:
+        raise CallerIdentityChanged(f"caller pid={pid} no longer live")
+    exe_now = _peer_exe(pid)
+    if has_exe_anchor and exe_now != exe_at_accept:
+        raise CallerIdentityChanged(
+            f"caller exe changed pid={pid} "
+            f"accept={exe_at_accept!r} now={exe_now!r}")
+
+
 # -- Broker request --------------------------------------------------------
+
+class CallerIdentityChanged(Exception):
+    """Raised when /proc/<pid>/exe (or starttime) no longer matches the
+    value captured at accept time, just before the privileged broker
+    call. Fail-closed signal — the handler turns this into a deny."""
+
 
 def _ask_broker(target_user: str, argv: list[str],
                  caller_uid: int, caller_pid: int, caller_exe: str,
@@ -165,6 +221,17 @@ def _ask_broker(target_user: str, argv: list[str],
     bus = dbus.SystemBus()
     obj = bus.get_object(BUS_NAME, OBJ_PATH)
     iface = dbus.Interface(obj, BUS_NAME)
+    # Final fail-closed re-check, performed AFTER the (potentially
+    # slow, GIL-yielding) dbus proxy setup above and IMMEDIATELY before
+    # the privileged RequestPermissionAs call. exec() does not change a
+    # process's starttime, so the starttime re-check alone cannot catch
+    # a connect→exec→request swap; the exe comparison does. handle_one
+    # already rechecked once, but anything between that check and this
+    # call (bus connect, name resolution) is a TOCTOU window — close it
+    # here so the identity the broker is asked to approve is the one
+    # live at the instant of the request. The broker repeats the same
+    # verification in RequestPermissionAs as defense-in-depth.
+    _recheck_caller_identity(caller_pid, caller_exe, caller_start_time)
     action = f"qsu.exec:{target_user}"
     details = {
         "target_user": target_user,
@@ -237,7 +304,8 @@ def _resolve_argv(argv: list[str]) -> list[str] | None:
 
 
 def _spawn_and_stream(sock: socket.socket, target_user: str,
-                       argv: list[str]) -> None:
+                       argv: list[str], *, caller_pid: int = 0,
+                       caller_exe: str = "", caller_start_time: int = 0) -> None:
     """Fork off the target command; stream stdout/stderr back as JSON
     frames; send a final `exit` frame with the return code.
 
@@ -245,6 +313,13 @@ def _spawn_and_stream(sock: socket.socket, target_user: str,
     `_resolve_argv` in the handler). Target user is resolved here
     solely to get uid/gid/home for env building and the subprocess
     user= kwarg.
+
+    The caller_* args carry the accept-time identity so the FINAL
+    fail-closed exe recheck runs immediately before Popen — after the
+    (potentially blocking) NSS / getgrouplist lookups below — closing
+    the last sliver of post-approval TOCTOU window. caller_pid==0 skips
+    the recheck (used only by tests that exercise the streaming path
+    directly).
     """
     uid, gid, home, _shell = _resolve_target(target_user)
 
@@ -260,6 +335,15 @@ def _spawn_and_stream(sock: socket.socket, target_user: str,
         groups = os.getgrouplist(target_user, gid)
     except OSError:
         groups = [gid]
+
+    # Last-instant fail-closed gate: NSS / getgrouplist above can block
+    # on a slow network directory, so re-verify the caller's exe one
+    # final time HERE — immediately before Popen — rather than only in
+    # handle_one before this call. If the caller exec'd a different
+    # binary while we were preparing, refuse: the admin's approval was
+    # about the original identity.
+    if caller_pid:
+        _recheck_caller_identity(caller_pid, caller_exe, caller_start_time)
 
     # Python 3.11+ `user=/group=/extra_groups=` kwargs do the right
     # thing inside subprocess itself — no `preexec_fn` deadlock risk
@@ -439,14 +523,48 @@ def handle_one(sock: socket.socket) -> None:
         syslog.syslog(syslog.LOG_NOTICE,
                       f"qsu exec request: caller uid={uid} pid={pid} "
                       f"exe={exe_at_accept} target={target_user!r} argv={argv!r}")
-        allowed = _ask_broker(target_user, argv, uid, pid, exe_at_accept,
-                              caller_start_time=start_at_accept,
-                              client_claimed_name=client_claimed_name)
+        try:
+            allowed = _ask_broker(target_user, argv, uid, pid, exe_at_accept,
+                                  caller_start_time=start_at_accept,
+                                  client_claimed_name=client_claimed_name)
+        except CallerIdentityChanged as e:
+            # Fail closed: the caller's executable or starttime changed
+            # in the window between the handle_one recheck and the
+            # actual RequestPermissionAs call. Never approve under a
+            # stale identity.
+            _send(sock, {"type": "error",
+                         "message": "caller executable changed between connect "
+                                    "and request; refusing"})
+            _send(sock, {"type": "exit", "code": 1})
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"qsu exe-race (pre-request): uid={uid} pid={pid} "
+                          f"{e}")
+            return
         if not allowed:
             _send(sock, {"type": "error", "message": "request denied"})
             _send(sock, {"type": "exit",  "code": 1})
             return
-        _spawn_and_stream(sock, target_user, argv)
+        # Final fail-closed gate happens INSIDE _spawn_and_stream, right
+        # before Popen (after its blocking NSS/getgrouplist lookups), so
+        # the recheck covers the whole post-approval preparation window.
+        # The admin's approval was made against the accept-time identity,
+        # but WaitForDecision can block for minutes; if the caller exec'd
+        # a different binary while the prompt was pending, refuse to run.
+        # exec() leaves starttime unchanged, so the exe comparison is the
+        # load-bearing check here.
+        try:
+            _spawn_and_stream(sock, target_user, argv,
+                              caller_pid=pid, caller_exe=exe_at_accept,
+                              caller_start_time=start_at_accept)
+        except CallerIdentityChanged as e:
+            _send(sock, {"type": "error",
+                         "message": "caller executable changed between connect "
+                                    "and request; refusing"})
+            _send(sock, {"type": "exit", "code": 1})
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"qsu exe-race (post-approval): uid={uid} pid={pid} "
+                          f"{e}")
+            return
     except Exception as e:  # noqa: BLE001 — never let one bad request kill the service
         syslog.syslog(syslog.LOG_ERR, f"qsu exec handler crash: {e!r}")
         try:
