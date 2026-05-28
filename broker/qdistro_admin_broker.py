@@ -288,14 +288,26 @@ def _argv_from_details(details: dict) -> list[str] | None:
     present but malformed — preserves caller-as-given semantics for
     audit while still letting argv-selector rules fail-to-match.
 
-    Sparse / out-of-order indices are tolerated (sorted by index) so
-    a hostile caller skipping `argv[03]` can't cause a missing-element
-    quirk to bypass an argv_exact selector — the resulting list is
-    "what was actually passed," and a rule expecting a specific
-    sequence won't match it. Indices beyond a reasonable cap (1024)
-    are dropped to keep the reconstruction bounded.
+    Out-of-order indices are tolerated (sorted by index) so a hostile
+    caller shuffling key order can't cause a quirk. Indices beyond a
+    reasonable cap (1024) are dropped to keep the reconstruction
+    bounded.
+
+    Fail-closed on a missing `argv[00]`: argv-aware approval scopes
+    (forever_argv / forever_basename / forever_prefix) and the cache's
+    basename/prefix matching all key off argv[0] (the program). A
+    caller that supplies `argv[01]`/`argv[02]` but omits `argv[00]`
+    would otherwise have its keys collapsed into a dense list whose
+    element 0 is the *second* real arg — silently turning an
+    argv-pinned scope into one matched against an attacker-chosen,
+    program-blind tuple. We treat "no argv[00]" as "argv not captured"
+    (return None) so those scopes are rejected at DecideRequest and the
+    cache writes/matches no argv-aware row. Once argv[00] is present,
+    interior gaps still collapse to "what was actually passed" — a rule
+    expecting a specific sequence won't match a sparse one.
     """
     indexed: list[tuple[int, str]] = []
+    have_zero = False
     for k, v in details.items():
         m = _ARGV_KEY_RE.match(str(k))
         if m is None:
@@ -303,8 +315,10 @@ def _argv_from_details(details: dict) -> list[str] | None:
         idx = int(m.group(1))
         if idx > 1024:
             continue
+        if idx == 0 and str(v) != "":
+            have_zero = True
         indexed.append((idx, str(v)))
-    if not indexed:
+    if not indexed or not have_zero:
         return None
     indexed.sort(key=lambda kv: kv[0])
     return [v for _, v in indexed]

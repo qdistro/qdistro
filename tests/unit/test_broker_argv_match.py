@@ -77,3 +77,42 @@ class TestArgvFromDetails:
             "argv[1": "noise",
         }
         assert _argv_from_details(d) == ["id"]
+
+    def test_missing_argv00_fails_closed_to_none(self):
+        # A caller that supplies argv[01]/argv[02] but omits argv[00]
+        # has not captured the program element argv-aware scopes pin
+        # on. Collapsing to ["/usr/bin/apt-get", "update"] would let an
+        # attacker present a program-blind tuple to an argv-pinned
+        # scope, so this must read as "no argv captured" (None) and the
+        # argv-aware scopes/cache then fail closed.
+        d = {
+            "target_user": "root",
+            "argv[01]": "/usr/bin/apt-get",
+            "argv[02]": "update",
+        }
+        assert _argv_from_details(d) is None
+
+    def test_missing_argv00_with_high_indices_fails_closed(self):
+        d = {"argv[05]": "x", "argv[06]": "y"}
+        assert _argv_from_details(d) is None
+
+    def test_empty_argv00_treated_as_not_captured(self):
+        # An explicitly-empty program element ("argv[00]": "") is not a
+        # captured program — collapsing to [""] (or ["", "update"]) would
+        # let an argv-pinned scope match a program-blind tuple, so it must
+        # read as "no argv captured" (None) exactly like a missing
+        # argv[00]. (The qsu path rejects empty argv strings; this guards
+        # the broker API / cache path.)
+        assert _argv_from_details({"argv[00]": ""}) is None
+        assert _argv_from_details(
+            {"argv[00]": "", "argv[01]": "update"}) is None
+
+    def test_argv00_present_with_interior_gap_still_returns_list(self):
+        # Once argv[00] is captured, an interior gap collapses to
+        # "what was actually passed" — unchanged from prior behavior.
+        d = {"argv[00]": "a", "argv[02]": "c"}
+        assert _argv_from_details(d) == ["a", "c"]
+
+    def test_only_argv00_present(self):
+        d = {"argv[00]": "/usr/bin/systemctl"}
+        assert _argv_from_details(d) == ["/usr/bin/systemctl"]

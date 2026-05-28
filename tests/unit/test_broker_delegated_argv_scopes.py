@@ -266,6 +266,26 @@ class TestArgvAwareScopesPermitted:
     @pytest.mark.parametrize("scope", [
         "forever_argv", "forever_basename", "forever_prefix",
     ])
+    def test_argv_aware_scope_rejected_when_argv00_missing(self, broker,
+                                                           scope):
+        # Sparse argv that omits argv[00]: the program element the
+        # argv-aware scopes pin on was never captured. Must fail closed
+        # exactly like a wholly-absent argv (no downgrade to an
+        # argv-blind cache row).
+        broker.set_peer(uid=ADMIN_UID)
+        details = {"target_user": "root",
+                   "argv[01]": "/usr/bin/apt-get",
+                   "argv[02]": "update"}
+        rid = broker._enqueue(NON_ADMIN_UID, 1234, "/usr/bin/qsu", 0,
+                              "qsu.exec:root", details, delegated=True)
+        with pytest.raises(Exception) as ei:
+            broker.DecideRequest(rid, "allow", scope)
+        assert "requires captured argv" in str(ei.value)
+        assert broker.cache.list_all() == []
+
+    @pytest.mark.parametrize("scope", [
+        "forever_argv", "forever_basename", "forever_prefix",
+    ])
     def test_argv_required_scope_rejected_without_argv_direct(self, broker,
                                                               scope):
         broker.set_peer(uid=ADMIN_UID)
