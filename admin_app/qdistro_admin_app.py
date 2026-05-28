@@ -679,6 +679,34 @@ class BrokerBridge(QObject):
     def reload_rules(self) -> None:
         self._call("ReloadRules")
 
+    def list_workflows(self) -> list[dict]:
+        raw = self._call("ListWorkflows")
+        out = []
+        for r in raw:
+            out.append({
+                "name":         str(r["name"]),
+                "trigger_type": str(r["trigger_type"]),
+                "description":  str(r["description"]),
+                "needs":        [str(x) for x in r.get("needs", [])],
+                "step_count":   int(r["step_count"]),
+                "source_path":  str(r["source_path"]),
+            })
+        return out
+
+    def list_workflow_runs(self, limit: int) -> list[dict]:
+        raw = self._call("ListWorkflowRuns", int(limit))
+        out = []
+        for r in raw:
+            out.append({
+                "run_id":        str(r["run_id"]),
+                "workflow_name": str(r["workflow_name"]),
+                "state":         str(r["state"]),
+                "started_at":    float(r["started_at"]),
+                "completed_at":  float(r["completed_at"]),
+                "error":         str(r["error"]),
+            })
+        return out
+
     def list_history(self, limit: int) -> list[dict]:
         raw = self._call("ListHistory", int(limit))
         out = []
@@ -1506,9 +1534,10 @@ class MainWindow(QMainWindow):
         if self.session is not None:
             self.silos_tab = SilosTab(self.session)
 
-        # Rules and History tabs
+        # Rules, History, and Workflows tabs
         self.rules_tab = RulesTab(broker)
         self.history_tab = HistoryTab(broker)
+        self.workflows_tab = WorkflowsTab(broker)
 
         # Tab container. Pending first so it's the default on launch.
         self.tabs = QTabWidget(self); self.tabs.setObjectName("main_tabs")
@@ -1516,6 +1545,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.cache_tab, "Cache")
         self.tabs.addTab(self.rules_tab, "Rules")
         self.tabs.addTab(self.history_tab, "History")
+        self.tabs.addTab(self.workflows_tab, "Workflows")
         if self.silos_tab is not None:
             self.tabs.addTab(self.silos_tab, "Silos")
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -2683,6 +2713,131 @@ class RuleEditorDialog(QDialog):
                 "entry": entries[0],
             }
         return {"filename": filename, "yaml_body": body}
+
+
+class WorkflowsTab(QWidget):
+    """Read-only view of loaded workflows and recent runs.
+
+    Top table lists workflow definitions (ListWorkflows); bottom table
+    lists recent runs (ListWorkflowRuns). Both refresh on demand and on
+    the broker's RulesReloaded signal (the broker reloads workflows on
+    the same trigger). Purely informational — no run/approve controls
+    here yet; the workflow engine auto-runs are gated server-side.
+    """
+    WF_COLUMNS = ("name", "trigger", "steps", "needs", "description")
+    RUN_COLUMNS = ("run_id", "workflow", "state", "started", "finished",
+                   "error")
+
+    def __init__(self, broker: BrokerBridge):
+        super().__init__()
+        self.broker = broker
+
+        self.wf_table = QTableView(self)
+        self.wf_table.setObjectName("workflows_table")
+        self._wf_model = QStandardItemModel(self)
+        self._wf_model.setHorizontalHeaderLabels(list(self.WF_COLUMNS))
+        self._configure_table(self.wf_table, self._wf_model)
+
+        self.runs_table = QTableView(self)
+        self.runs_table.setObjectName("workflow_runs_table")
+        self._runs_model = QStandardItemModel(self)
+        self._runs_model.setHorizontalHeaderLabels(list(self.RUN_COLUMNS))
+        self._configure_table(self.runs_table, self._runs_model)
+
+        btns = QHBoxLayout()
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.setObjectName("btn_refresh_workflows")
+        self.btn_refresh.clicked.connect(self.refresh)
+        btns.addWidget(self.btn_refresh)
+        btns.addStretch()
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Workflows"))
+        lay.addWidget(self.wf_table)
+        lay.addWidget(QLabel("Recent runs"))
+        lay.addWidget(self.runs_table)
+        lay.addLayout(btns)
+
+        # Auto-refresh when the broker reloads (rules + workflows share
+        # the same reload trigger).
+        try:
+            self.broker.bus.add_signal_receiver(
+                self._on_reloaded, signal_name="RulesReloaded",
+                dbus_interface=BUS_NAME, path=OBJ_PATH)
+        except Exception:  # noqa: BLE001
+            pass
+
+        self.refresh()
+
+    @staticmethod
+    def _configure_table(table: QTableView, model: QStandardItemModel) -> None:
+        table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        table.setModel(model)
+
+    def _on_reloaded(self, *_args) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        try:
+            workflows = self.broker.list_workflows()
+            runs = self.broker.list_workflow_runs(MAX_HISTORY_ENTRIES)
+        except dbus.DBusException as e:
+            QMessageBox.warning(self, "Broker unavailable",
+                                f"Couldn't list workflows:\n\n{e}")
+            return
+        self._populate_workflows(workflows)
+        self._populate_runs(runs)
+
+    def _populate_workflows(self, workflows: list[dict]) -> None:
+        self._wf_model.removeRows(0, self._wf_model.rowCount())
+        for wf in workflows:
+            needs = wf.get("needs") or []
+            items = [
+                QStandardItem(str(wf.get("name", "-"))),
+                QStandardItem(str(wf.get("trigger_type", "-"))),
+                QStandardItem(str(wf.get("step_count", 0))),
+                QStandardItem(", ".join(needs) if needs else "-"),
+                QStandardItem(str(wf.get("description", ""))),
+            ]
+            items[0].setData(wf, Qt.ItemDataRole.UserRole + 1)
+            for it in items:
+                it.setEditable(False)
+            self._wf_model.appendRow(items)
+        self.wf_table.resizeColumnsToContents()
+
+    def _populate_runs(self, runs: list[dict]) -> None:
+        self._runs_model.removeRows(0, self._runs_model.rowCount())
+        for r in runs:
+            started = self._fmt_ts(r.get("started_at"))
+            finished = self._fmt_ts(r.get("completed_at"))
+            items = [
+                QStandardItem(str(r.get("run_id", "-"))),
+                QStandardItem(str(r.get("workflow_name", "-"))),
+                QStandardItem(str(r.get("state", "-"))),
+                QStandardItem(started),
+                QStandardItem(finished),
+                QStandardItem(str(r.get("error", "")) or "-"),
+            ]
+            items[0].setData(r, Qt.ItemDataRole.UserRole + 1)
+            for it in items:
+                it.setEditable(False)
+            self._runs_model.appendRow(items)
+        self.runs_table.resizeColumnsToContents()
+
+    @staticmethod
+    def _fmt_ts(ts) -> str:
+        try:
+            ts = float(ts or 0)
+        except (TypeError, ValueError):
+            return "-"
+        if ts <= 0:
+            return "-"
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class HistoryTab(QWidget):
