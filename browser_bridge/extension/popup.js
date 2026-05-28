@@ -54,6 +54,15 @@ function render(payload) {
 }
 
 function sendToBackground(msg) {
+  const isFirefox = (typeof browser !== "undefined");
+  if (isFirefox) {
+    // Firefox: browser.runtime.sendMessage returns a Promise
+    return api.runtime.sendMessage(msg).then(
+      (resp) => resp || { ok: false, error: "no_response" },
+      (_err) => ({ ok: false, error: "no_response" })
+    );
+  }
+  // Chrome: callback-based
   return new Promise((resolve) => {
     api.runtime.sendMessage(msg, (resp) => {
       resolve(resp || { ok: false, error: "no_response" });

@@ -224,11 +224,22 @@ async function handleTabsClose(msg) {
 
 async function handlePageExtractRequest(msg) {
   const mode = msg.mode || "visible_text";
-  const tabs = await api.tabs.query({ active: true, currentWindow: true });
-  if (!tabs.length) {
-    return { ok: false, error: "no_active_tab" };
+  // Use the specified tab_id if provided; otherwise fall back to the active tab.
+  let tab;
+  const requestedTabId = msg.tab_id || msg.tabId;
+  if (typeof requestedTabId === "number") {
+    try {
+      tab = await api.tabs.get(requestedTabId);
+    } catch (e) {
+      return { ok: false, error: "tab_not_found", tab_id: requestedTabId };
+    }
+  } else {
+    const tabs = await api.tabs.query({ active: true, currentWindow: true });
+    if (!tabs.length) {
+      return { ok: false, error: "no_active_tab" };
+    }
+    tab = tabs[0];
   }
-  const tab = tabs[0];
   // Use scripting API (MV3) or tabs.executeScript (MV2) to extract content.
   const extractFn = `(function() {
     var mode = ${JSON.stringify(mode)};
@@ -312,17 +323,19 @@ async function handleCookiesExportInbound(msg) {
 
 async function handleContainersList(_msg) {
   if (!api.contextualIdentities) {
-    return { ok: false, error: "contextualIdentities_unavailable" };
+    return { ok: false, error: "contextualIdentities_unavailable", containers: [] };
   }
   try {
     const ids = await api.contextualIdentities.query({});
     return {
       ok: true,
       containers: ids.map(c => ({
-        cookieStoreId: c.cookieStoreId,
+        cookie_store_id: c.cookieStoreId,
         name: c.name,
         color: c.color,
+        color_code: c.colorCode || "",
         icon: c.icon,
+        icon_url: c.iconUrl || "",
       }))
     };
   } catch (e) {
@@ -338,9 +351,19 @@ async function handleContainersCreate(msg) {
     const c = await api.contextualIdentities.create({
       name: msg.name || "qdistro",
       color: msg.color || "blue",
-      icon: msg.icon || "circle",
+      icon: msg.icon || "fingerprint",
     });
-    return { ok: true, cookieStoreId: c.cookieStoreId, name: c.name };
+    return {
+      ok: true,
+      container: {
+        cookie_store_id: c.cookieStoreId,
+        name: c.name,
+        color: c.color,
+        color_code: c.colorCode || "",
+        icon: c.icon,
+        icon_url: c.iconUrl || "",
+      }
+    };
   } catch (e) {
     return { ok: false, error: "containers_create_failed", detail: String(e).slice(0, 200) };
   }
@@ -350,13 +373,24 @@ async function handleContainersRemove(msg) {
   if (!api.contextualIdentities) {
     return { ok: false, error: "contextualIdentities_unavailable" };
   }
-  const csid = msg.cookieStoreId;
+  // Accept both snake_case (protocol) and camelCase (JS native) field names
+  const csid = msg.cookie_store_id || msg.cookieStoreId;
   if (!csid) {
-    return { ok: false, error: "missing_cookieStoreId" };
+    return { ok: false, error: "missing_cookie_store_id" };
   }
   try {
-    await api.contextualIdentities.remove(csid);
-    return { ok: true, cookieStoreId: csid };
+    const c = await api.contextualIdentities.remove(csid);
+    return {
+      ok: true,
+      container: {
+        cookie_store_id: c.cookieStoreId,
+        name: c.name,
+        color: c.color,
+        color_code: c.colorCode || "",
+        icon: c.icon,
+        icon_url: c.iconUrl || "",
+      }
+    };
   } catch (e) {
     return { ok: false, error: "containers_remove_failed", detail: String(e).slice(0, 200) };
   }

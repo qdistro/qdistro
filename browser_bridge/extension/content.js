@@ -8,6 +8,27 @@
 
 const api = (typeof browser !== "undefined") ? browser : chrome;
 
+// Cross-browser sendMessage: Firefox's browser.runtime.sendMessage
+// returns a Promise (ignores callback arg); Chrome MV3's
+// chrome.runtime.sendMessage also returns a Promise since Chrome 121+.
+// Older Chrome uses callback style. This wrapper normalizes to
+// callback style for both by detecting the Promise return.
+function sendMsg(msg, callback) {
+  const isFirefox = (typeof browser !== "undefined");
+  if (isFirefox) {
+    // Firefox: always Promise-based
+    api.runtime.sendMessage(msg).then(
+      (resp) => { if (callback) callback(resp); },
+      (_err) => { if (callback) callback(undefined); }
+    );
+  } else {
+    // Chrome: pass callback directly
+    api.runtime.sendMessage(msg, (resp) => {
+      if (callback) callback(resp);
+    });
+  }
+}
+
 // ---- state ----------------------------------------------------------
 
 let _currentPasswordField = null;
@@ -124,7 +145,7 @@ function selectCredential(cred, pwdField) {
   removeFillBanner();
   _selectedCredential = cred;
   // Request the actual password via pwd.fill_confirm (two-step fill)
-  api.runtime.sendMessage({
+  sendMsg({
     action: "pwd.fill_confirm",
     url: location.href,
     username: cred.username || "",
@@ -180,7 +201,7 @@ function onPasswordFieldFocus(e) {
   _credentialsFetched = false;
   _credentials = [];
 
-  api.runtime.sendMessage({
+  sendMsg({
     action: "pwd.fill",
     url: url,
   }, (resp) => {
@@ -235,7 +256,7 @@ function showSaveBanner(url, username, password) {
   saveBtn.style.cssText = "margin-left:12px;padding:5px 14px;background:#fff;color:#1a73e8;border:none;border-radius:3px;cursor:pointer;font-weight:bold;";
   saveBtn.addEventListener("click", () => {
     removeSaveBanner();
-    api.runtime.sendMessage({
+    sendMsg({
       action: "pwd.save",
       url: url,
       username: username,
