@@ -101,6 +101,7 @@ libinput-devel libgbm-devel libdrm-devel seatd-devel
 libXcursor-devel adwaita-icon-theme
 python313-pywayland python313-cffi python313-PyQt6
 qt6-wayland python313-setuptools
+qt6-base-devel qt6-declarative-devel
 socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri
 ```
 
@@ -115,6 +116,16 @@ doesn't pull it in transitively, and the build step runs
 `pywayland-scanner` which needs `wayland-protocols` pkgconfig data.
 `python313-PyQt6` + `qt6-wayland` are for `qdshell.py` (which binds
 `qdwin_shell_v1` as a PyQt app).
+
+`qt6-base-devel` + `qt6-declarative-devel` are required to build the
+qdshell QML plugin (`qdshell/qml-plugin`, a Qt6 C++ meson build). Its
+`meson.build` resolves `Qt6Core`, `Qt6Network`, `Qt6Qml` and
+`Qt6QmlIntegration` (the latter `required: false`) and runs `moc` via
+`import('qt6')`: `qt6-base-devel` provides Core/Network + the moc
+tooling, and `qt6-declarative-devel` pulls in the Qml/QmlIntegration
+development files (via `qt6-qml-devel`). The
+plugin's Wayland side uses plain `wayland-client` + `wayland-scanner`
+(already covered by `wayland-devel`), not Qt's WaylandClient.
 
 Then run `scripts/vm/fresh-vm-bootstrap.sh` inside the VM
 (fetched via `http_server_vm_deploy.md` pattern) to sync the source
