@@ -49,7 +49,7 @@ application or overlay. Properties:
 
 ### Lock triggers
 
-- Idle timer (configurable, default 10 minutes).
+- Idle timer (configurable, default 5 minutes (300 s)).
 - Lid close (via `systemd-logind`).
 - Manual "Lock now" from the admin panel or shortcut.
 - System suspend.
@@ -193,9 +193,9 @@ crashes or admin logs out:
 3. Admin authenticates again → the session manager thaws sessions → the
  compositor renders their surfaces.
 
-If admin logs out deliberately, the flow is the same plus the SDK's
-`before_freeze` hook fires in each active app so apps can persist in-memory
-state.
+If admin logs out deliberately, the flow is the same. A `before_freeze` SDK
+hook is planned (not yet implemented) to fire in each active app so apps can
+persist in-memory state before freeze.
 
 Admin cannot log out in a way that leaves user sessions visibly active —
 rendering depends on admin's compositor. The admin session is the host, not
