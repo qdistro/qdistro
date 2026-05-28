@@ -23,8 +23,12 @@ work — see "Known gaps" below).
 | 6 | Ctrl+Alt+L hotkey → `lock_requested(reason=3=manual)` reaches locker | PASS | probe `[('lock_requested', 3)]` + journal `qdwin: lock_requested` |
 | 7 | **Security boundary**: typed-while-locked keystrokes route to locker via `overlay_key`, NOT to qdshell | **PASS** | probe reassembled `"kruger"` from 6 events + journal `qdwin: overlay_key role=2 sym=… utf8="x" state=PRESSED` for each char |
 
-Scenarios 03 (idle), 04 (lid), 06 (shell crash) — not exercised in
-this run.
+Scenarios 03 (idle), 04 (lid/suspend), 06 (shell crash) — not
+exercised in this run. Note that 03 (idle, via `ext-idle-notify-v1`)
+and 04 (lid/suspend, via qdlocker's own `LogindWatcher` subscribing to
+logind `Session.Lock`/`PrepareForSleep`) do NOT go through the qdwin
+`qdwin_locker_v1` wiring this smoke validates — only the manual hotkey
+(reason=3) and compositor lock state do.
 
 ## How it was driven
 

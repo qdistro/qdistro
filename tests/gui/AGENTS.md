@@ -57,7 +57,7 @@ wall-clock parallelism, clone the base VM per
 | Lock-state introspection | `qdlocker_ctrl status` → `locked=<bool> prompt-len=<n> pam-ready=<bool>` | always-on; the load-bearing assertion in every scenario |
 | Last-auth-result | `qdlocker_ctrl unlock-result` → `last=success\|failed\|none` | survives until the next lock cycle |
 | Idle-trigger | wall-clock wait for `QDLOCKER_IDLE_MS` (default 300000 ms = 5 min) — scenarios shorten via `systemctl --user set-environment QDLOCKER_IDLE_MS=3000` + restart | watches `ext-idle-notify-v1`; scenario 03 |
-| Lid close | `virsh qemu-monitor-command --hmp $VM 'sendkey lid_close'` — VMs don't model a real lid; the guest's logind path is exercised via a fake hint instead. Use `qdlocker_ctrl lock` and assert reason=lid-close after wiring | scenario 04, currently a TODO until qdwin's `lock_requested(reason=1)` plumbing lands |
+| Lid close / suspend | VMs don't model a real lid. qdlocker's own `LogindWatcher` (`qdlocker/logind.py`) subscribes directly over the system bus to logind's `Session.Lock` (reason=1, lid; needs `HandleLidSwitch=lock` in a `logind.conf.d` drop-in) and `Manager.PrepareForSleep` (reason=2, suspend). Drive via the guest `qdistro-fake-lid-close` helper (emits `PrepareForSleep`) and assert `locked=True` + a `reason=suspend` journal line | scenario 04. No qdwin C-side involvement — the helper exercises the suspend (reason=2) path; see 04 for a true `Session.Lock` (reason=1) variant |
 | Fingerprint match | `busctl --system call ... qdistro.FprintFake EmitMatch` (requires `qdistro-fprintd-fake.service`) | scenario 02 |
 | Visual assertion | `qdwin_screenshot <file.png>` — wraps `virsh screenshot` | qdlocker UI renders on the LOCK layer; screenshot captures it. Cursor visibility depends on renderer (see qdwin pitfall #6) — never assert on cursor presence |
 
@@ -195,14 +195,17 @@ prefer the qdlocker helpers and direct VM commands when possible.
 | [01-lock-cycle.md](01-lock-cycle.md) | Ctrl+Alt+L → type password → Enter unlocks → keyboard reaches focused toplevel again. End-to-end smoke; equivalent of qdwin's 03-locker-cycle but on the new path. |
 | [02-fprintd-fallback.md](02-fprintd-fallback.md) | fprintd `VerifyStatus("verify-match")` unlocks with an empty prompt buffer. Confirms the parallel D-Bus subscription. |
 | [03-idle-lock-trigger.md](03-idle-lock-trigger.md) | After `QDLOCKER_IDLE_MS` of no input, qdlocker engages the lock via the `ext-idle-notify-v1` subscription. |
-| [04-lid-close-lock.md](04-lid-close-lock.md) | systemd-logind lid-close event triggers `lock_requested(reason=lid_close)`. Currently TODO — see scenario text. |
+| [04-lid-close-lock.md](04-lid-close-lock.md) | A systemd-logind signal reaches qdlocker's own `LogindWatcher` (no qdwin C-side path) and engages the lock. The fake helper emits `PrepareForSleep`, so it validates the suspend path (reason=2); the scenario also documents the true-lid `Session.Lock` (reason=1) variant. |
 | [05-keystroke-isolation.md](05-keystroke-isolation.md) | **Security boundary.** While locked, password keystrokes reach qdlocker's `prompt-len` but NOT qdshell's. If qdshell's ctrl-socket sees the typed chars, the protocol's `overlay_key` routing is broken and the locker's purpose is defeated. |
 | [06-shell-crash-survives.md](06-shell-crash-survives.md) | qdshell.service is killed while locked → the lock surface stays up → typing still reaches qdlocker → unlock still works. Confirms the lifecycle independence that motivated splitting qdlocker out of qdshell. |
 | [07-lock-occludes-desktop.md](07-lock-occludes-desktop.md) | **Visual security invariant.** A full-screen magenta normal toplevel is placed behind qdlocker; after lock, screenshot edge bands and the full screen must contain zero magenta pixels. Catches fullscreen/first-map offset bugs. |
 | [08-locker-crash-demotes.md](08-locker-crash-demotes.md) | **Resource cleanup.** qdlocker is killed while locked → qdwin demotes the lock toplevel (journal: `locker_disconnect`) → screen stays black (fail-safe) → fresh qdlocker binds and recovers → unlock works. |
 
-A full smoke pass is 01 → 05 → 07 (skip 04 until the lid-close C
-plumbing lands). 06 and 08 are regression-only — run after touching
+A full smoke pass is 01 → 05 → 07 (skip 04 in guests without the
+`qdistro-fake-lid-close` helper — the scenario as written needs only
+that helper; the `HandleLidSwitch=lock` drop-in is required only for
+04's optional true-lid `Session.Lock` variant). 06 and 08 are
+regression-only — run after touching
 qdshell/qdlocker or qdwin's resource-destruction paths.
 
 ## Running a scenario
