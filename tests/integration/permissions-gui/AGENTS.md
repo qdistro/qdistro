@@ -377,6 +377,7 @@ happy path end-to-end with ~5 min of orchestrator wall-clock per VM.
 | `qdwin/tests/gui/04-alt-tab-switch.md` | switcher + focus + raise + close-and-refocus; the most-touched compositor code path |
 | `qdwin/tests/gui/03-locker-cycle.md` | lock + unlock end-to-end; exercises the pwd vault binding |
 | `qdwin/tests/gui/13-focus-events-emitted.md` | spawn / close / drop-to-no-window — the focus-event ground truth that downstream window-list highlight depends on |
+| `tests/integration/workflow-gui/01-one-trigger-one-run-audit-row.md` | workflow engine spine — a trigger fires a run on the broker loop and it lands in the audit DB + admin Workflows tab (see `tests/integration/workflow-gui/AGENTS.md`) |
 
 Optional add-ons when you're touching the bar:
 
