@@ -508,6 +508,31 @@ class TestReviewFixups:
         assert all(r[1] == State.STOPPED for r in results), results
         assert store.get("work").state == State.STOPPED
 
+    def test_stop_reentrant_from_on_change_does_not_deadlock(
+            self, ops, tmp_path):
+        """Round-3 review — the final Stopped on_change must fire AFTER the
+        in-flight marker is cleared, so a callback that re-enters stop() on
+        the same thread doesn't deadlock waiting on a marker only this
+        thread can clear."""
+        store_ref: dict = {}
+        reentered: list[bool] = []
+
+        def on_change(name, state):
+            if name == "work" and state == State.STOPPED and not reentered:
+                reentered.append(True)
+                # Re-enter stop() on the same thread from the callback.
+                store_ref["store"].stop("work", grace_s=0)
+
+        store = _SiloStore(
+            ops, config_path=tmp_path / "silos.yaml", on_change=on_change)
+        store_ref["store"] = store
+        store.create("work", 2000)
+        store.start("work")
+        # Must return without hanging.
+        store.stop("work", grace_s=0)
+        assert reentered == [True]
+        assert store.get("work").state == State.STOPPED
+
     def test_load_drops_row_with_invalid_name(self, ops, tmp_path, caplog):
         """SEC-H2 — hand-edited silos.yaml with a path-traversal name
         must be rejected at load(), not silently accepted."""

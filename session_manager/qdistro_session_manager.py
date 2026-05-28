@@ -534,6 +534,16 @@ class _SiloStore:
             except Exception:  # noqa: BLE001
                 log.exception("on_change callback raised; continuing")
 
+    def _clear_stop_inflight(self, name: str) -> None:
+        # Release the in-flight stop marker for *name* and wake any
+        # concurrent stop() callers waiting on it. Idempotent. Must be
+        # called with self._lock held, BEFORE any on_change emission, so a
+        # re-entrant stop() from the callback doesn't block on a marker
+        # only the current thread can clear.
+        if name in self._stopping_inflight:
+            self._stopping_inflight.discard(name)
+            self._stop_cv.notify_all()
+
     # ---- create / delete -----------------------------------------------
 
     def create(self, name: str, uid: int, *, autostart: bool = False) -> Silo:
@@ -716,6 +726,7 @@ class _SiloStore:
                 # Already-typed errors propagate; force back to STOPPED
                 # so the silo isn't wedged in STOPPING.
                 with self._lock:
+                    self._clear_stop_inflight(silo_name)
                     self._force_state(silo, State.STOPPED)
                 raise
             except Exception as e:  # noqa: BLE001
@@ -723,19 +734,25 @@ class _SiloStore:
                           "forcing STOPPED so the silo isn't wedged",
                           silo_name, e)
                 with self._lock:
+                    self._clear_stop_inflight(silo_name)
                     self._force_state(silo, State.STOPPED)
                 raise SessionError(
                     f"stop of silo {silo_name!r} failed: {e}") from e
 
             # Phase 3: re-acquire the lock for the final state transition.
+            # Clear the in-flight slot + notify waiters BEFORE _transition
+            # emits on_change: the callback may re-enter stop() on this same
+            # thread (Stopped signal), and it must not block waiting on a
+            # marker only this thread can clear (re-entrant deadlock).
             with self._lock:
+                self._clear_stop_inflight(silo_name)
                 self._transition(silo, State.STOPPED)
         finally:
-            # Release the in-flight slot and wake any concurrent stop()
-            # callers so they re-evaluate the now-final state.
+            # Safety net: guarantee the in-flight slot is released and
+            # waiters woken on every exit path (idempotent — the success
+            # and error paths above already cleared it).
             with self._lock:
-                self._stopping_inflight.discard(silo_name)
-                self._stop_cv.notify_all()
+                self._clear_stop_inflight(silo_name)
 
     def freeze(self, name: str) -> None:
         with self._lock:
