@@ -221,17 +221,6 @@ def _ask_broker(target_user: str, argv: list[str],
     bus = dbus.SystemBus()
     obj = bus.get_object(BUS_NAME, OBJ_PATH)
     iface = dbus.Interface(obj, BUS_NAME)
-    # Final fail-closed re-check, performed AFTER the (potentially
-    # slow, GIL-yielding) dbus proxy setup above and IMMEDIATELY before
-    # the privileged RequestPermissionAs call. exec() does not change a
-    # process's starttime, so the starttime re-check alone cannot catch
-    # a connect→exec→request swap; the exe comparison does. handle_one
-    # already rechecked once, but anything between that check and this
-    # call (bus connect, name resolution) is a TOCTOU window — close it
-    # here so the identity the broker is asked to approve is the one
-    # live at the instant of the request. The broker repeats the same
-    # verification in RequestPermissionAs as defense-in-depth.
-    _recheck_caller_identity(caller_pid, caller_exe, caller_start_time)
     action = f"qsu.exec:{target_user}"
     details = {
         "target_user": target_user,
@@ -267,6 +256,21 @@ def _ask_broker(target_user: str, argv: list[str],
     # cutoff. 900s = "admin's plausible attention span." If admin
     # really takes 15 minutes to click, the user almost certainly
     # ctrl+C'd qsu by then anyway.
+    #
+    # Final fail-closed re-check, performed AFTER the (potentially
+    # slow, GIL-yielding) dbus proxy setup AND after the action/details
+    # are fully built, IMMEDIATELY before the privileged
+    # RequestPermissionAs call — nothing the caller could exploit runs
+    # between this check and the request. exec() does not change a
+    # process's starttime, so the starttime re-check alone cannot catch
+    # a connect→exec→request swap; the exe comparison does. handle_one
+    # already rechecked once, but anything between that check and this
+    # call (bus connect, name resolution, details build) is a TOCTOU
+    # window — close it here so the identity the broker is asked to
+    # approve is the one live at the instant of the request. The broker
+    # repeats the same verification in RequestPermissionAs as
+    # defense-in-depth.
+    _recheck_caller_identity(caller_pid, caller_exe, caller_start_time)
     rid = int(iface.RequestPermissionAs(
         int(caller_uid), int(caller_pid), str(caller_exe),
         action, details,
