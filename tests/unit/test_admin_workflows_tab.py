@@ -35,6 +35,16 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_dialogs(monkeypatch):
+    """Stub QMessageBox so info/warning popups don't block the offscreen
+    event loop during widget tests."""
+    import qdistro_admin_app as app_mod
+    for name in ("information", "warning", "critical", "question"):
+        monkeypatch.setattr(app_mod.QMessageBox, name,
+                            staticmethod(lambda *a, **k: None))
+
+
 def _broker(workflows=None, runs=None):
     br = MagicMock()
     br.bus = MagicMock()
@@ -94,3 +104,47 @@ def test_reload_signal_triggers_refresh(qapp):
          "needs": [], "step_count": 1, "source_path": ""}]
     tab._on_reloaded(3)
     assert tab._wf_model.rowCount() == 1
+
+
+def _pending_run(run_id="p1"):
+    return {"run_id": run_id, "workflow_name": "wf", "state": "pending",
+            "started_at": 1716800000.0, "completed_at": 0.0, "error": ""}
+
+
+def test_approve_selected_calls_broker(qapp):
+    br = _broker([], [_pending_run("p1")])
+    br.approve_workflow_run.return_value = True
+    tab = WorkflowsTab(br)
+    # Select the pending run row, then approve.
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_called_once_with("p1")
+
+
+def test_approve_skips_non_pending(qapp):
+    run = {"run_id": "done", "workflow_name": "wf", "state": "completed",
+           "started_at": 1716800000.0, "completed_at": 1716800005.0,
+           "error": ""}
+    br = _broker([], [run])
+    tab = WorkflowsTab(br)
+    tab.runs_table.selectRow(0)
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()
+
+
+def test_approve_with_no_selection_is_noop(qapp):
+    br = _broker([], [_pending_run("p1")])
+    tab = WorkflowsTab(br)
+    # No row selected.
+    tab.approve_selected()
+    br.approve_workflow_run.assert_not_called()
+
+
+def test_pending_signal_triggers_refresh(qapp):
+    br = _broker([], [])
+    tab = WorkflowsTab(br)
+    br.list_workflow_runs.return_value = [_pending_run("p9")]
+    # WorkflowRunPending is wired to the same handler as RulesReloaded.
+    tab._on_reloaded("p9", "wf")
+    assert tab._runs_model.rowCount() == 1
+    assert tab._runs_model.item(0, 2).text() == "pending"

@@ -707,6 +707,10 @@ class BrokerBridge(QObject):
             })
         return out
 
+    def approve_workflow_run(self, run_id: str) -> bool:
+        """Approve a PENDING workflow run (admin-gated, server-side)."""
+        return bool(self._call("ApproveWorkflowRun", str(run_id)))
+
     def list_history(self, limit: int) -> list[dict]:
         raw = self._call("ListHistory", int(limit))
         out = []
@@ -2719,10 +2723,12 @@ class WorkflowsTab(QWidget):
     """Read-only view of loaded workflows and recent runs.
 
     Top table lists workflow definitions (ListWorkflows); bottom table
-    lists recent runs (ListWorkflowRuns). Both refresh on demand and on
-    the broker's RulesReloaded signal (the broker reloads workflows on
-    the same trigger). Purely informational — no run/approve controls
-    here yet; the workflow engine auto-runs are gated server-side.
+    lists recent runs (ListWorkflowRuns). Both refresh on demand, on the
+    broker's RulesReloaded signal (the broker reloads workflows on the
+    same trigger), and on WorkflowRunPending (a non-auto_run workflow fired
+    and parked a run for approval). The "Approve selected run" button
+    approves a PENDING run (ApproveWorkflowRun, admin-gated server-side);
+    approval re-checks the workflow's conditions before executing.
     """
     WF_COLUMNS = ("name", "trigger", "steps", "needs", "description")
     RUN_COLUMNS = ("run_id", "workflow", "state", "started", "finished",
@@ -2749,6 +2755,10 @@ class WorkflowsTab(QWidget):
         self.btn_refresh.setObjectName("btn_refresh_workflows")
         self.btn_refresh.clicked.connect(self.refresh)
         btns.addWidget(self.btn_refresh)
+        self.btn_approve = QPushButton("Approve selected run")
+        self.btn_approve.setObjectName("btn_approve_workflow_run")
+        self.btn_approve.clicked.connect(self.approve_selected)
+        btns.addWidget(self.btn_approve)
         btns.addStretch()
 
         lay = QVBoxLayout(self)
@@ -2759,14 +2769,56 @@ class WorkflowsTab(QWidget):
         lay.addLayout(btns)
 
         # Auto-refresh when the broker reloads (rules + workflows share
-        # the same reload trigger).
+        # the same reload trigger) and when a run parks for approval.
         try:
             self.broker.bus.add_signal_receiver(
                 self._on_reloaded, signal_name="RulesReloaded",
                 dbus_interface=BUS_NAME, path=OBJ_PATH)
+            self.broker.bus.add_signal_receiver(
+                self._on_reloaded, signal_name="WorkflowRunPending",
+                dbus_interface=BUS_NAME, path=OBJ_PATH)
         except Exception:  # noqa: BLE001
             pass
 
+        self.refresh()
+
+    def _selected_run(self) -> dict | None:
+        """The run dict backing the selected row of the runs table."""
+        sel = self.runs_table.selectionModel()
+        if sel is None or not sel.hasSelection():
+            return None
+        idx = sel.selectedRows()
+        if not idx:
+            return None
+        item = self._runs_model.item(idx[0].row(), 0)
+        if item is None:
+            return None
+        return item.data(Qt.ItemDataRole.UserRole + 1)
+
+    def approve_selected(self) -> None:
+        run = self._selected_run()
+        if not run:
+            QMessageBox.information(self, "No run selected",
+                                    "Select a pending run to approve.")
+            return
+        if str(run.get("state", "")) != "pending":
+            QMessageBox.information(
+                self, "Not pending",
+                f"Run {run.get('run_id', '')} is "
+                f"'{run.get('state', '')}', not pending; nothing to approve.")
+            return
+        run_id = str(run.get("run_id", ""))
+        try:
+            ok = self.broker.approve_workflow_run(run_id)
+        except dbus.DBusException as e:
+            QMessageBox.warning(self, "Approve failed",
+                                f"Couldn't approve run:\n\n{e}")
+            return
+        if not ok:
+            QMessageBox.warning(
+                self, "Approve failed",
+                f"Run {run_id} could not be approved (already running, "
+                f"gone, or queue saturated).")
         self.refresh()
 
     @staticmethod
