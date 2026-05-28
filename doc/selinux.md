@@ -172,18 +172,24 @@ kernel cap check).
 
 On first install of `/etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf`
 on a host where dbus-broker is already running, dbus-broker doesn't
-re-read the directory until SIGHUP. A broker restart immediately after
-install would fail `RequestName` because the policy still excludes the
-new bus name.
+re-read the directory until it is told to reload its config. A broker
+restart immediately after install would fail `RequestName` because the
+policy still excludes the new bus name.
 
 Mitigation: `qdistro-dbus-reload.service` is a `Type=oneshot` unit ordered
-`After=dbus.service Before=qdistro-admin-broker.service` with
-`RemainAfterExit=yes`. ExecStart wraps a single `systemctl reload
-dbus-broker.service`. It is pulled in via
+`After=dbus.service dbus-broker.service Before=qdistro-admin-broker.service`
+with `RemainAfterExit=yes`. ExecStart calls the `org.freedesktop.DBus.ReloadConfig`
+method via `busctl` first — on Tumbleweed dbus-broker 35.x a `systemctl reload
+dbus-broker.service` returns success but does not actually re-read the policy,
+whereas dbus-broker implements `ReloadConfig` faithfully. If the `busctl` call
+fails for any reason (e.g. `busctl` not installed) it falls back to `systemctl
+reload dbus-broker.service`, then `systemctl reload dbus.service`, and finally
+`true` so the oneshot always reports success. It is pulled in via
 `Wants=qdistro-dbus-reload.service` on `qdistro-admin-broker.service`.
-Redundant on cold boot (dbus-broker already parsed the .conf at startup),
-load-bearing on first install. Costs nothing on every subsequent boot —
-keep permanent.
+It fires unconditionally before the broker activates, so the mitigation is
+deterministic whether or not it's needed: load-bearing on first install and
+on first boot of a baked image, a cheap no-op on subsequent boots — keep
+permanent.
 
 ## Audit integration
 
