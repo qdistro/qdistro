@@ -457,11 +457,21 @@ class _SiloStore:
             finally:
                 os.close(fd)
             os.replace(tmp, self._config_path)
-            dfd = os.open(str(self._config_path.parent), os.O_RDONLY)
+            # Directory fdatasync orders the rename before a crash — it's a
+            # durability optimization, not a correctness requirement. If it
+            # fails, the new data is already on disk (os.replace succeeded).
+            # Swallow the error so callers (e.g. _transition) don't roll back
+            # in-memory state when the file has already been committed.
             try:
-                os.fdatasync(dfd)
-            finally:
-                os.close(dfd)
+                dfd = os.open(str(self._config_path.parent), os.O_RDONLY)
+                try:
+                    os.fdatasync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError as e:
+                log.warning("dir fdatasync after save failed: %s "
+                            "(data is on disk; ordering not guaranteed "
+                            "across crash)", e)
 
     # ---- lookup ---------------------------------------------------------
 
@@ -611,6 +621,11 @@ class _SiloStore:
         with self._lock:
             silo = self.get(name)
             if silo.state == State.STOPPED:
+                return
+            # A concurrent/retried StopSilo while a stop is already in
+            # progress should wait (the lock serializes) or return, not
+            # reject. Treat STOPPING as "stop already underway".
+            if silo.state == State.STOPPING:
                 return
             if silo.state not in (State.ACTIVE, State.FROZEN):
                 raise BadState(
