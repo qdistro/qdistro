@@ -455,8 +455,11 @@ except Exception:  # pragma: no cover
     reason="no session bus available",
 )
 def test_dbus_signal_real_session_bus():
-    DBusGMainLoop(set_as_default=True)
-    bus = dbus.SessionBus()
+    # Private connection with the GLib main loop attached: the shared
+    # dbus.SessionBus() cache may hold a loop-less connection created by
+    # an earlier test, on which exporting the emitter would raise.
+    glib_loop = DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus(private=True, mainloop=glib_loop)
     name = f"org.qdistro.WorkflowTest{uuid.uuid4().hex[:8]}"
     bus_name = dbus.service.BusName(name, bus)
     iface = name
@@ -471,24 +474,37 @@ def test_dbus_signal_real_session_bus():
 
     emitter = Emitter()
     fired = []
+    # Drive a short-lived GLib main loop on THIS (main) thread rather than
+    # letting the trigger spin its own loop thread. A live PyQt6
+    # QApplication left by earlier tests installs Qt's glib event
+    # dispatcher and acquires the default GLib context on the main thread,
+    # which starves a background MainLoop.run(); running the loop here (on
+    # the owning thread, recursively acquirable) dispatches reliably
+    # regardless of test order. Production uses run_own_loop=False sharing
+    # the broker's single loop.
+    loop = GLib.MainLoop()
+
+    def on_fire(n, c):
+        fired.append(c)
+        loop.quit()
+
     trig = DBusSignalTrigger(
         "wf",
         TriggerDef(type=TriggerType.DBUS_SIGNAL, config={
             "bus": "session", "bus_name": name,
             "interface": iface, "member": "Pinged",
         }),
-        lambda n, c: fired.append(c),
-        run_own_loop=True,
+        on_fire,
+        run_own_loop=False,
     )
     trig.start()
     assert trig.active
     try:
-        time.sleep(0.2)
-        emitter.Pinged("hello")
-        for _ in range(100):
-            if fired:
-                break
-            time.sleep(0.05)
+        # Emit once the loop is running, and cap the wait with a safety
+        # timeout that quits the loop if the signal never arrives.
+        GLib.timeout_add(50, lambda: (emitter.Pinged("hello"), False)[1])
+        GLib.timeout_add(5000, lambda: (loop.quit(), False)[1])
+        loop.run()
     finally:
         trig.stop()
     assert fired, "signal was not delivered"
