@@ -41,6 +41,16 @@ from qdistro_admin_app import (  # noqa: E402
     ESCALATION_MAX_PER_TICK,
     _format_age,
     _age_color,
+    StatusNotifierItemService,
+    _DBusMenuService,
+    _try_status_notifier,
+    _variant,
+    SNI_IFACE,
+    DBUSMENU_IFACE,
+    _MENU_ROOT_ID,
+    _MENU_SHOW_ID,
+    _MENU_MUTE_ID,
+    _MENU_QUIT_ID,
 )
 
 
@@ -541,3 +551,304 @@ class TestWindowTitle:
         broker.get_pending.return_value = []
         win.refresh()
         assert win.windowTitle() == "admin approvals"
+
+
+# ---------------------------------------------------------------------------
+# StatusNotifierItem — unit tests
+# ---------------------------------------------------------------------------
+
+class TestVariantHelper:
+    """_variant wraps Python values in D-Bus Variant types."""
+
+    def test_bool(self):
+        import dbus as _dbus
+        v = _variant(True)
+        assert isinstance(v, _dbus.Boolean)
+        assert bool(v) is True
+
+    def test_int(self):
+        import dbus as _dbus
+        v = _variant(42)
+        assert isinstance(v, _dbus.Int32)
+        assert int(v) == 42
+
+    def test_str(self):
+        import dbus as _dbus
+        v = _variant("hello")
+        assert isinstance(v, _dbus.String)
+        assert str(v) == "hello"
+
+    def test_other_type_becomes_string(self):
+        import dbus as _dbus
+        v = _variant(3.14)
+        assert isinstance(v, _dbus.String)
+        assert "3.14" in str(v)
+
+
+class TestStatusNotifierItemService:
+    """Test the SNI service properties and signal emission (no live D-Bus)."""
+
+    def test_get_property_category(self):
+        """The Category property should return 'SystemServices'."""
+        sni = self._make_stub_sni()
+        val = sni._get_property("Category")
+        assert str(val) == "SystemServices"
+
+    def test_get_property_id(self):
+        sni = self._make_stub_sni()
+        assert str(sni._get_property("Id")) == "qdistro-admin"
+
+    def test_get_property_title(self):
+        sni = self._make_stub_sni()
+        assert str(sni._get_property("Title")) == "qdistro admin approvals"
+
+    def test_get_property_status_default(self):
+        sni = self._make_stub_sni()
+        assert str(sni._get_property("Status")) == "Active"
+
+    def test_get_property_unknown_raises(self):
+        import dbus as _dbus
+        sni = self._make_stub_sni()
+        with pytest.raises(_dbus.DBusException):
+            sni._get_property("NoSuchProperty")
+
+    def test_set_status_emits_signal(self):
+        sni = self._make_stub_sni()
+        emitted = []
+        sni.NewStatus = lambda s: emitted.append(s)
+        sni.set_status("NeedsAttention")
+        assert sni._status == "NeedsAttention"
+        assert emitted == ["NeedsAttention"]
+
+    def test_set_status_noop_if_unchanged(self):
+        sni = self._make_stub_sni()
+        emitted = []
+        sni.NewStatus = lambda s: emitted.append(s)
+        sni.set_status("Active")  # already Active
+        assert emitted == []
+
+    def test_set_tooltip_emits_signal(self):
+        sni = self._make_stub_sni()
+        emitted = []
+        sni.NewToolTip = lambda: emitted.append(True)
+        sni.set_tooltip("new tooltip")
+        assert sni._tooltip_text == "new tooltip"
+        assert len(emitted) == 1
+
+    def test_set_tooltip_noop_if_unchanged(self):
+        sni = self._make_stub_sni()
+        emitted = []
+        sni.NewToolTip = lambda: emitted.append(True)
+        sni.set_tooltip("qdistro admin approvals")  # default
+        assert emitted == []
+
+    def test_set_pending_count_transitions_status(self):
+        sni = self._make_stub_sni()
+        statuses = []
+        sni.NewStatus = lambda s: statuses.append(s)
+        sni.NewIcon = lambda: None
+        sni.set_pending_count(3)
+        assert sni._status == "NeedsAttention"
+        sni.set_pending_count(0)
+        assert sni._status == "Active"
+        assert "NeedsAttention" in statuses
+        assert "Active" in statuses
+
+    def test_set_pending_count_emits_new_icon(self):
+        sni = self._make_stub_sni()
+        icons = []
+        sni.NewStatus = lambda s: None
+        sni.NewIcon = lambda: icons.append(True)
+        sni.set_pending_count(5)
+        assert len(icons) == 1
+
+    def test_set_mute_label_forwards_to_menu(self):
+        sni = self._make_stub_sni()
+        mock_menu = MagicMock()
+        sni._menu = mock_menu
+        sni.set_mute_label("Unmute")
+        mock_menu.set_mute_label.assert_called_once_with("Unmute")
+
+    def test_set_mute_label_noop_without_menu(self):
+        sni = self._make_stub_sni()
+        sni._menu = None
+        # Should not raise.
+        sni.set_mute_label("Unmute")
+
+    def test_activate_calls_callback(self):
+        activated = []
+        sni = self._make_stub_sni(callbacks={"activate": lambda: activated.append(True)})
+        sni.Activate(0, 0)
+        assert len(activated) == 1
+
+    def test_activate_no_callback(self):
+        sni = self._make_stub_sni(callbacks={})
+        # Should not raise.
+        sni.Activate(0, 0)
+
+    @staticmethod
+    def _make_stub_sni(callbacks=None):
+        """Create a StatusNotifierItemService with mocked-out D-Bus bus.
+
+        We patch the dbus.service.Object.__init__ and BusName so no actual
+        D-Bus connection is needed.
+        """
+        if callbacks is None:
+            callbacks = {"activate": lambda: None}
+        with patch("dbus.service.BusName"), \
+             patch("dbus.service.Object.__init__", return_value=None):
+            import dbus as _dbus
+            fake_bus = MagicMock(spec=_dbus.Bus)
+            sni = StatusNotifierItemService.__new__(StatusNotifierItemService)
+            sni._bus = fake_bus
+            sni._object_path = "/StatusNotifierItem"
+            sni._callbacks = callbacks
+            sni._bus_name_str = "org.kde.StatusNotifierItem-12345-1"
+            sni._well_known = MagicMock()
+            sni._status = "Active"
+            sni._tooltip_text = "qdistro admin approvals"
+            sni._pending_count = 0
+            sni._icon_name = "computer"
+            sni._attention_icon_name = "dialog-warning"
+            sni._menu_path = "/StatusNotifierItem/menu"
+            sni._menu = None
+            return sni
+
+
+class TestDBusMenuService:
+    """Test the DBusMenu service for context menu items."""
+
+    def test_get_layout_returns_three_items(self):
+        """Root layout should contain Show, Mute, Quit items."""
+        menu = self._make_stub_menu()
+        revision, root = menu.GetLayout(_MENU_ROOT_ID, -1, [])
+        assert int(revision) >= 1
+        # root is (id, {props}, [children])
+        _root_id, _root_props, children = root
+        assert len(children) == 3
+
+    def test_event_clicked_fires_callback(self):
+        """Clicking a menu item should invoke its callback."""
+        invoked = []
+        menu = self._make_stub_menu(callbacks={
+            _MENU_SHOW_ID: lambda: invoked.append("show"),
+        })
+        menu.Event(_MENU_SHOW_ID, "clicked", _variant(""), 0)
+        assert invoked == ["show"]
+
+    def test_event_non_clicked_is_noop(self):
+        invoked = []
+        menu = self._make_stub_menu(callbacks={
+            _MENU_SHOW_ID: lambda: invoked.append("show"),
+        })
+        menu.Event(_MENU_SHOW_ID, "hovered", _variant(""), 0)
+        assert invoked == []
+
+    def test_event_unknown_item_is_noop(self):
+        menu = self._make_stub_menu()
+        # Should not raise.
+        menu.Event(999, "clicked", _variant(""), 0)
+
+    def test_set_mute_label_bumps_revision(self):
+        menu = self._make_stub_menu()
+        rev_before = menu._revision
+        # Monkey-patch signal to avoid D-Bus emission.
+        menu.LayoutUpdated = MagicMock()
+        menu.set_mute_label("Unmute")
+        assert menu._mute_label == "Unmute"
+        assert menu._revision == rev_before + 1
+        menu.LayoutUpdated.assert_called_once()
+
+    def test_about_to_show_returns_false(self):
+        menu = self._make_stub_menu()
+        assert menu.AboutToShow(0) is False
+
+    @staticmethod
+    def _make_stub_menu(callbacks=None):
+        if callbacks is None:
+            callbacks = {}
+        with patch("dbus.service.Object.__init__", return_value=None):
+            import dbus as _dbus
+            menu = _DBusMenuService.__new__(_DBusMenuService)
+            menu._callbacks = callbacks
+            menu._revision = 1
+            menu._mute_label = "Mute 30m"
+            return menu
+
+
+class TestTryStatusNotifier:
+    """Test the _try_status_notifier() fallback logic."""
+
+    def test_returns_none_when_watcher_absent(self):
+        """No watcher on the bus → returns None (QSystemTrayIcon fallback)."""
+        import dbus as _dbus
+        with patch("dbus.SessionBus") as mock_bus_cls:
+            bus = MagicMock()
+            mock_bus_cls.return_value = bus
+            bus.get_object.side_effect = _dbus.DBusException(
+                "org.freedesktop.DBus.Error.ServiceUnknown")
+            result = _try_status_notifier({"activate": lambda: None})
+            assert result is None
+
+    def test_returns_none_on_session_bus_failure(self):
+        """Session bus connection failure → returns None."""
+        with patch("dbus.SessionBus", side_effect=Exception("no bus")):
+            result = _try_status_notifier({"activate": lambda: None})
+            assert result is None
+
+
+class TestMainWindowSNIIntegration:
+    """Verify MainWindow hooks up SNI correctly when available."""
+
+    def test_sni_attribute_set_when_watcher_absent(self, qapp):
+        """With no watcher, MainWindow._sni should be None."""
+        from qdistro_admin_app import MainWindow
+        broker = _make_stub_broker()
+        # Ensure _try_status_notifier returns None.
+        with patch("qdistro_admin_app._try_status_notifier", return_value=None):
+            win = MainWindow(broker)
+            assert win._sni is None
+            # QSystemTrayIcon fallback should still work.
+            assert hasattr(win, "tray_icon")
+
+    def test_sni_attribute_set_when_watcher_present(self, qapp):
+        """With a mock SNI, MainWindow._sni should be set."""
+        from qdistro_admin_app import MainWindow
+        broker = _make_stub_broker()
+        mock_sni = MagicMock(spec=StatusNotifierItemService)
+        with patch("qdistro_admin_app._try_status_notifier", return_value=mock_sni):
+            win = MainWindow(broker)
+            assert win._sni is mock_sni
+
+    def test_update_tray_icon_updates_sni(self, qapp):
+        """_update_tray_icon should call set_tooltip and set_pending_count on SNI."""
+        from qdistro_admin_app import MainWindow
+        broker = _make_stub_broker()
+        broker.get_pending.return_value = [
+            {"id": 1, "uid": 2000, "pid": 100, "exe": "/bin/ls",
+             "action": "qdistro.exec.ls", "details": {}},
+        ]
+        mock_sni = MagicMock(spec=StatusNotifierItemService)
+        with patch("qdistro_admin_app._try_status_notifier", return_value=mock_sni):
+            win = MainWindow(broker)
+            # Reset mock call counts after __init__ calls.
+            mock_sni.reset_mock()
+            win._update_tray_icon()
+            mock_sni.set_tooltip.assert_called()
+            mock_sni.set_pending_count.assert_called_with(1)
+
+    def test_toggle_mute_updates_sni_menu_label(self, qapp):
+        """_toggle_mute_from_tray should update SNI mute label."""
+        from qdistro_admin_app import MainWindow
+        broker = _make_stub_broker()
+        mock_sni = MagicMock(spec=StatusNotifierItemService)
+        with patch("qdistro_admin_app._try_status_notifier", return_value=mock_sni):
+            win = MainWindow(broker)
+            mock_sni.reset_mock()
+            # Mute (currently unmuted).
+            win._toggle_mute_from_tray()
+            mock_sni.set_mute_label.assert_called_with("Unmute")
+            mock_sni.reset_mock()
+            # Unmute.
+            win._toggle_mute_from_tray()
+            mock_sni.set_mute_label.assert_called_with("Mute 30m")

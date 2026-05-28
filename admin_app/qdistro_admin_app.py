@@ -12,6 +12,7 @@ Ctrl+Shift+1..8 scope picker.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import sys
@@ -20,6 +21,7 @@ from datetime import datetime
 
 import dbus
 import dbus.mainloop.glib
+import dbus.service
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import (
     QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
@@ -52,6 +54,426 @@ MAX_HISTORY_ENTRIES = 100
 # (no symlinks, no ../, no /etc/passwd surprises). Matches the broker's
 # default `RulesEngine` directory.
 RULES_DIR = "/etc/qdistro/rules.d"
+
+
+_log = logging.getLogger("qdistro.admin_app")
+
+# ---------------------------------------------------------------------------
+# StatusNotifierItem D-Bus interface
+# ---------------------------------------------------------------------------
+#
+# On Wayland compositors, QSystemTrayIcon.show() is often a no-op because
+# the XEmbed protocol is not available.  The org.kde.StatusNotifierItem
+# specification is the Wayland-era replacement that qdshell, KDE Plasma,
+# and GNOME (via extensions) all support.  We implement the interface
+# directly with dbus-python's service helpers so the tray icon works on
+# Wayland without relying on Qt's platform integration (which requires
+# the xdg-desktop-portal SNI provider to be installed).
+#
+# Fallback: if org.kde.StatusNotifierWatcher is not running we fall back
+# to the QSystemTrayIcon code path (X11, or hosts that use the old XEmbed
+# protocol).
+
+SNI_IFACE = "org.kde.StatusNotifierItem"
+DBUSMENU_IFACE = "com.canonical.dbusmenu"
+SNI_WATCHER_BUS = "org.kde.StatusNotifierWatcher"
+SNI_WATCHER_PATH = "/StatusNotifierWatcher"
+PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
+
+# Menu item IDs for the DBusMenu protocol.
+_MENU_ROOT_ID = 0
+_MENU_SHOW_ID = 1
+_MENU_MUTE_ID = 2
+_MENU_QUIT_ID = 3
+
+
+class _DBusMenuService(dbus.service.Object):
+    """Minimal com.canonical.dbusmenu service exposing Show / Mute / Quit.
+
+    The DBusMenu protocol is used by StatusNotifier hosts (panels) to
+    render right-click context menus without requiring client-side window
+    surfaces.
+    """
+
+    def __init__(self, bus, object_path: str, callbacks: dict):
+        super().__init__(bus, object_path)
+        self._callbacks = callbacks  # {item_id: callable}
+        self._revision = 1
+        self._mute_label = "Mute 30m"
+
+    # -- properties (via org.freedesktop.DBus.Properties) ---------------------
+
+    @dbus.service.method(dbus_interface=PROPERTIES_IFACE,
+                         in_signature="ss", out_signature="v")
+    def Get(self, interface_name, property_name):
+        if interface_name != DBUSMENU_IFACE:
+            raise dbus.DBusException(
+                f"No such interface: {interface_name}",
+                name="org.freedesktop.DBus.Error.UnknownInterface")
+        return self._get_prop(property_name)
+
+    @dbus.service.method(dbus_interface=PROPERTIES_IFACE,
+                         in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface_name):
+        if interface_name != DBUSMENU_IFACE:
+            return dbus.Dictionary({}, signature="sv")
+        props = {}
+        for name in ("Version", "TextDirection", "Status", "IconThemePath"):
+            try:
+                props[name] = self._get_prop(name)
+            except dbus.DBusException:
+                pass
+        return dbus.Dictionary(props, signature="sv")
+
+    def _get_prop(self, name: str):
+        if name == "Version":
+            return dbus.UInt32(3, variant_level=1)
+        if name == "TextDirection":
+            return dbus.String("ltr", variant_level=1)
+        if name == "Status":
+            return dbus.String("normal", variant_level=1)
+        if name == "IconThemePath":
+            return dbus.Array([], signature="s", variant_level=1)
+        raise dbus.DBusException(
+            f"No such property: {name}",
+            name="org.freedesktop.DBus.Error.UnknownProperty")
+
+    # -- methods --------------------------------------------------------------
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="iias", out_signature="u(ia{sv}av)")
+    def GetLayout(self, parent_id, recursion_depth, property_names):
+        """Return the menu tree starting from *parent_id*."""
+        children = []
+        if parent_id == _MENU_ROOT_ID:
+            children = [
+                (_MENU_SHOW_ID, {"label": "Show", "enabled": True}, []),
+                (_MENU_MUTE_ID, {"label": self._mute_label,
+                                 "enabled": True}, []),
+                (_MENU_QUIT_ID, {"label": "Quit", "enabled": True}, []),
+            ]
+        # Pack into the required (id, {props}, [children]) structure.
+        packed_children = dbus.Array([], signature="v")
+        for cid, props, _ in children:
+            props_dbus = dbus.Dictionary(
+                {k: _variant(v) for k, v in props.items()},
+                signature="sv")
+            entry = dbus.Struct(
+                (dbus.Int32(cid), props_dbus,
+                 dbus.Array([], signature="v")),
+                signature=None)
+            packed_children.append(entry)
+        root_props = dbus.Dictionary({}, signature="sv")
+        root = dbus.Struct(
+            (dbus.Int32(parent_id), root_props, packed_children),
+            signature=None)
+        return dbus.UInt32(self._revision), root
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="i", out_signature="a{sv}")
+    def GetGroupProperties(self, ids):
+        return dbus.Array([], signature="(ia{sv})")
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="isvu", out_signature="")
+    def Event(self, item_id, event_type, data, timestamp):
+        """Called when the user clicks a menu item."""
+        if event_type == "clicked":
+            cb = self._callbacks.get(int(item_id))
+            if cb is not None:
+                cb()
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="ai", out_signature="")
+    def EventGroup(self, events):
+        pass
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="i", out_signature="b")
+    def AboutToShow(self, item_id):
+        return False
+
+    @dbus.service.method(dbus_interface=DBUSMENU_IFACE,
+                         in_signature="ai", out_signature="aiai")
+    def AboutToShowGroup(self, ids):
+        return dbus.Array([], signature="i"), dbus.Array([], signature="i")
+
+    # -- signals --------------------------------------------------------------
+
+    @dbus.service.signal(dbus_interface=DBUSMENU_IFACE,
+                         signature="u")
+    def LayoutUpdated(self, revision):
+        pass
+
+    @dbus.service.signal(dbus_interface=DBUSMENU_IFACE,
+                         signature="a(ia{sv})a(ias)")
+    def ItemsPropertiesUpdated(self, updated_props, removed_props):
+        pass
+
+    # -- helpers --------------------------------------------------------------
+
+    def set_mute_label(self, label: str) -> None:
+        """Update the mute menu label and bump the layout revision."""
+        self._mute_label = label
+        self._revision += 1
+        self.LayoutUpdated(dbus.UInt32(self._revision))
+
+
+def _variant(value):
+    """Wrap a Python value in a D-Bus Variant."""
+    if isinstance(value, bool):
+        return dbus.Boolean(value, variant_level=1)
+    if isinstance(value, int):
+        return dbus.Int32(value, variant_level=1)
+    if isinstance(value, str):
+        return dbus.String(value, variant_level=1)
+    return dbus.String(str(value), variant_level=1)
+
+
+class StatusNotifierItemService(dbus.service.Object):
+    """org.kde.StatusNotifierItem D-Bus service.
+
+    Exposes the properties and signals required by StatusNotifier hosts
+    (KDE Plasma, qdshell, GNOME+AppIndicator extensions) to render a
+    tray icon, tooltip, and context menu for the admin app.
+
+    Lifecycle
+    ---------
+    Constructed by `MainWindow.__init__` via `_try_status_notifier()`.
+    The caller passes a *session_bus* (``dbus.SessionBus()``) and a
+    *callbacks* dict mapping activation actions to callables.  On
+    success `register()` claims the well-known bus name and pokes
+    `StatusNotifierWatcher.RegisterStatusNotifierItem`.
+
+    The instance keeps a mutable ``_status`` / ``_tooltip_text`` /
+    ``_pending_count`` that `MainWindow` updates; each setter emits the
+    matching ``New*`` signal so the host repaints.
+    """
+
+    def __init__(self, session_bus: dbus.Bus, object_path: str,
+                 callbacks: dict):
+        self._bus = session_bus
+        self._object_path = object_path
+        self._callbacks = callbacks  # {"activate": callable, ...}
+        self._bus_name_str = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+        self._well_known = dbus.service.BusName(
+            self._bus_name_str, self._bus, do_not_queue=True)
+        super().__init__(self._bus, self._object_path)
+
+        # Mutable state — setters emit signals.
+        self._status = "Active"   # Active | NeedsAttention | Passive
+        self._tooltip_text = "qdistro admin approvals"
+        self._pending_count = 0
+        self._icon_name = "computer"
+        self._attention_icon_name = "dialog-warning"
+
+        # DBusMenu service for context menu
+        self._menu_path = f"{self._object_path}/menu"
+        self._menu: _DBusMenuService | None = None
+
+    @property
+    def bus_name_str(self) -> str:
+        return self._bus_name_str
+
+    # ---- registration -------------------------------------------------------
+
+    def register(self) -> bool:
+        """Register with the StatusNotifierWatcher.  Returns True on success."""
+        try:
+            watcher = self._bus.get_object(SNI_WATCHER_BUS, SNI_WATCHER_PATH)
+            watcher.RegisterStatusNotifierItem(
+                self._bus_name_str,
+                dbus_interface=SNI_WATCHER_BUS)
+            _log.info("Registered SNI %s with StatusNotifierWatcher",
+                      self._bus_name_str)
+            return True
+        except dbus.DBusException as exc:
+            _log.warning("StatusNotifierWatcher registration failed: %s", exc)
+            return False
+
+    def setup_menu(self, callbacks: dict) -> None:
+        """Create the DBusMenu service on our menu object path."""
+        self._menu = _DBusMenuService(self._bus, self._menu_path, callbacks)
+
+    # ---- D-Bus properties (org.kde.StatusNotifierItem) ----------------------
+
+    @dbus.service.method(dbus_interface=PROPERTIES_IFACE,
+                         in_signature="ss", out_signature="v")
+    def Get(self, interface_name, property_name):
+        if interface_name != SNI_IFACE:
+            raise dbus.DBusException(
+                f"No such interface: {interface_name}",
+                name="org.freedesktop.DBus.Error.UnknownInterface")
+        return self._get_property(property_name)
+
+    @dbus.service.method(dbus_interface=PROPERTIES_IFACE,
+                         in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface_name):
+        if interface_name != SNI_IFACE:
+            return dbus.Dictionary({}, signature="sv")
+        props = {}
+        for name in ("Category", "Id", "Title", "Status", "IconName",
+                     "AttentionIconName", "ToolTip", "Menu",
+                     "ItemIsMenu", "IconThemePath"):
+            try:
+                props[name] = self._get_property(name)
+            except dbus.DBusException:
+                pass
+        return dbus.Dictionary(props, signature="sv")
+
+    def _get_property(self, name: str):
+        if name == "Category":
+            return dbus.String("SystemServices", variant_level=1)
+        if name == "Id":
+            return dbus.String("qdistro-admin", variant_level=1)
+        if name == "Title":
+            return dbus.String("qdistro admin approvals", variant_level=1)
+        if name == "Status":
+            return dbus.String(self._status, variant_level=1)
+        if name == "IconName":
+            return dbus.String(self._icon_name, variant_level=1)
+        if name == "AttentionIconName":
+            return dbus.String(self._attention_icon_name, variant_level=1)
+        if name == "ToolTip":
+            # (icon-name, icon-pixmap[], title, body)
+            return dbus.Struct(
+                (dbus.String(self._icon_name),
+                 dbus.Array([], signature="(iiay)"),
+                 dbus.String("qdistro admin"),
+                 dbus.String(self._tooltip_text)),
+                signature=None, variant_level=1)
+        if name == "Menu":
+            return dbus.ObjectPath(self._menu_path, variant_level=1)
+        if name == "ItemIsMenu":
+            return dbus.Boolean(False, variant_level=1)
+        if name == "IconThemePath":
+            return dbus.Array([], signature="s", variant_level=1)
+        raise dbus.DBusException(
+            f"No such property: {name}",
+            name="org.freedesktop.DBus.Error.UnknownProperty")
+
+    # ---- D-Bus methods (org.kde.StatusNotifierItem) -------------------------
+
+    @dbus.service.method(dbus_interface=SNI_IFACE,
+                         in_signature="ii", out_signature="")
+    def Activate(self, x, y):
+        """Primary click — bring the admin window to front."""
+        cb = self._callbacks.get("activate")
+        if cb is not None:
+            cb()
+
+    @dbus.service.method(dbus_interface=SNI_IFACE,
+                         in_signature="ii", out_signature="")
+    def SecondaryActivate(self, x, y):
+        pass
+
+    @dbus.service.method(dbus_interface=SNI_IFACE,
+                         in_signature="is", out_signature="")
+    def Scroll(self, delta, orientation):
+        pass
+
+    @dbus.service.method(dbus_interface=SNI_IFACE,
+                         in_signature="ii", out_signature="")
+    def ContextMenu(self, x, y):
+        pass
+
+    # ---- D-Bus signals (org.kde.StatusNotifierItem) -------------------------
+
+    @dbus.service.signal(dbus_interface=SNI_IFACE, signature="s")
+    def NewStatus(self, status):
+        pass
+
+    @dbus.service.signal(dbus_interface=SNI_IFACE, signature="")
+    def NewIcon(self):
+        pass
+
+    @dbus.service.signal(dbus_interface=SNI_IFACE, signature="")
+    def NewToolTip(self):
+        pass
+
+    @dbus.service.signal(dbus_interface=SNI_IFACE, signature="")
+    def NewAttentionIcon(self):
+        pass
+
+    @dbus.service.signal(dbus_interface=SNI_IFACE, signature="")
+    def NewTitle(self):
+        pass
+
+    # ---- public setters — update state + emit signals -----------------------
+
+    def set_status(self, status: str) -> None:
+        """Update the Status property and emit NewStatus."""
+        if status == self._status:
+            return
+        self._status = status
+        self.NewStatus(self._status)
+
+    def set_tooltip(self, text: str) -> None:
+        """Update the tooltip body text and emit NewToolTip."""
+        if text == self._tooltip_text:
+            return
+        self._tooltip_text = text
+        self.NewToolTip()
+
+    def set_pending_count(self, count: int) -> None:
+        """Update the pending count, adjusting status + icon signals."""
+        if count == self._pending_count:
+            return
+        self._pending_count = count
+        if count > 0:
+            self.set_status("NeedsAttention")
+        else:
+            self.set_status("Active")
+        # The host should re-read the icon (badge may have changed).
+        self.NewIcon()
+
+    def set_mute_label(self, label: str) -> None:
+        """Forward mute label change to the DBusMenu service."""
+        if self._menu is not None:
+            self._menu.set_mute_label(label)
+
+
+def _try_status_notifier(callbacks: dict) -> StatusNotifierItemService | None:
+    """Attempt to create and register a StatusNotifierItem on the session bus.
+
+    Returns the service instance on success, or None if the watcher is
+    unavailable (falls back to QSystemTrayIcon).
+    """
+    try:
+        session_bus = dbus.SessionBus()
+        # Probe whether the watcher exists before committing.
+        session_bus.get_object(SNI_WATCHER_BUS, SNI_WATCHER_PATH)
+    except dbus.DBusException:
+        _log.info("StatusNotifierWatcher not found on session bus; "
+                  "falling back to QSystemTrayIcon")
+        return None
+    except Exception:  # noqa: BLE001
+        _log.info("Failed to connect to session bus; "
+                  "falling back to QSystemTrayIcon")
+        return None
+
+    sni_path = "/StatusNotifierItem"
+    try:
+        sni = StatusNotifierItemService(session_bus, sni_path, callbacks)
+        sni.setup_menu({
+            _MENU_SHOW_ID: callbacks.get("activate", lambda: None),
+            _MENU_MUTE_ID: callbacks.get("toggle_mute", lambda: None),
+            _MENU_QUIT_ID: callbacks.get("quit", lambda: None),
+        })
+        if sni.register():
+            _log.info("Using StatusNotifierItem D-Bus tray integration")
+            return sni
+        _log.info("StatusNotifierWatcher registration failed; "
+                  "falling back to QSystemTrayIcon")
+        return None
+    except dbus.DBusException as exc:
+        _log.warning("StatusNotifierItem setup failed (%s); "
+                     "falling back to QSystemTrayIcon", exc)
+        return None
+    except Exception:  # noqa: BLE001
+        _log.info("StatusNotifierItem setup failed; "
+                  "falling back to QSystemTrayIcon")
+        return None
 
 
 class BrokerBridge(QObject):
@@ -1053,14 +1475,23 @@ class MainWindow(QMainWindow):
         self.broker.approvalRevoked.connect(
             lambda _uid, _action, _exe: self._cache_refresh_timer.start())
 
-        # System tray icon — only if the platform actually has a tray.
-        # On Wayland compositors without StatusNotifier, the constructor
-        # succeeds but show() is a noop and signals fire pointlessly.
-        # We still construct the object so _update_tray_icon doesn't
-        # AttributeError, but we gate show() + closeEvent behavior on
-        # isSystemTrayAvailable. The base pixmap is cached so the badge
-        # painter can redraw without re-fetching the system icon on
-        # every refresh.
+        # Tray integration — try StatusNotifierItem (Wayland-native)
+        # first; fall back to QSystemTrayIcon (X11 / XEmbed).
+        #
+        # StatusNotifierItem is the Wayland-era tray protocol supported
+        # by qdshell, KDE Plasma, and GNOME (via AppIndicator extensions).
+        # QSystemTrayIcon.show() is a no-op on Wayland compositors that
+        # do not provide the XEmbed compatibility shim.
+        self._sni: StatusNotifierItemService | None = None
+        self._sni = _try_status_notifier({
+            "activate": self._show_from_tray,
+            "toggle_mute": self._toggle_mute_from_tray,
+            "quit": self._confirm_quit_from_tray,
+        })
+
+        # Always construct QSystemTrayIcon — NotificationManager and
+        # the badge painter reference it; the SNI path uses it as the
+        # fallback notification surface.
         self._tray_base_pixmap: QPixmap = QApplication.style().standardIcon(
             QStyle.StandardPixmap.SP_ComputerIcon).pixmap(32, 32)
         self.tray_icon = QSystemTrayIcon(self)
@@ -1082,14 +1513,21 @@ class MainWindow(QMainWindow):
         # Connect tray icon click to show window.
         self.tray_icon.activated.connect(self._tray_icon_clicked)
 
-        if QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray_icon.show()
-            # Close-button minimises to tray instead of quitting; user
-            # must invoke Quit from the tray menu (which is confirmed).
+        if self._sni is not None:
+            # SNI path: the D-Bus tray integration handles the icon.
+            # Still set QApplication to not quit on last window close
+            # so close-to-tray works.
             QApplication.instance().setQuitOnLastWindowClosed(False)
             self._tray_available = True
+            _log.info("Tray integration: StatusNotifierItem (D-Bus)")
+        elif QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon.show()
+            QApplication.instance().setQuitOnLastWindowClosed(False)
+            self._tray_available = True
+            _log.info("Tray integration: QSystemTrayIcon (X11/XEmbed)")
         else:
             self._tray_available = False
+            _log.info("Tray integration: none available")
 
         # Pulse-animation state for the tray badge. _tray_pulse_timer
         # toggles between two badge tints for ~3s after a new pending
@@ -1342,9 +1780,13 @@ class MainWindow(QMainWindow):
         if self.notifications.muted:
             self.notifications.unmute()
             self._mute_action.setText("Mute 30m")
+            if self._sni is not None:
+                self._sni.set_mute_label("Mute 30m")
         else:
             self.notifications.mute(MUTE_DURATION_S)
             self._mute_action.setText("Unmute")
+            if self._sni is not None:
+                self._sni.set_mute_label("Unmute")
 
     def _refresh_age_column(self) -> None:
         """Repaint the Waiting column in the pending list with updated ages.
@@ -1434,8 +1876,10 @@ class MainWindow(QMainWindow):
         except dbus.DBusException:
             # If broker is unavailable, just show the basic tooltip and
             # don't redraw the badge — keep the last-known count.
-            self.tray_icon.setToolTip(
-                "qdistro admin approvals (broker unavailable)")
+            tooltip = "qdistro admin approvals (broker unavailable)"
+            self.tray_icon.setToolTip(tooltip)
+            if self._sni is not None:
+                self._sni.set_tooltip(tooltip)
             return
         # Sync NotificationManager's arrival-time map with actual pending.
         self.notifications.sync_pending(
@@ -1444,14 +1888,19 @@ class MainWindow(QMainWindow):
         )
         self._tray_last_count = count
         if count > 0:
-            self.tray_icon.setToolTip(
-                f"qdistro admin approvals ({count} pending)")
+            tooltip = f"qdistro admin approvals ({count} pending)"
+            self.tray_icon.setToolTip(tooltip)
         else:
-            self.tray_icon.setToolTip("qdistro admin approvals")
+            tooltip = "qdistro admin approvals"
+            self.tray_icon.setToolTip(tooltip)
             # No pending → drop any in-flight pulse and clear the badge.
             self._tray_pulse_remaining = 0
             self._tray_pulse_timer.stop()
         self._render_tray_badge(count)
+        # Update the StatusNotifierItem if active.
+        if self._sni is not None:
+            self._sni.set_tooltip(tooltip)
+            self._sni.set_pending_count(count)
         self._update_window_title()
 
     def _install_help_menu(self) -> None:
@@ -2392,6 +2841,11 @@ def _maybe_session_bridge() -> SessionManagerBridge | None:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[admin_app] %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
     app = QApplication(sys.argv)
     broker = BrokerBridge()
     session = _maybe_session_bridge()
