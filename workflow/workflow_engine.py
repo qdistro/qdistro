@@ -88,6 +88,12 @@ class WorkflowEngine:
         self._delivered_secrets: dict[str, list[str]] = {}
         # Live delivery handles per run_id; scrub() actually revokes.
         self._delivery_handles: dict[str, list[DeliveryHandle]] = {}
+        # Guards the two dicts above: runs execute on the worker pool, so
+        # delivery (worker thread) races cleanup/scrub_all (shutdown
+        # thread). Set during shutdown so a late delivery scrubs at once
+        # instead of being tracked into a dict that's already drained.
+        self._secrets_lock = threading.Lock()
+        self._stopping = False
         # When a real vault backend is wired up, sweep any secret dirs a
         # previously-crashed engine left mounted/on tmpfs before we start.
         if secret_source is not None:
@@ -144,12 +150,17 @@ class WorkflowEngine:
     def shutdown(self) -> None:
         """Stop all triggers, drain runs, scrub outstanding secrets."""
         self._registry.unregister_all()
-        # Stop accepting new runs and cancel any not-yet-started ones;
-        # in-flight runs finish (and self-scrub) on their worker threads.
+        # Flip the stopping flag first so any delivery that lands after the
+        # drain scrubs itself immediately instead of being tracked into a
+        # dict scrub_all_runs has already emptied.
+        with self._secrets_lock:
+            self._stopping = True
+        # Cancel queued runs; wait for in-flight ones to finish so they
+        # self-scrub at their own run exit before we sweep stragglers.
         try:
-            self._run_pool.shutdown(wait=False, cancel_futures=True)
+            self._run_pool.shutdown(wait=True, cancel_futures=True)
         except TypeError:  # pragma: no cover - py<3.9
-            self._run_pool.shutdown(wait=False)
+            self._run_pool.shutdown(wait=True)
         self.scrub_all_runs()
         logger.info("workflow engine shut down")
 
@@ -346,7 +357,8 @@ class WorkflowEngine:
 
         # Track the item name for audit/scrub bookkeeping regardless of
         # whether a real backend is wired up.
-        self._delivered_secrets.setdefault(run.run_id, []).append(item)
+        with self._secrets_lock:
+            self._delivered_secrets.setdefault(run.run_id, []).append(item)
 
         if self._secret_source is None:
             logger.info(
@@ -383,11 +395,17 @@ class WorkflowEngine:
 
         # Enforce scrub_on. Step-level lifetimes are revoked immediately
         # (the spawned command, if any, already ran inside deliver());
-        # everything else is tracked and scrubbed at workflow exit.
-        if scrub_on in _STEP_SCRUB_LIFETIMES:
+        # everything else is tracked and scrubbed at workflow exit. If the
+        # engine is shutting down, scrub now rather than tracking into a
+        # dict scrub_all_runs may have already drained.
+        with self._secrets_lock:
+            track = (scrub_on not in _STEP_SCRUB_LIFETIMES
+                     and not self._stopping)
+            if track:
+                self._delivery_handles.setdefault(
+                    run.run_id, []).append(handle)
+        if not track:
             handle.scrub()
-        else:
-            self._delivery_handles.setdefault(run.run_id, []).append(handle)
         logger.info(
             "deliver_secret: delivered %r via %s (scrub_on=%s) run %s",
             item, handle.method, scrub_on, run.run_id,
@@ -502,7 +520,9 @@ class WorkflowEngine:
         tmpfs unmounted, buffer wiped); the scrub is audited by item name
         only — never the secret value.
         """
-        handles = self._delivery_handles.pop(run_id, [])
+        with self._secrets_lock:
+            handles = self._delivery_handles.pop(run_id, [])
+            secrets = self._delivered_secrets.pop(run_id, [])
         for handle in handles:
             try:
                 handle.scrub()
@@ -511,7 +531,6 @@ class WorkflowEngine:
                     "secret scrub failed for run %s (%s): %r",
                     run_id, handle.method, e,
                 )
-        secrets = self._delivered_secrets.pop(run_id, [])
         for item in secrets:
             logger.info("scrubbed secret %r from run %s", item, run_id)
             if self._audit:
@@ -523,9 +542,13 @@ class WorkflowEngine:
         Best-effort safety net for shutdown so a secret never outlives
         the engine process when a clean per-run scrub was missed.
         """
-        for run_id in list(self._delivery_handles.keys()):
-            self._cleanup_secrets(run_id, self._runs.get(
-                run_id, WorkflowRun()).workflow_name)
+        with self._secrets_lock:
+            run_ids = list(self._delivery_handles.keys())
+        with self._runs_lock:
+            names = {rid: self._runs[rid].workflow_name
+                     for rid in run_ids if rid in self._runs}
+        for run_id in run_ids:
+            self._cleanup_secrets(run_id, names.get(run_id, ""))
 
     # ------------------------------------------------------------------
     # Trigger callback

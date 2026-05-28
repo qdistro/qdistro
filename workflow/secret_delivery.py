@@ -262,10 +262,17 @@ class FdPassDelivery(DeliveryHandle):
         self._pgid: int | None = None
         self.returncode: int | None = None
 
+    # Bound well under a pipe's typical 64 KiB capacity: we write the
+    # whole secret before any reader exists, so a secret larger than the
+    # buffer would block os.write indefinitely. 32 KiB covers every key
+    # type with margin.
+    _MAX_SECRET_BYTES = 32 * 1024
+
     def deliver(self) -> None:
         secret = self._secret.as_bytes()
-        if len(secret) > 64 * 1024:
-            raise DeliveryError("fd-pass secret exceeds 64 KiB pipe budget")
+        if len(secret) > self._MAX_SECRET_BYTES:
+            raise DeliveryError(
+                f"fd-pass secret exceeds {self._MAX_SECRET_BYTES}-byte budget")
         read_fd, write_fd = os.pipe()
         self._read_fd = read_fd
         try:
@@ -529,8 +536,12 @@ def reap_runtime_root(root: str = _DEFAULT_RUNTIME_ROOT) -> int:
     for entry in os.listdir(root):
         path = os.path.join(root, entry)
         try:
-            subprocess.run(["umount", path],  # noqa: S603
-                           capture_output=True, check=False)
+            r = subprocess.run(["umount", path],  # noqa: S603
+                               capture_output=True, check=False)
+            if r.returncode != 0:
+                # Busy mount: lazy-detach so it can't pin the dir.
+                subprocess.run(["umount", "-l", path],  # noqa: S603
+                               capture_output=True, check=False)
             shutil.rmtree(path, ignore_errors=True)
             reaped += 1
         except Exception as e:  # noqa: BLE001

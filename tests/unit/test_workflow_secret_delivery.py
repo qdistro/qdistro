@@ -471,6 +471,23 @@ class TestEngineDelivery:
         assert run.state == RunState.FAILED
         assert run.run_id not in engine._delivery_handles
 
+    def test_delivery_during_shutdown_scrubs_immediately(self, tmp_path):
+        # When the engine is stopping, a delivery must scrub at once
+        # rather than be tracked into a dict scrub_all_runs already drained.
+        audit = WorkflowAuditLogger(db_path=str(tmp_path / "a.sqlite"))
+        engine = WorkflowEngine(audit_logger=audit,
+                                secret_source=_FakeSource(SECRET))
+        engine._stopping = True
+        engine._workflows["wf"] = WorkflowDef(
+            name="wf", trigger=TriggerDef(type=TriggerType.CRON),
+            steps=[StepDef(type=StepType.DELIVER_SECRET, config={
+                "item": "vault/dev/key", "as": "fd-pass"})])
+        run = engine.start_run("wf")
+        assert run.state == RunState.COMPLETED
+        # Not tracked for later — scrubbed in-line.
+        assert run.run_id not in engine._delivery_handles
+        assert run.steps_completed[0].details["scrubbed"] is True
+
     def test_tracking_only_without_source(self, tmp_path):
         # No secret_source -> deliver_secret stays in tracking-only mode
         # and never fetches/delivers.
