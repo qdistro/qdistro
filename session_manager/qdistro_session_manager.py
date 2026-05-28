@@ -392,6 +392,13 @@ class _SiloStore:
         self._on_change = on_change
         self._lock = threading.RLock()
         self._silos: dict[str, Silo] = {}
+        # Names with a stop() currently in its phase-2 teardown (running
+        # without the store lock). A concurrent stop() for the same silo
+        # waits on _stop_cv until the in-flight one finishes, then re-checks
+        # state — so it observes the final result instead of returning
+        # success prematurely. Guarded by _lock.
+        self._stopping_inflight: set[str] = set()
+        self._stop_cv = threading.Condition(self._lock)
         self.load()
 
     # ---- persistence ----------------------------------------------------
@@ -620,12 +627,17 @@ class _SiloStore:
         # Phase 1: validate state and transition to STOPPING under the lock.
         with self._lock:
             silo = self.get(name)
+            # A concurrent/retried StopSilo while a stop is already in its
+            # phase-2 teardown (running without the lock) must NOT return
+            # success prematurely — the first stop may still fail. Wait for
+            # the in-flight stop to finish, then re-check the final state.
+            while silo.name in self._stopping_inflight:
+                self._stop_cv.wait()
+                # Re-fetch in case the silo was deleted while we waited.
+                silo = self._silos.get(name)
+                if silo is None:
+                    raise UnknownSilo(f"no such silo {name!r}")
             if silo.state == State.STOPPED:
-                return
-            # A concurrent/retried StopSilo while a stop is already in
-            # progress should wait (the lock serializes) or return, not
-            # reject. Treat STOPPING as "stop already underway".
-            if silo.state == State.STOPPING:
                 return
             if silo.state not in (State.ACTIVE, State.FROZEN):
                 raise BadState(
@@ -639,81 +651,91 @@ class _SiloStore:
                                 "stop pre-thaw: %s — continuing",
                                 silo.name, e)
             self._transition(silo, State.STOPPING)
-            # Snapshot the immutable identifiers we need outside the lock.
+            # Snapshot the immutable identifiers we need outside the lock,
+            # and claim the in-flight slot so concurrent stops wait.
             silo_name = silo.name
             silo_uid = silo.uid
+            self._stopping_inflight.add(silo_name)
 
         # Phase 2: grace-period polling WITHOUT holding the store lock.
         # Other callers (ListSilos, signal handlers) can proceed while we
-        # wait for processes to exit.
+        # wait for processes to exit. The try/finally guarantees the
+        # in-flight slot is cleared and waiters are woken on every exit.
         try:
-            unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
-            self._ops.systemctl_stop(unit)
-            # Capture pids defensively — cgroup_pids may raise on a
-            # corrupted procfs entry. Treat any read failure as
-            # "assume populated; SIGKILL anything we can find".
             try:
-                pids = self._ops.cgroup_pids(silo_name)
-            except Exception as e:  # noqa: BLE001
-                log.warning("cgroup_pids for %r raised %s; assuming "
-                            "empty", silo_name, e)
-                pids = []
-            if pids:
-                self._ops.kill_pids(pids, signal.SIGTERM)
-                deadline = time.monotonic() + max(0, int(grace_s))
-                while time.monotonic() < deadline:
+                unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
+                self._ops.systemctl_stop(unit)
+                # Capture pids defensively — cgroup_pids may raise on a
+                # corrupted procfs entry. Treat any read failure as
+                # "assume populated; SIGKILL anything we can find".
+                try:
+                    pids = self._ops.cgroup_pids(silo_name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cgroup_pids for %r raised %s; assuming "
+                                "empty", silo_name, e)
+                    pids = []
+                if pids:
+                    self._ops.kill_pids(pids, signal.SIGTERM)
+                    deadline = time.monotonic() + max(0, int(grace_s))
+                    while time.monotonic() < deadline:
+                        try:
+                            if not self._ops.cgroup_pids(silo_name):
+                                break
+                        except Exception:  # noqa: BLE001
+                            break
+                        time.sleep(0.1)
+                    try:
+                        remaining = self._ops.cgroup_pids(silo_name)
+                    except Exception:  # noqa: BLE001
+                        remaining = []
+                    if remaining:
+                        self._ops.kill_pids(remaining, signal.SIGKILL)
+                # After SIGKILL the kernel needs a moment to reap the
+                # task and drop it from cgroup.procs. Without this poll
+                # the rmdir below races EBUSY and the cgroup dir leaks.
+                reap_deadline = time.monotonic() + 1.0
+                while time.monotonic() < reap_deadline:
                     try:
                         if not self._ops.cgroup_pids(silo_name):
                             break
                     except Exception:  # noqa: BLE001
                         break
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                 try:
-                    remaining = self._ops.cgroup_pids(silo_name)
-                except Exception:  # noqa: BLE001
-                    remaining = []
-                if remaining:
-                    self._ops.kill_pids(remaining, signal.SIGKILL)
-            # After SIGKILL the kernel needs a moment to reap the
-            # task and drop it from cgroup.procs. Without this poll
-            # the rmdir below races EBUSY and the cgroup dir leaks.
-            reap_deadline = time.monotonic() + 1.0
-            while time.monotonic() < reap_deadline:
-                try:
-                    if not self._ops.cgroup_pids(silo_name):
-                        break
-                except Exception:  # noqa: BLE001
-                    break
-                time.sleep(0.05)
-            try:
-                self._ops.cgroup_remove(silo_name)
-            except OSError as e:
-                # The cgroup is still populated — kernel didn't reap
-                # in time, or one of the processes is stuck in D.
-                # Log loudly so the leak is visible; transition to
-                # STOPPED anyway so the admin can retry stop or
-                # delete (the autostart sweep will paper over the
-                # leftover dir on next daemon start).
-                log.error("cgroup rmdir for silo %r failed: %s "
-                          "(cgroup may have leaked)", silo_name, e)
-        except SessionError:
-            # Already-typed errors propagate; force back to STOPPED
-            # so the silo isn't wedged in STOPPING.
-            with self._lock:
-                self._force_state(silo, State.STOPPED)
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.error("stop of silo %r failed mid-teardown: %s — "
-                      "forcing STOPPED so the silo isn't wedged",
-                      silo_name, e)
-            with self._lock:
-                self._force_state(silo, State.STOPPED)
-            raise SessionError(
-                f"stop of silo {silo_name!r} failed: {e}") from e
+                    self._ops.cgroup_remove(silo_name)
+                except OSError as e:
+                    # The cgroup is still populated — kernel didn't reap
+                    # in time, or one of the processes is stuck in D.
+                    # Log loudly so the leak is visible; transition to
+                    # STOPPED anyway so the admin can retry stop or
+                    # delete (the autostart sweep will paper over the
+                    # leftover dir on next daemon start).
+                    log.error("cgroup rmdir for silo %r failed: %s "
+                              "(cgroup may have leaked)", silo_name, e)
+            except SessionError:
+                # Already-typed errors propagate; force back to STOPPED
+                # so the silo isn't wedged in STOPPING.
+                with self._lock:
+                    self._force_state(silo, State.STOPPED)
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.error("stop of silo %r failed mid-teardown: %s — "
+                          "forcing STOPPED so the silo isn't wedged",
+                          silo_name, e)
+                with self._lock:
+                    self._force_state(silo, State.STOPPED)
+                raise SessionError(
+                    f"stop of silo {silo_name!r} failed: {e}") from e
 
-        # Phase 3: re-acquire the lock for the final state transition.
-        with self._lock:
-            self._transition(silo, State.STOPPED)
+            # Phase 3: re-acquire the lock for the final state transition.
+            with self._lock:
+                self._transition(silo, State.STOPPED)
+        finally:
+            # Release the in-flight slot and wake any concurrent stop()
+            # callers so they re-evaluate the now-final state.
+            with self._lock:
+                self._stopping_inflight.discard(silo_name)
+                self._stop_cv.notify_all()
 
     def freeze(self, name: str) -> None:
         with self._lock:

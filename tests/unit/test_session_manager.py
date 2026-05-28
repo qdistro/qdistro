@@ -461,6 +461,53 @@ class TestReviewFixups:
             pass
         assert store.get("work").state == State.STOPPED
 
+    def test_concurrent_stop_both_observe_final_state(self, store, ops):
+        """Round-2 review — a second stop() that races with an in-flight
+        stop must wait for the in-flight teardown to finish and observe
+        the final Stopped state, not return success prematurely."""
+        import threading
+        import time as _t
+
+        store.create("work", 2000)
+        store.start("work")
+        assert store.get("work").state == State.ACTIVE
+
+        # Make phase-2 teardown slow so the second caller is forced to
+        # wait on the in-flight slot.
+        orig_stop = ops.systemctl_stop
+
+        def _slow_stop(unit):
+            _t.sleep(0.3)
+            orig_stop(unit)
+
+        ops.systemctl_stop = _slow_stop
+
+        results: list[tuple[str, str]] = []
+        rlock = threading.Lock()
+
+        def _do_stop():
+            try:
+                store.stop("work", grace_s=1)
+                with rlock:
+                    results.append(("ok", store.get("work").state))
+            except Exception as e:  # noqa: BLE001
+                with rlock:
+                    results.append(("err", repr(e)))
+
+        t1 = threading.Thread(target=_do_stop)
+        t2 = threading.Thread(target=_do_stop)
+        t1.start()
+        _t.sleep(0.05)  # ensure t1 enters phase 2 first
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert len(results) == 2
+        assert all(r[0] == "ok" for r in results), results
+        # Both callers must observe the silo at its final Stopped state.
+        assert all(r[1] == State.STOPPED for r in results), results
+        assert store.get("work").state == State.STOPPED
+
     def test_load_drops_row_with_invalid_name(self, ops, tmp_path, caplog):
         """SEC-H2 — hand-edited silos.yaml with a path-traversal name
         must be rejected at load(), not silently accepted."""
