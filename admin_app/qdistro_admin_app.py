@@ -679,6 +679,17 @@ class BrokerBridge(QObject):
     def reload_rules(self) -> None:
         self._call("ReloadRules")
 
+    def delete_rule(self, source_path: str, name: str) -> tuple[bool, int, list[str]]:
+        """Ask the broker to delete a rule file (broker-side audit + reload).
+
+        Returns (deleted, reload_count, errors). The broker re-applies
+        all path-safety fail-closed and writes the audit row, so the
+        admin app no longer unlinks the file itself.
+        """
+        ret = self._call("DeleteRule", str(source_path), str(name))
+        deleted, count, errors = ret
+        return bool(deleted), int(count), [str(e) for e in (errors or [])]
+
     def list_workflows(self) -> list[dict]:
         raw = self._call("ListWorkflows")
         out = []
@@ -2487,12 +2498,12 @@ class RulesTab(QWidget):
             f"Delete rule {name!r}? This action cannot be undone.")
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        # The broker does not yet expose a DeleteRule RPC (tracked as
-        # SHOULD-FIX). Until it does, the admin app deletes the YAML
-        # file directly. Validate the path is inside the rules.d
-        # directory and is not a symlink before unlinking; refuse any
-        # path that escapes. Audit the deletion to stderr so a
-        # post-hoc journalctl pass can see who deleted which rule.
+        # Deletion goes through the broker's DeleteRule RPC so the
+        # broker re-applies path-safety fail-closed and writes the
+        # audit row (security-hardening-carryforward §"Broker and
+        # rules"). The admin app no longer unlinks the file directly,
+        # so it no longer needs write access to the root-owned rules.d
+        # and there is now a proper broker-side audit trail.
         filepath = str(row.get("source_path", ""))
         if not filepath:
             QMessageBox.warning(
@@ -2501,72 +2512,37 @@ class RulesTab(QWidget):
                 "cannot delete from the admin app.")
             return
         try:
-            real = os.path.realpath(filepath)
-            rules_real = os.path.realpath(RULES_DIR)
-            # The file's *containing directory* must be the rules dir
-            # (rejects /etc/qdistro/rules.d/../passwd) and the file
-            # itself must not be a symlink (rejects ln -s).
-            if os.path.islink(filepath):
-                QMessageBox.warning(
-                    self, "Refused",
-                    f"Refusing to delete a symlink: {filepath}")
-                return
-            if os.path.dirname(real) != rules_real:
-                QMessageBox.warning(
-                    self, "Refused",
-                    f"Refusing to delete a file outside {RULES_DIR}: "
-                    f"{real}")
-                return
-            if not os.path.exists(filepath):
-                QMessageBox.warning(
-                    self, "File not found",
-                    f"Rule file {filepath} not found")
-                return
-            os.remove(filepath)
-            # Local audit trail — broker doesn't see this delete so
-            # there's no broker-side audit row. Stderr → journalctl
-            # gives ops a forensic record at least.
-            print(
-                f"[admin_app] deleted rule file {real} "
-                f"(name={name!r}, uid={os.getuid()})",
-                file=sys.stderr,
-            )
-            # Reload rules; the broker returns (count, errors). Surface
-            # any errors so a typo'd YAML elsewhere isn't masked.
-            errors: list[str] = []
+            _deleted, _count, errors = self.broker.delete_rule(filepath, name)
+        except dbus.DBusException as e:
+            dbus_name = ""
             try:
-                ret = self.broker.reload_rules()
-                if isinstance(ret, (tuple, list)) and len(ret) == 2:
-                    _count, errors = ret
-                    errors = [str(e) for e in (errors or [])]
-            except dbus.DBusException as e:
-                QMessageBox.warning(
-                    self, "Deleted but reload failed",
-                    f"Rule {name} deleted from disk but "
-                    f"ReloadRules failed:\n\n{e}")
-                self.refresh()
+                dbus_name = e.get_dbus_name() or ""
+            except Exception:  # noqa: BLE001
+                dbus_name = ""
+            if dbus_name.endswith(".UnknownMethod") or \
+                    "UnknownMethod" in str(e):
+                QMessageBox.critical(
+                    self, "DeleteRule unavailable",
+                    "This broker does not expose a DeleteRule RPC. "
+                    "Upgrade the broker, or remove the rule file "
+                    "manually as the admin user.")
                 return
-            if errors:
-                QMessageBox.warning(
-                    self, "Deleted with reload warnings",
-                    f"Rule {name} deleted. ReloadRules reported:\n\n"
-                    + "\n".join(errors))
-            else:
-                QMessageBox.information(
-                    self, "Success", f"Rule {name} deleted")
-            self.refresh()
-        except PermissionError as e:
-            QMessageBox.critical(
-                self, "Permission denied",
-                f"Cannot delete {filepath!r} as uid {os.getuid()}. "
-                f"The rules.d directory is typically root-owned; "
-                f"run the admin app as the admin user, or add a "
-                f"DeleteRule RPC to the broker.\n\n"
-                f"{e.__class__.__name__}")
-        except OSError as e:
             QMessageBox.critical(
                 self, "Error deleting rule",
-                f"{e.__class__.__name__}: {e.strerror or ''}")
+                f"Broker refused or failed to delete {name!r}:\n\n{e}")
+            self.refresh()
+            return
+        # The broker reloads as part of DeleteRule; surface any
+        # post-reload errors so a typo'd YAML elsewhere isn't masked.
+        if errors:
+            QMessageBox.warning(
+                self, "Deleted with reload warnings",
+                f"Rule {name} deleted. Reload reported:\n\n"
+                + "\n".join(errors))
+        else:
+            QMessageBox.information(
+                self, "Success", f"Rule {name} deleted")
+        self.refresh()
 
 
 class RuleEditorDialog(QDialog):
