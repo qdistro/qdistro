@@ -601,11 +601,24 @@ def verify_intent_token(token: dict | None, op: str,
     if extension_id is not None:
         secret = _lookup_extension_secret(extension_id)
         if secret is None:
-            # No handshake on record for this extension — fall back
-            # to master so the legacy stdio test path still works,
-            # but production callers MUST handshake first.
-            secret = _SESSION_SECRET
+            # No handshake on record for this attested extension. The
+            # master secret is NOT a production fallback here: validating
+            # a master-HMAC token without a handshake would be a
+            # master/shared-secret bypass of the per-extension binding
+            # (a token minted against the raw master would serve any
+            # sensitive op). Production callers MUST handshake first, so
+            # we reject. The master fallback survives ONLY as a
+            # test-path convenience, gated behind QDISTRO_TEST_MODE=1
+            # (cf. the parent-exe allowlist _TEST override, P0-2).
+            if os.environ.get("QDISTRO_TEST_MODE", "").strip() == "1":
+                secret = _SESSION_SECRET
+            else:
+                return False, "intent_token_no_handshake"
     else:
+        # extension_id=None is the legacy direct-call path (no attested
+        # identity, e.g. unit tests calling verify_intent_token directly);
+        # it uses the master and is never reached from production dispatch,
+        # which always passes the kernel-attested extension_id.
         secret = _SESSION_SECRET
     expected = _compute_token_hmac(request_id, ts, tok_op, secret=secret)
     if not hmac.compare_digest(expected, mac):

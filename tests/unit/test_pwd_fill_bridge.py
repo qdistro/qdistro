@@ -69,10 +69,17 @@ class _FakeDBus(bb._BaseDBusClient):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_session_secret():
+def _fresh_session_secret(monkeypatch):
     """Rotate the bridge's HMAC secret per test so intent tokens
     minted in one test can't accidentally validate against the next
-    test's secret. Also clears the per-extension secret registry."""
+    test's secret. Also clears the per-extension secret registry.
+
+    These tests mint master-secret tokens and run them through
+    ``dispatch`` *without* a prior ``qdistro.handshake``. In production
+    that no-handshake master path is rejected
+    (``intent_token_no_handshake``); it is permitted only under
+    ``QDISTRO_TEST_MODE=1``, which these unit tests opt into."""
+    monkeypatch.setenv("QDISTRO_TEST_MODE", "1")
     bb.reset_session_secret()
     bb._EXT_SECRETS.clear()
     yield

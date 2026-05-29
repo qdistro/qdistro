@@ -90,7 +90,12 @@ class _RecordingDBus(bb._BaseDBusClient):
 
 
 @pytest.fixture(autouse=True)
-def _reset_client():
+def _reset_client(monkeypatch):
+    # Some tests dispatch token-gated ops with a master-minted token and
+    # no prior qdistro.handshake. Production rejects that no-handshake
+    # master path (intent_token_no_handshake); it is permitted only under
+    # QDISTRO_TEST_MODE=1.
+    monkeypatch.setenv("QDISTRO_TEST_MODE", "1")
     bb._dbus_client = None
     bb.reset_session_secret()
     yield
