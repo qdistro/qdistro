@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import socket
 import struct
 import subprocess
@@ -282,6 +283,11 @@ def build_argv(op: str, device: str) -> list[str]:
 # crafted value can never inject `*`/`:` glob/structure into the action.
 _UUID_RE = re.compile(r"^[A-Fa-f0-9-]{1,64}$")
 
+# Per-request token folded into the action when a volume has no stable fs
+# UUID, so a durable approval cannot be reused by a later volume at the same
+# /dev node. Hex only — nothing structural (`*`/`:`/`?`) can be smuggled in.
+_VOLATILE_RE = re.compile(r"^[A-Fa-f0-9]{8,64}$")
+
 
 def device_uuid(device: str) -> str:
     """Resolve the device's filesystem UUID server-side (tokenized lsblk,
@@ -303,19 +309,33 @@ def device_uuid(device: str) -> str:
     return val if _UUID_RE.match(val) else ""
 
 
-def action_for(op: str, device: str, uuid: str = "") -> str:
+def action_for(op: str, device: str, uuid: str = "", *,
+               volatile: str = "") -> str:
     """The broker action string for this operation. The device suffix is
     the canonical node so admins can author ``qdistro.media.mount:*``
     rules; it is never a label / never interpolated. When a stable
     filesystem ``uuid`` is known it is appended (``...:/dev/sdb1?uuid=X``)
     so a durable approval pins the actual volume, not just the volatile
     /dev name (codex #1). The uuid is regex-validated by ``device_uuid``
-    before it ever reaches here."""
+    before it ever reaches here.
+
+    When there is NO stable fs UUID, the /dev node alone is an UNSTABLE
+    identity: a different volume can later be assigned the same
+    ``/dev/sdb1``. Since the broker matches every cached approval on the
+    exact ``(uid, action)`` pair, anchoring on the bare node would let a
+    durable (``forever``/``forever_argv``) approval be reused by an
+    unrelated volume. To keep durable approvals volume-pinned we instead
+    fold a per-request ``volatile`` token into the action: a saved rule's
+    action can never equal the next request's action, so a no-UUID volume
+    always re-prompts. ``volatile`` is hex-validated; a crafted value is
+    dropped rather than embedded."""
     if op not in _VALID_OPS:
         raise ValueError(f"unknown op: {op!r}")
     base = f"qdistro.media.{op}:{device}"
     if uuid and _UUID_RE.match(uuid):
         return f"{base}?uuid={uuid}"
+    if volatile and _VOLATILE_RE.match(volatile):
+        return f"{base}?volatile={volatile}"
     return base
 
 
@@ -349,7 +369,11 @@ def _ask_broker(op: str, device: str, argv: list[str], details: dict,
     bus = dbus.SystemBus()
     obj = bus.get_object(BUS_NAME, OBJ_PATH)
     iface = dbus.Interface(obj, BUS_NAME)
-    action = action_for(op, device, fs_uuid)
+    # No stable UUID → fold in a per-request volatile token so a durable
+    # approval can never be reused by a different volume at the same /dev
+    # node (the broker matches cached approvals on the exact action).
+    volatile = "" if fs_uuid else secrets.token_hex(16)
+    action = action_for(op, device, fs_uuid, volatile=volatile)
     if caller_start_time:
         details = dict(details)
         details["caller_start_time"] = dbus.UInt64(int(caller_start_time))

@@ -136,6 +136,30 @@ class TestActionFor:
             assert M.action_for("mount", "/dev/sdb1", bad) == \
                 "qdistro.media.mount:/dev/sdb1"
 
+    def test_volatile_token_pins_no_uuid_action(self):
+        # With no stable UUID, a per-request volatile token is folded into
+        # the action so a durable approval can't be reused by a later
+        # volume at the same /dev node (coordinator codex finding).
+        a = M.action_for("mount", "/dev/sdb1", "", volatile="deadbeefcafe1234")
+        assert a == "qdistro.media.mount:/dev/sdb1?volatile=deadbeefcafe1234"
+        # Two distinct tokens yield distinct (non-matchable) actions.
+        t1 = M.action_for("mount", "/dev/sdb1", "", volatile="a" * 32)
+        t2 = M.action_for("mount", "/dev/sdb1", "", volatile="b" * 32)
+        assert t1 != t2
+
+    def test_volatile_glob_chars_rejected_not_embedded(self):
+        # A crafted volatile token with structure chars fails the hex regex
+        # and is dropped, never embedded — falls back to node-only form.
+        for bad in ["*", "x:y", "a/b", "../../etc", "short", "g" * 16]:
+            assert M.action_for("mount", "/dev/sdb1", "", volatile=bad) == \
+                "qdistro.media.mount:/dev/sdb1"
+
+    def test_uuid_wins_over_volatile(self):
+        # A real UUID is the stable anchor; volatile is ignored when present.
+        assert M.action_for("mount", "/dev/sdb1", "1234-ABCD",
+                            volatile="a" * 32) == \
+            "qdistro.media.mount:/dev/sdb1?uuid=1234-ABCD"
+
 
 class TestRemovableParsing:
     def test_rm_flag_means_removable(self):
