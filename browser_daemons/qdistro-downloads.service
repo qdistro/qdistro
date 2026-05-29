@@ -1,0 +1,27 @@
+[Unit]
+Description=qdistro browser download-notification daemon (Bridge Phase-9e)
+# Per-user session daemon. Raises a desktop notification on a completed
+# browser download; "Open folder" launches the user's file manager on
+# the download's containing directory.
+After=dbus.socket
+Requires=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.qdistro.Downloads
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_downloads_daemon.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+# The "Open folder" path execs the user's own file manager as the user;
+# it never needs to write outside the session, but it must be able to
+# exec a file manager, so ProtectSystem stays at the lighter setting.
+ProtectSystem=yes
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -20,6 +20,7 @@ pythonpath = [
   "phone",
   "recall",
   "browser_bridge",
+  "browser_daemons",
   "snapshots",
   "sdk",
   "admin_app",

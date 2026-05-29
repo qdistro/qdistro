@@ -1,0 +1,25 @@
+[Unit]
+Description=qdistro browser screen-lock inhibit daemon (Bridge Phase-9e)
+# Per-user session daemon. Translates a tab's fullscreen/presentation
+# state into a logind idle inhibitor (policy-gated by reason allowlist +
+# per-uid cap). Needs the system bus to reach org.freedesktop.login1.
+After=dbus.socket
+Requires=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.qdistro.Compositor
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_compositor_daemon.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+# AF_UNIX for both session + system bus sockets.
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=qdistro browser web-notification relay (Bridge Phase-9e)
+# Per-user session daemon. Re-emits a page's Web Notification through the
+# desktop org.freedesktop.Notifications, gated by a per-origin/per-user
+# policy file (~/.config/qdistro/notify-policy.json).
+After=dbus.socket
+Requires=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.qdistro.Notifications
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_notifications_daemon.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -1,11 +1,14 @@
-// qdistro browser-bridge MV3 service-worker — Phase 9a/9b.
+// qdistro browser-bridge MV3 service-worker — Phase 9a/9b/9e.
 //
 // Persistent native-messaging port with:
 // - qdistro.handshake on connect (receives per-extension session secret)
 // - Heartbeat ack (qdistro.heartbeat -> qdistro.heartbeat.ack)
 // - Inbound request dispatch (tabs.list/open/close, page.extract.request,
-//   cookies.export, containers.*, mpris/downloads/notifications/screenlock)
+//   cookies.export, containers.*, notifications.show, mpris.control)
 // - pwd.fill / pwd.save message forwarding from content script / popup
+// - 9e desktop integrations: downloads.onChanged + notifications click
+//   listeners (outbound) and mpris.publish / screenlock.inhibit|release
+//   forwarding from the per-tab content scripts.
 // - Intent-token minting (HMAC-SHA256 over "request_id|ts|op")
 //
 // Cross-browser: chrome.* with `browser` fallback so the same source
@@ -161,6 +164,16 @@ async function handleInboundRequest(msg) {
         break;
       case "containers.remove":
         result = await handleContainersRemove(msg);
+        break;
+      // 9e-3 inbound: the notifications daemon (via the bridge) asks us
+      // to surface a system notification through chrome.notifications.
+      case "notifications.show":
+        result = await handleNotificationsShowInbound(msg);
+        break;
+      // 9e-1 inbound: the admin media widget pressed play/pause; route
+      // the control back to the originating tab's <audio>/<video>.
+      case "mpris.control":
+        result = await handleMprisControlInbound(msg);
         break;
       default:
         result = { ok: false, error: "unknown_inbound_op", op: op };
@@ -671,6 +684,22 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // 9e content-script events.
+  if (action === "mpris.publish") {
+    handleMprisPublish(msg, sender).then(sendResponse);
+    return true;
+  }
+
+  if (action === "screenlock.inhibit") {
+    handleScreenlockInhibit(msg, sender).then(sendResponse);
+    return true;
+  }
+
+  if (action === "screenlock.release") {
+    handleScreenlockRelease(msg, sender).then(sendResponse);
+    return true;
+  }
+
   return false;
 });
 
@@ -876,6 +905,154 @@ async function handlePing() {
   }
 }
 
+// =====================================================================
+// Phase-9e desktop integrations
+//
+// Outbound: browser events -> bridge ops, forwarded to the four 9e
+// daemons (org.qdistro.Mpris / Downloads / Notifications / Compositor).
+// Inbound: notifications.show (daemon -> chrome.notifications) and
+// mpris.control (admin media widget -> originating tab) handled above.
+//
+// These mirror the standalone qdchrome-extension / qdfirefox-extension
+// 9e modules; the in-tree copy carries the same wire shapes so a fleet
+// running the bundled extension gets the same behaviour.
+// =====================================================================
+
+// 9e-2 — download notifications. chrome.downloads.onChanged fires a
+// sparse delta; we resolve the full item and forward a completion (or
+// state-change) snapshot as `downloads.notify`. Field names match the
+// bridge's _handle_downloads_notify whitelist.
+function downloadSnapshot(item) {
+  if (!item) return null;
+  return {
+    download_id: item.id,
+    url: item.url || item.finalUrl || "",
+    filename: item.filename || "",
+    state: item.state || "in_progress",
+    total_bytes: item.totalBytes || 0,
+    bytes_received: item.bytesReceived || 0,
+    mime: item.mime || "",
+  };
+}
+
+function installDownloadsListener() {
+  if (!api.downloads || !api.downloads.onChanged) return;
+  api.downloads.onChanged.addListener((delta) => {
+    // The delta alone is sparse; resolve the full item before forwarding.
+    api.downloads.search({ id: delta.id }, (items) => {
+      if (api.runtime.lastError) return;
+      const item = items && items[0];
+      if (!item) return;
+      const snap = downloadSnapshot(item);
+      if (!snap) return;
+      bridgeRequest({ op: "downloads.notify", ...snap })
+        .catch(() => { /* fire-and-forget */ });
+    });
+  });
+}
+
+// 9e-3 — when the user clicks one of our extension notifications, ask
+// the bridge to open the originating download / surface. The daemon
+// owns the file-manager launch; here we only forward the click.
+function installNotificationsClickListener() {
+  if (!api.notifications || !api.notifications.onClicked) return;
+  api.notifications.onClicked.addListener((notificationId) => {
+    bridgeRequest({
+      op: "downloads.notify",
+      download_id: -1,
+      state: "clicked",
+      notification_id: String(notificationId || ""),
+    }).catch(() => { /* fire-and-forget */ });
+  });
+}
+
+// 9e-3 inbound — bridge/daemon asks us to show a notification.
+async function handleNotificationsShowInbound(msg) {
+  if (!api.notifications || !api.notifications.create) {
+    return { ok: false, error: "notifications_unavailable" };
+  }
+  return await new Promise((resolve) => {
+    api.notifications.create("", {
+      type: "basic",
+      iconUrl: msg.icon_url || "icons/icon-48.png",
+      title: String(msg.title || "qdistro"),
+      message: String(msg.body || msg.message || ""),
+    }, (id) => {
+      if (api.runtime.lastError) {
+        resolve({ ok: false, error: "create_failed" });
+        return;
+      }
+      resolve({ ok: true, notification_id: id });
+    });
+  });
+}
+
+// 9e-1 — MPRIS publish. The content script (mpris-content.js, injected
+// per-tab) observes navigator.mediaSession / <video> playback and posts
+// a `mpris.publish` message; we translate the content-script shape
+// ({state, position seconds}) into the bridge's wire shape
+// (playback_status, position_us) and forward.
+async function handleMprisPublish(msg, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : null;
+  const position = typeof msg.position === "number" ? msg.position : 0;
+  return await bridgeRequest({
+    op: "mpris.publish",
+    title: msg.title || "",
+    artist: msg.artist || "",
+    album: msg.album || "",
+    playback_status: msg.state || msg.playback_status || "none",
+    position_us: Math.floor(position * 1000000),
+    tab_id: tabId,
+  });
+}
+
+// 9e-1 inbound — admin media widget pressed play/pause; relay to the
+// originating tab's content script which drives the media element.
+async function handleMprisControlInbound(msg) {
+  const action = String(msg.action || "");
+  const tabId = msg.tab_id;
+  if (typeof tabId !== "number") {
+    return { ok: false, error: "no_tab" };
+  }
+  try {
+    await api.tabs.sendMessage(tabId, { action: "mpris.control", control: action });
+    return { ok: true, action };
+  } catch (e) {
+    return { ok: false, error: "tab_unreachable", detail: String(e).slice(0, 120) };
+  }
+}
+
+// 9e-4 — screen-lock inhibit/release. The content script
+// (screenlock-content.js) detects fullscreen video / presentation and
+// posts a screenlock.inhibit / screenlock.release message.
+async function handleScreenlockInhibit(msg, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : null;
+  return await bridgeRequest({
+    op: "screenlock.inhibit",
+    reason: String(msg.reason || "fullscreen_video"),
+    tab_id: tabId,
+    url: msg.url || "",
+  });
+}
+
+async function handleScreenlockRelease(msg, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : null;
+  return await bridgeRequest({
+    op: "screenlock.release",
+    tab_id: tabId,
+    url: msg.url || "",
+  });
+}
+
+// Install the outbound event listeners once per service-worker load.
+let _9eListenersInstalled = false;
+function install9eListeners() {
+  if (_9eListenersInstalled) return;
+  _9eListenersInstalled = true;
+  installDownloadsListener();
+  installNotificationsClickListener();
+}
+
 // ---- startup --------------------------------------------------------
 
 // Connect immediately on service worker load. On MV3, the service
@@ -883,6 +1060,7 @@ async function handlePing() {
 // keeps it alive. If the SW is killed and restarted (e.g. by a popup
 // open or content-script message), connectBridge() re-establishes.
 connectBridge();
+install9eListeners();
 
 // MV3 install / activate handlers
 self.addEventListener("install", () => {
