@@ -250,6 +250,10 @@ class TestCallDbus:
         return StepDef(type=StepType.CALL_DBUS, config=cfg)
 
     def test_success(self, monkeypatch):
+        # The default call_dbus policy is fail-closed default-deny; allowlist
+        # the test bus so the real-call path under test is exercised.
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example")
         rec = _install_fake_dbus(monkeypatch, return_value="pong")
         eng = _engine()
         r = _result()
@@ -266,6 +270,8 @@ class TestCallDbus:
         assert "timeout" in call[3]
 
     def test_timeout_clamped(self, monkeypatch):
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example")
         rec = _install_fake_dbus(monkeypatch)
         eng = _engine()
         r = _result()
@@ -291,6 +297,8 @@ class TestCallDbus:
         assert "private" in r.error
 
     def test_failure_isolated(self, monkeypatch):
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example")
         _install_fake_dbus(monkeypatch, raises=RuntimeError("bus down"))
         eng = _engine()
         r = _result()

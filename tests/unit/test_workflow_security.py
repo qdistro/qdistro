@@ -197,11 +197,12 @@ def _dbus_step(bus_name):
 
 
 class TestCallDbusPolicy:
-    # The destination policy is OFF by default (wide open for testing);
-    # these tests opt in via QDISTRO_WORKFLOW_DBUS_HARDENING=1 so the
-    # hardening stays covered for when it is enabled.
+    # The destination policy is ENFORCED by default and fail-closed:
+    # hard denylist + unique-name rejection + default-deny allowlist.
+    # Each test clears the dev escape hatch (QDISTRO_WORKFLOW_DBUS_OPEN) so
+    # the enforced default is exercised even if the ambient env sets it.
     def test_denylisted_bus_refused(self, monkeypatch):
-        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_HARDENING", "1")
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
         from workflow_schema import StepResult, WorkflowRun
         eng = WorkflowEngine(audit_logger=None)
         r = StepResult(step_name="s", step_type="call_dbus", success=False)
@@ -210,7 +211,7 @@ class TestCallDbusPolicy:
         assert not r.success and "denied" in r.error
 
     def test_systemd_refused(self, monkeypatch):
-        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_HARDENING", "1")
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
         from workflow_schema import StepResult, WorkflowRun
         eng = WorkflowEngine(audit_logger=None)
         r = StepResult(step_name="s", step_type="call_dbus", success=False)
@@ -218,10 +219,22 @@ class TestCallDbusPolicy:
                               WorkflowRun(workflow_name="w"), r)
         assert not r.success and "denied" in r.error
 
+    def test_denylisted_bus_refused_even_if_allowlisted(self, monkeypatch):
+        # The hard denylist wins over the allowlist: a privilege-escalation
+        # bus name can never be re-permitted by configuration.
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.qdistro.Pwd1")
+        from workflow_schema import StepResult, WorkflowRun
+        eng = WorkflowEngine(audit_logger=None)
+        r = StepResult(step_name="s", step_type="call_dbus", success=False)
+        eng._handle_call_dbus(_dbus_step("org.qdistro.Pwd1"),
+                              WorkflowRun(workflow_name="w"), r)
+        assert not r.success and "denied" in r.error
+
     def test_unique_name_refused(self, monkeypatch):
         # A workflow must not slip past the well-known-name denylist by
         # targeting a denied service's unique connection name (":1.N").
-        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_HARDENING", "1")
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
         from workflow_schema import StepResult, WorkflowRun
         eng = WorkflowEngine(audit_logger=None)
         r = StepResult(step_name="s", step_type="call_dbus", success=False)
@@ -229,8 +242,20 @@ class TestCallDbusPolicy:
                               WorkflowRun(workflow_name="w"), r)
         assert not r.success and "unique connection name" in r.error
 
+    def test_non_allowlisted_refused_by_default(self, monkeypatch):
+        # Default-deny: with no allowlist configured, even an otherwise
+        # innocuous bus name is refused — nothing is callable by default.
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_ALLOW", raising=False)
+        from workflow_schema import StepResult, WorkflowRun
+        eng = WorkflowEngine(audit_logger=None)
+        r = StepResult(step_name="s", step_type="call_dbus", success=False)
+        eng._handle_call_dbus(_dbus_step("org.example.Other"),
+                              WorkflowRun(workflow_name="w"), r)
+        assert not r.success and "allowlist" in r.error
+
     def test_allowlist_blocks_others(self, monkeypatch):
-        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_HARDENING", "1")
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
         monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example.Allowed")
         from workflow_schema import StepResult, WorkflowRun
         eng = WorkflowEngine(audit_logger=None)
@@ -239,19 +264,37 @@ class TestCallDbusPolicy:
                               WorkflowRun(workflow_name="w"), r)
         assert not r.success and "allowlist" in r.error
 
-    def test_wide_open_by_default_allows_denylisted(self, monkeypatch):
-        # Default (no hardening flag): even a normally-denied bus name is
-        # NOT rejected by policy — it only fails later at the real dbus
-        # call (no dbus module faked here), proving policy didn't block it.
-        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_HARDENING", raising=False)
+    def test_allowlisted_dest_permitted(self, monkeypatch):
+        # An explicitly-allowlisted, non-denied bus name passes the policy:
+        # it is NOT rejected by denylist/unique-name/allowlist checks. With
+        # no real dbus available the call fails downstream, but the error is
+        # never a policy refusal — proving the policy permitted it.
+        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example.Allowed")
+        from workflow_schema import StepResult, WorkflowRun
+        eng = WorkflowEngine(audit_logger=None)
+        r = StepResult(step_name="s", step_type="call_dbus", success=False)
+        eng._handle_call_dbus(_dbus_step("org.example.Allowed"),
+                              WorkflowRun(workflow_name="w"), r)
+        assert "denied" not in r.error
+        assert "allowlist" not in r.error
+        assert "unique connection name" not in r.error
+
+    def test_escape_hatch_restores_open(self, monkeypatch):
+        # Dev escape hatch (QDISTRO_WORKFLOW_DBUS_OPEN=1) reverts to the
+        # historical wide-open behavior: even a normally-denied bus name is
+        # NOT rejected by policy — it only fails later at the real dbus call
+        # (no dbus module faked here), proving policy didn't block it.
+        monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_OPEN", "1")
         from workflow_schema import StepResult, WorkflowRun
         eng = WorkflowEngine(audit_logger=None)
         r = StepResult(step_name="s", step_type="call_dbus", success=False)
         eng._handle_call_dbus(_dbus_step("org.qdistro.Pwd1"),
                               WorkflowRun(workflow_name="w"), r)
         # Policy did not reject it; any failure is from the actual call,
-        # never the denylist.
+        # never the denylist/allowlist.
         assert "denied" not in r.error
+        assert "allowlist" not in r.error
 
 
 # ----------------------------------------------------------------------
