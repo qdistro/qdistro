@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import struct
 import threading
 from pathlib import Path
 
@@ -33,6 +34,30 @@ log = logging.getLogger("qdlocker.ctrl")
 # How many bytes we'll read per command. The protocol is one line of
 # ASCII; anything longer is malformed.
 MAX_COMMAND_LEN = 1024
+
+# Linux `struct ucred` = three native ints (pid, uid, gid). This is the
+# payload returned by SO_PEERCRED on an AF_UNIX SOCK_STREAM socket.
+_UCRED_FMT = "iii"
+_UCRED_SIZE = struct.calcsize(_UCRED_FMT)
+
+
+def peer_uid(conn: socket.socket) -> int | None:
+    """Return the connecting peer's effective uid via SO_PEERCRED.
+
+    Returns ``None`` if the credentials can't be read (no SO_PEERCRED
+    support, short read, or any OSError) so callers can fail closed.
+    """
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is None:
+        return None
+    try:
+        raw = conn.getsockopt(socket.SOL_SOCKET, so_peercred, _UCRED_SIZE)
+    except OSError:
+        return None
+    if len(raw) != _UCRED_SIZE:
+        return None
+    _pid, uid, _gid = struct.unpack(_UCRED_FMT, raw)
+    return uid
 
 
 def default_socket_path() -> Path:
@@ -186,7 +211,39 @@ class CtrlSocket(QObject):
                 if not self._stop.is_set():
                     log.exception("accept failed")
                 return
+            if not self._authorize_peer(conn):
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
             self._handle_connection(conn)
+
+    def _authorize_peer(self, conn: socket.socket) -> bool:
+        """Peer-credential policy: serve ONLY the session owner.
+
+        The ctrl socket exposes live locker state, a length-revealing
+        masked prompt buffer (keystroke timing/length side channel) and
+        a synthetic lock injection. The socket already lives in the
+        0o700 XDG_RUNTIME_DIR and is itself 0o600, but those only bound
+        access to the same uid as a directory/file ACL. We additionally
+        verify the connecting peer's uid via SO_PEERCRED and accept only
+        connections whose uid matches our own (the session owner). Fail
+        closed: if the credentials can't be read at all, refuse.
+        """
+        uid = peer_uid(conn)
+        if uid is None:
+            log.warning("ctrl: refusing connection with unreadable peer credentials")
+            return False
+        own = os.getuid()
+        if uid != own:
+            log.warning(
+                "ctrl: refusing connection from foreign uid %d (expected %d)",
+                uid,
+                own,
+            )
+            return False
+        return True
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
