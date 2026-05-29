@@ -188,14 +188,22 @@ def _normalize_url_origin(url: str) -> str:
     ``https://example.com:443/path`` normalises to ``https://example.com``
     and matches credentials stored without an explicit port.
     """
-    parsed = urllib.parse.urlparse(url)
-    scheme = (parsed.scheme or "https").lower()
-    if scheme not in ("http", "https"):
+    # urlparse() itself raises ValueError on some malformed inputs (e.g. an
+    # unterminated IPv6 literal "http://[::1"), and parsed.port raises on a
+    # non-numeric / out-of-range port ("https://h:bad/", ":99999"). Fail
+    # closed on either so the caller records an audited `bad-url-origin`
+    # deny instead of crashing the RPC.
+    try:
+        parsed = urllib.parse.urlparse(url)
+        scheme = (parsed.scheme or "https").lower()
+        if scheme not in ("http", "https"):
+            return ""
+        host = (parsed.hostname or "").lower()
+        if not host or "\x00" in host:
+            return ""
+        port = parsed.port
+    except ValueError:
         return ""
-    host = (parsed.hostname or "").lower()
-    if not host or "\x00" in host:
-        return ""
-    port = parsed.port
     if port and not (
         (scheme == "https" and port == 443)
         or (scheme == "http" and port == 80)
@@ -309,6 +317,63 @@ def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
     if os.path.realpath(parent_exe) not in allowed:
         return False, "parent-not-browser"
     return True, "browser-bridge"
+
+
+def _bridge_app_id(pid: int) -> str:
+    """Kernel-attested browser identity behind a bridge RPC, for audit.
+
+    The bridge process's parent is the browser native-messaging host; its
+    exe path is the strongest non-spoofable handle we have on *which
+    browser* is driving the autofill request. Returned best-effort (empty
+    on a race / unreadable proc) — used only for the audit row, never for
+    a security decision (the gate is _browser_bridge_allowed)."""
+    ppid = _read_proc_ppid(pid)
+    if ppid is None:
+        return ""
+    return _read_proc_exe(ppid)
+
+
+def _request_app_context(
+        req: dict[str, Any],
+        redact: str | None = None) -> tuple[str | None, str | None]:
+    """Extract self-reported extension/browser identity + silo/app context
+    from a browser-bridge request, for the audit row only.
+
+    Returns (app_id, app_context). ``app_id`` is the self-reported
+    extension id when present (clearly distinct from the kernel-attested
+    parent-browser exe, which the caller stamps separately); ``app_context``
+    is the silo/app label when the bridge forwards one. Both are advisory
+    metadata — never a security input.
+
+    ``redact`` (the submitted password, on the Save path) names a value
+    that must NEVER be echoed into an audit field: any advisory string
+    equal to it is dropped, so a hostile/buggy bridge cannot launder the
+    password into audit via extension_id / silo / app_context."""
+    if not isinstance(req, dict):
+        return None, None
+
+    def _clean(v: object) -> str | None:
+        # Advisory, request-controlled metadata. Bound the length and drop
+        # control chars so a hostile bridge cannot smuggle a large blob (or
+        # a newline-laden credential dump) into an audit row through the
+        # context fields. NB: we only ever read the extension_id / silo /
+        # app_context keys — never `password` — so credential material does
+        # not reach the audit row through this path.
+        if not isinstance(v, str) or not v:
+            return None
+        cleaned = "".join(ch for ch in v if ch.isprintable())[:128].strip()
+        if not cleaned:
+            return None
+        # Compare AFTER cleaning so " pw\n" (which cleans to the password)
+        # is caught too — never persist the submitted password to audit.
+        if redact and (v == redact or cleaned == redact):
+            return None
+        return cleaned
+
+    ext = _clean(req.get("extension_id"))
+    silo = _clean(req.get("silo")) or _clean(req.get("app_context"))
+    app_id = f"ext:{ext}" if ext else None
+    return app_id, silo
 
 
 class PwdDaemon(dbus.service.Object):
@@ -924,36 +989,61 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        # Structured audit context, enriched as the request is parsed.
+        # `app_id` is the kernel-attested parent-browser exe (best-effort);
+        # origin/extension/silo are layered in below. Stamped on every
+        # Fill audit row — allow AND deny — so a denial is investigatable.
+        actx: dict[str, Any] = {"app_id": _bridge_app_id(pid) or None}
         bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
         if not bridge_ok:
             self._audit.record("fill", vault, decision="deny",
                                reason=f"bridge-caller:{bridge_reason}",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
             self._audit.record("fill", vault, decision="deny",
-                               reason=f"invalid-json:{e}", caller=caller)
+                               reason=f"invalid-json:{e}", caller=caller,
+                               **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
+        if not isinstance(req, dict):
+            # json.loads accepts non-objects ([], "x", 123, null); a later
+            # req.get() would raise — fail closed and audit (matches the
+            # ExportCookies guard).
+            self._audit.record("fill", vault, decision="deny",
+                               reason="non-object-json", caller=caller,
+                               **actx)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        # Layer self-reported extension id / silo context onto the
+        # attested browser identity (extension id keeps its own ext: tag,
+        # so the audit reader can tell attested from self-reported).
+        ext_app_id, app_context = _request_app_context(req)
+        if ext_app_id and actx.get("app_id"):
+            actx["app_id"] = f"{actx['app_id']} {ext_app_id}"
+        elif ext_app_id:
+            actx["app_id"] = ext_app_id
+        actx["app_context"] = app_context
 
         url = req.get("url")
         if not isinstance(url, str) or not url:
             self._audit.record("fill", vault, decision="deny",
-                               reason="missing-url", caller=caller)
+                               reason="missing-url", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
 
         origin = _normalize_url_origin(url)
         if not origin:
             self._audit.record("fill", vault, decision="deny",
-                               reason="bad-url-origin", caller=caller)
+                               reason="bad-url-origin", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
+        actx["origin"] = origin
 
         username_filter = req.get("username") or None
 
         if vault not in self._unlocked:
             self._audit.record("fill", vault, decision="deny",
-                               reason="vault-locked", caller=caller)
+                               reason="vault-locked", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "vault_locked"})
         self._touch(vault)
 
@@ -962,7 +1052,7 @@ class PwdDaemon(dbus.service.Object):
             items = list_items(VAULT_DIR, vault)
         except VaultNotFound:
             self._audit.record("fill", vault, decision="deny",
-                               reason="vault-missing", caller=caller)
+                               reason="vault-missing", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "vault_locked"})
 
         tag_prefix = f"pwd:{origin}/"
@@ -992,7 +1082,7 @@ class PwdDaemon(dbus.service.Object):
 
         if not matches:
             self._audit.record("fill", vault, decision="allow",
-                               reason="no-match", caller=caller)
+                               reason="no-match", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "no_match"})
 
         fill_token = secrets.token_urlsafe(32)
@@ -1013,7 +1103,8 @@ class PwdDaemon(dbus.service.Object):
             }
 
         self._audit.record("fill", vault, decision="allow",
-                           reason=f"matched:{len(matches)}", caller=caller)
+                           reason=f"matched:{len(matches)}", caller=caller,
+                           **actx)
         return json.dumps({
             "ok": True,
             "credentials": matches,
@@ -1028,18 +1119,32 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        actx: dict[str, Any] = {"app_id": _bridge_app_id(pid) or None}
         bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
         if not bridge_ok:
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason=f"bridge-caller:{bridge_reason}",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
             self._audit.record("fill-confirm", vault, decision="deny",
-                               reason=f"invalid-json:{e}", caller=caller)
+                               reason=f"invalid-json:{e}", caller=caller,
+                               **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
+        if not isinstance(req, dict):
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="non-object-json", caller=caller,
+                               **actx)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+
+        ext_app_id, app_context = _request_app_context(req)
+        if ext_app_id and actx.get("app_id"):
+            actx["app_id"] = f"{actx['app_id']} {ext_app_id}"
+        elif ext_app_id:
+            actx["app_id"] = ext_app_id
+        actx["app_context"] = app_context
 
         url = req.get("url")
         username = req.get("username")
@@ -1047,18 +1152,19 @@ class PwdDaemon(dbus.service.Object):
         if not (isinstance(url, str) and url
                 and isinstance(username, str) and username):
             self._audit.record("fill-confirm", vault, decision="deny",
-                               reason="missing-fields", caller=caller)
+                               reason="missing-fields", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
 
         origin = _normalize_url_origin(url)
         if not origin:
             self._audit.record("fill-confirm", vault, decision="deny",
-                               reason="bad-url-origin", caller=caller)
+                               reason="bad-url-origin", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
+        actx["origin"] = origin
 
         if vault not in self._unlocked:
             self._audit.record("fill-confirm", vault, decision="deny",
-                               reason="vault-locked", caller=caller)
+                               reason="vault-locked", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "vault_locked"})
         self._touch(vault)
 
@@ -1076,13 +1182,14 @@ class PwdDaemon(dbus.service.Object):
             self._fill_tokens.pop(token_key, None)
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason="invalid-or-expired-fill-token",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_token"})
         if (token_entry["origin"] != origin
                 or token_entry["username"] != username
                 or token_entry.get("pid") != pid):
             self._audit.record("fill-confirm", vault, decision="deny",
-                               reason="fill-token-mismatch", caller=caller)
+                               reason="fill-token-mismatch", caller=caller,
+                               **actx)
             return json.dumps({"ok": False, "error": "invalid_token"})
         # Daemon-session / originating-peer binding: the fill_token was
         # minted for the bridge process (pid) that called Fill. A
@@ -1095,7 +1202,7 @@ class PwdDaemon(dbus.service.Object):
         if token_entry.get("pid") != pid:
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason="fill-token-peer-mismatch",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_token"})
         # All bound fields match — consume the single-use approval now.
         self._fill_tokens.pop(token_key, None)
@@ -1107,14 +1214,14 @@ class PwdDaemon(dbus.service.Object):
         except VaultNotFound:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason="no-such-item",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "no_match"})
 
         ok, reason = pin_match(pins, caller)
         if not ok:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason=reason,
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "policy_denied"})
 
         try:
@@ -1123,12 +1230,12 @@ class PwdDaemon(dbus.service.Object):
         except VaultIntegrityError as e:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason="integrity-fail",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "integrity_error"})
         except VaultNotFound:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason="no-such-item",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "no_match"})
 
         try:
@@ -1136,11 +1243,12 @@ class PwdDaemon(dbus.service.Object):
         except UnicodeDecodeError:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason="decode-error",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "integrity_error"})
 
         self._audit.record("fill-confirm", vault, item_tag=tag,
-                           decision="allow", reason=reason, caller=caller)
+                           decision="allow", reason=reason, caller=caller,
+                           **actx)
         return json.dumps({
             "ok": True,
             "credentials": [{
@@ -1157,17 +1265,24 @@ class PwdDaemon(dbus.service.Object):
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
         vault = BROWSER_PWD_VAULT
+        actx: dict[str, Any] = {"app_id": _bridge_app_id(pid) or None}
         bridge_ok, bridge_reason = _browser_bridge_allowed(pid)
         if not bridge_ok:
             self._audit.record("save", vault, decision="deny",
                                reason=f"bridge-caller:{bridge_reason}",
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "policy_denied"})
         try:
             req = json.loads(str(creds_json))
         except (json.JSONDecodeError, TypeError) as e:
             self._audit.record("save", vault, decision="deny",
-                               reason=f"invalid-json:{e}", caller=caller)
+                               reason=f"invalid-json:{e}", caller=caller,
+                               **actx)
+            return json.dumps({"ok": False, "error": "invalid_request"})
+        if not isinstance(req, dict):
+            self._audit.record("save", vault, decision="deny",
+                               reason="non-object-json", caller=caller,
+                               **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
 
         url = req.get("url")
@@ -1176,26 +1291,53 @@ class PwdDaemon(dbus.service.Object):
         extension_id = req.get("extension_id") or ""
         parent_exe = req.get("parent_exe") or ""
 
+        # Self-reported extension/silo context for the audit row. NB:
+        # _request_app_context only reads extension_id / silo / app_context
+        # keys — never `password` — so credential material can't leak into
+        # the audit row through that path. Save is the one autofill RPC that
+        # *does* see the password, so as belt-and-suspenders we also redact
+        # any advisory-context value that mirrors the submitted password:
+        # a hostile/buggy bridge that copies the password into extension_id
+        # or silo must not get it persisted to audit (proven in
+        # test_pwd_autofill_audit::...advisory_context_password_redacted).
+        ext_app_id, app_context = _request_app_context(
+            req, redact=password if isinstance(password, str) else None)
+        if ext_app_id and actx.get("app_id"):
+            actx["app_id"] = f"{actx['app_id']} {ext_app_id}"
+        elif ext_app_id:
+            actx["app_id"] = ext_app_id
+        actx["app_context"] = app_context
+
         if not (isinstance(url, str) and url
                 and isinstance(username, str) and username
                 and isinstance(password, str) and password):
             self._audit.record("save", vault, decision="deny",
-                               reason="missing-fields", caller=caller)
+                               reason="missing-fields", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
 
         origin = _normalize_url_origin(url)
         if not origin:
             self._audit.record("save", vault, decision="deny",
-                               reason="bad-url-origin", caller=caller)
+                               reason="bad-url-origin", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
+        actx["origin"] = origin
 
         if vault not in self._unlocked:
             self._audit.record("save", vault, decision="deny",
-                               reason="vault-locked", caller=caller)
+                               reason="vault-locked", caller=caller, **actx)
             return json.dumps({"ok": False, "error": "vault_locked"})
         self._touch(vault)
 
         tag = f"pwd:{origin}/{username}"
+        # Audit-only tag: item_tag is stored in cleartext (admins need to
+        # know which credential was touched), but a hostile/buggy bridge
+        # could set username == password to launder the secret through the
+        # tag. Mask the username in the *audited* tag when it equals the
+        # submitted password; the real `tag` used for storage/lookup is
+        # untouched. (Proven in
+        # test_pwd_autofill_audit::...username_equal_password_redacted.)
+        audit_tag = (f"pwd:{origin}/<redacted>"
+                     if username == password else tag)
         master_key = bytes(self._unlocked[vault]["key"])
 
         # Check if credential already exists — if so, verify caller
@@ -1204,9 +1346,9 @@ class PwdDaemon(dbus.service.Object):
             existing_pins = get_item_pins(VAULT_DIR, vault, tag)
             ok, reason = pin_match(existing_pins, caller)
             if not ok:
-                self._audit.record("save", vault, item_tag=tag,
+                self._audit.record("save", vault, item_tag=audit_tag,
                                    decision="deny", reason=reason,
-                                   caller=caller)
+                                   caller=caller, **actx)
                 return json.dumps({"ok": False, "error": "policy_denied"})
         except VaultNotFound:
             pass  # new credential — no existing pins to check
@@ -1225,14 +1367,14 @@ class PwdDaemon(dbus.service.Object):
                      pin_uid=uid,
                      replace=True)
         except (VaultDuplicate, VaultNotFound, ValueError) as e:
-            self._audit.record("save", vault, item_tag=tag,
+            self._audit.record("save", vault, item_tag=audit_tag,
                                decision="error", reason=str(e),
-                               caller=caller)
+                               caller=caller, **actx)
             return json.dumps({"ok": False, "error": "invalid_request"})
 
-        self._audit.record("save", vault, item_tag=tag,
+        self._audit.record("save", vault, item_tag=audit_tag,
                            decision="allow", reason="saved",
-                           caller=caller)
+                           caller=caller, **actx)
         return json.dumps({"ok": True})
 
     # -- browser-bridge ExportCookies (Bridge Phase 9d) ----------------
@@ -1565,6 +1707,9 @@ class PwdDaemon(dbus.service.Object):
             "caller_sha":     dbus.String(r["caller_sha"] or ""),
             "caller_selinux": dbus.String(r["caller_selinux"] or ""),
             "caller_cgroup":  dbus.String(r["caller_cgroup"] or ""),
+            "origin":         dbus.String(r.get("origin") or ""),
+            "app_id":         dbus.String(r.get("app_id") or ""),
+            "app_context":    dbus.String(r.get("app_context") or ""),
         }
 
     # -- signals -------------------------------------------------------
