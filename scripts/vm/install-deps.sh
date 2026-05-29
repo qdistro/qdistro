@@ -18,6 +18,14 @@ QDISTRO_PKGS=(
   wayland-devel wayland-protocols-devel libxkbcommon-devel libevdev-devel
   libinput-devel libgbm-devel libdrm-devel seatd-devel
   libXcursor-devel adwaita-icon-theme xcursor-themes
+  # Devel headers for building the production profile of qdistro's
+  # vendored libweston-14 (libweston-vendored/build-libweston.sh
+  # QDWIN_LIBWESTON_PROFILE=production): GL renderer (Mesa EGL/GLES),
+  # colour management (lcms2), DRM-backend display-info, and the X11
+  # backend client libs. Runtime Mesa-libEGL1/GL1 above are not enough
+  # to compile the renderer.
+  Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel lcms2-devel
+  libdisplay-info-devel libX11-devel libxcb-devel
   python313-pywayland python313-cffi python313-PyQt6
   qt6-wayland python313-setuptools
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri

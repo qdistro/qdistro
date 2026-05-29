@@ -96,6 +96,22 @@ meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
 
+# ---- 2b. Build + stage vendored, patched libweston-14 -------------------
+# qdwin's layer-shell popup parenting needs soft-linked helper symbols
+# that only exist in the patched tree; stock libweston-14 cannot drive
+# the get_popup / layer-popup-grab paths. Build the production profile
+# and stage it under /usr/libexec/qdistro/qdwin-libweston/ — the qdwin
+# systemd unit (written by install-qdwin-session-for-vm.sh below) points
+# LD_LIBRARY_PATH + WESTON_MODULE_MAP at that tree.
+# Decision doc: qdwin/doc/decisions/0001-vendored-libweston-packaging.md
+log "building + staging vendored libweston (production profile)..."
+if [ -x "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" ]; then
+    bash "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin" \
+        || log "  WARN: vendored libweston staging failed — qdwin will fall back to distro libweston (layer-popup grab DEGRADED)"
+else
+    log "  WARN: install-vendored-libweston.sh missing — skipping vendored libweston"
+fi
+
 # ---- 3. Build qdistro daemons (C, against ../qdwin XML) ------------------
 log "building qdistro daemons..."
 cd "$SRC/qdistro/daemons"
