@@ -267,10 +267,39 @@ def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
     launched by the browser's native-messaging host. Require both facts so
     a random same-UID Python process cannot call FillConfirm directly and
     satisfy the per-item pin stored by Save.
+
+    The bridge script must be the *executed* script — the first non-flag
+    argument after the interpreter (``python3 [opts] <script> ...``). A
+    prior version accepted the script path anywhere in argv, so a hostile
+    native host launched as ``python3 evil.py <bridge-script>`` (passing
+    the real path as a data argument) would have impersonated the bridge.
     """
     cmdline = _read_proc_cmdline(pid)
     script_real = os.path.realpath(BROWSER_BRIDGE_SCRIPT)
-    if not any(os.path.realpath(arg) == script_real for arg in cmdline):
+    # Locate the executed script: skip the interpreter (argv[0]) and any
+    # leading interpreter flags; the first non-flag token is the script
+    # Python actually runs. Only a small allowlist of *valueless* flags is
+    # tolerated before the script. Flags that consume the following token
+    # as an operand (``-W spec``, ``-X opt``, ``-c cmd``, ``-m mod`` …)
+    # would otherwise let an attacker smuggle the real script path into an
+    # option value while Python actually executes a different file, e.g.
+    # ``python3 -W <bridge-script> evil.py`` runs evil.py. Reject anything
+    # not in the valueless allowlist so the parser can't be fooled.
+    _VALUELESS_FLAGS = frozenset({
+        "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO",
+        "-q", "-s", "-S", "-u", "-v", "-vv", "-x",
+    })
+    executed_script = ""
+    for arg in cmdline[1:]:
+        if arg.startswith("-"):
+            if arg in _VALUELESS_FLAGS:
+                continue
+            # Unknown / operand-consuming flag (incl. -c/-m/-W/-X): we
+            # cannot safely locate the executed script. Fail closed.
+            return False, "not-browser-bridge"
+        executed_script = arg
+        break
+    if not executed_script or os.path.realpath(executed_script) != script_real:
         return False, "not-browser-bridge"
     ppid = _read_proc_ppid(pid)
     if ppid is None:
@@ -343,6 +372,13 @@ class PwdDaemon(dbus.service.Object):
         key = state.get("key")
         if isinstance(key, bytearray):
             _wipe_bytearray(key)
+        # Locking a vault invalidates every outstanding Fill→FillConfirm
+        # approval that targets it. Tokens are an in-memory, session-scoped
+        # grant; a relock (explicit, idle-timeout, or rotate) must not leave
+        # a stale approval that a later re-unlock within the TTL would
+        # silently honour. For the browser-pwd vault, drop all fill tokens.
+        if name == BROWSER_PWD_VAULT:
+            self._fill_tokens = {}
         self._audit.record(
             "lock", name, decision="allow", reason=reason)
         return True
@@ -1035,7 +1071,9 @@ class PwdDaemon(dbus.service.Object):
                                reason="invalid-or-expired-fill-token",
                                caller=caller)
             return json.dumps({"ok": False, "error": "invalid_token"})
-        if token_entry["origin"] != origin or token_entry["username"] != username:
+        if (token_entry["origin"] != origin
+                or token_entry["username"] != username
+                or token_entry.get("pid") != pid):
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason="fill-token-mismatch", caller=caller)
             return json.dumps({"ok": False, "error": "invalid_token"})
@@ -1157,7 +1195,11 @@ class PwdDaemon(dbus.service.Object):
             add_item(VAULT_DIR, vault, master_key,
                      tag, password.encode("utf-8"),
                      pin_app_exe=caller.get("exe", ""),
-                     pin_selinux=caller.get("selinux", ""),
+                     # snapshot_caller() exposes the SELinux context under
+                     # "selinux_label" (see qdistro_pwd_identity); a stale
+                     # "selinux" key silently dropped the pin so browser-
+                     # saved creds were never SELinux-bound. Fail-closed fix.
+                     pin_selinux=caller.get("selinux_label", ""),
                      pin_uid=uid,
                      replace=True)
         except (VaultDuplicate, VaultNotFound, ValueError) as e:
