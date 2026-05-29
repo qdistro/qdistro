@@ -24,7 +24,13 @@ from textual.containers import Horizontal  # noqa: E402
 from textual.screen import ModalScreen  # noqa: E402
 from textual.widgets import DataTable, Footer, Header, Static  # noqa: E402
 
-from broker_client import BrokerClient, DBusBrokerClient, Request  # noqa: E402
+from broker_client import (  # noqa: E402
+    BrokerClient,
+    DBusBrokerClient,
+    Request,
+    broker_error_label,
+    log_broker_error,
+)
 from silo_colors import chip_for_uid  # noqa: E402
 
 # Same vocabulary as the GUI / broker. Dict for O(1) label lookup that
@@ -186,7 +192,7 @@ class DetailPane(Static):
         text += (
             f"Details: {details}\n\n"
             f"Scope: [b]{scope_label}[/b]   "
-            f"[dim](press 1-5 to change)[/dim]\n\n"
+            f"[dim](press 1-8 to change)[/dim]\n\n"
             f"[green]a[/green] approve   [red]d[/red] deny   [yellow]?[/yellow] help"
         )
         self.update(text)
@@ -214,6 +220,10 @@ class AdminTuiApp(App):
 
     TITLE = "qdistro admin approvals (TUI)"
 
+    # Approval/scope keybindings deliberately mirror the Qt admin app's
+    # vocabulary (admin_app/qdistro_admin_app.py). The authoritative
+    # side-by-side inventory + justified divergences live in
+    # tui/SHORTCUTS.md — keep both in sync on any approval/scope change.
     BINDINGS = [
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
@@ -295,10 +305,12 @@ class AdminTuiApp(App):
             self._broker.start(self._on_pending, self._on_decided)
             self._broker_started = True
         except Exception as e:  # noqa: BLE001
-            # Bad/missing broker: render an in-app error instead of
-            # bubbling a traceback up to the user.
-            self.notify(f"broker unavailable: {e}", severity="error",
-                        timeout=10)
+            # Bad/missing broker: render a bounded in-app label instead of
+            # bubbling a traceback (or raw D-Bus string) up to the user.
+            # Raw detail goes to the log only.
+            log_broker_error("start", e)
+            self.notify(f"broker unavailable — {broker_error_label(e)}",
+                        severity="error", timeout=10)
             return
         self.refresh_queue()
         self.set_interval(self.POLL_INTERVAL_S, self.refresh_queue)
@@ -339,10 +351,15 @@ class AdminTuiApp(App):
             self._pending.clear()
             self._row_to_id.clear()
             self.query_one("#queue", QueueTable).clear()
-            self._broker_error = str(e)
+            # Store the bounded label (not str(e)) — the sticky subtitle
+            # banner renders this, so it must be shoulder-safe. Raw detail
+            # is logged below.
+            log_broker_error("get_pending", e)
+            self._broker_error = broker_error_label(e)
             self._update_detail()
             self._update_subtitle()
-            self.notify(f"broker error: {e}", severity="error", timeout=8)
+            self.notify(f"broker error — {self._broker_error}",
+                        severity="error", timeout=8)
             return
         # Successful fetch — clear sticky error if any
         if self._broker_error is not None:
@@ -403,6 +420,8 @@ class AdminTuiApp(App):
         # Broker offline: replace the subtitle entirely with a high-
         # contrast banner. Stays sticky until the next successful refresh.
         if self._broker_error is not None:
+            # _broker_error is a bounded label (set in refresh_queue), not
+            # a raw D-Bus string — safe to show in chrome.
             self.sub_title = f"⚠ BROKER OFFLINE — press r to retry  ({self._broker_error})"
             return
         n = len(self._pending)
@@ -520,8 +539,9 @@ class AdminTuiApp(App):
             try:
                 path = save(filename, yaml_body)
             except Exception as e:  # noqa: BLE001
-                self.notify(f"SaveRule failed: {e}", severity="error",
-                            timeout=8)
+                log_broker_error("save_rule", e)
+                self.notify(f"save rule failed — {broker_error_label(e)}",
+                            severity="error", timeout=8)
                 return
             self.notify(f"Rule saved to {path}",
                         severity="information", timeout=6)
@@ -545,7 +565,9 @@ class AdminTuiApp(App):
         try:
             pending = self._broker.get_pending()
         except Exception as e:  # noqa: BLE001
-            self.notify(f"broker error: {e}", severity="error", timeout=8)
+            log_broker_error("approve_all/get_pending", e)
+            self.notify(f"broker error — {broker_error_label(e)}",
+                        severity="error", timeout=8)
             return
         if not pending:
             self.notify("No pending requests", severity="information",
@@ -563,7 +585,8 @@ class AdminTuiApp(App):
                     self._broker.decide_request(req.id, "allow", "once")
                     ok_count += 1
                 except Exception as e:  # noqa: BLE001
-                    failures.append((req.id, str(e)))
+                    log_broker_error(f"approve_all/decide rid={req.id}", e)
+                    failures.append((req.id, broker_error_label(e)))
             if failures:
                 self.notify(
                     f"Approved {ok_count} of {n}; "
@@ -588,7 +611,9 @@ class AdminTuiApp(App):
         try:
             pending = self._broker.get_pending()
         except Exception as e:  # noqa: BLE001
-            self.notify(f"broker error: {e}", severity="error", timeout=8)
+            log_broker_error("deny_all/get_pending", e)
+            self.notify(f"broker error — {broker_error_label(e)}",
+                        severity="error", timeout=8)
             return
         if not pending:
             self.notify("No pending requests", severity="information",
@@ -606,7 +631,8 @@ class AdminTuiApp(App):
                     self._broker.decide_request(req.id, "deny", "once")
                     ok_count += 1
                 except Exception as e:  # noqa: BLE001
-                    failures.append((req.id, str(e)))
+                    log_broker_error(f"deny_all/decide rid={req.id}", e)
+                    failures.append((req.id, broker_error_label(e)))
             if failures:
                 self.notify(
                     f"Denied {ok_count} of {n}; "
@@ -633,7 +659,9 @@ class AdminTuiApp(App):
         try:
             self._broker.decide_request(req.id, decision, self._scope)
         except Exception as e:  # noqa: BLE001
-            self.notify(f"decide failed: {e}", severity="error", timeout=8)
+            log_broker_error(f"decide rid={req.id}", e)
+            self.notify(f"decide failed — {broker_error_label(e)}",
+                        severity="error", timeout=8)
             return
         # Confirm the action explicitly. Row vanishing is implicit
         # feedback but easy to miss when the queue had only one entry

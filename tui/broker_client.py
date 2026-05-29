@@ -15,12 +15,113 @@ False in tests that verify the async contract).
 """
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
+
+_log = logging.getLogger("qdistro.tui.broker")
+
+
+# ---------------------------------------------------------------------------
+# Bounded broker-error labels for the (shoulder-visible) TUI surface
+# ---------------------------------------------------------------------------
+#
+# Security hardening (todo/security-hardening-carryforward.md §"Broker and
+# rules"): the admin UI must render *bounded, known* broker error labels.
+# Raw D-Bus exception strings — which can embed paths, argv fragments,
+# uids, or internal detail — belong in the logs, NOT in TUI text that a
+# bystander can read over the admin's shoulder.
+#
+# Keys are the broker's typed D-Bus error names (see
+# broker/qdistro_admin_broker.py `raise dbus.DBusException(name=BUS_NAME +
+# ".<Name>")`). Bare-name keys (the suffix after the last `.`) are also
+# accepted so the mapping survives a BUS_NAME change. The label is a short
+# human phrase with no embedded request detail.
+_BROKER_ERROR_LABELS: dict[str, str] = {
+    "AccessDenied":            "Access denied by broker policy",
+    "AuditUnavailable":        "Audit log unavailable — decision refused",
+    "BadArgument":             "Broker rejected the request (bad argument)",
+    "CacheGcFailed":           "Cache cleanup failed",
+    "CallerGone":              "The requesting process is no longer present",
+    "CallerIdentityMismatch":  "Caller identity check failed",
+    "Denied":                  "Request denied by broker",
+    "Internal":                "Broker internal error",
+    "InvalidArgument":         "Broker rejected the request (invalid argument)",
+    "PrintAuditError":         "Print audit failed",
+    "RateLimited":             "Too many requests — rate limited",
+    "RelayFailed":             "Relay to target failed",
+    "RulesEngineRefused":      "Rules engine refused this rule",
+    "ScopeNotPermitted":       "Selected scope is not permitted for this request",
+    "SiloManagerUnreachable":  "Silo manager unreachable",
+    "SiloNotActive":           "Target silo is not active",
+    "SnapperUnavailable":      "Snapshot service unavailable",
+    "SnapshotFailed":          "Snapshot failed",
+    "TargetNotReady":          "Target application is not ready",
+}
+
+# Bus-level errors that the retry layer surfaces when the broker is down.
+_BUS_ERROR_LABELS: dict[str, str] = {
+    "org.freedesktop.DBus.Error.ServiceUnknown": "Broker not running",
+    "org.freedesktop.DBus.Error.NameHasNoOwner": "Broker not running",
+    "org.freedesktop.DBus.Error.NoReply":        "Broker did not respond",
+    "org.freedesktop.DBus.Error.AccessDenied":   "Not authorized to talk to the broker",
+}
+
+# Fallback label when an exception carries no recognizable D-Bus error
+# name. Deliberately generic — no `str(exc)` leakage.
+_GENERIC_BROKER_ERROR_LABEL = "Broker error"
+
+
+def _dbus_error_name(exc: BaseException) -> str | None:
+    """Best-effort extraction of a D-Bus error name from an exception.
+
+    dbus-python's DBusException exposes `get_dbus_name()`. We avoid
+    importing dbus here (tests + the fake client run without it) and
+    duck-type instead.
+    """
+    getter = getattr(exc, "get_dbus_name", None)
+    if callable(getter):
+        try:
+            name = getter()
+        except Exception:  # noqa: BLE001
+            return None
+        return str(name) if name else None
+    return None
+
+
+def broker_error_label(exc: BaseException) -> str:
+    """Map a broker exception to a bounded, shoulder-safe label.
+
+    Returns a short known phrase for recognized D-Bus error names and a
+    generic fallback otherwise. NEVER includes the raw exception text;
+    callers are responsible for logging the raw detail separately (see
+    `log_broker_error`). Pure function — no textual / dbus import — so it
+    is unit-testable on a host without those deps.
+    """
+    name = _dbus_error_name(exc)
+    if name is not None:
+        if name in _BUS_ERROR_LABELS:
+            return _BUS_ERROR_LABELS[name]
+        # Match either the fully-qualified name or its bare suffix so a
+        # BUS_NAME prefix change doesn't silently fall through to generic.
+        suffix = name.rsplit(".", 1)[-1]
+        if name in _BROKER_ERROR_LABELS:
+            return _BROKER_ERROR_LABELS[name]
+        if suffix in _BROKER_ERROR_LABELS:
+            return _BROKER_ERROR_LABELS[suffix]
+    return _GENERIC_BROKER_ERROR_LABEL
+
+
+def log_broker_error(context: str, exc: BaseException) -> None:
+    """Log the raw broker exception detail (name + full text) so it lands
+    in the journal/logs, never on the shoulder-visible TUI surface."""
+    name = _dbus_error_name(exc) or type(exc).__name__
+    _log.warning("broker error during %s: name=%s detail=%s",
+                 context, name, exc)
 
 
 @dataclass
