@@ -30,6 +30,7 @@ import pwd
 import re as _re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -52,6 +53,13 @@ SILOS_STATE_DIR = Path("/var/lib/qdistro/silos")
 # regenerates it on every state change. Schema documented in the
 # header comment of the file the daemon writes.
 SILOS_CONFIG_PATH = Path("/etc/qdistro/silos.yaml")
+# Durable forensic record of every privileged lifecycle mutation
+# (create/delete/start/stop/freeze/resume), including refusals. Lives
+# alongside the other qdistro audit DBs (pwd_audit.sqlite, the broker
+# audit db) so an admin investigating "who started/stopped/deleted
+# which silo and when" has one obvious place to look. SQLite, append-
+# only, 0600.
+SILOS_AUDIT_PATH = Path("/var/lib/qdistro/audit/session_manager_audit.sqlite")
 # cgroup-v2 hierarchy root for silo scopes. One subdir per silo;
 # cgroup.freeze controls Freeze/Resume.
 CGROUP_ROOT = Path("/sys/fs/cgroup/qdistro-silos")
@@ -371,6 +379,111 @@ class _SystemOps:
 
 
 # ---------------------------------------------------------------------------
+# Durable audit log
+# ---------------------------------------------------------------------------
+
+# Schema mirrors pwd/qdistro_pwd_audit.py and broker/qdistro_admin_audit.py
+# for cross-daemon consistency: one row per lifecycle mutation attempt,
+# value payloads never logged (there are none here — only silo metadata).
+_AUDIT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_audit (
+    id          INTEGER PRIMARY KEY,
+    ts          INTEGER NOT NULL,            -- unix epoch seconds
+    action      TEXT    NOT NULL,            -- create|delete|start|stop|freeze|resume
+    silo        TEXT    NOT NULL,            -- silo name
+    decision    TEXT    NOT NULL,            -- allow | deny | error
+    reason      TEXT    NOT NULL,            -- short human-readable
+    caller_uid  INTEGER,
+    caller_pid  INTEGER,
+    caller_exe  TEXT
+);
+CREATE INDEX IF NOT EXISTS session_audit_ts_idx ON session_audit(ts DESC);
+CREATE INDEX IF NOT EXISTS session_audit_silo_idx ON session_audit(silo);
+"""
+
+
+class _AuditLog:
+    """Append-only SQLite audit log for session-manager lifecycle
+    mutations.
+
+    Durability: opened with ``isolation_level=None`` (autocommit, every
+    INSERT is its own committed transaction) and ``journal_mode=WAL`` +
+    ``synchronous=FULL`` so a committed row is fsync'd to durable
+    storage before ``record()`` returns — matching the
+    write-then-fdatasync durability the silos.yaml store already
+    guarantees in ``_SiloStore.save()``. The DB file is created 0600.
+    """
+
+    def __init__(self, path: Path = SILOS_AUDIT_PATH):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        old_umask = os.umask(0o077)
+        try:
+            self._conn = sqlite3.connect(
+                str(self.path), isolation_level=None,
+                check_same_thread=False)
+        finally:
+            os.umask(old_umask)
+        self._lock = threading.Lock()
+        self._conn.executescript(_AUDIT_SCHEMA)
+        # WAL + FULL: each committed INSERT is fsync'd before the
+        # autocommit returns, so a power loss after record() returns
+        # cannot lose the row.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            os.chmod(str(self.path), 0o600)
+        except OSError:
+            pass
+        # fsync the directory once so the newly-created DB/WAL files'
+        # directory entries are durable across a crash — mirrors the
+        # dir-fdatasync in _SiloStore.save(). Best-effort: the DB itself
+        # is already on disk; this only orders the dir entry.
+        try:
+            dfd = os.open(str(self.path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            log.warning("audit dir fsync failed: %s", e)
+
+    def record(self, action: str, silo: str, *,
+               decision: str = "allow", reason: str = "",
+               caller: dict[str, Any] | None = None) -> int:
+        c = caller or {}
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO session_audit "
+                "(ts, action, silo, decision, reason, "
+                " caller_uid, caller_pid, caller_exe) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(time.time()), str(action), str(silo),
+                 str(decision), str(reason),
+                 c.get("uid"), c.get("pid"), c.get("exe", "")))
+            return cur.lastrowid
+
+    def tail(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 10000))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, action, silo, decision, reason, "
+                "       caller_uid, caller_pid, caller_exe "
+                "FROM session_audit ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        cols = ("id", "ts", "action", "silo", "decision", "reason",
+                "caller_uid", "caller_pid", "caller_exe")
+        return [dict(zip(cols, r)) for r in rows]
+
+    def close(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Core store (no D-Bus)
 # ---------------------------------------------------------------------------
 
@@ -386,10 +499,14 @@ class _SiloStore:
 
     def __init__(self, ops: _SystemOps,
                  config_path: Path = SILOS_CONFIG_PATH,
-                 on_change: "callable | None" = None):
+                 on_change: "callable | None" = None,
+                 audit: "_AuditLog | None" = None):
         self._ops = ops
         self._config_path = Path(config_path)
         self._on_change = on_change
+        # Durable forensic sink. None disables auditing (e.g. tests that
+        # don't care). Audit writes never raise into the lifecycle path.
+        self._audit = audit
         self._lock = threading.RLock()
         self._silos: dict[str, Silo] = {}
         # Names with a stop() currently in its phase-2 teardown (running
@@ -534,6 +651,23 @@ class _SiloStore:
             except Exception:  # noqa: BLE001
                 log.exception("on_change callback raised; continuing")
 
+    def _audit_record(self, action: str, silo: str, *,
+                      decision: str, reason: str,
+                      caller: dict[str, Any] | None) -> None:
+        # Write a durable audit row for a lifecycle mutation attempt.
+        # Audit failures must NEVER break the lifecycle operation: the
+        # mutation has already succeeded (or been refused) at the call
+        # site, so we only log if the durable write fails.
+        if self._audit is None:
+            return
+        try:
+            self._audit.record(action, silo, decision=decision,
+                                reason=reason, caller=caller)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "audit record failed (action=%s silo=%s decision=%s)",
+                action, silo, decision)
+
     def _clear_stop_inflight(self, name: str) -> None:
         # Release the in-flight stop marker for *name* and wake any
         # concurrent stop() callers waiting on it. Idempotent. Must be
@@ -546,94 +680,147 @@ class _SiloStore:
 
     # ---- create / delete -----------------------------------------------
 
-    def create(self, name: str, uid: int, *, autostart: bool = False) -> Silo:
-        validate_name(name)
-        validate_uid(uid)
-        with self._lock:
-            if name in self._silos:
-                raise SiloExists(f"silo {name!r} already exists")
-            for existing in self._silos.values():
-                if existing.uid == uid:
-                    raise SiloExists(
-                        f"uid {uid} already in use by silo {existing.name!r}")
-            if self._ops.user_exists(name):
-                raise SiloExists(f"system user {name!r} already exists")
-            if self._ops.uid_exists(uid):
-                raise SiloExists(f"uid {uid} already in use on this system")
-            self._ops.useradd(name, uid)
-            self._ops.make_state_dir(name, uid)
-            silo = Silo(
-                name=name, uid=int(uid), state=State.CREATED,
-                autostart=bool(autostart),
-                created_at=int(time.time()),
-                last_change=int(time.time()),
-            )
-            self._silos[name] = silo
-            self.save()
-            self._emit_change(silo.name, silo.state)
-            return silo
+    def create(self, name: str, uid: int, *, autostart: bool = False,
+               caller: dict[str, Any] | None = None) -> Silo:
+        try:
+            validate_name(name)
+            validate_uid(uid)
+            with self._lock:
+                if name in self._silos:
+                    raise SiloExists(f"silo {name!r} already exists")
+                for existing in self._silos.values():
+                    if existing.uid == uid:
+                        raise SiloExists(
+                            f"uid {uid} already in use by silo "
+                            f"{existing.name!r}")
+                if self._ops.user_exists(name):
+                    raise SiloExists(f"system user {name!r} already exists")
+                if self._ops.uid_exists(uid):
+                    raise SiloExists(f"uid {uid} already in use on this system")
+                self._ops.useradd(name, uid)
+                self._ops.make_state_dir(name, uid)
+                silo = Silo(
+                    name=name, uid=int(uid), state=State.CREATED,
+                    autostart=bool(autostart),
+                    created_at=int(time.time()),
+                    last_change=int(time.time()),
+                )
+                self._silos[name] = silo
+                self.save()
+                self._emit_change(silo.name, silo.state)
+        except Exception as e:  # noqa: BLE001
+            # Refusals (SiloExists/BadArgument) are "deny"; an unexpected
+            # side-effect failure (useradd/btrfs/etc.) is "error". Either
+            # way the privileged attempt leaves a durable trail.
+            decision = "deny" if isinstance(e, SessionError) else "error"
+            self._audit_record("create", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("create", silo.name, decision="allow",
+                           reason=f"uid={silo.uid}", caller=caller)
+        return silo
 
-    def delete(self, name: str) -> None:
-        with self._lock:
-            silo = self.get(name)
-            # Refuse while the silo is anything other than Created or
-            # Stopped — the admin must explicitly Stop it first.
-            if silo.state not in (State.CREATED, State.STOPPED):
-                if silo.state in (State.STOPPING,):
-                    msg = (f"silo {silo.name!r} is {silo.state}; "
-                           f"wait for it to reach Stopped")
-                elif silo.state == State.DELETING:
-                    msg = (f"silo {silo.name!r} is {silo.state}; "
-                           f"the daemon may have crashed mid-delete")
-                else:
-                    msg = (f"silo {silo.name!r} is {silo.state}; "
-                           f"stop it first")
-                raise SiloBusy(msg)
-            self._transition(silo, State.DELETING)
-            try:
-                self._ops.cgroup_remove(silo.name)
-                self._ops.remove_state_dir(silo.name)
-                self._ops.userdel(silo.name)
-            except Exception as e:  # noqa: BLE001
-                # Side-effect failure mid-delete: roll back to
-                # Stopped so the admin can retry. Use _force_state
-                # so subscribers see the Deleting→Stopped emit and
-                # the silo isn't wedged in a terminal-on-paper state
-                # (DELETING has no legal outgoing edges).
-                log.error("delete of silo %r failed during teardown: %s",
-                          silo.name, e)
-                self._force_state(silo, State.STOPPED)
-                raise SessionError(f"delete failed: {e}") from e
-            self._silos.pop(name, None)
-            self.save()
-            self._emit_change(silo.name, "Deleted")
+    def delete(self, name: str, caller: dict[str, Any] | None = None) -> None:
+        try:
+            with self._lock:
+                silo = self.get(name)
+                # Refuse while the silo is anything other than Created or
+                # Stopped — the admin must explicitly Stop it first.
+                if silo.state not in (State.CREATED, State.STOPPED):
+                    if silo.state in (State.STOPPING,):
+                        msg = (f"silo {silo.name!r} is {silo.state}; "
+                               f"wait for it to reach Stopped")
+                    elif silo.state == State.DELETING:
+                        msg = (f"silo {silo.name!r} is {silo.state}; "
+                               f"the daemon may have crashed mid-delete")
+                    else:
+                        msg = (f"silo {silo.name!r} is {silo.state}; "
+                               f"stop it first")
+                    raise SiloBusy(msg)
+                self._transition(silo, State.DELETING)
+                try:
+                    self._ops.cgroup_remove(silo.name)
+                    self._ops.remove_state_dir(silo.name)
+                    self._ops.userdel(silo.name)
+                except Exception as e:  # noqa: BLE001
+                    # Side-effect failure mid-delete: roll back to
+                    # Stopped so the admin can retry. Use _force_state
+                    # so subscribers see the Deleting→Stopped emit and
+                    # the silo isn't wedged in a terminal-on-paper state
+                    # (DELETING has no legal outgoing edges).
+                    log.error("delete of silo %r failed during teardown: %s",
+                              silo.name, e)
+                    self._force_state(silo, State.STOPPED)
+                    raise SessionError(f"delete failed: {e}") from e
+                self._silos.pop(name, None)
+                self.save()
+                self._emit_change(silo.name, "Deleted")
+        except SessionError as e:
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, SiloBusy)) else "error"
+            self._audit_record("delete", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("delete", str(name), decision="allow",
+                           reason="deleted", caller=caller)
 
     # ---- start / stop / freeze / resume -------------------------------
 
-    def start(self, name: str) -> None:
-        with self._lock:
-            silo = self.get(name)
-            if silo.state == State.ACTIVE:
-                # idempotent
-                return
-            self._transition(silo, State.ACTIVE)
-            try:
-                self._ops.cgroup_create(silo.name)
-                unit = SILO_LAUNCHER_FMT.format(name=silo.name,
-                                                uid=silo.uid)
-                self._ops.systemctl_start(unit)
-            except Exception as e:  # noqa: BLE001
-                # Roll back state on failure. _force_state emits
-                # SiloChanged so the admin UI / PodApps don't stick on
-                # "Active" after a failed launch.
-                log.error("start of silo %r failed: %s", silo.name, e)
-                self._force_state(silo, State.STOPPED)
-                if isinstance(e, SessionError):
-                    raise
-                raise SessionError(
-                    f"start of silo {silo.name!r} failed: {e}") from e
+    def start(self, name: str, caller: dict[str, Any] | None = None) -> None:
+        reason = "started"
+        try:
+            with self._lock:
+                silo = self.get(name)
+                if silo.state == State.ACTIVE:
+                    # idempotent — fall through to the post-lock audit so
+                    # the (potentially fsync-blocking) audit write never
+                    # happens while the store lock is held.
+                    reason = "already active (idempotent)"
+                else:
+                    self._transition(silo, State.ACTIVE)
+                    try:
+                        self._ops.cgroup_create(silo.name)
+                        unit = SILO_LAUNCHER_FMT.format(name=silo.name,
+                                                        uid=silo.uid)
+                        self._ops.systemctl_start(unit)
+                    except Exception as e:  # noqa: BLE001
+                        # Roll back state on failure. _force_state emits
+                        # SiloChanged so the admin UI / PodApps don't stick
+                        # on "Active" after a failed launch.
+                        log.error("start of silo %r failed: %s", silo.name, e)
+                        self._force_state(silo, State.STOPPED)
+                        if isinstance(e, SessionError):
+                            raise
+                        raise SessionError(
+                            f"start of silo {silo.name!r} failed: {e}") from e
+        except SessionError as e:
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, BadState)) else "error"
+            self._audit_record("start", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("start", str(name), decision="allow",
+                           reason=reason, caller=caller)
 
-    def stop(self, name: str, grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
+    def stop(self, name: str, grace_s: int = DEFAULT_STOP_GRACE_S,
+             caller: dict[str, Any] | None = None) -> None:
+        # Thin audit wrapper around _stop_impl: the teardown logic
+        # (lock ordering, in-flight markers, grace polling) is left
+        # byte-for-byte unchanged so auditing cannot introduce a
+        # lifecycle regression. We only observe the outcome.
+        try:
+            self._stop_impl(name, grace_s)
+        except SessionError as e:
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, BadState)) else "error"
+            self._audit_record("stop", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("stop", str(name), decision="allow",
+                           reason="stopped", caller=caller)
+
+    def _stop_impl(self, name: str,
+                   grace_s: int = DEFAULT_STOP_GRACE_S) -> None:
         # Phase 1: validate state and transition to STOPPING under the lock.
         with self._lock:
             silo = self.get(name)
@@ -754,24 +941,49 @@ class _SiloStore:
             with self._lock:
                 self._clear_stop_inflight(silo_name)
 
-    def freeze(self, name: str) -> None:
-        with self._lock:
-            silo = self.get(name)
-            if silo.state == State.FROZEN:
-                return
-            self._transition(silo, State.FROZEN)
-            self._ops.cgroup_freeze(silo.name, True)
+    def freeze(self, name: str, caller: dict[str, Any] | None = None) -> None:
+        reason = "frozen"
+        try:
+            with self._lock:
+                silo = self.get(name)
+                if silo.state == State.FROZEN:
+                    # idempotent — audit after releasing the lock.
+                    reason = "already frozen (idempotent)"
+                else:
+                    self._transition(silo, State.FROZEN)
+                    self._ops.cgroup_freeze(silo.name, True)
+        except Exception as e:  # noqa: BLE001
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, BadState)) else "error"
+            self._audit_record("freeze", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("freeze", str(name), decision="allow",
+                           reason=reason, caller=caller)
 
-    def resume(self, name: str) -> None:
-        with self._lock:
-            silo = self.get(name)
-            if silo.state == State.ACTIVE:
-                return
-            if silo.state != State.FROZEN:
-                raise BadState(
-                    f"cannot resume silo {silo.name!r} in state {silo.state}")
-            self._ops.cgroup_freeze(silo.name, False)
-            self._transition(silo, State.ACTIVE)
+    def resume(self, name: str, caller: dict[str, Any] | None = None) -> None:
+        reason = "resumed"
+        try:
+            with self._lock:
+                silo = self.get(name)
+                if silo.state == State.ACTIVE:
+                    # idempotent — audit after releasing the lock.
+                    reason = "already active (idempotent)"
+                elif silo.state != State.FROZEN:
+                    raise BadState(
+                        f"cannot resume silo {silo.name!r} in state "
+                        f"{silo.state}")
+                else:
+                    self._ops.cgroup_freeze(silo.name, False)
+                    self._transition(silo, State.ACTIVE)
+        except Exception as e:  # noqa: BLE001
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, BadState)) else "error"
+            self._audit_record("resume", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("resume", str(name), decision="allow",
+                           reason=reason, caller=caller)
 
     # ---- startup recovery ----------------------------------------------
 
@@ -924,13 +1136,24 @@ if dbus is not None:
 
         def __init__(self, bus, ops: _SystemOps | None = None,
                      config_path: Path = SILOS_CONFIG_PATH,
-                     autostart: bool = True):
+                     autostart: bool = True,
+                     audit_path: Path = SILOS_AUDIT_PATH):
             super().__init__(bus, OBJ_PATH)
             self._bus = bus
+            try:
+                self.audit: _AuditLog | None = _AuditLog(audit_path)
+            except Exception:  # noqa: BLE001
+                # An unwritable audit DB must not take the daemon down —
+                # log loudly and run without durable auditing rather than
+                # refuse all lifecycle ops.
+                log.exception("could not open session-manager audit log at "
+                              "%s; running without durable audit", audit_path)
+                self.audit = None
             self.store = _SiloStore(
                 ops or _SystemOps(),
                 config_path=config_path,
                 on_change=self._emit_changed,
+                audit=self.audit,
             )
             if autostart:
                 self.store.autostart_pass()
@@ -945,6 +1168,29 @@ if dbus is not None:
                 return int(dbus_iface.GetConnectionUnixUser(sender))
             except Exception as e:  # noqa: BLE001
                 raise NotAuthorized(f"could not resolve caller uid: {e}")
+
+        def _peer_caller(self, sender, conn) -> dict[str, Any]:
+            """Resolve the calling peer's (uid, pid, exe) for the audit
+            row. Best-effort beyond uid: a failure to read pid/exe must
+            not block the privileged op (uid is already authoritative
+            from _require_admin), so pid/exe degrade to None/"" rather
+            than raising."""
+            caller: dict[str, Any] = {"uid": None, "pid": None, "exe": ""}
+            try:
+                bus_obj = conn.get_object("org.freedesktop.DBus",
+                                          "/org/freedesktop/DBus")
+                dbus_iface = dbus.Interface(bus_obj, "org.freedesktop.DBus")
+                caller["uid"] = int(dbus_iface.GetConnectionUnixUser(sender))
+                pid = int(dbus_iface.GetConnectionUnixProcessID(sender))
+                caller["pid"] = pid
+                try:
+                    caller["exe"] = os.readlink(f"/proc/{pid}/exe")
+                except OSError:
+                    caller["exe"] = ""
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not fully resolve caller identity for "
+                            "audit: %s", e)
+            return caller
 
         def _require_admin(self, sender, conn) -> None:
             uid = self._peer_uid(sender, conn)
@@ -965,13 +1211,33 @@ if dbus is not None:
 
         # ---- methods --------------------------------------------------
 
+        def _audit_refusal(self, action, name, caller, exc):
+            # Record an authorization refusal that happens BEFORE the
+            # store call (e.g. NotAuthorized), so even rejected privileged
+            # attempts leave a durable forensic trail. Store-level
+            # refusals (UnknownSilo/BadState/SiloBusy) are already audited
+            # inside the store.
+            if self.audit is None:
+                return
+            try:
+                self.audit.record(action, str(name), decision="deny",
+                                  reason=str(exc), caller=caller)
+            except Exception:  # noqa: BLE001
+                log.exception("audit refusal record failed (action=%s "
+                              "silo=%s)", action, name)
+
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
                              sender_keyword="sender",
                              connection_keyword="conn")
         def CreateSilo(self, name, uid, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.create(str(name), int(uid))
+            except SessionError as e:
+                self._audit_refusal("create", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.create(str(name), int(uid), caller=caller)
                 log.info("CreateSilo name=%s uid=%d", name, int(uid))
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -980,9 +1246,14 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def DeleteSilo(self, name, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.delete(str(name))
+            except SessionError as e:
+                self._audit_refusal("delete", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.delete(str(name), caller=caller)
                 log.info("DeleteSilo name=%s", name)
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -991,9 +1262,14 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def StartSilo(self, name, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.start(str(name))
+            except SessionError as e:
+                self._audit_refusal("start", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.start(str(name), caller=caller)
                 log.info("StartSilo name=%s", name)
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -1002,9 +1278,14 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def StopSilo(self, name, grace_s, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.stop(str(name), int(grace_s))
+            except SessionError as e:
+                self._audit_refusal("stop", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.stop(str(name), int(grace_s), caller=caller)
                 log.info("StopSilo name=%s grace_s=%d", name, int(grace_s))
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -1013,9 +1294,14 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def FreezeSilo(self, name, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.freeze(str(name))
+            except SessionError as e:
+                self._audit_refusal("freeze", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.freeze(str(name), caller=caller)
                 log.info("FreezeSilo name=%s", name)
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -1024,9 +1310,14 @@ if dbus is not None:
                              sender_keyword="sender",
                              connection_keyword="conn")
         def ResumeSilo(self, name, sender=None, conn=None):
+            caller = self._peer_caller(sender, conn)
             try:
                 self._require_admin(sender, conn)
-                self.store.resume(str(name))
+            except SessionError as e:
+                self._audit_refusal("resume", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.resume(str(name), caller=caller)
                 log.info("ResumeSilo name=%s", name)
             except SessionError as e:
                 raise _to_dbus_exception(e)
@@ -1035,6 +1326,23 @@ if dbus is not None:
         def ListSilos(self):
             rows = [s.to_dict() for s in self.store.list_silos()]
             return json.dumps(rows)
+
+        @dbus.service.method(BUS_NAME, in_signature="i", out_signature="s",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def ListAuditLog(self, limit, sender=None, conn=None):
+            # Admin-only read of the durable lifecycle audit log, most
+            # recent first. Mirrors the broker's ListHistory / pwd's
+            # audit-tail surface so the admin tooling has one query
+            # shape across daemons.
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                raise _to_dbus_exception(e)
+            if self.audit is None:
+                return json.dumps([])
+            lim = int(limit) if int(limit) > 0 else 100
+            return json.dumps(self.audit.tail(lim))
 
 
 # ---------------------------------------------------------------------------
