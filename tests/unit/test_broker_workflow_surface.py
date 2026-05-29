@@ -92,6 +92,79 @@ class TestListWorkflowRuns:
             br.ListWorkflowRuns(10, sender=":1", conn=None)
 
 
+class TestGetRunChannelEnv:
+    """The git-sign bridge read surface: root-only, allowlist-filtered,
+    uid-bound. ``sender`` is root-exec (uid 0); the third arg is the
+    ORIGINAL qsu caller uid the engine binds the run to. The runs use this
+    process's pid as the triggering pid so os.getuid() binds.
+    """
+
+    def _running_run(self, engine, env):
+        import os
+        from workflow_schema import WorkflowRun
+        run = WorkflowRun(workflow_name="git-sign",
+                          trigger_context={"pid": os.getpid()})
+        run.mark_running()
+        run.context["channel_env"] = dict(env)
+        with engine._runs_lock:
+            engine._runs[run.run_id] = run
+        return run
+
+    def test_root_gets_allowlisted_ref(self):
+        import os
+        engine = WorkflowEngine()
+        run = self._running_run(engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        br = _broker(engine, uid=0)
+        out = br.GetRunChannelEnv(run.run_id, ["SSH_AUTH_SOCK"], os.getuid(),
+                                  sender=":1", conn=None)
+        assert dict(out) == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_non_allowlisted_filtered(self):
+        import os
+        engine = WorkflowEngine()
+        run = self._running_run(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock", "SECRET": "x"})
+        br = _broker(engine, uid=0)
+        out = dict(br.GetRunChannelEnv(run.run_id, [], os.getuid(),
+                                       sender=":1", conn=None))
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_uid_mismatch_empty(self):
+        import os
+        engine = WorkflowEngine()
+        run = self._running_run(engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        br = _broker(engine, uid=0)
+        # A different bind uid (leaked run_id) gets nothing.
+        out = dict(br.GetRunChannelEnv(run.run_id, [], os.getuid() + 9999,
+                                       sender=":1", conn=None))
+        assert out == {}
+
+    def test_denied_for_non_root_admin(self):
+        import os
+        engine = WorkflowEngine()
+        run = self._running_run(engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        # Even the admin uid is rejected — this is root-only.
+        br = _broker(engine, uid=ADMIN)
+        with pytest.raises(dbus.DBusException):
+            br.GetRunChannelEnv(run.run_id, [], os.getuid(),
+                                sender=":1", conn=None)
+
+    def test_denied_for_non_admin(self):
+        br = _broker(None, uid=1500)
+        with pytest.raises(dbus.DBusException):
+            br.GetRunChannelEnv("run", [], 1500, sender=":1", conn=None)
+
+    def test_empty_when_no_engine(self):
+        br = _broker(None, uid=0)
+        assert dict(br.GetRunChannelEnv("run", [], 0,
+                                        sender=":1", conn=None)) == {}
+
+    def test_unknown_run_empty(self):
+        br = _broker(WorkflowEngine(), uid=0)
+        assert dict(br.GetRunChannelEnv("nope", [], 0, sender=":1",
+                                        conn=None)) == {}
+
+
 class TestRegistryLoopSharing:
     def test_dbus_trigger_shares_host_loop(self):
         # With dbus_run_own_loop=False the D-Bus trigger must not spin its

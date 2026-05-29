@@ -83,10 +83,16 @@ static int json_escape_into(char *dst, size_t cap, size_t *pos,
  * number of bytes written (excluding the NUL terminator), or -1 on
  * overflow.
  *
- * Output: {"target_user":"<user>","argv":[<elements>],"caller_name":"qsu"}\n
+ * Output: {"target_user":"<user>","argv":[<elements>],"caller_name":"qsu"
+ *          [,"run_id":"<id>"]}\n
+ *
+ * `run_id`, when non-NULL/non-empty, carries the optional workflow-run
+ * handshake (--workflow-run); the root-exec daemon uses it to fold the
+ * run's non-secret channel_env (e.g. SSH_AUTH_SOCK) into the child env.
  */
 static int build_request(char *buf, size_t cap,
                          const char *target_user,
+                         const char *run_id,
                          int argc, char **argv)
 {
     size_t pos = 0;
@@ -111,7 +117,14 @@ static int build_request(char *buf, size_t cap,
         if (pos + 1 > cap) return -1;
         buf[pos++] = '"';
     }
-    APPEND_LIT("],\"caller_name\":\"qsu\"}\n");
+    APPEND_LIT("],\"caller_name\":\"qsu\"");
+    if (run_id && *run_id) {
+        APPEND_LIT(",\"run_id\":\"");
+        if (json_escape_into(buf, cap, &pos, run_id) < 0) return -1;
+        if (pos + 1 > cap) return -1;
+        buf[pos++] = '"';
+    }
+    APPEND_LIT("}\n");
 
 #undef APPEND_LIT
 
@@ -393,10 +406,14 @@ static int stream_response(int fd)
 static void usage(void)
 {
     fprintf(stderr,
-        "Usage: qsu [-u USER] command [args...]\n"
+        "Usage: qsu [-u USER] [--workflow-run RUN_ID] command [args...]\n"
         "\n"
         "qdistro sudo replacement. Connects to qdistro-root-exec and\n"
-        "runs `command` as USER (default: root) after admin approval.\n");
+        "runs `command` as USER (default: root) after admin approval.\n"
+        "\n"
+        "  --workflow-run RUN_ID  inherit the workflow run's non-secret\n"
+        "                         channel_env (e.g. SSH_AUTH_SOCK) before\n"
+        "                         exec (git-sign bridge).\n");
 }
 
 int main(int argc, char **argv)
@@ -411,12 +428,16 @@ int main(int argc, char **argv)
     prctl(PR_SET_NAME, "qsu", 0, 0, 0);
 
     const char *target_user = "root";
+    const char *run_id = "";
     int opt;
 
-    /* Parse -u/--user. Stop at the first non-option (the command). */
+    /* Parse -u/--user and --workflow-run. Stop at the first non-option
+     * (the command). 'W' is the internal short code for --workflow-run;
+     * there is no single-letter form on the command line. */
     static struct option long_opts[] = {
-        {"user", required_argument, NULL, 'u'},
-        {"help", no_argument,       NULL, 'h'},
+        {"user",         required_argument, NULL, 'u'},
+        {"workflow-run", required_argument, NULL, 'W'},
+        {"help",         no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
@@ -426,6 +447,9 @@ int main(int argc, char **argv)
         switch (opt) {
         case 'u':
             target_user = optarg;
+            break;
+        case 'W':
+            run_id = optarg;
             break;
         case 'h':
             usage();
@@ -457,7 +481,7 @@ int main(int argc, char **argv)
     }
 
     int req_len = build_request(req_buf, req_cap,
-                                target_user, cmd_argc, cmd_argv);
+                                target_user, run_id, cmd_argc, cmd_argv);
     if (req_len < 0) {
         fprintf(stderr, "qsu: argv too large for request buffer\n");
         free(req_buf);
