@@ -116,6 +116,7 @@ INSTALLERS=(
     "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
+    "scripts/install/install-media-for-vm.sh           $QD/media"
     "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge  $SRC/qdbrowser/qdbrowser"
     "scripts/install/install-portal-backend-for-vm.sh  $QD"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
