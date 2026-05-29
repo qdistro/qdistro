@@ -1,0 +1,30 @@
+# File-context regexes for Tier-2.
+#
+# Unlike Tier-1, Tier-2 has NO host exec binary to label and NO
+# file-context-driven type transition. The Tier-2 confinement domain
+# (qdistro_tier2_t) is entered by podman, not by an execve of a labelled
+# launcher:
+#
+#   - spawn-tier2.sh is a plain shell script (label_t / bin_t); it runs
+#     in the caller's domain, NOT in qdistro_tier2_t.
+#   - The CONTAINER PROCESS enters qdistro_tier2_t via podman's
+#     `--security-opt label=type:qdistro_tier2_t` (a runtime process
+#     label, equivalent to a SELinux exec-context override), not via a
+#     domain_auto_trans keyed on a .fc-labelled binary.
+#   - The per-container runtime dir ($XDG_RUNTIME_DIR/qdistro-tier2/<tok>)
+#     and the sockets bound into it keep their HOST labels today
+#     (user_tmp_t), because spawn-tier2.sh mounts them with plain
+#     `-v ...:rw` and no `:z`/`:Z` relabel. Engaging qdistro_tier2_t
+#     requires the launcher to add `:z`/`:Z` so the binds become
+#     container_file_t (a launcher change, see README "Engaging the
+#     domain"); a custom qdistro_tier2_file_t here would fight that
+#     relabel and break the typebounds subset (container_t reaches its
+#     volumes as container_file_t, not a qdistro type).
+#
+# This file is therefore intentionally (almost) empty — it exists so the
+# module's three-file shape matches tier1 and so a future host-side
+# Tier-2 helper that DOES need a deterministic label has an obvious home.
+#
+# If a future change adds a host-side Tier-2 exec helper under
+# /usr/libexec/qdistro/, label it here, e.g.:
+#   /usr/libexec/qdistro/qdistro-tier2-exec  --  gen_context(system_u:object_r:qdistro_tier2_exec_t,s0)
