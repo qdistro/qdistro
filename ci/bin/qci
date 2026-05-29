@@ -693,9 +693,38 @@ run_agent_command() {
 }
 
 gate_qdshell_ui_agent() {
-    local rc=$EXIT_OK
-    local cmd="QDSHELL_UI_TESTS=1 python3 -m pytest tests/ui -v"
-    run_logged gui qdshell-ui "$EXIT_VISUAL" vision "$WORKSPACE/qdshell" "$cmd" "qdshell agent-assisted UI pytest" || rc=$?
+    # Runs the qdshell agent-assisted UI vision pytest. The harness drives the
+    # LIVE qdshell session inside the qdwin VM acquired by gate_gui (IPC over
+    # wayland-1 via vm-exec, screenshots via `virsh screenshot`), because the
+    # host headless nested compositor SIGSEGVs quickshell during early
+    # FileView settings load (see
+    # todo/qdwin-vm/agent-ui-harness-headless-quickshell-crash.md). codex
+    # describe/judge still run on the host against the pulled-back PNGs.
+    local vm=${1:-}
+    local rc=$EXIT_OK cmd
+    if [ -z "$vm" ]; then
+        # No VM in scope — do NOT silently fall through to the crashing host
+        # path. Mark the gate as failed with a precise reason.
+        record_result gui qdshell-ui fail "$EXIT_VISUAL" "$(exit_class_name "$EXIT_VISUAL")" vision "" \
+            "no GUI VM passed to gate_qdshell_ui_agent; cannot reach a live qdshell session"
+        return "$EXIT_VISUAL"
+    fi
+    # Pass the VM + the exact transport tools down to the pytest harness.
+    # QDSHELL_UI_VM switches runner.py to the VM transport; the harness
+    # validates the domain name and refuses to drive any non-allowlisted
+    # IPC token, and base64-wraps every guest command (no sh -c injection).
+    # Each value is shell-quoted with printf %q so a name/path containing
+    # spaces or quotes cannot break out of the run_logged `bash -lc` string.
+    local q_vm q_exec q_virsh
+    q_vm=$(printf '%q' "$vm")
+    q_exec=$(printf '%q' "$VM_TOOLS/vm-exec")
+    q_virsh=$(printf '%q' "${VIRSH[*]}")
+    cmd="QDSHELL_UI_TESTS=1 \
+QDSHELL_UI_VM=$q_vm \
+QDSHELL_UI_VM_EXEC=$q_exec \
+QDSHELL_UI_VIRSH=$q_virsh \
+python3 -m pytest tests/ui -v"
+    run_logged gui qdshell-ui "$EXIT_VISUAL" vision "$WORKSPACE/qdshell" "$cmd" "qdshell agent-assisted UI pytest (VM $vm)" || rc=$?
     if [ -d "$WORKSPACE/qdshell/tests/ui/artifacts" ]; then
         mkdir -p "$RDIR/gui/qdshell-ui-artifacts"
         cp -a "$WORKSPACE/qdshell/tests/ui/artifacts/." "$RDIR/gui/qdshell-ui-artifacts/" 2>/dev/null || true
@@ -720,8 +749,26 @@ gate_gui() {
 
     run_qdwin_executable_gui_smokes "$vm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    gate_qdshell_ui_agent; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
+    # Authoritatively probe noctalia-shell.service (the deployed qs unit) +
+    # the wayland-1 socket rather than relying solely on the pgrep-based
+    # noctalia_shell flag, which matches the broader scenario gating.
+    local qdshell_session=0
+    if [ "$noctalia_shell" = 1 ] || "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active noctalia-shell.service qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
+        qdshell_session=1
+    fi
+    if [ "$qdshell_session" = 1 ]; then
+        # qdshell quickshell session is live on wayland-1 — run the vision
+        # harness against it (drives IPC + virsh-screenshot of the VM).
+        gate_qdshell_ui_agent "$vm"; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    else
+        # labwc-only VM profile (e.g. spin-test-vm-gui): no qdshell session to
+        # screenshot. Skip with a precise reason rather than fail or silently
+        # pass — matches how the other qdshell/noctalia scenarios are gated.
+        record_result gui qdshell-ui skip 0 pass vision "" \
+            "qdshell/noctalia session not active on wayland-1 in this VM profile; vision harness needs a live qdshell session"
+    fi
 
     while IFS= read -r scenario; do
         rel=${scenario#$WORKSPACE/}
