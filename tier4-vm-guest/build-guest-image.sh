@@ -180,6 +180,20 @@ PUBLISHER_SRC="$SCRIPT_DIR/qdistro-tier4-publisher.sh"
 cp "$PUBLISHER_SRC" "$WORK/qdistro-tier4-publisher.sh"
 chmod 0755 "$WORK/qdistro-tier4-publisher.sh"
 
+# Identity-handshake helper the publisher uses to build its banner (and
+# the host uses to verify it). Ships to /usr/local/lib/qdistro/ in the
+# guest; the publisher resolves it via QDISTRO_TIER4_IDENTITY_PY (default
+# /usr/local/lib/qdistro/tier4_publisher_identity.py).
+IDENTITY_SRC="$(dirname "$SCRIPT_DIR")/tier4-vm/tier4_publisher_identity.py"
+IDENTITY_STAGED=0
+if [ -f "$IDENTITY_SRC" ]; then
+    cp "$IDENTITY_SRC" "$WORK/tier4_publisher_identity.py"
+    chmod 0644 "$WORK/tier4_publisher_identity.py"
+    IDENTITY_STAGED=1
+else
+    echo "[tier4-guest-build] WARN: identity helper missing at $IDENTITY_SRC; publisher will use its degraded inline banner builder" >&2
+fi
+
 cat >"$WORK/tier4-weston.ini" <<'EOF'
 [core]
 shell=qdwin-shell.so
@@ -336,6 +350,8 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'chmod +x /usr/bin/qdistro-forward' \
     --copy-in "$WORK/qdistro-tier4-publisher.sh:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier4-publisher.sh' \
+    --run-command 'mkdir -p /usr/local/lib/qdistro' \
+    $( [ "$IDENTITY_STAGED" = "1" ] && printf -- '--copy-in %s:/usr/local/lib/qdistro/' "$WORK/tier4_publisher_identity.py" ) \
     --copy-in "$WORK/qdwin-guest-session.service:/etc/systemd/system/" \
     --copy-in "$WORK/qdistro-pipewire-admin.service:/etc/systemd/system/" \
     --copy-in "$WORK/qdistro-tier4-publisher.service:/etc/systemd/system/" \

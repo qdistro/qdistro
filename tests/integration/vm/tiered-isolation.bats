@@ -410,6 +410,85 @@ stage_vm_driver() {
     assert_output_contains "[s46] 8 passes, 0 failures"
 }
 
+@test "phase7-tier4-waypipe-display: compositor-observed secctx + identity-bound publisher + ClipboardGate verdicts" {
+    # §Phase-7 tier-4 waypipe display — REPLACES the weak argv-only PASS
+    # shims (gpt-review/tier4-waypipe-display-tests.md) with assertions
+    # observed from qdwin's own secctx event/audit output, identity-bound
+    # publisher validation (no fixed-CID bypass), and real ClipboardGate
+    # verdicts with rich-MIME-leakage + fail-open negatives.
+    #
+    # Needs the tier-4 secctx stack + broker + qdshell. Skips cleanly on a
+    # minimal bake; fails LOUDLY on the bad path otherwise.
+    stage_vm_driver "s110-tier4-waypipe-display.sh"
+    vm_run "curl -s -o /tmp/s110.sh http://10.0.2.2:8768/s110-tier4-waypipe-display.sh && chmod +x /tmp/s110.sh && bash /tmp/s110.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        skip "tier-4 secctx stack / wayland-info / dbus-send absent on this VM (opt-in bake)"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdwin advertises wp_security_context_manager_v1"
+    assert_output_contains "PASS: qdwin emitted forwarded-toplevel secctx"
+    assert_output_contains "PASS: missing-secctx client did NOT receive a tier-4 secctx tag (fail closed)"
+    assert_output_contains "PASS: forged app-id"
+    assert_output_contains "PASS: cross-silo subscription attempt"
+    assert_output_contains "PASS: publisher endpoint bound to launch record"
+    assert_output_contains "PASS: wrong-instance publisher banner rejected (impostor/stale endpoint fails closed)"
+    assert_output_contains "PASS: ClipboardGate default-denies tier-4 -> admin text transfer (verdict=deny)"
+    assert_output_contains "PASS: rich-MIME leakage blocked: text/plain allowed, image/png denied (no fail-open)"
+    assert_output_contains "PASS: unverified same-silo clipboard receive fails closed (no fail-open)"
+    assert_output_contains "PASS: input-forwarding authorization denied without a rule (verdict=deny)"
+    assert_output_contains "PASS: §Phase-7 tier-4 waypipe-display compositor-observed end-to-end"
+    assert_output_contains "[s110] 14 passes, 0 failures"
+}
+
+@test "phase7-tier4-tier5-lifecycle-stress: crash/restart/churn leaves no orphaned resources" {
+    # §5 lifecycle stress — failure + churn paths must reap every qemu,
+    # waypipe, socat, domain, overlay, and socket. Observable resource
+    # ABSENCE, not "didn't crash". Live nested boot is opt-in; the driver
+    # marks PENDING-LIVE-BOOT steps and the wrapper skips on minimal bakes.
+    vm_run "command -v virsh >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-4/5 stack (virsh/kvm) absent on this VM (opt-in bake)"
+    fi
+    stage_vm_driver "s111-tier4-tier5-lifecycle-stress.sh"
+    vm_run "curl -s -o /tmp/s111.sh http://10.0.2.2:8768/s111-tier4-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        skip "tier-4/5 stack / kvm absent on this VM (opt-in bake)"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: guest crash during startup"
+    assert_output_contains "PASS: crash during publish / clipboard+audio: no leaked waypipe or socat helpers"
+    assert_output_contains "PASS: repeated launch/close churn: no orphan domain/overlay/qemu after 3 cycles"
+    assert_output_contains "PASS: repeated launch/close churn: no orphan tier-4 sockets/runtime files"
+    assert_output_contains "PASS: host qdshell crash/restart: display client is setsid-detached"
+    assert_output_contains "PASS: qdwin disconnect cleanup: client exit triggers domain destroy via EXIT trap"
+    assert_output_contains "PASS: denied nested-proxy: broker denies the cross-silo proxy (verdict=deny)"
+    assert_output_contains "PASS: §5 tier-4/tier-5 lifecycle stress end-to-end (no leaked resources)"
+}
+
+@test "phase7-cross-tier-clipboard: large + multi-MIME clipboard between tier-1/3/4/5b" {
+    # §5 last bullet — cross-tier large payload + per-MIME decisions.
+    # Probes the broker clipboard gate (the load-bearing authorization
+    # surface) over D-Bus; tier base disks not required. Real cross-
+    # compositor selection set+receive is PENDING-LIVE-FOCUS.
+    stage_vm_driver "s112-cross-tier-clipboard.sh"
+    vm_run "curl -s -o /tmp/s112.sh http://10.0.2.2:8768/s112-cross-tier-clipboard.sh && chmod +x /tmp/s112.sh && bash /tmp/s112.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "broker / dbus-send absent — cross-tier clipboard gate untestable"
+    fi
+    assert_output_contains "PASS: broker up"
+    assert_output_contains "PASS: cross-silo clipboard default-denies across all tier pairings (no tier bypass)"
+    assert_output_contains "PASS: large/duplicate-MIME payload does not flip the clipboard verdict (size-independent)"
+    assert_output_contains "PASS: multi-MIME per-MIME gate (tier-4 -> user1): text allowed, image/html denied"
+    assert_output_contains "PASS: multi-MIME per-MIME gate (tier-5b -> user1): text allowed, image/html denied"
+    assert_output_contains "PASS: clipboard audit records source app_id/engine across tiers (attributable)"
+    assert_output_contains "PASS: tier-1<->tier-3 same-silo: verified allowed, unverified fails closed"
+    assert_output_contains "PASS: §5 cross-tier large + multi-MIME clipboard end-to-end"
+    assert_output_contains "[s112] 9 passes, 0 failures"
+}
+
 @test "phase7-tier1-skeleton: spec/30 Tier-1 SELinux design + spike skeleton present" {
     # Tier-1 is design + spike (spec/30, 2026-04-27 night). No runtime
     # yet — six prior sessions deferred it. This bats just verifies the
