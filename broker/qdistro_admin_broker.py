@@ -3186,6 +3186,178 @@ class Broker(dbus.service.Object):
         self.reload_rules_from_disk(source="dbus-saverule")
         return target
 
+    @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="bias",
+                         sender_keyword="sender", connection_keyword="conn")
+    def DeleteRule(self, source_path: str, name: str,
+                   sender=None, conn=None):
+        """Delete a YAML rule file and hot-reload the engine.
+
+        Replaces the admin app's former direct ``os.remove`` of the
+        rule file (security-hardening-carryforward §"Broker and rules":
+        rule deletion should be a broker RPC with a broker-side audit
+        row, not a direct UI file unlink). Admin/root only.
+
+        ``source_path`` is the path ListRules returned for the rule;
+        ``name`` is carried only for the audit row. All path safety is
+        re-applied broker-side and fail-closed — the client's path is
+        NOT trusted:
+
+          - the file's realpath must resolve to a regular file whose
+            *containing directory* is the canonical rules dir this
+            broker's RulesEngine watches (rejects ``..`` escapes and
+            files outside rules.d),
+          - the supplied path must not be a symlink, and the realpath
+            must not differ in basename from a real entry of rules.d
+            (rejects symlink/hardlink redirection),
+          - the file must exist.
+
+        To avoid a TOCTOU between the safety check and the unlink, the
+        validated absolute path is opened-by-directory and removed via
+        ``os.unlink`` of the *basename* relative to an O_DIRECTORY fd of
+        the canonical rules dir, so a swap of an intermediate component
+        after validation cannot redirect the delete.
+
+        Returns ``(deleted, reload_count, errors)``. Raises a
+        DBusException with ``.AccessDenied`` for non-admin callers or
+        ``.RulesEngineRefused`` when path safety rejects the target.
+        Every outcome (success or refusal) is written to the broker
+        audit log with the caller's identity.
+        """
+        admin_uid, caller_pid, caller_exe, _st = self._peer_info(sender, conn)
+
+        def _audit(decision: bool, *, reason: str, path: str | None,
+                   fail_closed: bool = False) -> None:
+            try:
+                self.audit.log(
+                    caller_uid=admin_uid, caller_pid=caller_pid,
+                    caller_exe=caller_exe,
+                    action="qdistro.rules.delete",
+                    decision=decision, scope=None,
+                    source=f"dbus-deleterule name={name!r} {reason}",
+                    approver_uid=None,
+                    rule_path=path,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] DeleteRule audit log failed: {e!r}",
+                      flush=True)
+                # On the success path the audit row is the whole point of
+                # this RPC, so audit-fail means refuse the delete rather
+                # than silently dropping the forensic record.
+                if fail_closed:
+                    raise dbus.DBusException(
+                        f"DeleteRule: aborting, audit log write failed: {e}",
+                        name=BUS_NAME + ".RulesEngineRefused",
+                    )
+
+        if admin_uid not in (0, ADMIN_UID):
+            _audit(False, reason=f"refused: non-admin uid {admin_uid}",
+                   path=source_path or None)
+            raise dbus.DBusException(
+                f"DeleteRule restricted to admin/root; got uid {admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+
+        if not source_path:
+            _audit(False, reason="refused: empty source_path", path=None)
+            raise dbus.DBusException(
+                "DeleteRule: empty source_path",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+
+        # Canonical rules dir this broker actually watches (tests wire a
+        # tmp_path-backed RulesEngine; production wires /etc/qdistro/rules.d).
+        rules_real = os.path.realpath(self.rules._dir)
+        # Reject the supplied path itself being a symlink (ln -s redirect).
+        if os.path.islink(source_path):
+            _audit(False, reason="refused: symlink", path=source_path)
+            raise dbus.DBusException(
+                f"DeleteRule: refusing to delete a symlink: {source_path}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        real = os.path.realpath(source_path)
+        # The file's containing directory must be exactly the canonical
+        # rules dir (rejects ../ escapes and files outside rules.d).
+        if os.path.dirname(real) != rules_real:
+            _audit(False, reason="refused: outside rules.d", path=real)
+            raise dbus.DBusException(
+                f"DeleteRule: refusing to delete a file outside "
+                f"{rules_real}: {real}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        # Must be an existing regular file (not a dir / missing / special).
+        if not os.path.isfile(real) or os.path.islink(real):
+            _audit(False, reason="refused: missing or not a regular file",
+                   path=real)
+            raise dbus.DBusException(
+                f"DeleteRule: rule file not found or not a regular file: "
+                f"{real}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+
+        basename = os.path.basename(real)
+        # TOCTOU-resistant unlink: open the canonical rules dir as an
+        # O_DIRECTORY fd and unlink the basename relative to it, so an
+        # attacker swapping an intermediate path component after the
+        # checks above cannot redirect the delete elsewhere.
+        try:
+            dir_fd = os.open(rules_real, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as e:
+            _audit(False, reason=f"refused: cannot open rules dir: {e!r}",
+                   path=real)
+            raise dbus.DBusException(
+                f"DeleteRule: cannot open rules dir {rules_real}: {e}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        try:
+            # Re-check by-fd that the basename entry is not a symlink and
+            # is a regular file at unlink time, then unlink relative to
+            # the dir fd. Any OSError on this race path is converted to a
+            # fail-closed refusal (and audited), never a bare traceback.
+            import stat as _stat
+            try:
+                st = os.lstat(basename, dir_fd=dir_fd)
+            except OSError as e:
+                _audit(False, reason=f"refused: lstat at unlink failed: {e!r}",
+                       path=real)
+                raise dbus.DBusException(
+                    f"DeleteRule: rule entry {basename} vanished or is "
+                    f"inaccessible at unlink time: {e}",
+                    name=BUS_NAME + ".RulesEngineRefused",
+                )
+            if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+                _audit(False,
+                       reason="refused: entry changed to symlink/non-regular",
+                       path=real)
+                raise dbus.DBusException(
+                    f"DeleteRule: refusing to delete {basename}: not a "
+                    f"regular file at unlink time",
+                    name=BUS_NAME + ".RulesEngineRefused",
+                )
+            # Audit the (about-to-happen) deletion FIRST and fail-closed:
+            # the broker-side audit row is the whole point of this RPC, so
+            # if the audit write fails we abort before unlinking rather
+            # than delete without a forensic record.
+            _audit(True, reason="deleted", path=real, fail_closed=True)
+            try:
+                os.unlink(basename, dir_fd=dir_fd)
+            except OSError as e:
+                _audit(False, reason=f"unlink failed after audit: {e!r}",
+                       path=real)
+                raise dbus.DBusException(
+                    f"DeleteRule: unlink of {basename} failed: {e}",
+                    name=BUS_NAME + ".RulesEngineRefused",
+                )
+        finally:
+            os.close(dir_fd)
+
+        print(f"[broker] DeleteRule removed {real} (name={name!r}, "
+              f"admin_uid={admin_uid})", flush=True)
+        # Hot reload via the shared helper (also re-emits RulesReloaded).
+        n = self.reload_rules_from_disk(source="dbus-deleterule")
+        errs = self.rules.load_errors()
+        return dbus.Boolean(True), dbus.Int32(n), dbus.Array(errs,
+                                                             signature="s")
+
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="ias",
                          sender_keyword="sender", connection_keyword="conn")
     def ReloadRules(self, sender=None, conn=None):
