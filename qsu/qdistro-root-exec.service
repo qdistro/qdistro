@@ -7,7 +7,17 @@ After=qdistro-root-exec.socket qdistro-admin-broker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_root_exec.py
+# ExecStart points DIRECTLY at the labelled script (not at
+# `/usr/bin/python3 <script>`) so the SELinux domain transition fires.
+# The kernel takes the transition decision on the FIRST execve target;
+# with `python3 <script>` that target is the interpreter (bin_t) and the
+# script's qdistro_root_exec_exec_t label never triggers the
+# init_daemon_domain transition into qdistro_root_exec_t. Executing the
+# script directly (it carries a `#!/usr/bin/python3` shebang and is
+# installed mode 0755) makes the labelled script the first execve target,
+# so the daemon lands in qdistro_root_exec_t and the qdistro_qsu policy
+# module's allow rules apply. Mirrors qdistro-admin-broker.service.
+ExecStart=/usr/local/lib/qdistro/qdistro_root_exec.py
 User=root
 
 # Supervisor — if the handler process dies in-flight, pick it back up

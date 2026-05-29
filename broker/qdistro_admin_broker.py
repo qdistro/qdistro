@@ -267,6 +267,44 @@ def _read_lineage_enforce() -> bool:
 LINEAGE_ENFORCE = _read_lineage_enforce()
 
 
+# Strict-identity profile (security-hardening-carryforward.md §"Unresolved
+# executable/starttime identity should deny in strict profiles"). When True
+# the broker's delegated-claim verification refuses any RequestPermissionAs
+# whose caller exe OR starttime could not be resolved from /proc — rather
+# than accepting the claim on whichever single anchor happened to read.
+# Under SELinux enforcing a denied /proc/<pid>/stat read silently zeroes the
+# starttime anchor; in strict mode that becomes a hard deny instead of a
+# fall-back-open. Same toggle name/semantics as qsu's QDISTRO_IDENTITY_STRICT
+# so a deployment sets one flag and both the privileged-exec daemon and the
+# broker fail closed in lockstep. Read from $QDISTRO_IDENTITY_STRICT or
+# broker.conf key identity_strict. Default OFF (single-anchor fallback) for
+# permissive bakes; tier-1/enforcing bakes flip it on.
+_IDENTITY_STRICT_ENV = "QDISTRO_IDENTITY_STRICT"
+
+
+def _read_identity_strict() -> bool:
+    val = os.environ.get(_IDENTITY_STRICT_ENV, "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "identity_strict":
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+    except OSError:
+        pass
+    return False
+
+
+IDENTITY_STRICT = _read_identity_strict()
+
+
 def _read_hooks_enabled() -> bool:
     """Check whether Python hooks are enabled.
 
@@ -575,6 +613,27 @@ def _verify_delegated_claim(caller_uid: int, caller_pid: int,
             f"delegated caller pid {pid_i} is not a live process",
             name=BUS_NAME + ".CallerGone",
         )
+    # Strict profile: refuse the claim unless BOTH the live exe and the
+    # claimed starttime anchor are resolvable. live_start==0 is already a
+    # CallerGone above; here we also reject an unreadable /proc/<pid>/exe
+    # (live_exe "?"/empty) and a missing claimed starttime. In a strict
+    # deployment the SELinux policy is expected to grant both /proc reads,
+    # so a dropped anchor is a regression or an attack — fail closed
+    # rather than accept the delegated claim on a single anchor. (security-
+    # hardening-carryforward: do not fall back open in strict profiles.)
+    if IDENTITY_STRICT:
+        missing = []
+        if not live_exe or live_exe == "?":
+            missing.append("live-exe")
+        if not int(expected_start_time):
+            missing.append("claimed-starttime")
+        if missing:
+            raise dbus.DBusException(
+                f"strict profile: delegated caller pid {pid_i} identity "
+                f"not fully resolvable (missing {'+'.join(missing)}); "
+                f"refusing",
+                name=BUS_NAME + ".CallerIdentityMismatch",
+            )
     if expected_start_time and live_start != int(expected_start_time):
         raise dbus.DBusException(
             f"delegated caller pid {pid_i} start time mismatch",

@@ -1,0 +1,55 @@
+## <summary>qdistro qsu privileged-exec service policy interfaces.</summary>
+
+########################################
+## <summary>
+##	Authorise a domain to connect to the qdistro-root-exec service
+##	activation socket (/run/qdistro-root-exec/sock) and exchange the
+##	newline-delimited JSON exec protocol with it. The socket is the
+##	qsu client entry point: a client (an arbitrary user-silo process)
+##	opens it, the service authenticates the peer via SO_PEERCRED, and
+##	the request is then gated by admin approval.
+##
+##	This interface exists so a future confined qsu CLIENT domain
+##	(e.g. a tier-1 app spawning qsu) can be granted exactly the
+##	socket-connect leg without gen_requiring qdistro_root_exec_t
+##	directly. Today the client is unconfined and does not need it;
+##	keep it here so the surface is documented and the caller side is
+##	a one-liner when a client domain lands.
+##
+##	Note: this .if file deliberately uses NO backticks or apostrophes
+##	in its comments. m4 sees quote characters inside .if files even
+##	when they are preceded by # (m4 has no shell-style comment skip),
+##	and an unbalanced quote breaks the m4 expansion of any caller .te
+##	that pulls this interface in via the include search path. Same
+##	discipline as qdistro_broker.if.
+## </summary>
+## <param name="domain">
+##	<summary>Domain connecting to the qsu exec socket.</summary>
+## </param>
+#
+interface(`qdistro_qsu_connect',`
+	gen_require(`
+		type qdistro_root_exec_t;
+		type qdistro_root_exec_runtime_t;
+	')
+	allow $1 qdistro_root_exec_t:unix_stream_socket connectto;
+	allow $1 qdistro_root_exec_runtime_t:dir search_dir_perms;
+	allow $1 qdistro_root_exec_runtime_t:sock_file { read write getattr };
+')
+
+########################################
+## <summary>
+##	Grant a domain read access to the qsu exec service runtime state
+##	directory (/run/qdistro-root-exec/). Read-only.
+## </summary>
+## <param name="domain">
+##	<summary>Domain inspecting the qsu runtime directory.</summary>
+## </param>
+#
+interface(`qdistro_qsu_read_runtime',`
+	gen_require(`
+		type qdistro_root_exec_runtime_t;
+	')
+	allow $1 qdistro_root_exec_runtime_t:dir list_dir_perms;
+	allow $1 qdistro_root_exec_runtime_t:sock_file getattr;
+')

@@ -23,6 +23,13 @@ This is a **headless** scenario AND it must be driven over SSH —
 qemu-guest-agent's domain cannot `setenforce 1` (see "Transport"
 below).
 
+**Runnable form**: `run-55-qsu-selinux-enforcing.sh` in this directory
+is the executable runner for this scenario (SSH transport, headless
+D-Bus approve, AVC scan). It is `bash -n`-clean; the live PASS is
+**pending a provisioned enforcing VM** with `VM_SSH_PORT` exported.
+The SELinux policy that makes this scenario pass with zero AVCs lives
+in `selinux/qsu/` (`qdistro_root_exec_t` + `qsu_child_t`).
+
 ## Transport — IMPORTANT
 
 `scripts/vm/vm-exec` shells through qemu-guest-agent, which runs

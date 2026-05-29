@@ -1,0 +1,26 @@
+# File contexts for the qdistro qsu privileged-exec service.
+#
+# The service entry-point script is installed to
+# /usr/local/lib/qdistro/qdistro_root_exec.py mode 0755 with a
+# #!/usr/bin/python3 shebang (see scripts/install/install-qsu-for-vm.sh).
+# qdistro-root-exec.service ExecStart's it DIRECTLY, so the script is the
+# first execve target and the init_daemon_domain transition in
+# qdistro_qsu.te lands the daemon in qdistro_root_exec_t (NOT on the
+# python interpreter, which would happen if ExecStart were
+# `/usr/bin/python3 <script>`).
+#
+# /usr/local/lib matches Tumbleweed's `/usr/(.*/)?lib(/.*)?` -> lib_t
+# glob, so this more-specific regex must win; a `restorecon` of the file
+# after install applies the label.
+#
+# /run/qdistro-root-exec/ is created + labelled by systemd's
+# RuntimeDirectory= (it inherits the unit's runtime dir type); no .fc
+# regex is needed for it.
+
+/usr/local/lib/qdistro/qdistro_root_exec\.py    --  gen_context(system_u:object_r:qdistro_root_exec_exec_t,s0)
+
+# Activation-socket runtime dir. systemd's RuntimeDirectory= creates it;
+# label the tree so the daemon's create/bind of the socket lands on the
+# dedicated qdistro_root_exec_runtime_t (matched by the .te allow rules)
+# rather than generic var_run_t.
+/run/qdistro-root-exec(/.*)?    gen_context(system_u:object_r:qdistro_root_exec_runtime_t,s0)
