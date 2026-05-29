@@ -60,7 +60,12 @@ class FakeDBus(bb._BaseDBusClient):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_state():
+def _isolate_state(monkeypatch):
+    # These tests dispatch token-gated ops with a master-minted token and
+    # no prior qdistro.handshake. Production rejects that no-handshake
+    # master path (intent_token_no_handshake); it is permitted only under
+    # QDISTRO_TEST_MODE=1.
+    monkeypatch.setenv("QDISTRO_TEST_MODE", "1")
     bb.reset_session_secret()
     bb._pending.clear()
     yield

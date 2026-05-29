@@ -117,8 +117,14 @@ class FakeDBus(bb._BaseDBusClient):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_state():
-    """Each test gets a fresh session secret + empty pending/heartbeat."""
+def _isolate_state(monkeypatch):
+    """Each test gets a fresh session secret + empty pending/heartbeat.
+
+    Many tests here drive token-gated ops through ``dispatch`` with a
+    master-minted token and no prior ``qdistro.handshake``. Production
+    rejects that no-handshake master path (``intent_token_no_handshake``);
+    it is allowed only under ``QDISTRO_TEST_MODE=1``, set here."""
+    monkeypatch.setenv("QDISTRO_TEST_MODE", "1")
     bb.reset_session_secret()
     bb._pending.clear()
     bb._heartbeat.__init__()  # type: ignore[misc]
