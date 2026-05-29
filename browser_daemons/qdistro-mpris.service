@@ -1,0 +1,26 @@
+[Unit]
+Description=qdistro browser MPRIS republisher (Bridge Phase-9e)
+# Per-user session daemon. dbus-broker rejects cross-uid session-bus
+# peers, so each user owns their own org.qdistro.Mpris and exports the
+# standard org.mpris.MediaPlayer2.qdistro.<user>.<browser> players that
+# the admin's session media widget aggregates.
+After=dbus.socket
+Requires=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.qdistro.Mpris
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_mpris_daemon.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+# Pure republisher: no filesystem writes, no network.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
