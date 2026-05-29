@@ -87,6 +87,25 @@ def _make_stub_broker():
         },
     ]
     broker.save_rule.return_value = "/etc/qdistro/rules.d/new.yaml"
+    # Editing an existing rule fetches the verbatim on-disk YAML via the
+    # broker's GetRuleSource RPC (comments + unknown keys preserved). The
+    # stub returns text keyed by source_path so the editor loads raw text
+    # rather than a regenerated projection.
+    _RAW_SOURCES = {
+        "/etc/qdistro/rules.d/apt.yaml": (
+            "# hand-written rule, keep this comment\n"
+            "- name: allow-apt\n"
+            "  decision: allow\n"
+            "  match:\n"
+            "    uid: 2000\n"
+            "    action: qdistro.exec.apt-get\n"
+            "    exe: /usr/bin/apt-get\n"
+            "  scope: forever\n"
+            "  rationale: Allow apt-get for uid 2000\n"
+            "  future_unknown_key: preserve-me\n"
+        ),
+    }
+    broker.get_rule_source.side_effect = lambda src: _RAW_SOURCES.get(src, "")
     broker.reload_rules.return_value = None
     broker.list_history.return_value = []
     broker.get_pending.return_value = []
@@ -313,6 +332,78 @@ class TestRuleEditorDialog:
         assert dlg.filename_line.text() == "apt.yaml"
         text = dlg.yaml_editor.toPlainText()
         assert "allow" in text
+        # Editing an existing rule loads the RAW on-disk YAML via the
+        # broker, so comments and keys ListRules does not project survive.
+        broker.get_rule_source.assert_called_once_with(
+            "/etc/qdistro/rules.d/apt.yaml")
+        assert "# hand-written rule, keep this comment" in text
+        assert "future_unknown_key: preserve-me" in text
+
+    def test_edit_preserves_raw_source_not_regenerated(self, qapp):
+        """Editing an existing rule must show the verbatim on-disk YAML
+        (comments + unknown keys), NOT a view regenerated from the
+        projected ListRules fields."""
+        broker = _make_stub_broker()
+        rule_data = {
+            "name": "allow-apt",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/apt.yaml",
+            "uid": 2000,
+            "action": "qdistro.exec.apt-get",
+            "exe": "/usr/bin/apt-get",
+            "scope": "forever",
+            "rationale": "Allow apt-get for uid 2000",
+        }
+        dlg = RuleEditorDialog(broker, rule_data)
+        text = dlg.yaml_editor.toPlainText()
+        # Hallmarks of raw source that a regenerated projection drops:
+        assert "# hand-written rule, keep this comment" in text
+        assert "future_unknown_key: preserve-me" in text
+
+    def test_edit_degrades_gracefully_when_rpc_empty(self, qapp):
+        """If GetRuleSource is unavailable / returns empty, fall back to
+        the regenerated view rather than a blank editor."""
+        broker = _make_stub_broker()
+        broker.get_rule_source.side_effect = lambda src: ""
+        rule_data = {
+            "name": "allow-apt",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/apt.yaml",
+            "uid": 2000,
+            "action": "qdistro.exec.apt-get",
+            "exe": "/usr/bin/apt-get",
+            "scope": "forever",
+            "rationale": "Allow apt-get for uid 2000",
+        }
+        dlg = RuleEditorDialog(broker, rule_data)
+        text = dlg.yaml_editor.toPlainText()
+        # Regenerated view from the projected fields (non-empty editor).
+        assert "qdistro.exec.apt-get" in text
+        assert text.strip()
+
+    def test_edit_degrades_gracefully_when_rpc_raises(self, qapp):
+        """If GetRuleSource raises (RPC unavailable), fall back to the
+        regenerated view rather than crashing the dialog."""
+        broker = _make_stub_broker()
+
+        def _boom(src):
+            raise RuntimeError("no such method")
+
+        broker.get_rule_source.side_effect = _boom
+        rule_data = {
+            "name": "allow-apt",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/apt.yaml",
+            "uid": 2000,
+            "action": "qdistro.exec.apt-get",
+            "exe": "/usr/bin/apt-get",
+            "scope": "forever",
+            "rationale": "Allow apt-get for uid 2000",
+        }
+        dlg = RuleEditorDialog(broker, rule_data)
+        text = dlg.yaml_editor.toPlainText()
+        assert "qdistro.exec.apt-get" in text
+        assert text.strip()
 
     def test_generate_yaml_flat_schema(self, qapp):
         """_generate_yaml_from_rule handles the flat schema (uid/action/exe
