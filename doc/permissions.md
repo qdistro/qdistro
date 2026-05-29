@@ -150,6 +150,39 @@ that context is effectively privileged code. The deployed model is a
 seccomp, with an API surface restricted to a well-defined hook protocol;
 the broker IPCs to the executor.
 
+### Execution order
+
+When more than one hook file exports a handler for the same action, the
+handlers are invoked in **ascending alphabetical order of the hook
+filename** (the `.py` filename stem). The **first** handler to return a
+non-`None` verdict wins; later handlers for that action are not consulted.
+A handler that returns `None` (or that the file does not define) falls
+through to the next hook.
+
+This ordering is stable: it does not depend on the order in which files
+were dropped into the hooks directory or hot-reloaded. To make precedence
+explicit and leave room to insert hooks later, prefix filenames with a
+numeric ordering token:
+
+```
+/etc/qdistro/hooks/00-deny-secrets.py    # runs first
+/etc/qdistro/hooks/10-route-git-sha.py   # runs next
+/etc/qdistro/hooks/20-default-allow.py   # runs last
+```
+
+### Concurrency
+
+The executor accepts multiple broker connections concurrently and services
+each in its own worker thread, so several events can be evaluated at once.
+Hook authors should treat each `on_<action>` call as potentially running
+**in parallel with other hook invocations**: do not rely on global mutable
+state for per-event data, and guard any shared resource (file, network
+handle, in-module cache) you touch with your own locking. Each call
+receives its own *shallow* copy of the `event` dict, so replacing or
+adding top-level keys in one hook cannot affect another hook — but
+nested dicts/lists inside `event` are shared, so do not mutate nested
+values in place if you depend on isolation.
+
 ## Start declarative, escalate to hooks
 
 Pattern: implement the rule language first and cover the common cases. Only

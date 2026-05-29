@@ -23,6 +23,27 @@ Hooks are importable .py modules.  Each may export functions named
 function) means "fall through to admin prompt".  Exceptions are
 caught, logged, and treated as fall-through.
 
+Execution order: when more than one hook exports a handler for the
+same action, the handlers run in **ascending alphabetical order of
+the source filename** (i.e. the ``.py`` filename stem).  The first
+hook to return a non-None verdict wins; later hooks are not consulted.
+Authors should prefix filenames with a numeric ordering token
+(``00-``, ``10-``, ``20-``) to make precedence explicit.  This order
+is stable regardless of load / hot-reload sequence (see
+``HookLoader.call_hooks``).
+
+Concurrency: the server accepts multiple broker connections and
+services each in its own worker thread.  The ``HookLoader`` module
+cache is the executor's own shared mutable state; access to it is
+serialized by an internal lock, and ``call_hooks`` snapshots the
+module list under that lock before invoking any hook, so the cache
+cannot be corrupted by concurrent queries or hot-reloads.  Note this
+guarantee covers the *executor's* bookkeeping only: the loaded hook
+module objects are shared, so two concurrent queries can run the same
+``on_<action>`` function in parallel against shared module globals.
+Hook authors must make their own handlers thread-safe (see
+doc/permissions.md "Concurrency").
+
 The executor watches the hook directory with inotify and hot-reloads
 modules when files change.  Compiled bytecode is cached in-process.
 """
@@ -203,7 +224,14 @@ class HookLoader:
         fn_name = self._action_to_fn_name(action)
         errors: list[str] = []
         with self._lock:
-            modules = list(self._modules.values())
+            # Iterate in ascending alphabetical order of the source
+            # filename stem.  This is the documented hook-ordering
+            # contract for hook authors (see doc/permissions.md), and
+            # must hold regardless of the order files were loaded or
+            # hot-reloaded in (dict insertion order is NOT stable across
+            # incremental reloads, so we sort here explicitly).
+            modules = [self._modules[stem]
+                       for stem in sorted(self._modules)]
         for mod, _mtime in modules:
             fn = getattr(mod, fn_name, None)
             if fn is None:
@@ -477,7 +505,12 @@ def serve(hook_dir: str = HOOK_DIR,
         srv.bind(socket_path)
     finally:
         os.umask(old_umask)
-    srv.listen(8)
+    # Backlog of pending (accepted-by-kernel, not-yet-accept()ed)
+    # connections.  The handler pool is small (_MAX_HANDLER_THREADS),
+    # so under a burst of simultaneous broker connections the accept
+    # loop can fall behind; a generous backlog lets the kernel queue
+    # those connects instead of failing them with ECONNREFUSED/EAGAIN.
+    srv.listen(128)
     srv.settimeout(2.0)
 
     _log(f"[hook-executor] listening on {socket_path}")
