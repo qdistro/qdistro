@@ -10,7 +10,9 @@
 # Prerequisites (handled by build-baked-baseweed.sh):
 #   - SELinux permissive
 #   - admin user (uid 1000) present
-#   - meson + ninja + libweston-14-devel + wayland-protocols
+#   - meson + ninja + gcc/cc + libweston-14-devel + wayland-protocols
+#     (gcc is required: install-qsu-for-vm.sh compiles qsu.c into the
+#      /usr/local/bin/qsu ELF binary so /proc/<pid>/exe is unambiguous)
 #   - quickshell + qt6-* for qdshell
 #   - bats for in-VM integration tests
 #
