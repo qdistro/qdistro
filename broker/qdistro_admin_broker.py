@@ -1004,6 +1004,128 @@ class Broker(dbus.service.Object):
             return resolved_engine, resolved_app
         return claimed_engine, claimed_app_id
 
+    def _cross_silo_source(self, *, source_pid: int, source_starttime: int,
+                           claimed_src: str, claimed_app: str,
+                           claimed_engine: str, gate: str,
+                           uid: int, caller_pid: int, caller_exe: str):
+        """Resolve the SOURCE subject of a cross-silo gate to the
+        launcher-attested (silo, app_id, sandbox_engine) — finding P1-1.
+
+        On the clipboard/handoff gates the D-Bus caller is qdshell, not the
+        source app, so resolving the *caller* pid (as _lineage_selectors
+        does for CheckPermission) would attest qdshell, not the app whose
+        data is moving. Instead qdshell relays the source app's
+        kernel-authenticated ``(pid, starttime)`` — the tuple qdwin captured
+        via SO_PEERCRED at secctx-bind (qdwin.c:13551) and already feeds to
+        VerifyClientIdentity (ClipboardGate.qml). We resolve *that* pid
+        against the launch-record store, anchoring on the relayed starttime
+        so a recycled PID cannot inherit an old app's silo.
+
+        Returns ``(src, app_id, sandbox_engine, hard_deny)``:
+
+        - LINEAGE_ENFORCE off (shadow): the claimed values are returned
+          unchanged (legacy behaviour) and ``hard_deny`` is always False; a
+          divergence between the claim and the resolved subject is logged so
+          the gap is observable before enforcement is switched on.
+        - LINEAGE_ENFORCE on:
+            * a source pid is relayed AND resolves to a *verified* subject
+              whose live starttime matches the relayed one → the
+              launcher-attested ``(silo, app_id, sandbox_engine)`` is
+              returned; ``hard_deny`` False.
+            * a source pid is relayed but the subject is unverified (no
+              launch record, axis mismatch, starttime drift, or the process
+              is gone), OR no source pid is relayed at all → ``hard_deny``
+              True. A cross-silo decision must rest on an attested source;
+              an unattested or forged source can only ever be denied, never
+              satisfy a rule. This is the failure posture from
+              ``permission-lineage-findings.md`` applied to the source axis.
+        """
+        claimed_src = str(claimed_src or "")
+        claimed_app = str(claimed_app or "")
+        claimed_engine = str(claimed_engine or "")
+        try:
+            spid = int(source_pid)
+        except (TypeError, ValueError):
+            spid = 0
+        try:
+            sstart = int(source_starttime)
+        except (TypeError, ValueError):
+            sstart = 0
+
+        if not LINEAGE_ENFORCE:
+            # Shadow: never change the decision inputs, but surface a
+            # divergence so the lineage gap is observable pre-enforce.
+            if spid > 0:
+                subj = self._resolve_subject(spid)
+                live_exe, live_start = _read_proc_identity(spid)
+                drift = (sstart and live_start and int(live_start) != sstart)
+                if drift or not subj.verified or subj.silo != claimed_src:
+                    print(f"[broker] lineage shadow ({gate}): source "
+                          f"pid={spid} claimed silo={claimed_src!r}/"
+                          f"app={claimed_app!r}/engine={claimed_engine!r} "
+                          f"resolved silo={subj.silo!r}/app={subj.app_id!r}/"
+                          f"engine={subj.sandbox_engine!r} "
+                          f"verified={subj.verified} starttime_drift={bool(drift)} "
+                          f"({subj.reason})", flush=True)
+            return claimed_src, claimed_app, claimed_engine, False
+
+        # Enforce. A cross-silo decision requires an attested source.
+        if spid <= 0:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason="no-source-pid-relayed", claimed_src=claimed_src)
+            return claimed_src, "", "", True
+
+        # Anchor on the relayed starttime: if the live process no longer has
+        # the starttime qdwin observed, the PID was recycled — fail closed
+        # before even consulting the record.
+        _live_exe, live_start = _read_proc_identity(spid)
+        if sstart and (not live_start or int(live_start) != sstart):
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=(f"source-starttime-drift live={live_start} "
+                        f"relayed={sstart}"),
+                claimed_src=claimed_src)
+            return claimed_src, "", "", True
+
+        subj = self._resolve_subject(spid)
+        if not subj.verified:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=f"source-unverified ({subj.reason})",
+                claimed_src=claimed_src)
+            return claimed_src, "", "", True
+
+        # Verified source: use the launcher-attested identity, never the
+        # qdshell-relayed claim. Log when they diverge (a forged claim that
+        # enforcement just overrode).
+        if subj.silo != claimed_src or subj.app_id != claimed_app \
+                or subj.sandbox_engine != claimed_engine:
+            print(f"[broker] lineage ENFORCE ({gate}): source pid={spid} "
+                  f"claim silo={claimed_src!r}/app={claimed_app!r}/"
+                  f"engine={claimed_engine!r} overridden with attested "
+                  f"silo={subj.silo!r}/app={subj.app_id!r}/"
+                  f"engine={subj.sandbox_engine!r}", flush=True)
+        return subj.silo, subj.app_id, subj.sandbox_engine, False
+
+    def _audit_cross_silo_deny(self, gate: str, uid: int, caller_pid: int,
+                               caller_exe: str, *, reason: str,
+                               claimed_src: str) -> None:
+        """Audit a cross-silo gate denied for want of an attested source."""
+        try:
+            self.audit.log(
+                caller_uid=uid, caller_pid=caller_pid, caller_exe=caller_exe,
+                action=f"qdistro.lineage.source_deny:{gate}:{claimed_src}",
+                decision=False, scope=None,
+                source=f"cross_silo_source_unattested reason={reason}",
+                approver_uid=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: cross_silo_source_deny, "
+                  f"reason={e!r}", flush=True)
+        print(f"[broker] lineage ENFORCE ({gate}): cross-silo DENY — "
+              f"{reason}", flush=True)
+
     @dbus.service.method(BUS_NAME,
                          in_signature="ssssstst", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
@@ -1318,7 +1440,7 @@ class Broker(dbus.service.Object):
         return bool(verdict)
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="ssassssb", out_signature="s",
+                         in_signature="ssassssbut", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckClipboardTransfer(self, source_silo: str, dest_silo: str,
                                mime_types: list,
@@ -1326,6 +1448,8 @@ class Broker(dbus.service.Object):
                                dest_app_id: str = "",
                                source_sandbox_engine: str = "",
                                identity_verified: bool = False,
+                               source_pid: int = 0,
+                               source_starttime: int = 0,
                                sender=None, conn=None) -> str:
         """Cross-silo clipboard policy gate. Spec/10.
 
@@ -1439,6 +1563,19 @@ class Broker(dbus.service.Object):
         # clipboard transfer is the highest-bandwidth channel a
         # compromised tier-2 workload has to the host.  The default is
         # "deny" — tier-2 traffic requires an explicit allow rule.
+        #
+        # Permission lineage (P1-1): resolve the SOURCE app's relayed
+        # (pid, starttime) to its launcher-attested silo/app/engine instead
+        # of trusting the qdshell-claimed strings. Under enforce an
+        # unattested source is denied cross-silo before the rule lookup.
+        src, sapp, seng, _hard_deny = self._cross_silo_source(
+            source_pid=source_pid, source_starttime=source_starttime,
+            claimed_src=src, claimed_app=sapp, claimed_engine=seng,
+            gate="clipboard.transfer", uid=uid, caller_pid=pid,
+            caller_exe=exe)
+        if _hard_deny:
+            return "deny"
+        action_s = f"qdistro.clipboard.transfer:{src}:{dst}"
         rule = self.rules.match(uid=uid, action=action_s, exe=exe,
                                 app_id=sapp, sandbox_engine=seng)
         decision = "deny"
@@ -1604,7 +1741,7 @@ class Broker(dbus.service.Object):
         return json.dumps({"ok": False, "error": "policy_denied"})
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="ssssssb", out_signature="s",
+                         in_signature="ssssssbut", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckClipboardReceive(self, source_silo: str, dest_silo: str,
                               mime_type: str,
@@ -1612,6 +1749,8 @@ class Broker(dbus.service.Object):
                               dest_app_id: str = "",
                               source_sandbox_engine: str = "",
                               identity_verified: bool = False,
+                              source_pid: int = 0,
+                              source_starttime: int = 0,
                               sender=None, conn=None) -> str:
         """Per-MIME, per-recipient clipboard receive gate. Spec/10 v15.
 
@@ -1691,6 +1830,17 @@ class Broker(dbus.service.Object):
                       f"clipboard receive {src} without identity "
                       f"verification; secctx is self-asserted",
                       flush=True)
+        # Permission lineage (P1-1): resolve the source app to its
+        # launcher-attested identity; deny cross-silo under enforce when
+        # the source is unattested. See CheckClipboardTransfer.
+        src, sapp, seng, _hard_deny = self._cross_silo_source(
+            source_pid=source_pid, source_starttime=source_starttime,
+            claimed_src=src, claimed_app=sapp, claimed_engine=seng,
+            gate="clipboard.receive", uid=uid, caller_pid=pid,
+            caller_exe=exe)
+        if _hard_deny:
+            return "deny"
+        action_s = f"qdistro.clipboard.receive:{src}:{dst}"
         rule = self.rules.match(uid=uid, action=action_s, exe=exe,
                                 app_id=sapp, sandbox_engine=seng,
                                 mime_type=mime_s)
@@ -1717,12 +1867,14 @@ class Broker(dbus.service.Object):
         return decision
 
     @dbus.service.method(BUS_NAME,
-                         in_signature="sssssb", out_signature="s",
+                         in_signature="sssssbut", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
     def CheckHandoffActivation(self, source_silo: str, dest_silo: str,
                                source_app_id: str, dest_app_id: str,
                                source_sandbox_engine: str = "",
                                identity_verified: bool = False,
+                               source_pid: int = 0,
+                               source_starttime: int = 0,
                                sender=None, conn=None) -> str:
         """Cross-silo window-activation policy gate. Spec/09.
 
@@ -1789,6 +1941,16 @@ class Broker(dbus.service.Object):
                       f"handoff activation {src} without identity "
                       f"verification; secctx is self-asserted",
                       flush=True)
+        # Permission lineage (P1-1): resolve the source app to its
+        # launcher-attested identity; deny cross-silo under enforce when
+        # the source is unattested. See CheckClipboardTransfer.
+        src, sapp_raw, seng_raw, _hard_deny = self._cross_silo_source(
+            source_pid=source_pid, source_starttime=source_starttime,
+            claimed_src=src, claimed_app=sapp_raw, claimed_engine=seng_raw,
+            gate="handoff.activate", uid=uid, caller_pid=pid, caller_exe=exe)
+        if _hard_deny:
+            return "deny"
+        action_s = f"qdistro.handoff.activate:{src}:{dst}"
         # Pass source app_id + sandbox_engine to the rule matcher; rules
         # naming app_id or sandbox_engine selectors only match when the
         # caller propagated those (via qdwin_shell_v1@v13 secctx).
