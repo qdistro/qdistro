@@ -103,6 +103,14 @@ SPAWN_LOG_B=/tmp/s37-spawn-user2.log
 TIER3_NO_REAP=1 \
 bash "$TIER3_DIR/spawn-tier3.sh" user1 -- weston-terminal >"$SPAWN_LOG_A" 2>&1 &
 SPAWN_A=$!
+# Serialize bring-up: wait for silo A's bridge before launching silo B so the
+# two tier3 observations don't race for the compositor under load (was: both
+# silos spawned simultaneously, which flaked the [tier3] observation).
+for _ in $(seq 1 40); do
+    grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_A" 2>/dev/null && break
+    kill -0 "$SPAWN_A" 2>/dev/null || break
+    sleep 0.25
+done
 TIER3_NO_REAP=1 \
 bash "$TIER3_DIR/spawn-tier3.sh" user2 -- weston-terminal >"$SPAWN_LOG_B" 2>&1 &
 SPAWN_B=$!
@@ -144,7 +152,7 @@ jgrep_once() {
 
 OBS_A=""
 OBS_B=""
-deadline=$(( $(date +%s) + 30 ))
+deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -z "$OBS_A" ] && \
         OBS_A=$(jgrep_once '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')

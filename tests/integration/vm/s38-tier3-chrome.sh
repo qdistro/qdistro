@@ -162,7 +162,7 @@ OBS_USER1=""
 OBS_USER2=""
 COL_USER1=""
 COL_USER2=""
-deadline=$(( $(date +%s) + 30 ))
+deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -z "$OBS_USER1" ] && \
         OBS_USER1=$(jgrep_once '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')

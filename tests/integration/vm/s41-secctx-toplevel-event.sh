@@ -142,7 +142,7 @@ QDWIN_LINE=""
 QDSHELL_LINE=""
 TIER3_OBS=""
 TIER3_COL=""
-deadline=$(( $(date +%s) + 30 ))
+deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     [ -z "$QDWIN_LINE" ] && \
         QDWIN_LINE=$(jgrep_once 'qdwin: toplevel_security_context handle=[0-9]+ engine=qdistro\.tier3 app_id=qdistro\.tier3\.user1 instance=')

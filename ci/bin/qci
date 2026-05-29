@@ -617,7 +617,11 @@ gate_host() {
     # and shadow PyQt6, which would silently SKIP the ~150 admin-app Qt
     # tests. QDISTRO_REQUIRE_PYQT6=1 makes the conftest turn that shadow
     # into a hard failure instead of a quiet skip.
-    c="PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest tests/unit"
+    # Run the unit tests in file batches (~30 files each) rather than one
+    # giant process. A single native segfault (e.g. a Qt teardown crash) then
+    # fails only that batch instead of aborting the whole ~2300-test suite,
+    # and the crash is attributable to a small file set. rc=1 if any batch fails.
+    c='rc=0; mapfile -t _f < <(find tests/unit -name "test_*.py" | sort); for ((_i=0; _i<${#_f[@]}; _i+=30)); do PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest "${_f[@]:_i:30}" || rc=1; done; exit $rc'
     run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 

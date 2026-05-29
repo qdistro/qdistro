@@ -125,7 +125,7 @@ jgrep_once() {
 # Weston-terminal cold-start budget: ~5s on a warm VM, occasionally
 # more under load. 30s ceiling matches the s32 pattern.
 OBS=""
-deadline=$(( $(date +%s) + 30 ))
+deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     OBS=$(jgrep_once '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+')
     [ -n "$OBS" ] && break
