@@ -51,6 +51,14 @@ class AuthBackend(QObject):
                 "(neither $USER nor $LOGNAME set)"
             )
         self._state_lock = threading.Lock()
+        # Monotonically increasing session generation. Bumped on every
+        # reset_session() (i.e. each fresh lock). Every emitted outcome
+        # carries the generation that was current when its auth attempt
+        # ran, so the controller can drop a stale outcome that a slow PAM
+        # or fprintd worker delivers after the session already advanced
+        # (e.g. a laggy PAM FAILED racing in after fprintd already
+        # unlocked, or any worker finishing after the next lock began).
+        self._session_generation = 0
         self._fprintd_busy = False
         self._pam_thread: threading.Thread | None = None
         self._pam_pending_password: str | None = None
@@ -64,10 +72,13 @@ class AuthBackend(QObject):
         # Per-lock-session state. Reset by `reset_session()` whenever the
         # locker transitions from unlocked → locked.
         self._fprintd_failures = 0
-        # _fprintd_unavailable: sticky once fprintd is determined to be
-        # environmentally absent (no dbus-next, fprintd off the bus,
-        # listener API missing). Avoids re-paying the discovery cost on
-        # every keystroke and immediately routes to PAM.
+        # _fprintd_unavailable: set once fprintd is determined to be
+        # environmentally absent for THIS lock session (no dbus-next,
+        # fprintd off the bus, listener API missing, or a D-Bus
+        # timeout/hang). Sticky within a session — it avoids re-paying the
+        # discovery cost on every keystroke and immediately routes to PAM —
+        # but cleared by reset_session() so a transient wedge is retried on
+        # the next lock.
         self._fprintd_unavailable = not fprintd_enabled
         # Suppress duplicate fallback dispatch when multiple workers
         # cross the threshold simultaneously.
@@ -80,7 +91,27 @@ class AuthBackend(QObject):
         with self._state_lock:
             self._fprintd_failures = 0
             self._falling_back_to_pam = False
-        log.debug("auth session reset")
+            # Clear the per-session unavailable latch so a TRANSIENT wedge
+            # (a one-off claim/verify-start/connect timeout) is retried on
+            # the next lock instead of permanently disabling fingerprint
+            # for the rest of the process. If fprintd is genuinely absent
+            # the next discovery just re-fails cheaply and re-latches.
+            # When fprintd was disabled at construction it stays disabled.
+            if self._fprintd_enabled:
+                self._fprintd_unavailable = False
+            self._session_generation += 1
+            gen = self._session_generation
+        log.debug("auth session reset (generation=%d)", gen)
+
+    def _current_generation(self) -> int:
+        with self._state_lock:
+            return self._session_generation
+
+    def _emit_outcome(self, outcome: AuthOutcome, generation: int) -> None:
+        """Emit an outcome tagged with the session generation it belongs
+        to, so the controller can drop it if the session has since moved
+        on (stale-outcome race guard)."""
+        self.outcome.emit((outcome, generation))
 
     def probe_pam(self) -> None:
         if self._pam_service:
@@ -139,33 +170,61 @@ class AuthBackend(QObject):
 
     # ---- failure accounting helpers ----
 
-    def _record_fprintd_failure(self, *, environmental: bool) -> None:
-        """Increment the failure counter and start PAM fallback when
-        the threshold is crossed. Holds _state_lock around both the
-        increment and the should-fallback dispatch decision so two
-        concurrent workers can't both fire start_pam after both cross
-        the threshold."""
+    def _record_fprintd_failure(
+        self, *, environmental: bool, generation: int | None = None
+    ) -> None:
+        """Increment the failure counter and start PAM fallback.
+
+        An *environmental* failure (no dbus-next, fprintd off the bus, a
+        D-Bus timeout/hang, listener API missing) means the fingerprint
+        path is dead for this session, so we fail CLOSED immediately:
+        mark it unavailable and start PAM/password right away rather than
+        waiting out the 3-strike threshold (which would otherwise leave
+        the user with no prompt until the next keystroke). A *real*
+        verify-no-match still counts toward the strike threshold so a
+        determined attacker eventually trips the PAM fallback.
+
+        Holds _state_lock around both the increment and the
+        should-fallback dispatch decision so two concurrent workers can't
+        both fire start_pam after both cross the threshold.
+
+        If `generation` is supplied and no longer matches the current
+        session, the call is a stale worker from a superseded lock: drop
+        its side effects entirely so it can't poison the fresh session's
+        failure counter or spuriously start PAM."""
         with self._state_lock:
+            if generation is not None and generation != self._session_generation:
+                log.info(
+                    "dropping stale fprintd failure (gen=%s, current=%s)",
+                    generation, self._session_generation,
+                )
+                return
             if environmental:
                 self._fprintd_unavailable = True
             self._fprintd_failures += 1
             count = self._fprintd_failures
-            crossed = (count >= self._max_fprintd_failures
-                       and not self._falling_back_to_pam)
+            crossed = (
+                (environmental or count >= self._max_fprintd_failures)
+                and not self._falling_back_to_pam
+            )
             if crossed:
                 self._falling_back_to_pam = True
         log.info("fprintd failure recorded (count=%d, threshold=%d, env=%s)",
                  count, self._max_fprintd_failures, environmental)
         if crossed:
-            log.info("fprintd threshold reached; starting PAM fallback")
+            log.info("fprintd unavailable/threshold reached; starting PAM fallback")
             self.start_pam()
 
     def _pam_worker(self) -> None:
+        # Capture the generation this attempt belongs to. If a later lock
+        # bumps it (or fprintd unlocks first), the controller drops any
+        # outcome we emit below as stale.
+        generation = self._current_generation()
         try:
             import pam
         except ImportError:
             log.error("python-pam not installed; PAM auth unavailable")
-            self.outcome.emit(AuthOutcome.FAILED)
+            self._emit_outcome(AuthOutcome.FAILED, generation)
             return
 
         auth = pam.pam()
@@ -174,7 +233,7 @@ class AuthBackend(QObject):
         password = None
         while password is None:
             if self._pam_abort.wait(timeout=0.05):
-                self.outcome.emit(AuthOutcome.ABORTED)
+                self._emit_outcome(AuthOutcome.ABORTED, generation)
                 return
             with self._state_lock:
                 password = self._pam_pending_password
@@ -190,13 +249,15 @@ class AuthBackend(QObject):
             )
         except Exception:
             log.exception("PAM authentication raised")
-            self.outcome.emit(AuthOutcome.FAILED)
+            self._emit_outcome(AuthOutcome.FAILED, generation)
             return
 
         if self._pam_abort.is_set():
-            self.outcome.emit(AuthOutcome.ABORTED)
+            self._emit_outcome(AuthOutcome.ABORTED, generation)
             return
-        self.outcome.emit(AuthOutcome.SUCCESS if ok else AuthOutcome.FAILED)
+        self._emit_outcome(
+            AuthOutcome.SUCCESS if ok else AuthOutcome.FAILED, generation
+        )
 
     def _fprint_worker(self) -> None:
         try:
@@ -208,29 +269,55 @@ class AuthBackend(QObject):
                 self._fprintd_busy = False
 
     async def _fprint_async(self) -> None:
+        # Generation this fingerprint attempt belongs to; tags the SUCCESS
+        # emit so a stale match delivered after the next lock is dropped.
+        generation = self._current_generation()
         try:
             from dbus_next.aio import MessageBus
             from dbus_next import BusType
         except ImportError:
             log.warning("dbus-next not installed; fingerprint disabled")
-            self._record_fprintd_failure(environmental=True)
+            self._record_fprintd_failure(environmental=True, generation=generation)
             return
 
+        # Bound the connect itself: a wedged system bus can otherwise hang
+        # the whole fingerprint path indefinitely, before the verify timeout
+        # below ever has a chance to arm. Fail CLOSED (env-unavailable → PAM).
         try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            bus = await asyncio.wait_for(
+                MessageBus(bus_type=BusType.SYSTEM).connect(),
+                timeout=self._fprintd_timeout,
+            )
+        except asyncio.TimeoutError:
+            log.warning("fprintd system-bus connect timed out; falling back")
+            self._record_fprintd_failure(environmental=True, generation=generation)
+            return
         except Exception:
             log.exception("could not connect to system bus")
-            self._record_fprintd_failure(environmental=True)
+            self._record_fprintd_failure(environmental=True, generation=generation)
             return
 
         try:
+            # Each of introspect / get_default_device / claim / verify-start
+            # is a round-trip to fprintd over the system bus; any of them can
+            # wedge if fprintd is stuck. Cap every one with the same timeout
+            # so a hang anywhere in the discovery/claim phase fails CLOSED to
+            # PAM instead of leaving the locker stuck on the fingerprint path.
             try:
-                mgr_intro = await bus.introspect(
-                    "net.reactivated.Fprint", "/net/reactivated/Fprint/Manager"
+                mgr_intro = await asyncio.wait_for(
+                    bus.introspect(
+                        "net.reactivated.Fprint",
+                        "/net/reactivated/Fprint/Manager",
+                    ),
+                    timeout=self._fprintd_timeout,
                 )
+            except asyncio.TimeoutError:
+                log.warning("fprintd Manager introspect timed out; falling back")
+                self._record_fprintd_failure(environmental=True, generation=generation)
+                return
             except Exception:
                 log.info("fprintd not available on system bus; skipping")
-                self._record_fprintd_failure(environmental=True)
+                self._record_fprintd_failure(environmental=True, generation=generation)
                 return
 
             mgr_obj = bus.get_proxy_object(
@@ -238,9 +325,25 @@ class AuthBackend(QObject):
                 mgr_intro,
             )
             mgr = mgr_obj.get_interface("net.reactivated.Fprint.Manager")
-            dev_path = await mgr.call_get_default_device()  # type: ignore[attr-defined]
+            try:
+                dev_path = await asyncio.wait_for(
+                    mgr.call_get_default_device(),  # type: ignore[attr-defined]
+                    timeout=self._fprintd_timeout,
+                )
+            except asyncio.TimeoutError:
+                log.warning("fprintd GetDefaultDevice timed out; falling back")
+                self._record_fprintd_failure(environmental=True, generation=generation)
+                return
 
-            dev_intro = await bus.introspect("net.reactivated.Fprint", dev_path)
+            try:
+                dev_intro = await asyncio.wait_for(
+                    bus.introspect("net.reactivated.Fprint", dev_path),
+                    timeout=self._fprintd_timeout,
+                )
+            except asyncio.TimeoutError:
+                log.warning("fprintd Device introspect timed out; falling back")
+                self._record_fprintd_failure(environmental=True, generation=generation)
+                return
             dev_obj = bus.get_proxy_object(
                 "net.reactivated.Fprint", dev_path, dev_intro
             )
@@ -262,29 +365,61 @@ class AuthBackend(QObject):
                 dev.on_verify_status(on_status)  # type: ignore[attr-defined]
             except Exception:
                 log.exception("could not register VerifyStatus listener")
-                self._record_fprintd_failure(environmental=True)
+                self._record_fprintd_failure(environmental=True, generation=generation)
                 return
 
-            matched = False
+            # Auth accounting is decided exactly once below via `result`,
+            # one of: "match", "no_match", "env_fail", "verify_fail".
+            # Doing it inline used to double-count (e.g. a verify timeout
+            # recorded a failure in `except` AND again in the `else`).
+            result = "no_match"
             try:
-                await dev.call_claim(self._pam_user)  # type: ignore[attr-defined]
-                await dev.call_verify_start("any")  # type: ignore[attr-defined]
-                matched = await asyncio.wait_for(
-                    result_future, timeout=self._fprintd_timeout
-                )
+                # Claim and VerifyStart are blocking round-trips that can
+                # hang before the verify-result wait below arms. A hang
+                # here means fprintd itself is wedged — that's an
+                # ENVIRONMENTAL failure, so it must fail CLOSED to PAM
+                # immediately rather than burning a single non-environmental
+                # strike. Handle their timeout separately from the
+                # verify-RESULT timeout (which legitimately just means "no
+                # finger presented in N seconds" and stays non-environmental).
+                try:
+                    await asyncio.wait_for(
+                        dev.call_claim(self._pam_user),  # type: ignore[attr-defined]
+                        timeout=self._fprintd_timeout,
+                    )
+                    await asyncio.wait_for(
+                        dev.call_verify_start("any"),  # type: ignore[attr-defined]
+                        timeout=self._fprintd_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("fprintd claim/verify-start timed out; falling back")
+                    result = "env_fail"
+
+                if result != "env_fail":
+                    matched = await asyncio.wait_for(
+                        result_future, timeout=self._fprintd_timeout
+                    )
+                    result = "match" if matched else "no_match"
             except asyncio.TimeoutError:
+                # Verify-result timeout: no finger seen in time. Real
+                # (non-environmental) — counts toward the strike threshold.
                 log.info("fprintd verify timeout")
-                self._record_fprintd_failure(environmental=False)
+                result = "no_match"
             except Exception:
                 log.exception("fprintd verify failed")
-                self._record_fprintd_failure(environmental=False)
+                result = "verify_fail"
             finally:
+                # Bound cleanup too: if fprintd is wedged, verify-stop /
+                # release can hang just like the claim, which would defeat
+                # the whole fail-closed cap. Best-effort with a timeout.
                 for cleanup in (
                     lambda: dev.call_verify_stop(),  # type: ignore[attr-defined]
                     lambda: dev.call_release(),  # type: ignore[attr-defined]
                 ):
                     try:
-                        await cleanup()
+                        await asyncio.wait_for(
+                            cleanup(), timeout=self._fprintd_timeout
+                        )
                     except Exception:
                         pass
                 try:
@@ -292,22 +427,50 @@ class AuthBackend(QObject):
                 except Exception:
                     pass
 
-            if matched:
-                # Per-session reset of failure tally happens on the next
-                # lock; for now just zero so a later parallel attempt
-                # doesn't trip the fallback inappropriately.
+            if result == "match":
+                # Guard the success side effects against a stale worker:
+                # if a newer lock already advanced the generation, this
+                # match belongs to a dead session. Hold _state_lock across
+                # the stale check AND `_pam_abort.set()` so a concurrent
+                # reset_session()/new PAM worker can't interleave between
+                # them and get its fresh worker aborted by this stale one.
                 with self._state_lock:
-                    self._fprintd_failures = 0
-                self._pam_abort.set()
-                self.outcome.emit(AuthOutcome.SUCCESS)
+                    stale = generation != self._session_generation
+                    if stale:
+                        log.info(
+                            "dropping stale fprintd match (gen=%s, current=%s)",
+                            generation, self._session_generation,
+                        )
+                    else:
+                        # Per-session reset of failure tally happens on the
+                        # next lock; for now just zero so a later parallel
+                        # attempt doesn't trip the fallback inappropriately.
+                        self._fprintd_failures = 0
+                        # Abort the in-flight PAM worker for THIS session
+                        # while still holding the lock so it can't be a
+                        # freshly-started one from a newer generation.
+                        self._pam_abort.set()
+                if not stale:
+                    self._emit_outcome(AuthOutcome.SUCCESS, generation)
+            elif result == "env_fail":
+                self._record_fprintd_failure(
+                    environmental=True, generation=generation
+                )
             else:
-                # Real verify-no-match path — the fprintd state machine
-                # told us "wrong finger" via the `done=True` signal.
-                # Count this toward the 3-strike threshold so the PAM
-                # fallback eventually fires for a determined attacker.
-                self._record_fprintd_failure(environmental=False)
+                # "no_match" (wrong finger or verify-result timeout) and
+                # "verify_fail" (unexpected verify error) both count toward
+                # the strike threshold so the PAM fallback eventually fires.
+                self._record_fprintd_failure(
+                    environmental=False, generation=generation
+                )
         finally:
+            # Bound disconnect too. dbus-next's disconnect closes the
+            # local transport rather than round-tripping, so it should
+            # never block on a wedged peer — but cap it anyway so the
+            # worker (and `_fprintd_busy`) can never get pinned here.
             try:
-                await bus.disconnect()
+                await asyncio.wait_for(
+                    bus.disconnect(), timeout=self._fprintd_timeout
+                )
             except Exception:
                 pass

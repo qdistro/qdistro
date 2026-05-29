@@ -43,6 +43,12 @@ class LockController(QObject):
         self._error_message = ""
         self._info_message = ""
         self._pam_ready = False
+        # Stale-outcome race guard. `_unlocked` latches once any auth path
+        # succeeds for the current lock; a slower loser (e.g. a laggy PAM
+        # FAILED that raced in after fprintd already unlocked) is then
+        # dropped instead of flashing a spurious failure or corrupting
+        # state. Reset on each fresh lock via notify_lock_begin().
+        self._unlocked = False
 
         # Auth signals fire from a worker thread; explicit
         # QueuedConnection routes them through the main thread's
@@ -104,6 +110,7 @@ class LockController(QObject):
         """Called by WaylandBridge on every fresh lock_requested. Resets
         per-session auth state so the next lock cycle has a clean
         fprintd-failure counter."""
+        self._unlocked = False
         self._auth.reset_session()
 
     @pyqtSlot()
@@ -146,10 +153,46 @@ class LockController(QObject):
             self._infoMessageChanged.emit()
             self._set_show_info(True)
 
-    def _on_auth_outcome(self, outcome: AuthOutcome) -> None:
+    def _on_auth_outcome(self, payload: object) -> None:
+        # Outcomes from the real backend arrive tagged with the session
+        # generation they belong to: (AuthOutcome, generation). Bare
+        # AuthOutcome values (legacy callers / test stubs) are treated as
+        # untagged and always accepted.
+        generation: int | None = None
+        if isinstance(payload, tuple):
+            outcome, generation = payload  # type: ignore[assignment]
+        else:
+            outcome = payload  # type: ignore[assignment]
+
+        # Drop a stale outcome from a superseded lock session: a slow PAM
+        # or fprintd worker may deliver its result after the next lock
+        # already bumped the generation. Acting on it would corrupt the
+        # fresh session's state.
+        if generation is not None:
+            current = self._auth._current_generation()
+            if generation != current:
+                log.info(
+                    "dropping stale auth outcome %s (gen=%s, current=%s)",
+                    getattr(outcome, "name", outcome), generation, current,
+                )
+                return
+
+        # Drop a losing outcome that raced in after this lock already
+        # unlocked (e.g. PAM FAILED arriving just after fprintd SUCCESS in
+        # the same generation). Without this, the queued FAILED would flash
+        # a spurious "Authentication failed" over an already-unlocked
+        # session.
+        if self._unlocked:
+            log.info(
+                "dropping auth outcome %s; session already unlocked",
+                getattr(outcome, "name", outcome),
+            )
+            return
+
         self._set_unlock_in_progress(False)
         if outcome is AuthOutcome.SUCCESS:
             log.info("authentication successful")
+            self._unlocked = True
             self.currentText = ""
             self.unlocked.emit()
             return
