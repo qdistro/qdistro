@@ -1,0 +1,34 @@
+[Unit]
+Description=qdistro removable-media brokered mount/unmount service
+# Paired with qdistro-media-exec.socket; the socket owns the fd and
+# activates us on demand.
+Requires=qdistro-media-exec.socket
+After=qdistro-media-exec.socket qdistro-admin-broker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_media_exec.py
+User=root
+
+Restart=on-failure
+RestartSec=2s
+
+# Sandboxing. The service shells out to udisksctl (which talks to the
+# system udisks2 daemon over D-Bus) as the *caller's* uid after the
+# broker approves. It needs no new privileges of its own.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+# The helper only ever runs /usr/bin/udisksctl with a tokenized argv.
+# udisks2 itself performs the actual privileged mount over the system
+# bus; the helper holds no mount and needs no CAP_SYS_ADMIN.
+
+[Install]
+WantedBy=multi-user.target
