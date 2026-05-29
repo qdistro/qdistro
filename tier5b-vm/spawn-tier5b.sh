@@ -544,7 +544,9 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
         $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
-    TMP_XML="/tmp/qdistro-tier5b-${VM_NAME}-$$.xml"
+    # Private 0600 file in a 0700 admin-owned dir under /run/user/<uid>,
+    # not a predictable /tmp path (privileged virsh-define input).
+    TMP_XML="$(domain_xml_tmpfile qdistro-tier5b "$ADMIN_USER" "$ADMIN_RUNTIME")"
     NIC_XML_ESCAPED=$(printf '%s' "$NIC_XML" | sed 's|[\\/&]|\\&|g')
     sed \
         -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
@@ -561,7 +563,7 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         rm -f "$TMP_XML"
         exit 4
     fi
-    chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
+    # Already 0600 + admin-owned inside a 0700 admin-owned dir.
     if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
         echo "[tier5b] FAIL: virsh define failed" >&2
         rm -f "$TMP_XML"

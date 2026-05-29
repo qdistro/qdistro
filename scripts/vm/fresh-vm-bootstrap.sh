@@ -179,7 +179,9 @@ fi
 if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.key ]; then
     if command -v winpr-makecert >/dev/null 2>&1; then
         log "generating RDP TLS cert/key (winpr-makecert)..."
-        install -d -o admin -g admin /home/admin/qdwin-rdp
+        # Cert dir 0700 (private-key directory must not be group/world
+        # traversable); the private key itself is forced to 0600 below.
+        install -d -o admin -g admin -m 0700 /home/admin/qdwin-rdp
         runuser -u admin -- winpr-makecert -rdp -path /home/admin/qdwin-rdp \
             >/dev/null 2>&1 || log "  WARN: winpr-makecert failed"
         # winpr-makecert names files <hostname>.{crt,key}; rename.
@@ -189,6 +191,10 @@ if [ ! -f /home/admin/qdwin-rdp/rdp.crt ] || [ ! -f /home/admin/qdwin-rdp/rdp.ke
             && for f in *.key; do [ "$f" = rdp.key ] && continue; \
                  mv "$f" rdp.key 2>/dev/null; break; done)
         chown -R admin:admin /home/admin/qdwin-rdp 2>/dev/null || true
+        # Lock down: dir 0700, private key 0600, cert 0644 (public).
+        chmod 0700 /home/admin/qdwin-rdp 2>/dev/null || true
+        [ -f /home/admin/qdwin-rdp/rdp.key ] && chmod 0600 /home/admin/qdwin-rdp/rdp.key 2>/dev/null || true
+        [ -f /home/admin/qdwin-rdp/rdp.crt ] && chmod 0644 /home/admin/qdwin-rdp/rdp.crt 2>/dev/null || true
     else
         log "  WARN: winpr-makecert missing — §6.8 nested probes will fail"
     fi
@@ -414,6 +420,7 @@ if [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = "1" ]; then
     if [ -x "$SRC/qdistro/tier4-vm/build-guest-image.sh" ]; then
         log "building tier-4 base disk (QDISTRO_BUILD_TIER4_BASE=1)..."
         bash "$SRC/qdistro/tier4-vm/build-guest-image.sh" \
+            || log "  WARN: tier-4 base build failed; phase7-tier4-vm will SKIP"
     else
         log "  WARN: tier4-vm/build-guest-image.sh not staged; skipping"
     fi

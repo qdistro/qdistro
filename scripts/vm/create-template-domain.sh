@@ -50,6 +50,7 @@ fi
 mkdir -p "$IMG_DIR"
 
 TMPXML=$(mktemp --suffix=.xml)
+chmod 0600 "$TMPXML"
 trap 'rm -f "$TMPXML"' EXIT
 
 # Build the video stanza + (for the shim-free path) the qemu cmdline

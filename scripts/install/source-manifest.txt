@@ -1,0 +1,30 @@
+# qdistro source manifest — pinned commit SHAs for bootstrap source builds.
+#
+# Format (one repo per line, TAB- or space-separated):
+#   <repo>  <40-hex-commit-sha>
+#
+# Used by scripts/install/qdistro-bootstrap.sh in the HARDENED profiles
+# (daily-driver / release). Before any root `meson install` / `pip install`
+# from a source checkout, the bootstrap verifies the checkout is at exactly
+# the pinned commit (verify_repo_pin). This prevents a daily-driver/release
+# install from running root code out of an unpinned, signature-unverified
+# tree (e.g. a moved branch, a tampered mirror, or a stale sibling checkout).
+#
+# The `dev` profile ignores this manifest and uses shallow --branch clones.
+#
+# Releases SHOULD ship this file populated with the exact SHAs that were
+# built + tested for that release. The lines below are commented out on
+# purpose: an UNPINNED hardened install must FAIL LOUDLY ("no manifest pin")
+# rather than silently build from whatever HEAD happens to be — fill in the
+# real SHAs (e.g. via your release tooling) before a hardened install.
+#
+# Example (replace the SHAs with the real release commits):
+# qdistro      0000000000000000000000000000000000000000
+# qdwin        0000000000000000000000000000000000000000
+# qdshell      0000000000000000000000000000000000000000
+# qdlocker     0000000000000000000000000000000000000000
+# qdbrowser    0000000000000000000000000000000000000000
+# qdgreeter    0000000000000000000000000000000000000000
+# qterminator  0000000000000000000000000000000000000000
+# qnotebook    0000000000000000000000000000000000000000
+# qfileman     0000000000000000000000000000000000000000

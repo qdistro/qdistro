@@ -208,7 +208,12 @@ run_installer_in_vm() {
     local distro="$1" name="qdistro-baremetal-test-$distro"
     log "[$distro] running bare-metal-install.sh in VM..."
     local cmd
-    cmd="cd /opt/qdistro-src/qdistro && bash scripts/install/bare-metal-install.sh"
+    # --profile=dev: this is a DISPOSABLE VM test harness that fetches
+    # sources over plain HTTP tarballs and passes throwaway passwords on
+    # argv. Those shortcuts are gated behind the dev profile; the hardened
+    # default (daily-driver) would reject the argv passwords and require a
+    # pinned source manifest, which is intentionally not how this test runs.
+    cmd="cd /opt/qdistro-src/qdistro && bash scripts/install/bare-metal-install.sh --profile=dev"
     cmd+=" --admin-password='$ADMIN_PW'"
     cmd+=" --user='$USER_NAME' --user-password='$USER_PW'"
     cmd+=" --repo-root=/opt/qdistro-src --yes --noninteractive"

@@ -38,7 +38,21 @@ echo "qdistro" > /etc/hostname
 ssh-keygen -A
 systemctl enable sshd.service NetworkManager.service
 
-install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
+# Sudoers policy is profile-gated. This config.sh bakes a RELEASE image by
+# default, which must NOT ship `admin ALL=(ALL) NOPASSWD: ALL` — a baked-in
+# passwordless-root rule on every shipped disk is exactly the escape hatch the
+# hardening review flagged. Cross-uid privileged actions on a release image go
+# through qsu / the broker's scoped approval; admin keeps password-required
+# sudo via wheel membership. Set QDISTRO_PROFILE=dev when baking a disposable
+# developer image to restore the passwordless rule.
+QDISTRO_IMAGE_PROFILE="${QDISTRO_PROFILE:-release}"
+if [ "$QDISTRO_IMAGE_PROFILE" = dev ]; then
+    install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
+    echo "[qdistro-image] WARN: dev profile — baked passwordless sudoers (admin NOPASSWD: ALL); NOT for release"
+else
+    rm -f /etc/sudoers.d/99-admin
+    echo "[qdistro-image] hardened profile ($QDISTRO_IMAGE_PROFILE): no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
+fi
 
 # Build the three sibling projects out of /root/qdistro-src/.
 echo "[qdistro-image] building qdwin..."
@@ -145,12 +159,22 @@ install -d -m 0755 /etc/greetd
 # _greeter system user owns the unprivileged greeter process; PAM
 # does the privilege handoff at start_session time.
 if ! getent passwd _greeter >/dev/null; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin _greeter || true
+    useradd --system --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin _greeter || true
+else
+    usermod --shell /usr/sbin/nologin --home /nonexistent _greeter 2>/dev/null || true
 fi
 
 install -m 0644 "$QD/deploy/greetd-config.toml"          /etc/greetd/config.toml
 install -m 0644 "$QD/deploy/greetd-config-fallback.toml" /etc/greetd/config-fallback.toml
 install -m 0644 "$QD/deploy/greetd-fallback.service"     /etc/systemd/system/greetd-fallback.service
+
+# systemd hardening drop-in for the distro-packaged greetd.service.
+if [ -f "$QD/deploy/greetd-hardening.conf" ]; then
+    install -d -m 0755 /etc/systemd/system/greetd.service.d
+    install -m 0644 "$QD/deploy/greetd-hardening.conf" \
+        /etc/systemd/system/greetd.service.d/10-qdistro-hardening.conf
+fi
 install -m 0755 "$QD/deploy/qdwin-session-launcher.sh"   /usr/local/bin/qdwin-session-launcher
 
 # Install qdgreeter package files (the Python module + entry point are

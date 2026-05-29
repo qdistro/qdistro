@@ -26,5 +26,25 @@ KeyringMode=shared
 UtmpIdentifier=tty4
 UtmpMode=user
 
+# --- systemd hardening (greetd-related unit) ----------------------------
+# greetd legitimately needs to open VTs, run PAM, and spawn the post-auth
+# session, so the most aggressive sandboxing knobs (PrivateUsers,
+# RootDirectory, ProtectKernelModules, NoNewPrivileges=yes) would break the
+# seat/VT hand-off and PAM privilege transition and are deliberately NOT set.
+# The directives below are the subset compatible with a login manager that
+# still shrink the greeter's attack surface:
+ProtectSystem=strict
+ReadWritePaths=/run /var/log /var/lib/systemd /dev
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# Private /tmp so a hostile local user cannot plant predictable files in the
+# greeter's view (defends the same predictable-/tmp class hardened elsewhere).
+PrivateTmp=yes
+SystemCallArchitectures=native
+
 [Install]
 WantedBy=graphical.target
