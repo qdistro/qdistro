@@ -1275,7 +1275,6 @@ class Broker(dbus.service.Object):
         """
         uid, pid, exe, _st = self._peer_info(sender, conn)
         action_s = str(action)
-        argv = _argv_from_details(details)
         if not self.ratelimit.check(uid, action_s):
             raise dbus.DBusException(
                 f"Rate limit exceeded for uid={uid} "
@@ -1292,6 +1291,18 @@ class Broker(dbus.service.Object):
             pid, _selector_from_details(details, "sandbox_engine"),
             _selector_from_details(details, "app_id"),
             action_s, uid, exe)
+        return self._decide_check(
+            uid=uid, pid=pid, exe=exe, action_s=action_s,
+            details=details, lin_app=lin_app, lin_engine=lin_engine)
+
+    def _decide_check(self, *, uid: int, pid: int, exe: str, action_s: str,
+                      details: dict, lin_app: str, lin_engine: str) -> str:
+        """Shared rules→cache→hooks resolution for the synchronous
+        permission gates. The (uid, pid, exe, lin_app, lin_engine) subject
+        is the process being decided FOR — the D-Bus caller in
+        CheckPermission, or the launcher-attested originating client in
+        CheckPermissionForClient. Returns "allow"/"deny"/"unknown"."""
+        argv = _argv_from_details(details)
         rule = self.rules.match(
             uid=uid, action=action_s, exe=exe,
             app_id=lin_app,
@@ -1340,6 +1351,108 @@ class Broker(dbus.service.Object):
         except Exception:  # noqa: BLE001
             pass
         return "unknown"
+
+    def _resolve_client_for_portal(self, client_pid: int,
+                                   client_starttime: int):
+        """Resolve a portal frontend's relayed client pid to its live
+        kernel identity, anchored on the relayed starttime. Returns
+        ``(uid, exe, ok)``: ok is False (fail closed) when the process is
+        gone or the starttime drifted (PID reuse). The frontend is trusted
+        only to *name* a pid it kernel-authenticated on the app's own
+        connection; the broker re-reads /proc here so a recycled pid can
+        never inherit an old app's decision."""
+        live_exe, live_start = _read_proc_identity(client_pid)
+        if live_start == 0:
+            return (-1, "?", False)
+        if client_starttime and int(live_start) != int(client_starttime):
+            return (-1, live_exe, False)
+        live_uid = _read_proc_uid(client_pid)
+        if live_uid is None:
+            return (-1, live_exe, False)
+        return (int(live_uid), live_exe, True)
+
+    @dbus.service.method(BUS_NAME, in_signature="sa{sv}ut", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def CheckPermissionForClient(self, action: str, details: dict,
+                                 client_pid: int, client_starttime: int,
+                                 sender=None, conn=None) -> str:
+        """Synchronous gate for a trusted portal **frontend** (Option A of
+        the permission-lineage portal design). The frontend owns
+        ``org.freedesktop.portal.Desktop`` on a silo session bus, so it can
+        kernel-authenticate the originating app via
+        ``GetConnectionUnixProcessID`` / SO_PEERCRED on the app's *own* D-Bus
+        connection. It relays that ``(client_pid, client_starttime)`` here;
+        the broker resolves the CLIENT (not the frontend) against the
+        launch-record store and decides for it.
+
+        Root-only (D-Bus policy + the in-method uid-0 check): the frontend
+        runs privileged like ``qsu/root-exec``. A frontend-supplied pid is
+        trusted only because (a) only the root frontend may call this and
+        (b) the broker re-verifies the pid against /proc and anchors on the
+        relayed starttime — so a recycled/gone pid fails closed. Same posture
+        as the cross-silo source resolution; see findings P1-1 / portal §.
+        """
+        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        if caller_uid != 0:
+            raise dbus.DBusException(
+                f"CheckPermissionForClient restricted to root portal "
+                f"frontends; got uid {caller_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        action_s = str(action)
+        try:
+            spid = int(client_pid)
+            sstart = int(client_starttime)
+        except (TypeError, ValueError):
+            return "unknown"
+        cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
+        if not ok:
+            # The named client is gone or its pid was recycled — we cannot
+            # authenticate it, so no rule/cache row may be applied for it.
+            return "unknown"
+        if not self.ratelimit.check(cuid, action_s):
+            raise dbus.DBusException(
+                f"Rate limit exceeded for client uid={cuid} "
+                f"action={action_s!r}. Check rejected.",
+                name=BUS_NAME + ".RateLimited",
+            )
+        lin_engine, lin_app = self._lineage_selectors(
+            spid, _selector_from_details(details, "sandbox_engine"),
+            _selector_from_details(details, "app_id"),
+            action_s, cuid, cexe)
+        return self._decide_check(
+            uid=cuid, pid=spid, exe=cexe, action_s=action_s,
+            details=details, lin_app=lin_app, lin_engine=lin_engine)
+
+    @dbus.service.method(BUS_NAME, in_signature="sa{sv}ut", out_signature="i",
+                         sender_keyword="sender", connection_keyword="conn")
+    def RequestPermissionForClient(self, action: str, details: dict,
+                                   client_pid: int, client_starttime: int,
+                                   sender=None, conn=None) -> int:
+        """Async (admin-prompt) twin of CheckPermissionForClient for a
+        trusted portal frontend. Enqueues a pending request whose subject is
+        the launcher-attested originating client, not the frontend. Root-only.
+        Returns the request id, or 0 when the client can't be authenticated.
+        """
+        caller_uid, _cp, _ce, _ = self._peer_info(sender, conn)
+        if caller_uid != 0:
+            raise dbus.DBusException(
+                f"RequestPermissionForClient restricted to root portal "
+                f"frontends; got uid {caller_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        try:
+            spid = int(client_pid)
+            sstart = int(client_starttime)
+        except (TypeError, ValueError):
+            return 0
+        cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
+        if not ok:
+            return 0
+        # _enqueue resolves the client pid via _lineage_selectors itself, so
+        # the pending request carries the attested app_id/sandbox_engine.
+        return self._enqueue(cuid, spid, cexe, sstart,
+                             str(action), details, delegated=False)
 
     @dbus.service.method(BUS_NAME,
                          in_signature="utusssss", out_signature="b",
