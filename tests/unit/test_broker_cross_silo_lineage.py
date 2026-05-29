@@ -266,3 +266,104 @@ class TestReceiveAndHandoff:
         assert broker.CheckHandoffActivation(
             "user1", "admin", "", "", "", False,
             SOURCE_PID, SOURCE_START) == "allow"
+
+
+# --- enforce edge cases ------------------------------------------------
+
+class TestEnforceEdges:
+    def test_deny_rule_still_denies_verified_source(self, broker, rules_dir,
+                                                    fake_source_live,
+                                                    monkeypatch):
+        # A verified source whose silo matches an explicit *deny* rule is
+        # denied — attestation feeds the rule, it does not bypass it.
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="user1", dst="admin", decision="deny")
+        broker.rules.reload()
+        _register_source(broker, silo="user1")
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "deny"
+
+    def test_verified_source_no_rule_default_denies(self, broker, rules_dir,
+                                                    fake_source_live,
+                                                    monkeypatch):
+        # Verified source but no rule for its attested silo pair → the
+        # cross-silo default-deny still applies.
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="otheruser", dst="admin")
+        broker.rules.reload()
+        _register_source(broker, silo="user1")
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "deny"
+
+    def test_source_starttime_zero_still_resolves(self, broker, rules_dir,
+                                                  fake_source_live,
+                                                  monkeypatch):
+        # When the relayed starttime is 0 (qdwin could not read it) the
+        # drift check is skipped, but the launch-record lookup still anchors
+        # on the live starttime, so a registered source resolves + allows.
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="user1", dst="admin")
+        broker.rules.reload()
+        _register_source(broker, silo="user1")
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=0) == "allow"
+
+    def test_source_proc_gone_denied(self, broker, rules_dir, monkeypatch):
+        # The relayed pid names no live process (starttime read → 0) →
+        # unresolvable → cross-silo deny.
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        monkeypatch.setattr(pi, "read_exe_and_starttime",
+                            lambda pid: ("?", 0))
+        monkeypatch.setattr(pi, "read_uid", lambda pid: None)
+        monkeypatch.setattr(pi, "read_selinux_label", lambda pid: "")
+        monkeypatch.setattr(pi, "read_cgroup", lambda pid: "")
+        _transfer_rule(rules_dir, src="user1", dst="admin")
+        broker.rules.reload()
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "deny"
+
+    def test_registered_source_exe_mismatch_denied(self, broker, rules_dir,
+                                                   fake_source_live,
+                                                   monkeypatch):
+        # Record carries a different exe than the live process → resolver
+        # axis mismatch → unverified → deny (anti exe-swap).
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="user1", dst="admin")
+        broker.rules.reload()
+        broker.launch_records.register(
+            silo="user1", uid=SOURCE_UID, pid=SOURCE_PID,
+            starttime=SOURCE_START, exe="/usr/bin/evil",
+            sandbox_engine="qdistro.tier3", app_id="qdistro.tier3.user1")
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "deny"
+
+    def test_hard_deny_writes_audit_row(self, broker, rules_dir,
+                                        fake_source_live, monkeypatch):
+        # A cross-silo deny for want of an attested source leaves a
+        # forensic row (findings Q#7).
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="user1", dst="admin")
+        broker.rules.reload()
+        _transfer(broker, src="user1", dst="admin")  # no source pid
+        rows = broker.audit.recent(20)
+        assert any("qdistro.lineage.source_deny:clipboard.transfer"
+                   in str(r["action"]) for r in rows)
+
+    def test_shadow_does_not_override_diverging_claim(self, broker, rules_dir,
+                                                      fake_source_live,
+                                                      monkeypatch):
+        # Shadow: the source is really user1 but the caller claims "admin"
+        # to hit an admin:admin rule. Shadow keeps the legacy verdict
+        # (allow) — it only logs the divergence; enforce is what overrides.
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", False)
+        _transfer_rule(rules_dir, src="admin", dst="admin")
+        broker.rules.reload()
+        _register_source(broker, silo="user1")
+        assert _transfer(broker, src="admin", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "allow"
