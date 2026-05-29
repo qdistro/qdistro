@@ -58,6 +58,193 @@ RULES_DIR = "/etc/qdistro/rules.d"
 
 _log = logging.getLogger("qdistro.admin_app")
 
+
+# ---------------------------------------------------------------------------
+# Bounded broker-error labels
+# ---------------------------------------------------------------------------
+#
+# Raw D-Bus exception strings (e.g. `org.qdistro.AdminBroker1.RulesEngineRefused:
+# rule 'foo.yaml' at /etc/qdistro/rules.d/foo.yaml: scope 'forever' ...`) can
+# carry file paths, internal identifiers, and stack-y detail that should not be
+# rendered in a shoulder-visible modal. They belong in logs. The admin sees a
+# short, bounded, human-readable label for the *known* typed broker errors; the
+# full raw exception is always logged (and, where a widget supports it, kept
+# behind an explicit "Details" affordance).
+#
+# Keys are the D-Bus error names the broker actually raises (enumerated from
+# broker/qdistro_admin_broker.py and SessionManager). Anything not in this map
+# falls back to a generic "Broker error" label — never the raw string.
+_BUS_NAME = "org.qdistro.AdminBroker1"
+_SM_BUS_NAME = "org.qdistro.SessionManager1"
+
+# (title, label) for each known typed broker error name.
+_FRIENDLY_BROKER_ERRORS: dict[str, tuple[str, str]] = {
+    f"{_BUS_NAME}.ScopeNotPermitted": (
+        "Scope not permitted",
+        "The broker rejected the chosen approval scope for this request. "
+        "A narrower scope (for example “Just this once”) may be "
+        "accepted. The request is still pending — you can retry.",
+    ),
+    f"{_BUS_NAME}.RulesEngineRefused": (
+        "Rules engine refused",
+        "The broker’s rules engine refused this operation. The rule or "
+        "decision did not pass validation.",
+    ),
+    f"{_BUS_NAME}.RateLimited": (
+        "Rate limited",
+        "Too many requests in a short window. Wait a moment and try again.",
+    ),
+    f"{_BUS_NAME}.InvalidArgument": (
+        "Invalid argument",
+        "The broker rejected one of the supplied values as invalid.",
+    ),
+    f"{_BUS_NAME}.BadArgument": (
+        "Invalid argument",
+        "The broker rejected one of the supplied values as invalid.",
+    ),
+    f"{_BUS_NAME}.AccessDenied": (
+        "Access denied",
+        "The broker denied this operation for the current admin identity.",
+    ),
+    f"{_BUS_NAME}.Denied": (
+        "Denied",
+        "The broker denied this operation.",
+    ),
+    f"{_BUS_NAME}.AuditUnavailable": (
+        "Audit unavailable",
+        "The broker could not write its audit log, so it failed the "
+        "operation closed as a safety measure.",
+    ),
+    f"{_BUS_NAME}.CallerGone": (
+        "Caller gone",
+        "The requesting process exited before the decision was recorded.",
+    ),
+    f"{_BUS_NAME}.CallerIdentityMismatch": (
+        "Caller identity mismatch",
+        "The requesting process identity changed; the broker refused to act "
+        "on a stale request.",
+    ),
+    f"{_BUS_NAME}.RelayFailed": (
+        "Relay failed",
+        "The broker could not relay the decision to the user session.",
+    ),
+    f"{_BUS_NAME}.CacheGcFailed": (
+        "Cache cleanup failed",
+        "The broker could not garbage-collect its approval cache.",
+    ),
+    f"{_BUS_NAME}.SnapshotFailed": (
+        "Snapshot failed",
+        "The broker could not take the requested snapshot.",
+    ),
+    f"{_BUS_NAME}.SnapperUnavailable": (
+        "Snapshots unavailable",
+        "The snapshot subsystem (snapper) is not available on this host.",
+    ),
+    f"{_BUS_NAME}.SiloManagerUnreachable": (
+        "Silo manager unreachable",
+        "The broker could not reach the session/silo manager.",
+    ),
+    f"{_BUS_NAME}.SiloNotActive": (
+        "Silo not active",
+        "The target silo is not currently active.",
+    ),
+    f"{_BUS_NAME}.TargetNotReady": (
+        "Target not ready",
+        "The target service is not ready to handle this request yet.",
+    ),
+    f"{_BUS_NAME}.PrintAuditError": (
+        "Audit read failed",
+        "The broker could not read the audit log for this request.",
+    ),
+    f"{_BUS_NAME}.Internal": (
+        "Broker error",
+        "The broker hit an internal error and could not complete the "
+        "operation.",
+    ),
+    # Bus-level failures (broker not running / restarting).
+    "org.freedesktop.DBus.Error.ServiceUnknown": (
+        "Broker unavailable",
+        "The admin broker is not running. Start "
+        "qdistro-admin-broker.service and try again.",
+    ),
+    "org.freedesktop.DBus.Error.NameHasNoOwner": (
+        "Broker unavailable",
+        "The admin broker is not running. Start "
+        "qdistro-admin-broker.service and try again.",
+    ),
+    "org.freedesktop.DBus.Error.NoReply": (
+        "Broker not responding",
+        "The admin broker did not reply in time. It may be restarting; "
+        "try again in a moment.",
+    ),
+    "org.freedesktop.DBus.Error.UnknownMethod": (
+        "Unsupported by broker",
+        "The running broker does not support this operation. It may be an "
+        "older version.",
+    ),
+    # Session manager raises its own typed errors (see
+    # session_manager/qdistro_session_manager.py SessionError subclasses).
+    f"{_SM_BUS_NAME}.UnknownSilo": (
+        "Unknown silo",
+        "The named silo does not exist.",
+    ),
+    f"{_SM_BUS_NAME}.SiloExists": (
+        "Silo already exists",
+        "A silo with that name already exists.",
+    ),
+    f"{_SM_BUS_NAME}.SiloBusy": (
+        "Silo busy",
+        "The silo is busy with another operation; try again shortly.",
+    ),
+    f"{_SM_BUS_NAME}.BadState": (
+        "Silo in wrong state",
+        "The silo is not in a state that allows this operation.",
+    ),
+    f"{_SM_BUS_NAME}.BadArgument": (
+        "Invalid argument",
+        "The session manager rejected one of the supplied values.",
+    ),
+    f"{_SM_BUS_NAME}.NotAuthorized": (
+        "Not authorized",
+        "The session manager denied this operation for the current "
+        "admin identity.",
+    ),
+    f"{_SM_BUS_NAME}.Generic": (
+        "Session manager error",
+        "The session manager could not complete the operation.",
+    ),
+}
+
+_GENERIC_BROKER_ERROR = (
+    "Broker error",
+    "The broker rejected this operation. See the application log "
+    "(stderr) for the full diagnostic detail.",
+)
+
+
+def _friendly_broker_error(exc: Exception) -> tuple[str, str]:
+    """Map a broker D-Bus exception to a short, bounded (title, label).
+
+    Raw D-Bus strings can leak file paths and internal identifiers into a
+    shoulder-visible dialog, so callers should render only the returned
+    (title, label) to the user. The full raw exception is logged here at
+    WARNING so nothing is lost for operators reading stderr/journald.
+
+    Unknown error names fall back to a generic label — never the raw string.
+    """
+    name = ""
+    try:
+        getter = getattr(exc, "get_dbus_name", None)
+        if callable(getter):
+            name = getter() or ""
+    except Exception:  # noqa: BLE001 - defensive; never let logging break UX
+        name = ""
+    # Log the full raw exception (name + message) for operators. This is the
+    # only place the raw string is surfaced; the UI text never includes it.
+    _log.warning("broker error %s: %s", name or "(no dbus name)", exc)
+    return _FRIENDLY_BROKER_ERRORS.get(name, _GENERIC_BROKER_ERROR)
+
+
 # ---------------------------------------------------------------------------
 # StatusNotifierItem D-Bus interface
 # ---------------------------------------------------------------------------
@@ -841,6 +1028,9 @@ class DetailPane(QWidget):
 
         lay.addStretch()
         self._current_req: dict | None = None
+        # rid -> (bounded guidance label, raw diagnostic) for broker
+        # refusals on still-pending requests (e.g. ScopeNotPermitted).
+        self._broker_errors: dict[int, tuple[str, str]] = {}
 
     def show_request(self, req: dict):
         self._rid = req["id"]
@@ -850,23 +1040,69 @@ class DetailPane(QWidget):
         self.lbl_exe.setText(req["exe"])
         details = req.get("details") or {}
         self.lbl_details.setText("Details: " + (", ".join(f"{k}={v}" for k, v in details.items()) or "(none)"))
-        
-        # Hide error widget when showing a new request
-        self.error_widget.hide()
-        
-        # Check for error details in the request
-        if "error" in details:
+
+        # Hide error widget and reset its raw-detail toggle when showing a
+        # (re)selected request — start from a clean, collapsed state.
+        self._reset_error_widget()
+
+        # A broker refusal recorded for THIS pending request (e.g.
+        # ScopeNotPermitted) is re-surfaced inline so it persists in the
+        # detail view, not only as a transient popup. The request stays in
+        # the pending list and remains retryable. (item 3)
+        broker_err = self._broker_errors.get(self._rid)
+        if broker_err is not None:
+            label, raw = broker_err
+            self.error_widget.set_guidance(label)
+            self.error_widget.error_text.setPlainText(raw)
+            self.error_widget.show()
+        # Check for error details carried on the request itself.
+        elif "error" in details:
             self._show_error(details["error"])
+
+    def _reset_error_widget(self) -> None:
+        self.error_widget.set_guidance("")
+        self.error_widget.toggle_button.setChecked(False)
+        self.error_widget.error_text.hide()
+        self.error_widget.error_text.clear()
+        self.error_widget.toggle_button.setText("Show Error Details")
+        self.error_widget.hide()
 
     def _show_error(self, error_msg: str):
         self.error_widget.error_text.setPlainText(error_msg)
         self.error_widget.show()
+
+    def set_broker_error(self, rid: int, label: str, raw: str) -> None:
+        """Record a broker refusal for a pending request so it surfaces
+        inline in the detail view (not only as a transient popup) and
+        survives refreshes while the request stays pending."""
+        self._broker_errors[rid] = (label, raw)
+        # If the failed request is the one on screen, surface it now.
+        if self._rid == rid:
+            self._reset_error_widget()
+            self.error_widget.set_guidance(label)
+            self.error_widget.error_text.setPlainText(raw)
+            self.error_widget.show()
+
+    def clear_broker_error(self, rid: int) -> None:
+        self._broker_errors.pop(rid, None)
 
     def clear(self):
         self._rid = None
         self._current_req = None
         self.lbl_user.setText("(no selection)")
         self.lbl_action.setText(""); self.lbl_exe.setText(""); self.lbl_details.setText("")
+        self._reset_error_widget()
+
+    def reset_scope(self) -> None:
+        """Reset the scope picker back to the safe default ("once").
+
+        A non-`once` scope (forever/until/exe/...) chosen for one request
+        must NOT silently carry across to the next request as the default.
+        Called after each decision so every fresh request starts at the
+        narrowest scope. (item 2)
+        """
+        for key, rb in self._scope_buttons:
+            rb.setChecked(key == "once")
 
     def _emit(self, decision: str):
         if self._rid is None:
@@ -877,6 +1113,10 @@ class DetailPane(QWidget):
                 scope = key
                 break
         self.decided.emit(self._rid, decision, scope)
+        # Reset the picker to "once" immediately so a non-`once` scope
+        # never silently persists as the default for the next request,
+        # even if the broker refuses and the request stays pending. (item 2)
+        self.reset_scope()
 
     def _emit_rule_from_this(self):
         if self._current_req is not None:
@@ -928,8 +1168,9 @@ class CacheTab(QWidget):
             rows = self.broker.list_cache()
         except dbus.DBusException as e:
             # Transient broker outage — don't blow up the whole app.
-            QMessageBox.warning(self, "Broker unavailable",
-                                f"Couldn't list the cache:\n\n{e}")
+            title, label = _friendly_broker_error(e)
+            QMessageBox.warning(self, title,
+                                f"Couldn't list the cache.\n\n{label}")
             return
         self.model.removeRows(0, self.model.rowCount())
         for r in rows:
@@ -960,7 +1201,8 @@ class CacheTab(QWidget):
         try:
             ok = self.broker.revoke_approval(int(row["id"]))
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Revoke failed", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Revoke failed", label)
             return
         if not ok:
             QMessageBox.information(self, "Nothing to revoke",
@@ -1131,8 +1373,9 @@ class SilosTab(QWidget):
         try:
             rows = self.session.list_silos()
         except dbus.DBusException as e:
-            QMessageBox.warning(self, "Session manager unavailable",
-                                f"Couldn't list silos:\n\n{e}")
+            title, label = _friendly_broker_error(e)
+            QMessageBox.warning(self, title,
+                                f"Couldn't list silos.\n\n{label}")
             return
         self.model.removeRows(0, self.model.rowCount())
         for r in rows:
@@ -1179,7 +1422,8 @@ class SilosTab(QWidget):
         try:
             self.session.create(name, uid)
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Create failed", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Create failed", label)
             return
         self.refresh()
 
@@ -1198,8 +1442,9 @@ class SilosTab(QWidget):
             elif action == "resume":
                 self.session.resume(name)
         except dbus.DBusException as e:
+            _title, label = _friendly_broker_error(e)
             QMessageBox.critical(self, f"{action.capitalize()} failed",
-                                 str(e))
+                                 label)
             return
         self.refresh()
 
@@ -1218,7 +1463,8 @@ class SilosTab(QWidget):
         try:
             self.session.delete(name)
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Delete failed", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Delete failed", label)
             return
         self.refresh()
 
@@ -1752,7 +1998,8 @@ class MainWindow(QMainWindow):
         try:
             pending = self.broker.get_pending()
         except dbus.DBusException as e:
-            self.statusBar().showMessage(f"broker unavailable: {e}", 8000)
+            title, _label = _friendly_broker_error(e)
+            self.statusBar().showMessage(title, 8000)
             return
 
         # Sync NotificationManager arrival-time map with actual pending set.
@@ -1827,13 +2074,41 @@ class MainWindow(QMainWindow):
             # The broker refused to record this decision. For
             # ScopeNotPermitted the pending request is still retryable;
             # for audit failures it has already failed closed. In both
-            # cases the admin must get an explicit modal instead of a
-            # silent no-op or an easy-to-miss inline detail.
-            QMessageBox.critical(
-                self, "Decision not recorded",
-                f"The broker could not record this decision and denied "
-                f"the request as a safety measure.\n\n{e}",
-            )
+            # cases the admin gets an explicit modal AND the refusal is
+            # recorded against the request so it persists inline in the
+            # detail view (with expandable raw detail) after refresh —
+            # not only as a transient popup. (item 3)
+            #
+            # The modal shows a bounded, shoulder-safe label; the raw
+            # D-Bus string is logged by _friendly_broker_error and kept
+            # behind the detail pane's collapsible "Show Error Details"
+            # affordance, never in the dialog body. (item 1)
+            title, label = _friendly_broker_error(e)
+            self.detail.set_broker_error(rid, label, str(e))
+            # Tailor the modal copy: a policy refusal (e.g.
+            # ScopeNotPermitted) leaves the request pending and retryable,
+            # so don't claim it was "denied as a safety measure" — that
+            # phrasing only fits fail-closed errors (e.g. audit failure).
+            dbus_name = ""
+            try:
+                dbus_name = e.get_dbus_name() or ""
+            except Exception:  # noqa: BLE001
+                dbus_name = ""
+            if dbus_name.endswith(".ScopeNotPermitted"):
+                body = (
+                    f"{title}: the broker rejected the chosen scope for "
+                    f"this decision. The request is still pending — you "
+                    f"can retry with a different scope.\n\n{label}"
+                )
+            else:
+                body = (
+                    f"{title}: the broker could not record this decision "
+                    f"and denied the request as a safety measure.\n\n{label}"
+                )
+            QMessageBox.critical(self, "Decision not recorded", body)
+        else:
+            # Decision recorded — clear any stale refusal note for this rid.
+            self.detail.clear_broker_error(rid)
         self.refresh()
 
     def _on_tab_changed(self, index: int) -> None:
@@ -2147,7 +2422,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "rules_tab"):
                 self.rules_tab.refresh()
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Error saving rule", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Error saving rule", label)
 
     @staticmethod
     def _yaml_is_allow_all(yaml_body: str) -> bool:
@@ -2219,7 +2495,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "rules_tab"):
                 self.rules_tab.refresh()
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Error saving rule", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Error saving rule", label)
 
     # ----- bulk decide -----------------------------------------------------
     #
@@ -2254,9 +2531,10 @@ class MainWindow(QMainWindow):
         try:
             pending = self.broker.get_pending()
         except dbus.DBusException as e:
+            title, label = _friendly_broker_error(e)
             QMessageBox.critical(
-                self, "Broker unavailable",
-                f"Couldn't fetch pending requests:\n\n{e}")
+                self, title,
+                f"Couldn't fetch pending requests.\n\n{label}")
             return
         if scope_filter is not None:
             kind, val = scope_filter
@@ -2285,6 +2563,13 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
+
+        # The chosen `scope` is already captured in the local above and the
+        # async loop closes over it, so resetting the picker here is safe
+        # and does not change which scope this batch applies. Reset so a
+        # non-`once` scope does not silently carry forward to the next
+        # (single or bulk) decision. (item 2)
+        self.detail.reset_scope()
 
         rids = [int(r["id"]) for r in pending]
         total = len(rids)
@@ -2316,7 +2601,14 @@ class MainWindow(QMainWindow):
                 self.broker.decide(rid, decision, scope)
                 state["ok"] += 1
             except dbus.DBusException as e:
-                state["failures"].append((rid, str(e)))
+                # Bounded label for the inline summary; raw goes to stderr
+                # (via _friendly_broker_error's WARNING log + the print
+                # below) and is recorded against the request so it also
+                # surfaces inline in the detail view while it stays
+                # pending. (items 1 + 3)
+                _title, label = _friendly_broker_error(e)
+                state["failures"].append((rid, label))
+                self.detail.set_broker_error(rid, label, str(e))
                 print(
                     f"[admin_app] bulk-{decision} rid={rid} failed: {e}",
                     file=sys.stderr,
@@ -2417,8 +2709,9 @@ class RulesTab(QWidget):
         try:
             rules = self.broker.list_rules()
         except dbus.DBusException as e:
-            QMessageBox.warning(self, "Broker unavailable",
-                                f"Couldn't list rules:\n\n{e}")
+            title, label = _friendly_broker_error(e)
+            QMessageBox.warning(self, title,
+                                f"Couldn't list rules.\n\n{label}")
             return
         self.model.removeRows(0, self.model.rowCount())
         for r in rules:
@@ -2456,8 +2749,9 @@ class RulesTab(QWidget):
         try:
             self.broker.reload_rules()
         except dbus.DBusException as e:
+            _title, label = _friendly_broker_error(e)
             QMessageBox.critical(self, "Reload failed",
-                                 f"ReloadRules failed:\n\n{e}")
+                                 f"ReloadRules failed.\n\n{label}")
             return
         # The RulesReloaded signal will trigger refresh() via the
         # coalesced timer, but do an immediate refresh too so the
@@ -2496,7 +2790,8 @@ class RulesTab(QWidget):
                 self, "Success", f"{success_prefix} {result}")
             self.refresh()
         except dbus.DBusException as e:
-            QMessageBox.critical(self, "Error saving rule", str(e))
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(self, "Error saving rule", label)
 
     def _on_delete_rule(self) -> None:
         row = self._selected_row()
@@ -2526,6 +2821,10 @@ class RulesTab(QWidget):
         try:
             _deleted, _count, errors = self.broker.delete_rule(filepath, name)
         except dbus.DBusException as e:
+            # Always route through _friendly_broker_error so the raw D-Bus
+            # diagnostic is logged (and never shown raw) on every branch,
+            # including the UnknownMethod special-case below. (item 1)
+            _title, label = _friendly_broker_error(e)
             dbus_name = ""
             try:
                 dbus_name = e.get_dbus_name() or ""
@@ -2541,7 +2840,7 @@ class RulesTab(QWidget):
                 return
             QMessageBox.critical(
                 self, "Error deleting rule",
-                f"Broker refused or failed to delete {name!r}:\n\n{e}")
+                f"Broker refused or failed to delete {name!r}.\n\n{label}")
             self.refresh()
             return
         # The broker reloads as part of DeleteRule; surface any
@@ -2832,8 +3131,9 @@ class WorkflowsTab(QWidget):
         try:
             ok = self.broker.approve_workflow_run(run_id)
         except dbus.DBusException as e:
+            _title, label = _friendly_broker_error(e)
             QMessageBox.warning(self, "Approve failed",
-                                f"Couldn't approve run:\n\n{e}")
+                                f"Couldn't approve run.\n\n{label}")
             return
         if not ok:
             QMessageBox.warning(
@@ -2860,8 +3160,9 @@ class WorkflowsTab(QWidget):
             workflows = self.broker.list_workflows()
             runs = self.broker.list_workflow_runs(MAX_HISTORY_ENTRIES)
         except dbus.DBusException as e:
-            QMessageBox.warning(self, "Broker unavailable",
-                                f"Couldn't list workflows:\n\n{e}")
+            title, label = _friendly_broker_error(e)
+            QMessageBox.warning(self, title,
+                                f"Couldn't list workflows.\n\n{label}")
             return
         self._populate_workflows(workflows)
         self._populate_runs(runs)
@@ -2983,8 +3284,9 @@ class HistoryTab(QWidget):
             # Get history from broker
             history = self.broker.list_history(MAX_HISTORY_ENTRIES)
         except dbus.DBusException as e:
-            QMessageBox.warning(self, "Broker unavailable",
-                                f"Couldn't list history:\n\n{e}")
+            title, label = _friendly_broker_error(e)
+            QMessageBox.warning(self, title,
+                                f"Couldn't list history.\n\n{label}")
             return
         self._all_history = list(history)
         # Refresh UID dropdown from live rows (S2 operational) — keeps
@@ -3099,29 +3401,59 @@ class HistoryTab(QWidget):
 
 
 class ErrorDetailsWidget(QWidget):
-    """Expandable widget for displaying detailed error information."""
-    
+    """Expandable widget for displaying detailed error information.
+
+    Two layers:
+      * `guidance_label` — always-visible, bounded, shoulder-safe text
+        (a short broker-error label + actionable guidance). Never the raw
+        D-Bus string.
+      * `error_text` — the raw diagnostic, hidden behind the "Show Error
+        Details" toggle for the admin who explicitly wants it. Defaults
+        collapsed so the raw string isn't shoulder-visible by default.
+    """
+
     def __init__(self, error_message: str, parent=None):
         super().__init__(parent)
         self.error_message = error_message
         self.expanded = False
-        
+
         layout = QVBoxLayout(self)
-        
+
+        # Bounded, always-visible guidance (item 1 / item 3): short label
+        # the admin reads without exposing raw broker internals.
+        self.guidance_label = QLabel("")
+        self.guidance_label.setObjectName("broker_error_guidance")
+        self.guidance_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.guidance_label.setWordWrap(True)
+        self.guidance_label.setStyleSheet("color: #b00020; font-weight: bold;")
+        self.guidance_label.hide()
+        layout.addWidget(self.guidance_label)
+
         # Toggle button
         self.toggle_button = QPushButton("Show Error Details")
+        self.toggle_button.setObjectName("btn_show_error_details")
         self.toggle_button.setCheckable(True)
         self.toggle_button.clicked.connect(self._toggle_visibility)
         layout.addWidget(self.toggle_button)
-        
+
         # Error text area
         self.error_text = QTextEdit()
+        self.error_text.setObjectName("broker_error_raw")
         self.error_text.setReadOnly(True)
         self.error_text.setMaximumHeight(150)
         self.error_text.hide()
         layout.addWidget(self.error_text)
-        
+
         self.error_text.setPlainText(error_message)
+
+    def set_guidance(self, guidance: str) -> None:
+        """Set the always-visible bounded guidance text (no raw detail)."""
+        if guidance:
+            self.guidance_label.setText(guidance)
+            self.guidance_label.show()
+        else:
+            self.guidance_label.clear()
+            self.guidance_label.hide()
 
     def _toggle_visibility(self, checked):
         self.expanded = checked
