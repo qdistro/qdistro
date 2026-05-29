@@ -309,6 +309,30 @@ int main(int argc, char **argv)
 		_exit(127);
 	}
 
+	/* Permission-lineage launch-record hook (P1-1 rollout). When the
+	 * launcher set QDISTRO_LAUNCH_RECORD_PATH, publish the inner child's
+	 * pid there so a trusted *root* launcher ancestor (e.g. spawn-tier3.sh)
+	 * can RegisterLaunch it with the broker. We are the only component that
+	 * knows this pid: it is our fork child, and its pid survives the
+	 * execvp() above, so it is exactly the pid that connects to the
+	 * compositor and that a later gate resolves. We write the bare pid; the
+	 * root consumer re-reads /proc (exe/starttime/uid) *after* the inner
+	 * command has exec'd and is up, and the broker re-verifies it again at
+	 * RegisterLaunch — so a stale or mid-exec read can only fail closed,
+	 * never mint a wrong record. Best-effort: a write failure is logged but
+	 * never blocks the launch. */
+	const char *lr_path = getenv("QDISTRO_LAUNCH_RECORD_PATH");
+	if (lr_path && *lr_path) {
+		FILE *lrf = fopen(lr_path, "we");
+		if (lrf) {
+			fprintf(lrf, "%d\n", (int)pid);
+			fclose(lrf);
+		} else {
+			fprintf(stderr, "qdistro-secctx-exec: launch-record path "
+				"%s: %s\n", lr_path, strerror(errno));
+		}
+	}
+
 	/* Parent: wait for child. */
 	int status = 0;
 	pid_t r;

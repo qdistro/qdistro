@@ -419,10 +419,23 @@ fi
 # umask 0117 → world-clear, group-keep (file: 0660, dir: 0660-ish).
 # waypipe might explicitly chmod its own socket, but our chgrp below
 # normalizes the group regardless.
+# Permission-lineage (P1-1): when wrapping via qdistro-secctx-exec, ask it
+# to publish the inner waypipe-client pid so we (root) can RegisterLaunch it
+# with the broker below. The waypipe-client is the secctx-tagged process
+# qdwin sees as the source of a cross-silo clipboard/handoff; attesting its
+# pid → silo lets the broker resolve the source under enforce instead of
+# trusting a claimed string. Lives in the admin runtime dir (admin-writable;
+# secctx-exec runs as the admin uid).
+LAUNCHREC_PATH=""
+if [ "$USE_SECCTX" = "1" ]; then
+    LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$$.pid"
+    rm -f "$LAUNCHREC_PATH"
+fi
 runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
+    ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
     bash -c 'umask 0117; exec "$@"' bash \
     "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
@@ -462,6 +475,47 @@ chgrp "$TIER3_GROUP" "$SOCK_PID_FILE"
 chmod 0640 "$SOCK_PID_FILE"
 
 echo "[tier3] bridge socket ready at $BRIDGE_SOCK ($TIER3_GROUP:0660)" >&2
+
+# --- 1b. permission-lineage launch record (P1-1) ---------------------
+# We run as root and we built this bridge, so we are the authoritative
+# attestor that the secctx-tagged waypipe-client serves silo $SILO. Read
+# the inner pid qdistro-secctx-exec published and RegisterLaunch it with
+# the broker, binding (pid,starttime) -> (silo,engine,app_id). A later
+# cross-silo gate resolves the source pid qdwin reports (this same
+# waypipe-client) to this record under enforce; without it the gate
+# fails closed. Best-effort: a missing broker / failed register only
+# means cross-silo stays default-deny — never blocks the launch.
+#
+# By now waypipe-client has created the bridge socket, so it has exec'd
+# and /proc/<pid>/exe is stable; the broker re-reads and re-verifies the
+# pid (starttime/uid/exe) itself, target_starttime=0 means "trust /proc".
+if [ "$USE_SECCTX" = "1" ] && [ -n "$LAUNCHREC_PATH" ] \
+        && command -v dbus-send >/dev/null 2>&1; then
+    INNER_PID=""
+    for _ in $(seq 1 20); do
+        if [ -s "$LAUNCHREC_PATH" ]; then
+            INNER_PID=$(tr -dc '0-9' < "$LAUNCHREC_PATH" 2>/dev/null || true)
+            [ -n "$INNER_PID" ] && break
+        fi
+        sleep 0.1
+    done
+    if [ -n "$INNER_PID" ] && kill -0 "$INNER_PID" 2>/dev/null; then
+        if dbus-send --system --print-reply \
+            --dest=org.qdistro.AdminBroker1 \
+            /org/qdistro/AdminBroker1 \
+            org.qdistro.AdminBroker1.RegisterLaunch \
+            string:"$SILO" string:"$SECCTX_ENGINE" string:"$SECCTX_APPID" \
+            string:"$SECCTX_INSTANCE" string:"" uint64:"$INNER_PID" \
+            string:"tier3" uint64:0 >/dev/null 2>&1; then
+            echo "[tier3] lineage: registered waypipe-client pid=$INNER_PID as silo=$SILO" >&2
+        else
+            echo "[tier3] WARN lineage: RegisterLaunch failed for pid=$INNER_PID (cross-silo stays default-deny under enforce)" >&2
+        fi
+    else
+        echo "[tier3] WARN lineage: no inner pid published; skipping launch-record registration" >&2
+    fi
+    rm -f "$LAUNCHREC_PATH"
+fi
 
 # --- 2. silo-side runtime dir ----------------------------------------
 # waypipe-server needs an XDG_RUNTIME_DIR the silo uid can write to
