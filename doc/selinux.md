@@ -52,9 +52,11 @@ floor under the non-adversarial threat model.
 - **Flatpak as confinement.** Flatpak apps on a default install run in
  `unconfined_u:unconfined_r:unconfined_t`; `flatpak-selinux` only
  confines the system helper daemon, not the bubblewrap-launched child.
-- **`container_t` / podman.** Already taken by tier 2. Tier-1 is meant
- to be lighter than tier 2 — no user namespace, no nested compositor.
- Reusing `container_t` here would muddy tier semantics.
+- **`container_t` / podman.** Already taken by tier 2 (which now adds
+ `qdistro_tier2_t`, a typebounds subset of `container_t` — see the
+ Tier-2 policy module section below). Tier-1 is meant to be lighter than
+ tier 2 — no user namespace, no nested compositor. Reusing `container_t`
+ here would muddy tier semantics.
 - **Qubes-style.** Qubes' isolation primitive is the Xen domain; their
  per-template SELinux work is qrexec-scoped, not a per-app
  type-transition mechanism.
@@ -167,6 +169,93 @@ init), `cgroup_t:dir search + :file getattr` (`/proc/<pid>/cgroup`
 readers), and `self:capability sys_ptrace` for cross-uid
 `/proc/<other-uid>/exe` readlink (the SELinux check happens before the
 kernel cap check).
+
+## Tier-2 policy module
+
+`selinux/tier2/qdistro_tier2.{te,if,fc}` now exists (it previously did
+not; tier-2 relied solely on podman's default `container_t`). The
+follow-up wanted a qdistro-specific policy that constrains the tier-2
+podman workload — image-fs writes, pipewire socket access — the way the
+tier-1 policy constrains its workloads.
+
+It declares one domain, `qdistro_tier2_t`, built as a **member of the
+`container_domain` and `svirt_sandbox_domain` attributes** and then
+capped:
+
+```
+typeattribute qdistro_tier2_t container_domain;
+typeattribute qdistro_tier2_t svirt_sandbox_domain;
+typebounds container_t qdistro_tier2_t;
+```
+
+The attribute membership is load-bearing: `typebounds` does *not*
+inherit `container_t`'s allows — a bounded type gets only its own rules,
+capped at the parent — so a from-scratch bounded type with a few
+hand-written allows could not even exec the image entrypoint or load
+libraries (the container would fail to start). Joining the two
+attributes gives `qdistro_tier2_t` the same functional file/exec
+baseline the working `container_t` path uses; `typebounds container_t`
+then guarantees it can never *exceed* the default container surface.
+
+The **narrowing** is the set of `container_t` attributes
+`qdistro_tier2_t` deliberately does NOT join — the network attributes
+(`corenet_unconfined_type`, `corenet_unlabeled_type`,
+`container_net_domain`, `sandbox_net_domain`) and the kernel-state
+attributes (`can_dump_kernel`, `can_receive_kernel_messages`,
+`kernel_system_state_reader`). It DOES still join `mcs_constrained_type`
+(which `container_t` also carries), because that attribute enforces
+per-container MCS-category isolation — dropping it would *broaden*
+cross-container access, not narrow it. Omitting the network attributes is
+what strips the unconfined-network surface (matching the launcher's
+default `--network=none`); the module then pins the practical net socket
+surface off with `neverallow` assertions so a later `allow` can't re-add
+it:
+
+```
+neverallow qdistro_tier2_t self:tcp_socket { create listen };
+neverallow qdistro_tier2_t self:{ udp rawip sctp dccp icmp } socket create;
+neverallow qdistro_tier2_t self:{ netlink_route netlink_tcpdiag packet } socket create;
+```
+
+(The structural guarantee is that the network *attributes* aren't
+joined; the `neverallow`s belt-and-braces the transport/raw/diag classes
+most likely to be re-added by a careless future `allow`.) A workload
+that needs outbound (`TIER2_NETWORK=slirp4netns`) must run as
+stock `container_t` — an explicit, auditable downgrade. The follow-up's
+"image-fs writes" and "pipewire socket access" points are handled by the
+launcher's existing posture (image rootfs `--read-only`; only the
+specific `pipewire-N` sockets that exist at spawn time are bound, with
+no dbus/pulse/gpg/ssh-agent), not by widening this domain.
+
+Build path differs from tier-1 on purpose. tier-1 is refpolicy m4 built
+through `/usr/share/selinux/devel/Makefile`; the dev/host carries
+`container-selinux` (which supplies `container_t`, the `container_domain`
+/ `svirt_sandbox_domain` attributes, `container_file_t`, the
+`container_*` booleans) but not the full `selinux-policy-devel` m4 header
+set, so the tier-2 module is written in **kernel policy language** and
+built with the base `checkmodule -M -m` + `semodule_package` toolchain
+(`make` / `make check` in `selinux/tier2/`). The `.if`/`.fc` are kept in
+refpolicy style for symmetry but are not consumed by that build path;
+the whole policy is in the `.te`.
+
+**Engagement is deferred** and needs two things, neither landed:
+(1) `spawn-tier2.sh` must pass
+`--security-opt label=type:qdistro_tier2_t` to podman; and (2) the
+launcher's socket/dir binds (today plain `-v ...:rw`, host-labelled
+`user_tmp_t`) must gain `:z`/`:Z` so they relabel to `container_file_t`
+that the domain can reach — plus a label strategy for the
+`qdwin-shell.so` bind (a `:z` would mutate a host library label). Both
+are launcher changes, capability-gated behind a clean enforcing-mode AVC
+pass on a VM (none was available when the module landed). Until then
+tier-2 keeps running as stock `container_t`, so loading the module is a
+no-op. What is validated today: the module compiles (`make check`), and
+`sesearch` confirms the `neverallow` block can't collide with the joined
+attributes at load time (the net-socket perms come solely from the
+omitted network attributes). What needs the enforcing VM: the bind
+relabel wiring, a zero-new-AVC run of the nested weston under
+`qdistro_tier2_t`, and the load-time `typebounds`/`neverallow`
+resolution (`semodule -i` is not installed on the dev host). See
+`selinux/tier2/README.md` for the full validated-vs-deferred split.
 
 ## dbus-broker reload requirement
 

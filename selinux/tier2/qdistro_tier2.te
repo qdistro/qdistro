@@ -1,0 +1,199 @@
+## <summary>qdistro Tier-2 SELinux container confinement.</summary>
+## <desc>
+##   A tightened sibling of podman's default container_t for the
+##   qdistro Tier-2 workload (rootless podman host for a nested weston +
+##   qdwin-shell.so publisher; see tier2/spawn-tier2.sh).
+##
+##   Tier-2 already gets strong isolation from the user namespace +
+##   container_t + the launcher's runtime hardening (--cap-drop=ALL,
+##   no-new-privileges, --read-only rootfs, custom seccomp, private
+##   ipc/pid, per-container /run/user, --network=none). What container_t
+##   does NOT give is a qdistro-specific *narrowing*: every podman
+##   container on the host shares one container_t allow-set, including
+##   its full unconfined-network and kernel-state-reader surface, which
+##   a Tier-2 workload (default --network=none, no kernel introspection)
+##   never uses. This module defines qdistro_tier2_t as a functional
+##   container domain MINUS that surplus surface, capped by typebounds so
+##   it can provably never exceed container_t.
+##
+##   Domain-construction model (IMPORTANT — read before editing):
+##     qdistro_tier2_t is a member of the container_domain and
+##     svirt_sandbox_domain attributes. That is what makes it a WORKING
+##     container domain: those attributes carry the entrypoint / exec /
+##     library-read / container_file_t / tmpfs baseline a container
+##     process needs to even start (typebounds does NOT inherit
+##     container_t's allows — a bounded type gets only its own rules,
+##     capped at the parent). qdistro_tier2_t deliberately does NOT join
+##     the network/kernel attributes container_t also carries
+##     (corenet_unconfined_type, corenet_unlabeled_type,
+##     container_net_domain, sandbox_net_domain, can_dump_kernel,
+##     can_receive_kernel_messages, kernel_system_state_reader). Omitting
+##     those is the concrete narrowing; the neverallow block at the
+##     bottom pins it so a future allow can't quietly add the surface
+##     back.
+##
+##   Engagement: the domain is inert until spawn-tier2.sh passes
+##   `--security-opt label=type:qdistro_tier2_t` to podman AND the host
+##   binds are made reachable to it (see README "Engaging the domain"
+##   and the bind-relabel TODO below). Until then the workload keeps
+##   running as stock container_t, so loading this module is a no-op.
+##
+##   Build note: unlike the Tier-1 module (refpolicy m4, built through
+##   /usr/share/selinux/devel/Makefile), this module is kernel policy
+##   language so it compiles with the base checkmodule/semodule_package
+##   toolchain the qdistro host ships WITHOUT selinux-policy-devel. The
+##   host carries container-selinux (container_t, container_domain,
+##   svirt_sandbox_domain, container_file_t, the container_* booleans)
+##   but not the full refpolicy m4 header set, so tier1's idioms
+##   (policy_module(), gen_require(), container_domain_template()) can't
+##   expand here. The kernel-language `require {}` block is the direct
+##   equivalent of tier1's gen_require().
+##
+##   See doc/selinux.md for the full architectural rationale and
+##   selinux/tier2/README.md for the validated-vs-deferred split.
+## </desc>
+module qdistro_tier2 0.1.0;
+
+########################################
+#
+# Declarations
+#
+# Kernel-language equivalent of tier1's gen_require(): pull in the host
+# (container-selinux) types/attributes and the object classes this
+# module references. Every name here was confirmed present in the live
+# policy on the qdistro host (`seinfo -t`, `seinfo -a`, `seinfo -b`).
+
+require {
+	# The parent container domain. qdistro_tier2_t is bounded by it.
+	type container_t;
+
+	# The two attributes that carry the functional container baseline
+	# (entrypoint, exec image rootfs, read libs, container_file_t,
+	# tmpfs, etc.). Joining these is what makes the domain usable.
+	attribute container_domain;
+	attribute svirt_sandbox_domain;
+
+	# MCS constraint attribute. container_t carries this; it is what
+	# enforces per-container MCS-category isolation (a container can't
+	# touch another's container_file_t / signal another's process
+	# across categories). We MUST join it too — omitting it would
+	# *broaden* cross-category access, the opposite of narrowing.
+	attribute mcs_constrained_type;
+
+	# Socket classes named only by the neverallow assertions below —
+	# the surface we are pinning OFF. (These come from the network
+	# attributes we deliberately do NOT join; verified that neither
+	# container_domain nor svirt_sandbox_domain grants create on any of
+	# them, so the neverallows can't collide with the joined baseline.)
+	class tcp_socket { create listen };
+	class udp_socket { create };
+	class rawip_socket { create };
+	class sctp_socket { create };
+	class dccp_socket { create };
+	class icmp_socket { create };
+	class netlink_route_socket { create };
+	class netlink_tcpdiag_socket { create };
+	class packet_socket { create };
+}
+
+# The Tier-2 confinement domain. The nested-weston podman workload runs
+# here once spawn-tier2.sh labels it (see README "Engaging the domain").
+type qdistro_tier2_t;
+
+# Functional baseline: join the container file/exec attributes so the
+# domain can actually run a container. This is the deliberate,
+# load-bearing difference from a from-scratch bounded type (which could
+# not even exec the entrypoint). It does NOT join the network/kernel
+# attributes container_t also carries — that omission is the narrowing.
+typeattribute qdistro_tier2_t container_domain;
+typeattribute qdistro_tier2_t svirt_sandbox_domain;
+# MCS isolation must be preserved — see require{} note. Without this the
+# domain would escape per-container category separation.
+typeattribute qdistro_tier2_t mcs_constrained_type;
+
+# typebounds caps qdistro_tier2_t at container_t: the kernel refuses any
+# permission this domain would hold that container_t lacks (logged as
+# `op=security_bounded_transition result=denied` for the
+# transition/relabel edge; ordinary excess access is a plain AVC). Since
+# we only join attributes that are SUBSETS of container_t's attribute
+# set, the bound holds by construction. The bound is the guardrail
+# against a future edit accidentally widening the domain past the
+# default container surface.
+typebounds container_t qdistro_tier2_t;
+
+########################################
+#
+# Narrowing — what qdistro_tier2_t must NEVER hold
+#
+# These are the qdistro-specific constraints beyond default container_t.
+# Each is a permission container_t HAS (via the network attributes) that
+# the Tier-2 workload does not need under the launcher's defaults, and
+# that we want pinned OFF so no later allow (here or in a child module)
+# can re-grant it. neverallow is enforced at policy build/expand time,
+# so a violating allow fails the load loudly rather than silently
+# widening the domain.
+#
+# Network: Tier-2's launcher default is --network=none. container_t
+# carries full unconfined networking via corenet_unconfined_type /
+# sandbox_net_domain; by not joining those attributes the domain has no
+# net sockets, and these neverallows guarantee it stays that way. A
+# workload that genuinely needs outbound (TIER2_NETWORK=slirp4netns)
+# must run as stock container_t, not qdistro_tier2_t — an explicit,
+# auditable downgrade rather than a silent allowance.
+# Covers the transport + raw + diag/route socket classes that
+# container_t can create via its network attributes. This is the
+# practical network surface, not a claim of total coverage of every
+# netlink_* subclass — a workload that needs networking should run as
+# stock container_t, not qdistro_tier2_t.
+neverallow qdistro_tier2_t self:tcp_socket { create listen };
+neverallow qdistro_tier2_t self:udp_socket create;
+neverallow qdistro_tier2_t self:rawip_socket create;
+neverallow qdistro_tier2_t self:sctp_socket create;
+neverallow qdistro_tier2_t self:dccp_socket create;
+neverallow qdistro_tier2_t self:icmp_socket create;
+neverallow qdistro_tier2_t self:netlink_route_socket create;
+neverallow qdistro_tier2_t self:netlink_tcpdiag_socket create;
+neverallow qdistro_tier2_t self:packet_socket create;
+
+########################################
+#
+# PERMISSIVE-PENDING / live-AVC + launcher-wiring TODO
+#
+# The domain above is functional-by-attribute and bounded, and the
+# narrowing is pinned. What is NOT yet done, and gates making this the
+# default for Tier-2 (needs an enforcing-mode VM — none was available
+# when this module landed):
+#
+#   1. Bind reachability. spawn-tier2.sh mounts the per-container
+#      /run/user dir, the outer wayland socket, the pipewire-N sockets,
+#      and qdwin-shell.so into the container WITHOUT :z/:Z, so podman
+#      does NOT relabel them — they keep their host labels (user_tmp_t
+#      for the runtime/sockets, lib_t/usr_t for qdwin-shell.so). Stock
+#      container_t can't reach those either, which is exactly why the
+#      current default container_t Tier-2 path works only because the
+#      binds happen to be readable under the container's MCS category
+#      via the volume mount semantics. Before qdistro_tier2_t can be
+#      engaged, the launcher must add :z (shared) or :Z (private) to the
+#      socket/dir binds so they become container_file_t, and a
+#      deliberate strategy is needed for qdwin-shell.so (a :z would
+#      mutate a host library label — prefer a dedicated read interface
+#      or a copy-in). This is a LAUNCHER change, tracked in the README;
+#      adding allow rules here before the binds are relabelled would be
+#      cargo-culting against the wrong labels.
+#
+#   2. Workload AVC pass. Once #1 lands and the domain is engaged, run
+#      tests/integration/vm/s32-tier2-podman.sh + s40-tier2-hardening.sh
+#      enforcing and confirm ZERO new AVCs for the nested weston + guest
+#      app. The expectation is zero (the container_domain/svirt_sandbox
+#      attributes give the same file/exec surface the working
+#      container_t path uses), but it is asserted, not proven, until the
+#      VM run. For each AVC the VM surfaces:
+#        a. confirm container_t already allows it
+#           (`sesearch -A -s container_t ...`) so the typebounds holds,
+#        b. add the narrowest allow that closes it — to qdistro_tier2_t
+#           directly, NOT by joining another broad attribute.
+#
+#   3. container_runtime_t (podman/conmon) is intentionally OUT OF
+#      SCOPE: confining the runtime touches every podman invocation on
+#      the host, not just Tier-2. This module confines only the
+#      container (workload) side.

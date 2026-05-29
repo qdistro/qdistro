@@ -1,0 +1,62 @@
+## <summary>qdistro Tier-2 SELinux container confinement interfaces.</summary>
+##
+## NOTE on the build path: these interfaces are written in refpolicy m4
+## (matching tier1's .if) for systems that build through
+## /usr/share/selinux/devel/Makefile. The qdistro host builds
+## qdistro_tier2.te directly with checkmodule/semodule_package, which
+## does NOT process .if/.fc files — so on that path this file is
+## documentation + forward-compat only. The allow rules the interfaces
+## below would grant are already present inline in qdistro_tier2.te.
+
+########################################
+## <summary>
+##	Make the calling (container-runtime) domain able to run the
+##	Tier-2 workload in the bounded qdistro_tier2_t domain.
+## </summary>
+## <desc>
+##	Tier-2 does not transition via a labelled exec binary; podman sets
+##	the process label directly with `--security-opt label=type:`. This
+##	interface grants the runtime domain the dyntransition/setexec edge
+##	into qdistro_tier2_t. On the default qdistro host podman runs
+##	rootless under container_runtime_t (or unconfined for the admin
+##	uid), so this is wired only where the runtime is itself confined.
+## </desc>
+## <param name="domain">
+##	<summary>Container-runtime domain allowed to launch Tier-2.</summary>
+## </param>
+#
+interface(`qdistro_tier2_setexec',`
+	gen_require(`
+		type qdistro_tier2_t;
+	')
+	allow $1 qdistro_tier2_t:process { transition dyntransition };
+	allow $1 self:process { setexec setcurrent };
+')
+
+########################################
+## <summary>
+##	Allow a domain to read the per-container Tier-2 runtime files.
+##	Used by host-side helpers (e.g. the qdshell launcher correlator
+##	or podapps-scan) that inspect a live container's runtime dir.
+## </summary>
+## <desc>
+##	The per-container runtime dir is relabelled to container_file_t by
+##	podman, so this interface is a thin wrapper over the
+##	container-selinux container_read_lib_files-style access scoped to
+##	the Tier-2 use. Defined for symmetry with tier1's
+##	qdistro_tier1_read_config; the concrete label is container_file_t,
+##	owned by container-selinux, so callers normally use that module's
+##	container_read_* interfaces directly.
+## </desc>
+## <param name="domain">
+##	<summary>Domain allowed to read the runtime files.</summary>
+## </param>
+#
+interface(`qdistro_tier2_read_runtime',`
+	gen_require(`
+		type container_file_t;
+	')
+	allow $1 container_file_t:dir list_dir_perms;
+	allow $1 container_file_t:file read_file_perms;
+	allow $1 container_file_t:sock_file read_sock_file_perms;
+')
