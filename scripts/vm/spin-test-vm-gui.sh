@@ -201,6 +201,82 @@ fi
 EOF2
 chown admin:users /home/admin/.bash_profile
 
+# 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
+#     of the generic vesa/simple framebuffer.
+#
+#     The template (create-template-domain.sh, default path) now
+#     exposes a bare virtio-gpu-pci device (no VGA-compat shim), so
+#     there is no firmware VGA framebuffer for vesadrm/simpledrm to
+#     claim. Two guest-side changes make virtio_gpu win deterministically
+#     and survive a reboot:
+#
+#       (a) Force virtio_gpu into the initramfs so it binds the PCI
+#           device at the earliest possible point (before any generic
+#           framebuffer handoff). dracut's drm module pulls in the
+#           generic fb drivers too; listing virtio_gpu explicitly in
+#           force_drivers guarantees it's present and probed first.
+#       (b) Kernel cmdline: blacklist the generic framebuffer platform
+#           driver so that even if firmware did expose a framebuffer,
+#           simpledrm doesn't grab it ahead of virtio_gpu. We add
+#           `initcall_blacklist=simpledrm_platform_driver_init` only.
+#           We do NOT add `nomodeset` (we WANT KMS) and do NOT pin a
+#           `video=` mode (the connector name is kernel-version
+#           dependent; wlroots sets the real mode once virtio_gpu
+#           binds).
+#
+#     After a reboot of the VM the guest should let
+#     `wlr-randr --output Virtual-1 --custom-mode 1280x800@60` succeed
+#     (the connector name is whatever wlr-randr lists; virtio_gpu names
+#     it Virtual-1 on this image). This is the intended path; verifying
+#     it requires a live boot (see the resolution note at the foot of
+#     this script).
+echo "[gui-spin] applying virtio-gpu DRM + cmdline fix (effective next boot)"
+mkdir -p /etc/dracut.conf.d
+cat > /etc/dracut.conf.d/90-qdistro-virtio-gpu.conf <<'DRACUT'
+# Bind virtio_gpu early so it claims the PCI GPU before the generic
+# vesa/simple framebuffer platform driver can. Required for wlroots to
+# see modes >640x480 on the qdistro test template (virtio-gpu-pci, no
+# VGA shim). See scripts/vm/spin-test-vm-gui.sh §8b.
+force_drivers+=" virtio_gpu "
+DRACUT
+
+# Append the cmdline token idempotently to the default GRUB config.
+# We edit GRUB_CMDLINE_LINUX_DEFAULT in /etc/default/grub (skipping the
+# edit if the token is already present), then regenerate the bootloader
+# config below. If grub2-mkconfig is unavailable (rare on this image)
+# we fall back to openSUSE's update-bootloader wrapper.
+# Keep the token list minimal and well-known to avoid an unbootable
+# cmdline: the only token we need is the simpledrm initcall blacklist.
+# (A `video=` mode hint was considered but the connector name is
+# kernel-version-dependent and a wrong token is silently ignored at
+# best, fatal at worst — wlroots sets the real mode anyway once
+# virtio_gpu binds, so we don't pin a console mode here.)
+GRUB_ADD="initcall_blacklist=simpledrm_platform_driver_init"
+if [ -f /etc/default/grub ]; then
+    if ! grep -q "initcall_blacklist=simpledrm_platform_driver_init" /etc/default/grub; then
+        # Insert the token inside the existing quoted value.
+        sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"/\1 $GRUB_ADD\"/" \
+            /etc/default/grub
+    fi
+fi
+
+# Rebuild initramfs (dracut) and grub.cfg. Both are best-effort: a
+# failure here leaves the VM bootable on its current initramfs/cmdline
+# (the device is virtio-gpu-pci already; the worst case is the generic
+# fb still wins until a successful regen). We log loudly so a CI run
+# surfaces it.
+if command -v dracut >/dev/null 2>&1; then
+    dracut --force --regenerate-all >/dev/null 2>&1 \
+        || echo "[gui-spin] WARN: dracut regenerate-all failed"
+fi
+if command -v grub2-mkconfig >/dev/null 2>&1; then
+    grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 \
+        || echo "[gui-spin] WARN: grub2-mkconfig failed"
+elif command -v update-bootloader >/dev/null 2>&1; then
+    update-bootloader >/dev/null 2>&1 \
+        || echo "[gui-spin] WARN: update-bootloader failed"
+fi
+
 # Make sure greetd stays out of the way and getty@tty1 wins.
 systemctl mask greetd.service 2>/dev/null || true
 systemctl set-default multi-user.target >/dev/null
@@ -229,6 +305,10 @@ ls -l /usr/local/bin/startlxqtwayland /usr/local/bin/qdistro-lxqt-session-wrap
 ls -l /home/admin/qdistro/admin_app/qdistro_admin_app.py
 ls -l /home/admin/qdistro/tui/qdistro_admin_tui.py
 ls -l /home/admin/.config/qterminal.org/qterminal.ini
+ls -l /etc/dracut.conf.d/90-qdistro-virtio-gpu.conf 2>&1 \
+    || echo "WARN: virtio-gpu dracut conf not installed"
+grep -H "simpledrm_platform_driver_init" /etc/default/grub 2>&1 \
+    || echo "WARN: simpledrm blacklist not in GRUB cmdline"
 ls -l /run/user/1000/wayland-0 2>&1 || echo "WARN: wayland-0 not up"
 ps -ef | grep -E "labwc|lxqt|Xwayland" | grep -v grep | head -5
 echo "--- done ---"
@@ -236,23 +316,33 @@ POSTBOOT
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | QDISTRO_VM_PASSWORD='$QDISTRO_VM_PASSWORD' bash" >&2
 
-# Note on display resolution: the QXL video device in the template
-# (create-template-domain.sh) exposes only a 640×480 mode via vesafb.
-# Scenarios assuming a larger display (e.g. 35 — TUI + Qt admin app
-# side-by-side, qterminal pinned to 1200×700 per AGENTS.md ) won't
-# render correctly. Attempted fix (swap QXL → virtio-vga with
-# xres/yres) was abandoned because:
-#   - libvirt's <video><model type='virtio'/></video> maps to
-#     qemu's virtio-vga (with VGA-compat shim); the kernel's
-#     vesa-framebuffer driver grabs the framebuffer before
-#     virtio_gpu can claim the PCI device, so wlroots still
-#     sees only 640×480 via vesadrm.
-#   - Switching to virtio-gpu-pci (no VGA shim) would need
-#     deeper changes to the template + kernel cmdline + possibly
-#     initramfs.
-# Tracked in `todo/permissions-gui-vm-bootstrap.md` §"VM display
-# resolution gap"; scenarios that need larger geometry stay
-# platform-blocked.
+# Note on display resolution (FIXED — verify on a live boot):
+#   Earlier templates used QXL / virtio-vga (VGA-compat shim), which
+#   exposed only a 640×480 vesadrm mode because the kernel's generic
+#   framebuffer platform driver grabbed the firmware VGA framebuffer
+#   before virtio_gpu could bind. wlr-randr could not raise the mode.
+#
+#   The fix lands in two halves:
+#     1. create-template-domain.sh now defines a bare virtio-gpu-pci
+#        device (model='none' + a <qemu:commandline> override) with NO
+#        VGA-compat shim — so there is no firmware framebuffer to grab.
+#        (Escape hatch: QDISTRO_TEMPLATE_LEGACY_VGA=1 restores the old
+#        virtio-vga device.)
+#     2. §8b above forces virtio_gpu into the initramfs
+#        (/etc/dracut.conf.d/90-qdistro-virtio-gpu.conf) and blacklists
+#        the simpledrm platform driver on the kernel cmdline, then
+#        regenerates initramfs + grub.cfg. virtio_gpu therefore binds
+#        the PCI GPU and presents a real DRM device.
+#
+#   Expected result after the VM reboots onto the regenerated
+#   initramfs/cmdline: wlroots sees a virtio_gpu DRM card and
+#       wlr-randr --output Virtual-1 --custom-mode 1280x800@60
+#   succeeds (connector name per `wlr-randr` output; virtio_gpu names
+#   it Virtual-1 on this image). This cannot be booted headless in CI
+#   here; a live boot must confirm the >640×480 mode. The §8b changes
+#   take effect on the NEXT boot — the just-bootstrapped VM is still on
+#   its original initramfs, so reboot it (`virsh reboot $VM`) before
+#   running geometry-sensitive scenarios (e.g. 35).
 
 echo "[gui-spin] step 3/3: ready. Scenarios can target VMNAME=$VM" >&2
 # Final stdout line: the VM name, matching spin-test-vm.sh's contract.

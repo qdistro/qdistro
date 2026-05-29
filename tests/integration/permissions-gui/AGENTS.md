@@ -115,9 +115,42 @@ and return a report.
  focused qterminal — it sometimes does — that's fine, but don't
  rely on it; `virsh send-key` is the portable path.
 
+3a. **Keyboard navigation via `virsh send-key` is the BLESSED input
+ path.** Mouse-click delivery to Qt/XWayland windows is *not*
+ reliable on this labwc/XWayland template (see 3b for why and the
+ history). Unless a scenario's whole point is to exercise the mouse
+ (06-qt-admin-app-mouse.md), drive every interaction with the
+ keyboard:
+ - Modifier chords (`Ctrl+Y`, `Ctrl+N`): `virsh send-key "$VM"
+ --codeset linux KEY_LEFTCTRL KEY_Y`.
+ - Plain keys / arrows / Tab / Escape: `virsh send-key "$VM"
+ --codeset linux KEY_TAB` (etc).
+ `virsh send-key` injects at the virtual evdev keyboard, below
+ X/Wayland focus handling entirely, which is why it works where
+ xdotool/`vm-gui key` silently no-op. Always `xdotool search
+ --sync --name "<window title>" windowactivate --sync` (as the
+ right user, with `DISPLAY=:0`) immediately before a `send-key`
+ burst so the intended window holds X focus when the evdev event
+ arrives. This is the supported, portable contract for this VM
+ template; do not introduce new scenarios that depend on pixel
+ clicks.
+
 3b. **Mouse-click scenarios describe targets by visible text, not
- pixels.** When a scenario says `click Approve`, `click the "1
- hour" radio`, or `click OK`, the runner's job is:
+ pixels.** Mouse clicks are PLATFORM-BLOCKED on this template —
+ both `vm-gui click X Y` and direct `xdotool mousemove…click` fail
+ to reach Qt XWayland windows on this labwc build (labwc does not
+ synchronise pointer events into XWayland's focus the way the Qt
+ windows expect). 06-qt-admin-app-mouse.md is therefore the *only*
+ scenario that legitimately uses the mouse, and it is expected to
+ stay platform-blocked until a labwc build with working XWayland
+ pointer delivery is available; treat its mouse steps as a known
+ ERROR-on-this-template, not a regression. For every other
+ scenario use the keyboard path in 3a.
+
+ When a scenario nonetheless describes a click target by visible
+ text — `click Approve`, `click the "1 hour" radio`, `click OK` —
+ and you are on a template where clicks DO work, the runner's job
+ is:
  1. Take a fresh screenshot after the window is focused.
  2. Extract text + bounding boxes from the screenshot. A
  vision-capable LLM agent can read text off the PNG
@@ -186,6 +219,71 @@ and return a report.
  time against a given VM. If you need wall-clock parallelism,
  spin up a second clone from baseweed per memory's cloning
  procedure — one runner per VM.
+
+## Ground truth: broker state + app stdout, screenshots are coarse
+
+Screenshots on this VM template are NOT authoritative for
+fine-grained content assertions. `virsh screenshot` sometimes
+captures a stale framebuffer: Qt's `QLabel.setText` (verified via
+instrumented debug prints showing the show-request fired) has
+already run, but the SPICE/QXL output buffer hasn't been flipped
+yet, so the PNG shows the *previous* detail-pane content. Repaint
+nudges (`xdotool mousemove`, sleep loops) do not reliably force a
+flush. There is no blessed repaint-trigger — treat screenshots as a
+**coarse visual check** (is a window up? is the list empty vs.
+non-empty? is the right app focused?), never as the sole PASS/FAIL
+evidence for *what text a pane shows*.
+
+For any assertion about decision outcome, scope, cache state, pane
+text, or pending-request contents, use **broker-side state + app
+stdout** as ground truth:
+
+- **Broker decision / scope / cache** — read the broker's own
+ records, not the screen:
+ - Pending requests:
+ ```bash
+ $VMEXEC "$VM" 'dbus-send --system --print-reply \
+ --dest=org.qdistro.AdminBroker1 \
+ /org/qdistro/AdminBroker1 \
+ org.qdistro.AdminBroker1.GetPending'
+ ```
+ An empty `array [ ]` means no pending; each struct is one
+ pending request (uid / action / exe / scope choices). This is
+ the same call the Qt admin app makes to populate its list, so
+ it is exactly the model behind the pane.
+ - Cached approvals (post-decision):
+ ```bash
+ SQL_B64=$(base64 -w0 <<'SQL'
+ SELECT uid,action,scope FROM approvals WHERE action='test.action';
+ SQL
+ )
+ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | \
+ sqlite3 /var/lib/qdistro/approvals/approvals.sqlite"
+ ```
+ A row here with the expected scope proves the approve path
+ actually wrote the cache — independent of what the screenshot
+ shows.
+ - Audit trail: `/var/lib/qdistro/audit/audit.sqlite` records
+ every decision; query it when a scenario asserts "a deny was
+ logged" or "the argv was preserved".
+- **SDK return value** — the calling side is ground truth for
+ allow-vs-deny: `qdistro-test-permission` prints `ALLOWED` or
+ `DENIED` on its own line based on the broker's reply (see
+ scenario 04 S2/S3). `cat`/`wait` its log; that one line settles
+ the approve/deny question without trusting a pixel.
+- **Admin-app stdout** — launch the Qt admin app so its stdout is
+ captured to a log (the `qdistro-start-admin-app` launcher and the
+ scenarios redirect to `/tmp/admin-app.log`). The app logs
+ show-requests and decisions there; grep that log to confirm the
+ app *received* and *acted on* a request even when the screenshot
+ is stale.
+
+Rule of thumb: a screenshot can downgrade a PASS to "needs a
+closer look", but only broker state / SDK return / app stdout can
+turn a content assertion into a confident PASS or FAIL. When the
+screenshot and the broker state disagree, the broker state wins —
+note the screenshot staleness in your justification and decide from
+the broker.
 
 ## Running a scenario
 

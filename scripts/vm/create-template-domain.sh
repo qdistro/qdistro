@@ -19,6 +19,29 @@ set -euo pipefail
 NAME="${1:-qdistro-template}"
 IMG_DIR="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
+# Video model. Default is a pure virtio-gpu-pci device (no VGA-compat
+# shim) so the guest's generic framebuffer driver (vesadrm/simpledrm)
+# has no firmware framebuffer to grab and `virtio_gpu` binds the PCI
+# device directly — letting wlroots/wlr-randr drive modes >640×480.
+# See the QDISTRO_TEMPLATE_LEGACY_VGA escape hatch below.
+#
+# How the model is wired:
+#   - libvirt's <video><model type='virtio'/></video> maps to qemu's
+#     `virtio-vga` (WITH the VGA-compat shim). That shim exposes a
+#     legacy VGA framebuffer the guest firmware programs to 640×480,
+#     and the kernel's vesa/simple framebuffer platform driver claims
+#     it before virtio_gpu can bind — wlroots then only ever sees the
+#     640×480 vesadrm mode and `wlr-randr --custom-mode` fails.
+#   - To get virtio-gpu-pci (no VGA shim) through libvirt we set the
+#     video model to 'none' (suppresses libvirt's default VGA device)
+#     and add the device via a <qemu:commandline> override. This is
+#     the only way libvirt exposes the shim-free PCI GPU.
+#
+# Set QDISTRO_TEMPLATE_LEGACY_VGA=1 to fall back to the old virtio-vga
+# device (for hosts whose qemu lacks virtio-gpu-pci, or to reproduce
+# the historical 640×480 behaviour).
+LEGACY_VGA="${QDISTRO_TEMPLATE_LEGACY_VGA:-0}"
+
 if virsh -c qemu:///session dominfo "$NAME" >/dev/null 2>&1; then
     echo "template domain '$NAME' already exists" >&2
     exit 0
@@ -29,8 +52,28 @@ mkdir -p "$IMG_DIR"
 TMPXML=$(mktemp --suffix=.xml)
 trap 'rm -f "$TMPXML"' EXIT
 
+# Build the video stanza + (for the shim-free path) the qemu cmdline
+# override. clone-baseweed.sh copies whatever is here verbatim into
+# each test VM, so the GPU wiring is centralised in this template.
+if [ "$LEGACY_VGA" = 1 ]; then
+    VIDEO_XML="    <video><model type='virtio' heads='1' primary='yes'/></video>"
+    QEMU_CMDLINE_XML=""
+    DOMAIN_NS=""
+else
+    # model='none' suppresses libvirt's default VGA adapter; the GPU is
+    # added below via the qemu:commandline override as a bare
+    # virtio-gpu-pci (no VGA-compat shim). max_outputs=1 mirrors the
+    # single-head template; the guest sees one connector.
+    VIDEO_XML="    <video><model type='none'/></video>"
+    QEMU_CMDLINE_XML="  <qemu:commandline>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-gpu-pci,max_outputs=1'/>
+  </qemu:commandline>"
+    DOMAIN_NS=" xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"
+fi
+
 cat > "$TMPXML" <<EOF
-<domain type='kvm'>
+<domain type='kvm'$DOMAIN_NS>
   <name>$NAME</name>
   <memory unit='KiB'>4194304</memory>
   <currentMemory unit='KiB'>4194304</currentMemory>
@@ -60,9 +103,10 @@ cat > "$TMPXML" <<EOF
     </channel>
     <input type='tablet' bus='usb'/>
     <input type='keyboard' bus='usb'/>
-    <video><model type='virtio' heads='1' primary='yes'/></video>
+$VIDEO_XML
     <memballoon model='virtio'/>
   </devices>
+$QEMU_CMDLINE_XML
 </domain>
 EOF
 
