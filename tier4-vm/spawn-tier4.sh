@@ -741,7 +741,11 @@ NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
 # __DISK_PATH__, __VIRTIOFS_DIR__. (__MAC__ is documented but the actual
 # P10 template doesn't currently carry a NIC, so __MAC__ may be absent;
 # substituting it as a no-op is harmless.)
-TMP_XML="/tmp/qdistro-tier4-${VM_NAME}-$$.xml"
+# Render into a 0600 file inside a 0700 admin-owned private dir under the
+# admin's /run/user/<uid> (tmpfs), NOT a predictable /tmp path: a local
+# attacker could otherwise pre-create / symlink-race this privileged
+# virsh-define input.
+TMP_XML="$(domain_xml_tmpfile qdistro-tier4 "$ADMIN_USER" "$ADMIN_RUNTIME")"
 sed \
     -e "s|__VM_NAME__|$VM_NAME|g" \
     -e "s|__MAC__|$NEW_MAC|g" \
@@ -764,7 +768,7 @@ fi
 maybe_overwrite_existing
 
 echo "[tier4] defining domain '$VM_NAME' (mem=${MEM_MIB}MiB, mac=$NEW_MAC, display=$TIER4_DISPLAY, cid=$CID, port=$PORT)" >&2
-chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
+# Already 0600 + admin-owned inside a 0700 admin-owned dir (domain_xml_tmpfile).
 if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
     echo "[tier4] FAIL: virsh define failed" >&2
     rm -f "$TMP_XML"

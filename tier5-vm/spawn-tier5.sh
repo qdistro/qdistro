@@ -489,7 +489,11 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
         $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
-    TMP_XML="/tmp/qdistro-tier5-${VM_NAME}-$$.xml"
+    # Render into a 0600 file inside a 0700 admin-owned private dir under
+    # the admin's /run/user/<uid> (tmpfs), NOT a predictable /tmp path: a
+    # local attacker could otherwise pre-create / symlink-race the
+    # privileged virsh-define input.
+    TMP_XML="$(domain_xml_tmpfile qdistro-tier5 "$ADMIN_USER" "$ADMIN_RUNTIME")"
     # NIC_XML resolved above from TIER5_NETWORK. The default is the
     # empty-NIC variant (TIER5_NETWORK=none). When TIER5_NETWORK=user
     # the substituted snippet still contains the __MAC__ marker so the
@@ -510,7 +514,8 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         rm -f "$TMP_XML"
         exit 4
     fi
-    chown "$ADMIN_USER" "$TMP_XML"; chmod 0644 "$TMP_XML"
+    # File is already 0600 + admin-owned inside a 0700 admin-owned dir
+    # (domain_xml_tmpfile); no world-readable chmod 0644 here.
     if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
         echo "[tier5] FAIL: virsh define failed" >&2
         rm -f "$TMP_XML"

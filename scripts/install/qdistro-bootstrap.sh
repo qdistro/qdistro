@@ -44,10 +44,33 @@
 #        --user=alice --user-password=secret \
 #        --yes                                            # no prompts
 #
+# Install profiles (the single dev-vs-hardened gate — QDISTRO_PROFILE or
+# --profile):
+#   dev           disposable VM / developer bring-up. Throwaway shortcuts
+#                 are permitted: --no-gpg-checks fetches, env-var passwords,
+#                 `admin NOPASSWD: ALL` sudoers, root pip --prefix=/usr from
+#                 unpinned source checkouts, warn-and-continue on btrfs.
+#   daily-driver  (DEFAULT) a real machine. Hardened: GPG-checked fetches,
+#                 NO env-var passwords (use --*-password-fd or interactive),
+#                 NO `NOPASSWD: ALL`, source checkouts pinned/verified before
+#                 root install, pip apps go to an isolated /opt/qdistro prefix
+#                 with /usr/bin wrappers, btrfs subvolume failure is FATAL.
+#   release       packaged image build. Same hardening as daily-driver.
+# The default is the HARDENED profile: a caller who forgets to choose still
+# gets the safe path, never the throwaway one. Pass --profile=dev (or set
+# QDISTRO_PROFILE=dev) explicitly for disposable VMs.
+#
 # CLI flags (all override the matching env var below):
-#   --admin-password=PW    set admin's password (uid 1000)
+#   --profile=P            dev | daily-driver | release (default daily-driver)
+#   --dev                  shorthand for --profile=dev
+#   --admin-password=PW    set admin's password (uid 1000). DEV ONLY — in
+#                          hardened profiles a password on argv/env leaks via
+#                          /proc; use --admin-password-fd or interactive.
+#   --admin-password-fd=N  read admin's password from file descriptor N
+#                          (hardened-safe: never appears in argv/environ).
 #   --user=NAME            set the regular username (uid 1001)
-#   --user-password=PW     set the regular user's password
+#   --user-password=PW     set the regular user's password (DEV ONLY, as above)
+#   --user-password-fd=N   read the regular user's password from fd N
 #   --reset-passwords      re-apply the admin/regular passwords even for
 #                          accounts that already exist (state-rewriting).
 #                          Without this flag, a password is only set when
@@ -112,6 +135,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+# Shared profile gate + hardened primitives (dev vs daily-driver/release).
+# shellcheck source=lib/qdistro-profile.sh
+. "$SCRIPT_DIR/lib/qdistro-profile.sh"
 # scripts/install/<this> -> qdistro/ -> qdistro-org/
 QDISTRO_DIR_DEFAULT=$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd || true)
 REPO_ROOT="${QDISTRO_REPO_ROOT:-${QDISTRO_DIR_DEFAULT:+$(dirname "$QDISTRO_DIR_DEFAULT")}}"
@@ -119,6 +145,15 @@ REPO_ROOT="${REPO_ROOT:-/opt/qdistro-src}"
 BRANCH="${QDISTRO_BRANCH:-main}"
 
 DISTRO=""           # "tumbleweed" | "ubuntu"
+# Profile is resolved in main() via resolve_profile (defaults to the
+# hardened daily-driver profile). --profile / --dev set this.
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}"
+# Password file descriptors (hardened-safe input). Empty unless --*-fd given.
+ADMIN_PASSWORD_FD=""
+REGULAR_PASSWORD_FD=""
+# Env-var passwords are read here but are ONLY honoured under the dev
+# profile (enforced in prompt_inputs). In hardened profiles they are
+# ignored with a warning because /proc/<pid>/environ leaks them.
 ADMIN_PASSWORD="${QDISTRO_ADMIN_PASSWORD:-}"
 REGULAR_USER="${QDISTRO_USER_NAME:-}"
 REGULAR_PASSWORD="${QDISTRO_USER_PASSWORD:-}"
@@ -162,23 +197,46 @@ fail_or_warn() {
     fi
 }
 
+# fail_subvol — classify a btrfs per-silo subvolume failure. The subvolume is
+# the snapshot + quota boundary, so a daily-driver/release install that
+# cannot create it is broken and must FAIL VISIBLY. The dev profile may
+# warn-and-continue (a disposable VM can live without snapshots). Independent
+# of --strict (which is about package/build core ops); the subvolume boundary
+# is a daily-driver/release invariant of its own.
+fail_subvol() {
+    if is_dev; then
+        warn "$*"
+    else
+        die "$* — fatal in '$QDISTRO_PROFILE' profile (the per-silo subvolume is the snapshot/quota boundary; use --profile=dev to warn-and-continue)"
+    fi
+}
+
 require_root() {
     [ "$(id -u)" -eq 0 ] || die "must run as root (try: sudo $0)"
 }
 
 print_help() {
-    sed -n '2,106p' "$SCRIPT_PATH"
+    # Print the leading comment banner (everything up to, but not
+    # including, the first non-comment line / `set -euo pipefail`).
+    awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/,""); print}' "$SCRIPT_PATH"
 }
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
+            --profile=*)         QDISTRO_PROFILE="${1#*=}" ;;
+            --profile)           shift; QDISTRO_PROFILE="$1" ;;
+            --dev)               QDISTRO_PROFILE=dev ;;
             --admin-password=*)  ADMIN_PASSWORD="${1#*=}" ;;
             --admin-password)    shift; ADMIN_PASSWORD="$1" ;;
+            --admin-password-fd=*) ADMIN_PASSWORD_FD="${1#*=}" ;;
+            --admin-password-fd) shift; ADMIN_PASSWORD_FD="$1" ;;
             --user=*)            REGULAR_USER="${1#*=}" ;;
             --user)              shift; REGULAR_USER="$1" ;;
             --user-password=*)   REGULAR_PASSWORD="${1#*=}" ;;
             --user-password)     shift; REGULAR_PASSWORD="$1" ;;
+            --user-password-fd=*) REGULAR_PASSWORD_FD="${1#*=}" ;;
+            --user-password-fd)  shift; REGULAR_PASSWORD_FD="$1" ;;
             --repo-root=*)       REPO_ROOT="${1#*=}" ;;
             --repo-root)         shift; REPO_ROOT="$1" ;;
             --branch=*)          BRANCH="${1#*=}" ;;
@@ -199,16 +257,62 @@ parse_args() {
         shift
     done
 
+    # Resolve + validate the profile (defaults to the hardened daily-driver).
+    resolve_profile || die "invalid --profile / QDISTRO_PROFILE (want dev|daily-driver|release)"
+
+    # Branch name is operator input that flows into a `git clone --branch`.
+    # It must not be allowed to become a shell/URL interpolation surface, so
+    # constrain it to a conservative git-ref-safe shape (no whitespace, no
+    # shell metacharacters, no leading '-' that could be read as a flag, no
+    # '..' that could escape a manifest pin). Refs like main, v1.2.3,
+    # feat/foo-bar, and 40-hex SHAs all pass.
+    if ! printf '%s' "$BRANCH" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+        die "invalid --branch '$BRANCH' (git-ref-safe chars only: [A-Za-z0-9._/-], no leading dash)"
+    fi
+    case "$BRANCH" in
+        *..*) die "invalid --branch '$BRANCH' ('..' not allowed)" ;;
+    esac
+
+    # Password fds are operator input that flows into `read -u <fd>` and an
+    # `exec <fd><&-` close (qd_read_password_fd). A non-numeric value would be
+    # an eval/redirection-injection surface, so constrain each to a small
+    # non-negative integer before it is ever used.
+    if [ -n "$ADMIN_PASSWORD_FD" ] && ! printf '%s' "$ADMIN_PASSWORD_FD" | grep -qE '^[0-9]+$'; then
+        die "invalid --admin-password-fd '$ADMIN_PASSWORD_FD': must be a non-negative integer"
+    fi
+    if [ -n "$REGULAR_PASSWORD_FD" ] && ! printf '%s' "$REGULAR_PASSWORD_FD" | grep -qE '^[0-9]+$'; then
+        die "invalid --user-password-fd '$REGULAR_PASSWORD_FD': must be a non-negative integer"
+    fi
+
+    # Env-var passwords leak via /proc/<pid>/environ. Honour them ONLY under
+    # the dev profile; in hardened profiles ignore them with a clear warning
+    # so the operator switches to --*-password-fd or interactive entry.
+    if ! qd_password_env_allowed; then
+        if [ -n "${QDISTRO_ADMIN_PASSWORD:-}" ] && [ "$ADMIN_PASSWORD" = "${QDISTRO_ADMIN_PASSWORD:-}" ] && [ -z "$ADMIN_PASSWORD_FD" ]; then
+            warn "ignoring QDISTRO_ADMIN_PASSWORD in '$QDISTRO_PROFILE' profile (/proc/<pid>/environ leak); use --admin-password-fd or interactive entry"
+            ADMIN_PASSWORD=""
+        fi
+        if [ -n "${QDISTRO_USER_PASSWORD:-}" ] && [ "$REGULAR_PASSWORD" = "${QDISTRO_USER_PASSWORD:-}" ] && [ -z "$REGULAR_PASSWORD_FD" ]; then
+            warn "ignoring QDISTRO_USER_PASSWORD in '$QDISTRO_PROFILE' profile; use --user-password-fd or interactive entry"
+            REGULAR_PASSWORD=""
+        fi
+    fi
+
     # Fail fast: in noninteractive mode, missing required fields are an
     # immediate error before we even check root. This allows the test
-    # suite to verify the error message without running as root.
+    # suite to verify the error message without running as root. A password
+    # supplied via fd counts as present.
     if [ -n "$NONINTERACTIVE" ]; then
         local missing=0
-        [ -z "$ADMIN_PASSWORD" ]   && missing=1
+        [ -z "$ADMIN_PASSWORD" ]   && [ -z "$ADMIN_PASSWORD_FD" ]   && missing=1
         [ -z "$REGULAR_USER" ]     && missing=1
-        [ -z "$REGULAR_PASSWORD" ] && missing=1
+        [ -z "$REGULAR_PASSWORD" ] && [ -z "$REGULAR_PASSWORD_FD" ] && missing=1
         if [ "$missing" -eq 1 ]; then
-            die "noninteractive mode but missing values; supply --admin-password, --user, --user-password"
+            if is_dev; then
+                die "noninteractive mode but missing values; supply --admin-password(-fd), --user, --user-password(-fd)"
+            else
+                die "noninteractive mode but missing values; supply --admin-password-fd, --user, --user-password-fd (env/argv passwords disabled in '$QDISTRO_PROFILE' profile)"
+            fi
         fi
         # Validate username format early too (before root check)
         if ! printf '%s' "$REGULAR_USER" | grep -qE '^[a-z_][a-z0-9_-]*$'; then
@@ -216,6 +320,18 @@ parse_args() {
         fi
         if [ "$REGULAR_USER" = "admin" ] || [ "$REGULAR_USER" = "root" ]; then
             die "regular user must not be 'admin' or 'root'"
+        fi
+    fi
+
+    # In hardened profiles, an admin/user password passed literally on argv
+    # also leaks (ps/argv). Reject --admin-password / --user-password and
+    # point at the fd alternative.
+    if ! is_dev; then
+        if [ -n "$ADMIN_PASSWORD" ] && [ -z "$ADMIN_PASSWORD_FD" ]; then
+            die "--admin-password on argv is disabled in '$QDISTRO_PROFILE' profile (argv leak); use --admin-password-fd=N or interactive entry"
+        fi
+        if [ -n "$REGULAR_PASSWORD" ] && [ -z "$REGULAR_PASSWORD_FD" ]; then
+            die "--user-password on argv is disabled in '$QDISTRO_PROFILE' profile (argv leak); use --user-password-fd=N or interactive entry"
         fi
     fi
 }
@@ -266,8 +382,21 @@ prompt_password() {
 }
 
 prompt_inputs() {
-    # If a value is already supplied (CLI flag or env var), keep it;
-    # otherwise prompt — unless --noninteractive, in which case fail.
+    # Hardened-safe password source #1: a file descriptor. Read it FIRST so a
+    # fd-supplied password counts as present and we never prompt for it. The
+    # fd is closed after the read (qd_read_password_fd) so the secret source
+    # does not linger open for the rest of the install.
+    if [ -n "$ADMIN_PASSWORD_FD" ]; then
+        qd_read_password_fd "$ADMIN_PASSWORD_FD" ADMIN_PASSWORD
+        [ -n "$ADMIN_PASSWORD" ] || die "admin password fd ($ADMIN_PASSWORD_FD) was empty"
+    fi
+    if [ -n "$REGULAR_PASSWORD_FD" ]; then
+        qd_read_password_fd "$REGULAR_PASSWORD_FD" REGULAR_PASSWORD
+        [ -n "$REGULAR_PASSWORD" ] || die "user password fd ($REGULAR_PASSWORD_FD) was empty"
+    fi
+
+    # If a value is already supplied (CLI flag, fd, or dev-only env var),
+    # keep it; otherwise prompt — unless --noninteractive, in which case fail.
     local need_prompt=0
     [ -z "$ADMIN_PASSWORD" ]     && need_prompt=1
     [ -z "$REGULAR_USER" ]       && need_prompt=1
@@ -309,8 +438,18 @@ prompt_inputs() {
 # ---------------------------------------------------------------------------
 install_packages_tumbleweed() {
     log "refreshing zypper repositories..."
+    # GPG checking is profile-gated. dev may skip signature checks for a
+    # throwaway VM with stale/unsigned local mirrors; daily-driver/release
+    # MUST verify repo signatures (a tampered mirror could ship a malicious
+    # root package). The flag array is empty in hardened profiles so zypper's
+    # default (gpg-checks ON) applies.
+    local gpg_flags=()
+    if is_dev; then
+        gpg_flags=( --no-gpg-checks )
+        warn "dev profile: zypper --no-gpg-checks (unsigned repo metadata accepted) — NOT a release default"
+    fi
     local _zypper_rc=0
-    zypper -n --no-gpg-checks refresh 2>&1 \
+    zypper -n "${gpg_flags[@]}" refresh 2>&1 \
         | sed '/^[[:space:]]*$/d' \
         | sed 's/^/  /' \
         || _zypper_rc="${PIPESTATUS[0]}"
@@ -467,9 +606,15 @@ provision_subvolumes() {
         if btrfs subvolume show "$path" >/dev/null 2>&1; then
             log "  $path: already a subvolume"
         elif [ -d "$path" ] && [ "$(ls -A "$path" 2>/dev/null)" ]; then
-            warn "  $path: directory exists and is non-empty, not converting to subvolume"
+            # The subvolume is the snapshot + quota boundary. In hardened
+            # profiles a path that cannot be made a subvolume (because a
+            # non-empty plain dir already occupies it) is a FATAL config
+            # error, not a silent downgrade; dev keeps warn-and-continue.
+            fail_subvol "  $path: directory exists and is non-empty, not converting to subvolume"
         else
             [ -d "$path" ] && rmdir "$path" 2>/dev/null || true
+            # btrfs subvolume create is already fatal under set -e in every
+            # profile; the snapshot/quota boundary must exist.
             btrfs subvolume create "$path"
             log "  $path: created"
         fi
@@ -527,7 +672,9 @@ create_user_subvolume() {
     if btrfs subvolume show "$home" >/dev/null 2>&1; then
         log "  /home/$user: already a subvolume"
     elif [ -d "$home" ] && [ "$(ls -A "$home" 2>/dev/null)" ]; then
-        warn "  /home/$user: directory exists and is non-empty, not converting to subvolume"
+        # Per-silo home subvolume = snapshot + quota boundary. Hardened
+        # profiles FAIL here; dev warns and continues.
+        fail_subvol "  /home/$user: directory exists and is non-empty, not converting to subvolume"
     else
         [ -d "$home" ] && rmdir "$home" 2>/dev/null || true
         btrfs subvolume create "$home"
@@ -623,7 +770,27 @@ create_users() {
     # wheel group on Tumbleweed, sudo on Ubuntu
     if getent group wheel >/dev/null; then usermod -aG wheel admin; fi
     if getent group sudo  >/dev/null; then usermod -aG sudo  admin; fi
-    install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
+    # Sudoers policy is profile-gated:
+    #   dev           — passwordless `admin ALL=(ALL) NOPASSWD: ALL` so a
+    #                   throwaway VM is frictionless. This is the named
+    #                   dev-only escape hatch.
+    #   daily-driver/ — NO passwordless-everything rule. admin keeps normal
+    #   release         wheel/sudo membership (password-REQUIRED sudo); all
+    #                   cross-uid privileged actions flow through qsu / the
+    #                   broker's scoped approval, which is the qdistro design.
+    # Any stale 99-admin NOPASSWD file from a previous dev install is removed
+    # in hardened profiles so a re-run upgrades the box rather than leaving
+    # the passwordless rule behind.
+    if is_dev; then
+        install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
+        warn "dev profile: installed passwordless sudoers (admin NOPASSWD: ALL) — NOT a release default"
+    else
+        if [ -e /etc/sudoers.d/99-admin ]; then
+            rm -f /etc/sudoers.d/99-admin
+            log "  removed stale passwordless sudoers /etc/sudoers.d/99-admin (hardened profile)"
+        fi
+        log "  hardened profile: admin uses password-required sudo; cross-uid actions go through qsu/broker"
+    fi
 
     log "creating regular user '$REGULAR_USER' (uid 1001)..."
     ensure_regular_account
@@ -664,6 +831,54 @@ repo_present() {
     esac
 }
 
+# Source manifest: maps each repo to a pinned 40-hex commit SHA. Default
+# location is scripts/install/source-manifest.txt, overridable via
+# QDISTRO_SOURCE_MANIFEST. In hardened (daily-driver/release) profiles this
+# manifest is REQUIRED before any root build/install from a checkout: we will
+# not run `meson install` / root `pip install` from an unpinned, unverified
+# tree. dev installs may skip it (shallow branch clones).
+SOURCE_MANIFEST="${QDISTRO_SOURCE_MANIFEST:-$SCRIPT_DIR/source-manifest.txt}"
+
+# manifest_pin <repo> — print the pinned 40-hex SHA for <repo>, or empty if
+# the repo is absent / the manifest does not exist. Lines: `repo <sha>`,
+# '#' comments and blanks ignored.
+manifest_pin() {
+    local repo="$1"
+    [ -f "$SOURCE_MANIFEST" ] || return 0
+    awk -v r="$repo" '
+        /^[[:space:]]*#/ {next}
+        $1==r { print $2; exit }
+    ' "$SOURCE_MANIFEST"
+}
+
+# verify_repo_pin <repo> — in hardened profiles, ensure the checkout at
+# $REPO_ROOT/<repo> is exactly at its manifest-pinned commit; check it out if
+# a fetched full clone allows. FATAL on any mismatch / missing pin / detached
+# unpinned state. No-op (returns 0) under dev.
+verify_repo_pin() {
+    local repo="$1" pin head
+    is_dev && return 0
+    pin="$(manifest_pin "$repo")"
+    if [ -z "$pin" ]; then
+        die "$repo: no manifest pin in $SOURCE_MANIFEST; hardened profiles refuse to root-install from an unpinned source tree (add a '<repo> <40-hex-sha>' line, or --profile=dev)"
+    fi
+    if ! printf '%s' "$pin" | grep -qE '^[0-9a-f]{40}$'; then
+        die "$repo: manifest pin '$pin' is not a 40-hex commit SHA"
+    fi
+    [ -d "$REPO_ROOT/$repo/.git" ] || die "$repo: pinned profile needs a git checkout to verify $pin (found a non-git tree at $REPO_ROOT/$repo)"
+    # Make sure the pinned object exists, then check it out.
+    if ! git -C "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null; then
+        git -C "$REPO_ROOT/$repo" fetch --quiet origin "$pin" 2>/dev/null || true
+    fi
+    git -C "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null \
+        || die "$repo: pinned commit $pin not present in checkout (shallow clone? fetch the pin or supply a full checkout)"
+    git -C "$REPO_ROOT/$repo" checkout --quiet --detach "$pin" \
+        || die "$repo: failed to check out pinned commit $pin"
+    head="$(git -C "$REPO_ROOT/$repo" rev-parse HEAD 2>/dev/null || true)"
+    [ "$head" = "$pin" ] || die "$repo: HEAD ($head) != pinned $pin after checkout"
+    log "  $repo: verified at pinned commit $pin"
+}
+
 fetch_repo() {
     local repo="$1"
     local fatal="${2:-fatal}"
@@ -671,13 +886,26 @@ fetch_repo() {
 
     if repo_present "$repo"; then
         log "  $repo: using existing checkout at $REPO_ROOT/$repo"
+        verify_repo_pin "$repo"
         return 0
     fi
 
     url="$(repo_url "$repo")"
-    log "  $repo: cloning $url (branch=$BRANCH)..."
-    if git clone --depth 1 --branch "$BRANCH" "$url" "$REPO_ROOT/$repo"; then
-        return 0
+    # Pinned (hardened) profiles need the pinned commit object available, so
+    # a shallow --branch clone is not enough — do a full clone and let
+    # verify_repo_pin detach to the manifest SHA. dev keeps the fast shallow
+    # branch clone (branch already validated git-ref-safe in parse_args).
+    if is_dev; then
+        log "  $repo: cloning $url (branch=$BRANCH, shallow — dev)..."
+        if git clone --depth 1 --branch "$BRANCH" "$url" "$REPO_ROOT/$repo"; then
+            return 0
+        fi
+    else
+        log "  $repo: cloning $url (full, will pin per manifest)..."
+        if git clone "$url" "$REPO_ROOT/$repo"; then
+            verify_repo_pin "$repo"
+            return 0
+        fi
     fi
 
     if [ "$fatal" = "fatal" ]; then
@@ -794,18 +1022,65 @@ build_qdshell_plugin() {
         || die "qdshell meson install failed"
 }
 
+# Isolated install prefix for source-built Python apps in hardened profiles.
+# Writing app files into RPM-owned /usr widens upgrade/audit collision risk,
+# so daily-driver/release install into /opt/qdistro and expose launchers via
+# small /usr/bin wrappers. dev keeps the simpler --prefix=/usr.
+QDISTRO_OPT_PREFIX="${QDISTRO_OPT_PREFIX:-/opt/qdistro}"
+
+# pip_install_one <app> — install one source-built Python app under the
+# profile-appropriate prefix. In hardened profiles the source must already be
+# manifest-pinned + verified (verify_repo_pin ran during fetch_sources).
+pip_install_one() {
+    local app="$1" launcher
+    if is_dev; then
+        # dev: write into /usr (collides with RPM ownership, but a throwaway
+        # VM does not care). --prefix=/usr launchers land in /usr/bin.
+        python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
+            "$REPO_ROOT/$app" \
+            || warn "  pip install $app failed (non-fatal)"
+        return 0
+    fi
+    # Hardened: isolated /opt/qdistro prefix; no writes into RPM-owned /usr.
+    install -d -m 0755 "$QDISTRO_OPT_PREFIX"
+    python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
+        "$REPO_ROOT/$app" \
+        || { warn "  pip install $app -> $QDISTRO_OPT_PREFIX failed (non-fatal)"; return 0; }
+    # Expose the launcher on PATH via a thin wrapper that sets PYTHONPATH to
+    # the isolated prefix's site dir. Avoids touching /usr/lib*/python*/site.
+    launcher="$QDISTRO_OPT_PREFIX/bin/$app"
+    if [ -x "$launcher" ]; then
+        cat > "/usr/bin/$app" <<EOF
+#!/bin/sh
+# qdistro wrapper -> isolated $QDISTRO_OPT_PREFIX install (hardened profile).
+PYBASE="$QDISTRO_OPT_PREFIX/lib"
+for d in "\$PYBASE"/python*/site-packages; do
+    [ -d "\$d" ] && PYTHONPATH="\${PYTHONPATH:+\$PYTHONPATH:}\$d"
+done
+export PYTHONPATH PYTHONNOUSERSITE=1
+exec "$launcher" "\$@"
+EOF
+        chmod 0755 "/usr/bin/$app"
+        log "  $app: installed to $QDISTRO_OPT_PREFIX + /usr/bin/$app wrapper"
+    else
+        warn "  $app: no launcher at $launcher after pip install"
+    fi
+}
+
 pip_install_apps() {
     if [ -n "$SKIP_BUILD" ]; then
         log "skipping pip install of apps (--skip-build)"
         return 0
     fi
-    log "installing Python apps (qdgreeter, qdlocker, qdbrowser, qterminator, qnotebook, qfileman)..."
+    if is_dev; then
+        log "installing Python apps via pip --prefix=/usr (dev profile)..."
+    else
+        log "installing Python apps to isolated $QDISTRO_OPT_PREFIX (+ /usr/bin wrappers)..."
+    fi
     for app in qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman; do
         if [ -f "$REPO_ROOT/$app/pyproject.toml" ]; then
             log "  pip install $app..."
-            python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
-                "$REPO_ROOT/$app" \
-                || warn "  pip install $app failed (non-fatal)"
+            pip_install_one "$app"
         else
             warn "  $app source not found at $REPO_ROOT/$app"
         fi
@@ -819,10 +1094,19 @@ pip_install_apps() {
     # pyproject [tool.setuptools.packages.find]). Non-fatal: WARN, same as the
     # install step above.
     log "  import smoke check (qdgreeter, qdlocker, qdbrowser)..."
-    local smoke
+    # In hardened profiles the modules live under the isolated prefix, so
+    # point PYTHONPATH at it for the smoke import (matches the /usr/bin
+    # wrapper); dev installs into /usr so the default path resolves.
+    local smoke smoke_pp=""
+    if ! is_dev; then
+        local d
+        for d in "$QDISTRO_OPT_PREFIX"/lib/python*/site-packages; do
+            [ -d "$d" ] && smoke_pp="${smoke_pp:+$smoke_pp:}$d"
+        done
+    fi
     for smoke in qdgreeter qdlocker qdbrowser; do
         if [ -f "$REPO_ROOT/$smoke/pyproject.toml" ]; then
-            python3 -c "import $smoke" \
+            PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 python3 -c "import $smoke" \
                 || warn "  import smoke check failed: \"import $smoke\" — $smoke installed but a runtime dependency is missing (--no-deps skips dep resolution); the app may fail to launch"
         fi
     done
@@ -875,18 +1159,30 @@ install_python_modules() {
 install_qdlocker_service() {
     local locker_src="$REPO_ROOT/qdlocker"
     [ -d "$locker_src/systemd" ] || { warn "qdlocker systemd dir not found"; return 0; }
-    install -d -m 0755 /home/admin/.config/systemd/user
-    install -m 0644 "$locker_src/systemd/qdlocker.service" \
-        /home/admin/.config/systemd/user/qdlocker.service
 
-    # Patch ExecStart from /usr/local/bin to /usr/bin (pip --prefix=/usr installs there)
-    local unit_file="/home/admin/.config/systemd/user/qdlocker.service"
-    if grep -q "ExecStart=/usr/local/bin/qdlocker" "$unit_file" 2>/dev/null; then
-        sed -i 's|ExecStart=/usr/local/bin/qdlocker|ExecStart=/usr/bin/qdlocker|g' "$unit_file"
-        log "  patched qdlocker.service ExecStart: /usr/local/bin → /usr/bin"
-    fi
+    # Build the final unit in a ROOT-OWNED staging file, then install it
+    # atomically into admin's unit dir. We do NOT sed -i an already-installed
+    # unit (a post-install in-place edit on a user-controlled tree is a
+    # symlink/TOCTOU hazard), and we do NOT recursively chown the whole
+    # ~/.config/systemd tree (a recursive chown follows symlinks the user
+    # could plant). The qdlocker launcher path is profile-dependent:
+    #   dev           -> /usr/bin/qdlocker (pip --prefix=/usr)
+    #   daily/release -> /usr/bin/qdlocker wrapper into /opt/qdistro
+    # In both cases the canonical launcher is /usr/bin/qdlocker, so rewrite
+    # the upstream /usr/local/bin ExecStart to /usr/bin in the staging copy.
+    local stage admin_grp unit_dir="/home/admin/.config/systemd/user"
+    admin_grp="$(id -gn admin)"
+    stage="$(mktemp)" || { warn "qdlocker: mktemp staging failed"; return 0; }
+    # Render the unit with the corrected ExecStart into the root-owned stage.
+    sed 's|ExecStart=/usr/local/bin/qdlocker|ExecStart=/usr/bin/qdlocker|g' \
+        "$locker_src/systemd/qdlocker.service" > "$stage"
+    # Atomic, ownership-explicit install (no -R, no symlink following).
+    install -d -m 0755 -o admin -g "$admin_grp" /home/admin/.config/systemd
+    install -d -m 0755 -o admin -g "$admin_grp" "$unit_dir"
+    install -m 0644 -o admin -g "$admin_grp" "$stage" "$unit_dir/qdlocker.service"
+    rm -f "$stage"
+    log "  qdlocker.service staged (root-owned) + installed atomically (ExecStart -> /usr/bin/qdlocker)"
 
-    chown -R admin:"$(id -gn admin)" /home/admin/.config/systemd
     install -d -m 0755 /etc/systemd/user/qdlocker.service.d
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<'EOF'
 [Service]
@@ -963,10 +1259,18 @@ configure_greetd() {
 
     # _greeter system user. greetd's [default_session].user convention;
     # runs the qdgreeter UI without admin privileges. PAM does the
-    # privilege handoff at start_session time.
+    # privilege handoff at start_session time. Provisioned as a NON-LOGIN
+    # (nologin shell), NON-HOME (no home dir) system user so a compromise of
+    # the greeter process has no shell, no home to drop persistence into, and
+    # no uid in the human-user range.
     if ! getent passwd _greeter >/dev/null; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin _greeter \
+        useradd --system --no-create-home --home-dir /nonexistent \
+            --shell /usr/sbin/nologin _greeter \
             || warn "useradd _greeter failed (already present from RPM scriptlet?)"
+    else
+        # Idempotent re-harden: if a prior/RPM provisioning gave _greeter a
+        # login shell or a real home, pin it back to non-login / non-home.
+        usermod --shell /usr/sbin/nologin --home /nonexistent _greeter 2>/dev/null || true
     fi
 
     # greetd config (tty3 — production qdgreeter path).
@@ -982,6 +1286,15 @@ configure_greetd() {
     install -m 0644 \
         "$REPO_ROOT/qdistro/deploy/greetd-fallback.service" \
         /etc/systemd/system/greetd-fallback.service
+
+    # systemd hardening drop-in for the distro-packaged greetd.service.
+    if [ -f "$REPO_ROOT/qdistro/deploy/greetd-hardening.conf" ]; then
+        install -d -m 0755 /etc/systemd/system/greetd.service.d
+        install -m 0644 \
+            "$REPO_ROOT/qdistro/deploy/greetd-hardening.conf" \
+            /etc/systemd/system/greetd.service.d/10-qdistro-hardening.conf
+        log "  installed greetd.service systemd hardening drop-in"
+    fi
 
     # session launcher — what greetd execs as admin post-auth.
     install -m 0755 \
@@ -1065,6 +1378,7 @@ main() {
     prompt_inputs
 
     log "summary:"
+    log "  profile      : $QDISTRO_PROFILE$(is_dev && echo '  (throwaway shortcuts ENABLED)' || echo '  (hardened)')"
     log "  distro       : $DISTRO"
     log "  admin user   : admin (uid 1000)"
     log "  regular user : $REGULAR_USER (uid 1001)"
@@ -1165,4 +1479,9 @@ main() {
     fi
 }
 
-main "$@"
+# Run main() only when executed directly, not when sourced (the idempotency
+# test harness sources this file to exercise individual functions with mocked
+# privileged commands). ${BASH_SOURCE[0]} != $0 means we were sourced.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi
