@@ -31,7 +31,13 @@ install -d -o root -g root -m 0755 "$DEST_BIN"
 # 1. Privileged-exec service (root-side D-Bus delegator + subprocess
 #    streamer). Same install layout as the broker — under
 #    /usr/local/lib/qdistro/ so an unprivileged user can't replace it.
-install -o root -g root -m 0644 "$QSU_SRC/qdistro_root_exec.py" \
+# Installed mode 0755 (executable) with a `#!/usr/bin/python3` shebang so
+# the service unit can ExecStart it DIRECTLY. That makes the labelled
+# script the first execve target, which is what triggers the SELinux
+# init_daemon_domain transition into qdistro_root_exec_t (see
+# selinux/qsu/qdistro_qsu.te). ExecStart-ing `/usr/bin/python3 <script>`
+# instead would transition on the interpreter (bin_t), never the script.
+install -o root -g root -m 0755 "$QSU_SRC/qdistro_root_exec.py" \
     "$DEST_LIB/qdistro_root_exec.py"
 
 # 2. User-facing entry point. /usr/local/bin/qsu is what humans type.

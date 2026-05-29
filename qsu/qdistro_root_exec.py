@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """qdistro-root-exec — privileged exec service for qsu.
 
 Runs as root, listens on a systemd-activated Unix socket, and for each
@@ -109,6 +110,60 @@ _CHANNEL_ENV_WAIT_S = 10.0
 _CHANNEL_ENV_POLL_S = 0.1
 
 
+# -- Strict-profile fail-closed identity resolution ------------------------
+#
+# security-hardening-carryforward.md §"Unresolved executable/starttime
+# identity should deny in strict profiles":
+#
+# The baseline (non-strict) posture fails closed only when *neither* the
+# caller exe NOR its starttime can be anchored — a process whose
+# /proc/<pid>/exe is unreadable but whose starttime is readable (or vice
+# versa) still proceeds on the single available anchor. Under SELinux
+# enforcing this single-anchor fallback is a real exposure: if the
+# qdistro-root-exec domain is denied read on /proc/<pid>/stat (starttime)
+# but can still readlink /proc/<pid>/exe, the starttime anti-PID-reuse
+# anchor silently drops out and the request proceeds on the exe path
+# alone — exactly the "falls back open" failure the carryforward flags.
+#
+# STRICT mode closes that: BOTH the exe and the starttime anchor must be
+# resolvable, or the request is denied. A strict deployment is one where
+# the SELinux policy *should* grant both reads (the qdistro_qsu module
+# does), so a missing anchor signals either a policy regression or an
+# active attack — fail closed in both cases rather than degrade silently.
+#
+# Read at import from $QDISTRO_IDENTITY_STRICT or
+# /etc/qdistro/broker.conf (key = identity_strict = true). Mirrors the
+# broker's _read_require_silo_active / _read_secctx_launcher_gated
+# toggle convention. Default OFF so existing permissive bakes keep the
+# single-anchor fallback; tier-1/enforcing bakes flip it on.
+_IDENTITY_STRICT_ENV = "QDISTRO_IDENTITY_STRICT"
+_BROKER_CONF_PATH = "/etc/qdistro/broker.conf"
+
+
+def _read_identity_strict() -> bool:
+    """Resolve the strict-identity profile flag (env, then broker.conf)."""
+    val = os.environ.get(_IDENTITY_STRICT_ENV, "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "identity_strict":
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+    except OSError:
+        pass
+    return False
+
+
+IDENTITY_STRICT = _read_identity_strict()
+
+
 _inflight_lock = threading.Lock()
 _inflight_by_uid: dict[int, int] = {}
 
@@ -194,6 +249,22 @@ def _recheck_caller_identity(pid: int, exe_at_accept: str,
     """
     has_exe_anchor = bool(exe_at_accept) and exe_at_accept != "?"
     has_start_anchor = start_at_accept != 0
+    # Strict profile (security-hardening-carryforward): BOTH anchors must
+    # be resolvable, or deny. A single readable anchor is not enough in a
+    # deployment whose SELinux policy is supposed to grant both /proc
+    # reads — a missing one is a policy regression or an attack, not a
+    # benign degradation. Checked before the baseline no-anchor gate so
+    # the deny reason is specific.
+    if IDENTITY_STRICT and not (has_exe_anchor and has_start_anchor):
+        missing = []
+        if not has_exe_anchor:
+            missing.append("exe")
+        if not has_start_anchor:
+            missing.append("starttime")
+        raise CallerIdentityChanged(
+            f"strict profile: caller pid={pid} identity not fully "
+            f"resolvable (missing {'+'.join(missing)} anchor); refusing "
+            f"to fall back to a single anchor")
     # Fail closed when neither anchor is usable — we cannot verify the
     # caller identity at all, so we must not let the request proceed
     # under an unverifiable (possibly pid-reused) process. Mirrors the

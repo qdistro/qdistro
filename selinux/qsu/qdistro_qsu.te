@@ -1,0 +1,221 @@
+## <summary>qdistro qsu privileged-exec service (qdistro-root-exec).</summary>
+## <desc>
+##   Dedicated SELinux domain for the root-side qsu delegator,
+##   qdistro-root-exec.service (qsu/qdistro_root_exec.py). The service
+##   runs as root, listens on a systemd-activated Unix socket, reads the
+##   peer's /proc identity (exe + starttime), calls the admin broker over
+##   the SYSTEM bus for approval, then forks + setuid-drops to the target
+##   user and execs the approved argv.
+##
+##   The permissive-mode qsu scenarios (tests/integration/permissions-gui/
+##   43-54) all ran against an unconfined_service_t broker; the streamed
+##   id(1) output of scenario 51 leaked unconfined_service_t, confirming
+##   the qsu code path had never been confined. This module is the
+##   enforcing-mode complement: it confines qdistro-root-exec into
+##   qdistro_root_exec_t and grants exactly the access the
+##   qsu-selinux-enforcing analysis predicts the service needs, so the
+##   55-qsu-selinux-enforcing runner sees ZERO new AVCs.
+##
+##   Analysis-predicted access (todo/issues/qsu/
+##   qsu-selinux-enforcing-untested.md §"Why it matters"):
+##
+##   1. The service reads /proc/<caller-pid>/exe and /proc/<caller-pid>/
+##      stat for SO_PEERCRED-anchored caller identity (audit + the
+##      TOCTOU re-verify). Covered by domain_read_all_domains_state +
+##      domain_getattr_all_domains.
+##
+##   2. The service connects to the broker on /run/dbus/system_bus_socket.
+##      Covered by dbus_system_bus_client + the system_dbusd_var_run_t
+##      sock_file connect leg + the qdistro_broker_dbus_chat() edge.
+##
+##   3. The setuid subprocess.Popen(user=uid, ...) child must NOT silently
+##      inherit qdistro_root_exec_t (that would sandbox arbitrary
+##      admin-approved commands in the delegator's own domain). It type-
+##      transitions to qsu_child_t — a thin, near-unconfined target domain
+##      for the spawned command. qsu's threat model puts the security gate
+##      at admin APPROVAL, not at the child's domain; the child is meant to
+##      run as an ordinary process of the target user. qsu_child_t exists
+##      so the transition is EXPLICIT and auditable rather than an
+##      accidental domain inheritance.
+##
+##   Co-ships with qdistro_broker (the broker module must be in the active
+##   store first — this module gen_requires qdistro_broker_t and calls
+##   qdistro_broker_dbus_chat()).
+##
+##   Spec refs: doc/selinux.md; doc/sudo.md §"Privileged exec service".
+## </desc>
+policy_module(qdistro_qsu, 0.1.0)
+
+########################################
+#
+# Declarations
+#
+
+require {
+	type system_dbusd_var_run_t;
+	type bin_t;
+	type shell_exec_t;
+}
+
+# The privileged-exec service domain + its labelled entry-point script.
+# The script carries a #!/usr/bin/python3 shebang and is ExecStart'd
+# directly, so it is the first execve target and init_daemon_domain's
+# transition lands the daemon here (NOT on the python interpreter).
+type qdistro_root_exec_t;
+type qdistro_root_exec_exec_t;
+
+# The setuid child domain: where an admin-approved `qsu <cmd>` actually
+# runs after the fork + uid drop. Declared so the transition below is
+# explicit; intentionally thin (the child is an ordinary target-user
+# process — the security decision already happened at admin approval).
+type qsu_child_t;
+
+# application_domain pulls in the standard application allow-set the
+# daemon needs (read its own libraries / site-packages, exec the python
+# interpreter behind the shebang, etc). init_daemon_domain layers the
+# systemd entry-point semantics so the daemon drops into
+# qdistro_root_exec_t on exec of the labelled script.
+application_domain(qdistro_root_exec_t, qdistro_root_exec_exec_t)
+init_daemon_domain(qdistro_root_exec_t, qdistro_root_exec_exec_t)
+
+# qsu_child_t is a free-standing domain (no application_domain attribute):
+# the child is a plain target-user process and we do not want to pull the
+# delegator's application allow-set into it. corecmd_* below grant the
+# child the right to exec the approved command + its libraries.
+domain_type(qsu_child_t)
+domain_entry_file(qsu_child_t, bin_t)
+domain_entry_file(qsu_child_t, shell_exec_t)
+role system_r types qsu_child_t;
+
+########################################
+#
+# (1) Caller-identity /proc reads
+#
+# qdistro_root_exec.py reads the peer's /proc/<pid>/exe (readlink) and
+# /proc/<pid>/stat (field 22, starttime) at accept time and re-reads them
+# immediately before the broker call + before Popen to close the TOCTOU
+# window. Under enforcing, a confined qdistro_root_exec_t denied either
+# read would (in a non-strict bake) silently drop an identity anchor; the
+# strict profile turns that into a hard deny (QDISTRO_IDENTITY_STRICT) —
+# but the correct posture is to GRANT both reads so the anchors are
+# present and the request proceeds. These two interfaces cover read +
+# getattr of /proc/<pid>/{exe,stat,status,attr/current} across all
+# domains (callers are arbitrary user-silo processes).
+domain_read_all_domains_state(qdistro_root_exec_t)
+domain_getattr_all_domains(qdistro_root_exec_t)
+
+# sys_ptrace: readlink /proc/<other-uid>/exe across uid boundaries (the
+# qsu caller is a different uid than the root service). Same kernel path
+# the broker's 0.4.0 self:capability sys_ptrace grant covers.
+allow qdistro_root_exec_t self:capability { sys_ptrace dac_read_search dac_override setuid setgid sys_resource };
+
+########################################
+#
+# (2) Broker D-Bus call over /run/dbus/system_bus_socket
+#
+# The service does iface.RequestPermissionAs / WaitForDecision /
+# GetRunChannelEnv against org.qdistro.AdminBroker1 on the SYSTEM bus.
+# dbus_system_bus_client covers the connectto + send_msg leg; the
+# explicit system_dbusd_var_run_t rules cover connecting to the bus
+# socket file at /run/dbus/system_bus_socket on this policy variant
+# (matching the pattern qdistro_tier1.te uses).
+dbus_system_bus_client(qdistro_root_exec_t)
+allow qdistro_root_exec_t system_dbusd_var_run_t:sock_file { write read getattr };
+allow qdistro_root_exec_t system_dbusd_var_run_t:dir search;
+
+# Caller-to-broker messaging edge (send_msg both directions + the dbus
+# daemon forwarding legs). qdistro_broker_dbus_chat is the broker
+# module's exported interface; it gen_requires qdistro_broker_t, so the
+# broker module must load first.
+optional_policy(`
+	qdistro_broker_dbus_chat(qdistro_root_exec_t)
+')
+
+########################################
+#
+# (3) Fork + setuid + exec of the approved command
+#
+# subprocess.Popen(user=uid, group=gid, extra_groups=..., ...) does the
+# setuid/setgid drop in the child between fork and exec. The service needs
+# the process-management perms; the child gets a TYPE TRANSITION into
+# qsu_child_t on exec so it does not inherit qdistro_root_exec_t.
+
+allow qdistro_root_exec_t self:process { fork signal sigchld sigkill setexec setpgid getsched };
+allow qdistro_root_exec_t self:fifo_file rw_fifo_file_perms;
+allow qdistro_root_exec_t self:unix_stream_socket { create connect accept listen getopt setopt getattr read write shutdown };
+
+# Read user/group databases for getpwnam/getgrouplist (target_user
+# resolution + the supplementary-group list passed to Popen).
+auth_read_passwd(qdistro_root_exec_t)
+sysnet_dns_name_resolve(qdistro_root_exec_t)
+
+# Exec the python interpreter (behind the shebang) + arbitrary approved
+# target binaries (the service resolves argv[0] via PATH and Popen execs
+# it). corecmd_exec_bin / corecmd_exec_shell are needed by the SERVICE to
+# launch the child; the domain_auto_trans then redirects the child into
+# qsu_child_t.
+corecmd_exec_bin(qdistro_root_exec_t)
+corecmd_exec_shell(qdistro_root_exec_t)
+
+# Type transition: when qdistro_root_exec_t execs a /bin (bin_t) or shell
+# (shell_exec_t) program, the child runs in qsu_child_t — explicit and
+# auditable, never an accidental inheritance of the delegator domain.
+domain_auto_trans(qdistro_root_exec_t, bin_t, qsu_child_t)
+domain_auto_trans(qdistro_root_exec_t, shell_exec_t, qsu_child_t)
+allow qdistro_root_exec_t qsu_child_t:process { transition siginh rlimitinh signal sigkill };
+
+# The child needs to actually run: exec its binary + libraries, read
+# passwd/locale for libc startup, write its stdout/stderr back through the
+# pipes the service holds, and use /dev/null + basic devices. This is the
+# minimal "ordinary target-user process" allow-set — the security decision
+# was the admin approval, not the child's confinement.
+corecmd_exec_bin(qsu_child_t)
+corecmd_exec_shell(qsu_child_t)
+application_executable_file(bin_t)
+files_read_etc_files(qsu_child_t)
+files_read_usr_files(qsu_child_t)
+auth_read_passwd(qsu_child_t)
+miscfiles_read_localization(qsu_child_t)
+dev_read_urand(qsu_child_t)
+allow qsu_child_t self:process { fork signal sigchld getsched };
+allow qsu_child_t self:fifo_file rw_fifo_file_perms;
+# Inherited stdout/stderr pipes from the service so the child's output
+# streams back to the qsu client.
+allow qsu_child_t qdistro_root_exec_t:fd use;
+allow qsu_child_t qdistro_root_exec_t:fifo_file { read write getattr };
+
+########################################
+#
+# Service runtime: socket activation + syslog + supervision
+#
+
+# Accept the systemd-passed listen fd (LISTEN_FDS) and serve connections.
+allow qdistro_root_exec_t self:unix_stream_socket { connectto };
+
+# Per-service runtime dir /run/qdistro-root-exec/ holding the activation
+# socket. systemd's RuntimeDirectory= creates it; the socket unit owns the
+# listen fd. Declare a dedicated runtime type and let the daemon manage the
+# dir + the socket file under it. Hedged in optional_policy over the
+# generic var_run_t so the module still loads if the distro labels
+# /run/qdistro-root-exec differently. (The same raw-allow + optional_policy
+# hedge style the tier1 module uses for system_dbusd_var_run_t.)
+type qdistro_root_exec_runtime_t;
+files_type(qdistro_root_exec_runtime_t)
+allow qdistro_root_exec_t qdistro_root_exec_runtime_t:dir { search getattr open read add_name remove_name };
+allow qdistro_root_exec_t qdistro_root_exec_runtime_t:sock_file { create unlink read write getattr setattr };
+optional_policy(`
+	gen_require(`
+		type var_run_t;
+	')
+	allow qdistro_root_exec_t var_run_t:dir { search getattr open read add_name remove_name };
+	allow qdistro_root_exec_t var_run_t:sock_file { create unlink read write getattr setattr };
+')
+
+# syslog (the service logs every exec request + every fail-closed deny).
+logging_send_syslog_msg(qdistro_root_exec_t)
+
+# /etc + libc startup self-introspection. usr-file reads (the python
+# interpreter + its site-packages) come from application_domain above.
+files_read_etc_files(qdistro_root_exec_t)
+miscfiles_read_localization(qdistro_root_exec_t)
+dev_read_urand(qdistro_root_exec_t)
