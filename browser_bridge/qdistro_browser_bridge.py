@@ -749,6 +749,104 @@ def _strip_identity(reply: dict) -> dict:
     return reply
 
 
+# =====================================================================
+# Outbound reply allowlist (response schema, per op)
+# =====================================================================
+#
+# Security model: the daemons the bridge talks to are MORE trusted than
+# the browser extension. A denylist (``_strip_identity``) fails OPEN —
+# any new/unexpected field a daemon starts returning is forwarded to the
+# extension unless someone remembers to add it to the strip list. We
+# instead forward replies through a per-op ALLOWLIST and copy ONLY the
+# fields named here; anything else is dropped (fail CLOSED). Per
+# todo/security-hardening-carryforward.md §"Clipboard".
+#
+# The fields below are derived from the actual handlers / daemon reply
+# shapes:
+#   * qdistro.ping       — _handle_ping(); identity fields re-stamped by
+#                          dispatch (pong/echo are the handler's own).
+#   * qdistro.handshake  — _handle_handshake() return dict.
+#   * recall.push        — _default_recall_push_impl() return dict.
+#   * pwd.fill           — qdistro-pwd Fill: credentials + fill_token.
+#   * pwd.fill_confirm   — qdistro-pwd FillConfirm: credentials.
+#   * pwd.save           — qdistro-pwd Save: envelope only.
+#   * page.extract       — qbus-admin PageExtract: envelope only.
+#   * cookies.export     — qdistro-pwd ExportCookies: exported count.
+#   * qdistro.heartbeat.ack — _handle_heartbeat_ack(): matched.
+#   * *.reply landings   — _handle_tabs_reply(): delivered.
+#   * 9e desktop ops     — daemon/stub: stub flag.
+#
+# The envelope keys (ok/op/error/detail/request_id) are ALWAYS allowed
+# (see _ENVELOPE_FIELDS); they carry status and error reporting and are
+# never daemon-identity material. The identity fields that the two
+# identity-reflecting ops surface (extension_id/ppid/parent_exe/
+# parent_selinux) are re-stamped by dispatch AFTER projection from the
+# bridge's kernel-attested view, so they don't need to be allowlisted
+# from the handler body here.
+
+# Status / error envelope. Always forwarded for every op.
+_ENVELOPE_FIELDS: frozenset[str] = frozenset({
+    "ok", "op", "error", "detail", "request_id",
+})
+
+# Per-op success-reply field allowlist (excluding the envelope). An op
+# absent from this table is "no registered schema" → forward envelope
+# only (fail closed), NOT the raw daemon reply.
+_REPLY_SCHEMA: dict[str, frozenset[str]] = {
+    "qdistro.ping": frozenset({"pong", "echo"}),
+    "qdistro.handshake": frozenset({
+        "session_secret_hex", "token_ttl_s", "hmac_algo",
+        "token_canonical",
+    }),
+    "recall.push": frozenset({"row_id", "user", "db"}),
+    "pwd.fill": frozenset({"credentials", "fill_token"}),
+    "pwd.fill_confirm": frozenset({"credentials"}),
+    "pwd.save": frozenset(),
+    "page.extract": frozenset(),
+    "cookies.export": frozenset({"exported"}),
+    "qdistro.heartbeat.ack": frozenset({"matched"}),
+    "clipboard.set": frozenset({"stub"}),
+    # 9b *.reply landings — the bridge only acks delivery to the ext.
+    "tabs.list.reply": frozenset({"delivered"}),
+    "tabs.open.reply": frozenset({"delivered"}),
+    "tabs.close.reply": frozenset({"delivered"}),
+    "page.extract.reply": frozenset({"delivered"}),
+    "page.extract.request.reply": frozenset({"delivered"}),
+    "cookies.export.reply": frozenset({"delivered"}),
+    "mpris.publish.reply": frozenset({"delivered"}),
+    "downloads.notify.reply": frozenset({"delivered"}),
+    "notifications.show.reply": frozenset({"delivered"}),
+    "screenlock.inhibit.reply": frozenset({"delivered"}),
+    "screenlock.release.reply": frozenset({"delivered"}),
+    "containers.list.reply": frozenset({"delivered"}),
+    "containers.create.reply": frozenset({"delivered"}),
+    "containers.remove.reply": frozenset({"delivered"}),
+    # 9e desktop integrations — daemons not yet shipped; stub flag.
+    "mpris.publish": frozenset({"stub"}),
+    "downloads.notify": frozenset({"stub"}),
+    "notifications.show": frozenset({"stub"}),
+    "screenlock.inhibit": frozenset({"stub"}),
+    "screenlock.release": frozenset({"stub"}),
+}
+
+
+def _project_reply(op: str, reply: dict) -> dict:
+    """Build the outbound reply by ALLOWLIST: keep only the envelope
+    keys plus the per-op schema fields registered in
+    :data:`_REPLY_SCHEMA`. Everything else a (more-trusted) daemon
+    returned is DROPPED before it reaches the (less-trusted) extension.
+
+    Fail-closed: an op with no registered schema forwards ONLY the
+    envelope (ok/op/error/detail/request_id) — never the raw daemon
+    reply body.
+
+    This is the primary outbound filter; :func:`_strip_identity` is
+    retained as a defense-in-depth second pass at the call site.
+    """
+    allowed = _ENVELOPE_FIELDS | _REPLY_SCHEMA.get(op, frozenset())
+    return {k: v for k, v in reply.items() if k in allowed}
+
+
 # ---- 9a: pwd.fill / pwd.save -------------------------------------
 #
 # CANONICAL NAMES — must match ``qdistro/pwd/qdistro_pwd_daemon.py``:
@@ -1459,13 +1557,30 @@ def dispatch(
     except Exception as e:
         return {"ok": False, "error": "handler_raised",
                 "op": op, "detail": str(e)[:200]}
-    # Central identity-strip — handlers don't have to remember (L4
-    # review). Any new field a future op adds is automatically
-    # guarded. Handlers that deliberately reflect identity back to
-    # the extension (currently only ``qdistro.ping`` and
-    # ``qdistro.handshake``) annotate themselves on
-    # :data:`_IDENTITY_REFLECTING_OPS` and run a re-stamp pass
-    # after the strip.
+    # PRIMARY outbound filter: allowlist by response schema. We copy
+    # ONLY the envelope keys + the per-op fields registered in
+    # :data:`_REPLY_SCHEMA`; anything else a (more-trusted) daemon
+    # returned is dropped before it reaches the (less-trusted)
+    # extension. Fail-closed: an op with no registered schema forwards
+    # the envelope only. This supersedes the old denylist
+    # ``_strip_identity`` (which failed OPEN on unexpected fields).
+    #
+    # Projection applies to the production op surface (DEFAULT_HANDLERS,
+    # i.e. ``handlers is None``). When a caller injects a custom
+    # ``handlers`` table (test harnesses), there is no registered
+    # schema for those ops, so we leave the body unfiltered and rely on
+    # the identity-strip defense-in-depth pass below — projecting an
+    # unknown injected op to the bare envelope would be a surprising
+    # behavior change for that escape hatch.
+    if handlers is None:
+        body = _project_reply(op, body)
+    # Defense-in-depth: even after the allowlist, run the legacy
+    # identity-strip so the kernel-attested fields can never leak (e.g.
+    # for the custom-handler escape hatch above, which skips projection).
+    # Handlers that deliberately reflect identity back to the extension
+    # (currently only ``qdistro.ping`` and ``qdistro.handshake``)
+    # annotate themselves on :data:`_IDENTITY_REFLECTING_OPS` and run a
+    # re-stamp pass below from the bridge's own view of the caller.
     _strip_identity(body)
     if op in _IDENTITY_REFLECTING_OPS:
         body["extension_id"] = str(identity.get("extension_id") or "")
