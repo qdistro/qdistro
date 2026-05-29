@@ -198,6 +198,72 @@ def validate_device(device: str) -> str:
     return canon
 
 
+LSBLK = "/usr/bin/lsblk"
+
+
+def parse_lsblk_removable(stdout: str) -> bool | None:
+    """Parse `lsblk -dno RM,HOTPLUG <dev>` output. Returns True if the
+    device (or its parent) is removable/hotpluggable, False if it is a
+    fixed/system-internal disk, None if the output couldn't be parsed.
+
+    lsblk prints one line per device with two 0/1 columns. We treat the
+    device as removable if EITHER RM or HOTPLUG is 1 — USB sticks set
+    HOTPLUG, SD card readers often set RM. A fixed internal SATA/NVMe
+    disk has both 0, so this rejects unmounting the system disk via a
+    broad qdistro.media.* rule (codex finding #2)."""
+    saw_line = False
+    for line in str(stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        saw_line = True
+        try:
+            rm = int(parts[0])
+            hotplug = int(parts[1])
+        except ValueError:
+            continue
+        if rm == 1 or hotplug == 1:
+            return True
+    return False if saw_line else None
+
+
+def device_is_removable(device: str) -> bool:
+    """Authoritatively decide (server-side, NOT trusting qdshell) whether
+    ``device`` is removable/hotpluggable. We query the partition's parent
+    disk too (a partition inherits its disk's RM/HOTPLUG). Fail-closed:
+    any lsblk failure or unparseable output → not removable → refuse.
+
+    The argv is tokenized; ``device`` is already a canonical /dev node
+    from validate_device(), so no shell and no interpolation."""
+    try:
+        proc = subprocess.run(
+            [LSBLK, "-dno", "RM,HOTPLUG", device],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env={"PATH": "/usr/bin:/bin"},
+            close_fds=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    direct = parse_lsblk_removable(proc.stdout.decode(errors="replace"))
+    if direct:
+        return True
+    # The node itself may be a partition whose RM/HOTPLUG is 0 while the
+    # parent disk carries the flag. Walk to the parent disk and re-check.
+    try:
+        proc2 = subprocess.run(
+            [LSBLK, "-no", "RM,HOTPLUG", device],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env={"PATH": "/usr/bin:/bin"},
+            close_fds=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc2.returncode != 0:
+        return False
+    parent = parse_lsblk_removable(proc2.stdout.decode(errors="replace"))
+    return bool(parent)
+
+
 def build_argv(op: str, device: str) -> list[str]:
     """Build the tokenized udisksctl argv for ``op`` on ``device``.
 
@@ -211,13 +277,46 @@ def build_argv(op: str, device: str) -> list[str]:
     return [UDISKSCTL, sub, "-b", device]
 
 
-def action_for(op: str, device: str) -> str:
+# A filesystem UUID is hex + dashes (and FAT's short XXXX-XXXX form). We
+# only ever embed a UUID into the action string if it matches this, so a
+# crafted value can never inject `*`/`:` glob/structure into the action.
+_UUID_RE = re.compile(r"^[A-Fa-f0-9-]{1,64}$")
+
+
+def device_uuid(device: str) -> str:
+    """Resolve the device's filesystem UUID server-side (tokenized lsblk,
+    no shell). Returns "" if unreadable / no filesystem. This is a STABLE
+    identity anchor: durable approvals are pinned to it so a re-used
+    /dev/<node> assigned to a different volume re-prompts (codex #1)."""
+    try:
+        proc = subprocess.run(
+            [LSBLK, "-dno", "UUID", device],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env={"PATH": "/usr/bin:/bin"},
+            close_fds=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    uuid = proc.stdout.decode(errors="replace").strip().splitlines()
+    val = uuid[0].strip() if uuid else ""
+    return val if _UUID_RE.match(val) else ""
+
+
+def action_for(op: str, device: str, uuid: str = "") -> str:
     """The broker action string for this operation. The device suffix is
     the canonical node so admins can author ``qdistro.media.mount:*``
-    rules; it is never a label / never interpolated."""
+    rules; it is never a label / never interpolated. When a stable
+    filesystem ``uuid`` is known it is appended (``...:/dev/sdb1?uuid=X``)
+    so a durable approval pins the actual volume, not just the volatile
+    /dev name (codex #1). The uuid is regex-validated by ``device_uuid``
+    before it ever reaches here."""
     if op not in _VALID_OPS:
         raise ValueError(f"unknown op: {op!r}")
-    return f"qdistro.media.{op}:{device}"
+    base = f"qdistro.media.{op}:{device}"
+    if uuid and _UUID_RE.match(uuid):
+        return f"{base}?uuid={uuid}"
+    return base
 
 
 def build_details(op: str, device: str, argv: list[str], *,
@@ -242,14 +341,15 @@ def build_details(op: str, device: str, argv: list[str], *,
 
 def _ask_broker(op: str, device: str, argv: list[str], details: dict,
                 caller_uid: int, caller_pid: int, caller_exe: str,
-                *, caller_start_time: int = 0) -> bool:
+                *, caller_start_time: int = 0, fs_uuid: str = "") -> bool:
     """RequestPermissionAs on the broker for the media action; wait for
     the decision. Fail-closed: the final identity recheck runs right
-    before the privileged call."""
+    before the privileged call. ``fs_uuid`` (server-resolved) pins the
+    action string to the actual volume."""
     bus = dbus.SystemBus()
     obj = bus.get_object(BUS_NAME, OBJ_PATH)
     iface = dbus.Interface(obj, BUS_NAME)
-    action = action_for(op, device)
+    action = action_for(op, device, fs_uuid)
     if caller_start_time:
         details = dict(details)
         details["caller_start_time"] = dbus.UInt64(int(caller_start_time))
@@ -370,12 +470,31 @@ def handle_one(sock: socket.socket) -> None:
             _send(sock, {"type": "result", "ok": False, "error": str(e)})
             return
 
+        # Authoritatively confirm the device is removable/hotpluggable
+        # BEFORE asking the broker. Refuse fixed/system-internal disks so
+        # a broad `qdistro.media.*` rule can never mount/unmount the OS
+        # disk (codex finding #2). Server-side check — we do not trust any
+        # removability claim from qdshell.
+        if not device_is_removable(device):
+            _send(sock, {"type": "result", "ok": False,
+                         "error": f"not a removable device: {device}"})
+            syslog.syslog(syslog.LOG_WARNING,
+                          f"media refused non-removable device={device} "
+                          f"uid={uid} pid={pid}")
+            return
+
+        # Resolve the STABLE filesystem UUID server-side; this anchors a
+        # durable approval to the actual volume (codex #1). Falls back to
+        # "" when the volume has no fs UUID — then the action is keyed on
+        # the /dev node alone (and argv-pinned scopes still apply).
+        fs_uuid = device_uuid(device)
         argv = build_argv(op, device)
         details = build_details(
             op, device, argv,
             label=str(req.get("label") or ""),
             fstype=str(req.get("fstype") or ""),
-            uuid=str(req.get("uuid") or ""))
+            # Prefer the server-resolved UUID over any client claim.
+            uuid=fs_uuid or str(req.get("uuid") or ""))
 
         # Re-verify identity before the (privileged) broker call.
         start_now = _peer_start_time(pid)
@@ -392,7 +511,8 @@ def handle_one(sock: socket.socket) -> None:
         try:
             allowed = _ask_broker(op, device, argv, details, uid, pid,
                                   exe_at_accept,
-                                  caller_start_time=start_at_accept)
+                                  caller_start_time=start_at_accept,
+                                  fs_uuid=fs_uuid)
         except CallerIdentityChanged as e:
             _send(sock, {"type": "result", "ok": False,
                          "error": "caller identity changed; refusing"})

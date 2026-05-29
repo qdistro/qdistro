@@ -123,6 +123,68 @@ class TestActionFor:
         with pytest.raises(ValueError):
             M.action_for("eject", "/dev/sdb1")
 
+    def test_uuid_anchors_action(self):
+        # A stable UUID pins the action to the actual volume (codex #1).
+        assert M.action_for("mount", "/dev/sdb1", "1234-ABCD") == \
+            "qdistro.media.mount:/dev/sdb1?uuid=1234-ABCD"
+
+    def test_uuid_glob_chars_rejected_not_embedded(self):
+        # A crafted "uuid" with glob/structure chars is NOT embedded — it
+        # fails the UUID regex, so the action falls back to the node-only
+        # form and cannot smuggle `*` or `:` into the action string.
+        for bad in ["*", "x:y", "a/b", "../../etc"]:
+            assert M.action_for("mount", "/dev/sdb1", bad) == \
+                "qdistro.media.mount:/dev/sdb1"
+
+
+class TestRemovableParsing:
+    def test_rm_flag_means_removable(self):
+        assert M.parse_lsblk_removable("1 0\n") is True
+
+    def test_hotplug_flag_means_removable(self):
+        assert M.parse_lsblk_removable("0 1\n") is True
+
+    def test_fixed_disk_not_removable(self):
+        assert M.parse_lsblk_removable("0 0\n") is False
+
+    def test_parent_disk_line_promotes(self):
+        # lsblk -no (tree) prints parent then child; if ANY line is
+        # removable the device is treated removable.
+        assert M.parse_lsblk_removable("0 0\n0 1\n") is True
+
+    def test_unparseable_returns_none(self):
+        assert M.parse_lsblk_removable("") is None
+        assert M.parse_lsblk_removable("garbage") is None
+
+    def test_device_uuid_validates_format(self, monkeypatch):
+        import subprocess as _sp
+
+        class _R:
+            def __init__(self, rc, out):
+                self.returncode = rc
+                self.stdout = out.encode()
+
+        # Well-formed UUID is returned.
+        monkeypatch.setattr(M.subprocess, "run",
+                            lambda *a, **k: _R(0, "1234-ABCD\n"))
+        assert M.device_uuid("/dev/sdb1") == "1234-ABCD"
+
+        # A garbage value that doesn't match the UUID regex → "".
+        monkeypatch.setattr(M.subprocess, "run",
+                            lambda *a, **k: _R(0, "; rm -rf /\n"))
+        assert M.device_uuid("/dev/sdb1") == ""
+
+        # Nonzero exit → "" (fail-closed).
+        monkeypatch.setattr(M.subprocess, "run",
+                            lambda *a, **k: _R(1, ""))
+        assert M.device_uuid("/dev/sdb1") == ""
+
+    def test_device_is_removable_fail_closed_on_error(self, monkeypatch):
+        def _boom(*a, **k):
+            raise OSError("lsblk missing")
+        monkeypatch.setattr(M.subprocess, "run", _boom)
+        assert M.device_is_removable("/dev/sdb1") is False
+
 
 class TestBuildDetails:
     def test_argv_shipped_as_indexed_keys(self):

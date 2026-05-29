@@ -80,7 +80,10 @@ fi
 # Give udev a beat to settle the new node.
 udevadm settle 2>/dev/null || sleep 1
 
-# --- 2. allow rule → mount succeeds -----------------------------------
+# --- 2. removability gate: a fixed/loopback device is refused ---------
+# Authoritative server-side check (lsblk RM/HOTPLUG). A plain loopback
+# device reports RM=0 HOTPLUG=0, so even with a broad allow rule it must
+# be refused as non-removable — this is the codex-#2 hardening.
 cat > "$RULES/test-media-allow.yaml" <<'EOF'
 - name: test-media-allow
   decision: allow
@@ -89,21 +92,15 @@ cat > "$RULES/test-media-allow.yaml" <<'EOF'
 EOF
 sleep 2
 out=$(run_client mount "$LOOP")
-if echo "$out" | grep -q '"ok": true'; then
-    pass "media: brokered mount allowed by rule"
+if echo "$out" | grep -q 'not a removable device'; then
+    pass "media: non-removable device refused even with allow rule"
 else
-    fail "media: expected mount ok, got: $out"
-fi
-if echo "$out" | grep -q '/run/media'; then
-    pass "media: mounted under /run/media"
-else
-    fail "media: expected /run/media mountpoint, got: $out"
+    fail "media: expected non-removable refusal, got: $out"
 fi
 
 # --- 3. unmount is a distinct action; mount rule does NOT cover it -----
-# (no unmount rule authored yet, and the broker has no admin attached in
-#  this headless driver, so the request would block on a prompt — assert
-#  the action namespace instead by checking CheckPermission directly.)
+# Assert the action namespace via CheckPermission (the action carries a
+# uuid anchor when the volume has one; the prefix glob still applies).
 BUS=org.qdistro.AdminBroker1
 CP=$(busctl --system --no-pager call "$BUS" /org/qdistro/AdminBroker1 \
         "$BUS" CheckPermission sa{sv} "qdistro.media.unmount:$LOOP" 0 2>&1)
@@ -113,10 +110,22 @@ else
     fail "media: expected unmount unknown, got: $CP"
 fi
 
-# clean up the mount before unmount-allow test
-runuser -u user1 -- udisksctl unmount -b "$LOOP" >/dev/null 2>&1 || true
+# Optional: if the runner exposes a real removable device via
+# QD_REMOVABLE_DEV (e.g. a qemu USB mass-storage), exercise the full
+# brokered mount. Skipped by default since the shared VM has no USB.
+if [ -n "${QD_REMOVABLE_DEV:-}" ] && [ -b "${QD_REMOVABLE_DEV}" ]; then
+    out=$(run_client mount "$QD_REMOVABLE_DEV")
+    if echo "$out" | grep -q '"ok": true' && echo "$out" | grep -q '/run/media'; then
+        pass "media: brokered mount of real removable device succeeded"
+    else
+        fail "media: expected real removable mount ok, got: $out"
+    fi
+    runuser -u user1 -- udisksctl unmount -b "$QD_REMOVABLE_DEV" >/dev/null 2>&1 || true
+fi
 
-# --- 4. deny rule blocks the mount ------------------------------------
+# --- 4. deny rule blocks before the removability gate is irrelevant ---
+# A deny rule must short-circuit. We assert via CheckPermission so the
+# verdict is observable without an admin prompt.
 rm -f "$RULES/test-media-allow.yaml"
 cat > "$RULES/test-media-deny.yaml" <<'EOF'
 - name: test-media-deny
@@ -125,16 +134,16 @@ cat > "$RULES/test-media-deny.yaml" <<'EOF'
     action: 'qdistro.media.mount:*'
 EOF
 sleep 2
-out=$(run_client mount "$LOOP")
-if echo "$out" | grep -q '"ok": false'; then
-    pass "media: brokered mount denied by deny rule"
+CPD=$(busctl --system --no-pager call "$BUS" /org/qdistro/AdminBroker1 \
+        "$BUS" CheckPermission sa{sv} "qdistro.media.mount:$LOOP" 0 2>&1)
+if echo "$CPD" | grep -q '"deny"'; then
+    pass "media: mount denied by deny rule"
 else
-    fail "media: expected mount denied, got: $out"
+    fail "media: expected deny verdict, got: $CPD"
 fi
 
 # --- cleanup ----------------------------------------------------------
 rm -f "$RULES"/test-media-*.yaml
-runuser -u user1 -- udisksctl unmount -b "$LOOP" >/dev/null 2>&1 || true
 losetup -d "$LOOP" 2>/dev/null || true
 rm -f "$IMG" /tmp/media_client.py
 sleep 1

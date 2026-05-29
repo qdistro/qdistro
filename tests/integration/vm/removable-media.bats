@@ -34,9 +34,8 @@ setup() {
     assert_success
     assert_output_contains "PASS: media: injection device string refused"
     assert_output_contains "PASS: media: non-/dev device refused"
-    assert_output_contains "PASS: media: brokered mount allowed by rule"
-    assert_output_contains "PASS: media: mounted under /run/media"
+    assert_output_contains "PASS: media: non-removable device refused even with allow rule"
     assert_output_contains "PASS: media: unmount action not covered by mount allow rule"
-    assert_output_contains "PASS: media: brokered mount denied by deny rule"
+    assert_output_contains "PASS: media: mount denied by deny rule"
     assert_output_contains "PASS: removable-media end-to-end"
 }

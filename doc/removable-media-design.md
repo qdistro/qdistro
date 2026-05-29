@@ -137,6 +137,32 @@ filesystem and are attacker-controlled:
   shell command or an action string. The action string suffix is the
   canonical device path, slugged the same way other actions are.
 
+## Scope: removable media only (not the system disk)
+
+The helper authoritatively confirms — **server-side, not trusting any
+claim from qdshell** — that the target is removable/hotpluggable before
+it contacts the broker. It runs `lsblk -dno RM,HOTPLUG <dev>` (tokenized
+argv, no shell) and, if the node itself reads 0/0, re-checks the parent
+disk's flags. A fixed SATA/NVMe system disk has `RM=0 HOTPLUG=0` on both
+and is refused. This means even a broad admin rule like
+`qdistro.media.unmount:*` cannot be turned against the OS disk: the
+privilege gate is the broker AND the removability gate. Fail-closed: any
+`lsblk` failure or unparseable output → treated as not-removable →
+refuse.
+
+## Stable identity anchoring
+
+`/dev/sdX` names are volatile — the kernel can reassign `/dev/sdb1` to a
+different stick after a replug. To stop a durable `forever_argv` approval
+from silently covering a *different* volume that later inherits the same
+node, the helper resolves the filesystem **UUID** server-side
+(`lsblk -dno UUID`, regex-validated) and appends it to the action string:
+`qdistro.media.mount:/dev/sdb1?uuid=<UUID>`. A re-used `/dev` node with a
+different filesystem produces a different action string, so the durable
+approval no longer matches and the request re-prompts. The UUID is regex-
+validated (`[A-Fa-f0-9-]`) before being embedded so a crafted value can
+never inject `*`/`:` structure into the action string.
+
 ## Failure posture
 
 Broker absent / timeout / malformed / `deny` / `unknown` → **deny the
