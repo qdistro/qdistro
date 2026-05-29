@@ -69,12 +69,20 @@ _BROKER_METHOD_WHITELIST = frozenset({
 # call_dbus destination policy (F2). call_dbus can reach any system-bus
 # service *as root* (the engine runs inside the root broker), so — unlike
 # call_broker's allowlist — it must NOT be an unrestricted escape hatch.
-# Two layers: a hard denylist of bus names a workflow may never call
-# (the secret/vault daemon, init/login managers — privilege-escalation
-# surfaces), and an optional allowlist. When the allowlist is non-empty
-# (configured per deployment via QDISTRO_WORKFLOW_DBUS_ALLOW, comma-sep),
-# ONLY those bus names are permitted (default-deny); when empty, any
-# non-denied bus name is permitted (default-allow minus the denylist).
+# The policy is ENFORCED by default (fail-closed) and has three layers:
+#   1. a hard denylist of bus names a workflow may NEVER call (the
+#      secret/vault daemon, our own broker, init/login/authorization
+#      managers — privilege-escalation surfaces). These can't be
+#      re-allowed, even via the allowlist.
+#   2. rejection of unique connection names (":1.N"), so a denied service
+#      can't be reached by its unique owner instead of its well-known name.
+#   3. a default-deny allowlist (QDISTRO_WORKFLOW_DBUS_ALLOW, comma-sep):
+#      ONLY the configured well-known bus names are callable. An empty
+#      allowlist means NOTHING is callable — the fail-closed end state,
+#      mirroring call_broker's allowlist model.
+# A documented dev escape hatch (QDISTRO_WORKFLOW_DBUS_OPEN=1) restores the
+# historical wide-open behavior for bring-up/testing; it must never be set
+# in a daily-driver/production deployment.
 _DBUS_BUS_NAME_DENYLIST = frozenset({
     "org.qdistro.Pwd1",            # vault/secret daemon
     "org.qdistro.AdminBroker1",    # our own broker (use call_broker, whitelisted)
@@ -89,17 +97,19 @@ def _dbus_allowlist() -> frozenset[str]:
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
 
 
-def _dbus_hardening_enabled() -> bool:
-    """Whether the call_dbus destination policy (denylist + unique-name
-    rejection + allowlist) is active.
+def _dbus_open_escape_hatch() -> bool:
+    """Whether the dev escape hatch restoring wide-open call_dbus is set.
 
-    DEFAULT OFF — call_dbus is wide open for now to keep workflow testing
-    unobstructed; hardening is a deliberate later step (see
-    todo/issues/qdistro/qdistro-workflow-dbus-hardening.md). Flip on with
-    QDISTRO_WORKFLOW_DBUS_HARDENING=1. The code below stays in place so
-    enabling is a one-flag change once testing settles."""
+    DEFAULT OFF — the call_dbus destination policy (denylist + unique-name
+    rejection + default-deny allowlist) is ENFORCED by default and
+    fail-closed. Setting QDISTRO_WORKFLOW_DBUS_OPEN=1 reverts to the
+    historical wide-open behavior (only the private-method ``_`` guard
+    remains) for workflow bring-up/testing. This is the inverse of the
+    former QDISTRO_WORKFLOW_DBUS_HARDENING opt-in and MUST NOT be set in a
+    daily-driver/production deployment — see
+    todo/issues/qdistro/qdistro-workflow-dbus-hardening.md."""
     return os.environ.get(
-        "QDISTRO_WORKFLOW_DBUS_HARDENING", "").strip().lower() in (
+        "QDISTRO_WORKFLOW_DBUS_OPEN", "").strip().lower() in (
         "1", "true", "yes", "on")
 
 
@@ -1071,14 +1081,12 @@ class WorkflowEngine:
         if method.startswith("_"):
             result.error = f"call_dbus: refusing private method {method!r}"
             return
-        # F2: this runs as root inside the broker. When hardening is enabled
-        # (deliberately OFF by default for now — see
-        # _dbus_hardening_enabled / the dbus-hardening todo), refuse the
-        # privilege-escalation/secret bus names outright and, when an
-        # allowlist is configured, refuse anything not on it (default deny).
-        # Without this, a workflow YAML is an arbitrary root D-Bus escape
-        # hatch — intentionally tolerated during testing only.
-        if _dbus_hardening_enabled():
+        # F2: this runs as root inside the broker, so without a policy a
+        # workflow YAML is an arbitrary root D-Bus escape hatch. The policy
+        # is ENFORCED by default and fail-closed; only the dev escape hatch
+        # (QDISTRO_WORKFLOW_DBUS_OPEN=1) reverts to the historical wide-open
+        # behavior for bring-up/testing.
+        if not _dbus_open_escape_hatch():
             # Reject unique connection names (":1.N"): the denylist /
             # allowlist match well-known names, but a workflow could
             # otherwise name the *unique* owner of a denied service (e.g.
@@ -1094,11 +1102,15 @@ class WorkflowEngine:
                     f"(use call_broker for the broker; the vault/init/login "
                     f"managers are never callable from a workflow)")
                 return
+            # Default-deny allowlist: ONLY explicitly-configured well-known
+            # bus names are callable. An empty/unset allowlist means nothing
+            # is callable — the fail-closed end state (mirrors call_broker).
             allow = _dbus_allowlist()
-            if allow and bus_name not in allow:
+            if bus_name not in allow:
                 result.error = (
                     f"call_dbus: bus_name {bus_name!r} not in the configured "
-                    f"allowlist {sorted(allow)} (fail-closed)")
+                    f"allowlist {sorted(allow)} (default-deny, fail-closed; "
+                    f"set QDISTRO_WORKFLOW_DBUS_ALLOW to permit it)")
                 return
         timeout = _clamp_timeout(step.config.get("timeout"),
                                  _DEFAULT_DBUS_TIMEOUT_S, _MAX_DBUS_TIMEOUT_S)
