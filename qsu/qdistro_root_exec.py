@@ -5,7 +5,14 @@ incoming connection:
 
 1. Reads the peer's uid + pid from SO_PEERCRED (plus reads the peer's
    /proc/<pid>/exe for the audit record).
-2. Parses a JSON request: `{"target_user": "<name>", "argv": [...]}`.
+2. Parses a JSON request: `{"target_user": "<name>", "argv": [...],
+   "run_id": "<optional workflow run id>"}`. When `run_id` is present,
+   the daemon asks the broker for that run's non-secret, allowlisted
+   `channel_env` (e.g. SSH_AUTH_SOCK) and folds it into the child env
+   before exec (the git-sign external-consume bridge). The lookup
+   forwards the qsu caller's SO_PEERCRED uid; the engine binds the run to
+   it (run_id is not a bearer token). Fail-closed: unknown run / uid
+   mismatch / not-published-within-bounded-wait → the exec is refused.
 3. Calls the qdistro broker's RequestPermission with action `qsu.exec`
    and the argv / target_user in the details dict. Waits for the
    decision.
@@ -78,6 +85,28 @@ MAX_REQUEST_BYTES = 1_000_000
 # embedded newlines / control chars flow into the broker action string
 # and the audit syslog line.
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+# Workflow-run ids are uuid4 hex-with-dashes (see WorkflowRun.run_id).
+# Validate before it flows into the broker call / syslog: a hostile
+# client could otherwise stuff control chars or an oversized blob in.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Allowlist of channel_env names the bridge will fold into a child's
+# environment. This is a SECOND, independent gate to the engine's own
+# allowlist (defense-in-depth: the privileged exec daemon does not trust
+# the broker to have filtered correctly). Only non-secret *references*
+# belong here — never a name that could carry secret material. Keep it
+# tight; widening it is a deliberate, reviewable act.
+_CHANNEL_ENV_ALLOWLIST = frozenset({"SSH_AUTH_SOCK"})
+
+# Bounded wait for the run to publish its channel_env. The process_spawn
+# model spawns the child (this exec) before the engine's deliver_secret
+# step has necessarily published SSH_AUTH_SOCK, so we poll the broker for
+# a short, bounded window. On timeout we FAIL CLOSED (refuse the exec)
+# rather than running git with no agent — the run never reached the
+# published state in time.
+_CHANNEL_ENV_WAIT_S = 10.0
+_CHANNEL_ENV_POLL_S = 0.1
 
 
 _inflight_lock = threading.Lock()
@@ -279,6 +308,128 @@ def _ask_broker(target_user: str, argv: list[str],
     return bool(iface.WaitForDecision(rid, timeout=900))
 
 
+# -- Workflow channel-env bridge -------------------------------------------
+
+class ChannelEnvUnavailable(Exception):
+    """Raised when a --workflow-run handshake was requested but the run's
+    allowlisted channel_env could not be obtained (unknown run, not yet
+    published within the bounded wait, broker unreachable, or nothing
+    allowlisted returned). Fail-closed signal — never exec without the
+    env the caller explicitly asked the bridge to deliver."""
+
+
+def _broker_get_run_channel_env(run_id: str, names: list[str],
+                                caller_uid: int,
+                                call_timeout: float = 5.0) -> dict[str, str]:
+    """Single broker lookup of a run's allowlisted channel_env.
+
+    Returns the (already engine-side-filtered) {name: value} map, or {} if
+    the run hasn't published yet / doesn't exist / uid doesn't match.
+    Raises on a broker/dbus transport failure so the caller can
+    distinguish "not yet" (retry) from "broker down" (fail closed).
+
+    ``caller_uid`` is the qsu caller's SO_PEERCRED uid, forwarded so the
+    engine can bind the run to it. ``call_timeout`` bounds THIS dbus call
+    so a wedged broker cannot stall past the overall fail-closed deadline.
+    """
+    bus = dbus.SystemBus()
+    obj = bus.get_object(BUS_NAME, OBJ_PATH)
+    iface = dbus.Interface(obj, BUS_NAME)
+    ret = iface.GetRunChannelEnv(str(run_id),
+                                 dbus.Array(names, signature="s"),
+                                 dbus.Int32(int(caller_uid)),
+                                 timeout=max(0.1, float(call_timeout)))
+    return {str(k): str(v) for k, v in dict(ret).items()}
+
+
+def _resolve_channel_env(run_id: str, caller_uid: int, *,
+                         wait_s: float = _CHANNEL_ENV_WAIT_S,
+                         poll_s: float = _CHANNEL_ENV_POLL_S,
+                         _clock=None, _sleep=None,
+                         _lookup=None) -> dict[str, str]:
+    """Fold a workflow run's allowlisted channel_env into a name->value map.
+
+    Bounded-poll the broker until the run publishes at least one
+    allowlisted reference, then re-filter the result through this daemon's
+    OWN allowlist (defense-in-depth — never trust the broker to have
+    filtered). ``caller_uid`` (the qsu caller's SO_PEERCRED uid) is
+    forwarded so the engine binds the run to it (run_id is not a bearer
+    token). Fail closed (raise ChannelEnvUnavailable) on:
+
+    - an invalid run_id;
+    - the bounded wait elapsing with nothing published / uid mismatch
+      ("run has not published channel_env yet");
+    - the broker returning a name not on our allowlist (would mean the
+      engine/broker allowlist drifted — refuse rather than trust it);
+    - any value that isn't a non-empty string.
+
+    Never blocks indefinitely; the TOTAL wait is bounded by ``wait_s`` —
+    each dbus call is given only the remaining budget so a wedged broker
+    cannot exceed it.
+
+    ``_clock``/``_sleep``/``_lookup`` are injection points for tests.
+    """
+    if not _RUN_ID_RE.match(run_id or ""):
+        raise ChannelEnvUnavailable(f"invalid workflow run_id: {run_id!r}")
+    clock = _clock or __import__("time").monotonic
+    sleep = _sleep or __import__("time").sleep
+    lookup = _lookup or _broker_get_run_channel_env
+    names = sorted(_CHANNEL_ENV_ALLOWLIST)
+    start = clock()
+    deadline = start + max(0.0, float(wait_s))
+    last_err: Exception | None = None
+    raw: dict[str, str] = {}
+    attempted = False
+    while True:
+        # Bound each dbus call by the remaining deadline so a hung broker
+        # cannot blow past the advertised total fail-closed window. Once
+        # the deadline has passed we do NOT start another lookup (which
+        # could overshoot by its own timeout) — except we always allow the
+        # FIRST attempt, even for wait_s<=0 (a single non-blocking probe).
+        remaining = deadline - clock()
+        if remaining <= 0 and attempted:
+            if last_err is not None:
+                raise ChannelEnvUnavailable(
+                    f"broker lookup for run {run_id!r} failed: {last_err!r}")
+            raise ChannelEnvUnavailable(
+                f"run {run_id!r} has not published channel_env yet "
+                f"(waited {wait_s:.0f}s)")
+        # Floor the dbus timeout to a small positive value so the call is
+        # valid, but never larger than the remaining budget.
+        call_timeout = min(max(remaining, 0.0), 5.0)
+        if call_timeout <= 0:
+            call_timeout = 0.5  # only reachable on the first attempt
+        attempted = True
+        try:
+            raw = lookup(run_id, names, caller_uid, call_timeout)
+        except Exception as e:  # noqa: BLE001 — transport failure
+            last_err = e
+            raw = {}
+        if raw:
+            break
+        # Don't sleep past the deadline.
+        if deadline - clock() <= 0:
+            continue
+        sleep(max(0.01, float(poll_s)))
+    # Re-filter through our own allowlist. The broker already filters, but
+    # this daemon is the privileged side and must not widen its trust to
+    # whatever the broker returned.
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if k not in _CHANNEL_ENV_ALLOWLIST:
+            raise ChannelEnvUnavailable(
+                f"run {run_id!r} returned non-allowlisted env name {k!r}; "
+                f"refusing")
+        if not isinstance(v, str) or not v:
+            raise ChannelEnvUnavailable(
+                f"run {run_id!r} returned empty/invalid value for {k!r}")
+        out[k] = v
+    if not out:
+        raise ChannelEnvUnavailable(
+            f"run {run_id!r} published no allowlisted channel_env")
+    return out
+
+
 # -- Target user handling --------------------------------------------------
 
 def _resolve_target(target_user: str) -> tuple[int, int, str, str]:
@@ -309,7 +460,8 @@ def _resolve_argv(argv: list[str]) -> list[str] | None:
 
 def _spawn_and_stream(sock: socket.socket, target_user: str,
                        argv: list[str], *, caller_pid: int = 0,
-                       caller_exe: str = "", caller_start_time: int = 0) -> None:
+                       caller_exe: str = "", caller_start_time: int = 0,
+                       channel_env: dict[str, str] | None = None) -> None:
     """Fork off the target command; stream stdout/stderr back as JSON
     frames; send a final `exit` frame with the return code.
 
@@ -334,6 +486,15 @@ def _spawn_and_stream(sock: socket.socket, target_user: str,
         "LOGNAME": target_user,
         "TERM":  "xterm",
     }
+    # Workflow channel-env bridge: fold the run's allowlisted, non-secret
+    # references (e.g. SSH_AUTH_SOCK) into the child env. This map was
+    # already validated against the allowlist in _resolve_channel_env;
+    # re-assert here so the only way a name reaches the child is via the
+    # allowlist, even if a future caller passes an unvalidated dict.
+    if channel_env:
+        for k, v in channel_env.items():
+            if k in _CHANNEL_ENV_ALLOWLIST and isinstance(v, str) and v:
+                env[k] = v
 
     try:
         groups = os.getgrouplist(target_user, gid)
@@ -462,6 +623,13 @@ def handle_one(sock: socket.socket) -> None:
         target_user = str(req.get("target_user") or "")
         argv = list(req.get("argv") or [])
         client_claimed_name = str(req.get("caller_name") or "")
+        # Optional workflow-run handshake. Empty/absent = current behaviour.
+        run_id = str(req.get("run_id") or "")
+        if run_id and not _RUN_ID_RE.match(run_id):
+            _send(sock, {"type": "error",
+                         "message": f"invalid run_id: {run_id!r}"})
+            _send(sock, {"type": "exit",  "code": 1})
+            return
         if not target_user or not argv:
             _send(sock, {"type": "error", "message": "target_user and argv required"})
             _send(sock, {"type": "exit",  "code": 1})
@@ -548,6 +716,31 @@ def handle_one(sock: socket.socket) -> None:
             _send(sock, {"type": "error", "message": "request denied"})
             _send(sock, {"type": "exit",  "code": 1})
             return
+
+        # Workflow channel-env bridge. Resolve AFTER approval (so an
+        # unapproved caller can never probe run state through this daemon)
+        # and BEFORE spawn. Fail closed: if the run hasn't published its
+        # allowlisted channel_env within the bounded wait, refuse to exec
+        # rather than run git with no agent / a stale env.
+        channel_env: dict[str, str] | None = None
+        if run_id:
+            try:
+                # Bind to the qsu caller's authenticated uid (SO_PEERCRED),
+                # not anything the client put in the request, so a run_id
+                # is not a bearer capability for another uid's socket.
+                channel_env = _resolve_channel_env(run_id, uid)
+            except ChannelEnvUnavailable as e:
+                _send(sock, {"type": "error",
+                             "message": f"workflow channel_env unavailable: {e}"})
+                _send(sock, {"type": "exit", "code": 1})
+                syslog.syslog(syslog.LOG_WARNING,
+                              f"qsu channel-env fail-closed: uid={uid} "
+                              f"pid={pid} run_id={run_id!r} {e}")
+                return
+            syslog.syslog(syslog.LOG_NOTICE,
+                          f"qsu channel-env bridge: uid={uid} pid={pid} "
+                          f"run_id={run_id!r} names={sorted(channel_env)}")
+
         # Final fail-closed gate happens INSIDE _spawn_and_stream, right
         # before Popen (after its blocking NSS/getgrouplist lookups), so
         # the recheck covers the whole post-approval preparation window.
@@ -559,7 +752,8 @@ def handle_one(sock: socket.socket) -> None:
         try:
             _spawn_and_stream(sock, target_user, argv,
                               caller_pid=pid, caller_exe=exe_at_accept,
-                              caller_start_time=start_at_accept)
+                              caller_start_time=start_at_accept,
+                              channel_env=channel_env)
         except CallerIdentityChanged as e:
             _send(sock, {"type": "error",
                          "message": "caller executable changed between connect "

@@ -13,18 +13,44 @@
 #        anchored) until the commit finishes
 #     -> scrub on workflow_exit: kill the agent, remove its socket dir
 #
-# IMPORTANT — consumption is NOT yet wired for an EXTERNAL git.
-#   The agent socket is published on the *run context* (consumable by a
-#   LATER in-engine step via $run.SSH_AUTH_SOCK / consume_channels — see
-#   git-sign-inline.yaml, which works end-to-end today). An independently
-#   launched git process (e.g. via qsu) does NOT automatically inherit
-#   SSH_AUTH_SOCK: qsu/qdistro-root-exec is not workflow-aware yet, so it
-#   has no path to read the run context. Until that bridge exists (the
-#   root-exec daemon accepting a run_id and folding the run's channel_env
-#   into the child's environment at exec time), this workflow stands the
-#   agent up and tears it down around the commit window but the external
-#   git will not pick the socket up. Tracked in
-#   todo/issues/qdistro/qdistro-workflow-engine.md.
+# EXTERNAL consumption via the qsu / root-exec bridge.
+#   The agent socket is published on the *run context* (channel_env). An
+#   externally launched git inherits it ONLY when launched through the
+#   explicit run_id handshake:
+#
+#       qsu --workflow-run <RUN_ID> -- git -C /srv/repo commit -S ...
+#
+#   The root-exec daemon then asks the broker (GetRunChannelEnv, root-only)
+#   for this run's allowlisted, NON-SECRET channel_env (SSH_AUTH_SOCK only)
+#   and folds it into git's environment before exec. The lookup is:
+#     - fail-closed + bounded: if the run has not reached the *published*
+#       state (its deliver_secret step has not run) within the bounded
+#       wait, the exec is REFUSED rather than running git with no agent;
+#     - allowlisted: only SSH_AUTH_SOCK is ever exposed, never secret
+#       material (the plaintext `env` delivery method is not publishable);
+#     - UID-BOUND: the run is revealed only to a caller whose uid owns the
+#       run's TRIGGERING process. A run_id leaks via the WorkflowRunPending
+#       admin broadcast, so it is NOT a bearer token — another uid holding
+#       it still cannot pull the socket.
+#
+#   ORDERING / CHOREOGRAPHY CAVEAT (important — read before relying on this
+#   for a `process_spawn(git)` flow):
+#     The run must already exist, be approved, and have PUBLISHED its
+#     channel before root-exec reads it. In the pure `process_spawn` shape
+#     the trigger fires only AFTER git is observed in the cgroup — but with
+#     this bridge git is launched by root-exec, not by qsu directly, so the
+#     trigger-pid identity is the wrong anchor and the deliver step cannot
+#     have run yet at exec time. The bridge's short bounded wait covers a
+#     small publish lag, NOT the full create→approve→deliver lifecycle.
+#     A working external flow therefore needs a launcher that:
+#       1. raises the run (e.g. a qbus_event / cron the dev triggers),
+#       2. waits for it to be approved AND to publish SSH_AUTH_SOCK,
+#       3. then runs `qsu --workflow-run <RUN_ID> -- git ...`.
+#     The uid-binding uses the run's triggering process; for a non
+#     process_spawn trigger that has no triggering pid the bridge fails
+#     closed (no uid to bind to). For a fully self-contained signing flow
+#     with no external launcher coordination, prefer the engine-launched
+#     model in git-sign-inline.yaml — it is the recommended default.
 #
 # auto_run is OMITTED, so this defaults to FALSE: each fire parks a
 # PENDING run for admin approval (ApproveWorkflowRun). Set `auto_run: true`

@@ -3664,6 +3664,62 @@ class Broker(dbus.service.Object):
                 pass
         return approved
 
+    @dbus.service.method(BUS_NAME, in_signature="sasi", out_signature="a{ss}",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetRunChannelEnv(self, run_id: str, names, caller_uid: int,
+                         sender=None, conn=None) -> dict:
+        """Return a workflow run's NON-SECRET published channel_env refs.
+
+        The read side of the git-sign external-consume bridge: the
+        root-exec daemon (uid 0) carries the run_id from a
+        ``qsu --workflow-run`` handshake and folds the returned references
+        (e.g. ``SSH_AUTH_SOCK``) into the child's environment before exec.
+
+        ROOT ONLY. Unlike the admin-facing list surfaces, this is callable
+        exclusively by uid 0 — the only legitimate caller is the root-exec
+        daemon, which runs as root. The D-Bus policy denies it for the
+        default context; this server-side check is defense-in-depth (and
+        the bus name is owned by root, so admin/non-root must not reach it
+        either — hence uid != 0 is rejected, not uid not in (0, ADMIN_UID)).
+
+        ``caller_uid`` is the SO_PEERCRED uid of the ORIGINAL qsu caller,
+        forwarded by root-exec (trusted because only uid 0 can reach this
+        method). The engine binds the lookup to it: a run is revealed only
+        when its triggering process belongs to that uid, so a run_id (which
+        leaks via the WorkflowRunPending broadcast) is not a bearer token.
+
+        Returns ONLY allowlisted, non-secret references (the engine
+        intersects the requested ``names`` with its own allowlist and only
+        returns a live RUNNING run's published channel). Fail-closed:
+        unknown run / uid-mismatch / not-yet-published / non-allowlisted
+        name → empty dict. Never returns secret material.
+        """
+        sender_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if sender_uid != 0:
+            raise dbus.DBusException(
+                f"GetRunChannelEnv restricted to root; got uid {sender_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        engine = getattr(self, "workflow_engine", None)
+        if engine is None:
+            return {}
+        try:
+            req_names = [str(n) for n in names] if names else None
+        except TypeError:
+            req_names = None
+        try:
+            bind_uid = int(caller_uid)
+        except (TypeError, ValueError):
+            return {}
+        try:
+            env = engine.get_run_channel_env(
+                str(run_id), req_names, caller_uid=bind_uid)
+        except Exception as e:  # noqa: BLE001 — fail closed on any engine error
+            print(f"[broker] GetRunChannelEnv failed: {e!r}", flush=True)
+            return {}
+        return {dbus.String(str(k)): dbus.String(str(v))
+                for k, v in (env or {}).items()}
+
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="aa{sv}",
                          sender_keyword="sender", connection_keyword="conn")
     def ListHistory(self, limit: int, sender=None, conn=None) -> list[dict]:

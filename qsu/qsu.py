@@ -2,7 +2,7 @@
 """qsu — qdistro sudo replacement (v1, non-pty).
 
 Usage:
-    qsu [-u TARGET_USER] command [args...]
+    qsu [-u TARGET_USER] [--workflow-run RUN_ID] command [args...]
 
 Connects to /run/qdistro-root-exec.sock, sends a JSON request for the
 privileged exec, streams stdout/stderr back to the caller, and exits
@@ -34,8 +34,9 @@ import sys
 SOCKET_PATH = "/run/qdistro-root-exec/sock"
 
 
-def _parse_argv(argv: list[str]) -> tuple[str, list[str]]:
-    """Return (target_user, command_argv). -u must precede the command."""
+def _parse_argv(argv: list[str]) -> tuple[str, str, list[str]]:
+    """Return (target_user, run_id, command_argv). Flags must precede the
+    command. ``run_id`` is "" when --workflow-run was not given."""
     ap = argparse.ArgumentParser(
         prog="qsu",
         description="qdistro sudo replacement",
@@ -43,6 +44,10 @@ def _parse_argv(argv: list[str]) -> tuple[str, list[str]]:
     )
     ap.add_argument("-u", "--user", default="root",
                     help="target user (default: root)")
+    ap.add_argument(
+        "--workflow-run", dest="run_id", default="",
+        help=("workflow run id to inherit non-secret channel_env from "
+              "(e.g. SSH_AUTH_SOCK for git-sign); omit for normal behaviour"))
     # Grab the remainder without argparse trying to interpret flags.
     # argparse.REMAINDER is deprecated-but-still-present; nargs=* +
     # '--' gets awkward on shebang-driven calls, so we accept the
@@ -59,7 +64,7 @@ def _parse_argv(argv: list[str]) -> tuple[str, list[str]]:
         cmd = cmd[1:]
     if not cmd:
         ap.error("command required")
-    return args.user, cmd
+    return args.user, args.run_id, cmd
 
 
 def _stream(sock: socket.socket) -> int:
@@ -100,7 +105,8 @@ def _stream(sock: socket.socket) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    target_user, cmd = _parse_argv(sys.argv[1:] if argv is None else argv)
+    target_user, run_id, cmd = _parse_argv(
+        sys.argv[1:] if argv is None else argv)
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(SOCKET_PATH)
@@ -116,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
             "argv": cmd,
             "caller_name": "qsu",
         }
+        # Optional workflow-run handshake: when present, the root-exec
+        # daemon asks the broker for this run's non-secret channel_env
+        # (allowlisted refs like SSH_AUTH_SOCK) and folds them into the
+        # child's environment before exec. Omitting it = current behaviour.
+        if run_id:
+            request["run_id"] = run_id
         sock.sendall((json.dumps(request) + "\n").encode())
         return _stream(sock)
     finally:

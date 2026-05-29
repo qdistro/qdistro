@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -683,3 +685,291 @@ class TestSshAgentConsumptionLoop:
         # Mid-step failure still scrubs the published channel.
         assert not os.path.exists(sock)
         assert run.run_id not in engine._delivery_handles
+
+
+# ======================================================================
+# External git-sign bridge (qsu --workflow-run -> root-exec channel_env)
+# ======================================================================
+
+import qdistro_root_exec as REX  # noqa: E402
+from workflow_schema import WorkflowRun  # noqa: E402
+
+
+def _running_run_with_channel(engine, env):
+    """Register a RUNNING run on the engine whose context already publishes
+    ``env`` on channel_env (mirrors what _publish_channel does after a real
+    deliver_secret step)."""
+    run = WorkflowRun(workflow_name="git-sign", trigger_context={})
+    run.mark_running()
+    run.context["channel_env"] = dict(env)
+    with engine._runs_lock:
+        engine._runs[run.run_id] = run
+    return run
+
+
+class TestEngineGetRunChannelEnv:
+    """Read side of the bridge — the engine surface GetRunChannelEnv calls."""
+
+    def _engine(self, tmp_path):
+        audit = WorkflowAuditLogger(db_path=str(tmp_path / "a.sqlite"))
+        return WorkflowEngine(audit_logger=audit)
+
+    def test_running_run_returns_allowlisted(self, tmp_path):
+        engine = self._engine(tmp_path)
+        run = _running_run_with_channel(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        out = engine.get_run_channel_env(run.run_id)
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_unknown_run_returns_empty(self, tmp_path):
+        engine = self._engine(tmp_path)
+        assert engine.get_run_channel_env("does-not-exist") == {}
+
+    def test_non_allowlisted_name_filtered_out(self, tmp_path):
+        engine = self._engine(tmp_path)
+        # A run that somehow published a non-allowlisted key must never
+        # leak it to an external child.
+        run = _running_run_with_channel(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock",
+                     "SECRET_TOKEN": "p@ss"})
+        out = engine.get_run_channel_env(run.run_id)
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+        assert "SECRET_TOKEN" not in out
+
+    def test_explicit_name_intersects_allowlist(self, tmp_path):
+        engine = self._engine(tmp_path)
+        run = _running_run_with_channel(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        # Asking for a non-allowlisted name returns nothing for it.
+        assert engine.get_run_channel_env(run.run_id, ["SECRET_TOKEN"]) == {}
+        assert engine.get_run_channel_env(
+            run.run_id, ["SSH_AUTH_SOCK"]) == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_completed_run_returns_empty(self, tmp_path):
+        # A non-RUNNING run's socket has already been scrubbed; its
+        # channel_env entry is a dangling path -> must not be handed out.
+        engine = self._engine(tmp_path)
+        run = _running_run_with_channel(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        run.mark_completed()
+        assert engine.get_run_channel_env(run.run_id) == {}
+
+    def test_not_yet_published_returns_empty(self, tmp_path):
+        engine = self._engine(tmp_path)
+        run = WorkflowRun(workflow_name="git-sign", trigger_context={})
+        run.mark_running()
+        with engine._runs_lock:
+            engine._runs[run.run_id] = run
+        assert engine.get_run_channel_env(run.run_id) == {}
+
+    def test_wait_returns_when_published_late(self, tmp_path):
+        # The publish lands after the first poll -> the bounded wait picks
+        # it up rather than timing out.
+        engine = self._engine(tmp_path)
+        run = WorkflowRun(workflow_name="git-sign", trigger_context={})
+        run.mark_running()
+        with engine._runs_lock:
+            engine._runs[run.run_id] = run
+
+        import threading
+        def publish_later():
+            time.sleep(0.15)
+            run.context["channel_env"] = {"SSH_AUTH_SOCK": "/run/late.sock"}
+        threading.Thread(target=publish_later, daemon=True).start()
+        out = engine.wait_for_run_channel_env(
+            run.run_id, timeout=2.0, poll_interval=0.02)
+        assert out == {"SSH_AUTH_SOCK": "/run/late.sock"}
+
+    def test_wait_times_out_fail_closed(self, tmp_path):
+        engine = self._engine(tmp_path)
+        run = WorkflowRun(workflow_name="git-sign", trigger_context={})
+        run.mark_running()
+        with engine._runs_lock:
+            engine._runs[run.run_id] = run
+        # Never publishes -> bounded wait returns {} (fail closed).
+        out = engine.wait_for_run_channel_env(
+            run.run_id, timeout=0.2, poll_interval=0.02)
+        assert out == {}
+
+    # --- caller-uid binding (run_id is not a bearer token) --------------
+
+    def _running_run_with_trigger_pid(self, engine, env, pid):
+        run = WorkflowRun(
+            workflow_name="git-sign",
+            trigger_context={"pid": pid})
+        run.mark_running()
+        run.context["channel_env"] = dict(env)
+        with engine._runs_lock:
+            engine._runs[run.run_id] = run
+        return run
+
+    def test_uid_binding_matches_caller(self, tmp_path):
+        # The triggering pid is THIS process; caller_uid == our uid matches.
+        engine = self._engine(tmp_path)
+        run = self._running_run_with_trigger_pid(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"}, os.getpid())
+        out = engine.get_run_channel_env(run.run_id, caller_uid=os.getuid())
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_uid_binding_rejects_other_uid(self, tmp_path):
+        # A different uid (run_id leaked via the pending broadcast) cannot
+        # pull the socket — the triggering process is owned by us, not them.
+        engine = self._engine(tmp_path)
+        run = self._running_run_with_trigger_pid(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"}, os.getpid())
+        other = os.getuid() + 12345
+        assert engine.get_run_channel_env(run.run_id, caller_uid=other) == {}
+
+    def test_uid_binding_no_trigger_pid_fails_closed(self, tmp_path):
+        # A cron/engine-launched run has no triggering process to bind to,
+        # so the uid-bound external path can never reach it.
+        engine = self._engine(tmp_path)
+        run = _running_run_with_channel(
+            engine, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        assert engine.get_run_channel_env(
+            run.run_id, caller_uid=os.getuid()) == {}
+
+
+class TestRootExecResolveChannelEnv:
+    """root-exec side — bounded broker poll + own-allowlist re-filter.
+
+    The injected lookups take ``*a`` because the real signature is
+    ``lookup(run_id, names, caller_uid, call_timeout)``; the daemon
+    forwards the qsu caller uid (1234 here) so the engine can bind the run.
+    """
+
+    def test_success_folds_value(self):
+        calls = []
+        def lookup(run_id, names, *a):
+            calls.append((run_id, tuple(names), a))
+            return {"SSH_AUTH_SOCK": "/run/agent.sock"}
+        out = REX._resolve_channel_env("run-abc-123", 1234, _lookup=lookup)
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+        # It only ever asked for allowlisted names...
+        assert calls[0][1] == ("SSH_AUTH_SOCK",)
+        # ...and forwarded the caller uid for binding.
+        assert calls[0][2][0] == 1234
+
+    def test_invalid_run_id_fails_closed(self):
+        for bad in ("", "bad id with spaces", "x" * 65, "a;b", "../etc"):
+            with pytest.raises(REX.ChannelEnvUnavailable):
+                REX._resolve_channel_env(bad, 1234, _lookup=lambda *a: {})
+
+    def test_unknown_run_fails_closed(self):
+        # Broker keeps returning {} (run unknown / never published / uid
+        # mismatch) -> bounded wait elapses -> ChannelEnvUnavailable.
+        with pytest.raises(REX.ChannelEnvUnavailable):
+            REX._resolve_channel_env(
+                "run-unknown", 1234, wait_s=0.1, poll_s=0.02,
+                _lookup=lambda *a: {})
+
+    def test_not_yet_published_then_succeeds(self):
+        seq = [{}, {}, {"SSH_AUTH_SOCK": "/run/agent.sock"}]
+        def lookup(run_id, names, *a):
+            return seq.pop(0) if seq else {"SSH_AUTH_SOCK": "/run/agent.sock"}
+        out = REX._resolve_channel_env(
+            "run-late", 1234, wait_s=2.0, poll_s=0.01, _lookup=lookup)
+        assert out == {"SSH_AUTH_SOCK": "/run/agent.sock"}
+
+    def test_non_allowlisted_name_from_broker_rejected(self):
+        # Defense in depth: even if the broker returned a non-allowlisted
+        # name, the daemon refuses (allowlist drift -> fail closed).
+        def lookup(run_id, names, *a):
+            return {"EVIL_VAR": "value"}
+        with pytest.raises(REX.ChannelEnvUnavailable):
+            REX._resolve_channel_env("run-evil", 1234, wait_s=0.1, poll_s=0.02,
+                                     _lookup=lookup)
+
+    def test_empty_value_rejected(self):
+        def lookup(run_id, names, *a):
+            return {"SSH_AUTH_SOCK": ""}
+        # Empty value never satisfies the wait (treated as not-published) ->
+        # times out fail-closed.
+        with pytest.raises(REX.ChannelEnvUnavailable):
+            REX._resolve_channel_env("run-empty", 1234, wait_s=0.1, poll_s=0.02,
+                                     _lookup=lookup)
+
+    def test_broker_transport_error_fails_closed(self):
+        def lookup(run_id, names, *a):
+            raise RuntimeError("dbus down")
+        with pytest.raises(REX.ChannelEnvUnavailable):
+            REX._resolve_channel_env("run-down", 1234, wait_s=0.1, poll_s=0.02,
+                                     _lookup=lookup)
+
+    def test_no_lookup_started_after_deadline(self):
+        # The total wait must be bounded: once the deadline has passed the
+        # loop must NOT start another (potentially blocking) lookup. Drive a
+        # virtual clock and assert the per-call timeout never exceeds the
+        # remaining budget and no call is issued past the deadline.
+        now = [0.0]
+        timeouts = []
+        def clock():
+            return now[0]
+        def sleep(dt):
+            now[0] += dt  # advance the virtual clock by the poll interval
+        def lookup(run_id, names, caller_uid, call_timeout):
+            # Never start a call once the deadline has elapsed.
+            assert now[0] < 1.0, "lookup started at/after the deadline"
+            # The per-call timeout never exceeds the remaining budget.
+            assert call_timeout <= (1.0 - now[0]) + 1e-9
+            timeouts.append(call_timeout)
+            return {}
+        with pytest.raises(REX.ChannelEnvUnavailable):
+            REX._resolve_channel_env(
+                "run-x", 1234, wait_s=1.0, poll_s=0.3,
+                _clock=clock, _sleep=sleep, _lookup=lookup)
+        assert timeouts  # at least one probe happened
+
+
+class TestRootExecChildEnvFold:
+    """The env the daemon hands the child: SSH_AUTH_SOCK folded in, but
+    only allowlisted names. We capture the env passed to subprocess.Popen
+    rather than actually dropping privileges (the real path needs CAP_SETGID
+    to setgid/setgroups for the target user — exercised in the VM smoke).
+    """
+
+    def _capture_env(self, monkeypatch, channel_env):
+        import subprocess as _sp
+        captured = {}
+
+        class _FakeProc:
+            returncode = 0
+            def __init__(self, *a, **kw):
+                captured["env"] = kw.get("env")
+                # Provide closed-ish pipe stand-ins so the stream loop ends.
+                r1, w1 = os.pipe(); r2, w2 = os.pipe()
+                os.close(w1); os.close(w2)
+                self.stdout = os.fdopen(r1, "rb")
+                self.stderr = os.fdopen(r2, "rb")
+            def poll(self):
+                return 0
+            def wait(self):
+                return 0
+
+        monkeypatch.setattr(_sp, "Popen", _FakeProc)
+        # Avoid NSS/getgrouplist needing a real user; resolve to current.
+        monkeypatch.setattr(REX, "_resolve_target",
+                            lambda u: (os.getuid(), os.getgid(),
+                                       "/tmp", "/bin/sh"))
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            REX._spawn_and_stream(a, "someuser", ["/bin/true"],
+                                  channel_env=channel_env)
+        finally:
+            a.close(); b.close()
+        return captured["env"]
+
+    def test_child_inherits_channel_env(self, monkeypatch):
+        env = self._capture_env(
+            monkeypatch, {"SSH_AUTH_SOCK": "/run/agent.sock"})
+        assert env.get("SSH_AUTH_SOCK") == "/run/agent.sock"
+
+    def test_non_allowlisted_channel_env_not_folded(self, monkeypatch):
+        # Even if a non-allowlisted name reaches _spawn_and_stream, the
+        # final re-assert drops it (defense in depth).
+        env = self._capture_env(monkeypatch, {"EVIL_VAR": "value"})
+        assert "EVIL_VAR" not in env
+
+    def test_no_channel_env_is_clean(self, monkeypatch):
+        env = self._capture_env(monkeypatch, None)
+        assert "SSH_AUTH_SOCK" not in env

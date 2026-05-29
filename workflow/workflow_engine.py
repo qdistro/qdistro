@@ -40,6 +40,16 @@ logger = logging.getLogger("qdistro.workflow.engine")
 # itself (the channel is revoked immediately rather than at run exit).
 _STEP_SCRUB_LIFETIMES = frozenset({"step", "step_exit", "immediate", "now"})
 
+# Allowlist of channel_env variable names that may be handed to an
+# EXTERNALLY launched process via the qsu/root-exec bridge
+# (GetRunChannelEnv). These are non-secret *references* (a unix-socket
+# path) published by _publish_channel — never secret material. The
+# allowlist is the load-bearing fail-closed gate: a run may publish other
+# keys into channel_env (now or in future), but only names in this set
+# are ever exposed to an external child's environment. Adding a name here
+# is a deliberate, reviewable act — never widen it to a wildcard.
+_EXTERNAL_CHANNEL_ENV_ALLOWLIST = frozenset({"SSH_AUTH_SOCK"})
+
 # Broker methods a ``call_broker`` step is allowed to invoke. Restricted
 # to read-only / maintenance surface so a workflow can never drive the
 # broker's decision or secret machinery (RequestPermission, DecideRequest,
@@ -471,6 +481,169 @@ class WorkflowEngine:
             }
             for r in runs
         ]
+
+    # ------------------------------------------------------------------
+    # External-process channel bridge (qsu / root-exec)
+    # ------------------------------------------------------------------
+
+    def _run_trigger_uid(self, run: WorkflowRun) -> int | None:
+        """Best-effort uid of the run's TRIGGERING process.
+
+        Used to bind the external channel-env bridge to the caller: only a
+        process owned by the same uid as the run's trigger may inherit the
+        run's socket. Derived once from ``trigger_context['pid']`` (the
+        process_spawn watcher's pid), PID-reuse-anchored against the
+        captured ``pid_starttime``, and cached on the run. Returns None when
+        the run has no triggering pid (cron / engine-launched runs — those
+        are NOT reachable by the uid-bound external bridge), the pid has
+        exited, or the pid was recycled (anchor mismatch).
+        """
+        cached = run.context.get("_trigger_uid")
+        if cached is not None:
+            return int(cached) if cached >= 0 else None
+        pid = run.trigger_context.get("pid")
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            run.context["_trigger_uid"] = -1
+            return None
+        ident = condition_eval._read_identity(pid_i)  # type: ignore[attr-defined]
+        uid = None
+        if ident is not None:
+            # PID-reuse anchor: if the live pid's starttime differs from the
+            # one captured at fire, the original triggering process is gone
+            # and this pid is a stranger — refuse to bind to it.
+            expected = run.trigger_context.get("pid_starttime")
+            if expected is not None:
+                now_start = _proc_starttime(pid_i)
+                if now_start is not None and now_start != expected:
+                    ident = None
+            if ident is not None:
+                uid = ident.get("uid")
+        # Cache (-1 sentinel = "no bindable uid") so a later exit/recycle
+        # doesn't flip the answer mid-run after we first resolved it.
+        run.context["_trigger_uid"] = int(uid) if uid is not None else -1
+        return int(uid) if uid is not None else None
+
+    def get_run_channel_env(
+        self,
+        run_id: str,
+        names: list[str] | tuple[str, ...] | None = None,
+        *,
+        caller_uid: int | None = None,
+    ) -> dict[str, str]:
+        """Return a run's NON-SECRET published ``channel_env`` references,
+        filtered to the external allowlist.
+
+        This is the read side of the git-sign bridge: an externally
+        launched, workflow-gated process (a ``git`` started via ``qsu``)
+        cannot inherit the run's ``SSH_AUTH_SOCK`` on its own, so the
+        root-exec daemon asks for it here (carrying the run_id from the
+        ``qsu --workflow-run`` handshake) and folds the result into the
+        child's environment before ``exec``.
+
+        ``caller_uid`` BINDS the lookup to the requesting uid (root-exec
+        passes the qsu caller's SO_PEERCRED uid). The run is only revealed
+        when its TRIGGERING process belongs to that same uid — so a run_id
+        (which leaks via the WorkflowRunPending broadcast) is NOT a bearer
+        capability: another uid holding the id still cannot pull the socket.
+        ``caller_uid=None`` skips the binding (in-process/admin callers
+        only — never the unprivileged external path).
+
+        Fail-closed semantics — returns an EMPTY dict (never raises) when:
+
+        - the run does not exist;
+        - ``caller_uid`` is given and the run's triggering process uid does
+          not match it (or cannot be determined — cron/engine-launched runs
+          have no triggering process to bind to);
+        - the run is not in a state where its channel is live (only a
+          RUNNING run has a published channel that is still backed by a
+          tracked, un-scrubbed delivery handle — a COMPLETED/FAILED run's
+          channel has already been scrubbed, so handing out its socket
+          path would be a stale, dangling reference);
+        - the run has not yet published ``channel_env`` (the deliver_secret
+          step hasn't run — the caller must retry, see
+          ``wait_for_run_channel_env``);
+        - a requested name is not in ``_EXTERNAL_CHANNEL_ENV_ALLOWLIST``
+          (only allowlisted *references* are ever exposed; secret material
+          such as the plaintext ``env`` method is never publishable and
+          never reaches here).
+
+        ``names`` optionally narrows the result to those keys (still
+        intersected with the allowlist); ``None`` returns every allowlisted
+        key the run has published. The value is a filesystem reference (a
+        socket path), not secret material.
+        """
+        run = self.get_run(run_id)
+        if run is None:
+            return {}
+        # Only a live (RUNNING) run's published reference is valid: once a
+        # run COMPLETES or FAILS, _cleanup_secrets has scrubbed the agent
+        # and removed the socket, so its channel_env entry is a dangling
+        # path. Never hand a stale reference to a child.
+        if run.state != RunState.RUNNING:
+            return {}
+        # Caller-uid binding (fail closed): the requesting uid must own the
+        # run's triggering process. Defeats run_id-as-bearer-token.
+        if caller_uid is not None:
+            trig_uid = self._run_trigger_uid(run)
+            if trig_uid is None or int(trig_uid) != int(caller_uid):
+                return {}
+        chan = run.context.get("channel_env") or {}
+        if not isinstance(chan, dict) or not chan:
+            return {}
+        if names is None:
+            wanted = _EXTERNAL_CHANNEL_ENV_ALLOWLIST
+        else:
+            # Intersect requested names with the allowlist — a caller can
+            # never pull a non-allowlisted key by naming it explicitly.
+            wanted = {n for n in names
+                      if n in _EXTERNAL_CHANNEL_ENV_ALLOWLIST}
+        out: dict[str, str] = {}
+        for key in wanted:
+            val = chan.get(key)
+            # Guard against a non-string/empty value sneaking through.
+            if isinstance(val, str) and val:
+                out[key] = val
+        return out
+
+    def wait_for_run_channel_env(
+        self,
+        run_id: str,
+        names: list[str] | tuple[str, ...] | None = None,
+        timeout: float = 10.0,
+        poll_interval: float = 0.05,
+        *,
+        caller_uid: int | None = None,
+    ) -> dict[str, str]:
+        """Bounded wait for a run to publish its allowlisted ``channel_env``.
+
+        The process_spawn model has an inherent ordering caveat: the run's
+        ``deliver_secret`` step (which publishes ``SSH_AUTH_SOCK``) only
+        fires AFTER the trigger detects the spawned process, so the
+        externally launched child can reach root-exec before the run has
+        published. This polls ``get_run_channel_env`` up to ``timeout``
+        seconds; it returns as soon as ANY allowlisted key is available.
+
+        Returns ``{}`` on timeout (the caller fails closed — it does NOT
+        exec with a partial/stale environment). Bounded by design: never
+        blocks indefinitely, and a run that fails / never publishes simply
+        yields an empty dict at the deadline. ``timeout <= 0`` performs a
+        single non-blocking lookup.
+        """
+        try:
+            timeout = max(0.0, float(timeout))
+        except (TypeError, ValueError):
+            timeout = 0.0
+        deadline = time.monotonic() + timeout
+        while True:
+            env = self.get_run_channel_env(run_id, names,
+                                           caller_uid=caller_uid)
+            if env:
+                return env
+            if time.monotonic() >= deadline:
+                return env  # {} — fail closed
+            time.sleep(max(0.01, poll_interval))
 
     # ------------------------------------------------------------------
     # Step execution
