@@ -33,7 +33,7 @@
 #                              runs build-libweston.sh in production mode.
 #   DEST                     — install root (default
 #                              /usr/libexec/qdistro/qdwin-libweston).
-set -eu
+set -euo pipefail
 
 QDWIN_SRC=${1:-/root/qdistro-src/qdwin}
 DEST=${DEST:-/usr/libexec/qdistro/qdwin-libweston}
@@ -76,9 +76,12 @@ fi
 #    major SONAME here — the patched tree is pinned to the same upstream
 #    14.0.x as the distro package (see libweston-vendored/VERSION).
 if command -v weston >/dev/null 2>&1; then
-    want=$(objdump -p "$(command -v weston)" 2>/dev/null \
-            | sed -n 's/.*NEEDED *\(libweston-[0-9]*\.so\.[0-9]*\).*/\1/p' \
-            | head -n1)
+    # `head -n1` closes the pipe early, which under `pipefail` would make
+    # the pipeline fail with SIGPIPE (141) and abort under `set -e`; grab
+    # the full NEEDED list first, then take the first match in the shell.
+    weston_needed=$(objdump -p "$(command -v weston)" 2>/dev/null \
+            | sed -n 's/.*NEEDED *\(libweston-[0-9]*\.so\.[0-9]*\).*/\1/p') || true
+    want=${weston_needed%%$'\n'*}
     if [ -n "$want" ] && [ ! -e "$PREFIX/lib64/$want" ]; then
         echo "ERROR: system weston needs '$want' but vendored prefix has none" >&2
         ls -1 "$PREFIX"/lib64/libweston-14.so* >&2 || true
@@ -108,13 +111,30 @@ chown -R root:root "$TMP" 2>/dev/null || \
 find "$TMP" -type d -exec chmod 0755 {} +
 find "$TMP" -type f -exec chmod 0644 {} +
 
-rm -rf "$DEST"
-mv "$TMP" "$DEST"
+# Swap the new tree into place without ever leaving $DEST absent: move
+# any existing tree aside first, then mv the new tree in, then drop the
+# old one. If the final mv fails the old tree is restored so weston is
+# never left with no libweston at all.
+OLD="$DEST.old.$$"
+if [ -e "$DEST" ]; then
+    rm -rf "$OLD"
+    mv "$DEST" "$OLD"
+fi
+if mv "$TMP" "$DEST"; then
+    rm -rf "$OLD"
+else
+    echo "ERROR: failed to move staged tree into $DEST; restoring previous tree" >&2
+    [ -e "$OLD" ] && mv "$OLD" "$DEST"
+    rm -rf "$TMP"
+    exit 1
+fi
 
 echo "vendored libweston installed under $DEST"
-echo "  core:     $(ls -1 "$DEST"/lib64/libweston-14.so.0* | tail -n1)"
-echo "  backends: $(ls -1 "$DEST"/lib64/libweston-14/*.so 2>/dev/null | wc -l) module(s)"
-ls -1 "$DEST"/lib64/libweston-14/*.so 2>/dev/null | sed 's/^/    /'
+# Informational summary only — guard the pipelines so a quirk in the
+# staged tree can't abort the (already-successful) install under pipefail.
+echo "  core:     $(ls -1 "$DEST"/lib64/libweston-14.so.0* 2>/dev/null | tail -n1 || true)"
+echo "  backends: $(ls -1 "$DEST"/lib64/libweston-14/*.so 2>/dev/null | wc -l || true) module(s)"
+ls -1 "$DEST"/lib64/libweston-14/*.so 2>/dev/null | sed 's/^/    /' || true
 
 # 5. SELinux: relabel so the loader can mmap+execute the vendored .so
 #    under the targeted policy. /usr/libexec is lib_t-adjacent; restorecon
