@@ -652,10 +652,21 @@ class _Request:
 
 
 class Broker(dbus.service.Object):
+    # Debounce window (ms) for coalescing per-uid UserRelay
+    # LocalReceiversChanged signals into a single ReceiversChanged. A
+    # class attribute so tests can zero it out and exercise the
+    # coalesce/emit path without a live GLib mainloop. 250ms mirrors the
+    # relay's own debounce: long enough to swallow a silo's startup
+    # burst, short enough to feel instant in the launcher.
+    RECEIVERS_CHANGED_DEBOUNCE_MS = 250
+
     def __init__(self, bus):
         super().__init__(bus, OBJ_PATH)
         self._lock = threading.Lock()
         self._next_id = 1
+        # GLib timeout id of a pending (debounced) ReceiversChanged emit,
+        # 0 when none is armed.
+        self._receivers_changed_timer = 0
         self._pending: dict[int, _Request] = {}
         self.cache = ApprovalCache(DB_PATH)
         self.audit = AuditLog(AUDIT_PATH)
@@ -764,6 +775,27 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] inotify watch on {rules_dir} skipped: {e!r}",
                   flush=True)
+
+        # Observe every per-uid UserRelay's LocalReceiversChanged on the
+        # system bus. All relays share the same iface + object path, so a
+        # single sender-agnostic match catches them all; the handler
+        # debounces and re-emits the payload-free ReceiversChanged that
+        # qdshell's launcher subscribes to. Per-uid session-bus
+        # NameOwnerChanged never reaches the system bus, hence this relay
+        # → broker → qdshell signal chain.
+        try:
+            bus.add_signal_receiver(
+                self._on_relay_receivers_changed,
+                signal_name="LocalReceiversChanged",
+                dbus_interface=USER_RELAY_IFACE,
+                path=USER_RELAY_OBJ_PATH)
+        except Exception as e:  # noqa: BLE001
+            # A bus without signal support (the test stub bypasses
+            # __init__ entirely) or an old dbus-python: degrade to the
+            # safety-net poll on the qdshell side rather than failing to
+            # start the broker.
+            print(f"[broker] LocalReceiversChanged subscription skipped: "
+                  f"{e!r}", flush=True)
 
         # Workflow orchestration engine — shares this process + main loop.
         self.workflow_engine = None
@@ -2574,7 +2606,11 @@ class Broker(dbus.service.Object):
                 argv=argv,
             )
             if matched_rule is None:
-                cached_row = self.cache.lookup_detail(uid, action_s, exe, argv)
+                # Delegated requests must not be auto-satisfied by an
+                # argv-blind (exe_only / always) row — the decision-time
+                # mirror of the _DELEGATED_FORBIDDEN_SCOPES store guard.
+                cached_row = self.cache.lookup_detail(
+                    uid, action_s, exe, argv, delegated=delegated)
 
         # Sanitise caller-supplied details before storing them. The
         # admin UI (GUI/TUI) renders these verbatim; without scrubbing,
@@ -3926,6 +3962,48 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] qdistro.audit.failure: notification, "
                   f"reason={e!r}", flush=True)
+
+    @dbus.service.signal(BUS_NAME, signature="")
+    def ReceiversChanged(self):
+        """Emitted when the set of org.qdistro.App1 receivers visible
+        via :meth:`ListReceivers` may have changed inside some running
+        session — a receiver registered or unregistered on a user's
+        session bus while the broker (and silos) stayed up.
+
+        Carries no payload: it's a "re-fetch" nudge, never a leak of
+        which app changed in which uid. qdshell's Send-to menu / App1
+        launcher subscribes and re-runs ListReceivers on it instead of
+        relying solely on its slow safety-net poll.
+
+        The trigger is each per-uid UserRelay's own
+        ``LocalReceiversChanged`` signal (observed on the system bus via
+        a single sender-agnostic match in :meth:`__init__`); the broker
+        coalesces a burst across relays into one ReceiversChanged.
+        """
+        pass
+
+    def _on_relay_receivers_changed(self, uid=None):
+        """Signal handler for any per-uid UserRelay's
+        LocalReceiversChanged. Arms a debounced ReceiversChanged emit so
+        a burst (multiple relays, or one relay's rapid changes) collapses
+        to a single re-fetch nudge. ``uid`` is logged for diagnosis only;
+        the re-emitted ReceiversChanged carries no payload."""
+        print(f"[broker] relay receivers changed (uid={uid}); "
+              f"scheduling ReceiversChanged", flush=True)
+        if self._receivers_changed_timer:
+            # A burst is already pending — coalesce onto the armed timer.
+            return
+        self._receivers_changed_timer = GLib.timeout_add(
+            self.RECEIVERS_CHANGED_DEBOUNCE_MS,
+            self._emit_receivers_changed)
+
+    def _emit_receivers_changed(self) -> bool:
+        """Debounce-timer callback: emit one ReceiversChanged and clear
+        the pending-timer id. Returns False so GLib drops the one-shot
+        timeout."""
+        self._receivers_changed_timer = 0
+        self.ReceiversChanged()
+        return False
 
     @dbus.service.signal(BUS_NAME, signature="i")
     def RequestPending(self, request_id: int):

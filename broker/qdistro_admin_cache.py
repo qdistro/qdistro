@@ -125,6 +125,14 @@ _PRIORITY = {
     "always":     4,
 }
 
+# Match-kinds that match argv-blind (ignore the request's argv tuple).
+# A delegated request must NOT be auto-satisfied by these: the broker
+# never authenticated the claimed peer, so an exe_only / always row
+# would let one process inherit another's blanket trust. Mirrors the
+# broker's _DELEGATED_FORBIDDEN_SCOPES (forever / forever_exe map to
+# 'always' / 'exe_only'); see qdistro_admin_broker.py:117.
+_DELEGATED_FORBIDDEN_KINDS = frozenset(("exe_only", "always"))
+
 
 def _argv_basename(argv: list | tuple | None) -> str:
     """Return the program basename for matching purposes. argv[0] is
@@ -196,13 +204,15 @@ class ApprovalCache:
         os.chmod(db_path, 0o600)
 
     def lookup(self, caller_uid: int, action: str, exe: str,
-               argv: list | tuple | None = None) -> bool | None:
+               argv: list | tuple | None = None,
+               delegated: bool = False) -> bool | None:
         """Return True/False if an unexpired matching allow/deny exists; None for prompt."""
-        hit = self.lookup_detail(caller_uid, action, exe, argv)
+        hit = self.lookup_detail(caller_uid, action, exe, argv, delegated)
         return None if hit is None else bool(hit["decision"])
 
     def lookup_detail(self, caller_uid: int, action: str, exe: str,
-                      argv: list | tuple | None = None) -> dict | None:
+                      argv: list | tuple | None = None,
+                      delegated: bool = False) -> dict | None:
         """Like lookup() but returns the full matching row (or None)
         for richer logging. Selects the most-specific match.
 
@@ -211,6 +221,12 @@ class ApprovalCache:
         for backward compatibility (rules-engine cache-store path on
         rule decisions doesn't always have argv) — passing None makes
         the argv-tracked kinds skip.
+
+        delegated: when True, argv-blind rows (exe_only / always) are
+        skipped so a delegated request cannot be satisfied program-blind
+        by a pre-existing blanket grant — the decision-time mirror of
+        the broker's _DELEGATED_FORBIDDEN_SCOPES store-path guard.
+        Defaults to False to preserve existing (non-delegated) callers.
         """
         now = int(time.time())
         cur = self._conn.execute(
@@ -227,6 +243,8 @@ class ApprovalCache:
         best_priority = len(_PRIORITY) + 1
         for row in cur.fetchall():
             r_id, r_kind, r_value, r_argv, r_dec, r_exp, r_cre, r_app, r_scope = row
+            if delegated and r_kind in _DELEGATED_FORBIDDEN_KINDS:
+                continue
             if not _match_row_argv(r_kind, r_value, r_argv, exe, argv):
                 continue
             p = _PRIORITY.get(r_kind, len(_PRIORITY))

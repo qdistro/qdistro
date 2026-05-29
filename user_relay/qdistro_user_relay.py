@@ -61,10 +61,47 @@ EXCLUDED_NAMES = frozenset({
     "org.qdistro.StubSender",     # senders aren't receivers
 })
 
+# Debounce window for coalescing a burst of session-bus
+# NameOwnerChanged events into a single LocalReceiversChanged emit. A
+# silo coming up registers several receivers back-to-back; without the
+# coalesce the broker (and qdshell behind it) would re-run ListReceivers
+# once per name. 250ms is short enough to feel instant in the launcher,
+# long enough to swallow a typical startup burst.
+RECEIVER_CHANGE_DEBOUNCE_MS = 250
+
+
+def _is_receiver_name_change(name: str, old_owner: str,
+                             new_owner: str) -> bool:
+    """True iff a session-bus NameOwnerChanged represents a receiver
+    appearing or disappearing — i.e. the kind of change qdshell's
+    launcher must re-fetch for.
+
+    A change counts only when ``name`` is a real receiver name (matches
+    :data:`RECEIVER_PREFIX`, not in :data:`EXCLUDED_NAMES`, not a
+    ``:1.N`` unique-connection name) AND it is an acquire or a release —
+    exactly one of ``old_owner`` / ``new_owner`` is empty:
+
+    - acquire:  ``old_owner == ""`` and ``new_owner != ""``
+    - release:  ``new_owner == ""`` and ``old_owner != ""``
+
+    A pure ownership transfer (both owners present) and a no-op (both
+    empty) are *not* receiver changes — the set of registered receivers
+    is unchanged — so they return False. Pure function, no bus access,
+    unit-tested in tests/unit/test_user_relay.py.
+    """
+    if not name.startswith(RECEIVER_PREFIX):
+        return False
+    if name in EXCLUDED_NAMES:
+        return False
+    if name.startswith(":"):
+        return False
+    # Exactly one of the two owners empty == acquire xor release.
+    return (old_owner == "") != (new_owner == "")
+
 
 class UserRelay(dbus.service.Object):
 
-    def __init__(self, system_bus, session_bus):
+    def __init__(self, system_bus, session_bus, uid=None):
         # Expose on the SYSTEM bus so root-broker can call us without
         # crossing uid into this user's session bus (dbus-broker's
         # session instance rejects non-owner-uid peers). All receiver
@@ -72,6 +109,13 @@ class UserRelay(dbus.service.Object):
         # second connection we hold here.
         super().__init__(system_bus, OBJ_PATH)
         self._bus = session_bus
+        # uid carried in the LocalReceiversChanged payload so the broker
+        # can log which session changed. Defaults to this process's
+        # euid; main() passes it explicitly.
+        self._uid = int(uid if uid is not None else os.geteuid())
+        # GLib timeout id of a pending (debounced) emit, 0 when none is
+        # armed. Coalesces a burst of receiver changes into one signal.
+        self._receivers_changed_timer = 0
 
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="a(ss)",
                          sender_keyword="sender", connection_keyword="conn")
@@ -266,6 +310,49 @@ class UserRelay(dbus.service.Object):
                 name=BUS_NAME + ".ForwardFailed",
             )
 
+    @dbus.service.signal(BUS_NAME, signature="i")
+    def LocalReceiversChanged(self, uid):
+        """Emitted when a receiver appears or disappears on this user's
+        session bus — i.e. the result of :meth:`ListLocalReceivers`
+        would now differ. ``uid`` is this relay's uid.
+
+        Emitted on the relay's *system*-bus object (same iface + path
+        for every per-uid relay) so the root broker can observe it with
+        a single, sender-agnostic match instead of one per uid. The
+        broker re-emits its own payload-free ``ReceiversChanged`` for
+        qdshell. Emits are coalesced: a burst of session-bus
+        NameOwnerChanged events (a silo bringing up several receivers at
+        once) collapses to one signal via a short debounce.
+        """
+        pass
+
+    def _on_session_name_owner_changed(self, name, old_owner, new_owner):
+        """Session-bus NameOwnerChanged handler. Arms a debounced
+        LocalReceiversChanged emit when the change is a receiver
+        acquire/release; ignores everything else (transfers, no-ops,
+        non-receiver names)."""
+        if not _is_receiver_name_change(str(name), str(old_owner),
+                                        str(new_owner)):
+            return
+        if self._receivers_changed_timer:
+            # A burst is already pending — let the armed timer fire once
+            # for the whole burst rather than resetting it (resetting on
+            # every event could starve the emit under a steady trickle).
+            return
+        self._receivers_changed_timer = GLib.timeout_add(
+            RECEIVER_CHANGE_DEBOUNCE_MS, self._emit_receivers_changed)
+
+    def _emit_receivers_changed(self) -> bool:
+        """Debounce-timer callback: emit one LocalReceiversChanged and
+        clear the pending-timer id. Returns False so GLib drops the
+        one-shot timeout."""
+        self._receivers_changed_timer = 0
+        print(f"[qdistro-user-relay] receivers changed on session bus; "
+              f"emitting LocalReceiversChanged(uid={self._uid})",
+              file=sys.stderr, flush=True)
+        self.LocalReceiversChanged(self._uid)
+        return False
+
 
 def _audit(kind: str, sender: str | None, op: str,
            bridge: str, reply: dict) -> None:
@@ -328,8 +415,18 @@ def main() -> int:
               f"{system_name}: {e} (missing dbus policy for uid={uid}?)",
               file=sys.stderr, flush=True)
         return 1
-    relay = UserRelay(system_bus, session_bus)
+    relay = UserRelay(system_bus, session_bus, uid=uid)
     relay._anchor_system = system_bus_name  # noqa: SLF001
+    # Watch the session bus for receivers coming and going so we can
+    # nudge the broker (and qdshell behind it) to re-fetch. Per-uid
+    # NameOwnerChanged is session-local; the broker's system-bus name
+    # never reflects it, hence this relay-side bridge into a system-bus
+    # LocalReceiversChanged signal.
+    session_bus.add_signal_receiver(
+        relay._on_session_name_owner_changed,  # noqa: SLF001
+        signal_name="NameOwnerChanged",
+        dbus_interface="org.freedesktop.DBus",
+        bus_name="org.freedesktop.DBus")
     print(f"[qdistro-user-relay] uid={uid} system={system_name} "
           f"session-peer-for-receivers=OK",
           flush=True)

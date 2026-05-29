@@ -406,3 +406,193 @@ class TestArgvAware:
         # And the row still matches what forever_exe semantics expects.
         assert c.lookup(2000, "act", "/usr/bin/apt-get",
                         argv=["/usr/bin/apt-get", "anything"]) is True
+
+
+# --- delegated-request argv-blind guard ----------------------------------
+
+class TestDelegatedArgvBlindGuard:
+    """A delegated request must NOT be auto-satisfied program-blind by a
+    pre-existing argv-blind row (exe_only / always). This is the
+    decision-time mirror of the broker's _DELEGATED_FORBIDDEN_SCOPES
+    store-path guard: a delegated peer was never authenticated by the
+    broker, so it can't inherit another process's blanket trust. The
+    argv-pinned kinds (argv_exact / basename / prefix) remain valid for
+    delegated requests because they fix argv."""
+
+    def test_exe_only_row_skipped_for_delegated(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/apt-get", "forever_exe", True, 1000)
+        argv = ["/usr/bin/apt-get", "install", "evil"]
+        # Non-delegated: argv-blind exe_only satisfies.
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv) is True
+        # Delegated: same row must NOT satisfy → re-prompt.
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv,
+                        delegated=True) is None
+        assert c.lookup_detail(2000, "act", "/usr/bin/apt-get", argv=argv,
+                               delegated=True) is None
+
+    def test_always_row_skipped_for_delegated(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "", "forever", True, 1000)
+        # Non-delegated: 'always' satisfies any exe.
+        assert c.lookup(2000, "act", "/usr/bin/python3") is True
+        # Delegated: skipped.
+        assert c.lookup(2000, "act", "/usr/bin/python3",
+                        delegated=True) is None
+
+    def test_argv_exact_row_still_matches_for_delegated(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/apt-get", "forever_argv", True, 1000,
+                argv=["/usr/bin/apt-get", "update"])
+        argv = ["/usr/bin/apt-get", "update"]
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv,
+                        delegated=True) is True
+
+    def test_delegated_falls_back_past_blind_row_to_argv_row(self, cache_db):
+        """With both an argv-blind allow and an argv-pinned deny present,
+        a delegated request ignores the blind allow and lands on the
+        argv-pinned row when its argv matches."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever", True, 1000)            # always allow
+        c.store(2000, "act", "/p", "forever_argv", False, 1000,      # argv_exact deny
+                argv=["/p", "x"])
+        # Delegated, argv matches the pinned deny → deny (blind allow skipped).
+        assert c.lookup(2000, "act", "/p", argv=["/p", "x"],
+                        delegated=True) is False
+        # Delegated, argv doesn't match the pinned row → blind allow is
+        # skipped too, so no decision (re-prompt).
+        assert c.lookup(2000, "act", "/p", argv=["/p", "y"],
+                        delegated=True) is None
+        # Non-delegated, non-matching argv → blind always allow applies.
+        assert c.lookup(2000, "act", "/p", argv=["/p", "y"]) is True
+
+    def test_default_is_non_delegated(self, cache_db):
+        """delegated defaults to False so existing callers are unchanged."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever_exe", True, 1000)
+        assert c.lookup(2000, "act", "/p") is True
+        assert c.lookup_detail(2000, "act", "/p") is not None
+
+    # --- argv-AWARE kinds must NOT be skipped for delegated ----------
+
+    def test_prefix_row_still_matches_for_delegated(self, cache_db):
+        """prefix is argv-aware (pins argv[0..n]) so a delegated request
+        must still be satisfied by it — it is NOT in
+        _DELEGATED_FORBIDDEN_KINDS."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/systemctl", "forever_prefix", True,
+                1000, argv=["/usr/bin/systemctl", "restart"])
+        argv = ["/usr/bin/systemctl", "restart", "nginx"]
+        assert c.lookup(2000, "act", "/usr/bin/systemctl", argv=argv,
+                        delegated=True) is True
+        row = c.lookup_detail(2000, "act", "/usr/bin/systemctl", argv=argv,
+                              delegated=True)
+        assert row is not None and row["match_kind"] == "prefix"
+        # A prefix DENY is likewise honoured for delegated (argv-pinned).
+        c.store(2000, "act", "/usr/bin/systemctl", "forever_prefix", False,
+                1000, argv=["/usr/bin/systemctl", "stop"])
+        assert c.lookup(2000, "act", "/usr/bin/systemctl",
+                        argv=["/usr/bin/systemctl", "stop", "nginx"],
+                        delegated=True) is False
+
+    def test_basename_row_still_matches_for_delegated(self, cache_db):
+        """basename is argv-aware (pins basename(argv[0])) so it must
+        still satisfy a delegated request, even across exe paths."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/python3", "forever_basename", True,
+                1000, argv=["/usr/bin/python3", "-V"])
+        # Same basename via a different path still matches when delegated.
+        assert c.lookup(2000, "act", "/usr/local/bin/python3",
+                        argv=["/usr/local/bin/python3", "-c", "print(1)"],
+                        delegated=True) is True
+
+    # --- blind DENY rows are also skipped for delegated -------------
+
+    def test_exe_only_deny_row_skipped_for_delegated(self, cache_db):
+        """The skip is symmetric across the verdict: a delegated request
+        must not be auto-DENIED by a blind exe_only deny row either —
+        the broker never authenticated the peer, so it re-prompts rather
+        than inheriting another process's blanket deny. Non-delegated
+        still gets the cached deny."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever_exe", False, 1000)
+        argv = ["/p", "install", "x"]
+        assert c.lookup(2000, "act", "/p", argv=argv) is False
+        assert c.lookup(2000, "act", "/p", argv=argv,
+                        delegated=True) is None
+        assert c.lookup_detail(2000, "act", "/p", argv=argv,
+                               delegated=True) is None
+
+    def test_always_deny_row_skipped_for_delegated(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "", "forever", False, 1000)
+        assert c.lookup(2000, "act", "/anything") is False
+        assert c.lookup(2000, "act", "/anything", delegated=True) is None
+
+    # --- priority-ordering interaction with the skip ---------------
+
+    def test_delegated_skips_blind_allow_falls_to_argv_deny(self, cache_db):
+        """A blind 'always' allow (priority 4) sits below an argv_exact
+        deny (priority 0). For a delegated request the blind allow is
+        removed from consideration entirely; the argv_exact deny still
+        applies when its argv matches. (Mirrors the existing
+        test_delegated_falls_back_past_blind_row_to_argv_row but for the
+        full _PRIORITY span / lookup_detail row identity.)"""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever", True, 1000)           # always allow
+        c.store(2000, "act", "/p", "forever_argv", False, 1000,     # argv_exact deny
+                argv=["/p", "rm"])
+        row = c.lookup_detail(2000, "act", "/p", argv=["/p", "rm"],
+                              delegated=True)
+        assert row is not None
+        assert row["match_kind"] == "argv_exact"
+        assert row["decision"] == 0
+
+    def test_only_matching_row_is_blind_delegated_reprompts(self, cache_db):
+        """Multiple competing rows, but the only one whose argv/exe match
+        the request is blind (exe_only). Non-delegated gets the allow;
+        delegated gets no hit (re-prompt)."""
+        c = ApprovalCache(cache_db)
+        # An argv_exact deny that does NOT match the request's argv.
+        c.store(2000, "act", "/p", "forever_argv", False, 1000,
+                argv=["/p", "other"])
+        # A blind exe_only allow that DOES match (argv-blind).
+        c.store(2000, "act", "/p", "forever_exe", True, 1000)
+        argv = ["/p", "actual"]
+        # Non-delegated: argv_exact doesn't match argv, exe_only does → allow.
+        assert c.lookup(2000, "act", "/p", argv=argv) is True
+        # Delegated: exe_only removed; argv_exact doesn't match → re-prompt.
+        assert c.lookup(2000, "act", "/p", argv=argv,
+                        delegated=True) is None
+
+    def test_mixed_blind_kinds_both_skipped_for_delegated(self, cache_db):
+        """When BOTH an exe_only and an always row match, a delegated
+        request skips both and re-prompts; non-delegated takes the
+        higher-priority exe_only."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "", "forever", True, 1000)          # always allow
+        c.store(2000, "act", "/p", "forever_exe", False, 1000)   # exe_only deny
+        # Non-delegated: exe_only (priority 3) beats always (4) → deny.
+        assert c.lookup(2000, "act", "/p") is False
+        # Delegated: both blind → no decision.
+        assert c.lookup(2000, "act", "/p", delegated=True) is None
+
+    # --- expiry interaction ----------------------------------------
+
+    def test_expired_blind_row_with_delegated(self, cache_db, monkeypatch):
+        """An expired blind row is already filtered by the expiry clause;
+        the delegated flag is orthogonal. Assert the combination: expired
+        + delegated → None, and that an unexpired blind row would also be
+        None purely from the delegated skip (belt-and-suspenders)."""
+        c = ApprovalCache(cache_db)
+        # 1h (timed) with no argv → stored as a timed exe_only (blind) row.
+        c.store(2000, "act", "/p", "1h", True, 1000)
+        # Before expiry: non-delegated allow, delegated skipped.
+        assert c.lookup(2000, "act", "/p") is True
+        assert c.lookup(2000, "act", "/p", delegated=True) is None
+        # After expiry: both None (expiry filter for non-delegated;
+        # expiry AND skip for delegated).
+        future = int(time.time()) + 7200
+        monkeypatch.setattr("qdistro_admin_cache.time.time", lambda: future)
+        assert c.lookup(2000, "act", "/p") is None
+        assert c.lookup(2000, "act", "/p", delegated=True) is None

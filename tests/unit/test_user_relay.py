@@ -523,3 +523,133 @@ class TestRelayConstants:
     def test_system_bus_name_fmt_interpolates_uid(self):
         assert R.SYSTEM_BUS_NAME_FMT.format(uid=2000) == \
             "org.qdistro.UserRelay.uid2000"
+
+
+# --- _is_receiver_name_change ---------------------------------------------
+
+class TestIsReceiverNameChange:
+    """Pure predicate behind the relay's LocalReceiversChanged emit:
+    True iff a session-bus NameOwnerChanged represents a *receiver*
+    appearing or disappearing — the only changes qdshell's launcher must
+    re-fetch for. Mirrors the ListLocalReceivers filter (prefix,
+    EXCLUDED_NAMES, `:`-unique) plus an acquire-xor-release owner check.
+    """
+
+    def test_receiver_acquire_is_true(self):
+        # old empty, new non-empty == the receiver just appeared.
+        assert R._is_receiver_name_change(
+            "org.qdistro.StubNotepad.uid3000", "", ":1.42") is True
+
+    def test_receiver_lose_is_true(self):
+        # new empty, old non-empty == the receiver just went away.
+        assert R._is_receiver_name_change(
+            "org.qdistro.StubNotepad.uid3000", ":1.42", "") is True
+
+    def test_non_prefix_name_is_false(self):
+        assert R._is_receiver_name_change(
+            "org.freedesktop.NetworkManager", "", ":1.9") is False
+
+    def test_excluded_name_is_false(self):
+        # Own name + the defensive broker entry + the stub sender are all
+        # excluded even though they match the prefix.
+        for name in (R.BUS_NAME, "org.qdistro.AdminBroker1",
+                     "org.qdistro.StubSender"):
+            assert R._is_receiver_name_change(name, "", ":1.42") is False
+
+    def test_unique_colon_name_is_false(self):
+        assert R._is_receiver_name_change(":1.4810", "", ":1.4810") is False
+
+    def test_ownership_transfer_is_false(self):
+        # Both owners present == a transfer; the SET of receivers is
+        # unchanged, so the launcher need not re-fetch.
+        assert R._is_receiver_name_change(
+            "org.qdistro.StubNotepad.uid3000", ":1.10", ":1.99") is False
+
+    def test_both_owners_empty_is_false(self):
+        # Degenerate no-op; never a real receiver change.
+        assert R._is_receiver_name_change(
+            "org.qdistro.StubNotepad.uid3000", "", "") is False
+
+    def test_lookalike_just_outside_prefix_is_false(self):
+        # "org.qdistrox.*" shares a leading substring but is NOT under
+        # the "org.qdistro." prefix (the dot is load-bearing), so a
+        # foreign service can't masquerade as a receiver.
+        assert R._is_receiver_name_change(
+            "org.qdistrox.Evil", "", ":1.42") is False
+
+
+# --- LocalReceiversChanged debounce/emit ----------------------------------
+
+class TestLocalReceiversChangedEmit:
+    """The session-bus NameOwnerChanged handler arms a single debounced
+    LocalReceiversChanged for a burst. We stub GLib.timeout_add to run
+    synchronously (capture the callback) and spy on the emit so the test
+    needs no live bus or mainloop.
+    """
+
+    def _relay(self):
+        relay = _StubUserRelay(_FakeBus())
+        relay._uid = 3000
+        relay._receivers_changed_timer = 0
+        relay._emitted = []
+        # Spy on the dbus signal method.
+        relay.LocalReceiversChanged = (  # type: ignore[method-assign]
+            lambda uid: relay._emitted.append(int(uid)))
+        return relay
+
+    def test_burst_coalesces_to_one_emit(self, monkeypatch):
+        relay = self._relay()
+        captured = {}
+
+        def fake_timeout_add(_ms, cb):
+            captured["cb"] = cb
+            return 99  # fake non-zero timer id
+
+        monkeypatch.setattr(R.GLib, "timeout_add", fake_timeout_add)
+        # A burst of three receiver acquires.
+        for i in range(3):
+            relay._on_session_name_owner_changed(
+                f"org.qdistro.Stub{i}.uid3000", "", f":1.{i}")
+        # Only the first armed a timer; the rest coalesced onto it.
+        assert relay._receivers_changed_timer == 99
+        assert relay._emitted == []
+        # Fire the debounce timer once.
+        assert captured["cb"]() is False
+        assert relay._emitted == [3000]
+        assert relay._receivers_changed_timer == 0
+
+    def test_non_receiver_change_does_not_arm(self, monkeypatch):
+        relay = self._relay()
+        monkeypatch.setattr(
+            R.GLib, "timeout_add",
+            lambda *_a: pytest.fail("should not arm a timer"))
+        # Transfer (both owners) + non-prefix name: neither is a change.
+        relay._on_session_name_owner_changed(
+            "org.qdistro.Stub.uid3000", ":1.1", ":1.2")
+        relay._on_session_name_owner_changed(
+            "org.freedesktop.DBus", "", ":1.9")
+        assert relay._receivers_changed_timer == 0
+        assert relay._emitted == []
+
+    def test_second_burst_after_emit_arms_again(self, monkeypatch):
+        """Once the debounce timer has fired and cleared its id, a later
+        receiver change must arm a fresh timer and emit again — the
+        coalesce window is per-burst, not a permanently-latched one-shot
+        that drops all future changes (the no-forward-progress bug)."""
+        relay = self._relay()
+        cbs = []
+        monkeypatch.setattr(
+            R.GLib, "timeout_add",
+            lambda _ms, cb: (cbs.append(cb), 5)[1])
+
+        relay._on_session_name_owner_changed(
+            "org.qdistro.Stub0.uid3000", "", ":1.0")
+        assert cbs[-1]() is False  # fire first burst
+        assert relay._emitted == [3000]
+        assert relay._receivers_changed_timer == 0
+
+        relay._on_session_name_owner_changed(
+            "org.qdistro.Stub1.uid3000", "", ":1.1")
+        assert cbs[-1]() is False  # fire second burst
+        assert relay._emitted == [3000, 3000]
+        assert len(cbs) == 2  # two distinct timers were armed

@@ -371,3 +371,100 @@ class TestArgvAwareScopesPermitted:
             NON_ADMIN_UID, "qsu.exec:root", "/usr/bin/qsu",
             ["/usr/bin/journalctl", "-u", "foo"])
         assert nomatch is None
+
+
+# --- decision-time guard: a delegated _enqueue is NOT auto-resolved by a
+#     pre-existing argv-blind cache row, while a non-delegated one is ----
+
+class TestDelegatedEnqueueNotAutoResolvedByBlindRow:
+    """The store-path guard (TestArgvBlindScopesStillForbidden) stops a
+    delegated decision from CREATING a blind row. This class covers the
+    complementary decision-time guard added to _enqueue: even if a blind
+    exe_only / always row already exists (e.g. seeded by a prior direct,
+    authenticated request at the same uid), a delegated _enqueue must NOT
+    inherit it — it stays pending for admin. A direct (non-delegated)
+    _enqueue against the same row auto-resolves as before."""
+
+    # The claimed exe/action used by _enqueue_delegated.
+    CLAIM_EXE = "/usr/bin/qsu"
+    ACTION = "qsu.exec:root"
+
+    def _seed_blind(self, broker, scope, decision=True):
+        """Seed a blind cache row for the delegated lookup key."""
+        exe = "" if scope == "forever" else self.CLAIM_EXE
+        broker.cache.store(NON_ADMIN_UID, self.ACTION, exe, scope,
+                           decision, ADMIN_UID)
+
+    @pytest.mark.parametrize("scope", ["forever_exe", "forever"])
+    def test_delegated_enqueue_not_auto_resolved_by_blind_allow(self, broker,
+                                                                scope):
+        broker.set_peer(uid=ADMIN_UID)
+        self._seed_blind(broker, scope, decision=True)
+        rid = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                  argv=["/usr/bin/apt-get", "install", "x"])
+        # No auto-resolution: request stays pending for admin.
+        assert broker._pending[rid].decision is None
+
+    @pytest.mark.parametrize("scope", ["forever_exe", "forever"])
+    def test_delegated_enqueue_not_auto_denied_by_blind_deny(self, broker,
+                                                             scope):
+        """Symmetric: a blind DENY row must not auto-resolve a delegated
+        request either — it re-prompts rather than inheriting a blanket
+        deny the broker never authenticated for this peer."""
+        broker.set_peer(uid=ADMIN_UID)
+        self._seed_blind(broker, scope, decision=False)
+        rid = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                  argv=["/usr/bin/apt-get", "install", "x"])
+        assert broker._pending[rid].decision is None
+
+    def test_direct_enqueue_is_auto_resolved_by_same_blind_row(self, broker):
+        """Control: the very same seeded exe_only allow row auto-resolves
+        a direct (non-delegated) request at the same uid/action/exe.
+        Proves the pending-vs-resolved difference is the delegated flag,
+        not an unrelated lookup miss."""
+        broker.set_peer(uid=ADMIN_UID)
+        # Seed against the direct request's exe (/usr/bin/app).
+        broker.cache.store(NON_ADMIN_UID, "test.action", "/usr/bin/app",
+                           "forever_exe", True, ADMIN_UID)
+        rid = _enqueue_direct(broker, exe="/usr/bin/app",
+                              argv=["/usr/bin/app", "go"])
+        assert broker._pending[rid].decision is True
+
+    def test_delegated_enqueue_still_resolved_by_argv_pinned_row(self, broker):
+        """An argv-pinned (forever_argv → argv_exact) row IS argv-aware
+        and must still auto-resolve a delegated request whose argv
+        matches — the decision-time guard only strips blind kinds."""
+        broker.set_peer(uid=ADMIN_UID)
+        broker.cache.store(NON_ADMIN_UID, self.ACTION, self.CLAIM_EXE,
+                           "forever_argv", True, ADMIN_UID,
+                           argv=["/usr/bin/apt-get", "update"])
+        rid = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                  argv=["/usr/bin/apt-get", "update"])
+        assert broker._pending[rid].decision is True
+        # A different argv under the same pinned row → no hit → pending.
+        rid2 = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                   argv=["/usr/bin/apt-get", "install", "x"])
+        assert broker._pending[rid2].decision is None
+
+    def test_delegated_enqueue_blind_allow_skipped_argv_deny_applies(self,
+                                                                     broker):
+        """End-to-end priority interaction through _enqueue: with BOTH a
+        blind 'always' allow (lower priority) and an argv-pinned deny
+        (higher priority) present, a delegated request whose argv matches
+        the pinned deny must resolve to DENY — the blind allow is stripped
+        and must not mask the argv-aware deny. The cache-level twin is
+        test_delegated_skips_blind_allow_falls_to_argv_deny; this proves
+        the same outcome on the real broker decision path (no fail-open via
+        the higher-priority blind row)."""
+        broker.set_peer(uid=ADMIN_UID)
+        # Blind always-allow (priority 4) for any exe under this action.
+        broker.cache.store(NON_ADMIN_UID, self.ACTION, "", "forever",
+                           True, ADMIN_UID)
+        # Argv-pinned deny (argv_exact, priority 0) for the offending argv.
+        broker.cache.store(NON_ADMIN_UID, self.ACTION, self.CLAIM_EXE,
+                           "forever_argv", False, ADMIN_UID,
+                           argv=["/usr/bin/apt-get", "install", "evil"])
+        rid = _enqueue_delegated(broker, claim_uid=NON_ADMIN_UID,
+                                  argv=["/usr/bin/apt-get", "install", "evil"])
+        # Blind allow skipped; argv_exact deny still applies → deny.
+        assert broker._pending[rid].decision is False

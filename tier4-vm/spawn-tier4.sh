@@ -80,6 +80,12 @@
 #   TIER4_RDP_GUEST_APP  Guest app launched before subscribing.
 #                        Currently only weston-terminal is accepted.
 #   TIER4_KEEP_DOMAIN=1  Skip destroy+undefine on exit (debug, waypipe).
+#   TIER4_ALLOW_OVERWRITE_RUNNING=1
+#                        Silence the warning when a same-named domain is
+#                        already running/paused and gets destroyed on
+#                        relaunch. Does NOT relax the post-destroy
+#                        verification — a live domain that refuses to die
+#                        still fails closed before overlay recreation.
 #
 # Lifecycle:
 #   - Defines + starts a domain named <vm_name>. Idempotent: an existing
@@ -270,9 +276,78 @@ resolve_template() {
 }
 
 # ---------------------------------------------------------------------
+# Idempotent same-named-domain replacement helpers. Defined above the
+# --source-only short-circuit so the unit tests can source the script
+# and exercise domain_is_gone / maybe_overwrite_existing in isolation
+# (with run_as_admin + sleep stubbed); both only resolve run_as_admin
+# and $VM_NAME at call time, so position here does not change runtime
+# behaviour — they are still only *called* from the launch logic below.
+# ---------------------------------------------------------------------
+
+# domain_is_gone: true (0) when no live QEMU is attached to $VM_NAME
+# anymore. virsh domstate on a vanished domain emits "error: failed to
+# get domain ..." to stderr and exits non-zero; an undefined-but-was-
+# transient domain may report empty or "shut off". Any of those means
+# the old QEMU has released the overlay inode and it is safe to unlink.
+# A "running"/"paused"/"in shutdown"/"pmsuspended" state means a live
+# domain is still attached and we must NOT touch the overlay.
+domain_is_gone() {
+    local state
+    state="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
+    case "$state" in
+        ''|'shut off') return 0 ;;
+        *)             return 1 ;;
+    esac
+}
+
+# Common: idempotent destroy/undefine of any pre-existing same-named
+# domain (so re-runs in tests don't trip on stale state).
+#
+# Fail-closed contract: after destroy+undefine we POLL domstate with a
+# bounded retry. If a live domain is still attached after the bound we
+# abort with non-zero BEFORE any caller unlinks/recreates the overlay,
+# because a surviving QEMU would keep writing to the orphaned overlay
+# inode and corrupt the freshly created linked clone. The destroy/
+# undefine calls themselves stay best-effort (|| true) — it's the
+# verification, not the teardown rc, that gates progress.
+maybe_overwrite_existing() {
+    if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+        local existing_state
+        existing_state="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
+        case "$existing_state" in
+            running|paused)
+                if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
+                    echo "[tier4] WARN: domain '$VM_NAME' is $existing_state; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
+                fi
+                ;;
+            *)
+                echo "[tier4] domain '$VM_NAME' already exists ($existing_state) — destroying + undefining" >&2
+                ;;
+        esac
+        run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+
+        # Bounded post-destroy verification (~5s: 10 tries * 0.5s). Fail
+        # closed if the old domain refuses to die — never proceed to
+        # overlay recreation with a live QEMU still holding the inode.
+        local tries=10
+        while [ "$tries" -gt 0 ]; do
+            if domain_is_gone; then
+                return 0
+            fi
+            tries=$((tries - 1))
+            sleep 0.5
+        done
+        echo "[tier4] FAIL: domain '$VM_NAME' still present after destroy+undefine; refusing to recreate overlay while a live domain is attached (would corrupt the linked clone)" >&2
+        exit 8
+    fi
+}
+
+# ---------------------------------------------------------------------
 # --source-only short-circuit. Unit tests source the script to exercise
-# build_secctx_wrap / resolve_template / constants without executing
-# the launch logic (no virsh, no waypipe, no root required).
+# build_secctx_wrap / resolve_template / domain_is_gone /
+# maybe_overwrite_existing / constants without executing the launch
+# logic (no virsh, no waypipe, no root required).
 # ---------------------------------------------------------------------
 if [ "${1:-}" = "--source-only" ]; then
     return 0 2>/dev/null || exit 0
@@ -499,27 +574,6 @@ PY
 # Uses idempotent domain-replacement + cleanup() trap
 # with disk, XML markers, display launch, and teardown.
 # ---------------------------------------------------------------------
-
-# Common: idempotent destroy/undefine of any pre-existing same-named
-# domain (so re-runs in tests don't trip on stale state).
-maybe_overwrite_existing() {
-    if run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-        local existing_state
-        existing_state="$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\n' | tr -s ' ')"
-        case "$existing_state" in
-            running|paused)
-                if [ "${TIER4_ALLOW_OVERWRITE_RUNNING:-0}" != "1" ]; then
-                    echo "[tier4] WARN: domain '$VM_NAME' is $existing_state; destroying it (set TIER4_ALLOW_OVERWRITE_RUNNING=1 to silence)" >&2
-                fi
-                ;;
-            *)
-                echo "[tier4] domain '$VM_NAME' already exists ($existing_state) — destroying + undefining" >&2
-                ;;
-        esac
-        run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-    fi
-}
 
 # State for cleanup() trap.
 DOMAIN_DEFINED=0
