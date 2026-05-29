@@ -16,6 +16,103 @@ KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Per-assertion evidence markers emitted by the bats helpers in
+# tests/integration/vm/helpers.bash (ensures / check_pass / check_fail) and by
+# any other layer that follows the same greppable shape. Parsing these is
+# strictly OPTIONAL: a captured log without them yields no evidence rows and
+# renders exactly as before.
+#
+#   --- ensures: <capability> ---
+#   --- CHECK pass: <message> | evidence: <...> ---
+#   --- CHECK pass: <message> ---
+#   --- CHECK fail: <message> | expected: <...> | actual: <...> ---
+#   --- CHECK fail: expected: <...> | actual: <...> ---
+ENSURES_RE = re.compile(r"^---\s*ensures:\s*(?P<cap>.*?)\s*---\s*$")
+CHECK_PASS_RE = re.compile(
+    r"^---\s*CHECK pass:\s*(?P<msg>.*?)(?:\s*\|\s*evidence:\s*(?P<evidence>.*?))?\s*---\s*$"
+)
+CHECK_FAIL_RE = re.compile(
+    r"^---\s*CHECK fail:\s*(?:(?P<msg>.*?)\s*\|\s*)?"
+    r"expected:\s*(?P<expected>.*?)\s*\|\s*actual:\s*(?P<actual>.*?)\s*---\s*$"
+)
+
+
+def parse_evidence(path: Path, max_checks: int = 40) -> list[dict[str, str]]:
+    """Extract per-assertion evidence from a captured log.
+
+    Returns a list of check dicts, each with a ``kind`` of ``pass`` or
+    ``fail`` plus the parsed fields and the nearest preceding ``ensures``
+    capability (when present). Returns an empty list when the log is missing
+    or carries no evidence markers, so callers stay backward compatible.
+    """
+    if not path.exists() or not path.is_file():
+        return []
+    checks: list[dict[str, str]] = []
+    pending_ensures = ""
+    for line in path.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        m = ENSURES_RE.match(stripped)
+        if m:
+            pending_ensures = m.group("cap")
+            continue
+        m = CHECK_PASS_RE.match(stripped)
+        if m:
+            checks.append(
+                {
+                    "kind": "pass",
+                    "message": m.group("msg") or "",
+                    "evidence": m.group("evidence") or "",
+                    "ensures": pending_ensures,
+                }
+            )
+            pending_ensures = ""
+            if len(checks) >= max_checks:
+                break
+            continue
+        m = CHECK_FAIL_RE.match(stripped)
+        if m:
+            checks.append(
+                {
+                    "kind": "fail",
+                    "message": m.group("msg") or "",
+                    "expected": m.group("expected") or "",
+                    "actual": m.group("actual") or "",
+                    "ensures": pending_ensures,
+                }
+            )
+            pending_ensures = ""
+            if len(checks) >= max_checks:
+                break
+            continue
+    return checks
+
+
+def evidence_md_lines(checks: list[dict[str, str]]) -> list[str]:
+    """Render parsed evidence checks as Markdown list lines.
+
+    Returns an empty list when there is nothing to render, so existing rows
+    without evidence add no output at all.
+    """
+    if not checks:
+        return []
+    lines = ["- evidence (per-assertion):"]
+    for chk in checks:
+        ensures = chk.get("ensures", "")
+        prefix = f"_ensures: {ensures}_ — " if ensures else ""
+        if chk["kind"] == "pass":
+            ev = chk.get("evidence", "")
+            ev_suffix = f": `{ev}`" if ev else ""
+            lines.append(f"  - PASS {prefix}{chk.get('message', '')}{ev_suffix}")
+        else:
+            msg = chk.get("message", "")
+            msg_part = f"{msg} — " if msg else ""
+            lines.append(
+                f"  - FAIL {prefix}{msg_part}"
+                f"expected `{chk.get('expected', '')}`, "
+                f"actual `{chk.get('actual', '')}`"
+            )
+    return lines
+
 
 def read_kv(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -240,6 +337,7 @@ def generate_md(run_dir: Path) -> str:
                 lines.append(f"- notes: {row['notes']}")
             lines.append(f"- recommendation: {recommendation(row, run_dir)}")
             log_path = run_dir / row.get("log", "")
+            lines.extend(evidence_md_lines(parse_evidence(log_path)))
             ex = excerpt(log_path)
             if ex:
                 lines.append("")
@@ -259,6 +357,32 @@ def generate_md(run_dir: Path) -> str:
             suffix = f" ({log})" if log else ""
             lines.append(f"- {row.get('gate', '?')} / {row.get('subject', '?')}: {row.get('notes', '')}{suffix}")
         lines.append("")
+
+    # Optional per-assertion evidence section. Only emitted when at least one
+    # result's captured log carries the greppable evidence markers; runs with
+    # no evidence-bearing logs render exactly as before (no section, no
+    # heading). Failure rows already inline their evidence above, so this
+    # section surfaces evidence from the remaining rows (e.g. passing ones
+    # that cite what they proved).
+    failure_ids = {id(r) for r in failures}
+    evidence_blocks: list[list[str]] = []
+    for row in rows:
+        if id(row) in failure_ids:
+            continue
+        checks = parse_evidence(run_dir / row.get("log", ""))
+        if not checks:
+            continue
+        block = [
+            f"### {row.get('status', '?').upper()}: "
+            f"{row.get('gate', '?')} / {row.get('subject', '?')}"
+        ]
+        block.extend(evidence_md_lines(checks))
+        block.append("")
+        evidence_blocks.append(block)
+    if evidence_blocks:
+        lines.append("## Per-assertion evidence")
+        for block in evidence_blocks:
+            lines.extend(block)
 
     lines.append("## All Results")
     lines.append("| status | gate | subject | kind | exit | log | notes |")

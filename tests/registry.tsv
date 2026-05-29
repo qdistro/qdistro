@@ -1,0 +1,32 @@
+# qdistro test registry — PILOT (partial, NOT yet enforced)
+#
+# A central, machine-readable inventory of selected qdistro tests. This is
+# a deliberately SMALL pilot subset (see todo/levitateos/
+# nixos-testing-synthesis.md item 5): it does NOT yet cover every test, is
+# NOT consulted by qci for selection, and skips/blocked are NOT yet enforced
+# against it. The goal of the pilot is to validate the column schema against
+# a handful of real, hand-inspected tests before expanding it.
+#
+# Consistency is checked by `qci registry-check` (verifies each path exists
+# and each gate is one qci knows). Lines starting with '#' and blank lines
+# are ignored. Columns are TAB-separated.
+#
+# Columns:
+#   path             repo-relative path to the test (from qdistro repo root)
+#   gate             qci gate that runs it: host | bats | gui | image | vm-smoke
+#   isolation_tier   none | host | vm | vm-nested  (execution isolation needed)
+#   required_services VM/system services that must be live; 'none' for pure host
+#   network          none | loopback | external
+#   agent_or_ocr     none | ocr | agent  (needs OCR or an LLM agent runner)
+#   owner_component  the source component this test guards
+#   slow_or_flaky    no | slow | flaky | slow,flaky
+#
+path	gate	isolation_tier	required_services	network	agent_or_ocr	owner_component	slow_or_flaky
+tests/unit/test_audit.py	host	none	none	none	none	broker	no
+tests/unit/test_audisp_parser.py	host	none	none	none	none	selinux	no
+tests/integration/vm/qsu-binary.bats	bats	host	none	none	none	qsu	no
+tests/integration/vm/broker-e2e.bats	bats	vm	qdistro-admin-broker.service	loopback	none	broker	slow
+tests/integration/vm/tiered-isolation.bats	bats	vm-nested	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow,flaky
+tests/integration/vm/compositor-shell.bats	bats	vm	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow
+tests/integration/permissions-gui/03-qt-admin-app-visual.md	gui	vm	qdistro-admin-broker.service	loopback	agent	qdistro	slow
+tests/integration/qdwin-noctalia/03-clock-updates.md	gui	vm	noctalia-shell.service	none	ocr	qdshell	slow,flaky

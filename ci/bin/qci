@@ -17,6 +17,8 @@ WORKSPACE=$(cd "$QDISTRO_REPO/.." && pwd)
 RUNS_DIR=${QCI_RUNS_DIR:-$QCI_DIR/runs}
 REPORT_PY="$QCI_DIR/lib/report.py"
 VM_TOOLS="$QDISTRO_REPO/scripts/vm"
+IMAGE_DIR="$QDISTRO_REPO/image"
+REGISTRY_TSV="$QDISTRO_REPO/tests/registry.tsv"
 VIRSH=(virsh -c qemu:///session)
 
 PROJECTS=(
@@ -58,16 +60,32 @@ usage() {
     cat <<'EOF'
 Usage:
   qci preflight
+  qci lint
   qci host
   qci vm-smoke [--vm <name>]
   qci bats [--vm <name>] [--file <file.bats> ...]
   qci gui [--vm <name>] [--scenario <path.md> ...]
+  qci image [--root <extracted-tree>] [--idempotency] [--no-boot]
+  qci registry-check
   qci full [--keep-on-fail|--delete-failed-vm]
   qci snapshot-daily [--date YYYY-MM-DD] [--name <vm-name>]
   qci cleanup [--dry-run] [--age-hours N]
   qci report [--latest|--run <run-dir>]
   qci triage [--latest|--run <run-dir>]
   qci list-runs
+
+Notes:
+  qci lint    Static pre-VM lint: shellcheck (warn-by-default), bats syntax
+              validation, and a heuristic Markdown GUI-scenario structure
+              check. Runs without a VM; missing shellcheck/bats => skip+warn.
+  qci image   Static image-content checklist (image/verify-contents.sh) first,
+              then the boot/install flow (image/verify.sh, image/install-test.sh).
+              Boot/install stages are recorded as blocked when no built image
+              is present. --root inspects an extracted tree instead of the
+              built artifact; --idempotency runs install twice; --no-boot
+              runs only the static checklist.
+  qci registry-check  Validate tests/registry.tsv (pilot): each path exists
+              and each gate is one qci knows. Advisory only, not enforced.
 
 Environment:
   QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs
@@ -461,6 +479,10 @@ gate_preflight() {
         echo "## qci overlays"
         ls -1 "${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"/qci-*.qcow2 2>/dev/null || true
     } >> "$report"
+    # Static pre-VM lint runs as part of preflight, but only ever records
+    # results (warn/skip) — it must not change preflight's required/optional
+    # pass-fail accounting, so we deliberately ignore its return code.
+    gate_lint || true
     return "$rc"
 }
 
@@ -1050,6 +1072,299 @@ gate_cleanup() {
     return "$rc"
 }
 
+# ---------------------------------------------------------------------------
+# Static pre-VM lint (additive, host-only, degrades gracefully).
+#
+# Three checks, all non-fatal by default:
+#   1. shellcheck over a bounded set of first-party shell scripts.
+#   2. bats syntax validation (bats --count) over the VM bats files.
+#   3. heuristic Markdown structure check over GUI scenarios.
+# Missing shellcheck/bats => recorded as skip with a clear message.
+# This gate never hard-fails; it returns EXIT_OK so it can run in
+# preflight without changing preflight's required/optional pass-fail.
+# ---------------------------------------------------------------------------
+lint_shell_files() {
+    # Bounded, first-party set; excludes vendored/build trees.
+    find "$QDISTRO_REPO/scripts" "$QDISTRO_REPO/ci/bin" "$QDISTRO_REPO/image" \
+        -type f -name '*.sh' 2>/dev/null
+    find "$QDISTRO_REPO/ci/bin" -type f ! -name '*.*' 2>/dev/null   # qci itself
+    find "$QDISTRO_REPO/tests/integration" -maxdepth 2 -type f -name '*.sh' 2>/dev/null
+}
+
+gate_lint() {
+    local log_path="$RDIR/host/lint.log"
+    mkdir -p "$(dirname "$log_path")"
+    : > "$log_path"
+
+    # 1. shellcheck (warn-by-default; tree not confirmed clean).
+    if command -v shellcheck >/dev/null 2>&1; then
+        local files=() f findings=0 file_errs
+        while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(lint_shell_files | sort -u)
+        {
+            echo "## shellcheck (${#files[@]} files)"
+            echo "shellcheck $(shellcheck --version 2>/dev/null | awk '/version:/{print $2}')"
+            echo
+        } >> "$log_path"
+        # Count findings per file but never hard-fail the gate.
+        for f in "${files[@]}"; do
+            file_errs=$(shellcheck -f gcc "$f" 2>/dev/null | grep -c ':' || true)
+            if [ "${file_errs:-0}" -gt 0 ]; then
+                printf '%s: %s findings\n' "$f" "$file_errs" >> "$log_path"
+                findings=$((findings + file_errs))
+            fi
+        done
+        printf '\nTOTAL shellcheck findings: %s across %s files\n' "$findings" "${#files[@]}" >> "$log_path"
+        log "lint: shellcheck $findings findings across ${#files[@]} files"
+        if [ "$findings" -eq 0 ]; then
+            record_result lint shellcheck pass 0 pass lint "$log_path" "${#files[@]} files clean"
+        else
+            record_result lint shellcheck skip 0 pass lint "$log_path" "$findings findings (warn-only, not enforced)"
+        fi
+    else
+        record_skip lint shellcheck lint "shellcheck not installed; skipping shell static lint"
+        log "lint: shellcheck not installed (skip)"
+    fi
+
+    # 2. bats syntax validation (no VM): bats --count parses each file.
+    if command -v bats >/dev/null 2>&1; then
+        local bf bats_files=() bad=0 nbf
+        while IFS= read -r bf; do [ -n "$bf" ] && bats_files+=("$bf"); done \
+            < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+        { echo; echo "## bats syntax (bats --count over ${#bats_files[@]} files)"; } >> "$log_path"
+        # helpers.bash hard-requires VM_NAME at `load` time; supply a dummy so
+        # bats --count exercises real parsing instead of failing on the guard.
+        # We never boot anything here — this is syntax validation only.
+        for bf in "${bats_files[@]}"; do
+            if nbf=$(VM_NAME="${VM_NAME:-qci-lint-syntax}" bats --count "$bf" 2>>"$log_path"); then
+                printf 'OK   %s: %s tests\n' "$(rel_path "$bf")" "$nbf" >> "$log_path"
+            else
+                printf 'PARSE-ERROR %s\n' "$(rel_path "$bf")" >> "$log_path"
+                bad=$((bad + 1))
+            fi
+        done
+        log "lint: bats syntax $bad parse errors across ${#bats_files[@]} files"
+        if [ "$bad" -eq 0 ]; then
+            record_result lint bats-syntax pass 0 pass lint "$log_path" "${#bats_files[@]} bats files parse cleanly"
+        else
+            record_result lint bats-syntax fail "$EXIT_BATS" bats lint "$log_path" "$bad bats files failed to parse"
+        fi
+    else
+        record_skip lint bats-syntax lint "bats not installed; skipping bats syntax validation"
+        log "lint: bats not installed (skip)"
+    fi
+
+    # 3. heuristic Markdown GUI-scenario structure check (non-fatal).
+    local md mds=() md_missing=0 nmd=0
+    while IFS= read -r md; do [ -n "$md" ] && mds+=("$md"); done < <(
+        find "$QDISTRO_REPO/tests/integration" -type f -name '[0-9][0-9]-*.md' 2>/dev/null | sort
+    )
+    { echo; echo "## markdown GUI-scenario structure (${#mds[@]} scenarios)"; } >> "$log_path"
+    for md in "${mds[@]}"; do
+        nmd=$((nmd + 1))
+        # Heuristic: expect a top-level title plus Setup and Steps sections.
+        if grep -qE '^#[[:space:]]' "$md" \
+            && grep -qiE '^##[[:space:]]+setup' "$md" \
+            && grep -qiE '^##[[:space:]]+steps' "$md"; then
+            : # well-formed
+        else
+            printf 'WARN  %s: missing one of title/##Setup/##Steps\n' "$(rel_path "$md")" >> "$log_path"
+            md_missing=$((md_missing + 1))
+        fi
+    done
+    printf '\n%s/%s scenarios well-formed; %s missing expected headings\n' \
+        "$((nmd - md_missing))" "$nmd" "$md_missing" >> "$log_path"
+    log "lint: markdown $md_missing/$nmd scenarios missing expected headings"
+    if [ "$md_missing" -eq 0 ]; then
+        record_result lint md-structure pass 0 pass lint "$log_path" "$nmd scenarios well-formed"
+    else
+        record_result lint md-structure skip 0 pass lint "$log_path" "$md_missing/$nmd scenarios missing headings (heuristic, non-fatal)"
+    fi
+
+    return "$EXIT_OK"
+}
+
+# ---------------------------------------------------------------------------
+# Registry consistency check (pilot, advisory). Verifies each listed path
+# exists and each gate name is one qci knows. Never gates qci full.
+# ---------------------------------------------------------------------------
+gate_registry_check() {
+    local log_path="$RDIR/host/registry-check.log"
+    mkdir -p "$(dirname "$log_path")"
+    : > "$log_path"
+    if [ ! -f "$REGISTRY_TSV" ]; then
+        record_skip registry-check registry lint "registry.tsv not found at $REGISTRY_TSV"
+        log "registry-check: no registry.tsv"
+        return "$EXIT_OK"
+    fi
+    local known_gates="host bats gui image vm-smoke"
+    local line path gate rest rows=0 bad=0
+    {
+        echo "## registry-check (PILOT — advisory, not enforced)"
+        echo "registry: $REGISTRY_TSV"
+        echo
+    } >> "$log_path"
+    while IFS=$'\t' read -r path gate rest; do
+        case "$path" in
+            ''|'#'*|path) continue ;;   # skip blanks, comments, header
+        esac
+        rows=$((rows + 1))
+        if [ ! -e "$QDISTRO_REPO/$path" ]; then
+            printf 'MISS-PATH  %s\n' "$path" >> "$log_path"
+            bad=$((bad + 1))
+            continue
+        fi
+        case " $known_gates " in
+            *" $gate "*) printf 'OK    %s [%s]\n' "$path" "$gate" >> "$log_path" ;;
+            *) printf 'BAD-GATE   %s [%s]\n' "$path" "$gate" >> "$log_path"; bad=$((bad + 1)) ;;
+        esac
+    done < "$REGISTRY_TSV"
+    printf '\n%s rows checked; %s problems (pilot is partial, not yet enforced)\n' \
+        "$rows" "$bad" >> "$log_path"
+    log "registry-check: $rows rows, $bad problems (advisory)"
+    if [ "$bad" -eq 0 ]; then
+        record_result registry-check registry.tsv pass 0 pass lint "$log_path" "$rows rows consistent (pilot)"
+    else
+        record_result registry-check registry.tsv fail "$EXIT_USAGE" args lint "$log_path" "$bad of $rows rows inconsistent"
+    fi
+    [ "$bad" -eq 0 ] && return "$EXIT_OK"
+    return "$EXIT_USAGE"
+}
+
+# ---------------------------------------------------------------------------
+# qci image gate. (a) static image-content checklist first (fail fast,
+# no VM); then (b) boot-verify + install-test. The boot/install stages
+# need a built image + libvirt + a VM, so they degrade to record_blocked
+# with a clear "needs VM/image" message when prerequisites are absent.
+# ---------------------------------------------------------------------------
+gate_image() {
+    local root="" idempotency=0 no_boot=0 rc=$EXIT_OK
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --root) shift; root=${1:-} ;;
+            --idempotency) idempotency=1 ;;
+            --no-boot) no_boot=1 ;;
+            *) record_blocked image "$1" "$EXIT_USAGE" args "unknown image flag"; return "$EXIT_USAGE" ;;
+        esac
+        shift
+    done
+
+    local checker="$IMAGE_DIR/verify-contents.sh"
+    local build_dir="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+    kv image_build_dir "$build_dir"
+    [ -n "$root" ] && kv image_static_root "$root"
+
+    # --- Stage A: static image-content checklist (fail fast) ----------------
+    if [ ! -x "$checker" ] && [ ! -f "$checker" ]; then
+        record_blocked image verify-contents "$EXIT_PREFLIGHT" image "image/verify-contents.sh missing"
+        return "$EXIT_PREFLIGHT"
+    fi
+    # Resolve the tree to inspect: explicit --root, else an extracted tree
+    # under the build dir, else nothing (boot-only build present).
+    local static_root="$root"
+    if [ -z "$static_root" ]; then
+        for cand in "$build_dir/extracted" "$build_dir/root" "$build_dir/mnt"; do
+            [ -d "$cand" ] && { static_root="$cand"; break; }
+        done
+    fi
+    # Run the checker whenever the user EXPLICITLY passed --root (even a bad
+    # path: verify-contents.sh returns 2 for a missing/non-dir root, which must
+    # surface as a FAIL, not be masked as a non-failing record_blocked). Only
+    # the auto-discovery-found-nothing case is a legitimate "blocked, needs an
+    # extracted tree" — never a user-supplied root.
+    if [ -n "$root" ] || { [ -n "$static_root" ] && [ -d "$static_root" ]; }; then
+        local sc_log="$RDIR/host/image-verify-contents.log"
+        mkdir -p "$(dirname "$sc_log")"
+        log "image: static content checklist against ${static_root:-<unset>}"
+        bash "$checker" "$static_root" > "$sc_log" 2>&1
+        local sc_rc=$?
+        if [ "$sc_rc" -eq 0 ]; then
+            record_result image verify-contents pass 0 pass image "$sc_log" "static checklist passed ($static_root)"
+        else
+            record_result image verify-contents fail "$EXIT_BUILD" build image "$sc_log" "static checklist failed rc=$sc_rc ($static_root)"
+            rc=$EXIT_BUILD
+            # Fail fast: do not boot a tree that failed static inspection.
+            return "$rc"
+        fi
+    else
+        record_blocked image verify-contents "$EXIT_BUILD" image \
+            "no extracted image tree to inspect; pass --root <dir> or extract under $build_dir (needs built image)"
+    fi
+
+    if [ "$no_boot" = 1 ]; then
+        log "image: --no-boot set; skipping boot/install stages"
+        return "$rc"
+    fi
+
+    # --- Stage B: boot-verify + install-test (needs VM + built image) -------
+    # These are NOT runnable without libvirt and a built artifact. Guard each
+    # and degrade to record_blocked with a precise reason.
+    local have_image=0 img
+    img=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | head -1)
+    [ -n "$img" ] && have_image=1
+    local have_virsh=0
+    command -v virsh >/dev/null 2>&1 && "${VIRSH[@]}" list >/dev/null 2>&1 && have_virsh=1
+
+    if [ "$have_image" = 0 ] || [ "$have_virsh" = 0 ]; then
+        local why="needs VM/image:"
+        [ "$have_image" = 0 ] && why="$why no built image in $build_dir;"
+        [ "$have_virsh" = 0 ] && why="$why libvirt session unavailable;"
+        record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
+        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
+        if [ "$idempotency" = 1 ]; then
+            record_blocked image install-test.sh-2nd "$EXIT_VM_PROVISION" image "$why idempotency (double-install) needs a built image + VM"
+        fi
+        return "$rc"
+    fi
+
+    # Prerequisites present: run the existing boot/install flow.
+    local v_log="$RDIR/host/image-verify.log"
+    log "image: boot-verify (image/verify.sh)"
+    bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
+    local v_rc=$?
+    if [ "$v_rc" -eq 0 ]; then
+        record_result image verify.sh pass 0 pass image "$v_log" "boot-verify passed"
+    else
+        record_result image verify.sh fail "$EXIT_VM_BOOT" vm_boot image "$v_log" "boot-verify failed rc=$v_rc"
+        [ "$rc" -eq 0 ] && rc=$EXIT_VM_BOOT
+    fi
+
+    local i_log="$RDIR/host/image-install.log"
+    log "image: install-test (image/install-test.sh)"
+    bash "$IMAGE_DIR/install-test.sh" > "$i_log" 2>&1
+    local i_rc=$?
+    # Trust the exit code, but also fail on a "RESULT: FAIL" line in the log:
+    # install-test.sh historically printed RESULT: FAIL and still exited 0, which
+    # would record a real install failure as a pass. Defense in depth so a future
+    # fall-through can't mask a failure here either.
+    if [ "$i_rc" -eq 0 ] && ! grep -q "RESULT: FAIL" "$i_log" 2>/dev/null; then
+        record_result image install-test.sh pass 0 pass image "$i_log" "install + reboot passed"
+    else
+        grep -q "RESULT: FAIL" "$i_log" 2>/dev/null && [ "$i_rc" -eq 0 ] && i_rc="RESULT:FAIL(exit0)"
+        record_result image install-test.sh fail "$EXIT_VM_BOOT" vm_boot image "$i_log" "install-test failed rc=$i_rc"
+        [ "$rc" -eq 0 ] && rc=$EXIT_VM_BOOT
+    fi
+
+    if [ "$idempotency" = 1 ]; then
+        # Double-install idempotency: a clean second install over the
+        # already-installed target. install-test.sh wipes+reinstalls its
+        # own target, so re-invoking it exercises a fresh install; the
+        # idempotency assertion is that the second run is ALSO clean.
+        local i2_log="$RDIR/host/image-install-2nd.log"
+        log "image: idempotency — second install pass"
+        bash "$IMAGE_DIR/install-test.sh" > "$i2_log" 2>&1
+        local i2_rc=$?
+        if [ "$i2_rc" -eq 0 ] && ! grep -q "RESULT: FAIL" "$i2_log" 2>/dev/null; then
+            record_result image install-test.sh-2nd pass 0 pass image "$i2_log" "second install clean (idempotent)"
+        else
+            grep -q "RESULT: FAIL" "$i2_log" 2>/dev/null && [ "$i2_rc" -eq 0 ] && i2_rc="RESULT:FAIL(exit0)"
+            record_result image install-test.sh-2nd fail "$EXIT_VM_BOOT" vm_boot image "$i2_log" "second install not clean rc=$i2_rc"
+            [ "$rc" -eq 0 ] && rc=$EXIT_VM_BOOT
+        fi
+    fi
+
+    return "$rc"
+}
+
 gate_full() {
     local rc=$EXIT_OK step_rc
     gate_preflight || return $?
@@ -1098,6 +1413,12 @@ main() {
     case "$cmd" in
         preflight)
             gate_preflight; rc=$?; finish_run "$rc" ;;
+        lint)
+            gate_lint; rc=$?; finish_run "$rc" ;;
+        image)
+            gate_image "$@"; rc=$?; finish_run "$rc" ;;
+        registry-check)
+            gate_registry_check; rc=$?; finish_run "$rc" ;;
         host)
             gate_host; rc=$?; finish_run "$rc" ;;
         vm-smoke)

@@ -1,0 +1,343 @@
+#!/bin/bash
+# vm-boot-watch — fail-fast serial-console boot watcher for qdistro VMs.
+#
+# ADDITIVE companion to vm-start-and-wait. It watches a VM's serial console
+# for early-boot fatals (kernel panic, dracut/systemd emergency mode, OOM,
+# SELinux policy load failure, greetd/qdshell crash loops, ...) and for a
+# no-output STALL, and fails fast with the matched line + a serial tail —
+# instead of waiting out the opaque 120s guest-agent timeout.
+#
+# It re-derives a Tumbleweed/systemd/dracut pattern catalog (see
+# vm-boot-patterns.sh); it does NOT port LevitateOS recqemu's serial marker
+# protocol — qdistro drives the guest via libvirt + qemu-guest-agent.
+#
+# MODES
+#   vm-boot-watch watch <vm> [serial-source]
+#       Watch a running VM's serial console. Exits:
+#         0  guest-agent became ready (delegated success signal) OR
+#            the serial source ended cleanly without a fatal (caller decides)
+#         3  fatal pattern matched
+#         4  no-output stall (and guest agent not yet up)
+#       Use --until-agent to make it the concurrent racer (see vm-start-and-wait).
+#
+#   vm-boot-watch match            # read serial text on stdin, classify each
+#                                  # line; exit 3 on first fatal, 0 at clean EOF
+#
+#   vm-boot-watch self-test        # run built-in synthetic self-tests, no VM
+#
+# SERIAL SOURCE (for `watch`)
+#   The template/clone domains expose <serial type='pty'>, which has no
+#   persistent log file. vm-boot-watch obtains serial text in this order:
+#     1. explicit path argument or $QD_BOOT_SERIAL_LOG (a file we tail -F), or
+#     2. $QD_BOOT_SERIAL_CMD (a command whose stdout is the serial stream), or
+#     3. `virsh -c qemu:///session console --force <vm>` (attaches to the pty) —
+#        OFF by default; opt in with QD_BOOT_PTY_FALLBACK=1, since --force steals
+#        whatever else holds the console. With no source configured (and pty
+#        fallback off) the watcher is a harmless no-op.
+#   See create-template-domain.sh suggestion in the report for adding a
+#   <serial type='file'> log sink, which is the most robust source.
+#
+# TUNABLES (env)
+#   QD_BOOT_STALL_SECS   no-output stall threshold (default 45)
+#   QD_BOOT_MAX_SECS     overall backstop cap (default 120)
+#   QD_BOOT_TAIL_LINES   serial-tail lines to print on failure (default 40)
+#   QD_BOOT_SERIAL_LOG   serial log file to tail
+#   QD_BOOT_SERIAL_CMD   command emitting the serial stream on stdout
+#   QD_VIRSH             virsh invocation (default "virsh -c qemu:///session")
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/vm/vm-boot-patterns.sh
+. "$HERE/vm-boot-patterns.sh"
+
+QD_BOOT_STALL_SECS="${QD_BOOT_STALL_SECS:-45}"
+QD_BOOT_MAX_SECS="${QD_BOOT_MAX_SECS:-120}"
+QD_BOOT_TAIL_LINES="${QD_BOOT_TAIL_LINES:-40}"
+QD_VIRSH="${QD_VIRSH:-virsh -c qemu:///session}"
+
+log() { printf '[vm-boot-watch] %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# match mode: classify stdin line by line. Exit 3 on first fatal, else 0.
+# ---------------------------------------------------------------------------
+mode_match() {
+  local line cause rc=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if cause="$(vm_boot_classify_line "$line")"; then
+      printf 'FATAL\t%s\t%s\n' "$cause" "$line"
+      rc=3
+      break
+    fi
+  done
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# Resolve a serial source command (prints the stream on its stdout).
+# ---------------------------------------------------------------------------
+serial_source_cmd() {
+  local vm="$1" src="$2"
+  if [ -n "$src" ]; then
+    printf 'tail -n +1 -F %q 2>/dev/null' "$src"
+  elif [ -n "${QD_BOOT_SERIAL_LOG:-}" ]; then
+    printf 'tail -n +1 -F %q 2>/dev/null' "$QD_BOOT_SERIAL_LOG"
+  elif [ -n "${QD_BOOT_SERIAL_CMD:-}" ]; then
+    printf '%s' "$QD_BOOT_SERIAL_CMD"
+  elif [ "${QD_BOOT_PTY_FALLBACK:-0}" != "0" ]; then
+    # Attach to the pty serial console. `--force` STEALS an existing console
+    # session, so it is OFF by default (even for a bare `watch <vm>`): with no
+    # configured serial source the watcher is a no-op rather than silently
+    # hijacking whatever holds the pty. Opt in explicitly with
+    # QD_BOOT_PTY_FALLBACK=1 only when you know nothing else owns the console.
+    printf '%s console --force %q' "$QD_VIRSH" "$vm"
+  fi
+}
+
+agent_ready() {
+  local vm="$1"
+  # shellcheck disable=SC2086  # QD_VIRSH is an intentional word-split command
+  $QD_VIRSH qemu-agent-command "$vm" '{"execute":"guest-info"}' >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# watch mode: race serial fatals/stall against guest-agent readiness.
+# ---------------------------------------------------------------------------
+mode_watch() {
+  local vm="$1" src="${2:-}" until_agent="$3"
+  [ -n "$vm" ] || { log "ERROR: watch needs a <vm> name"; return 2; }
+
+  local srccmd; srccmd="$(serial_source_cmd "$vm" "$src")"
+  if [ -z "$srccmd" ]; then
+    log "no serial source available (set QD_BOOT_SERIAL_LOG/QD_BOOT_SERIAL_CMD"
+    log "or allow pty fallback); nothing to watch — exiting 0 (no-op)"
+    return 0
+  fi
+  log "watching serial of '$vm' (stall=${QD_BOOT_STALL_SECS}s cap=${QD_BOOT_MAX_SECS}s)"
+  log "serial source: $srccmd"
+
+  local tailfile; tailfile="$(mktemp -t qd-boot-serial.XXXXXX)"
+  # Start the serial reader in the background, capturing into a file we tail.
+  # We can't rely on the reader exiting, so we manage it explicitly.
+  bash -c "$srccmd" >"$tailfile" 2>/dev/null &
+  local rpid=$!
+
+  # Cleanup: kill the reader (+ any virsh console / tail child) and drop the
+  # temp file. The PID/path are expanded into the trap NOW so the handler does
+  # not depend on mode_watch's locals still being live when it fires.
+  #
+  # We trap RETURN for the normal function-exit path AND the termination
+  # signals: when vm-start-and-wait (or anything else) kills this watcher, the
+  # RETURN trap does NOT run, so without a signal trap the backgrounded reader
+  # (tail -F / `virsh console --force`) would be orphaned. On a signal we clean
+  # up the reader subtree and then exit so the kill still terminates us.
+  # shellcheck disable=SC2064  # intentional early expansion of rpid/tailfile
+  trap "kill $rpid 2>/dev/null; pkill -P $rpid 2>/dev/null; wait $rpid 2>/dev/null; rm -f $tailfile 2>/dev/null; trap - RETURN" RETURN
+  # shellcheck disable=SC2064
+  trap "kill $rpid 2>/dev/null; pkill -P $rpid 2>/dev/null; rm -f $tailfile 2>/dev/null; trap - INT TERM HUP RETURN; exit 143" INT TERM HUP
+
+  local start_ts last_size last_progress now line cause
+  start_ts="$(date +%s)"
+  last_progress="$start_ts"
+  last_size=0
+
+  while :; do
+    now="$(date +%s)"
+
+    # Overall backstop cap.
+    if [ $((now - start_ts)) -ge "$QD_BOOT_MAX_SECS" ]; then
+      log "FAIL: overall cap ${QD_BOOT_MAX_SECS}s reached without success"
+      print_tail "$tailfile"
+      return 4
+    fi
+
+    # Guest agent up? Delegated success — race winner.
+    if [ "$until_agent" = 1 ] && agent_ready "$vm"; then
+      log "PASS: guest agent ready after $((now - start_ts))s"
+      return 0
+    fi
+
+    # Scan any new serial lines for fatals.
+    local cur_size
+    cur_size="$(wc -c <"$tailfile" 2>/dev/null || echo 0)"
+    if [ "$cur_size" -gt "$last_size" ]; then
+      last_progress="$now"
+      # Read only the newly appended bytes, classify line by line.
+      local chunk
+      chunk="$(tail -c "+$((last_size + 1))" "$tailfile" 2>/dev/null)"
+      last_size="$cur_size"
+      while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        if cause="$(vm_boot_classify_line "$line")"; then
+          log "FAIL: fatal serial pattern matched"
+          log "cause : $cause"
+          log "line  : $line"
+          print_tail "$tailfile"
+          return 3
+        fi
+      done <<<"$chunk"
+    fi
+
+    # Stall detection: no new output for stall window AND agent not up.
+    if [ $((now - last_progress)) -ge "$QD_BOOT_STALL_SECS" ]; then
+      if [ "$until_agent" = 1 ] && agent_ready "$vm"; then
+        log "PASS: guest agent ready (output stalled but agent up)"
+        return 0
+      fi
+      log "FAIL: no serial output for ${QD_BOOT_STALL_SECS}s and guest agent not up — stall"
+      print_tail "$tailfile"
+      return 4
+    fi
+
+    # If the reader died and the agent is up, treat as success; else keep
+    # looping until cap (the disk log may still be flushed).
+    if ! kill -0 "$rpid" 2>/dev/null; then
+      if [ "$until_agent" = 1 ] && agent_ready "$vm"; then
+        log "PASS: guest agent ready (serial reader exited)"
+        return 0
+      fi
+    fi
+
+    sleep 1
+  done
+}
+
+print_tail() {
+  local f="$1"
+  log "--- last ${QD_BOOT_TAIL_LINES} serial lines ---"
+  tail -n "$QD_BOOT_TAIL_LINES" "$f" 2>/dev/null | sed 's/^/[serial] /' >&2
+  log "--- end serial tail ---"
+}
+
+# ---------------------------------------------------------------------------
+# self-test: feed synthetic logs through the matcher, no VM required.
+# ---------------------------------------------------------------------------
+mode_self_test() {
+  local fails=0
+
+  expect_fatal() {
+    local name="$1" log_text="$2"
+    local out rc
+    out="$(printf '%s\n' "$log_text" | mode_match)"; rc=$?
+    if [ "$rc" -eq 3 ]; then
+      printf 'PASS  %-22s -> %s\n' "$name" "${out#FATAL$'\t'}"
+    else
+      printf 'FAIL  %-22s -> expected fatal(3), got rc=%s\n' "$name" "$rc"
+      fails=$((fails + 1))
+    fi
+  }
+  expect_clean() {
+    local name="$1" log_text="$2"
+    local rc
+    printf '%s\n' "$log_text" | mode_match >/dev/null; rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf 'PASS  %-22s -> no fatal (clean)\n' "$name"
+    else
+      printf 'FAIL  %-22s -> expected clean(0), got rc=%s\n' "$name" "$rc"
+      fails=$((fails + 1))
+    fi
+  }
+
+  echo "== vm-boot-watch self-test =="
+
+  expect_clean clean-boot "$(cat <<'EOF'
+[    0.000000] Linux version 6.13.4-1-default (geeko@buildhost)
+[    1.234567] systemd[1]: Detected virtualization kvm.
+[    2.000000] systemd[1]: Reached target Local File Systems.
+[    3.100000] systemd[1]: Starting Network Manager...
+[    4.200000] systemd[1]: Started qemu-guest-agent.service.
+[    5.300000] systemd[1]: Reached target Multi-User System.
+[   10.000000] Welcome to openSUSE Tumbleweed!
+linux-abcd login:
+EOF
+)"
+
+  expect_fatal kernel-panic "$(cat <<'EOF'
+[    2.100000] systemd[1]: Detected virtualization kvm.
+[    3.500000] VFS: Cannot open root device "vda3" or unknown-block(0,0): error -6
+[    3.600000] Please append a correct "root=" boot option
+[    3.700000] Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
+EOF
+)"
+
+  expect_fatal dracut-emergency "$(cat <<'EOF'
+[    4.000000] dracut-initqueue[321]: Warning: dracut-initqueue: timeout, still waiting for following initqueue hooks:
+[   95.123456] dracut-initqueue[321]: Warning: /dev/disk/by-uuid/1234 does not exist
+Generating "/run/initramfs/rdsosreport.txt"
+You are in emergency mode. After logging in, type "journalctl -xb" to view
+Give root password for maintenance (or press Control-D to continue):
+EOF
+)"
+
+  expect_fatal oom-kill "$(cat <<'EOF'
+[   12.345678] systemd[1]: Starting heavy.service...
+[   13.000000] Out of memory: Killed process 842 (qdshell) total-vm:...
+EOF
+)"
+
+  expect_fatal selinux-policy "$(cat <<'EOF'
+[    2.500000] systemd[1]: Detected virtualization kvm.
+[    2.900000] SELinux:  Could not load policy: No such file or directory
+[    3.000000] systemd[1]: Failed to load SELinux policy. Freezing.
+EOF
+)"
+
+  expect_fatal greetd-loop "$(cat <<'EOF'
+[   20.100000] systemd[1]: Started greetd.service.
+[   21.000000] greetd-qdwin.service: Main process exited, code=dumped, status=11/SEGV
+[   21.100000] greetd-qdwin.service: Start request repeated too quickly.
+[   21.200000] greetd-qdwin.service: Failed with result 'start-limit-hit'.
+EOF
+)"
+
+  # Stall: a truncated/clean prefix that simply stops producing output.
+  # mode_match sees no fatal -> rc 0; the live STALL path is exercised in
+  # mode_watch (needs a running source) and is flagged pending on a test VM.
+  expect_clean stall-prefix "$(cat <<'EOF'
+[    0.000000] Linux version 6.13.4-1-default
+[    1.000000] systemd[1]: Detected virtualization kvm.
+[    2.000000] systemd[1]: Starting Load Kernel Modules...
+EOF
+)"
+
+  echo
+  if [ "$fails" -eq 0 ]; then
+    echo "SELF-TEST: all matcher cases passed"
+    return 0
+  fi
+  echo "SELF-TEST: $fails case(s) FAILED"
+  return 1
+}
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  vm-boot-watch watch <vm> [serial-source] [--until-agent]
+  vm-boot-watch match            # classify serial text on stdin
+  vm-boot-watch self-test        # synthetic self-tests, no VM
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    match)     mode_match ;;
+    self-test) mode_self_test ;;
+    watch)
+      local vm="" src="" until_agent=0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --until-agent) until_agent=1 ;;
+          -*) log "unknown flag: $1"; usage; return 2 ;;
+          *) if [ -z "$vm" ]; then vm="$1"; else src="$1"; fi ;;
+        esac
+        shift
+      done
+      mode_watch "$vm" "$src" "$until_agent"
+      ;;
+    ""|-h|--help|help) usage; [ -z "$cmd" ] && return 2 || return 0 ;;
+    *) log "unknown command: $cmd"; usage; return 2 ;;
+  esac
+}
+
+main "$@"

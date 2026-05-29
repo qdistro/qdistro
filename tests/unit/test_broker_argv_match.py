@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 # Match the layout test_broker_check_permission.py uses.
 _BROKER = Path(__file__).resolve().parents[1] / "broker"
 if str(_BROKER) not in sys.path:
@@ -78,6 +80,21 @@ class TestArgvFromDetails:
         }
         assert _argv_from_details(d) == ["id"]
 
+    @pytest.mark.cheat_aware(
+        protects="argv with no captured program element (argv[00]) reads as "
+                 "'no argv captured' so argv-pinned scopes fail closed",
+        severity="critical",
+        cheats=[
+            "change the expected None to the collapsed list "
+            "['/usr/bin/apt-get', 'update']",
+            "make _argv_from_details synthesize a program element from "
+            "argv[01]+",
+            "broaden the argv match to ignore the missing argv[00]",
+        ],
+        consequence="an attacker presents a program-blind argv tuple that "
+                    "matches an argv-pinned approval, broadening the scope of "
+                    "what a stored approval authorizes",
+    )
     def test_missing_argv00_fails_closed_to_none(self):
         # A caller that supplies argv[01]/argv[02] but omits argv[00]
         # has not captured the program element argv-aware scopes pin

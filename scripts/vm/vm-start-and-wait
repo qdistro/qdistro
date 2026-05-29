@@ -1,10 +1,25 @@
 #!/bin/bash
 # Usage: ./vm-start-and-wait <vm_name>
-# Starts VM if not running and waits for QEMU guest agent
+# Starts VM if not running and waits for QEMU guest agent.
+#
+# BACKWARD COMPATIBLE: the <vm_name> contract is unchanged; exit 0 on
+# guest-agent ready, non-zero on timeout. Callers (qci, bats helpers,
+# clone-baseweed, build-in-vm, spin-test-vm) keep working unchanged.
+#
+# ADDITIVE fail-fast: if a serial source is available (a serial log file via
+# $QD_BOOT_SERIAL_LOG, a stream via $QD_BOOT_SERIAL_CMD, or the pty console),
+# a background vm-boot-watch races the guest-agent poll. Whichever fires first
+# wins: guest-agent-ready -> exit 0; fatal serial pattern / stall -> exit
+# non-zero with a diagnostic, instead of waiting out the full timeout. The
+# overall MAX_WAIT cap is preserved as a backstop.
+#
+# Disable the watcher with QD_BOOT_WATCH=0 (e.g. if a caller already holds the
+# serial pty and concurrent access would conflict).
 
 set -euo pipefail
 
 VM_NAME=$1
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check if VM is running
 VM_STATE=$(virsh -c qemu:///session domstate "$VM_NAME" 2>/dev/null || echo "")
@@ -16,15 +31,82 @@ else
     echo "VM '$VM_NAME' is already running"
 fi
 
-# Wait for QEMU guest agent
-echo "Waiting for QEMU guest agent..."
 MAX_WAIT=120
 WAITED=0
+
+# Optionally launch the concurrent serial fail-fast watcher. It races the
+# guest-agent poll below. We DON'T pass --until-agent here (this script owns
+# the agent-ready decision); the watcher only reports fatals/stalls. If it
+# exits non-zero before the agent comes up, we fail fast with its diagnostic.
+WATCH_PID=""
+WATCH_RC_FILE=""
+if [ "${QD_BOOT_WATCH:-1}" != "0" ] && [ -x "$HERE/vm-boot-watch" ]; then
+    WATCH_RC_FILE="$(mktemp -t qd-boot-watch-rc.XXXXXX)"
+    # Cap the watcher to our own MAX_WAIT so it can't outlive us.
+    # PTY fallback is OFF by default here: auto-`virsh console --force` would
+    # steal an interactive console and could race other tooling that holds the
+    # pty. The watcher is a no-op unless a serial source is configured
+    # (QD_BOOT_SERIAL_LOG / QD_BOOT_SERIAL_CMD) or pty fallback is explicitly
+    # re-enabled via QD_BOOT_PTY_FALLBACK=1.
+    # Note: this script runs under `set -e`. Guard the watcher call with
+    # `&& :`/explicit rc capture so a non-zero watcher exit does NOT abort the
+    # subshell before it records its rc to WATCH_RC_FILE.
+    (
+        _wrc=0
+        QD_BOOT_MAX_SECS="${QD_BOOT_MAX_SECS:-$MAX_WAIT}" \
+        QD_BOOT_PTY_FALLBACK="${QD_BOOT_PTY_FALLBACK:-0}" \
+            "$HERE/vm-boot-watch" watch "$VM_NAME" || _wrc=$?
+        echo "$_wrc" > "$WATCH_RC_FILE"
+    ) &
+    WATCH_PID=$!
+fi
+
+# Recursively TERM a process and all its descendants. The watcher is a tree:
+# this subshell -> vm-boot-watch -> a backgrounded serial reader (tail -F /
+# `virsh console`). Killing only $WATCH_PID (the subshell) would orphan
+# vm-boot-watch and its reader, leaving a stray `virsh console`/`tail` behind.
+# We walk children first (depth-first) so parents do not respawn/reparent them.
+kill_tree() {
+    local p=$1 c
+    for c in $(pgrep -P "$p" 2>/dev/null); do
+        kill_tree "$c"
+    done
+    kill -TERM "$p" 2>/dev/null || true
+}
+
+cleanup_watch() {
+    if [ -n "$WATCH_PID" ]; then
+        kill_tree "$WATCH_PID"
+        wait "$WATCH_PID" 2>/dev/null || true
+    fi
+    [ -n "$WATCH_RC_FILE" ] && rm -f "$WATCH_RC_FILE" 2>/dev/null || true
+}
+trap cleanup_watch EXIT
+
+# Wait for QEMU guest agent
+echo "Waiting for QEMU guest agent..."
 while [ $WAITED -lt $MAX_WAIT ]; do
     if virsh -c qemu:///session qemu-agent-command "$VM_NAME" '{"execute":"guest-info"}' >/dev/null 2>&1; then
         echo "Guest agent ready after ${WAITED}s"
         exit 0
     fi
+
+    # Did the serial watcher already detect a fatal/stall? Fail fast.
+    # The watcher subshell writes its rc to WATCH_RC_FILE only after it
+    # returns, so a non-empty rc file means it has finished. (Don't probe
+    # with `kill -0`: an unreaped child zombie still answers, so it never
+    # looks dead.)
+    if [ -n "$WATCH_PID" ] && [ -n "$WATCH_RC_FILE" ] && [ -s "$WATCH_RC_FILE" ]; then
+        WRC="$(cat "$WATCH_RC_FILE" 2>/dev/null || echo 0)"
+        wait "$WATCH_PID" 2>/dev/null || true
+        WATCH_PID=""
+        if [ "$WRC" != "0" ]; then
+            echo "ERROR: serial boot watcher reported failure (rc=$WRC) before guest agent came up" >&2
+            exit "$WRC"
+        fi
+        # Watcher exited 0 without us seeing the agent yet — keep polling.
+    fi
+
     sleep 1
     WAITED=$((WAITED + 1))
     if [ $WAITED -gt 0 ] && [ $((WAITED % 30)) -eq 0 ]; then

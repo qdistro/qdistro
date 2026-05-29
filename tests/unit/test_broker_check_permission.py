@@ -156,6 +156,20 @@ class TestCheckPermissionResolution:
         broker.set_peer(uid=NON_ADMIN_UID)
         assert broker.CheckPermission(STREAM_ACTION, {}) == "unknown"
 
+    @pytest.mark.cheat_aware(
+        protects="an explicit deny rule is authoritative and a cached allow "
+                 "can never override it",
+        severity="critical",
+        cheats=[
+            "change the expected 'deny' to 'allow' or to skip",
+            "stop writing the cache row so the test no longer exercises the "
+            "rule-vs-cache conflict",
+            "reorder resolution so cache is consulted before rules",
+        ],
+        consequence="a stale or maliciously-seeded cache allow overrides an "
+                    "admin's explicit deny, authorizing a command the policy "
+                    "forbids",
+    )
     def test_rule_beats_cache(self, broker, rules_dir):
         """Rules are authoritative; cache never overrides."""
         _write_rule(rules_dir, decision="deny",

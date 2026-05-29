@@ -281,9 +281,15 @@ if [ "$ssh_up" = 1 ]; then
         'echo "hostname=$(cat /etc/hostname)"; echo "id=$(grep ^ID= /etc/os-release)"; lsblk; df -h /' \
         2>&1 | tee "$INSTALL_DIR/installed-fingerprint.log"
     echo "RESULT: PASS — installer wrote the system to disk and it booted."
+    result_rc=0
 else
     echo "RESULT: FAIL — installed system never reached SSH; see $INSTALL_DIR/"
+    result_rc=1
 fi
 
 log "artifacts: $INSTALL_DIR"
 log "VM left running. Teardown: $0 --teardown"
+
+# Exit status must reflect the RESULT line: a FAIL that fell through to exit 0
+# made callers (qci gate_image) record a real install failure as a pass.
+exit "$result_rc"

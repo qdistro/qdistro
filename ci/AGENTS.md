@@ -15,6 +15,24 @@ You are running or triaging local CI for the qdistro umbrella checkout.
   in `/tmp`.
 - On failure, preserve the VM unless the user asked for deletion.
 
+## Test integrity / anti-cheat
+
+- Do not weaken an assertion, widen a match, or drop a status check to
+  make a test pass. New work is additive; flag wrong tests, don't quietly
+  change them.
+- Do not raise or remove a timeout to hide a real failure — diagnose it.
+  Never regress a `require`/`fail_loud` (see
+  `tests/integration/vm/helpers.bash`) back into a silent `skip`.
+- Skip is not green. qci records `pass`/`fail`/`skip`/`blocked` for a
+  reason (`record_skip`/`record_blocked` in `ci/bin/qci`); never convert a
+  required failure into a warning or skip to dodge a red gate.
+- A test's expected behavior changes only with a corresponding product-code
+  change, and your report must name that change.
+- Every PASS cites evidence: command + output, journal delta, unit/socket
+  state, or artifact path. A bare "PASS" is not a result.
+- Full details and the per-assertion evidence model: see
+  `ci/prompts/anti-cheat-guidance.md` (and `tests/AGENTS.md` for authoring).
+
 ## Standard flow
 
 1. Run `qdistro/ci/bin/qci preflight`.

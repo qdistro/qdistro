@@ -71,6 +71,18 @@ class TestFraming:
 
 
 class TestRecheckCallerIdentity:
+    @pytest.mark.cheat_aware(
+        protects="qsu recheck fails closed when caller identity is unanchored",
+        severity="critical",
+        cheats=[
+            "delete or weaken the pytest.raises(CallerIdentityChanged) guard",
+            "monkeypatch _peer_exe/_peer_start_time to a readable value so the "
+            "anchor is no longer absent",
+            "convert the expected exception into a skip/xfail",
+        ],
+        consequence="a pid-reused process inherits another caller's root "
+                    "approval and executes as that identity",
+    )
     def test_no_anchor_fails_closed(self, monkeypatch):
         """When neither the exe nor starttime was readable at accept
         time, the recheck has nothing to anchor on and MUST fail closed

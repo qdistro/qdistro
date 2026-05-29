@@ -29,6 +29,20 @@ def scope_from_row(row: dict) -> str:
     return "forever_exe"
 
 
+@pytest.mark.cheat_aware(
+    protects="every persisted approval scope round-trips store->lookup "
+             "without silently widening (e.g. 1h decoded back as forever)",
+    severity="high",
+    cheats=[
+        "drop a scope from the parametrize list to avoid testing it",
+        "relax the scope_from_row reference so it no longer asserts the "
+        "exact original scope",
+        "change the assert to a looser comparison or a skip",
+    ],
+    consequence="a time-limited or exe-pinned approval is reconstructed as a "
+                "broader scope, so an approval outlives or escapes the bounds "
+                "the user granted",
+)
 @pytest.mark.parametrize("scope", ["1h", "24h", "forever", "forever_exe"])
 def test_scope_roundtrip_via_cache(cache_db, scope):
     """Storing then looking up should reconstruct the original scope."""
