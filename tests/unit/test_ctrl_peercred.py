@@ -172,6 +172,21 @@ def test_same_uid_peer_is_served(ctrl_socket):
     assert reply.startswith("locked=")
 
 
+@pytest.mark.cheat_aware(
+    protects="qdlocker ctrl-socket serves only the session owner; a "
+    "cross-uid peer is refused before any reply (no lock-state or "
+    "prompt-length side-channel leaks to another user)",
+    severity="critical",
+    cheats=[
+        "make peer_uid return os.getuid() so the foreign peer is accepted",
+        "assert on the connection succeeding instead of reply is None",
+        "loosen the uid match to a range/group instead of exact equality",
+        "let the gate fail OPEN when SO_PEERCRED is unreadable",
+    ],
+    consequence="another local user reads live locker state and the "
+    "length-revealing masked prompt buffer (a keystroke timing/length "
+    "side channel) off the screen locker's control socket",
+)
 def test_foreign_uid_peer_is_rejected(ctrl_socket, monkeypatch):
     """A simulated cross-uid peer is refused: the server closes the
     connection without serving any reply."""
@@ -182,6 +197,20 @@ def test_foreign_uid_peer_is_rejected(ctrl_socket, monkeypatch):
     assert reply is None  # refused before any data was served
 
 
+@pytest.mark.cheat_aware(
+    protects="a peer refused by the SO_PEERCRED gate cannot drive the "
+    "locker via the synthetic lock-injection command",
+    severity="critical",
+    cheats=[
+        "process the command before the authorize gate runs",
+        "drop or shorten the time.sleep so the unhandled inject is missed",
+        "assert len(bridge.injected) >= 0 instead of == []",
+        "monkeypatch peer_uid to our own uid so the peer is authorized",
+    ],
+    consequence="a foreign local process forces lock-state transitions on "
+    "the locker control surface, e.g. to grief or to probe the prompt "
+    "side channel",
+)
 def test_foreign_uid_cannot_inject_lock(ctrl_socket, monkeypatch):
     """A refused peer can't drive the locker via the synthetic lock."""
     sock, bridge = ctrl_socket

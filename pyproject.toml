@@ -48,3 +48,9 @@ pythonpath = ["."]
 # and then breaks the subsequent PyQt6 import with a missing
 # Qt_*_PRIVATE_API symbol error.
 qt_api = "pyqt6"
+# Opt-in marker for security-critical tests. The failure hook in
+# tests/unit/conftest.py surfaces protects/severity/cheats/consequence
+# on FAILURE only; the marker is inert on pass. See tests/AGENTS.md.
+markers = [
+    "cheat_aware(protects, severity, cheats, consequence): security-critical test; on failure prints what capability it protects, how the test could be cheated green, and the consequence of a false pass.",
+]

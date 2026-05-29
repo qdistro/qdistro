@@ -137,6 +137,21 @@ def _make_backend():
 # ---- item 1: each phase hangs → times out → fails closed -------------------
 
 
+@pytest.mark.cheat_aware(
+    protects="every D-Bus await on the fingerprint unlock path is "
+    "timeout-bounded and fails CLOSED — a hang anywhere records a "
+    "failure and never emits SUCCESS (the locker stays locked)",
+    severity="critical",
+    cheats=[
+        "drop the 'phase != connect' branches from the parametrize list",
+        "assert fallback.called without also asserting no SUCCESS emitted",
+        "widen the timeout/raise fprintd_timeout_s so the hang resolves",
+        "treat a timed-out verify as a match to 'fix' a flaky test",
+    ],
+    consequence="a wedged or hostile fprintd hangs the locker or, worse, "
+    "a timeout is read as a successful fingerprint and the screen unlocks "
+    "without a real auth result",
+)
 @pytest.mark.parametrize(
     "phase",
     ["connect", "mgr_introspect", "get_device", "dev_introspect",

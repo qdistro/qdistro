@@ -143,6 +143,21 @@ def test_tagged_success_unlocks(qapp, auth):
     assert ctrl._unlocked is True
 
 
+@pytest.mark.cheat_aware(
+    protects="an auth outcome tagged with a superseded session generation "
+    "cannot unlock or flash failure on a fresh lock — only a result for "
+    "the current generation is honored",
+    severity="critical",
+    cheats=[
+        "emit the outcome with the current generation instead of the old one",
+        "skip notify_lock_begin so no generation bump occurs",
+        "assert only on showFailure and drop the fails == [] check",
+        "compare generations with <= instead of exact-match equality",
+    ],
+    consequence="a slow/laggy worker's stale SUCCESS from a previous lock "
+    "session unlocks the screen for whoever is in front of it now — a "
+    "real unlock-without-auth bypass",
+)
 def test_stale_outcome_from_old_generation_is_dropped(qapp, auth):
     ctrl = LockController(auth)
     captured_gen = auth._current_generation()
