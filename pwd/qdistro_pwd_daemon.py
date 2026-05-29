@@ -1029,8 +1029,15 @@ class PwdDaemon(dbus.service.Object):
         token_key = f"{fill_token}:{username}" if fill_token else ""
         if not hasattr(self, "_fill_tokens"):
             self._fill_tokens = {}
-        token_entry = self._fill_tokens.pop(token_key, None)
+        # Peek (do NOT pop yet): an identity-binding mismatch must not
+        # let a wrong/forged caller burn the legitimate peer's pending
+        # approval (that would be a DoS — the genuine bridge could no
+        # longer redeem it). The token is consumed only once all bound
+        # fields match, immediately before we release the secret.
+        token_entry = self._fill_tokens.get(token_key)
         if not token_entry or token_entry["expires"] < int(time.time()):
+            # An expired entry is dead weight — drop it.
+            self._fill_tokens.pop(token_key, None)
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason="invalid-or-expired-fill-token",
                                caller=caller)
@@ -1039,6 +1046,21 @@ class PwdDaemon(dbus.service.Object):
             self._audit.record("fill-confirm", vault, decision="deny",
                                reason="fill-token-mismatch", caller=caller)
             return json.dumps({"ok": False, "error": "invalid_token"})
+        # Daemon-session / originating-peer binding: the fill_token was
+        # minted for the bridge process (pid) that called Fill. A
+        # different process — even one that satisfies the per-item pin
+        # set (same exe/uid) — must NOT be able to consume another
+        # peer's approval. Bind the confirm to the originating peer pid
+        # captured at Fill time so the token is single-target, not just
+        # single-use. (pin_match below still re-validates exe/selinux/uid
+        # of the live caller; this is the orthogonal session axis.)
+        if token_entry.get("pid") != pid:
+            self._audit.record("fill-confirm", vault, decision="deny",
+                               reason="fill-token-peer-mismatch",
+                               caller=caller)
+            return json.dumps({"ok": False, "error": "invalid_token"})
+        # All bound fields match — consume the single-use approval now.
+        self._fill_tokens.pop(token_key, None)
 
         tag = f"pwd:{origin}/{username}"
         # Verify caller identity against item pins
