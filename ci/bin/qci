@@ -516,6 +516,18 @@ gate_host() {
     run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
+    # Headless gate for the SHIPPED (production-profile) vendored
+    # libweston: builds it and asserts the four soft-linked
+    # weston_desktop_xdg_popup_* helper symbols are exported + the qdistro
+    # staging script lays a complete tree. This is the no-VM proof that
+    # the packaging decision ships a usable patched library. Backends that
+    # need devel packages absent on the runner can be toggled off via
+    # QDWIN_LW_* without affecting the symbol assertion (the helpers live
+    # in the always-built libweston-desktop core).
+    c="bash libweston-vendored/run-production-symbols-test.sh"
+    run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
     c="export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"
     run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, jstest (node), lint, format check"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
@@ -613,6 +625,7 @@ run_qdwin_executable_gui_smokes() {
         do
             record_result gui "qdwin-$scenario" skip 0 pass gui "" "qdwin production session not active in this VM profile"
         done
+        record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "qdwin production session not active in this VM profile"
         return 0
     fi
     for scenario in \
@@ -630,6 +643,27 @@ run_qdwin_executable_gui_smokes() {
         run_logged gui "qdwin-$scenario" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$file'" ""; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     done
+
+    # agent-vendored-libweston-verify.sh exercises the layer-popup grab
+    # paths that ONLY work against qdistro's patched libweston. Precheck
+    # which libweston the session loaded: only run (and let it gate the
+    # pipeline) when the vendored tree is in force. On a stock-libweston
+    # VM profile, skip rather than fail — the verify script's exit 2
+    # (SETUP) would otherwise map to a hard GUI failure.
+    local vlw_file vlw_prefix loaded_lw
+    vlw_file="$WORKSPACE/qdwin/tests/gui/agent-vendored-libweston-verify.sh"
+    vlw_prefix="${QDWIN_VENDORED_LIBWESTON_PREFIX:-/usr/libexec/qdistro/qdwin-libweston}"
+    loaded_lw=$("$VM_TOOLS/vm-exec" "$vm" "pmap \$(pgrep -x weston | head -n1) 2>/dev/null | grep -o '/[^ ]*libweston-14\.so[^ ]*' | sort -u | head -n1" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
+    if [ ! -x "$vlw_file" ]; then
+        record_blocked gui "agent-vendored-libweston-verify.sh" "$EXIT_GUI" gui "scenario script missing or not executable"
+        [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+    elif [ -z "$loaded_lw" ] || [ "${loaded_lw#"$vlw_prefix"}" = "$loaded_lw" ]; then
+        record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" \
+            "session not running vendored libweston (loaded: ${loaded_lw:-unknown}); layer-popup grab discriminators N/A"
+    else
+        run_logged gui "qdwin-agent-vendored-libweston-verify.sh" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$vlw_file'" ""; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    fi
     return "$rc"
 }
 

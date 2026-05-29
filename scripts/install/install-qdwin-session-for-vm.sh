@@ -179,7 +179,58 @@ echo "/var/lib/qdistro/podapps perms: $(stat -c '%U:%G %a' /var/lib/qdistro/poda
 # 4. User systemd units.
 install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
 
-cat > /home/admin/.config/systemd/user/noctalia-session.service <<'EOF'
+# Vendored libweston: qdwin's layer-shell popup parenting needs the
+# soft-linked helper symbols that only exist in qdistro's patched
+# libweston-14 (see qdwin/doc/decisions/0001-vendored-libweston-packaging.md).
+# install-vendored-libweston.sh stages a self-contained tree under
+# $QDWIN_LIBWESTON. The system `weston` binary loads the patched core
+# via LD_LIBRARY_PATH and ALL backends from the same tree via
+# WESTON_MODULE_MAP — core and backends must come from one build (the
+# core<->backend ABI is internal to libweston). If the vendored tree is
+# absent the unit still starts against the distro libweston, but
+# layer-popup grab paths log DEGRADED and Quickshell popups parented to
+# layer surfaces will not grab; that is the documented fallback.
+QDWIN_LIBWESTON=${QDWIN_LIBWESTON:-/usr/libexec/qdistro/qdwin-libweston}
+QDWIN_LIBWESTON_MODDIR="$QDWIN_LIBWESTON/lib64/libweston-14"
+QDWIN_MODULE_MAP=""
+QDWIN_VENDORED=0
+if [ -f "$QDWIN_LIBWESTON_MODDIR/drm-backend.so" ]; then
+    # Vendored: load the patched core via LD_LIBRARY_PATH and map every
+    # backend to the SAME tree (core<->backend ABI is internal).
+    QDWIN_VENDORED=1
+    QDWIN_MOD_BASE="$QDWIN_LIBWESTON_MODDIR"
+    echo "qdwin session: vendored libweston present — modules mapped to $QDWIN_LIBWESTON_MODDIR"
+else
+    # Fallback: distro libweston-14, default loader path (no
+    # LD_LIBRARY_PATH so the absent vendored dir is not in the search
+    # path). Layer-popup grab degrades — documented fallback.
+    QDWIN_MOD_BASE="/usr/lib64/libweston-14"
+    echo "WARN: vendored libweston not found at $QDWIN_LIBWESTON_MODDIR —" \
+         "qdwin session will use distro libweston (layer-popup grab DEGRADED)." \
+         "Run install-vendored-libweston.sh to ship the patched tree."
+fi
+for _mod in drm-backend.so gl-renderer.so color-lcms.so \
+            headless-backend.so pipewire-backend.so rdp-backend.so \
+            wayland-backend.so x11-backend.so xwayland.so; do
+    # In the vendored case only map modules that actually exist (the
+    # production build may omit, e.g., vnc); in the distro fallback map
+    # the full set (the distro package ships them all).
+    if [ "$QDWIN_VENDORED" = 1 ] && [ ! -f "$QDWIN_MOD_BASE/$_mod" ]; then
+        continue
+    fi
+    QDWIN_MODULE_MAP="${QDWIN_MODULE_MAP:+$QDWIN_MODULE_MAP;}$_mod=$QDWIN_MOD_BASE/$_mod"
+done
+
+# Only emit the LD_LIBRARY_PATH line in the vendored case — an empty
+# LD_LIBRARY_PATH is a (minor) loader smell, and the distro library is on
+# the default search path anyway.
+if [ "$QDWIN_VENDORED" = 1 ]; then
+    QDWIN_LD_LINE="Environment=LD_LIBRARY_PATH=$QDWIN_LIBWESTON/lib64"
+else
+    QDWIN_LD_LINE="# (distro libweston on default loader path; no LD_LIBRARY_PATH)"
+fi
+
+cat > /home/admin/.config/systemd/user/noctalia-session.service <<EOF
 [Unit]
 Description=qdwin compositor session (libweston + qdwin-shell.so)
 After=graphical.target
@@ -188,8 +239,8 @@ After=graphical.target
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
-Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64
-Environment=WESTON_MODULE_MAP=drm-backend.so=/usr/lib64/libweston-14/drm-backend.so;gl-renderer.so=/usr/lib64/libweston-14/gl-renderer.so;color-lcms.so=/usr/lib64/libweston-14/color-lcms.so;headless-backend.so=/usr/lib64/libweston-14/headless-backend.so;pipewire-backend.so=/usr/lib64/libweston-14/pipewire-backend.so;rdp-backend.so=/usr/lib64/libweston-14/rdp-backend.so;wayland-backend.so=/usr/lib64/libweston-14/wayland-backend.so;x11-backend.so=/usr/lib64/libweston-14/x11-backend.so;xwayland.so=/usr/lib64/libweston-14/xwayland.so
+$QDWIN_LD_LINE
+Environment=WESTON_MODULE_MAP=$QDWIN_MODULE_MAP
 ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
