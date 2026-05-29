@@ -53,7 +53,7 @@ fi
 # not exec'd directly (spawn-tier4.sh invokes them through python).
 DEST_DIR=/usr/share/qdistro/tier4-vm
 install -d "$DEST_DIR"
-for mod in tier4_control.py tier4_chrome.py; do
+for mod in tier4_control.py tier4_chrome.py tier4_publisher_identity.py; do
     src="$TIER4_DIR/$mod"
     if [ ! -f "$src" ]; then
         echo "[install-tier4] FAIL: $src not found" >&2

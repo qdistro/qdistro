@@ -807,6 +807,21 @@ if [ "$QGA_OK" != "1" ]; then
 fi
 echo "[tier4] qga ready" >&2
 
+# --- inject this spawn's instance token into the guest publisher ------
+# The waypipe publisher auto-starts at boot (P10 image bake) and so does
+# not know which host spawn it is serving. Push this spawn's launch
+# record (vm + instance token) into the guest via qga env, then restart
+# the publisher unit so it (re)writes its identity banner bound to THIS
+# spawn. The subsequent vsock probe + banner verification then bind the
+# endpoint to the launch record. Best-effort: a guest that predates this
+# mechanism simply won't emit a matching banner, and the verification
+# gate below will fail closed (loud), which is the correct behaviour.
+if [ "$TIER4_DISPLAY" = "waypipe" ]; then
+    _inject_cmd="systemctl set-environment QDISTRO_TIER4_INSTANCE='$SECCTX_INSTANCE' QDISTRO_TIER4_VM='$VM_NAME' 2>/dev/null; systemctl restart qdistro-tier4-publisher.service 2>/dev/null || true"
+    qga_exec_capture_quiet "$_inject_cmd" >/dev/null 2>&1 || \
+        echo "[tier4] WARN: could not inject instance token into guest publisher via qga (will fail closed at identity check if banner is stale)" >&2
+fi
+
 if [ "$TIER4_DISPLAY" = "rdp" ]; then
     RDP_SUBSCRIBE="${TIER4_RDP_SUBSCRIBE:-last}"
     RDP_GUEST_APP="${TIER4_RDP_GUEST_APP:-weston-terminal}"
@@ -844,7 +859,7 @@ test -S /run/user/1000/wayland-0
     qga_exec_capture "systemctl stop qdistro-tier4-publisher.service 2>/dev/null || true" >/dev/null || true
     qga_exec_capture "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 $RDP_GUEST_APP >/tmp/qdistro-tier4-rdp-app.log 2>&1 &" >/dev/null || true
 
-    RDP_PUBLISHER_CMD="rm -f '$RDP_CREDS_PATH'; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 QDISTRO_TIER4_DISPLAY=rdp QDISTRO_TIER4_RDP_SUBSCRIBE='$RDP_SUBSCRIBE' QDISTRO_TIER4_RDP_CREDS='$RDP_CREDS_PATH' /usr/local/bin/qdistro-tier4-publisher.sh '$PORT' >/var/log/qdistro-tier4-rdp-publisher.launch.log 2>&1 &"
+    RDP_PUBLISHER_CMD="rm -f '$RDP_CREDS_PATH'; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 QDISTRO_TIER4_DISPLAY=rdp QDISTRO_TIER4_RDP_SUBSCRIBE='$RDP_SUBSCRIBE' QDISTRO_TIER4_RDP_CREDS='$RDP_CREDS_PATH' QDISTRO_TIER4_INSTANCE='$SECCTX_INSTANCE' QDISTRO_TIER4_VM='$VM_NAME' /usr/local/bin/qdistro-tier4-publisher.sh '$PORT' >/var/log/qdistro-tier4-rdp-publisher.launch.log 2>&1 &"
     echo "[tier4] starting guest RDP publisher (subscribe=$RDP_SUBSCRIBE vsock=$PORT)" >&2
     if ! qga_exec_shell_bg "$RDP_PUBLISHER_CMD"; then
         echo "[tier4] FAIL: qga failed to start RDP publisher" >&2
@@ -904,6 +919,68 @@ if [ "$VSOCK_OK" != "1" ]; then
     exit 7
 fi
 echo "[tier4] publisher vsock bind confirmed on vsock://$CID:$PORT" >&2
+
+# --- identity-bound publisher validation -----------------------------
+# The bare vsock-CONNECT probe above proves *something* listens on
+# CID:PORT — but a stale prior-spawn publisher, a co-tenant VM that
+# grabbed the CID, or an impostor would all satisfy it. Verify the
+# endpoint belongs to THIS spawn by reading the publisher's identity
+# banner back over qga and matching it against the launch record we
+# minted (vm + instance token + port). Fail closed on mismatch/missing.
+# (gpt-review/tier4-waypipe-display-tests.md, medium item.)
+#
+# Opt-out (dev only) via QDISTRO_TIER4_ALLOW_UNVERIFIED_PUBLISHER=1,
+# mirroring QDISTRO_ALLOW_NO_SECCTX. Production keeps the hard-fail.
+TIER4_BANNER_PATH="${TIER4_BANNER_PATH:-/run/qdistro-tier4-publisher.banner}"
+IDENTITY_PY=""
+for cand in \
+    "$SCRIPT_DIR/tier4_publisher_identity.py" \
+    /usr/local/lib/qdistro/tier4_publisher_identity.py \
+    /usr/share/qdistro/tier4-vm/tier4_publisher_identity.py; do
+    [ -f "$cand" ] && { IDENTITY_PY="$cand"; break; }
+done
+
+verify_publisher_identity() {
+    # Read the banner the guest publisher wrote, then verify it names
+    # this spawn's launch record. Returns 0 on match, non-zero (with a
+    # loud diagnostic) on any mismatch / missing banner / parse failure.
+    local banner
+    banner="$(qga_exec_capture_quiet \
+        "cat '$TIER4_BANNER_PATH' 2>/dev/null" 2>/dev/null || true)"
+    if [ -z "$banner" ]; then
+        echo "[tier4] FAIL: publisher identity banner $TIER4_BANNER_PATH absent in guest — cannot bind endpoint to launch record (instance=$SECCTX_INSTANCE)" >&2
+        return 1
+    fi
+    if [ -n "$IDENTITY_PY" ] && command -v python3 >/dev/null 2>&1; then
+        if python3 "$IDENTITY_PY" verify \
+                "$VM_NAME" "$SECCTX_INSTANCE" "$PORT" "$banner" >/dev/null 2>/tmp/qdistro-tier4-identity.err; then
+            echo "[tier4] publisher identity verified (vm=$VM_NAME instance=$SECCTX_INSTANCE)" >&2
+            return 0
+        fi
+        echo "[tier4] FAIL: publisher identity verification failed: $(cat /tmp/qdistro-tier4-identity.err 2>/dev/null)" >&2
+        echo "[tier4]   banner was: $banner" >&2
+        return 1
+    fi
+    # Degraded fallback: no helper -> do a literal substring match on the
+    # instance token (the unforgeable anchor) so we still fail closed on
+    # a wrong/stale publisher even without python3 + the helper present.
+    case "$banner" in
+        *"instance=$SECCTX_INSTANCE "*|*"instance=$SECCTX_INSTANCE")
+            echo "[tier4] publisher identity verified via literal banner match (degraded; no helper)" >&2
+            return 0 ;;
+        *)
+            echo "[tier4] FAIL: publisher banner does not carry this spawn's instance token (instance=$SECCTX_INSTANCE)" >&2
+            echo "[tier4]   banner was: $banner" >&2
+            return 1 ;;
+    esac
+}
+
+if [ "${QDISTRO_TIER4_ALLOW_UNVERIFIED_PUBLISHER:-0}" = "1" ]; then
+    echo "[tier4] WARN: QDISTRO_TIER4_ALLOW_UNVERIFIED_PUBLISHER=1 — skipping publisher identity check (dev-only opt-out)" >&2
+elif ! verify_publisher_identity; then
+    echo "[tier4]   Set QDISTRO_TIER4_ALLOW_UNVERIFIED_PUBLISHER=1 for dev-only opt-out." >&2
+    exit 7
+fi
 
 if [ "$NO_VIEWER" = "1" ]; then
     echo "[tier4] TIER4_NO_VIEWER=1 — domain running; not launching display client" >&2

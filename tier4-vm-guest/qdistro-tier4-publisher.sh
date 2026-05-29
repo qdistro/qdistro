@@ -154,12 +154,66 @@ case "$WAYLAND_SOCKET" in
         ;;
 esac
 
+# --- identity banner (publisher->host endpoint binding) ---------------
+# Closes the "any listener on CID:port satisfies the readiness probe"
+# fail-open (gpt-review/tier4-waypipe-display-tests.md, medium item).
+# The host mints a per-spawn instance token, passes it here out-of-band
+# (QDISTRO_TIER4_INSTANCE via qga env), and we publish a single-line
+# banner at a well-known path. The host reads the banner back via qga
+# and verifies (vm, instance, port) matches the launch record it minted
+# BEFORE attaching the display client; a stale/co-tenant/impostor
+# publisher carries a different (or no) token and fails closed.
+#
+# vm_name is recovered from the instance token's prefix (spawn-tier4
+# mints SECCTX_INSTANCE as "<vm_name>-<32hex>"); we also accept an
+# explicit QDISTRO_TIER4_VM override. The banner is built+validated by
+# the shared tier4_publisher_identity helper so the wire shape can never
+# drift between the two sides.
+TIER4_INSTANCE="${QDISTRO_TIER4_INSTANCE:-}"
+TIER4_VM="${QDISTRO_TIER4_VM:-${TIER4_INSTANCE%-*}}"
+TIER4_BANNER_PATH="${QDISTRO_TIER4_BANNER_PATH:-/run/qdistro-tier4-publisher.banner}"
+PUBLISHER_IDENTITY_PY="${QDISTRO_TIER4_IDENTITY_PY:-/usr/local/lib/qdistro/tier4_publisher_identity.py}"
+
+write_identity_banner() {
+    # Best-effort but loud: when the host gave us an instance token we
+    # MUST emit a matching banner, else the host probe fails closed and
+    # the operator gets a clear diagnostic rather than a silent hang.
+    [ -n "$TIER4_INSTANCE" ] || return 0
+    local banner
+    if [ -f "$PUBLISHER_IDENTITY_PY" ] && command -v python3 >/dev/null 2>&1; then
+        banner="$(python3 "$PUBLISHER_IDENTITY_PY" build \
+            "$TIER4_VM" "$TIER4_INSTANCE" "$PORT" 2>/dev/null)" || {
+            echo "[tier4-publisher] FAIL: could not build identity banner (vm=$TIER4_VM instance=$TIER4_INSTANCE port=$PORT)" >&2
+            return 1
+        }
+    else
+        # Degraded fallback: emit the v1 wire shape directly. Field
+        # values are already validated above (port numeric; vm/instance
+        # come from spawn-tier4's validated triple).
+        banner="QDISTRO-TIER4-PUBLISHER v1 vm=$TIER4_VM instance=$TIER4_INSTANCE port=$PORT"
+    fi
+    if printf '%s\n' "$banner" >"$TIER4_BANNER_PATH" 2>/dev/null; then
+        chmod 0644 "$TIER4_BANNER_PATH" 2>/dev/null || true
+        echo "[tier4-publisher] identity banner written to $TIER4_BANNER_PATH" >&2
+    else
+        echo "[tier4-publisher] WARN: could not write identity banner to $TIER4_BANNER_PATH" >&2
+    fi
+}
+
 LOG="${QDISTRO_TIER4_LOG:-/var/log/qdistro-tier4-publisher.log}"
 if ! touch "$LOG" 2>/dev/null; then
     LOG="$(mktemp -t qdistro-tier4-publisher.XXXXXX.log)"
 fi
 exec >>"$LOG" 2>&1
 echo "=== $(date -Iseconds): tier4-publisher port=$PORT sock_dir=$SOCK_DIR sock_name=$SOCK_NAME ==="
+
+# Publish the identity banner as early as possible so the host probe can
+# verify it the moment the publisher is reachable. Skipped under dry-run
+# (unit tests assert the banner fields via the DRY_OUT dump instead, and
+# the default banner path is unwritable in the test sandbox).
+if [ "${QDISTRO_TIER4_DRY_RUN:-0}" != "1" ]; then
+    write_identity_banner || exit 5
+fi
 
 # Wait briefly for the vsock module on first boot (idempotent).
 modprobe vhost_vsock 2>/dev/null || true
@@ -206,6 +260,8 @@ if [ "${QDISTRO_TIER4_DRY_RUN:-0}" = "1" ]; then
         echo "sock_name=$SOCK_NAME"
         echo "bystander_bin=$BYSTANDER_BIN"
         echo "xdg_runtime_dir=$XDG_RUNTIME_DIR"
+        echo "instance=$TIER4_INSTANCE"
+        echo "banner_path=$TIER4_BANNER_PATH"
         if [ "$DISPLAY_MODE" = "rdp" ]; then
             echo "rdp_subscribe=$RDP_SUBSCRIBE"
             echo "rdp_creds_path=$RDP_CREDS_PATH"
