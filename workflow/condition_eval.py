@@ -34,11 +34,14 @@ Any other key is rejected (fail closed) rather than ignored.
 from __future__ import annotations
 
 import fnmatch
-import grp
 import logging
 import os
-import pwd
 from typing import Any
+
+# Shared, fail-closed /proc readers (permission-lineage consolidation).
+# The broker ships qdistro_proc_identity.py next to its other modules and
+# loads workflow/ in-process, so it is importable as a top-level module.
+import qdistro_proc_identity as _pi
 
 logger = logging.getLogger("qdistro.workflow.conditions")
 
@@ -50,80 +53,23 @@ _KNOWN_KEYS = _PROCESS_KEYS | _CONTEXT_KEYS
 
 
 def _proc_starttime(pid: int) -> int | None:
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            data = f.read()
-    except OSError:
-        return None
-    try:
-        rparen = data.rfind(b")")
-        fields = data[rparen + 2:].split()
-        return int(fields[19])
-    except (ValueError, IndexError):
-        return None
+    # Shared reader returns 0 (not None) on failure; preserve this
+    # module's None-on-failure contract used by the recycled-pid guard.
+    st = _pi.read_starttime(pid)
+    return st if st != 0 else None
 
 
 def _read_identity(pid: int) -> dict[str, Any] | None:
     """Read uid/gid/exe/argv0/comm for ``pid`` from /proc. None if gone."""
-    ident: dict[str, Any] = {}
-    try:
-        with open(f"/proc/{pid}/status", "r", encoding="ascii",
-                  errors="replace") as f:
-            for line in f:
-                if line.startswith("Uid:"):
-                    # "Uid:\treal\teffective\tsaved\tfs"
-                    ident["uid"] = int(line.split()[1])
-                elif line.startswith("Gid:"):
-                    ident["gid"] = int(line.split()[1])
-                if "uid" in ident and "gid" in ident:
-                    break
-    except (OSError, ValueError, IndexError):
-        return None
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            raw = f.read()
-        ident["argv0"] = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
-    except OSError:
-        ident["argv0"] = ""
-    try:
-        ident["exe"] = os.path.realpath(f"/proc/{pid}/exe")
-    except OSError:
-        ident["exe"] = ""
-    try:
-        with open(f"/proc/{pid}/comm", "r", encoding="utf-8",
-                  errors="replace") as f:
-            ident["comm"] = f.read().strip()
-    except OSError:
-        ident["comm"] = ""
-    return ident
+    return _pi.read_identity(pid)
 
 
 def _resolve_uid(value: Any) -> int | None:
-    if isinstance(value, bool):  # bool is an int subclass — reject early
-        return None
-    if isinstance(value, int):
-        return value
-    s = str(value).strip()
-    if s.isdigit():
-        return int(s)
-    try:
-        return pwd.getpwnam(s).pw_uid
-    except KeyError:
-        return None
+    return _pi.resolve_uid_name(value)
 
 
 def _resolve_gid(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    s = str(value).strip()
-    if s.isdigit():
-        return int(s)
-    try:
-        return grp.getgrnam(s).gr_gid
-    except KeyError:
-        return None
+    return _pi.resolve_gid_name(value)
 
 
 def _as_list(value: Any) -> list[Any]:

@@ -49,6 +49,10 @@ Numbering is roughly chronological; each scenario stands on its own.
   requires SSH transport, qga cannot setenforce).
 - **56–57** — tier-4 RDP transport visual acceptance: single guest
   window visible over FreeRDP/vsock and close-cleanup of the RDP path.
+- **58** — permission lineage (findings P0-1): a forged `sandbox_engine`
+  matches a tier-1 rule in shadow mode but is denied under
+  `lineage_enforce=true` unless the caller has a `RegisterLaunch` record;
+  `RegisterLaunch` is root-only.
 
 ## Running
 

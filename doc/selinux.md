@@ -241,11 +241,35 @@ qdistro-tier1-spawn user1 -- firefox
  └─ execvp("firefox", ...)
 ```
 
-qdshell's `parse_silo_from_secctx` returns `tier1-user1`; the broker
-independently verifies via `/proc/<pid>/attr/current` that the process is
-actually in `qdistro_tier1_t`. If they disagree, broker's
-`CheckPermission` denies — defence in depth against a process that
-managed to get the secctx tag without the SELinux transition.
+qdshell's `parse_silo_from_secctx` returns `tier1-user1`. How the broker
+treats the secctx strings on a `CheckPermission` / `RequestPermission`
+call depends on the **permission-lineage** posture
+(`issues/qdistro/permission-lineage-findings.md`, broker.conf
+`lineage_enforce`):
+
+- **`lineage_enforce = true`**: the broker resolves the live caller pid to
+  an authoritative subject (`qdistro_resolver`) and uses the
+  **launcher-attested** `sandbox_engine` / `app_id` from the broker launch
+  record (`RegisterLaunch`, Phase 1) instead of the client-supplied
+  strings. A caller with no launch record — or one whose live
+  `/proc/<pid>/attr/current` / uid / exe / cgroup diverges from the
+  record — resolves to the `unknown` subject (empty `sandbox_engine` /
+  `app_id`), so a forged secctx tag can only ever *fail* a rule selector,
+  never satisfy one. This is the defence-in-depth against a process that
+  obtained the secctx tag without the matching launch record / SELinux
+  transition.
+- **`lineage_enforce = false`** (current default, "shadow"): the broker
+  matches rules on the client-supplied `sandbox_engine` / `app_id` (the
+  historical behaviour — see finding P0-1), but the resolver still runs
+  and logs to the journal whenever the claimed identity diverges from the
+  resolved one, so the gap is observable before enforcement is switched
+  on. Until launch-record registration is wired across all tiers, treat
+  `app_id` / `sandbox_engine` as advisory on this path; the
+  kernel-anchored selectors (`uid`, `exe`, argv) remain trustworthy.
+
+Note: the **qdshell-mediated** clipboard / handoff gates already
+re-verify the underlying app identity per call via `VerifyClientIdentity`
+(Option B, below) regardless of `lineage_enforce`.
 
 Tier-1 spawn authorization is mandatory. Before the wrapper enters
 `qdistro-tier1-exec`, it calls broker `CheckPermission` with action

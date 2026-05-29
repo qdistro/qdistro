@@ -34,6 +34,9 @@ from qdistro_admin_ratelimit import RateLimiter  # type: ignore[import-not-found
 from qdistro_admin_rules import RulesEngine  # type: ignore[import-not-found]
 from qdistro_audisp_parser import is_qdistro_subj_type  # type: ignore[import-not-found]
 from qdistro_hook_client import HookClient  # type: ignore[import-not-found]
+import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+from qdistro_launch_record import LaunchRecordStore  # type: ignore[import-not-found]
+from qdistro_resolver import resolve_subject  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
@@ -222,6 +225,48 @@ def _read_secctx_launcher_gated() -> bool:
 SECCTX_LAUNCHER_GATED = _read_secctx_launcher_gated()
 
 
+# Permission lineage (issues/qdistro/permission-lineage-findings.md):
+# when True, gates resolve the live caller to an authoritative subject
+# (qdistro_resolver) and use the *launcher-attested* sandbox_engine /
+# app_id / silo from the broker launch record instead of the
+# client-supplied secctx strings (closing finding P0-1). An unverified
+# caller resolves to the `unknown` subject: its sandbox_engine / app_id /
+# silo are empty, so a forged claim can only ever FAIL a non-empty rule
+# selector, never satisfy one.
+#
+# Default OFF (shadow mode): gates behave exactly as before, but the
+# resolver still runs and the broker logs/audits when the resolved
+# identity would differ from the claimed one. This lets the launch-record
+# registration roll out across all tiers before enforcement is switched
+# on, so enabling lineage never silently breaks a legitimately-sandboxed
+# app that hasn't been registered yet. Read from
+# $QDISTRO_LINEAGE_ENFORCE or broker.conf key lineage_enforce.
+_LINEAGE_ENFORCE_ENV = "QDISTRO_LINEAGE_ENFORCE"
+
+
+def _read_lineage_enforce() -> bool:
+    val = os.environ.get(_LINEAGE_ENFORCE_ENV, "").strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    try:
+        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "lineage_enforce":
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+    except OSError:
+        pass
+    return False  # default off — shadow mode until launchers register
+
+
+LINEAGE_ENFORCE = _read_lineage_enforce()
+
+
 def _read_hooks_enabled() -> bool:
     """Check whether Python hooks are enabled.
 
@@ -364,22 +409,17 @@ def _selector_from_details(details: dict, key: str) -> str:
     return str(value or "")[:128]
 
 
+# These three readers now delegate to the shared qdistro_proc_identity
+# module (permission-lineage consolidation) but keep their broker-level
+# names + signatures: tests monkeypatch B._read_proc_identity /
+# _read_proc_uid / _read_proc_selinux_label, and the broker's own methods
+# call the module-global names so those patches take effect.
 def _read_proc_uid(pid: int) -> int | None:
     """Return the real uid of pid from /proc/<pid>/status, or None if the
     process is gone. Used by VerifyClientIdentity to cross-check the
     uid qdwin observed via SO_PEERCRED.
     """
-    try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("Uid:"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        return int(parts[1])
-                    break
-    except (OSError, ValueError):
-        return None
-    return None
+    return _pi.read_uid(pid)
 
 
 def _read_proc_selinux_label(pid: int) -> str:
@@ -389,12 +429,7 @@ def _read_proc_selinux_label(pid: int) -> str:
     against the live process — see todo/decisions/
     secctx-identity-contract.md.
     """
-    try:
-        with open(f"/proc/{pid}/attr/current", "rb") as f:
-            label = f.read(4096)
-        return label.rstrip(b"\x00\n\r ").decode("utf-8", "replace")
-    except OSError:
-        return ""
+    return _pi.read_selinux_label(pid)
 
 
 def _read_proc_identity(pid: int) -> tuple[str, int]:
@@ -405,22 +440,7 @@ def _read_proc_identity(pid: int) -> tuple[str, int]:
     so we split from the *right* of the closing paren to avoid a
     maliciously-named comm breaking the parse.
     """
-    try:
-        exe = os.readlink(f"/proc/{pid}/exe")
-    except OSError:
-        exe = "?"
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            data = f.read()
-        rparen = data.rfind(b")")
-        if rparen < 0:
-            return exe, 0
-        fields = data[rparen + 2:].split()
-        # starttime is field 22 overall; after splitting past (comm)
-        # it lands at fields[19].
-        return exe, int(fields[19])
-    except (OSError, ValueError, IndexError):
-        return exe, 0
+    return _pi.read_exe_and_starttime(pid)
 
 
 # Cap how much of an exe we hash. Most binaries are well under 64 MiB;
@@ -428,7 +448,8 @@ def _read_proc_identity(pid: int) -> tuple[str, int]:
 # trailing payload doesn't change identity assertions for the wrapping
 # binary. Bounded reads keep _enqueue under a hundred ms even on the
 # pathological "200 MiB monolith with one hot-path mtime tick" case.
-_EXE_HASH_BYTES_MAX = 64 * 1024 * 1024
+# Kept as a broker-level alias (tests reference B._EXE_HASH_BYTES_MAX).
+_EXE_HASH_BYTES_MAX = _pi.EXE_HASH_BYTES_MAX
 
 _proc_layered_cache: dict[tuple[int, int, str], dict[str, str]] = {}
 _proc_layered_lock = threading.Lock()
@@ -453,56 +474,15 @@ def _read_proc_layered(pid: int) -> dict[str, str]:
         cached = _proc_layered_cache.get(key)
         if cached is not None:
             return cached
-    out = {"exe_sha256": "", "selinux_label": "", "cgroup": ""}
-
-    # Hash via the kernel's /proc/<pid>/exe symlink. Reading through
-    # /proc means a process re-exec'ing into a different binary between
-    # request and hash will be reflected — we don't snapshot the path
-    # then re-open; we open through the live link.
-    try:
-        import hashlib
-        h = hashlib.sha256()
-        remaining = _EXE_HASH_BYTES_MAX
-        with open(f"/proc/{pid}/exe", "rb") as f:
-            while remaining > 0:
-                chunk = f.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                h.update(chunk)
-                remaining -= len(chunk)
-        out["exe_sha256"] = h.hexdigest()
-    except OSError:
-        pass
-
-    # SELinux process label. On non-SELinux systems the file simply
-    # doesn't exist; on permissive systems it's still populated and
-    # is informative for the admin. The kernel terminates the value
-    # with a NUL byte; strip it for cleaner display.
-    try:
-        with open(f"/proc/{pid}/attr/current", "rb") as f:
-            label = f.read(4096)
-        out["selinux_label"] = label.rstrip(b"\x00\n").decode(
-            "utf-8", "replace")
-    except OSError:
-        pass
-
-    # cgroup v2 unified path is the last line of /proc/<pid>/cgroup
-    # ("0::/path/...") on a unified hierarchy. On hybrid hosts there
-    # are multiple lines; surface the unified one when present, else
-    # fall back to the first non-empty line so the admin still sees
-    # something useful.
-    try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
-            lines = [ln.rstrip("\n") for ln in f.readlines()]
-        unified = next(
-            (ln.split("::", 1)[1] for ln in lines if ln.startswith("0::")),
-            None)
-        if unified:
-            out["cgroup"] = unified
-        elif lines:
-            out["cgroup"] = lines[0]
-    except OSError:
-        pass
+    # Reads go through the shared qdistro_proc_identity readers (each
+    # fail-closed to ""); the exe hash reads through the live
+    # /proc/<pid>/exe link so a re-exec into a different binary between
+    # request and hash is reflected rather than masked.
+    out = {
+        "exe_sha256": _pi.read_exe_sha256(pid),
+        "selinux_label": _pi.read_selinux_label(pid),
+        "cgroup": _pi.read_cgroup(pid),
+    }
 
     with _proc_layered_lock:
         if len(_proc_layered_cache) >= _PROC_LAYERED_CACHE_MAX:
@@ -713,6 +693,13 @@ class Broker(dbus.service.Object):
         # in journalctl at broker start.
         print(f"[broker] secctx_launcher_gated="
               f"{SECCTX_LAUNCHER_GATED}", flush=True)
+        # Permission-lineage launch-record store (Phase 1). Trusted
+        # launchers register via RegisterLaunch; gates resolve live pids
+        # against it (Phase 2/3). Reaped once a minute alongside the
+        # cache GC.
+        self.launch_records = LaunchRecordStore()
+        print(f"[broker] lineage_enforce={LINEAGE_ENFORCE} "
+              f"(False=shadow/audit-only)", flush=True)
         # Retention knob: env override wins for tests; 0 disables GC.
         try:
             self._audit_retention_days = int(
@@ -916,6 +903,12 @@ class Broker(dbus.service.Object):
             self.cache.gc()
         except Exception as e:  # noqa: BLE001
             print(f"[broker] cache.gc failed: {e}", flush=True)
+        try:
+            store = getattr(self, "launch_records", None)
+            if store is not None:
+                store.reap_expired()
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] launch_records.reap failed: {e}", flush=True)
         return True  # keep firing
 
     def _audit_gc_tick(self) -> bool:
@@ -946,6 +939,185 @@ class Broker(dbus.service.Object):
         pid = int(dbus_iface.GetConnectionUnixProcessID(sender))
         exe, start_time = _read_proc_identity(pid)
         return uid, pid, exe, start_time
+
+    # ---- permission lineage (findings.md Phases 2/3) -------------------
+    def _resolve_subject(self, pid: int):
+        """Resolve a live pid to an authoritative Subject against the
+        launch-record store. Always returns a Subject (never raises);
+        an unverified caller resolves to the `unknown` subject."""
+        store = getattr(self, "launch_records", None)
+        return resolve_subject(pid, store)
+
+    def _lineage_selectors(self, pid: int, claimed_engine: str,
+                           claimed_app_id: str, action_s: str,
+                           uid: int, exe: str) -> tuple[str, str]:
+        """Decide which (sandbox_engine, app_id) the rules engine sees.
+
+        Closes finding P0-1: the claimed secctx strings are caller-
+        controlled, so they must never be trusted on their own. Resolve
+        the live caller and:
+
+        - LINEAGE_ENFORCE on  → return the *launcher-attested* values from
+          the verified launch record; for an unverified caller return
+          ("", "") so a forged claim can only fail a non-empty selector.
+        - LINEAGE_ENFORCE off → return the claimed values unchanged
+          (legacy behaviour) but, when the resolved identity disagrees
+          with the claim, emit one audit/log line so the lineage gap is
+          observable before enforcement is switched on (shadow mode).
+        """
+        subj = self._resolve_subject(pid)
+        resolved_engine = subj.sandbox_engine if subj.verified else ""
+        resolved_app = subj.app_id if subj.verified else ""
+        claimed_engine = str(claimed_engine or "")
+        claimed_app_id = str(claimed_app_id or "")
+        mismatch = (not subj.verified and (claimed_engine or claimed_app_id)) \
+            or (subj.verified and (resolved_engine != claimed_engine
+                                   or resolved_app != claimed_app_id))
+        if mismatch:
+            mode = "ENFORCE" if LINEAGE_ENFORCE else "shadow"
+            # Audit the mismatch only in enforce mode — that is when the
+            # broker actually changed the decision inputs and an admin
+            # needs the row. Shadow mode is print-only so it can be rolled
+            # out without perturbing audit-history expectations.
+            if LINEAGE_ENFORCE:
+                try:
+                    self.audit.log(
+                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                        action=f"qdistro.lineage.mismatch:{action_s}",
+                        decision=False, scope=None,
+                        source=(f"lineage_{mode} verified={subj.verified} "
+                                f"claimed_engine={claimed_engine!r} "
+                                f"resolved_engine={resolved_engine!r} "
+                                f"claimed_app={claimed_app_id!r} "
+                                f"resolved_app={resolved_app!r} "
+                                f"reason={subj.reason}"),
+                        approver_uid=None,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] qdistro.audit.failure: lineage_mismatch, "
+                          f"reason={e!r}", flush=True)
+            print(f"[broker] lineage {mode}: caller pid={pid} uid={uid} "
+                  f"claimed engine={claimed_engine!r}/app={claimed_app_id!r} "
+                  f"resolved engine={resolved_engine!r}/app={resolved_app!r} "
+                  f"({subj.reason})", flush=True)
+        if LINEAGE_ENFORCE:
+            return resolved_engine, resolved_app
+        return claimed_engine, claimed_app_id
+
+    @dbus.service.method(BUS_NAME,
+                         in_signature="ssssstst", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def RegisterLaunch(self, silo: str, sandbox_engine: str, app_id: str,
+                       instance_id: str, exe: str, target_pid: int,
+                       namespace: str, target_starttime: int,
+                       sender=None, conn=None) -> str:
+        """Trusted launcher registers a process it is about to expose as a
+        silo workload (permission-lineage Phase 1). Returns the opaque
+        record id.
+
+        Restricted to **root** launchers (D-Bus policy + the in-method
+        uid-0 check below), exactly like RequestPermissionAs: only a
+        more-privileged component may attest a child's intended silo. The
+        broker re-reads the registered pid from /proc and verifies the
+        (starttime, uid, exe) the launcher supplied still names that live
+        process before storing — a launcher cannot register a record for a
+        process that already changed identity. The stored record binds
+        (pid, starttime) → (silo, sandbox_engine, app_id, uid, exe, label,
+        cgroup); a later gate resolves a live pid to it and revalidates
+        the kernel facts (qdistro_resolver).
+
+        target_starttime==0 means "trust /proc"; otherwise it is checked
+        against the live value (anti-PID-reuse at registration time).
+        """
+        launcher_uid, launcher_pid, launcher_exe, _ = self._peer_info(
+            sender, conn)
+        if launcher_uid != 0:
+            raise dbus.DBusException(
+                f"RegisterLaunch restricted to root launchers; "
+                f"got uid {launcher_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        try:
+            pid_i = int(target_pid)
+            expected_start = int(target_starttime)
+        except (TypeError, ValueError):
+            raise dbus.DBusException(
+                "target_pid and target_starttime must be integers",
+                name=BUS_NAME + ".BadArgument",
+            )
+        if pid_i <= 0:
+            raise dbus.DBusException(
+                f"invalid target_pid {pid_i}",
+                name=BUS_NAME + ".BadArgument",
+            )
+        # Re-read the live process and verify it still matches the
+        # launcher's claim. starttime is the anti-PID-reuse anchor.
+        live_exe, live_start = _read_proc_identity(pid_i)
+        if live_start == 0:
+            raise dbus.DBusException(
+                f"target pid {pid_i} is not a live process",
+                name=BUS_NAME + ".CallerGone",
+            )
+        if expected_start and live_start != expected_start:
+            raise dbus.DBusException(
+                f"target pid {pid_i} starttime mismatch "
+                f"(live={live_start} claimed={expected_start})",
+                name=BUS_NAME + ".CallerIdentityMismatch",
+            )
+        exe_s = str(exe or "")
+        # The broker runs as root, so a live process's exe is normally
+        # readable. Refuse to mint a record we can't anchor on a real exe
+        # (the record's exe is a verification axis the resolver enforces) —
+        # fail closed rather than storing the launcher's unverified claim.
+        if not live_exe or live_exe == "?":
+            raise dbus.DBusException(
+                f"target pid {pid_i} exe unreadable; refusing to register "
+                f"an unverifiable launch record",
+                name=BUS_NAME + ".CallerIdentityMismatch",
+            )
+        if exe_s and exe_s != "?" and live_exe != exe_s:
+            raise dbus.DBusException(
+                f"target pid {pid_i} exe mismatch "
+                f"(live={live_exe!r} claimed={exe_s!r})",
+                name=BUS_NAME + ".CallerIdentityMismatch",
+            )
+        live_uid = _read_proc_uid(pid_i)
+        if live_uid is None:
+            raise dbus.DBusException(
+                f"target pid {pid_i} uid could not be verified",
+                name=BUS_NAME + ".CallerGone",
+            )
+        live_label = _read_proc_selinux_label(pid_i)
+        live_cgroup = _pi.read_cgroup(pid_i)
+        rec = self.launch_records.register(
+            silo=str(silo or "")[:80],
+            uid=int(live_uid),
+            pid=pid_i,
+            starttime=int(live_start),
+            exe=(live_exe if live_exe and live_exe != "?" else exe_s)[:4096],
+            selinux_label=live_label[:512],
+            cgroup=live_cgroup[:4096],
+            sandbox_engine=str(sandbox_engine or "")[:128],
+            app_id=str(app_id or "")[:128],
+            instance_id=str(instance_id or "")[:128],
+            namespace=str(namespace or "")[:128],
+        )
+        try:
+            self.audit.log(
+                caller_uid=launcher_uid, caller_pid=launcher_pid,
+                caller_exe=launcher_exe,
+                action=f"qdistro.lineage.register:{rec.silo}",
+                decision=True, scope=None,
+                source=(f"register_launch record={rec.record_id} "
+                        f"pid={pid_i} starttime={live_start} "
+                        f"uid={live_uid} engine={rec.sandbox_engine!r} "
+                        f"app={rec.app_id!r} label={live_label!r}"),
+                approver_uid=None,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: register_launch, "
+                  f"reason={e!r}", flush=True)
+        return rec.record_id
 
     @dbus.service.method(BUS_NAME, in_signature="sa{sv}", out_signature="i", sender_keyword="sender", connection_keyword="conn")
     def RequestPermission(self, action: str, details: dict, sender=None, conn=None) -> int:
@@ -989,10 +1161,19 @@ class Broker(dbus.service.Object):
                 f"{self.ratelimit.window_s}s). Check rejected.",
                 name=BUS_NAME + ".RateLimited",
             )
+        # Permission lineage (finding P0-1): the app_id / sandbox_engine
+        # selectors are client-supplied and forgeable. Resolve the live
+        # caller and use launcher-attested values (enforce mode) instead
+        # of the raw claim; shadow mode logs divergence but preserves the
+        # legacy claim. uid/action/exe/argv stay kernel-/argv-anchored.
+        lin_engine, lin_app = self._lineage_selectors(
+            pid, _selector_from_details(details, "sandbox_engine"),
+            _selector_from_details(details, "app_id"),
+            action_s, uid, exe)
         rule = self.rules.match(
             uid=uid, action=action_s, exe=exe,
-            app_id=_selector_from_details(details, "app_id"),
-            sandbox_engine=_selector_from_details(details, "sandbox_engine"),
+            app_id=lin_app,
+            sandbox_engine=lin_engine,
             mime_type=_selector_from_details(details, "mime_type"),
             argv=argv,
         )
@@ -2101,11 +2282,19 @@ class Broker(dbus.service.Object):
         hook_verdict = None
         if not one_shot:
             argv = _argv_from_details(details)
+            # Permission lineage (finding P0-1): resolve the live caller
+            # and use launcher-attested app_id/sandbox_engine in enforce
+            # mode rather than the forgeable client-supplied claim.
+            # Delegated requests (RequestPermissionAs) carry the *real*
+            # caller's pid, so the resolution targets the right process.
+            lin_engine, lin_app = self._lineage_selectors(
+                pid, _selector_from_details(details, "sandbox_engine"),
+                _selector_from_details(details, "app_id"),
+                action_s, uid, exe)
             matched_rule = self.rules.match(
                 uid=uid, action=action_s, exe=exe,
-                app_id=_selector_from_details(details, "app_id"),
-                sandbox_engine=_selector_from_details(
-                    details, "sandbox_engine"),
+                app_id=lin_app,
+                sandbox_engine=lin_engine,
                 mime_type=_selector_from_details(details, "mime_type"),
                 argv=argv,
             )
