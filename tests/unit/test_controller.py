@@ -39,11 +39,18 @@ def auth():
 
         def __init__(self):
             super().__init__()
+            self._gen = 0
             self.probe_pam = MagicMock(side_effect=lambda: self.ready.emit())
             self.start_pam = MagicMock()
             self.abort_pam = MagicMock()
             self.respond_pam = MagicMock()
             self.occupy_fingerprint_sensor = MagicMock()
+
+        def reset_session(self):
+            self._gen += 1
+
+        def _current_generation(self):
+            return self._gen
 
     return StubAuth()
 
@@ -120,3 +127,57 @@ def test_overlay_key_return_triggers_unlock(qapp, auth):
     ctrl._current_text = "pw"
     ctrl.handle_overlay_key(XKB_Return, "")
     auth.start_pam.assert_called_once()
+
+
+# ---- item 2: stale-outcome race guard --------------------------------------
+
+
+def test_tagged_success_unlocks(qapp, auth):
+    ctrl = LockController(auth)
+    sink = []
+    ctrl.unlocked.connect(lambda: sink.append(True))
+    # Tagged tuple from the real backend, matching the current generation.
+    auth.outcome.emit((AuthOutcome.SUCCESS, auth._current_generation()))
+    QCoreApplication.processEvents()
+    assert sink == [True]
+    assert ctrl._unlocked is True
+
+
+def test_stale_outcome_from_old_generation_is_dropped(qapp, auth):
+    ctrl = LockController(auth)
+    captured_gen = auth._current_generation()
+    # A new lock begins, bumping the generation, before the slow worker's
+    # FAILED finally arrives tagged with the old generation.
+    ctrl.notify_lock_begin()
+    fails = []
+    ctrl.failed.connect(lambda: fails.append(True))
+    auth.outcome.emit((AuthOutcome.FAILED, captured_gen))
+    QCoreApplication.processEvents()
+    assert fails == [], "stale FAILED from a superseded session leaked through"
+    assert ctrl.showFailure is False
+
+
+def test_loser_outcome_after_unlock_is_dropped(qapp, auth):
+    ctrl = LockController(auth)
+    gen = auth._current_generation()
+    unlocks = []
+    fails = []
+    ctrl.unlocked.connect(lambda: unlocks.append(True))
+    ctrl.failed.connect(lambda: fails.append(True))
+    # fprintd wins first (same generation), then a laggy PAM FAILED races in.
+    auth.outcome.emit((AuthOutcome.SUCCESS, gen))
+    QCoreApplication.processEvents()
+    auth.outcome.emit((AuthOutcome.FAILED, gen))
+    QCoreApplication.processEvents()
+    assert unlocks == [True]
+    assert fails == [], "spurious FAILED flashed after the session unlocked"
+    assert ctrl.showFailure is False
+
+
+def test_notify_lock_begin_resets_unlocked_and_session(qapp, auth):
+    ctrl = LockController(auth)
+    ctrl._unlocked = True
+    ctrl.notify_lock_begin()
+    assert ctrl._unlocked is False
+    # reset_session was invoked on the backend (generation advanced).
+    assert auth._current_generation() == 1
