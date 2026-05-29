@@ -50,12 +50,28 @@ run_boot() { run bash "$BOOT" "$@"; }
 # --- A. Forbidden-pattern static invariants -----------------------------
 
 @test "hardening: NOPASSWD: ALL sudoers only appears gated behind dev profile" {
-    # Every literal 'NOPASSWD: ALL' install in the bootstrap must be inside an
-    # is_dev branch. We assert the dev-gating sentinel + the hardened removal
-    # of the stale file both exist.
-    grep -q "is_dev; then" "$BOOT"
-    grep -q "NOPASSWD: ALL" "$BOOT"
-    # Hardened path removes any stale passwordless sudoers.
+    # Mutation-sensitive: assert every line that INSTALLS the passwordless
+    # 'NOPASSWD: ALL' sudoers rule is STRUCTURALLY inside an `if is_dev; then`
+    # branch (between the `then` and its matching `else`/`fi`), not merely that
+    # the string and an unrelated is_dev gate both exist somewhere. A
+    # regression that moves the install out of the dev branch — making hardened
+    # installs passwordless — must turn this red.
+    run awk '
+        /if is_dev; then/      { depth++; dev[depth]=1; next }
+        /^[[:space:]]*if /     { depth++; dev[depth]=0; next }
+        /^[[:space:]]*else\>/  { if (depth) dev[depth]=0; next }
+        /^[[:space:]]*fi\>/    { if (depth) { dev[depth]=0; depth-- }; next }
+        /install .*NOPASSWD: ALL/ {
+            indev=0
+            for (d=1; d<=depth; d++) if (dev[d]) indev=1
+            if (!indev) { print "ungated NOPASSWD install at line " NR ": " $0; bad=1 }
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$BOOT"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    # The install must exist at all (so the awk above is not vacuously green),
+    # and the hardened path must remove any stale passwordless sudoers.
+    grep -q "install .*NOPASSWD: ALL" "$BOOT"
     grep -q "rm -f /etc/sudoers.d/99-admin" "$BOOT"
 }
 

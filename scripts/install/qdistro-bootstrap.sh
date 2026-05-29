@@ -273,6 +273,17 @@ parse_args() {
         *..*) die "invalid --branch '$BRANCH' ('..' not allowed)" ;;
     esac
 
+    # Password fds are operator input that flows into `read -u <fd>` and an
+    # `exec <fd><&-` close (qd_read_password_fd). A non-numeric value would be
+    # an eval/redirection-injection surface, so constrain each to a small
+    # non-negative integer before it is ever used.
+    if [ -n "$ADMIN_PASSWORD_FD" ] && ! printf '%s' "$ADMIN_PASSWORD_FD" | grep -qE '^[0-9]+$'; then
+        die "invalid --admin-password-fd '$ADMIN_PASSWORD_FD': must be a non-negative integer"
+    fi
+    if [ -n "$REGULAR_PASSWORD_FD" ] && ! printf '%s' "$REGULAR_PASSWORD_FD" | grep -qE '^[0-9]+$'; then
+        die "invalid --user-password-fd '$REGULAR_PASSWORD_FD': must be a non-negative integer"
+    fi
+
     # Env-var passwords leak via /proc/<pid>/environ. Honour them ONLY under
     # the dev profile; in hardened profiles ignore them with a clear warning
     # so the operator switches to --*-password-fd or interactive entry.

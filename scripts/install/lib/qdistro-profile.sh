@@ -120,6 +120,15 @@ qd_mktemp_xml() {
 #   named variable. The fd is closed after the read so it cannot leak.
 qd_read_password_fd() {
     local fd="$1" out="$2" line=""
+    # The fd flows into `read -u` and an `exec <fd><&-` close below. Reject a
+    # non-numeric value outright so it can never become a redirection/eval
+    # injection surface (defence-in-depth; callers should validate too).
+    case "$fd" in
+        ''|*[!0-9]*)
+            printf 'qd_read_password_fd: invalid file descriptor %s\n' "${fd:-<empty>}" >&2
+            return 2
+            ;;
+    esac
     # shellcheck disable=SC2229
     if ! IFS= read -r -u "$fd" line; then
         # Allow a trailing-newline-less single line.
