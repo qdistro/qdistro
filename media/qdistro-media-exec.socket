@@ -1,0 +1,18 @@
+[Unit]
+Description=qdistro removable-media brokered mount/unmount listen socket
+
+[Socket]
+# Socket lives in a systemd-managed RuntimeDirectory (0755 root:root)
+# so the parent is root-owned and no non-root user can replace the
+# sock node between stop/start. Same posture as qdistro-root-exec.socket.
+ListenStream=/run/qdistro-media-exec/sock
+# World-writable node: peers from any uid connect; peer identity is
+# authoritative via SO_PEERCRED inside the service, and every
+# mount/unmount still passes the broker's admin approval.
+SocketMode=0666
+RuntimeDirectory=qdistro-media-exec
+RuntimeDirectoryMode=0755
+Accept=no
+
+[Install]
+WantedBy=sockets.target
