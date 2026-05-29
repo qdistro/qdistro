@@ -3358,6 +3358,137 @@ class Broker(dbus.service.Object):
         return dbus.Boolean(True), dbus.Int32(n), dbus.Array(errs,
                                                              signature="s")
 
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                         sender_keyword="sender", connection_keyword="conn")
+    def GetRuleSource(self, source_path: str,
+                      sender=None, conn=None) -> str:
+        """Return the raw on-disk YAML text of a rule file for editing.
+
+        Powers the admin app's "Edit rule" path: when editing an
+        existing rule the editor must show the actual file text so that
+        comments and any keys ListRules does not project (future/unknown
+        keys) are preserved on round-trip, instead of regenerating YAML
+        from the projected ListRules fields and dropping them
+        (security-hardening-carryforward §"Broker and rules"). The admin
+        app cannot read /etc/qdistro/rules.d directly (root-owned), so
+        this is a broker RPC — the same reason DeleteRule exists.
+
+        Read-only, so no audit row (matching the local convention for
+        the other read RPCs ListRules/ReloadRules). Admin/root only.
+
+        ``source_path`` is the path ListRules returned for the rule. All
+        path safety is re-applied broker-side and fail-closed exactly as
+        DeleteRule does — the client's path is NOT trusted:
+
+          - the supplied path must not be a symlink (rejects ln -s
+            redirect),
+          - the file's realpath's *containing directory* must be exactly
+            the canonical rules dir this broker's RulesEngine watches
+            (rejects ``..`` escapes and files outside rules.d),
+          - the realpath must be an existing regular file.
+
+        To avoid a TOCTOU between the safety check and the read, the
+        validated absolute path is opened-by-directory and read via an
+        ``os.open`` of the *basename* relative to an ``O_DIRECTORY`` fd
+        of the canonical rules dir with ``O_NOFOLLOW``, so a swap of an
+        intermediate component after validation cannot redirect the read
+        outside rules.d.
+
+        Returns the file's UTF-8 text. Raises a DBusException with
+        ``.AccessDenied`` for non-admin callers or ``.RulesEngineRefused``
+        when path safety rejects the target.
+        """
+        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
+        if admin_uid not in (0, ADMIN_UID):
+            raise dbus.DBusException(
+                f"GetRuleSource restricted to admin/root; got uid "
+                f"{admin_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        if not source_path:
+            raise dbus.DBusException(
+                "GetRuleSource: empty source_path",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+
+        # Canonical rules dir this broker actually watches (tests wire a
+        # tmp_path-backed RulesEngine; production wires /etc/qdistro/rules.d).
+        rules_real = os.path.realpath(self.rules._dir)
+        # Reject the supplied path itself being a symlink (ln -s redirect).
+        if os.path.islink(source_path):
+            raise dbus.DBusException(
+                f"GetRuleSource: refusing to read a symlink: {source_path}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        real = os.path.realpath(source_path)
+        # The file's containing directory must be exactly the canonical
+        # rules dir (rejects ../ escapes and files outside rules.d).
+        if os.path.dirname(real) != rules_real:
+            raise dbus.DBusException(
+                f"GetRuleSource: refusing to read a file outside "
+                f"{rules_real}: {real}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        if not os.path.isfile(real) or os.path.islink(real):
+            raise dbus.DBusException(
+                f"GetRuleSource: rule file not found or not a regular "
+                f"file: {real}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        # Narrow the RPC's authority to rule files: only .yaml/.yml
+        # entries are served, so it cannot be used to read arbitrary
+        # non-rule regular files that happen to sit directly inside
+        # rules.d. (We deliberately do NOT require the path to back a
+        # currently *loaded* rule: an admin must be able to open a rule
+        # file that fails to parse — e.g. to fix a malformed entry — or
+        # one carrying keys a future engine will accept but this one
+        # rejects, which is exactly the comments/future-keys preservation
+        # this RPC exists for.)
+        if os.path.splitext(real)[1].lower() not in (".yaml", ".yml"):
+            raise dbus.DBusException(
+                f"GetRuleSource: not a YAML rule file: {real}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+
+        basename = os.path.basename(real)
+        # TOCTOU-resistant read: open the canonical rules dir as an
+        # O_DIRECTORY fd and open the basename relative to it with
+        # O_NOFOLLOW, so an attacker swapping an intermediate path
+        # component (or the entry into a symlink) after the checks above
+        # cannot redirect the read outside rules.d.
+        try:
+            dir_fd = os.open(rules_real, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as e:
+            raise dbus.DBusException(
+                f"GetRuleSource: cannot open rules dir {rules_real}: {e}",
+                name=BUS_NAME + ".RulesEngineRefused",
+            )
+        try:
+            try:
+                file_fd = os.open(
+                    basename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except OSError as e:
+                raise dbus.DBusException(
+                    f"GetRuleSource: cannot open rule {basename}: {e}",
+                    name=BUS_NAME + ".RulesEngineRefused",
+                )
+            import stat as _stat
+            st = os.fstat(file_fd)
+            if not _stat.S_ISREG(st.st_mode):
+                os.close(file_fd)
+                raise dbus.DBusException(
+                    f"GetRuleSource: refusing to read {basename}: not "
+                    f"a regular file at read time",
+                    name=BUS_NAME + ".RulesEngineRefused",
+                )
+            # os.fdopen takes ownership of file_fd and closes it on exit.
+            with os.fdopen(file_fd, "r", encoding="utf-8") as f:
+                text = f.read()
+        finally:
+            os.close(dir_fd)
+
+        return dbus.String(text)
+
     @dbus.service.method(BUS_NAME, in_signature="", out_signature="ias",
                          sender_keyword="sender", connection_keyword="conn")
     def ReloadRules(self, sender=None, conn=None):

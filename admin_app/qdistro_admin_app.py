@@ -676,6 +676,18 @@ class BrokerBridge(QObject):
     def save_rule(self, filename: str, yaml_body: str) -> str:
         return str(self._call("SaveRule", str(filename), str(yaml_body)))
 
+    def get_rule_source(self, source_path: str) -> str:
+        """Fetch the raw on-disk YAML text of a rule file for editing.
+
+        The admin app cannot read /etc/qdistro/rules.d directly
+        (root-owned), so the broker exposes a read-only GetRuleSource
+        RPC that re-applies all path safety fail-closed and returns the
+        verbatim file text. Editing an existing rule loads THIS (not the
+        projected ListRules fields) so comments and any future/unknown
+        keys are preserved on round-trip.
+        """
+        return str(self._call("GetRuleSource", str(source_path)))
+
     def reload_rules(self) -> None:
         self._call("ReloadRules")
 
@@ -2576,8 +2588,35 @@ class RuleEditorDialog(QDialog):
         self.yaml_editor.setMaximumHeight(500)
         layout.addWidget(self.yaml_editor)
         
-        # Generate YAML from rule data if provided
-        if rule_data:
+        # Decide what to load into the editor:
+        #   - Editing an existing rule (source_path set): fetch the RAW
+        #     on-disk YAML via the broker so comments and any keys the
+        #     projected ListRules view does not carry (future/unknown
+        #     keys) are preserved on round-trip. Regenerating from the
+        #     projected fields would silently drop them.
+        #   - New rule (no source_path): fall back to a generated view
+        #     from the seed fields (or the default template).
+        warning_text = ""
+        source_path = rule_data.get("source_path") if rule_data else None
+        if source_path:
+            yaml_content = ""
+            try:
+                yaml_content = self.broker.get_rule_source(source_path)
+            except Exception as exc:  # noqa: BLE001 - degrade gracefully
+                warning_text = (
+                    "Could not fetch the on-disk rule source from the "
+                    f"broker ({exc}). Showing a regenerated view; saving "
+                    "may drop comments or unrecognized keys.")
+            if not yaml_content:
+                # RPC unavailable or returned empty: degrade to the
+                # generated view rather than presenting a blank editor.
+                if not warning_text:
+                    warning_text = (
+                        "The broker returned no source for this rule. "
+                        "Showing a regenerated view; saving may drop "
+                        "comments or unrecognized keys.")
+                yaml_content = self._generate_yaml_from_rule(rule_data)
+        elif rule_data:
             yaml_content = self._generate_yaml_from_rule(rule_data)
         else:
             # Default template
@@ -2590,7 +2629,13 @@ class RuleEditorDialog(QDialog):
   scope: "once"
   rationale: "Example rule for demonstration"
 """
-        
+
+        if warning_text:
+            warn_label = QLabel(warning_text)
+            warn_label.setWordWrap(True)
+            warn_label.setStyleSheet("color: #b58900;")
+            layout.addWidget(warn_label)
+
         self.yaml_editor.setPlainText(yaml_content)
         
         # Buttons
