@@ -30,8 +30,27 @@
 #
 # Build cost: one-time download of ~400MB (Tumbleweed Minimal-VM
 # cloud qcow2) + ~30-60s of customization per app variant.
+#
+# Base-image hardening (guest-image-perms track)
+# ----------------------------------------------
+# - The published base qcow2 is written 0640 root:root (NOT world-readable),
+#   mirroring the Tier-4 per-VM overlay precedent. On qemu:///session the
+#   admin uid reads it directly; on qemu:///system add the qemu user to the
+#   image's group if it must read without root.
+# - Baking a debug root password is OPT-IN via the environment flag
+#       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD  (default 1)
+#   DEFAULT = 1 (bake the password) to preserve the existing test-VM
+#   workflows that log in over the serial console with QDISTRO_VM_PASSWORD.
+#   Set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a HARDENED / production
+#   build: no root password is baked and QDISTRO_VM_PASSWORD is not required.
+#   When the flag is 1 the virt-customize argument set is byte-identical to
+#   the historical behavior, so any deterministic output is unchanged unless
+#   the operator explicitly opts into the hardened path.
 
 set -euo pipefail
+
+# Opt-in debug-password gate (default on; see header).
+QDISTRO_GUEST_BAKE_DEBUG_PASSWORD="${QDISTRO_GUEST_BAKE_DEBUG_PASSWORD:-1}"
 
 usage() {
     cat <<'EOF'
@@ -59,8 +78,12 @@ Reqs:
   virt-customize, qemu-img, wget. zypper install libguestfs guestfs-tools qemu-tools.
 
 Env:
-  QDISTRO_VM_PASSWORD  Root password baked into the image (mandatory;
-                       same as tier-5).
+  QDISTRO_VM_PASSWORD  Root password baked into the image. Mandatory unless
+                       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 (same as tier-5).
+  QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
+                       1 (default) bakes the debug root password from
+                       QDISTRO_VM_PASSWORD; 0 = hardened build, no password
+                       baked. Either way the output image is 0640 root:root.
 EOF
 }
 
@@ -105,8 +128,9 @@ fi
 for tool in virt-customize qemu-img wget; do
     command -v "$tool" >/dev/null || { echo "[tier5b-build] missing: $tool" >&2; exit 2; }
 done
-if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
+if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ] && [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
     echo "[tier5b-build] FAIL: set QDISTRO_VM_PASSWORD env var (root pw for the guest)" >&2
+    echo "[tier5b-build]       or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a hardened build with no baked password" >&2
     exit 2
 fi
 
@@ -153,6 +177,16 @@ if ! grep -qE "^APP_BIN=\"$APP_BIN\"\$" "$PUBLISHER"; then
 fi
 chmod 0755 "$PUBLISHER"
 
+# Build the (optional) root-password argument. Default bakes the debug
+# password; the hardened path (flag=0) bakes none.
+PW_ARGS=()
+if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ]; then
+    PW_ARGS=(--root-password "password:${QDISTRO_VM_PASSWORD:?QDISTRO_VM_PASSWORD must be set (or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)}")
+    echo "[tier5b-build] baking debug root password (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=1)"
+else
+    echo "[tier5b-build] HARDENED build: no root password baked (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)"
+fi
+
 echo "[tier5b-build] customizing for app=$APP pkg=$PKG..."
 # shellcheck disable=SC2086
 virt-customize -a "$BASE_QCOW" \
@@ -162,7 +196,7 @@ virt-customize -a "$BASE_QCOW" \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier5b-publisher.sh' \
     --run-command "echo \"qdistro-tier5b-$APP-base\" >/etc/hostname" \
-    --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
+    "${PW_ARGS[@]}" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
 
@@ -173,7 +207,9 @@ virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 # Move into place.
 install -d "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
-chmod 0644 "$DEST"
+# Base image is sensitive (may contain a baked debug password); keep it
+# non-world-readable (0640 root:root), mirroring the Tier-4 overlay.
+chmod 0640 "$DEST"
 chown root:root "$DEST"
 
 echo "[tier5b-build] done: $DEST"

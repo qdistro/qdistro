@@ -37,6 +37,19 @@
 
 set -euo pipefail
 
+# Base-image hardening (guest-image-perms track)
+# ----------------------------------------------
+# - The published guest qcow2 is written 0640 root:root (NOT world-
+#   readable), mirroring the Tier-4 per-VM overlay precedent.
+# - Baking a debug root password is OPT-IN via the environment flag
+#       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD  (default 1)
+#   DEFAULT = 1 (bake the password) to preserve existing test-VM
+#   workflows that log in with QDISTRO_VM_PASSWORD. Set it to 0 for a
+#   HARDENED / production build: no root password is baked and
+#   QDISTRO_VM_PASSWORD is not required. With the flag at 1 the
+#   virt-customize argument set is unchanged from historical behavior.
+QDISTRO_GUEST_BAKE_DEBUG_PASSWORD="${QDISTRO_GUEST_BAKE_DEBUG_PASSWORD:-1}"
+
 usage() {
     cat <<'EOF'
 qdistro tier-4-guest image builder.
@@ -64,7 +77,12 @@ Reqs:
   freerdp-devel, winpr-devel, pipewire-devel.
 
 Env:
-  QDISTRO_VM_PASSWORD  Root password baked into the image (mandatory).
+  QDISTRO_VM_PASSWORD  Root password baked into the image. Mandatory unless
+                       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0.
+  QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
+                       1 (default) bakes the debug root password from
+                       QDISTRO_VM_PASSWORD; 0 = hardened build, no password
+                       baked. Either way the output image is 0640 root:root.
 EOF
 }
 
@@ -97,8 +115,9 @@ for tool in virt-customize qemu-img wget meson ninja; do
         exit 2
     }
 done
-if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
+if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ] && [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
     echo "[tier4-guest-build] FAIL: set QDISTRO_VM_PASSWORD env var (root pw for the guest)" >&2
+    echo "[tier4-guest-build]       or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a hardened build with no baked password" >&2
     exit 2
 fi
 if [ -z "$QDWIN_SRC" ] || [ ! -f "$QDWIN_SRC/meson.build" ]; then
@@ -318,18 +337,29 @@ cat >"$WORK/fstab.host-mount" <<'EOF'
 qdistro-host /host virtiofs nofail,_netdev 0 0
 EOF
 
-# §P10 fix-pass SF3: write the root password to a mode-0600 temp file
-# and pass it to virt-customize as `--root-password file:<path>`.
+# Build the (optional) root-password argument. Default (flag=1) bakes the
+# debug password; the hardened path (flag=0) bakes none.
+#
+# §P10 fix-pass SF3: when baking, write the root password to a mode-0600
+# temp file and pass it to virt-customize as `--root-password file:<path>`.
 # Avoids leaking the plaintext via argv → /proc/PID/cmdline AND, more
 # importantly, avoids leaking it into virt-customize stderr (which
 # s109 tees to /tmp/s109-bake.log and dumps to stderr on bake failure;
 # CI logs would otherwise capture `--root-password password:<value>`).
-PW_FILE="$WORK/root-pw"
-(umask 077 && printf '%s\n' "${QDISTRO_VM_PASSWORD:?}" >"$PW_FILE")
-chmod 0600 "$PW_FILE"
-# trap already covers $WORK, but be explicit: scrub the password file
-# on exit even if the trap is somehow bypassed.
-trap 'shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"; rm -rf "$WORK"' EXIT
+PW_ARGS=()
+PW_FILE=""
+if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ]; then
+    PW_FILE="$WORK/root-pw"
+    (umask 077 && printf '%s\n' "${QDISTRO_VM_PASSWORD:?QDISTRO_VM_PASSWORD must be set (or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)}" >"$PW_FILE")
+    chmod 0600 "$PW_FILE"
+    # trap already covers $WORK, but be explicit: scrub the password file
+    # on exit even if the trap is somehow bypassed.
+    trap 'shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"; rm -rf "$WORK"' EXIT
+    PW_ARGS=(--root-password "file:$PW_FILE")
+    echo "[tier4-guest-build] baking debug root password (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=1)"
+else
+    echo "[tier4-guest-build] HARDENED build: no root password baked (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)"
+fi
 
 echo "[tier4-guest-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable; zypper install works
@@ -372,14 +402,15 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'systemctl enable qdwin-guest-session.service' \
     --run-command 'systemctl enable qdistro-tier4-publisher.service' \
     --run-command 'echo "qdistro-tier4-guest" >/etc/hostname' \
-    --root-password "file:$PW_FILE" \
+    "${PW_ARGS[@]}" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
 
 # Scrub the password file immediately after virt-customize finishes
 # (in addition to the EXIT trap). Defence-in-depth against the file
 # being readable to any concurrent process during the bake window.
-shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"
+# No-op on the hardened path where no password file was created.
+[ -n "$PW_FILE" ] && { shred -u "$PW_FILE" 2>/dev/null || rm -f "$PW_FILE"; }
 
 # Sparsify the result so the published base disk stays small.
 echo "[tier4-guest-build] sparsifying..."
@@ -387,7 +418,9 @@ virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 
 install -d "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
-chmod 0644 "$DEST"
+# Base image is sensitive (may contain a baked debug password); keep it
+# non-world-readable (0640 root:root), mirroring the Tier-4 per-VM overlay.
+chmod 0640 "$DEST"
 chown root:root "$DEST"
 
 echo "[tier4-guest-build] done: $DEST"

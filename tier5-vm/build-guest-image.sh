@@ -14,6 +14,22 @@
 #
 # Linux-only per spec/00 (memory qdistro_linux_only.md).
 #
+# Base-image hardening (guest-image-perms track)
+# ----------------------------------------------
+# - The published base qcow2 is written 0640 root:root (NOT world-readable),
+#   mirroring the Tier-4 per-VM overlay precedent. On qemu:///session the
+#   admin uid reads it directly; on qemu:///system add the qemu user to the
+#   image's group if it must read without root.
+# - Baking a debug root password is OPT-IN via the environment flag
+#       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD  (default 1)
+#   DEFAULT = 1 (bake the password) to preserve the existing test-VM
+#   workflows that log in over the serial console with QDISTRO_VM_PASSWORD.
+#   Set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a HARDENED / production
+#   build: no root password is baked and QDISTRO_VM_PASSWORD is not required.
+#   When the flag is 1 the virt-customize argument set is byte-identical to
+#   the historical behavior, so any deterministic output is unchanged unless
+#   the operator explicitly opts into the hardened path.
+#
 # Run this once on the host (or inside the test VM if you want to
 # exercise --vm mode end-to-end inside bats). The bats coverage in
 # phase7-tier5-vm skips gracefully when the base image is absent, so
@@ -23,6 +39,9 @@
 # cloud qcow2), then ~30s of customization. Linked clones per VM
 # come from spawn-tier5.sh at runtime.
 set -euo pipefail
+
+# Opt-in debug-password gate (default on; see header).
+QDISTRO_GUEST_BAKE_DEBUG_PASSWORD="${QDISTRO_GUEST_BAKE_DEBUG_PASSWORD:-1}"
 
 usage() {
     cat <<'EOF'
@@ -40,6 +59,14 @@ Options:
 
 Reqs:
   virt-customize, qemu-img, wget. zypper install libguestfs guestfs-tools qemu-tools.
+
+Env:
+  QDISTRO_VM_PASSWORD  Root password baked into the image. Mandatory unless
+                       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0.
+  QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
+                       1 (default) bakes the debug root password from
+                       QDISTRO_VM_PASSWORD; 0 = hardened build, no password
+                       baked. Either way the output image is 0640 root:root.
 EOF
 }
 
@@ -138,6 +165,16 @@ exec waypipe --vsock -s "2:$PORT" server -- "$@"
 PUBEOF
 chmod 0755 "$PUBLISHER"
 
+# Build the (optional) root-password argument. Default bakes the debug
+# password; the hardened path (flag=0) bakes none.
+PW_ARGS=()
+if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ]; then
+    PW_ARGS=(--root-password "password:${QDISTRO_VM_PASSWORD:?QDISTRO_VM_PASSWORD must be set (or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)}")
+    echo "[tier5-build] baking debug root password (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=1)"
+else
+    echo "[tier5-build] HARDENED build: no root password baked (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)"
+fi
+
 echo "[tier5-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable (not transactional), so
 # zypper install works directly via virt-customize.
@@ -151,7 +188,7 @@ virt-customize -a "$BASE_QCOW" \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
     --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
-    --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
+    "${PW_ARGS[@]}" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
 
@@ -162,11 +199,13 @@ virt-sparsify --in-place "$BASE_QCOW" 2>/dev/null || true
 # Move into place.
 install -d "$(dirname "$DEST")"
 mv "$BASE_QCOW" "$DEST"
-chmod 0644 "$DEST"
+# Base image is sensitive (may contain a baked debug password); keep it
+# non-world-readable (0640 root:root), mirroring the Tier-4 overlay.
+chmod 0640 "$DEST"
 chown root:root "$DEST"
 
-# Make sure libvirt's qemu user can read it (mode 0644 is fine; on
-# qemu:///session as the admin user there's no qemu user — the admin
-# uid reads directly).
+# On qemu:///session as the admin user there's no qemu user — the admin
+# uid reads directly. On qemu:///system, add the qemu user to the image's
+# group if it must read without root (0640 is not world-readable).
 echo "[tier5-build] done: $DEST"
 ls -lh "$DEST"
