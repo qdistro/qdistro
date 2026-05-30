@@ -21,6 +21,7 @@ pythonpath = [
   "recall",
   "browser_bridge",
   "browser_daemons",
+  "daemons",
   "snapshots",
   "sdk",
   "admin_app",
