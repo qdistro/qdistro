@@ -25,6 +25,7 @@ path	gate	isolation_tier	required_services	network	agent_or_ocr	owner_component	
 tests/unit/test_audit.py	host	none	none	none	none	broker	no
 tests/unit/test_audisp_parser.py	host	none	none	none	none	selinux	no
 tests/integration/vm/qsu-binary.bats	bats	host	none	none	none	qsu	no
+tests/integration/vm/edit-guard.bats	bats	host	none	none	none	qci	no
 tests/integration/vm/broker-e2e.bats	bats	vm	qdistro-admin-broker.service	loopback	none	broker	slow
 tests/integration/vm/tiered-isolation.bats	bats	vm-nested	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow,flaky
 tests/integration/vm/compositor-shell.bats	bats	vm	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow
