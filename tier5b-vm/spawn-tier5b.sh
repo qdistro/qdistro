@@ -72,6 +72,38 @@
 #   QDISTRO_TIER5B_DRY_RUN=1
 #                        Dry-run mode for tests: relax caller-controlled
 #                        path restrictions.
+#   TIER5B_OVERLAY_HEADROOM_BYTES
+#                        Free-space headroom (bytes) required ON TOP OF the
+#                        base image's virtual size before creating the
+#                        linked-clone overlay. Default 2 GiB. The budget is
+#                        `base virtual-size + headroom`; if the overlay
+#                        target filesystem has less free than that, the
+#                        spawn FAILS CLOSED (exit 4 + QDISTRO_EVENT=error
+#                        ERROR_CODE=enospc) instead of launching into a
+#                        guaranteed mid-session ENOSPC.
+#   QDISTRO_EVENT_SINK   (test hook) argv prefix the structured event
+#                        MESSAGE is appended to instead of `logger`.
+#   QDISTRO_FREE_BYTES_CMD / QDISTRO_BASE_VSIZE_CMD
+#                        (test hooks) override the free-bytes / base
+#                        virtual-size queries so the precheck can be driven
+#                        both above and below budget without a live disk.
+#
+# Structured journald events (machine-readable; see qd_emit_event in
+# lib/spawn-common.sh). Each is a single MESSAGE line of space-separated
+# KEY=VALUE tokens, tagged SYSLOG_IDENTIFIER=qdistro-tier5b, so ops can
+# `journalctl -t qdistro-tier5b -o json` and filter on QDISTRO_EVENT=:
+#   launch  QDISTRO_EVENT=launch TIER=5b VM_NAME=<vm|loopback-PID>
+#           APP_ID=<app> ADMIN_UID=<uid> MODE=<vm|loopback>
+#           LAUNCH_TOKEN=<tok>
+#   close   QDISTRO_EVENT=close  TIER=5b VM_NAME=<...> APP_ID=<app>
+#           ADMIN_UID=<uid> EXIT_REASON=<app-exit|cleanup> RC=<rc>
+#   error   QDISTRO_EVENT=error  TIER=5b VM_NAME=<...> APP_ID=<app>
+#           ADMIN_UID=<uid> ERROR_CODE=<stable-code> EXIT=<exit-status>
+# Stable ERROR_CODE values: enospc (overlay free-space budget),
+#   overlay-create (qemu-img create failed), define (virsh define),
+#   start (virsh start), qga-timeout (guest agent never answered),
+#   guest-exec (publisher guest-exec returned no pid),
+#   client-died (waypipe-client died during readiness poll).
 #
 # Lifecycle:
 #   - define + start libvirt domain (linked clone of per-app base disk)
@@ -379,6 +411,41 @@ echo "VM_NAME=$VM_NAME"
 echo "APP_ID=$APP_NAME"
 echo "TIER=5b"
 
+# Structured-event context. For loopback VM_NAME is empty, so the event
+# VM_NAME field uses SILO_TAG (loopback-<pid>) — a stable per-spawn id.
+EVENT_TAG="qdistro-tier5b"
+EVENT_VM="${VM_NAME:-$SILO_TAG}"
+emit_launch_event() {
+    qd_emit_event "$EVENT_TAG" launch \
+        "TIER=5b" "VM_NAME=$EVENT_VM" "APP_ID=$APP_NAME" \
+        "ADMIN_UID=$ADMIN_UID" "MODE=$MODE" "LAUNCH_TOKEN=$LAUNCH_TOKEN"
+}
+emit_close_event() {
+    # $1 = exit reason (single token), $2 = rc
+    qd_emit_event "$EVENT_TAG" close \
+        "TIER=5b" "VM_NAME=$EVENT_VM" "APP_ID=$APP_NAME" \
+        "ADMIN_UID=$ADMIN_UID" "EXIT_REASON=${1:-cleanup}" "RC=${2:-0}"
+}
+emit_error_event() {
+    # $1 = stable error code, $2 = exit status
+    qd_emit_event "$EVENT_TAG" error \
+        "TIER=5b" "VM_NAME=$EVENT_VM" "APP_ID=$APP_NAME" \
+        "ADMIN_UID=$ADMIN_UID" "ERROR_CODE=${1:-unknown}" "EXIT=${2:-1}"
+}
+# die_event CODE EXIT_STATUS MESSAGE...: emit a structured error event,
+# print the human message to stderr, and exit fail-closed.
+die_event() {
+    local code="$1" status="$2"; shift 2
+    echo "[tier5b] FAIL: $*" >&2
+    emit_error_event "$code" "$status"
+    # Make the paired close event (emitted by the EXIT-trap cleanup)
+    # record the real failure reason/status instead of the default 0.
+    CLOSE_REASON=error; CLOSE_RC="$status"
+    exit "$status"
+}
+
+emit_launch_event
+
 USE_SECCTX="${TIER5B_USE_SECCTX:-1}"
 SECCTX_ENGINE="${TIER5B_SECCTX_ENGINE:-qdistro.tier5b}"
 SECCTX_APPID="${TIER5B_SECCTX_APPID:-qdistro.tier5b.$SILO_TAG}"
@@ -415,6 +482,11 @@ DOMAIN_DEFINED=0
 DISK_CREATED=0
 GUEST_PID=
 CLEANUP_DONE=0
+# Close-event bookkeeping. The normal app-exit paths set these to
+# (app-exit, <rc>) just before they exit; a signal-driven teardown leaves
+# the default (cleanup, <signal-rc>) so the close event still records why.
+CLOSE_REASON=cleanup
+CLOSE_RC=0
 cleanup() {
     # Re-entrancy guard (correctness S1): a chained INT→TERM must not
     # rerun the qga path twice.
@@ -422,6 +494,9 @@ cleanup() {
         return 0
     fi
     CLEANUP_DONE=1
+    # Structured close event: emitted exactly once (re-entrancy guarded),
+    # so ops can correlate the launch event with its teardown + reason.
+    emit_close_event "$CLOSE_REASON" "$CLOSE_RC"
     # 1. Try to SIGTERM the guest publisher gracefully (lets Firefox
     #    write its session), then reap the waypipe-server inside guest.
     if [ "$MODE" = "vm" ] && [ -n "$GUEST_PID" ]; then
@@ -442,8 +517,8 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+trap 'CLOSE_REASON=signal-int; CLOSE_RC=130; cleanup; exit 130' INT
+trap 'CLOSE_REASON=signal-term; CLOSE_RC=143; cleanup; exit 143' TERM
 
 # --- 1. host-side waypipe client (creates vsock listener) -----------
 HOST_LISTEN_CID=1
@@ -481,9 +556,8 @@ done
 # loop. If it crashed during startup, surface the failure here instead
 # of waiting until the guest publisher times out.
 if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
-    echo "[tier5b] FAIL: waypipe-client died during readiness poll" >&2
     cat "$CLIENT_LOG" >&2 || true
-    exit 6
+    die_event client-died 6 "waypipe-client died during readiness poll"
 fi
 echo "[tier5b] vsock listener ready cid=$HOST_LISTEN_CID port=$PORT" >&2
 
@@ -495,8 +569,7 @@ if [ "$MODE" = "loopback" ]; then
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     PUB="$SCRIPT_DIR/qdistro-tier5b-publisher.sh"
     if [ ! -x "$PUB" ]; then
-        echo "[tier5b] FAIL: publisher script not executable at $PUB" >&2
-        exit 5
+        die_event publisher-missing 5 "publisher script not executable at $PUB"
     fi
     echo "[tier5b] $SILO_TAG (loopback) → vsock:$HOST_LISTEN_CID:$PORT → wayland-1" >&2
     echo "[tier5b] app: $APP_NAME" >&2
@@ -509,14 +582,24 @@ if [ "$MODE" = "loopback" ]; then
     wait "$SERVER_PID" 2>/dev/null
     EXIT=$?
     echo "[tier5b] guest app exited rc=$EXIT" >&2
+    CLOSE_REASON=app-exit; CLOSE_RC=$EXIT
     exit "$EXIT"
 fi
 
 # --- 2'. --vm mode --------------------------------------------------
+# Free-space budget precheck (fail-closed): before creating the overlay,
+# confirm the overlay target filesystem can hold the base image's full
+# copy-on-write growth (its virtual size) plus a configurable headroom.
+# Without this, a near-full disk launches and then dies mid-session with
+# ENOSPC, corrupting whatever the guest was writing. Skip only when the
+# overlay already exists (re-attach: we are not allocating new space).
 if [ ! -f "$DISK" ]; then
+    OVERLAY_HEADROOM="${TIER5B_OVERLAY_HEADROOM_BYTES:-2147483648}"  # 2 GiB
+    if ! qd_free_space_check "$DISK_BASE" "$DISK_DIR" "$OVERLAY_HEADROOM"; then
+        die_event enospc 4 "insufficient free space for overlay in $DISK_DIR (see precheck diagnostic above)"
+    fi
     if ! run_as_admin qemu-img create -f qcow2 -F qcow2 -b "$DISK_BASE" "$DISK" >/dev/null 2>&1; then
-        echo "[tier5b] FAIL: qemu-img create -b $DISK_BASE failed at $DISK" >&2
-        exit 4
+        die_event overlay-create 4 "qemu-img create -b $DISK_BASE failed at $DISK"
     fi
     DISK_CREATED=1
 fi
@@ -535,8 +618,7 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         elif [ -f /usr/share/qdistro/tier5b/domain-template.xml ]; then
             TMPL=/usr/share/qdistro/tier5b/domain-template.xml
         else
-            echo "[tier5b] FAIL: domain template not found" >&2
-            exit 4
+            die_event template-missing 4 "domain template not found"
         fi
     fi
 
@@ -561,13 +643,12 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         echo "[tier5b] FAIL: unsubstituted markers in domain XML:" >&2
         grep -o '__[A-Z_]*__' "$TMP_XML" | sort -u >&2
         rm -f "$TMP_XML"
-        exit 4
+        die_event domain-render 4 "unsubstituted markers in domain XML"
     fi
     # Already 0600 + admin-owned inside a 0700 admin-owned dir.
     if ! run_as_admin virsh define "$TMP_XML" >/dev/null; then
-        echo "[tier5b] FAIL: virsh define failed" >&2
         rm -f "$TMP_XML"
-        exit 5
+        die_event define 5 "virsh define failed"
     fi
     rm -f "$TMP_XML"
     DOMAIN_DEFINED=1
@@ -581,8 +662,7 @@ exec 9>&- 2>/dev/null || true
 
 if ! run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; then
     if ! run_as_admin virsh start "$VM_NAME" >/dev/null; then
-        echo "[tier5b] FAIL: virsh start failed" >&2
-        exit 6
+        die_event start 6 "virsh start failed"
     fi
 fi
 DOMAIN_DEFINED=1
@@ -597,8 +677,7 @@ for i in $(seq 1 90); do
     sleep 1
 done
 if [ "$QGA_OK" != "1" ]; then
-    echo "[tier5b] FAIL: qemu-guest-agent never responded after 90s" >&2
-    exit 7
+    die_event qga-timeout 7 "qemu-guest-agent never responded after 90s"
 fi
 echo "[tier5b] qga ready" >&2
 
@@ -617,10 +696,9 @@ QGA_REQ="{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/usr/local/bin/qd
 
 QGA_REPLY=$(qga_cmd "$VM_NAME" "$QGA_REQ" 2>"$SERVER_LOG" || true)
 if [ -z "$QGA_REPLY" ] || ! echo "$QGA_REPLY" | grep -q '"pid"'; then
-    echo "[tier5b] FAIL: guest-exec didn't return a pid" >&2
     echo "[tier5b] reply: $QGA_REPLY" >&2
     cat "$SERVER_LOG" >&2 || true
-    exit 8
+    die_event guest-exec 8 "guest-exec didn't return a pid"
 fi
 GUEST_PID=$(echo "$QGA_REPLY" | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
 echo "[tier5b] guest publisher pid=$GUEST_PID running" >&2
@@ -631,4 +709,5 @@ echo "[tier5b] app: $APP_NAME" >&2
 wait "$CLIENT_PID" 2>/dev/null
 EXIT=$?
 echo "[tier5b] tier-5b spawn exited rc=$EXIT" >&2
+CLOSE_REASON=app-exit; CLOSE_RC=$EXIT
 exit "$EXIT"

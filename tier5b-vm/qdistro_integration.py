@@ -166,6 +166,25 @@ def maybe_install(window=None) -> object | None:
     importable / no session bus is available. The receiver is
     deliberately a no-op on inbound payload (tier-5b VMs don't
     accept Send-To deliveries in v1; that's a future feature).
+
+    App1-receiver-registration decision (2026-05-30 — was an open
+    watch-list question in todo/open-followups.md):
+      * Today this helper has ZERO callers — no qdshell launcher calls
+        ``maybe_install()`` — so the ``org.qdistro.Tier5bVM.uidNNNN``
+        bus name is NOT actually claimed for a running tier-5b VM, and
+        must NOT be treated as launch evidence.
+      * The registration is intentionally EPHEMERAL: there is no
+        NameLost / re-register-on-name-loss handler, and if the session
+        bus restarts the name is simply dropped. That is acceptable
+        because (a) the receiver is a v1 no-op that only drops Send-To
+        deliveries, so losing it costs nothing, and (b) the
+        load-bearing launch→toplevel correlation runs over the per-spawn
+        ``LAUNCH_TOKEN`` / secctx ``instance_id`` path
+        (see :func:`expected_service_name`'s callers and the module
+        docstring), not over bus-name liveness.
+      * If/when Send-To-into-a-tier-5b-VM ships, re-registration on name
+        loss should be added THEN, alongside an actual caller — not
+        speculatively now. No behaviour change is made here.
     """
     if _app_receiver is None:
         print("[tier5b/qdistro] qdistro_app SDK not importable; "
