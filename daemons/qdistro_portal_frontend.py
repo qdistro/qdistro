@@ -47,9 +47,22 @@ Architecture::
     qdistro-admin-broker  (system bus) -> resolve_subject(client_pid) -> decide
 
 The dispatch core (``resolve_client_tuple`` / ``build_broker_call`` /
-``decision_to_response`` / ``handle_access``) is pure and takes an
+``decision_to_response`` / ``attested_decision``) is pure and takes an
 injectable broker client, so it unit-tests without a live bus, mirroring
 ``qdistro_mpris_daemon`` / ``qdistro_portal_backend``.
+
+The per-method handlers all route through the SAME attested core:
+
+- ``handle_access``       -- representative Access method.
+- ``handle_open_file`` / ``handle_save_file`` -- FileChooser; a denied
+  request returns ``RESP_CANCELLED`` and NO files.
+- ``handle_screenshot``   -- Screenshot; denied returns no ``uri``.
+- ``handle_notification`` -- Notification; boolean gate, denied drops the
+  notification.
+
+Each handler decides strictly against the kernel-attested
+``(pid, starttime)`` for the resolved client -- never an app-supplied
+``pid`` / ``app_id``.
 """
 from __future__ import annotations
 
@@ -173,13 +186,13 @@ class BrokerClient:
         raise NotImplementedError
 
 
-def handle_access(base_action: str, app_id: str, *,
-                  client_pid: int,
-                  broker: BrokerClient,
-                  extra: dict[str, str] | None = None,
-                  resolver: Callable[[int], tuple[int, int, bool]]
-                  = resolve_client_tuple) -> int:
-    """Pure core for a representative portal Access / permission method.
+def attested_decision(base_action: str, app_id: str, *,
+                      client_pid: int,
+                      broker: BrokerClient,
+                      extra: dict[str, str] | None = None,
+                      resolver: Callable[[int], tuple[int, int, bool]]
+                      = resolve_client_tuple) -> int:
+    """Shared kernel-attested decision core for every portal method.
 
     ``client_pid`` is the kernel-attested pid of the app's *own* D-Bus
     connection (resolved by the D-Bus wrapper via
@@ -200,6 +213,9 @@ def handle_access(base_action: str, app_id: str, *,
 
     Any exception talking to the broker is treated as a denial
     (fail-closed), mirroring the backend's ``CheckPermission`` posture.
+
+    Returns a portal Response code; ``RESP_SUCCESS`` ONLY on an explicit
+    ``allow`` verdict for the resolved client.
     """
     pid, starttime, ok = resolver(client_pid)
     if not ok:
@@ -216,6 +232,94 @@ def handle_access(base_action: str, app_id: str, *,
             pass
         return RESP_CANCELLED
     return decision_to_response(verdict)
+
+
+def handle_access(base_action: str, app_id: str, *,
+                  client_pid: int,
+                  broker: BrokerClient,
+                  extra: dict[str, str] | None = None,
+                  resolver: Callable[[int], tuple[int, int, bool]]
+                  = resolve_client_tuple) -> int:
+    """Pure handler for the representative portal Access method.
+
+    Thin wrapper over :func:`attested_decision` (passing the caller's
+    ``base_action`` through, for the existing test suite and the Access
+    D-Bus glue). ``app_id`` is advisory only; see ``attested_decision``
+    for the fail-closed decision steps.
+    """
+    return attested_decision(base_action, app_id,
+                             client_pid=client_pid, broker=broker,
+                             extra=extra, resolver=resolver)
+
+
+def handle_open_file(app_id: str, *, client_pid: int, broker: BrokerClient,
+                     extra: dict[str, str] | None = None,
+                     resolver: Callable[[int], tuple[int, int, bool]]
+                     = resolve_client_tuple) -> tuple[int, dict[str, Any]]:
+    """Pure handler for ``FileChooser.OpenFile`` on the attested core.
+
+    Routes ``com.qdistro.fs.open`` (the backend's FileChooser action) for
+    the *resolved* client. On ``allow`` returns ``(RESP_SUCCESS, {})`` —
+    the D-Bus glue runs the real picker and fills ``uris`` only after this
+    gate passes. On ANY non-allow / fail-closed path returns
+    ``(RESP_CANCELLED, {})`` with **no files**: a denied client must never
+    receive a file URI.
+    """
+    response = attested_decision("com.qdistro.fs.open", app_id,
+                                 client_pid=client_pid, broker=broker,
+                                 extra=extra, resolver=resolver)
+    return (response, {})
+
+
+def handle_save_file(app_id: str, *, client_pid: int, broker: BrokerClient,
+                     extra: dict[str, str] | None = None,
+                     resolver: Callable[[int], tuple[int, int, bool]]
+                     = resolve_client_tuple) -> tuple[int, dict[str, Any]]:
+    """Pure handler for ``FileChooser.SaveFile`` on the attested core.
+
+    Shares the FileChooser action/contract with :func:`handle_open_file`:
+    a denied request returns ``(RESP_CANCELLED, {})`` with no ``uris``.
+    """
+    response = attested_decision("com.qdistro.fs.open", app_id,
+                                 client_pid=client_pid, broker=broker,
+                                 extra=extra, resolver=resolver)
+    return (response, {})
+
+
+def handle_screenshot(app_id: str, *, client_pid: int, broker: BrokerClient,
+                      extra: dict[str, str] | None = None,
+                      resolver: Callable[[int], tuple[int, int, bool]]
+                      = resolve_client_tuple) -> tuple[int, dict[str, Any]]:
+    """Pure handler for ``Screenshot`` on the attested core.
+
+    Routes ``com.qdistro.screen.capture`` for the *resolved* client. On
+    ``allow`` returns ``(RESP_SUCCESS, {})`` — the glue invokes the
+    compositor screencopy and fills the ``uri`` only after this gate
+    passes. On any non-allow / fail-closed path returns
+    ``(RESP_CANCELLED, {})`` with no ``uri``.
+    """
+    response = attested_decision("com.qdistro.screen.capture", app_id,
+                                 client_pid=client_pid, broker=broker,
+                                 extra=extra, resolver=resolver)
+    return (response, {})
+
+
+def handle_notification(app_id: str, *, client_pid: int, broker: BrokerClient,
+                        extra: dict[str, str] | None = None,
+                        resolver: Callable[[int], tuple[int, int, bool]]
+                        = resolve_client_tuple) -> bool:
+    """Pure handler for ``Notification.AddNotification`` on the core.
+
+    The Notification interface has no Request/Response object, so the
+    contract is a boolean: ``True`` means the notification is allowed to
+    be shown, ``False`` means it must be dropped. An unauthenticatable
+    client, a broker exception, or any non-``allow`` verdict all
+    fail-closed to ``False`` (the notification is silently dropped).
+    """
+    response = attested_decision("portal.notification", app_id,
+                                 client_pid=client_pid, broker=broker,
+                                 extra=extra, resolver=resolver)
+    return response == RESP_SUCCESS
 
 
 # --------------------------------------------------------------------- #
@@ -328,15 +432,112 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             the Request object's Response signal.
             """
             req = self._new_request(sender)
-            try:
-                client_pid = _conn_pid(sender)
-            except dbus.DBusException:
-                client_pid = -1  # resolver fails closed
+            client_pid = self._resolve_caller(sender)
             response = handle_access(
                 "portal.access", str(app_id or ""),
                 client_pid=client_pid, broker=broker)
             req.finish(response, {})
             return req._path
+
+        def _resolve_caller(self, sender) -> int:
+            """Kernel-attested pid of the app's OWN connection (or -1).
+
+            Always resolves from the D-Bus daemon's view of the connection,
+            never from anything in the message body. On any failure returns
+            -1 so the pure core's resolver fails closed.
+            """
+            try:
+                return _conn_pid(sender)
+            except dbus.DBusException:
+                return -1
+
+        @dbus.service.method(
+            "org.freedesktop.portal.FileChooser",
+            in_signature="osssa{sv}", out_signature="o",
+            sender_keyword="sender")
+        def OpenFile(self, parent_window, app_id, title, options,
+                     sender=None):
+            """Gated FileChooser.OpenFile.
+
+            Resolves the app's OWN connection pid (NOT any app-supplied
+            value) and relays the kernel-attested (pid, starttime) to the
+            broker via ``handle_open_file``. On allow the real picker would
+            run here and populate ``uris``; a denied request delivers an
+            empty result (no files).
+            """
+            req = self._new_request(sender)
+            client_pid = self._resolve_caller(sender)
+            response, results = handle_open_file(
+                str(app_id or ""), client_pid=client_pid, broker=broker)
+            req.finish(response, results)
+            return req._path
+
+        @dbus.service.method(
+            "org.freedesktop.portal.FileChooser",
+            in_signature="osssa{sv}", out_signature="o",
+            sender_keyword="sender")
+        def SaveFile(self, parent_window, app_id, title, options,
+                     sender=None):
+            """Gated FileChooser.SaveFile (see ``OpenFile``)."""
+            req = self._new_request(sender)
+            client_pid = self._resolve_caller(sender)
+            response, results = handle_save_file(
+                str(app_id or ""), client_pid=client_pid, broker=broker)
+            req.finish(response, results)
+            return req._path
+
+        @dbus.service.method(
+            "org.freedesktop.portal.Screenshot",
+            in_signature="ossa{sv}", out_signature="o",
+            sender_keyword="sender")
+        def Screenshot(self, parent_window, app_id, options, sender=None):
+            """Gated Screenshot.
+
+            Same attested core: resolves the caller's own connection pid
+            and relays it to the broker via ``handle_screenshot``. On allow
+            the compositor screencopy would run and fill ``uri``; a denied
+            request returns an empty result.
+            """
+            req = self._new_request(sender)
+            client_pid = self._resolve_caller(sender)
+            response, results = handle_screenshot(
+                str(app_id or ""), client_pid=client_pid, broker=broker)
+            req.finish(response, results)
+            return req._path
+
+        @dbus.service.method(
+            "org.freedesktop.portal.Notification",
+            in_signature="ssa{sv}", out_signature="",
+            sender_keyword="sender")
+        def AddNotification(self, app_id, id_, notification, sender=None):
+            """Gated Notification.AddNotification.
+
+            No Request/Response object (the portal spec gives this method
+            no reply). Resolves the caller's own connection pid and relays
+            it to the broker via ``handle_notification``; if not allowed
+            the notification is silently dropped.
+            """
+            client_pid = self._resolve_caller(sender)
+            if handle_notification(
+                    str(app_id or ""), client_pid=client_pid, broker=broker):
+                # Allowed: the glue would forward to the host notification
+                # surface here. The attested gate has passed.
+                pass
+
+        @dbus.service.method(
+            "org.freedesktop.portal.Notification",
+            in_signature="ss", out_signature="",
+            sender_keyword="sender")
+        def RemoveNotification(self, app_id, id_, sender=None):
+            """Gated Notification.RemoveNotification.
+
+            Policy-checked identically so a denied app cannot remove
+            notifications it did not create.
+            """
+            client_pid = self._resolve_caller(sender)
+            if handle_notification(
+                    str(app_id or ""), client_pid=client_pid, broker=broker):
+                pass
 
     PortalFrontend()
     print(f"[qdistro-portal-frontend] listening on {PORTAL_BUS_NAME} "
