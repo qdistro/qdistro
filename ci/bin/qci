@@ -56,6 +56,18 @@ KEEP_FAILED_DEFAULT=1
 CREATED_VMS=()
 FINALIZING=0
 
+# QCI_OFFLINE=1 forces a host-only / no-egress posture for VM tests:
+#   - tests/scenarios see QCI_OFFLINE=1 in their environment and are expected
+#     to self-skip anything that needs external network (the annotation hook);
+#   - the runner records the source tree as a tarball + sha256 in manifest.txt
+#     so a run is reproducible without re-fetching anything;
+#   - gates whose registry `network` column is 'external' are skipped where
+#     that is statically knowable.
+# The deep podman/container/browser egress audit under SLIRP NAT is a separate
+# VM task; this is the env gate + plumbing only.
+QCI_OFFLINE="${QCI_OFFLINE:-0}"
+[ "$QCI_OFFLINE" = 1 ] && export QCI_OFFLINE
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -67,6 +79,8 @@ Usage:
   qci gui [--vm <name>] [--scenario <path.md> ...]
   qci image [--root <extracted-tree>] [--idempotency] [--no-boot]
   qci registry-check
+  qci affected [--changed-from <ref>] [--run] [--vm <name>] [<path> ...]
+  qci replay <scenario> <vm>
   qci full [--keep-on-fail|--delete-failed-vm]
   qci snapshot-daily [--date YYYY-MM-DD] [--name <vm-name>]
   qci cleanup [--dry-run] [--age-hours N]
@@ -86,6 +100,19 @@ Notes:
               runs only the static checklist.
   qci registry-check  Validate tests/registry.tsv (pilot): each path exists
               and each gate is one qci knows. Advisory only, not enforced.
+  qci affected  Map changed file paths to the qci gates that should run, using
+              tests/registry.tsv plus conservative path-prefix rules. Paths not
+              covered by either map to the FULL gate set (fail-safe: an unknown
+              path never narrows coverage). With no paths and --changed-from
+              <ref>, derives the changed set from `git diff --name-only <ref>`.
+              Prints the selected gates; with --run, runs them (passing --vm to
+              the VM gates). Never silently skips: any cap/narrowing is logged.
+  qci replay  Rerun ONE named scenario against an already-preserved (named) VM,
+              without provisioning. <scenario> is a bats file (path or basename
+              under tests/integration/vm) or a GUI markdown scenario (path or
+              basename). The VM must already exist; it is NOT created or
+              destroyed (reuses the existing --vm dispatch). qdistro-daily* is
+              refused unless QCI_FORCE_PROTECTED_VM=1.
 
 Environment:
   QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs
@@ -102,6 +129,14 @@ Environment:
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
   QCI_ZOLA_SKIP_EXTERNAL=1  Run zola check with --skip-external-links.
+  QCI_OFFLINE=1             Host-only / no-egress posture for VM tests. Records
+                            a source tarball + sha256 in manifest.txt, exports
+                            the gate down to scenarios so external-network tests
+                            self-skip, and (statically clear cases) skips gates
+                            whose registry network column is 'external'. Deep
+                            podman/container/browser SLIRP-NAT egress audit is a
+                            VM task (see todo); this is the env gate + the
+                            test-annotation hook.
 EOF
 }
 
@@ -177,7 +212,32 @@ init_run() {
     printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
     : > "$RDIR/vm/created-vms.txt"
     collect_repo_state
+    record_offline_source
     log "artifacts -> $RDIR"
+}
+
+# When QCI_OFFLINE=1, capture the qdistro source tree as a tarball + sha256 in
+# the run dir and record both (plus the offline posture) in manifest.txt, so a
+# run is reproducible without re-fetching from any network. Cheap no-op when
+# offline mode is not requested.
+record_offline_source() {
+    kv qci_offline "$QCI_OFFLINE"
+    [ "$QCI_OFFLINE" = 1 ] || return 0
+    local tarball="$RDIR/source.tar.gz" head
+    head=$(git -C "$QDISTRO_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+    # Archive the committed tree at HEAD (deterministic; excludes runs/ etc.).
+    if git -C "$QDISTRO_REPO" archive --format=tar.gz -o "$tarball" HEAD 2>/dev/null; then
+        local sum
+        sum=$(sha256sum "$tarball" 2>/dev/null | awk '{print $1}')
+        kv source_tarball "$(rel_path "$tarball")"
+        kv source_sha256 "${sum:-unknown}"
+        kv source_head "$head"
+        log "offline: source tarball $(rel_path "$tarball") sha256=${sum:-unknown}"
+    else
+        kv source_tarball "unavailable (git archive failed)"
+        kv source_head "$head"
+        log "offline: git archive failed; source tarball not captured"
+    fi
 }
 
 finish_run() {
@@ -828,6 +888,12 @@ gate_gui() {
 
     while IFS= read -r scenario; do
         rel=${scenario#$WORKSPACE/}
+        # QCI_OFFLINE annotation hook: registry network=external GUI scenarios
+        # self-skip in offline mode. The registry key is qdistro-repo-relative.
+        if [ "$QCI_OFFLINE" = 1 ] && offline_should_skip_external "${scenario#$QDISTRO_REPO/}"; then
+            record_result gui "$rel" skip 0 pass agent "" "QCI_OFFLINE=1: registry network=external; skipped"
+            continue
+        fi
         prompt="$RDIR/agent-notes/$(safe_name "$rel").prompt.md"
         log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
         mkdir -p "$(dirname "$log_path")"
@@ -966,6 +1032,15 @@ gate_bats() {
     fi
     for file in "${files[@]}"; do
         base=$(basename "$file")
+        # QCI_OFFLINE annotation hook: if the registry marks this test's
+        # network column 'external', skip it in offline mode rather than let
+        # it try (and fail) to reach the network. Tests not in the registry
+        # see QCI_OFFLINE=1 in their env and are expected to self-skip.
+        local rel_test="tests/integration/vm/$base"
+        if offline_should_skip_external "$rel_test"; then
+            record_result bats "$base" skip 0 pass bats "" "QCI_OFFLINE=1: registry network=external; skipped"
+            continue
+        fi
         if [ -n "$explicit" ]; then
             vm="$explicit"
             validate_vm bats "$vm" || return "$EXIT_VM_PROVISION"
@@ -980,7 +1055,7 @@ gate_bats() {
         log "bats $base on $vm"
         (
             cd "$WORKSPACE/qdistro" || exit 2
-            VM_NAME="$vm" bats "$file"
+            VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" bats "$file"
         ) > "$log_path" 2>&1
         gate_rc=$?
         collect_vm_artifacts "$vm" "bats-${base%.bats}"
@@ -1399,6 +1474,329 @@ gate_image() {
     return "$rc"
 }
 
+# ---------------------------------------------------------------------------
+# Registry helpers shared by `qci affected` and the QCI_OFFLINE annotation.
+#
+# registry_lookup_gate <path>     -> prints the registry gate for a path, or ""
+# registry_network_for <path>     -> prints the registry network column, or ""
+# Both read the (TAB-separated) tests/registry.tsv, skipping comments/header.
+# ---------------------------------------------------------------------------
+registry_field_for() {
+    # $1 = repo-relative path; $2 = 1-based column index to print.
+    local want=$1 col=$2
+    [ -f "$REGISTRY_TSV" ] || return 0
+    awk -F'\t' -v want="$want" -v col="$col" '
+        /^[[:space:]]*#/ { next }
+        $1 == "path" { next }
+        $1 == "" { next }
+        $1 == want { print $col; exit }
+    ' "$REGISTRY_TSV"
+}
+registry_lookup_gate() { registry_field_for "$1" 2; }
+registry_network_for() { registry_field_for "$1" 5; }
+
+# offline_should_skip_external <repo-relative test path>
+# Returns 0 (true, "skip it") when QCI_OFFLINE=1 AND the registry marks this
+# test's network column as 'external'. This is the statically-knowable half of
+# the offline annotation; tests not in the registry rely on the exported
+# QCI_OFFLINE=1 env to self-skip at runtime.
+offline_should_skip_external() {
+    [ "$QCI_OFFLINE" = 1 ] || return 1
+    local net
+    net=$(registry_network_for "$1")
+    [ "$net" = external ]
+}
+
+# ---------------------------------------------------------------------------
+# Changed-path -> gate selection.
+#
+# Maps a set of changed file paths (repo-relative, qdistro-rooted) to the qci
+# gates that should run. Resolution order per path:
+#   1. exact registry row  -> that row's gate;
+#   2. else path-prefix rules below;
+#   3. else UNKNOWN -> the FULL gate set (fail-safe: never "nothing").
+# We never narrow without logging; an unknown path always widens coverage.
+#
+# Gate vocabulary mirrors the registry/known_gates plus the host/lint pre-VM
+# gates and the catch-all 'full'. The emitted set is sorted + de-duplicated.
+# ---------------------------------------------------------------------------
+ALL_GATES="lint host image vm-smoke bats gui"
+
+affected_gates_for_path() {
+    # Prints zero or more gate tokens (one per line) for a single path.
+    local p=$1 g
+    # 1. exact registry hit.
+    g=$(registry_lookup_gate "$p")
+    if [ -n "$g" ]; then
+        printf '%s\n' "$g"
+        return 0
+    fi
+    # 2. conservative path-prefix rules.
+    case "$p" in
+        # CI runner / registry / lint inputs themselves.
+        ci/*|tests/registry.tsv)
+            printf 'lint\nhost\n' ;;
+        # Image build / packaging inputs.
+        image/*)
+            printf 'image\n' ;;
+        # bats VM integration tests.
+        tests/integration/vm/*.bats)
+            printf 'bats\n' ;;
+        # GUI markdown / agent scenarios.
+        tests/integration/permissions-gui/*|\
+        tests/integration/qdwin-noctalia/*|\
+        tests/integration/workflow-gui/*)
+            printf 'gui\n' ;;
+        # Pure host unit tests.
+        tests/unit/*)
+            printf 'host\n' ;;
+        # VM lifecycle tooling -> exercise a VM boot at least.
+        scripts/vm/*)
+            printf 'vm-smoke\n' ;;
+        # Source under a component dir that the host gate builds/tests.
+        src/*|broker/*|selinux/*|qsu/*|workflow/*)
+            printf 'host\n' ;;
+        # Docs / notes / changelog: no gate.
+        *.md|todo/*|future/*|docs/*|*.txt|LICENSE|README*)
+            : ;;
+        # 3. anything else is UNKNOWN -> full coverage (fail-safe).
+        *)
+            printf 'UNKNOWN\n' ;;
+    esac
+}
+
+# Resolve a list of paths to a sorted, de-duplicated gate set.
+# Writes a human-readable mapping to $1 (log file) and prints the final
+# space-separated gate list on stdout.
+resolve_affected_gates() {
+    local log_path=$1; shift
+    local p gates_raw="" line saw_unknown=0
+    : > "$log_path"
+    {
+        echo "## affected: changed-path -> gate mapping"
+        echo "registry: $REGISTRY_TSV"
+        echo
+    } >> "$log_path"
+    if [ "$#" -eq 0 ]; then
+        echo "(no changed paths supplied -> selecting FULL gate set, fail-safe)" >> "$log_path"
+        saw_unknown=1
+    fi
+    for p in "$@"; do
+        [ -n "$p" ] || continue
+        local out
+        out=$(affected_gates_for_path "$p")
+        if [ -z "$out" ]; then
+            printf '  %-50s -> (no gate; docs/notes)\n' "$p" >> "$log_path"
+            continue
+        fi
+        if printf '%s\n' "$out" | grep -qx UNKNOWN; then
+            printf '  %-50s -> UNKNOWN -> FULL set\n' "$p" >> "$log_path"
+            saw_unknown=1
+            continue
+        fi
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf '  %-50s -> %s\n' "$p" "$line" >> "$log_path"
+            gates_raw="$gates_raw $line"
+        done <<EOF
+$out
+EOF
+    done
+
+    local selected
+    if [ "$saw_unknown" = 1 ]; then
+        # Fail-safe widening: an unknown (or empty) path set means run everything.
+        selected="$ALL_GATES"
+        {
+            echo
+            echo "UNKNOWN/empty path encountered -> widening to FULL gate set: $ALL_GATES"
+        } >> "$log_path"
+    else
+        # Order the de-duplicated set by ALL_GATES order for stable output.
+        selected=""
+        local known g present
+        for known in $ALL_GATES; do
+            present=0
+            for g in $gates_raw; do
+                [ "$g" = "$known" ] && present=1 && break
+            done
+            [ "$present" = 1 ] && selected="$selected $known"
+        done
+        # Trim leading space.
+        selected="${selected# }"
+        # Defensive: if nothing matched (e.g. all docs), DO NOT emit empty and
+        # silently skip coverage — widen to full and log it.
+        if [ -z "$selected" ]; then
+            selected="$ALL_GATES"
+            {
+                echo
+                echo "no gate matched any changed path (all docs/notes?) -> widening to FULL set to avoid silently skipping coverage: $ALL_GATES"
+            } >> "$log_path"
+        fi
+    fi
+    {
+        echo
+        echo "SELECTED GATES: $selected"
+    } >> "$log_path"
+    printf '%s\n' "$selected"
+}
+
+# Run a single named gate (used by `qci affected --run`). Mirrors the main
+# dispatch but only for the gate vocabulary affected can emit.
+run_one_gate() {
+    local gate=$1 vm=$2 step_rc
+    case "$gate" in
+        lint)     gate_lint; step_rc=$? ;;
+        host)     gate_host; step_rc=$? ;;
+        image)    gate_image; step_rc=$? ;;
+        vm-smoke) gate_vm_smoke "$vm"; step_rc=$? ;;
+        bats)     gate_bats "$vm"; step_rc=$? ;;
+        gui)      gate_gui "$vm"; step_rc=$? ;;
+        *)        record_blocked affected "$gate" "$EXIT_USAGE" args "unknown gate token in affected set"; step_rc=$EXIT_USAGE ;;
+    esac
+    return "$step_rc"
+}
+
+gate_affected() {
+    # Args: <changed-from-ref-or-empty> <run flag 0/1> <vm-or-empty> <paths...>
+    local changed_from=$1 do_run=$2 vm=$3; shift 3
+    local paths=("$@") log_path="$RDIR/host/affected.log"
+    mkdir -p "$(dirname "$log_path")"
+
+    # Derive the changed set from git when --changed-from was given and no
+    # explicit paths were passed.
+    if [ -n "$changed_from" ] && [ "${#paths[@]}" -eq 0 ]; then
+        local diff
+        if diff=$(git -C "$QDISTRO_REPO" diff --name-only "$changed_from" 2>/dev/null); then
+            while IFS= read -r line; do [ -n "$line" ] && paths+=("$line"); done <<EOF
+$diff
+EOF
+            kv affected_changed_from "$changed_from"
+        else
+            record_blocked affected "$changed_from" "$EXIT_USAGE" args "git diff --name-only $changed_from failed"
+            return "$EXIT_USAGE"
+        fi
+    fi
+
+    local selected
+    selected=$(resolve_affected_gates "$log_path" "${paths[@]}")
+    kv affected_gates "$selected"
+    cat "$log_path" >&2
+    record_result affected gate-selection pass 0 pass selection "$log_path" "selected: $selected"
+
+    if [ "$do_run" != 1 ]; then
+        # Selection-only mode: print the gate list to stdout for callers/CI.
+        printf '%s\n' "$selected"
+        return "$EXIT_OK"
+    fi
+
+    # --run: execute the selected gates in ALL_GATES order, accumulating the
+    # first non-zero exit class (mirrors gate_full's accumulation).
+    local rc=$EXIT_OK g step_rc
+    for g in $selected; do
+        run_one_gate "$g" "$vm"; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    done
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# qci replay <scenario> <vm>: rerun ONE named scenario against an
+# already-preserved (named) VM, WITHOUT provisioning or destroying it.
+#
+# <scenario> is resolved to one of:
+#   - a bats file: an explicit path, or a basename under
+#     tests/integration/vm (.bats optional);
+#   - a GUI markdown scenario: an explicit path, or a basename matched against
+#     the standard scenario roots.
+# The VM is validated (must exist; qdistro-daily* refused unless forced) and is
+# passed as the explicit --vm to the existing bats/gui dispatch, which never
+# creates or releases an explicitly-named VM.
+# ---------------------------------------------------------------------------
+resolve_replay_scenario() {
+    # Prints "<kind>\t<resolved-path>" or nothing. kind = bats|gui.
+    local s=$1 cand
+    # Explicit, existing path.
+    if [ -f "$s" ]; then
+        case "$s" in
+            *.bats) printf 'bats\t%s\n' "$s" ;;
+            *.md)   printf 'gui\t%s\n' "$s" ;;
+            *)      : ;;
+        esac
+        return 0
+    fi
+    # bats basename (with or without .bats) under tests/integration/vm.
+    local base=${s%.bats}
+    cand="$QDISTRO_REPO/tests/integration/vm/$base.bats"
+    if [ -f "$cand" ]; then
+        printf 'bats\t%s\n' "$cand"
+        return 0
+    fi
+    # GUI markdown basename across the known scenario roots.
+    local root mdbase=${s%.md}
+    for root in \
+        "$QDISTRO_REPO/tests/integration/permissions-gui" \
+        "$QDISTRO_REPO/tests/integration/qdwin-noctalia" \
+        "$QDISTRO_REPO/tests/integration/workflow-gui"
+    do
+        cand="$root/$mdbase.md"
+        [ -f "$cand" ] && { printf 'gui\t%s\n' "$cand"; return 0; }
+    done
+    # Glob fallback: a basename prefix match (e.g. "03" -> 03-*.md).
+    for root in \
+        "$QDISTRO_REPO/tests/integration/permissions-gui" \
+        "$QDISTRO_REPO/tests/integration/qdwin-noctalia" \
+        "$QDISTRO_REPO/tests/integration/workflow-gui"
+    do
+        for cand in "$root/$mdbase"*.md; do
+            [ -f "$cand" ] && { printf 'gui\t%s\n' "$cand"; return 0; }
+        done
+    done
+    return 0
+}
+
+gate_replay() {
+    local scenario=$1 vm=$2 kind path
+    if [ -z "$scenario" ] || [ -z "$vm" ]; then
+        record_blocked replay "${scenario:-<missing>}" "$EXIT_USAGE" args "usage: qci replay <scenario> <vm>"
+        return "$EXIT_USAGE"
+    fi
+    # The VM must already exist; replay never provisions. validate_vm also
+    # enforces the qdistro-daily* protection (override via QCI_FORCE_PROTECTED_VM).
+    if ! validate_vm replay "$vm"; then
+        return "$EXIT_VM_PROVISION"
+    fi
+    local resolved
+    resolved=$(resolve_replay_scenario "$scenario")
+    if [ -z "$resolved" ]; then
+        record_blocked replay "$scenario" "$EXIT_USAGE" args "scenario not found (no bats/gui match)"
+        return "$EXIT_USAGE"
+    fi
+    kind=${resolved%%$'\t'*}
+    path=${resolved#*$'\t'}
+    kv replay_scenario "$path"
+    kv replay_kind "$kind"
+    kv replay_vm "$vm"
+    log "replay $kind scenario '$path' against existing VM '$vm'"
+    case "$kind" in
+        bats)
+            gate_bats "$vm" "$path"
+            return $?
+            ;;
+        gui)
+            # Restrict gate_gui to just this one scenario by overriding the
+            # scenario producer, exactly like `qci gui --scenario` does.
+            agent_scenarios() { printf '%s\n' "$path"; }
+            gate_gui "$vm"
+            return $?
+            ;;
+        *)
+            record_blocked replay "$scenario" "$EXIT_USAGE" args "unresolvable scenario kind"
+            return "$EXIT_USAGE"
+            ;;
+    esac
+}
+
 gate_full() {
     local rc=$EXIT_OK step_rc
     gate_preflight || return $?
@@ -1453,6 +1851,24 @@ main() {
             gate_image "$@"; rc=$?; finish_run "$rc" ;;
         registry-check)
             gate_registry_check; rc=$?; finish_run "$rc" ;;
+        affected)
+            local changed_from="" do_run=0 affected_vm="" affected_paths=()
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --changed-from) shift; changed_from=${1:-} ;;
+                    --run) do_run=1 ;;
+                    --vm) shift; affected_vm=${1:-} ;;
+                    --) shift; while [ $# -gt 0 ]; do affected_paths+=("$1"); shift; done; break ;;
+                    -*) record_blocked affected "$1" "$EXIT_USAGE" args "unknown affected flag"; finish_run "$EXIT_USAGE" ;;
+                    *) affected_paths+=("$1") ;;
+                esac
+                shift
+            done
+            gate_affected "$changed_from" "$do_run" "$affected_vm" "${affected_paths[@]}"
+            rc=$?; finish_run "$rc" ;;
+        replay)
+            local replay_scenario=${1:-} replay_vm=${2:-}
+            gate_replay "$replay_scenario" "$replay_vm"; rc=$?; finish_run "$rc" ;;
         host)
             gate_host; rc=$?; finish_run "$rc" ;;
         vm-smoke)
