@@ -230,3 +230,271 @@ def test_build_broker_call_empty_app_id_defaults_unknown():
     action, details = F.build_broker_call("portal.access", "")
     assert action == "portal.access:unknown"
     assert details["app_id"] == "unknown"
+
+
+# === Remaining portal methods on the same attested core ==================
+#
+# Each method must: (1) relay the RESOLVED (pid, starttime), never an
+# app-claimed pid/app_id; (2) fail closed (no broker call) on a gone /
+# recycled client; (3) ignore an app-supplied pid/app_id for the decision;
+# (4) return the SAFE empty/dropped result on the denied path.
+
+# Each method scopes its own broker action (mirrors the backend naming).
+_FS_ACTION = "com.qdistro.fs.open"
+_SHOT_ACTION = "com.qdistro.screen.capture"
+_NOTIFY_ACTION = "portal.notification"
+
+
+# --- FileChooser.OpenFile -----------------------------------------------
+
+def test_open_file_allow_uses_fs_action_and_resolved_tuple(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_open_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_SUCCESS
+    assert results == {}  # no files leaked by the pure gate itself
+    assert len(broker.check_calls) == 1
+    action, _details, pid, start = broker.check_calls[0]
+    # FileChooser-scoped action, decided against the RESOLVED tuple.
+    assert action == f"{_FS_ACTION}:org.example.App"
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+def test_open_file_deny_returns_no_files(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="deny")
+    resp, results = F.handle_open_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    # The denied path must carry NO file URIs at all.
+    assert results == {}
+    assert "uris" not in results
+    assert broker.request_calls == []  # deny is decisive, no prompt
+
+
+def test_open_file_gone_client_fails_closed_no_broker(monkeypatch):
+    monkeypatch.setattr(pi, "read_starttime", lambda p: 0)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_open_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    assert broker.check_calls == []  # unauthenticatable -> no decision
+    assert broker.request_calls == []
+
+
+def test_open_file_recycled_client_fails_closed(monkeypatch):
+    def _recycled(_pid):
+        return (APP_PID, 0, False)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_open_file("org.example.App", client_pid=APP_PID,
+                                       broker=broker, resolver=_recycled)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    assert broker.check_calls == []
+
+
+def test_open_file_app_supplied_pid_ignored(monkeypatch):
+    # App smuggles a foreign pid via extra; the decision must use ONLY the
+    # kernel-attested connection pid.
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    F.handle_open_file("org.example.App", client_pid=APP_PID, broker=broker,
+                       extra={"pid": "999999", "client_pid": "1"})
+    _a, _d, pid, start = broker.check_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+    assert pid != 999999 and pid != 1
+
+
+def test_open_file_broker_exception_fails_closed(monkeypatch):
+    _live_proc(monkeypatch)
+
+    class _Boom(F.BrokerClient):
+        def check_for_client(self, *a):
+            raise RuntimeError("broker down")
+
+    resp, results = F.handle_open_file("org.example.App", client_pid=APP_PID,
+                                       broker=_Boom())
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+
+
+def test_open_file_unknown_prompts_with_resolved_tuple(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="unknown")
+    resp, results = F.handle_open_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED  # unknown is not a success
+    assert results == {}
+    assert len(broker.request_calls) == 1
+    _a, _d, pid, start = broker.request_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+# --- FileChooser.SaveFile -----------------------------------------------
+
+def test_save_file_allow_uses_fs_action(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_save_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_SUCCESS
+    assert results == {}
+    action, _d, pid, start = broker.check_calls[0]
+    assert action == f"{_FS_ACTION}:org.example.App"
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+def test_save_file_deny_returns_no_files(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="deny")
+    resp, results = F.handle_save_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+
+
+def test_save_file_gone_client_fails_closed_no_broker(monkeypatch):
+    monkeypatch.setattr(pi, "read_starttime", lambda p: 0)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_save_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    assert broker.check_calls == []
+
+
+def test_save_file_app_supplied_pid_ignored(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    F.handle_save_file("org.example.App", client_pid=APP_PID, broker=broker,
+                       extra={"client_pid": "1"})
+    _a, _d, pid, start = broker.check_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+# --- Screenshot ----------------------------------------------------------
+
+def test_screenshot_allow_uses_capture_action_and_resolved_tuple(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_screenshot("org.example.App",
+                                        client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_SUCCESS
+    assert results == {}  # no uri leaked by the pure gate
+    action, _d, pid, start = broker.check_calls[0]
+    assert action == f"{_SHOT_ACTION}:org.example.App"
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+def test_screenshot_deny_returns_no_uri(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="deny")
+    resp, results = F.handle_screenshot("org.example.App",
+                                        client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    assert "uri" not in results
+
+
+def test_screenshot_gone_client_fails_closed_no_broker(monkeypatch):
+    monkeypatch.setattr(pi, "read_starttime", lambda p: 0)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_screenshot("org.example.App",
+                                        client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    assert broker.check_calls == []
+
+
+def test_screenshot_app_supplied_pid_ignored(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    F.handle_screenshot("org.example.App", client_pid=APP_PID, broker=broker,
+                        extra={"pid": "999999"})
+    _a, _d, pid, start = broker.check_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+    assert pid != 999999
+
+
+def test_screenshot_broker_exception_fails_closed(monkeypatch):
+    _live_proc(monkeypatch)
+
+    class _Boom(F.BrokerClient):
+        def check_for_client(self, *a):
+            raise RuntimeError("broker down")
+
+    resp, results = F.handle_screenshot("org.example.App", client_pid=APP_PID,
+                                        broker=_Boom())
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+
+
+def test_screenshot_unknown_prompts_with_resolved_tuple(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="unknown")
+    resp, results = F.handle_screenshot("org.example.App",
+                                        client_pid=APP_PID, broker=broker)
+    assert resp == F.RESP_CANCELLED
+    assert results == {}
+    _a, _d, pid, start = broker.request_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+# --- Notification (boolean gate: True == show, False == drop) ------------
+
+def test_notification_allow_shows_with_resolved_tuple(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    assert F.handle_notification("org.example.App",
+                                 client_pid=APP_PID, broker=broker) is True
+    action, _d, pid, start = broker.check_calls[0]
+    assert action == f"{_NOTIFY_ACTION}:org.example.App"
+    assert (pid, start) == (APP_PID, APP_START)
+
+
+def test_notification_deny_dropped(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="deny")
+    assert F.handle_notification("org.example.App",
+                                 client_pid=APP_PID, broker=broker) is False
+    assert broker.request_calls == []
+
+
+def test_notification_gone_client_dropped_no_broker(monkeypatch):
+    monkeypatch.setattr(pi, "read_starttime", lambda p: 0)
+    broker = _RecordingBroker(verdict="allow")
+    assert F.handle_notification("org.example.App",
+                                 client_pid=APP_PID, broker=broker) is False
+    assert broker.check_calls == []  # unauthenticatable -> no decision
+
+
+def test_notification_app_supplied_pid_ignored(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    F.handle_notification("org.example.App", client_pid=APP_PID,
+                          broker=broker, extra={"client_pid": "1"})
+    _a, _d, pid, start = broker.check_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
+    assert pid != 1
+
+
+def test_notification_broker_exception_dropped(monkeypatch):
+    _live_proc(monkeypatch)
+
+    class _Boom(F.BrokerClient):
+        def check_for_client(self, *a):
+            raise RuntimeError("broker down")
+
+    assert F.handle_notification("org.example.App", client_pid=APP_PID,
+                                 broker=_Boom()) is False
+
+
+def test_notification_unknown_dropped_but_prompts(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="unknown")
+    assert F.handle_notification("org.example.App",
+                                 client_pid=APP_PID, broker=broker) is False
+    _a, _d, pid, start = broker.request_calls[0]
+    assert (pid, start) == (APP_PID, APP_START)
