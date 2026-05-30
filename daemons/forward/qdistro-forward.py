@@ -33,6 +33,10 @@ import time
 
 def main() -> int:
     p = argparse.ArgumentParser(prog="qdistro-forward")
+    # Cheap, side-effect-free health smoke: --version prints + exits 0
+    # before any required-arg validation or PipeWire/RDP setup.
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     p.add_argument("--pipewire-node", required=True,
                    help="PipeWire Node name to subscribe to "
                         "(e.g. weston.pipewire-0)")

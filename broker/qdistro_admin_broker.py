@@ -4235,6 +4235,13 @@ class Broker(dbus.service.Object):
 
 
 def main():
+    # Cheap, side-effect-free health smoke. The broker has no argparse
+    # (its only real invocation is the systemd ExecStart with no args),
+    # so handle --version with an explicit guard BEFORE touching the
+    # system bus — the smoke gate must not require root or a live bus.
+    if "--version" in sys.argv[1:]:
+        print("qdistro-admin-broker (qdistro)")
+        return
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)

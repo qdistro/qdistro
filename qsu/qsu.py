@@ -42,6 +42,10 @@ def _parse_argv(argv: list[str]) -> tuple[str, str, list[str]]:
         description="qdistro sudo replacement",
         allow_abbrev=False,
     )
+    # Cheap, side-effect-free health smoke: --version prints + exits 0
+    # before the root-exec socket is contacted.
+    ap.add_argument("--version", action="version",
+                    version="%(prog)s (qdistro)")
     ap.add_argument("-u", "--user", default="root",
                     help="target user (default: root)")
     ap.add_argument(

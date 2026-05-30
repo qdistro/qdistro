@@ -276,6 +276,10 @@ def cmd_audit(args, ifc: dbus.Interface) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="qdistro-pwd-admin")
+    # Cheap, side-effect-free health smoke. The action="version" path
+    # prints + exits 0 inside parse_args, before any vault/bus access.
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list-vaults").set_defaults(fn=cmd_list_vaults)
     sp = sub.add_parser("create");     sp.add_argument("vault"); sp.set_defaults(fn=cmd_create)
