@@ -18,12 +18,14 @@ from any user's silo with no extra wiring, and ``Play`` / ``Pause`` /
 the bridge to the originating tab as an inbound ``mpris.control`` op.
 
 Auth: every ``Publish`` is gated by
-``qdistro_browser_daemon_identity.browser_bridge_allowed`` — the caller
-must be the qdistro native-messaging host (``/proc`` executed-script +
-allowlisted parent-browser exe), same gate the pwd daemon uses for
-browser-credential ops. The kernel-attested caller uid (SO_PEERCRED via
-the bus) is what selects the ``<user>`` segment of the player name; a
-body field can NOT spoof it.
+``qdistro_browser_daemon_identity.daemon_forward_allowed`` — the caller
+must be EITHER the qdistro native-messaging host (``/proc`` executed-
+script + allowlisted parent-browser exe) OR the first-party qdbrowser
+process (``/proc`` executed-script match against the installed
+``qdbrowser`` entry point). Both are kernel-attested; same anchors the
+pwd daemon uses for browser-credential ops. The kernel-attested caller
+uid (SO_PEERCRED via the bus) is what selects the ``<user>`` segment of
+the player name; a body field can NOT spoof it.
 
 The published metadata is presentation-only. No security-sensitive data
 flows; the value is the cross-uid surfacing.
@@ -47,7 +49,8 @@ import sys
 from typing import Any, Callable
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
-    browser_bridge_allowed, browser_label, caller_advisory, username_for_uid,
+    browser_label, caller_advisory, daemon_forward_allowed, read_proc_ppid,
+    username_for_uid,
 )
 
 BUS_NAME = "org.qdistro.Mpris"
@@ -58,6 +61,20 @@ IFACE = "org.qdistro.Mpris1"
 # sanitised to the D-Bus member charset before interpolation.
 MPRIS_NAME_FMT = "org.mpris.MediaPlayer2.qdistro.{user}.{browser}"
 MPRIS_OBJ_PATH = "/org/mpris/MediaPlayer2"
+
+# Well-known name template the browser bridge owns for its *inbound*
+# surface (qdistro_browser_bridge.py: ``org.qdistro.BrowserBridge.<ppid>``
+# where ppid is the bridge's parent — i.e. the browser pid). The bridge
+# exposes a single method ``RequestTabs(s op, s args_json) -> s reply``;
+# an ``mpris.control`` op delivered there is routed down to the
+# originating tab. We derive the name from the kernel-attested bridge pid
+# at publish time (its PPid is the same value the bridge interpolated),
+# never from a body field — so a control op can only ever be addressed
+# back to the bridge connection that actually published the player.
+BRIDGE_NAME_FMT = "org.qdistro.BrowserBridge.{ppid}"
+BRIDGE_OBJ_PATH = "/org/qdistro/BrowserBridge"
+BRIDGE_IFACE = "org.qdistro.BrowserBridge1"
+BRIDGE_METHOD = "RequestTabs"
 
 _VALID_STATUSES = frozenset({"Playing", "Paused", "Stopped"})
 # Chromium mediaSession.playbackState values + a few synonyms the
@@ -128,39 +145,97 @@ class _BasePublisher:
     """Sink that owns the exported ``org.mpris.MediaPlayer2.*`` players.
 
     The pure handler calls :meth:`publish` with the resolved player name,
-    PlaybackStatus and Metadata; the production glib-backed implementation
-    claims the bus name lazily and pushes ``PropertiesChanged``. Tests
-    record the calls instead.
+    PlaybackStatus, Metadata, and the control-routing context
+    (``bridge_name`` / ``uid`` / ``browser``) bound to that player; the
+    production glib-backed implementation claims the bus name lazily,
+    pushes ``PropertiesChanged`` and wires the exported Play/Pause/etc
+    methods back through that bridge. Tests record the calls instead.
     """
 
     def publish(self, player_name: str, playback_status: str,
-                metadata: dict[str, Any]) -> None:
+                metadata: dict[str, Any], *, bridge_name: str = "",
+                uid: int = -1, browser: str = "") -> None:
         raise NotImplementedError
+
+
+def bridge_bus_name_for_pid(bridge_pid: int,
+                            *, ppid_reader=read_proc_ppid) -> str:
+    """Derive the bridge's inbound bus name from its kernel-attested pid.
+
+    The bridge owns ``org.qdistro.BrowserBridge.<ppid>`` where ``ppid`` is
+    its *own* parent (the browser pid, ``os.getppid()`` at bridge start).
+    We read that same PPid from ``/proc/<bridge_pid>/status`` so the
+    control op can only be addressed back to the connection that actually
+    published — there is no body field involved. Returns ``""`` when the
+    PPid is unreadable (racing/exited bridge), which fails the control
+    closed downstream.
+    """
+    ppid = ppid_reader(int(bridge_pid))
+    if not ppid:
+        return ""
+    return BRIDGE_NAME_FMT.format(ppid=int(ppid))
 
 
 class _BridgeClient:
     """Routes an inbound ``mpris.control`` back to the originating bridge.
 
     The admin's media widget calls ``Play`` / ``Pause`` on the exported
-    player; the publisher resolves which (uid, browser) it belongs to and
-    asks this client to deliver the control op to that bridge over the
-    user-relay surface. Injectable so the control path unit-tests.
+    player; the publisher resolves which bridge connection published it
+    (bound at publish time to a concrete ``org.qdistro.BrowserBridge.<ppid>``
+    bus name) and asks this client to deliver the control op there via the
+    bridge's ``RequestTabs("mpris.control", {...})`` inbound surface — the
+    same path the bridge already routes down to the originating tab's
+    media element (extension ``handleMprisControlInbound``).
+
+    The actual D-Bus ``call(bus_name, op, args_json) -> dict`` is injected
+    so the routing logic (op name, args shape, error envelope) unit-tests
+    without a session bus, mirroring the bridge's own ``_dbus_client`` and
+    qdbrowser's ``DaemonForwarder`` injectable-client pattern. Production
+    binds a jeepney-backed client lazily (see ``_main``).
     """
+
+    def __init__(self, bridge_bus_name: str,
+                 call: Callable[[str, str, str], dict] | None = None):
+        self._bus_name = bridge_bus_name
+        self._call = call
 
     def control(self, uid: int, browser: str, action: str,
                 tab_id: Any) -> dict:
-        raise NotImplementedError
+        """Deliver an ``mpris.control`` op to the bound bridge.
+
+        ``uid`` / ``browser`` are carried for audit/symmetry but are NOT a
+        privilege: the bridge connection is already pinned to the
+        publishing (uid, browser) by its bus name, so a control can never
+        be steered at a different user's bridge. The extension's inbound
+        handler keys off ``action`` + ``tab_id``.
+        """
+        if not self._bus_name:
+            return {"ok": False, "error": "no_bridge"}
+        if self._call is None:  # pragma: no cover - production lazy bind
+            self._call = _jeepney_bridge_call
+        args = json.dumps({"action": action, "tab_id": tab_id,
+                           "uid": int(uid), "browser": str(browser or "")})
+        return dict(self._call(self._bus_name, "mpris.control", args))
 
 
 def handle_publish(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
                    publisher: _BasePublisher,
                    bridge_gate: Callable[..., tuple[bool, str]]
-                   = browser_bridge_allowed) -> dict:
+                   = daemon_forward_allowed,
+                   bridge_name_fn: Callable[[int], str]
+                   = bridge_bus_name_for_pid) -> dict:
     """Pure ``mpris.publish`` core.
 
     ``req`` is the decoded bridge body; ``caller_uid`` / ``caller_pid``
     are the kernel-attested SO_PEERCRED values resolved by the D-Bus
     method wrapper (or supplied directly by tests).
+
+    Besides updating the exported player, this binds the player to the
+    *originating bridge's* inbound bus name (derived from the attested
+    ``caller_pid``), so a later Play/Pause on the exported player routes
+    the control back to exactly that bridge connection. The binding is
+    handed to ``publisher.publish`` as ``bridge_name``; a publisher that
+    does not export controls may ignore it.
 
     Returns the JSON-able reply dict. Fails closed (``parent_not_allowed``)
     when the caller is not the qdistro browser bridge.
@@ -172,8 +247,12 @@ def handle_publish(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
     player_name = player_name_for(caller_uid, parent_exe)
     status = normalize_playback_status(req.get("playback_status"))
     metadata = build_metadata(req, player_name)
+    browser = browser_label(parent_exe)
+    bridge_name = bridge_name_fn(caller_pid)
     try:
-        publisher.publish(player_name, status, metadata)
+        publisher.publish(player_name, status, metadata,
+                          bridge_name=bridge_name, uid=caller_uid,
+                          browser=browser)
     except Exception as e:  # noqa: BLE001 — never crash the RPC on a sink error
         return {"ok": False, "error": "publish_failed",
                 "detail": str(e)[:200]}
@@ -200,6 +279,36 @@ def handle_control(action: str, *, uid: int, browser: str, tab_id: Any,
 # D-Bus glue (production only; skipped in unit tests via import guard)
 # --------------------------------------------------------------------- #
 
+def _jeepney_bridge_call(bridge_bus_name: str, op: str,
+                         args_json: str) -> dict:  # pragma: no cover
+    """Default jeepney-backed call into a bridge's inbound surface.
+
+    Invokes ``RequestTabs(op, args_json) -> reply_json`` on the bridge's
+    ``org.qdistro.BrowserBridge.<ppid>`` connection over the SESSION bus
+    and decodes the JSON reply. Mirrors the bridge's own
+    ``_JeepneyDBusClient.call`` / qdbrowser's ``_jeepney_session_call``.
+    """
+    from jeepney import DBusAddress, new_method_call
+    from jeepney.io.blocking import open_dbus_connection
+    addr = DBusAddress(BRIDGE_OBJ_PATH, bus_name=bridge_bus_name,
+                       interface=BRIDGE_IFACE)
+    msg = new_method_call(addr, BRIDGE_METHOD, "ss", (op, args_json))
+    conn = open_dbus_connection(bus="SESSION")
+    try:
+        reply = conn.send_and_get_reply(msg, timeout=5.0)
+    finally:
+        conn.close()
+    if reply.header.message_type.name == "ERROR":
+        return {"ok": False, "error": "dbus_error",
+                "detail": str(reply.body)[:200]}
+    if reply.body and isinstance(reply.body[0], str):
+        try:
+            return json.loads(reply.body[0])
+        except ValueError:
+            return {"ok": True, "raw": reply.body[0]}
+    return {"ok": True, "body": list(reply.body)}
+
+
 def _main() -> int:  # pragma: no cover - requires a live session bus
     import dbus
     import dbus.service
@@ -216,11 +325,16 @@ def _main() -> int:  # pragma: no cover - requires a live session bus
             self._bus = session_bus
             self._players: dict[str, _ExportedPlayer] = {}
 
-        def publish(self, player_name, playback_status, metadata):
+        def publish(self, player_name, playback_status, metadata, *,
+                    bridge_name="", uid=-1, browser=""):
             player = self._players.get(player_name)
             if player is None:
                 player = _ExportedPlayer(self._bus, player_name)
                 self._players[player_name] = player
+            # Re-bind the control route on every publish: the bridge pid
+            # (hence its inbound bus name) can change across browser
+            # restarts while the (uid, browser) player name is stable.
+            player.bind_control(bridge_name, uid, browser)
             player.update(playback_status, metadata)
 
     class _ExportedPlayer(dbus.service.Object):
@@ -229,25 +343,59 @@ def _main() -> int:  # pragma: no cover - requires a live session bus
             super().__init__(session_bus, MPRIS_OBJ_PATH)
             self._status = "Stopped"
             self._metadata: dict[str, Any] = {}
+            self._bridge_name = ""
+            self._uid = -1
+            self._browser = ""
+            self._tab_id = None
+
+        def bind_control(self, bridge_name, uid, browser):
+            self._bridge_name = bridge_name or ""
+            self._uid = int(uid)
+            self._browser = str(browser or "")
 
         def update(self, status, metadata):
             self._status = status
             self._metadata = metadata
+            # Remember the active tab so a control op can be routed to the
+            # exact media element the metadata came from.
+            tid = metadata.get("mpris:trackid", "")
+            if isinstance(tid, str) and "/" in tid:
+                self._tab_id = tid.rsplit("/", 1)[-1]
             self.PropertiesChanged(
                 "org.mpris.MediaPlayer2.Player",
                 {"PlaybackStatus": status, "Metadata": metadata}, [])
 
+        def _route(self, verb):
+            """Dispatch an exported-player control verb back to the bound
+            bridge via the pure ``handle_control`` core."""
+            client = _BridgeClient(self._bridge_name,
+                                   call=_jeepney_bridge_call)
+            return handle_control(verb, uid=self._uid, browser=self._browser,
+                                  tab_id=self._tab_id, bridge_client=client)
+
         @dbus.service.method("org.mpris.MediaPlayer2.Player")
         def PlayPause(self):
-            pass
+            self._route("playpause")
 
         @dbus.service.method("org.mpris.MediaPlayer2.Player")
         def Play(self):
-            pass
+            self._route("play")
 
         @dbus.service.method("org.mpris.MediaPlayer2.Player")
         def Pause(self):
-            pass
+            self._route("pause")
+
+        @dbus.service.method("org.mpris.MediaPlayer2.Player")
+        def Stop(self):
+            self._route("stop")
+
+        @dbus.service.method("org.mpris.MediaPlayer2.Player")
+        def Next(self):
+            self._route("next")
+
+        @dbus.service.method("org.mpris.MediaPlayer2.Player")
+        def Previous(self):
+            self._route("previous")
 
         @dbus.service.signal("org.freedesktop.DBus.Properties",
                              signature="sa{sv}as")

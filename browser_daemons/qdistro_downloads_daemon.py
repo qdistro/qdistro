@@ -37,7 +37,7 @@ import sys
 from typing import Any, Callable
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
-    browser_bridge_allowed, username_for_uid,
+    daemon_forward_allowed, username_for_uid,
 )
 
 BUS_NAME = "org.qdistro.Downloads"
@@ -96,7 +96,7 @@ def path_allowed_for_uid(path: str, uid: int,
 def handle_notify(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
                   notifier: _BaseNotifier,
                   bridge_gate: Callable[..., tuple[bool, str]]
-                  = browser_bridge_allowed) -> dict:
+                  = daemon_forward_allowed) -> dict:
     """Pure ``downloads.notify`` core.
 
     Only *completed* downloads raise a notification; in-progress / sparse

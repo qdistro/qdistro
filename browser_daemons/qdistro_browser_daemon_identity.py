@@ -147,6 +147,109 @@ def browser_bridge_allowed(
     return True, "browser-bridge"
 
 
+# --------------------------------------------------------------------- #
+# qdbrowser forward allowance (Track 02 unification — explicit, narrow)
+# --------------------------------------------------------------------- #
+#
+# qdbrowser is a *first-party* qdistro browser, not a third-party browser
+# launched by an allowlisted RPM binary, so it can never satisfy
+# ``browser_bridge_allowed`` (no native-messaging host script, no
+# allowlisted parent-browser exe). Yet its ``DaemonForwarder`` needs to
+# reach the same SESSION-bus daemons so qdbrowser media/downloads surface
+# in the admin widget alongside Firefox/Chrome.
+#
+# The allowance is a deliberate, NARROW security decision:
+#
+#   * It admits ONLY qdbrowser's real identity — a process whose
+#     kernel-attested *executed script* (read from /proc, never the body)
+#     is the installed ``qdbrowser`` console-script entry point. It is NOT
+#     "any same-uid parent" and NOT a body-supplied marker (the
+#     ``parent_exe: "qdbrowser"`` field in the forward body stays purely
+#     advisory — used for the player-name label / audit, never trusted).
+#   * The executed-script resolution reuses the exact valueless-flag /
+#     operand-flag rules ``browser_bridge_allowed`` uses, so a hostile
+#     ``python3 -W org/qdbrowser evil.py`` cannot smuggle the allowed path
+#     into a flag operand while Python runs a different file.
+#   * It fails closed on any unreadable /proc entry.
+#
+# Caller uid is still resolved by the daemon from SO_PEERCRED, so this
+# only decides *whether* a qdbrowser caller may forward — never *which
+# user* the forward belongs to (that is always the attested uid).
+#
+# The allowlist defaults to the common ``-e .`` / packaged console-script
+# locations and is overridable for tests / non-standard layouts via
+# ``QDISTRO_QDBROWSER_SCRIPTS`` (``:``-separated). Empty list ⇒ no
+# qdbrowser caller is ever admitted (fail-closed by configuration).
+
+QDBROWSER_SCRIPTS = tuple(
+    p for p in os.environ.get(
+        "QDISTRO_QDBROWSER_SCRIPTS",
+        ":".join((
+            "/usr/bin/qdbrowser",
+            "/usr/local/bin/qdbrowser",
+            os.path.expanduser("~/.local/bin/qdbrowser"),
+        ))).split(":") if p)
+
+
+def qdbrowser_forwarder_allowed(
+        pid: int,
+        *,
+        scripts: tuple[str, ...] | None = None,
+        cmdline_reader=read_proc_cmdline,
+) -> tuple[bool, str]:
+    """Verify the calling pid is the first-party qdbrowser process.
+
+    Returns ``(allowed, reason)``. Allowed only when the executed script
+    (resolved exactly as in :func:`browser_bridge_allowed`) realpath-
+    matches one of the allowlisted qdbrowser entry points. Fails closed on
+    an empty allowlist, an unreadable cmdline, or a smuggled flag operand.
+    """
+    allowed_scripts = {
+        os.path.realpath(p)
+        for p in (scripts if scripts is not None else QDBROWSER_SCRIPTS)
+    }
+    if not allowed_scripts:
+        return False, "qdbrowser-not-configured"
+    cmdline = cmdline_reader(pid)
+    executed_script = ""
+    for arg in cmdline[1:]:
+        if arg.startswith("-"):
+            if arg in _VALUELESS_FLAGS:
+                continue
+            return False, "not-qdbrowser"
+        executed_script = arg
+        break
+    if (not executed_script
+            or os.path.realpath(executed_script) not in allowed_scripts):
+        return False, "not-qdbrowser"
+    return True, "qdbrowser"
+
+
+def daemon_forward_allowed(
+        pid: int,
+        *,
+        bridge_gate=browser_bridge_allowed,
+        qdbrowser_gate=qdbrowser_forwarder_allowed,
+) -> tuple[bool, str]:
+    """Combined forward-parent gate used by the Phase-9e daemons.
+
+    Accepts a forward from EITHER the native-messaging browser bridge
+    (Firefox/Chrome via ``browser_bridge_allowed``) OR the first-party
+    qdbrowser process (``qdbrowser_forwarder_allowed``). Both are
+    kernel-attested executed-script checks; anything else fails closed
+    with the bridge gate's reason (so existing audit lines are unchanged
+    for the non-qdbrowser case).
+    """
+    ok, reason = bridge_gate(pid)
+    if ok:
+        return True, reason
+    ok2, reason2 = qdbrowser_gate(pid)
+    if ok2:
+        return True, reason2
+    # Surface the bridge-gate reason by default; it is the primary path.
+    return False, reason
+
+
 def username_for_uid(uid: int) -> str:
     """Resolve a uid to its login name, falling back to ``uid:<n>`` so
     the result is always a well-formed, addressable silo label even for

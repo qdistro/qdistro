@@ -138,10 +138,12 @@ class _RecordingPublisher(mpris._BasePublisher):
         self.calls = []
         self._fail = fail
 
-    def publish(self, player_name, playback_status, metadata):
+    def publish(self, player_name, playback_status, metadata, *,
+                bridge_name="", uid=-1, browser=""):
         if self._fail:
             raise RuntimeError("sink boom")
-        self.calls.append((player_name, playback_status, metadata))
+        self.calls.append((player_name, playback_status, metadata,
+                           bridge_name, uid, browser))
 
 
 class TestMprisDaemon:
@@ -152,16 +154,23 @@ class TestMprisDaemon:
              "playback_status": "playing",
              "parent_exe": "/usr/lib64/firefox/firefox", "tab_id": 5},
             caller_uid=0, caller_pid=1234, publisher=pub,
-            bridge_gate=allow_gate)
+            bridge_gate=allow_gate,
+            bridge_name_fn=lambda pid: f"org.qdistro.BrowserBridge.{pid}")
         assert reply["ok"] is True
         assert reply["playback_status"] == "Playing"
         assert reply["player"] == "org.mpris.MediaPlayer2.qdistro.root.firefox"
         assert len(pub.calls) == 1
-        name, status, meta = pub.calls[0]
+        name, status, meta, bridge_name, uid, browser = pub.calls[0]
         assert status == "Playing"
         assert meta["xesam:title"] == "Song"
         assert meta["xesam:artist"] == ["Band"]
         assert meta["mpris:trackid"].endswith("/5")
+        # The player is bound to the originating bridge connection so a
+        # later Play/Pause routes back to it, and to the attested uid +
+        # resolved browser label.
+        assert bridge_name == "org.qdistro.BrowserBridge.1234"
+        assert uid == 0
+        assert browser == "firefox"
 
     def test_publish_user_in_player_name(self):
         # uid 0 -> root; the <user> segment is the kernel-attested uid,
@@ -170,7 +179,8 @@ class TestMprisDaemon:
         reply = mpris.handle_publish(
             {"title": "x", "user": "attacker",
              "parent_exe": "/usr/bin/chromium"},
-            caller_uid=0, caller_pid=1, publisher=pub, bridge_gate=allow_gate)
+            caller_uid=0, caller_pid=1, publisher=pub, bridge_gate=allow_gate,
+            bridge_name_fn=lambda pid: "org.qdistro.BrowserBridge.0")
         assert reply["player"] == (
             "org.mpris.MediaPlayer2.qdistro.root.chromium")
 
@@ -187,7 +197,8 @@ class TestMprisDaemon:
         pub = _RecordingPublisher(fail=True)
         reply = mpris.handle_publish(
             {"title": "x"}, caller_uid=0, caller_pid=1, publisher=pub,
-            bridge_gate=allow_gate)
+            bridge_gate=allow_gate,
+            bridge_name_fn=lambda pid: "org.qdistro.BrowserBridge.0")
         assert reply["ok"] is False
         assert reply["error"] == "publish_failed"
 
@@ -221,6 +232,9 @@ class TestMprisDaemon:
 
     def test_control_rejects_bad_action(self):
         class _BC(mpris._BridgeClient):
+            def __init__(self):
+                pass
+
             def control(self, *a):
                 raise AssertionError("should not be called")
 
