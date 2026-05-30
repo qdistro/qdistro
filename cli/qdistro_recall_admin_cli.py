@@ -266,6 +266,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qdistro-recall-admin",
         description="Admin CLI for cross-uid recall + live browser state.")
+    # Cheap, side-effect-free health smoke. Handled before _require_root()
+    # in main() so the version check works without privileges or a bus.
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     p.add_argument("--root", default=None,
                    help="recall DB root "
                         "(default $QDISTRO_RECALL_ROOT or /var/lib/qdistro/recall)")
@@ -306,10 +310,17 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = _build_argparser()
+    # --version is a side-effect-free smoke check: handle it (the
+    # action="version" path exits 0 inside parse_args) before the root
+    # gate so the health probe needs no privileges.
+    raw = sys.argv[1:] if argv is None else argv
+    if "--version" in raw:
+        parser.parse_args(raw)
     # No env-var escape hatch. Tests monkey-patch _require_root
     # directly; production runs through it.
     _require_root()
-    args = _build_argparser().parse_args(argv)
+    args = parser.parse_args(argv)
     return args.fn(args)
 
 

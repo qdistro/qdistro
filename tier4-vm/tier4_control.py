@@ -404,6 +404,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="tier4_control",
         description="Tier-4 VM control wrapper: claims App1 bus name, "
                     "exposes Close() RPC, runs the display client.")
+    # Cheap, side-effect-free health smoke: --version prints + exits 0
+    # before any required-arg validation or libvirt/bus access.
+    parser.add_argument("--version", action="version",
+                        version="%(prog)s (qdistro)")
     parser.add_argument("--vm-name", required=True,
                         help="Libvirt domain name (== secctx silo tag).")
     parser.add_argument("viewer_argv", nargs=argparse.REMAINDER,

@@ -171,6 +171,9 @@ def cmd_push(args) -> int:
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="qdistro-phone")
+    # Cheap, side-effect-free health smoke (no config, no bus, no root).
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
     sub = p.add_subparsers(dest="cmd", required=True)
 

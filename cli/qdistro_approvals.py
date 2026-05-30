@@ -205,6 +205,10 @@ def cmd_gc(_args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="qdistro-approvals",
                                  description=__doc__.split("\n")[0])
+    # Cheap, side-effect-free health smoke. Handled before _require_root()
+    # in main() so the version check works without privileges.
+    ap.add_argument("--version", action="version",
+                    version="%(prog)s (qdistro)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="List currently-cached approvals").set_defaults(fn=cmd_list)
@@ -233,8 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    parser = build_parser()
+    # --version is a side-effect-free smoke check: handle it (the
+    # action="version" path exits 0 inside parse_args) before the root
+    # gate so the health probe needs no privileges.
+    if "--version" in sys.argv[1:]:
+        parser.parse_args()
     _require_root()
-    args = build_parser().parse_args()
+    args = parser.parse_args()
     return args.fn(args)
 
 

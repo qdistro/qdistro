@@ -56,6 +56,9 @@ def _load_eng():
 
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="qdistro-snap-export")
+    # Cheap, side-effect-free health smoke (no btrfs, no ssh, no root).
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_run = sub.add_parser(

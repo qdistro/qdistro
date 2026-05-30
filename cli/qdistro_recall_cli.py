@@ -182,6 +182,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="qdistro-recall",
         description="Phase-8 MVP recall ingest + search CLI.")
+    # Cheap, side-effect-free health smoke (no DB, no root, no bus). The
+    # action="version" path prints + exits 0 before subcommand dispatch.
+    p.add_argument("--version", action="version",
+                   version="%(prog)s (qdistro)")
     p.add_argument("--root", default=None,
                    help="recall DB root "
                         "(default $QDISTRO_RECALL_ROOT or /var/lib/qdistro/recall)")
