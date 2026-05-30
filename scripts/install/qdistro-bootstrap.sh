@@ -118,6 +118,27 @@
 #                          non-fatal. Default OFF (warn-and-continue) — opt in
 #                          for unattended daily-driver installs.
 #   --tier4-base           opt-in: build the tier-4 guest base qcow2 image
+#
+#   Installer-chain step-level rerun / resume (partial-failure recovery for
+#   the install-*.sh chain; the coarse --skip-* flags are whole-phase toggles
+#   and cannot skip an already-completed prefix). Each step records its name
+#   in a state file ($QDISTRO_STATE_DIR/installer-chain.state, written
+#   atomically) once it succeeds. Exactly one of the three modes may be given:
+#   --resume               re-run the installer chain skipping every step
+#                          already recorded as complete; start after the last
+#                          successful one. A missing/empty state file means
+#                          "nothing done yet" and runs the whole chain; a
+#                          state file naming an UNKNOWN step is refused
+#                          (fail-closed) so a corrupt file never silently
+#                          skips/re-runs the wrong installers.
+#   --from-step NAME       run the installer chain from step NAME to the end
+#                          (inclusive), ignoring recorded state. Unknown NAME
+#                          is a fatal error.
+#   --rerun-step NAME      run EXACTLY the one installer-chain step NAME (the
+#                          rest of the chain is skipped). Unknown NAME is a
+#                          fatal error.
+#   --list-steps           print the ordered installer-chain step names and
+#                          exit (no install performed).
 #   -h, --help             show help and exit
 #
 # Equivalent env vars (CLI wins): QDISTRO_ADMIN_PASSWORD,
@@ -126,7 +147,7 @@
 #   QDISTRO_SKIP_PACKAGES, QDISTRO_SKIP_GREETD,
 #   QDISTRO_SKIP_SUBVOLUMES, QDISTRO_SKIP_SOURCES,
 #   QDISTRO_SKIP_BUILD, QDISTRO_BUILD_TIER4_BASE,
-#   QDISTRO_RESET_PASSWORDS, QDISTRO_STRICT.
+#   QDISTRO_RESET_PASSWORDS, QDISTRO_STRICT, QDISTRO_STATE_DIR.
 
 set -euo pipefail
 
@@ -173,6 +194,39 @@ RESET_PASSWORDS="${QDISTRO_RESET_PASSWORDS:-}"
 # install fails loudly rather than producing a half-installed system.
 # Optional bring-up / smoke checks stay non-fatal even under strict.
 STRICT="${QDISTRO_STRICT:-}"
+
+# ---------------------------------------------------------------------------
+# Installer-chain step-level rerun / resume state.
+#
+# The installer chain (install_python_modules) iterates an ordered array of
+# install-*.sh steps, several of which are NOT idempotent. The coarse
+# --skip-* flags are whole-phase toggles only; they cannot skip an
+# already-completed prefix of the chain. To support partial-failure recovery
+# without re-running earlier non-idempotent installers we persist, after each
+# step succeeds, that step's name into a state file (one name per line,
+# written atomically via a temp file + rename). The modes below read it:
+#
+#   --resume          run only the steps AFTER the last successfully recorded
+#                     one (skip the completed prefix). If the state file is
+#                     missing/empty it falls back to running the whole chain
+#                     (nothing recorded == nothing done). If the state file is
+#                     present but CORRUPT (contains a name that is not a known
+#                     step) the run is REFUSED (fail-closed) rather than
+#                     guessing — the operator must inspect/clear it.
+#   --from-step NAME  run from NAME to the end of the chain (inclusive),
+#                     regardless of recorded state. Unknown NAME is an error.
+#   --rerun-step NAME run EXACTLY the one step NAME (and nothing else in the
+#                     chain). Unknown NAME is an error.
+#   --list-steps      print the ordered step names and exit 0.
+#
+# Exactly one of --resume / --from-step / --rerun-step may be given.
+# QDISTRO_STATE_DIR overrides the default state directory.
+QDISTRO_STATE_DIR="${QDISTRO_STATE_DIR:-/var/lib/qdistro/bootstrap}"
+CHAIN_STATE_FILE="$QDISTRO_STATE_DIR/installer-chain.state"
+RESUME=""           # --resume
+FROM_STEP=""        # --from-step NAME
+RERUN_STEP=""       # --rerun-step NAME
+LIST_STEPS=""       # --list-steps
 
 # Set by ensure_*_account: 1 if the account already existed before this run
 # (so its password must NOT be touched unless --reset-passwords is given),
@@ -251,6 +305,12 @@ parse_args() {
             --tier4-base)        BUILD_TIER4_BASE=1 ;;
             --strict)            STRICT=1 ;;
             --reset-passwords)   RESET_PASSWORDS=1 ;;
+            --resume)            RESUME=1 ;;
+            --from-step=*)       FROM_STEP="${1#*=}" ;;
+            --from-step)         shift; FROM_STEP="$1" ;;
+            --rerun-step=*)      RERUN_STEP="${1#*=}" ;;
+            --rerun-step)        shift; RERUN_STEP="$1" ;;
+            --list-steps)        LIST_STEPS=1 ;;
             -h|--help)           print_help; exit 0 ;;
             *) die "unknown argument: $1 (try --help)" ;;
         esac
@@ -272,6 +332,18 @@ parse_args() {
     case "$BRANCH" in
         *..*) die "invalid --branch '$BRANCH' ('..' not allowed)" ;;
     esac
+
+    # Installer-chain rerun mode: at most ONE of --resume / --from-step /
+    # --rerun-step. They select different, mutually exclusive subsets of the
+    # chain; combining them is ambiguous, so reject it up front rather than
+    # silently letting one win.
+    local _chain_modes=0
+    [ -n "$RESUME" ]      && _chain_modes=$((_chain_modes + 1))
+    [ -n "$FROM_STEP" ]   && _chain_modes=$((_chain_modes + 1))
+    [ -n "$RERUN_STEP" ]  && _chain_modes=$((_chain_modes + 1))
+    if [ "$_chain_modes" -gt 1 ]; then
+        die "choose at most one of --resume / --from-step / --rerun-step (they select mutually exclusive parts of the installer chain)"
+    fi
 
     # Password fds are operator input that flows into `read -u <fd>` and an
     # `exec <fd><&-` close (qd_read_password_fd). A non-numeric value would be
@@ -1115,42 +1187,171 @@ pip_install_apps() {
 # ---------------------------------------------------------------------------
 # 8. Python modules + systemd units (chain the existing installers)
 # ---------------------------------------------------------------------------
-install_python_modules() {
-    log "installing Python modules + systemd units..."
-    local QD="$REPO_ROOT/qdistro"
-    local installers=(
-        "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
-        "scripts/install/install-session-manager.sh        $QD/session_manager"
-        "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
-        "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
-        "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
-        "scripts/install/install-browser-bridge-for-vm.sh  $QD/browser_bridge"
-        "scripts/install/install-portal-backend-for-vm.sh  $QD"
-        "scripts/install/install-phone-for-vm.sh           $QD/phone"
-        "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-        "scripts/install/install-recall-for-vm.sh          $QD"
-        "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
-        "scripts/install/install-tier3-for-vm.sh           $QD"
-        "scripts/install/install-tier4-host-for-vm.sh      $QD"
-        "scripts/install/install-tier5-for-vm.sh           $QD"
-        "scripts/install/install-tier5b-for-vm.sh          $QD"
-    )
-    cd "$QD"
-    for entry in "${installers[@]}"; do
-        # shellcheck disable=SC2086
-        set -- $entry
-        local installer="$1" src_dir="$2"
-        if [ -x "$installer" ]; then
-            log "  -> $(basename "$installer")"
-            # Core op: installer-chain step. Non-fatal by default
-            # (warn-and-continue), fatal under --strict.
-            bash "$installer" "$src_dir" \
-                || fail_or_warn "$installer failed (default mode continues, --strict aborts)"
-        else
-            # A missing/unexecutable core installer is also a core failure.
-            fail_or_warn "  installer not found or not executable: $installer"
+# Ordered installer chain. Each entry is "step-name|installer-path|src-suffix"
+# where step-name is a stable, operator-facing identifier (used by --resume /
+# --from-step / --rerun-step / the state file), installer-path is relative to
+# $REPO_ROOT/qdistro, and src-suffix is appended to $REPO_ROOT/qdistro to form
+# the source dir argument ("" means the qdistro root itself). Keeping the name
+# decoupled from the script basename means the state file stays stable even if
+# a script is renamed. Defined as a function (not a global array) so it works
+# whether the file is executed or sourced by the test harness.
+installer_chain_entries() {
+    cat <<'EOF'
+broker|scripts/install/install-broker-for-qdwin.sh|/broker
+session-manager|scripts/install/install-session-manager.sh|/session_manager
+polkit|scripts/install/install-polkit-agent-for-vm.sh|/polkit
+pwd|scripts/install/install-pwd-for-vm.sh|/pwd
+qsu|scripts/install/install-qsu-for-vm.sh|/qsu
+browser-bridge|scripts/install/install-browser-bridge-for-vm.sh|/browser_bridge
+portal-backend|scripts/install/install-portal-backend-for-vm.sh|
+phone|scripts/install/install-phone-for-vm.sh|/phone
+print|scripts/install/install-print-proxy-for-vm.sh|/print
+recall|scripts/install/install-recall-for-vm.sh|
+snapshots|scripts/install/install-snapshots-for-vm.sh|/snapshots
+tier3|scripts/install/install-tier3-for-vm.sh|
+tier4-host|scripts/install/install-tier4-host-for-vm.sh|
+tier5|scripts/install/install-tier5-for-vm.sh|
+tier5b|scripts/install/install-tier5b-for-vm.sh|
+EOF
+}
+
+# installer_chain_names — print the ordered step names, one per line.
+installer_chain_names() {
+    installer_chain_entries | awk -F'|' 'NF{print $1}'
+}
+
+# chain_step_known <name> — return 0 if <name> is a valid step name.
+chain_step_known() {
+    installer_chain_names | grep -qxF "$1"
+}
+
+# chain_state_completed — print the recorded-complete step names (one per
+# line) from $CHAIN_STATE_FILE, or nothing if the file is absent/empty.
+# Blank lines and lines beginning with '#' are ignored.
+chain_state_completed() {
+    [ -f "$CHAIN_STATE_FILE" ] || return 0
+    grep -vE '^[[:space:]]*(#|$)' "$CHAIN_STATE_FILE" 2>/dev/null || true
+}
+
+# chain_state_record <name> — append <name> to the state file ATOMICALLY:
+# write the new contents to a temp file in the same dir, then rename over the
+# state file (rename is atomic on the same filesystem) so a crash mid-write
+# never leaves a half-written/truncated state file. Idempotent: re-recording an
+# already-present name does not duplicate it.
+chain_state_record() {
+    local name="$1" tmp
+    install -d -m 0755 "$QDISTRO_STATE_DIR"
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX")" \
+        || { warn "could not create state temp file in $QDISTRO_STATE_DIR; step '$name' not recorded"; return 0; }
+    {
+        chain_state_completed
+        printf '%s\n' "$name"
+    } | awk 'NF && !seen[$0]++' > "$tmp"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$CHAIN_STATE_FILE"
+}
+
+# chain_resume_validate — fail-closed validation of the state file for a
+# --resume run: every recorded name MUST be a known step, otherwise the file
+# is corrupt and we refuse to run (don't guess which installers already ran).
+# A missing/empty state file is fine (nothing recorded yet). Called once
+# before the chain loop; the per-step skip decision is chain_step_completed.
+chain_resume_validate() {
+    local names completed c
+    names="$(installer_chain_names)"
+    completed="$(chain_state_completed)"
+    [ -n "$completed" ] || return 0
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        if ! printf '%s\n' "$names" | grep -qxF "$c"; then
+            die "installer-chain state file $CHAIN_STATE_FILE is corrupt: records unknown step '$c'; refusing to --resume (inspect/clear it, or use --from-step). Steps: $(installer_chain_names | tr '\n' ' ')"
         fi
-    done
+    done <<EOF
+$completed
+EOF
+}
+
+# chain_step_completed <name> — return 0 if <name> is recorded complete in the
+# state file. Used by --resume to skip ANY already-completed step (not just a
+# contiguous prefix), so a re-run after a mid-chain failure re-runs exactly the
+# steps that did NOT finish — the genuinely-idempotent recovery behaviour.
+chain_step_completed() {
+    chain_state_completed | grep -qxF "$1"
+}
+
+# run_installer_step <name> <installer-rel-path> <src-dir> — execute one chain
+# step (relative to the already-cwd'd qdistro dir) and, on success, record it
+# in the state file. Same fatal/warn classification as before.
+run_installer_step() {
+    local name="$1" installer="$2" src_dir="$3"
+    if [ -x "$installer" ]; then
+        log "  -> [$name] $(basename "$installer")"
+        # Core op: installer-chain step. Non-fatal by default
+        # (warn-and-continue), fatal under --strict.
+        if bash "$installer" "$src_dir"; then
+            chain_state_record "$name"
+        else
+            fail_or_warn "$installer ([$name]) failed (default mode continues, --strict aborts)"
+        fi
+    else
+        # A missing/unexecutable core installer is also a core failure.
+        fail_or_warn "  installer not found or not executable: $installer ([$name])"
+    fi
+}
+
+install_python_modules() {
+    local QD="$REPO_ROOT/qdistro"
+    cd "$QD"
+
+    # Decide which steps to run based on the rerun/resume mode. Default
+    # (no mode): the full chain. Each mode is validated fail-closed (unknown
+    # step name / corrupt state aborts the run before any step executes).
+    #   mode="full"   run every step
+    #   mode="only"   run exactly $only_step
+    #   mode="from"   run from $from_step to the end (inclusive)
+    #   mode="resume" run every step NOT already recorded complete
+    local mode="full" only_step="" from_step=""
+    if [ -n "$RERUN_STEP" ]; then
+        chain_step_known "$RERUN_STEP" \
+            || die "--rerun-step '$RERUN_STEP' is not a known installer-chain step. Steps: $(installer_chain_names | tr '\n' ' ')"
+        mode="only"; only_step="$RERUN_STEP"
+        log "installer chain: rerunning ONLY step '$RERUN_STEP'"
+    elif [ -n "$FROM_STEP" ]; then
+        chain_step_known "$FROM_STEP" \
+            || die "--from-step '$FROM_STEP' is not a known installer-chain step. Steps: $(installer_chain_names | tr '\n' ' ')"
+        mode="from"; from_step="$FROM_STEP"
+        log "installer chain: starting from step '$FROM_STEP' to end (inclusive)"
+    elif [ -n "$RESUME" ]; then
+        # Validate the state file up front (fail-closed on corruption).
+        chain_resume_validate
+        mode="resume"
+        if [ -z "$(chain_state_completed)" ]; then
+            log "installer chain: --resume but no completed steps recorded (state file missing/empty) — running the full chain"
+        else
+            log "installer chain: --resume skipping already-completed steps ($(chain_state_completed | tr '\n' ' '))"
+        fi
+    fi
+
+    log "installing Python modules + systemd units..."
+    local name installer src_suffix from_reached=""
+    while IFS='|' read -r name installer src_suffix; do
+        [ -n "$name" ] || continue
+        case "$mode" in
+            only)
+                [ "$name" = "$only_step" ] || continue ;;
+            from)
+                # Skip until we hit $from_step, then run the rest.
+                if [ -z "$from_reached" ]; then
+                    [ "$name" = "$from_step" ] && from_reached=1 || continue
+                fi ;;
+            resume)
+                if chain_step_completed "$name"; then
+                    log "  -> [$name] already complete (--resume) — skipping"
+                    continue
+                fi ;;
+        esac
+        run_installer_step "$name" "$installer" "$QD$src_suffix"
+    done < <(installer_chain_entries)
 }
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1574,14 @@ smoke_check() {
 # ---------------------------------------------------------------------------
 main() {
     parse_args "$@"
+
+    # --list-steps: print the ordered installer-chain step names and exit.
+    # No install is performed and root is not required (read-only query).
+    if [ -n "$LIST_STEPS" ]; then
+        installer_chain_names
+        exit 0
+    fi
+
     require_root
     detect_distro
     prompt_inputs
