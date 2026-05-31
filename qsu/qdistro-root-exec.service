@@ -34,10 +34,10 @@ RestartSec=2s
 NoNewPrivileges=false
 # Config dirs read-only, /var /etc writable only via explicit paths.
 ProtectSystem=full
-# Never read/write user homes from the service or its children. Spawned
-# commands inherit this service's mount namespace, so qsu is intentionally
-# not a byte-for-byte sudo replacement until exec is split into a helper with
-# a different sandbox contract.
+# User homes are mounted read-only for the service and its children. Spawned
+# commands inherit this service's mount namespace, so qsu is intentionally not
+# a byte-for-byte sudo replacement until exec is split into a helper with a
+# different sandbox contract.
 ProtectHome=read-only
 # Don't expose the service to per-user /run/user or private IPC.
 PrivateTmp=true

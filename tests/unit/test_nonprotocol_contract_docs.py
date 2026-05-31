@@ -21,3 +21,10 @@ def test_qsu_service_documents_mount_namespace_inheritance():
     unit = (ROOT / "qsu" / "qdistro-root-exec.service").read_text(encoding="utf-8")
     assert "commands inherit this service's mount namespace" in unit
     assert "access is independent of this" not in unit
+    assert "Never read/write user homes" not in unit
+
+
+def test_pwd_readme_does_not_claim_get_portal_key_uid_gate():
+    readme = (ROOT / "pwd" / "README.md").read_text(encoding="utf-8")
+    assert "GetPortalKey(app_id)` | audited caller; test-open peer gate" in readme
+    assert "GetPortalKey(app_id)` | non-admin" not in readme
