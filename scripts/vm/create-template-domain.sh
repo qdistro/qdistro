@@ -102,8 +102,15 @@ cat > "$TMPXML" <<EOF
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+    </channel>
     <input type='tablet' bus='usb'/>
     <input type='keyboard' bus='usb'/>
+    <graphics type='spice' autoport='yes'>
+      <listen type='address'/>
+      <image compression='off'/>
+    </graphics>
 $VIDEO_XML
     <memballoon model='virtio'/>
   </devices>
