@@ -9,9 +9,11 @@
 # Layout:
 #   /usr/libexec/qdistro/qdistro_browser_bridge.py    # host module
 #   /usr/libexec/qdistro/qdistro_browser_install.py   # install module
+#   /usr/libexec/qdistro/qdistro_*_daemon.py          # 9e session daemons
 #   /usr/lib/qdistro/browser-bridge                   # exec-stub
 #   /usr/local/bin/qdistro-browser-install            # admin CLI
 #   /usr/share/qdistro/browser-extension/             # WebExtension src
+#   /etc/systemd/user/qdistro-{downloads,mpris,...}.service
 #
 # The bridge "binary" at /usr/lib/qdistro/browser-bridge is a tiny
 # bash exec stub. The browser launches it; it execs the python module
@@ -29,6 +31,7 @@ SRC=${1:-/root/browser-bridge-src}
 # ``from qdbrowser.pwd_autofill import ...`` (see s105 in
 # tests/integration/vm/, search-path lines 432-434).
 QDBROWSER_PKG="${2:-}"
+BROWSER_DAEMONS_SRC="${3:-}"
 if [ -z "$QDBROWSER_PKG" ]; then
     for cand in \
         "$SRC/../../qdbrowser/qdbrowser" \
@@ -36,6 +39,17 @@ if [ -z "$QDBROWSER_PKG" ]; then
         "/root/qdistro-src/qdbrowser/qdbrowser" \
         "/root/qdbrowser-src/qdbrowser"; do
         if [ -f "$cand/__init__.py" ]; then QDBROWSER_PKG="$cand"; break; fi
+    done
+fi
+if [ -z "$BROWSER_DAEMONS_SRC" ]; then
+    for cand in \
+        "$SRC/../browser_daemons" \
+        "$SRC/../../qdistro/browser_daemons" \
+        "/root/qdistro-src/qdistro/browser_daemons"; do
+        if [ -f "$cand/qdistro_downloads_daemon.py" ]; then
+            BROWSER_DAEMONS_SRC="$cand"
+            break
+        fi
     done
 fi
 if [ ! -d "$SRC" ]; then
@@ -48,12 +62,45 @@ DEST_LIB_BIN=/usr/lib/qdistro
 DEST_BIN=/usr/local/bin
 DEST_SHARE=/usr/share/qdistro/browser-extension
 DEST_QDBROWSER=/usr/local/lib/qdistro/qdbrowser
+DEST_USER_SYSD=/etc/systemd/user
 
-install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_LIB_BIN" "$DEST_BIN" "$DEST_SHARE"
+install -d -m 0755 \
+    "$DEST_LIB_QDISTRO" "$DEST_LIB_BIN" "$DEST_BIN" "$DEST_SHARE" \
+    "$DEST_USER_SYSD"
 
 # Module + install module.
 install -m 0644 "$SRC/qdistro_browser_bridge.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_browser_install.py" "$DEST_LIB_QDISTRO/"
+
+# Phase-9e per-user desktop-integration daemons. The bridge forwards
+# download/media/notification/compositor events to these well-known
+# SESSION-bus services, so installing only the native-messaging host
+# leaves every Phase-9e unit test and runtime feature with no bus owner.
+if [ -z "$BROWSER_DAEMONS_SRC" ] || [ ! -d "$BROWSER_DAEMONS_SRC" ]; then
+    echo "[install-browser-bridge] missing browser_daemons source dir" >&2
+    exit 2
+fi
+install -m 0644 \
+    "$BROWSER_DAEMONS_SRC/qdistro_browser_daemon_identity.py" \
+    "$DEST_LIB_QDISTRO/"
+for daemon in downloads mpris notifications compositor; do
+    install -m 0755 \
+        "$BROWSER_DAEMONS_SRC/qdistro_${daemon}_daemon.py" \
+        "$DEST_LIB_QDISTRO/"
+    install -m 0644 \
+        "$BROWSER_DAEMONS_SRC/qdistro-${daemon}.service" \
+        "$DEST_USER_SYSD/"
+done
+systemctl daemon-reload 2>/dev/null || true
+systemctl --global enable \
+    qdistro-downloads.service \
+    qdistro-mpris.service \
+    qdistro-notifications.service \
+    qdistro-compositor.service >/dev/null 2>&1 || {
+    echo "[install-browser-bridge] could not globally enable browser daemon user units" >&2
+    exit 3
+}
+echo "[install-browser-bridge] installed Phase-9e browser daemons -> $DEST_LIB_QDISTRO"
 
 # Exec stub at the bridge-spec pinned path.
 cat >"$DEST_LIB_BIN/browser-bridge" <<'STUB'

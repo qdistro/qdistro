@@ -23,6 +23,8 @@ isolation where it applies).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import qdistro_browser_daemon_identity as ident
@@ -30,6 +32,9 @@ import qdistro_mpris_daemon as mpris
 import qdistro_downloads_daemon as downloads
 import qdistro_notifications_daemon as notifications
 import qdistro_compositor_daemon as compositor
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # --------------------------------------------------------------------- #
@@ -127,6 +132,35 @@ class TestBrowserBridgeAllowed:
     def test_caller_advisory_strips_control_chars(self):
         ext, _ = ident.caller_advisory({"extension_id": "a\nb\x00c"})
         assert ext == "abc"
+
+
+class TestBrowserDaemonInstall:
+    def test_browser_bridge_installer_deploys_9e_daemons(self):
+        script = (
+            REPO_ROOT / "scripts/install/install-browser-bridge-for-vm.sh"
+        ).read_text()
+        assert "BROWSER_DAEMONS_SRC" in script
+        assert "/etc/systemd/user" in script
+        assert "qdistro_browser_daemon_identity.py" in script
+        assert "missing browser_daemons source dir" in script
+        assert "exit 2" in script
+        assert "could not globally enable browser daemon user units" in script
+        assert "exit 3" in script
+        for name in ("downloads", "mpris", "notifications", "compositor"):
+            assert f"qdistro_${{daemon}}_daemon.py" in script
+            assert f"qdistro-{name}.service" in script
+            assert f"qdistro-{name}.service" in script
+        assert "systemctl --global enable" in script
+
+    def test_9e_service_execstarts_match_installed_libexec_paths(self):
+        for name in ("downloads", "mpris", "notifications", "compositor"):
+            service = (
+                REPO_ROOT / "browser_daemons" / f"qdistro-{name}.service"
+            ).read_text()
+            assert (
+                f"ExecStart=/usr/bin/python3 "
+                f"/usr/libexec/qdistro/qdistro_{name}_daemon.py"
+            ) in service
 
 
 # =====================================================================
