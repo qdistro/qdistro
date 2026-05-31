@@ -47,6 +47,9 @@ QDISTRO_PKGS=(
   podman slirp4netns fuse-overlayfs crun
   waypipe
   wl-clipboard
+  # Test-VM-only synthetic input. Requires a kernel with uinput; production
+  # images must not depend on this package.
+  ydotool
   libvirt libvirt-daemon-qemu libvirt-client virt-install
   qemu-x86 qemu-tools
   qemu-audio-pipewire qemu-audio-alsa

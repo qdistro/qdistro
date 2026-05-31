@@ -133,9 +133,61 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q 'zypper -n "${gpg_flags\[@\]}" refresh' "$BOOT"
 }
 
+@test "hardening: tier5 secctx wrapper is fail-closed by default" {
+    SPAWN="$REPO_ROOT/tier5-vm/spawn-tier5.sh"
+    grep -q "TIER5_USE_SECCTX:-1" "$SPAWN"
+    grep -q "qdistro-secctx-exec not in PATH; refusing untagged Tier-5 launch" "$SPAWN"
+    grep -q "set TIER5_USE_SECCTX=0 only for explicit debug runs" "$SPAWN"
+    run grep -nE '^[[:space:]]*USE_SECCTX=0([[:space:]]|$)' "$SPAWN"
+    [ "$status" -ne 0 ] || { echo "implicit secctx disable remains:"$'\n'"$output" >&2; return 1; }
+}
+
 @test "hardening: RDP cert dir is 0700 and private key 0600" {
     grep -q "install -d -o admin -g admin -m 0700 /home/admin/qdwin-rdp" "$FRESH"
     grep -q "chmod 0600 /home/admin/qdwin-rdp/rdp.key" "$FRESH"
+}
+
+@test "vm-gui: ydotool uses a user-runtime socket and uinput condition" {
+    SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
+    VM_GUI="$REPO_ROOT/scripts/vm/vm-gui"
+    grep -q "usermod -aG video,input,render,seat admin" "$SESSION_INSTALL"
+    grep -q "ExecCondition=.*test -e /sys/module/uinput && test -w /dev/uinput" "$SESSION_INSTALL"
+    grep -q "ydotoold --socket-path=/run/user/1000/ydotool.sock --socket-perm=0600" "$SESSION_INSTALL"
+    grep -q "YDOTOOL_SOCKET=/run/user/1000/ydotool.sock" "$VM_GUI"
+    run grep -n "ydotool key \\$\\*" "$VM_GUI"
+    [ "$status" -ne 0 ] || { echo "raw xdotool-style key names still pass to ydotool:"$'\n'"$output" >&2; return 1; }
+}
+
+@test "vm-gui: ydotool key names translate to Linux input events" {
+    VM_GUI="$REPO_ROOT/scripts/vm/vm-gui"
+    run bash -c '
+        vm_gui="$1"
+        set -- dummy wait 0
+        source "$vm_gui"
+        ydotool_key_sequence ctrl+space enter a exclam
+    ' bash "$VM_GUI"
+    [ "$status" -eq 0 ]
+    [ "$output" = "29:1 57:1 57:0 29:0 28:1 28:0 30:1 30:0 42:1 2:1 2:0 42:0" ]
+}
+
+@test "vm-gui: ydotool type shell quoting preserves apostrophes" {
+    VM_GUI="$REPO_ROOT/scripts/vm/vm-gui"
+    run bash -c '
+        vm_gui="$1"
+        set -- dummy wait 0
+        source "$vm_gui"
+        quoted=$(shell_quote "it is '\''quoted'\''")
+        eval "roundtrip=$quoted"
+        [ "$roundtrip" = "it is '\''quoted'\''" ]
+    ' bash "$VM_GUI"
+    [ "$status" -eq 0 ]
+}
+
+@test "vm bootstrap: ydotool uinput setup is installed but best-effort" {
+    grep -q "KERNEL==\\\"uinput\\\", GROUP=\\\"input\\\", MODE=\\\"0660\\\"" "$FRESH"
+    grep -q "/etc/modules-load.d/uinput.conf" "$FRESH"
+    grep -q "WARN: uinput module unavailable; ydotoold will stay inactive" "$FRESH"
+    grep -q "WARN: ydotoold.service did not start" "$FRESH"
 }
 
 @test "hardening: greetd hardening drop-in exists and is installed" {

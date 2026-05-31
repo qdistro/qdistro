@@ -266,6 +266,20 @@ if [ ! -S /run/seatd.sock ]; then
     log "  WARN: /run/seatd.sock did not appear within 5s"
 fi
 
+# ---- 5d. Configure VM-test synthetic input ------------------------------
+# ydotool is test infrastructure only. It needs /dev/uinput, which older
+# baseweed kernels may not ship; in that case the user service below is skipped
+# by its ExecCondition and GUI tests keep their documented soft-pass.
+log "configuring ydotool/uinput for VM GUI tests..."
+install -d -m 0755 /etc/udev/rules.d /etc/modules-load.d
+cat > /etc/udev/rules.d/60-uinput.rules <<'EOF'
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+EOF
+cat > /etc/modules-load.d/uinput.conf <<'EOF'
+uinput
+EOF
+modprobe uinput >/dev/null 2>&1 || log "  WARN: uinput module unavailable; ydotoold will stay inactive"
+
 # ---- 6. Install qdwin session (weston + qdshell user units) -------------
 log "installing qdwin session (noctalia-session + noctalia-shell user units)..."
 bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
@@ -380,6 +394,8 @@ fi
 
 runuser -l admin -c 'systemctl --user daemon-reload' || true
 runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+runuser -l admin -c 'systemctl --user start ydotoold.service' \
+    || log "  WARN: ydotoold.service did not start (expected if /dev/uinput is absent)"
 
 log "  enabling pipewire user socket..."
 runuser -l admin -c 'systemctl --user enable --now pipewire.socket pipewire.service' \

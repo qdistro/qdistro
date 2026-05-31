@@ -30,6 +30,169 @@ run_as_jan() {
     "$VM_EXEC" "$VM" "su - admin -c 'export DISPLAY=:0; $1'"
 }
 
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+run_input() {
+    "$VM_EXEC" "$VM" "runuser -u admin -- env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 YDOTOOL_SOCKET=/run/user/1000/ydotool.sock $1"
+}
+
+have_ydotool() {
+    "$VM_EXEC" "$VM" "runuser -u admin -- bash -lc 'command -v ydotool >/dev/null 2>&1 && [ -S /run/user/1000/ydotool.sock ]'" >/dev/null 2>&1
+}
+
+ydotool_keycode() {
+    local key="${1,,}"
+    case "$key" in
+        ctrl|control|control_l|leftctrl|leftcontrol) echo 29 ;;
+        alt|alt_l|leftalt) echo 56 ;;
+        shift|shift_l|leftshift) echo 42 ;;
+        super|meta|win|windows|leftmeta|leftsuper) echo 125 ;;
+        enter|return) echo 28 ;;
+        esc|escape) echo 1 ;;
+        tab) echo 15 ;;
+        space) echo 57 ;;
+        backspace) echo 14 ;;
+        delete|del) echo 111 ;;
+        up) echo 103 ;;
+        down) echo 108 ;;
+        left) echo 105 ;;
+        right) echo 106 ;;
+        home) echo 102 ;;
+        end) echo 107 ;;
+        page_up|pageup|prior) echo 104 ;;
+        page_down|pagedown|next) echo 109 ;;
+        f1) echo 59 ;;
+        f2) echo 60 ;;
+        f3) echo 61 ;;
+        f4) echo 62 ;;
+        f5) echo 63 ;;
+        f6) echo 64 ;;
+        f7) echo 65 ;;
+        f8) echo 66 ;;
+        f9) echo 67 ;;
+        f10) echo 68 ;;
+        f11) echo 87 ;;
+        f12) echo 88 ;;
+        1) echo 2 ;;
+        2) echo 3 ;;
+        3) echo 4 ;;
+        4) echo 5 ;;
+        5) echo 6 ;;
+        6) echo 7 ;;
+        7) echo 8 ;;
+        8) echo 9 ;;
+        9) echo 10 ;;
+        0) echo 11 ;;
+        a) echo 30 ;;
+        b) echo 48 ;;
+        c) echo 46 ;;
+        d) echo 32 ;;
+        e) echo 18 ;;
+        f) echo 33 ;;
+        g) echo 34 ;;
+        h) echo 35 ;;
+        i) echo 23 ;;
+        j) echo 36 ;;
+        k) echo 37 ;;
+        l) echo 38 ;;
+        m) echo 50 ;;
+        n) echo 49 ;;
+        o) echo 24 ;;
+        p) echo 25 ;;
+        q) echo 16 ;;
+        r) echo 19 ;;
+        s) echo 31 ;;
+        t) echo 20 ;;
+        u) echo 22 ;;
+        v) echo 47 ;;
+        w) echo 17 ;;
+        x) echo 45 ;;
+        y) echo 21 ;;
+        z) echo 44 ;;
+        minus|hyphen) echo 12 ;;
+        equal) echo 13 ;;
+        bracketleft) echo 26 ;;
+        bracketright) echo 27 ;;
+        semicolon) echo 39 ;;
+        apostrophe|quote) echo 40 ;;
+        grave) echo 41 ;;
+        backslash) echo 43 ;;
+        comma) echo 51 ;;
+        period) echo 52 ;;
+        slash) echo 53 ;;
+        *) return 1 ;;
+    esac
+}
+
+ydotool_shifted_keycode() {
+    local key="${1,,}"
+    case "$key" in
+        exclam|'!') echo 2 ;;
+        at|'@') echo 3 ;;
+        numbersign|hash|'#') echo 4 ;;
+        dollar|'$') echo 5 ;;
+        percent|'%') echo 6 ;;
+        asciicircum|caret|'^') echo 7 ;;
+        ampersand|'&') echo 8 ;;
+        asterisk|'*') echo 9 ;;
+        parenleft|'(') echo 10 ;;
+        parenright|')') echo 11 ;;
+        underscore|'_') echo 12 ;;
+        plus|'+') echo 13 ;;
+        braceleft|'{') echo 26 ;;
+        braceright|'}') echo 27 ;;
+        colon|':') echo 39 ;;
+        quotedbl|'"') echo 40 ;;
+        asciitilde|tilde|'~') echo 41 ;;
+        bar|'|') echo 43 ;;
+        less|'<') echo 51 ;;
+        greater|'>') echo 52 ;;
+        question|'?') echo 53 ;;
+        *) return 1 ;;
+    esac
+}
+
+ydotool_key_sequence() {
+    local chord part code shifted_code i
+    local -a parts mods seq
+    seq=()
+    for chord in "$@"; do
+        IFS='+' read -r -a parts <<< "$chord"
+        mods=()
+        for part in "${parts[@]}"; do
+            part="${part//[[:space:]]/}"
+            [ -n "$part" ] || continue
+            if shifted_code="$(ydotool_shifted_keycode "$part")"; then
+                for i in "${mods[@]}"; do seq+=("$i:1"); done
+                seq+=("42:1" "$shifted_code:1" "$shifted_code:0" "42:0")
+                for (( i=${#mods[@]} - 1; i>=0; i-- )); do seq+=("${mods[$i]}:0"); done
+                mods=()
+                continue
+            fi
+            code="$(ydotool_keycode "$part")" || return 1
+            case "${part,,}" in
+                ctrl|control|control_l|leftctrl|leftcontrol|alt|alt_l|leftalt|shift|shift_l|leftshift|super|meta|win|windows|leftmeta|leftsuper)
+                    mods+=("$code")
+                    ;;
+                *)
+                    for i in "${mods[@]}"; do seq+=("$i:1"); done
+                    seq+=("$code:1" "$code:0")
+                    for (( i=${#mods[@]} - 1; i>=0; i-- )); do seq+=("${mods[$i]}:0"); done
+                    mods=()
+                    ;;
+            esac
+        done
+        if [ "${#mods[@]}" -gt 0 ]; then
+            for i in "${mods[@]}"; do seq+=("$i:1" "$i:0"); done
+        fi
+    done
+    printf '%s\n' "${seq[*]}"
+}
+
 qmp_mouse_move() {
     local x="$1" y="$2"
     local w="${QDWIN_SCREEN_W:-1280}" h="${QDWIN_SCREEN_H:-800}"
@@ -137,53 +300,63 @@ case "$CMD" in
         ;;
     type)
         TEXT="$*"
-        # Send each character as a key event to handle spaces properly
-        for (( i=0; i<${#TEXT}; i++ )); do
-            char="${TEXT:$i:1}"
-            case "$char" in
-                ' ') KEY="space" ;;
-                '.')  KEY="period" ;;
-                ',')  KEY="comma" ;;
-                '/')  KEY="slash" ;;
-                '-')  KEY="minus" ;;
-                '=')  KEY="equal" ;;
-                ';')  KEY="semicolon" ;;
-                "'")  KEY="apostrophe" ;;
-                '[')  KEY="bracketleft" ;;
-                ']')  KEY="bracketright" ;;
-                '!')  KEY="shift+1" ;;
-                '@')  KEY="shift+2" ;;
-                '#')  KEY="shift+3" ;;
-                '$')  KEY="shift+4" ;;
-                '%')  KEY="shift+5" ;;
-                '^')  KEY="shift+6" ;;
-                '&')  KEY="shift+7" ;;
-                '*')  KEY="shift+8" ;;
-                '(')  KEY="shift+9" ;;
-                ')')  KEY="shift+0" ;;
-                '_')  KEY="shift+minus" ;;
-                '+')  KEY="shift+equal" ;;
-                ':')  KEY="shift+semicolon" ;;
-                '"')  KEY="shift+apostrophe" ;;
-                '<')  KEY="shift+comma" ;;
-                '>')  KEY="shift+period" ;;
-                '?')  KEY="shift+slash" ;;
-                '~')  KEY="shift+grave" ;;
-                '`')  KEY="grave" ;;
-                *)
-                    if [[ "$char" =~ [A-Z] ]]; then
-                        KEY="shift+${char,,}"
-                    else
-                        KEY="$char"
-                    fi
-                    ;;
-            esac
-            run_as_jan "xdotool key $KEY" 2>/dev/null
-            sleep "0.$(printf '%03d' $DELAY)"
-        done
+        if have_ydotool; then
+            run_input "ydotool type --key-delay=$DELAY $(shell_quote "$TEXT")"
+        else
+            # Send each character as a key event to handle spaces properly
+            for (( i=0; i<${#TEXT}; i++ )); do
+                char="${TEXT:$i:1}"
+                case "$char" in
+                    ' ') KEY="space" ;;
+                    '.')  KEY="period" ;;
+                    ',')  KEY="comma" ;;
+                    '/')  KEY="slash" ;;
+                    '-')  KEY="minus" ;;
+                    '=')  KEY="equal" ;;
+                    ';')  KEY="semicolon" ;;
+                    "'")  KEY="apostrophe" ;;
+                    '[')  KEY="bracketleft" ;;
+                    ']')  KEY="bracketright" ;;
+                    '!')  KEY="shift+1" ;;
+                    '@')  KEY="shift+2" ;;
+                    '#')  KEY="shift+3" ;;
+                    '$')  KEY="shift+4" ;;
+                    '%')  KEY="shift+5" ;;
+                    '^')  KEY="shift+6" ;;
+                    '&')  KEY="shift+7" ;;
+                    '*')  KEY="shift+8" ;;
+                    '(')  KEY="shift+9" ;;
+                    ')')  KEY="shift+0" ;;
+                    '_')  KEY="shift+minus" ;;
+                    '+')  KEY="shift+equal" ;;
+                    ':')  KEY="shift+semicolon" ;;
+                    '"')  KEY="shift+apostrophe" ;;
+                    '<')  KEY="shift+comma" ;;
+                    '>')  KEY="shift+period" ;;
+                    '?')  KEY="shift+slash" ;;
+                    '~')  KEY="shift+grave" ;;
+                    '`')  KEY="grave" ;;
+                    *)
+                        if [[ "$char" =~ [A-Z] ]]; then
+                            KEY="shift+${char,,}"
+                        else
+                            KEY="$char"
+                        fi
+                        ;;
+                esac
+                run_as_jan "xdotool key $KEY" 2>/dev/null
+                sleep "0.$(printf '%03d' $DELAY)"
+            done
+        fi
         ;;
     key)
-        run_as_jan "xdotool key $*"
+        if have_ydotool; then
+            KEY_EVENTS="$(ydotool_key_sequence "$@")" \
+                || { echo "vm-gui: unsupported ydotool key name(s): $*" >&2; exit 2; }
+            run_input "ydotool key --key-delay=$DELAY $KEY_EVENTS"
+        else
+            run_as_jan "xdotool key $*"
+        fi
         sleep 0.3
         ;;
     wait)

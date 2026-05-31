@@ -352,8 +352,9 @@ SECCTX_ENGINE="${TIER5_SECCTX_ENGINE:-qdistro.tier5}"
 SECCTX_APPID="${TIER5_SECCTX_APPID:-qdistro.tier5.$SILO_TAG}"
 SECCTX_INSTANCE="${TIER5_SECCTX_INSTANCE:-$LAUNCH_TOKEN}"
 if [ "$USE_SECCTX" = "1" ] && ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    echo "[tier5] WARN: qdistro-secctx-exec not in PATH; placeholder correlation will not work" >&2
-    USE_SECCTX=0
+    echo "[tier5] FAIL: qdistro-secctx-exec not in PATH; refusing untagged Tier-5 launch" >&2
+    echo "        set TIER5_USE_SECCTX=0 only for explicit debug runs" >&2
+    exit 3
 fi
 
 CLIENT_LOG="$ADMIN_RUNTIME/tier5-${SILO_TAG}-${APP_BASENAME}-client.log"

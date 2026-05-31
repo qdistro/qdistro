@@ -179,6 +179,22 @@ echo "/var/lib/qdistro/podapps perms: $(stat -c '%U:%G %a' /var/lib/qdistro/poda
 # 4. User systemd units.
 install -d -o admin -g users -m 0755 /home/admin/.config/systemd/user
 
+cat > /home/admin/.config/systemd/user/ydotoold.service <<'EOF'
+[Unit]
+Description=ydotool synthetic input daemon for qdistro VM tests
+
+[Service]
+Type=simple
+Environment=YDOTOOL_SOCKET=/run/user/1000/ydotool.sock
+ExecCondition=/bin/sh -c 'test -e /sys/module/uinput && test -w /dev/uinput'
+ExecStart=/usr/bin/ydotoold --socket-path=/run/user/1000/ydotool.sock --socket-perm=0600
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
 # Vendored libweston: qdwin's layer-shell popup parenting needs the
 # soft-linked helper symbols that only exist in qdistro's patched
 # libweston-14 (see qdwin/doc/decisions/0001-vendored-libweston-packaging.md).
@@ -302,7 +318,7 @@ polkit.addRule(function(action, subject) {
 EOF
 
 # 5. Enable (but don't start — caller decides).
-runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service' \
+runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service ydotoold.service' \
     2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
 
 echo "qdwin session installed."
