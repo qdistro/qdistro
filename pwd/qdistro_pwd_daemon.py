@@ -119,6 +119,12 @@ BROWSER_PWD_VAULT = os.environ.get("QDISTRO_PWD_BROWSER_VAULT", "passwords")
 BROWSER_BRIDGE_SCRIPT = os.environ.get(
     "QDISTRO_PWD_BROWSER_BRIDGE_SCRIPT",
     "/usr/libexec/qdistro/qdistro_browser_bridge.py")
+PORTAL_BACKEND_SCRIPT = os.environ.get(
+    "QDISTRO_PWD_PORTAL_SCRIPT",
+    "/usr/libexec/qdistro/qdistro_pwd_portal.py")
+PORTAL_BACKEND_UNIT = os.environ.get(
+    "QDISTRO_PWD_PORTAL_UNIT",
+    "qdistro-pwd-portal.service")
 
 BROWSER_PARENT_EXES = tuple(
     p for p in os.environ.get(
@@ -267,6 +273,28 @@ def _read_proc_exe(pid: int) -> str:
         return ""
 
 
+def _read_proc_cgroup(pid: int) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+            paths = []
+            for line in f:
+                parts = line.rstrip("\n").split(":", 2)
+                if len(parts) == 3:
+                    paths.append(parts[2])
+            return paths
+    except OSError:
+        return []
+
+
+def _proc_in_systemd_unit(pid: int, unit_name: str) -> bool:
+    if not unit_name:
+        return False
+    for path in _read_proc_cgroup(pid):
+        if unit_name in [p for p in path.split("/") if p]:
+            return True
+    return False
+
+
 def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
     """Verify that a browser-password RPC came from the native bridge.
 
@@ -317,6 +345,58 @@ def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
     if os.path.realpath(parent_exe) not in allowed:
         return False, "parent-not-browser"
     return True, "browser-bridge"
+
+
+def _python_executed_script(pid: int) -> str:
+    """Return the Python script path being executed by pid, or empty.
+
+    We accept only simple valueless interpreter flags before the script.
+    Flags such as -c, -m, -W, or -X can consume following operands or run
+    code that is not the script path, so they fail closed.
+    """
+    cmdline = _read_proc_cmdline(pid)
+    if len(cmdline) < 2:
+        return ""
+    valueless_flags = frozenset({
+        "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO",
+        "-q", "-s", "-S", "-u", "-v", "-vv", "-x",
+    })
+    for arg in cmdline[1:]:
+        if arg.startswith("-"):
+            if arg in valueless_flags:
+                continue
+            return ""
+        return arg
+    return ""
+
+
+def _is_system_python_exe(path: str) -> bool:
+    """Return true for the system Python interpreters used by script helpers."""
+    real = os.path.realpath(path)
+    directory = os.path.dirname(real)
+    basename = os.path.basename(real)
+    if directory not in ("/usr/bin", "/usr/local/bin"):
+        return False
+    return re.fullmatch(r"python(?:3(?:\.\d+)?)?", basename) is not None
+
+
+def _portal_backend_allowed(pid: int) -> tuple[bool, str]:
+    """Verify GetPortalKey is called by the installed portal backend."""
+    if not _proc_in_systemd_unit(pid, PORTAL_BACKEND_UNIT):
+        return False, "not-portal-backend-unit"
+    portal_script = os.path.realpath(PORTAL_BACKEND_SCRIPT)
+    exe = _read_proc_exe(pid)
+    if not exe:
+        return False, "not-portal-backend"
+    exe_real = os.path.realpath(exe)
+    if exe_real == portal_script:
+        return True, "portal-backend"
+    if not _is_system_python_exe(exe_real):
+        return False, "not-portal-backend"
+    script = _python_executed_script(pid)
+    if not script or os.path.realpath(script) != portal_script:
+        return False, "not-portal-backend"
+    return True, "portal-backend"
 
 
 def _bridge_app_id(pid: int) -> str:
@@ -1619,14 +1699,20 @@ class PwdDaemon(dbus.service.Object):
 
         Constraints:
           - The portal-keys vault MUST be unlocked first (admin task).
-          - Caller identity is audited, but this test-open endpoint does
-            not yet enforce a portal-backend-only peer identity gate.
+          - Caller identity must be the installed qdistro-pwd-portal helper.
           - App-id format is loosely validated (no path separators,
             non-empty). A production portal backend must derive this from
             portal metadata instead of trusting a caller-provided string.
         """
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
+        portal_ok, portal_reason = _portal_backend_allowed(pid)
+        if not portal_ok:
+            self._audit.record("portal-get", PORTAL_KEYS_VAULT,
+                               item_tag=str(app_id), decision="deny",
+                               reason=f"portal-caller:{portal_reason}",
+                               caller=caller)
+            raise PwdPolicyError("GetPortalKey requires qdistro-pwd-portal")
         app_id = str(app_id)
         if not app_id or "/" in app_id or app_id.startswith("."):
             self._audit.record("portal-get", PORTAL_KEYS_VAULT,

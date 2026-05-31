@@ -4,17 +4,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_portal_key_policy_comment_matches_test_open_contract():
+def test_portal_key_policy_comment_documents_portal_helper_gate():
     conf = (ROOT / "pwd" / "org.qdistro.Pwd1.conf").read_text(encoding="utf-8")
-    assert "does not yet enforce a portal-backend-only peer" in conf
-    assert "daemon validates the caller uid" not in conf
+    assert "requires the installed" in conf
+    assert "qdistro-pwd-portal helper identity" in conf
 
 
-def test_portal_key_docstring_does_not_claim_uid_enforcement():
+def test_portal_key_docstring_documents_portal_helper_gate():
     src = (ROOT / "pwd" / "qdistro_pwd_daemon.py").read_text(encoding="utf-8")
     get_portal_key = src.split("def GetPortalKey", 1)[1].split("app_id = str(app_id)", 1)[0]
-    assert "not yet enforce a portal-backend-only peer" in get_portal_key
-    assert "Caller must be a non-admin uid" not in get_portal_key
+    assert "installed qdistro-pwd-portal helper" in get_portal_key
 
 
 def test_qsu_service_documents_mount_namespace_inheritance():
@@ -24,7 +23,6 @@ def test_qsu_service_documents_mount_namespace_inheritance():
     assert "Never read/write user homes" not in unit
 
 
-def test_pwd_readme_does_not_claim_get_portal_key_uid_gate():
+def test_pwd_readme_documents_get_portal_key_helper_gate():
     readme = (ROOT / "pwd" / "README.md").read_text(encoding="utf-8")
-    assert "GetPortalKey(app_id)` | audited caller; test-open peer gate" in readme
-    assert "GetPortalKey(app_id)` | non-admin" not in readme
+    assert "GetPortalKey(app_id)` | installed `qdistro-pwd-portal` helper only" in readme

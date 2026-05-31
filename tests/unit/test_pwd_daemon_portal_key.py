@@ -31,6 +31,8 @@ def staged(tmp_path, monkeypatch):
     daemon = d.PwdDaemon.__new__(d.PwdDaemon)
     daemon._unlocked = {}
     daemon._audit = PwdAuditLog(audit_path)
+    monkeypatch.setattr(d, "_portal_backend_allowed",
+                        lambda pid: (True, "portal-backend"))
     return daemon, vd, audit_path
 
 
@@ -42,11 +44,135 @@ def _unlock(daemon, vd):
     }
 
 
+def test_portal_backend_allowed_for_system_python_script(monkeypatch, tmp_path):
+    script = tmp_path / "qdistro_pwd_portal.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(script))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "qdistro-pwd-portal.service",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: "/usr/bin/python3")
+    monkeypatch.setattr(
+        d,
+        "_read_proc_cmdline",
+        lambda pid: ["python3", "-I", str(script), "--verbose"],
+    )
+
+    assert d._portal_backend_allowed(1234) == (True, "portal-backend")
+
+
+def test_portal_backend_allowed_for_direct_script_exe(monkeypatch, tmp_path):
+    script = tmp_path / "qdistro_pwd_portal.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(script))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "qdistro-pwd-portal.service",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: str(script))
+    monkeypatch.setattr(d, "_read_proc_cmdline", lambda pid: [str(script)])
+
+    assert d._portal_backend_allowed(1234) == (True, "portal-backend")
+
+
+def test_portal_backend_rejects_python_script_outside_unit(monkeypatch,
+                                                          tmp_path):
+    script = tmp_path / "qdistro_pwd_portal.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(script))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "app-org.example.Terminal.scope",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: "/usr/bin/python3")
+    monkeypatch.setattr(
+        d,
+        "_read_proc_cmdline",
+        lambda pid: ["python3", str(script)],
+    )
+
+    assert d._portal_backend_allowed(1234) == (
+        False, "not-portal-backend-unit",
+    )
+
+
+def test_portal_backend_rejects_argv_spoof_without_python_exe(monkeypatch,
+                                                            tmp_path):
+    script = tmp_path / "qdistro_pwd_portal.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(script))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "qdistro-pwd-portal.service",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: "/tmp/not-python")
+    monkeypatch.setattr(
+        d,
+        "_read_proc_cmdline",
+        lambda pid: ["anything", str(script)],
+    )
+
+    assert d._portal_backend_allowed(1234) == (False, "not-portal-backend")
+
+
+def test_portal_backend_rejects_portal_path_as_data_argument(monkeypatch,
+                                                            tmp_path):
+    portal = tmp_path / "qdistro_pwd_portal.py"
+    evil = tmp_path / "evil.py"
+    portal.write_text("#!/usr/bin/env python3\n")
+    evil.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(portal))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "qdistro-pwd-portal.service",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: "/usr/bin/python3")
+    monkeypatch.setattr(
+        d,
+        "_read_proc_cmdline",
+        lambda pid: ["python3", str(evil), str(portal)],
+    )
+
+    assert d._portal_backend_allowed(1234) == (False, "not-portal-backend")
+
+
+def test_portal_backend_rejects_operand_python_flags(monkeypatch, tmp_path):
+    script = tmp_path / "qdistro_pwd_portal.py"
+    script.write_text("#!/usr/bin/env python3\n")
+    monkeypatch.setattr(d, "PORTAL_BACKEND_SCRIPT", str(script))
+    monkeypatch.setattr(d, "_read_proc_cgroup", lambda pid: [
+        "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+        "qdistro-pwd-portal.service",
+    ])
+    monkeypatch.setattr(d, "_read_proc_exe", lambda pid: "/usr/bin/python3")
+    monkeypatch.setattr(
+        d,
+        "_read_proc_cmdline",
+        lambda pid: ["python3", "-W", str(script), "evil.py"],
+    )
+
+    assert d._portal_backend_allowed(1234) == (False, "not-portal-backend")
+
+
 def test_get_portal_key_locked_raises(staged):
     daemon, vd, _ = staged
     with patch.object(daemon, "_peer_info", return_value=(1500, 1234)):
         with pytest.raises(d.PwdNotUnlocked):
             daemon.GetPortalKey("org.example.App", sender=":1.42")
+
+
+def test_get_portal_key_rejects_non_portal_backend(staged, monkeypatch):
+    daemon, vd, audit_path = staged
+    _unlock(daemon, vd)
+    monkeypatch.setattr(d, "_portal_backend_allowed",
+                        lambda pid: (False, "not-portal-backend"))
+    with patch.object(daemon, "_peer_info", return_value=(1500, 1234)):
+        with pytest.raises(d.PwdPolicyError):
+            daemon.GetPortalKey("org.example.App", sender=":1.42")
+    rows = daemon._audit.tail(10)
+    assert rows[0]["decision"] == "deny"
+    assert rows[0]["reason"] == "portal-caller:not-portal-backend"
 
 
 def test_get_portal_key_provisions_then_returns_same_bytes(staged):

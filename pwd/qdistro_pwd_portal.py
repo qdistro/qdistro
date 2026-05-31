@@ -67,6 +67,15 @@ PORTAL_IFC = "org.freedesktop.impl.portal.Secret"
 
 PWD_BUS = "org.qdistro.Pwd1"
 PWD_OBJ = "/org/qdistro/Pwd1"
+XDG_DESKTOP_PORTAL_BUS = "org.freedesktop.portal.Desktop"
+XDG_DESKTOP_PORTAL_EXES = tuple(
+    p for p in os.environ.get(
+        "QDISTRO_XDG_DESKTOP_PORTAL_EXES",
+        ":".join((
+            "/usr/libexec/xdg-desktop-portal",
+            "/usr/lib/xdg-desktop-portal",
+            "/usr/bin/xdg-desktop-portal",
+        ))).split(":") if p)
 
 
 # Per the portal Request flow, response codes are:
@@ -81,6 +90,7 @@ RESP_OTHER_ERROR = 2
 class PortalSecretBackend(dbus.service.Object):
     def __init__(self, bus: dbus.Bus):
         super().__init__(bus, PORTAL_OBJ_PATH)
+        self._session_bus = bus
         # System-bus connection to the pwd daemon. Cache it; D-Bus
         # auto-reconnects if the daemon restarts.
         self._sys_bus = dbus.SystemBus()
@@ -88,6 +98,32 @@ class PortalSecretBackend(dbus.service.Object):
     def _pwd_iface(self) -> dbus.Interface:
         proxy = self._sys_bus.get_object(PWD_BUS, PWD_OBJ)
         return dbus.Interface(proxy, PWD_BUS)
+
+    def _read_proc_exe(self, pid: int) -> str:
+        try:
+            return os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return ""
+
+    def _portal_frontend_allowed(self, sender: str | None) -> bool:
+        """Only accept calls relayed by the xdg-desktop-portal frontend."""
+        if not sender:
+            return False
+        try:
+            proxy = self._session_bus.get_object(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus")
+            ifc = dbus.Interface(proxy, "org.freedesktop.DBus")
+            owner = str(ifc.GetNameOwner(XDG_DESKTOP_PORTAL_BUS))
+            if owner != str(sender):
+                return False
+            pid = int(ifc.GetConnectionUnixProcessID(sender))
+            exe = os.path.realpath(self._read_proc_exe(pid))
+            allowed = {os.path.realpath(p) for p in XDG_DESKTOP_PORTAL_EXES}
+            return bool(exe) and exe in allowed
+        except dbus.DBusException:
+            return False
+        except (TypeError, ValueError):
+            return False
 
     @dbus.service.method(
         PORTAL_IFC, in_signature="osha{sv}", out_signature="ua{sv}",
@@ -103,6 +139,16 @@ class PortalSecretBackend(dbus.service.Object):
 
         Returns (response_code, results_dict).
         """
+        if not self._portal_frontend_allowed(sender):
+            sys.stderr.write(
+                "[qdistro-pwd-portal] rejecting non-portal frontend "
+                f"caller {sender!r}\n")
+            sys.stderr.flush()
+            try:
+                os.close(fd.take())
+            except Exception:
+                pass
+            return dbus.UInt32(RESP_OTHER_ERROR), dbus.Dictionary({}, signature="sv")
         try:
             key = bytes(self._pwd_iface().GetPortalKey(str(app_id)))
         except dbus.DBusException as e:

@@ -43,7 +43,7 @@ pwd/
 | `ListItems(vault)` | admin only | metadata only (no decryption) |
 | `GetItem(vault, tag)` | any | gated by per-item pin against caller |
 | `GetItemAdmin(vault, tag)` | admin only | bypasses pin gate |
-| `GetPortalKey(app_id)` | audited caller; test-open peer gate | XDG portal Secret bridge (auto-provisions) |
+| `GetPortalKey(app_id)` | installed `qdistro-pwd-portal` helper only | XDG portal Secret bridge (auto-provisions) |
 | `ListAuditLog(limit)` | admin only | newest-first |
 
 ## Pin model

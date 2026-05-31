@@ -38,7 +38,9 @@ def backend(monkeypatch):
     The dbus.service.Object init is bypassed via __new__.
     """
     obj = PortalSecretBackend.__new__(PortalSecretBackend)
+    obj._session_bus = MagicMock()
     obj._sys_bus = MagicMock()
+    obj._portal_frontend_allowed = MagicMock(return_value=True)
     return obj
 
 
@@ -65,6 +67,7 @@ def test_retrieve_secret_writes_key_bytes_to_fd(backend):
                 app_id="org.example.App",
                 fd=_FakeUnixFD(w),
                 options={},
+                sender=":1.10",
             )
         finally:
             payload = _read_pipe(r)
@@ -82,7 +85,7 @@ def test_retrieve_secret_pwd_dbus_error_returns_other_error(backend):
         r, w = os.pipe()
         resp, _ = backend.RetrieveSecret(
             handle="/h", app_id="org.example.App",
-            fd=_FakeUnixFD(w), options={})
+            fd=_FakeUnixFD(w), options={}, sender=":1.10")
         # fd must have been closed by the backend on the error path
         with pytest.raises(OSError):
             os.write(w, b"x")
@@ -98,7 +101,7 @@ def test_retrieve_secret_invalid_app_id_propagates_dbus_error(backend):
         r, w = os.pipe()
         resp, _ = backend.RetrieveSecret(
             handle="/h", app_id="../escape",
-            fd=_FakeUnixFD(w), options={})
+            fd=_FakeUnixFD(w), options={}, sender=":1.10")
         os.close(r)
     assert int(resp) == RESP_OTHER_ERROR
 
@@ -113,7 +116,7 @@ def test_retrieve_secret_chunked_write_completes(backend):
         try:
             resp, _ = backend.RetrieveSecret(
                 handle="/h", app_id="org.example.App",
-                fd=_FakeUnixFD(w), options={})
+                fd=_FakeUnixFD(w), options={}, sender=":1.10")
         finally:
             payload = _read_pipe(r)
     assert int(resp) == RESP_SUCCESS
@@ -129,11 +132,63 @@ def test_retrieve_secret_closes_fd_on_pwd_error(backend):
     r, w = os.pipe()
     with patch.object(backend, "_pwd_iface", return_value=fake_iface):
         backend.RetrieveSecret(handle="/h", app_id="org.x",
-                               fd=_FakeUnixFD(w), options={})
+                               fd=_FakeUnixFD(w), options={}, sender=":1.10")
     # If the fd was closed, writing should fail.
     with pytest.raises(OSError):
         os.write(w, b"y")
     os.close(r)
+
+
+def test_retrieve_secret_rejects_non_portal_frontend(backend):
+    backend._portal_frontend_allowed = MagicMock(return_value=False)
+    fake_iface = MagicMock()
+    r, w = os.pipe()
+    with patch.object(backend, "_pwd_iface", return_value=fake_iface):
+        resp, _ = backend.RetrieveSecret(
+            handle="/h", app_id="org.example.App",
+            fd=_FakeUnixFD(w), options={}, sender=":1.99")
+    with pytest.raises(OSError):
+        os.write(w, b"x")
+    os.close(r)
+    assert int(resp) == RESP_OTHER_ERROR
+    fake_iface.GetPortalKey.assert_not_called()
+
+
+def test_portal_frontend_allowed_requires_desktop_portal_owner():
+    backend = PortalSecretBackend.__new__(PortalSecretBackend)
+    bus = MagicMock()
+    backend._session_bus = bus
+    dbus_iface = MagicMock()
+    dbus_iface.GetNameOwner.return_value = ":1.10"
+    dbus_iface.GetConnectionUnixProcessID.return_value = 4242
+    backend._read_proc_exe = MagicMock(
+        return_value="/usr/libexec/xdg-desktop-portal")
+    with patch("qdistro_pwd_portal.dbus.Interface", return_value=dbus_iface):
+        assert backend._portal_frontend_allowed(":1.10") is True
+        assert backend._portal_frontend_allowed(":1.99") is False
+
+
+def test_portal_frontend_allowed_rejects_private_bus_name_owner():
+    backend = PortalSecretBackend.__new__(PortalSecretBackend)
+    backend._session_bus = MagicMock()
+    dbus_iface = MagicMock()
+    dbus_iface.GetNameOwner.return_value = ":1.10"
+    dbus_iface.GetConnectionUnixProcessID.return_value = 4242
+    backend._read_proc_exe = MagicMock(return_value="/tmp/fake-portal")
+
+    with patch("qdistro_pwd_portal.dbus.Interface", return_value=dbus_iface):
+        assert backend._portal_frontend_allowed(":1.10") is False
+
+
+def test_portal_frontend_allowed_fails_closed_on_dbus_error():
+    backend = PortalSecretBackend.__new__(PortalSecretBackend)
+    backend._session_bus = MagicMock()
+    dbus_iface = MagicMock()
+    dbus_iface.GetNameOwner.side_effect = dbus.DBusException(
+        "no owner", name="org.freedesktop.DBus.Error.NameHasNoOwner")
+
+    with patch("qdistro_pwd_portal.dbus.Interface", return_value=dbus_iface):
+        assert backend._portal_frontend_allowed(":1.10") is False
 
 
 def test_module_constants():
