@@ -52,16 +52,16 @@ else
     fail "qdistro-secctx-exec --help did not print usage"
 fi
 
-# --- 2. qdwin advertises wp_security_context_manager_v1 ---
+# --- 2. qdwin hides wp_security_context_manager_v1 from ordinary clients ---
 WI_OUT=$(runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     WAYLAND_DISPLAY=wayland-1 \
     wayland-info 2>&1)
 if echo "$WI_OUT" | grep -q "wp_security_context_manager_v1"; then
-    pass "wp_security_context_manager_v1 advertised by qdwin"
-else
     echo "$WI_OUT" | tail -40 >&2
-    fail "wp_security_context_manager_v1 not in outer compositor's globals"
+    fail "wp_security_context_manager_v1 visible to ordinary admin client"
+else
+    pass "wp_security_context_manager_v1 hidden from ordinary admin client"
 fi
 
 # --- 3. wrap qdistro-test-window with tier-4 secctx ---
@@ -79,6 +79,7 @@ WRAP_LOG=/tmp/s44-wrap.log
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     WAYLAND_DISPLAY=wayland-1 \
+    QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$APPID" \

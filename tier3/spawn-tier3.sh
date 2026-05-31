@@ -402,7 +402,8 @@ fi
 
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
-    SECCTX_WRAP=(qdistro-secctx-exec
+    SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
         --instance-id    "$SECCTX_INSTANCE"
@@ -424,11 +425,18 @@ fi
 # with the broker below. The waypipe-client is the secctx-tagged process
 # qdwin sees as the source of a cross-silo clipboard/handoff; attesting its
 # pid → silo lets the broker resolve the source under enforce instead of
-# trusting a claimed string. Lives in the admin runtime dir (admin-writable;
-# secctx-exec runs as the admin uid).
+# trusting a claimed string. The pid file lives in the admin runtime dir
+# because secctx-exec runs as admin; its path includes a per-launch file id,
+# secctx-exec creates it with O_EXCL/O_NOFOLLOW, and we verify a separate
+# token inside the file before trusting the pid so a pre-created admin-owned
+# file cannot spoof the registration.
 LAUNCHREC_PATH=""
+LAUNCHREC_TOKEN=""
+LAUNCHREC_FILE_ID=""
 if [ "$USE_SECCTX" = "1" ]; then
-    LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$$.pid"
+    LAUNCHREC_TOKEN="$(gen_launch_token "[tier3] FAIL")"
+    LAUNCHREC_FILE_ID="$(gen_launch_token "[tier3] FAIL")"
+    LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$LAUNCHREC_FILE_ID.pid"
     rm -f "$LAUNCHREC_PATH"
 fi
 runuser -u "$ADMIN_USER" -- env \
@@ -436,6 +444,7 @@ runuser -u "$ADMIN_USER" -- env \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
     ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
+    ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
     bash -c 'umask 0117; exec "$@"' bash \
     "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
@@ -492,10 +501,15 @@ echo "[tier3] bridge socket ready at $BRIDGE_SOCK ($TIER3_GROUP:0660)" >&2
 if [ "$USE_SECCTX" = "1" ] && [ -n "$LAUNCHREC_PATH" ] \
         && command -v dbus-send >/dev/null 2>&1; then
     INNER_PID=""
+    INNER_TOKEN=""
     for _ in $(seq 1 20); do
         if [ -s "$LAUNCHREC_PATH" ]; then
-            INNER_PID=$(tr -dc '0-9' < "$LAUNCHREC_PATH" 2>/dev/null || true)
-            [ -n "$INNER_PID" ] && break
+            read -r INNER_PID INNER_TOKEN < "$LAUNCHREC_PATH" || true
+            case "$INNER_PID" in ''|*[!0-9]*) INNER_PID="" ;; esac
+            if [ -n "$INNER_PID" ] && [ "$INNER_TOKEN" = "$LAUNCHREC_TOKEN" ]; then
+                break
+            fi
+            INNER_PID=""
         fi
         sleep 0.1
     done

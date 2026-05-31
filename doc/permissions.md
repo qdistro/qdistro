@@ -315,9 +315,12 @@ silo classifier for same-silo clipboard / handoff gates.
 **Option A (launcher-gated, active):** qdwin restricts the secctx manager
 bind to the trusted launcher:
 
-1. Only the bound shell (qdshell) or a client running as qdwin's
-   `allowed_uid` may bind `wp_security_context_manager_v1`. Other clients
-   receive a protocol error and a rejection log line.
+1. Only the bound shell (qdshell) or the installed `qdistro-secctx-exec`
+   helper executable may bind `wp_security_context_manager_v1`. Same uid
+   is not an authorization basis; qdwin independently requires an
+   admin-uid helper to have a direct root launcher parent. Helpers under
+   any non-root uid other than qdwin's configured admin/allowed uid are
+   refused.
 2. The broker annotates every clipboard / handoff audit entry with
    `secctx_provenance=launcher_gated` (or `advisory` when the gate is
    off), so admins can filter decisions by trust level.
@@ -326,6 +329,25 @@ bind to the trusted launcher:
    `secctx_launcher_gated = false` in `/etc/qdistro/broker.conf`) switches
    the provenance tag to `advisory` and emits warnings when same-silo
    gates fire without identity verification.
+4. `qdistro-secctx-exec` is not a generic identity-minting tool. Production
+   use must come through a qdistro root launcher, which passes
+   `QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1`; the wrapper accepts that marker
+   only when its direct parent is a root launcher. Direct
+   test/development runs must opt in with
+   `QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1` and must run under a qdwin started
+   with `QDWIN_SECCTX_OPEN=1`, because production qdwin rejects admin-uid
+   helpers that carry the dev-only marker. Root-owned helpers are admitted
+   by uid/executable identity because qdwin may not be able to read their
+   `/proc` environment. Admin-uid helpers require the root launcher to
+   remain the live direct parent until the manager bind; double-forking
+   launchers fail closed. Historical Tier-1 and Tier-2 direct-admin
+   launch paths cannot satisfy that direct-parent contract yet, so they
+   warn and run untagged unless invoked from the root launcher path or an
+   explicit dev override is active. The wrapper validates the secctx triple before
+   binding the Wayland manager and writes launch-record pid files with
+   exclusive, no-symlink creation under `XDG_RUNTIME_DIR`.
+   Tier-1 and Tier-2 should move behind that same root launcher/broker path
+   before their secctx tags are considered production coverage again.
 
 **Option B (broker-attested, implemented):** qdwin snapshots each tagged
 client's `(pid, starttime, uid, exe, selinux_label)` at secctx-bind time

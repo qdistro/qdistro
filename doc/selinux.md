@@ -356,6 +356,12 @@ call depends on the **permission-lineage** posture
   `app_id` / `sandbox_engine` as advisory on this path; the
   kernel-anchored selectors (`uid`, `exe`, argv) remain trustworthy.
 
+For hosts ready to fail closed, `deploy/etc/qdistro/broker-hardened.conf`
+sets `secctx_launcher_gated`, `lineage_enforce`, `identity_strict`, and
+`require_silo_active` to true. It is shipped as an explicit profile rather
+than replacing the default until all tier launchers publish broker launch
+records in the installed image.
+
 Note: the **qdshell-mediated** clipboard / handoff gates already
 re-verify the underlying app identity per call via `VerifyClientIdentity`
 (Option B, below) regardless of `lineage_enforce`.

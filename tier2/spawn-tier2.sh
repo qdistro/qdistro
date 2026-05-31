@@ -433,11 +433,18 @@ trap 'forward_signal TERM' TERM
 trap 'forward_signal INT'  INT
 
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    qdistro-secctx-exec \
-        --sandbox-engine "$ENGINE" \
-        --app-id "$SECCTX_APPID" \
-        --instance-id "$LAUNCH_TOKEN" \
-        -- bash -c "$WRAPPER_BODY" &
+    if [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
+        echo "spawn-tier2: WARN: secctx stamping requires a direct root launcher parent;" >&2
+        echo "             running un-tagged. Use the root launcher/broker path, or set" >&2
+        echo "             QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
+        bash -c "$WRAPPER_BODY" &
+    else
+        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 qdistro-secctx-exec \
+            --sandbox-engine "$ENGINE" \
+            --app-id "$SECCTX_APPID" \
+            --instance-id "$LAUNCH_TOKEN" \
+            -- bash -c "$WRAPPER_BODY" &
+    fi
 else
     if [ "$USE_SECCTX" = "1" ]; then
         echo "spawn-tier2: WARN: qdistro-secctx-exec not in PATH; running un-tagged" >&2

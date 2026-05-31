@@ -100,15 +100,15 @@ journal_after() {
     fi
 }
 
-# qdwin advertises wp_security_context_manager_v1 (compositor global).
+# qdwin hides wp_security_context_manager_v1 from ordinary admin clients.
 WI_OUT=$(runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
     wayland-info 2>&1)
 if echo "$WI_OUT" | grep -q "wp_security_context_manager_v1"; then
-    pass "qdwin advertises wp_security_context_manager_v1"
-else
     echo "$WI_OUT" | tail -30 >&2
-    fail "wp_security_context_manager_v1 not advertised by qdwin"
+    fail "wp_security_context_manager_v1 visible to ordinary admin client"
+else
+    pass "qdwin hides wp_security_context_manager_v1 from ordinary admin client"
 fi
 
 # =====================================================================
@@ -118,6 +118,7 @@ WRAP_LOG=/tmp/s110-wrap.log
 : >"$WRAP_LOG"
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
+    QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$APPID" \
@@ -176,6 +177,7 @@ kill -TERM "$NOSEC_PID" 2>/dev/null || true
 FORGED_APPID="qdistro.admin.terminal"
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
+    QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$FORGED_APPID" \
