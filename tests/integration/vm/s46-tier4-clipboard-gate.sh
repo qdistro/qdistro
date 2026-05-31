@@ -117,6 +117,7 @@ SRC_LOG=/tmp/s46-source.log
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     WAYLAND_DISPLAY=wayland-1 \
+    QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$APPID" \

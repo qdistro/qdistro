@@ -415,7 +415,8 @@ fi
 # Build the secctx-exec wrap if enabled.
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
-    SECCTX_WRAP=(qdistro-secctx-exec
+    SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
         --instance-id    "$SECCTX_INSTANCE"

@@ -181,14 +181,21 @@ CMD=("$TIER1_EXEC" --)
 CMD+=("$@")
 
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    SECCTX_CMD=(
-        qdistro-secctx-exec
-        --sandbox-engine "$ENGINE"
-        --app-id "$APPID"
-        --instance-id "tier1-$SILO-$$"
-        --
-    )
-    CMD=("${SECCTX_CMD[@]}" "${CMD[@]}")
+    if [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
+        echo "[tier1] WARN: secctx stamping requires a direct root launcher parent;" >&2
+        echo "        running untagged. Use the root launcher/broker path, or set" >&2
+        echo "        QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
+    else
+        SECCTX_CMD=(
+            env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+            qdistro-secctx-exec
+            --sandbox-engine "$ENGINE"
+            --app-id "$APPID"
+            --instance-id "tier1-$SILO-$$"
+            --
+        )
+        CMD=("${SECCTX_CMD[@]}" "${CMD[@]}")
+    fi
 fi
 
 [ "${TIER1_DEBUG:-0}" = "1" ] && printf '[tier1] exec: %q ' "${CMD[@]}" >&2 \
@@ -197,4 +204,5 @@ fi
 # Title prefix for chrome differentiation when secctx isn't used or
 # qdshell hasn't been extended with the tier-1 silo regex yet.
 # qdshell parse_silo_from_title fallback consumes "[<silo>] " prefix.
-exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"
+exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
+    "${CMD[@]}"

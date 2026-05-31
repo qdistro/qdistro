@@ -227,7 +227,8 @@ build_secctx_wrap() {
     local instance="$4"
     SECCTX_WRAP=()
     if [ "$use_secctx" = "1" ]; then
-        SECCTX_WRAP=(qdistro-secctx-exec
+        SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+            qdistro-secctx-exec
             --sandbox-engine "$engine"
             --app-id         "$appid"
             --instance-id    "$instance"

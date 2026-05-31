@@ -35,6 +35,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
@@ -42,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -59,6 +61,284 @@ struct ctx {
 	struct wl_registry *registry;
 	struct wp_security_context_manager_v1 *mgr;
 };
+
+static int
+env_true(const char *name)
+{
+	const char *v = getenv(name);
+	return v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 ||
+		     strcmp(v, "yes") == 0 || strcmp(v, "on") == 0);
+}
+
+static int
+is_token_char(int ch, int allow_slash)
+{
+	return isalnum((unsigned char)ch) || ch == '.' || ch == '_' ||
+	       ch == '-' || (allow_slash && ch == '/');
+}
+
+static int
+validate_token(const char *label, const char *value, size_t max_len,
+	       int allow_slash)
+{
+	size_t len;
+
+	if (!value || !*value) {
+		fprintf(stderr, "qdistro-secctx-exec: %s is empty\n", label);
+		return -1;
+	}
+	len = strlen(value);
+	if (len > max_len) {
+		fprintf(stderr, "qdistro-secctx-exec: %s is too long\n", label);
+		return -1;
+	}
+	if (allow_slash &&
+	    (value[0] == '/' || strstr(value, "//") || strstr(value, ".."))) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: %s has invalid path-like shape\n",
+			label);
+		return -1;
+	}
+	for (size_t i = 0; i < len; i++) {
+		if (!is_token_char(value[i], allow_slash)) {
+			fprintf(stderr,
+				"qdistro-secctx-exec: %s contains invalid byte 0x%02x\n",
+				label, (unsigned char)value[i]);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int
+validate_secctx(const char *engine, const char *app_id, const char *instance_id)
+{
+	if (validate_token("sandbox-engine", engine, 64, 0) < 0)
+		return -1;
+	if (strncmp(engine, "qdistro.tier", strlen("qdistro.tier")) != 0) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: sandbox-engine must start with qdistro.tier\n");
+		return -1;
+	}
+	if (validate_token("app-id", app_id, 128, 1) < 0)
+		return -1;
+	if (instance_id && *instance_id &&
+	    validate_token("instance-id", instance_id, 128, 0) < 0)
+		return -1;
+	return 0;
+}
+
+static int
+read_proc_status(pid_t pid, pid_t *ppid, uid_t *uid)
+{
+	char path[64];
+	char line[256];
+	FILE *f;
+	int saw_ppid = 0, saw_uid = 0;
+
+	snprintf(path, sizeof path, "/proc/%ld/status", (long)pid);
+	f = fopen(path, "re");
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof line, f)) {
+		int ppid_i;
+		if (sscanf(line, "PPid:\t%d", &ppid_i) == 1) {
+			*ppid = (pid_t)ppid_i;
+			saw_ppid = 1;
+		} else if (strncmp(line, "Uid:", 4) == 0) {
+			unsigned int ruid;
+			if (sscanf(line, "Uid:\t%u", &ruid) == 1) {
+				*uid = (uid_t)ruid;
+				saw_uid = 1;
+			}
+		}
+	}
+	fclose(f);
+	return (saw_ppid && saw_uid) ? 0 : -1;
+}
+
+static int
+proc_basename(pid_t pid, char *out, size_t out_sz)
+{
+	char path[64];
+	char buf[512];
+	ssize_t n;
+	const char *base;
+
+	snprintf(path, sizeof path, "/proc/%ld/exe", (long)pid);
+	n = readlink(path, buf, sizeof buf - 1);
+	if (n < 0)
+		return -1;
+	buf[n] = '\0';
+	base = strrchr(buf, '/');
+	base = base ? base + 1 : buf;
+	snprintf(out, out_sz, "%s", base);
+	return 0;
+}
+
+static uint64_t
+proc_starttime(pid_t pid)
+{
+	char path[64];
+	char buf[2048];
+	int fd;
+	ssize_t n;
+	char *p;
+	int field = 2;
+	uint64_t v = 0;
+
+	if (pid <= 0)
+		return 0;
+	snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+	n = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	if (n <= 0)
+		return 0;
+	buf[n] = '\0';
+	p = strrchr(buf, ')');
+	if (!p)
+		return 0;
+	p++;
+	while (*p && field < 22) {
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (!*p)
+			return 0;
+		field++;
+		if (field == 22)
+			break;
+		while (*p && *p != ' ' && *p != '\t')
+			p++;
+	}
+	if (field != 22)
+		return 0;
+	while (*p >= '0' && *p <= '9') {
+		v = v * 10 + (uint64_t)(*p - '0');
+		p++;
+	}
+	return v;
+}
+
+static int
+trusted_root_parent(void)
+{
+	pid_t pid = getppid();
+	pid_t ppid = 0;
+	uid_t uid = (uid_t)-1;
+	uint64_t st_before, st_after;
+	char base[128] = {0};
+
+	if (pid <= 1 || read_proc_status(pid, &ppid, &uid) < 0)
+		return 0;
+	(void)ppid;
+	st_before = proc_starttime(pid);
+	if (uid == 0 && proc_basename(pid, base, sizeof base) == 0) {
+		if (strcmp(base, "runuser") == 0 ||
+		    strcmp(base, "su") == 0 ||
+		    strcmp(base, "sudo") == 0 ||
+		    strcmp(base, "pkexec") == 0) {
+			st_after = proc_starttime(pid);
+			return st_before != 0 && st_after != 0 &&
+			       st_before == st_after;
+		}
+	}
+	return 0;
+}
+
+static int
+authorized_launcher(void)
+{
+	if (env_true("QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED")) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: WARN dev override allows untrusted caller\n");
+		return 1;
+	}
+	if (geteuid() == 0)
+		return 1;
+	if (!env_true("QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER")) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: refused: missing trusted launcher marker "
+			"(set QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 for dev-only use)\n");
+		return 0;
+	}
+	if (trusted_root_parent())
+		return 1;
+	fprintf(stderr,
+		"qdistro-secctx-exec: refused: trusted marker is not backed by "
+		"a direct root launcher parent\n");
+	return 0;
+}
+
+static int
+path_under_runtime(const char *path, const char *xdg_runtime_dir)
+{
+	char runtime_real[PATH_MAX], parent[PATH_MAX], parent_real[PATH_MAX];
+	const char *slash;
+	size_t parent_len;
+
+	if (!path || !*path || !xdg_runtime_dir || !*xdg_runtime_dir)
+		return 0;
+	if (path[0] != '/')
+		return strchr(path, '/') == NULL;
+	slash = strrchr(path, '/');
+	if (!slash || slash == path)
+		return 0;
+	parent_len = (size_t)(slash - path);
+	if (parent_len >= sizeof parent)
+		return 0;
+	memcpy(parent, path, parent_len);
+	parent[parent_len] = '\0';
+	if (!realpath(xdg_runtime_dir, runtime_real) ||
+	    !realpath(parent, parent_real))
+		return 0;
+	return strcmp(runtime_real, parent_real) == 0;
+}
+
+static void
+publish_launch_record(const char *lr_path, const char *xdg_runtime_dir,
+		      pid_t pid)
+{
+	char full[256];
+	const char *path = lr_path;
+	const char *token = getenv("QDISTRO_LAUNCH_RECORD_TOKEN");
+	int fd;
+	char buf[256];
+	int n;
+
+	if (!lr_path || !*lr_path)
+		return;
+	if (!path_under_runtime(lr_path, xdg_runtime_dir)) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: launch-record path refused outside XDG_RUNTIME_DIR\n");
+		return;
+	}
+	if (lr_path[0] != '/') {
+		n = snprintf(full, sizeof full, "%s/%s", xdg_runtime_dir, lr_path);
+		if (n < 0 || (size_t)n >= sizeof full) {
+			fprintf(stderr,
+				"qdistro-secctx-exec: launch-record path too long\n");
+			return;
+		}
+		path = full;
+	}
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+		  0600);
+	if (fd < 0) {
+		fprintf(stderr, "qdistro-secctx-exec: launch-record path %s: %s\n",
+			path, strerror(errno));
+		return;
+	}
+	if (token && *token)
+		n = snprintf(buf, sizeof buf, "%ld %s\n", (long)pid, token);
+	else
+		n = snprintf(buf, sizeof buf, "%ld\n", (long)pid);
+	if (n > 0)
+		(void)write(fd, buf, (size_t)n);
+	close(fd);
+}
 
 static void
 registry_global(void *data, struct wl_registry *reg, uint32_t name,
@@ -154,6 +434,9 @@ usage(FILE *f)
 "  --instance-id ID          Optional instance identifier.\n"
 "  --display NAME            Outer compositor's display name (default\n"
 "                            $WAYLAND_DISPLAY or wayland-1).\n"
+"Security:\n"
+"  Production use must come from a qdistro root launcher. Developer-only\n"
+"  direct use requires QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1.\n"
 "\n", f);
 }
 
@@ -201,6 +484,10 @@ int main(int argc, char **argv)
 		usage(stderr);
 		return 2;
 	}
+	if (!authorized_launcher())
+		return 13;
+	if (validate_secctx(sandbox_engine, app_id, instance_id) < 0)
+		return 2;
 
 	const char *xdg = getenv("XDG_RUNTIME_DIR");
 	if (!xdg || !*xdg) {
@@ -302,6 +589,10 @@ int main(int argc, char **argv)
 		/* Drop WAYLAND_SOCKET if inherited; otherwise libwayland
 		 * tries to use that fd instead of WAYLAND_DISPLAY. */
 		unsetenv("WAYLAND_SOCKET");
+		unsetenv("QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER");
+		unsetenv("QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED");
+		unsetenv("QDISTRO_LAUNCH_RECORD_PATH");
+		unsetenv("QDISTRO_LAUNCH_RECORD_TOKEN");
 
 		execvp(argv[optind], &argv[optind]);
 		fprintf(stderr, "qdistro-secctx-exec: execvp(%s): %s\n",
@@ -311,7 +602,7 @@ int main(int argc, char **argv)
 
 	/* Permission-lineage launch-record hook (P1-1 rollout). When the
 	 * launcher set QDISTRO_LAUNCH_RECORD_PATH, publish the inner child's
-	 * pid there so a trusted *root* launcher ancestor (e.g. spawn-tier3.sh)
+	 * pid there so a trusted *root* launcher parent (e.g. spawn-tier3.sh)
 	 * can RegisterLaunch it with the broker. We are the only component that
 	 * knows this pid: it is our fork child, and its pid survives the
 	 * execvp() above, so it is exactly the pid that connects to the
@@ -321,17 +612,7 @@ int main(int argc, char **argv)
 	 * RegisterLaunch — so a stale or mid-exec read can only fail closed,
 	 * never mint a wrong record. Best-effort: a write failure is logged but
 	 * never blocks the launch. */
-	const char *lr_path = getenv("QDISTRO_LAUNCH_RECORD_PATH");
-	if (lr_path && *lr_path) {
-		FILE *lrf = fopen(lr_path, "we");
-		if (lrf) {
-			fprintf(lrf, "%d\n", (int)pid);
-			fclose(lrf);
-		} else {
-			fprintf(stderr, "qdistro-secctx-exec: launch-record path "
-				"%s: %s\n", lr_path, strerror(errno));
-		}
-	}
+	publish_launch_record(getenv("QDISTRO_LAUNCH_RECORD_PATH"), xdg, pid);
 
 	/* Parent: wait for child. */
 	int status = 0;
