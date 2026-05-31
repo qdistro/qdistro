@@ -350,3 +350,77 @@ class TestScopeNotPermittedVisibility:
         broker.get_pending.return_value = []
         win._on_decided(1, "allow", "once")
         assert 1 not in win.detail._broker_errors
+
+
+# ---------------------------------------------------------------------------
+# Pending-decision shortcut scope (open-followups: WindowShortcut + guard).
+#
+# All shortcuts are WindowShortcut-scoped (not the old ApplicationShortcut), so
+# they only fire while the admin window is active. The decision keys
+# (approve/deny/rule, bulk, per-silo) act on the *selected* pending request and
+# are guarded: pressed from another tab the first press raises the Pending tab
+# so the admin sees the request, a second press acts on it. The scope-picker
+# keys (Ctrl+Shift+1..8) commit nothing, so they are exempt from the guard and
+# take effect from any tab.
+# ---------------------------------------------------------------------------
+
+class TestPendingDecisionShortcutGuard:
+    def _shortcut(self, win, seq):
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        want = QKeySequence(seq).toString()
+        for sc in win.findChildren(QShortcut):
+            if sc.key().toString() == want:
+                return sc
+        raise AssertionError(f"no shortcut bound for {seq!r}")
+
+    def test_all_shortcuts_are_window_scoped(self, qapp):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QShortcut
+        win = MainWindow(_make_stub_broker())
+        shortcuts = win.findChildren(QShortcut)
+        assert shortcuts  # sanity: they exist
+        for sc in shortcuts:
+            assert sc.context() == Qt.ShortcutContext.WindowShortcut
+
+    def test_ensure_pending_tab_switches_only_when_elsewhere(self, qapp):
+        win = MainWindow(_make_stub_broker())
+        win.tabs.setCurrentWidget(win.pending_tab)
+        assert win._ensure_pending_tab() is False
+        assert win.tabs.currentWidget() is win.pending_tab
+
+        win.tabs.setCurrentWidget(win.rules_tab)
+        assert win._ensure_pending_tab() is True
+        assert win.tabs.currentWidget() is win.pending_tab
+
+    def test_shortcut_from_other_tab_raises_pending_without_deciding(self, qapp):
+        broker = _make_stub_broker()
+        broker.get_pending.return_value = [_req(1)]
+        win = MainWindow(broker)
+        win.tabs.setCurrentWidget(win.rules_tab)
+        with patch.object(win.detail, "_emit") as emit:
+            self._shortcut(win, "Ctrl+Y").activated.emit()
+        emit.assert_not_called()
+        assert win.tabs.currentWidget() is win.pending_tab
+
+    def test_shortcut_on_pending_tab_acts(self, qapp):
+        broker = _make_stub_broker()
+        broker.get_pending.return_value = [_req(1)]
+        win = MainWindow(broker)
+        win.tabs.setCurrentWidget(win.pending_tab)
+        with patch.object(win.detail, "_emit") as emit:
+            self._shortcut(win, "Ctrl+Y").activated.emit()
+        emit.assert_called_once_with("allow")
+
+    def test_scope_keys_are_unguarded_and_act_from_other_tab(self, qapp):
+        # Scope-picker keys (Ctrl+Shift+1..8) commit nothing — they only
+        # tick a radio button — so they are exempt from the Pending-tab
+        # guard: they take effect from any tab WITHOUT first switching.
+        broker = _make_stub_broker()
+        broker.get_pending.return_value = [_req(1)]
+        win = MainWindow(broker)
+        win.tabs.setCurrentWidget(win.rules_tab)
+        with patch.object(win, "_set_scope") as set_scope:
+            self._shortcut(win, "Ctrl+Shift+3").activated.emit()
+        set_scope.assert_called_once_with("24h")
+        # Still on Rules — the unguarded key did not yank the admin away.
+        assert win.tabs.currentWidget() is win.rules_tab

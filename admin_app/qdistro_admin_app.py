@@ -1928,14 +1928,32 @@ class MainWindow(QMainWindow):
         self.notifications = NotificationManager(self.tray_icon, parent=self)
         self.notifications.ageTickFired.connect(self._refresh_age_column)
 
-        # Shortcuts. ApplicationShortcut context so Ctrl+Y/N/R and
-        # Ctrl+Shift+A/D fire from any tab — the admin can be reading
-        # the Rules tab when a request arrives and approve without
-        # switching focus.
-        def _mk_shortcut(seq: str, slot):
+        # Shortcuts. WindowShortcut context so they only fire while the
+        # admin window itself is active — they can't be triggered from a
+        # background window or while the app sits in the tray.
+        #
+        # Decision keys (approve/deny/rule, bulk, per-silo) act on the
+        # *currently selected pending request*, so they are guarded
+        # (guard=True, the default): pressed from any other tab, the
+        # first keypress raises the Pending tab so the admin sees what
+        # they're about to act on; a second keypress commits. This stops
+        # a stray Ctrl+Y on the Rules/History tab from silently approving
+        # a request the admin never looked at.
+        #
+        # The scope-picker keys (Ctrl+Shift+1..8) only tick a radio
+        # button on the detail pane and commit nothing, so they are
+        # exempt (guard=False) — guarding them would force a pointless
+        # double-press when an admin pre-selects a scope from elsewhere.
+        def _mk_shortcut(seq: str, slot, *, guard: bool = True):
             sc = QShortcut(QKeySequence(seq), self)
-            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            sc.activated.connect(slot)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+
+            def _activated(_slot=slot):
+                if guard and self._ensure_pending_tab():
+                    return
+                _slot()
+
+            sc.activated.connect(_activated)
             return sc
 
         # doc/admin-approval.md: Ctrl+Y or Alt+A approves CURRENT.
@@ -1960,7 +1978,8 @@ class MainWindow(QMainWindow):
                                        "forever_exe", "forever_argv",
                                        "forever_basename", "forever_prefix"]):
             _mk_shortcut(f"Ctrl+Shift+{i+1}",
-                         lambda s=scope_key: self._set_scope(s))
+                         lambda s=scope_key: self._set_scope(s),
+                         guard=False)
 
         # Help menu surfacing the documented shortcuts.
         self._install_help_menu()
@@ -2110,6 +2129,19 @@ class MainWindow(QMainWindow):
             # Decision recorded — clear any stale refusal note for this rid.
             self.detail.clear_broker_error(rid)
         self.refresh()
+
+    def _ensure_pending_tab(self) -> bool:
+        """Guard for the pending-decision shortcuts. If the Pending tab
+        is not the active tab, raise it (and focus the queue list) and
+        return True so the caller aborts without committing — the admin
+        then sees the request before a second keypress acts on it.
+        Returns False when the Pending tab is already active, so the
+        action proceeds immediately."""
+        if self.tabs.currentWidget() is self.pending_tab:
+            return False
+        self.tabs.setCurrentWidget(self.pending_tab)
+        self.list.setFocus()
+        return True
 
     def _on_tab_changed(self, index: int) -> None:
         # Refresh the Cache / Silos / Rules / History tabs lazily so they're fresh when
@@ -2346,7 +2378,12 @@ class MainWindow(QMainWindow):
             "  Alt+Shift+A\n"
             "Deny all pending in current silo only (with confirmation):\n"
             "  Alt+Shift+D\n\n"
-            "Scope picker (sets DetailPane scope radio):\n"
+            "The decision keys above act on the selected pending request\n"
+            "and fire only while this window is active. Pressed from\n"
+            "another tab, the first keypress switches to the Pending tab\n"
+            "so you see the request; press again to act on it.\n\n"
+            "Scope picker (sets DetailPane scope radio — takes effect from\n"
+            "any tab, no confirmation):\n"
             "  Ctrl+Shift+1  once\n"
             "  Ctrl+Shift+2  1 hour\n"
             "  Ctrl+Shift+3  24 hours\n"

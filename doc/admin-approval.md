@@ -132,6 +132,16 @@ for `Ctrl+Shift+A` regardless of the active scope picker, so a
 fatigued admin who left scope on "Forever" can't accidentally pin
 a long-lived grant on every queued row.
 
+In the GUI these decision shortcuts are scoped to the admin window
+(they don't fire while it's unfocused or sitting in the tray) and
+are guarded by the Pending tab: pressed while another tab (Rules,
+History, …) is showing, the first keypress switches to the Pending
+tab so the admin sees the request, and a second keypress acts on
+it — a stray `Ctrl+Y` can't approve a request the admin never
+looked at. The scope-picker keys (`Ctrl+Shift+1..8`) only tick a
+radio button and commit nothing, so they are exempt from this
+guard and take effect from any tab.
+
 ## Urgency levels
 
 Three levels, admin policy determines per action:

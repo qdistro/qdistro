@@ -91,11 +91,15 @@ $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s2-populated.png
 
 ### S3 — Deny via Ctrl+N, confirm empty state returns
 
-The Qt admin app wires `Ctrl+Y`/`Ctrl+N` as global QShortcuts for
-Approve/Deny (see `admin_app/qdistro_admin_app.py:173-177`).
-We inject Ctrl+N at the KVM keyboard level via `virsh send-key`
-because xdotool modifier combos don't reach XWayland Qt apps under
-labwc (see AGENTS.md caveat).
+The Qt admin app wires `Ctrl+Y`/`Ctrl+N` as `WindowShortcut`-scoped
+QShortcuts for Approve/Deny (see `_mk_shortcut` in
+`admin_app/qdistro_admin_app.py`). They fire only while the admin
+window is active, and the decision keys are guarded by the Pending
+tab — but this test launches straight into the Pending tab with the
+window focused, so a single Ctrl+N decides as expected (no tab
+switch is needed). We inject Ctrl+N at the KVM keyboard level via
+`virsh send-key` because xdotool modifier combos don't reach
+XWayland Qt apps under labwc (see AGENTS.md caveat).
 
 ```bash
 # Focus the admin-approvals window before the KVM-level keystroke,
