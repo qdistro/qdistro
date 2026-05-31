@@ -320,7 +320,8 @@ bind to the trusted launcher:
    is not an authorization basis; qdwin independently requires an
    admin-uid helper to have a direct root launcher parent. Helpers under
    any non-root uid other than qdwin's configured admin/allowed uid are
-   refused.
+   refused. The helper executable inode must be owned by root and not
+   writable by group or other users.
 2. The broker annotates every clipboard / handoff audit entry with
    `secctx_provenance=launcher_gated` (or `advisory` when the gate is
    off), so admins can filter decisions by trust level.
