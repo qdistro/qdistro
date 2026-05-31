@@ -1619,11 +1619,11 @@ class PwdDaemon(dbus.service.Object):
 
         Constraints:
           - The portal-keys vault MUST be unlocked first (admin task).
-          - Caller must be a non-admin uid (admin doesn't need portal
-            keys; this endpoint is for the per-user portal backend).
-            App-id format is loosely validated (no path separators,
-            non-empty) — the portal frontend already validated it
-            against flatpak-info, but we double-check.
+          - Caller identity is audited, but this test-open endpoint does
+            not yet enforce a portal-backend-only peer identity gate.
+          - App-id format is loosely validated (no path separators,
+            non-empty). A production portal backend must derive this from
+            portal metadata instead of trusting a caller-provided string.
         """
         uid, pid = self._peer_info(sender)
         caller = snapshot_caller(pid, uid)
