@@ -879,6 +879,29 @@ class Broker(dbus.service.Object):
             from audit_logger import WorkflowAuditLogger
             from pwd_secret_source import PwdSecretSource
             wf_audit = WorkflowAuditLogger(broker_audit=self.audit)
+            # Zero-coordination git-signing relay (OPT-IN, off by default).
+            # When QDISTRO_SIGN_AGENT_RELAY names a fixed per-user agent
+            # socket path, stand up an ssh-agent relay there and inject its
+            # registrar so a plain `git -S` (no qsu, no run_id) blocked on
+            # that path starts relaying the moment a run publishes its per-run
+            # agent. The dev points SSH_AUTH_SOCK / ~/.ssh IdentityAgent at
+            # this same path once, ahead of time. See
+            # workflow/examples/git-sign-zero-coord.yaml. Best-effort: a relay
+            # bind failure must not take down the engine.
+            channel_registrar = None
+            self._sign_agent_relay = None
+            relay_path = os.environ.get("QDISTRO_SIGN_AGENT_RELAY", "").strip()
+            if relay_path:
+                try:
+                    from agent_relay import build_relay_registrar
+                    relay, channel_registrar = build_relay_registrar(relay_path)
+                    self._sign_agent_relay = relay
+                    print(f"[broker] ssh-agent sign relay listening on "
+                          f"{relay_path}", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] ssh-agent sign relay init skipped: {e!r}",
+                          flush=True)
+                    channel_registrar = None
             engine = WorkflowEngine(
                 broker_proxy=self,
                 audit_logger=wf_audit,
@@ -886,6 +909,7 @@ class Broker(dbus.service.Object):
                 # The broker owns the process main loop; D-Bus triggers
                 # must reuse it instead of starting their own.
                 own_dbus_loop=False,
+                channel_registrar=channel_registrar,
             )
             for err in engine.load_workflows():
                 print(f"[broker] workflow load error: {err}", flush=True)
@@ -4258,6 +4282,17 @@ def main():
                 engine.shutdown()
             except Exception as e:  # noqa: BLE001
                 print(f"[broker] workflow engine shutdown failed: {e!r}",
+                      flush=True)
+        # Tear down the zero-coordination sign-agent relay (if started) so a
+        # clean exit does not leave its listening socket bound or its socket
+        # file on disk. build_relay_registrar() hands us the relay handle
+        # precisely so we can stop() it here.
+        relay = getattr(broker, "_sign_agent_relay", None)
+        if relay is not None:
+            try:
+                relay.stop()
+            except Exception as e:  # noqa: BLE001
+                print(f"[broker] sign-agent relay stop failed: {e!r}",
                       flush=True)
 
 

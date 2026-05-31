@@ -1,0 +1,109 @@
+# git-sign-zero-coord — the ZERO-COORDINATION variant of git-sign.
+#
+# Goal: a dev runs plain `git commit -S ...` with NO wrapper, NO run id, NO
+# waiting, and the engine transparently makes the signing key available for
+# the duration of the commit, then scrubs it. The call site has ZERO
+# knowledge of qdistro.
+#
+# Why the other two flows can't do this (read this before relying on it):
+#   - git-sign-inline.yaml works because the ENGINE launches git and folds
+#     SSH_AUTH_SOCK into git's env at exec time.
+#   - git-sign-commit.yaml (+ `qsu --workflow-run`) works because qsu/
+#     root-exec launch git and fold the env in at exec time.
+#   Both inject the socket BEFORE git execs. A plain `git -S` gives us
+#   neither hook, and you CANNOT push SSH_AUTH_SOCK into an already-running
+#   git — its environment is frozen at execve.
+#
+# The mechanism: a FIXED-PATH ssh-agent relay (workflow.agent_relay).
+#   ONE-TIME dev setup (the only "coordination", done once, ahead of time —
+#   not per-commit): point the dev's ssh at a fixed, well-known per-user
+#   agent path that the relay owns. Either:
+#       export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/qdistro-sign-agent.sock   # shell profile
+#   or, equivalently, in ~/.ssh/config:
+#       Host *
+#           IdentityAgent ~/.run/qdistro-sign-agent.sock
+#   The relay binds that path and is ALWAYS listening (0600, in a 0700 dir),
+#   so git's ssh connect() never races a "socket not created yet" window.
+#
+#   Per-commit (fully automatic, no coordination):
+#     1. dev runs `git commit -S` -> git's ssh connects to the fixed path.
+#        The relay accepts and HOLDS the connection (git blocks harmlessly on
+#        the agent-protocol read).
+#     2. The process_spawn trigger notices git, the run goes PENDING, an
+#        admin approves (or auto_run is on), deliver_secret stands up the
+#        per-run agent and publishes SSH_AUTH_SOCK.
+#     3. The engine's channel registrar calls relay.set_target(per-run-sock);
+#        the relay dials the per-run agent and byte-pumps both directions.
+#        git's blocked ssh now completes the signature.
+#     4. On workflow_exit the agent is scrubbed and the registrar re-arms the
+#        relay to fail closed (a later connection no longer relays).
+#
+# RESIDUAL RACE (documented, NOT papered over):
+#   git's own ssh has a finite patience for the agent socket. If admin
+#   approval + publish takes longer than that client-side timeout (or longer
+#   than the relay's connect_wait), git's signing attempt FAILS CLOSED and
+#   the dev retries. The relay converts the *unsolvable* "inject into a
+#   running process" problem into a *bounded liveness* problem (does
+#   approval+publish beat the client timeout?). It cannot make a human
+#   approval instantaneous. Set auto_run: true (below) to remove the human
+#   from the per-commit hot path once an admin has decided this workflow may
+#   run unattended — that makes the window just the publish lag (sub-second),
+#   which the relay's connect_wait comfortably covers.
+#
+# CONCURRENCY + RUN-BINDING (fail-closed): the relay has ONE fixed front path
+# and one live target. Two layers keep overlap safe:
+#   1. The engine's channel registrar refuses to move the live target off the
+#      run that owns it (a second run can't steal the slot).
+#   2. Each front connection is bound to the OWNING RUN: the relay reads the
+#      peer's pid via SO_PEERCRED (kernel-attested, unforgeable) and relays
+#      ONLY if that peer is the run's triggering git or a descendant of it
+#      (pid-reuse anchored on /proc starttime). So even at the same uid, a
+#      second dev's git that connects during a live run's window is REFUSED
+#      and fails closed — it is not in the owning run's process tree.
+# Net: overlapping signing runs are serialized and never cross-wired. If you
+# need genuine concurrency (e.g. distinct keys per repo), give each its own
+# workflow + its own relay front path rather than sharing one.
+#
+# auto_run is OMITTED here -> defaults to FALSE: each fire parks a PENDING
+# run for admin approval. For a usable zero-coordination flow you almost
+# certainly want `auto_run: true` (a one-time admin decision), accepting that
+# the identity conditions below are then the only per-commit gate.
+#
+# EXAMPLE only — copy to /etc/qdistro/workflows/ (system) or
+# ~/.config/qdistro/workflows/ (user), set cgroup_pattern/uid + the vault
+# item, and wire the relay front path (see broker --sign-agent-relay).
+- name: git-sign-zero-coord
+  description: >-
+    Plain `git commit -S` with no wrapper: a fixed-path ssh-agent relay
+    delivers the per-run signing key to the already-running git, then scrubs.
+  trigger:
+    type: process_spawn
+    # Match the cgroup the dev's interactive git lands in. With a plain git
+    # (no scope wrapper) this is typically the user's app/session slice;
+    # tighten it to your shell's scope so unrelated git invocations don't
+    # fire the workflow.
+    cgroup_pattern: "user.slice/user-*.slice/*/app-*.scope"
+    poll_interval: 0.25
+  conditions:
+    # ENFORCED fail-closed identity gate (re-evaluated at execution): the key
+    # is delivered only if the firing process really is dev's git.
+    - uid: dev
+    - argv0: git
+  needs:
+    - vault/dev/github-ssh-key
+  steps:
+    - deliver_secret:
+        # Stand up the per-run agent and publish SSH_AUTH_SOCK. The engine's
+        # channel registrar points the fixed-path relay at this socket the
+        # instant it is published, so the dev's already-blocked git starts
+        # relaying. No command here: the engine does NOT launch git — the
+        # dev's own git is the consumer.
+        item: vault/dev/github-ssh-key
+        as: ssh-agent
+        expose_as: SSH_AUTH_SOCK
+        ttl: 120
+        scrub_on: workflow_exit
+    - wait_for_process: $trigger.pid
+  roles:
+    - dev: invoker
+    - admin: approver

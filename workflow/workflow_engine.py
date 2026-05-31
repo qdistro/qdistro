@@ -227,9 +227,22 @@ class WorkflowEngine:
         secret_source: Any | None = None,
         own_dbus_loop: bool = True,
         max_concurrent_runs: int = 4,
+        channel_registrar: Any | None = None,
     ):
         self._broker = broker_proxy
         self._audit = audit_logger
+        # Optional sink notified (run_id, name, value) the instant a
+        # NON-SECRET allowlisted channel reference is published, and
+        # (run_id, name, None) when it is scrubbed. The zero-coordination
+        # git-signing flow wires this to an ssh-agent relay's
+        # set_target/clear_target so a plain `git -S` already blocked on the
+        # fixed agent path starts relaying the moment this run's per-run
+        # agent comes up — see workflow.agent_relay. Injected (not imported)
+        # so the engine stays pure/testable. _publish_channel intersects each
+        # published name with _EXTERNAL_CHANNEL_ENV_ALLOWLIST before notifying,
+        # and the registrar (workflow.agent_relay) independently re-filters —
+        # two gates, so the allowlist discipline holds even if one side drifts.
+        self._channel_registrar = channel_registrar
         self._loader = loader or WorkflowLoader()
         self._registry = TriggerRegistry(dbus_run_own_loop=own_dbus_loop)
         self._secret_source = secret_source
@@ -892,6 +905,48 @@ class WorkflowEngine:
         # Steps for a single run execute sequentially on one worker thread,
         # so run.context needs no lock.
         run.context.setdefault("channel_env", {}).update(env)
+        # Zero-coordination relay hook: notify the (optional) channel
+        # registrar with each published name/value so a fixed-path ssh-agent
+        # relay can point at this run's freshly-stood-up agent the instant it
+        # comes up — making a plain `git -S` (no wrapper, no run_id) work.
+        # Only the names assembled into `env` above reach here, and those are
+        # exactly the publishable, allowlisted references (ssh-agent socket /
+        # tmpfs path) — never secret material. A registrar failure must NOT
+        # abort delivery (the inline/bridge consumers still work off
+        # run.context); log and continue.
+        if self._channel_registrar is not None:
+            # Owner anchor for the relay's per-connection run-binding: the
+            # triggering git's pid + its /proc starttime (pid-reuse anchor).
+            # The relay relays a front connection only to a peer in this
+            # process tree, so a second uid-peer git can't ride this target.
+            # process_spawn runs have a pid; cron/engine-launched runs don't
+            # (None -> the relay falls back to uid-only for those).
+            owner_pid = run.trigger_context.get("pid")
+            try:
+                owner_pid = int(owner_pid) if owner_pid is not None else None
+            except (TypeError, ValueError):
+                owner_pid = None
+            owner_start = run.trigger_context.get("pid_starttime")
+            for k, v in env.items():
+                # Second, explicit gate: only an allowlisted reference name is
+                # ever handed to the registrar (the relay re-filters too).
+                if k not in _EXTERNAL_CHANNEL_ENV_ALLOWLIST:
+                    continue
+                try:
+                    self._channel_registrar(
+                        run.run_id, k, v, owner_pid=owner_pid,
+                        owner_pid_starttime=owner_start)
+                except TypeError:
+                    # Registrar predates the owner-anchor kwargs (e.g. a simple
+                    # test callable) — fall back to the 3-arg contract.
+                    try:
+                        self._channel_registrar(run.run_id, k, v)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "channel registrar publish for %s failed: %r", k, e)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "channel registrar publish for %s failed: %r", k, e)
         logger.info("deliver_secret: published channel %s for run %s",
                     sorted(env.keys()), run.run_id)
         return sorted(env.keys())
@@ -1194,6 +1249,24 @@ class WorkflowEngine:
         with self._secrets_lock:
             handles = self._delivery_handles.pop(run_id, [])
             secrets = self._delivered_secrets.pop(run_id, [])
+        # Zero-coordination relay hook: re-arm any fixed-path agent relay to
+        # fail closed BEFORE the per-run agent is torn down, so a connection
+        # arriving during teardown never even sees the (about-to-die) target
+        # path. Clearing first, then scrubbing, removes the window where the
+        # relay still points at an agent the very next lines are about to kill.
+        # The registrar only re-arms if THIS run still owns the relay target
+        # (overlap is fail-closed, so another run can't have taken it; a stale
+        # clear is ignored regardless), so this can't stomp another run.
+        # Best-effort; a registrar failure must not break cleanup.
+        if self._channel_registrar is not None:
+            run = self.get_run(run_id)
+            chan = (run.context.get("channel_env") or {}) if run else {}
+            for name in list(chan):
+                try:
+                    self._channel_registrar(run_id, name, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "channel registrar clear for %s failed: %r", name, e)
         for handle in handles:
             try:
                 handle.scrub()
