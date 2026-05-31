@@ -14,7 +14,7 @@ vt = 3
 # greetd's JSON-IPC for PAM. Runs as the unprivileged `_greeter`
 # user; $GREETD_SOCK is inherited from greetd.
 [default_session]
-command = "/usr/bin/qdgreeter"
+command = "env QT_QPA_PLATFORM=eglfs QT_QPA_EGLFS_INTEGRATION=eglfs_kms QT_QPA_EGLFS_NO_LIBINPUT=1 QT_QPA_EGLFS_DISABLE_INPUT=1 /usr/bin/qdgreeter"
 user = "_greeter"
 
 # Optional auto-login (disabled by default — keeps the boot greeter

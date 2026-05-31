@@ -164,6 +164,9 @@ if ! getent passwd _greeter >/dev/null; then
 else
     usermod --shell /usr/sbin/nologin --home /nonexistent _greeter 2>/dev/null || true
 fi
+for g in video render input tty; do
+    getent group "$g" >/dev/null && usermod -aG "$g" _greeter || true
+done
 
 install -m 0644 "$QD/deploy/greetd-config.toml"          /etc/greetd/config.toml
 install -m 0644 "$QD/deploy/greetd-config-fallback.toml" /etc/greetd/config-fallback.toml

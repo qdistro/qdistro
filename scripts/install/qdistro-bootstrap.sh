@@ -1473,6 +1473,12 @@ configure_greetd() {
         # login shell or a real home, pin it back to non-login / non-home.
         usermod --shell /usr/sbin/nologin --home /nonexistent _greeter 2>/dev/null || true
     fi
+    # EGLFS reads input devices directly, and qdgreeter handles
+    # Ctrl+Alt+Fx VT switching itself because Qt consumes the key
+    # sequence before the kernel console switch path sees it.
+    for g in video render input tty; do
+        getent group "$g" >/dev/null && usermod -aG "$g" _greeter || true
+    done
 
     # greetd config (tty3 — production qdgreeter path).
     install -d -m 0755 /etc/greetd

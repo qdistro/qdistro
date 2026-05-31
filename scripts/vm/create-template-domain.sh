@@ -93,6 +93,7 @@ cat > "$TMPXML" <<EOF
       <source file='$IMG_DIR/$NAME.qcow2'/>
       <target dev='vda' bus='virtio'/>
     </disk>
+    <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
     <interface type='user'>
       <mac address='52:54:00:de:ad:01'/>
       <model type='virtio'/>
@@ -106,12 +107,16 @@ cat > "$TMPXML" <<EOF
       <target type='virtio' name='com.redhat.spice.0'/>
     </channel>
     <input type='tablet' bus='usb'/>
-    <input type='keyboard' bus='usb'/>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
     <graphics type='spice' autoport='yes'>
       <listen type='address'/>
       <image compression='off'/>
     </graphics>
+    <audio id='1' type='spice'/>
 $VIDEO_XML
+    <redirdev bus='usb' type='spicevmc'/>
+    <redirdev bus='usb' type='spicevmc'/>
     <memballoon model='virtio'/>
   </devices>
 $QEMU_CMDLINE_XML
