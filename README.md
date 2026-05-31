@@ -142,6 +142,7 @@ This is the initial scaffold:
 - ✅ qdwin C-side `bind_qdwin_locker` + locker resource handlers
       (see qdwin/doc/locker.md)
 - ✅ pywayland scanner output committed under `protocol/`
-- ⏳ Ctrl-socket implementation in app.py for test introspection
+- ✅ Ctrl-socket implementation for test introspection (`qdlocker/ctrl.py`),
+      wired from `app.py` after the QML root window is ready
 
 See `tests/gui/01-lock-cycle.md` for the acceptance criterion.
