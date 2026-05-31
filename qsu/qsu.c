@@ -413,7 +413,8 @@ static void usage(void)
         "\n"
         "  --workflow-run RUN_ID  inherit the workflow run's non-secret\n"
         "                         channel_env (e.g. SSH_AUTH_SOCK) before\n"
-        "                         exec (git-sign bridge).\n");
+        "                         exec (git-sign bridge).\n"
+        "  --version              print version and exit without connecting.\n");
 }
 
 int main(int argc, char **argv)
@@ -438,12 +439,13 @@ int main(int argc, char **argv)
         {"user",         required_argument, NULL, 'u'},
         {"workflow-run", required_argument, NULL, 'W'},
         {"help",         no_argument,       NULL, 'h'},
+        {"version",      no_argument,       NULL, 'V'},
         {NULL, 0, NULL, 0}
     };
 
     /* We need POSIX-style option parsing: stop at first non-option. */
     opterr = 0;  /* suppress getopt's own error messages */
-    while ((opt = getopt_long(argc, argv, "+u:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "+u:hV", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'u':
             target_user = optarg;
@@ -453,6 +455,9 @@ int main(int argc, char **argv)
             break;
         case 'h':
             usage();
+            return 0;
+        case 'V':
+            printf("qsu (qdistro)\n");
             return 0;
         default:
             usage();

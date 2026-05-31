@@ -28,6 +28,7 @@ covered by the in-VM bats/integration gates instead.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -108,6 +109,39 @@ def test_component_version_smoke(entry: str, prog: str) -> None:
     assert "(qdistro)" in out, (
         f"{entry} --version output {out!r} lacks the (qdistro) marker"
     )
+
+
+def test_shipped_qsu_c_client_version(tmp_path: Path) -> None:
+    """The installed qsu is the C client, so smoke that exact entrypoint."""
+    cc = shutil.which("cc")
+    if cc is None:
+        pytest.skip("cc not available to build qsu C client")
+    binary = tmp_path / "qsu"
+    compile_cp = subprocess.run(
+        [cc, "-O2", "-Wall", "-Wextra", "-o", str(binary), str(_REPO / "qsu/qsu.c")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+    )
+    assert compile_cp.returncode == 0, (
+        f"qsu.c compile failed\nstdout={compile_cp.stdout!r}"
+        f"\nstderr={compile_cp.stderr!r}"
+    )
+    cp = subprocess.run(
+        [str(binary), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+    )
+    assert cp.returncode == 0, (
+        f"compiled qsu --version exited {cp.returncode}\n"
+        f"stdout={cp.stdout!r}\nstderr={cp.stderr!r}"
+    )
+    out = (cp.stdout + cp.stderr).strip()
+    assert "qsu" in out
+    assert "(qdistro)" in out
 
 
 # The two covered CLIs whose real subcommands sit behind a root gate; the
