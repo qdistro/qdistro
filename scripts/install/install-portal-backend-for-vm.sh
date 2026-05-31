@@ -21,6 +21,12 @@ install -d -m 0755 \
 
 install -m 0755 "$SRC/daemons/qdistro_portal_backend.py" \
     "$DEST_LIB/qdistro_portal_backend.py"
+install -m 0755 "$SRC/daemons/qdistro_portal_frontend.py" \
+    "$DEST_LIB/qdistro_portal_frontend.py"
+install -m 0644 "$SRC/broker/qdistro_proc_identity.py" \
+    "$DEST_LIB/qdistro_proc_identity.py"
+install -m 0644 "$SRC/broker/qdistro_resolver.py" \
+    "$DEST_LIB/qdistro_resolver.py"
 install -m 0644 "$SRC/deploy/portals/qdistro.portal" \
     "$DEST_PORTALS/qdistro.portal"
 install -m 0644 "$SRC/deploy/portals/qdistro-portals.conf" \
@@ -31,4 +37,4 @@ install -m 0644 \
 install -m 0644 "$SRC/deploy/systemd/services/qdistro-portal-backend.service" \
     "$DEST_USER_SYSD/qdistro-portal-backend.service"
 
-echo "[install-portal-backend] installed qdistro xdg-desktop-portal backend"
+echo "[install-portal-backend] installed qdistro xdg-desktop-portal backend/frontend core"

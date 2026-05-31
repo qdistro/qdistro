@@ -62,6 +62,7 @@ def _username_for_uid(uid: int) -> str:
     except (KeyError, ValueError, OverflowError):
         return f"uid:{int(uid)}"
 
+
 # Audit rows older than this are deleted by a daily timer (and on
 # demand via RunAuditGc). 90 days is long enough for "what happened
 # last quarter?" investigations without unbounded disk growth on
@@ -1508,18 +1509,18 @@ class Broker(dbus.service.Object):
         as the cross-silo source resolution; see findings P1-1 / portal §.
         """
         caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
-        if caller_uid != 0:
-            raise dbus.DBusException(
-                f"CheckPermissionForClient restricted to root portal "
-                f"frontends; got uid {caller_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
         action_s = str(action)
         try:
             spid = int(client_pid)
             sstart = int(client_starttime)
         except (TypeError, ValueError):
             return "unknown"
+        if caller_uid != 0:
+            raise dbus.DBusException(
+                f"CheckPermissionForClient restricted to root portal "
+                f"frontends; got uid {caller_uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
         cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
         if not ok:
             # The named client is gone or its pid was recycled — we cannot
@@ -1549,18 +1550,18 @@ class Broker(dbus.service.Object):
         the launcher-attested originating client, not the frontend. Root-only.
         Returns the request id, or 0 when the client can't be authenticated.
         """
-        caller_uid, _cp, _ce, _ = self._peer_info(sender, conn)
+        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        try:
+            spid = int(client_pid)
+            sstart = int(client_starttime)
+        except (TypeError, ValueError):
+            return 0
         if caller_uid != 0:
             raise dbus.DBusException(
                 f"RequestPermissionForClient restricted to root portal "
                 f"frontends; got uid {caller_uid}",
                 name=BUS_NAME + ".AccessDenied",
             )
-        try:
-            spid = int(client_pid)
-            sstart = int(client_starttime)
-        except (TypeError, ValueError):
-            return 0
         cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
         if not ok:
             return 0

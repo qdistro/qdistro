@@ -46,6 +46,13 @@ class _RecordingBroker(F.BrokerClient):
         return self._rid
 
 
+class _Subject:
+    def __init__(self, app_id="", sandbox_engine="", exe=""):
+        self.app_id = app_id
+        self.sandbox_engine = sandbox_engine
+        self.exe = exe
+
+
 def _live_proc(monkeypatch, *, pid=APP_PID, starttime=APP_START):
     monkeypatch.setattr(
         pi, "read_starttime",
@@ -232,6 +239,24 @@ def test_build_broker_call_empty_app_id_defaults_unknown():
     assert details["app_id"] == "unknown"
 
 
+def test_app_id_for_client_pid_uses_stable_resolved_subject():
+    assert F.app_id_for_client_pid(
+        APP_PID, resolver=lambda pid: _Subject(app_id="org.example.App")
+    ) == "org.example.App"
+
+
+def test_app_id_for_client_pid_falls_back_to_unknown_on_failure():
+    def _boom(_pid):
+        raise RuntimeError("gone")
+    assert F.app_id_for_client_pid(APP_PID, resolver=_boom) == "unknown"
+
+
+def test_app_id_for_client_pid_does_not_fallback_to_exe():
+    assert F.app_id_for_client_pid(
+        APP_PID, resolver=lambda pid: _Subject(exe="/usr/bin/firefox")
+    ) == "unknown"
+
+
 # === Remaining portal methods on the same attested core ==================
 #
 # Each method must: (1) relay the RESOLVED (pid, starttime), never an
@@ -251,9 +276,10 @@ def test_open_file_allow_uses_fs_action_and_resolved_tuple(monkeypatch):
     _live_proc(monkeypatch)
     broker = _RecordingBroker(verdict="allow")
     resp, results = F.handle_open_file("org.example.App",
-                                       client_pid=APP_PID, broker=broker)
+                                       client_pid=APP_PID, broker=broker,
+                                       picker=lambda **kw: ["/tmp/doc.txt"])
     assert resp == F.RESP_SUCCESS
-    assert results == {}  # no files leaked by the pure gate itself
+    assert results == {"uris": ["file:///tmp/doc.txt"]}
     assert len(broker.check_calls) == 1
     action, _details, pid, start = broker.check_calls[0]
     # FileChooser-scoped action, decided against the RESOLVED tuple.
@@ -301,7 +327,8 @@ def test_open_file_app_supplied_pid_ignored(monkeypatch):
     _live_proc(monkeypatch)
     broker = _RecordingBroker(verdict="allow")
     F.handle_open_file("org.example.App", client_pid=APP_PID, broker=broker,
-                       extra={"pid": "999999", "client_pid": "1"})
+                       extra={"pid": "999999", "client_pid": "1"},
+                       picker=lambda **kw: ["/tmp/doc.txt"])
     _a, _d, pid, start = broker.check_calls[0]
     assert (pid, start) == (APP_PID, APP_START)
     assert pid != 999999 and pid != 1
@@ -338,9 +365,10 @@ def test_save_file_allow_uses_fs_action(monkeypatch):
     _live_proc(monkeypatch)
     broker = _RecordingBroker(verdict="allow")
     resp, results = F.handle_save_file("org.example.App",
-                                       client_pid=APP_PID, broker=broker)
+                                       client_pid=APP_PID, broker=broker,
+                                       picker=lambda **kw: ["/tmp/out.txt"])
     assert resp == F.RESP_SUCCESS
-    assert results == {}
+    assert results == {"uris": ["file:///tmp/out.txt"]}
     action, _d, pid, start = broker.check_calls[0]
     assert action == f"{_FS_ACTION}:org.example.App"
     assert (pid, start) == (APP_PID, APP_START)
@@ -369,7 +397,8 @@ def test_save_file_app_supplied_pid_ignored(monkeypatch):
     _live_proc(monkeypatch)
     broker = _RecordingBroker(verdict="allow")
     F.handle_save_file("org.example.App", client_pid=APP_PID, broker=broker,
-                       extra={"client_pid": "1"})
+                       extra={"client_pid": "1"},
+                       picker=lambda **kw: ["/tmp/out.txt"])
     _a, _d, pid, start = broker.check_calls[0]
     assert (pid, start) == (APP_PID, APP_START)
 
@@ -381,7 +410,7 @@ def test_screenshot_allow_uses_capture_action_and_resolved_tuple(monkeypatch):
     broker = _RecordingBroker(verdict="allow")
     resp, results = F.handle_screenshot("org.example.App",
                                         client_pid=APP_PID, broker=broker)
-    assert resp == F.RESP_SUCCESS
+    assert resp == F.RESP_OTHER
     assert results == {}  # no uri leaked by the pure gate
     action, _d, pid, start = broker.check_calls[0]
     assert action == f"{_SHOT_ACTION}:org.example.App"
@@ -498,3 +527,27 @@ def test_notification_unknown_dropped_but_prompts(monkeypatch):
                                  client_pid=APP_PID, broker=broker) is False
     _a, _d, pid, start = broker.request_calls[0]
     assert (pid, start) == (APP_PID, APP_START)
+
+
+def test_file_chooser_allow_without_picker_is_not_fake_success(monkeypatch):
+    _live_proc(monkeypatch)
+    broker = _RecordingBroker(verdict="allow")
+    resp, results = F.handle_open_file("org.example.App",
+                                       client_pid=APP_PID, broker=broker,
+                                       picker=None)
+    assert resp == F.RESP_OTHER
+    assert results == {}
+
+
+def test_frontend_declares_app_facing_signatures():
+    text = F.__loader__.get_source(F.__name__)
+    assert 'in_signature="ssa{sv}", out_signature="o"' in text
+    assert 'in_signature="sa{sv}", out_signature="o"' in text
+    assert 'in_signature="osssa{sv}", out_signature="o"' not in text
+    assert 'in_signature="ossa{sv}", out_signature="o"' not in text
+    assert "app_id_for_client_pid(client_pid)" in text
+    assert "handle_token" in text
+    assert "GLib.idle_add" in text
+    assert 'or f"qdistro_{self._req_seq}"' in text
+    assert 'f"{self._handle_token(options)}_{self._req_seq}"' not in text
+    assert "str(sender or \"\")" not in text

@@ -68,9 +68,12 @@ from __future__ import annotations
 
 import re
 import sys
+from urllib.parse import quote
 from typing import Any, Callable
 
 import qdistro_proc_identity as pi  # type: ignore[import-not-found]
+import qdistro_resolver as resolver_mod  # type: ignore[import-not-found]
+from qdistro_portal_backend import _run_file_picker  # type: ignore[import-not-found]
 
 # Frontend-owned portal name + object (the real one, owned per silo).
 PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
@@ -100,6 +103,32 @@ def _sanitize_app_id(app_id: Any) -> str:
     s = str(app_id or "unknown")[:128]
     s = _APPID_RE.sub("_", s).strip("._-")
     return s or "unknown"
+
+
+def app_id_for_client_pid(client_pid: int,
+                          resolver: Callable[[int], Any] | None = None
+                          ) -> str:
+    """Resolve a stable advisory app id for action scoping.
+
+    The broker still overrides identity from the launch record for the
+    attested pid/starttime. This value is only the cache/audit action
+    suffix, so it must be stable across D-Bus reconnects and must not be
+    the transient sender name.
+    """
+    if resolver is None:
+        resolver = lambda pid: resolver_mod.resolve_subject(pid, None)
+    try:
+        subject = resolver(int(client_pid))
+    except Exception:
+        return "unknown"
+    for attr in ("app_id", "sandbox_engine"):
+        try:
+            value = getattr(subject, attr, "")
+        except Exception:
+            value = ""
+        if value:
+            return _sanitize_app_id(value)
+    return "unknown"
 
 
 def _portal_action(base: str, app_id: str) -> str:
@@ -254,36 +283,46 @@ def handle_access(base_action: str, app_id: str, *,
 
 def handle_open_file(app_id: str, *, client_pid: int, broker: BrokerClient,
                      extra: dict[str, str] | None = None,
+                     title: str = "",
+                     options: dict[str, Any] | None = None,
+                     picker: Callable[..., list[str]] | None = _run_file_picker,
                      resolver: Callable[[int], tuple[int, int, bool]]
                      = resolve_client_tuple) -> tuple[int, dict[str, Any]]:
     """Pure handler for ``FileChooser.OpenFile`` on the attested core.
 
     Routes ``com.qdistro.fs.open`` (the backend's FileChooser action) for
-    the *resolved* client. On ``allow`` returns ``(RESP_SUCCESS, {})`` —
-    the D-Bus glue runs the real picker and fills ``uris`` only after this
-    gate passes. On ANY non-allow / fail-closed path returns
+    the *resolved* client. On ``allow`` runs the picker and returns
+    ``uris``. On ANY non-allow / fail-closed path returns
     ``(RESP_CANCELLED, {})`` with **no files**: a denied client must never
     receive a file URI.
     """
     response = attested_decision("com.qdistro.fs.open", app_id,
                                  client_pid=client_pid, broker=broker,
                                  extra=extra, resolver=resolver)
-    return (response, {})
+    if response != RESP_SUCCESS:
+        return (response, {})
+    return _file_chooser_results(title=title, options=options,
+                                 save=False, picker=picker)
 
 
 def handle_save_file(app_id: str, *, client_pid: int, broker: BrokerClient,
                      extra: dict[str, str] | None = None,
+                     title: str = "",
+                     options: dict[str, Any] | None = None,
+                     picker: Callable[..., list[str]] | None = _run_file_picker,
                      resolver: Callable[[int], tuple[int, int, bool]]
                      = resolve_client_tuple) -> tuple[int, dict[str, Any]]:
     """Pure handler for ``FileChooser.SaveFile`` on the attested core.
 
-    Shares the FileChooser action/contract with :func:`handle_open_file`:
-    a denied request returns ``(RESP_CANCELLED, {})`` with no ``uris``.
+    Shares the FileChooser action/contract with :func:`handle_open_file`.
     """
     response = attested_decision("com.qdistro.fs.open", app_id,
                                  client_pid=client_pid, broker=broker,
                                  extra=extra, resolver=resolver)
-    return (response, {})
+    if response != RESP_SUCCESS:
+        return (response, {})
+    return _file_chooser_results(title=title, options=options,
+                                 save=True, picker=picker)
 
 
 def handle_screenshot(app_id: str, *, client_pid: int, broker: BrokerClient,
@@ -293,15 +332,45 @@ def handle_screenshot(app_id: str, *, client_pid: int, broker: BrokerClient,
     """Pure handler for ``Screenshot`` on the attested core.
 
     Routes ``com.qdistro.screen.capture`` for the *resolved* client. On
-    ``allow`` returns ``(RESP_SUCCESS, {})`` — the glue invokes the
-    compositor screencopy and fills the ``uri`` only after this gate
-    passes. On any non-allow / fail-closed path returns
+    ``allow`` returns ``RESP_OTHER`` until the compositor screencopy path
+    can return a real ``uri``. On any non-allow / fail-closed path returns
     ``(RESP_CANCELLED, {})`` with no ``uri``.
     """
     response = attested_decision("com.qdistro.screen.capture", app_id,
                                  client_pid=client_pid, broker=broker,
                                  extra=extra, resolver=resolver)
+    if response == RESP_SUCCESS:
+        return (RESP_OTHER, {})
     return (response, {})
+
+
+def _file_chooser_results(*, title: str = "",
+                          options: dict[str, Any] | None = None,
+                          save: bool = False,
+                          picker: Callable[..., list[str]] | None
+                          = _run_file_picker
+                          ) -> tuple[int, dict[str, Any]]:
+    if picker is None:
+        return (RESP_OTHER, {})
+    opts = dict(options) if options else {}
+    picker_title = str(title or opts.get(
+        "title", "Save File" if save else "Open File"))
+    multiple = bool(opts.get("multiple", False)) and not save
+    directory = bool(opts.get("directory", False))
+    current_folder = ""
+    if "current_folder" in opts:
+        try:
+            raw = bytes(opts["current_folder"])
+            current_folder = raw.rstrip(b"\x00").decode("utf-8", "replace")
+        except Exception:
+            pass
+    paths = picker(title=picker_title, save=save, multiple=multiple,
+                   directory=directory, current_folder=current_folder)
+    if not paths:
+        return (RESP_CANCELLED, {})
+    return (RESP_SUCCESS, {
+        "uris": ["file://" + quote(str(path), safe="/") for path in paths],
+    })
 
 
 def handle_notification(app_id: str, *, client_pid: int, broker: BrokerClient,
@@ -411,12 +480,29 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             super().__init__(bus, PORTAL_OBJ_PATH)
             self._req_seq = 0
 
-        def _new_request(self, sender) -> "_Request":
+        @staticmethod
+        def _handle_token(options) -> str:
+            try:
+                token = str(dict(options or {}).get("handle_token", ""))
+            except Exception:
+                token = ""
+            token = re.sub(r"[^A-Za-z0-9_]+", "_", token)[:128]
+            return token
+
+        def _new_request(self, sender, options=None) -> "_Request":
             self._req_seq += 1
-            token = self._req_seq
+            token = self._handle_token(options) or f"qdistro_{self._req_seq}"
             base = sender.replace(":", "").replace(".", "_") or "x"
             path = f"/org/freedesktop/portal/desktop/request/{base}/{token}"
             return _Request(bus, path)
+
+        @staticmethod
+        def _finish_later(req, response, results):
+            GLib.idle_add(lambda: (req.finish(response, results), False)[1])
+
+        @staticmethod
+        def _run_later(callback):
+            GLib.idle_add(lambda: (callback(), False)[1])
 
         @dbus.service.method(
             "org.freedesktop.portal.Access",
@@ -431,12 +517,12 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             broker via ``handle_access``, and delivers the verdict through
             the Request object's Response signal.
             """
-            req = self._new_request(sender)
+            req = self._new_request(sender, options)
             client_pid = self._resolve_caller(sender)
             response = handle_access(
                 "portal.access", str(app_id or ""),
                 client_pid=client_pid, broker=broker)
-            req.finish(response, {})
+            self._finish_later(req, response, {})
             return req._path
 
         def _resolve_caller(self, sender) -> int:
@@ -453,10 +539,9 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
 
         @dbus.service.method(
             "org.freedesktop.portal.FileChooser",
-            in_signature="osssa{sv}", out_signature="o",
+            in_signature="ssa{sv}", out_signature="o",
             sender_keyword="sender")
-        def OpenFile(self, parent_window, app_id, title, options,
-                     sender=None):
+        def OpenFile(self, parent_window, title, options, sender=None):
             """Gated FileChooser.OpenFile.
 
             Resolves the app's OWN connection pid (NOT any app-supplied
@@ -465,32 +550,47 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             run here and populate ``uris``; a denied request delivers an
             empty result (no files).
             """
-            req = self._new_request(sender)
+            req = self._new_request(sender, options)
             client_pid = self._resolve_caller(sender)
-            response, results = handle_open_file(
-                str(app_id or ""), client_pid=client_pid, broker=broker)
-            req.finish(response, results)
+            opts = dict(options or {})
+            title_s = str(title or "")
+
+            def _work():
+                app_id = app_id_for_client_pid(client_pid)
+                response, results = handle_open_file(
+                    app_id, client_pid=client_pid, broker=broker,
+                    title=title_s, options=opts)
+                req.finish(response, results)
+
+            self._run_later(_work)
             return req._path
 
         @dbus.service.method(
             "org.freedesktop.portal.FileChooser",
-            in_signature="osssa{sv}", out_signature="o",
+            in_signature="ssa{sv}", out_signature="o",
             sender_keyword="sender")
-        def SaveFile(self, parent_window, app_id, title, options,
-                     sender=None):
+        def SaveFile(self, parent_window, title, options, sender=None):
             """Gated FileChooser.SaveFile (see ``OpenFile``)."""
-            req = self._new_request(sender)
+            req = self._new_request(sender, options)
             client_pid = self._resolve_caller(sender)
-            response, results = handle_save_file(
-                str(app_id or ""), client_pid=client_pid, broker=broker)
-            req.finish(response, results)
+            opts = dict(options or {})
+            title_s = str(title or "")
+
+            def _work():
+                app_id = app_id_for_client_pid(client_pid)
+                response, results = handle_save_file(
+                    app_id, client_pid=client_pid, broker=broker,
+                    title=title_s, options=opts)
+                req.finish(response, results)
+
+            self._run_later(_work)
             return req._path
 
         @dbus.service.method(
             "org.freedesktop.portal.Screenshot",
-            in_signature="ossa{sv}", out_signature="o",
+            in_signature="sa{sv}", out_signature="o",
             sender_keyword="sender")
-        def Screenshot(self, parent_window, app_id, options, sender=None):
+        def Screenshot(self, parent_window, options, sender=None):
             """Gated Screenshot.
 
             Same attested core: resolves the caller's own connection pid
@@ -498,18 +598,20 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             the compositor screencopy would run and fill ``uri``; a denied
             request returns an empty result.
             """
-            req = self._new_request(sender)
+            req = self._new_request(sender, options)
             client_pid = self._resolve_caller(sender)
+            app_id = app_id_for_client_pid(client_pid)
             response, results = handle_screenshot(
-                str(app_id or ""), client_pid=client_pid, broker=broker)
-            req.finish(response, results)
+                app_id, client_pid=client_pid, broker=broker,
+                extra={k: str(v) for k, v in dict(options or {}).items()})
+            self._finish_later(req, response, results)
             return req._path
 
         @dbus.service.method(
             "org.freedesktop.portal.Notification",
-            in_signature="ssa{sv}", out_signature="",
+            in_signature="sa{sv}", out_signature="",
             sender_keyword="sender")
-        def AddNotification(self, app_id, id_, notification, sender=None):
+        def AddNotification(self, id_, notification, sender=None):
             """Gated Notification.AddNotification.
 
             No Request/Response object (the portal spec gives this method
@@ -518,25 +620,29 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             the notification is silently dropped.
             """
             client_pid = self._resolve_caller(sender)
+            app_id = app_id_for_client_pid(client_pid)
             if handle_notification(
-                    str(app_id or ""), client_pid=client_pid, broker=broker):
+                    app_id, client_pid=client_pid, broker=broker,
+                    extra={"notification_id": str(id_ or "")}):
                 # Allowed: the glue would forward to the host notification
                 # surface here. The attested gate has passed.
                 pass
 
         @dbus.service.method(
             "org.freedesktop.portal.Notification",
-            in_signature="ss", out_signature="",
+            in_signature="s", out_signature="",
             sender_keyword="sender")
-        def RemoveNotification(self, app_id, id_, sender=None):
+        def RemoveNotification(self, id_, sender=None):
             """Gated Notification.RemoveNotification.
 
             Policy-checked identically so a denied app cannot remove
             notifications it did not create.
             """
             client_pid = self._resolve_caller(sender)
+            app_id = app_id_for_client_pid(client_pid)
             if handle_notification(
-                    str(app_id or ""), client_pid=client_pid, broker=broker):
+                    app_id, client_pid=client_pid, broker=broker,
+                    extra={"notification_id": str(id_ or "")}):
                 pass
 
     PortalFrontend()
