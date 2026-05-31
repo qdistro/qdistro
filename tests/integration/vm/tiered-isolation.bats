@@ -537,6 +537,35 @@ stage_vm_driver() {
     assert_output_contains "PASS: spec/10 v14 focus-aware selection clear end-to-end"
 }
 
+@test "phase7-clipboard-focus-gate-journal: qdshell CLIPBOARD_FOCUS_GATE fires on cross-silo focus, not same-silo" {
+    # Companion to phase7-focus-aware-clear: that test asserts the qdwin-side
+    # clear (set_keyboard_focus / weston clear_selection); this one asserts
+    # the qdshell DECISION layer — the CLIPBOARD_FOCUS_GATE journal line that
+    # ClipboardGate._onSeatFocusChanged emits when focus crosses OUT of a
+    # selection's source silo. A tier-3 (user1) silo owns the selection so
+    # the source silo is KNOWN (an "unknown" source is never tracked and
+    # would never log the line). Phase A: user1 → admin focus change must log
+    # CLIPBOARD_FOCUS_GATE and leave the destination paste empty. Phase B:
+    # user1 → user1 (same silo) must NOT log a clear — proving strict mode
+    # still allows same-silo paste.
+    stage_vm_driver "s49-clipboard-focus-gate-journal.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s49.sh http://10.0.2.2:8768/s49-clipboard-focus-gate-journal.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / qs / qdistro-test-clipboard-source / user1 silo / qdshell) not available on this VM"
+    fi
+    assert_output_contains "PASS: outer admin compositor up"
+    assert_output_contains "PASS: qdshell up"
+    assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 14"
+    assert_output_contains "PASS: admin destination toplevel registered handle="
+    assert_output_contains "PASS: silo toplevel registered silo=user1 handle="
+    assert_output_contains "PASS: qdshell recorded selection with known source silo"
+    assert_output_contains "PASS: qdshell logged CLIPBOARD_FOCUS_GATE on cross-silo focus"
+    assert_output_contains "PASS: destination paste empty after focus-clear"
+    assert_output_contains "PASS: same-silo focus change did NOT clear"
+    assert_output_contains "PASS: qdshell focus-aware clipboard clear (CLIPBOARD_FOCUS_GATE) end-to-end"
+}
+
 @test "phase7-tier1-e2e: spec/30 Tier-1 SELinux pipeline end-to-end" {
     # Validates the full tier-1 stack (spec/30 §Phase plan step 8):
     # policy module loaded, type_transition rule active, spawn pipeline
