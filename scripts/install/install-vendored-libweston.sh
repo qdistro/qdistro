@@ -104,6 +104,21 @@ cp -a "$PREFIX"/lib64/libweston-14.so* "$TMP/lib64/"
 # Backends (drm/pipewire/rdp/wayland/x11/headless/...) + xwayland.
 cp -a "$PREFIX"/lib64/libweston-14/*.so "$TMP/lib64/libweston-14/" 2>/dev/null || true
 
+# Bundled libdisplay-info, when the production build vendored it. weston-14
+# links libdisplay-info.so.1 (ABI 1, soname libdisplay-info.so.1); the
+# distro ships an incompatible libdisplay-info.so.3, so without bundling the
+# vendored weston fails to load with "libdisplay-info.so.1: cannot open
+# shared object file" and every session start falls back / dies until the
+# lib is hand-copied. The production profile builds libdisplay-info as a
+# meson subproject and installs it into $PREFIX/lib64 alongside the core, so
+# copy it from there into the vendored tree (which is on LD_LIBRARY_PATH).
+# Tolerate its absence: a profile that links the system libdisplay-info
+# (compatible ABI) won't have one here, and that's fine.
+if ls "$PREFIX"/lib64/libdisplay-info.so* >/dev/null 2>&1; then
+    cp -a "$PREFIX"/lib64/libdisplay-info.so* "$TMP/lib64/"
+    echo "  bundled libdisplay-info: $(ls -1 "$TMP"/lib64/libdisplay-info.so.[0-9]* 2>/dev/null | tail -n1)"
+fi
+
 # Own as root in the real (root) install; tolerate non-root host
 # dry-runs (e.g. CI staging tests) where chown is not permitted.
 chown -R root:root "$TMP" 2>/dev/null || \

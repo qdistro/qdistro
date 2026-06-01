@@ -117,7 +117,28 @@ chown -R root:root /usr/share/quickshell/qdshell
 # this, qdshell's Services/Qdwin/Qdwin.qml cannot resolve
 # `import Qdistro.Qdwin 1.0` and falls back to the no-binding stubs.
 QDSHELL_PLUGIN_BUILD="${QDSHELL_PLUGIN_BUILD:-$QDSHELL_SRC/build}"
-if [ -f "$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so" ]; then
+PLUGIN_SO="$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so"
+if [ -f "$PLUGIN_SO" ]; then
+    # Staleness guard. A plugin .so older than its own sources is the
+    # classic cause of the qdshell crash-loop: the .so predates a
+    # Q_PROPERTY (e.g. `outputs`) that the deployed Qdwin.qml binds via a
+    # NOTIFY handler (onOutputsChanged), so Quickshell throws "Cannot
+    # assign to non-existent property", exits 255, and nothing paints.
+    # Copying a stale build artifact turns a missed `meson compile` into a
+    # silent black screen. Refuse it here so the skew is a loud install-time
+    # error instead — rebuild and re-run. (Set QDSHELL_ALLOW_STALE_PLUGIN=1
+    # to override, e.g. when intentionally shipping a prebuilt .so.)
+    newer_src=$(find "$QDSHELL_SRC/qml-plugin" -type f \
+        \( -name '*.cpp' -o -name '*.h' -o -name '*.xml' -o -name 'meson.build' \) \
+        -newer "$PLUGIN_SO" -print -quit 2>/dev/null || true)
+    if [ -n "$newer_src" ] && [ "${QDSHELL_ALLOW_STALE_PLUGIN:-0}" != 1 ]; then
+        echo "ERROR: $PLUGIN_SO is STALE — '$newer_src' is newer than the" >&2
+        echo "       built plugin. Shipping it risks the qdshell" >&2
+        echo "       onOutputsChanged crash-loop (version-skewed QML <-> plugin)." >&2
+        echo "       Rebuild: 'meson compile -C $QDSHELL_PLUGIN_BUILD' then re-run." >&2
+        echo "       (override with QDSHELL_ALLOW_STALE_PLUGIN=1)" >&2
+        exit 2
+    fi
     install -d -o root -g root -m 0755 /usr/share/qdistro/qml/Qdistro/Qdwin
     install -m 0755 -o root -g root \
         "$QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so" \
