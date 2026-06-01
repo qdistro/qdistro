@@ -20,6 +20,8 @@ load helpers
 SKIP_LEGACY_CTRL_SOCK="legacy qdshell.py ctrl-socket pipeline archived in qdistro-old-plan/compositor/qdshell/; new qdshell is QML — needs Phase-3 rewrite ticket"
 SKIP_LEGACY_RDP_BROKER="legacy sdl-freerdp/RDP-broker (port 3389) pipeline archived in qdistro-old-plan/compositor/spike-6.5/; new qdshell has no RDP path — needs Phase-3 rewrite ticket"
 SKIP_P01_BAKE_GAP="/root/s100-greeter-boots-qdshell.sh not in bake — P01 deliverable, see plan2/tasks/P01-greeter-boot-path.md"
+SKIP_S103_NO_GUI="no qdwin GUI session on $VM_NAME (/run/user/1000/wayland-1 absent) — s103 needs a logged-in qdshell; boot the GUI VM first"
+SKIP_S103_NO_INPUT="ydotool/foot not installed on $VM_NAME — s103 drives the rocket icon via synthetic input; see fresh-vm-bootstrap.sh uinput setup"
 
 setup() {
     vm_run "pgrep -x pipewire >/dev/null"
@@ -179,4 +181,38 @@ setup() {
     assert_output_contains "PASS: qdshell panel visible (screenshot OCR found 'system menu')"
     assert_output_contains "PASS: LXQt is NOT running (no labwc / lxqt-panel processes)"
     assert_output_contains "PASS: fallback escape-hatch documented and reachable via tty4"
+}
+
+# Full "real user" round-trip on top of the greeter boot path:
+#   login → click the upper-left ROCKET icon (the qdshell launcher /
+#   "start" button) → launch foot from the launcher → type `ls /` →
+#   verify the listing is printed on screen (grim + tesseract OCR).
+# Driver: tests/integration/vm/s103-launcher-foot-roundtrip.sh, staged
+# over the host HTTP server (same pattern as app-launcher.bats).
+@test "launcher-foot-roundtrip: rocket icon click launches foot, runs ls / and prints output" {
+    # Needs a live qdwin GUI session...
+    vm_run "test -S /run/user/1000/wayland-1"
+    [ "$status" -eq 0 ] || skip "$SKIP_S103_NO_GUI"
+    # ...and the synthetic-input + terminal tooling the driver drives.
+    vm_run "command -v ydotool >/dev/null && command -v foot >/dev/null"
+    [ "$status" -eq 0 ] || skip "$SKIP_S103_NO_INPUT"
+
+    local script_path
+    script_path="$(dirname "$BATS_TEST_FILENAME")/s103-launcher-foot-roundtrip.sh"
+    [ -f "$script_path" ] || fail_loud "driver script missing: $script_path"
+
+    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
+    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
+
+    vm_run 'curl -s -o /tmp/s103.sh http://10.0.2.2:8765/s103-launcher-foot-roundtrip.sh && chmod +x /tmp/s103.sh && bash /tmp/s103.sh'
+    assert_success
+
+    # Load-bearing PASS contract — one per step of the scenario.
+    assert_output_contains "PASS: login complete — qdwin session is up"
+    assert_output_contains "PASS: clicked rocket icon (upper-left) — launcher opened"
+    assert_output_contains "PASS: foot terminal launched from the launcher"
+    assert_output_contains "PASS: foot terminal is up and focused"
+    assert_output_contains "PASS: typed 'ls /' into foot"
+    assert_output_contains "PASS: foot printed the root listing"
+    assert_output_contains "PASS: launcher → foot → command round-trip end-to-end"
 }
