@@ -32,7 +32,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/* Compiled default; can be overridden at build time with
+ * -DSOCKET_PATH=... so the host test gate can point qsu at a mock
+ * server socket without touching /run (which needs root). The wire
+ * protocol and runtime behavior are unchanged. */
+#ifndef SOCKET_PATH
 #define SOCKET_PATH "/run/qdistro-root-exec/sock"
+#endif
 
 /* Maximum single recv chunk. Generous for line-buffered JSON frames. */
 #define RECV_BUF 8192
@@ -147,17 +153,16 @@ static int build_request(char *buf, size_t cap,
  * (the server never sends them in the fields we care about: "type",
  * "data", "message"). Good enough for this protocol.
  */
+static const char *json_find_str_value(const char *json, const char *key);
+
 static int json_get_str(const char *json, const char *key,
                         char *out, size_t out_cap)
 {
-    /* Build the search needle: "<key>":"  */
-    char needle[128];
-    int n = snprintf(needle, sizeof(needle), "\"%s\":\"", key);
-    if (n < 0 || (size_t)n >= sizeof(needle)) return -1;
-
-    const char *p = strstr(json, needle);
+    /* Locate the opening of the quoted value, tolerating optional
+     * whitespace after the colon (json.dumps emits a space, the
+     * compact format does not). */
+    const char *p = json_find_str_value(json, key);
     if (!p) return -1;
-    p += (size_t)n;  /* skip past the opening quote of the value */
 
     size_t i = 0;
     while (*p && *p != '"' && i + 1 < out_cap) {
@@ -168,6 +173,33 @@ static int json_get_str(const char *json, const char *key,
     }
     out[i] = '\0';
     return 0;
+}
+
+/*
+ * Locate the first character inside the quoted string value of `key`
+ * in a flat JSON object, tolerating optional whitespace after the
+ * colon (json.dumps emits a space; the compact format does not).
+ * Returns a pointer just past the opening quote of the value, or NULL
+ * if the key is absent or its value is not a string. The caller is
+ * responsible for consuming up to the (unescaped) closing quote.
+ */
+static const char *json_find_str_value(const char *json, const char *key)
+{
+    char needle[128];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(needle)) return NULL;
+
+    const char *p = strstr(json, needle);
+    if (!p) return NULL;
+    p += (size_t)n;  /* skip past the closing quote of the key */
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return NULL;
+    p++;  /* skip opening quote of the value */
+    return p;
 }
 
 /*
@@ -216,10 +248,8 @@ static int dispatch_frame(const char *line, int *got_exit, int *exit_code)
     if (strcmp(type, "stdout") == 0) {
         /* Stream raw "data" to stdout.  We need to handle JSON string
          * unescaping for common sequences (\n, \t, \\, \"). */
-        char needle[] = "\"data\":\"";
-        const char *p = strstr(line, needle);
+        const char *p = json_find_str_value(line, "data");
         if (!p) return 0;
-        p += sizeof(needle) - 1;
         while (*p && *p != '"') {
             if (*p == '\\') {
                 p++;
@@ -261,10 +291,8 @@ static int dispatch_frame(const char *line, int *got_exit, int *exit_code)
         fflush(stdout);
 
     } else if (strcmp(type, "stderr") == 0) {
-        char needle[] = "\"data\":\"";
-        const char *p = strstr(line, needle);
+        const char *p = json_find_str_value(line, "data");
         if (!p) return 0;
-        p += sizeof(needle) - 1;
         while (*p && *p != '"') {
             if (*p == '\\') {
                 p++;
