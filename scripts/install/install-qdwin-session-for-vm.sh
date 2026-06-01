@@ -61,9 +61,16 @@ loginctl enable-linger admin
 # If you're hand-building elsewhere, adjust this path to match
 # `meson install --dry-run` output.
 #
-# renderer=pixman is critical for virtio-gpu VMs without accel3d —
-# the GL renderer segfaults on a software-only virtio-gpu. Drop the
-# line on hardware with a real GPU to get hardware acceleration.
+# renderer=gl is required for the virtio-gpu hardware cursor plane:
+# libweston only allocates the GBM cursor BOs in the GL/EGL path
+# (drm-gbm.c), so under pixman b->gbm is NULL and the cursor is always
+# software-composited into the scanout — which, under SPICE, doubles
+# with the host/client cursor (see todo/issues/qdwin/vm-double-cursor.md).
+# GL runs fine on a software-only virtio-gpu via llvmpipe-over-GBM
+# (Mesa 26.1.0); the old "GL segfaults on software-only virtio-gpu"
+# rationale is stale. Paired with libweston's DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
+# support, the cursor then lands on the DRM cursor plane (off the
+# scanout) and QEMU forwards it to SPICE → a single cursor.
 #
 # The `[pipewire]` section enables the pipewire sub-backend so qdwin's
 # §6.5 view_stream forwarding (qdwin_shell_v1.subscribe_view_stream)
@@ -81,7 +88,7 @@ loginctl enable-linger admin
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
-renderer=pixman
+renderer=gl
 modules=
 idle-time=0
 
