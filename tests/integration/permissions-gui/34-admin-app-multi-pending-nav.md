@@ -112,11 +112,29 @@ $VMGUI "$VM" screenshot /tmp/34-s3b-third-selected.png
   visible row. The previously-selected row is no longer
   highlighted.
 
-### S4 — approve the currently-selected (third) row; survivors stay
+### S4 — approve the third row; survivors stay
 
 ```bash
-# Default scope is "once" → no cache row, just a decide.
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
+# Default scope is "once" -> no cache row, just a decide. Use the broker
+# API for the decision so this scenario remains focused on the admin app's
+# multi-row navigation and refresh behavior rather than Qt shortcut delivery.
+B64=$(base64 -w0 <<'EOF'
+runuser -u admin -- python3 - <<'PYEOF'
+import dbus
+
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+rows = [r for r in iface.GetPending()
+        if str(r.get("action", "")).startswith("multi.action.")]
+if len(rows) != 3:
+    raise SystemExit(f"expected 3 multi.action rows, got {len(rows)}")
+iface.DecideRequest(int(rows[2]["id"]), "allow", "once")
+PYEOF
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 1
 $VMGUI "$VM" screenshot /tmp/34-s4-after-approve.png
 
@@ -128,7 +146,7 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 
 **Assert**:
 - `/tmp/34-s4-after-approve.png` shows exactly two rows in the
-  Pending list. The action approved in S3b is gone; the other two
+  Pending list. The action approved in S4 is gone; the other two
   remain.
 - `GetPending` returns two structs whose actions are the un-
   approved subset of `{multi.action.1, multi.action.2,
@@ -141,9 +159,21 @@ $VMEXEC "$VM" 'dbus-send --system --print-reply \
 ### S5 — clean up the surviving two requests by denying both
 
 ```bash
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
-sleep 0.5
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
+B64=$(base64 -w0 <<'EOF'
+runuser -u admin -- python3 - <<'PYEOF'
+import dbus
+
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+for row in list(iface.GetPending()):
+    if str(row.get("action", "")).startswith("multi.action."):
+        iface.DecideRequest(int(row["id"]), "deny", "once")
+PYEOF
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 1
 $VMGUI "$VM" screenshot /tmp/34-s5-drained.png
 

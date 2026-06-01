@@ -653,6 +653,25 @@ def _recv_request(sock: socket.socket) -> dict | None:
     return json.loads(line.decode())
 
 
+def _drain_rejected_request(sock: socket.socket, timeout: float = 1.0) -> None:
+    """Best-effort drain for rejected clients.
+
+    The qsu client sends its request immediately after connect. If an
+    over-cap connection is closed before that send completes, the client can
+    report `send: Broken pipe` instead of the explicit cap-exceeded error.
+    Drain one bounded request frame first so the socket state is ordered:
+    client request, then server error + exit.
+    """
+    old_timeout = sock.gettimeout()
+    try:
+        sock.settimeout(timeout)
+        _recv_request(sock)
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+        pass
+    finally:
+        sock.settimeout(old_timeout)
+
+
 # -- Connection handler ----------------------------------------------------
 
 def handle_one(sock: socket.socket) -> None:
@@ -673,6 +692,7 @@ def handle_one(sock: socket.socket) -> None:
         # Step 2: per-uid in-flight cap. DoS defense against one uid
         # opening enough connections to starve the admin queue.
         if not _inflight_acquire(uid):
+            _drain_rejected_request(sock)
             _send(sock, {"type": "error",
                          "message": f"too many in-flight qsu requests for uid={uid}"})
             _send(sock, {"type": "exit", "code": 1})

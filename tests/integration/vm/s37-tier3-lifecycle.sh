@@ -106,7 +106,7 @@ SPAWN_A=$!
 # Serialize bring-up: wait for silo A's bridge before launching silo B so the
 # two tier3 observations don't race for the compositor under load (was: both
 # silos spawned simultaneously, which flaked the [tier3] observation).
-for _ in $(seq 1 40); do
+for _ in $(seq 1 360); do
     grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_A" 2>/dev/null && break
     kill -0 "$SPAWN_A" 2>/dev/null || break
     sleep 0.25
@@ -122,7 +122,7 @@ for tag in A B; do
         B) log=$SPAWN_LOG_B; pid=$SPAWN_B ;;
     esac
     READY=0
-    for _ in $(seq 1 40); do
+    for _ in $(seq 1 360); do
         if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$log" 2>/dev/null; then
             READY=1; break
         fi
@@ -134,7 +134,7 @@ for tag in A B; do
         # Tear down what we did get up so we don't leak.
         kill -TERM "$SPAWN_A" "$SPAWN_B" 2>/dev/null || true
         wait "$SPAWN_A" "$SPAWN_B" 2>/dev/null || true
-        fail "silo $tag bridge did not come up within 10s"
+        fail "silo $tag bridge did not come up within 90s"
         echo "[s37] $PASSCOUNT passes, $FAILCOUNT failures"
         exit 1
     fi

@@ -91,7 +91,7 @@ SPAWN_PID=$!
 
 # --- 5. wait for the bridge socket to be ready -----------------------
 BRIDGE_READY=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 360); do
     if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG" 2>/dev/null; then
         BRIDGE_READY=1; break
     fi
@@ -102,7 +102,7 @@ for _ in $(seq 1 40); do
 done
 if [ "$BRIDGE_READY" = "0" ]; then
     cat "$SPAWN_LOG" >&2 || true
-    fail "spawn-tier3.sh did not signal bridge-socket-ready within 10s"
+    fail "spawn-tier3.sh did not signal bridge-socket-ready within 90s"
 fi
 
 # --- 6. assert socket perms via the spawn-tier3 log line --------------

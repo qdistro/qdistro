@@ -252,7 +252,7 @@ class TestBridgeRecallPush:
 
         def stub(msg, ident, text):
             called.append((msg, ident, text))
-            return {"ok": True, "stub": True}
+            return {"ok": True, "row_id": 123}
 
         bb._recall_push_impl = stub
         try:
@@ -260,7 +260,7 @@ class TestBridgeRecallPush:
                 {"op": "recall.push", "text": "x"}, identity)
         finally:
             bb._recall_push_impl = None
-        assert resp.get("stub") is True, resp
+        assert resp.get("row_id") == 123, resp
         assert called and called[0][2] == "x"
 
     def test_recall_push_denied_when_parent_not_allowed(self):

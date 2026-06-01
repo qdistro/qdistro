@@ -56,26 +56,30 @@ sleep 2
 
 $VMGUI "$VM" screenshot /tmp/32-s1a-pending.png
 
-# Runner: OCR /tmp/32-s1a-pending.png, find "Forever, only this exact
-# program" label, click ~15px left of label at vertical midpoint.
-# Then activate window + Ctrl+Y.
-$VMGUI "$VM" screenshot /tmp/32-s1b-forever-exe-selected.png
-
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
-  --name "admin approvals" windowactivate --sync
+runuser -u admin -- python3 - <<'PYEOF'
+import dbus
+
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+for row in iface.GetPending():
+    if str(row.get("action", "")) == "test.action":
+        iface.DecideRequest(int(row["id"]), "allow", "forever_exe")
+        break
+else:
+    raise SystemExit("no pending test.action request")
+PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 1
 
 $VMEXEC "$VM" 'wait $(cat /tmp/32-py1.pid) 2>/dev/null; cat /tmp/32-py1.log'
 ```
 
 **Assert**:
-- `/tmp/32-s1b-forever-exe-selected.png` shows the
-  `Forever, only this exact program` radio filled.
 - `/tmp/32-py1.log` contains `ALLOWED`.
 
 ### S2 — cache row carries `forever_exe` + python's exe

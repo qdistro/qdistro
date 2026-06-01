@@ -118,6 +118,26 @@ class TestResolveTarget:
 
 
 class TestHandleOneIdentity:
+    def test_inflight_cap_drains_request_before_error(self, pair, monkeypatch):
+        sent: list[dict] = []
+
+        monkeypatch.setattr(Q, "_peer_cred", lambda sock: (4242, 2000, 2000))
+        monkeypatch.setattr(Q, "_peer_start_time", lambda pid: 12345)
+        monkeypatch.setattr(Q, "_peer_exe", lambda pid: "/usr/local/bin/qsu")
+        monkeypatch.setattr(Q, "_inflight_acquire", lambda uid: False)
+        monkeypatch.setattr(Q, "_send", lambda sock, obj: sent.append(dict(obj)))
+
+        _send(pair.a, {"target_user": "root", "argv": ["id"]})
+        Q.handle_one(pair.b)
+
+        assert sent == [
+            {
+                "type": "error",
+                "message": "too many in-flight qsu requests for uid=2000",
+            },
+            {"type": "exit", "code": 1},
+        ]
+
     def test_rejects_same_pid_exec_between_connect_and_broker(self, pair,
                                                                monkeypatch):
         sent: list[dict] = []

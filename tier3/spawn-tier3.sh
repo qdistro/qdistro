@@ -402,8 +402,7 @@ fi
 
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
-    SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
-        qdistro-secctx-exec
+    SECCTX_WRAP=(qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
         --instance-id    "$SECCTX_INSTANCE"
@@ -439,14 +438,27 @@ if [ "$USE_SECCTX" = "1" ]; then
     LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$LAUNCHREC_FILE_ID.pid"
     rm -f "$LAUNCHREC_PATH"
 fi
-runuser -u "$ADMIN_USER" -- env \
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-    HOME="$ADMIN_HOME" \
-    ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
-    ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
-    bash -c 'umask 0117; exec "$@"' bash \
-    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+if [ "$USE_SECCTX" = "1" ]; then
+    env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+        HOME="$ADMIN_HOME" \
+        ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
+        ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
+        "${SECCTX_WRAP[@]}" \
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+            HOME="$ADMIN_HOME" \
+            bash -c 'umask 0117; exec "$@"' bash \
+            waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+else
+    runuser -u "$ADMIN_USER" -- env \
+        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+        HOME="$ADMIN_HOME" \
+        bash -c 'umask 0117; exec "$@"' bash \
+        waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
+fi
 CLIENT_PID=$!
 
 # Wait for waypipe-client to create the socket (it'll be born 0660

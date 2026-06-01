@@ -140,6 +140,17 @@ class _BaseNotifier:
         raise NotImplementedError
 
 
+class _UnavailableNotifier(_BaseNotifier):
+    """Notifier used when the desktop notification service is absent."""
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def notify(self, *, summary: str, body: str, icon: str,
+               origin: str, uid: int) -> int:
+        raise RuntimeError(self._reason)
+
+
 def handle_show(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
                 notifier: _BaseNotifier, policy: NotificationPolicy,
                 bridge_gate: Callable[..., tuple[bool, str]]
@@ -203,7 +214,11 @@ def _main() -> int:  # pragma: no cover - requires a live session bus
                 "qdistro-web", 0, icon or "web-browser",
                 summary, body, [], {"x-qdistro-origin": origin}, 6000))
 
-    notifier = _FreedesktopNotifier(bus)
+    try:
+        notifier = _FreedesktopNotifier(bus)
+    except Exception as e:  # noqa: BLE001
+        notifier = _UnavailableNotifier(
+            f"org.freedesktop.Notifications unavailable: {e}")
     # Reload the policy file on each request so admin edits take effect
     # without a daemon restart (cheap JSON read).
 

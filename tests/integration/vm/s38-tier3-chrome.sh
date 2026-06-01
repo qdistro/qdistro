@@ -124,18 +124,25 @@ SPAWN_LOG_B=/tmp/s38-spawn-user2.log
 TIER3_NO_REAP=1 \
 bash "$TIER3_DIR/spawn-tier3.sh" user1 -- weston-terminal >"$SPAWN_LOG_A" 2>&1 &
 SPAWN_A=$!
+# Serialize bring-up so the compositor and qdshell do not have to observe two
+# cold tier3 bridges at once under qci load.
+for _ in $(seq 1 360); do
+    grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG_A" 2>/dev/null && break
+    kill -0 "$SPAWN_A" 2>/dev/null || break
+    sleep 0.25
+done
 TIER3_NO_REAP=1 \
 bash "$TIER3_DIR/spawn-tier3.sh" user2 -- weston-terminal >"$SPAWN_LOG_B" 2>&1 &
 SPAWN_B=$!
 
-# Wait up to 20s for both bridges to come up. Then leave the spawns
+# Wait up to 90s for both bridges to come up. Then leave the spawns
 # running while we grep the journal; tear down at the end.
 for tag in A B; do
     case "$tag" in
         A) log=$SPAWN_LOG_A; pid=$SPAWN_A ;;
         B) log=$SPAWN_LOG_B; pid=$SPAWN_B ;;
     esac
-    for _ in $(seq 1 80); do
+    for _ in $(seq 1 360); do
         if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$log" 2>/dev/null; then
             break
         fi

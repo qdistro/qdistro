@@ -65,8 +65,8 @@ title and an empty queue table.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/sh -c "echo hi" \
-  >/tmp/48-qsu.log 2>&1 & echo $! >/tmp/48-qsu.pid'
+sudo -u work bash -c 'setsid /usr/local/bin/qsu /bin/sh -c "echo hi" \
+  >/tmp/48-qsu.log 2>&1 </dev/null & echo $! >/tmp/48-qsu.pid'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"

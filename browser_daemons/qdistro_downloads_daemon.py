@@ -61,6 +61,21 @@ class _BaseNotifier:
         raise NotImplementedError
 
 
+class _UnavailableNotifier(_BaseNotifier):
+    """Notifier used when the session has no notification server.
+
+    The daemon must still own org.qdistro.Downloads so browser bridge calls
+    get a structured error instead of a missing-service failure.
+    """
+
+    def __init__(self, reason: str):
+        self._reason = reason
+
+    def notify(self, *, summary: str, body: str, download_id: int,
+               path: str, uid: int) -> int:
+        raise RuntimeError(self._reason)
+
+
 def _home_for_uid(uid: int) -> str:
     import pwd as _pwd
     try:
@@ -255,7 +270,11 @@ def _main() -> int:  # pragma: no cover - requires a live session bus
                 return
             open_location(path, int(uid), int(gid))
 
-    notifier = _FreedesktopNotifier(bus)
+    try:
+        notifier = _FreedesktopNotifier(bus)
+    except Exception as e:  # noqa: BLE001
+        notifier = _UnavailableNotifier(
+            f"org.freedesktop.Notifications unavailable: {e}")
 
     class DownloadsDaemon(dbus.service.Object):
         def __init__(self):

@@ -325,7 +325,8 @@ fi
 # headless test, so without the rule the call would hang on the
 # pending approval. The rule is uid 2000 + action `qsu.exec:root` +
 # argv_exact `/usr/bin/id -u` — minimal surface, single test
-# binary.
+# binary. Match the qsu helper itself; qdistro_root_exec attests the
+# connecting caller as /usr/local/bin/qsu.
 install -d -o root -g root -m 0755 /etc/qdistro/rules.d
 cat >/etc/qdistro/rules.d/s102-qsu-id.yaml <<'YAMLEOF'
 - name: s102-qsu-id-uid2000
@@ -333,7 +334,7 @@ cat >/etc/qdistro/rules.d/s102-qsu-id.yaml <<'YAMLEOF'
   match:
     uid: 2000
     action: qsu.exec:root
-    exe: /usr/bin/python3.13
+    exe: /usr/local/bin/qsu
     argv_exact: ["/usr/bin/id", "-u"]
   rationale: "s102 send-to-roundtrip: pre-approve `id -u` for the qsu test"
 YAMLEOF
@@ -345,7 +346,7 @@ runuser -u admin -- busctl --system call \
     org.qdistro.AdminBroker1 \
     ReloadRules >/dev/null 2>&1 || true
 
-QSU_OUT=$(runuser -u work -- env \
+QSU_OUT=$(timeout 20s runuser -u work -- env \
     XDG_RUNTIME_DIR=/run/user/2000 \
     qsu -u root -- id -u 2>&1 || true)
 if echo "$QSU_OUT" | grep -q '^0$'; then

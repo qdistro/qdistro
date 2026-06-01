@@ -59,7 +59,8 @@ sudo -u work bash -c '
   export PYTHONPATH=/tmp/poison
   export LD_LIBRARY_PATH=/tmp/lib-evil
   export PATH=/tmp/evilbin:/bin
-  /usr/local/bin/qsu /usr/bin/env >/tmp/54-env.log 2>&1 &
+  setsid /usr/local/bin/qsu /usr/bin/env \
+    >/tmp/54-env.log 2>/tmp/54-qsu-client.err </dev/null &
   echo $! >/tmp/54-env.pid
 '
 EOF
@@ -88,7 +89,11 @@ $VMEXEC "$VM" 'wait $(cat /tmp/54-env.pid) 2>/dev/null
 sort /tmp/54-env.log'
 ```
 
-**Assert**: `/tmp/54-env.log` (sorted) MUST contain:
+**Assert**: `/tmp/54-env.log` is the privileged command's stdout
+only. qsu/client stderr is captured separately in
+`/tmp/54-qsu-client.err`, because a hostile `LD_PRELOAD` can make
+the dynamic loader warn before the qsu client reaches its own
+sanitization boundary. `/tmp/54-env.log` (sorted) MUST contain:
 
 ```
 HOME=/root
@@ -141,7 +146,7 @@ has already exited.
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qsu 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/54-*.log /tmp/54-*.pid'
+$VMEXEC "$VM" 'rm -f /tmp/54-*.log /tmp/54-*.err /tmp/54-*.pid'
 B64=$(base64 -w0 <<'EOF'
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
 sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"

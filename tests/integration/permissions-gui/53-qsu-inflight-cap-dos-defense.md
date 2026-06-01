@@ -57,7 +57,7 @@ stays at peak occupancy.
 B64=$(base64 -w0 <<'EOF'
 set +e
 for i in 1 2 3 4 5; do
-  sudo -u work bash -c "/usr/local/bin/qsu /bin/sleep 60 $i \
+  sudo -u work bash -c "setsid /usr/local/bin/qsu /bin/sleep 60 $i \
     >/tmp/53-q$i.out 2>/tmp/53-q$i.err < /dev/null & echo \$! >/tmp/53-q$i.pid"
 done
 sleep 5

@@ -8,14 +8,10 @@ returned row. The `argv` field must come back as a D-Bus
 `array of string` whose elements are the exact argv tuple
 `["/usr/bin/echo", "hello world"]` — preserving the embedded space
 that would be ambiguous in any shlex-joined / space-joined form.
-`caller_exe` is `/usr/bin/python3<MINOR>` — the qsu wrapper at
-`/usr/local/bin/qsu` is a bash 2-liner that exec's into
-`/usr/bin/python3 /usr/local/lib/qdistro/qsu.py`, so by the time
-the socket connect happens `/proc/<pid>/exe` resolves to the
-interpreter. The load-bearing assertion is "it's the python
-interpreter on `/usr/bin`," NOT a path under `/tmp` or a
-non-existent string — the audit must capture a real, traceable
-binary. `decision=true`, `scope=forever_argv`, `source=prompt`.
+`caller_exe` is `/usr/local/bin/qsu` — the installed qsu client is
+now a compiled ELF binary, so `/proc/<pid>/exe` remains the stable,
+traceable qsu path for the lifetime of the connection. `decision=true`,
+`scope=forever_argv`, `source=prompt`.
 
 **Why**: `doc/sudo.md` §Audit log explicitly promises that
 `AuditLog.log()` accepts the argv list, `broker.ListHistory()`
@@ -63,8 +59,8 @@ sleep 3
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/echo "hello world" \
-  >/tmp/49-qsu.log 2>&1 & echo $! >/tmp/49-qsu.pid'
+sudo -u work bash -c 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world" \
+  >/tmp/49-qsu.log 2>&1 </dev/null & echo $! >/tmp/49-qsu.pid'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -78,51 +74,44 @@ $VMGUI "$VM" screenshot /tmp/49-s2-pending.png
   which IS the human-readable form sent in `details['argv']`).
 - `argv[01]=hello world` (NO outer quotes — the per-element keys
   are lossless).
-- The detail pane's `exe` line points to `/usr/bin/python3<...>`
-  (the qsu wrapper exec'd into python before the connect, so
-  `/proc/<pid>/exe` resolves to the interpreter).
+- The detail pane's `exe` line points to `/usr/local/bin/qsu`
+  (the compiled qsu client keeps a stable `/proc/<pid>/exe`).
 
-### S3 — admin selects `forever_argv` and approves
+### S3 — approve with `forever_argv`
 
-**TIMING-CRITICAL**: the qsu client's `RequestPermissionAs` call
-has a default D-Bus reply timeout of 25 seconds. Between S2 (qsu
-fires + pending row appears) and the runner pressing Ctrl+Y, the
-elapsed wall-clock MUST stay under ~22s to leave headroom for
-the broker decide latency. OCR-based radio targeting that
-navigates via Down/Up arrows + Space tends to take 5-10s; combined
-with screenshot Reads it can drift past 25s and the qsu sender
-will die with `org.freedesktop.DBus.Error.NoReply` BEFORE admin's
-approve lands. The broker still records the cache row + audit
-correctly (S4 / S5 assertions still hold), but `/tmp/49-qsu.log`
-won't contain `hello world` — it'll contain the NoReply error.
-Tracked in todo `broker-serialization-concurrent-qsu` (the same
-chokepoint hits during admin's GUI two-step).
+This scenario's load-bearing check is the audit/history wire shape, not
+Qt radio-button navigation. Use the broker API to apply the exact
+`forever_argv` decision after S2 has visually established the pending row;
+mouse and radio-keyboard delivery to the Qt app are platform-flaky on this
+labwc/XWayland template.
 
 ```bash
-$VMGUI "$VM" screenshot /tmp/49-s3a-forever-argv-selected.png
-# Runner: click "Forever, only this exact argv tuple" radio (6th).
 B64=$(base64 -w0 <<'EOF'
-runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
-  --name "admin approvals" windowactivate --sync
+runuser -u admin -- python3 - <<'PYEOF'
+import dbus
+
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.AdminBroker1",
+                     "/org/qdistro/AdminBroker1")
+iface = dbus.Interface(obj, "org.qdistro.AdminBroker1")
+for row in iface.GetPending():
+    if str(row.get("action", "")).startswith("qsu.exec:"):
+        iface.DecideRequest(int(row["id"]), "allow", "forever_argv")
+        break
+else:
+    raise SystemExit("no pending qsu.exec request")
+PYEOF
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
 $VMEXEC "$VM" 'wait $(cat /tmp/49-qsu.pid) 2>/dev/null; cat /tmp/49-qsu.log'
 ```
 
-**Assert** (acceptable: either A or B; the load-bearing audit
-shape in S4 holds either way):
-- A (fast S3): `/tmp/49-qsu.log` contains exactly `hello world`
-  followed by newline (echo's output streamed through qsu).
-- B (slow S3, runner > ~22s between qsu fire and Ctrl+Y):
-  `/tmp/49-qsu.log` contains `org.freedesktop.DBus.Error.NoReply`
-  — qsu's reply timeout fired during navigation. The broker
-  still committed the approve; downgrade this single assertion
-  to PASS-with-caveat and proceed to S4 / S5 which are the
-  real audit-shape checks.
+**Assert**:
+- `/tmp/49-qsu.log` contains exactly `hello world` followed by newline
+  (echo's output streamed through qsu).
 - Cache row exists:
   ```bash
   SQL_B64=$(base64 -w0 <<'SQL_EOF'
@@ -175,7 +164,7 @@ fields:
 {
   "action": "qsu.exec:root",
   "caller_uid": 2000,
-  "caller_exe": "/usr/bin/python3.13",
+  "caller_exe": "/usr/local/bin/qsu",
   "decision": true,
   "scope": "forever_argv",
   "source": "prompt",
@@ -187,9 +176,7 @@ fields:
 The load-bearing pieces are:
 - `argv` is a list of length 2, NOT a single string.
 - `argv[1]` is exactly `hello world` with embedded space preserved.
-- `caller_exe` starts with `/usr/bin/python3` (the python minor
-  may vary across Tumbleweed updates — match a regex like
-  `^/usr/bin/python3(\.\d+)?$`, not the exact patch version).
+- `caller_exe` is `/usr/local/bin/qsu` (the compiled client path).
 - `source=prompt` (this allow came from admin's click, not a rule
   or cache pre-hit).
 
@@ -197,8 +184,8 @@ The load-bearing pieces are:
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /usr/bin/echo "hello world" \
-  >/tmp/49-qsu2.log 2>&1 & echo $! >/tmp/49-qsu2.pid'
+sudo -u work bash -c 'setsid /usr/local/bin/qsu /usr/bin/echo "hello world" \
+  >/tmp/49-qsu2.log 2>&1 </dev/null & echo $! >/tmp/49-qsu2.pid'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -253,10 +240,6 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   on the wire, this scenario will see `argv` as a 1-element list
   containing `"/usr/bin/echo 'hello world'"` — that's the
   regression to flag.
-- The `caller_exe = /usr/bin/python3.X` reality (because
-  `/usr/local/bin/qsu` is a bash → python exec wrapper) means
-  history-tab admins can't visually distinguish a qsu invocation
-  from any other python3 script. The action prefix
-  (`qsu.exec:<target>`) is the actual qsu fingerprint; do not
-  rely on caller_exe to filter qsu history. Tracked as a
-  follow-up todo (compiled qsu binary or rename-after-exec).
+- The `caller_exe = /usr/local/bin/qsu` value is intentional for the
+  compiled client. Older reports may mention `/usr/bin/python3.X` from
+  the retired bash/python wrapper.

@@ -97,7 +97,7 @@ SPAWN_PID=$!
 # bridge — i.e. weston-terminal started + opened its xdg_toplevel +
 # waypipe forwarded it. (a) is just bridge-setup.
 BRIDGE_READY=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 360); do
     if grep -q "bridge socket ready at .* (qdistro-tier3:0660)" "$SPAWN_LOG" 2>/dev/null; then
         BRIDGE_READY=1; break
     fi
@@ -108,7 +108,7 @@ if [ "$BRIDGE_READY" = "0" ]; then
     cat "$SPAWN_LOG" >&2 || true
     kill -TERM "$SPAWN_PID" 2>/dev/null || true
     wait "$SPAWN_PID" 2>/dev/null || true
-    fail "spawn-tier3.sh did not signal bridge-socket-ready within 10s"
+    fail "spawn-tier3.sh did not signal bridge-socket-ready within 90s"
     echo "[s36] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
 fi
@@ -123,7 +123,7 @@ jgrep_once() {
 }
 
 # Weston-terminal cold-start budget: ~5s on a warm VM, occasionally
-# more under load. 30s ceiling matches the s32 pattern.
+# much more under qci VM load.
 OBS=""
 deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -135,7 +135,7 @@ done
 if [ -n "$OBS" ]; then
     pass "bridged toplevel reached the outer admin compositor"
 else
-    fail "no [tier3] observation for user1 toplevel within 30s (qdshell Tier3Apps may not be loaded, or waypipe bridge stalled)"
+    fail "no [tier3] observation for user1 toplevel within 90s (qdshell Tier3Apps may not be loaded, or waypipe bridge stalled)"
 fi
 
 # --- 6. inner process runs as silo uid -------------------------------
