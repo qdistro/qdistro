@@ -57,6 +57,8 @@ install -m 0755 "$QD/deploy/qdwin-session-launcher.sh" /usr/local/bin/qdwin-sess
 install -m 0755 "$QD/deploy/qdistro-startlxqtwayland.sh" /usr/local/bin/qdistro-startlxqtwayland
 install -d -m 0755 /etc/systemd/user
 install -m 0644 "$QD/deploy/qdwin-session.target" /etc/systemd/user/qdwin-session.target
+install -m 0644 "$QD/deploy/qdwin-compositor.service" /etc/systemd/user/qdwin-compositor.service
+install -m 0644 "$QD/deploy/qdshell.service" /etc/systemd/user/qdshell.service
 
 if ! getent passwd _greeter >/dev/null; then
     useradd --system --no-create-home --home-dir /nonexistent \
@@ -78,6 +80,9 @@ systemctl unmask greetd.service 2>/dev/null || true
 loginctl disable-linger admin 2>/dev/null || true
 loginctl terminate-user admin 2>/dev/null || true
 systemctl stop user@1000.service 2>/dev/null || true
+runuser -l admin -c \
+    'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null || true' \
+    || true
 systemctl enable greetd.service
 systemctl enable greetd-fallback.service || true
 install -d -m 0755 /etc/systemd/system/multi-user.target.wants
@@ -85,4 +90,9 @@ ln -sfn /usr/lib/systemd/system/greetd.service \
     /etc/systemd/system/multi-user.target.wants/greetd.service
 systemctl reset-failed greetd.service 2>/dev/null || true
 systemctl restart --no-block greetd.service
+if [ ! -s /usr/bin/qdgreeter ]; then
+    echo "installed /usr/bin/qdgreeter wrapper is empty after greeter setup" >&2
+    exit 3
+fi
+sync
 chvt 3 || true

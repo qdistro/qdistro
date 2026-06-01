@@ -1147,6 +1147,11 @@ gate_snapshot_daily() {
         record_result snapshot-daily "$new_name" fail "$EXIT_VM_PROVISION" vm_provision vm "$RDIR/vm/enable-qdgreeter.log" "could not enable qdgreeter/greetd"
         return "$EXIT_VM_PROVISION"
     fi
+    if ! "$VM_TOOLS/vm-exec" "$tmp" "test -s /usr/bin/qdgreeter && sync" \
+        >> "$RDIR/vm/enable-qdgreeter.log" 2>&1; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_PROVISION" vm_provision vm "$RDIR/vm/enable-qdgreeter.log" "qdgreeter wrapper missing or empty after setup"
+        return "$EXIT_VM_PROVISION"
+    fi
     collect_vm_artifacts "$tmp" snapshot-source
     "${VIRSH[@]}" destroy "$tmp" >/dev/null 2>&1 || true
     old_disk=$(vm_disk_path "$tmp" || true)
@@ -1182,6 +1187,11 @@ gate_snapshot_daily() {
     fi
     if ! "$VM_TOOLS/vm-start-and-wait" "$new_name" >> "$RDIR/vm/snapshot-define.log" 2>&1; then
         record_result snapshot-daily "$new_name" fail "$EXIT_VM_BOOT" vm_boot vm "$RDIR/vm/snapshot-define.log" "daily VM did not become ready"
+        return "$EXIT_VM_BOOT"
+    fi
+    if ! "$VM_TOOLS/vm-exec" "$new_name" "test -s /usr/bin/qdgreeter && for i in \$(seq 1 30); do systemctl is-active --quiet greetd.service && exit 0; sleep 1; done; exit 1" \
+        >> "$RDIR/vm/snapshot-define.log" 2>&1; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_BOOT" vm_boot vm "$RDIR/vm/snapshot-define.log" "daily VM booted without active qdgreeter/greetd"
         return "$EXIT_VM_BOOT"
     fi
     kv daily_vm "$new_name"

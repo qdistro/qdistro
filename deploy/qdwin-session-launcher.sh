@@ -18,14 +18,16 @@
 set -eu
 
 # greetd sets XDG_RUNTIME_DIR=/run/user/$(id -u) before exec'ing us
-# under the target user. Defensive default in case a future greetd
-# version drops the env.
-: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+# under the target user. Force the authenticated user's runtime dir so
+# greeter-only variables cannot leak into the desktop session.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
+export XDG_CACHE_HOME="${HOME:-/home/$(id -un)}/.cache"
 
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=qdistro
 export QT_QPA_PLATFORM=wayland
+unset QDGREETER_LOG QDGREETER_RAW_KEYBOARD
 
 log() {
     # All logging goes to journal via greetd's PAM session stderr.
@@ -35,6 +37,11 @@ log() {
 }
 
 log "starting qdwin-session.target for $(id -un)"
+
+systemctl --user import-environment \
+    XDG_RUNTIME_DIR XDG_CACHE_HOME XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
+    XDG_SESSION_ID XDG_VTNR WAYLAND_DISPLAY QT_QPA_PLATFORM HOME USER LOGNAME \
+    >/dev/null 2>&1 || true
 
 # Wait briefly for the user systemd manager to be reachable. The
 # admin user has linger enabled (`loginctl enable-linger admin` in
