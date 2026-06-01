@@ -493,10 +493,37 @@ release_vm() {
     "${VIRSH[@]}" destroy "$vm" >/dev/null 2>&1 || true
     "${VIRSH[@]}" undefine "$vm" --remove-all-storage >/dev/null 2>&1 || {
         "${VIRSH[@]}" undefine "$vm" --nvram >/dev/null 2>&1 || true
-        if [ -n "$disk" ] && [ -f "$disk" ]; then
-            rm -f "$disk" 2>/dev/null || true
-        fi
     }
+    # On qemu:///session, `undefine --remove-all-storage` returns 0 but does NOT
+    # delete the overlay qcow2 (it is not a pool-tracked managed volume), so the
+    # `||` fallback never fired and the overlay leaked. Unconditionally reclaim
+    # the overlay if it survived undefine. safe_rm_overlay guards path/name so
+    # this is a harmless no-op when --remove-all-storage actually deleted it.
+    if [ -n "$disk" ] && [ -f "$disk" ]; then
+        if safe_rm_overlay "$disk"; then
+            log "reclaimed leaked overlay $disk"
+        fi
+    fi
+}
+
+# Guarded removal of a qci disposable overlay. Only removes a path that is a
+# regular non-empty file, lives directly under the libvirt images dir, and
+# whose basename starts with `qci-` (so backing images like baseweed-baked.qcow2
+# or qdistro-daily* are never touched). Returns 0 only if it removed the file.
+safe_rm_overlay() {
+    local path=$1
+    [ -n "$path" ] || return 1
+    [ -f "$path" ] || return 1
+    local img_dir base
+    img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
+    base=$(basename -- "$path")
+    case "$base" in
+        qci-*) ;;
+        *) return 1 ;;
+    esac
+    # Must reside directly in the images dir (not a symlink/escape).
+    [ "$path" = "$img_dir/$base" ] || return 1
+    rm -f -- "$path" 2>/dev/null && [ ! -f "$path" ]
 }
 
 vm_disk_path() {
@@ -1246,10 +1273,52 @@ gate_cleanup() {
             }
         fi
     done < <("${VIRSH[@]}" list --all --name 2>/dev/null)
+
+    # Orphan-overlay sweep: the domain loop above only sees DEFINED domains, so
+    # an overlay whose domain is already gone (the release_vm leak, or a SIGKILL'd
+    # run) is invisible there and never reclaimed. Scan the images dir directly
+    # and remove stale qci-*.qcow2 files that have no matching defined domain.
+    local img_dir defined_names orphans=0 f obase mt
+    img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
+    defined_names=$("${VIRSH[@]}" list --all --name 2>/dev/null)
+    for f in "$img_dir"/qci-*.qcow2; do
+        [ -f "$f" ] || continue
+        obase=$(basename -- "$f")
+        # Never touch backing/daily images even if name-prefixed oddly.
+        case "$obase" in qdistro-daily*) continue ;; qci-*) ;; *) continue ;; esac
+        # Skip if a defined domain owns this overlay (basename minus .qcow2).
+        if printf '%s\n' "$defined_names" | grep -Fxq "${obase%.qcow2}"; then
+            echo "keep $obase (defined domain exists)" >> "$log_path"
+            continue
+        fi
+        mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ "$mt" = 0 ]; then
+            echo "keep orphan $obase (could not stat)" >> "$log_path"
+            continue
+        fi
+        if [ "$mt" -ge "$cutoff" ]; then
+            echo "keep recent orphan $obase mtime=$mt" >> "$log_path"
+            continue
+        fi
+        if [ "$dry" = 1 ]; then
+            echo "would remove orphan overlay $f" >> "$log_path"
+            orphans=$((orphans + 1))
+        else
+            if safe_rm_overlay "$f"; then
+                echo "removed orphan overlay $f" >> "$log_path"
+                log "reclaimed orphan overlay $f"
+                orphans=$((orphans + 1))
+            else
+                echo "FAIL remove orphan overlay $f" >> "$log_path"
+                rc=$EXIT_RUNNER
+            fi
+        fi
+    done
+
     if [ "$rc" -eq 0 ]; then
-        record_result cleanup qci-vms pass "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry"
+        record_result cleanup qci-vms pass "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry orphans=$orphans"
     else
-        record_result cleanup qci-vms fail "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry"
+        record_result cleanup qci-vms fail "$rc" "$(exit_class_name "$rc")" vm "$log_path" "age_hours=$age_hours dry_run=$dry orphans=$orphans"
     fi
     return "$rc"
 }
