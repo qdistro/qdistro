@@ -118,6 +118,11 @@ if [ -d "$PARENT/qdbrowser" ]; then
         --exclude='.git' --exclude='build' --exclude='build-host*' \
         -czf "$STAGE/qdbrowser.tar.gz" -C "$PARENT/qdbrowser" .
 fi
+if [ -d "$PARENT/qdgreeter" ]; then
+    tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
+        --exclude='.git' --exclude='build' --exclude='build-host*' \
+        -czf "$STAGE/qdgreeter.tar.gz" -C "$PARENT/qdgreeter" .
+fi
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     --exclude='.git' --exclude='build' --exclude='build-host*' \
     -czf "$STAGE/qnotebook.tar.gz" -C "$PARENT/qnotebook" .

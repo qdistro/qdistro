@@ -1141,6 +1141,12 @@ gate_snapshot_daily() {
     fi
     vm=$(acquire_vm snapshot-daily "") || return "$EXIT_VM_PROVISION"
     tmp=$vm
+    mkdir -p "$RDIR/vm"
+    if ! "$VM_TOOLS/vm-exec" "$tmp" "bash /root/qdistro-src/qdistro/scripts/vm/enable-qdgreeter.sh" \
+        > "$RDIR/vm/enable-qdgreeter.log" 2>&1; then
+        record_result snapshot-daily "$new_name" fail "$EXIT_VM_PROVISION" vm_provision vm "$RDIR/vm/enable-qdgreeter.log" "could not enable qdgreeter/greetd"
+        return "$EXIT_VM_PROVISION"
+    fi
     collect_vm_artifacts "$tmp" snapshot-source
     "${VIRSH[@]}" destroy "$tmp" >/dev/null 2>&1 || true
     old_disk=$(vm_disk_path "$tmp" || true)

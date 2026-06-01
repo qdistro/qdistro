@@ -50,15 +50,15 @@ systemctl mask greetd.service 2>/dev/null || true
 
 # ---- 1. Fetch + unpack the three repos -----------------------------------
 log "fetching tarballs from $HOST..."
-mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser,qnotebook}
-for repo in qdistro qdwin qdshell qdlocker qdbrowser qnotebook; do
+mkdir -p "$SRC"/{qdistro,qdwin,qdshell,qdlocker,qdbrowser,qdgreeter,qnotebook}
+for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qnotebook; do
     if ! wget -q -O "/tmp/$repo.tar.gz" "$HOST/$repo.tar.gz"; then
-        # qdlocker + qdbrowser + qnotebook are optional during the rollout; older
+        # qdlocker + qdbrowser + qdgreeter + qnotebook are optional during the rollout; older
         # spin scripts don't stage them. Don't fail the whole bootstrap
         # if they're absent — the bridge installer will WARN and the
         # qdbrowser pwd_autofill probes will then ModuleNotFoundError,
         # but the broker / pwd / session-manager paths still come up.
-        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ] || [ "$repo" = "qnotebook" ]; then
+        if [ "$repo" = "qdlocker" ] || [ "$repo" = "qdbrowser" ] || [ "$repo" = "qdgreeter" ] || [ "$repo" = "qnotebook" ]; then
             log "$repo tarball not staged; skipping"
             rmdir "$SRC/$repo" 2>/dev/null || true
             continue
