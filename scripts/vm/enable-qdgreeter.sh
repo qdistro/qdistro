@@ -26,7 +26,8 @@ install -d -m 0755 /opt/qdgreeter
 cp -a "$QDG"/. /opt/qdgreeter/
 find /opt/qdgreeter -type d -name __pycache__ -prune -exec rm -rf {} +
 
-cat > /usr/bin/qdgreeter <<'EOF'
+tmp_wrapper=$(mktemp)
+cat > "$tmp_wrapper" <<'EOF'
 #!/bin/sh
 export PYTHONPATH=/opt/qdgreeter${PYTHONPATH:+:$PYTHONPATH}
 export QDGREETER_LOG=${QDGREETER_LOG:-INFO}
@@ -35,7 +36,12 @@ export XDG_CACHE_HOME=/run/qdgreeter/cache
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CACHE_HOME" 2>/dev/null || true
 exec /usr/bin/python3 -m qdgreeter.app "$@"
 EOF
-chmod 0755 /usr/bin/qdgreeter
+install -m 0755 "$tmp_wrapper" /usr/bin/qdgreeter
+rm -f "$tmp_wrapper"
+if [ ! -s /usr/bin/qdgreeter ]; then
+    echo "installed /usr/bin/qdgreeter wrapper is empty" >&2
+    exit 3
+fi
 
 log "installing greetd config and fallback..."
 install -d -m 0755 /etc/greetd
@@ -67,8 +73,16 @@ install -d -o _greeter -g _greeter -m 0755 /run/qdgreeter
 
 log "enabling greetd on tty3..."
 systemctl daemon-reload
-systemctl unmask greetd.service jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true
+systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true
+systemctl unmask greetd.service 2>/dev/null || true
+loginctl disable-linger admin 2>/dev/null || true
+loginctl terminate-user admin 2>/dev/null || true
+systemctl stop user@1000.service 2>/dev/null || true
 systemctl enable greetd.service
 systemctl enable greetd-fallback.service || true
-systemctl restart greetd.service
+install -d -m 0755 /etc/systemd/system/multi-user.target.wants
+ln -sfn /usr/lib/systemd/system/greetd.service \
+    /etc/systemd/system/multi-user.target.wants/greetd.service
+systemctl reset-failed greetd.service 2>/dev/null || true
+systemctl restart --no-block greetd.service
 chvt 3 || true
