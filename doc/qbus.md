@@ -57,11 +57,11 @@ admin-authored policy independent of admin's desktop session lifecycle.
 
 ## `qbus-peer-$uidA-$uidB`
 
-For direct cross-user transfers (clipboard send, view-handoff coordination),
-qdistro uses **ephemeral p2p D-Bus sockets** rather than a persistent bus.
-D-Bus supports this natively.
+For direct cross-uid transfers between sessions (clipboard send,
+view-handoff coordination), qdistro uses **ephemeral p2p D-Bus sockets**
+rather than a persistent bus. D-Bus supports this natively.
 
-Workflow for "user A sends clipboard to user B":
+Workflow for "session A sends clipboard to session B":
 
 1. A's compositor invokes "Send clipboard to B" (context menu).
 2. A's compositor asks `qbus-admin` whether the transfer is allowed.
@@ -70,8 +70,8 @@ Workflow for "user A sends clipboard to user B":
 4. A's compositor writes the clipboard payload; B's compositor reads.
 5. Both ends close. Socket gone.
 
-Ephemeral sockets avoid a persistent bus that both users would need standing
-access to. Each transfer is its own scoped channel.
+Ephemeral sockets avoid a persistent bus that both sessions would need
+standing access to. Each transfer is its own scoped channel.
 
 ## Polkit vs bus — separation of concerns
 

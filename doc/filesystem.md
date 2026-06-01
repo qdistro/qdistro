@@ -256,7 +256,7 @@ space rapidly. High-churn subdirs are marked **NOCOW + subvolume-excluded**:
 
 ## Integration with other features
 
-- **TTY-escape fullscreen sessions**: snapshot the user's home subvolume
+- **Fullscreen TTY sessions**: snapshot the user's home subvolume
  before launching a game session so save corruption is recoverable.
 - **Password vault**: every item add/modify triggers a snapshot of
  `/var/lib/qdistro/vaults`.

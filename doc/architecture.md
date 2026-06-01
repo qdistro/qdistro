@@ -2,20 +2,32 @@
 
 ## Admin is home
 
-Admin's compositor runs on tty3 and owns all hardware (GPU, KMS, inputs, audio,
-network, Bluetooth, camera). Every regular user session is a **nested
-compositor** (or container with a nested compositor) whose surfaces appear as
-Wayland clients inside admin's compositor.
+Admin's compositor runs on tty3 and owns the trusted control plane for hardware
+(GPU, KMS, inputs, audio, network, Bluetooth, camera). Regular user sessions
+can run either as **nested compositor** sessions whose surfaces appear as
+Wayland clients inside admin's compositor, or as fullscreen TTY sessions with
+their own compositor, shell, clipboard surface, and notification surface.
 
 This is the Qubes Dom0 role, mapped to a single-machine, non-Xen, mainstream-
 Linux world.
 
-Seamless cross-user UX (clipboard, view handoff, admin-approval overlays)
-*requires* multiple users' windows coexisting on one display — only achievable
-in the nested model. The nested model also unifies small apps and large
+Seamless cross-silo UX (clipboard, view handoff, admin-approval overlays)
+requires multiple silos' windows coexisting on one display, which is the nested
+or mixed-session model. The nested model also unifies small apps and large
 multi-window apps (IDEs) under one "each isolated thing runs a compositor"
-pattern. TTY-switched fullscreen sessions remain as an escape hatch for games,
-VR, and GPU-heavy workloads (see [games](games.md)).
+pattern.
+
+TTY-switched fullscreen sessions are also first-class. They are useful for
+games, VR, GPU-heavy workloads, and for tasks where the owner wants stronger
+mental separation than coloured windows on one desktop can provide. The TTY
+boundary is not the whole security model, but Linux VT switching gives a
+natural UI boundary and useful incidental separation (see [games](games.md)).
+
+A session is not a silo. A session is the dynamic runtime context with
+processes, UI, and reserved resources; a silo is an isolated program/data/state
+resource that may be attached to one or more sessions. This distinction matters
+for workflows such as development versus commit: the same source-code silo can
+be visible in different sessions while commit authority remains separate.
 
 ## TTY layout
 
@@ -25,7 +37,7 @@ VR, and GPU-heavy workloads (see [games](games.md)).
 | tty2 | Textual admin login | `greetd` + `tuigreet` | Admin login for repairs when Wayland won't start. |
 | tty3 | Admin graphical session | `greetd` → `qdgreeter` → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell) | Pinned; boots here by default; the PyQt locker is active from start. P01 wired this path in 2026-05; before that, greetd ran LXQt+labwc here. |
 | tty4 | Escape hatch — legacy LXQt+labwc | `greetd-fallback.service` → `qdistro-startlxqtwayland` | Recovery path when qdwin is broken. Same code that used to run on tty3 pre-P01. |
-| tty5+ | Pinned and dynamic mix | `qdistro-session-manager` | Some TTYs may be pinned to special roles (recall-user, future ones); remaining slots are allocated dynamically. |
+| tty5+ | Pinned and dynamic sessions | `qdistro-session-manager` | TTY work sessions, fullscreen sessions, VM viewers, and special-role sessions; some slots may be pinned, remaining slots allocated dynamically. |
 
 Kernel cmdline: `systemd.default_vt=3`. Boot lands on admin.
 
@@ -58,8 +70,8 @@ model. Tier 2 adds real sandboxing but is heavier; admin opts in per app.
 
 ## Hardware ownership
 
-- **GPU / KMS / outputs / inputs** — admin compositor on tty3 (or the TTY-escape
- compositor when active).
+- **GPU / KMS / outputs / inputs** — admin compositor on tty3 (or a fullscreen
+ TTY session compositor when active).
 - **Audio / camera** — admin's PipeWire daemon (system-wide).
 - **Network** — admin's NetworkManager; per-user network namespaces for silo
  separation.
@@ -71,19 +83,23 @@ Regular users cannot `open()` device nodes for sensitive hardware. Enforcement
 is layered via SELinux policy and cgroup device whitelists on user sessions.
 PipeWire and polkit-gated services surface virtual equivalents.
 
-## TTY escape hatch for fullscreen sessions
+## TTY sessions
 
-A user session can be promoted to a **fullscreen TTY session**:
+A user session can run as a **TTY session**:
 
-- Launched on tty4+ via greetd.
+- Launched on tty5+ via greetd. tty4 is reserved as the fallback desktop.
 - Runs the user's compositor directly on that TTY (DRM master, full GPU access).
-- Used for games, video editors, GPU-heavy work — anywhere maximum performance
- matters more than seamless multi-user UX.
-- No handoff or clipboard-paste-from-other-user in this mode. It's a committed
- fullscreen context; VT-switch back to tty3 when done.
+- Owns its own shell, panel, clipboard surface, notification surface, and
+ session-local UI state.
+- Provides stronger mental separation because the owner switches desktops
+ rather than merely seeing differently coloured windows.
+- May be used for normal task-focused work, games, video editors, GPU-heavy
+ work, VM viewers, or special-role sessions.
 
-Primary users of this mechanism are games and VR (see [games](games.md)),
-multi-monitor VM viewers, and GPU-heavy creative workloads.
+Some TTY sessions are fullscreen-only and deliberately give up seamless handoff
+or cross-silo clipboard affordances. Other TTY sessions may still use explicit
+brokered transfers. Games and VR are examples of the stricter fullscreen mode
+(see [games](games.md)).
 
 ## Components
 
@@ -95,8 +111,8 @@ multi-monitor VM viewers, and GPU-heavy creative workloads.
  routing, rule evaluation, audit log, and approval cache.
 - **qdistro-admin-app** — PyQt admin queue UI for triaging permission requests
  (see [admin-approval](admin-approval.md)).
-- **qdistro-session-manager** — user-lifecycle daemon; creates, freezes, and
- resumes user sessions.
+- **qdistro-session-manager** — user-lifecycle daemon; creates, starts, stops,
+ and attaches silos and sessions.
 - **qdistro_app SDK** — Python library that first-party apps integrate with
  (see [app-sdk](app-sdk.md)).
 - **qdistro-pwd** — secret/vault daemon (see [password-manager](password-manager.md)).

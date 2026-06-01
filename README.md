@@ -99,9 +99,9 @@ setup.
    modify it directly. The compositor core and transport
    infrastructure are commodity C (libweston, PipeWire, FreeRDP,
    qemu, kernel) — leveraged, not rewritten.
-2. **Single-tenant.** One physical person, one fingerprint. Multiple
-   Linux users exist only to separate *data*, not to authenticate
-   different humans.
+2. **Single-tenant, multi-silo.** One physical person, one fingerprint,
+   one admin-owned machine policy. Multiple Linux users, silos, and
+   sessions separate *data and work contexts*, not humans.
 3. **Admin is the trusted base.** One admin user owns all hardware
    and approves all cross-silo actions. Regular users are
    admin-spawned uid sandboxes.
@@ -118,7 +118,7 @@ Start with [doc/overview.md](doc/overview.md) for the vision, then:
 
 | Topic | Doc |
 | --- | --- |
-| System model | [architecture.md](doc/architecture.md), [threat-model.md](doc/threat-model.md), [isolation-tiers.md](doc/isolation-tiers.md) |
+| System model | [glossary.md](doc/glossary.md), [architecture.md](doc/architecture.md), [threat-model.md](doc/threat-model.md), [isolation-tiers.md](doc/isolation-tiers.md) |
 | Compositor & shell | [compositor.md](doc/compositor.md), [admin-approval.md](doc/admin-approval.md), [window-handoff.md](doc/window-handoff.md), [window-hierarchy.md](doc/window-hierarchy.md), [clipboard.md](doc/clipboard.md) |
 | Sessions & devices | [sessions.md](doc/sessions.md), [devices.md](doc/devices.md), [qbus.md](doc/qbus.md), [filesystem.md](doc/filesystem.md) |
 | Permissions | [permissions.md](doc/permissions.md), [sudo.md](doc/sudo.md), [selinux.md](doc/selinux.md) |

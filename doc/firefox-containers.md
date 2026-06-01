@@ -113,7 +113,7 @@ The reply echoes the deleted container's metadata — useful for an
 
 The bridge's `RequestTabs(s op, s args_json) -> s reply_json` method
 already routes every inbound op through one entry point (see
-[`todo/browser/02-page-extract-request-usage.md`](../../todo/browser/02-page-extract-request-usage.md)).
+[`todo/issues/qdistro/browser/02-page-extract-request-usage.md`](../../todo/issues/qdistro/browser/02-page-extract-request-usage.md)).
 The three `containers.*` ops add no new D-Bus surface — they just need
 `_handle_containers_list / _create / _remove` in
 `qdistro_browser_bridge.py`, mirroring the existing
@@ -254,8 +254,7 @@ mirrored into a second log site.
 
 The **bridge-side journal logging** described in
 [browser.md §Audit](browser.md#audit) is not yet implemented for any
-op; that's a separate Phase-9 follow-up tracked in
-[`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md).
+op; that's a separate Phase-9 follow-up tracked in the private todo repo.
 
 ## Calling from a qdistro daemon
 

@@ -96,7 +96,7 @@ ML transforms; modern laptop CPU handles 720p/30fps background blur at
 
 - **Admin-only UIs** for resolution, scaling, rotation, and output layout.
 - **User compositors / games can set modes within their own context.** In a
- TTY-escape fullscreen user session, the user's compositor has DRM master
+ fullscreen TTY session, the user's compositor has DRM master
  and can mode-set freely.
 - In nested mode, a user app requesting a different resolution asks the
  nested compositor, which either scales or requests from admin's

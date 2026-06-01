@@ -17,34 +17,41 @@ Searchable from the admin launcher:
 - Window / app / user filter ("everything in firefox work-user on
  thursday").
 
-## Privilege separation — `recall-user`
+## Privilege separation — `recall-user` (provisional)
 
 Recall data is sensitive enough to deserve its own privilege compartment,
 distinct from admin's TCB. Rather than admin directly reading recall,
 qdistro introduces a dedicated **`recall-user`** role.
+
+This section is provisional. `recall-user` is a special system role, not a
+regular data silo, and its exact relation to the admin-only lock/unlock model is
+still open.
 
 - **Distinct uid**, created by admin. Not a regular data silo; a reader
  role.
 - **Read-only access** to `/var/lib/qdistro/recall/*` across all users
  (enforced via group membership + filesystem ACLs). Only
  `qdistro-recall@<user>.service` writes; only `recall-user` reads.
-- **Lives on its own pinned TTY** following the TTY-escape model. A likely
- slot is **tty4**, but the specific allocation is one instance of a
- broader "pinned special-role session" pattern.
+- **Lives on its own pinned TTY** following the TTY-session model. A likely
+ slot is **tty5+** because tty4 is reserved for the fallback desktop, but the
+ specific allocation is one instance of a broader "pinned special-role session"
+ pattern.
 - **Own compositor, not nested in admin's.** While recall-user's TTY is
  active, admin's compositor isn't displaying — so a compromised admin
  session *can't* passively snoop recall queries in progress.
-- **Own authentication** — the same fingerprint by default, optionally a
- second factor (hardware token, TOTP).
-- **Switching in = "open the time machine"** — Ctrl+Alt+F4 → recall-user's
- compositor unlocks, the user browses the timeline. Ctrl+Alt+F3 → back to
- admin, recall-user freezes.
+- **Authentication model open** — earlier drafts gave recall-user its own
+ authentication. Current single-tenant lock design keeps unlock authority in
+ admin. The final recall flow must reconcile recall privacy with the rule that
+ non-admin sessions should not hold admin/root unlock credentials.
+- **Switching in = "open the time machine"** — the intended UX is a clear,
+ dedicated recall context, but the final TTY, unlock, and lifecycle semantics
+ are open.
 
 Consequences:
 
-- If admin's live session is compromised, recall is only at risk while
- recall-user is *actively unlocked and rendering*. Most of the time admin
- is on tty3 and recall-user is frozen.
+- If admin's live session is compromised, recall should not become ambiently
+ readable. The exact mechanism is open because recall privacy must be reconciled
+ with the admin-only unlock path.
 - Recall queries live in a dedicated session context; no bleed into admin's
  normal workflow.
 - Admin manages the machine (users, vaults, policy); recall-user only
@@ -160,7 +167,7 @@ and a snippet matching the query.
  only if admin policy enables it. Useful for "what was I doing yesterday
  in work-user?"
 - **Admin's launcher does *not* include recall search by default.** Admin
- accesses recall by VT-switching to tty4 (recall-user). Keeps admin's
+ accesses recall by VT-switching to recall-user's pinned TTY. Keeps admin's
  TCB-grade session out of the recall-data read path.
 
 ## Apps opt in via the SDK

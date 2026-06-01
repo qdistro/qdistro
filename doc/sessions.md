@@ -9,9 +9,15 @@ The only authentication boundary is **admin**. Admin authenticates once
 (fingerprint or password); once authed, all user sessions admin has marked
 "available" are accessible without further credentials.
 
-Users are not humans in qdistro; they are **uid-scoped sandboxes** spawned
-by admin's session manager. There is only ever one human. Fingerprint =
-"the owner is present."
+Users are not humans in qdistro; they are implementation identities for silos
+and sessions spawned by admin's session manager. There is only ever one human.
+Fingerprint = "the owner is present."
+
+This does not collapse work into one context. A session is a dynamic set of
+processes and attached or reserved resources. The owner may keep separate TTY
+sessions for strong mental separation, use a mixed desktop where multiple
+silos share one compositor, or run a headless session for an automated
+workflow.
 
 ## Session launch chain
 
@@ -23,9 +29,14 @@ Each TTY starts a greetd instance with a role-specific config:
 | tty2 | `initial_session = tuigreet` | Textual admin login via PAM (fingerprint or password) → shell. |
 | tty3 | `default_session.command = /usr/bin/qdgreeter` (deploy/greetd-config.toml) | Graphical qdgreeter → admin auth via greetd JSON-IPC → `qdwin-session-launcher` → `qdwin-session.target` → qdwin compositor + qdshell. |
 | tty4 | `default_session.command = qdistro-startlxqtwayland` (deploy/greetd-config-fallback.toml, run by greetd-fallback.service) | **Escape hatch.** Legacy LXQt+labwc session for recovering from a broken qdwin commit. Reachable via Ctrl+Alt+F4. Documented in `deploy/AGENTS.md`. |
-| tty5+ | Dynamic; session manager writes ephemeral configs | Fullscreen user sessions or VM viewers. |
+| tty5+ | Dynamic; session manager writes ephemeral configs | TTY work sessions, fullscreen user sessions, special-role sessions, or VM viewers. |
 
 `systemd.default_vt=3` boots to admin.
+
+Admin-configured sessions may autostart or autologin before the owner performs
+the first admin login after boot. They may run background jobs and use network
+if their policy allows it, but they must not be visible or interactable until
+admin authenticates and the machine lock is cleared.
 
 > **History:** before P01 (closed 2026-05), tty3 ran
 > `qdistro-startlxqtwayland` (LXQt+labwc) with qdshell as a
@@ -44,8 +55,8 @@ application or overlay. Properties:
 - The lock UI is Qt / QML, rendered by the admin compositor shell.
 - Auth calls `fprintd` over D-Bus (no PAM on the interactive path).
 - Password fallback uses PAM (the same admin account).
-- Successful auth transitions the compositor to `unlocked`; the session
- manager thaws frozen user sessions.
+- Successful auth transitions the compositor to `unlocked`; user-session
+ surfaces become reachable again.
 
 ### Lock triggers
 
@@ -58,6 +69,16 @@ application or overlay. Properties:
 
 A single lock covers the whole machine. No per-user locks. Matches the
 single-tenant assumption. Fingerprint unlocks everything at once.
+
+Lock is a visibility and input gate, not a normal process-freeze mechanism.
+User sessions can keep running while the machine is locked: downloads,
+already-approved network jobs, and other background work may continue. New
+privilege grants and new cross-silo approvals require admin to unlock first.
+
+User sessions do not run independent screenlockers and must not prompt for the
+admin/root password. When locked, the only unlock path is the admin locker. For
+TTY sessions, the visible seat is forced to the admin lock surface or kept
+there, and switching to non-admin TTYs is blocked until admin authenticates.
 
 ## Fingerprint handling
 
@@ -72,19 +93,26 @@ single-tenant assumption. Fingerprint unlocks everything at once.
 
 `fprintd` stores enrolled templates per Linux user — there is no native
 "shared fingerprint DB accessible to multiple users." For qdistro's
-"admin authenticates, all nested sessions resume" model, all fingers enrol
-on admin; the locker (which runs in admin's session) auths against admin's
-DB directly. A future PAM module backed by a system-wide fingerprint store
-would let any context verify against admin's enrolled fingers.
+"admin authenticates, all sessions become reachable" model, all fingers enrol
+on admin; the locker (which runs in admin's session) auths against admin's DB
+directly. A future PAM module backed by a system-wide fingerprint store would
+let any context verify against admin's enrolled fingers.
 
 ## Admin-controlled silo lifecycle
 
-A separate daemon, `qdistro-session-manager.service`, owns silo state.
-A "silo" is a Linux uid plus its per-silo state (subvolume, runtime dir,
-cgroup-v2 scope) plus a registry entry the broker reads when routing
-send-to / cross-uid actions. The terms "user" and "silo" are used
-interchangeably in older spec text; new code and the D-Bus surface
-both use "silo".
+A separate daemon, `qdistro-session-manager.service`, owns silo lifecycle for
+the current uid-backed implementation. A "silo" is a qdistro resource kind: an
+isolated program context with state and data. Current code often backs a silo
+with a Linux uid plus per-silo state (subvolume, runtime dir, cgroup-v2 scope)
+and a registry entry the broker reads when routing send-to / cross-uid actions.
+The terms "user" and "silo" are used interchangeably in older spec text; new
+code and D-Bus surfaces should use "silo" for the resource kind and "session"
+for the dynamic process/UI context.
+
+A silo can be attached to sessions in different ways: UI surfaces, directory
+mounts, app state, credentials, or one-shot transfers. Those attachment rules
+are not all the same. A source tree may be mounted in more than one session;
+a browser profile or signing authority may require stricter brokered use.
 
 ### Silo states
 
@@ -172,9 +200,8 @@ qdshell package (to be added in a follow-up task).
 
 1. fprintd verifies the print.
 2. The compositor transitions to `unlocked`.
-3. The session manager thaws all silos in state `Frozen`; their processes
- resume.
-4. The compositor starts rendering their surfaces.
+3. Non-admin TTY switching becomes available again.
+4. The compositor starts rendering allowed user-session surfaces.
 5. Input is dispatched normally.
 
 No per-user auth at any point. One fingerprint, everything becomes reachable.
@@ -186,16 +213,15 @@ crashes or admin logs out:
 
 1. greetd notices the session ended; systemd restarts it — a fresh admin
  compositor comes up in the locked state.
-2. As soon as admin's compositor is gone, `qdistro-session-manager`
- **cgroup-freezes all active silos**. Processes remain alive; no data is
- lost. Surfaces can't render anywhere because admin's compositor is their
- renderer.
-3. Admin authenticates again → the session manager thaws sessions → the
- compositor renders their surfaces.
+2. As soon as admin's compositor is gone, the machine is treated as locked.
+ Nested user-session surfaces are no longer reachable because the admin
+ compositor is their trusted renderer and input gate. TTY user sessions are not
+ reachable until admin auth returns. Processes may keep running underneath,
+ subject to their normal resource policy.
+3. Admin authenticates again → sessions become reachable → the compositor
+ renders allowed surfaces.
 
-If admin logs out deliberately, the flow is the same. A `before_freeze` SDK
-hook is planned (not yet implemented) to fire in each active app so apps can
-persist in-memory state before freeze.
+If admin logs out deliberately, the flow is the same.
 
 Admin cannot log out in a way that leaves user sessions visibly active —
 rendering depends on admin's compositor. The admin session is the host, not

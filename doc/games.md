@@ -2,7 +2,7 @@
 
 Covers workloads that need unmediated hardware access: games (especially
 fullscreen-exclusive, VRR / HDR, anti-cheat), VR, GPU-heavy video editing.
-The TTY-escape fullscreen mechanism from [architecture](architecture.md) is
+The fullscreen TTY-session mechanism from [architecture](architecture.md) is
 the primitive; this document covers how it is used for these workloads.
 
 ## Why nested isn't good enough
@@ -24,7 +24,7 @@ None of these matter for a terminal. All of them matter for a shooter at
 ## Mechanism
 
 Admin (or user via a policy-permitted shortcut) requests a fullscreen
-session → `qdistro-session-manager` allocates tty4+ → writes an ephemeral
+session → `qdistro-session-manager` allocates tty5+ → writes an ephemeral
 greetd config → greetd launches the user's session with a game-suitable
 compositor.
 
@@ -73,7 +73,7 @@ silos.
 
 ## Anti-cheat compatibility
 
-TTY-escape fullscreen provides:
+Fullscreen TTY sessions provide:
 
 - Native kernel, no hypervisor / VM.
 - Direct hardware access, no virtualization trickery.
@@ -88,7 +88,7 @@ is its own saga, separate from qdistro's architecture.
  under Proton or in a VM. Out of scope for qdistro; document and suggest
  dual-boot.
 
-TTY-escape is the most anti-cheat-friendly surface Linux can offer.
+Fullscreen TTY sessions are the most anti-cheat-friendly surface Linux can offer.
 
 ## VR
 
@@ -99,7 +99,7 @@ not see the headset at all while the VR session is active.
 The standard approach is `monado` using **`drm-lease-v1`** to lease the
 HMD output from the session compositor — *not* full DRM master. Both
 gamescope (≥ 3.16) and cage (≥ 0.3) implement `drm-lease-v1`. This means
-VR can coexist with the TTY-escape compositor running other outputs on
+VR can coexist with the session compositor running other outputs on
 the same GPU; the compositor stays in charge of the rest of the desktop
 while monado owns the headset's plane.
 
@@ -118,7 +118,7 @@ The admin panel has a "Launch fullscreen session" action per user:
 1. Pick user (e.g., `games-user`).
 2. Pick launcher (Steam, VR runtime, specific binary, custom command).
 3. Optional: **sandbox mode** — launch in nested gamescope under admin
- instead of TTY-escape, for testing or casual games that don't need
+ instead of a fullscreen TTY session, for testing or casual games that don't need
  DRM master.
 4. The session manager allocates the TTY, starts the session, and
  VT-switches to it.
@@ -128,10 +128,10 @@ is permitted if admin policy allows.
 
 ## The trade
 
-TTY-escape sessions are fullscreen-only. No seamless handoff, no
-cross-user clipboard transfer into the running session, no admin approval
+Fullscreen TTY sessions are fullscreen-only. No seamless handoff, no
+cross-silo clipboard transfer into the running session, no admin approval
 overlays visible. This is the explicit cost of tier choice: maximum
-performance and hardware access in exchange for the seamless multi-user
+performance and hardware access in exchange for the seamless mixed-session
 UX. Users VT-switch back to admin (tty3) when done.
 
 ## Audio routing for games

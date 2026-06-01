@@ -43,13 +43,14 @@ that file's language.
 
 ## Single-tenant assumption
 
-qdistro is a one-physical-person system. Multiple uids exist to
-separate data, not to authenticate humans. When in doubt:
+qdistro is a one-physical-person system. Multiple uids and silos exist to
+separate data, state, authority, and work contexts, not to authenticate
+different humans. When in doubt:
 
 - The admin uid (`jan` on dev VMs, uid 1000) owns hardware and
   approves cross-uid actions.
-- Regular user uids are sandboxes spawned by admin's session
-  manager.
+- Regular user uids are implementation identities for silos and sessions
+  spawned by admin's session manager.
 - There is no multi-user login screen, no per-user fingerprint, no
   per-user network stack. One human, one boot.
 

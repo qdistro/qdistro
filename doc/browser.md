@@ -10,13 +10,12 @@ Integration.
 > **Status snapshot.** The bridge today implements only `qdistro.ping` and
 > `recall.push`. Every other operation in this document is **specified but
 > not yet implemented**; each such section is marked with a `Phase: 9x`
-> banner. The phasing and per-op fix plan live in
-> [`todo/browser/`](../../todo/browser/) at the qdistro-org root.
+> banner. Current browser follow-ups live in the private todo repo under
+> [`todo/issues/qdistro/browser/`](../../todo/issues/qdistro/browser/).
 >
 > Six pre-existing bridge defects (P0-1..P0-6) must be fixed before any
-> Phase-9 work lands. See
-> [`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md)
-> §"Phase 9 prerequisites".
+> Phase-9 work lands. Historical Phase-9 planning notes were pruned from the
+> public repo; remaining current follow-ups live in the private todo repo.
 
 ## Supported-browser matrix
 
@@ -199,8 +198,8 @@ when no daemon is configured).
 > **Known defect (P0-3).** The handler reads `msg.get("user")` from the
 > extension payload and uses it to choose the destination directory,
 > falling back to `getpass.getuser()` if absent. A compromised extension
-> in user A's browser can therefore write recall rows tagged as user B
-> if the bridge has write access to that path. The fix: drop the
+> running under one uid can therefore write recall rows tagged as another
+> uid if the bridge has write access to that path. The fix: drop the
 > stdio-supplied `user` field, derive the destination strictly from the
 > kernel-attested identity chain.
 
@@ -477,9 +476,8 @@ decides what destinations are offered. The destination user's policy
 decides what content types are accepted; cross-user transfers route
 through `qdistro_admin_cache.approvals` with
 `action='browser.share_to'` and argv-scoped match keys, defaulting to
-one-hour session grants (see `todo/browser/04-compositor-clipboard.md`
-for the cache schema applied to clipboard transfers; share-to follows
-the same pattern). Requires extension permission `contextMenus` plus an
+one-hour session grants (using the same cache-schema pattern as clipboard
+transfers). Requires extension permission `contextMenus` plus an
 `intent_token` per transfer.
 
 ## Cross-user defaults
@@ -547,9 +545,7 @@ timestamp, decision, identity chain.
 
 ## Known defects index
 
-Fix plan lives in
-[`todo/browser/01-bridge-phase9.md`](../../todo/browser/01-bridge-phase9.md)
-§"Phase 9 prerequisites". Summary:
+Historical fix-plan details were pruned from the public repo. Summary:
 
 | ID | Defect | Severity | Status |
 |---|---|---|---|

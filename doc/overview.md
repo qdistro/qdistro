@@ -13,6 +13,60 @@ seamless app isolation. The target user is one physical person who wants:
  Xen-based legacy.
 - Everything modifiable with LLM assistance — userspace in Python, Qt, and QML.
 
+The core nouns are defined in [glossary.md](glossary.md). Short version:
+qdistro has one owner, many resources, many data/state silos, and one or more
+sessions that can attach resources for a task. A Linux uid is a useful
+isolation primitive, not the user-facing definition of a session.
+
+Design shorthand: **one owner, many silos, dynamic sessions**. The owner is the
+single human and policy authority. Silos are isolated program/data/state
+resources. Sessions are runtime contexts that reserve resources and attach
+silos while work is happening.
+
+## Single tenant
+
+"Single-tenant" means more than isolated data silos. Because there is only ever
+one physical person at the machine, configuration and authentication are
+unified rather than replicated per user.
+
+Single-tenant does **not** mean single-context. qdistro intentionally keeps many
+data and program contexts separate: work, home, dev, client projects, browser
+profiles, credentials, and task-specific state. The simplification is on the
+human-authentication and machine-policy axis, not on the data-separation axis.
+
+**One configuration.** Settings live in a single, system-wide place rather than
+being duplicated per component or per uid. Appearance — UI theme and colours,
+fonts, icons, cursors — together with monitor arrangement is defined once and
+shared by *every* component: qdgreeter, the lock screen, qdshell, first-party
+apps, and the desktops inside embedded VMs. There is no per-app theming to keep
+in sync; change the font once and the greeter, locker, panel, and VM windows
+all follow when their sessions next start. The canonical store is admin-owned —
+changing the system theme is an admin action — though a small set of values may
+be overridden per uid where it makes sense ([ui.md](ui.md)). The per-user accent
+colour is the deliberate exception: it is the visual cue that tells silos apart,
+so it is *meant* to differ per user.
+
+**Many sessions.** qdistro supports both coarse session separation and
+Qubes-style mixed desktops. A TTY session has its own compositor, shell, panel,
+clipboard surface, and notifications. A mixed session shows windows from
+multiple silos on one compositor, with silo identity carried by trusted chrome
+and cross-silo actions mediated by the broker. Both modes are valid; the owner
+chooses based on task, performance, and desired mental separation.
+
+Sessions are not the same as silos. A development session may attach a
+source-code silo without commit authority. A commit session may attach the same
+source-code silo plus a signing-key or GitHub-authority silo. A browser silo
+logged into Google may be temporarily attached, or used by a workflow in a
+headless compositor, to authenticate another tool. These are policy decisions,
+not hardcoded product flows.
+
+**One unlock.** One human means one lock. A single screen lock covers the whole
+machine, and one unlock — password or fingerprint — releases everything at once.
+You never return to the machine and have to dismiss a separate lock screen per
+silo or per app. (Password-vault unlock state is a separate, deliberate
+exception — see [password-manager.md](password-manager.md).) The lock mechanics
+are in [sessions.md](sessions.md).
+
 ## Not Qubes
 
 qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
