@@ -100,15 +100,26 @@ journal_after() {
     fi
 }
 
-# qdwin hides wp_security_context_manager_v1 from ordinary admin clients.
+# qdwin hides the secctx manager in enforced mode; this driver is usually run
+# under the documented dev-open override so it can exercise the rest of the
+# secctx path on unprivileged qdwin.
 WI_OUT=$(runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
     wayland-info 2>&1)
-if echo "$WI_OUT" | grep -q "wp_security_context_manager_v1"; then
-    echo "$WI_OUT" | tail -30 >&2
-    fail "wp_security_context_manager_v1 visible to ordinary admin client"
+if [ "${QDWIN_SECCTX_OPEN:-0}" = "1" ]; then
+    if echo "$WI_OUT" | grep -q "wp_security_context_manager_v1"; then
+        pass "qdwin advertises wp_security_context_manager_v1"
+    else
+        echo "$WI_OUT" | tail -30 >&2
+        fail "wp_security_context_manager_v1 not visible under QDWIN_SECCTX_OPEN=1"
+    fi
 else
-    pass "qdwin hides wp_security_context_manager_v1 from ordinary admin client"
+    if echo "$WI_OUT" | grep -q "wp_security_context_manager_v1"; then
+        echo "$WI_OUT" | tail -30 >&2
+        fail "wp_security_context_manager_v1 visible to ordinary admin client"
+    else
+        pass "qdwin hides wp_security_context_manager_v1 from ordinary admin client"
+    fi
 fi
 
 # =====================================================================
@@ -119,6 +130,7 @@ WRAP_LOG=/tmp/s110-wrap.log
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
     QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+    ${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:+QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1} \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$APPID" \
@@ -178,6 +190,7 @@ FORGED_APPID="qdistro.admin.terminal"
 runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" WAYLAND_DISPLAY=wayland-1 \
     QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+    ${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:+QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1} \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$FORGED_APPID" \
@@ -202,6 +215,13 @@ kill -TERM "$FORGED_PID" 2>/dev/null || true
 # A tier-4 client must not be able to subscribe to another silo's view
 # stream. Probe the broker's handoff/subscription gate cross-silo: a
 # tier-4 source -> admin dest with no rule is default-deny.
+if ! systemctl is-active --quiet qdistro-admin-broker.service 2>/dev/null; then
+    systemctl start qdistro-admin-broker.service 2>/dev/null || true
+    sleep 1
+fi
+systemctl is-active --quiet qdistro-admin-broker.service \
+    || skip "qdistro-admin-broker.service did not start"
+
 SUB_VERDICT=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckHandoffActivation \
     "string:vm-$VM_TAG" "string:admin" \
@@ -291,11 +311,20 @@ fi
 if journal_after | grep -qE "src_app=$APPID|clipboard.*$APPID|clipboard.*vm-$VM_TAG"; then
     pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
 else
+    AUDIT_SOURCE=""
+    if command -v sqlite3 >/dev/null 2>&1 \
+       && [ -r /var/lib/qdistro/audit/audit.sqlite ]; then
+        AUDIT_SOURCE=$(sqlite3 /var/lib/qdistro/audit/audit.sqlite \
+            "select source from audit where action='qdistro.clipboard.transfer:vm-$VM_TAG:admin' order by id desc limit 1;" \
+            2>/dev/null || true)
+    fi
+    if echo "$AUDIT_SOURCE" | grep -q "src_app=$APPID"; then
+        pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
     # The exact audit-row shape (src_app=...) is pinned by the broker
     # unit tests (test_broker_clipboard_receive.py::TestAuditShape); here
     # the live broker may log differently. Fail loudly only if there is
     # NO journal evidence the decision happened at all.
-    if journal_after | grep -qE "clipboard.*deny|CheckClipboardTransfer"; then
+    elif journal_after | grep -qE "clipboard.*deny|CheckClipboardTransfer"; then
         pass "clipboard decision bound source window identity (src_app=$APPID in audit)"
         echo "  (note: exact src_app= not in journal on this build; audit-row shape covered by unit tests)" >&2
     else

@@ -74,13 +74,13 @@ pass "outer admin compositor up"
 
 # qdshell process — noctalia-shell is the canonical name on the test
 # VM (per qdshell deploy). Both check patterns accepted.
-if pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
+if pgrep -u admin -af "noctalia-shell|qs -p /usr/share/quickshell/qdshell|quickshell/qdshell" >/dev/null 2>&1; then
     pass "qdshell up"
 else
     if systemctl --user --machine=admin@.host status noctalia-shell.service >/dev/null 2>&1; then
         pass "qdshell up"
     else
-        fail "qdshell (noctalia-shell) not running under admin uid"
+        fail "qdshell not running under admin uid"
     fi
 fi
 
@@ -118,6 +118,7 @@ runuser -u admin -- env \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     WAYLAND_DISPLAY=wayland-1 \
     QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+    ${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:+QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1} \
     qdistro-secctx-exec \
         --sandbox-engine "$ENGINE" \
         --app-id "$APPID" \

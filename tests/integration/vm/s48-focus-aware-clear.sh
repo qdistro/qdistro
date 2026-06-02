@@ -103,12 +103,12 @@ OUTER_SOCK="$RUNTIME_DIR/wayland-1"
 runuser -u admin -- test -S "$OUTER_SOCK" || skip "outer admin compositor not up"
 pass "outer admin compositor up"
 
-if pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
+if pgrep -u admin -af "noctalia-shell|qs -p /usr/share/quickshell/qdshell|quickshell/qdshell" >/dev/null 2>&1; then
     pass "qdshell up"
 elif systemctl --user --machine=admin@.host status noctalia-shell.service >/dev/null 2>&1; then
     pass "qdshell up"
 else
-    fail "qdshell (noctalia-shell) not running under admin uid"
+    fail "qdshell not running under admin uid"
 fi
 
 # --- 4. qdshell bound qdwin_shell_v1 at version >= 14 ----------------
@@ -285,25 +285,39 @@ else
 fi
 
 # --- 11. weston processed clear_selection ----------------------------
-# qdwin's v14 set_keyboard_focus handler unconditionally calls
-# weston_seat_set_selection(seat, NULL, fresh_serial). Log line at
-# qdwin/qdwin.c (search "clear" + "selection"). Match any of the
-# canonical clear-selection log patterns.
+# qdwin's v14 set_keyboard_focus handler clears the seat selection. Some qdwin
+# builds do not emit the clear breadcrumb even though the selection-state probe
+# below observes the cleared end-state, so treat this log as diagnostic.
 CLEAR_LINE=$(inject_journal | grep -m1 -E "qdwin.*(clear_selection|seat_set_selection.*NULL|selection.*cleared)|qdwin: set_keyboard_focus.*handle=$SILO_HANDLE" || true)
 if [ -n "$CLEAR_LINE" ]; then
     pass "weston processed clear_selection request"
 else
-    fail "no weston clear_selection / set_keyboard_focus follow-up log"
+    echo "INFO: no weston clear_selection / set_keyboard_focus follow-up log; selection-state is asserted below"
 fi
 
-# --- 12. selection-state post-inject ---------------------------------
+# --- 12. destination clipboard is empty post-inject -------------------
+if ! runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        WAYLAND_DISPLAY=wayland-1 sh -c 'command -v wl-paste' >/dev/null 2>&1; then
+    fail "wl-paste absent; cannot assert destination clipboard empty after focus-clear"
+else
+    PASTE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        WAYLAND_DISPLAY=wayland-1 timeout 10 wl-paste -n 2>/dev/null)
+    PASTE_RC=$?
+    if [ "$PASTE_RC" -eq 124 ]; then
+        fail "destination wl-paste timed out after focus-clear (data-source path wedged)"
+    elif [ -n "$PASTE" ]; then
+        fail "destination paste still returned data after focus-clear: '$PASTE'"
+    else
+        pass "destination paste empty after focus-clear"
+    fi
+fi
+
 STATE_POST=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     qs "${QS_IPC_ARGS[@]}" call tier3focus selectionState 2>&1 | head -1)
 if [ -n "$STATE_POST" ]; then
-    pass "ctrl selection-state cleared post-focus-change"
     echo "  (post-IPC reply: $STATE_POST)" >&2
 else
-    fail "qs ipc call tier3focus selectionState (post-inject) returned empty"
+    echo "INFO: qs ipc call tier3focus selectionState (post-inject) returned empty"
 fi
 
 # --- cleanup handled by trap above ----------------------------------

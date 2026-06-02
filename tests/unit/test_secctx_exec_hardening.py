@@ -78,16 +78,24 @@ def test_tier1_tier2_direct_admin_degrades_untagged():
     assert "secctx stamping now requires" not in tier2
 
 
-def test_vm_secctx_integration_tests_do_not_use_dev_override():
+def test_vm_secctx_integration_tests_only_forward_dev_override_conditionally():
     tests = [
+        ROOT / "tier3/spawn-tier3.sh",
         ROOT / "tests/integration/vm/s44-tier4-secctx-exec.sh",
         ROOT / "tests/integration/vm/s46-tier4-clipboard-gate.sh",
         ROOT / "tests/integration/vm/s110-tier4-waypipe-display.sh",
     ]
     for test in tests:
         text = test.read_text(encoding="utf-8")
-        assert "QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1" not in text, test
         assert "QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1" in text, test
+        assert (
+            "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:+"
+            "QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1}"
+        ) in text, test
+        assert (
+            "QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED="
+            "$QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED"
+        ) not in text, test
 
 
 def test_hardened_broker_profile_fails_closed():

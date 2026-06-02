@@ -167,7 +167,7 @@ if [ -n "${PKEXEC_UID:-}" ]; then
         TIER3_GROUP TIER3_ADMIN_USER \
         TIER3_NO_REAP TIER3_REAP_AGE \
         TIER3_SECCTX TIER3_SECCTX_ENGINE TIER3_SECCTX_APPID TIER3_SECCTX_INSTANCE \
-        TIER3_OUTER_DISPLAY; do
+        TIER3_OUTER_DISPLAY QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED; do
         if [ -n "${!danger:-}" ]; then
             echo "[tier3] FAIL: env knob '$danger' not allowed via pkexec (PKEXEC_UID=$PKEXEC_UID set)" >&2
             exit 2
@@ -402,7 +402,9 @@ fi
 
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
-    SECCTX_WRAP=(qdistro-secctx-exec
+    SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        ${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:+QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1}
+        qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
         --instance-id    "$SECCTX_INSTANCE"
@@ -438,27 +440,39 @@ if [ "$USE_SECCTX" = "1" ]; then
     LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$LAUNCHREC_FILE_ID.pid"
     rm -f "$LAUNCHREC_PATH"
 fi
-if [ "$USE_SECCTX" = "1" ]; then
-    env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
-        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-        HOME="$ADMIN_HOME" \
-        ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
-        ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
-        "${SECCTX_WRAP[@]}" \
-        runuser -u "$ADMIN_USER" -- env \
-            XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-            HOME="$ADMIN_HOME" \
-            bash -c 'umask 0117; exec "$@"' bash \
-            waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
-else
-    runuser -u "$ADMIN_USER" -- env \
-        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-        HOME="$ADMIN_HOME" \
-        bash -c 'umask 0117; exec "$@"' bash \
-        waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
-fi
+# secctx identity contract (qdwin §6.10, hardened 2026-05-31 in
+# 732f700/12954d5/00fdc0c): qdwin only advertises + lets a client bind
+# wp_security_context_manager_v1 when that client is the bound shell, or
+# is an installed qdistro-secctx-exec that is (a) on the allowed exe path,
+# (b) root-owned and not group/world-writable, and (c) — when it runs as
+# qdwin's allowed_uid — launched with a *direct root launcher parent*
+# (runuser/su/sudo/pkexec), per qdwin_secctx_helper_has_root_launcher_parent.
+#
+# So qdistro-secctx-exec MUST run as the admin (allowed_uid) with runuser as
+# its direct parent — NOT as root. Two reasons it can't run as root here:
+#   - qdwin runs unprivileged (allowed_uid); it cannot readlink/stat the
+#     /proc/<pid>/exe of a more-privileged root client (kernel
+#     ptrace_may_access → EACCES), so conditions (a)/(b) become unverifiable
+#     and qdwin filters the global out entirely ("outer compositor doesn't
+#     advertise wp_security_context_manager_v1").
+#   - secctx-exec's listen socket would be born root-owned 0600 under admin's
+#     XDG_RUNTIME_DIR, and the admin waypipe-client could not connect to it
+#     (EACCES).
+# Hence: runuser (root) is the OUTER command and the helper runs under it as
+# admin. The helper's own self-check (authorized_launcher) is satisfied by
+# QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 + the root runuser parent in
+# production. Integration tests may explicitly export the documented
+# QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 dev override, but spawn-tier3.sh only
+# forwards it when the caller already opted in. When USE_SECCTX=0, SECCTX_WRAP
+# is empty and this reduces to a bare admin waypipe.
+runuser -u "$ADMIN_USER" -- env \
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+    HOME="$ADMIN_HOME" \
+    ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
+    ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
+    bash -c 'umask 0117; exec "$@"' bash \
+    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
 
 # Wait for waypipe-client to create the socket (it'll be born 0660

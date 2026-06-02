@@ -90,12 +90,12 @@ OUTER_SOCK="$RUNTIME_DIR/wayland-1"
 runuser -u admin -- test -S "$OUTER_SOCK" || skip "outer admin compositor not up"
 pass "outer admin compositor up"
 
-if pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
+if pgrep -u admin -af "noctalia-shell|qs -p /usr/share/quickshell/qdshell|quickshell/qdshell" >/dev/null 2>&1; then
     pass "qdshell up"
 elif systemctl --user --machine=admin@.host status noctalia-shell.service >/dev/null 2>&1; then
     pass "qdshell up"
 else
-    fail "qdshell (noctalia-shell) not running under admin uid"
+    fail "qdshell not running under admin uid"
 fi
 
 # --- 4. broker must be up + reachable --------------------------------
