@@ -26,6 +26,15 @@ QDISTRO_PKGS=(
   # to compile the renderer.
   Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel lcms2-devel
   libdisplay-info-devel libX11-devel libxcb-devel
+  # The shared "toytoolkit" lib (libweston shared/meson.build) is built
+  # unconditionally and hard-requires cairo + libpng (+ pango/pangocairo/
+  # fontconfig/glib for HAVE_PANGO frame text); the drm backend's VA-API
+  # screencast recorder needs libva. Without these, `meson setup` fails with
+  # "Dependency not found" before any backend is built — independent of the
+  # GL/RDP/pipewire backends above. (libpng16-compat-devel provides the
+  # unversioned libpng.pc that dependency('libpng') resolves.)
+  cairo-devel libpng16-devel libpng16-compat-devel pango-devel
+  fontconfig-devel glib2-devel libva-devel
   python313-pywayland python313-cffi python313-PyQt6
   qt6-wayland qt6-declarative-imports python313-setuptools
   tesseract-ocr grim
