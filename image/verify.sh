@@ -199,10 +199,19 @@ expect "default target is graphical" remote 'systemctl get-default | grep -qx gr
 expect "qdistro-admin-broker active" remote 'systemctl is-active qdistro-admin-broker.service || sudo -n systemctl is-active qdistro-admin-broker.service'
 expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q org.qdistro.AdminBroker1"
 
-expect "noctalia-session user unit enabled" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-session.service | grep -qx enabled"
-expect "noctalia-shell user unit enabled" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-shell.service | grep -qx enabled"
+# Greeter boot path: greetd execs /usr/bin/qdgreeter (greetd-config.toml),
+# which after auth runs qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`. Assert the exact binary + units that path needs.
+expect "qdgreeter binary present" \
+    remote 'test -x /usr/bin/qdgreeter'
+expect "greetd execs an existing greeter (no exec failure in journal)" \
+    remote 'sudo -n journalctl -u greetd -b --no-pager | grep -Eiq "No such file|exec.*qdgreeter.*fail|failed to execute" && exit 1 || exit 0'
+expect "qdwin-session.target user unit installed" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user cat qdwin-session.target >/dev/null 2>&1"
+expect "qdshell wanted by qdwin-session.target" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Wants qdwin-session.target | grep -q qdshell.service"
+expect "qdlocker wanted by qdwin-session.target" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Wants qdwin-session.target | grep -q qdlocker.service"
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
@@ -220,7 +229,7 @@ remote 'sudo -n journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/
 remote 'sudo -n journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
 remote 'sudo -n journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
 remote 'systemctl --failed --no-pager'                   > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
-remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status noctalia-session.service noctalia-shell.service' \
+remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service noctalia-session.service noctalia-shell.service' \
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
 shoot 02-fully-booted

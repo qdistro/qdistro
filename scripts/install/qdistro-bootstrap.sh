@@ -1139,6 +1139,80 @@ EOF
     fi
 }
 
+# install_app_desktop_assets <app> — install an app's .desktop launcher,
+# AppStream metainfo, and icons into the system XDG dirs under /usr/share so
+# the app is discoverable in the shell launcher / AppStream catalog / icon
+# theme (finding #21). The pyproject [tool.setuptools.data-files] entries cover
+# the dev `--prefix=/usr` install, but hardened installs go to
+# $QDISTRO_OPT_PREFIX (not an XDG dir) and pip data-files cannot rename the
+# sized hicolor PNGs (qterminator-<N>.png -> qterminator.png). This shared step
+# handles both: it always lands the assets under /usr/share regardless of
+# profile, and renames the sized PNGs into hicolor/<N>x<N>/apps/<app>.png.
+install_app_desktop_assets() {
+    local app="$1"
+    local src="$REPO_ROOT/$app"
+    [ -d "$src" ] || return 0
+    # .desktop
+    if [ -f "$src/$app.desktop" ]; then
+        install -d -m 0755 /usr/share/applications
+        install -m 0644 "$src/$app.desktop" "/usr/share/applications/$app.desktop"
+    fi
+    # AppStream metainfo
+    if [ -f "$src/$app.metainfo.xml" ]; then
+        install -d -m 0755 /usr/share/metainfo
+        install -m 0644 "$src/$app.metainfo.xml" "/usr/share/metainfo/$app.metainfo.xml"
+    fi
+    # Scalable SVG icon (named <app>.svg in-tree -> hicolor/scalable).
+    if [ -f "$src/icons/$app.svg" ]; then
+        install -d -m 0755 /usr/share/icons/hicolor/scalable/apps
+        install -m 0644 "$src/icons/$app.svg" \
+            "/usr/share/icons/hicolor/scalable/apps/$app.svg"
+    fi
+    # Sized PNG icons: <app>-<N>.png in-tree -> hicolor/<N>x<N>/apps/<app>.png.
+    local size png
+    for size in 16 22 24 32 48 64 128 256 512; do
+        png="$src/icons/$app-$size.png"
+        [ -f "$png" ] || continue
+        install -d -m 0755 "/usr/share/icons/hicolor/${size}x${size}/apps"
+        install -m 0644 "$png" \
+            "/usr/share/icons/hicolor/${size}x${size}/apps/$app.png"
+    done
+    log "  $app: desktop/metainfo/icon assets installed under /usr/share"
+}
+
+# build_qtermwidget_binding — qterminator imports `QTermWidget` at runtime
+# (qterminator/terminal.py), but that SIP binding is NOT a pip dependency: it
+# is built from the vendored source in qterminator/qtermwidget-pyqt/ against the
+# system C++ qtermwidget library. Because pip_install_one uses --no-deps, the
+# binding is never resolved, so a bootstrapped system gets /usr/bin/qterminator
+# that dies with `ModuleNotFoundError: No module named 'QTermWidget'` at first
+# launch (finding #20). Build + install it here as a first-class step before
+# qterminator. The repo ships util/build-sip.sh (used by `just build-sip`),
+# which is idempotent (no-op if the binding already imports) and self-locates
+# the qmake/headers; reuse it verbatim rather than re-deriving the build.
+build_qtermwidget_binding() {
+    local sip="$REPO_ROOT/qterminator/util/build-sip.sh"
+    # Already importable (e.g. distro qtermwidget-qt6 python binding)? Done.
+    if python3 -c "from QTermWidget import QTermWidget" >/dev/null 2>&1; then
+        log "  QTermWidget binding already importable (system package)"
+        return 0
+    fi
+    if [ ! -x "$sip" ]; then
+        fail_or_warn "  QTermWidget binding builder not found at $sip — qterminator will fail to launch (missing QTermWidget). Install the distro qtermwidget python binding or ship qterminator/qtermwidget-pyqt/."
+        return 0
+    fi
+    log "  building QTermWidget SIP binding (qterminator/qtermwidget-pyqt)..."
+    if bash "$sip"; then
+        if python3 -c "from QTermWidget import QTermWidget" >/dev/null 2>&1; then
+            log "  QTermWidget binding installed + importable"
+        else
+            fail_or_warn "  QTermWidget binding built but still not importable — qterminator will fail at launch"
+        fi
+    else
+        fail_or_warn "  QTermWidget binding build failed (need qmake6 + qtermwidget-devel + pyqt-builder) — qterminator will fail at launch"
+    fi
+}
+
 pip_install_apps() {
     if [ -n "$SKIP_BUILD" ]; then
         log "skipping pip install of apps (--skip-build)"
@@ -1151,8 +1225,21 @@ pip_install_apps() {
     fi
     for app in qdgreeter qdlocker qdbrowser qterminator qnotebook qfileman; do
         if [ -f "$REPO_ROOT/$app/pyproject.toml" ]; then
+            # qterminator's runtime QTermWidget binding is not a pip dep;
+            # build/install it before qterminator so the package is usable
+            # at first launch (finding #20).
+            if [ "$app" = qterminator ]; then
+                build_qtermwidget_binding
+            fi
             log "  pip install $app..."
             pip_install_one "$app"
+            # Desktop integration assets for utility apps that ship them
+            # in-tree (finding #21). pip data-files only reach /usr/share in
+            # the dev profile; this lands them under /usr/share in every
+            # profile and renames the sized hicolor PNGs.
+            case "$app" in
+                qterminator|qfileman) install_app_desktop_assets "$app" ;;
+            esac
         else
             warn "  $app source not found at $REPO_ROOT/$app"
         fi
@@ -1165,7 +1252,7 @@ pip_install_apps() {
     # importable top-level module (verified against each repo's package dir /
     # pyproject [tool.setuptools.packages.find]). Non-fatal: WARN, same as the
     # install step above.
-    log "  import smoke check (qdgreeter, qdlocker, qdbrowser)..."
+    log "  import smoke check (qdgreeter, qdlocker, qdbrowser, qterminator, qfileman)..."
     # In hardened profiles the modules live under the isolated prefix, so
     # point PYTHONPATH at it for the smoke import (matches the /usr/bin
     # wrapper); dev installs into /usr so the default path resolves.
@@ -1176,10 +1263,26 @@ pip_install_apps() {
             [ -d "$d" ] && smoke_pp="${smoke_pp:+$smoke_pp:}$d"
         done
     fi
-    for smoke in qdgreeter qdlocker qdbrowser; do
+    # repo -> module to import. Most apps' top-level package import suffices,
+    # but qterminator's missing-binding failure (finding #20) only surfaces
+    # when terminal.py runs `from QTermWidget import QTermWidget`, so import
+    # qterminator.terminal specifically. qfileman is added so a broken file
+    # manager install is also caught (previously omitted). Qt offscreen
+    # platform keeps the import headless on a build host with no display.
+    local smoke_repos="qdgreeter qdlocker qdbrowser qterminator qfileman"
+    smoke_module() {
+        case "$1" in
+            qterminator) echo "qterminator.terminal" ;;
+            *)           echo "$1" ;;
+        esac
+    }
+    for smoke in $smoke_repos; do
         if [ -f "$REPO_ROOT/$smoke/pyproject.toml" ]; then
-            PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 python3 -c "import $smoke" \
-                || warn "  import smoke check failed: \"import $smoke\" — $smoke installed but a runtime dependency is missing (--no-deps skips dep resolution); the app may fail to launch"
+            local mod
+            mod="$(smoke_module "$smoke")"
+            QT_QPA_PLATFORM=offscreen PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 \
+                python3 -c "import $mod" \
+                || warn "  import smoke check failed: \"import $mod\" — $smoke installed but a runtime dependency is missing (e.g. QTermWidget binding for qterminator; --no-deps skips dep resolution); the app may fail to launch"
         fi
     done
 }
