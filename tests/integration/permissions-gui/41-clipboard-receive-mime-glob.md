@@ -223,6 +223,7 @@ for i in range(60):
         proxy.CheckClipboardReceive(
             "user1", "admin", "text/plain", "", "", "",
             dbus.Boolean(True),
+            dbus.UInt32(0), dbus.UInt64(0),
             dbus_interface="org.qdistro.AdminBroker1")
         ok += 1
     except dbus.DBusException as e:
