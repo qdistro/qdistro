@@ -8,6 +8,12 @@ This repository is the **umbrella** for qdistro: documentation,
 permission infrastructure, daemons, SDK, admin app, helper tools,
 build scripts, and integration tests.
 
+The current design shorthand is **one owner, many silos, dynamic sessions**.
+The owner is the single human and policy authority. Silos isolate data and
+program state. Sessions attach silos and resources while work is happening.
+Start with [doc/overview.md](doc/overview.md) and
+[doc/glossary.md](doc/glossary.md) for those terms.
+
 The compositor lives in a separate repo:
 [codeberg.org/qdistro/qdwin](https://codeberg.org/qdistro/qdwin).
 The desktop shell (a Noctalia QML fork) lives in
@@ -87,10 +93,14 @@ qdistro-org/
 └── qdshell/     ← desktop shell
 ```
 
-Build order: `qdwin` first (the umbrella's daemons compile against
-qdwin's protocol XML at `../qdwin/qdwin/*.xml`), then `qdistro`,
-then `qdshell`. See [doc/dev.md](doc/dev.md) for the full developer
-setup.
+That three-repo set is the minimum developer layout. The bootstrap and full
+desktop image also consume first-party app repos as siblings when present:
+`qdgreeter`, `qdlocker`, `qdbrowser`, `qterminator`, `qnotebook`, and
+`qfileman`.
+
+Build order: `qdwin` first (the umbrella's daemons compile against qdwin's
+protocol XML at `../qdwin/qdwin/*.xml`), then `qdistro`, then `qdshell`. See
+[doc/dev.md](doc/dev.md) for the full developer setup.
 
 ## Project principles
 
