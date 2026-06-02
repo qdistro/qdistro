@@ -37,6 +37,19 @@ StartLimitIntervalSec=0
 # process never notified, so systemd held the unit `activating` until
 # TimeoutStartSec.
 Type=simple
+# CANONICAL ExecStart for an unprefixed `pip install` (--prefix=/usr/local).
+# qdistro's installers pip-install qdlocker with --prefix=/usr, which lands the
+# console_script at /usr/bin/qdlocker, so BOTH installers MUST rewrite this line
+# rather than copy the unit verbatim:
+#   - qdistro/scripts/install/qdistro-bootstrap.sh (sed /usr/local/bin -> /usr/bin)
+#   - qdistro/image/config.sh                      (same sed; fail-closed if the
+#                                                    rewritten ExecStart is not
+#                                                    an executable in the image)
+# Copying this unit verbatim into a --prefix=/usr install makes qdlocker.service
+# die 203/EXEC at boot — the locker silently never starts. Do NOT repoint this
+# at /usr/bin here: that would break the standalone --prefix=/usr/local path and
+# the installers' sed contract. The installers are authoritative for the
+# deployed ExecStart path.
 ExecStart=/usr/local/bin/qdlocker
 Environment=QT_QPA_PLATFORM=wayland
 Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
@@ -63,4 +76,14 @@ RestartSec=2
 # default.target for the user manager is the right target for an
 # always-on user service. PartOf=graphical-session.target above ties
 # our lifetime to the session so we go down cleanly on logout.
-WantedBy=default.target
+#
+# qdwin-session.target is the production qdistro desktop session
+# (greetd -> qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`). The session target also Wants= this unit, so
+# the locker comes up with the desktop; declaring it WantedBy= here means
+# `systemctl --user enable qdlocker.service` installs the .wants symlink
+# under qdwin-session.target.wants/ in addition to default.target.wants/,
+# making qdlocker a first-class member of the qdwin-session deployment
+# path (finding #16). Keeping default.target too preserves the
+# standalone/test-VM bring-up that does not use a session target.
+WantedBy=default.target qdwin-session.target
