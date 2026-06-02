@@ -278,12 +278,30 @@ fi
 # selection-state probe when wl-paste isn't installed.
 if runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         WAYLAND_DISPLAY=wayland-1 sh -c 'command -v wl-paste' >/dev/null 2>&1; then
+    # Bound wl-paste: when the focus-gate fails to hand off the selection the
+    # destination seat is offered a data source whose owner never answers the
+    # data request, so `wl-paste -n` blocks indefinitely. With no per-call
+    # timeout in vm-exec this wedged the entire bats run, so `timeout` caps it.
+    #
+    # Capture stdout and the exit status SEPARATELY (no `|| true`, which would
+    # mask the status). The three outcomes are not equivalent:
+    #   rc 124          -> the timeout fired: the compositor/data-source path
+    #                      is wedged (the source's owner never answered the
+    #                      data request). That is a real failure, NOT a valid
+    #                      empty-clipboard end-state — fail loudly so a hung
+    #                      paste can't masquerade as a clean focus-clear.
+    #   rc != 0 (≠124) + empty -> wl-paste's normal "no selection" exit; that
+    #                      IS the empty end-state this step asserts -> pass.
+    #   rc 0 + non-empty -> the selection survived the clear -> fail as before.
     PASTE=$(runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-        WAYLAND_DISPLAY=wayland-1 wl-paste -n 2>/dev/null || true)
-    if [ -z "$PASTE" ]; then
-        pass "destination paste empty after focus-clear"
-    else
+        WAYLAND_DISPLAY=wayland-1 timeout 10 wl-paste -n 2>/dev/null)
+    PASTE_RC=$?
+    if [ "$PASTE_RC" -eq 124 ]; then
+        fail "destination wl-paste timed out after focus-clear (data-source path wedged)"
+    elif [ -n "$PASTE" ]; then
         fail "destination paste still returned data after focus-clear: '$PASTE'"
+    else
+        pass "destination paste empty after focus-clear"
     fi
 else
     STATE_POST=$(qs_ipc call tier3focus selectionState)
