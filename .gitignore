@@ -1,11 +1,21 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.pytest_cache/
+*.pyc
+*.so
 *.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
 .coverage
 htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 
 # Build
 build/
@@ -13,19 +23,28 @@ build-*/
 dist/
 *.o
 *.so
+*.whl
 
 # Generated wayland-scanner outputs
 *-server-protocol.h
 *-client-protocol.h
 *-protocol.c
 
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
 # Editor / IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
+.cache/
 .obsidian/
 .qwen/
+.zed
 
 # Local test artifacts
 *-credentials.txt
