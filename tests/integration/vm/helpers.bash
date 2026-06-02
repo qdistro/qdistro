@@ -268,9 +268,8 @@ wait_for_unit() {
 
 # wait_for_bus_name <name> [timeout_s=30] [--user] — poll the session/system
 # bus until <name> is an owned (not merely activatable) well-known name, or
-# the timeout elapses. With --user the same session bus used by the caller's
-# `busctl --user` assertion is queried via vm_run; otherwise the system bus is
-# queried via vm_run.
+# the timeout elapses. With --user the name is queried on admin's session bus
+# via vm_run_admin; otherwise the system bus via vm_run.
 #
 # Type=dbus units report "active" only once their BusName is acquired, but a
 # freshly-provisioned graphical session can bounce a per-user daemon once
@@ -290,11 +289,17 @@ wait_for_bus_name() {
     [[ -n "$name" ]] || { echo "--- wait_for_bus_name: missing name ---" >&2; return 2; }
     [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "--- wait_for_bus_name: invalid bus name '$name' ---" >&2; return 2; }
 
-    # Query the same bus the caller asserts against: vm_run + `busctl --user`
-    # (the session user's own bus), matching how this suite already lists
-    # names — rather than vm_run_admin, which could resolve a different bus.
-    local userflag=""
-    [[ "$user" -eq 1 ]] && userflag="--user "
+    # The session 9e daemons own their names on admin's (uid 1000) bus, which
+    # is only reachable as that user: under qga `vm_run` executes as root with
+    # no XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS, so a root `busctl --user`
+    # binds root's empty user bus and never sees them. Route --user through
+    # vm_run_admin (runuser -l admin), matching wait_for_unit and the suite's
+    # other `systemctl --user`/`busctl --user` callers.
+    local userflag="" runner=vm_run
+    if [[ "$user" -eq 1 ]]; then
+        userflag="--user "
+        runner=vm_run_admin
+    fi
 
     local i
     for ((i=0; i<timeout; i++)); do
@@ -302,7 +307,7 @@ wait_for_bus_name() {
         # activatable-but-unstarted name shows "(activatable)". Match the
         # first column literally so regex metacharacters in a name cannot
         # false-match a different bus name.
-        vm_run "busctl ${userflag}list --no-legend 2>/dev/null | awk -v name='${name}' '\$1 == name && \$2 != \"(activatable)\" { found=1 } END { exit found ? 0 : 1 }'"
+        "$runner" "busctl ${userflag}list --no-legend 2>/dev/null | awk -v name='${name}' '\$1 == name && \$2 != \"(activatable)\" { found=1 } END { exit found ? 0 : 1 }'"
         [[ "$status" -eq 0 ]] && return 0
         sleep 1
     done
