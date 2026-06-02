@@ -73,6 +73,11 @@ def pytest_configure(config) -> None:
         "critical test; on failure prints what capability it protects, how "
         "the test could be cheated green, and the consequence of a false pass.",
     )
+    config.addinivalue_line(
+        "markers",
+        "no_attest: opt out of the portal-backend attestation autouse "
+        "fixture so the test can drive sender-attestation DENY paths.",
+    )
 
 
 def _format_cheat_aware_block(kwargs: dict) -> str:

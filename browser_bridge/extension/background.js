@@ -43,7 +43,14 @@ const _pendingByOp = {};       // keyed by op (FIFO queue per op for extension-i
 
 function nextRequestId() {
   _requestSeq++;
-  const rand = Math.random().toString(36).slice(2, 10);
+  // Use a CSPRNG for the random suffix so an observer of one request_id
+  // cannot predict the next (mirrors qdchrome/qdfirefox intent.js).
+  // Math.random() is NOT cryptographically secure and must not be used
+  // for intent-token request ids.
+  const buf = new Uint8Array(6);
+  crypto.getRandomValues(buf);
+  const rand = Array.from(buf)
+    .map(b => b.toString(16).padStart(2, "0")).join("");
   return "ext-" + _requestSeq + "-" + rand;
 }
 
@@ -603,6 +610,14 @@ function onBridgeMessage(msg) {
 // chrome.runtime.sendMessage / onMessage.
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Sender hardening: only accept messages from this extension's own
+  // pages / content scripts. Reject anything whose sender.id is not our
+  // runtime id (mirrors qdchrome/qdfirefox background.js). Without this
+  // guard a privileged action could be dispatched from a foreign sender.
+  if (!sender || sender.id !== api.runtime.id) {
+    sendResponse({ ok: false, error: "sender_rejected" });
+    return false;
+  }
   if (!msg || typeof msg !== "object") return false;
   const action = msg.action;
 

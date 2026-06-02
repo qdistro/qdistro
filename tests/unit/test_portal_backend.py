@@ -39,7 +39,9 @@ from qdistro_portal_backend import (  # type: ignore[import-not-found]
     _portal_action,
     _request_permission,
     _run_file_picker,
+    attest_app_id,
 )
+import qdistro_portal_backend as pb  # type: ignore[import-not-found]
 
 
 # -- Fixtures -----------------------------------------------------------
@@ -50,6 +52,27 @@ def backend():
     obj = QdistroPortalBackend.__new__(QdistroPortalBackend)
     obj._sys_bus = MagicMock()
     return obj
+
+
+# The fixed identity returned by mocked attestation in positive tests.
+# After finding #8, the broker action is scoped to the ATTESTED id, not
+# the spoofable app_id argument, so positive tests assert this value.
+ATTESTED_ID = "firefox"
+
+
+@pytest.fixture(autouse=True)
+def _attest_ok(request):
+    """By default, make sender attestation succeed and return a fixed
+    attested id (:data:`ATTESTED_ID`). Tests that exercise the DENY path
+    opt out with the ``no_attest`` marker and patch attestation
+    themselves.
+    """
+    if request.node.get_closest_marker("no_attest"):
+        yield
+        return
+    with patch("qdistro_portal_backend.attest_app_id",
+               return_value=(ATTESTED_ID, True)):
+        yield
 
 
 def _mock_broker(verdict: str):
@@ -128,12 +151,13 @@ class TestAccessDialog:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == "portal.access:org.example.App"
-        assert args[0][2]["app_id"] == "org.example.App"
+        assert args[0][1] == f"portal.access:{ATTESTED_ID}"
+        assert args[0][2]["app_id"] == ATTESTED_ID
         assert args[0][2]["title"] == "Title"
 
     def test_access_passes_app_id_and_title(self, backend):
-        """Details dict carries app_id and title to the broker."""
+        """Details dict carries the ATTESTED app_id (not the spoofable
+        argument) and the title to the broker."""
         captured = {}
 
         def fake_check(bus, action, details):
@@ -142,10 +166,12 @@ class TestAccessDialog:
 
         with patch("qdistro_portal_backend._check_permission",
                    side_effect=fake_check):
+            # Argument app_id is a lie ("com.example.Foo"); the backend
+            # must ignore it and use the attested identity.
             backend.AccessDialog(
                 "/handle", "com.example.Foo", "",
                 "Camera access", "sub", "body", {})
-        assert captured["app_id"] == "com.example.Foo"
+        assert captured["app_id"] == ATTESTED_ID
         assert captured["title"] == "Camera access"
 
 
@@ -268,11 +294,12 @@ class TestScreenshot:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == "com.qdistro.screen.capture:org.example.App"
-        assert args[0][2]["app_id"] == "org.example.App"
+        assert args[0][1] == f"com.qdistro.screen.capture:{ATTESTED_ID}"
+        assert args[0][2]["app_id"] == ATTESTED_ID
 
     def test_screenshot_action_string(self, backend):
-        """The action string sent to broker is com.qdistro.screen.capture."""
+        """The action string sent to broker is com.qdistro.screen.capture
+        scoped to the attested identity."""
         captured_action = None
 
         def fake_check(bus, action, details):
@@ -283,7 +310,7 @@ class TestScreenshot:
         with patch("qdistro_portal_backend._check_permission",
                    side_effect=fake_check):
             backend.Screenshot("/handle", "org.example.App", "", {})
-        assert captured_action == "com.qdistro.screen.capture:org.example.App"
+        assert captured_action == f"com.qdistro.screen.capture:{ATTESTED_ID}"
 
     def test_portal_action_scopes_by_app_id(self):
         assert _portal_action("com.qdistro.fs.open", "org.example.App") == \
@@ -302,7 +329,7 @@ class TestNotification:
             backend.AddNotification("org.example.App", "notif-1", {})
         captured = capsys.readouterr()
         assert "notification allowed" in captured.out
-        assert "org.example.App" in captured.out
+        assert ATTESTED_ID in captured.out
 
     def test_add_notification_denied_silent(self, backend, capsys):
         """Denied notification is silently dropped."""
@@ -392,3 +419,124 @@ class TestRunFilePicker:
                    side_effect=sp.TimeoutExpired("zenity", 120)):
             paths = _run_file_picker(title="Open")
         assert paths == []
+
+
+# -- Sender attestation (finding #8) -----------------------------------
+
+class TestAttestAppId:
+    """attest_app_id must derive identity from the sender's real pid and
+    fail closed (return ok=False) when it cannot."""
+
+    def test_missing_sender_denies(self):
+        app, ok = attest_app_id("")
+        assert ok is False and app == ""
+        app, ok = attest_app_id(None)
+        assert ok is False and app == ""
+
+    def test_unresolvable_pid_denies(self):
+        with patch("qdistro_portal_backend._caller_pid", return_value=0):
+            app, ok = attest_app_id(":1.42")
+        assert ok is False and app == ""
+
+    def test_zero_starttime_denies(self):
+        """A zero starttime (process gone / unreadable) is the
+        anti-PID-reuse fail-closed signal."""
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=0):
+            app, ok = attest_app_id(":1.42")
+        assert ok is False and app == ""
+
+    def test_missing_exe_denies(self):
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=999), \
+             patch.object(pb._pi, "read_exe", return_value="?"):
+            app, ok = attest_app_id(":1.42")
+        assert ok is False and app == ""
+
+    def test_resolved_exe_yields_sanitized_basename(self):
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=999), \
+             patch.object(pb._pi, "read_exe",
+                          return_value="/usr/lib64/firefox/firefox"):
+            app, ok = attest_app_id(":1.42")
+        assert ok is True and app == "firefox"
+
+    def test_no_proc_identity_module_denies(self, monkeypatch):
+        monkeypatch.setattr(pb, "_pi", None)
+        app, ok = attest_app_id(":1.42")
+        assert ok is False and app == ""
+
+
+@pytest.mark.no_attest
+class TestPortalMethodsDenyUnattestable:
+    """Every gated portal method must DENY when the caller cannot be
+    attested — the spoofable app_id argument must never grant access.
+
+    These tests are the regression for finding #8: under the old code
+    (which read app_id from the argument and had no sender_keyword) a
+    forged app_id would scope a real broker decision.
+    """
+
+    def _deny(self):
+        return patch("qdistro_portal_backend.attest_app_id",
+                     return_value=("", False))
+
+    def test_access_dialog_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            resp, _ = backend.AccessDialog(
+                "/h", "evil.spoof", "", "t", "s", "b", {}, sender=":1.99")
+        assert int(resp) == RESP_CANCELLED
+        # Fail closed BEFORE any broker decision is made.
+        chk.assert_not_called()
+
+    def test_open_file_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            resp, _ = backend.OpenFile(
+                "/h", "evil.spoof", "", "Open", {}, sender=":1.99")
+        assert int(resp) == RESP_CANCELLED
+        chk.assert_not_called()
+
+    def test_save_file_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            resp, _ = backend.SaveFile(
+                "/h", "evil.spoof", "", "Save", {}, sender=":1.99")
+        assert int(resp) == RESP_CANCELLED
+        chk.assert_not_called()
+
+    def test_screenshot_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            resp, _ = backend.Screenshot(
+                "/h", "evil.spoof", "", {}, sender=":1.99")
+        assert int(resp) == RESP_CANCELLED
+        chk.assert_not_called()
+
+    def test_add_notification_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            backend.AddNotification("evil.spoof", "n1", {}, sender=":1.99")
+        chk.assert_not_called()
+
+    def test_remove_notification_denies(self, backend):
+        with self._deny(), \
+             patch("qdistro_portal_backend._check_permission") as chk:
+            backend.RemoveNotification("evil.spoof", "n1", sender=":1.99")
+        chk.assert_not_called()
+
+
+@pytest.mark.no_attest
+class TestPortalMethodsHaveSenderKeyword:
+    """Each gated method must declare sender_keyword so dbus-python passes
+    the kernel-attested sender; without it the attestation is impossible.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "AccessDialog", "OpenFile", "SaveFile", "Screenshot",
+        "AddNotification", "RemoveNotification",
+    ])
+    def test_method_declares_sender_keyword(self, name):
+        method = getattr(QdistroPortalBackend, name)
+        assert getattr(method, "_dbus_sender_keyword", None) == "sender"

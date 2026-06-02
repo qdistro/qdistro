@@ -57,10 +57,19 @@ initiate browser-bound operations. The object lives at
   per-op arguments. The reply is a JSON object
   ``{"ok": bool, ...}``.
 
-  Note that the RequestTabs method body does not gate ``op`` against
-  this list — anything the extension's dispatcher knows how to
-  handle will round-trip. New inbound ops can be added on the
-  extension side and the bridge will route them transparently.
+  RequestTabs is authenticated and authorized before anything is
+  forwarded to the extension (fail closed):
+
+  * The D-Bus sender's uid/pid are resolved via
+    ``GetConnectionUnixUser`` / ``GetConnectionUnixProcessID`` and the
+    caller must be same-uid AND on the trusted-caller policy
+    (:func:`_inbound_caller_authorized`).
+  * ``op`` is checked against :data:`INBOUND_OP_ALLOWLIST`
+    (:func:`_inbound_op_allowed`). Page-extraction-class ops
+    (:data:`INBOUND_EXTRACT_OPS`) are denied by default and only
+    reachable with ``QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT=1``.
+
+  Both decisions are audited to stderr/journal.
 
 Tests do not need a real bus running — they call
 :func:`enqueue_inbound_request` directly and read the matching
@@ -1415,6 +1424,128 @@ def heartbeat_loop(out_stream,
 # inbound D-Bus surface (Phase-9b)
 # =====================================================================
 
+# Inbound op allowlist. The RequestTabs surface forwards *only* these
+# ops to the extension; anything else is denied before
+# enqueue_inbound_request runs (fail closed). Page-extraction-class ops
+# are NOT in the default set — they read arbitrary page content and are
+# only reachable when explicitly enabled via
+# QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT=1.
+INBOUND_OP_ALLOWLIST: frozenset[str] = frozenset({
+    "tabs.list",
+    "tabs.open",
+    "tabs.close",
+    "mpris.publish",
+    "downloads.notify",
+    "notifications.show",
+    "screenlock.inhibit",
+    "screenlock.release",
+    "containers.list",
+    "containers.create",
+    "containers.remove",
+})
+
+# Page-extraction-class ops: high-risk (exfiltrate page content / cookies)
+# and therefore opt-in only.
+INBOUND_EXTRACT_OPS: frozenset[str] = frozenset({
+    "page.extract",
+    "page.extract.request",
+    "cookies.export",
+})
+
+
+def _inbound_op_allowed(op: str) -> tuple[bool, str]:
+    """Authorize an inbound op against the allowlist. Returns
+    (allowed, reason). Fail closed: unknown ops are denied."""
+    op = str(op or "")
+    if op in INBOUND_OP_ALLOWLIST:
+        return True, "op-allowed"
+    if op in INBOUND_EXTRACT_OPS:
+        if os.environ.get(
+                "QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT", "") == "1":
+            return True, "op-extract-enabled"
+        return False, "op-extract-disabled"
+    return False, "op-not-allowlisted"
+
+
+def _inbound_caller_authorized(conn, sender: str) -> tuple[bool, str]:
+    """Authenticate the D-Bus caller of an inbound RequestTabs.
+
+    Resolves the sender's uid + pid via
+    ``org.freedesktop.DBus.GetConnectionUnixUser`` /
+    ``GetConnectionUnixProcessID`` and authorizes against a narrow
+    policy:
+
+      * The caller MUST be the same uid as the bridge (cross-uid callers
+        are always denied).
+      * AND it must satisfy the trusted-caller policy. By default only
+        the bridge's own uid is trusted; an operator can widen this with
+        a configurable allowlist of trusted uids via
+        ``QDISTRO_BRIDGE_INBOUND_TRUSTED_UIDS`` (comma-separated). The
+        same-uid requirement is always additionally enforced, so the env
+        var can only *narrow*, never escalate across users.
+
+    Fail closed: a sender we cannot resolve (missing sender, bus error)
+    is denied. Returns ``(allowed, reason)``; ``reason`` includes the
+    resolved uid/pid for the audit log.
+    """
+    if not sender:
+        return False, "no-sender"
+    try:
+        from jeepney import new_method_call, MessageType, DBusAddress
+    except ImportError:
+        return False, "jeepney-missing"
+
+    dbus_daemon = DBusAddress(
+        "/org/freedesktop/DBus",
+        bus_name="org.freedesktop.DBus",
+        interface="org.freedesktop.DBus")
+
+    def _dbus_call(member: str) -> int | None:
+        try:
+            call = new_method_call(dbus_daemon, member, "s", (sender,))
+            reply = conn.send_and_get_reply(call)
+            if reply.header.message_type == MessageType.error:
+                return None
+            return int(reply.body[0])
+        except Exception:  # noqa: BLE001
+            return None
+
+    uid = _dbus_call("GetConnectionUnixUser")
+    pid = _dbus_call("GetConnectionUnixProcessID")
+    if uid is None:
+        return False, "uid-unresolved"
+    my_uid = os.getuid()
+    if uid != my_uid:
+        return False, f"cross-uid uid={uid} pid={pid}"
+    trusted = _trusted_inbound_uids(my_uid)
+    if uid not in trusted:
+        return False, f"uid-not-trusted uid={uid} pid={pid}"
+    return True, f"caller-ok uid={uid} pid={pid}"
+
+
+def _trusted_inbound_uids(my_uid: int) -> frozenset[int]:
+    """Resolve the trusted-caller uid policy. Always includes the
+    bridge's own uid; an operator may add more via the env var, but the
+    same-uid gate in :func:`_inbound_caller_authorized` still applies so
+    a foreign uid added here is a no-op (defense in depth)."""
+    uids = {my_uid}
+    raw = os.environ.get("QDISTRO_BRIDGE_INBOUND_TRUSTED_UIDS", "")
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            uids.add(int(tok))
+    return frozenset(uids)
+
+
+def _audit_inbound(member: str, op: str, decision: str,
+                   reason: str) -> None:
+    """Audit an inbound D-Bus decision to stderr (journal)."""
+    sys.stderr.write(
+        f"qdistro-browser-bridge: inbound {member} op={op!r} "
+        f"decision={decision} reason={reason}\n")
+    sys.stderr.flush()
+
+
 def inbound_dbus_serve(ppid: int, out_stream,
                        stop_event: threading.Event,
                        request_timeout_s: float = 75.0,
@@ -1490,6 +1621,29 @@ def inbound_dbus_serve(ppid: int, out_stream,
                     msg, "org.freedesktop.DBus.Error.InvalidArgs",
                     "s", (str(e),)))
                 continue
+            # ---- caller authorization (fail closed) -----------------
+            # Authenticate the D-Bus sender BEFORE forwarding anything to
+            # the extension. A bare per-session bus name is reachable by
+            # any same-session process; without this gate any of them
+            # could drive privileged browser ops.
+            sender = msg.header.fields.get(7)  # SENDER
+            allowed, why = _inbound_caller_authorized(conn, sender)
+            if not allowed:
+                _audit_inbound("RequestTabs", op, "deny-caller", why)
+                conn.send(new_error(
+                    msg, "org.freedesktop.DBus.Error.AccessDenied",
+                    "s", ("caller not authorized",)))
+                continue
+            # ---- op allowlist (fail closed) -------------------------
+            op_ok, op_why = _inbound_op_allowed(op)
+            if not op_ok:
+                _audit_inbound("RequestTabs", op, "deny-op", op_why)
+                conn.send(new_error(
+                    msg, "org.freedesktop.DBus.Error.AccessDenied",
+                    "s", (f"op not allowed: {op_why}",)))
+                continue
+            _audit_inbound("RequestTabs", op, "allow",
+                           f"{why}; {op_why}")
             reply_body = enqueue_inbound_request(
                 op, args, out_stream, timeout_s=request_timeout_s)
             conn.send(new_method_return(

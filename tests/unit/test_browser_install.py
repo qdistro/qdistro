@@ -21,16 +21,62 @@ sys.modules["qdistro_browser_install"] = bi
 spec.loader.exec_module(bi)
 
 
+# Canonical standalone Firefox extension id. This MUST stay in lock-step
+# with qdfirefox-extension/manifest.json's
+# ``browser_specific_settings.gecko.id``. Hard-coded here (rather than
+# read cross-repo) so the unit suite stays self-contained; the cross-repo
+# manifest contract is checked by test_native_host_id_matches_qdfirefox
+# when that manifest is present in the tree.
+QDFIREFOX_GECKO_ID = "qdistro-firefox@qdistro.local"
+
+
+# ---- extension-id single source of truth (finding #13) -----------
+
+class TestFirefoxExtensionIdContract:
+    def test_default_firefox_id_is_canonical(self):
+        """The installer default must be the real qdfirefox gecko id, not
+        the stale ``qdistro@qdistro.local`` bundled-extension id."""
+        assert bi.DEFAULT_FIREFOX_EXTENSION_ID == QDFIREFOX_GECKO_ID
+        # Regression guard: the old wrong id must not creep back.
+        assert bi.DEFAULT_FIREFOX_EXTENSION_ID != "qdistro@qdistro.local"
+
+    def test_default_rendered_manifest_uses_canonical_id(self):
+        """render_manifest('firefox') with no explicit id must emit the
+        canonical id in allowed_extensions."""
+        body = bi.render_manifest("firefox", bridge_path="/x/bridge")
+        assert body["allowed_extensions"] == [QDFIREFOX_GECKO_ID]
+
+    def test_native_host_id_matches_qdfirefox(self):
+        """Cross-repo contract: if the qdfirefox manifest is present in
+        the tree, its declared gecko id must equal the installer default.
+        Skipped when the sibling extension repo is not checked out."""
+        candidates = [
+            Path(__file__).resolve().parents[3]
+            / "qdfirefox-extension" / "manifest.json",
+            Path(__file__).resolve().parents[2]
+            / "qdfirefox-extension" / "manifest.json",
+        ]
+        manifest = next((p for p in candidates if p.exists()), None)
+        if manifest is None:
+            import pytest
+            pytest.skip("qdfirefox-extension/manifest.json not in tree")
+        data = json.loads(manifest.read_text())
+        gecko_id = (data.get("browser_specific_settings", {})
+                    .get("gecko", {}).get("id"))
+        assert gecko_id == bi.DEFAULT_FIREFOX_EXTENSION_ID
+
+
 # ---- manifest rendering ------------------------------------------
 
 class TestManifestRendering:
     def test_firefox_shape(self):
         body = bi.render_firefox_manifest(
-            "/usr/lib/qdistro/browser-bridge", "qdistro@qdistro.local")
+            "/usr/lib/qdistro/browser-bridge",
+            "qdistro-firefox@qdistro.local")
         assert body["name"] == "qdistro"
         assert body["type"] == "stdio"
         assert body["path"] == "/usr/lib/qdistro/browser-bridge"
-        assert body["allowed_extensions"] == ["qdistro@qdistro.local"]
+        assert body["allowed_extensions"] == ["qdistro-firefox@qdistro.local"]
         assert "allowed_origins" not in body
 
     def test_chromium_shape(self):
@@ -105,7 +151,7 @@ class TestInstall:
         assert path.exists()
         body = json.loads(path.read_text())
         assert body["name"] == "qdistro"
-        assert body["allowed_extensions"] == ["qdistro@qdistro.local"]
+        assert body["allowed_extensions"] == ["qdistro-firefox@qdistro.local"]
         # 0644 — manifest is read by the user's browser process.
         assert (path.stat().st_mode & 0o777) == 0o644
 

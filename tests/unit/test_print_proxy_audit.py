@@ -64,6 +64,10 @@ def test_audit_rows_recorded_for_allowed_connection(tmp_path):
     env["QDISTRO_PRINT_BACKEND"] = "unix"
     env["QDISTRO_PRINT_UNIX_PATH"] = backend_path
     env["QDISTRO_PRINT_AUDIT_DB"] = audit_db
+    # This test asserts the "allow" audit row for a forwarded connection;
+    # opt out of the broker gate (dev mode) so the absent broker doesn't
+    # turn the connection into a deny.
+    env["QDISTRO_PRINT_GATE_REQUIRED"] = "0"
     # Make sure the proxy can find the audit module — print/
     # is on sys.path via the conftest, but the subprocess inherits a
     # fresh PYTHONPATH so the proxy needs an explicit hint.

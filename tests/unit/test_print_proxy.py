@@ -52,6 +52,9 @@ def test_proxy_forwards_bytes_unix_backend(tmp_path):
     env["QDISTRO_PRINT_LISTEN"] = listen
     env["QDISTRO_PRINT_BACKEND"] = "unix"
     env["QDISTRO_PRINT_UNIX_PATH"] = backend
+    # This test exercises byte-forwarding mechanics, not the broker gate;
+    # use the explicit dev opt-out so the (absent) broker doesn't deny.
+    env["QDISTRO_PRINT_GATE_REQUIRED"] = "0"
     proxy = subprocess.Popen(
         [sys.executable, PROXY_PY],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -123,6 +126,8 @@ def test_proxy_handles_backend_unreachable(tmp_path):
     env["QDISTRO_PRINT_LISTEN"] = listen
     env["QDISTRO_PRINT_BACKEND"] = "unix"
     env["QDISTRO_PRINT_UNIX_PATH"] = backend
+    # Isolate the backend-unreachable behavior from the broker gate.
+    env["QDISTRO_PRINT_GATE_REQUIRED"] = "0"
     proxy = subprocess.Popen(
         [sys.executable, PROXY_PY],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

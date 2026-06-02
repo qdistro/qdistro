@@ -43,12 +43,24 @@ import re
 import signal
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 import dbus
 import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
+
+# Shared /proc identity readers (anti-PID-reuse starttime anchor, exe
+# resolution). Lives under broker/; add it to sys.path so this daemon can
+# attest the *real* caller rather than trusting the spoofable app_id arg.
+_BROKER_DIR = Path(__file__).resolve().parent.parent / "broker"
+if str(_BROKER_DIR) not in sys.path:
+    sys.path.insert(0, str(_BROKER_DIR))
+try:
+    import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 — readers are best-effort; absence = DENY
+    _pi = None  # type: ignore[assignment]
 
 # Portal bus name claimed on the session bus so xdg-desktop-portal
 # can activate this backend on demand.
@@ -75,11 +87,72 @@ RESP_OTHER = 2
 _FILE_PICKER = os.environ.get("QDISTRO_FILE_PICKER", "zenity")
 
 
+def _sanitize_app_id(app_id: str) -> str:
+    """Reduce an app id to the broker-detail charset."""
+    app = str(app_id or "unknown")[:128]
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", app).strip("._-") or "unknown"
+
+
 def _portal_action(base: str, app_id: str) -> str:
     """Scope portal approvals to the requesting portal app_id."""
-    app = str(app_id or "unknown")[:128]
-    app = re.sub(r"[^A-Za-z0-9_.-]+", "_", app).strip("._-") or "unknown"
-    return f"{base}:{app}"
+    return f"{base}:{_sanitize_app_id(app_id)}"
+
+
+def _caller_pid(sender: str) -> int:
+    """Kernel-attested pid of the D-Bus ``sender`` connection.
+
+    Resolves ``org.freedesktop.DBus.GetConnectionUnixProcessID`` on the
+    session bus. Returns ``0`` when the sender is missing/unknown (the
+    connection went away, or the caller is the bus itself).
+    """
+    if not sender:
+        return 0
+    try:
+        bus = dbus.SessionBus()
+        proxy = bus.get_object("org.freedesktop.DBus",
+                               "/org/freedesktop/DBus")
+        ifc = dbus.Interface(proxy, "org.freedesktop.DBus")
+        return int(ifc.GetConnectionUnixProcessID(sender))
+    except dbus.DBusException as exc:
+        print(f"[qdistro-portal] GetConnectionUnixProcessID({sender!r}) "
+              f"failed: {exc.get_dbus_name()}", file=sys.stderr, flush=True)
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[qdistro-portal] pid attestation failed: {exc!r}",
+              file=sys.stderr, flush=True)
+        return 0
+
+
+def attest_app_id(sender: str) -> tuple[str, bool]:
+    """Derive the requesting app's identity from its *attested* pid.
+
+    The legacy XDG portal protocol carries a self-reported ``app_id``
+    string that xdg-desktop-portal forwards unmodified; a same-session
+    process can spoof it. Instead we resolve the D-Bus ``sender`` to its
+    real pid via the bus, read the binary behind ``/proc/<pid>/exe``
+    (anchored against re-use by also requiring a non-zero starttime), and
+    derive the app identity from the resolved executable's basename.
+
+    Returns ``(app_id, ok)``. On any failure to attest — missing sender,
+    no proc-identity readers, pid gone, exe unreadable, or a zero
+    starttime (anti-PID-reuse) — returns ``("", False)`` so callers fail
+    closed (DENY). Never falls back to the caller-supplied ``app_id``.
+    """
+    if _pi is None:
+        return ("", False)
+    pid = _caller_pid(sender)
+    if pid <= 0:
+        return ("", False)
+    starttime = _pi.read_starttime(pid)
+    if not starttime:  # 0 -> gone / unreadable / malformed: fail closed
+        return ("", False)
+    exe = _pi.read_exe(pid)
+    if not exe or exe == "?":
+        return ("", False)
+    base = os.path.basename(exe).strip()
+    if not base:
+        return ("", False)
+    return (_sanitize_app_id(base), True)
 
 
 def _broker_iface(sys_bus: dbus.Bus) -> dbus.Interface:
@@ -170,9 +243,10 @@ class QdistroPortalBackend(dbus.service.Object):
         ACCESS_IFC,
         in_signature="osssssa{sv}",
         out_signature="ua{sv}",
+        sender_keyword="sender",
     )
     def AccessDialog(self, handle, app_id, parent_window,
-                     title, subtitle, body, options):
+                     title, subtitle, body, options, sender=None):
         """Generic access dialog.
 
         Checks ``portal.access`` via the broker.  If the broker says
@@ -180,8 +254,17 @@ class QdistroPortalBackend(dbus.service.Object):
         "unknown" triggers a fire-and-forget RequestPermission and
         returns cancelled (the next attempt after admin approval will
         succeed via the cache).
+
+        The broker action is scoped to the *attested* caller identity
+        (derived from the D-Bus sender's real pid), never the spoofable
+        ``app_id`` argument. An unattestable caller is DENIED.
         """
-        app_id_s = str(app_id or "")
+        app_id_s, ok = attest_app_id(sender)
+        if not ok:
+            print(f"[qdistro-portal] AccessDialog DENY: unattestable "
+                  f"sender={sender!r}", file=sys.stderr, flush=True)
+            return (dbus.UInt32(RESP_CANCELLED),
+                    dbus.Dictionary({}, signature="sv"))
         title_s = str(title or "")
         action = _portal_action("portal.access", app_id_s)
         details = {"app_id": app_id_s, "title": title_s}
@@ -205,25 +288,35 @@ class QdistroPortalBackend(dbus.service.Object):
         FILECHOOSER_IFC,
         in_signature="osssa{sv}",
         out_signature="ua{sv}",
+        sender_keyword="sender",
     )
-    def OpenFile(self, handle, app_id, parent_window, title, options):
+    def OpenFile(self, handle, app_id, parent_window, title, options,
+                 sender=None):
         """Open-file portal: broker gate then file picker."""
         return self._file_chooser(handle, app_id, parent_window,
-                                  title, options, save=False)
+                                  title, options, save=False, sender=sender)
 
     @dbus.service.method(
         FILECHOOSER_IFC,
         in_signature="osssa{sv}",
         out_signature="ua{sv}",
+        sender_keyword="sender",
     )
-    def SaveFile(self, handle, app_id, parent_window, title, options):
+    def SaveFile(self, handle, app_id, parent_window, title, options,
+                 sender=None):
         """Save-file portal: broker gate then file picker."""
         return self._file_chooser(handle, app_id, parent_window,
-                                  title, options, save=True)
+                                  title, options, save=True, sender=sender)
 
     def _file_chooser(self, handle, app_id, parent_window,
-                      title, options, *, save: bool):
-        app_id_s = str(app_id or "")
+                      title, options, *, save: bool, sender=None):
+        app_id_s, ok = attest_app_id(sender)
+        if not ok:
+            print(f"[qdistro-portal] {'SaveFile' if save else 'OpenFile'} "
+                  f"DENY: unattestable sender={sender!r}",
+                  file=sys.stderr, flush=True)
+            return (dbus.UInt32(RESP_CANCELLED),
+                    dbus.Dictionary({}, signature="sv"))
         action = _portal_action("com.qdistro.fs.open", app_id_s)
         details = {"app_id": app_id_s}
         verdict = _check_permission(self._sys_bus, action, details)
@@ -272,15 +365,22 @@ class QdistroPortalBackend(dbus.service.Object):
         SCREENSHOT_IFC,
         in_signature="ossa{sv}",
         out_signature="ua{sv}",
+        sender_keyword="sender",
     )
-    def Screenshot(self, handle, app_id, parent_window, options):
+    def Screenshot(self, handle, app_id, parent_window, options,
+                   sender=None):
         """Screenshot portal: broker gate on screen capture.
 
         The actual screencopy is deferred to the compositor (qdshell);
         this backend only handles the policy gate. A real implementation
         would invoke qdshell's screencopy interface after approval.
         """
-        app_id_s = str(app_id or "")
+        app_id_s, ok = attest_app_id(sender)
+        if not ok:
+            print(f"[qdistro-portal] Screenshot DENY: unattestable "
+                  f"sender={sender!r}", file=sys.stderr, flush=True)
+            return (dbus.UInt32(RESP_CANCELLED),
+                    dbus.Dictionary({}, signature="sv"))
         action = _portal_action("com.qdistro.screen.capture", app_id_s)
         details = {"app_id": app_id_s}
         verdict = _check_permission(self._sys_bus, action, details)
@@ -304,16 +404,21 @@ class QdistroPortalBackend(dbus.service.Object):
         NOTIFICATION_IFC,
         in_signature="ssa{sv}",
         out_signature="",
+        sender_keyword="sender",
     )
-    def AddNotification(self, app_id, id_, notification):
+    def AddNotification(self, app_id, id_, notification, sender=None):
         """Add a notification.
 
         Checks ``portal.notification`` via the broker.  If denied or
         unknown the notification is silently dropped (no error to the
         caller -- the portal spec says AddNotification has no reply
-        content).
+        content). An unattestable caller is dropped.
         """
-        app_id_s = str(app_id or "")
+        app_id_s, ok = attest_app_id(sender)
+        if not ok:
+            print(f"[qdistro-portal] AddNotification DENY: unattestable "
+                  f"sender={sender!r}", file=sys.stderr, flush=True)
+            return
         action = _portal_action("portal.notification", app_id_s)
         details = {"app_id": app_id_s, "notification_id": str(id_ or "")}
         verdict = _check_permission(self._sys_bus, action, details)
@@ -330,14 +435,20 @@ class QdistroPortalBackend(dbus.service.Object):
         NOTIFICATION_IFC,
         in_signature="ss",
         out_signature="",
+        sender_keyword="sender",
     )
-    def RemoveNotification(self, app_id, id_):
+    def RemoveNotification(self, app_id, id_, sender=None):
         """Remove a notification.
 
         Policy-checked the same way as AddNotification so a denied app
-        cannot remove notifications it did not create.
+        cannot remove notifications it did not create. An unattestable
+        caller is dropped.
         """
-        app_id_s = str(app_id or "")
+        app_id_s, ok = attest_app_id(sender)
+        if not ok:
+            print(f"[qdistro-portal] RemoveNotification DENY: unattestable "
+                  f"sender={sender!r}", file=sys.stderr, flush=True)
+            return
         action = _portal_action("portal.notification", app_id_s)
         details = {"app_id": app_id_s, "notification_id": str(id_ or "")}
         verdict = _check_permission(self._sys_bus, action, details)

@@ -11,9 +11,11 @@ The proxy intentionally has narrow responsibilities:
 - Per-connection forward (one socketpair per incoming stream).
 - Peer-cred capture (uid/pid + best-effort /proc/<pid>/exe) for
   audit + the broker gate.
-- Broker gate via org.qdistro.AdminBroker1.CheckPermission — opt-in
-  via QDISTRO_PRINT_GATE_REQUIRED=1. Default OFF for MVP; flip to ON
-  once admin has authored print.* rules.
+- Broker gate via org.qdistro.AdminBroker1.CheckPermission — REQUIRED
+  by default (fail closed). Set QDISTRO_PRINT_GATE_REQUIRED=0 only for
+  development to run ungated. An absent broker rule ("unknown") is
+  treated as DENY unless QDISTRO_PRINT_GATE_ALLOW_UNKNOWN=1 is set for
+  rule bring-up.
 - Spawn-on-demand for the vsock backend: if the backend connect
   fails with ECONNREFUSED / EHOSTUNREACH and QDISTRO_PRINT_VM_SPAWN
   is set, the proxy invokes the configured spawn helper (default
@@ -35,7 +37,8 @@ Backend selection (env vars):
 
 Gate / spawn (env vars):
 
-    QDISTRO_PRINT_GATE_REQUIRED  = 0 | 1                              (default: 0)
+    QDISTRO_PRINT_GATE_REQUIRED  = 0 | 1                              (default: 1)
+    QDISTRO_PRINT_GATE_ALLOW_UNKNOWN = 0 | 1  (dev: allow "unknown")  (default: 0)
     QDISTRO_PRINT_GATE_ACTION    = broker action name                 (default: print.access)
     QDISTRO_PRINT_VM_SPAWN       = path to spawn helper, or empty     (default: empty / disabled)
     QDISTRO_PRINT_SPAWN_BACKOFF_S = float seconds to wait after spawn (default: 1.5)
@@ -105,8 +108,23 @@ def _audit() -> "PrintAuditLog | None":  # noqa: F821 — forward ref
             _AUDIT_LOG = False  # type: ignore[assignment]
     return _AUDIT_LOG if _AUDIT_LOG else None
 
-GATE_REQUIRED = os.environ.get("QDISTRO_PRINT_GATE_REQUIRED", "0") != "0"
+# Fail-closed by default. The broker gate is REQUIRED unless an operator
+# explicitly disables it for development by setting
+# QDISTRO_PRINT_GATE_REQUIRED=0. Historically this defaulted to "0"
+# (allow-on-disabled), which meant any member of the socket's owning
+# group could push arbitrary IPP traffic at the print backend with no
+# broker decision whenever the systemd unit forgot to set the env. The
+# default is now "1" so production is gated even if the unit is missing
+# the variable; dev/bring-up opts out with an explicit "0".
+GATE_REQUIRED = os.environ.get("QDISTRO_PRINT_GATE_REQUIRED", "1") != "0"
 GATE_ACTION = os.environ.get("QDISTRO_PRINT_GATE_ACTION", "print.access")
+# When the broker has no rule for this caller it returns "unknown". By
+# default we treat that as DENY (fail closed) — an absent rule must not
+# silently grant printing. A developer can set
+# QDISTRO_PRINT_GATE_ALLOW_UNKNOWN=1 to keep the proxy available during
+# rule authoring; that opt-out is logged on every unknown verdict.
+GATE_ALLOW_UNKNOWN = os.environ.get(
+    "QDISTRO_PRINT_GATE_ALLOW_UNKNOWN", "0") != "0"
 VM_SPAWN = os.environ.get("QDISTRO_PRINT_VM_SPAWN", "")
 SPAWN_BACKOFF_S = float(os.environ.get("QDISTRO_PRINT_SPAWN_BACKOFF_S", "1.5"))
 
@@ -251,16 +269,25 @@ def _pump(a: socket.socket, b: socket.socket) -> None:
 
 def _gate(uid: int, pid: int) -> tuple[bool, str]:
     """Decide whether this connection should proceed. Returns
-    (allowed, reason). When the gate is off, allowed=True with
-    reason "gate-disabled". When on, queries the broker and:
-      - "allow" → allow
-      - "deny"  → deny
-      - "unknown" → allow with reason "gate-unknown" (rule absent;
-        admin can author one — proxy stays available during bring-up)
-      - "error"  → deny with reason "gate-error" (fail closed when
+    (allowed, reason). When the gate is explicitly disabled for dev,
+    allowed=True with reason "gate-disabled". When on (the production
+    default), queries the broker and:
+      - "allow"   → allow
+      - "deny"    → deny
+      - "unknown" → DENY by default (rule absent → fail closed). Only
+        allowed when QDISTRO_PRINT_GATE_ALLOW_UNKNOWN=1 is set for
+        bring-up, in which case the dev opt-out is logged.
+      - "error"   → deny with reason "gate-error" (fail closed when
         the broker is unreachable AND gate is required).
     """
     if not GATE_REQUIRED:
+        # Explicit dev opt-out — log so it is visible in the journal that
+        # the proxy is running ungated.
+        sys.stderr.write(
+            f"[qdistro-print-proxy] WARNING gate disabled "
+            f"(QDISTRO_PRINT_GATE_REQUIRED=0) — allowing pid={pid} "
+            f"uid={uid} without a broker decision\n")
+        sys.stderr.flush()
         return True, "gate-disabled"
     exe = _read_proc_exe(pid) if pid > 0 else ""
     verdict = _broker_check_permission(uid, pid, exe)
@@ -269,7 +296,15 @@ def _gate(uid: int, pid: int) -> tuple[bool, str]:
     if verdict == "deny":
         return False, "gate-deny"
     if verdict == "unknown":
-        return True, "gate-unknown"
+        if GATE_ALLOW_UNKNOWN:
+            sys.stderr.write(
+                f"[qdistro-print-proxy] WARNING gate verdict=unknown "
+                f"allowed by dev opt-out "
+                f"(QDISTRO_PRINT_GATE_ALLOW_UNKNOWN=1) pid={pid} "
+                f"uid={uid}\n")
+            sys.stderr.flush()
+            return True, "gate-unknown-dev"
+        return False, "gate-unknown"
     return False, "gate-error"
 
 

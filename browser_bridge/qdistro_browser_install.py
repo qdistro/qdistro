@@ -32,7 +32,12 @@ from pathlib import Path
 
 NATIVE_HOST_NAME = "qdistro"
 DEFAULT_BRIDGE_PATH = "/usr/lib/qdistro/browser-bridge"
-DEFAULT_FIREFOX_EXTENSION_ID = "qdistro@qdistro.local"
+# Single source of truth for the standalone Firefox extension id. This
+# MUST match the ``browser_specific_settings.gecko.id`` declared in
+# qdfirefox-extension/manifest.json (``qdistro-firefox@qdistro.local``).
+# A mismatch renders the native-messaging manifest's allowed_extensions
+# inert, so the bridge would refuse the real qdfirefox extension.
+DEFAULT_FIREFOX_EXTENSION_ID = "qdistro-firefox@qdistro.local"
 DEFAULT_CHROMIUM_EXTENSION_ID = "qdistroqdistroqdistroqdistroaaaaaaaa"
 
 # Per-browser native-messaging host-manifest directories. Keyed by
@@ -71,7 +76,7 @@ def render_firefox_manifest(
         description: str = "qdistro browser bridge",
 ) -> dict:
     """Firefox-shape manifest. ``allowed_extensions`` is a list of
-    raw extension IDs (e.g. ``qdistro@qdistro.local``).
+    raw extension IDs (e.g. ``qdistro-firefox@qdistro.local``).
     """
     return {
         "name": NATIVE_HOST_NAME,
