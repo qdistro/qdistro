@@ -234,8 +234,10 @@ trusted_root_parent(void)
 	if (pid <= 1 || read_proc_status(pid, &ppid, &uid) < 0)
 		return 0;
 	(void)ppid;
+	if (uid != 0)
+		return 0;
 	st_before = proc_starttime(pid);
-	if (uid == 0 && proc_basename(pid, base, sizeof base) == 0) {
+	if (proc_basename(pid, base, sizeof base) == 0) {
 		if (strcmp(base, "runuser") == 0 ||
 		    strcmp(base, "su") == 0 ||
 		    strcmp(base, "sudo") == 0 ||
@@ -244,6 +246,28 @@ trusted_root_parent(void)
 			return st_before != 0 && st_after != 0 &&
 			       st_before == st_after;
 		}
+		return 0;
+	}
+	/* proc_basename() readlink(/proc/<ppid>/exe) is denied when this
+	 * helper runs unprivileged (e.g. tier-3/4: `runuser -u admin -- env ...
+	 * qdistro-secctx-exec`) and the launcher parent is root: the kernel
+	 * gates the exe symlink behind PTRACE_MODE_READ_FSCREDS, so a lower-
+	 * privilege process cannot read a higher-privilege parent's exe path.
+	 * We already confirmed uid==0 from /proc/<ppid>/status (which IS
+	 * readable). The load-bearing trust property is exactly that: the
+	 * direct parent is a root process — an unprivileged attacker cannot
+	 * give their own process a uid-0 direct parent, so they cannot forge
+	 * this marker. The launcher-basename allowlist is defense-in-depth
+	 * that is structurally unavailable here; fall back to the root-parent
+	 * + stable-starttime proof rather than fail closed against the
+	 * supported production tier-3/4/5 path. */
+	st_after = proc_starttime(pid);
+	if (st_before != 0 && st_after != 0 && st_before == st_after) {
+		fprintf(stderr,
+			"qdistro-secctx-exec: trusted launcher accepted via "
+			"root-parent fallback (parent pid=%ld uid=0, exe "
+			"unreadable; stable starttime)\n", (long)pid);
+		return 1;
 	}
 	return 0;
 }

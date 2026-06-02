@@ -191,7 +191,12 @@ stage_vm_driver() {
         fail_loud "tier-3 stack (waypipe / wayland-info / user1 silo) not available on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: wp_security_context_manager_v1 advertised by qdwin"
+    # Post-hardening: qdwin gates wp_security_context_manager_v1 behind a
+    # wl_global_filter, hiding it from ordinary same-uid clients (only the
+    # bound shell or the authorized secctx helper may see/bind it). The
+    # driver asserts the hidden-from-ordinary-client property; the positive
+    # bind path is the "waypipe bound ..." line below.
+    assert_output_contains "PASS: wp_security_context_manager_v1 hidden from ordinary admin client"
     assert_output_contains "PASS: waypipe bound wp_security_context_manager_v1"
     assert_output_contains "PASS: silo client tagged with secctx"
     assert_output_contains "PASS: secctx app_id propagated via wrapper default"
@@ -303,7 +308,10 @@ stage_vm_driver() {
     fi
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdistro-secctx-exec --help"
-    assert_output_contains "PASS: wp_security_context_manager_v1 advertised by qdwin"
+    # Post-hardening: the manager global is hidden from ordinary admin
+    # clients (the s44 driver was updated to assert this); the authorized
+    # helper still binds it on the line below.
+    assert_output_contains "PASS: wp_security_context_manager_v1 hidden from ordinary admin client"
     assert_output_contains "PASS: qdistro-secctx-exec bound wp_security_context_manager_v1"
     assert_output_contains "PASS: secctx commit recorded with engine=qdistro.tier4 app_id=qdistro.tier4.s44vm"
     assert_output_contains "PASS: inner client accepted on the secctx listener"
