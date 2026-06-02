@@ -32,7 +32,84 @@ from pathlib import Path
 
 NATIVE_HOST_NAME = "qdistro"
 DEFAULT_BRIDGE_PATH = "/usr/lib/qdistro/browser-bridge"
-DEFAULT_FIREFOX_EXTENSION_ID = "qdistro@qdistro.local"
+
+
+def _bundled_firefox_extension_id() -> str:
+    """Read the gecko id of the *bundled* Firefox extension that this
+    installer authorizes.
+
+    This installer ships next to ``browser_bridge/extension/`` and the
+    README directs users to run ``qdistro-browser-install --browsers
+    firefox`` to authorize the bundled extension built by
+    ``build-extension.sh`` from ``manifest.firefox.json``. The native-
+    messaging manifest's ``allowed_extensions`` MUST therefore match that
+    bundled manifest's ``browser_specific_settings.gecko.id`` — otherwise
+    the native-messaging host rejects the canonical bundled extension.
+
+    The bundled manifest is the single source of truth: read it at import
+    time so the default can never silently drift from what is shipped.
+    Falls back to the known-shipped literal if the file is absent (e.g.
+    the module is vendored without the extension tree).
+    """
+    fallback = "qdistro@qdistro.local"
+    try:
+        manifest = (Path(__file__).resolve().parent
+                    / "extension" / "manifest.firefox.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        gecko_id = (data.get("browser_specific_settings", {})
+                    .get("gecko", {}).get("id"))
+        return str(gecko_id) if gecko_id else fallback
+    except (OSError, ValueError):
+        return fallback
+
+
+# Single source of truth for the bundled Firefox extension id — derived
+# from the bundled ``extension/manifest.firefox.json`` this installer
+# authorizes (``qdistro@qdistro.local``). A mismatch renders the native-
+# messaging manifest's ``allowed_extensions`` inert, so the bridge would
+# refuse the canonical bundled extension.
+DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
+
+# The *standalone* qdfirefox extension is a SEPARATE artifact shipped from
+# the ``qdfirefox-extension`` repo; it declares a DIFFERENT gecko id
+# (``qdistro-firefox@qdistro.local``) in its own ``manifest.json``. A user
+# who installed that standalone extension (rather than the bundled MV2
+# build) needs the native-messaging host to authorize THAT id, or the
+# bridge refuses it — this was finding #13: the generic installer only
+# knew the bundled id and silently left qdfirefox unauthorized.
+#
+# This id is a known-shipped literal here (the standalone manifest lives
+# in a sibling repo that is NOT part of this package's source tree, so it
+# cannot be read at import time on an installed system). The cross-repo
+# contract — that this literal equals the standalone manifest's gecko id —
+# is asserted by the unit suite's contract test against the canonical
+# ``qdfirefox-extension/manifest.json`` when that repo is checked out.
+STANDALONE_FIREFOX_EXTENSION_ID = "qdistro-firefox@qdistro.local"
+
+# Firefox install modes. ``bundled`` authorizes the MV2 extension built
+# next to this installer (manifest.firefox.json); ``standalone`` (a.k.a.
+# the native-host install mode) authorizes the separately-shipped
+# qdfirefox extension. Each maps to its own default extension id so the
+# right ``allowed_extensions`` is written for what the user actually has.
+FIREFOX_MODE_IDS: dict[str, str] = {
+    "bundled": DEFAULT_FIREFOX_EXTENSION_ID,
+    "standalone": STANDALONE_FIREFOX_EXTENSION_ID,
+}
+DEFAULT_FIREFOX_MODE = "bundled"
+
+
+def firefox_extension_id_for_mode(mode: str) -> str:
+    """Default Firefox extension id for an install ``mode`` (bundled |
+    standalone). Unknown modes are a hard error — fail closed rather than
+    silently authorize the wrong (or no) extension."""
+    try:
+        return FIREFOX_MODE_IDS[mode]
+    except KeyError:
+        raise ValueError(
+            f"unknown firefox install mode: {mode!r} "
+            f"(expected one of {sorted(FIREFOX_MODE_IDS)})") from None
+
+
 DEFAULT_CHROMIUM_EXTENSION_ID = "qdistroqdistroqdistroqdistroaaaaaaaa"
 
 # Per-browser native-messaging host-manifest directories. Keyed by
@@ -246,8 +323,18 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--bridge-path", default=DEFAULT_BRIDGE_PATH,
                    help="path to the bridge binary "
                         f"(default {DEFAULT_BRIDGE_PATH})")
-    p.add_argument("--firefox-extension-id",
-                   default=DEFAULT_FIREFOX_EXTENSION_ID)
+    p.add_argument("--firefox-mode",
+                   choices=sorted(FIREFOX_MODE_IDS),
+                   default=DEFAULT_FIREFOX_MODE,
+                   help="which Firefox extension this host authorizes: "
+                        "'bundled' (the MV2 build shipped with this "
+                        "package) or 'standalone' (the separately-shipped "
+                        "qdfirefox extension). Selects the default "
+                        "allowed-extensions id; overridden by "
+                        "--firefox-extension-id if given.")
+    p.add_argument("--firefox-extension-id", default=None,
+                   help="explicit Firefox extension id; overrides the "
+                        "--firefox-mode default.")
     p.add_argument("--chromium-extension-id",
                    default=DEFAULT_CHROMIUM_EXTENSION_ID)
     p.add_argument("--install-policy", action="store_true",
@@ -281,11 +368,17 @@ def parse_browser_list(arg: str | None) -> tuple[str, ...]:
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
     browsers = parse_browser_list(args.browsers)
+    # An explicit --firefox-extension-id wins; otherwise the id is the
+    # default for the chosen --firefox-mode (bundled vs standalone).
+    firefox_extension_id = (
+        args.firefox_extension_id
+        if args.firefox_extension_id is not None
+        else firefox_extension_id_for_mode(args.firefox_mode))
     if args.print:
         for b in browsers:
             body = render_manifest(
                 browser=b, bridge_path=args.bridge_path,
-                firefox_extension_id=args.firefox_extension_id,
+                firefox_extension_id=firefox_extension_id,
                 chromium_extension_id=args.chromium_extension_id)
             print(f"# {b}: {manifest_path(args.home, b)}")
             print(json.dumps(body, indent=2))
@@ -294,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         home=args.home,
         browsers=browsers,
         bridge_path=args.bridge_path,
-        firefox_extension_id=args.firefox_extension_id,
+        firefox_extension_id=firefox_extension_id,
         chromium_extension_id=args.chromium_extension_id,
     )
     for b, p in written.items():

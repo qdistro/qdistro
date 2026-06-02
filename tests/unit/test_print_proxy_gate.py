@@ -54,9 +54,17 @@ def _stop_proxy(p):
         p.kill()
 
 
-# -- gate disabled by default ------------------------------------------------
+# -- gate fail-closed by default (finding #9) --------------------------------
 
-def test_gate_disabled_by_default_forwards_normally(tmp_path):
+def test_gate_required_by_default_blocks_when_broker_unreachable(tmp_path):
+    """With NO gate env set, the proxy must be fail-closed: the gate is
+    required by default, so an unreachable broker denies the connection
+    and the backend never receives anything.
+
+    This is the regression for finding #9 — under the old default
+    (QDISTRO_PRINT_GATE_REQUIRED defaulting to "0") this connection would
+    have been forwarded ungated.
+    """
     listen = str(tmp_path / "ipp.sock")
     backend = str(tmp_path / "cupsd.sock")
     backend_sock = _start_stub_backend(backend)
@@ -64,7 +72,37 @@ def test_gate_disabled_by_default_forwards_normally(tmp_path):
     env["QDISTRO_PRINT_LISTEN"] = listen
     env["QDISTRO_PRINT_BACKEND"] = "unix"
     env["QDISTRO_PRINT_UNIX_PATH"] = backend
-    # No QDISTRO_PRINT_GATE_REQUIRED -> default 0.
+    # No QDISTRO_PRINT_GATE_REQUIRED -> now defaults to required (1).
+    env.pop("QDISTRO_PRINT_GATE_REQUIRED", None)
+    env.pop("QDISTRO_PRINT_GATE_ALLOW_UNKNOWN", None)
+    # Force the broker call to fail so the gate has to fail closed.
+    env["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/nonexistent/dbus"
+    proxy = _start_proxy(env)
+    try:
+        _wait_for_socket(listen)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(listen)
+        c.settimeout(5.0)
+        backend_sock.settimeout(0.5)
+        with pytest.raises(socket.timeout):
+            backend_sock.accept()
+        assert c.recv(64) == b""
+        c.close()
+    finally:
+        _stop_proxy(proxy)
+        backend_sock.close()
+
+
+def test_gate_disabled_dev_optout_forwards_normally(tmp_path):
+    listen = str(tmp_path / "ipp.sock")
+    backend = str(tmp_path / "cupsd.sock")
+    backend_sock = _start_stub_backend(backend)
+    env = os.environ.copy()
+    env["QDISTRO_PRINT_LISTEN"] = listen
+    env["QDISTRO_PRINT_BACKEND"] = "unix"
+    env["QDISTRO_PRINT_UNIX_PATH"] = backend
+    # Explicit dev opt-out -> gate disabled, forwards like a plain proxy.
+    env["QDISTRO_PRINT_GATE_REQUIRED"] = "0"
     proxy = _start_proxy(env)
     try:
         _wait_for_socket(listen)
@@ -194,20 +232,77 @@ def test_spawn_helper_skipped_for_non_vsock_backend(tmp_path):
     assert not spawn_marker.exists()
 
 
-def test_gate_function_returns_disabled_when_off(monkeypatch):
-    """Direct unit-style check on the _gate helper without spawning the
-    proxy subprocess."""
-    monkeypatch.delenv("QDISTRO_PRINT_GATE_REQUIRED", raising=False)
+def _reload_proxy(monkeypatch, **env):
+    """Reload the proxy module with a controlled gate environment and
+    return it. Module-level gate constants are read at import time, so we
+    must reload after setting env."""
+    for key in ("QDISTRO_PRINT_GATE_REQUIRED",
+                "QDISTRO_PRINT_GATE_ALLOW_UNKNOWN"):
+        monkeypatch.delenv(key, raising=False)
+    for key, val in env.items():
+        monkeypatch.setenv(key, val)
     sys.path.insert(0, os.path.join(os.path.dirname(PROXY_PY)))
     try:
         import importlib
         import qdistro_print_proxy as p
         importlib.reload(p)
-        allowed, reason = p._gate(uid=1500, pid=12345)
-        assert allowed is True
-        assert reason == "gate-disabled"
+        return p
     finally:
         sys.path.pop(0)
+
+
+def test_gate_function_disabled_only_with_explicit_optout(monkeypatch):
+    """The _gate helper returns gate-disabled ONLY when the operator
+    explicitly opts out with QDISTRO_PRINT_GATE_REQUIRED=0."""
+    p = _reload_proxy(monkeypatch, QDISTRO_PRINT_GATE_REQUIRED="0")
+    allowed, reason = p._gate(uid=1500, pid=12345)
+    assert allowed is True
+    assert reason == "gate-disabled"
+
+
+def test_gate_required_by_default(monkeypatch):
+    """Regression for finding #9: with no env set, the gate is REQUIRED.
+    Under the old default this returned (True, 'gate-disabled')."""
+    p = _reload_proxy(monkeypatch)
+    assert p.GATE_REQUIRED is True
+    # broker unreachable -> _broker_check_permission returns "error"
+    monkeypatch.setattr(p, "_broker_check_permission",
+                        lambda uid, pid, exe: "error")
+    allowed, reason = p._gate(uid=1500, pid=12345)
+    assert allowed is False
+    assert reason == "gate-error"
+
+
+def test_gate_unknown_denies_by_default(monkeypatch):
+    """Finding #9: a broker 'unknown' verdict is DENY by default (an
+    absent rule must not grant printing)."""
+    p = _reload_proxy(monkeypatch)
+    monkeypatch.setattr(p, "_broker_check_permission",
+                        lambda uid, pid, exe: "unknown")
+    allowed, reason = p._gate(uid=1500, pid=12345)
+    assert allowed is False
+    assert reason == "gate-unknown"
+
+
+def test_gate_unknown_allowed_with_dev_optout(monkeypatch):
+    """The 'unknown' verdict is allowed only when the dev opt-out
+    QDISTRO_PRINT_GATE_ALLOW_UNKNOWN=1 is set."""
+    p = _reload_proxy(monkeypatch, QDISTRO_PRINT_GATE_ALLOW_UNKNOWN="1")
+    monkeypatch.setattr(p, "_broker_check_permission",
+                        lambda uid, pid, exe: "unknown")
+    allowed, reason = p._gate(uid=1500, pid=12345)
+    assert allowed is True
+    assert reason == "gate-unknown-dev"
+
+
+def test_gate_deny_verdict_denies(monkeypatch):
+    """A broker 'deny' verdict denies regardless of dev flags."""
+    p = _reload_proxy(monkeypatch)
+    monkeypatch.setattr(p, "_broker_check_permission",
+                        lambda uid, pid, exe: "deny")
+    allowed, reason = p._gate(uid=1500, pid=12345)
+    assert allowed is False
+    assert reason == "gate-deny"
 
 
 def test_spawn_helper_script_handles_missing_virsh(tmp_path):
