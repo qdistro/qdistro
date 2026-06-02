@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import socket
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -68,6 +73,126 @@ class TestFraming:
         pair.a.sendall(frame[mid:] + b"\n")
         got = _recv_request(pair.b)
         assert got["argv"] == ["id"]
+
+
+_QSU_C = Path(__file__).resolve().parents[2] / "qsu" / "qsu.c"
+
+
+@pytest.fixture(scope="module")
+def qsu_bin(tmp_path_factory):
+    """Compile the qsu C client against a tmp AF_UNIX socket path.
+
+    Skips (rather than fails) only when there is no C compiler or the
+    source is missing; on any host that can build qsu this runs for
+    real. The -DSOCKET_PATH override points the binary at a per-test
+    mock-server socket (the compiled default lives under /run and needs
+    root to bind).
+    """
+    cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    if cc is None:
+        pytest.skip("no C compiler available to build qsu")
+    if not _QSU_C.exists():
+        pytest.skip(f"qsu source not found at {_QSU_C}")
+
+    out_dir = tmp_path_factory.mktemp("qsu_build")
+    sock_path = out_dir / "sock"
+    binary = out_dir / "qsu"
+    proc = subprocess.run(
+        [cc, "-O2", "-Wall", "-Wextra", "-Wformat=2",
+         "-Werror=format-security",
+         f'-DSOCKET_PATH="{sock_path}"',
+         "-o", str(binary), str(_QSU_C)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.fail(f"qsu build failed:\n{proc.stdout}\n{proc.stderr}")
+    return str(binary), str(sock_path)
+
+
+def _run_qsu_against_frames(qsu_bin, frames: bytes):
+    """Run the compiled qsu with a mock server emitting `frames`.
+
+    Returns (stdout_bytes, stderr_bytes, returncode).
+    """
+    binary, sock_path = qsu_bin
+    if os.path.exists(sock_path):
+        os.unlink(sock_path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(sock_path)
+        srv.listen(1)
+        proc = subprocess.Popen(
+            [binary, "id"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        conn, _ = srv.accept()
+        try:
+            conn.recv(65536)  # drain the request frame
+            conn.sendall(frames)
+            conn.shutdown(socket.SHUT_WR)
+            out, err = proc.communicate(timeout=10)
+        finally:
+            conn.close()
+        return out, err, proc.returncode
+    finally:
+        srv.close()
+
+
+class TestQsuFrameParse:
+    """Regression for qci-fix/qsu-json-frame-parse.
+
+    The real server serializes frames with json.dumps, which emits a
+    SPACE after every colon: {"type": "stdout", ...}. The C client's
+    string-field parser must tolerate that whitespace, or it drops every
+    frame and always returns rc=1. Drive the actual compiled binary
+    against a mock server to lock the behavior in.
+    """
+
+    @pytest.mark.cheat_aware(
+        protects="qsu relays the privileged command's stdout and real "
+                 "exit code over the json.dumps (spaced) wire format",
+        severity="high",
+        cheats=[
+            "send compact frames instead of json.dumps output, hiding the "
+            "space-after-colon the real server emits",
+            "assert only on exit code and not on relayed stdout",
+            "convert to xfail/skip when the binary misbehaves",
+        ],
+        consequence="qsu silently drops all root command output and always "
+                    "exits 1, breaking every privileged invocation",
+    )
+    def test_spaced_frames_relayed(self, qsu_bin):
+        # EXACTLY what qdistro_root_exec._send emits.
+        frames = (
+            json.dumps({"type": "stdout",
+                        "data": "uid=0(root) gid=0(root)\n"}) + "\n"
+            + json.dumps({"type": "exit", "code": 0}) + "\n"
+        ).encode()
+        assert b'"type": "stdout"' in frames  # guard: spaced format
+        out, err, rc = _run_qsu_against_frames(qsu_bin, frames)
+        assert b"uid=0(root) gid=0(root)" in out, (out, err)
+        assert rc == 0, (rc, err)
+
+    def test_compact_frames_relayed(self, qsu_bin):
+        # Documented compact format — back-compat must not regress.
+        frames = (b'{"type":"stdout","data":"x\\n"}\n'
+                  b'{"type":"exit","code":7}\n')
+        assert b'"type":"stdout"' in frames  # guard: compact format
+        out, err, rc = _run_qsu_against_frames(qsu_bin, frames)
+        assert b"x" in out, (out, err)
+        assert rc == 7, (rc, err)
+
+    def test_spaced_stderr_and_error_message(self, qsu_bin):
+        # stderr relay + error-frame message extraction, spaced format.
+        frames = (
+            json.dumps({"type": "stderr", "data": "boom\n"}) + "\n"
+            + json.dumps({"type": "error",
+                          "message": "Request denied."}) + "\n"
+        ).encode()
+        out, err, rc = _run_qsu_against_frames(qsu_bin, frames)
+        assert b"boom" in err, (out, err)
+        assert b"Request denied." in err, (out, err)
+        assert rc == 1, (rc, err)
 
 
 class TestRecheckCallerIdentity:
