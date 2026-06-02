@@ -4,6 +4,17 @@ Screen locker for [qdistro](../qdistro). Qt/QML UI driven by a Python
 controller, talking to [qdwin](../qdwin) over the
 `qdwin_locker_v1` private Wayland protocol.
 
+## Role in qdistro
+
+qdlocker owns runtime re-authentication for the whole machine. qdistro is
+single-tenant, so one lock covers every silo and session surface on the active
+compositor. qdlocker authenticates the owner through fprintd/PAM and then asks
+qdwin to demote the lock layer.
+
+Boot login is deliberately separate and belongs to [qdgreeter](../qdgreeter).
+The production session should treat qdlocker as part of the qdwin session stack,
+not as optional shell chrome.
+
 Sibling to [qdshell](../qdshell), not part of it. The original locker
 lived inside qdshell as `Modules/LockScreen/*.qml`; this repo lifts
 it out so the locker's process lifecycle is independent of the shell
@@ -132,7 +143,7 @@ The harness lives in `tests/gui/qdlocker-helpers.sh`; it sources
 
 ## Status
 
-This is the initial scaffold:
+Implemented preview:
 
 - ✅ Protocol XML + meson generation in qdwin
 - ✅ Python controller + auth backend (fprintd + PAM)
