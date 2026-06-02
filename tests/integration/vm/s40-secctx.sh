@@ -82,17 +82,22 @@ OUTER_SOCK="$RUNTIME_DIR/wayland-1"
 runuser -u admin -- test -S "$OUTER_SOCK" || skip "outer admin compositor not up"
 pass "outer admin compositor up"
 
-# --- 4. wp_security_context_manager_v1 advertised -------------------
-# wayland-info enumerates globals on the outer compositor. The
-# manager_v1 line should appear in the output. Run as admin (the
-# socket is admin-owned).
+# --- 4. wp_security_context_manager_v1 hidden from ordinary clients --
+# Post-hardening (qdwin "Harden secctx manager authorization"): the
+# manager global is gated behind a wl_global_filter and is only visible
+# to the bound shell or an authorized qdistro-secctx-exec helper. An
+# ordinary admin wayland-info client (not the helper) must NOT see it —
+# same-uid visibility would let any session process self-assert secctx
+# strings and impersonate a silo. The load-bearing positive path (the
+# wrapper actually binding the manager) is asserted below via the
+# spawn-tier3 → waypipe → secctx flow. Mirrors s44's updated assertion.
 WL_INFO=$(runuser -u admin -- env WAYLAND_DISPLAY=wayland-1 \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" wayland-info 2>&1 || true)
 if echo "$WL_INFO" | grep -q "wp_security_context_manager_v1"; then
-    pass "wp_security_context_manager_v1 advertised by qdwin"
-else
     echo "$WL_INFO" | head -40 >&2
-    fail "wp_security_context_manager_v1 not in outer wayland globals"
+    fail "wp_security_context_manager_v1 visible to ordinary admin client"
+else
+    pass "wp_security_context_manager_v1 hidden from ordinary admin client"
 fi
 
 # --- 5. capture journal cursor --------------------------------------

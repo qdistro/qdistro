@@ -402,7 +402,8 @@ fi
 
 SECCTX_WRAP=()
 if [ "$USE_SECCTX" = "1" ]; then
-    SECCTX_WRAP=(qdistro-secctx-exec
+    SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
         --instance-id    "$SECCTX_INSTANCE"
@@ -438,27 +439,28 @@ if [ "$USE_SECCTX" = "1" ]; then
     LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$LAUNCHREC_FILE_ID.pid"
     rm -f "$LAUNCHREC_PATH"
 fi
-if [ "$USE_SECCTX" = "1" ]; then
-    env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
-        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-        HOME="$ADMIN_HOME" \
-        ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
-        ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
-        "${SECCTX_WRAP[@]}" \
-        runuser -u "$ADMIN_USER" -- env \
-            XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-            HOME="$ADMIN_HOME" \
-            bash -c 'umask 0117; exec "$@"' bash \
-            waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
-else
-    runuser -u "$ADMIN_USER" -- env \
-        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
-        HOME="$ADMIN_HOME" \
-        bash -c 'umask 0117; exec "$@"' bash \
-        waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
-fi
+# IMPORTANT (topology): run qdistro-secctx-exec as the ADMIN uid, not as
+# root. The hardened qdwin secctx authorization (qdwin_secctx_client_is_
+# authorized) verifies the helper by reading /proc/<pid>/exe (path
+# allowlist + root-owned/non-writable integrity) and its launcher parent.
+# The admin compositor runs unprivileged (no CAP_SYS_PTRACE), and the
+# kernel gates readlink/stat of a *more*-privileged (root) process's exe
+# symlink behind PTRACE_MODE_READ_FSCREDS. If secctx-exec runs as root,
+# qdwin therefore cannot introspect it, hides wp_security_context_manager_
+# v1 from it, and the bridge never comes up. Running secctx-exec under
+# `runuser -u admin` keeps it at the admin uid (introspectable by the
+# admin compositor) while its launcher parent stays root (runuser) so
+# QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER still resolves to a trusted root
+# parent. This is the original (pre-"ci: harden ... tier3") topology;
+# the root-wrap variant silently broke every tier-3 secctx flow.
+runuser -u "$ADMIN_USER" -- env \
+    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+    XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
+    HOME="$ADMIN_HOME" \
+    ${LAUNCHREC_PATH:+QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"} \
+    ${LAUNCHREC_TOKEN:+QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"} \
+    bash -c 'umask 0117; exec "$@"' bash \
+    "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
 
 # Wait for waypipe-client to create the socket (it'll be born 0660
