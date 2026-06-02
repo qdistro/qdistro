@@ -12,6 +12,13 @@ Documentation=https://codeberg.org/qdistro/qdistro
 # whole target dies if the compositor dies). qdshell.service has
 # Restart=on-failure inside the unit; the target itself stays up.
 Wants=qdshell.service
+# qdlocker is a first-class session member: the screen locker must be
+# running and bound to qdwin_locker_v1 for panel lock actions and
+# compositor-driven lock requests to work. Wants= (not Requires=) so a
+# locker crash does not tear down the desktop — qdlocker.service has
+# Restart=always and re-binds. Ordered After= the compositor so the
+# qdwin_locker_v1 global is advertised before the locker connects.
+Wants=qdlocker.service
 Requires=qdwin-compositor.service
 After=qdwin-compositor.service
 

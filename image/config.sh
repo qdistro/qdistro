@@ -180,9 +180,108 @@ if [ -f "$QD/deploy/greetd-hardening.conf" ]; then
 fi
 install -m 0755 "$QD/deploy/qdwin-session-launcher.sh"   /usr/local/bin/qdwin-session-launcher
 
-# Install qdgreeter package files (the Python module + entry point are
-# packaged separately under qdgreeter/; this assumes they're already
-# on $PATH as /usr/bin/qdgreeter from a sibling pip-install step).
+# qdgreeter (boot greeter) + qdlocker (screen locker) are part of the
+# production boot/session path:
+#   - greetd-config.toml execs /usr/bin/qdgreeter (finding #19).
+#   - qdwin-session.target Wants= qdlocker.service (finding #16).
+# Earlier this config.sh assumed both were on $PATH from a "sibling
+# pip-install step" that the image build never ran, so greetd booted to a
+# missing greeter. Build them from the synced overlay here (build.sh now
+# rsyncs qdgreeter/ + qdlocker/). --prefix=/usr lands the qdgreeter /
+# qdlocker entry points in /usr/bin so greetd and the session units find
+# them. --no-deps: the Python runtime deps (PyQt6, dbus_next, python-pam,
+# pywayland) are RPM-installed via config.xml.
+for pyapp in qdgreeter qdlocker; do
+    if [ -f "$SRC/$pyapp/pyproject.toml" ]; then
+        echo "[qdistro-image] pip installing $pyapp -> /usr ..."
+        python3 -m pip install --break-system-packages --no-deps \
+            --prefix=/usr "$SRC/$pyapp" \
+            || echo "[qdistro-image]   WARN: pip install $pyapp failed"
+    else
+        echo "[qdistro-image]   WARN: $SRC/$pyapp not synced — $pyapp binary will be missing"
+    fi
+done
+
+# REQUIRED gate: greetd is enabled to exec /usr/bin/qdgreeter, so a
+# missing greeter binary is a hard image-build failure, not a silent
+# fallback to a black login (finding #19).
+if [ ! -x /usr/bin/qdgreeter ]; then
+    echo "[qdistro-image] FATAL: /usr/bin/qdgreeter missing after pip install;" \
+         "greetd would boot to a non-existent greeter. Aborting build." >&2
+    exit 1
+fi
+echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
+
+# Production session units (qdwin-session.target + qdwin-compositor.service
+# + qdshell.service) and the screen locker (qdlocker.service). The greeter
+# launcher does `systemctl --user start qdwin-session.target`, so these
+# MUST be installed and enabled for the admin user — the legacy
+# install-qdwin-session-for-vm.sh above only writes the noctalia-* units,
+# which the greeter never starts (findings #15, #16). Install both unit
+# sets so the boot path the greeter drives actually resolves; the noctalia
+# units stay for the GUI test harness that greps their names.
+ADMIN_USER_UNITS=/home/admin/.config/systemd/user
+install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS"
+install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS/qdwin-session.target.wants"
+for unit in qdwin-session.target qdwin-compositor.service qdshell.service; do
+    install -m 0644 "$QD/deploy/$unit" "$ADMIN_USER_UNITS/$unit"
+done
+# qdlocker.service ships from the qdlocker repo (synced as $SRC/qdlocker).
+# The upstream unit hardcodes ExecStart=/usr/local/bin/qdlocker, but the
+# image pip-installs qdlocker with --prefix=/usr (above), which lands the
+# console_script at /usr/bin/qdlocker. Nothing creates /usr/local/bin/qdlocker
+# in the image, so copying the unit verbatim makes qdlocker.service die
+# 203/EXEC at boot — the locker never starts. Render the unit through the
+# SAME sed rewrite the from-source bootstrap uses so ExecStart matches the
+# installed binary path (finding #16). Keep this rewrite as the authoritative
+# fix even if the canonical unit is later made path-robust.
+if [ -f "$SRC/qdlocker/systemd/qdlocker.service" ]; then
+    sed 's|ExecStart=/usr/local/bin/qdlocker|ExecStart=/usr/bin/qdlocker|g' \
+        "$SRC/qdlocker/systemd/qdlocker.service" \
+        > "$ADMIN_USER_UNITS/qdlocker.service"
+    chmod 0644 "$ADMIN_USER_UNITS/qdlocker.service"
+    # Fail-closed: the rewritten ExecStart must point at the binary the image
+    # actually installed. If the path does not resolve to an executable, the
+    # unit would 203/EXEC at boot — abort the build rather than ship a locker
+    # that silently never starts.
+    locker_exec="$(sed -n 's|^ExecStart=\([^ ]*\).*|\1|p' \
+        "$ADMIN_USER_UNITS/qdlocker.service" | head -n1)"
+    if [ -z "$locker_exec" ] || [ ! -x "$locker_exec" ]; then
+        echo "[qdistro-image] FATAL: qdlocker.service ExecStart ($locker_exec)" \
+             "is not an executable in the image; qdlocker.service would" \
+             "203/EXEC at boot. Aborting build." >&2
+        exit 1
+    fi
+    echo "[qdistro-image] qdlocker.service ExecStart -> $locker_exec (rewritten from /usr/local/bin)"
+else
+    echo "[qdistro-image]   WARN: qdlocker.service not synced — locker absent from session"
+fi
+# Wire qdshell + qdlocker into qdwin-session.target.wants/ so the target
+# pulls them in. (The target unit also declares Wants= for both, but the
+# .wants symlinks are how `systemctl enable` would normally materialize
+# that; we write them directly because there is no live user manager in
+# the kiwi chroot.) qdwin-session.target itself is NOT enabled under
+# default.target — the greeter's qdwin-session-launcher starts it
+# explicitly (`systemctl --user start qdwin-session.target`) after PAM
+# auth, which is the authoritative session-start path.
+for unit in qdshell.service qdlocker.service; do
+    [ -f "$ADMIN_USER_UNITS/$unit" ] || continue
+    ln -sf "../$unit" "$ADMIN_USER_UNITS/qdwin-session.target.wants/$unit"
+done
+
+# Unify on ONE production session: the greeter launches
+# qdwin-session.target, NOT the legacy noctalia-* units. The legacy
+# installer enabled noctalia-session/-shell under default.target.wants,
+# which would auto-start a SECOND compositor at login and race
+# qdwin-session.target for the wayland-1 socket. Remove those auto-start
+# symlinks so only the greeter-driven qdwin-session.target brings up the
+# desktop. The noctalia unit FILES stay on disk for the GUI test harness
+# that greps their names; they are simply not auto-enabled (finding #15).
+for u in noctalia-session.service noctalia-shell.service; do
+    rm -f "$ADMIN_USER_UNITS/default.target.wants/$u"
+done
+chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
+echo "[qdistro-image] qdwin-session.target installed; qdshell + qdlocker wired into it; noctalia auto-start disabled"
 
 systemctl enable greetd.service
 systemctl enable greetd-fallback.service || true

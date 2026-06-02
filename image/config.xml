@@ -127,6 +127,7 @@
     <package name="adwaita-icon-theme"/>
     <package name="xcursor-themes"/>
     <package name="python313"/>
+    <package name="python313-pip"/>
     <package name="python313-pywayland"/>
     <package name="python313-cffi"/>
     <package name="python313-PyQt6"/>
@@ -134,6 +135,7 @@
     <package name="python313-setuptools"/>
     <package name="python313-python-pam"/>
     <package name="python313-dbus-python"/>
+    <package name="python313-dbus_next"/>
     <package name="python313-gobject"/>
     <package name="python313-gobject-Gdk"/>
     <package name="python313-PyYAML"/>

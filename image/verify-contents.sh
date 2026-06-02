@@ -165,6 +165,10 @@ check_req_any "qdwin weston shell" \
     /usr/lib64/weston/qdwin-shell.so /usr/lib/weston/qdwin-shell.so
 check_req     "qdshell QML install" /usr/share/quickshell/qdshell
 check_opt     "qdwin session launcher" /usr/local/bin/qdwin-session-launcher
+# greetd is enabled to exec /usr/bin/qdgreeter (deploy/greetd-config.toml).
+# A missing greeter binary means the primary login path boots to a
+# non-existent command (finding #19) — REQUIRED static gate.
+check_req     "qdgreeter binary" /usr/bin/qdgreeter
 
 echo
 echo "-- admin uid assumptions (single-tenant: admin=1000) --"
@@ -198,16 +202,36 @@ check_opt "greetd unit" \
     /usr/lib/systemd/system/greetd.service
 
 echo
+echo "-- production session units (greeter boot path) --"
+# The greeter (greetd -> qdgreeter -> qdwin-session-launcher) starts
+# qdwin-session.target, which Wants= qdshell.service + qdlocker.service
+# and Requires= qdwin-compositor.service. These unit FILES must be
+# installed in admin's user systemd dir or the greeter authenticates and
+# then hands greetd a target that does not exist (findings #15, #16).
+check_req "qdwin-session.target (admin user unit)" \
+    /home/admin/.config/systemd/user/qdwin-session.target
+check_req "qdwin-compositor.service (admin user unit)" \
+    /home/admin/.config/systemd/user/qdwin-compositor.service
+check_req "qdshell.service (admin user unit)" \
+    /home/admin/.config/systemd/user/qdshell.service
+check_req "qdlocker.service (admin user unit)" \
+    /home/admin/.config/systemd/user/qdlocker.service
+
+echo
 echo "-- systemd units enabled (wants/ symlinks) --"
-# System-level enable lands as a symlink under */.wants/. User units
-# (noctalia-*) are enabled per the config.sh trick by writing symlinks
-# under admin's ~/.config/systemd/user/default.target.wants/.
+# System-level enable lands as a symlink under */.wants/.
 check_glob_opt "system multi-user.wants symlinks" \
     "/etc/systemd/system/multi-user.target.wants/*"
 check_glob_opt "greetd enabled (wants symlink)" \
     "/etc/systemd/system/*.wants/greetd.service"
-check_glob_opt "noctalia user units enabled (admin default.target.wants)" \
-    "/home/admin/.config/systemd/user/default.target.wants/noctalia-*.service"
+# qdshell + qdlocker are wired into qdwin-session.target.wants/ so the
+# greeter-started target pulls them in (findings #15, #16). The target
+# itself is started transiently by the launcher, not enabled under
+# default.target.
+check_glob_req "qdshell wired into qdwin-session.target.wants" \
+    "/home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service"
+check_glob_req "qdlocker wired into qdwin-session.target.wants" \
+    "/home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service"
 
 echo
 echo "-- SELinux policy modules / files --"
@@ -229,6 +253,31 @@ check_req     "qsu compiled binary"    /usr/local/bin/qsu
 check_opt     "browser-bridge exec stub" /usr/lib/qdistro/browser-bridge
 check_opt     "browser-bridge host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_opt     "browser-install CLI"    /usr/local/bin/qdistro-browser-install
+
+echo
+echo "-- utility app desktop integration assets --"
+# qterminator / qfileman ship .desktop + metainfo + icons in-tree; the
+# bootstrap install_app_desktop_assets step lands them under /usr/share so
+# the apps are discoverable in the launcher / AppStream / icon theme
+# (finding #21). Optional: an image that does not include these utility
+# apps legitimately omits them, but when an app's /usr/bin entry exists its
+# assets should too.
+if [ -e "$ROOT/usr/bin/qterminator" ]; then
+    check_req "qterminator .desktop"  /usr/share/applications/qterminator.desktop
+    check_req "qterminator metainfo"  /usr/share/metainfo/qterminator.metainfo.xml
+    check_glob_req "qterminator icon" "/usr/share/icons/hicolor/*/apps/qterminator.*"
+else
+    check_opt "qterminator .desktop"  /usr/share/applications/qterminator.desktop
+    check_opt "qterminator metainfo"  /usr/share/metainfo/qterminator.metainfo.xml
+fi
+if [ -e "$ROOT/usr/bin/qfileman" ]; then
+    check_req "qfileman .desktop"  /usr/share/applications/qfileman.desktop
+    check_req "qfileman metainfo"  /usr/share/metainfo/qfileman.metainfo.xml
+    check_glob_req "qfileman icon" "/usr/share/icons/hicolor/*/apps/qfileman.*"
+else
+    check_opt "qfileman .desktop"  /usr/share/applications/qfileman.desktop
+    check_opt "qfileman metainfo"  /usr/share/metainfo/qfileman.metainfo.xml
+fi
 
 echo
 echo "== summary =="

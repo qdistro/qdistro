@@ -199,10 +199,58 @@ expect "default target is graphical" remote 'systemctl get-default | grep -qx gr
 expect "qdistro-admin-broker active" remote 'systemctl is-active qdistro-admin-broker.service || sudo -n systemctl is-active qdistro-admin-broker.service'
 expect "broker owns dbus name"       remote "sudo -n busctl list --no-pager | grep -q org.qdistro.AdminBroker1"
 
-expect "noctalia-session user unit enabled" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-session.service | grep -qx enabled"
-expect "noctalia-shell user unit enabled" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-enabled noctalia-shell.service | grep -qx enabled"
+# Greeter boot path: greetd execs /usr/bin/qdgreeter (greetd-config.toml),
+# which after auth runs qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`. Assert the exact binary + units that path needs.
+expect "qdgreeter binary present" \
+    remote 'test -x /usr/bin/qdgreeter'
+expect "greetd execs an existing greeter (no exec failure in journal)" \
+    remote 'sudo -n journalctl -u greetd -b --no-pager | grep -Eiq "No such file|exec.*qdgreeter.*fail|failed to execute" && exit 1 || exit 0'
+expect "qdwin-session.target user unit installed" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user cat qdwin-session.target >/dev/null 2>&1"
+expect "qdshell wanted by qdwin-session.target" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Wants qdwin-session.target | grep -q qdshell.service"
+expect "qdlocker wanted by qdwin-session.target" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Wants qdwin-session.target | grep -q qdlocker.service"
+
+# qdlocker.service ExecStart must point at the binary the image actually
+# installed (/usr/bin/qdlocker from the --prefix=/usr pip install). If the
+# unit still carries the upstream /usr/local/bin/qdlocker ExecStart, the
+# locker 203/EXECs at boot and never starts — wiring it into the session
+# Wants= is then a no-op (finding #16, BROKEN remediation). These are GATING
+# assertions: the unit must load with a resolvable ExecStart AND not show an
+# exec failure in its journal. The Wants= check above alone could not catch
+# an ExecStart/binary-path mismatch.
+expect "qdlocker.service ExecStart resolves to an installed binary" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p ExecStart qdlocker.service | grep -oE 'path=[^ ;]+' | head -n1 | cut -d= -f2 | xargs test -x"
+expect "qdlocker.service is loaded (not error/masked/not-found)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p LoadState qdlocker.service | grep -qx 'LoadState=loaded'"
+expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u qdlocker.service -b --no-pager 2>/dev/null | grep -Eiq '203/EXEC|No such file or directory|Failed to locate executable|Failed at step EXEC' && exit 1 || exit 0"
+# qdlocker.service is Type=simple, so it should reach `active` promptly. We
+# require `active` (NOT merely `activating`) — a unit stuck activating or
+# flapping under Restart=always is a real failure, not something to tolerate.
+# A short bounded settle absorbs only first-boot bring-up timing; the permanent
+# ExecStart-failure case is already caught definitively by the 203/EXEC journal
+# check above.
+#
+# Crash-loop hardening: reaching `active` once is not enough — a unit that
+# becomes active briefly and then exits under Restart=always could be sampled
+# during an active window. So after first reaching active we settle, then
+# require ActiveState=active AND SubState=running AND a low restart count
+# (NRestarts<=1) so a flapping locker fails the gate.
+expect "qdlocker.service reaches and holds active/running (not flapping)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
+            sleep 1
+        done
+        sleep 3
+        read as ss nr <<EOF2
+\$(systemctl --user show -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
+EOF2
+        echo \"qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+        [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
@@ -220,7 +268,7 @@ remote 'sudo -n journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/
 remote 'sudo -n journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
 remote 'sudo -n journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
 remote 'systemctl --failed --no-pager'                   > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
-remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status noctalia-session.service noctalia-shell.service' \
+remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service noctalia-session.service noctalia-shell.service' \
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 
 shoot 02-fully-booted

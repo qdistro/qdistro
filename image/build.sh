@@ -24,7 +24,11 @@ SRC_OVERLAY="$HERE/root/root/qdistro-src"  # ends up at /root/qdistro-src in ima
 
 sync_sources() {
     install -d -m 0755 "$SRC_OVERLAY"
-    for repo in qdistro qdwin qdshell; do
+    # qdgreeter + qdlocker are part of the production boot/session path:
+    # greetd execs /usr/bin/qdgreeter (greetd-config.toml) and the
+    # qdwin-session.target Wants= qdlocker.service. config.sh pip-installs
+    # both from this overlay, so they must be synced in (findings #16, #19).
+    for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
         if [ ! -d "$SIBLINGS/$repo" ]; then
             echo "[build] ERROR: $SIBLINGS/$repo not found (sibling repo missing)" >&2
             exit 2
