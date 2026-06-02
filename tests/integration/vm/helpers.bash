@@ -266,6 +266,50 @@ wait_for_unit() {
     return 1
 }
 
+# wait_for_bus_name <name> [timeout_s=30] [--user] — poll the session/system
+# bus until <name> is an owned (not merely activatable) well-known name, or
+# the timeout elapses. With --user the same session bus used by the caller's
+# `busctl --user` assertion is queried via vm_run; otherwise the system bus is
+# queried via vm_run.
+#
+# Type=dbus units report "active" only once their BusName is acquired, but a
+# freshly-provisioned graphical session can bounce a per-user daemon once
+# during bring-up (clean Stop/Start), so a single-shot `busctl list` right
+# after `systemctl start` can race the settle window — exactly the flake that
+# dropped org.qdistro.Compositor (the last-started 9e daemon) from the check.
+# Poll instead of asserting once.
+wait_for_bus_name() {
+    local name="" timeout=30 user=0 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --user) user=1 ;;
+            *[!0-9]*|'') [[ -z "$name" ]] && name="$arg" ;;
+            *) timeout="$arg" ;;
+        esac
+    done
+    [[ -n "$name" ]] || { echo "--- wait_for_bus_name: missing name ---" >&2; return 2; }
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "--- wait_for_bus_name: invalid bus name '$name' ---" >&2; return 2; }
+
+    # Query the same bus the caller asserts against: vm_run + `busctl --user`
+    # (the session user's own bus), matching how this suite already lists
+    # names — rather than vm_run_admin, which could resolve a different bus.
+    local userflag=""
+    [[ "$user" -eq 1 ]] && userflag="--user "
+
+    local i
+    for ((i=0; i<timeout; i++)); do
+        # An owned name appears in `busctl list` with a numeric PID; an
+        # activatable-but-unstarted name shows "(activatable)". Match the
+        # first column literally so regex metacharacters in a name cannot
+        # false-match a different bus name.
+        vm_run "busctl ${userflag}list --no-legend 2>/dev/null | awk -v name='${name}' '\$1 == name && \$2 != \"(activatable)\" { found=1 } END { exit found ? 0 : 1 }'"
+        [[ "$status" -eq 0 ]] && return 0
+        sleep 1
+    done
+    echo "--- TIMEOUT: bus name '$name' not owned after ${timeout}s${userflag:+ (--user)} ---" >&2
+    return 1
+}
+
 # wait_for_socket <path> [timeout_s=30] — poll `test -S <path>` inside the
 # VM (via vm_run) until the unix socket exists or the timeout elapses.
 wait_for_socket() {

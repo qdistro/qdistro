@@ -40,6 +40,17 @@ setup() {
             || systemctl --user start qdistro-notifications.service"
     vm_run "systemctl --user is-active --quiet qdistro-compositor.service \
             || systemctl --user start qdistro-compositor.service"
+
+    # `systemctl start` of a Type=dbus unit returns once the BusName is
+    # acquired, but a freshly-provisioned session can bounce a per-user
+    # daemon once during bring-up, so a well-known name can briefly be
+    # unowned right when the @test below introspects the bus. Wait for all
+    # four to settle so the single-shot busctl check can't race that window
+    # (previously dropped org.qdistro.Compositor — the last one started).
+    wait_for_bus_name org.qdistro.Mpris         --user
+    wait_for_bus_name org.qdistro.Downloads     --user
+    wait_for_bus_name org.qdistro.Notifications --user
+    wait_for_bus_name org.qdistro.Compositor    --user
 }
 
 @test "9e-daemons: four bus names owned on the user session bus" {
