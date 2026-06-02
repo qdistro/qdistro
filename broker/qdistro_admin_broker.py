@@ -1242,6 +1242,34 @@ class Broker(dbus.service.Object):
         print(f"[broker] lineage ENFORCE ({gate}): cross-silo DENY — "
               f"{reason}", flush=True)
 
+    def _journal_cross_silo_decision(self, *, gate: str, src: str, dst: str,
+                                     decision: str, src_app: str,
+                                     src_engine: str) -> None:
+        """Emit one concise journal line per cross-silo clipboard/handoff
+        decision.
+
+        The full audit row lands in the sqlite audit DB (AuditLog.log), which
+        is the system of record for history/forensics. But that DB is not
+        readable from the journal, so an operator tailing `journalctl -u
+        qdistro-admin-broker` (and the VM integration suite that observes the
+        live broker that way) had no line tying a cross-silo verdict to the
+        *source window identity* it was decided against. This prints that
+        attribution — the same ``src_app=/src_engine=`` shape the audit row
+        carries — so the decision is observable without opening the DB.
+
+        stdout only; never raises (best-effort observability).
+        """
+        try:
+            print(
+                f"[broker] clipboard/{gate} cross-silo decision: "
+                f"{src} -> {dst} verdict={decision} "
+                f"src_app={src_app or '(unknown)'} "
+                f"src_engine={src_engine or '(unknown)'}",
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     @dbus.service.method(BUS_NAME,
                          in_signature="ssssstst", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
@@ -1826,6 +1854,9 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] qdistro.audit.failure: clipboard, "
                   f"reason={e!r}", flush=True)
+        self._journal_cross_silo_decision(
+            gate="transfer", src=src, dst=dst, decision=decision,
+            src_app=sapp, src_engine=seng)
         return decision
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
@@ -2093,6 +2124,9 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] qdistro.audit.failure: clipboard_receive, "
                   f"reason={e!r}", flush=True)
+        self._journal_cross_silo_decision(
+            gate="receive", src=src, dst=dst, decision=decision,
+            src_app=sapp, src_engine=seng)
         return decision
 
     @dbus.service.method(BUS_NAME,
@@ -2207,6 +2241,9 @@ class Broker(dbus.service.Object):
         except Exception as e:  # noqa: BLE001
             print(f"[broker] qdistro.audit.failure: handoff, "
                   f"reason={e!r}", flush=True)
+        self._journal_cross_silo_decision(
+            gate="handoff", src=src, dst=dst, decision=decision,
+            src_app=sapp, src_engine=seng)
         return decision
 
     @dbus.service.method(BUS_NAME,
