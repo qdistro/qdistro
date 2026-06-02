@@ -213,6 +213,26 @@ expect "qdshell wanted by qdwin-session.target" \
 expect "qdlocker wanted by qdwin-session.target" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Wants qdwin-session.target | grep -q qdlocker.service"
 
+# qdlocker.service ExecStart must point at the binary the image actually
+# installed (/usr/bin/qdlocker from the --prefix=/usr pip install). If the
+# unit still carries the upstream /usr/local/bin/qdlocker ExecStart, the
+# locker 203/EXECs at boot and never starts — wiring it into the session
+# Wants= is then a no-op (finding #16, BROKEN remediation). These are GATING
+# assertions: the unit must load with a resolvable ExecStart AND not show an
+# exec failure in its journal. The Wants= check above alone could not catch
+# an ExecStart/binary-path mismatch.
+expect "qdlocker.service ExecStart resolves to an installed binary" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p ExecStart qdlocker.service | grep -oE 'path=[^ ;]+' | head -n1 | cut -d= -f2 | xargs test -x"
+expect "qdlocker.service is loaded (not error/masked/not-found)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p LoadState qdlocker.service | grep -qx 'LoadState=loaded'"
+expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u qdlocker.service -b --no-pager 2>/dev/null | grep -Eiq '203/EXEC|No such file or directory|Failed to locate executable|Failed at step EXEC' && exit 1 || exit 0"
+# qdlocker has Restart=always, so a transient race during bring-up may leave
+# it activating; what must NEVER hold is a permanent ExecStart failure. Accept
+# active OR activating, reject failed.
+expect "qdlocker.service is active (or activating), not failed" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c 'st=\$(systemctl --user is-active qdlocker.service); echo \"qdlocker is-active=\$st\"; [ \"\$st\" = active ] || [ \"\$st\" = activating ]'"
+
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'

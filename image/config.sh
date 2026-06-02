@@ -227,9 +227,32 @@ for unit in qdwin-session.target qdwin-compositor.service qdshell.service; do
     install -m 0644 "$QD/deploy/$unit" "$ADMIN_USER_UNITS/$unit"
 done
 # qdlocker.service ships from the qdlocker repo (synced as $SRC/qdlocker).
+# The upstream unit hardcodes ExecStart=/usr/local/bin/qdlocker, but the
+# image pip-installs qdlocker with --prefix=/usr (above), which lands the
+# console_script at /usr/bin/qdlocker. Nothing creates /usr/local/bin/qdlocker
+# in the image, so copying the unit verbatim makes qdlocker.service die
+# 203/EXEC at boot — the locker never starts. Render the unit through the
+# SAME sed rewrite the from-source bootstrap uses so ExecStart matches the
+# installed binary path (finding #16). Keep this rewrite as the authoritative
+# fix even if the canonical unit is later made path-robust.
 if [ -f "$SRC/qdlocker/systemd/qdlocker.service" ]; then
-    install -m 0644 "$SRC/qdlocker/systemd/qdlocker.service" \
-        "$ADMIN_USER_UNITS/qdlocker.service"
+    sed 's|ExecStart=/usr/local/bin/qdlocker|ExecStart=/usr/bin/qdlocker|g' \
+        "$SRC/qdlocker/systemd/qdlocker.service" \
+        > "$ADMIN_USER_UNITS/qdlocker.service"
+    chmod 0644 "$ADMIN_USER_UNITS/qdlocker.service"
+    # Fail-closed: the rewritten ExecStart must point at the binary the image
+    # actually installed. If the path does not resolve to an executable, the
+    # unit would 203/EXEC at boot — abort the build rather than ship a locker
+    # that silently never starts.
+    locker_exec="$(sed -n 's|^ExecStart=\([^ ]*\).*|\1|p' \
+        "$ADMIN_USER_UNITS/qdlocker.service" | head -n1)"
+    if [ -z "$locker_exec" ] || [ ! -x "$locker_exec" ]; then
+        echo "[qdistro-image] FATAL: qdlocker.service ExecStart ($locker_exec)" \
+             "is not an executable in the image; qdlocker.service would" \
+             "203/EXEC at boot. Aborting build." >&2
+        exit 1
+    fi
+    echo "[qdistro-image] qdlocker.service ExecStart -> $locker_exec (rewritten from /usr/local/bin)"
 else
     echo "[qdistro-image]   WARN: qdlocker.service not synced — locker absent from session"
 fi

@@ -75,6 +75,36 @@ setup() {
     grep -q 'qdlocker wanted by qdwin-session.target' "$VERIFY"
 }
 
+# --- #16 (BROKEN remediation): qdlocker ExecStart path correctness ------
+# The image pip-installs qdlocker with --prefix=/usr (binary -> /usr/bin),
+# but the upstream unit hardcodes ExecStart=/usr/local/bin/qdlocker. Copying
+# the unit verbatim makes qdlocker.service 203/EXEC at boot. config.sh MUST
+# rewrite the ExecStart (same sed the bootstrap uses), NOT install it verbatim.
+
+@test "#16: config.sh rewrites qdlocker ExecStart /usr/local/bin -> /usr/bin (not verbatim)" {
+    # Must contain the sed that corrects the ExecStart to the installed path.
+    grep -Eq 'sed .*ExecStart=/usr/local/bin/qdlocker.*ExecStart=/usr/bin/qdlocker' "$IMAGE_CFG"
+    # Must NOT do a verbatim `install ... qdlocker/systemd/qdlocker.service`
+    # into the admin user dir (that is exactly the broken copy).
+    run grep -E 'install -m 0644 .*qdlocker/systemd/qdlocker.service' "$IMAGE_CFG"
+    [ "$status" -ne 0 ] || { echo "config.sh still verbatim-installs qdlocker.service:"$'\n'"$output" >&2; return 1; }
+}
+
+@test "#16: config.sh fail-closes if the rewritten qdlocker ExecStart is not executable" {
+    # A non-executable ExecStart would 203/EXEC at boot; the build must abort.
+    grep -Eq 'ExecStart=\\\([^ ]*\\\)' "$IMAGE_CFG" || \
+        grep -q 'qdlocker.service ExecStart' "$IMAGE_CFG"
+    grep -Eq 'test -x .*locker_exec|! -x "\$locker_exec"' "$IMAGE_CFG"
+    grep -q 'FATAL: qdlocker.service ExecStart' "$IMAGE_CFG"
+}
+
+@test "#16: verify.sh GATES on qdlocker.service running (is-active + no 203/EXEC)" {
+    # Not just Wanted= — the unit must actually come up without an exec failure.
+    grep -q 'systemctl --user is-active qdlocker.service' "$VERIFY"
+    grep -Eq '203/EXEC' "$VERIFY"
+    grep -q 'qdlocker.service ExecStart resolves to an installed binary' "$VERIFY"
+}
+
 # --- #19: image stages + verifies /usr/bin/qdgreeter --------------------
 
 @test "#19: build.sh syncs qdgreeter (and qdlocker) into the image overlay" {
