@@ -1,5 +1,12 @@
 # Threat model
 
+qdistro aims for brokered chokepoint provenance and contamination control, not
+full fine-grained information-flow noninterference. Malicious apps are not
+trusted to self-report security-relevant lineage. Authoritative lineage and
+audit identity must come from broker decisions, kernel peer credentials,
+SELinux labels, compositor endpoint identity, process snapshots, resource
+handles, or workflow records.
+
 qdistro's threat model is **explicit** because many design decisions
 (hide-UI vs sandbox, cooperative vs enforced read-only, single-fingerprint vs
 per-user auth) only make sense once the model is clear.

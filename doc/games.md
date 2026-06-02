@@ -70,6 +70,10 @@ silos.
  Some games recover on VT-switch back; some do not. Users should pause
  the game before locking.
 - On unlock, admin can VT-switch back to the game's TTY to resume.
+- Games are not frozen merely because the desktop is locked. Whether they
+ continue, pause, or receive a notification is a per-session policy decision.
+ VR and immersive sessions should prefer headset presence / idle signals over
+ desktop lock as the pause trigger.
 
 ## Anti-cheat compatibility
 

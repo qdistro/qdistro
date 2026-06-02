@@ -103,6 +103,21 @@ brokered transfers. Games and VR are examples of the stricter fullscreen mode
 
 ## Components
 
+Design documents for the policy/resource layer:
+
+- [resources.md](resources.md) — manifest shape, kind registry, lifecycle,
+  finalizers, and capability handles.
+- [silos.md](silos.md) — desktop workload definition, bootstrap, health checks,
+  actions, rollback, and agent guardrails.
+- [metadata.md](metadata.md) — labels, annotations, typed security metadata,
+  lineage references, and audit references.
+- [attachments.md](attachments.md) — UI, filesystem, credential, app-state,
+  and one-shot transfer sharing rules.
+- [workflows.md](workflows.md) — Markdown intent plus strict executable
+  manifest, cleanup, compensation, and run records.
+- [lineage.md](lineage.md) — PROV-style vocabulary, central store, artifact
+  receipts, and contamination propagation.
+
 - **qdwin** — libweston shell plugin (C). Private protocol server, peer-uid
  enforcement, chrome compositing, window placement.
 - **qdshell** — per-uid Qt/QML shell client. Panels, menus, notifications,

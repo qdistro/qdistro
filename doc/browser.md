@@ -7,15 +7,15 @@ transport, qdistro surfaces browser state in the desktop — history, tabs,
 MPRIS media, downloads, share-to — analogous to KDE's Plasma Browser
 Integration.
 
-> **Status snapshot.** The bridge today implements only `qdistro.ping` and
-> `recall.push`. Every other operation in this document is **specified but
-> not yet implemented**; each such section is marked with a `Phase: 9x`
-> banner. Current browser follow-ups live in the private todo repo under
+> **Status snapshot.** The bridge implements `qdistro.ping`, `recall.push`,
+> and the Firefox `containers.*` relay path documented in
+> [firefox-containers.md](firefox-containers.md). Most desktop integrations
+> below remain specified/planned Phase-9 work. Current browser follow-ups live
+> in the private todo repo under
 > [`todo/issues/qdistro/browser/`](../../todo/issues/qdistro/browser/).
 >
-> Six pre-existing bridge defects (P0-1..P0-6) must be fixed before any
-> Phase-9 work lands. Historical Phase-9 planning notes were pruned from the
-> public repo; remaining current follow-ups live in the private todo repo.
+> P0-1, P0-2, and P0-3 are landed. P0-4..P0-6 remain open deployment or
+> policy decisions; see the defect index.
 
 ## Supported-browser matrix
 
@@ -119,7 +119,7 @@ user can in principle point their per-user manifest at any binary. The
 re-verify the bridge binary path against an admin-controlled list rather
 than trusting the connecting process to be the canonical bridge.
 
-### 3. Extension identity (defective today — P0-1)
+### 3. Extension identity (Phase 8 implemented)
 
 The browser passes the calling extension's origin to the bridge as a
 command-line argument:
@@ -135,10 +135,9 @@ These argv values are set by the browser at exec time and are not
 forgeable by extension JS. The bridge **should** parse them and treat
 the result as the authoritative extension identity.
 
-The bridge currently does not. It reads `msg.get("extension_id")` from
-the stdio payload, which is whatever string the extension chose to send.
-P0-1 in the todo plan fixes this by parsing argv at startup and either
-rejecting mismatched stdio payloads or dropping the stdio field entirely.
+P0-1 fixed this path: the bridge parses argv at startup and treats the
+browser-supplied extension identity as authoritative. Stdio-provided extension
+identity is not trusted for policy.
 
 ### 4. Daemon policy (Phase 9 — not implemented)
 
@@ -189,19 +188,14 @@ caller's resolved identity (parent exe, parent SELinux label,
 extension_id as currently self-asserted, caller UID/username). Used by
 the install flow to verify end-to-end connectivity.
 
-### `recall.push` — Phase 8 (implemented, has defect P0-3)
+### `recall.push` — Phase 8 (implemented)
 
 Text snapshot ingest from the extension. Writes to the per-day SQLite
 database under `/var/lib/qdistro/recall/<user>/` (or the per-user dir
 when no daemon is configured).
 
-> **Known defect (P0-3).** The handler reads `msg.get("user")` from the
-> extension payload and uses it to choose the destination directory,
-> falling back to `getpass.getuser()` if absent. A compromised extension
-> running under one uid can therefore write recall rows tagged as another
-> uid if the bridge has write access to that path. The fix: drop the
-> stdio-supplied `user` field, derive the destination strictly from the
-> kernel-attested identity chain.
+P0-3 fixed the former cross-silo write hazard: the destination user is derived
+from the kernel-attested identity chain, not from an extension-supplied field.
 
 ### `pwd.fill` / `pwd.save` — Phase 9a (not implemented)
 
@@ -381,6 +375,17 @@ production builds (see P0-2).
  silent retry, no fallback to in-browser equivalents.
 
 ## Desktop integrations on top of the bridge
+
+### Browser resources in workflows
+
+Authenticated browser profiles are authority-bearing resources. A workflow may
+attach a profile to complete OAuth or web login, route a temporary auth URL
+into it, and return only the callback code or token to the requesting task.
+
+Agent-assisted browser steps should prefer accessibility-tree roles, labels,
+and refs over coordinates or screenshot-only actions. The workflow run records
+the browser resource, intent token, callback result, and any generated
+credential resource in lineage.
 
 > **Status: Phase 9e — none of the desktop integrations below are
 > implemented.** Each subsection describes the intended behavior and

@@ -94,6 +94,10 @@ raw HTML, and simplified URLs where possible. Unsanitized Markdown, HTML,
 images, files, and app-specific MIME formats remain available through explicit
 context-menu actions when policy allows them.
 
+Sanitization creates a tracked derivative. It does not erase lineage. A
+cross-silo transfer appends lineage, conservatively unions contamination
+labels, and records whether the payload was plain, sanitized, or unsanitized.
+
 ### No central clipboard daemon
 
 qdistro deliberately avoids a "clipboard service" that holds clipboard state

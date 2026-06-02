@@ -2,8 +2,10 @@
 
 ## Admin owns all hardware
 
-Regular user sessions (nested or TTY-fullscreen-escape) cannot directly open
-device nodes for sensitive hardware. Enforcement is layered:
+Regular nested sessions cannot directly open device nodes for sensitive
+hardware. Policy-approved fullscreen TTY sessions are the explicit exception:
+games, VR, and similar sessions may receive direct GPU/input/hidraw/audio
+grants scoped to that session and revoked on teardown. Enforcement is layered:
 
 1. **SELinux** (or AppArmor) policy denies `/dev/snd/*`, `/dev/video*`,
  Bluetooth sockets, NetworkManager D-Bus, etc. to non-admin contexts.
@@ -14,15 +16,18 @@ device nodes for sensitive hardware. Enforcement is layered:
 4. **polkit rules** — qdistro actions namespaced `org.qdistro.*` always
  route to admin's approval agent.
 
-Users access devices only via **virtualized endpoints** surfaced by
-admin-side services.
+Nested users access devices only via **virtualized endpoints** surfaced by
+admin-side services. Fullscreen hardware sessions use direct grants only when
+the session policy says so.
 
 ## Audio and camera — PipeWire
 
 PipeWire is the model that fits perfectly.
 
-- **Admin's host PipeWire daemon** owns ALSA, V4L2, and libcamera nodes.
- It's the only process with device-node access.
+- **Admin's host PipeWire daemon** owns ALSA, V4L2, and libcamera nodes for
+ nested-session use. In the default virtualized-device path, user sessions see
+ only PipeWire-mediated endpoints; policy-approved fullscreen sessions are the
+ explicit direct-grant exception.
 - **Per-user PipeWire instances** run inside each user session (via
  `systemd --user`). They link upward to admin's PipeWire as downstream
  clients.
@@ -141,3 +146,14 @@ Admin can adjust per user.
  whenever a sensitive device is live in *any* session. Hover shows which
  session and which device. Matches the mobile-OS convention.
 - **Hardware kill switches** always win over software grants.
+
+## Lock-time capture policy
+
+The lock screen is still the active privacy surface. Existing capture may
+continue only when the grant explicitly allows lock continuation. New capture
+requires admin unlock.
+
+The lock UI shows non-suppressible indicators for active microphone, camera,
+screen capture, system-audio capture, virtual input/accessibility control, and
+qdistro-specific network egress. Network egress is a qdistro extension to the
+usual mic/camera privacy-indicator model.

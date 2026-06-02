@@ -17,47 +17,37 @@ Searchable from the admin launcher:
 - Window / app / user filter ("everything in firefox work-user on
  thursday").
 
-## Privilege separation — `recall-user` (provisional)
+## Privilege separation — viewer grant
 
 Recall data is sensitive enough to deserve its own privilege compartment,
-distinct from admin's TCB. Rather than admin directly reading recall,
-qdistro introduces a dedicated **`recall-user`** role.
+distinct from admin's normal live session. Admin unlock proves owner presence
+for the machine, but it must not make historical Recall data ambiently
+readable by ordinary admin-session processes.
 
-This section is provisional. `recall-user` is a special system role, not a
-regular data silo, and its exact relation to the admin-only lock/unlock model is
-still open.
+Recall has two principals:
 
-- **Distinct uid**, created by admin. Not a regular data silo; a reader
- role.
-- **Read-only access** to `/var/lib/qdistro/recall/*` across all users
- (enforced via group membership + filesystem ACLs). Only
- `qdistro-recall@<user>.service` writes; only `recall-user` reads.
-- **Lives on its own pinned TTY** following the TTY-session model. A likely
- slot is **tty5+** because tty4 is reserved for the fallback desktop, but the
- specific allocation is one instance of a broader "pinned special-role session"
- pattern.
-- **Own compositor, not nested in admin's.** While recall-user's TTY is
- active, admin's compositor isn't displaying — so a compromised admin
- session *can't* passively snoop recall queries in progress.
-- **Authentication model open** — earlier drafts gave recall-user its own
- authentication. Current single-tenant lock design keeps unlock authority in
- admin. The final recall flow must reconcile recall privacy with the rule that
- non-admin sessions should not hold admin/root unlock credentials.
-- **Switching in = "open the time machine"** — the intended UX is a clear,
- dedicated recall context, but the final TTY, unlock, and lifecycle semantics
- are open.
+- **Capture/index service** — write-only from the live session's perspective.
+  It ingests screenshots, text, and structure, and cannot browse history.
+- **Viewer/query service** — holds read/decrypt authority only for a
+  time-boxed viewing grant after explicit re-authorization.
+
+`recall-user` remains a useful name for the viewer principal, but it is not a
+standing TTY that continuously owns read access. The viewer may be implemented
+as a pinned TTY, a dedicated secure surface, or a separate service plus UI; the
+security requirement is that decrypted Recall results are unavailable to the
+ordinary live admin session.
 
 Consequences:
 
 - If admin's live session is compromised, recall should not become ambiently
- readable. The exact mechanism is open because recall privacy must be reconciled
- with the admin-only unlock path.
+ readable. Admin can request a viewer grant, but the grant is explicit,
+ time-boxed, audited, and revoked on lock.
 - Recall queries live in a dedicated session context; no bleed into admin's
  normal workflow.
 - Admin manages the machine (users, vaults, policy); recall-user only
  *views* recall. Clear separation of duties.
 
-### What recall-user cannot do
+### What the viewer cannot do
 
 - Write recall data — read-only. The capture daemons are the sole source
  of truth.
@@ -81,8 +71,9 @@ A PyQt app in recall-user's session:
 Recall is a high-value attack target.
 
 - **Default off per user.** Admin opts in per user, never automatic.
-- **Encrypted at rest**, keyed to admin fingerprint + TPM (same sealing as
- password vaults). Unreadable when admin is locked.
+- **Encrypted behind the viewer gate.** Encryption-at-rest alone is not enough:
+ keys must be unavailable to ordinary live-session processes and released only
+ through the viewer/query grant.
 - **TTL** — default 30 days, admin-configurable; older captures
  auto-deleted.
 - **Exclusion lists** — URLs, apps, window titles, widget kinds marked
@@ -96,6 +87,10 @@ Recall is a high-value attack target.
 - **Visible indicator** — admin compositor shows a recall-active icon
  (top-right) whenever any user's recall is ingesting, matching mic/camera
  indicators.
+- **Viewing re-auth** — every viewing session requires a fresh, time-boxed
+ owner re-authorization and is logged.
+- **Lock behavior** — admin lock revokes active viewing grants and clears
+ decrypted thumbnails, snippets, query results, and viewer state.
 
 ## What is captured
 
@@ -112,11 +107,14 @@ Three streams per user:
  activations. Lightweight metadata stream used to reconstruct the
  timeline.
 
+Capture tiers are policy-controlled: metadata only, text, screenshots, OCR,
+and audio are separate opt-ins. The default should be narrow and visible.
+
 ## Architecture
 
 ```
  +----------------------------+
- | qdistro-recall@<user> | (per-user; systemd --user;
+ | qdistro-recall@<user> | (planned per-user writer/indexer;
  | .service | writes /var/lib/qdistro/recall/<user>/)
  +-------------+--------------+
  ^
@@ -131,7 +129,9 @@ Three streams per user:
 ```
 
 The WM is the only screenshot source. The SDK + browser bridge are the text
-sources. Subunit tracking is the structural-event source.
+sources. Subunit tracking is the structural-event source. Today the browser
+bridge can write `recall.push` rows directly; the planned service makes that
+write path explicit and centralizes indexing/query policy.
 
 ## Indexing
 
@@ -146,7 +146,8 @@ data local.
 
 ## Query API
 
-`qdistro-recall` exposes on `qbus-admin`:
+The planned `qdistro-recall` query service exposes viewer-gated methods on
+`qbus-admin`:
 
 ```
 SearchText(user, query, time_range) -> list[Hit]
@@ -159,16 +160,21 @@ Each `Hit` includes the user (colour-tagged), the window title and app
 identity, the subunit (tab URL / pane cwd / notebook name), the timestamp,
 and a snippet matching the query.
 
+Export is not a query method. Exporting Recall results is a declassification
+workflow that records destination, labels/security changes, approval, and
+lineage. See [workflows.md](workflows.md#export-and-declassification).
+
 ## UI surfaces by role
 
-- **recall-user's session** (primary) — full recall viewer. All opted-in
- users, full timeline, cross-user search, filter chips.
+- **Viewer grant/session** (primary) — full recall viewer. All opted-in
+ users, full timeline, cross-user search, filter chips, time-boxed grant.
 - **Per-user launcher** (narrow) — shows only that user's own recall, and
  only if admin policy enables it. Useful for "what was I doing yesterday
  in work-user?"
-- **Admin's launcher does *not* include recall search by default.** Admin
- accesses recall by VT-switching to recall-user's pinned TTY. Keeps admin's
- TCB-grade session out of the recall-data read path.
+- **Admin's launcher does *not* include ambient recall search by default.**
+ Admin requests a viewer grant. The final UI may be a pinned TTY, secure
+ surface, or separate viewer process, but decrypted results stay out of the
+ normal admin workflow.
 
 ## Apps opt in via the SDK
 
@@ -216,13 +222,15 @@ Consulted by the WM, the SDK, and the bridge before ingesting.
 
 - Path: `/var/lib/qdistro/recall/<user>/<year-month>/`.
 - Per-day SQLite DB + object storage for thumbnails.
-- The master key is derived from admin fingerprint + TPM. Unlocked only
- when admin is unlocked.
+- The master key is sealed so ordinary live-session processes cannot unwrap it.
+ Decryption authority is bound to the viewer/query grant, not merely to
+ "admin is unlocked."
 - Daily DB rolled over; old entries auto-deleted per TTL.
 - Size cap (e.g., 20GB per user) with FIFO eviction when the cap is hit.
 
-If the disk is stolen, recall is unrecoverable without admin's live
-fingerprint + TPM.
+If the disk is stolen, recall is unrecoverable without the required TPM/owner
+authorization material. Key recovery, backup, and deletion semantics remain
+open design items.
 
 ## Cost
 
@@ -235,27 +243,26 @@ Not free. Opt-in per user precisely because of this cost.
 
 ## Threat-model lessons from Microsoft Recall
 
-The 2024 Recall launch was pulled within weeks: the SQLite store and
-screenshots were plaintext on disk, readable by any malware running as the
-user. The 2025 relaunch added a VBS enclave, TPM-bound keys tied to
-Windows-Hello Enhanced Sign-in Security, proof-of-presence (re-auth on
-every query), opt-in only, anti-hammering rate limits, content filters,
-and Pluton on supported SKUs. The enclave holds. The **renderer process
-does not** — DLL injection into the user-context renderer pulls
-already-decrypted snapshots through legitimate COM.
+Microsoft's redesigned Recall documentation describes a stronger architecture
+than the original public preview: opt-in capture, filtering, TPM/Windows Hello
+binding, proof-of-presence for viewing, and protected storage. qdistro treats
+that as vendor-described prior art, not as proof against every live-session
+malware path.
 
-qdistro's design absorbs three lessons:
+qdistro's design absorbs four lessons:
 
 1. **The decrypted-render surface is the real attack target, not the
- at-rest blob.** "recall-user on its own pinned tty + own compositor"
- is a direct response: admin malware can't observe decrypted recall
- pixels because admin's compositor isn't even rendering while
- recall-user is active.
+ at-rest blob.** The viewer grant and separate viewer principal are direct
+ responses: decrypted pixels, snippets, thumbnails, clipboard content, logs,
+ accessibility output, and browser caches are all sensitive.
 2. **Per-query re-auth, not per-session.** Argues for fingerprint or
- biometric on every search, not just at VT-switch time.
- Annoying-by-design.
+ biometric on every viewing grant, not just at machine unlock. Annoying by
+ design.
 3. **Content filters at *capture* time, not at index time.** Pwd-manager
  surfaces and incognito browsing must be excluded by the *producer*
  (WM, SDK, browser bridge), not by post-hoc filtering on the index.
  The WM is the only enforcement layer that holds against a malicious
  app — SDK + bridge are advisory.
+4. **Export is declassification.** Exported snapshots, snippets, and query
+ results become ordinary data outside the protected store and must go through
+ workflow policy, lineage, and destination labeling.

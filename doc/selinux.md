@@ -316,6 +316,38 @@ Operational note: `virt_qemu_ga_t` (the qga's SELinux domain) cannot
 operate in enforcing mode. Drive enforcing-mode tests via SSH where root
 lands in `unconfined_u:unconfined_r:unconfined_t`.
 
+## Sensitive Resource Delivery
+
+SELinux can constrain path-based sensitive resource delivery, but qdistro
+should avoid paths when the consumer can accept a narrower mechanism.
+
+Preferred order:
+
+1. Authenticated `AF_UNIX` IPC plus `SCM_RIGHTS` fd passing or a scoped agent
+ socket for qdistro-controlled consumers. Verify peer credentials and SELinux
+ peer context, pass only to the intended process, and use close-on-exec
+ discipline.
+2. systemd credentials for systemd-managed tasks. Credentials are acquired at
+ activation, exposed through `$CREDENTIALS_DIRECTORY`, restricted to the
+ service user, and released on deactivation.
+3. Short-lived path-based delivery only for legacy consumers, using a dedicated
+ SELinux type, dedicated reader domain, DAC mode/ownership, lifecycle-bound
+ mount namespace, and optional MCS range separation.
+
+Type Enforcement answers "which domains may read secret material at all." MCS
+can add per-instance separation only when qdistro controls the launched
+process context/range. Sensitive sessions must not run in unconfined domains,
+and processes must not accumulate unrelated MCS categories.
+
+Same-session sibling attacks are part of the design surface: ptrace,
+inherited fds, `/proc/$pid/fd`, shell escapes, broad SELinux ranges, and
+LD_PRELOAD-style subversion all need either confinement or a delivery mode
+that gives siblings no path to open.
+
+The broker logs every grant, attach, detach, and delivery handle. SELinux AVCs
+cover denials; successful reads require explicit audit policy such as
+`auditallow`, so AVCs alone are not proof of every successful secret read.
+
 ## File context labelling
 
 A `qdistro-tier1-spawn` invocation looks like:

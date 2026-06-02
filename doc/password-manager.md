@@ -158,28 +158,42 @@ delivery is a real user action via admin's compositor UI.
 
 ## Delivery mechanism
 
-Three modes, per item or per request:
+Delivery uses the narrowest mechanism the consumer supports. Path or text
+delivery is a fallback, not the normal shape.
 
 1. **Direct D-Bus reply.** The daemon returns the payload on the same
  socket. Stays in app memory; no clipboard. Standard for API-style
  requests (browser extension, app with native secret integration).
-2. **Autotype.** The daemon delivers via simulated keystrokes into the
+2. **Agent socket / fd pass.** For SSH keys, signing keys, tokens consumed by
+ qdistro-controlled helpers, and other use-not-read cases, the daemon exposes
+ a scoped agent socket or passes an fd over authenticated `AF_UNIX` IPC.
+3. **systemd credentials.** For transient systemd-managed helpers, the daemon
+ can hand off material as a credential acquired at service activation and
+ released on deactivation.
+4. **Autotype.** The daemon delivers via simulated keystrokes into the
  currently-focused window, with compositor cooperation ensuring focus
  hasn't changed between trigger and delivery.
-3. **IME fill.** The qdistro compositor exposes a special input-method
+5. **IME fill.** The qdistro compositor exposes a special input-method
  backend; the daemon acts as the source. Cleaner than autotype (respects
  IME conventions, handles composition).
 
 **Never via clipboard.** Clipboards leak to other clients of the compositor.
 Not an acceptable delivery channel for secrets.
 
+Environment-variable and path delivery are exceptional legacy modes and must
+be tied to a controlled exec, mount namespace, SELinux context, and audit
+record when used.
+
 ## Polkit unlock
 
 `UnlockVault` for non-admin callers routes through the polkit action
-`org.qdistro.pwd.unlock` (default `auth_admin_keep` — admin auth, cached
-for the session). The daemon calls polkit's `CheckAuthorization` with the
-vault name + caller details before any unsealing. The admin uid bypasses
-polkit entirely.
+`org.qdistro.pwd.unlock`. The shipped qdistro polkit-agent config maps
+`org.qdistro.pwd.*` to PAM, so vault unlocks require a fresh admin password by
+default. Fingerprint and `auth_admin_keep` caching are policy alternatives, not
+the default vault-unlock ceremony.
+
+The daemon calls polkit's `CheckAuthorization` with the vault name + caller
+details before any unsealing. The admin uid bypasses polkit entirely.
 
 The actual prompt is rendered by whichever polkit AuthenticationAgent the
 admin's session has registered — qdistro ships one (see "polkit agent"
@@ -199,7 +213,8 @@ below).
 3. The daemon triggers a polkit action `org.qdistro.pwd.unlock.<vault>`.
 4. Admin's polkit agent shows a dialog in admin's compositor:
  "dev-user's firefox wants an item from the work vault."
-5. Admin fingerprint → the daemon unseals the vault master key via TPM.
+5. Admin password → the daemon unseals the vault master key via TPM. A policy
+ override may use fingerprint instead.
 6. The vault transitions to `unlocked`. The request proceeds through
  normal policy.
 7. The vault relocks on idle, suspend, or explicit lock.
@@ -216,8 +231,8 @@ dispatches `BeginAuthentication` to one of three methods:
 
 The method is picked per polkit action via fnmatch globs in
 `/etc/qdistro/polkit-agent.conf`. The default is `broker`. The shipped
-config maps `org.qdistro.pwd.*` to `pam` so vault unlocks always require
-a fresh admin password.
+config maps `org.qdistro.pwd.*` to `pam` so vault unlocks require a fresh
+admin password unless admin changes that policy.
 
 ## Portal Secret integration
 

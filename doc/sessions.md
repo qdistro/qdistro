@@ -75,6 +75,27 @@ User sessions can keep running while the machine is locked: downloads,
 already-approved network jobs, and other background work may continue. New
 privilege grants and new cross-silo approvals require admin to unlock first.
 
+"Already approved" is not sufficient by itself. A grant that may continue
+while locked carries an explicit lock-continuation bit. Starting new
+mic/camera/screen capture, virtual input, screencopy, new privilege grants,
+new resource attachments, and new cross-silo approvals requires admin unlock.
+
+Lock-time defaults:
+
+| Activity | Lock behavior |
+| --- | --- |
+| Audio output already playing | continue if grant allows continuation |
+| Active call media/capture | continue only if pre-approved for lock continuation |
+| New mic/camera/screen/system-audio capture | require unlock |
+| Virtual input / accessibility control | require unlock unless a specific workflow says otherwise |
+| Running games | keep process alive; rendering may pause or lose DRM depending on TTY state |
+| VR / immersive session | prefer presence/idle policy, not desktop lock alone |
+| Recall viewing | revoke viewer grant and clear decrypted results |
+
+The lock UI must show non-suppressible indicators for live microphone,
+camera, screencast/screen capture, system-audio capture, virtual input or
+accessibility control, and qdistro-specific network egress.
+
 User sessions do not run independent screenlockers and must not prompt for the
 admin/root password. When locked, the only unlock path is the admin locker. For
 TTY sessions, the visible seat is forced to the admin lock surface or kept
@@ -113,8 +134,20 @@ A silo can be attached to sessions in different ways: UI surfaces, directory
 mounts, app state, credentials, or one-shot transfers. Those attachment rules
 are not all the same. A source tree may be mounted in more than one session;
 a browser profile or signing authority may require stricter brokered use.
+See [attachments.md](attachments.md).
 
-### Silo states
+A silo also has an owner-facing workload definition: desired state, parameters,
+bootstrap steps, health checks, recovery actions, rollback policy, and
+capability guardrails. For that higher-level contract, see
+[silos.md](silos.md). The state machine below is the current implementation
+lifecycle for uid-backed silos, not the full health model.
+
+`Silo` is a resource kind. Future registry-backed implementations should expose
+`spec`, `status`, stable `uid`, `generation`, and finalizer-based deletion as
+defined in [resources.md](resources.md), even when the current implementation
+is still uid-backed.
+
+### Session-manager silo states
 
 The state machine has six states. Two of them (`Stopping`, `Deleting`)
 are transient — they're observable on the `SiloChanged` signal for UI
@@ -205,6 +238,9 @@ qdshell package (to be added in a follow-up task).
 5. Input is dispatched normally.
 
 No per-user auth at any point. One fingerprint, everything becomes reachable.
+Recall is the exception: admin unlock makes live sessions reachable, but it
+does not grant ambient historical Recall browsing. Recall viewing needs its own
+time-boxed viewer grant.
 
 ## Admin logout / compositor crash
 

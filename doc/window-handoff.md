@@ -35,6 +35,11 @@ normally local to admin's compositor, is bridged through waypipe to the
 target user's (or machine's) compositor. All protocol messages — surface,
 buffer, input, clipboard — flow over that bridge.
 
+waypipe is a transport, not a trust boundary. It does not by itself enforce
+qdistro policy or filter every privileged Wayland protocol. Handoff policy is
+enforced by the broker, compositor, nested compositor, SELinux, or VM boundary
+around the transport.
+
 ## Wayland constraint — one display connection per process
 
 A Wayland client normally has **one** `wl_display` per process. All its
@@ -122,6 +127,11 @@ Two tiers:
 
 Tier 1 for trusted first-party apps; tier 2 for third-party or
 defence-in-depth.
+
+UI sharing modes are distinct: read-only mirror, control transfer, and live
+shared authority. A single app window has one active controlling session at a
+time. New handoff/control grants require admin unlock unless an existing
+workflow explicitly has lock-continuation semantics.
 
 ## Cross-uid activation gate
 

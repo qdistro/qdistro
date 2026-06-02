@@ -15,7 +15,9 @@ qdistro uses multiple D-Bus instances, each for a specific concern. Benefits:
 - **Smaller blast radius** — compromise of the clipboard bus doesn't expose
  the permission-approval flow.
 - **Simpler policy** — each bus has its own rules file, easy to audit.
-- **No centralized broker** — no single daemon sees every call.
+- **No centralized transport broker** — no single bus daemon sees every
+ intra-user call. Cross-boundary authorization is intentionally centralized in
+ `qdistro-admin-broker`.
 
 | Bus | Instance type | Who connects | Purpose |
 |---------------------------|--------------------------------------------------|---------------------------------------------------------|------------------------------------------------------------------------------------|

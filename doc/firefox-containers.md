@@ -42,9 +42,10 @@ no daemon strictly needs them today.
 
 Direction matches the rest of the inbound surface (`tabs.*`,
 `page.extract.request`): the bridge is the initiator, the extension
-processes the request and replies. Already implemented in
-`qdfirefox-extension/src/modules/containers.js`; the bridge handlers
-do not exist yet.
+processes the request and replies. The extension-side dispatcher is
+implemented in `qdfirefox-extension/src/modules/containers.js`; the bridge
+routes these operations through the shared inbound request machinery rather
+than per-op bridge methods.
 
 ### `containers.list`
 
@@ -114,10 +115,9 @@ The reply echoes the deleted container's metadata — useful for an
 The bridge's `RequestTabs(s op, s args_json) -> s reply_json` method
 already routes every inbound op through one entry point (see
 [`todo/issues/qdistro/browser/02-page-extract-request-usage.md`](../../todo/issues/qdistro/browser/02-page-extract-request-usage.md)).
-The three `containers.*` ops add no new D-Bus surface — they just need
-`_handle_containers_list / _create / _remove` in
-`qdistro_browser_bridge.py`, mirroring the existing
-`_handle_tabs_list / _open / _close`.
+The three `containers.*` ops add no new D-Bus surface and no per-op bridge
+handler. They use `enqueue_inbound_request` plus the `*.reply` registrations
+in `DEFAULT_HANDLERS`.
 
 ## Cross-user routing
 
@@ -248,13 +248,12 @@ The **cross-uid relay** writes one journal line per
 
 Fields are space-separated `key=value` so `journalctl -u
 qdistro-user-relay | grep audit` is the audit-trail. The relay does
-**not** log container names, icons, or cookie_store_ids — those
-belong in the bridge's own audit (not yet implemented) so they aren't
-mirrored into a second log site.
+**not** log container names, icons, or cookie_store_ids — those belong in the
+bridge or consumer audit so they are not mirrored into a second log site.
 
-The **bridge-side journal logging** described in
-[browser.md §Audit](browser.md#audit) is not yet implemented for any
-op; that's a separate Phase-9 follow-up tracked in the private todo repo.
+Bridge-side journal logging follows [browser.md §Audit](browser.md#audit) for
+bridge-terminating operations. Container operations usually terminate at the
+calling daemon, so the consumer owns the detailed operation audit.
 
 ## Calling from a qdistro daemon
 

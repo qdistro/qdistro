@@ -29,6 +29,11 @@ Every qdistro action is polkit-namespaced: `org.qdistro.device.camera.claim`,
 `org.qdistro.network.join_interactive`, etc. polkit rules route them all to
 the admin PyQt agent by default.
 
+Actions operate on [resources](resources.md) and resource verbs. The action
+string remains the polkit namespace, but `details` should carry manifest-shaped
+resource identity, labels, typed security fields, lock state, workflow/run
+identity, and requested attachment semantics rather than a flat tag bag.
+
 ## Two broker entry points — synchronous check vs long-term ask
 
 The broker exposes two D-Bus methods. The distinction is about *user
@@ -103,21 +108,21 @@ Rule shape:
 
 ```yaml
 - match:
- action: org.qdistro.clipboard.send
- source_user: work-user
- target_user: dev-user
- mime: text/plain
- action: allow
+    action: org.qdistro.clipboard.send
+    source_user: work-user
+    target_user: dev-user
+    mime: text/plain
+  decision: allow
 
 - match:
- action: org.qdistro.device.camera.claim
- user: work-user
- app: /usr/bin/notebook
- action: allow_session
+    action: org.qdistro.device.camera.claim
+    user: work-user
+    app: /usr/bin/notebook
+  decision: allow_session
 
 - match:
- action: org.qdistro.device.microphone.claim
- action: prompt
+    action: org.qdistro.device.microphone.claim
+  decision: prompt
 ```
 
 Rules are matched top-to-bottom; first match wins. Unmatched requests fall
@@ -126,6 +131,12 @@ through to the polkit prompt.
 String selectors (`action`, `exe`, `app_id`, `mime_type`, `sandbox_engine`)
 accept fnmatch-style globs when the value contains `*`; exact match
 otherwise.
+
+The policy model is ABAC-shaped: subject identity, action, resource metadata,
+typed security fields, environment, lock state, and workflow context are policy
+inputs. Policy returns allow, deny, prompt, warn, transform, contaminate, or
+declassify. Labels are the fast selector path; annotations are not routine
+selectors.
 
 ## Python hooks
 
@@ -197,9 +208,13 @@ is one instance of a framework that coordinates across all qdistro primitives
 — clipboard, window handoff, device claims, file access, secret delivery to
 privileged tasks, remote service calls, VM / container lifecycle.
 
+The representation contract is in [workflows.md](workflows.md). The short
+version: a human/agent-readable Markdown plan is linked to a strict manifest
+that the broker can validate, policy-check, execute, and audit.
+
 ### Workflow shape
 
-A workflow is a declarative + scripted definition with:
+A workflow is a declarative manifest with:
 
 - **Triggers** — events that start the workflow: user action, clipboard
  event, app lifecycle, scheduled time, incoming request, file change.
@@ -210,6 +225,10 @@ A workflow is a declarative + scripted definition with:
 - **Roles** — which users and services participate and what each is allowed
  to do within the workflow's scope.
 - **Secrets-needed** — declared dependencies on vault items.
+- **Cleanup / compensation** — declared release and repair actions, with
+ terminal states for cleanup failure and human review.
+- **Lineage** — workflow-run id, input/output resource refs, approval refs,
+ and generated artifact refs.
 
 ### Example uses
 
@@ -232,11 +251,26 @@ Pattern — a task needs a secret from a vault:
 1. Workflow declares `needs: vault/dev/github-ssh-key`.
 2. Admin approves (polkit prompt or pre-authored rule).
 3. Pwd daemon unseals the item.
-4. Engine delivers via a narrow mechanism: ephemeral SSH agent socket,
- env var on exec, fd pass, or tmpfs file mounted into the task's namespace.
+4. Engine delivers via the narrowest mechanism the consumer supports.
 5. Task runs, consumes the secret.
-6. Engine scrubs: socket closed, tmpfs unmounted, env overwritten, kernel
- memory where possible.
+6. Engine scrubs: handle closed, socket closed, credential released, mount
+ namespace torn down, and audit/lineage finalized.
+
+Delivery preference:
+
+1. Authenticated `AF_UNIX` IPC with `SCM_RIGHTS` fd passing or an agent socket
+ for consumers qdistro controls. Verify peer credentials and SELinux context;
+ use close-on-exec discipline.
+2. systemd credentials for systemd-managed tasks. They are acquired at service
+ activation, exposed via `$CREDENTIALS_DIRECTORY`, restricted to the service
+ user, and released on deactivation.
+3. Short-lived path delivery only for legacy apps that require a path, with
+ dedicated SELinux type/domain, lifecycle-bound mount namespace, DAC mode, and
+ optional MCS range separation.
+
+Environment variables are discouraged for secrets except tightly controlled
+exec-only cases because they leak through process inspection, crash dumps,
+logs, and child processes.
 
 Identity verification: the secret is released only if the expected process
 (e.g., `git` in expected cgroup via `qsu`) is asking, not any process with
@@ -244,15 +278,20 @@ the right uid.
 
 ### Principles
 
-- **Workflow language is text** — YAML declarative + Python escape hatch.
- Both inspectable, both editable, both under git.
+- **Workflow language is text** — Markdown intent plus YAML/JSON manifest.
+ Side effects live in declared action handlers, not arbitrary workflow code.
 - **One policy brain** — the workflow engine extends the broker; no new
  daemon.
 - **Every workflow run is audited** — who ran it, when, what secrets were
- touched, what steps executed, outcome.
+ touched, what resources were attached, what steps executed, cleanup state,
+ lineage refs, and outcome.
 - **Human-in-the-loop remains default.** AI agents may draft workflows;
  admin approves. Auto-run workflows are opt-in per workflow per admin
  decision.
+
+New grants and new cross-silo approvals require admin unlock. A previously
+approved activity may continue while locked only when the grant explicitly has
+lock-continuation semantics and the relevant indicators remain visible.
 
 ## xdg-desktop-portal
 

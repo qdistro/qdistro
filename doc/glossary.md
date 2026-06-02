@@ -36,9 +36,9 @@ resources than to Unix users. Examples:
 - a one-shot transfer payload such as clipboard content, exported files, or a
   rendered image.
 
-Resources carry tags, policy, audit identity, and lineage metadata. A resource
-may be backed by a Linux uid, file, D-Bus service, VM, browser profile, or
-something else.
+Resources carry labels, annotations, security metadata, audit identity, and
+lineage references. A resource may be backed by a Linux uid, file, D-Bus
+service, VM, browser profile, or something else.
 
 `Resource` is a precise policy/API noun, not necessarily a simplified UI noun.
 The owner may ask an agent for a human-level task; the agent can translate that
@@ -55,12 +55,21 @@ Resources have a **kind**. Open candidate kinds include:
 - network route / namespace / proxy;
 - one-shot transfer payload.
 
+A resource **manifest** is the typed document the broker validates and applies.
+It has `apiVersion`, `kind`, `metadata`, `spec`, `security`, `lineageRefs`,
+`auditRefs`, and `status`. See [resources.md](resources.md).
+
+Labels are small indexed selectors; annotations are non-selector descriptive
+metadata; security fields are typed policy inputs. See
+[metadata.md](metadata.md).
+
 ## Silo
 
 A qdistro resource kind that packages an isolated program context with its
-state and data. A silo may be a single program, minimal VM, container,
+state, data, expected behavior, health checks, actions, rollback policy, and
+guarded capabilities. A silo may be a single program, minimal VM, container,
 uid-backed process group, browser profile logged into Gmail, or similar
-self-contained work unit.
+self-contained desktop workload.
 
 A silo is not a session. A silo can be attached to different sessions at
 different times, and some attachment types may allow the same silo to be used
@@ -79,6 +88,10 @@ Current code often backs a silo with a Linux uid, home subvolume, runtime dir,
 and cgroup scope. That is an implementation shape, not the whole concept.
 Containers, VMs, credential stores, and browser profiles can also be part of
 the silo model.
+
+Silo definitions are semistructured Markdown for now. They describe parameters,
+bootstrap steps, health checks, recovery actions, and agent/user guardrails.
+See [silos.md](silos.md).
 
 `Silo` is qdistro's term for this resource kind. Qubes uses "qube" / "domain"
 for isolated compartments; Kubernetes has "pods" as runnable groups of
@@ -133,6 +146,10 @@ receive a UI surface, a directory mount, a credential grant, or a one-shot
 transfer without becoming the silo's home. Detach semantics, sharing rules, and
 exclusive-use rules are per attachment type.
 
+Attachment subtypes are UI, filesystem, credential, app-state, and one-shot
+transfer. The broker records every attach/detach and the resulting capability
+handle. See [attachments.md](attachments.md).
+
 ## Workflow
 
 A declarative and optionally scripted plan that coordinates resources, actions,
@@ -148,12 +165,13 @@ For example, a Claude Code authentication workflow might declare:
 - transfer: return the generated code or callback result;
 - cleanup: detach the browser resource and restore the normal link handler.
 
-Workflow definitions live in the permissions/workflow model rather than being
-hardcoded product flows. See [permissions.md](permissions.md#workflows--universal-orchestration-engine).
+Workflow definitions live in the workflow model rather than being hardcoded
+product flows. See [workflows.md](workflows.md).
 
-Workflows can attach their own tags in addition to tags inherited from
-resources. Tags may describe origin, sensitivity, authority, project, client,
-workflow intent, contamination, or export state.
+Workflows can attach their own labels and security metadata in addition to
+metadata inherited from resources. Labels may describe project, client, or
+workflow intent; typed security fields describe sensitivity, authority,
+contamination, conflict classes, and export state.
 
 Workflows are dynamic plans. They may include conditions, agent-assisted GUI
 steps, approvals, and cleanup; they are not static deployment bundles.
@@ -171,6 +189,11 @@ and generated artifacts. Future versions may track finer-grained provenance
 such as file lines and individual UI actions. For example: "this commit was
 generated with Claude Code, authenticated through company Gmail, using source
 from project X and commit authority Y."
+
+qdistro uses W3C PROV vocabulary as a naming model: resources and artifacts are
+Entities, workflow runs and transfers are Activities, and admin, apps, agents,
+silos, and credential authorities are Agents. The authoritative store and
+enforcement are qdistro's responsibility. See [lineage.md](lineage.md).
 
 ## Clipboard
 

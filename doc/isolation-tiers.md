@@ -4,12 +4,12 @@ qdistro's isolation ladder is a graduated set of containment mechanisms,
 selectable per app or per user's default. Higher tier = stronger
 isolation = less seamless.
 
-The outer-compositor windowing contract is **the same at every tier**:
-every toplevel arrives via `qdwin_nested_manager_v1.advertise_toplevel`,
-identity is carried by `wp_security_context_v1`, and policy is enforced
-by the broker's clipboard / handoff gates. The tier choice affects what
-carries pixels and window-create events to the outer compositor, not how
-the outer renders them.
+The outer-compositor chrome and policy model is **the same at every tier**:
+qdwin owns the visible toplevel, qdshell decorates it, identity is carried by
+the best available secctx/process metadata, and policy is enforced by the
+broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
+`xdg_toplevel`; nested/container/VM paths advertise inner windows through
+`qdwin_nested_manager_v1.advertise_toplevel`.
 
 | Tier | Mechanism | Seamless? |
 |-------------------|-------------------------------------------------------------|-----------|

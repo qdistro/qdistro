@@ -179,6 +179,13 @@ to paint and place via the private protocol.
 
 ## Runtime environments
 
+`wp_security_context_v1` and qdistro secctx tags provide authenticated client
+identity metadata: sandbox engine, app id, instance id, silo, and process
+identity. They are not isolation by themselves. The compositor still enforces
+policy by deciding which clients may use privileged protocols such as
+screencopy, virtual input, clipboard transfer, activation, and lock-time
+capture.
+
 The compositor must work across a wide range of graphics stacks — not just
 "modern GPU on bare metal." A large share of qdistro development and a real
 share of deployment happens inside VMs where GPU acceleration ranges from

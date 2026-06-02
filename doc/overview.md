@@ -19,8 +19,9 @@ sessions that can attach resources for a task. A Linux uid is a useful
 isolation primitive, not the user-facing definition of a session.
 
 Design shorthand: **one owner, many silos, dynamic sessions**. The owner is the
-single human and policy authority. Silos are isolated program/data/state
-resources. Sessions are runtime contexts that reserve resources and attach
+single human and policy authority. Silos are isolated desktop workloads with
+program state, health checks, actions, rollback policy, and guarded
+capabilities. Sessions are runtime contexts that reserve resources and attach
 silos while work is happening.
 
 ## Single tenant
