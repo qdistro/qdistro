@@ -113,8 +113,7 @@ The reply echoes the deleted container's metadata — useful for an
 ## D-Bus exposure on the bridge
 
 The bridge's `RequestTabs(s op, s args_json) -> s reply_json` method
-already routes every inbound op through one entry point (see
-[`todo/issues/qdistro/browser/02-page-extract-request-usage.md`](../../todo/issues/qdistro/browser/02-page-extract-request-usage.md)).
+already routes every inbound op through one entry point.
 The three `containers.*` ops add no new D-Bus surface and no per-op bridge
 handler. They use `enqueue_inbound_request` plus the `*.reply` registrations
 in `DEFAULT_HANDLERS`.
@@ -334,6 +333,3 @@ forward-compatible regardless of which routing option above wins:
   the Firefox-containers gap in its op matrix.
 - [containers.md](containers.md) — *unrelated*: tier-2 podman containers.
 - [admin-approval.md](admin-approval.md) — Option C's policy substrate.
-- [`qdfirefox-extension/todo/08-bridge-protocol-alignment.md`](../../qdfirefox-extension/todo/08-bridge-protocol-alignment.md)
-  §"Bridge-side gaps the extensions assume work" — where the missing
-  bridge handlers were first surfaced.

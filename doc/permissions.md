@@ -302,8 +302,7 @@ requests through `qbus-admin` instead of the usual same-user approval. It
 is a PyQt service registered as `org.freedesktop.impl.portal.qdistro`.
 
 > Status (2026-05-16): doc-only. No portal backend ships yet; SDK
-> callers use direct D-Bus today. Tracked in
-> `todo/qdistro-portal-backend.md`.
+> callers use direct D-Bus today.
 
 ## What's implemented vs planned
 
@@ -408,19 +407,14 @@ falls through to the default-deny cross-silo rule path.
 `VerifyClientIdentity` and the three gate methods are denied to non-admin
 / default-context users by D-Bus policy (`org.qdistro.AdminBroker1.conf`);
 only the admin uid and root may call them.
-See `todo/decisions/secctx-identity-contract.md` and
-`todo/gpt-review/wider-codex-review.md` findings #1 and #2 (resolved).
 
 Doc-only / not yet wired:
 
 - **xdg-desktop-portal backend** (`org.freedesktop.impl.portal.qdistro`).
-  Tracked in `todo/qdistro-portal-backend.md`.
 - **Workflow engine** (triggers / steps / roles / secrets-needed) — the
   rule engine is the seed; the full orchestration framework is future.
-  Tracked in `todo/qdistro-workflow-engine.md`.
 - **Notification surface / tray-counter / mobile admin** — current Qt
-  admin app is an always-on window with no badge. Tracked in
-  `todo/qdistro-admin-notifications.md`.
+  admin app is an always-on window with no badge.
 
 ## Test coverage
 

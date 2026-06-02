@@ -43,6 +43,11 @@ kept in semistructured Markdown for now: desired state, parameters, bootstrap
 steps, health checks, actions, rollback policy, and capability guardrails. See
 [silos.md](silos.md).
 
+VM-backed silos additionally carry a guest definition reference. New Linux VM
+images should use the NixOS definition contract in
+[vm-definitions.md](vm-definitions.md), while qdistro policy remains expressed
+through the resource manifest.
+
 `metadata.name` is human-facing and may be reused after deletion.
 `metadata.uid` is broker-assigned, immutable, and used by audit, lineage,
 owner references, and capability handles.

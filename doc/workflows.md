@@ -70,7 +70,8 @@ Each action declares whether it is:
 - compensatable;
 - terminal;
 - allowed while locked;
-- allowed to produce or declassify data.
+- allowed to produce, contaminate, sanitize, or declassify data;
+- local, local-VM/container, remote-service, or unknown processing.
 
 Arbitrary Python belongs in explicit hooks or action handlers, not inside the
 policy-checkable manifest core.
@@ -134,6 +135,17 @@ Intent: authenticate a dev tool to Anthropic using an existing Google login.
 The resulting token is a credential resource. Future uses of it carry lineage
 back to the workflow run, browser profile, and approval that minted it.
 
+## VM Build Workflow
+
+Building or updating a VM-backed silo is a workflow. For new Linux VM images,
+the input should be a NixOS module or flake output as described in
+[vm-definitions.md](vm-definitions.md). The run records the definition ref,
+lock ref, builder, build command, output digest, image manifest, and health
+checks.
+
+The built image is an artifact, not authority by itself. Runtime permission
+still comes from qdistro resource grants, secctx identity, and broker policy.
+
 ## Export And Declassification
 
 Export is a workflow, not a viewer-only action. A sanitize/export step creates
@@ -143,10 +155,25 @@ metadata, and approval evidence.
 Recall export, rich clipboard transfer, browser upload, and commit creation
 all use this shape.
 
+For guarded inputs, the workflow records:
+
+- source entity refs and hashes;
+- requested destination and effective processing host;
+- transform or sanitizer action version;
+- output entity refs and hashes;
+- inherited guards, compartments, and conflict classes;
+- any narrowed guard set and the authority that approved it.
+
+Sanitization is a transform. Declassification is the authority-bearing decision
+that narrows security fields on the transformed output. The source remains
+guarded and the output remains derived from it.
+
 ## See Also
 
 - [resources.md](resources.md)
 - [attachments.md](attachments.md)
 - [metadata.md](metadata.md)
 - [lineage.md](lineage.md)
+- [guards.md](guards.md)
+- [vm-definitions.md](vm-definitions.md)
 - [permissions.md](permissions.md)
