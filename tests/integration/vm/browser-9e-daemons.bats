@@ -59,7 +59,10 @@ setup() {
 }
 
 @test "9e-daemons: four bus names owned on the user session bus" {
-    run vm_run_admin "busctl --user list | grep -Eo \
+    # vm_run/vm_run_admin already wrap the command in bats `run`, setting
+    # $status/$output in this scope; call it bare (a second `run` would
+    # capture vm_run_admin's own empty stdout and clobber $output).
+    vm_run_admin "busctl --user list | grep -Eo \
         'org.qdistro.(Mpris|Downloads|Notifications|Compositor)' | sort -u"
     [ "$status" -eq 0 ]
     [[ "$output" == *"org.qdistro.Compositor"* ]]
