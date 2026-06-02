@@ -148,6 +148,80 @@ setup() {
     grep -Eq 'smoke_repos=.*qfileman' "$BOOT"
 }
 
+# --- #20 (WEAK remediation): a broken QTermWidget binding is FATAL in the ---
+# daily-driver/release profiles, warn-only in dev. The warn-only version
+# (fail_or_warn, fatal only under --strict) shipped an unusable
+# /usr/bin/qterminator in the default release profile; these tests lock in
+# that the binding build AND the qterminator import smoke step now ABORT
+# (non-zero) for hardened profiles and still warn-and-continue under dev.
+
+# Source the bootstrap (functions only; main() is guarded by BASH_SOURCE!=0)
+# and run a single function with a forced-failing python3 (QTermWidget never
+# imports) under the requested profile. Echoes the function's exit status.
+_run_boot_fn() {
+    local profile="$1" fn="$2"
+    local shimdir reporoot
+    shimdir="$(mktemp -d)"
+    reporoot="$(mktemp -d)"
+    mkdir -p "$reporoot/qterminator"
+    # python3 shim that always fails -> "from QTermWidget import QTermWidget"
+    # is unimportable, the deterministic broken-binding condition.
+    printf '#!/usr/bin/env bash\nexit 1\n' >"$shimdir/python3"
+    chmod +x "$shimdir/python3"
+    # Run the function in a subshell so a die()/exit inside the hardened path
+    # only exits the subshell; the parent still reaches the echo to report rc.
+    run bash -c '
+        source "$1" 2>/dev/null
+        set +e   # the sourced bootstrap re-enables set -e; disable it again
+        export PATH="$2:$PATH"
+        ( QDISTRO_PROFILE="$3" REPO_ROOT="$4" '"$fn"' ) >/dev/null 2>&1
+        echo "rc=$?"
+    ' _ "$BOOT" "$shimdir" "$profile" "$reporoot"
+    rm -rf "$shimdir" "$reporoot"
+}
+
+@test "#20: fail_qterminator_binding helper exists (replaces warn-only fail_or_warn for the binding)" {
+    grep -q 'fail_qterminator_binding()' "$BOOT"
+    # The binding build + smoke import must route through it, NOT fail_or_warn.
+    grep -Eq 'fail_qterminator_binding "  QTermWidget binding' "$BOOT"
+    # The qterminator import smoke step is gated through the same helper.
+    grep -Eq 'fail_qterminator_binding "  import smoke check failed' "$BOOT"
+    # No leftover fail_or_warn calls for the QTermWidget binding (the bug).
+    run grep -E 'fail_or_warn ".*QTermWidget' "$BOOT"
+    [ "$status" -ne 0 ] || { echo "binding still routed through fail_or_warn:"$'\n'"$output" >&2; return 1; }
+}
+
+@test "#20: a broken QTermWidget binding ABORTS the build in daily-driver profile" {
+    _run_boot_fn daily-driver build_qtermwidget_binding
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    [ "$output" = "rc=1" ] || { echo "expected rc=1 (abort), got: $output" >&2; return 1; }
+}
+
+@test "#20: a broken QTermWidget binding ABORTS the build in release profile" {
+    _run_boot_fn release build_qtermwidget_binding
+    [ "$output" = "rc=1" ] || { echo "expected rc=1 (abort), got: $output" >&2; return 1; }
+}
+
+@test "#20: dev profile still WARNs (non-fatal) on a broken QTermWidget binding" {
+    _run_boot_fn dev build_qtermwidget_binding
+    [ "$output" = "rc=0" ] || { echo "expected rc=0 (warn-and-continue), got: $output" >&2; return 1; }
+}
+
+@test "#20: fail_qterminator_binding itself is fatal in hardened, warn in dev" {
+    # Direct unit check of the gate independent of the build wrapper.
+    run bash -c '
+        source "$1" 2>/dev/null
+        set +e   # the sourced bootstrap re-enables set -e; disable it again
+        ( QDISTRO_PROFILE=daily-driver; fail_qterminator_binding x >/dev/null 2>&1 ); echo "dd=$?"
+        ( QDISTRO_PROFILE=release;      fail_qterminator_binding x >/dev/null 2>&1 ); echo "rel=$?"
+        ( QDISTRO_PROFILE=dev;          fail_qterminator_binding x >/dev/null 2>&1 ); echo "dev=$?"
+    ' _ "$BOOT"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    echo "$output" | grep -q 'dd=1'  || { echo "daily-driver not fatal: $output" >&2; return 1; }
+    echo "$output" | grep -q 'rel=1' || { echo "release not fatal: $output" >&2; return 1; }
+    echo "$output" | grep -q 'dev=0' || { echo "dev not warn-and-continue: $output" >&2; return 1; }
+}
+
 # --- #21: desktop/metainfo/icon assets ----------------------------------
 
 @test "#21: bootstrap installs desktop/metainfo/icon assets for qterminator + qfileman" {

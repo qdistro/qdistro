@@ -251,6 +251,26 @@ fail_or_warn() {
     fi
 }
 
+# fail_qterminator_binding — classify a QTermWidget SIP-binding failure. The
+# binding is a HARD runtime requirement of qterminator (terminal.py does
+# `from QTermWidget import QTermWidget` at import time): without it the
+# /usr/bin/qterminator we install dies with ModuleNotFoundError at first
+# launch (finding #20). So in the daily-driver/release profiles a
+# missing/unbuildable/unimportable binding must FAIL VISIBLY — shipping an
+# install-time-broken terminal as a "daily driver" or release artifact is not
+# acceptable. The dev (disposable) profile keeps the warn-and-continue
+# behaviour so a throwaway VM that does not care about the terminal can still
+# bootstrap the rest of the apps. Independent of --strict (which is about
+# package/build core ops): the usable-terminal guarantee is a
+# daily-driver/release invariant of its own, mirroring fail_subvol.
+fail_qterminator_binding() {
+    if is_dev; then
+        warn "$*"
+    else
+        die "$* — fatal in '$QDISTRO_PROFILE' profile (qterminator is unusable without the QTermWidget binding; install the distro qtermwidget python binding, ship qterminator/qtermwidget-pyqt/, or use --profile=dev to warn-and-continue)"
+    fi
+}
+
 # fail_subvol — classify a btrfs per-silo subvolume failure. The subvolume is
 # the snapshot + quota boundary, so a daily-driver/release install that
 # cannot create it is broken and must FAIL VISIBLY. The dev profile may
@@ -1198,7 +1218,7 @@ build_qtermwidget_binding() {
         return 0
     fi
     if [ ! -x "$sip" ]; then
-        fail_or_warn "  QTermWidget binding builder not found at $sip — qterminator will fail to launch (missing QTermWidget). Install the distro qtermwidget python binding or ship qterminator/qtermwidget-pyqt/."
+        fail_qterminator_binding "  QTermWidget binding builder not found at $sip — qterminator will fail to launch (missing QTermWidget). Install the distro qtermwidget python binding or ship qterminator/qtermwidget-pyqt/."
         return 0
     fi
     log "  building QTermWidget SIP binding (qterminator/qtermwidget-pyqt)..."
@@ -1206,10 +1226,10 @@ build_qtermwidget_binding() {
         if python3 -c "from QTermWidget import QTermWidget" >/dev/null 2>&1; then
             log "  QTermWidget binding installed + importable"
         else
-            fail_or_warn "  QTermWidget binding built but still not importable — qterminator will fail at launch"
+            fail_qterminator_binding "  QTermWidget binding built but still not importable — qterminator will fail at launch"
         fi
     else
-        fail_or_warn "  QTermWidget binding build failed (need qmake6 + qtermwidget-devel + pyqt-builder) — qterminator will fail at launch"
+        fail_qterminator_binding "  QTermWidget binding build failed (need qmake6 + qtermwidget-devel + pyqt-builder) — qterminator will fail at launch"
     fi
 }
 
@@ -1250,8 +1270,10 @@ pip_install_apps() {
     # lightweight import smoke check per app so a broken dependency closure is
     # flagged loudly now instead of at first use. Maps each pip package to its
     # importable top-level module (verified against each repo's package dir /
-    # pyproject [tool.setuptools.packages.find]). Non-fatal: WARN, same as the
-    # install step above.
+    # pyproject [tool.setuptools.packages.find]). Most apps WARN on a failed
+    # import; qterminator's failure is FATAL in hardened profiles (finding #20,
+    # via fail_qterminator_binding) because a terminal that cannot import its
+    # QTermWidget binding is unusable at first launch.
     log "  import smoke check (qdgreeter, qdlocker, qdbrowser, qterminator, qfileman)..."
     # In hardened profiles the modules live under the isolated prefix, so
     # point PYTHONPATH at it for the smoke import (matches the /usr/bin
@@ -1280,9 +1302,19 @@ pip_install_apps() {
         if [ -f "$REPO_ROOT/$smoke/pyproject.toml" ]; then
             local mod
             mod="$(smoke_module "$smoke")"
-            QT_QPA_PLATFORM=offscreen PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 \
-                python3 -c "import $mod" \
-                || warn "  import smoke check failed: \"import $mod\" — $smoke installed but a runtime dependency is missing (e.g. QTermWidget binding for qterminator; --no-deps skips dep resolution); the app may fail to launch"
+            if QT_QPA_PLATFORM=offscreen PYTHONPATH="$smoke_pp" PYTHONNOUSERSITE=1 \
+                    python3 -c "import $mod"; then
+                : # importable
+            elif [ "$smoke" = qterminator ]; then
+                # qterminator's import failure means the QTermWidget binding
+                # was not resolved — the terminal is unusable at first launch.
+                # Hardened (daily-driver/release) profiles must abort here
+                # rather than ship a broken /usr/bin/qterminator; only the dev
+                # throwaway profile warns and continues (finding #20).
+                fail_qterminator_binding "  import smoke check failed: \"import $mod\" — qterminator installed but the QTermWidget binding is missing (--no-deps skips dep resolution); the terminal will fail to launch"
+            else
+                warn "  import smoke check failed: \"import $mod\" — $smoke installed but a runtime dependency is missing (--no-deps skips dep resolution); the app may fail to launch"
+            fi
         fi
     done
 }
