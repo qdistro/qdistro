@@ -32,13 +32,18 @@ setup() {
     # They are socket/dbus-activated, so a busctl introspect is enough to
     # spawn them; we start them explicitly here to fail loud if a unit is
     # missing rather than silently skipping.
-    vm_run "systemctl --user is-active --quiet qdistro-mpris.service \
+    # These are admin's (uid 1000) per-user units; `systemctl --user` only
+    # reaches them as that user. Under qga, vm_run runs as root with no
+    # XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS, so a root `systemctl --user`
+    # fails to connect to any user bus — use vm_run_admin like the rest of the
+    # --user suite (and the @test/wait_for_bus_name below).
+    vm_run_admin "systemctl --user is-active --quiet qdistro-mpris.service \
             || systemctl --user start qdistro-mpris.service"
-    vm_run "systemctl --user is-active --quiet qdistro-downloads.service \
+    vm_run_admin "systemctl --user is-active --quiet qdistro-downloads.service \
             || systemctl --user start qdistro-downloads.service"
-    vm_run "systemctl --user is-active --quiet qdistro-notifications.service \
+    vm_run_admin "systemctl --user is-active --quiet qdistro-notifications.service \
             || systemctl --user start qdistro-notifications.service"
-    vm_run "systemctl --user is-active --quiet qdistro-compositor.service \
+    vm_run_admin "systemctl --user is-active --quiet qdistro-compositor.service \
             || systemctl --user start qdistro-compositor.service"
 
     # `systemctl start` of a Type=dbus unit returns once the BusName is
@@ -54,7 +59,7 @@ setup() {
 }
 
 @test "9e-daemons: four bus names owned on the user session bus" {
-    run vm_run "busctl --user list | grep -Eo \
+    run vm_run_admin "busctl --user list | grep -Eo \
         'org.qdistro.(Mpris|Downloads|Notifications|Compositor)' | sort -u"
     [ "$status" -eq 0 ]
     [[ "$output" == *"org.qdistro.Compositor"* ]]
