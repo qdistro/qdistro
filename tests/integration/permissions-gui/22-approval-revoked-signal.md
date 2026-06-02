@@ -87,25 +87,65 @@ $VMGUI "$VM" screenshot /tmp/22-s1-launched.png
   header lines from dbus-monitor's startup) does NOT yet contain
   the substring `member=ApprovalRevoked` — no signal has fired.
 
-### S2 — switch to Cache tab, select row, click Revoke
+### S2 — keyboard: reach Cache tab, select row, press Revoke
+
+Mouse clicks are platform-blocked on the labwc/XWayland template
+(AGENTS.md §3b), so drive the whole revoke path with the keyboard via
+`virsh send-key` (the blessed input path, §3a). After launch the
+window focuses the Pending list; one **Shift+Tab** moves focus back to
+the tab bar, **Right** switches Pending→Cache, **Tab** enters the
+Cache table, **Down** selects the `test.action` row (sets the table's
+`currentIndex`, which `btn_revoke` acts on), a second **Tab** moves
+focus from the table OUT to the `btn_revoke` button, and **Space**
+activates it. The Tab-out-of-table step relies on the Cache table
+having `tabKeyNavigation` disabled — Qt's default traps Tab inside the
+view, which would make `btn_revoke` unreachable by keyboard with a row
+selected.
 
 ```bash
-# >>> Runner: OCR /tmp/22-s1-launched.png to find the `Cache` tab
-# header; click it. Then OCR the new screenshot for the row containing
-# `test.action`; click any cell in that row; then OCR for the `Revoke`
-# button and click it. (Same pattern as scenario 10.)
+# Re-focus the window so the evdev send-key events land on it.
+B64=$(base64 -w0 <<'EOF'
+runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
+  --name "admin approvals" windowactivate --sync
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+sleep 0.5
+
+# Shift+Tab: Pending list -> tab bar.
+virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_TAB
+sleep 0.3
+# Right: Pending -> Cache tab.
+virsh send-key "$VM" --codeset linux KEY_RIGHT
+sleep 0.3
 $VMGUI "$VM" screenshot /tmp/22-s2a-cache-tab.png
-# (runner clicks `Cache` tab)
+# Tab: focus into the Cache table.
+virsh send-key "$VM" --codeset linux KEY_TAB
+sleep 0.3
+# Down: select the test.action row (sets currentIndex).
+virsh send-key "$VM" --codeset linux KEY_DOWN
+sleep 0.3
 $VMGUI "$VM" screenshot /tmp/22-s2b-row-selected.png
-# (runner clicks the test.action row)
-$VMGUI "$VM" screenshot /tmp/22-s2c-after-revoke.png
-# (runner clicks `Revoke`)
+# Tab: focus OUT of the table to btn_revoke (needs tabKeyNavigation off).
+virsh send-key "$VM" --codeset linux KEY_TAB
+sleep 0.3
+# Space: activate the focused Revoke button.
+virsh send-key "$VM" --codeset linux KEY_SPACE
 sleep 1
+$VMGUI "$VM" screenshot /tmp/22-s2c-after-revoke.png
 ```
 
-**Assert** (`/tmp/22-s2c-after-revoke.png`):
-- Cache tab table is empty (no `test.action` row).
+**Assert**:
+- `/tmp/22-s2a-cache-tab.png`: the Cache tab is selected and shows the
+  `test.action` row (table is non-empty before revoke).
+- `/tmp/22-s2c-after-revoke.png`: Cache tab table is empty (no
+  `test.action` row).
 - No error dialog appeared.
+
+(Screenshots are coarse on this template — AGENTS.md "Ground truth".
+The authoritative checks are the dbus-monitor log in S3 and the audit
+row in S4, which prove the revoke actually fired with the right
+payload.)
 
 ### S3 — exactly one signal, correct payload
 
