@@ -282,7 +282,35 @@ class TestInboundCallerAuth:
         ok, reason = bb._inbound_caller_authorized(
             _AuthConn(my, 4242), ":1.55")
         assert ok is False
-        assert "non-python-interp" in reason
+        assert "non-system-interp" in reason
+
+    def test_non_canonical_interpreter_denied(self, monkeypatch):
+        """A python interpreter that is NOT a root-owned binary at a
+        canonical system bindir (e.g. an attacker-built /tmp/python3) is
+        denied even with a perfect argv — /proc/exe is non-forgeable, so we
+        anchor on its canonical root-owned location."""
+        my = os.getuid()
+        real = _a_real_root_file()
+        monkeypatch.setattr(bb, "TRUSTED_INBOUND_SCRIPTS", frozenset({real}))
+        _fake_proc(monkeypatch, exe="/tmp/python3",
+                   argv=["/tmp/python3", real])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "non-system-interp" in reason
+
+    def test_relative_script_argv_denied(self, monkeypatch):
+        """A relative argv[1] is rejected outright (it would otherwise be
+        realpath()'d against the daemon cwd, which is not an identity)."""
+        my = os.getuid()
+        monkeypatch.setattr(bb, "TRUSTED_INBOUND_SCRIPTS",
+                            frozenset({"qdistro_mpris_daemon.py"}))
+        _fake_proc(monkeypatch, exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3", "qdistro_mpris_daemon.py"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "script-not-trusted" in reason
 
     def test_cross_uid_denied(self, monkeypatch):
         my = os.getuid()

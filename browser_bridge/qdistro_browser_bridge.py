@@ -1568,8 +1568,12 @@ def _is_trusted_root_file(path: str, allowed: frozenset) -> bool:
     """True iff ``path`` realpaths to an absolute path on ``allowed`` AND the
     resolved file is a regular file owned by root and not group/other
     writable. Fail closed on any error. Shared "canonical, system-managed
-    file" predicate (see the TRUSTED_INBOUND_SCRIPTS rationale)."""
-    if not path:
+    file" predicate (see the TRUSTED_INBOUND_SCRIPTS rationale).
+
+    The input must already be ABSOLUTE — a relative argv[1] would otherwise
+    be realpath()'d against the *daemon's* cwd, which is not the attacker's
+    file but is also not a meaningful identity; reject it outright."""
+    if not path or not os.path.isabs(path):
         return False
     try:
         real = os.path.realpath(path)
@@ -1585,6 +1589,35 @@ def _is_trusted_root_file(path: str, allowed: frozenset) -> bool:
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         return False
     return True
+
+
+# Trusted system bindirs the python interpreter behind a daemon must live
+# under. /proc/<pid>/exe is kernel-set (non-forgeable), so requiring the exe
+# to be a root-owned, non-writable interpreter at a canonical bindir removes
+# the weaker "basename python3 from anywhere" signal.
+_TRUSTED_INTERP_BINDIRS: tuple[str, ...] = (
+    "/usr/bin/", "/bin/", "/usr/local/bin/",
+)
+
+
+def _is_trusted_interpreter(exe: str) -> bool:
+    """True iff ``exe`` (a resolved /proc/<pid>/exe) is a root-owned,
+    non-writable system python interpreter at a canonical bindir. Fail
+    closed on any error."""
+    if not exe or not os.path.isabs(exe):
+        return False
+    base = os.path.basename(exe)
+    if base not in _TRUSTED_INTERP_BASENAMES:
+        return False
+    if not any(exe.startswith(d) and "/" not in exe[len(d):]
+               for d in _TRUSTED_INTERP_BINDIRS):
+        return False
+    try:
+        st = os.stat(exe)
+    except OSError:
+        return False
+    return (stat.S_ISREG(st.st_mode) and st.st_uid == 0
+            and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
 
 
 def _proc_cmdline(pid: int) -> list[str]:
@@ -1645,9 +1678,12 @@ def _attest_inbound_caller(pid: int) -> tuple[bool, str]:
     exe = _pi.read_exe(pid)
     if not exe or exe == "?":
         return False, "exe-unreadable"
+    # /proc/<pid>/exe is kernel-set and non-forgeable: require it to be a
+    # root-owned, non-writable system python at a canonical bindir, not just
+    # the right basename from anywhere.
+    if not _is_trusted_interpreter(exe):
+        return False, f"non-system-interp exe={exe!r}"
     interp = os.path.basename(exe).strip()
-    if interp not in _TRUSTED_INTERP_BASENAMES:
-        return False, f"non-python-interp exe={exe!r}"
     script = _caller_script_path(_proc_cmdline(pid))
     if not script:
         return False, "no-script"
