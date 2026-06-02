@@ -10,6 +10,20 @@ container, VM, browser profile, credential store, or a mix of those
 implementation pieces. The user-facing object is "this workload with this
 state and authority", not "this Unix account".
 
+The name comes from the older enterprise-architecture sense of a silo: a
+department, team, or tool keeps some data, workflow, login, key, cloud account,
+or operational authority separate from the rest of the organization. Sometimes
+that separation is accidental fragmentation; sometimes it is deliberate because
+only one group should be able to reach a system or act with a particular
+authority.
+
+qdistro keeps the word because the same shape appears on a single workstation.
+Work, personal, development, browser profiles, signing keys, cloud CLIs, and
+throwaway apps should not all share one ambient desktop authority. qdistro turns
+that familiar "siloed access" idea into an explicit local resource with visible
+identity, lifecycle, policy gates, audit, and brokered ways to cross the
+boundary.
+
 Examples:
 
 - `dev-source`: editor, terminal, source tree, build cache, no commit keys.
