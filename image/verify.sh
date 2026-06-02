@@ -233,8 +233,24 @@ expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
 # A short bounded settle absorbs only first-boot bring-up timing; the permanent
 # ExecStart-failure case is already caught definitively by the 203/EXEC journal
 # check above.
-expect "qdlocker.service reaches active (not failed/activating)" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do st=\$(systemctl --user is-active qdlocker.service); [ \"\$st\" = active ] && { echo \"qdlocker is-active=active (try \$i)\"; exit 0; }; sleep 1; done; echo \"qdlocker is-active=\$st (never reached active)\"; exit 1'"
+#
+# Crash-loop hardening: reaching `active` once is not enough — a unit that
+# becomes active briefly and then exits under Restart=always could be sampled
+# during an active window. So after first reaching active we settle, then
+# require ActiveState=active AND SubState=running AND a low restart count
+# (NRestarts<=1) so a flapping locker fails the gate.
+expect "qdlocker.service reaches and holds active/running (not flapping)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
+            sleep 1
+        done
+        sleep 3
+        read as ss nr <<EOF2
+\$(systemctl --user show -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
+EOF2
+        echo \"qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+        [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
