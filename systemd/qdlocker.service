@@ -63,4 +63,14 @@ RestartSec=2
 # default.target for the user manager is the right target for an
 # always-on user service. PartOf=graphical-session.target above ties
 # our lifetime to the session so we go down cleanly on logout.
-WantedBy=default.target
+#
+# qdwin-session.target is the production qdistro desktop session
+# (greetd -> qdwin-session-launcher -> `systemctl --user start
+# qdwin-session.target`). The session target also Wants= this unit, so
+# the locker comes up with the desktop; declaring it WantedBy= here means
+# `systemctl --user enable qdlocker.service` installs the .wants symlink
+# under qdwin-session.target.wants/ in addition to default.target.wants/,
+# making qdlocker a first-class member of the qdwin-session deployment
+# path (finding #16). Keeping default.target too preserves the
+# standalone/test-VM bring-up that does not use a session target.
+WantedBy=default.target qdwin-session.target
