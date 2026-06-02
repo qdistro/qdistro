@@ -571,6 +571,7 @@ gate_preflight() {
     check_optional "bats" "command -v bats"
     check_optional "meson" "command -v meson"
     check_optional "ninja" "command -v ninja"
+    check_optional "pkg-config" "command -v pkg-config"
     check_optional "npm" "command -v npm"
     check_optional "zola" "command -v zola"
     check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
