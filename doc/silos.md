@@ -191,6 +191,12 @@ update_sources:
 - qdistro-package
 - app-native-updater
 
+agent_review: required_for_untrusted_sources
+agent_review_sources:
+- github-repo
+- npm-package-with-postinstall
+- obsidian-plugin-from-github
+
 app_rollback: supported
 state_rollback: partial
 state_rollback_notes: Cookies and local settings can be restored from a
@@ -208,6 +214,8 @@ update_health_checks:
 auto_update_guardrails:
 - If the app has a native auto-updater, qdistro must detect version changes.
 - Run required health checks after an observed auto-update.
+- If an update comes from GitHub, npm postinstall scripts, unsigned plugins, or
+  another untrusted source, require agent review before install or activation.
 - If an auto-update fails and app rollback is unavailable, mark `failed` and
   request user action instead of pretending rollback is possible.
 ```
@@ -346,7 +354,14 @@ update_sources:
 - container-image
 - app-native-updater
 - browser-extension-store
+- github-repo
+- npm-package
+- obsidian-plugin
 - manual-installer
+
+agent_review: never | optional | required | required_for_untrusted_sources
+agent_review_sources:
+- <source name or pattern>
 
 app_rollback: supported | partial | not_supported
 state_rollback: supported | partial | not_supported
@@ -370,6 +385,34 @@ Meanings:
 - `manual`: the owner or agent follows an update action runbook.
 - `forbidden`: the silo must not update except by replacing the definition or
   base image.
+
+Some updates need review before install or activation even when the user asked
+for the update. A silo should require agent review for sources that execute
+installer code, bypass a trusted package repository, or add executable plugin
+surface.
+
+Examples:
+
+- an app installed or updated directly from a GitHub repository;
+- an npm package with `preinstall`, `install`, or `postinstall` scripts;
+- an Obsidian plugin installed from GitHub or another unsigned source;
+- a browser/editor/desktop plugin that can run code inside an authority-bearing
+  profile;
+- a manual installer downloaded from a vendor site.
+
+Agent review should produce a short decision record before the update proceeds.
+At minimum it should capture:
+
+- source URL, commit/tag/version, and hash when available;
+- install or update commands;
+- whether installer scripts run;
+- requested permissions or new capabilities;
+- changed network, filesystem, secret, or plugin surfaces;
+- rollback support for app, state, and data;
+- whether the update should be allowed, denied, or require owner confirmation.
+
+The review does not make arbitrary code safe. It is a policy gate that keeps
+untrusted update mechanisms visible, auditable, and reversible where possible.
 
 Rollback dimensions are separate:
 
