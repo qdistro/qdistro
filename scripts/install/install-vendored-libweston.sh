@@ -41,14 +41,28 @@ PREFIX=${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}
 
 BUILD_SCRIPT="$QDWIN_SRC/libweston-vendored/build-libweston.sh"
 
+# Locate the source libdir under $PREFIX without assuming lib64: meson installs
+# to lib64 on openSUSE but to the arch multiarch dir (lib/x86_64-linux-gnu) on
+# Debian/Ubuntu, and build-libweston.sh deliberately does not force --libdir.
+# Echoes the directory holding libweston-14.so.0*, or nothing if not built.
+find_srclib() {
+    local so
+    so=$(ls "$PREFIX"/lib64/libweston-14.so.0* \
+            "$PREFIX"/lib/*/libweston-14.so.0* \
+            "$PREFIX"/lib/libweston-14.so.0* 2>/dev/null | head -n1 || true)
+    [ -n "$so" ] && dirname "$so"
+}
+
 # 1. Ensure a built production prefix exists. Build it on demand if the
 #    caller didn't pre-stage one (and the qdwin source tree is present).
-if [ ! -d "$PREFIX/lib64" ]; then
+SRCLIB=$(find_srclib)
+if [ -z "$SRCLIB" ]; then
     if [ -x "$BUILD_SCRIPT" ]; then
         echo "vendored libweston prefix '$PREFIX' missing — building (production profile)..."
         QDWIN_LIBWESTON_PROFILE=production \
             QDWIN_LIBWESTON_PREFIX="$PREFIX" \
             bash "$BUILD_SCRIPT"
+        SRCLIB=$(find_srclib)
     else
         echo "ERROR: no built prefix at '$PREFIX' and no build script at" >&2
         echo "       '$BUILD_SCRIPT'. Build the production profile first:" >&2
@@ -59,12 +73,12 @@ fi
 
 # 2. Sanity: the core .so and at least the drm backend must be present.
 #    A headless-only prefix (the test profile) is not shippable.
-if ! ls "$PREFIX"/lib64/libweston-14.so.0* >/dev/null 2>&1; then
-    echo "ERROR: $PREFIX/lib64 has no libweston-14.so.0 — wrong/incomplete prefix" >&2
+if [ -z "$SRCLIB" ] || ! ls "$SRCLIB"/libweston-14.so.0* >/dev/null 2>&1; then
+    echo "ERROR: no libweston-14.so.0 under $PREFIX (lib64 or lib/<arch>) — wrong/incomplete prefix" >&2
     exit 2
 fi
-if [ ! -f "$PREFIX/lib64/libweston-14/drm-backend.so" ]; then
-    echo "ERROR: $PREFIX/lib64/libweston-14/drm-backend.so missing —" >&2
+if [ ! -f "$SRCLIB/libweston-14/drm-backend.so" ]; then
+    echo "ERROR: $SRCLIB/libweston-14/drm-backend.so missing —" >&2
     echo "       this looks like a headless-only (test) build, not production." >&2
     echo "       Rebuild with QDWIN_LIBWESTON_PROFILE=production." >&2
     exit 2
@@ -82,9 +96,9 @@ if command -v weston >/dev/null 2>&1; then
     weston_needed=$(objdump -p "$(command -v weston)" 2>/dev/null \
             | sed -n 's/.*NEEDED *\(libweston-[0-9]*\.so\.[0-9]*\).*/\1/p') || true
     want=${weston_needed%%$'\n'*}
-    if [ -n "$want" ] && [ ! -e "$PREFIX/lib64/$want" ]; then
+    if [ -n "$want" ] && [ ! -e "$SRCLIB/$want" ]; then
         echo "ERROR: system weston needs '$want' but vendored prefix has none" >&2
-        ls -1 "$PREFIX"/lib64/libweston-14.so* >&2 || true
+        ls -1 "$SRCLIB"/libweston-14.so* >&2 || true
         exit 2
     fi
     [ -n "$want" ] && echo "ABI check: system weston needs $want, vendored prefix provides it"
@@ -99,10 +113,12 @@ TMP="$DEST.new.$$"
 rm -rf "$TMP"
 install -d -m 0755 "$TMP/lib64/libweston-14"
 
-# Core library + its versioned symlinks.
-cp -a "$PREFIX"/lib64/libweston-14.so* "$TMP/lib64/"
+# Core library + its versioned symlinks. Source libdir is discovered
+# (lib64 or lib/<arch>); the staged tree is always lib64 — the layout the
+# qdwin runtime's LD path on the (openSUSE) image expects.
+cp -a "$SRCLIB"/libweston-14.so* "$TMP/lib64/"
 # Backends (drm/pipewire/rdp/wayland/x11/headless/...) + xwayland.
-cp -a "$PREFIX"/lib64/libweston-14/*.so "$TMP/lib64/libweston-14/" 2>/dev/null || true
+cp -a "$SRCLIB"/libweston-14/*.so "$TMP/lib64/libweston-14/" 2>/dev/null || true
 
 # Bundled libdisplay-info, when the production build vendored it. weston-14
 # links libdisplay-info.so.1 (ABI 1, soname libdisplay-info.so.1); the
@@ -110,12 +126,12 @@ cp -a "$PREFIX"/lib64/libweston-14/*.so "$TMP/lib64/libweston-14/" 2>/dev/null |
 # vendored weston fails to load with "libdisplay-info.so.1: cannot open
 # shared object file" and every session start falls back / dies until the
 # lib is hand-copied. The production profile builds libdisplay-info as a
-# meson subproject and installs it into $PREFIX/lib64 alongside the core, so
-# copy it from there into the vendored tree (which is on LD_LIBRARY_PATH).
+# meson subproject and installs it into the prefix libdir alongside the core,
+# so copy it from there into the vendored tree (which is on LD_LIBRARY_PATH).
 # Tolerate its absence: a profile that links the system libdisplay-info
 # (compatible ABI) won't have one here, and that's fine.
-if ls "$PREFIX"/lib64/libdisplay-info.so* >/dev/null 2>&1; then
-    cp -a "$PREFIX"/lib64/libdisplay-info.so* "$TMP/lib64/"
+if ls "$SRCLIB"/libdisplay-info.so* >/dev/null 2>&1; then
+    cp -a "$SRCLIB"/libdisplay-info.so* "$TMP/lib64/"
     echo "  bundled libdisplay-info: $(ls -1 "$TMP"/lib64/libdisplay-info.so.[0-9]* 2>/dev/null | tail -n1)"
 fi
 
