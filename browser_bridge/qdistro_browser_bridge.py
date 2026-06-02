@@ -62,8 +62,14 @@ initiate browser-bound operations. The object lives at
 
   * The D-Bus sender's uid/pid are resolved via
     ``GetConnectionUnixUser`` / ``GetConnectionUnixProcessID`` and the
-    caller must be same-uid AND on the trusted-caller policy
-    (:func:`_inbound_caller_authorized`).
+    caller must be same-uid AND be one of the *specific legitimate
+    qdistro daemons* that drive this surface — authorized by its
+    resolved executable identity (the python interpreter behind
+    ``/proc/<pid>/exe`` plus the daemon SCRIPT path it is running),
+    anchored against PID reuse by the process starttime
+    (:func:`_inbound_caller_authorized`). Same-uid is necessary but NOT
+    sufficient: an arbitrary same-session process (which IS the desktop
+    user) is denied.
   * ``op`` is checked against :data:`INBOUND_OP_ALLOWLIST`
     (:func:`_inbound_op_allowed`). Page-extraction-class ops
     (:data:`INBOUND_EXTRACT_OPS`) are denied by default and only
@@ -98,7 +104,20 @@ import struct
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
+
+# Shared /proc identity readers (anti-PID-reuse starttime anchor, exe
+# resolution). Lives under broker/; add it to sys.path so the inbound
+# RequestTabs gate can attest the *real* caller (a specific qdistro
+# daemon) rather than trusting any same-uid session-bus process.
+_BROKER_DIR = Path(__file__).resolve().parent.parent / "broker"
+if str(_BROKER_DIR) not in sys.path:
+    sys.path.insert(0, str(_BROKER_DIR))
+try:
+    import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 — fail closed if readers are unavailable
+    _pi = None  # type: ignore[assignment]
 
 # Allowlist of acceptable parent-process exe paths. Per spec/14:
 # RPM-only support matrix; sandboxed-browser support is explicitly
@@ -1426,31 +1445,170 @@ def heartbeat_loop(out_stream,
 
 # Inbound op allowlist. The RequestTabs surface forwards *only* these
 # ops to the extension; anything else is denied before
-# enqueue_inbound_request runs (fail closed). Page-extraction-class ops
-# are NOT in the default set — they read arbitrary page content and are
-# only reachable when explicitly enabled via
-# QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT=1.
+# enqueue_inbound_request runs (fail closed).
+#
+# This set is derived from the extension's REAL inbound dispatcher —
+# ``handleInboundRequest``'s ``switch (op)`` in
+# ``browser_bridge/extension/background.js``. Only ops the extension
+# actually handles on the inbound path belong here. In particular:
+#
+#   * ``mpris.control`` IS a real inbound op (admin media widget ->
+#     originating tab; sent by qdistro_mpris_daemon via RequestTabs and
+#     handled by ``handleMprisControlInbound``). Omitting it broke
+#     legitimate media Play/Pause/Next — it MUST be allowlisted.
+#   * Outbound-only ops the extension *initiates* (``mpris.publish``,
+#     ``downloads.notify``, ``screenlock.inhibit``/``release``,
+#     ``cookies.export``) are NOT handled by the inbound switch, so they
+#     must NOT appear in this inbound allowlist.
+#
+# Page-extraction-class ops are NOT in the default set — they read
+# arbitrary page content and are only reachable when explicitly enabled
+# via QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT=1 (see INBOUND_EXTRACT_OPS).
 INBOUND_OP_ALLOWLIST: frozenset[str] = frozenset({
     "tabs.list",
     "tabs.open",
     "tabs.close",
-    "mpris.publish",
-    "downloads.notify",
-    "notifications.show",
-    "screenlock.inhibit",
-    "screenlock.release",
     "containers.list",
     "containers.create",
     "containers.remove",
+    "notifications.show",
+    "mpris.control",
 })
 
-# Page-extraction-class ops: high-risk (exfiltrate page content / cookies)
-# and therefore opt-in only.
+# Page-extraction-class op: high-risk (exfiltrates arbitrary page
+# content) and therefore opt-in only. ``page.extract.request`` is the
+# only extraction op the extension's inbound switch handles;
+# ``cookies.export`` is deliberately NOT inbound-dispatchable (it must be
+# extension-initiated with intent-token validation), so it is neither
+# allowlisted nor in this extract set.
 INBOUND_EXTRACT_OPS: frozenset[str] = frozenset({
-    "page.extract",
     "page.extract.request",
-    "cookies.export",
 })
+
+
+# ---- trusted inbound CALLER identity (finding #7) --------------------
+#
+# The RequestTabs surface is a per-session bus name reachable by *any*
+# same-uid process — and the attacker class here IS the desktop user, so
+# a same-uid gate alone authorizes the whole attacker class. We therefore
+# authorize only the SPECIFIC legitimate qdistro daemons that drive this
+# surface, by their resolved executable identity (anti-PID-reuse anchored
+# on starttime). Same-uid remains a necessary precondition but is no
+# longer sufficient.
+#
+# In-tree callers of ``RequestTabs(op, args_json)`` (grep: "RequestTabs"):
+#   * browser_daemons/qdistro_mpris_daemon.py  (mpris.control -> tab)
+#   * user_relay/qdistro_user_relay.py         (broker -> bridge relay)
+# Both are launched by systemd as ``/usr/bin/python3 <script.py>`` (see
+# their .service ExecStart), so ``/proc/<pid>/exe`` is the python
+# interpreter and the DAEMON identity lives in the script path. We
+# authorize on the SCRIPT BASENAME running under a python interpreter,
+# requiring the resolved interpreter exe to look like a system python and
+# the script to be one of the known daemon scripts. The script's
+# directory is intentionally not pinned (install prefixes vary:
+# /usr/libexec/qdistro vs /usr/local/lib/qdistro vs an in-tree checkout)
+# — the basename + python-interpreter pairing is the stable signal.
+#
+# ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` may NARROW this set (replace
+# it with a comma-separated allowlist of script basenames); it can never
+# authorize an arbitrary process because the python-interpreter exe check
+# and starttime anchor still apply, and the value only further restricts
+# which scripts qualify.
+TRUSTED_INBOUND_SCRIPTS: frozenset[str] = frozenset({
+    "qdistro_mpris_daemon.py",
+    "qdistro_user_relay.py",
+})
+
+# Basenames accepted as the python interpreter behind a trusted caller's
+# ``/proc/<pid>/exe``. Anchors the "this is a packaged python daemon"
+# half of the identity so a random ELF named like a script can't pass.
+_TRUSTED_INTERP_BASENAMES: tuple[str, ...] = (
+    "python3", "python", "python3.10", "python3.11", "python3.12",
+    "python3.13",
+)
+
+
+def _trusted_inbound_scripts() -> frozenset[str]:
+    """Resolve the trusted-caller script-basename allowlist.
+
+    Defaults to :data:`TRUSTED_INBOUND_SCRIPTS`. The env var
+    ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` (comma-separated basenames)
+    REPLACES the default only with a NARROWER set: any name it lists that
+    is not already a built-in trusted script is ignored, so the override
+    can never widen the allowlist to an arbitrary script.
+    """
+    raw = os.environ.get("QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS", "")
+    requested = {tok.strip() for tok in raw.split(",") if tok.strip()}
+    if not requested:
+        return TRUSTED_INBOUND_SCRIPTS
+    return frozenset(requested & TRUSTED_INBOUND_SCRIPTS)
+
+
+def _proc_cmdline(pid: int) -> list[str]:
+    """NUL-split ``/proc/<pid>/cmdline`` argv, or ``[]`` (fail closed)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [a.decode("utf-8", "replace")
+            for a in raw.split(b"\x00") if a]
+
+
+def _caller_script_basename(argv: list[str]) -> str:
+    """Best-effort: the python SCRIPT basename a python daemon is running.
+
+    For ``python3 /path/qdistro_mpris_daemon.py [args...]`` this is
+    ``qdistro_mpris_daemon.py``. Skips interpreter flags (``-X..``,
+    ``-E``, ``-S``, ``-O`` ...) and ``-m module`` is treated as no script
+    (returns ``""`` -> denied; the daemons are launched by path, not -m).
+    Returns ``""`` when no script argument is present.
+    """
+    if not argv:
+        return ""
+    args = argv[1:]  # skip argv[0] (the interpreter itself)
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "-m":
+            return ""  # module launch: not the by-path daemon form
+        if tok == "-c":
+            return ""  # inline program: no script file
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return os.path.basename(tok)
+    return ""
+
+
+def _attest_inbound_caller(pid: int) -> tuple[bool, str]:
+    """Attest that ``pid`` is one of the trusted qdistro daemons.
+
+    Anti-PID-reuse: requires a non-zero starttime (the kernel's recycle
+    anchor). Requires ``/proc/<pid>/exe`` to resolve to a system python
+    interpreter AND the running script's basename to be in the (possibly
+    env-narrowed) trusted-script allowlist. Fail closed on any unreadable
+    field. Returns ``(ok, detail)``; ``detail`` feeds the audit log.
+    """
+    if _pi is None:
+        return False, "no-proc-identity"
+    if pid <= 0:
+        return False, "bad-pid"
+    starttime = _pi.read_starttime(pid)
+    if not starttime:  # 0 -> gone / unreadable: anti-PID-reuse fail-closed
+        return False, "zero-starttime"
+    exe = _pi.read_exe(pid)
+    if not exe or exe == "?":
+        return False, "exe-unreadable"
+    interp = os.path.basename(exe).strip()
+    if interp not in _TRUSTED_INTERP_BASENAMES:
+        return False, f"non-python-interp exe={exe!r}"
+    script = _caller_script_basename(_proc_cmdline(pid))
+    if not script:
+        return False, "no-script"
+    if script not in _trusted_inbound_scripts():
+        return False, f"script-not-trusted script={script!r}"
+    return True, f"script={script} interp={interp} starttime={starttime}"
 
 
 def _inbound_op_allowed(op: str) -> tuple[bool, str]:
@@ -1468,25 +1626,32 @@ def _inbound_op_allowed(op: str) -> tuple[bool, str]:
 
 
 def _inbound_caller_authorized(conn, sender: str) -> tuple[bool, str]:
-    """Authenticate the D-Bus caller of an inbound RequestTabs.
+    """Authenticate + authorize the D-Bus caller of an inbound RequestTabs.
 
     Resolves the sender's uid + pid via
     ``org.freedesktop.DBus.GetConnectionUnixUser`` /
-    ``GetConnectionUnixProcessID`` and authorizes against a narrow
-    policy:
+    ``GetConnectionUnixProcessID`` and authorizes against a NARROW
+    trusted-caller identity:
 
       * The caller MUST be the same uid as the bridge (cross-uid callers
-        are always denied).
-      * AND it must satisfy the trusted-caller policy. By default only
-        the bridge's own uid is trusted; an operator can widen this with
-        a configurable allowlist of trusted uids via
-        ``QDISTRO_BRIDGE_INBOUND_TRUSTED_UIDS`` (comma-separated). The
-        same-uid requirement is always additionally enforced, so the env
-        var can only *narrow*, never escalate across users.
+        are always denied). This is *necessary but NOT sufficient* — the
+        attacker class is the desktop user itself, so a same-uid gate
+        alone would authorize every same-session process (finding #7).
+      * AND the resolved pid must attest as one of the SPECIFIC
+        legitimate qdistro daemons that drive this surface — a packaged
+        python interpreter running a known daemon script
+        (:func:`_attest_inbound_caller`), anchored against PID reuse by
+        the process starttime. An arbitrary same-uid process (random exe
+        / random script) is DENIED.
 
-    Fail closed: a sender we cannot resolve (missing sender, bus error)
-    is denied. Returns ``(allowed, reason)``; ``reason`` includes the
-    resolved uid/pid for the audit log.
+    The env-var narrowing
+    (``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS``) can only *restrict* the
+    daemon-script allowlist, never authorize an arbitrary process.
+
+    Fail closed: a sender we cannot resolve (missing sender, bus error,
+    unreadable ``/proc``) is denied. Returns ``(allowed, reason)``;
+    ``reason`` includes the resolved uid/pid + attestation detail for the
+    audit log.
     """
     if not sender:
         return False, "no-sender"
@@ -1517,24 +1682,12 @@ def _inbound_caller_authorized(conn, sender: str) -> tuple[bool, str]:
     my_uid = os.getuid()
     if uid != my_uid:
         return False, f"cross-uid uid={uid} pid={pid}"
-    trusted = _trusted_inbound_uids(my_uid)
-    if uid not in trusted:
-        return False, f"uid-not-trusted uid={uid} pid={pid}"
-    return True, f"caller-ok uid={uid} pid={pid}"
-
-
-def _trusted_inbound_uids(my_uid: int) -> frozenset[int]:
-    """Resolve the trusted-caller uid policy. Always includes the
-    bridge's own uid; an operator may add more via the env var, but the
-    same-uid gate in :func:`_inbound_caller_authorized` still applies so
-    a foreign uid added here is a no-op (defense in depth)."""
-    uids = {my_uid}
-    raw = os.environ.get("QDISTRO_BRIDGE_INBOUND_TRUSTED_UIDS", "")
-    for tok in raw.split(","):
-        tok = tok.strip()
-        if tok.isdigit():
-            uids.add(int(tok))
-    return frozenset(uids)
+    if pid is None or pid <= 0:
+        return False, f"pid-unresolved uid={uid}"
+    ok, detail = _attest_inbound_caller(pid)
+    if not ok:
+        return False, f"caller-not-trusted uid={uid} pid={pid} {detail}"
+    return True, f"caller-ok uid={uid} pid={pid} {detail}"
 
 
 def _audit_inbound(member: str, op: str, decision: str,

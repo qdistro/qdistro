@@ -6,14 +6,18 @@ and NO op allowlist: any same-session process that reached the per-bridge
 bus name could open/close tabs or extract page content.
 
 These tests pin:
-  * the op allowlist (fail closed; page-extraction opt-in only),
-  * the caller authorization (same-uid AND trusted; fail closed for
-    unresolved/cross-uid callers),
+  * the op allowlist (fail closed; page-extraction opt-in only) derived
+    from the extension's REAL inbound switch — including ``mpris.control``,
+  * the caller authorization: same-uid is NECESSARY BUT NOT SUFFICIENT —
+    an arbitrary same-uid process (random exe / random script) is DENIED,
+    and only the specific legitimate qdistro daemon scripts (attested via
+    /proc exe + script basename, anchored on starttime) are ALLOWED,
   * the full ``inbound_dbus_serve`` dispatch denying an unauthorized
     caller and an unknown op before any forward to the extension.
 
-Each test fails against the old behavior (no gate) and passes after the
-fix.
+The caller-auth tests deliberately FAIL against a same-uid-sufficient
+implementation (the broken finding #7 remediation): an arbitrary same-uid
+caller running a random exe must be denied.
 """
 from __future__ import annotations
 
@@ -40,15 +44,38 @@ spec.loader.exec_module(bb)
 # ---- op allowlist ----------------------------------------------------
 
 class TestInboundOpAllowlist:
+    # The allowlist must equal the extension's REAL inbound switch(op)
+    # (handleInboundRequest in background.js): tabs.list/open/close,
+    # containers.list/create/remove, notifications.show, mpris.control.
     @pytest.mark.parametrize("op", [
-        "tabs.list", "tabs.open", "tabs.close", "mpris.publish",
-        "notifications.show", "containers.list",
+        "tabs.list", "tabs.open", "tabs.close",
+        "containers.list", "containers.create", "containers.remove",
+        "notifications.show", "mpris.control",
     ])
     def test_allowlisted_ops_allowed(self, op):
         ok, _ = bb._inbound_op_allowed(op)
         assert ok is True
 
+    def test_mpris_control_is_allowed(self):
+        """Regression for the broken finding #7 remediation: mpris.control
+        is a REAL inbound op (admin media widget -> tab, sent by
+        qdistro_mpris_daemon via RequestTabs). It MUST be allowed or
+        legitimate media Play/Pause/Next is denied."""
+        ok, reason = bb._inbound_op_allowed("mpris.control")
+        assert ok is True
+        assert reason == "op-allowed"
+
+    def test_bogus_op_is_denied(self):
+        ok, reason = bb._inbound_op_allowed("totally.bogus.op")
+        assert ok is False
+        assert reason == "op-not-allowlisted"
+
     @pytest.mark.parametrize("op", [
+        # Outbound-only ops the extension *initiates*; they are NOT in the
+        # inbound switch, so the inbound surface must deny them.
+        "mpris.publish", "downloads.notify", "screenlock.inhibit",
+        "screenlock.release", "cookies.export",
+        # genuinely unknown ops.
         "", "qdistro.handshake", "pwd.fill", "clipboard.set",
         "totally.unknown", "tabs.list.reply",
     ])
@@ -58,7 +85,7 @@ class TestInboundOpAllowlist:
         assert reason in ("op-not-allowlisted",)
 
     @pytest.mark.parametrize("op", [
-        "page.extract", "page.extract.request", "cookies.export",
+        "page.extract.request",
     ])
     def test_extract_ops_denied_by_default(self, op, monkeypatch):
         monkeypatch.delenv("QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT",
@@ -68,7 +95,7 @@ class TestInboundOpAllowlist:
         assert reason == "op-extract-disabled"
 
     @pytest.mark.parametrize("op", [
-        "page.extract", "page.extract.request", "cookies.export",
+        "page.extract.request",
     ])
     def test_extract_ops_allowed_only_with_optin(self, op, monkeypatch):
         monkeypatch.setenv("QDISTRO_BRIDGE_INBOUND_ALLOW_EXTRACT", "1")
@@ -106,20 +133,119 @@ class _AuthConn:
         return r
 
 
+def _fake_proc(monkeypatch, *, exe, argv, starttime=999):
+    """Make the /proc identity readers describe a single fake caller.
+
+    ``exe`` is the resolved ``/proc/<pid>/exe`` target (the interpreter
+    for a python daemon); ``argv`` is the NUL-split cmdline (argv[0] =
+    interpreter, then the script path + args).
+    """
+    assert bb._pi is not None, "proc-identity readers must be importable"
+    monkeypatch.setattr(bb._pi, "read_starttime", lambda pid: starttime)
+    monkeypatch.setattr(bb._pi, "read_exe", lambda pid: exe)
+    monkeypatch.setattr(bb, "_proc_cmdline", lambda pid: list(argv))
+
+
+# A legitimate caller: systemd launches the daemons as
+# `/usr/bin/python3 <install>/qdistro_mpris_daemon.py` (see .service
+# ExecStart), so exe is the interpreter and the script identifies the
+# daemon.
+_LEGIT_MPRIS = dict(
+    exe="/usr/bin/python3",
+    argv=["/usr/bin/python3", "/usr/libexec/qdistro/qdistro_mpris_daemon.py"])
+_LEGIT_RELAY = dict(
+    exe="/usr/bin/python3",
+    argv=["/usr/bin/python3", "/usr/local/lib/qdistro/qdistro_user_relay.py"])
+
+
 class TestInboundCallerAuth:
     def test_no_sender_denied(self):
         ok, reason = bb._inbound_caller_authorized(_AuthConn(0, 0), "")
         assert ok is False and reason == "no-sender"
 
-    def test_same_uid_trusted_allowed(self):
+    def test_arbitrary_same_uid_caller_denied(self, monkeypatch):
+        """The CORE finding-#7 regression: an arbitrary same-uid process
+        (the desktop user running some random binary) must be DENIED.
+
+        This FAILS against the broken same-uid-sufficient version, which
+        authorized every same-session process.
+        """
         my = os.getuid()
+        _fake_proc(monkeypatch,
+                   exe="/usr/bin/evil-tool",
+                   argv=["/usr/bin/evil-tool", "--pwn"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "caller-not-trusted" in reason
+
+    def test_same_uid_random_python_script_denied(self, monkeypatch):
+        """Even a same-uid python process is denied unless it is running
+        one of the specific trusted daemon scripts."""
+        my = os.getuid()
+        _fake_proc(monkeypatch,
+                   exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3", "/home/user/attacker.py"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "script-not-trusted" in reason
+
+    def test_legit_mpris_daemon_allowed(self, monkeypatch):
+        """The real qdistro_mpris_daemon (python interpreter running the
+        known daemon script) is ALLOWED."""
+        my = os.getuid()
+        _fake_proc(monkeypatch, **_LEGIT_MPRIS)
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is True
+        assert "caller-ok" in reason
+        assert "qdistro_mpris_daemon.py" in reason
+
+    def test_legit_user_relay_allowed(self, monkeypatch):
+        my = os.getuid()
+        _fake_proc(monkeypatch, **_LEGIT_RELAY)
         ok, reason = bb._inbound_caller_authorized(
             _AuthConn(my, 4242), ":1.55")
         assert ok is True
         assert "caller-ok" in reason
 
-    def test_cross_uid_denied(self):
+    def test_legit_daemon_but_cross_uid_denied(self, monkeypatch):
+        """Same-uid is necessary: a cross-uid caller is denied even if it
+        would otherwise attest as a trusted daemon."""
         my = os.getuid()
+        _fake_proc(monkeypatch, **_LEGIT_MPRIS)
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my + 1, 4242), ":1.55")
+        assert ok is False
+        assert reason.startswith("cross-uid")
+
+    def test_zero_starttime_denied(self, monkeypatch):
+        """Anti-PID-reuse: a zero starttime (process gone / unreadable) is
+        the fail-closed signal even for the right exe/script."""
+        my = os.getuid()
+        _fake_proc(monkeypatch, starttime=0, **_LEGIT_MPRIS)
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "zero-starttime" in reason
+
+    def test_spoofed_script_name_but_non_python_exe_denied(self, monkeypatch):
+        """A random ELF named like a daemon script (argv[1] looks right)
+        but whose interpreter exe is NOT python is denied — the python
+        interpreter pairing anchors the identity."""
+        my = os.getuid()
+        _fake_proc(monkeypatch,
+                   exe="/home/user/qdistro_mpris_daemon.py",
+                   argv=["/home/user/qdistro_mpris_daemon.py"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "non-python-interp" in reason
+
+    def test_cross_uid_denied(self, monkeypatch):
+        my = os.getuid()
+        _fake_proc(monkeypatch, **_LEGIT_MPRIS)
         ok, reason = bb._inbound_caller_authorized(
             _AuthConn(my + 1, 4242), ":1.55")
         assert ok is False
@@ -131,16 +257,29 @@ class TestInboundCallerAuth:
         assert ok is False
         assert reason == "uid-unresolved"
 
-    def test_trusted_uids_env_cannot_escalate_cross_uid(self, monkeypatch):
-        """Adding a foreign uid to the trusted env var must NOT let a
-        cross-uid caller through — the same-uid gate still applies."""
+    def test_trusted_scripts_env_narrows_only(self, monkeypatch):
+        """The env override may only NARROW: setting it to exclude the
+        mpris daemon denies it; it can never authorize an arbitrary
+        script not already built-in."""
         my = os.getuid()
-        monkeypatch.setenv("QDISTRO_BRIDGE_INBOUND_TRUSTED_UIDS",
-                           str(my + 7))
+        # Narrow to relay only -> mpris denied.
+        monkeypatch.setenv("QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS",
+                           "qdistro_user_relay.py")
+        _fake_proc(monkeypatch, **_LEGIT_MPRIS)
         ok, reason = bb._inbound_caller_authorized(
-            _AuthConn(my + 7, 4242), ":1.55")
+            _AuthConn(my, 4242), ":1.55")
         assert ok is False
-        assert reason.startswith("cross-uid")
+        assert "script-not-trusted" in reason
+        # An arbitrary script named in the env var is NOT authorized.
+        monkeypatch.setenv("QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS",
+                           "attacker.py")
+        _fake_proc(monkeypatch,
+                   exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3", "/home/user/attacker.py"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "script-not-trusted" in reason
 
 
 # ---- full dispatch integration --------------------------------------
@@ -220,6 +359,12 @@ def _run_serve(monkeypatch, conn, stop):
                           request_timeout_s=0.5)
 
 
+def _trust_caller(monkeypatch):
+    """Make /proc attestation describe a legit qdistro daemon so the
+    dispatch tests can isolate the op-allowlist / forward behavior."""
+    _fake_proc(monkeypatch, **_LEGIT_MPRIS)
+
+
 class TestInboundDispatchGate:
     def test_cross_uid_caller_denied_no_forward(self, monkeypatch):
         """A cross-uid caller is denied with AccessDenied and the op is
@@ -228,6 +373,7 @@ class TestInboundDispatchGate:
         monkeypatch.setattr(
             bb, "enqueue_inbound_request",
             lambda *a, **k: forwarded.append(a) or {"ok": True})
+        _trust_caller(monkeypatch)  # even an attestable daemon, cross-uid
         stop = threading.Event()
         my = os.getuid()
         conn = _DispatchConn(my + 1, 4242,
@@ -237,13 +383,34 @@ class TestInboundDispatchGate:
         assert ("error", "org.freedesktop.DBus.Error.AccessDenied") \
             in conn.sent
 
+    def test_arbitrary_same_uid_caller_denied_no_forward(self, monkeypatch):
+        """A same-uid caller that is NOT an attestable trusted daemon is
+        denied before any forward — the finding-#7 regression at the
+        dispatch layer."""
+        forwarded = []
+        monkeypatch.setattr(
+            bb, "enqueue_inbound_request",
+            lambda *a, **k: forwarded.append(a) or {"ok": True})
+        _fake_proc(monkeypatch,
+                   exe="/usr/bin/evil-tool",
+                   argv=["/usr/bin/evil-tool"])
+        stop = threading.Event()
+        my = os.getuid()
+        conn = _DispatchConn(
+            my, 4242, _request_tabs_msg("tabs.list", ":1.7"), stop)
+        _run_serve(monkeypatch, conn, stop)
+        assert forwarded == []
+        assert ("error", "org.freedesktop.DBus.Error.AccessDenied") \
+            in conn.sent
+
     def test_unknown_op_denied_no_forward(self, monkeypatch):
-        """An authorized same-uid caller asking for a non-allowlisted op
+        """An authorized (attested) caller asking for a non-allowlisted op
         is still denied before any forward."""
         forwarded = []
         monkeypatch.setattr(
             bb, "enqueue_inbound_request",
             lambda *a, **k: forwarded.append(a) or {"ok": True})
+        _trust_caller(monkeypatch)
         stop = threading.Event()
         my = os.getuid()
         conn = _DispatchConn(
@@ -260,6 +427,7 @@ class TestInboundDispatchGate:
         monkeypatch.setattr(
             bb, "enqueue_inbound_request",
             lambda *a, **k: forwarded.append(a) or {"ok": True})
+        _trust_caller(monkeypatch)
         stop = threading.Event()
         my = os.getuid()
         conn = _DispatchConn(
@@ -268,17 +436,36 @@ class TestInboundDispatchGate:
         assert forwarded == []
 
     def test_authorized_allowlisted_op_forwards(self, monkeypatch):
-        """Positive control: same-uid trusted caller + allowlisted op is
+        """Positive control: attested trusted caller + allowlisted op is
         forwarded to the extension and returns a method_return."""
         forwarded = []
         monkeypatch.setattr(
             bb, "enqueue_inbound_request",
             lambda op, args, out, **k: forwarded.append(op)
             or {"ok": True, "op": op})
+        _trust_caller(monkeypatch)
         stop = threading.Event()
         my = os.getuid()
         conn = _DispatchConn(
             my, 4242, _request_tabs_msg("tabs.list", ":1.7"), stop)
         _run_serve(monkeypatch, conn, stop)
         assert forwarded == ["tabs.list"]
+        assert ("return", None) in conn.sent
+
+    def test_mpris_control_forwards(self, monkeypatch):
+        """mpris.control (real inbound op) from the attested mpris daemon
+        is forwarded — guards the functional regression where it had been
+        dropped from the allowlist."""
+        forwarded = []
+        monkeypatch.setattr(
+            bb, "enqueue_inbound_request",
+            lambda op, args, out, **k: forwarded.append(op)
+            or {"ok": True, "op": op})
+        _trust_caller(monkeypatch)
+        stop = threading.Event()
+        my = os.getuid()
+        conn = _DispatchConn(
+            my, 4242, _request_tabs_msg("mpris.control", ":1.7"), stop)
+        _run_serve(monkeypatch, conn, stop)
+        assert forwarded == ["mpris.control"]
         assert ("return", None) in conn.sent

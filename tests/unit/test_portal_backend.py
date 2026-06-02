@@ -39,7 +39,8 @@ from qdistro_portal_backend import (  # type: ignore[import-not-found]
     _portal_action,
     _request_permission,
     _run_file_picker,
-    attest_app_id,
+    verify_frontend,
+    resolve_app_id,
 )
 import qdistro_portal_backend as pb  # type: ignore[import-not-found]
 
@@ -54,24 +55,23 @@ def backend():
     return obj
 
 
-# The fixed identity returned by mocked attestation in positive tests.
-# After finding #8, the broker action is scoped to the ATTESTED id, not
-# the spoofable app_id argument, so positive tests assert this value.
-ATTESTED_ID = "firefox"
-
-
 @pytest.fixture(autouse=True)
-def _attest_ok(request):
-    """By default, make sender attestation succeed and return a fixed
-    attested id (:data:`ATTESTED_ID`). Tests that exercise the DENY path
-    opt out with the ``no_attest`` marker and patch attestation
-    themselves.
+def _frontend_ok(request):
+    """By default, make the D-Bus sender verify as the trusted portal
+    frontend so :func:`resolve_app_id` returns the *forwarded* ``app_id``
+    argument (scoped to THAT app). Tests that exercise the DENY path opt
+    out with the ``no_attest`` marker and drive verification themselves.
+
+    Note: after the corrected finding #8, the broker action is scoped to
+    the frontend-forwarded ``app_id`` argument (sanitized), NOT to the
+    sender's exe — so positive tests assert the sanitized argument value,
+    e.g. ``org.example.App``.
     """
     if request.node.get_closest_marker("no_attest"):
         yield
         return
-    with patch("qdistro_portal_backend.attest_app_id",
-               return_value=(ATTESTED_ID, True)):
+    with patch("qdistro_portal_backend.verify_frontend",
+               return_value=True):
         yield
 
 
@@ -151,13 +151,14 @@ class TestAccessDialog:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == f"portal.access:{ATTESTED_ID}"
-        assert args[0][2]["app_id"] == ATTESTED_ID
+        assert args[0][1] == "portal.access:org.example.App"
+        assert args[0][2]["app_id"] == "org.example.App"
         assert args[0][2]["title"] == "Title"
 
-    def test_access_passes_app_id_and_title(self, backend):
-        """Details dict carries the ATTESTED app_id (not the spoofable
-        argument) and the title to the broker."""
+    def test_access_scopes_to_forwarded_app_id(self, backend):
+        """Once the sender is verified as the frontend, the details dict
+        carries the FORWARDED app_id argument (the frontend set it after
+        authenticating the real app) — scoped to THAT app."""
         captured = {}
 
         def fake_check(bus, action, details):
@@ -166,12 +167,11 @@ class TestAccessDialog:
 
         with patch("qdistro_portal_backend._check_permission",
                    side_effect=fake_check):
-            # Argument app_id is a lie ("com.example.Foo"); the backend
-            # must ignore it and use the attested identity.
             backend.AccessDialog(
                 "/handle", "com.example.Foo", "",
                 "Camera access", "sub", "body", {})
-        assert captured["app_id"] == ATTESTED_ID
+        # Scoped to the forwarded app_id, not the frontend's identity.
+        assert captured["app_id"] == "com.example.Foo"
         assert captured["title"] == "Camera access"
 
 
@@ -294,12 +294,12 @@ class TestScreenshot:
         assert int(resp) == RESP_CANCELLED
         mock_req.assert_called_once()
         args = mock_req.call_args
-        assert args[0][1] == f"com.qdistro.screen.capture:{ATTESTED_ID}"
-        assert args[0][2]["app_id"] == ATTESTED_ID
+        assert args[0][1] == "com.qdistro.screen.capture:org.example.App"
+        assert args[0][2]["app_id"] == "org.example.App"
 
     def test_screenshot_action_string(self, backend):
         """The action string sent to broker is com.qdistro.screen.capture
-        scoped to the attested identity."""
+        scoped to the forwarded app_id."""
         captured_action = None
 
         def fake_check(bus, action, details):
@@ -310,7 +310,7 @@ class TestScreenshot:
         with patch("qdistro_portal_backend._check_permission",
                    side_effect=fake_check):
             backend.Screenshot("/handle", "org.example.App", "", {})
-        assert captured_action == f"com.qdistro.screen.capture:{ATTESTED_ID}"
+        assert captured_action == "com.qdistro.screen.capture:org.example.App"
 
     def test_portal_action_scopes_by_app_id(self):
         assert _portal_action("com.qdistro.fs.open", "org.example.App") == \
@@ -329,7 +329,7 @@ class TestNotification:
             backend.AddNotification("org.example.App", "notif-1", {})
         captured = capsys.readouterr()
         assert "notification allowed" in captured.out
-        assert ATTESTED_ID in captured.out
+        assert "org.example.App" in captured.out
 
     def test_add_notification_denied_silent(self, backend, capsys):
         """Denied notification is silently dropped."""
@@ -421,65 +421,95 @@ class TestRunFilePicker:
         assert paths == []
 
 
-# -- Sender attestation (finding #8) -----------------------------------
+# -- Sender = frontend verification (finding #8, corrected) ------------
 
-class TestAttestAppId:
-    """attest_app_id must derive identity from the sender's real pid and
-    fail closed (return ok=False) when it cannot."""
+class TestVerifyFrontend:
+    """verify_frontend must attest the D-Bus sender's real pid/exe and
+    return True ONLY when the sender is the trusted XDG portal frontend
+    (xdg-desktop-portal). Anything else fails closed (False).
+    """
 
     def test_missing_sender_denies(self):
-        app, ok = attest_app_id("")
-        assert ok is False and app == ""
-        app, ok = attest_app_id(None)
-        assert ok is False and app == ""
+        assert verify_frontend("") is False
+        assert verify_frontend(None) is False
 
     def test_unresolvable_pid_denies(self):
         with patch("qdistro_portal_backend._caller_pid", return_value=0):
-            app, ok = attest_app_id(":1.42")
-        assert ok is False and app == ""
+            assert verify_frontend(":1.42") is False
 
     def test_zero_starttime_denies(self):
-        """A zero starttime (process gone / unreadable) is the
-        anti-PID-reuse fail-closed signal."""
         with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
              patch.object(pb._pi, "read_starttime", return_value=0):
-            app, ok = attest_app_id(":1.42")
-        assert ok is False and app == ""
+            assert verify_frontend(":1.42") is False
 
     def test_missing_exe_denies(self):
         with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
              patch.object(pb._pi, "read_starttime", return_value=999), \
              patch.object(pb._pi, "read_exe", return_value="?"):
-            app, ok = attest_app_id(":1.42")
-        assert ok is False and app == ""
+            assert verify_frontend(":1.42") is False
 
-    def test_resolved_exe_yields_sanitized_basename(self):
+    def test_non_frontend_exe_denies(self):
+        """A direct same-session caller whose exe is NOT the portal
+        frontend (e.g. a malicious app trying to impersonate the frontend
+        and forge app_id) is denied."""
         with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
              patch.object(pb._pi, "read_starttime", return_value=999), \
              patch.object(pb._pi, "read_exe",
-                          return_value="/usr/lib64/firefox/firefox"):
-            app, ok = attest_app_id(":1.42")
-        assert ok is True and app == "firefox"
+                          return_value="/usr/bin/evil-app"):
+            assert verify_frontend(":1.42") is False
+
+    def test_frontend_exe_verifies(self):
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=999), \
+             patch.object(pb._pi, "read_exe",
+                          return_value="/usr/libexec/xdg-desktop-portal"):
+            assert verify_frontend(":1.42") is True
 
     def test_no_proc_identity_module_denies(self, monkeypatch):
         monkeypatch.setattr(pb, "_pi", None)
-        app, ok = attest_app_id(":1.42")
+        assert verify_frontend(":1.42") is False
+
+
+class TestResolveAppId:
+    """resolve_app_id denies a non-frontend sender, and for a verified
+    frontend returns the FORWARDED app_id argument (scoped to THAT app —
+    not to xdg-desktop-portal)."""
+
+    def test_non_frontend_sender_denied(self):
+        with patch("qdistro_portal_backend.verify_frontend",
+                   return_value=False):
+            app, ok = resolve_app_id("org.real.App", ":1.99")
         assert ok is False and app == ""
+
+    def test_frontend_scopes_to_forwarded_app_id(self):
+        """The key correctness assertion for finding #8's fix: a legit
+        frontend call is scoped to the forwarded app_id, NOT collapsed to
+        the frontend ('xdg-desktop-portal'). Two different forwarded
+        app_ids must yield two different scopes."""
+        with patch("qdistro_portal_backend.verify_frontend",
+                   return_value=True):
+            a, ok_a = resolve_app_id("org.app.Aaa", ":1.10")
+            b, ok_b = resolve_app_id("org.app.Bbb", ":1.10")
+        assert ok_a and a == "org.app.Aaa"
+        assert ok_b and b == "org.app.Bbb"
+        assert a != b  # not collapsed to one principal
 
 
 @pytest.mark.no_attest
-class TestPortalMethodsDenyUnattestable:
-    """Every gated portal method must DENY when the caller cannot be
-    attested — the spoofable app_id argument must never grant access.
+class TestPortalMethodsDenyNonFrontend:
+    """Every gated portal method must DENY when the D-Bus sender is NOT
+    the verified portal frontend — a direct same-session caller forging
+    app_id must never reach a broker decision.
 
-    These tests are the regression for finding #8: under the old code
-    (which read app_id from the argument and had no sender_keyword) a
-    forged app_id would scope a real broker decision.
+    Regression for the corrected finding #8: the broken first remediation
+    attested the SENDER's exe (always xdg-desktop-portal) and scoped every
+    app to one principal; the corrected version verifies the sender IS the
+    frontend and otherwise denies.
     """
 
     def _deny(self):
-        return patch("qdistro_portal_backend.attest_app_id",
-                     return_value=("", False))
+        return patch("qdistro_portal_backend.verify_frontend",
+                     return_value=False)
 
     def test_access_dialog_denies(self, backend):
         with self._deny(), \
@@ -525,6 +555,44 @@ class TestPortalMethodsDenyUnattestable:
              patch("qdistro_portal_backend._check_permission") as chk:
             backend.RemoveNotification("evil.spoof", "n1", sender=":1.99")
         chk.assert_not_called()
+
+
+@pytest.mark.no_attest
+class TestPortalMethodsScopeToForwardedAppId:
+    """A legitimate frontend call (verified sender) scopes the broker
+    action to the FORWARDED app_id argument — to THAT app, not to
+    xdg-desktop-portal. This is the positive half of finding #8's fix.
+    """
+
+    def _frontend(self):
+        return patch("qdistro_portal_backend.verify_frontend",
+                     return_value=True)
+
+    def test_access_dialog_scopes_forwarded(self, backend):
+        captured = {}
+
+        def fake_check(bus, action, details):
+            captured["action"] = action
+            captured.update(details)
+            return "allow"
+
+        with self._frontend(), \
+             patch("qdistro_portal_backend._check_permission",
+                   side_effect=fake_check):
+            backend.AccessDialog(
+                "/h", "org.real.App", "", "t", "s", "b", {},
+                sender=":1.5")
+        assert captured["app_id"] == "org.real.App"
+        assert captured["action"] == "portal.access:org.real.App"
+
+    def test_notification_scopes_forwarded(self, backend, capsys):
+        with self._frontend(), \
+             patch("qdistro_portal_backend._check_permission",
+                   return_value="allow"):
+            backend.AddNotification("org.real.App", "n1", {}, sender=":1.5")
+        out = capsys.readouterr().out
+        assert "org.real.App" in out
+        assert "xdg-desktop-portal" not in out
 
 
 @pytest.mark.no_attest
