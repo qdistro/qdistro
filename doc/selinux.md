@@ -364,9 +364,8 @@ qdistro-tier1-spawn user1 -- firefox
 
 qdshell's `parse_silo_from_secctx` returns `tier1-user1`. How the broker
 treats the secctx strings on a `CheckPermission` / `RequestPermission`
-call depends on the **permission-lineage** posture
-(`issues/qdistro/permission-lineage-findings.md`, broker.conf
-`lineage_enforce`):
+call depends on the **permission-lineage** posture (`lineage_enforce` in
+broker.conf):
 
 - **`lineage_enforce = true`**: the broker resolves the live caller pid to
   an authoritative subject (`qdistro_resolver`) and uses the
@@ -433,5 +432,4 @@ D-Bus policy (`org.qdistro.AdminBroker1.conf`) — only the admin uid and
 root may call them — and starttime is kernel-attested. The
 broker trusts qdshell's per-call `identity_verified` flag; it is qdshell
 that requires BOTH endpoints to verify before setting it. See
-`todo/decisions/secctx-identity-contract.md` (Option B) and
-`todo/gpt-review/wider-codex-review.md` finding #2 (resolved).
+the broker-attested identity contract above.

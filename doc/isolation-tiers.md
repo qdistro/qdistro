@@ -145,9 +145,6 @@ by D-Bus policy (`org.qdistro.AdminBroker1.conf`) — only the admin uid and
 root may call them — so a non-admin same-uid sandboxed client cannot invoke
 them, and starttime is kernel-attested.
 
-See `todo/decisions/secctx-identity-contract.md` (Option B) and
-`todo/gpt-review/wider-codex-review.md` finding #2 (resolved).
-
 ## Tier 2 — podman / container
 
 Default for most user-owned apps. Rootless podman + `--userns=keep-id`
@@ -227,9 +224,7 @@ the bats drivers.
 
 Reference: `qdistro/tier3/README.md` for the operator-facing entry
 point; `tests/integration/vm/s{35..41,48}-*.sh` for the 8 bats
-drivers; `todo/qdwin-vm/tier3-spawn-design.md` for the original
-design + the 2026-05-16 hardening deltas from the two-round
-security/correctness/operational review.
+drivers.
 
 ## Tier 4 — whole-VM windowed
 
@@ -263,6 +258,12 @@ Stack:
 - **No GPU passthrough by default.** Use `virtio-gpu-gl` with virgl when 3D
  matters. VFIO + Looking-Glass is rejected as the tier-4 default because
  it's gaming-niche and requires two GPUs.
+
+New Linux VM images should be defined with the NixOS-language contract in
+[vm-definitions.md](vm-definitions.md). Existing Tumbleweed image builders may
+continue for current tier-4/tier-5 images, but new VM-backed silos should carry
+a declarative guest definition, lock reference, build lineage, and qdistro
+runtime policy.
 
 ## Tier 5 — per-app VM windowed (Linux guest)
 
@@ -319,6 +320,9 @@ nor `qemu-hw-display-virtio-gpu-rutabaga` is in
 parity is in flight upstream but not in a tagged release. Realistic
 Tumbleweed availability is multiple quarters out. The decision is to
 revisit when packaging gaps close.
+
+See [vm-definitions.md](vm-definitions.md) for the preferred NixOS module /
+flake definition shape for new VM-backed silos.
 
 ## Tier 6 — remote machine
 

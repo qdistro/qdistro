@@ -10,9 +10,7 @@ Integration.
 > **Status snapshot.** The bridge implements `qdistro.ping`, `recall.push`,
 > and the Firefox `containers.*` relay path documented in
 > [firefox-containers.md](firefox-containers.md). Most desktop integrations
-> below remain specified/planned Phase-9 work. Current browser follow-ups live
-> in the private todo repo under
-> [`todo/issues/qdistro/browser/`](../../todo/issues/qdistro/browser/).
+> below remain specified/planned Phase-9 work.
 >
 > P0-1, P0-2, and P0-3 are landed. P0-4..P0-6 remain open deployment or
 > policy decisions; see the defect index.

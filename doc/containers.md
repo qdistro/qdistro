@@ -299,20 +299,17 @@ is delegated by default.
 - **Tier-5 VMApps service**: shares the launcher / taskbar / badge
   vocabulary with PodApps but **not** the wayland transport. Tier-5
   apps arrive at the outer compositor as ordinary `xdg_toplevel`s
-  from the host-side `waypipe-client` (waypipe-over-`AF_VSOCK` per
-  `spec/29`), tagged via `wp_security_context_v1`
+  from the host-side `waypipe-client` (waypipe-over-`AF_VSOCK`), tagged via `wp_security_context_v1`
   app_id=`qdistro.tier5.<silo>`. VMApps therefore filters the
   existing toplevel list by secctx prefix rather than wiring its
   own `qdwin_nested_manager_v1` consumer like PodApps does. Badge
   ring colour differs (see [ui.md](ui.md#silo-badges)). Lands
   once spawn-tier5.sh hardening parity + tier-5 base image are
   hardened (see
-  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)
-  and `todo/qdwin-vm/tier5-vm-bringup.md`).
+  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)).
 - **End-to-end click validation** is gated on synthetic input in the
-  test VM — see `todo/qdwin-vm/ydotool-install-uinput-missing.md`
-  and `todo/qdwin-vm/visual-gui-tests-pending.md`. Wire-level
-  correctness is journal-asserted by `phase7-tier2-*` today.
+  test VM. Wire-level correctness is journal-asserted by `phase7-tier2-*`
+  today.
 - **Adopt user-created libvirt domains / podman containers**: out of
   scope. Tier 2 surfaces only containers spawned through
   `spawn-tier2.sh`.
