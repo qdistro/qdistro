@@ -3,7 +3,9 @@
 **What**: as `admin`, exercise `CheckHandoffActivation` in three
 configurations:
 1. Same-silo activation → unconditional `"allow"` + audit source
-   starting with `handoff_same_silo_verified src_app=`.
+   starting with `handoff_same_silo_verified` and naming `src_app=`
+   (the row also carries enriched `secctx_provenance=`/`dst_app=`/`src_engine=`
+   fields — see S1).
 2. Cross-silo with no rule → `"deny"` + audit source
    `handoff_default_deny`.
 3. Cross-silo with a rule that names `app_id` matching the source's
@@ -70,7 +72,11 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 **Assert**:
 - Reply: `string "allow"`.
-- Audit row starts with `qdistro.handoff.activate:user1:user1|1|handoff_same_silo_verified src_app=org.mozilla.firefox`.
+- Audit row starts with `qdistro.handoff.activate:user1:user1|1|handoff_same_silo_verified `
+  and contains `src_app=org.mozilla.firefox`. (The verified-handoff audit was
+  enriched in `9a7741d` with `secctx_provenance=`, `dst_app=`, and `src_engine=`
+  fields that appear between `handoff_same_silo_verified` and `src_app=`, so match
+  the prefix and the `src_app=` token rather than expecting them adjacent.)
 
 ### S2 — cross-silo, no rule: default deny
 
@@ -100,7 +106,9 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 **Assert**:
 - Reply: `string "deny"`.
-- Audit row starts with `0|handoff_default_deny src_app=`.
+- Audit row starts with `0|handoff_default_deny secctx_prov` (the query uses
+  `substr(source, 1, 32)`, so this pins the deny source plus the beginning of
+  the enriched `secctx_provenance=` field).
 
 ### S3 — install a rule with `app_id: org.mozilla.firefox`, retest
 
@@ -172,9 +180,11 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**: two newest rows (reverse chrono):
-- `0|handoff_default_deny src_app=com|` (chrome, no rule match;
+- `0|handoff_default_deny secctx_prov|` (chrome, no rule match;
   prefix is truncated by `substr(source, 1, 32)`).
-- `1|handoff_rule src_app=org.mozilla|/etc/qdistro/rules.d/42-allow-firefox.yaml` (firefox, rule match with rule_path).
+- `1|handoff_rule secctx_provenance=l|/etc/qdistro/rules.d/42-allow-firefox.yaml`
+  (firefox, rule match with rule_path; prefix is truncated by
+  `substr(source, 1, 32)`).
 
 ### S4 — non-admin caller is denied at bus-policy level
 
