@@ -227,11 +227,14 @@ expect "qdlocker.service is loaded (not error/masked/not-found)" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p LoadState qdlocker.service | grep -qx 'LoadState=loaded'"
 expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u qdlocker.service -b --no-pager 2>/dev/null | grep -Eiq '203/EXEC|No such file or directory|Failed to locate executable|Failed at step EXEC' && exit 1 || exit 0"
-# qdlocker has Restart=always, so a transient race during bring-up may leave
-# it activating; what must NEVER hold is a permanent ExecStart failure. Accept
-# active OR activating, reject failed.
-expect "qdlocker.service is active (or activating), not failed" \
-    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c 'st=\$(systemctl --user is-active qdlocker.service); echo \"qdlocker is-active=\$st\"; [ \"\$st\" = active ] || [ \"\$st\" = activating ]'"
+# qdlocker.service is Type=simple, so it should reach `active` promptly. We
+# require `active` (NOT merely `activating`) — a unit stuck activating or
+# flapping under Restart=always is a real failure, not something to tolerate.
+# A short bounded settle absorbs only first-boot bring-up timing; the permanent
+# ExecStart-failure case is already caught definitively by the 203/EXEC journal
+# check above.
+expect "qdlocker.service reaches active (not failed/activating)" \
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do st=\$(systemctl --user is-active qdlocker.service); [ \"\$st\" = active ] && { echo \"qdlocker is-active=active (try \$i)\"; exit 0; }; sleep 1; done; echo \"qdlocker is-active=\$st (never reached active)\"; exit 1'"
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
