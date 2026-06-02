@@ -750,3 +750,79 @@ class TestYamlIsAllowAllGuard:
     def test_rejects_allow_no_match_key(self, qapp):
         yaml_body = "- decision: allow\n"
         assert MainWindow._yaml_is_allow_all(yaml_body) is True
+
+
+# ---------------------------------------------------------------------------
+# Table tab-key navigation (accessibility): Tab must escape the QTableView so
+# the keyboard can reach the row-action buttons. Qt's default
+# tabKeyNavigation=True traps Tab inside the view; on the labwc/XWayland GUI
+# test template mouse is platform-blocked, so this is the only path to e.g.
+# the Cache tab's "Revoke" button after selecting a row.
+# ---------------------------------------------------------------------------
+
+class TestTableTabKeyNavigation:
+    def test_all_tab_tables_have_tabkeynav_disabled(self, qapp):
+        from qdistro_admin_app import SilosTab, WorkflowsTab
+
+        broker = _make_stub_broker()
+        broker.list_cache.return_value = []
+        broker.list_silos.return_value = []
+        broker.list_workflows.return_value = []
+        broker.list_workflow_runs.return_value = []
+        # SilosTab takes a SessionManagerBridge; the MagicMock stub quacks
+        # for both signatures, so the same object works for every tab.
+        single_table = {
+            CacheTab: ["table"],
+            SilosTab: ["table"],
+            RulesTab: ["table"],
+            HistoryTab: ["table"],
+            # WorkflowsTab has two views, both configured via _configure_table.
+            WorkflowsTab: ["wf_table", "runs_table"],
+        }
+        for cls, attrs in single_table.items():
+            tab = cls(broker)
+            for attr in attrs:
+                view = getattr(tab, attr)
+                assert view.tabKeyNavigation() is False, (
+                    f"{cls.__name__}.{attr} still traps Tab")
+
+    def test_tab_from_cache_table_reaches_revoke_button(self, qapp):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
+
+        broker = _make_stub_broker()
+        broker.list_cache.return_value = [{
+            "id": 1, "caller_uid": 2000, "action": "test.action",
+            "scope": "forever_exe", "match_value": "/usr/bin/python3.13",
+            "expires_at": 0,
+        }]
+        tab = CacheTab(broker)
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.addWidget(tab)
+        host.show()
+        QApplication.setActiveWindow(host)
+        tab.refresh()
+        assert tab.model.rowCount() == 1
+
+        # Focus the table, select the row, then press Tab. The key event
+        # goes through QTableView.keyPressEvent, whose Tab handling is
+        # governed by tabKeyNavigation — so this assertion FAILS if the
+        # flag is left at Qt's trapping default. (A plain nextInFocusChain
+        # walk would pass either way and not guard the fix.)
+        tab.table.setFocus()
+        tab.table.setCurrentIndex(tab.model.index(0, 0))
+        tab.table.selectRow(0)
+        QTest.keyClick(tab.table, Qt.Key.Key_Tab)
+
+        focused = QApplication.focusWidget()
+        assert focused is not None and focused.objectName() == "btn_revoke", (
+            "Tab did not escape the cache table to btn_revoke")
+        # Moving focus off the table must NOT clear the row selection
+        # (revoke acts on currentIndex), so the keyboard path can both
+        # select a row AND reach the button.
+        assert tab.table.currentIndex().isValid()
+        assert tab.table.currentIndex().row() == 0
+        assert [i.row() for i in
+                tab.table.selectionModel().selectedRows()] == [0]
