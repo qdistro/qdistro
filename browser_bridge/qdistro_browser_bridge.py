@@ -100,6 +100,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import struct
 import sys
 import threading
@@ -1501,22 +1502,41 @@ INBOUND_EXTRACT_OPS: frozenset[str] = frozenset({
 #   * user_relay/qdistro_user_relay.py         (broker -> bridge relay)
 # Both are launched by systemd as ``/usr/bin/python3 <script.py>`` (see
 # their .service ExecStart), so ``/proc/<pid>/exe`` is the python
-# interpreter and the DAEMON identity lives in the script path. We
-# authorize on the SCRIPT BASENAME running under a python interpreter,
-# requiring the resolved interpreter exe to look like a system python and
-# the script to be one of the known daemon scripts. The script's
-# directory is intentionally not pinned (install prefixes vary:
-# /usr/libexec/qdistro vs /usr/local/lib/qdistro vs an in-tree checkout)
-# — the basename + python-interpreter pairing is the stable signal.
+# interpreter and the DAEMON identity lives in the script PATH.
 #
-# ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` may NARROW this set (replace
-# it with a comma-separated allowlist of script basenames); it can never
-# authorize an arbitrary process because the python-interpreter exe check
-# and starttime anchor still apply, and the value only further restricts
-# which scripts qualify.
+# We authorize on the FULL RESOLVED SCRIPT PATH (argv[1]) — required to be
+# one of the canonical, root-owned, non-writable daemon scripts below — NOT
+# on the basename. Pinning to the basename alone was forgeable: a same-uid
+# attacker could run ``/usr/bin/python3 /tmp/qdistro_mpris_daemon.py`` and
+# the basename matched (finding #7, second review). Requiring the realpath
+# to be a root-owned file at a canonical install location defeats that: the
+# attacker cannot place a root-owned file under /usr, and a /tmp/... or
+# ~/... script fails both the path allowlist and the root-owned stat.
+#
+# (Residual: argv is process-writable, so a process could in principle run
+# attacker code yet present argv[1]=<the real root-owned script>. That is
+# the same residual as the qdwin locker entrypoint check; closing it fully
+# needs a non-forgeable launch credential — systemd cgroup unit match or a
+# broker registration token — tracked as future hardening. The realpath +
+# root-owned gate removes the trivial filename-spoof attack the review
+# demonstrated.)
+#
+# Canonical install paths (see the daemons' .service ExecStart and
+# scripts/install/*): mpris -> /usr/libexec/qdistro, user-relay ->
+# /usr/local/lib/qdistro. Plausible alternate prefixes are included; every
+# entry is still gated by the root-owned/non-writable stat, so listing a
+# path that an unprivileged user could write would not weaken the check.
+# ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` may NARROW this set (replace it
+# with a comma-separated allowlist of absolute paths); it can never widen
+# to an arbitrary script.
 TRUSTED_INBOUND_SCRIPTS: frozenset[str] = frozenset({
-    "qdistro_mpris_daemon.py",
-    "qdistro_user_relay.py",
+    "/usr/libexec/qdistro/qdistro_mpris_daemon.py",
+    "/usr/lib/qdistro/qdistro_mpris_daemon.py",
+    "/usr/local/lib/qdistro/qdistro_mpris_daemon.py",
+    "/usr/local/libexec/qdistro/qdistro_mpris_daemon.py",
+    "/usr/local/lib/qdistro/qdistro_user_relay.py",
+    "/usr/lib/qdistro/qdistro_user_relay.py",
+    "/usr/libexec/qdistro/qdistro_user_relay.py",
 })
 
 # Basenames accepted as the python interpreter behind a trusted caller's
@@ -1529,19 +1549,42 @@ _TRUSTED_INTERP_BASENAMES: tuple[str, ...] = (
 
 
 def _trusted_inbound_scripts() -> frozenset[str]:
-    """Resolve the trusted-caller script-basename allowlist.
+    """Resolve the trusted-caller script-PATH allowlist.
 
-    Defaults to :data:`TRUSTED_INBOUND_SCRIPTS`. The env var
-    ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` (comma-separated basenames)
-    REPLACES the default only with a NARROWER set: any name it lists that
-    is not already a built-in trusted script is ignored, so the override
-    can never widen the allowlist to an arbitrary script.
+    Defaults to :data:`TRUSTED_INBOUND_SCRIPTS` (canonical absolute paths).
+    The env var ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` (comma-separated
+    absolute paths) REPLACES the default only with a NARROWER set: any path
+    it lists that is not already a built-in trusted path is ignored, so the
+    override can never widen the allowlist to an arbitrary script.
     """
     raw = os.environ.get("QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS", "")
     requested = {tok.strip() for tok in raw.split(",") if tok.strip()}
     if not requested:
         return TRUSTED_INBOUND_SCRIPTS
     return frozenset(requested & TRUSTED_INBOUND_SCRIPTS)
+
+
+def _is_trusted_root_file(path: str, allowed: frozenset) -> bool:
+    """True iff ``path`` realpaths to an absolute path on ``allowed`` AND the
+    resolved file is a regular file owned by root and not group/other
+    writable. Fail closed on any error. Shared "canonical, system-managed
+    file" predicate (see the TRUSTED_INBOUND_SCRIPTS rationale)."""
+    if not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+        if real not in allowed:
+            return False
+        st = os.stat(real)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_uid != 0:
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    return True
 
 
 def _proc_cmdline(pid: int) -> list[str]:
@@ -1555,13 +1598,15 @@ def _proc_cmdline(pid: int) -> list[str]:
             for a in raw.split(b"\x00") if a]
 
 
-def _caller_script_basename(argv: list[str]) -> str:
-    """Best-effort: the python SCRIPT basename a python daemon is running.
+def _caller_script_path(argv: list[str]) -> str:
+    """Best-effort: the python SCRIPT PATH (argv[1]) a python daemon runs.
 
-    For ``python3 /path/qdistro_mpris_daemon.py [args...]`` this is
-    ``qdistro_mpris_daemon.py``. Skips interpreter flags (``-X..``,
-    ``-E``, ``-S``, ``-O`` ...) and ``-m module`` is treated as no script
-    (returns ``""`` -> denied; the daemons are launched by path, not -m).
+    For ``python3 /usr/libexec/qdistro/qdistro_mpris_daemon.py [args...]``
+    this is ``/usr/libexec/qdistro/qdistro_mpris_daemon.py`` — the FULL
+    path, NOT the basename, so the caller can require it to resolve to a
+    canonical root-owned file. Skips interpreter flags (``-X..``, ``-E``,
+    ``-S``, ``-O`` ...) and ``-m module`` / ``-c prog`` are treated as no
+    script (returns ``""`` -> denied; the daemons are launched by path).
     Returns ``""`` when no script argument is present.
     """
     if not argv:
@@ -1577,7 +1622,7 @@ def _caller_script_basename(argv: list[str]) -> str:
         if tok.startswith("-"):
             i += 1
             continue
-        return os.path.basename(tok)
+        return tok
     return ""
 
 
@@ -1603,10 +1648,14 @@ def _attest_inbound_caller(pid: int) -> tuple[bool, str]:
     interp = os.path.basename(exe).strip()
     if interp not in _TRUSTED_INTERP_BASENAMES:
         return False, f"non-python-interp exe={exe!r}"
-    script = _caller_script_basename(_proc_cmdline(pid))
+    script = _caller_script_path(_proc_cmdline(pid))
     if not script:
         return False, "no-script"
-    if script not in _trusted_inbound_scripts():
+    # Require the FULL resolved script path to be a canonical, root-owned,
+    # non-writable daemon script — not merely the right basename. This
+    # rejects a same-uid `/usr/bin/python3 /tmp/qdistro_mpris_daemon.py`
+    # (finding #7): /tmp/... is neither on the path allowlist nor root-owned.
+    if not _is_trusted_root_file(script, _trusted_inbound_scripts()):
         return False, f"script-not-trusted script={script!r}"
     return True, f"script={script} interp={interp} starttime={starttime}"
 

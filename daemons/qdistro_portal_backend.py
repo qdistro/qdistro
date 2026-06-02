@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -87,20 +88,62 @@ RESP_OTHER = 2
 # QDISTRO_FILE_PICKER for testing or alternate UIs.
 _FILE_PICKER = os.environ.get("QDISTRO_FILE_PICKER", "zenity")
 
-# Basenames of the trusted XDG portal *frontend* binary. The D-Bus caller
-# of ``org.freedesktop.impl.portal.*`` is always xdg-desktop-portal (the
-# frontend), never the app itself — the app talks to the frontend, the
-# frontend authenticates it and re-issues the impl call carrying the app's
-# identity in the ``app_id`` argument. We therefore verify the *sender* is
-# the expected frontend exe and, having done so, trust the forwarded
-# ``app_id`` for broker scoping. Override the accepted basenames for
-# testing / alternate frontends via QDISTRO_PORTAL_FRONTEND_EXE
-# (comma-separated).
-_FRONTEND_EXE_BASENAMES = frozenset(
-    b.strip() for b in os.environ.get(
+# Canonical ABSOLUTE paths of the trusted XDG portal *frontend* binary. The
+# D-Bus caller of ``org.freedesktop.impl.portal.*`` is always
+# xdg-desktop-portal (the frontend), never the app itself — the app talks to
+# the frontend, the frontend authenticates it and re-issues the impl call
+# carrying the app's identity in the ``app_id`` argument. We therefore verify
+# the *sender* is the expected frontend exe and, having done so, trust the
+# forwarded ``app_id`` for broker scoping.
+#
+# We match the FULL resolved ``/proc/<pid>/exe`` path against this allowlist —
+# NOT the basename. /proc/<pid>/exe is set by the kernel at execve() and is
+# not writable by the process, so a full-path match cannot be forged: a
+# same-uid attacker who runs a self-authored binary named "xdg-desktop-portal"
+# out of /tmp has exe=/tmp/xdg-desktop-portal, which is not on the allowlist
+# (the earlier basename check accepted it — finding #8). We additionally
+# require the file to be root-owned and not group/other-writable so a path on
+# the allowlist can only ever be a system-managed binary. Override the
+# accepted paths for testing / alternate frontends via
+# QDISTRO_PORTAL_FRONTEND_EXE (comma-separated absolute paths).
+_FRONTEND_EXE_PATHS = frozenset(
+    p.strip() for p in os.environ.get(
         "QDISTRO_PORTAL_FRONTEND_EXE",
-        "xdg-desktop-portal").split(",") if b.strip()
+        "/usr/libexec/xdg-desktop-portal:"
+        "/usr/lib/xdg-desktop-portal:"
+        "/usr/lib64/xdg-desktop-portal:"
+        "/usr/local/libexec/xdg-desktop-portal").split(":") if p.strip()
 )
+
+
+def _is_trusted_root_file(path: str, allowed: frozenset) -> bool:
+    """True iff ``path`` resolves (realpath) to an absolute path on the
+    ``allowed`` allowlist AND the resolved file is a regular file owned by
+    root and not writable by group/other.
+
+    This is the shared "the process is executing a canonical, system-managed
+    file" predicate. /proc/<pid>/exe is non-forgeable; an argv-derived script
+    path is forgeable in argv memory but the realpath+root-owned+non-writable
+    requirement still defeats the trivial "name a file in /tmp" attack and
+    bounds the residual to a process that has actually arranged for a
+    root-owned canonical file to appear as its identity. Fail closed on any
+    error."""
+    if not path:
+        return False
+    try:
+        real = os.path.realpath(path)
+        if real not in allowed:
+            return False
+        st = os.stat(real)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    if st.st_uid != 0:
+        return False
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    return True
 
 
 def _sanitize_app_id(app_id: str) -> str:
@@ -151,14 +194,20 @@ def verify_frontend(sender: str) -> bool:
     So the right thing to attest about the *sender* is not "which app",
     but "is this really the frontend". We resolve the sender's real pid
     via the bus, require a non-zero starttime (anti-PID-reuse), read the
-    binary behind ``/proc/<pid>/exe``, and require its basename to be the
-    expected frontend (see :data:`_FRONTEND_EXE_BASENAMES`).
+    binary behind ``/proc/<pid>/exe``, and require its FULL RESOLVED PATH
+    to be a canonical, root-owned, non-writable frontend binary (see
+    :data:`_FRONTEND_EXE_PATHS` / :func:`_is_trusted_root_file`).
 
-    This blocks a direct same-session caller that impersonates the
-    frontend to forge an ``app_id``. Returns ``True`` only when the sender
-    is verified as the frontend; any failure to attest — missing sender,
-    no proc-identity readers, pid gone, exe unreadable, zero starttime, or
-    a non-frontend exe — returns ``False`` so callers fail closed (DENY).
+    Matching the full exe path — not the basename — is what makes this
+    non-forgeable: /proc/<pid>/exe is fixed by the kernel at execve() and
+    cannot be rewritten by the process, so a same-uid attacker who runs a
+    self-authored ``/tmp/xdg-desktop-portal`` is rejected (its exe path is
+    not on the allowlist), whereas the old basename check accepted it
+    (finding #8). Returns ``True`` only when the sender is verified as the
+    frontend; any failure to attest — missing sender, no proc-identity
+    readers, pid gone, exe unreadable, zero starttime, or an exe that is
+    not a canonical root-owned frontend binary — returns ``False`` so
+    callers fail closed (DENY).
     """
     if _pi is None:
         return False
@@ -171,10 +220,7 @@ def verify_frontend(sender: str) -> bool:
     exe = _pi.read_exe(pid)
     if not exe or exe == "?":
         return False
-    base = os.path.basename(exe).strip()
-    if not base:
-        return False
-    return base in _FRONTEND_EXE_BASENAMES
+    return _is_trusted_root_file(exe, _FRONTEND_EXE_PATHS)
 
 
 def resolve_app_id(app_id: str, sender: str) -> tuple[str, bool]:

@@ -458,12 +458,57 @@ class TestVerifyFrontend:
                           return_value="/usr/bin/evil-app"):
             assert verify_frontend(":1.42") is False
 
+    @staticmethod
+    def _a_real_root_file():
+        """A real, root-owned, non-group/other-writable regular file on this
+        host (used as a stand-in for the frontend binary so the root-owned
+        stat check runs against the real filesystem)."""
+        import os as _os
+        import stat as _stat
+        for cand in ("/usr/bin/python3", "/bin/true", "/usr/bin/env",
+                     "/bin/sh", "/usr/bin/cat"):
+            try:
+                st = _os.stat(_os.path.realpath(cand))
+            except OSError:
+                continue
+            if (_stat.S_ISREG(st.st_mode) and st.st_uid == 0
+                    and not st.st_mode & (_stat.S_IWGRP | _stat.S_IWOTH)):
+                return _os.path.realpath(cand)
+        pytest.skip("no root-owned reference binary available")
+
     def test_frontend_exe_verifies(self):
+        """A sender whose exe FULL PATH is a canonical, root-owned frontend
+        binary verifies."""
+        real = self._a_real_root_file()
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=999), \
+             patch.object(pb, "_FRONTEND_EXE_PATHS", frozenset({real})), \
+             patch.object(pb._pi, "read_exe", return_value=real):
+            assert verify_frontend(":1.42") is True
+
+    def test_tmp_basename_spoof_denies(self):
+        """Finding #8 (second review): a same-uid attacker running a
+        self-authored binary NAMED xdg-desktop-portal out of /tmp must be
+        denied. The old basename check accepted it; the full-path check
+        rejects it because /tmp/xdg-desktop-portal is not on the allowlist."""
         with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
              patch.object(pb._pi, "read_starttime", return_value=999), \
              patch.object(pb._pi, "read_exe",
-                          return_value="/usr/libexec/xdg-desktop-portal"):
-            assert verify_frontend(":1.42") is True
+                          return_value="/tmp/xdg-desktop-portal"):
+            assert verify_frontend(":1.42") is False
+
+    def test_non_root_owned_frontend_path_denies(self, tmp_path):
+        """Even a path ON the allowlist is rejected when the file is not
+        root-owned (so an attacker who got a same-name file onto the
+        allowlist via a writable location still can't pass)."""
+        fake = tmp_path / "xdg-desktop-portal"
+        fake.write_text("#!/bin/sh\n")  # owned by the test user, not root
+        with patch("qdistro_portal_backend._caller_pid", return_value=1234), \
+             patch.object(pb._pi, "read_starttime", return_value=999), \
+             patch.object(pb, "_FRONTEND_EXE_PATHS",
+                          frozenset({str(fake)})), \
+             patch.object(pb._pi, "read_exe", return_value=str(fake)):
+            assert verify_frontend(":1.42") is False
 
     def test_no_proc_identity_module_denies(self, monkeypatch):
         monkeypatch.setattr(pb, "_pi", None)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -158,6 +159,23 @@ _LEGIT_RELAY = dict(
     argv=["/usr/bin/python3", "/usr/local/lib/qdistro/qdistro_user_relay.py"])
 
 
+def _a_real_root_file():
+    """A real, root-owned, non-group/other-writable regular file on this host.
+    Used as a stand-in for a canonical daemon script so the root-owned stat in
+    _is_trusted_root_file runs against the real filesystem (the canonical
+    /usr/libexec/qdistro/... paths don't exist in the test sandbox)."""
+    for cand in ("/usr/bin/python3", "/bin/true", "/usr/bin/env",
+                 "/bin/sh", "/usr/bin/cat"):
+        try:
+            st = os.stat(os.path.realpath(cand))
+        except OSError:
+            continue
+        if (stat.S_ISREG(st.st_mode) and st.st_uid == 0
+                and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            return os.path.realpath(cand)
+    pytest.skip("no root-owned reference binary available")
+
+
 class TestInboundCallerAuth:
     def test_no_sender_denied(self):
         ok, reason = bb._inbound_caller_authorized(_AuthConn(0, 0), "")
@@ -191,20 +209,43 @@ class TestInboundCallerAuth:
         assert ok is False
         assert "script-not-trusted" in reason
 
-    def test_legit_mpris_daemon_allowed(self, monkeypatch):
-        """The real qdistro_mpris_daemon (python interpreter running the
-        known daemon script) is ALLOWED."""
+    def test_tmp_trusted_basename_denied(self, monkeypatch):
+        """Finding #7 (second review): a same-uid attacker running
+        `/usr/bin/python3 /tmp/qdistro_mpris_daemon.py` — argv[1] basename
+        matches a trusted daemon — must be DENIED. The basename check passed
+        it; the full-path + root-owned check rejects it (/tmp/... is not on
+        the path allowlist and is not root-owned)."""
         my = os.getuid()
-        _fake_proc(monkeypatch, **_LEGIT_MPRIS)
+        _fake_proc(monkeypatch,
+                   exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3",
+                         "/tmp/qdistro_mpris_daemon.py"])
+        ok, reason = bb._inbound_caller_authorized(
+            _AuthConn(my, 4242), ":1.55")
+        assert ok is False
+        assert "script-not-trusted" in reason
+
+    def test_legit_mpris_daemon_allowed(self, monkeypatch):
+        """A python interpreter running the canonical, root-owned daemon
+        script (stood in by a real root-owned file on the allowlist) is
+        ALLOWED."""
+        my = os.getuid()
+        real = _a_real_root_file()
+        monkeypatch.setattr(bb, "TRUSTED_INBOUND_SCRIPTS", frozenset({real}))
+        _fake_proc(monkeypatch, exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3", real])
         ok, reason = bb._inbound_caller_authorized(
             _AuthConn(my, 4242), ":1.55")
         assert ok is True
         assert "caller-ok" in reason
-        assert "qdistro_mpris_daemon.py" in reason
+        assert real in reason
 
     def test_legit_user_relay_allowed(self, monkeypatch):
         my = os.getuid()
-        _fake_proc(monkeypatch, **_LEGIT_RELAY)
+        real = _a_real_root_file()
+        monkeypatch.setattr(bb, "TRUSTED_INBOUND_SCRIPTS", frozenset({real}))
+        _fake_proc(monkeypatch, exe="/usr/bin/python3",
+                   argv=["/usr/bin/python3", real])
         ok, reason = bb._inbound_caller_authorized(
             _AuthConn(my, 4242), ":1.55")
         assert ok is True
@@ -361,8 +402,15 @@ def _run_serve(monkeypatch, conn, stop):
 
 def _trust_caller(monkeypatch):
     """Make /proc attestation describe a legit qdistro daemon so the
-    dispatch tests can isolate the op-allowlist / forward behavior."""
-    _fake_proc(monkeypatch, **_LEGIT_MPRIS)
+    dispatch tests can isolate the op-allowlist / forward behavior.
+
+    Uses a real root-owned file (stood in for the canonical daemon script)
+    so _is_trusted_root_file's root-owned stat passes in the sandbox where
+    /usr/libexec/qdistro/... does not exist."""
+    real = _a_real_root_file()
+    monkeypatch.setattr(bb, "TRUSTED_INBOUND_SCRIPTS", frozenset({real}))
+    _fake_proc(monkeypatch, exe="/usr/bin/python3",
+               argv=["/usr/bin/python3", real])
 
 
 class TestInboundDispatchGate:
