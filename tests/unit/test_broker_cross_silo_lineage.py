@@ -119,6 +119,15 @@ def _register_source(broker, *, silo="user1", engine="qdistro.tier3",
         exe=SOURCE_EXE, sandbox_engine=engine, app_id=app_id)
 
 
+def _journal_decision_line(capsys, gate: str) -> str:
+    """Return the single `[broker] clipboard/<gate> cross-silo decision:` line
+    from captured stdout (the journal observability surface)."""
+    marker = f"[broker] clipboard/{gate} cross-silo decision:"
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if marker in ln]
+    assert len(lines) == 1, f"expected exactly one {marker!r} line, got {lines!r}"
+    return lines[0]
+
+
 def _transfer(broker, *, src, dst, identity_verified=False,
               source_pid=0, source_starttime=0):
     return broker.CheckClipboardTransfer(
@@ -266,6 +275,68 @@ class TestReceiveAndHandoff:
         assert broker.CheckHandoffActivation(
             "user1", "admin", "", "", "", False,
             SOURCE_PID, SOURCE_START) == "allow"
+
+
+class TestAttestedAttributionLogged:
+    """The audit row and the journal line must carry the *attested* source
+    identity the decision was made against, never the qdshell-relayed claim.
+
+    Regression guard for the handoff path: _cross_silo_source() writes the
+    resolved identity back into sapp_raw/seng_raw (used for the rule match),
+    and CheckHandoffActivation must refresh its sapp/seng display values from
+    those raws before auditing/journalling — otherwise a forged app_id/engine
+    claim is logged even though the rule was decided against the attested one.
+    Transfer/Receive bind sapp/seng directly to the resolved return and are
+    covered here too so the journal-line format itself is pinned.
+    """
+
+    def test_handoff_logs_attested_app_engine_not_claim(
+            self, broker, rules_dir, fake_source_live, monkeypatch, capsys):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        (rules_dir / "h.yaml").write_text(
+            "- name: h\n  decision: allow\n  match:\n"
+            "    action: 'qdistro.handoff.activate:user1:admin'\n")
+        broker.rules.reload()
+        # Attested identity differs from the forged claim below.
+        _register_source(broker, silo="user1",
+                         app_id="qdistro.tier3.user1", engine="qdistro.tier3")
+        verdict = broker.CheckHandoffActivation(
+            "user1", "admin",
+            "forged.evil.app", "dst.app", "forged.engine", False,
+            SOURCE_PID, SOURCE_START)
+        assert verdict == "allow"
+        # Audit row carries the attested identity, never the forged claim.
+        row = broker.audit.recent(10)[0]["source"]
+        assert "src_app=qdistro.tier3.user1" in row
+        assert "src_engine=qdistro.tier3" in row
+        assert "forged.evil.app" not in row
+        assert "forged.engine" not in row
+        # The journal line (the s110/s112 observability surface) agrees.
+        # Isolate it: _cross_silo_source() also prints an "overridden"
+        # diagnostic that legitimately names the forged claim, so assert on
+        # the decision line itself, not all of stdout.
+        jline = _journal_decision_line(capsys, "handoff")
+        assert "verdict=allow" in jline
+        assert "src_app=qdistro.tier3.user1" in jline
+        assert "src_engine=qdistro.tier3" in jline
+        assert "forged.evil.app" not in jline
+        assert "forged.engine" not in jline
+
+    def test_transfer_journal_line_format(
+            self, broker, rules_dir, fake_source_live, monkeypatch, capsys):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _transfer_rule(rules_dir, src="user1", dst="admin")
+        broker.rules.reload()
+        _register_source(broker, silo="user1",
+                         app_id="qdistro.tier3.user1", engine="qdistro.tier3")
+        assert _transfer(broker, src="user1", dst="admin",
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "allow"
+        jline = _journal_decision_line(capsys, "transfer")
+        assert "user1 -> admin" in jline
+        assert "verdict=allow" in jline
+        assert "src_app=qdistro.tier3.user1" in jline
+        assert "src_engine=qdistro.tier3" in jline
 
 
 # --- enforce edge cases ------------------------------------------------

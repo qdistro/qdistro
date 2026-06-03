@@ -202,6 +202,19 @@ kill -TERM "$FORGED_PID" 2>/dev/null || true
 # A tier-4 client must not be able to subscribe to another silo's view
 # stream. Probe the broker's handoff/subscription gate cross-silo: a
 # tier-4 source -> admin dest with no rule is default-deny.
+#
+# The broker is a plain systemd service (NOT D-Bus auto-activated), so it
+# must be running before this probe — otherwise dbus-send fails with
+# ServiceUnknown and the verdict comes back EMPTY (not "deny"), which the
+# assertion below would (correctly) flag as a fail. Start it here, the same
+# way the clipboard section (step 3) does, so the handoff probe runs against
+# a live broker rather than racing whatever an earlier test left behind.
+if ! systemctl is-active --quiet qdistro-admin-broker.service 2>/dev/null; then
+    systemctl start qdistro-admin-broker.service 2>/dev/null || true
+    sleep 1
+fi
+systemctl is-active --quiet qdistro-admin-broker.service \
+    || skip "qdistro-admin-broker.service did not start"
 SUB_VERDICT=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckHandoffActivation \
     "string:vm-$VM_TAG" "string:admin" \
