@@ -149,6 +149,36 @@ appears.
 Failure:
 The page cannot load, crashes, or shows a different account.
 
+## Host Integration
+
+systemd_service: qdistro-silo@gmail-work.service
+systemd_timers:
+- qdistro-silo-health@gmail-work.timer
+- qdistro-silo-update@gmail-work.timer
+startup_health_checks:
+- browser starts
+- calendar account
+startup_timeout: 5min
+update_timeout: 30min
+logging: systemd-journal
+
+The host OS must be able to start, stop, and inspect the silo through native
+systemd units. The silo service must not enter systemd's `started` / active
+state until all required startup health checks have completed successfully or
+the silo has explicitly settled into `needs_user_action`.
+
+If a required check fails, or if the silo is stuck in a transient state such as
+`bootstrapping`, `starting`, `recovering`, or an in-progress update, the host
+service must remain activating until its timeout expires and then fail. This
+prevents a half-updated or wedged silo from being reported as started.
+
+Startup, update, recovery, and health-check logs should be emitted to the
+native journal with the silo name, generation, action, check name, result, and
+failure reason. Silo definitions should choose timeouts large enough for cold
+VM/container starts, browser profile migrations, package transactions, and
+rollback attempts; the default Linux service timeout is often too short for
+these workflows.
+
 ## Actions
 
 ### Action: relogin
@@ -317,6 +347,47 @@ Each check should state healthy result, user-action result, and failure result.
 For GUI checks, prefer accessibility names, roles, window titles, and stable UI
 text. Vision and click-capable agents are allowed, but screenshots are evidence,
 not the strongest oracle.
+
+## Host systemd Integration
+
+Every silo definition must declare how the host OS represents the silo in
+systemd. The host needs native units so operators, boot policy, dependency
+ordering, timers, journald, and health probes can reason about silos without a
+separate qdistro-only process supervisor.
+
+At minimum, a silo definition should name:
+
+- the host systemd service that starts and stops the silo;
+- any host systemd timers used for scheduled health checks, snapshots,
+  freeze/resume windows, updates, cleanup, or reapers;
+- which health checks gate startup readiness;
+- startup, update, recovery, and stop timeouts;
+- where logs are written, normally the systemd journal.
+
+Readiness is health-gated. A host systemd service for a silo must not report
+`active` / `started` merely because the launcher process exists. It may become
+active only after required startup checks pass, or after the silo intentionally
+settles into a non-running state such as `needs_user_action` that the unit and
+admin UI both expose clearly.
+
+Unhealthy transitional states must fail closed. If the silo is stuck during an
+update, bootstrap, rollback, or recovery action, the service should remain in
+`activating` until the declared timeout expires and then fail with a useful
+journal reason. This is especially important for update workflows: a
+half-updated browser profile, VM image, container image, or package transaction
+must not be advertised to the host as a started workload.
+
+Timeouts should be explicitly longer than generic systemd defaults when the
+silo can cold-start a VM/container, migrate browser state, run package
+transactions, wait for network-backed first-run checks, or attempt rollback.
+Definitions may use separate values such as `startup_timeout`,
+`update_timeout`, `rollback_timeout`, and `stop_timeout`.
+
+Native logging is part of the contract. Startup, health, update, recovery,
+rollback, and stop events should be visible through `journalctl` for the host
+unit and should include the silo name, generation, action, check name, result,
+duration, and reason. qdistro may also keep structured audit/status records,
+but those records do not replace host-visible service logs.
 
 ## Actions
 
