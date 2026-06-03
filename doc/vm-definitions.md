@@ -9,6 +9,12 @@ for current tiers, but new VM work should be specified in a way that makes the
 guest package set, services, files, publisher command, and qdistro integration
 reviewable before the image is built.
 
+NixOS is an implementation definition for the guest, not qdistro's resource
+language. The qdistro resource remains implementation-agnostic: it records what
+desktop/security object exists, what policy applies, which guest definition or
+image it references, and what lineage/audit evidence was produced. The NixOS
+module records how that guest image is built and configured.
+
 ## Why NixOS For New VMs
 
 NixOS is useful here because it configures the system declaratively: packages,
@@ -21,10 +27,10 @@ qdistro should still treat the built VM image as an artifact with lineage:
 source flake/module, lock file, build command, builder identity, output hash,
 and any overlay disk derived from it.
 
-## Resource Shape
+## Resource Reference Shape
 
-A VM-backed silo manifest should identify both qdistro runtime policy and the
-guest definition source:
+A VM-backed silo manifest should identify qdistro runtime policy and reference
+the guest definition source without embedding the full native NixOS schema:
 
 ```yaml
 apiVersion: resources.qdistro.io/v1alpha1
@@ -59,9 +65,10 @@ lineageRefs: []
 auditRefs: []
 ```
 
-`spec.guest.language` is a selector for the definition evaluator. For new VM
-images, use `nixos-module` or `nixos-flake`. Other values are legacy or
-special-case until explicitly standardized.
+The guest language field shown above is illustrative. The important boundary is
+that the manifest points to the guest definition, lock, output, and publisher
+contract; the NixOS module remains the authoritative native configuration for
+packages, services, users, files, and VM build details.
 
 ## NixOS Module Contract
 

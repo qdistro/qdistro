@@ -55,9 +55,12 @@ Resources have a **kind**. Open candidate kinds include:
 - network route / namespace / proxy;
 - one-shot transfer payload.
 
-A resource **manifest** is the typed document the broker validates and applies.
-It has `apiVersion`, `kind`, `metadata`, `spec`, `security`, `lineageRefs`,
-`auditRefs`, and `status`. See [resources.md](resources.md).
+A resource **definition** has two layers: predictable owner-facing Markdown for
+authored intent, and a normalized manifest the broker validates and applies.
+The exact manifest fields are still open, but the stable principles are:
+schema/version family, kind, metadata, requested state, observed status, typed
+security fields, lineage references, and audit references. See
+[resources.md](resources.md).
 
 Labels are small indexed selectors; annotations are non-selector descriptive
 metadata; security fields are typed policy inputs. See
@@ -89,9 +92,10 @@ and cgroup scope. That is an implementation shape, not the whole concept.
 Containers, VMs, credential stores, and browser profiles can also be part of
 the silo model.
 
-Silo definitions are semistructured Markdown for now. They describe parameters,
-bootstrap steps, health checks, recovery actions, and agent/user guardrails.
-See [silos.md](silos.md).
+Silo definitions are predictable Markdown for now. They describe parameters,
+bootstrap steps, health checks, recovery actions, and agent/user guardrails in
+a form humans can read and agents can transform into a stricter broker
+manifest. See [silos.md](silos.md).
 
 `Silo` is qdistro's term for this resource kind. Qubes uses "qube" / "domain"
 for isolated compartments; Kubernetes has "pods" as runnable groups of

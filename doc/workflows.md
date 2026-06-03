@@ -17,6 +17,11 @@ The strict manifest is the source of truth for execution. The Markdown plan
 is retained for review and traceability. A run records hashes of both so drift
 is visible.
 
+This differs from owner-facing resource authoring, where predictable Markdown
+may be the higher-level source of intent. In both cases, the broker executes
+only the strict manifest form; prose is retained for human/agent review and
+drift detection.
+
 ## Manifest Sketch
 
 ```yaml

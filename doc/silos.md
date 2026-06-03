@@ -34,10 +34,10 @@ Examples:
 
 ## Silo Definition Files
 
-For now, silo definitions are semistructured Markdown. They are intended to be
-readable by the owner, the admin UI, and GUI-capable agents. A later registry
-can parse the stable headings and simple key-value fields without losing the
-paragraph runbooks.
+For now, silo definitions are predictable Markdown. They are intended to be
+readable by the owner, the admin UI, and GUI-capable agents, while still using
+stable headings, simple key-value fields, and bounded lists that can be turned
+into a stricter broker manifest without losing the paragraph runbooks.
 
 Recommended shape:
 
