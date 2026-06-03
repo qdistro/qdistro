@@ -2213,6 +2213,13 @@ class Broker(dbus.service.Object):
             gate="handoff.activate", uid=uid, caller_pid=pid, caller_exe=exe)
         if _hard_deny:
             return "deny"
+        # _cross_silo_source() may have replaced the claimed identity with the
+        # launcher-attested one (sapp_raw/seng_raw). Refresh the display values
+        # so the audit row and journal line report the identity the decision is
+        # actually made against, matching CheckClipboardTransfer/Receive which
+        # bind sapp/seng directly to the resolved return.
+        sapp = sapp_raw or "(unknown)"
+        seng = seng_raw or "(unknown)"
         action_s = f"qdistro.handoff.activate:{src}:{dst}"
         # Pass source app_id + sandbox_engine to the rule matcher; rules
         # naming app_id or sandbox_engine selectors only match when the
