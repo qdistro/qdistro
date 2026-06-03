@@ -209,8 +209,10 @@ is one instance of a framework that coordinates across all qdistro primitives
 privileged tasks, remote service calls, VM / container lifecycle.
 
 The representation contract is in [workflows.md](workflows.md). The short
-version: a human/agent-readable Markdown plan is linked to a strict manifest
-that the broker can validate, policy-check, execute, and audit.
+version: a predictable human/agent-readable Markdown plan is linked to a strict
+manifest that the broker can validate, policy-check, execute, and audit.
+Material data flows are explicit so guard propagation and lineage are not
+hidden inside prose.
 
 ### Workflow shape
 
@@ -222,6 +224,9 @@ A workflow is a declarative manifest with:
 - **Steps** — actions: deliver secret, copy file, transfer clipboard,
  initiate window handoff, spawn VM / container, call an external API,
  run a command via `qsu`.
+- **Data flows** — declared source entities, transformations, destinations,
+ effective processing host, generated outputs, and inherited or narrowed
+ security fields.
 - **Roles** — which users and services participate and what each is allowed
  to do within the workflow's scope.
 - **Secrets-needed** — declared dependencies on vault items.
@@ -278,13 +283,14 @@ the right uid.
 
 ### Principles
 
-- **Workflow language is text** — Markdown intent plus YAML/JSON manifest.
- Side effects live in declared action handlers, not arbitrary workflow code.
+- **Workflow language is text** — predictable Markdown intent plus a strict
+ execution manifest. Side effects live in declared action handlers, not
+ arbitrary workflow code.
 - **One policy brain** — the workflow engine extends the broker; no new
  daemon.
 - **Every workflow run is audited** — who ran it, when, what secrets were
- touched, what resources were attached, what steps executed, cleanup state,
- lineage refs, and outcome.
+ touched, what resources were attached, what data flowed where, what steps
+ executed, cleanup state, lineage refs, and outcome.
 - **Human-in-the-loop remains default.** AI agents may draft workflows;
  admin approves. Auto-run workflows are opt-in per workflow per admin
  decision.

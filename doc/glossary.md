@@ -156,10 +156,11 @@ handle. See [attachments.md](attachments.md).
 
 ## Workflow
 
-A declarative and optionally scripted plan that coordinates resources, actions,
-dependencies, approvals, and audit records. Workflows can be interactive
-(driven by the owner in a TTY session), GUI-assisted (agent clicks through a
-browser login), or headless (a compositor or VM runs only to execute the plan).
+A policy-checkable orchestration plan that coordinates resources, actions, data
+flows, approvals, cleanup, lineage, and audit records. Workflows can be
+interactive (driven by the owner in a TTY session), GUI-assisted (agent clicks
+through a browser login), or headless (a compositor or VM runs only to execute
+the plan).
 
 For example, a Claude Code authentication workflow might declare:
 
@@ -177,14 +178,18 @@ metadata inherited from resources. Labels may describe project, client, or
 workflow intent; typed security fields describe sensitivity, authority,
 contamination, conflict classes, and export state.
 
-Workflows are dynamic plans. They may include conditions, agent-assisted GUI
-steps, approvals, and cleanup; they are not static deployment bundles.
+Workflow definitions have two layers: predictable Markdown for human/agent
+review and a strict manifest the broker executes. They may include conditions,
+agent-assisted GUI steps, data-flow declarations, approvals, cleanup, and
+compensation. They are not static deployment bundles, package recipes, or shell
+scripts.
 
 ## Data lineage
 
 The record of where data, authority, UI actions, and generated outputs came
 from. Lineage tracks source resources, attached authority resources,
-transformations, workflow steps, approvals, and destinations.
+declared data flows, transformations, workflow steps, approvals, and
+destinations.
 
 Lineage is used both for warnings and for audit. A paste from home into work is
 one visible case, but the broader goal is scriptable provenance at useful
