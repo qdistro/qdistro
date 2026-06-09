@@ -1206,6 +1206,32 @@ class Broker(dbus.service.Object):
             return resolved_engine, resolved_app
         return claimed_engine, claimed_app_id
 
+    def _cache_sandboxed(self, pid: int) -> bool:
+        """True iff ``pid`` resolves to a VERIFIED sandboxed launch record.
+
+        Security guard for the approval cache (issue
+        broker-forever-cache-scope): an authenticated sandboxed (tier-2)
+        caller must not inherit a uid-wide argv-blind ``forever`` /
+        ``forever_exe`` grant minted for a different exe/argv/tier. The
+        cache lookup skips the argv-blind kinds when this is True.
+
+        Crucially this is anchored on the *verified* launch-record
+        ``sandbox_engine`` — NOT the claimed selector returned by
+        ``_lineage_selectors`` (which, in lineage *shadow* mode, is the
+        forgeable client-supplied string). Using the claimed value would
+        let a sandboxed caller claim an empty engine and keep hitting the
+        blind row, defeating the guard in the default shadow posture. An
+        unverified subject yields False — a forged claim can never make
+        the guard MORE permissive, only less.
+        """
+        try:
+            subj = self._resolve_subject(pid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] _cache_sandboxed resolve failed pid={pid}: {e!r}",
+                  flush=True)
+            return False
+        return bool(subj.verified and subj.sandbox_engine)
+
     def _cross_silo_source(self, *, source_pid: int, source_starttime: int,
                            claimed_src: str, claimed_app: str,
                            claimed_engine: str, gate: str,
@@ -1546,7 +1572,14 @@ class Broker(dbus.service.Object):
         # verdict must not mint a new sandboxed process.
         if action_s.startswith("qdistro.tier1.spawn:"):
             return "unknown"
-        row = self.cache.lookup_detail(uid, action_s, exe, argv)
+        # An authenticated sandboxed (tier-2) caller must not be
+        # auto-decided by an argv-blind forever/forever_exe grant minted
+        # for a different exe/argv/tier at this uid (issue
+        # broker-forever-cache-scope). Derived from the verified launch
+        # record, not the (shadow-mode forgeable) claimed selector.
+        sandboxed = self._cache_sandboxed(pid)
+        row = self.cache.lookup_detail(uid, action_s, exe, argv,
+                                       sandboxed=sandboxed)
         if row is not None:
             return "allow" if bool(row["decision"]) else "deny"
         # Consult Python hooks when rules and cache are both
@@ -2793,11 +2826,15 @@ class Broker(dbus.service.Object):
         # "deny" when rules.match() returns None, without reaching the
         # prompt queue at all.
         #
-        # Caveat: the cache is tier-blind -- keyed by (uid, action,
-        # exe, argv), not sandbox_engine/app_id.  A prior approval for
-        # a same-(uid, action, exe) request from a different tier can
-        # admit a tier-2 request.  Mitigated by cross-silo actions
-        # using tier-specific synthetic action strings.
+        # Tier-2 escalation guard (issue broker-forever-cache-scope):
+        # the cache rows carry no sandbox_engine column, so an argv-blind
+        # forever/forever_exe grant minted for a non-sandboxed process
+        # could once admit a same-(uid, action) tier-2 request. We now
+        # derive `sandboxed` from the VERIFIED launch record and skip the
+        # argv-blind kinds for an authenticated sandboxed caller (see
+        # _cache_sandboxed); it falls through to an argv-pinned row, a
+        # rule/hook, or the admin prompt (default-deny). Cross-silo
+        # actions additionally use tier-specific synthetic action strings.
         matched_rule = None
         cached_row = None
         hook_verdict = None
@@ -2823,8 +2860,16 @@ class Broker(dbus.service.Object):
                 # Delegated requests must not be auto-satisfied by an
                 # argv-blind (exe_only / always) row — the decision-time
                 # mirror of the _DELEGATED_FORBIDDEN_SCOPES store guard.
+                # Likewise an authenticated sandboxed (tier-2) caller
+                # must not inherit a uid-wide forever/forever_exe grant
+                # minted for a different exe/argv/tier (issue
+                # broker-forever-cache-scope). The sandboxed flag is
+                # anchored on the verified launch record, not the
+                # (shadow-mode forgeable) claimed sandbox_engine.
+                sandboxed = self._cache_sandboxed(pid)
                 cached_row = self.cache.lookup_detail(
-                    uid, action_s, exe, argv, delegated=delegated)
+                    uid, action_s, exe, argv, delegated=delegated,
+                    sandboxed=sandboxed)
 
         # Sanitise caller-supplied details before storing them. The
         # admin UI (GUI/TUI) renders these verbatim; without scrubbing,

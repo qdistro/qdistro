@@ -108,20 +108,29 @@ properties are verified:
        ``(uid, action, argv[:N])`` -- exe is NOT checked.
    A prior admin approval for a non-tier-2 request with the same
    ``(uid, action)`` tuple (especially a ``forever``-scoped approval)
-   will also match a subsequent tier-2 request. This cache caveat
-   applies to ``_enqueue`` and ``CheckPermission`` -- NOT to the
+   could once also match a subsequent tier-2 request. **Closed
+   (issue broker-forever-cache-scope):** the broker now derives a
+   ``sandboxed`` flag from the *verified* launch record
+   (``bool(subj.verified and subj.sandbox_engine)``) and passes it to
+   the cache lookup on ``_enqueue`` and ``CheckPermission`` /
+   ``CheckPermissionForClient``. When set, the argv-blind kinds
+   (``always`` / ``exe_only``) are skipped exactly like the delegated
+   guard, so an authenticated sandboxed (tier-2) caller can never
+   inherit a uid-wide ``forever`` / ``forever_exe`` grant minted for a
+   different exe/argv/tier — it falls through to an argv-pinned row, a
+   rule, a hook, or the admin prompt (operationally default-deny). The
+   argv-pinned kinds (``argv_exact`` / ``basename`` / ``prefix``) stay
+   valid because they fix argv. Anchoring on the verified record rather
+   than the claimed ``sandbox_engine`` keeps the guard intact in
+   lineage shadow mode (a forged claim cannot loosen it). Non-sandboxed
+   host apps are unchanged.
+   This guard applies to ``_enqueue`` and ``CheckPermission`` -- the
    cross-silo gates (``CheckClipboardTransfer`` / ``Receive`` /
-   ``HandoffActivation``), which do rules-only lookup then explicit
-   default-deny without consulting the cache. Auditors should be
-   aware the cache is tier-blind for general ``RequestPermission`` /
-   ``CheckPermission`` flows. A future ``sandbox_engine`` column on
-   the cache schema would close this gap.
-   **Also affected:** ``CheckPermission`` (the synchronous fast-path
-   method) follows the same rules -> cache -> hooks resolution order
-   and can return ``"allow"`` from the tier-blind cache or hook path.
-   D-Bus policy allows non-admin callers to call ``CheckPermission``,
-   so a tier-2 request routed through that path inherits the same
-   cache-blindness caveat.
+   ``HandoffActivation``) never consulted the cache anyway (rules-only
+   lookup then explicit default-deny). A future ``sandbox_engine``
+   column on the cache schema would additionally let *non-sandboxed*
+   blanket grants distinguish engines, but is not required for the
+   tier-2 escalation guard.
 
 2. **instance_id is correlation-only, never authentication.**
    The ``Rule`` dataclass has no ``instance_id`` field; rules cannot

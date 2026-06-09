@@ -596,3 +596,102 @@ class TestDelegatedArgvBlindGuard:
         monkeypatch.setattr("qdistro_admin_cache.time.time", lambda: future)
         assert c.lookup(2000, "act", "/p") is None
         assert c.lookup(2000, "act", "/p", delegated=True) is None
+
+
+# --- sandboxed-caller argv-blind guard -----------------------------------
+
+class TestSandboxedArgvBlindGuard:
+    """An authenticated sandboxed (tier-2) caller must NOT inherit a
+    uid-wide argv-blind ``forever`` (always) / ``forever_exe`` (exe_only)
+    grant minted for a different exe/argv/tier at the same uid (issue
+    broker-forever-cache-scope). This mirrors the delegated guard but
+    keys off the broker-supplied ``sandboxed`` flag on the
+    *non-delegated* RequestPermission / CheckPermission path. The
+    argv-pinned kinds (argv_exact / basename / prefix) stay valid."""
+
+    def test_always_row_skipped_for_sandboxed(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "", "forever", True, 1000)
+        # Non-sandboxed: 'always' satisfies any exe.
+        assert c.lookup(2000, "act", "/usr/bin/python3") is True
+        # Sandboxed: skipped → re-prompt.
+        assert c.lookup(2000, "act", "/usr/bin/python3",
+                        sandboxed=True) is None
+        assert c.lookup_detail(2000, "act", "/usr/bin/python3",
+                               sandboxed=True) is None
+
+    def test_exe_only_row_skipped_for_sandboxed(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/apt-get", "forever_exe", True, 1000)
+        argv = ["/usr/bin/apt-get", "install", "evil"]
+        # Non-sandboxed: argv-blind exe_only satisfies.
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv) is True
+        # Sandboxed: must NOT satisfy.
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv,
+                        sandboxed=True) is None
+
+    def test_always_deny_row_skipped_for_sandboxed(self, cache_db):
+        """Symmetric across verdict: a sandboxed caller does not inherit a
+        blind DENY either — it re-prompts rather than carrying another
+        process's blanket deny."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "", "forever", False, 1000)
+        assert c.lookup(2000, "act", "/anything") is False
+        assert c.lookup(2000, "act", "/anything", sandboxed=True) is None
+
+    def test_argv_exact_row_still_matches_for_sandboxed(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/apt-get", "forever_argv", True, 1000,
+                argv=["/usr/bin/apt-get", "update"])
+        argv = ["/usr/bin/apt-get", "update"]
+        assert c.lookup(2000, "act", "/usr/bin/apt-get", argv=argv,
+                        sandboxed=True) is True
+
+    def test_prefix_and_basename_still_match_for_sandboxed(self, cache_db):
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/usr/bin/systemctl", "forever_prefix", True,
+                1000, argv=["/usr/bin/systemctl", "restart"])
+        c.store(2000, "actb", "/usr/bin/python3", "forever_basename", True,
+                1000, argv=["/usr/bin/python3", "-V"])
+        assert c.lookup(2000, "act", "/usr/bin/systemctl",
+                        argv=["/usr/bin/systemctl", "restart", "nginx"],
+                        sandboxed=True) is True
+        assert c.lookup(2000, "actb", "/usr/local/bin/python3",
+                        argv=["/usr/local/bin/python3", "-c", "print(1)"],
+                        sandboxed=True) is True
+
+    def test_sandboxed_skips_blind_allow_falls_to_argv_deny(self, cache_db):
+        """A blind 'always' allow is skipped for a sandboxed caller; an
+        argv-pinned deny still applies when its argv matches."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever", True, 1000)            # always allow
+        c.store(2000, "act", "/p", "forever_argv", False, 1000,      # argv_exact deny
+                argv=["/p", "rm"])
+        row = c.lookup_detail(2000, "act", "/p", argv=["/p", "rm"],
+                              sandboxed=True)
+        assert row is not None
+        assert row["match_kind"] == "argv_exact"
+        assert row["decision"] == 0
+        # argv doesn't match the pinned row → blind allow skipped → re-prompt.
+        assert c.lookup(2000, "act", "/p", argv=["/p", "ls"],
+                        sandboxed=True) is None
+        # Non-sandboxed, non-matching argv → blind always allow applies.
+        assert c.lookup(2000, "act", "/p", argv=["/p", "ls"]) is True
+
+    def test_default_is_non_sandboxed(self, cache_db):
+        """sandboxed defaults to False so existing callers are unchanged."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever_exe", True, 1000)
+        assert c.lookup(2000, "act", "/p") is True
+        assert c.lookup_detail(2000, "act", "/p") is not None
+
+    def test_delegated_or_sandboxed_both_skip(self, cache_db):
+        """delegated and sandboxed compose: either one skips blind rows."""
+        c = ApprovalCache(cache_db)
+        c.store(2000, "act", "/p", "forever_exe", True, 1000)
+        assert c.lookup(2000, "act", "/p", delegated=True,
+                        sandboxed=False) is None
+        assert c.lookup(2000, "act", "/p", delegated=False,
+                        sandboxed=True) is None
+        assert c.lookup(2000, "act", "/p", delegated=True,
+                        sandboxed=True) is None

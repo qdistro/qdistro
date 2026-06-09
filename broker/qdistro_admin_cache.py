@@ -125,13 +125,25 @@ _PRIORITY = {
     "always":     4,
 }
 
-# Match-kinds that match argv-blind (ignore the request's argv tuple).
-# A delegated request must NOT be auto-satisfied by these: the broker
-# never authenticated the claimed peer, so an exe_only / always row
-# would let one process inherit another's blanket trust. Mirrors the
-# broker's _DELEGATED_FORBIDDEN_SCOPES (forever / forever_exe map to
-# 'always' / 'exe_only'); see qdistro_admin_broker.py:117.
-_DELEGATED_FORBIDDEN_KINDS = frozenset(("exe_only", "always"))
+# Match-kinds that match argv-blind (ignore the request's argv tuple):
+# 'always' (scope forever) keys on (uid, action) alone, 'exe_only' (scope
+# forever_exe) on (uid, action, exe). Two classes of caller must NOT be
+# auto-satisfied (allow OR deny) by these blanket rows, for the same
+# fail-closed reason — they fall through to an argv-pinned row
+# (argv_exact / basename / prefix), a rule, a hook, or the admin prompt
+# (operationally default-deny):
+#   - DELEGATED requests (RequestPermissionAs): the broker never
+#     authenticated the claimed peer, so it can't let one process inherit
+#     another's blanket trust. Mirrors the broker's
+#     _DELEGATED_FORBIDDEN_SCOPES (forever / forever_exe).
+#   - authenticated SANDBOXED (tier-2) callers: the broker is the sole
+#     gateway between a compromised tier-2 workload and host-side
+#     sensitive ops, so a blanket grant minted for a *different exe /
+#     argv / isolation tier* at the same uid must not auto-decide it.
+_ARGV_BLIND_KINDS = frozenset(("exe_only", "always"))
+# Back-compat alias kept for any external reference; the lookup uses
+# _ARGV_BLIND_KINDS directly so the two skip reasons can never drift apart.
+_DELEGATED_FORBIDDEN_KINDS = _ARGV_BLIND_KINDS
 
 
 def _argv_basename(argv: list | tuple | None) -> str:
@@ -205,14 +217,17 @@ class ApprovalCache:
 
     def lookup(self, caller_uid: int, action: str, exe: str,
                argv: list | tuple | None = None,
-               delegated: bool = False) -> bool | None:
+               delegated: bool = False,
+               sandboxed: bool = False) -> bool | None:
         """Return True/False if an unexpired matching allow/deny exists; None for prompt."""
-        hit = self.lookup_detail(caller_uid, action, exe, argv, delegated)
+        hit = self.lookup_detail(caller_uid, action, exe, argv, delegated,
+                                 sandboxed)
         return None if hit is None else bool(hit["decision"])
 
     def lookup_detail(self, caller_uid: int, action: str, exe: str,
                       argv: list | tuple | None = None,
-                      delegated: bool = False) -> dict | None:
+                      delegated: bool = False,
+                      sandboxed: bool = False) -> dict | None:
         """Like lookup() but returns the full matching row (or None)
         for richer logging. Selects the most-specific match.
 
@@ -227,8 +242,18 @@ class ApprovalCache:
         by a pre-existing blanket grant — the decision-time mirror of
         the broker's _DELEGATED_FORBIDDEN_SCOPES store-path guard.
         Defaults to False to preserve existing (non-delegated) callers.
+
+        sandboxed: when True, the same argv-blind rows are skipped so an
+        authenticated sandboxed (tier-2) caller cannot inherit a
+        uid-wide 'forever'/'forever_exe' grant minted for a different
+        exe/argv/tier — closing the cache's tier-blindness on the
+        non-delegated RequestPermission / CheckPermission path. The
+        broker must derive this from the *verified* launch-record
+        sandbox_engine, never the forgeable claimed selector, or the
+        guard is bypassable in lineage shadow mode. Defaults to False.
         """
         now = int(time.time())
+        skip_blind = delegated or sandboxed
         cur = self._conn.execute(
             """
             SELECT id, match_kind, match_value, argv, decision, expires_at,
@@ -243,7 +268,7 @@ class ApprovalCache:
         best_priority = len(_PRIORITY) + 1
         for row in cur.fetchall():
             r_id, r_kind, r_value, r_argv, r_dec, r_exp, r_cre, r_app, r_scope = row
-            if delegated and r_kind in _DELEGATED_FORBIDDEN_KINDS:
+            if skip_blind and r_kind in _ARGV_BLIND_KINDS:
                 continue
             if not _match_row_argv(r_kind, r_value, r_argv, exe, argv):
                 continue
