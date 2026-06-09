@@ -37,6 +37,7 @@ For machine parsing, use `results.tsv`, `repo-state.tsv`, and `manifest.txt`.
 | Gate | Purpose |
 | --- | --- |
 | `preflight` | Verify sibling repos, libvirt session, VM tools, prebaked image, and common host tools. |
+| `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
 | `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, qdwin/qdshell meson/QML checks, and the Zola site. |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. By default each file gets a fresh disposable VM. |

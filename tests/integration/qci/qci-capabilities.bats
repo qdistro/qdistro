@@ -58,10 +58,17 @@ affected_gates() {
     [ "$output" = "lint host image vm-smoke bats gui" ]
 }
 
-@test "affected: ci/ prefix selects lint+host" {
+@test "affected: ci/ prefix selects selftest+lint+host" {
     run affected_gates ci/bin/qci
     [ "$status" -eq 0 ]
-    [ "$output" = "lint host" ]
+    # A change to the runner itself re-runs the host-only runner self-test.
+    [ "$output" = "selftest lint host" ]
+}
+
+@test "affected: qci self-test bats selects selftest" {
+    run affected_gates tests/integration/qci/qci-runner-contract.bats
+    [ "$status" -eq 0 ]
+    [ "$output" = "selftest" ]
 }
 
 @test "affected: image/ prefix selects image" {
@@ -89,11 +96,12 @@ affected_gates() {
     [ "$output" = "lint host image vm-smoke bats gui" ]
 }
 
-@test "affected: mixed paths are de-duplicated and ordered by ALL_GATES" {
+@test "affected: mixed paths are de-duplicated and ordered by GATE_ORDER" {
     run affected_gates tests/unit/test_audit.py tests/integration/vm/broker-e2e.bats ci/bin/qci
     [ "$status" -eq 0 ]
-    # lint+host from ci/, host from unit, bats from the bats file: ordered set.
-    [ "$output" = "lint host bats" ]
+    # selftest+lint+host from ci/, host from unit, bats from the bats file:
+    # de-duplicated and ordered by GATE_ORDER (selftest first).
+    [ "$output" = "selftest lint host bats" ]
 }
 
 @test "affected: no paths at all fails safe to FULL set" {

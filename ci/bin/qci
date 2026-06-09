@@ -88,6 +88,7 @@ usage() {
 Usage:
   qci preflight
   qci lint
+  qci selftest
   qci host
   qci vm-smoke [--vm <name>]
   qci bats [--vm <name>] [--file <file.bats> ...]
@@ -108,6 +109,12 @@ Notes:
   qci lint    Static pre-VM lint: shellcheck (warn-by-default), bats syntax
               validation, and a heuristic Markdown GUI-scenario structure
               check. Runs without a VM; missing shellcheck/bats => skip+warn.
+  qci selftest  Headless self-test of the qci runner itself: runs the host-only
+              tests/integration/qci/*.bats suite (no VM, no libvirt) that locks
+              down the gate-runner contract — exit-class table, usage/unknown
+              dispatch, headless gate manifest+results.tsv, affected/replay/
+              offline plumbing. Runs first in the host gate. Missing bats =>
+              skip+warn; any failure => EXIT_BATS (35).
   qci image   Static image-content checklist (image/verify-contents.sh) first,
               then the boot/install flow (image/verify.sh, image/install-test.sh).
               Boot/install stages are recorded as blocked when no built image
@@ -235,7 +242,7 @@ init_run() {
     mkdir -p "$RUNS_DIR"
     local rid="${GATE}-$(stamp)-$$"
     RDIR="$RUNS_DIR/$rid"
-    mkdir -p "$RDIR"/{agent-notes,preflight,host,vm,gui,bats,repos,screenshots,journals,reports}
+    mkdir -p "$RDIR"/{agent-notes,preflight,host,vm,gui,bats,repos,screenshots,journals,reports,selftest}
     {
         printf 'run_id=%s\n' "$rid"
         printf 'gate=%s\n' "$GATE"
@@ -638,6 +645,12 @@ gate_host() {
     # working-tree diff. Sanction with QCI_ALLOW_TEST_EDITS=1 for genuine
     # test/CI maintenance tasks. Fail-safe: an unresolvable base FAILS the gate.
     gate_edit_guard "" 0; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    # Self-test the qci runner itself (host-only, no VM) before spending build
+    # time. If the gate-runner contract (exit classes, dispatch, manifest) is
+    # broken, every downstream result is untrustworthy — fail fast here.
+    gate_selftest; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
     # Pin the Qt binding to PyQt6 so a CI image that also has PySide6
@@ -1436,6 +1449,66 @@ gate_lint() {
 }
 
 # ---------------------------------------------------------------------------
+# Self-test gate: run the host-only qci runner unit tests headlessly (NO VM).
+#
+# These bats files under tests/integration/qci/ drive the real qci runner with
+# QCI_RUNS_DIR pointed at a throwaway dir and stub virsh/bats on PATH where a
+# dispatch path is asserted. They lock down the gate-runner CONTRACT that the
+# CI proposal hinges on (gates.md): the stable exit-class table, usage/unknown
+# dispatch, headless gate execution producing a manifest + results.tsv with the
+# documented classification, and the changed-path -> gate selection / replay /
+# offline plumbing. This is the smoke test you can run on any host with no
+# libvirt: missing bats => skip+warn (matches the lint convention). EXIT_BATS
+# on failure.
+# ---------------------------------------------------------------------------
+gate_selftest() {
+    local log_path="$RDIR/selftest/qci-selftest.log" rc=$EXIT_OK
+    mkdir -p "$(dirname "$log_path")"
+    : > "$log_path"
+    # Recursion guard: the bats suite this gate runs itself invokes `qci
+    # selftest` (to assert the gate dispatches headlessly). When that nested
+    # call sees QCI_IN_SELFTEST=1, it records a no-op pass instead of re-running
+    # the suite — otherwise selftest would recurse forever.
+    if [ "${QCI_IN_SELFTEST:-0}" = 1 ]; then
+        record_result selftest qci-bats skip 0 pass selftest "$log_path" "nested selftest invocation; suite already running (recursion guard)"
+        return "$EXIT_OK"
+    fi
+    if ! command -v bats >/dev/null 2>&1; then
+        record_skip selftest qci-bats selftest "bats not installed; skipping qci runner self-test"
+        log "selftest: bats not installed (skip)"
+        return "$EXIT_OK"
+    fi
+    local sf bats_files=()
+    while IFS= read -r sf; do [ -n "$sf" ] && bats_files+=("$sf"); done \
+        < <(find "$QDISTRO_REPO/tests/integration/qci" -maxdepth 1 -name '*.bats' -type f | sort)
+    if [ "${#bats_files[@]}" -eq 0 ]; then
+        record_skip selftest qci-bats selftest "no tests/integration/qci/*.bats present"
+        log "selftest: no qci self-test bats files found (skip)"
+        return "$EXIT_OK"
+    fi
+    {
+        echo "## qci runner self-test (host-only, no VM)"
+        echo "bats $(bats --version 2>/dev/null)"
+        echo "files: ${#bats_files[@]}"
+        echo
+    } >> "$log_path"
+    log "selftest: running ${#bats_files[@]} qci self-test bats files (no VM)"
+    # Isolate the self-test's own runs from this gate's artifact dir so the
+    # nested qci invocations cannot pollute $RDIR (or recurse into runs/).
+    local sf_runs
+    sf_runs=$(mktemp -d "${TMPDIR:-/tmp}/qci-selftest.XXXXXX")
+    if QCI_IN_SELFTEST=1 QCI_RUNS_DIR="$sf_runs" bats "${bats_files[@]}" >> "$log_path" 2>&1; then
+        record_result selftest qci-bats pass 0 pass selftest "$log_path" "${#bats_files[@]} qci self-test files passed"
+    else
+        rc=$EXIT_BATS
+        record_result selftest qci-bats fail "$EXIT_BATS" bats selftest "$log_path" "qci runner self-test failed"
+    fi
+    rm -rf "$sf_runs" 2>/dev/null || true
+    log "selftest: exit $rc"
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Registry consistency check (pilot, advisory). Verifies each listed path
 # exists and each gate name is one qci knows. Never gates qci full.
 # ---------------------------------------------------------------------------
@@ -1663,7 +1736,13 @@ offline_should_skip_external() {
 # Gate vocabulary mirrors the registry/known_gates plus the host/lint pre-VM
 # gates and the catch-all 'full'. The emitted set is sorted + de-duplicated.
 # ---------------------------------------------------------------------------
+# ALL_GATES is the fail-safe FULL coverage set chosen for an unknown/empty
+# path (host already runs the runner self-test internally, so selftest is not
+# part of the widen-to-full set). GATE_ORDER is the stable emission order and
+# includes selftest, which a ci/* or tests/integration/qci/* change selects
+# explicitly.
 ALL_GATES="lint host image vm-smoke bats gui"
+GATE_ORDER="selftest lint host image vm-smoke bats gui"
 
 affected_gates_for_path() {
     # Prints zero or more gate tokens (one per line) for a single path.
@@ -1676,9 +1755,13 @@ affected_gates_for_path() {
     fi
     # 2. conservative path-prefix rules.
     case "$p" in
-        # CI runner / registry / lint inputs themselves.
+        # CI runner / registry / lint inputs themselves. A change to the runner
+        # or its self-test must re-run the host-only runner self-test.
         ci/*|tests/registry.tsv)
-            printf 'lint\nhost\n' ;;
+            printf 'selftest\nlint\nhost\n' ;;
+        # qci runner self-test bats live here.
+        tests/integration/qci/*.bats)
+            printf 'selftest\n' ;;
         # Image build / packaging inputs.
         image/*)
             printf 'image\n' ;;
@@ -1755,10 +1838,10 @@ EOF
             echo "UNKNOWN/empty path encountered -> widening to FULL gate set: $ALL_GATES"
         } >> "$log_path"
     else
-        # Order the de-duplicated set by ALL_GATES order for stable output.
+        # Order the de-duplicated set by GATE_ORDER for stable output.
         selected=""
         local known g present
-        for known in $ALL_GATES; do
+        for known in $GATE_ORDER; do
             present=0
             for g in $gates_raw; do
                 [ "$g" = "$known" ] && present=1 && break
@@ -1789,6 +1872,7 @@ EOF
 run_one_gate() {
     local gate=$1 vm=$2 step_rc
     case "$gate" in
+        selftest) gate_selftest; step_rc=$? ;;
         lint)     gate_lint; step_rc=$? ;;
         host)     gate_host; step_rc=$? ;;
         image)    gate_image; step_rc=$? ;;
@@ -2254,6 +2338,8 @@ main() {
             gate_preflight; rc=$?; finish_run "$rc" ;;
         lint)
             gate_lint; rc=$?; finish_run "$rc" ;;
+        selftest)
+            gate_selftest; rc=$?; finish_run "$rc" ;;
         image)
             gate_image "$@"; rc=$?; finish_run "$rc" ;;
         registry-check)
