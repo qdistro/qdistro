@@ -50,6 +50,19 @@ QDISTRO_PKGS=(
   # Test-VM-only synthetic input. Requires a kernel with uinput; production
   # images must not depend on this package.
   ydotool
+  # Full kernel for the test VM. The baseweed base derives from the upstream
+  # Tumbleweed Minimal-VM Cloud image, which ships only `kernel-default-base`
+  # — a stripped kernel that omits less-common modules, including `uinput`
+  # (CONFIG_INPUT_UINPUT). Without uinput there is no /dev/uinput and ydotool
+  # is a no-op, so the GUI input tests (s33/s60) can't reach hard-pass.
+  # Installing `kernel-default` adds the full module set. When this list is
+  # baked into baseweed-baked.qcow2 (build-baked-baseweed.sh), the resulting
+  # base BOOTS the full kernel from first boot, so clones have /dev/uinput
+  # with no reboot. NOTE: `kernel-default` is the SAME package the PRODUCTION
+  # image already uses (image/config.xml) — it is test-only HERE only because
+  # the Minimal-VM-derived test base started from kernel-default-base;
+  # production is unaffected.
+  kernel-default
   libvirt libvirt-daemon-qemu libvirt-client virt-install
   qemu-x86 qemu-tools
   qemu-audio-pipewire qemu-audio-alsa

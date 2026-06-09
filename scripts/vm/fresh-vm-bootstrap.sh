@@ -267,10 +267,52 @@ if [ ! -S /run/seatd.sock ]; then
 fi
 
 # ---- 5d. Configure VM-test synthetic input ------------------------------
-# ydotool is test infrastructure only. It needs /dev/uinput, which older
-# baseweed kernels may not ship; in that case the user service below is skipped
-# by its ExecCondition and GUI tests keep their documented soft-pass.
+# ydotool is test infrastructure only. It needs /dev/uinput, provided by the
+# `uinput` kernel module (CONFIG_INPUT_UINPUT=m).
+#
+# The baseweed template derives from the upstream openSUSE Tumbleweed
+# Minimal-VM Cloud image, which ships `kernel-default-base` — a stripped
+# kernel package that deliberately omits less-common modules, including
+# uinput. (There is no "custom pinned kernel"; the production image at
+# image/config.xml already uses the full `kernel-default`, which is why
+# production has uinput and only the Minimal-VM-derived test base lacks it.)
+#
+# Primary fix: `kernel-default` is now in install-deps.sh's package list, so
+# a freshly BAKED baseweed (build-baked-baseweed.sh) already carries the full
+# kernel and BOOTS it — clones then have uinput from first boot, no reboot.
+#
+# This block is the FALLBACK for VMs cloned from an OLDER baked image that
+# predates that change (uinput modules absent for the running kernel). It
+# pulls `kernel-default` from the repo. Tumbleweed rolls forward, so the
+# repo's `kernel-default` is usually NEWER than the booted kernel-default-base
+# and installs as a *new* kernel under /usr/lib/modules/<newver>/ — uinput is
+# then only available after a reboot into that kernel, which we cannot safely
+# do mid-bootstrap. In that case we surface a clear WARN; the durable fix is
+# to rebake the base. (If the repo still has the matching version, the module
+# overlays the running kernel's tree and modprobe below succeeds immediately.)
 log "configuring ydotool/uinput for VM GUI tests..."
+krel="$(uname -r)"
+moddir="/lib/modules/$krel/kernel/drivers/input/misc"
+if [ ! -e "$moddir/uinput.ko" ] && [ ! -e "$moddir/uinput.ko.zst" ] \
+   && [ ! -e "$moddir/uinput.ko.xz" ]; then
+    log "  uinput.ko absent for running kernel ${krel}; installing kernel-default (fallback)..."
+    zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+    if zypper -n install --no-recommends kernel-default >/dev/null 2>&1; then
+        # Refresh the running kernel's module dep index in case the install
+        # overlaid a matching version (same-version repo case).
+        depmod -a "$krel" >/dev/null 2>&1 || true
+        if [ ! -e "$moddir/uinput.ko" ] && [ ! -e "$moddir/uinput.ko.zst" ] \
+           && [ ! -e "$moddir/uinput.ko.xz" ]; then
+            newk="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-default 2>/dev/null | tail -n1)"
+            log "  WARN: kernel-default (${newk:-installed}) provides uinput only for a"
+            log "        kernel newer than the booted ${krel}. uinput needs a reboot into"
+            log "        the new kernel; ydotoold stays inactive this boot. Rebake the"
+            log "        baseweed base (kernel-default is in install-deps.sh) to fix durably."
+        fi
+    else
+        log "  WARN: kernel-default install failed; uinput will be unavailable"
+    fi
+fi
 install -d -m 0755 /etc/udev/rules.d /etc/modules-load.d
 cat > /etc/udev/rules.d/60-uinput.rules <<'EOF'
 KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

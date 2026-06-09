@@ -164,8 +164,20 @@ fi
 
 if [ -n "$BUTTON_LINE" ]; then
     pass "pointer button (S3B) reached in-container nested compositor"
-else
+elif [ -z "$INJECT_CMD" ]; then
+    # No synthetic-input tool at all (neither ydotool nor wtype). This is
+    # the documented soft-pass: the PING wire-format-prove path above
+    # already proves the QDNI input-sink is alive end-to-end; the only
+    # missing piece is a real injector. Kept so the test still passes on a
+    # VM whose kernel lacks uinput entirely.
     pass "pointer button (S3B) reached in-container nested compositor (SOFT: no inject tool installed; PING wire-format-prove path already covered above)"
+else
+    # An injector WAS available (ydotool/wtype) and ran, but no button/key
+    # event landed in the inner weston within the window. Now that test VMs
+    # ship kernel-default → /dev/uinput → ydotoold (see install-deps.sh +
+    # fresh-vm-bootstrap.sh §5d), this is a real regression, not infra
+    # absence: hard-fail so it surfaces instead of being masked.
+    fail "pointer button (S3B) NOT observed in nested compositor despite injector '$INJECT_CMD' (uinput/ydotool path regressed?)"
 fi
 
 # Cleanup.

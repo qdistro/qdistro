@@ -77,6 +77,29 @@ stage_vm_driver() {
     assert_output_contains "PASS: §Phase-7 tier-2 input forwarding end-to-end"
 }
 
+@test "phase7-tier2-launcher-click: synthetic Ctrl+Space opens launcher, podapp launches" {
+    # Drives the s18 spec end-to-end via real ydotool/uinput synthetic
+    # input: Ctrl+Space → launcher, type+Enter → launch the tier-2 podapp.
+    # Requires /dev/uinput (kernel-default, now in install-deps.sh) and a
+    # running admin ydotoold; the driver SKIPs when that surface is absent
+    # and SKIP is escalated to fail_loud below so missing infra is noticed.
+    stage_vm_driver "s60-launcher-podapp-click.sh"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s60.sh http://10.0.2.2:8768/s60-launcher-podapp-click.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "podman / tier-2 image / outer compositor / ydotool+uinput absent on this VM"
+    fi
+    assert_output_contains "PASS: podapps cache populated for 'tier2-c-ui'"
+    # Load-bearing: the launcher_requested line can only appear if the
+    # synthetic Ctrl+Space traversed /dev/uinput → ydotoold → qdwin.
+    assert_output_contains "PASS: launcher opened via synthetic Ctrl+Space"
+    # NOTE: the post-Enter "podapp launched" advertise is best-effort (the
+    # driver emits NOTE not FAIL when launcher→spawn activation isn't
+    # journal-deterministic; that path is also covered by phase7-tier2-podman),
+    # so it is intentionally not asserted here.
+    assert_output_contains "PASS: §Phase-7 tier-2 launcher click (synthetic input) end-to-end"
+}
+
 @test "phase7-tier2-lifecycle: two containers + stop-cleanup" {
     stage_vm_driver "s34-tier2-lifecycle.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s34.sh http://10.0.2.2:8768/s34-tier2-lifecycle.sh && chmod +x /tmp/s34.sh && bash /tmp/s34.sh 2>/dev/null"
