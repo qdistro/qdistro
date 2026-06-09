@@ -60,6 +60,24 @@ class AuthBackend(QObject):
         # unlocked, or any worker finishing after the next lock began).
         self._session_generation = 0
         self._fprintd_busy = False
+        # Generation of the worker currently holding `_fprintd_busy` (valid
+        # only while busy). Lets a same-generation duplicate arm (e.g. a
+        # keystroke while the lock-start worker is still in flight) be a true
+        # no-op, and a re-arm be scheduled ONLY when the busy worker belongs
+        # to a superseded lock.
+        self._fprintd_busy_generation = 0
+        # Set when an arm request (occupy_fingerprint_sensor(True)) arrives
+        # while a worker from a PRIOR generation is still busy (e.g. the old
+        # worker is in its D-Bus disconnect/cleanup after a success when the
+        # screen relocks). The busy flag suppresses an immediate start, so we
+        # remember that the current generation still wants the sensor armed
+        # and start a fresh worker from the old worker's `finally` once it
+        # clears `_fprintd_busy`. Without this, a relock that races an
+        # in-flight worker would leave the fresh lock with no fprintd verify
+        # (and no PAM until a keystroke) — the very gap this whole change
+        # closes. Holds the generation that requested the re-arm so a worker
+        # finishing into a *superseded* session doesn't re-arm a dead one.
+        self._fprintd_rearm_generation: int | None = None
         self._pam_thread: threading.Thread | None = None
         self._pam_pending_password: str | None = None
         self._pam_abort = threading.Event()
@@ -158,15 +176,35 @@ class AuthBackend(QObject):
                 self.start_pam()
             return
         with self._state_lock:
-            if on and not self._fprintd_busy:
+            if not on:
+                # An explicit disarm cancels any pending re-arm.
+                self._fprintd_rearm_generation = None
+                return
+            if not self._fprintd_busy:
                 self._fprintd_busy = True
+                self._fprintd_busy_generation = self._session_generation
+                self._fprintd_rearm_generation = None
                 start = True
-            else:
+            elif self._fprintd_busy_generation == self._session_generation:
+                # The in-flight worker belongs to the CURRENT lock — the
+                # sensor is already armed for this session, so a duplicate
+                # arm (e.g. a keystroke while the lock-start worker is still
+                # running) is a true no-op. No redundant re-arm scheduled.
                 start = False
+            else:
+                # The in-flight worker belongs to an OLDER lock that is still
+                # cleaning up. Remember that this fresh generation wants the
+                # sensor so the worker's `finally` starts a new one once it
+                # clears `_fprintd_busy`.
+                start = False
+                self._fprintd_rearm_generation = self._session_generation
         if start:
-            threading.Thread(
-                target=self._fprint_worker, name="qdlocker-fprintd", daemon=True
-            ).start()
+            self._spawn_fprint_worker()
+
+    def _spawn_fprint_worker(self) -> None:
+        threading.Thread(
+            target=self._fprint_worker, name="qdlocker-fprintd", daemon=True
+        ).start()
 
     # ---- failure accounting helpers ----
 
@@ -265,8 +303,28 @@ class AuthBackend(QObject):
         except Exception:
             log.exception("fprintd verify raised")
         finally:
+            # Clear busy and decide — under the same lock — whether a fresh
+            # worker is owed. A re-arm is honored only if a newer lock
+            # requested the sensor (rearm_generation set) AND that generation
+            # is still the current one AND fprintd is still viable for it
+            # (not env-unavailable). This closes the relock-races-cleanup gap
+            # without ever running two workers at once (we re-set busy before
+            # releasing the lock).
             with self._state_lock:
                 self._fprintd_busy = False
+                rearm = (
+                    self._fprintd_rearm_generation is not None
+                    and self._fprintd_rearm_generation == self._session_generation
+                    and self._fprintd_enabled
+                    and not self._fprintd_unavailable
+                )
+                if rearm:
+                    self._fprintd_busy = True
+                    self._fprintd_busy_generation = self._session_generation
+                self._fprintd_rearm_generation = None
+            if rearm:
+                log.info("re-arming fprintd for the current lock session")
+                self._spawn_fprint_worker()
 
     async def _fprint_async(self) -> None:
         # Generation this fingerprint attempt belongs to; tags the SUCCESS
@@ -334,6 +392,18 @@ class AuthBackend(QObject):
                 log.warning("fprintd GetDefaultDevice timed out; falling back")
                 self._record_fprintd_failure(environmental=True, generation=generation)
                 return
+            except Exception:
+                # A machine with no enrolled reader makes fprintd answer
+                # GetDefaultDevice with net.reactivated.Fprint.Error.NoSuchDevice
+                # ("No devices available"). That's a DBusError, not a timeout —
+                # it MUST fail CLOSED to PAM, not propagate out of the worker
+                # uncaught (which would swallow it via _fprint_worker's generic
+                # except and leave the user with no prompt). This matters now
+                # that the sensor is armed on every fresh lock, even on
+                # deviceless hosts.
+                log.info("fprintd has no default device; falling back")
+                self._record_fprintd_failure(environmental=True, generation=generation)
+                return
 
             try:
                 dev_intro = await asyncio.wait_for(
@@ -342,6 +412,10 @@ class AuthBackend(QObject):
                 )
             except asyncio.TimeoutError:
                 log.warning("fprintd Device introspect timed out; falling back")
+                self._record_fprintd_failure(environmental=True, generation=generation)
+                return
+            except Exception:
+                log.info("fprintd device introspect failed; falling back")
                 self._record_fprintd_failure(environmental=True, generation=generation)
                 return
             dev_obj = bus.get_proxy_object(

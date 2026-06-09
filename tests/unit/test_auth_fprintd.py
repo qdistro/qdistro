@@ -26,6 +26,13 @@ import pytest
 from qdlocker.auth import AuthBackend, AuthOutcome
 
 
+async def _noop_async():
+    """Stand-in for AuthBackend._fprint_async that does nothing — lets a test
+    drive the real _fprint_worker() purely for its busy-clear / re-arm
+    `finally` logic without touching D-Bus."""
+    return None
+
+
 # ---- fake dbus-next plumbing ------------------------------------------------
 
 
@@ -278,6 +285,182 @@ def test_stale_generation_worker_side_effects_dropped(monkeypatch):
 
     started.assert_not_called()
     assert backend._fprintd_failures == 0  # fresh session untouched
+
+
+@pytest.mark.cheat_aware(
+    protects="a deviceless host (fprintd answers GetDefaultDevice with a "
+    "DBusError 'No devices available') fails CLOSED — records an "
+    "environmental failure and starts PAM, instead of letting the error "
+    "escape the worker uncaught and leaving the user with no prompt",
+    severity="critical",
+    cheats=[
+        "only catch asyncio.TimeoutError on GetDefaultDevice (the original bug)",
+        "swallow the error in _fprint_worker without recording a failure",
+        "assert recorded but not that PAM fallback (start_pam) was reached",
+    ],
+    consequence="on a laptop with no enrolled/working reader the locker arms "
+    "fprintd on every lock, the DBusError escapes uncaught, no failure is "
+    "recorded, and the password prompt never appears until a keystroke — a "
+    "fail-OPEN-to-stuck regression once touch-to-unlock is armed on lock",
+)
+def test_get_default_device_dbus_error_fails_closed(monkeypatch):
+    bus = _FakeBus()
+    _install_fake_dbus(monkeypatch, bus=bus)
+
+    backend = AuthBackend(max_fprintd_failures=3, fprintd_timeout_s=0.05)
+    started = MagicMock()
+    monkeypatch.setattr(backend, "start_pam", started)
+
+    async def raise_no_device(self):
+        raise RuntimeError("No devices available")  # stand-in for DBusError
+
+    monkeypatch.setattr(_FakeManager, "call_get_default_device", raise_no_device)
+
+    emitted = []
+    backend.outcome.connect(lambda p: emitted.append(p))
+
+    # Must NOT raise out of the worker; the async path returns cleanly.
+    asyncio.run(asyncio.wait_for(backend._fprint_async(), timeout=5.0))
+
+    # Environmental → unavailable latched, PAM started, never SUCCESS.
+    assert backend._fprintd_unavailable is True
+    started.assert_called_once()
+    assert all(
+        not (isinstance(p, tuple) and p[0] is AuthOutcome.SUCCESS)
+        for p in emitted
+    )
+    assert bus.disconnected
+
+
+def test_device_introspect_error_fails_closed(monkeypatch):
+    # The device introspect (after GetDefaultDevice) raising a non-timeout
+    # error must also fail CLOSED rather than escape the worker.
+    bus = _FakeBus()
+    _install_fake_dbus(monkeypatch, bus=bus)
+
+    backend = AuthBackend(max_fprintd_failures=3, fprintd_timeout_s=0.05)
+    started = MagicMock()
+    monkeypatch.setattr(backend, "start_pam", started)
+
+    orig_introspect = _FakeBus.introspect
+
+    async def introspect_raise_on_device(self, service, path):
+        if "Manager" in path:
+            return await orig_introspect(self, service, path)
+        raise RuntimeError("device introspect failed")
+
+    monkeypatch.setattr(_FakeBus, "introspect", introspect_raise_on_device)
+
+    asyncio.run(asyncio.wait_for(backend._fprint_async(), timeout=5.0))
+
+    assert backend._fprintd_unavailable is True
+    started.assert_called_once()
+    assert bus.disconnected
+
+
+@pytest.mark.cheat_aware(
+    protects="arming the sensor while a PRIOR-generation worker is still busy "
+    "schedules a re-arm; once that worker clears _fprintd_busy a FRESH worker "
+    "is started for the current lock — so a relock racing an in-flight worker "
+    "still gets a fingerprint verify (and PAM fallback) without a keystroke",
+    severity="high",
+    cheats=[
+        "make occupy_fingerprint_sensor a plain no-op when busy (the bug)",
+        "re-arm regardless of generation, including for a superseded lock",
+        "spawn the re-arm worker without re-setting _fprintd_busy (two at once)",
+    ],
+    consequence="a screen that relocks while a previous fprintd worker is in "
+    "its D-Bus cleanup is left with no fprintd verify and no PAM prompt until "
+    "the user types — reintroducing the dormant-sensor bug this change fixes",
+)
+def test_rearm_when_busy_starts_fresh_worker_on_clear(monkeypatch):
+    backend = AuthBackend(max_fprintd_failures=1, fprintd_timeout_s=0.05)
+    spawned = []
+    monkeypatch.setattr(
+        backend, "_spawn_fprint_worker",
+        lambda: spawned.append(backend._current_generation()),
+    )
+
+    # Simulate a prior-generation (gen 1) worker already in flight.
+    backend.reset_session()  # generation -> 1
+    with backend._state_lock:
+        backend._fprintd_busy = True
+        backend._fprintd_busy_generation = backend._session_generation
+
+    # A relock advances the generation, then arms while still busy.
+    backend.reset_session()  # generation -> 2
+    backend.occupy_fingerprint_sensor(True)
+    # Suppressed (busy), but a re-arm is now pending for gen 2.
+    assert spawned == []
+    assert backend._fprintd_rearm_generation == 2
+
+    # The old worker finishes: run the real worker with a no-op async body so
+    # its `finally` clears busy and honors the pending re-arm.
+    monkeypatch.setattr(backend, "_fprint_async", _noop_async)
+    backend._fprint_worker()
+    assert spawned == [2], "re-arm did not start a fresh worker for the current lock"
+    assert backend._fprintd_rearm_generation is None
+
+
+def test_same_generation_arm_while_busy_is_noop(monkeypatch):
+    """A duplicate arm for the CURRENT lock (e.g. a keystroke while the
+    lock-start worker is still running) must NOT schedule a redundant
+    re-arm — the sensor is already armed for this session."""
+    backend = AuthBackend(max_fprintd_failures=1, fprintd_timeout_s=0.05)
+    spawned = []
+    monkeypatch.setattr(
+        backend, "_spawn_fprint_worker", lambda: spawned.append(True)
+    )
+    # Worker for the current generation is already in flight.
+    with backend._state_lock:
+        backend._fprintd_busy = True
+        backend._fprintd_busy_generation = backend._session_generation
+
+    backend.occupy_fingerprint_sensor(True)  # duplicate arm, same generation
+    assert backend._fprintd_rearm_generation is None, "redundant re-arm scheduled"
+
+    # Worker finishes: no extra worker is owed.
+    monkeypatch.setattr(backend, "_fprint_async", _noop_async)
+    backend._fprint_worker()
+    assert spawned == [], "same-generation duplicate arm spawned an extra worker"
+    assert backend._fprintd_busy is False
+
+
+def test_rearm_for_superseded_generation_is_dropped(monkeypatch):
+    backend = AuthBackend(max_fprintd_failures=1, fprintd_timeout_s=0.05)
+    spawned = []
+    monkeypatch.setattr(
+        backend, "_spawn_fprint_worker", lambda: spawned.append(True)
+    )
+    with backend._state_lock:
+        backend._fprintd_busy = True
+        # A re-arm was requested for generation 1...
+        backend._session_generation = 1
+        backend._fprintd_rearm_generation = 1
+        # ...but a newer lock already advanced to generation 2.
+        backend._session_generation = 2
+
+    monkeypatch.setattr(backend, "_fprint_async", _noop_async)
+    backend._fprint_worker()
+    assert spawned == [], "re-armed a worker for a superseded lock session"
+    assert backend._fprintd_busy is False
+
+
+def test_rearm_skipped_when_env_unavailable(monkeypatch):
+    backend = AuthBackend(max_fprintd_failures=1, fprintd_timeout_s=0.05)
+    spawned = []
+    monkeypatch.setattr(
+        backend, "_spawn_fprint_worker", lambda: spawned.append(True)
+    )
+    with backend._state_lock:
+        backend._fprintd_busy = True
+        backend._fprintd_rearm_generation = backend._session_generation
+        backend._fprintd_unavailable = True  # fprintd died this session
+
+    monkeypatch.setattr(backend, "_fprint_async", _noop_async)
+    backend._fprint_worker()
+    assert spawned == [], "re-armed fprintd after it was declared unavailable"
+    assert backend._fprintd_busy is False
 
 
 def test_reset_session_clears_transient_unavailable_latch():
