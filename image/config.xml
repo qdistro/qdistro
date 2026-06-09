@@ -26,15 +26,22 @@
           filesystem="btrfs"
           firmware="uefi"
           installiso="true"
-          installboot="harddisk"
+          installboot="install"
           kernelcmdline="quiet systemd.default_vt=3"
           efipartsize="512">
-      <!-- timeout=30 gives a human time to read the menu; the install
-           ISO's default entry is "Boot from Hard Disk" (installboot=
-           harddisk), so a timeout expiry never auto-installs. kiwi-
-           oem-dump *additionally* asks "Destroying ALL data on
-           /dev/vda? <Yes>/<No>" before writing — that prompt is
-           unconditional unless oem-unattended is set (we don't). -->
+      <!-- installboot="install" makes "Install qdistro" the *default*
+           (pre-highlighted) GRUB entry on the install ISO, so the
+           unattended install-test driver no longer has to send a Down
+           keypress to move off "Boot from Hard Disk" — a single Enter
+           at the GRUB menu starts the install. The real safety gate is
+           kiwi-oem-dump's unconditional "Destroying ALL data on
+           /dev/vda? <Yes>/<No>" prompt, which always blocks the actual
+           disk write (oem-unattended is NOT set), so a human medium
+           still gets one explicit confirmation before anything is
+           overwritten. timeout=30 (timeout_style=menu) gives a human
+           time to read the menu; on timeout expiry GRUB proceeds to the
+           default Install entry, but the destroy-confirm still stops it
+           short of touching the disk. -->
       <bootloader name="grub2" timeout="30" timeout_style="menu"/>
       <oemconfig>
         <oem-systemsize>20480</oem-systemsize>

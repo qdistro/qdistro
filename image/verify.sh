@@ -166,10 +166,41 @@ done
 [ "$ready" = 1 ] || { shoot 99-ssh-timeout; die "SSH never came up; see $VERIFY_DIR/screenshots/99-ssh-timeout.png"; }
 shoot 01-ssh-ready
 
-# admin's user systemd starts after the autologin pam session opens, which
-# happens at greetd-time. Give it 30s to bring up noctalia-{session,shell}.
-log "giving services 30s to come up..."
-sleep 30
+# admin's user systemd manager comes up under linger right after boot and
+# reaches default.target, which trails the moment sshd accepts auth by ~5-10s
+# and can flap under load. The assertions below query admin's user manager
+# (systemctl --user cat/show/is-active for qdwin-session.target, qdlocker, ...),
+# so they need that manager up and settled. Instead of a fixed empirical 30s
+# sleep, poll `systemctl --user is-system-running` until the manager reports it
+# has finished bringing up default.target. Bounded: if it never settles within
+# the budget we fall through and let the assertions below report the real
+# failure rather than hanging here.
+#
+# `is-system-running` prints (and exits 0 for) `running`; during bring-up it
+# prints `initializing`/`starting`, and on a unit failure it prints `degraded`
+# (exit 1). We accept `running` OR `degraded` as "settled" — a degraded manager
+# has still finished its startup transaction, and the individual assertions
+# below are what should adjudicate any unit failure, not this gate.
+user_mgr_check() {
+    remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-system-running" 2>/dev/null
+}
+mgr_wait_deadline=$(( $(date +%s) + 120 ))
+log "waiting for admin's user manager to settle (max 120s)..."
+mgr_state=""
+while [ "$(date +%s)" -lt "$mgr_wait_deadline" ]; do
+    mgr_state="$(user_mgr_check || true)"
+    case "$mgr_state" in
+        running|degraded)
+            log "admin user manager settled (is-system-running=$mgr_state)"
+            break
+            ;;
+    esac
+    sleep 3
+done
+case "$mgr_state" in
+    running|degraded) ;;
+    *) warn "admin user manager did not settle within 120s (is-system-running='$mgr_state'); running assertions anyway" ;;
+esac
 
 #-- 8. Assertions (journal-side, per project memory) --------------------------
 PASS=0; FAIL=0

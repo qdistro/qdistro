@@ -128,71 +128,58 @@ shoot() {
     rm -f "$tmp"
 }
 
-# Drive the OVMF picker → GRUB → kiwi-oem-dump confirm sequence by
-# hashing virsh screenshots and waiting for the screen content to
-# *change* between stages. Plain PPM-size detection fails because OVMF
-# picker and GRUB menu both render at ~3-7 KB text mode and aren't
-# distinguishable by size alone.
-ppm_hash() {
-    local tmp
-    tmp=$(mktemp --suffix=.ppm)
-    virsh screenshot "$VM" "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; echo ""; return; }
-    sha256sum < "$tmp" | cut -c1-16
-    rm -f "$tmp"
-}
-wait_for_change() {
-    # Block until the screen hash differs from $1 or $2 deadline-seconds elapse.
-    local from_hash="$1"
-    local deadline=$(( SECONDS + ${2:-30} ))
-    local h
-    while [ "$SECONDS" -lt "$deadline" ]; do
-        h=$(ppm_hash)
-        if [ -n "$h" ] && [ "$h" != "$from_hash" ]; then
-            echo "$h"; return 0
-        fi
-        sleep 1
-    done
-    echo ""; return 1
-}
+# Drive the OVMF picker → GRUB → kiwi-oem-dump confirm sequence.
+#
+# The image now ships installboot="install" in config.xml, so GRUB
+# pre-highlights "Install qdistro" as the default entry. That removes
+# the fragile part of the old driver — we no longer need to hash
+# screenshots to detect the OVMF↔GRUB transition and send a Down
+# keypress to move off "Boot from Hard Disk" (the source of the
+# OVMF-picker hash-collision race documented in todo/issues/qdistro/
+# image.md). The driver now only has to:
+#   1. send one Enter at the OVMF firmware boot-entry picker, and
+#   2. send one Enter at kiwi-oem-dump's "Destroying ALL data? <Yes>"
+#      confirm (GRUB's 30s timeout otherwise auto-selects the default
+#      Install entry, so no GRUB keypress is required).
 drive_install_menu() {
-    log "driving UEFI + GRUB menus via send-key (hash-driven)"
-    # Stage 1: wait for OVMF picker to stabilize (hash stops changing
-    # for 2 consecutive samples).
-    local h prev=""
+    log "driving UEFI + GRUB menus via send-key"
+    # Stage 1: wait for the OVMF picker to stabilize (screenshot size
+    # stops changing for 2 consecutive samples), then send Enter to
+    # pick the boot entry / continue past the firmware menu.
+    local size prev=""
     for _ in $(seq 1 60); do
         sleep 1
-        h=$(ppm_hash)
-        if [ -n "$h" ] && [ "$h" = "$prev" ]; then
-            log "  OVMF picker stable (hash=$h); sending Enter"
-            break
-        fi
-        prev="$h"
-    done
-    local ovmf_hash="$h"
-    virsh send-key "$VM" KEY_ENTER >/dev/null
-    # Stage 2: wait for GRUB menu (screen hash MUST differ from OVMF).
-    log "  waiting for GRUB menu (max 30s)..."
-    h=$(wait_for_change "$ovmf_hash" 30)
-    if [ -z "$h" ]; then
-        log "  WARN: screen never changed after OVMF Enter; bailing"; return
-    fi
-    log "  GRUB menu reached (hash=$h); sending Down + Enter"
-    virsh send-key "$VM" KEY_DOWN  >/dev/null
-    sleep 1
-    virsh send-key "$VM" KEY_ENTER >/dev/null
-    # Stage 3: kiwi-oem-dump destroy-confirm. Blue-background dialog
-    # is a big graphical frame (~30 KB+); both OVMF and GRUB are
-    # smaller text screens. Detect by size.
-    local stage3_deadline=$(( SECONDS + 60 ))
-    while [ "$SECONDS" -lt "$stage3_deadline" ]; do
         local tmp
         tmp=$(mktemp --suffix=.ppm)
         if virsh screenshot "$VM" "$tmp" >/dev/null 2>&1; then
-            local size
             size=$(stat -c %s "$tmp")
+        else
+            size=""
+        fi
+        rm -f "$tmp"
+        if [ -n "$size" ] && [ "$size" = "$prev" ]; then
+            log "  OVMF picker stable (ppm=$size B); sending Enter"
+            break
+        fi
+        prev="$size"
+    done
+    virsh send-key "$VM" KEY_ENTER >/dev/null
+    # Stage 2: kiwi-oem-dump destroy-confirm. "Install qdistro" is the
+    # GRUB default, so GRUB boots it on Enter or on its 30s timeout — no
+    # GRUB keypress needed. The destroy-confirm is a blue-background
+    # dialog rendered as a big graphical frame (~20 KB+ PPM); both the
+    # OVMF picker and the GRUB menu are smaller text screens, so a size
+    # threshold distinguishes it. Confirm "Yes" with one Enter.
+    local stage2_deadline=$(( SECONDS + 120 ))
+    while [ "$SECONDS" -lt "$stage2_deadline" ]; do
+        local tmp
+        tmp=$(mktemp --suffix=.ppm)
+        if virsh screenshot "$VM" "$tmp" >/dev/null 2>&1; then
+            local sz
+            sz=$(stat -c %s "$tmp")
             rm -f "$tmp"
-            if [ "$size" -gt 20000 ]; then
-                log "  destroy-confirm detected (ppm=$size B); confirming Yes"
+            if [ "$sz" -gt 20000 ]; then
+                log "  destroy-confirm detected (ppm=$sz B); confirming Yes"
                 virsh send-key "$VM" KEY_ENTER >/dev/null
                 return
             fi
