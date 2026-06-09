@@ -196,3 +196,37 @@ def test_notify_lock_begin_resets_unlocked_and_session(qapp, auth):
     assert ctrl._unlocked is False
     # reset_session was invoked on the backend (generation advanced).
     assert auth._current_generation() == 1
+
+
+@pytest.mark.cheat_aware(
+    protects="a fresh lock arms the fingerprint sensor immediately, with no "
+    "keystroke required, so touch-to-unlock works on an empty password field",
+    severity="high",
+    cheats=[
+        "arm fingerprint only from the currentText setter once text is typed",
+        "call occupy_fingerprint_sensor(False) or omit the arm entirely",
+        "assert call count without asserting it was armed with True",
+    ],
+    consequence="an idle lock leaves fprintd dormant; a finger-only unlock "
+    "never fires — the touch-to-unlock spec path is dead until the user types, "
+    "and GUI scenario 02 hangs",
+)
+def test_notify_lock_begin_arms_fingerprint(qapp, auth):
+    ctrl = LockController(auth)
+    auth.occupy_fingerprint_sensor.reset_mock()
+    ctrl.notify_lock_begin()
+    # Sensor armed on the fresh lock with no text typed.
+    auth.occupy_fingerprint_sensor.assert_called_once_with(True)
+
+
+def test_notify_lock_begin_arms_after_session_reset(qapp, auth):
+    """The sensor must be armed AFTER reset_session() so the fprintd worker
+    captures the fresh generation (and a prior transient wedge is retried)."""
+    ctrl = LockController(auth)
+    order = []
+    auth.reset_session = MagicMock(side_effect=lambda: order.append("reset"))
+    auth.occupy_fingerprint_sensor = MagicMock(
+        side_effect=lambda on: order.append(("occupy", on))
+    )
+    ctrl.notify_lock_begin()
+    assert order == ["reset", ("occupy", True)]

@@ -109,9 +109,21 @@ class LockController(QObject):
     def notify_lock_begin(self) -> None:
         """Called by WaylandBridge on every fresh lock_requested. Resets
         per-session auth state so the next lock cycle has a clean
-        fprintd-failure counter."""
+        fprintd-failure counter, then arms the fingerprint sensor so a
+        touch-to-unlock works on a FRESH lock with an empty password
+        field — matching the spec's "fingerprint = the owner is present"
+        path (sessions.md). Previously the sensor was only armed lazily
+        from the currentText setter once the user typed, so an idle lock
+        left fprintd dormant and a finger-only unlock never fired."""
         self._unlocked = False
+        # reset_session() bumps the generation and clears the per-session
+        # fprintd-unavailable latch; arm AFTER it so the worker captures
+        # the fresh generation and a transient wedge from a prior lock is
+        # retried. occupy_fingerprint_sensor(True) is idempotent for the
+        # session (the _fprintd_busy guard makes a later keystroke-driven
+        # call a no-op while the worker is in flight).
         self._auth.reset_session()
+        self._auth.occupy_fingerprint_sensor(True)
 
     @pyqtSlot()
     def tryUnlock(self) -> None:
