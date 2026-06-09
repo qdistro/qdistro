@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import math
 import os
 import pwd as _pwd_mod
 import re
 import signal
 import sys
 import threading
+import time
 from typing import Any
 
 import dbus
@@ -70,6 +72,18 @@ def _username_for_uid(uid: int) -> str:
 # for testing or stricter policies; set to 0 to disable GC entirely.
 AUDIT_RETENTION_DAYS_DEFAULT = 90
 AUDIT_GC_INTERVAL_S = 86400  # once per day
+
+# Decided _Request entries are reaped this many seconds after their
+# decision lands. They must outlive any late WaitForDecision caller: a
+# qsu client that races the admin's click can call WaitForDecision a
+# moment after the decision is recorded and still expects the real
+# verdict (a reaped request replies False, silently turning an Approve
+# into a deny). 300s is far longer than the prompt→wait round-trip yet
+# bounds _pending growth to "decisions in the last 5 minutes" instead of
+# "every decision since boot". Reaped on the existing once-a-minute
+# _gc_tick. Override with QDISTRO_PENDING_RETENTION_S for testing or
+# tighter memory targets; set to 0 to disable reaping entirely.
+PENDING_RETENTION_S_DEFAULT = 300
 
 # If True, an audit-log failure on the prompt path (admin pressed
 # Approve/Deny) forces a deny: waiters get False, the admin app gets
@@ -666,6 +680,7 @@ class _Request:
         "id", "uid", "pid", "exe", "start_time", "action", "details",
         "decision", "waiters", "delegated", "one_shot",
         "exe_sha256", "selinux_label", "cgroup", "layered_pending",
+        "decided_at",
     )
 
     def __init__(self, rid: int, uid: int, pid: int, exe: str,
@@ -709,6 +724,15 @@ class _Request:
         self.selinux_label = str(selinux_label or "")
         self.cgroup = str(cgroup or "")
         self.layered_pending = bool(layered_pending)
+        # Monotonic-ish wall-clock (time.time()) when this request was
+        # decided, used by the broker's periodic reaper to drop decided
+        # entries after a retention window. None while undecided. The
+        # reaper stamps this lazily the first time it sees a decided
+        # request with decided_at still None, so every decision site
+        # (rule/cache/hook fast path, admin prompt, TOCTOU force-deny,
+        # audit-failure downgrade) gets reaped without each one having
+        # to remember to set it.
+        self.decided_at: float | None = None
 
 
 class Broker(dbus.service.Object):
@@ -778,6 +802,21 @@ class Broker(dbus.service.Object):
                                AUDIT_RETENTION_DAYS_DEFAULT))
         except ValueError:
             self._audit_retention_days = AUDIT_RETENTION_DAYS_DEFAULT
+        # Retention window (seconds) for decided _pending entries; env
+        # override wins for tests, <=0 disables reaping. A non-finite
+        # value (inf/nan) would silently neuter the reaper — every
+        # `now - decided_at >= retention` comparison is False against
+        # nan/inf — re-introducing the leak this fix exists to close, so
+        # reject it and fall back to the default rather than fail open.
+        try:
+            retention = float(
+                os.environ.get("QDISTRO_PENDING_RETENTION_S",
+                               PENDING_RETENTION_S_DEFAULT))
+            if not math.isfinite(retention):
+                raise ValueError("non-finite retention")
+            self._pending_retention_s = retention
+        except ValueError:
+            self._pending_retention_s = float(PENDING_RETENTION_S_DEFAULT)
         # GC expired rows once per minute
         GLib.timeout_add_seconds(60, self._gc_tick)
         # GC the audit log once on startup (so short-lived services
@@ -1025,7 +1064,54 @@ class Broker(dbus.service.Object):
                 store.reap_expired()
         except Exception as e:  # noqa: BLE001
             print(f"[broker] launch_records.reap failed: {e}", flush=True)
+        try:
+            self._reap_pending()
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] _pending reap failed: {e}", flush=True)
         return True  # keep firing
+
+    def _reap_pending(self, now: float | None = None) -> int:
+        """Drop decided _pending entries older than the retention window.
+
+        Runs on the GLib mainloop thread (via _gc_tick), which is the
+        only thread that mutates _pending, but takes the lock anyway to
+        keep the single-writer invariant explicit and consistent with
+        the rest of the broker.
+
+        Decided requests are stamped lazily: the first reap pass that
+        sees a decided request with decided_at == None records the
+        current time, and a later pass reaps it once retention has
+        elapsed. This keeps the leak fix off the hot decision paths —
+        no decision site has to remember to set decided_at — at the cost
+        of at most one extra _gc_tick interval of retention, which is
+        immaterial against a 5-minute window.
+
+        Undecided requests are never reaped: they may still have waiters
+        blocked on a verdict, and the admin approvals UI lists them.
+        Returns the number of entries removed (for tests/logging)."""
+        retention = getattr(self, "_pending_retention_s", 0.0)
+        if not retention or retention <= 0:
+            return 0  # reaping disabled
+        if now is None:
+            now = time.time()
+        removed = 0
+        with self._lock:
+            for rid, req in list(self._pending.items()):
+                if req.decision is None:
+                    continue  # still awaiting a verdict; keep it
+                if req.decided_at is None:
+                    # First sighting after the decision landed: stamp
+                    # now, reap on a subsequent pass once retention
+                    # elapses.
+                    req.decided_at = now
+                    continue
+                if now - req.decided_at >= retention:
+                    del self._pending[rid]
+                    removed += 1
+        if removed:
+            print(f"[broker] _pending reap removed {removed} decided "
+                  f"request(s) older than {retention:g}s", flush=True)
+        return removed
 
     def _audit_gc_tick(self) -> bool:
         seconds = self._audit_retention_days * 86400
