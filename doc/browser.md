@@ -207,6 +207,10 @@ User selects content and chooses "Send to notebook" (extension
 context-menu item). The bridge forwards to the cross-user broker, which
 applies policy for the cross-silo transfer. Requires an `intent_token`.
 
+Daemon-initiated page reads use `page.extract.request`; see
+[browser-page-extract](browser-page-extract.md) for the wire shape, modes,
+limits, examples, and security handling.
+
 ### `tabs.list`, `tabs.open`, `tabs.close` — Phase 9b (not implemented)
 
 Bidirectional. A consumer daemon initiates → the daemon's D-Bus call
