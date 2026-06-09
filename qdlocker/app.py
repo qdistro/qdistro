@@ -14,6 +14,7 @@ import stat
 import sys
 import tomllib
 from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import (
     QCoreApplication,
@@ -231,6 +232,20 @@ class WaylandBridge(QObject):
         self._idle_watcher = idle_watcher
         self._initially_locked = False
         self._locked = False
+        # `_locked` mirrors *intent*: it is set True on the request path
+        # (_on_lock_requested) BEFORE the compositor has actually committed
+        # the lock surface, for idempotency. `_compositor_locked` is the
+        # stricter flag: it is True only after the compositor's own
+        # locked_changed(1) confirmation. The suspend delay inhibitor must
+        # gate on the strict flag, never on mere intent, or it could be
+        # released before the LOCK-layer frame is painted (the flash race
+        # this whole feature exists to close).
+        self._compositor_locked = False
+        # Optional thread-safe callback fired when the COMPOSITOR confirms
+        # it has entered the locked state (qdwin_locker_v1.locked_changed=1).
+        # Used by the logind suspend-path delay inhibitor to release the
+        # sleep inhibitor only once the lock surface is actually committed.
+        self._lock_confirmed_cb: Callable[[], None] | None = None
         controller.unlocked.connect(self._on_unlocked)
         self._readySignal.connect(self._on_ready, Qt.ConnectionType.QueuedConnection)
         self._lockedChangedSignal.connect(self._on_locked_changed, Qt.ConnectionType.QueuedConnection)
@@ -255,6 +270,12 @@ class WaylandBridge(QObject):
     def set_idle_watcher(self, watcher: IdleWatcher) -> None:
         self._idle_watcher = watcher
 
+    def set_lock_confirmed_cb(self, cb: Callable[[], None] | None) -> None:
+        """Register a thread-safe callback fired when the compositor
+        confirms the locked state. Used to release the logind sleep
+        delay inhibitor only after the lock surface is committed."""
+        self._lock_confirmed_cb = cb
+
     # ---- worker-thread entry points (must be re-entrant-safe) ----
 
     def _thread_on_ready(self, initially_locked: bool) -> None:
@@ -274,6 +295,11 @@ class WaylandBridge(QObject):
     @pyqtSlot(bool)
     def _on_ready(self, initially_locked: bool) -> None:
         log.info("locker bound; initially_locked=%s", initially_locked)
+        # If the compositor reports it is already locked at bind time, that
+        # IS a compositor-confirmed locked state — seed the strict flag so a
+        # suspend arriving before any fresh locked_changed(1) confirms
+        # immediately instead of waiting out the inhibitor timeout.
+        self._compositor_locked = initially_locked
         if self._initially_locked != initially_locked:
             self._initially_locked = initially_locked
             self.initiallyLockedChanged.emit(initially_locked)
@@ -285,10 +311,21 @@ class WaylandBridge(QObject):
     @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
         log.info("compositor locked_changed=%s", locked)
+        # This is the compositor's authoritative lock state — track it
+        # separately from the intent mirror `_locked`.
+        self._compositor_locked = locked
         if self._locked != locked:
             self._locked = locked
             self.lockedChanged.emit(locked)
         self.lockedChangedForCtrl.emit(locked)
+        # The compositor has confirmed it entered the locked state: the
+        # lock surface is now committed on the LOCK layer. Let the logind
+        # suspend path know so it can release the sleep delay inhibitor.
+        if locked and self._lock_confirmed_cb is not None:
+            try:
+                self._lock_confirmed_cb()
+            except Exception:
+                log.exception("lock_confirmed callback raised")
 
     @pyqtSlot(int)
     def _on_lock_requested(self, reason: int) -> None:
@@ -300,6 +337,20 @@ class WaylandBridge(QObject):
         if self._locked:
             log.info("lock_requested reason=%s (already locked; ignoring)",
                      reason_name)
+            # Confirm-immediately is ONLY safe when the COMPOSITOR has
+            # already committed the lock surface (_compositor_locked). If
+            # we merely mirror intent from an in-flight earlier lock
+            # request whose locked_changed(1) has not arrived yet, firing
+            # the confirm here would release the suspend inhibitor before
+            # the LOCK-layer frame is painted — the exact flash race we
+            # are guarding against. In that case do nothing: the pending
+            # compositor locked_changed(1) will fire the confirm via
+            # _on_locked_changed once the surface is actually committed.
+            if self._compositor_locked and self._lock_confirmed_cb is not None:
+                try:
+                    self._lock_confirmed_cb()
+                except Exception:
+                    log.exception("lock_confirmed callback raised")
             return
         # Notify the controller so it can reset per-lock-session state
         # (e.g. fprintd failure counter).
@@ -330,6 +381,9 @@ class WaylandBridge(QObject):
 
     @pyqtSlot()
     def _on_unlocked(self) -> None:
+        # We are leaving the locked state: drop the compositor-confirmed
+        # flag so a subsequent suspend waits for a fresh locked_changed(1).
+        self._compositor_locked = False
         if self._locked:
             self._locked = False
             self.lockedChanged.emit(False)
@@ -421,6 +475,9 @@ def main(argv: list[str] | None = None) -> int:
         _logind = LogindWatcher(
             on_lock=bridge.inject_lock_requested,
         )
+        # Release the suspend delay inhibitor only once the compositor
+        # confirms the lock surface is committed.
+        bridge.set_lock_confirmed_cb(_logind.notify_lock_confirmed)
         _logind.start()
     else:
         log.info("lid_action=ignore: skipping logind subscription")
