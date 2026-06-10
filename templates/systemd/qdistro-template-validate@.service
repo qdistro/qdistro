@@ -1,0 +1,18 @@
+[Unit]
+Description=qdistro template candidate validation for run-id %i
+Documentation=man:qdistro-template-validate doc/templates.md
+# Probes run against the candidate digest in a disposable, network-none
+# container; they never touch a binding or real silo state.
+
+[Service]
+Type=oneshot
+# Same admin rootless store as the build/launch path so the candidate
+# digest resolves locally. Local-runtime probes get no network — enforced
+# by the CLI (--network=none), not by the unit.
+User=admin
+Group=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/libexec/qdistro/qdistro-template-validate %i
+NoNewPrivileges=true
+PrivateTmp=true
+Restart=no
