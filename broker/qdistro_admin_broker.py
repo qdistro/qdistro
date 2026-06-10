@@ -4247,6 +4247,20 @@ class Broker(dbus.service.Object):
     def RecordNotification(self, app_name: str, summary: str, body: str,
                            urgency: int, sender=None, conn=None) -> None:
         uid, pid, exe, _st = self._peer_info(sender, conn)
+        # Any (non-admin) uid may record its own notification rows (the
+        # D-Bus policy allows this member for the default context), so
+        # rate-limit per uid to bound audit-DB write amplification — a
+        # buggy or hostile silo must not be able to churn the SQLite store
+        # with unbounded fire-and-forget writes. Same shared limiter +
+        # dedicated action key used by SnapshotBefore; the key is
+        # (uid, action) so this never competes with permission accounting.
+        # Fire-and-forget contract: on reject we silently drop the row
+        # (log once) rather than raise — qdshell never awaits a reply.
+        if not self.ratelimit.check(int(uid), "notification.posted"):
+            print(f"[broker] notification rate-limited: uid={uid} "
+                  f"(>{self.ratelimit.limit}/{self.ratelimit.window_s}s); "
+                  f"dropping row", flush=True)
+            return
         urgency_i = int(urgency) if urgency in (0, 1, 2) else 1
         # Truncate aggressively — audit.log is not a notification archive.
         # Long bodies bloat the SQLite store and slow History queries.

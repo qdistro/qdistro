@@ -279,3 +279,49 @@ class TestRecordNotificationPidExePassthrough:
         broker.RecordNotification("App", "s", "b", 1)
         row = broker.audit.recent(1)[0]
         assert row["caller_exe"] == "/usr/bin/qs-custom"
+
+
+class TestRecordNotificationRateLimit:
+    """The D-Bus policy now allows any non-admin uid to call
+    RecordNotification, so the method rate-limits per uid to bound
+    audit-DB write amplification (a hostile/buggy silo must not churn
+    the SQLite store with unbounded fire-and-forget writes)."""
+
+    @pytest.fixture
+    def rl_broker(self, tmp_path: Path, rules_dir: Path) -> _StubBroker:
+        b = _StubBroker(
+            str(tmp_path / "approvals.sqlite"),
+            str(tmp_path / "audit.sqlite"),
+            str(rules_dir),
+        )
+        # Tiny window so the test pins the limit deterministically.
+        b.ratelimit = RateLimiter(limit=3, window_s=1000.0)
+        return b
+
+    def test_excess_calls_are_dropped(self, rl_broker):
+        rl_broker.set_peer(uid=SILO_UID_USER1)
+        for i in range(10):
+            rl_broker.RecordNotification("App", f"s{i}", "b", 1)
+        # Only the first `limit` (3) within the window are recorded;
+        # the rest are silently dropped (fire-and-forget contract).
+        assert len(rl_broker.audit.recent(50)) == 3
+
+    def test_dropped_call_does_not_raise(self, rl_broker):
+        rl_broker.set_peer(uid=SILO_UID_USER1)
+        for _ in range(5):
+            # Must never raise even when over the limit — qdshell does
+            # not await a reply.
+            assert rl_broker.RecordNotification("App", "s", "b", 1) is None
+
+    def test_limit_is_per_uid(self, rl_broker):
+        """One noisy silo exhausting its bucket must not starve another
+        silo's ability to record its own notifications."""
+        rl_broker.set_peer(uid=SILO_UID_USER1)
+        for i in range(10):
+            rl_broker.RecordNotification("Noisy", f"s{i}", "b", 1)
+        rl_broker.set_peer(uid=SILO_UID_USER2)
+        rl_broker.RecordNotification("Quiet", "hello", "b", 1)
+        rows = rl_broker.audit.recent(50)
+        user2 = [r for r in rows if int(r["caller_uid"]) == SILO_UID_USER2]
+        assert len(user2) == 1
+        assert "Quiet" in user2[0]["source"]
