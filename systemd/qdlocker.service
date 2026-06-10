@@ -15,6 +15,11 @@ PartOf=graphical-session.target
 # qdwin_locker_v1 global. The Requires= form is intentionally NOT
 # used — qdlocker has Restart=always and will re-attempt the
 # connection if qdwin isn't ready, which is the documented fail-safe.
+# qdlocker exits non-zero when it cannot bind qdwin_locker_v1 (a
+# locker that never bound cannot drive the lock), so Restart=always +
+# RestartSec below provide exactly this backoff-retry; a persistent
+# bind failure stays visible in the journal instead of a live-but-
+# useless detached process masking the breakage.
 After=graphical-session.target qdwin-compositor.service
 # Disable systemd's start-limit-hit gate. Qt's wayland platform plugin
 # qFatals (SIGABRT) when $WAYLAND_DISPLAY isn't accepting connections

@@ -447,9 +447,34 @@ def main(argv: list[str] | None = None) -> int:
         log.error("QML failed to load")
         return 2
 
+    wayland_bound = False
     if os.environ.get("QDLOCKER_NO_WAYLAND") != "1":
-        if not client.connect():
-            log.error("Wayland connect failed; running in detached mode")
+        wayland_bound = client.connect()
+        if not wayland_bound:
+            # Fail closed. A locker that never bound qdwin_locker_v1 cannot
+            # drive the lock: set_locked() is a no-op without a bound proxy
+            # (wayland.LockerClient.set_locked), so the process would look
+            # healthy to systemd while being unable to ever lock the screen,
+            # masking the breakage indefinitely. Exit non-zero instead and
+            # let the unit's Restart=always re-attempt the bind with backoff
+            # (RestartSec), so a persistent failure stays visible in the
+            # journal and the start-failure state rather than hiding behind a
+            # live-but-useless process. An explicit opt-out is provided for
+            # the dev/standalone case where a transient detached run is
+            # acceptable; production never sets it.
+            if os.environ.get("QDLOCKER_ALLOW_DETACHED") == "1":
+                log.error(
+                    "Wayland connect failed; QDLOCKER_ALLOW_DETACHED=1 -> "
+                    "staying up in detached mode (cannot drive the lock)"
+                )
+            else:
+                log.error(
+                    "Wayland connect failed; exiting non-zero so "
+                    "Restart=always re-attempts the bind (set "
+                    "QDLOCKER_ALLOW_DETACHED=1 to stay up detached)"
+                )
+                client.disconnect()
+                return 3
     else:
         log.info("QDLOCKER_NO_WAYLAND=1: skipping compositor binding (dev mode)")
 
@@ -495,7 +520,18 @@ def main(argv: list[str] | None = None) -> int:
         app.aboutToQuit.connect(_logind.stop)
     app.aboutToQuit.connect(_idle.stop)
 
-    _notify_ready()
+    # Withhold READY=1 when we never bound the compositor and are only
+    # staying up because of the QDLOCKER_ALLOW_DETACHED opt-out: a detached
+    # locker cannot drive the lock, so signalling ready would tell a
+    # Type=notify unit the locker is healthy when it is not. The NO_WAYLAND
+    # dev path is intentionally exempt (no compositor expected at all).
+    detached_no_bind = (
+        os.environ.get("QDLOCKER_NO_WAYLAND") != "1" and not wayland_bound
+    )
+    if detached_no_bind:
+        log.error("detached mode: withholding READY=1 (locker cannot lock)")
+    else:
+        _notify_ready()
     return app.exec()
 
 
