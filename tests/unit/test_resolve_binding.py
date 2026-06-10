@@ -114,3 +114,33 @@ def test_main_tag_binding_exit_2(tmp_path, monkeypatch):
     _binding(layout, "dev-silo", active="latest")
     monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
     assert rb.main(["dev-silo"]) == 2
+
+
+def test_resolve_unreadable_bindings_dir_is_hard_error(tmp_path):
+    # An unreadable bindings dir (EACCES) must NOT map to rc 3 (untemplated) —
+    # that would fail-open to the mutable :latest tag at the launch boundary.
+    # Only a genuinely missing binding file is untemplated.
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    os.chmod(layout.bindings_dir, 0o000)
+    try:
+        with pytest.raises(OSError):
+            rb.resolve("dev-silo", layout=layout)
+    finally:
+        # Restore so pytest's tmp_path cleanup can recurse into the dir.
+        os.chmod(layout.bindings_dir, 0o700)
+
+
+def test_main_unreadable_bindings_dir_exit_2(tmp_path, monkeypatch):
+    # main() must turn the permission error into rc 2 (hard error) with a
+    # FATAL log line, not a traceback and not rc 3.
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
+    os.chmod(layout.bindings_dir, 0o000)
+    try:
+        assert rb.main(["dev-silo"]) == 2
+    finally:
+        os.chmod(layout.bindings_dir, 0o700)

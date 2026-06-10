@@ -80,11 +80,16 @@ def resolve(silo: str, layout: qt.Layout | None = None,
     layout = layout or qt.Layout()
     qt.require_safe_name(silo, "silo")
     binding_path = layout.binding_file(silo)
-    if not os.path.isfile(binding_path):
-        return 3, None
+    # Only a genuinely absent binding maps to rc 3 (untemplated). An
+    # unreadable binding (EACCES on the file or its dir, EIO, ...) must be a
+    # hard error: os.path.isfile() swallows those into False and would
+    # fail-open to the mutable :latest tag at the launch boundary.
     # read_binding validates the schema, including: active_generation MUST
-    # be an immutable digest. A tag reference raises here -> exit 2.
-    binding = qt.read_binding(binding_path)
+    # be an immutable digest. A tag reference raises TemplateError here -> exit 2.
+    try:
+        binding = qt.read_binding(binding_path)
+    except FileNotFoundError:
+        return 3, None
     generation = binding["active_generation"]
 
     # A digest alone is not enough: the launch target must be a *promoted
@@ -134,7 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         rc, generation = resolve(args.silo, record=args.record)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, OSError) as exc:
+        # OSError covers an unreadable binding/generation record (EACCES, EIO):
+        # those are hard errors at the launch boundary, not a tag fallback and
+        # not a crash traceback. (Status-recording OSErrors are caught inside
+        # resolve() and stay advisory — they never reach here.)
         log(f"FATAL: invalid binding for silo {args.silo!r}: {exc}")
         return 2
     if rc == 3:

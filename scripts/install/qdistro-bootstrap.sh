@@ -756,14 +756,21 @@ provision_template_dirs() {
     # Template/promotion on-disk model (doc/templates.md §On-disk model,
     # todo/fableplan task 01). Plain directories + TOML, no daemon. The
     # bindings/pins/identity trees hold the security state that decides
-    # which image a silo launches, so they are owner-root-only (0700);
-    # the template payload/policy trees are world-readable (0755).
+    # which image a silo launches, so they keep restrictive 0700 modes; the
+    # template payload/policy trees are world-readable (0755). The state
+    # trees are owned by admin (uid 1000), not root: rootless podman and the
+    # template systemd units (User=admin) run as admin, so promote must be
+    # able to write a binding under /var/lib/qdistro — root ownership would
+    # lock admin out and make resolve-binding fail-closed at launch.
     log "provisioning template directories..."
     install -d -m 0755 /etc/qdistro/templates
     install -d -m 0755 /var/lib/qdistro/templates
     install -d -m 0700 /var/lib/qdistro/bindings
     install -d -m 0700 /var/lib/qdistro/pins
     install -d -m 0700 /var/lib/qdistro/identity
+    # Recursive so a prior root-created nested path does not lock admin out.
+    chown -R admin:admin /var/lib/qdistro/templates /var/lib/qdistro/bindings \
+        /var/lib/qdistro/pins /var/lib/qdistro/identity 2>/dev/null || true
 
     # Global retention defaults — never clobber an operator's edited file.
     local retention_src="$REPO_ROOT/qdistro/deploy/etc/qdistro/template-retention.toml"
