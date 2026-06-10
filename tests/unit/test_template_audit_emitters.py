@@ -69,9 +69,10 @@ def test_validate_emits_finished(tmp_path):
     qt.write_toml_atomic(os.path.join(cdir, "manifest.toml"), manifest, 0o644)
     qt.set_candidate_state(cdir, "built")
 
-    def runner(image_ref, probe, ctr):
+    def runner(image_ref, probe, ctr, evidence_dir=None):
         return {"name": probe["name"], "kind": probe["kind"], "class": "local-runtime",
-                "required": True, "result": "pass", "duration_seconds": 0.1, "reason": ""}
+                "required": True, "result": "pass", "duration_seconds": 0.1,
+                "reason": "", "artifacts": []}
 
     assert validate.validate(run_id, layout=layout, runner=runner) == 0
     assert "template.validate.finished" in _audit_events(layout)

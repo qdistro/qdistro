@@ -30,8 +30,10 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 #     floor (same as tier2-weston-terminal).
 #   - chromium: the browser payload.
 #   - libgtk-3-0: Chromium's GTK runtime (file dialogs, theming).
-#   - dbus-1: provides dbus-run-session, which the GUI/page-open probe wraps
-#     the browser in (Chromium expects a session bus).
+#   - dbus-1 + dbus-1-daemon: the session bus libs + the dbus-run-session
+#     wrapper the GUI/page-open probe runs the browser under (Chromium
+#     expects a session bus; dbus-run-session ships in dbus-1-daemon, not
+#     dbus-1).
 #   - dejavu-fonts + fontconfig: fontconfig with ZERO fonts renders blank
 #     pages; DejaVu Sans is the deterministic font the probe page relies on.
 #   - libpipewire-0_3-0: the pixel-feed client libs (inner weston publisher).
@@ -50,6 +52,7 @@ RUN zypper --non-interactive --gpg-auto-import-keys refresh \
         chromium \
         libgtk-3-0 \
         dbus-1 \
+        dbus-1-daemon \
         fontconfig \
         dejavu-fonts \
  && zypper clean --all \
