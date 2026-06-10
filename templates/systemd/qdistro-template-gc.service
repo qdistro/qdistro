@@ -1,0 +1,21 @@
+[Unit]
+Description=qdistro template payload garbage collection
+Documentation=man:qdistro-template-gc doc/templates.md
+# GC is security-critical: it deletes payloads (podman images) only, never
+# evidence/manifests/audit records, and never a pinned generation. It fails
+# closed on any corrupt pin/binding/retention file.
+
+[Service]
+Type=oneshot
+# Rootless podman (for `podman rmi`) runs as the owning admin against the
+# same store the launch path uses. The packaged admin account is uid 1000;
+# substitute at install time if the deployment uses a different admin user.
+User=admin
+Group=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# Shakedown: for the first week of deployment, run with --dry-run (log-only)
+# by dropping in an override that sets ExecStart with --dry-run, then remove
+# the override to enforce. The default here enforces.
+ExecStart=/usr/libexec/qdistro/qdistro-template-gc
+NoNewPrivileges=true
+PrivateTmp=true

@@ -434,13 +434,35 @@ def validate_pin(pin: dict) -> dict:
     return pin
 
 
+RETENTION_COUNT_KEYS = (
+    "keep_promoted_generations", "keep_promoted_generations_vm",
+    "failed_candidate_days", "build_log_days", "audit_evidence_years",
+)
+
+
 def validate_retention(retention: dict) -> dict:
-    for key in ("keep_promoted_generations", "keep_promoted_generations_vm",
-                "failed_candidate_days", "build_log_days",
-                "audit_evidence_years"):
+    for key in RETENTION_COUNT_KEYS:
         value = _require(retention, key, "retention")
         if not _is_int(value) or value < 0:
             raise TemplateError(f"retention.{key} must be a non-negative integer")
+    # Validate the whole [overrides.<template>] tree up front so GC fails
+    # closed before deleting anything — a malformed override for a later
+    # template must not surface mid-run after earlier rmi calls.
+    overrides = retention.get("overrides", {})
+    if not isinstance(overrides, dict):
+        raise TemplateError("retention.overrides must be a table")
+    for template, override in overrides.items():
+        if not isinstance(override, dict):
+            raise TemplateError(f"retention.overrides.{template} must be a table")
+        for key, value in override.items():
+            if key not in RETENTION_COUNT_KEYS:
+                raise TemplateError(
+                    f"retention.overrides.{template}.{key} is not a valid "
+                    f"retention key")
+            if not _is_int(value) or value < 0:
+                raise TemplateError(
+                    f"retention.overrides.{template}.{key} must be a "
+                    f"non-negative integer")
     return retention
 
 

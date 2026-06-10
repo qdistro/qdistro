@@ -1,0 +1,11 @@
+[Unit]
+Description=qdistro template payload GC — daily timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=qdistro-template-gc.service
+
+[Install]
+WantedBy=timers.target
