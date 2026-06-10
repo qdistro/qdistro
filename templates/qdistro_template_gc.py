@@ -242,6 +242,79 @@ def _delete_candidate_payload(layout: qt.Layout, template: str, run_id: str,
     return deletion
 
 
+def _collect_state_snapshots(layout: qt.Layout, now: float,
+                             dry_run: bool) -> list[dict]:
+    """Retention for fableplan2 task-05 pre-activation state snapshots.
+
+    A snapshot is deleted once its own ``expires_at`` (baked at creation =
+    created_at + rollback window) has passed. Deletion removes the snapshot
+    PAYLOAD and drops it from rollback choices; ONLY the audit metadata
+    (mechanism, source, generations, created/deleted times) is kept — this is
+    USER STATE, so the record must not imply the data survives. (The matching
+    pre-migration-snapshot pin shares the same expiry and lapses in step, so
+    the outgoing generation's image becomes collectable too.)"""
+    deletions: list[dict] = []
+    silos_dir = layout.silos_dir
+    if not os.path.isdir(silos_dir):
+        return deletions
+    for silo in sorted(os.listdir(silos_dir)):
+        snaps_dir = os.path.join(silos_dir, silo, "state-snapshots")
+        if not os.path.isdir(snaps_dir):
+            continue
+        for snap_id in sorted(os.listdir(snaps_dir)):
+            sdir = os.path.join(snaps_dir, snap_id)
+            meta_path = os.path.join(sdir, "meta.toml")
+            if not os.path.isfile(meta_path):
+                continue
+            meta = qt.read_toml(meta_path)            # fail-closed on corrupt
+            expires = meta.get("expires_at")
+            if expires is None or _parse_expiry(expires) > now:
+                continue  # unexpired — still a rollback target
+            payload = os.path.join(sdir, "snapshot")
+            if not os.path.isdir(payload):
+                continue  # already collected; audit metadata remains
+            deletion = {"kind": "state-snapshot", "silo": silo,
+                        "template": meta.get("template"),
+                        "generation": meta.get("outgoing_generation"),
+                        "snapshot_id": snap_id, "reason": "snapshot-expired",
+                        "evidence_path": meta_path, "deleted": False}
+            if dry_run:
+                log(f"DRY-RUN would delete expired state snapshot {snap_id} for "
+                    f"silo {silo} (user state; audit metadata kept)")
+                deletions.append(deletion)
+                continue
+            _rm_snapshot_payload(payload)
+            # Honesty: keep the metadata as the audit record, mark it
+            # ineligible + when it was deleted; the user state itself is GONE.
+            meta["restore_eligible"] = "false"
+            meta["deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               time.gmtime(now))
+            qt.write_toml_atomic(meta_path, meta, 0o600)
+            deletion["deleted"] = True
+            audit.emit("template.gc.deleted", db_path=_audit_db(layout),
+                       silo=silo, template=meta.get("template"),
+                       generation=meta.get("outgoing_generation"),
+                       result="deleted", reason="state-snapshot-expired",
+                       evidence_path=meta_path, kind="state-snapshot",
+                       snapshot_id=snap_id)
+            log(f"deleted expired state snapshot {snap_id} for silo {silo} "
+                f"(user state gone; audit metadata kept at {meta_path})")
+            deletions.append(deletion)
+    return deletions
+
+
+def _rm_snapshot_payload(path: str) -> None:
+    btrfs = subprocess.run(["sh", "-c", "command -v btrfs"],
+                           capture_output=True, text=True).stdout.strip()
+    if btrfs:
+        rc = subprocess.run([btrfs, "subvolume", "delete", path],
+                            capture_output=True, text=True)
+        if rc.returncode == 0:
+            return
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
        now: float | None = None, rmi=_rmi, image_exists=_image_exists) -> list[dict]:
     layout = layout or qt.Layout()
@@ -251,6 +324,11 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
     pinned_digests = _all_pinned_digests(pinned)
     promoted_digests = _all_promoted_generations(layout)
     deletions: list[dict] = []
+    # State-snapshot retention (task 05) is independent of the template payload
+    # passes: expired user-state snapshots are collected by their own window,
+    # keeping only audit metadata. Run it first so a silo with no template
+    # payloads (templates_var absent) still gets its snapshots reaped.
+    deletions.extend(_collect_state_snapshots(layout, now, dry_run))
     if not os.path.isdir(layout.templates_var):
         return deletions
 

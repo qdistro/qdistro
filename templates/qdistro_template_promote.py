@@ -27,6 +27,7 @@ import time
 
 import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_state_snapshot as state_snapshot
 
 # How long the outgoing generation stays pinned as a rollback target.
 ROLLBACK_WINDOW_DAYS = int(os.environ.get("QDISTRO_ROLLBACK_WINDOW_DAYS", "14"))
@@ -329,10 +330,26 @@ def _build_binding(layout: qt.Layout, silo: str, template: str, new_gen: str,
     }
 
 
+def _silo_running(silo: str) -> bool:
+    """Best-effort: is a tier-2 container for this silo currently running?
+    A state restore must not race a live writer of state_path. The session
+    manager owns authoritative lifecycle; this is a defence-in-depth guard
+    (containers are named ``qdistro-tier2-<silo>-*`` by task 04's launcher)."""
+    proc = subprocess.run(
+        ["podman", "ps", "--format", "{{.Names}}"],
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    needle = f"qdistro-tier2-{silo}"
+    return any(needle in ln for ln in proc.stdout.splitlines())
+
+
 def promote(silo: str, run_id: str | None = None, *,
             rollback: str | None = None, layout: qt.Layout | None = None,
             resolver=resolve_selector, state_path: str | None = None,
-            now: float | None = None, image_exists=_image_exists) -> int:
+            now: float | None = None, image_exists=_image_exists,
+            restore_state: bool = False, restore_snapshot: str | None = None,
+            keep_state: bool = False, running_check=_silo_running) -> int:
     layout = layout or qt.Layout()
     qt.require_safe_name(silo, "silo")
     now = time.time() if now is None else now
@@ -341,7 +358,9 @@ def promote(silo: str, run_id: str | None = None, *,
 
     if rollback is not None:
         return _do_rollback(layout, silo, rollback, existing, resolver, now,
-                            image_exists)
+                            image_exists, restore_state=restore_state,
+                            restore_snapshot=restore_snapshot,
+                            keep_state=keep_state, running_check=running_check)
 
     # --- promote a validated candidate ---------------------------------
     found = _find_candidate(layout, run_id)
@@ -429,7 +448,9 @@ def promote(silo: str, run_id: str | None = None, *,
 
 
 def _do_rollback(layout: qt.Layout, silo: str, target: str, existing: dict | None,
-                 resolver, now: float, image_exists) -> int:
+                 resolver, now: float, image_exists, *,
+                 restore_state: bool = False, restore_snapshot: str | None = None,
+                 keep_state: bool = False, running_check=_silo_running) -> int:
     qt.require_digest(target, "rollback generation")
     if existing is None:
         return _refuse(layout, f"silo {silo} has no binding to roll back",
@@ -449,13 +470,85 @@ def _do_rollback(layout: qt.Layout, silo: str, target: str, existing: dict | Non
         return _refuse(layout, f"rollback target {target} has no image payload "
                        f"(collected past its rollback window); cannot launch it",
                        silo=silo, template=template, generation=target)
+
+    # State choice (codex r1): WHEN a matching snapshot exists, refusing to
+    # choose is an error — a silent default either loses new data
+    # (--restore-state) or hands the old browser a migrated profile
+    # (--keep-state). When NO matching snapshot exists there is nothing to
+    # restore, so rollback proceeds keep-state with no choice required (this
+    # is the only sane option and keeps un-snapshotted silos rollable).
+    if restore_state and keep_state:
+        return _refuse(layout, "choose at most one of --restore-state / "
+                       "--keep-state", silo=silo, template=template,
+                       generation=target)
+    if not restore_state and not keep_state:
+        snap = state_snapshot.find_restore_snapshot(layout, silo, target)
+        if snap is not None:
+            return _refuse(layout, f"--rollback requires a state choice: a "
+                           f"matching state snapshot exists ({snap['id']}) — "
+                           f"pass --restore-state to bring back {target[:19]}…-"
+                           f"era state, or --keep-state to keep current state",
+                           silo=silo, template=template, generation=target)
+        keep_state = True  # no snapshot to restore: keep-state is implicit
+
+    snap_meta = None
+    if restore_state:
+        snap_meta = (
+            _lookup_snapshot(layout, silo, restore_snapshot, target)
+            if restore_snapshot else
+            state_snapshot.find_restore_snapshot(layout, silo, target))
+        if snap_meta is None:
+            return _refuse(layout, f"--restore-state requested but no restore-"
+                           f"eligible snapshot captures {target}'s state "
+                           f"(the flip from {target} ran un-snapshotted, or the "
+                           f"snapshot was collected); use --keep-state instead",
+                           silo=silo, template=template, generation=target)
+        if running_check(silo):
+            return _refuse(layout, f"silo {silo} appears to be running; stop it "
+                           f"before --restore-state (a live writer of state_path "
+                           f"would race the swap)", silo=silo, template=template,
+                           generation=target)
+
     audit.emit("template.promote.requested", db_path=_audit_db(layout),
                silo=silo, template=template, generation=target,
                new_generation=target, old_generation=existing["active_generation"],
                identity_revision=existing["identity_revision"],
-               result="requested", reason="rollback")
+               result="requested",
+               reason="rollback-restore-state" if restore_state else "rollback-keep-state")
+
+    # Restore the matching state FIRST (state_path is never left missing;
+    # the displaced B-era state is preserved aside as state-rejected-<ts>),
+    # then flip the binding so a binding=A / state=B window never opens.
+    if restore_state:
+        try:
+            result = state_snapshot.restore_snapshot(
+                layout, silo, snap_meta, existing["state_path"], now=now)
+        except (state_snapshot.StateSnapshotError, OSError) as exc:
+            return _refuse(layout, f"state restore failed: {exc}", silo=silo,
+                           template=template, generation=target)
+        log(f"restored state snapshot {snap_meta['id']} into "
+            f"{existing['state_path']} (method={result['method']}); displaced "
+            f"state kept at {result['rejected']}")
+
     return _apply(layout, silo, template, target, None, existing, resolver,
                   existing["state_path"], now, mode="rollback")
+
+
+def _lookup_snapshot(layout: qt.Layout, silo: str, snap_id: str,
+                     target: str) -> dict | None:
+    """Resolve an explicit --restore-state <snap-id> and verify it captures
+    the rollback TARGET's state (its outgoing_generation). A snapshot that
+    captured some other generation's state must not be restored under this
+    target — that would pair the target binary with the wrong profile."""
+    for meta in state_snapshot.list_snapshots(layout, silo):
+        if meta["id"] != snap_id:
+            continue
+        if (meta.get("outgoing_generation") == target
+                and meta.get("restore_eligible") == "true"
+                and os.path.isdir(meta["path"])):
+            return meta
+        return None
+    return None
 
 
 def _apply(layout: qt.Layout, silo: str, template: str, new_gen: str,
@@ -553,14 +646,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="silo state mount, settable only on the first "
                              "promote (refused once a binding exists; default "
                              "/var/lib/qdistro/silos/<silo>/state)")
+    parser.add_argument("--restore-state", nargs="?", const=True, default=False,
+                        metavar="SNAPSHOT_ID",
+                        help="with --rollback: restore the matching state "
+                             "snapshot (optionally a specific snapshot id) so "
+                             "the old generation gets its old state back")
+    parser.add_argument("--keep-state", action="store_true",
+                        help="with --rollback: flip the binding only and keep "
+                             "the current state as-is")
     args = parser.parse_args(argv)
     if args.rollback is None and args.run_id is None:
         parser.error("a run-id or --rollback <digest> is required")
     if args.rollback is not None and args.run_id is not None:
         parser.error("give a run-id OR --rollback <digest>, not both")
+    if args.rollback is None and (args.restore_state or args.keep_state):
+        parser.error("--restore-state / --keep-state only apply to --rollback")
+    restore_state = args.restore_state is not False
+    restore_snapshot = args.restore_state if isinstance(args.restore_state, str) else None
     try:
         return promote(args.silo, args.run_id, rollback=args.rollback,
-                       state_path=args.state_path)
+                       state_path=args.state_path, restore_state=restore_state,
+                       restore_snapshot=restore_snapshot,
+                       keep_state=args.keep_state)
     except (qt.TemplateError, OSError) as exc:
         log(f"FATAL: {exc}")
         return 2

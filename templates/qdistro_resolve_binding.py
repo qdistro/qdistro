@@ -38,6 +38,12 @@ import time
 
 import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_state_snapshot as state_snapshot
+
+# Distinct exit code for a strict-policy pre-activation snapshot refusal — the
+# binding resolved fine, but the new generation must not activate without a
+# state snapshot. spawn-tier2 treats any non-0/3 rc as a launch refusal.
+RC_SNAPSHOT_REFUSED = 4
 
 RUN_STATUS_DIR = os.environ.get("QDISTRO_RUN_STATUS_DIR",
                                 "/run/qdistro/silo-generation")
@@ -66,16 +72,14 @@ def read_activated_marker(layout: qt.Layout, silo: str) -> str | None:
         return fh.read().strip() or None
 
 
-def record_activation(layout: qt.Layout, silo: str, generation: str,
-                      run_status_dir: str | None = None) -> bool:
-    """Record the running generation and report whether this is a new
-    activation (resolved generation differs from the last recorded one).
-
-    Returns True when the activation changed (caller emits
-    template.binding.activated)."""
+def record_run_status(layout: qt.Layout, silo: str, generation: str,
+                      run_status_dir: str | None = None) -> None:
+    """Write ONLY the per-boot runtime status file ("this generation was
+    selected for this launch"). No marker, no audit — task 05 splits the
+    marker commit out so a failed pre-activation snapshot leaves the
+    activation obligation un-discharged."""
     # Read the module default at call time so it stays overridable.
     run_status_dir = run_status_dir or RUN_STATUS_DIR
-    # Per-boot runtime status: which generation is running right now.
     os.makedirs(run_status_dir, exist_ok=True)
     qt.atomic_write(
         os.path.join(run_status_dir, silo),
@@ -83,15 +87,56 @@ def record_activation(layout: qt.Layout, silo: str, generation: str,
         f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())!r}\n",
         0o644,
     )
-    marker = activated_marker(layout, silo)
-    last = None
-    if os.path.isfile(marker):
-        with open(marker, encoding="utf-8") as fh:
-            last = fh.read().strip()
+
+
+def _commit_marker(layout: qt.Layout, silo: str, generation: str) -> bool:
+    """Commit the persistent activation marker if the generation changed;
+    return whether it changed. The marker is the "snapshot obligation
+    discharged" record — only the launch anchor commits it, and only after the
+    pre-activation snapshot succeeds (or is explicitly waived)."""
+    last = read_activated_marker(layout, silo)
     changed = last != generation
     if changed:
-        qt.atomic_write(marker, generation + "\n", 0o600)
+        qt.atomic_write(activated_marker(layout, silo), generation + "\n", 0o600)
     return changed
+
+
+def commit_activation_marker_and_audit(layout: qt.Layout, silo: str,
+                                       generation: str,
+                                       template: str | None, *,
+                                       reason: str | None = None,
+                                       state_rollback: str | None = None) -> bool:
+    """Commit the activation marker AND emit the SINGLE
+    template.binding.activated when the generation changed. Called only after
+    the pre-activation snapshot succeeds or is waived; the snapshot outcome
+    (e.g. ``state_rollback="unavailable"`` for a waived/availability flip) is
+    carried on this one event so the activation stream is unambiguous. Returns
+    whether the activation changed."""
+    changed = _commit_marker(layout, silo, generation)
+    if changed:
+        fields = {"silo": silo, "template": template, "generation": generation,
+                  "result": "activated", "reason": reason}
+        if state_rollback is not None:
+            fields["state_rollback"] = state_rollback
+        audit.emit("template.binding.activated",
+                   db_path=os.path.join(layout.var, "audit",
+                                        "template_audit.sqlite"),
+                   **fields)
+        log(f"binding.activated silo={silo} generation={generation}"
+            + (f" ({reason})" if reason else ""))
+    return changed
+
+
+def record_activation(layout: qt.Layout, silo: str, generation: str,
+                      run_status_dir: str | None = None) -> bool:
+    """Back-compat composition for the plain ``--record`` status path (and
+    tests): per-boot status + marker commit, returning whether the activation
+    changed. This path does NOT take a pre-activation snapshot — that ordering
+    belongs to the launch anchor (``--launch-env``); the plain ``--record``
+    call is a status/restart convenience that must not be interposed before a
+    silo's first real launch."""
+    record_run_status(layout, silo, generation, run_status_dir)
+    return _commit_marker(layout, silo, generation)
 
 
 def _read_resolved_binding(silo: str, layout: qt.Layout) -> tuple[int, dict | None]:
@@ -170,51 +215,126 @@ def resolve(silo: str, layout: qt.Layout | None = None,
     if record:
         # Status recording is advisory — never let a non-writable /run break
         # the launch. The digest resolution above is the load-bearing part.
+        # The plain --record path keeps M1 behaviour (status + marker + audit);
+        # the snapshot-gated ordering is the launch anchor's job
+        # (_launch_env_main), not this status/restart convenience.
         try:
-            changed = record_activation(layout, silo, generation)
-            if changed:
-                # The new generation is actually starting now — this is the
-                # anchor the first-activation state snapshot (deferred) hangs
-                # off of.
-                audit.emit("template.binding.activated",
-                           db_path=os.path.join(layout.var, "audit",
-                                                "template_audit.sqlite"),
-                           silo=silo, template=binding["template"],
-                           generation=generation, result="activated")
-                log(f"binding.activated silo={silo} generation={generation}")
-            else:
+            record_run_status(layout, silo, generation)
+            if not commit_activation_marker_and_audit(
+                    layout, silo, generation, binding["template"]):
                 log(f"silo={silo} already running generation={generation}")
         except OSError as exc:
             log(f"WARN: could not record activation status for {silo}: {exc}")
     return 0, generation
 
 
+def _activation_policy(layout: qt.Layout, template: str) -> str:
+    """The template's pre-activation snapshot policy (strict|availability).
+
+    A missing or unreadable policy defaults to availability — we will not
+    refuse a launch for a silo whose policy we cannot read. A strict silo
+    always ships an authored policy with the key set, so this default only
+    relaxes the unknown case (logged)."""
+    try:
+        policy = qt.validate_template_policy(
+            qt.read_toml(layout.template_policy(template)))
+    except (qt.TemplateError, OSError, ValueError) as exc:
+        log(f"WARN: could not read activation_snapshot policy for "
+            f"{template!r} ({exc}); defaulting to availability")
+        return qt.DEFAULT_ACTIVATION_SNAPSHOT
+    return qt.activation_snapshot_policy(policy)
+
+
 def _launch_env_main(silo: str, layout: qt.Layout, record: bool) -> int:
     """`--launch-env`: emit KEY=VALUE lines for the launch path from ONE
     binding read, so spawn-tier2 never parses TOML in bash nor reads the
-    binding twice. With --record, the per-boot status + marker + audit are
-    committed under the current ordering (task 05 moves the marker commit to
-    after the pre-activation snapshot)."""
+    binding twice.
+
+    With --record this is the activation anchor (task 05). Strict ordering:
+    write the per-boot run status, take the pre-activation snapshot of the
+    OUTGOING state FIRST, and only then commit the activation marker + emit
+    template.binding.activated. A strict-policy snapshot failure refuses the
+    launch with the marker uncommitted (next launch retries)."""
     rc, env = compute_launch_env(silo, layout)
     if rc == 3:
         log(f"silo {silo!r} is untemplated (no binding)")
         return 3
     if record:
+        # Per-boot run status is advisory — a non-writable /run must never
+        # break the launch (the digest resolution above is load-bearing).
         try:
-            changed = record_activation(layout, silo, env["generation"])
-            if changed:
-                audit.emit("template.binding.activated",
-                           db_path=os.path.join(layout.var, "audit",
-                                                "template_audit.sqlite"),
-                           silo=silo, template=env["template"],
-                           generation=env["generation"], result="activated")
-                log(f"binding.activated silo={silo} generation={env['generation']}")
+            record_run_status(layout, silo, env["generation"])
         except OSError as exc:
-            log(f"WARN: could not record activation status for {silo}: {exc}")
+            log(f"WARN: could not record run status for {silo}: {exc}")
+
+        act_reason = None
+        act_rollback = None
+        if env["first_activation"]:
+            outgoing = read_activated_marker(layout, silo)
+            policy = _activation_policy(layout, env["template"])
+            try:
+                result = state_snapshot.take_pre_activation_snapshot(
+                    layout, silo,
+                    incoming_generation=env["generation"],
+                    outgoing_generation=outgoing,
+                    template=env["template"],
+                    state_path=env["state_path"],
+                    policy=policy)
+            except state_snapshot.StrictSnapshotRefused as exc:
+                log(f"FATAL: {exc}")
+                log("strict activation_snapshot policy: NOT activating the new "
+                    "generation without a state snapshot (marker uncommitted; "
+                    "next launch retries). Recovery: roll the binding back with "
+                    "--keep-state and fix storage, or an admin one-shot "
+                    "--waive-activation-snapshot --reason <text>.")
+                return RC_SNAPSHOT_REFUSED
+            if result.get("taken"):
+                log(f"pre-activation snapshot {result['id']} taken "
+                    f"(mechanism={result['mechanism']}, outgoing={outgoing})")
+            elif result.get("waived"):
+                act_reason = f"snapshot-waived: {result.get('reason')}"
+                act_rollback = "unavailable"
+                log(f"pre-activation snapshot WAIVED for {silo} "
+                    f"(reason: {result.get('reason')}); flip recorded "
+                    f"rollback-unavailable")
+            elif result.get("unavailable"):
+                act_reason = f"snapshot-unavailable: {result.get('reason')}"
+                act_rollback = "unavailable"
+                log(f"pre-activation snapshot unavailable for {silo} "
+                    f"(availability policy): {result.get('reason')}; flip "
+                    f"recorded rollback-unavailable")
+
+        # Snapshot taken / skipped / waived → discharge the obligation with the
+        # SINGLE activation event carrying the snapshot outcome.
+        try:
+            commit_activation_marker_and_audit(
+                layout, silo, env["generation"], env["template"],
+                reason=act_reason, state_rollback=act_rollback)
+        except OSError as exc:
+            log(f"WARN: could not commit activation marker for {silo}: {exc}")
     print(f"GENERATION={env['generation']}")
     print(f"TEMPLATE={env['template']}")
     print(f"STATE_PATH={env['state_path']}")
     print(f"FIRST_ACTIVATION={'yes' if env['first_activation'] else 'no'}")
+    return 0
+
+
+def _waive_main(silo: str, layout: qt.Layout, reason: str | None) -> int:
+    """Record a one-shot pre-activation-snapshot waiver for the silo's bound
+    generation. Admin break-glass (gated by filesystem ownership of the
+    silo state tree); the reason is mandatory and the next launch consumes it,
+    recording the flip rollback-unavailable."""
+    if not reason or not reason.strip():
+        log("FATAL: --waive-activation-snapshot requires --reason <text>")
+        return 2
+    rc, env = compute_launch_env(silo, layout)
+    if rc == 3:
+        log(f"silo {silo!r} is untemplated (no binding); nothing to waive")
+        return 3
+    path = state_snapshot.write_waiver(layout, silo, env["generation"],
+                                       reason.strip())
+    log(f"recorded one-shot activation-snapshot waiver for silo {silo} "
+        f"generation {env['generation']} at {path} (reason: {reason.strip()})")
     return 0
 
 
@@ -227,9 +347,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="emit GENERATION/TEMPLATE/STATE_PATH/"
                              "FIRST_ACTIVATION KEY=VALUE lines from a single "
                              "binding read (for spawn-tier2)")
+    parser.add_argument("--waive-activation-snapshot", action="store_true",
+                        help="admin break-glass: record a one-shot waiver so "
+                             "the next launch activates the bound generation "
+                             "WITHOUT a pre-activation snapshot (requires "
+                             "--reason; the flip is recorded rollback-"
+                             "unavailable)")
+    parser.add_argument("--reason", default=None,
+                        help="mandatory justification for "
+                             "--waive-activation-snapshot")
     args = parser.parse_args(argv)
     layout = qt.Layout()
     try:
+        if args.waive_activation_snapshot:
+            return _waive_main(args.silo, layout, args.reason)
         if args.launch_env:
             return _launch_env_main(args.silo, layout, args.record)
         rc, generation = resolve(args.silo, layout=layout, record=args.record)

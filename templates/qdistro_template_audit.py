@@ -41,6 +41,12 @@ EVENTS = (
     "template.promote.refused",
     "template.binding.activated",
     "template.gc.deleted",
+    # fableplan2 task 05: pre-activation state snapshots + crash-consistent
+    # rollback restore. created fires at the launch anchor (before the new
+    # generation's first write); restored fires when promote --rollback
+    # --restore-state swaps a snapshot back into the live state.
+    "template.state_snapshot.created",
+    "template.state_snapshot.restored",
 )
 
 SCHEMA = """

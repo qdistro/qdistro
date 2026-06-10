@@ -42,9 +42,16 @@ for mod in qdistro_templates.py qdistro_template_audit.py \
            qdistro_template_build.py qdistro_template_validate.py \
            qdistro_template_promote.py qdistro_template_gc.py \
            qdistro_template_freshness.py qdistro_resolve_binding.py \
-           qdistro_template_status.py; do
+           qdistro_template_status.py qdistro_state_snapshot.py; do
     install -m 0644 "$SRC/$mod" "$LIBEXEC/$mod"
 done
+
+# fableplan2 task 05: qdistro-snap-swap (the crash-consistent state-restore
+# primitive) lives under snapshots/ but is imported by qdistro_state_snapshot
+# and run as a CLI by the rollback flow + the admin app, so it ships flat into
+# the same libexec dir (so the sibling import resolves).
+install -m 0644 "$UMBRELLA/snapshots/qdistro_snap_swap.py" \
+    "$LIBEXEC/qdistro_snap_swap.py"
 
 # CLI wrappers.
 make_wrapper() {
@@ -62,13 +69,14 @@ make_wrapper qdistro-template-gc        qdistro_template_gc.py
 make_wrapper qdistro-template-freshness qdistro_template_freshness.py
 make_wrapper qdistro-resolve-binding    qdistro_resolve_binding.py
 make_wrapper qdistro-template-status    qdistro_template_status.py
+make_wrapper qdistro-snap-swap          qdistro_snap_swap.py
 
 # Expose all template CLIs on PATH (resolve-binding is required there for
 # spawn-tier2; the rest are admin conveniences).
 for w in qdistro-template-build qdistro-template-validate \
          qdistro-template-promote qdistro-template-gc \
          qdistro-template-freshness qdistro-resolve-binding \
-         qdistro-template-status; do
+         qdistro-template-status qdistro-snap-swap; do
     ln -sf "$LIBEXEC/$w" "$BIN/$w"
 done
 

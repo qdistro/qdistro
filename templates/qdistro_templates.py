@@ -390,7 +390,31 @@ def validate_template_policy(policy: dict) -> dict:
             f"[template.state_boundary].enforced must be true|partial|false, "
             f"got {enforced!r}"
         )
+    # fableplan2 task 05: pre-activation snapshot policy. Optional (defaults to
+    # availability — a snapshot failure never wedges a silo that did not ask
+    # for strict protection), but a typo must fail loudly rather than silently
+    # downgrade a strict silo to availability.
+    snap_policy = tmpl.get("activation_snapshot")
+    if snap_policy is not None and snap_policy not in ("strict", "availability"):
+        raise TemplateError(
+            f"[template].activation_snapshot must be strict|availability, "
+            f"got {snap_policy!r}")
     return policy
+
+
+# fableplan2 task 05: the default when a template policy omits
+# activation_snapshot. Availability — never refuse a launch for a silo that
+# did not explicitly opt into strict pre-activation snapshots.
+DEFAULT_ACTIVATION_SNAPSHOT = "availability"
+
+
+def activation_snapshot_policy(policy: dict | None) -> str:
+    """The pre-activation snapshot policy for a validated template policy
+    dict, or the default when the policy (or the key) is absent."""
+    if not policy:
+        return DEFAULT_ACTIVATION_SNAPSHOT
+    return policy.get("template", {}).get(
+        "activation_snapshot", DEFAULT_ACTIVATION_SNAPSHOT)
 
 
 def validate_binding(binding: dict) -> dict:
