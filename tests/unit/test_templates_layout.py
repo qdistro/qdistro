@@ -172,6 +172,7 @@ def _valid_manifest(**over):
         "build_command": "podman build .",
         "network_mode": "unrestricted",
         "artifact_manifest": [],
+        "generation_ref": "sha256:" + "a" * 64,
     }
     base.update(over)
     return base
@@ -188,6 +189,32 @@ def test_manifest_requires_artifact_manifest():
     del m["artifact_manifest"]
     with pytest.raises(qt.TemplateError, match="artifact_manifest"):
         qt.validate_manifest(m)
+
+
+def test_manifest_requires_generation_ref_digest():
+    m = _valid_manifest()
+    del m["generation_ref"]
+    with pytest.raises(qt.TemplateError, match="generation_ref"):
+        qt.validate_manifest(m)
+    with pytest.raises(qt.TemplateError, match="generation_ref"):
+        qt.validate_manifest(_valid_manifest(generation_ref="latest"))
+    assert qt.generation_ref(_valid_manifest()) == "sha256:" + "a" * 64
+
+
+def test_require_safe_name_rejects_path_escape():
+    for bad in ["../evil", "a/b", "..", ".hidden", "", "a b", "a:b"]:
+        with pytest.raises(qt.TemplateError):
+            qt.require_safe_name(bad, "template")
+    for ok in ["tier2-dev", "dev-silo", "a", "A1_b.c", "20260610T100013Z-c2cb2019"]:
+        assert qt.require_safe_name(ok) == ok
+
+
+def test_layout_rejects_unsafe_template_name(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    with pytest.raises(qt.TemplateError):
+        layout.template_policy("../../etc/passwd")
+    with pytest.raises(qt.TemplateError):
+        layout.candidate_dir("tier2-dev", "../escape")
 
 
 def test_manifest_validation_section_shape_checked_when_present():

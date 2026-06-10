@@ -1,0 +1,31 @@
+[Unit]
+Description=qdistro template candidate build for %i
+Documentation=man:qdistro-template-build doc/templates.md
+# The build fetches the recipe's packages, so it needs egress; it never
+# touches a binding or any silo state.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Rootless podman runs as the owning admin (uid 1000) and writes into the
+# SAME image store the launch path (spawn-tier2) reads, so the promoted
+# generation is directly launchable by digest. That shared store is why
+# this unit cannot hide or relocate admin's home — doing so would split
+# the store and make the promoted image invisible to launch.
+#
+# The empty-room property (no host secret reaches the build) is enforced
+# in the CLI itself: podman runs with an allowlisted env (no *_PROXY,
+# SSH_AUTH_SOCK, or registry auth-file pointers) plus --http-proxy=false,
+# and passes no --build-arg/--env/mount. Deployment hardening — a
+# dedicated template-builder uid with a private store copied into the
+# launch store on promote — is a later step.
+User=admin
+Group=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/libexec/qdistro/qdistro-template-build %i
+NoNewPrivileges=true
+PrivateTmp=true
+# A failed build is expected to exit nonzero and leave evidence; do not
+# restart automatically.
+Restart=no

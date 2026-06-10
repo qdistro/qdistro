@@ -49,6 +49,22 @@ class TemplateError(Exception):
     """Raised when a template file fails validation at a trust boundary."""
 
 
+# Template/silo/run-id names become path components under /etc and
+# /var/lib, and arrive as CLI args or systemd ``%i`` instance strings, so
+# they are untrusted input. Constrain them to a narrow alphabet with no
+# path separators or dot-dot so a crafted name cannot escape its tree.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def require_safe_name(name: object, kind: str = "name") -> str:
+    if not isinstance(name, str) or not _SAFE_NAME_RE.match(name) or ".." in name:
+        raise TemplateError(
+            f"unsafe {kind} {name!r}: must match [A-Za-z0-9][A-Za-z0-9_.-]* "
+            f"and contain no '..'"
+        )
+    return name
+
+
 # --------------------------------------------------------------------------
 # digest helpers
 # --------------------------------------------------------------------------
@@ -232,6 +248,7 @@ class Layout:
         return os.path.join(self.etc, "template-retention.toml")
 
     def template_policy(self, template: str) -> str:
+        require_safe_name(template, "template")
         return os.path.join(self.templates_etc, f"{template}.toml")
 
     # runtime state
@@ -252,27 +269,33 @@ class Layout:
         return os.path.join(self.var, "identity")
 
     def binding_file(self, silo: str) -> str:
+        require_safe_name(silo, "silo")
         return os.path.join(self.bindings_dir, f"{silo}.toml")
 
     def template_dir(self, template: str) -> str:
+        require_safe_name(template, "template")
         return os.path.join(self.templates_var, template)
 
     def generations_dir(self, template: str) -> str:
         return os.path.join(self.template_dir(template), "generations")
 
     def generation_dir(self, template: str, digest: str) -> str:
+        require_digest(digest, "generation digest")
         return os.path.join(self.generations_dir(template), digest)
 
     def candidates_dir(self, template: str) -> str:
         return os.path.join(self.template_dir(template), "candidates")
 
     def candidate_dir(self, template: str, run_id: str) -> str:
+        require_safe_name(run_id, "run-id")
         return os.path.join(self.candidates_dir(template), run_id)
 
     def pins_for(self, template: str, digest: str) -> str:
-        return os.path.join(self.pins_dir, template, digest)
+        require_digest(digest, "pin generation digest")
+        return os.path.join(self.pins_dir, require_safe_name(template, "template"), digest)
 
     def identity_for(self, silo: str) -> str:
+        require_safe_name(silo, "silo")
         return os.path.join(self.identity_dir, silo)
 
 
@@ -364,20 +387,32 @@ def validate_binding(binding: dict) -> dict:
     return binding
 
 
+def generation_ref(manifest: dict) -> str:
+    """The single canonical digest a silo launches and a binding pins.
+
+    podman resolves an image's config id (``image_id``) locally with
+    ``podman run sha256:<id>``, so that is the launch reference. Promotion
+    and the launch path use *only* this — never a tag, never the candidate
+    name."""
+    return manifest["generation_ref"]
+
+
 def validate_manifest(manifest: dict) -> dict:
     """Validate a generation/candidate manifest.
 
     The build tool writes every required key including ``artifact_manifest``
     (the fetched-artifact record — the build-time evidence of what entered
-    the candidate). ``validation`` is added later by the validate tool, so
-    it is optional here and only shape-checked when present."""
+    the candidate) and ``generation_ref`` (the canonical launch digest).
+    ``validation`` is added later by the validate tool, so it is optional
+    here and only shape-checked when present."""
     for key in ("template", "run_id", "image_digest", "image_id",
                 "containerfile_digest", "build_command", "network_mode",
-                "artifact_manifest"):
+                "artifact_manifest", "generation_ref"):
         _require(manifest, key, "manifest")
     require_digest(manifest["image_digest"], "manifest.image_digest")
     require_digest(manifest["image_id"], "manifest.image_id")
     require_digest(manifest["containerfile_digest"], "manifest.containerfile_digest")
+    require_digest(manifest["generation_ref"], "manifest.generation_ref")
     if not isinstance(manifest["artifact_manifest"], list):
         raise TemplateError("manifest.artifact_manifest must be a list")
     validation = manifest.get("validation")

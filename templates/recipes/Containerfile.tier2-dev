@@ -1,0 +1,28 @@
+# tier2-dev — recipe-derived dev toolchain (doc/templates.md first
+# workload). The cleanest state boundary in the slice: all software
+# comes from this recipe, no user state lives in the image. A silo
+# referencing a generation of this template mounts its own home/state
+# dir outside the image (binding.state_path).
+#
+# Built by qdistro-template-build into a candidate, resolved to an
+# immutable digest, validated by the tier2-dev probes (process starts,
+# gcc present, hello-world compiles and runs), then manually promoted.
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# Minimal C/dev toolchain. --no-recommends keeps the closure tight so
+# the recipe stays reproducible and the candidate image small. The
+# validation probes need: a shell + coreutils (process/command probes),
+# gcc + glibc-devel (compile-and-run hello world).
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install --no-recommends \
+        bash \
+        coreutils \
+        gcc \
+        glibc-devel \
+        make \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# Stable, non-root default. A real silo run overrides --user via
+# spawn-tier2 (--userns=keep-id); this is only the image default.
+CMD ["/bin/bash"]
