@@ -7,6 +7,17 @@
 #   - admin user uid 1000, password ${QDISTRO_VM_PASSWORD}, sudo NOPASSWD
 #   - qemu-guest-agent enabled (so vm-exec works first boot)
 #   - SELinux permissive (per memory selinux_permissive_required.md)
+#   - GRUB graphics handoff disabled (GRUB_TERMINAL_OUTPUT=console,
+#     GRUB_GFXPAYLOAD_LINUX=text). The template domain drives a
+#     shim-free virtio-gpu-pci (no VGA BIOS) so wlroots can set modes
+#     >640×480; but GRUB's default gfxterm/gfxpayload=keep tries to
+#     mode-set that GPU, finds no VGA firmware, and HANGS before ever
+#     loading the kernel — the guest spins a core with zero serial and
+#     a blank display, and qga never comes up (qci vm-smoke timed out
+#     in vm_provision). Forcing GRUB to the plain console terminal +
+#     text payload makes it hand straight to the kernel, which then
+#     drives the virtio-gpu itself. Keep this whenever the template GPU
+#     is the shim-free virtio-gpu-pci.
 #   - cloud-init AND jeos-firstboot masked (we own first-boot config;
 #     without the jeos-firstboot mask its wizard runs on tty1 and
 #     blocks `systemctl reload user@*.service` triggered by every
@@ -90,6 +101,9 @@ virt-customize \
     --run-command 'zypper -n install --no-recommends qemu-guest-agent' \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
+    --run-command 'sed -i -e "s/^GRUB_TERMINAL_OUTPUT=.*/GRUB_TERMINAL_OUTPUT=\"console\"/" /etc/default/grub; grep -q "^GRUB_TERMINAL_OUTPUT=" /etc/default/grub || echo "GRUB_TERMINAL_OUTPUT=\"console\"" >>/etc/default/grub' \
+    --run-command 'sed -i -e "s/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=\"text\"/" /etc/default/grub; grep -q "^GRUB_GFXPAYLOAD_LINUX=" /etc/default/grub || echo "GRUB_GFXPAYLOAD_LINUX=\"text\"" >>/etc/default/grub' \
+    --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
     --run-command 'sed -i "s/^SELINUX=.*/SELINUX=permissive/" /etc/selinux/config 2>/dev/null || true' \
     --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service cloud-init.target 2>/dev/null || true' \
     --run-command 'systemctl mask jeos-firstboot.service 2>/dev/null || true' \
