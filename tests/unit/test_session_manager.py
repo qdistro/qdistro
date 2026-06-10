@@ -35,6 +35,7 @@ class _FakeOps:
         self.cgroup_pids_map: dict[str, list[int]] = {}
         self.cgroup_frozen: dict[str, bool] = {}
         self.systemctl_calls: list[tuple[str, str]] = []
+        self.launch_envs: dict[str, str] = {}   # name → env file content
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
@@ -101,6 +102,14 @@ class _FakeOps:
 
     def systemctl_stop(self, unit: str) -> None:
         self.systemctl_calls.append(("stop", unit))
+
+    # tier2-template launch env (fableplan2 task 04)
+    def write_launch_env(self, name: str, content: str):
+        self.launch_envs[name] = content
+        return Path("/run/qdistro/silo-launch") / f"{name}.env"
+
+    def remove_launch_env(self, name: str) -> None:
+        self.launch_envs.pop(name, None)
 
     def kill_pids(self, pids, sig: int) -> None:
         for pid in pids:
@@ -592,3 +601,159 @@ class TestReviewFixups:
         store = _SiloStore(ops, config_path=cfg)
         names = [s.name for s in store.list_silos()]
         assert names == ["good"]
+
+
+# ---------------------------------------------------------------------------
+# tier2-template silos (fableplan2 task 04)
+# ---------------------------------------------------------------------------
+
+_LAUNCH = {
+    "workload": "browser",
+    "template_silo": "browser1",
+    "network": "slirp4netns",
+    "argv": ["chromium"],
+}
+
+
+class TestTier2TemplateKind:
+    def test_validate_kind(self):
+        assert sm.validate_kind("tier3-user") == "tier3-user"
+        assert sm.validate_kind("tier2-template") == "tier2-template"
+        with pytest.raises(BadArgument):
+            sm.validate_kind("bogus")
+
+    def test_tier2_uid_must_be_admin(self):
+        assert sm.validate_silo_uid(1000, "tier2-template") == 1000
+        with pytest.raises(BadArgument):
+            sm.validate_silo_uid(2001, "tier2-template")
+        # tier3 still uses the silo range; admin uid is rejected there.
+        assert sm.validate_silo_uid(2001, "tier3-user") == 2001
+        with pytest.raises(BadArgument):
+            sm.validate_silo_uid(1000, "tier3-user")
+
+    def test_validate_launch_rejects_tier3_stanza(self):
+        assert sm.validate_launch("tier3-user", {}) == {}
+        with pytest.raises(BadArgument):
+            sm.validate_launch("tier3-user", {"workload": "x"})
+
+    def test_validate_launch_normalises(self):
+        out = sm.validate_launch("tier2-template", dict(_LAUNCH))
+        assert out["workload"] == "browser"
+        assert out["network"] == "slirp4netns"
+        assert out["argv"] == ["chromium"]
+
+    @pytest.mark.parametrize("bad", [
+        {"template_silo": "s", "network": "none"},                  # no workload
+        {"workload": "w", "network": "none"},                       # no template_silo
+        {"workload": "w", "template_silo": "s", "network": "lan"},  # bad network
+        {"workload": "w", "template_silo": "s", "argv": "notalist"},
+        {"workload": "../x", "template_silo": "s"},                 # unsafe token
+    ])
+    def test_validate_launch_rejects_bad(self, bad):
+        with pytest.raises(BadArgument):
+            sm.validate_launch("tier2-template", bad)
+
+    def test_create_tier2_no_useradd(self, store, ops):
+        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        silo = store.get("browser1")
+        assert silo.kind == "tier2-template"
+        assert silo.launch["template_silo"] == "browser1"
+        # No system user / state dir created for a template silo.
+        assert "browser1" not in ops.users
+        assert "browser1" not in ops.state_dirs
+
+    def test_create_tier2_rejects_non_admin_uid(self, store):
+        with pytest.raises(BadArgument):
+            store.create("browser1", 2001, kind="tier2-template", launch=dict(_LAUNCH))
+
+    def test_schema_round_trips_tier2(self, ops, tmp_path):
+        s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        s1.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        s1.create("dev1", 2001)  # a plain tier3 silo alongside
+        # Reload from the persisted file into a fresh store + ops.
+        s2 = _SiloStore(_FakeOps(), config_path=tmp_path / "silos.yaml")
+        b = s2.get("browser1")
+        assert b.kind == "tier2-template"
+        assert b.uid == 1000
+        assert b.launch == {"workload": "browser", "template_silo": "browser1",
+                            "network": "slirp4netns", "argv": ["chromium"]}
+        assert s2.get("dev1").kind == "tier3-user"
+        assert s2.get("dev1").launch == {}
+
+    def test_start_tier2_exports_env_and_starts_unit(self, store, ops):
+        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        assert store.get("browser1").state == State.ACTIVE
+        # Started the tier-2 unit, NOT the tier-3 session launcher; no cgroup.
+        assert ("start", "qdistro-tier2-silo@browser1.service") in ops.systemctl_calls
+        assert "browser1" not in ops.cgroups
+        env = ops.launch_envs["browser1"]
+        # The env file must be sourceable by the launcher (`set -a; . file`)
+        # and round-trip every value, INCLUDING an argv entry with a single
+        # quote (validate_launch allows it; shlex.quote must escape it).
+        import json as _json
+        recovered = _source_env_via_bash(env)
+        assert recovered["TIER2_SILO"] == "browser1"
+        assert recovered["TIER2_NETWORK"] == "slirp4netns"
+        assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == ["chromium"]
+        assert recovered["QD_WORKLOAD"] == "browser"
+
+
+def _source_env_via_bash(env_text: str) -> dict:
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+        fh.write(env_text)
+        path = fh.name
+    keys = ["TIER2_SILO", "TIER2_NETWORK", "QD_WORKLOAD", "QD_CONTAINER",
+            "QD_APP_ARGV_JSON"]
+    script = (f"set -a; . {path}; set +a; "
+              + "; ".join(f'printf "%s\\0" "${{{k}}}"' for k in keys))
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                         check=True)
+    vals = out.stdout.split("\0")
+    return dict(zip(keys, vals))
+
+
+def test_launch_env_round_trips_argv_with_single_quote(store, ops):
+    # codex r2: an argv entry with a single quote must survive shlex.quote +
+    # bash sourcing (a naive single-quote wrapper would corrupt it).
+    store.create("b2", 1000, kind="tier2-template", launch={
+        "workload": "browser", "template_silo": "b2", "network": "none",
+        "argv": ["chromium", "--user-agent=it's me"]})
+    store.start("b2")
+    import json as _json
+    recovered = _source_env_via_bash(ops.launch_envs["b2"])
+    assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == \
+        ["chromium", "--user-agent=it's me"]
+
+    def test_stop_tier2_stops_unit_and_clears_env(self, store, ops):
+        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        store.stop("browser1")
+        assert store.get("browser1").state == State.STOPPED
+        assert ("stop", "qdistro-tier2-silo@browser1.service") in ops.systemctl_calls
+        assert "browser1" not in ops.launch_envs
+
+    def test_loader_drops_tier2_row_with_bad_uid(self, ops, tmp_path):
+        # A hand-edited tier2-template row with a non-admin uid must be dropped
+        # (the loader rejects fake uids), not loaded with wrong privileges.
+        p = tmp_path / "silos.yaml"
+        p.write_text(
+            "silos:\n"
+            "  - name: browser1\n"
+            "    uid: 2001\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 0\n"
+            "    last_change: 0\n"
+            "    kind: tier2-template\n"
+            "    launch:\n"
+            "      workload: browser\n"
+            "      template_silo: browser1\n"
+            "      network: none\n"
+            "      argv: [\"chromium\"]\n"
+        )
+        s = _SiloStore(ops, config_path=p)
+        with pytest.raises(UnknownSilo):
+            s.get("browser1")

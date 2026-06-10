@@ -44,9 +44,15 @@
 #   TIER2_QDWIN_SHELL_SO   Host path to the qdwin-shell.so to bind-mount
 #                          into the container at /usr/lib64/weston/.
 #                          Default /usr/lib64/weston/qdwin-shell.so.
-#   TIER2_DETACH=1         Run podman with -d (detached). Default
-#                          foreground; container exit propagates to
-#                          this script's exit code.
+#   TIER2_DETACH=1         Supervised detach: emit the stdout contract,
+#                          hand the wait + per-container-dir cleanup to a
+#                          setsid'd supervisor, and return 0 immediately
+#                          (the named container keeps running for `podman
+#                          exec`; the dir is cleaned only after it exits).
+#                          NOT `podman run -d` (that tears the secctx tag
+#                          down before the inner weston connects). Default
+#                          foreground; container exit propagates to this
+#                          script's exit code.
 #   TIER2_DEBUG=1          Echo the resolved podman command before running.
 #
 # Hardening knobs (defaults are the secure choice; relax for special
@@ -540,6 +546,33 @@ else
     bash -c "$WRAPPER_BODY" &
 fi
 child_pid=$!
+
+# --- detached test mode (TIER2_DETACH=1) -------------------------------
+# Supervised detach (codex r1/r2): NOT `podman run -d` — under secctx-exec
+# that returns before the inner weston connects (tearing down the
+# wp_security_context_v1 tag), and the EXIT trap would rm the per-container
+# dir while the container still needs it. Instead, the stdout contract
+# (LAUNCH_TOKEN/CONTAINER/IMAGE/APP_ID) has ALREADY been emitted above, the
+# wrapper chain is running as $child_pid, and here we hand the wait +
+# deferred cleanup to a setsid'd supervisor and return now. The supervisor
+# removes the per-container dir ONLY after the container (child) exits, so a
+# `podman exec`-ing test harness sees a stable, live container. The container
+# name is the stable silo-derived $CONTAINER, and the secctx tag on the outer
+# connection is unchanged (it was stamped by the still-running wrapper chain).
+if [ "${TIER2_DETACH:-0}" = "1" ]; then
+    trap - EXIT TERM INT   # the supervisor owns cleanup now, not this shell
+    setsid bash -c '
+        cpid="'"$child_pid"'"
+        # Poll, not wait: $cpid is this process'"'"'s parent-shell child, not
+        # ours, so wait(2) cannot reap it; kill -0 sees it until it exits.
+        while kill -0 "$cpid" 2>/dev/null; do sleep 0.5; done
+        rm -rf "'"$PERCONT_DIR"'" 2>/dev/null || true
+        rmdir "'"$PARENT_DIR"'" 2>/dev/null || true
+    ' >/dev/null 2>&1 &
+    disown
+    echo "spawn-tier2: detached (container=$CONTAINER token=$LAUNCH_TOKEN)" >&2
+    exit 0
+fi
 
 # `wait` returns 128+signo when a trap interrupts it — the child may
 # still be alive (mid-podman-teardown). Loop until the child actually

@@ -1,0 +1,52 @@
+#!/bin/bash
+# qdistro-tier2-silo-launch <silo-name> — ExecStart of
+# qdistro-tier2-silo@<name>.service (fableplan2 task 04).
+#
+# The session manager (root) writes /run/qdistro/silo-launch/<name>.env and
+# `systemctl start`s the unit; the unit runs THIS script as admin (the
+# privilege drop happens at the unit boundary — rootless podman runs as
+# admin). The script reads the exported launch stanza and execs spawn-tier2
+# in the FOREGROUND as the unit's main process: it IS the supervisor, so
+# `systemctl stop` (SIGTERM) propagates through spawn-tier2 to the podman
+# container, and the per-container runtime dir is cleaned only after the
+# container exits (spawn-tier2's existing trap). No `podman run -d`.
+set -euo pipefail
+
+NAME="${1:?usage: qdistro-tier2-silo-launch <silo-name>}"
+ENV_FILE="/run/qdistro/silo-launch/${NAME}.env"
+
+[ -r "$ENV_FILE" ] || { echo "tier2-silo-launch: no launch env at $ENV_FILE" >&2; exit 2; }
+# The env file is single-quoted KEY='VALUE' written by the daemon (trusted).
+# `set -a` exports everything it defines so the Python argv splitter (a
+# subprocess) sees QD_WORKLOAD/QD_APP_ARGV_JSON, and spawn-tier2 sees
+# TIER2_SILO/TIER2_NETWORK.
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+
+: "${TIER2_SILO:?launch env missing TIER2_SILO}"
+: "${QD_WORKLOAD:?launch env missing QD_WORKLOAD}"
+: "${QD_CONTAINER:?launch env missing QD_CONTAINER}"
+export TIER2_NETWORK="${TIER2_NETWORK:-none}"
+
+# Re-split the JSON argv the daemon exported (no quoting hazards: it was
+# json.dumps'd). Empty/absent argv defaults to the workload binary name.
+mapfile -t APP_ARGV < <(python3 -c '
+import json, os, sys
+argv = json.loads(os.environ.get("QD_APP_ARGV_JSON", "[]") or "[]")
+if not argv:
+    argv = [os.environ["QD_WORKLOAD"]]
+sys.stdout.write("\n".join(argv))
+')
+
+# Resolve spawn-tier2 (installed wrapper, else dev tree).
+SPAWN=""
+for cand in /usr/bin/qdistro-tier2-spawn \
+            /usr/libexec/qdistro/spawn-tier2.sh \
+            "$(dirname "$(readlink -f "$0")")/../tier2/spawn-tier2.sh"; do
+    if [ -x "$cand" ]; then SPAWN="$cand"; break; fi
+done
+[ -n "$SPAWN" ] || { echo "tier2-silo-launch: spawn-tier2 not found" >&2; exit 5; }
+
+exec "$SPAWN" "$QD_CONTAINER" "$QD_WORKLOAD" -- "${APP_ARGV[@]}"

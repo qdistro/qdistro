@@ -41,7 +41,8 @@ install -d -m 0755 "$LIBEXEC" "$BIN" "$SYSD" "$RECIPES"
 for mod in qdistro_templates.py qdistro_template_audit.py \
            qdistro_template_build.py qdistro_template_validate.py \
            qdistro_template_promote.py qdistro_template_gc.py \
-           qdistro_template_freshness.py qdistro_resolve_binding.py; do
+           qdistro_template_freshness.py qdistro_resolve_binding.py \
+           qdistro_template_status.py; do
     install -m 0644 "$SRC/$mod" "$LIBEXEC/$mod"
 done
 
@@ -60,12 +61,14 @@ make_wrapper qdistro-template-promote   qdistro_template_promote.py
 make_wrapper qdistro-template-gc        qdistro_template_gc.py
 make_wrapper qdistro-template-freshness qdistro_template_freshness.py
 make_wrapper qdistro-resolve-binding    qdistro_resolve_binding.py
+make_wrapper qdistro-template-status    qdistro_template_status.py
 
 # Expose all template CLIs on PATH (resolve-binding is required there for
 # spawn-tier2; the rest are admin conveniences).
 for w in qdistro-template-build qdistro-template-validate \
          qdistro-template-promote qdistro-template-gc \
-         qdistro-template-freshness qdistro-resolve-binding; do
+         qdistro-template-freshness qdistro-resolve-binding \
+         qdistro-template-status; do
     ln -sf "$LIBEXEC/$w" "$BIN/$w"
 done
 
