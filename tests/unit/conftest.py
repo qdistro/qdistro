@@ -45,6 +45,7 @@ sys.path.insert(0, str(_ROOT / "browser_bridge"))
 sys.path.insert(0, str(_ROOT / "games"))
 sys.path.insert(0, str(_ROOT / "daemons"))
 sys.path.insert(0, str(_ROOT / "workflow"))
+sys.path.insert(0, str(_ROOT / "templates"))
 
 
 # --------------------------------------------------------------------------

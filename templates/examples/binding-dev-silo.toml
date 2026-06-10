@@ -1,0 +1,14 @@
+# Example binding for a tier2-dev silo, installed/created at
+# /var/lib/qdistro/bindings/<silo>.toml by qdistro-template-promote.
+# Hand-authored example: the digests below are illustrative. Generations
+# are referenced by immutable podman image digest, never a tag — the
+# launch path (spawn-tier2) refuses a non-digest reference.
+
+silo = "dev-silo"
+template = "tier2-dev"
+backend = "podman-image"
+active_generation = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+previous_generations = []
+state_path = "/var/lib/qdistro/silos/dev-silo/state"
+identity_revision = 1
+activation_policy = "manual"

@@ -1,0 +1,24 @@
+# Global template retention defaults (doc/templates.md §Retention).
+# Installed to /etc/qdistro/template-retention.toml. qdistro-template-gc
+# reads this; pin receipts always win over these counts — a generation
+# with an unexpired pin is never collected regardless of the numbers
+# below.
+
+# Keep the N most-recent promoted generations per template (the active
+# one plus rollback targets). VM artifacts default to 2 (bigger bytes).
+keep_promoted_generations = 3
+keep_promoted_generations_vm = 2
+
+# Failed candidate payloads (image layers, build scratch) are kept this
+# many days for post-mortem, then their payload is collectable. Evidence
+# (manifest, build log, validation report, audit) is never deleted here.
+failed_candidate_days = 7
+
+# Build logs retained 180 days; audit evidence 3 years. Security-decision
+# evidence is kept indefinitely (never expressed as a day count).
+build_log_days = 180
+audit_evidence_years = 3
+
+# Per-template overrides, e.g.:
+# [overrides.tier2-dev]
+# keep_promoted_generations = 5

@@ -752,6 +752,43 @@ provision_subvolumes() {
     fi
 }
 
+provision_template_dirs() {
+    # Template/promotion on-disk model (doc/templates.md §On-disk model,
+    # todo/fableplan task 01). Plain directories + TOML, no daemon. The
+    # bindings/pins/identity trees hold the security state that decides
+    # which image a silo launches, so they are owner-root-only (0700);
+    # the template payload/policy trees are world-readable (0755).
+    log "provisioning template directories..."
+    install -d -m 0755 /etc/qdistro/templates
+    install -d -m 0755 /var/lib/qdistro/templates
+    install -d -m 0700 /var/lib/qdistro/bindings
+    install -d -m 0700 /var/lib/qdistro/pins
+    install -d -m 0700 /var/lib/qdistro/identity
+
+    # Global retention defaults — never clobber an operator's edited file.
+    local retention_src="$REPO_ROOT/qdistro/deploy/etc/qdistro/template-retention.toml"
+    if [ ! -f /etc/qdistro/template-retention.toml ]; then
+        if [ -f "$retention_src" ]; then
+            install -m 0644 "$retention_src" /etc/qdistro/template-retention.toml
+            log "  installed /etc/qdistro/template-retention.toml"
+        else
+            warn "  template retention defaults not found at $retention_src; GC will rely on built-in defaults"
+        fi
+    fi
+
+    # Example authored policy for the first workload (tier2-dev). Only
+    # dropped if no policy is present yet; the operator owns it afterward.
+    local policy_src="$REPO_ROOT/qdistro/templates/examples/tier2-dev.toml"
+    if [ ! -f /etc/qdistro/templates/tier2-dev.toml ]; then
+        if [ -f "$policy_src" ]; then
+            install -m 0644 "$policy_src" /etc/qdistro/templates/tier2-dev.toml
+            log "  installed /etc/qdistro/templates/tier2-dev.toml"
+        else
+            warn "  example template policy not found at $policy_src"
+        fi
+    fi
+}
+
 create_user_subvolume() {
     # $1 = username, $2 = uid
     local user="$1" uid="$2"
@@ -1752,6 +1789,11 @@ main() {
 
     # Step 9: Fetch sources
     fetch_sources
+
+    # Step 9b: Template/promotion directory skeleton + retention defaults.
+    # Runs after fetch_sources so the example policy + retention defaults
+    # are present in $REPO_ROOT/qdistro to copy from.
+    provision_template_dirs
 
     # Step 10: Build qdwin
     build_qdwin

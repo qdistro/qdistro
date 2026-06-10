@@ -1,0 +1,46 @@
+# Authored policy for the tier2-dev template (podman-image backend).
+# Installed to /etc/qdistro/templates/tier2-dev.toml. This is the
+# cleanest boundary in the slice: a recipe-derived dev toolchain with no
+# user state in the image — software is fully reproducible from the
+# Containerfile, state lives in the silo's mounted home/state dir.
+
+[template]
+class = "derived"
+
+[template.state_boundary]
+class = "recipe-derived-toolchain"
+enforced = "true"
+
+[template.build]
+# Containerfile is resolved relative to the recipes dir shipped with
+# qdistro (/usr/lib/qdistro/templates/recipes), or an absolute path.
+containerfile = "Containerfile.tier2-dev"
+# Plain egress during build is acceptable in this slice but must be
+# recorded honestly: the recording proxy ("record"/"replay") is a later
+# slice. "unrestricted" keeps the claim true.
+network_mode = "unrestricted"
+
+# Probes run in a minimal disposable runtime against the built candidate
+# digest. All tier2-dev probes are local-runtime class: no network.
+# class: local-runtime (default) | remote-read (network allowed)
+# kind:  process | command | compile-run | window
+
+[[template.probe]]
+name = "process-starts"
+kind = "process"
+class = "local-runtime"
+command = "true"
+timeout = 30
+
+[[template.probe]]
+name = "gcc-present"
+kind = "command"
+class = "local-runtime"
+command = "gcc --version"
+timeout = 30
+
+[[template.probe]]
+name = "hello-world-compiles-and-runs"
+kind = "compile-run"
+class = "local-runtime"
+timeout = 60
