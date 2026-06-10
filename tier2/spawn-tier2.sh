@@ -15,6 +15,12 @@
 # by tier2/make-tier2-image.sh.
 #
 # Env knobs:
+#   TIER2_SILO             Silo name for template binding resolution. When
+#                          set, the image is the silo's active generation
+#                          DIGEST resolved from
+#                          /var/lib/qdistro/bindings/<silo>.toml (never the
+#                          :latest tag). A silo with no binding runs
+#                          untemplated; a non-digest binding is a hard error.
 #   TIER2_ADMIN_UID        Admin uid; default $(id -u) (usually 1000).
 #   TIER2_OUTER_DISPLAY    Outer Wayland socket basename in
 #                          $XDG_RUNTIME_DIR. Default $WAYLAND_DISPLAY,
@@ -190,7 +196,47 @@ fail() { echo "spawn-tier2: $*" >&2; exit 2; }
 command -v podman >/dev/null 2>&1 \
     || fail "podman not in PATH"
 
+# --- template binding resolution (fableplan task 05) --------------------
+# When this launch represents a templated silo (TIER2_SILO set), the image
+# is the silo's active generation DIGEST resolved from its binding file —
+# never the mutable :latest tag. This is the enforcement point for "a
+# candidate is mechanically unable to launch against real state": the only
+# image a binding can name is a promoted generation (qdistro-template-promote
+# is the only writer of bindings), and a non-digest reference is a hard
+# error with no tag fallback. A silo with no binding runs untemplated
+# (today's tag-based behaviour), logged so coverage is visible.
+TIER2_SILO="${TIER2_SILO:-}"
+if [ -n "$TIER2_SILO" ]; then
+    RESOLVER=()
+    if command -v qdistro-resolve-binding >/dev/null 2>&1; then
+        RESOLVER=(qdistro-resolve-binding)
+    elif [ -f /usr/libexec/qdistro/qdistro-resolve-binding ]; then
+        RESOLVER=(/usr/libexec/qdistro/qdistro-resolve-binding)
+    elif [ -f "$SCRIPT_DIR/../templates/qdistro_resolve_binding.py" ]; then
+        RESOLVER=(env "PYTHONPATH=$SCRIPT_DIR/../templates" python3 \
+                  "$SCRIPT_DIR/../templates/qdistro_resolve_binding.py")
+    fi
+    [ "${#RESOLVER[@]}" -gt 0 ] \
+        || fail "TIER2_SILO=$TIER2_SILO set but qdistro-resolve-binding not found"
+    resolved_gen="$("${RESOLVER[@]}" "$TIER2_SILO" --record)"
+    resolve_rc=$?
+    case "$resolve_rc" in
+        0)  # Defence in depth: never trust resolver stdout shape — only an
+            # exact sha256 digest may become the launch image.
+            if [[ ! "$resolved_gen" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                fail "resolver returned a non-digest for silo $TIER2_SILO: '$resolved_gen'"
+            fi
+            IMAGE="$resolved_gen"
+            echo "spawn-tier2: silo $TIER2_SILO resolved to generation $IMAGE" >&2 ;;
+        3)  echo "spawn-tier2: silo $TIER2_SILO runs UNTEMPLATED (no binding); using $IMAGE" >&2 ;;
+        *)  fail "binding resolution failed for silo $TIER2_SILO (rc=$resolve_rc) — refusing to launch (no tag fallback)" ;;
+    esac
+fi
+
 if ! podman image exists "$IMAGE" 2>/dev/null; then
+    if [ -n "$TIER2_SILO" ]; then
+        fail "resolved generation $IMAGE for silo $TIER2_SILO is not present in the image store"
+    fi
     fail "image $IMAGE not present; run tier2/make-tier2-image.sh $WORKLOAD"
 fi
 
