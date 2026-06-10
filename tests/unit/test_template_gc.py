@@ -63,6 +63,31 @@ def _collected_runner():
     return deleted, rmi
 
 
+def _exists_true(_ref):
+    return True
+
+
+def _candidate(layout, template, run_id, *, mtime, state="failed", gen=None):
+    """A failed candidate dir. With gen=None it is a failed-BUILD candidate
+    (no manifest, no image); with a digest it gets a valid candidate manifest
+    whose generation_ref is that digest."""
+    cdir = layout.candidate_dir(template, run_id)
+    os.makedirs(cdir, exist_ok=True)
+    if gen is not None:
+        ev = os.path.join(cdir, "evidence")
+        os.makedirs(ev, exist_ok=True)
+        manifest = {"template": template, "run_id": run_id, "image_digest": gen,
+                    "image_id": gen, "containerfile_digest": gen,
+                    "build_command": "x", "network_mode": "unrestricted",
+                    "artifact_manifest": [], "generation_ref": gen}
+        qt.write_toml_atomic(os.path.join(cdir, "manifest.toml"), manifest, 0o644)
+        qt.write_toml_atomic(os.path.join(ev, "validation.toml"),
+                             {"result": "failed"}, 0o644)
+    qt.set_candidate_state(cdir, state)
+    os.utime(cdir, (mtime, mtime))
+    return cdir
+
+
 def test_pinned_generation_survives_aggressive_retention(tmp_path):
     layout = _layout(tmp_path)
     # retention keeps 1 promoted generation
@@ -187,16 +212,29 @@ def test_failed_candidate_payload_collected_after_window(tmp_path):
     qt.write_toml_atomic(layout.retention_file,
                          dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
     now = 1_700_000_000.0
-    cdir = layout.candidate_dir("tier2-dev", "run-old")
-    os.makedirs(cdir)
-    qt.set_candidate_state(cdir, "failed")
-    os.utime(cdir, (now - 8 * 86400, now - 8 * 86400))  # older than 7d
+    payload = _digest(7)
+    cdir = _candidate(layout, "tier2-dev", "run-old", mtime=now - 8 * 86400,
+                      gen=payload)  # older than 7d, with a real payload digest
     deleted, rmi = _collected_runner()
-    res = gc.gc(layout=layout, now=now, rmi=rmi)
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
     assert any(d["kind"] == "candidate" and d["run_id"] == "run-old" for d in res)
-    assert "qdistro-candidate/tier2-dev:run-old" in deleted
-    # evidence (the candidate dir) still present
+    # the payload is reclaimed by the manifest's generation_ref digest, NOT a
+    # per-run candidate tag (which the build untags immediately).
+    assert payload in deleted
+    assert not any(ref.startswith("qdistro-candidate/") for ref in deleted)
+    # evidence (the candidate dir + its manifest) still present
     assert os.path.isdir(cdir)
+    assert os.path.isfile(os.path.join(cdir, "manifest.toml"))
+    # a gc.deleted row was written naming the digest
+    db = os.path.join(layout.var, "audit", "template_audit.sqlite")
+    import qdistro_template_audit as audit
+    alog = audit.TemplateAuditLog(db)
+    try:
+        rows = [r for r in alog.recent() if r["event"] == "template.gc.deleted"]
+        assert any(r["run_id"] == "run-old" and r["generation"] == payload
+                   for r in rows)
+    finally:
+        alog.close()
 
 
 def test_recent_failed_candidate_kept(tmp_path):
@@ -204,13 +242,124 @@ def test_recent_failed_candidate_kept(tmp_path):
     qt.write_toml_atomic(layout.retention_file,
                          dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
     now = 1_700_000_000.0
-    cdir = layout.candidate_dir("tier2-dev", "run-new")
-    os.makedirs(cdir)
-    qt.set_candidate_state(cdir, "failed")
-    os.utime(cdir, (now - 1 * 86400, now - 1 * 86400))  # 1 day old
+    _candidate(layout, "tier2-dev", "run-new", mtime=now - 1 * 86400,
+               gen=_digest(7))  # 1 day old
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
     assert deleted == []
+
+
+def test_failed_build_candidate_no_payload_no_rmi(tmp_path):
+    # A failed BUILD leaves no manifest and no image: "nothing to collect",
+    # not an error — no rmi, no exception, run continues.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file,
+                         dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
+    now = 1_700_000_000.0
+    _candidate(layout, "tier2-dev", "run-nobuild", mtime=now - 8 * 86400, gen=None)
+    deleted, rmi = _collected_runner()
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    assert deleted == []
+    assert not any(d["kind"] == "candidate" for d in res)
+
+
+def test_failed_candidate_digest_pinned_under_other_template_not_collected(tmp_path):
+    # A failed candidate under template X whose payload digest is pinned as a
+    # live generation of ANOTHER template Y (a cache-identical rebuild shares
+    # the image_id) must NOT be rmi'd — the generation path owns that payload.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file,
+                         dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
+    now = 1_700_000_000.0
+    shared = _digest(5)
+    # live generation + active binding for template "tier2-other"
+    _gen(layout, "tier2-other", shared, mtime=now - 100)
+    _binding(layout, "other-silo", "tier2-other", shared)
+    # failed candidate under tier2-dev with the same payload digest
+    _candidate(layout, "tier2-dev", "run-shared", mtime=now - 8 * 86400, gen=shared)
+    deleted, rmi = _collected_runner()
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    assert shared not in deleted
+
+
+def test_failed_candidate_digest_with_promoted_record_not_collected(tmp_path):
+    # A failed candidate whose digest has a promoted generation record (even
+    # unpinned, even under another template) must NOT be rmi'd: the generation
+    # retention path owns its payload.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=3, failed_candidate_days=7),
+                         0o644)
+    now = 1_700_000_000.0
+    shared = _digest(6)
+    _gen(layout, "tier2-other", shared, mtime=now - 100)  # generation record exists
+    _candidate(layout, "tier2-dev", "run-shared2", mtime=now - 8 * 86400, gen=shared)
+    deleted, rmi = _collected_runner()
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    assert shared not in deleted
+
+
+def test_failed_candidate_absent_image_silent_no_audit(tmp_path):
+    # A manifest whose image is already gone (rmi'd by an earlier run) is
+    # already-collected: no rmi WARN, no audit row, no exception.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file,
+                         dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
+    now = 1_700_000_000.0
+    _candidate(layout, "tier2-dev", "run-gone", mtime=now - 8 * 86400, gen=_digest(8))
+    deleted, rmi = _collected_runner()
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=lambda _r: False)
+    assert deleted == []
+    assert res and res[0]["deleted"] is False
+    db = os.path.join(layout.var, "audit", "template_audit.sqlite")
+    if os.path.isfile(db):
+        import qdistro_template_audit as audit
+        alog = audit.TemplateAuditLog(db)
+        try:
+            assert [r for r in alog.recent()
+                    if r["event"] == "template.gc.deleted"] == []
+        finally:
+            alog.close()
+
+
+def test_failed_candidate_corrupt_manifest_skipped_run_continues(tmp_path):
+    # A corrupt/untrusted manifest in a failed candidate must NOT abort the
+    # run nor read as collectable: skip it, continue with the rest.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file,
+                         dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
+    now = 1_700_000_000.0
+    bad = layout.candidate_dir("tier2-dev", "run-corrupt")
+    os.makedirs(bad)
+    qt.atomic_write(os.path.join(bad, "manifest.toml"),
+                    'template = "tier2-dev"\n', 0o644)  # missing required keys
+    qt.set_candidate_state(bad, "failed")
+    os.utime(bad, (now - 8 * 86400, now - 8 * 86400))
+    good_payload = _digest(9)
+    _candidate(layout, "tier2-dev", "run-good", mtime=now - 8 * 86400,
+               gen=good_payload)
+    deleted, rmi = _collected_runner()
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    # corrupt one skipped, good one still collected
+    assert good_payload in deleted
+
+
+def test_failed_candidate_unparseable_manifest_skipped(tmp_path):
+    # Syntactically-invalid TOML (tomllib raises a ValueError subclass) in a
+    # failed candidate manifest must also be skipped, not abort the run.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file,
+                         dict(gc.DEFAULT_RETENTION, failed_candidate_days=7), 0o644)
+    now = 1_700_000_000.0
+    bad = layout.candidate_dir("tier2-dev", "run-badtoml")
+    os.makedirs(bad)
+    qt.atomic_write(os.path.join(bad, "manifest.toml"), "this is not = valid\n", 0o644)
+    qt.set_candidate_state(bad, "failed")
+    os.utime(bad, (now - 8 * 86400, now - 8 * 86400))
+    deleted, rmi = _collected_runner()
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    assert deleted == []
+    assert not any(d.get("run_id") == "run-badtoml" for d in res)
 
 
 def test_dry_run_deletes_nothing(tmp_path):

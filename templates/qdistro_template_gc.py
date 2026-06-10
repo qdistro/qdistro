@@ -128,6 +128,12 @@ def _keep_count(retention: dict, template: str) -> int:
                          retention["keep_promoted_generations"])
 
 
+def _image_exists(image_ref: str) -> bool:
+    proc = subprocess.run(["podman", "image", "exists", image_ref],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
 def _rmi(image_ref: str) -> bool:
     proc = subprocess.run(["podman", "rmi", image_ref],
                           capture_output=True, text=True)
@@ -135,6 +141,33 @@ def _rmi(image_ref: str) -> bool:
         log(f"WARN: podman rmi {image_ref} failed: {proc.stderr.strip()}")
         return False
     return True
+
+
+def _all_pinned_digests(pinned: set[tuple[str, str]]) -> set[str]:
+    """Just the generation digests from the pinned (template, gen) set,
+    flattened across templates. A candidate's payload (its config digest)
+    can be shared with a live pinned generation even under a *different*
+    template (a cache-identical rebuild yields the same image_id), so the
+    candidate payload is protected if its digest matches ANY pinned gen."""
+    return {gen for (_template, gen) in pinned}
+
+
+def _all_promoted_generations(layout: qt.Layout) -> set[str]:
+    """Every digest that has a materialized generation record under any
+    template. The generation-retention path owns those payloads; a failed
+    candidate sharing such a digest must not delete the live generation's
+    image out from under it."""
+    promoted: set[str] = set()
+    if not os.path.isdir(layout.templates_var):
+        return promoted
+    for template in os.listdir(layout.templates_var):
+        gens_dir = layout.generations_dir(template)
+        if not os.path.isdir(gens_dir):
+            continue
+        for gen in os.listdir(gens_dir):
+            if os.path.isdir(os.path.join(gens_dir, gen)):
+                promoted.add(gen)
+    return promoted
 
 
 def _delete_generation_payload(layout: qt.Layout, template: str, gen: str,
@@ -161,34 +194,62 @@ def _delete_generation_payload(layout: qt.Layout, template: str, gen: str,
     return deletion
 
 
+def _candidate_payload_digest(cdir: str) -> str | None:
+    """The candidate's launchable payload digest (the manifest's
+    generation_ref == image_id config digest), or None when there is no
+    payload to collect.
+
+    A failed *build* leaves no manifest and no image — that is "nothing to
+    collect", not an error. A manifest we cannot trust (corrupt/unparseable,
+    or filing a digest the schema rejects) must NOT read as collectable:
+    deleting on the strength of a manifest you can't trust is worse than
+    leaving the payload, so fail closed by raising back to the per-candidate
+    skip in gc()."""
+    man = os.path.join(cdir, "manifest.toml")
+    if not os.path.isfile(man):
+        return None
+    return qt.generation_ref(qt.read_manifest(man))
+
+
 def _delete_candidate_payload(layout: qt.Layout, template: str, run_id: str,
-                              cdir: str, dry_run: bool, rmi) -> dict:
+                              cdir: str, digest: str, dry_run: bool,
+                              rmi, image_exists) -> dict:
     evidence = cdir  # the candidate dir IS the evidence (build.log, manifest, report)
-    tag = f"qdistro-candidate/{template}:{run_id}"
     deletion = {"kind": "candidate", "template": template, "run_id": run_id,
-                "reason": "failed-candidate-expired", "evidence_path": evidence,
-                "deleted": False}
+                "generation": digest, "reason": "failed-candidate-expired",
+                "evidence_path": evidence, "deleted": False}
     if dry_run:
         log(f"DRY-RUN would delete failed candidate payload {run_id} "
-            f"(image {tag}); evidence kept at {evidence}")
+            f"(image {digest}); evidence kept at {evidence}")
         return deletion
-    deletion["deleted"] = rmi(tag)
+    # An already-absent image (rmi'd by an earlier run, or never pushed past
+    # a build that produced no image) is already-collected — silent, no WARN,
+    # no audit row. Only an extant payload gets an rmi attempt.
+    if not image_exists(digest):
+        log(f"already collected: failed candidate payload {run_id} "
+            f"(image {digest} absent); evidence kept at {evidence}")
+        return deletion
+    deletion["deleted"] = rmi(digest)
     if not deletion["deleted"]:
         log(f"NOT deleted: failed candidate payload {run_id} (podman rmi failed)")
         return deletion
     audit.emit("template.gc.deleted", db_path=_audit_db(layout),
-               template=template, run_id=run_id, result="deleted",
-               reason="failed-candidate-expired", evidence_path=evidence)
-    log(f"deleted failed candidate payload {run_id}; evidence kept at {evidence}")
+               template=template, generation=digest, run_id=run_id,
+               result="deleted", reason="failed-candidate-expired",
+               evidence_path=evidence)
+    log(f"deleted failed candidate payload {run_id} (image {digest}); "
+        f"evidence kept at {evidence}")
     return deletion
 
 
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
-       now: float | None = None, rmi=_rmi) -> list[dict]:
+       now: float | None = None, rmi=_rmi, image_exists=_image_exists) -> list[dict]:
     layout = layout or qt.Layout()
     now = time.time() if now is None else now
     retention = load_retention(layout)            # fail-closed
     pinned = build_pinned_set(layout, now)        # fail-closed
+    pinned_digests = _all_pinned_digests(pinned)
+    promoted_digests = _all_promoted_generations(layout)
     deletions: list[dict] = []
     if not os.path.isdir(layout.templates_var):
         return deletions
@@ -221,8 +282,33 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
                     continue
                 if os.path.getmtime(cdir) >= cutoff:
                     continue
+                try:
+                    digest = _candidate_payload_digest(cdir)
+                except (qt.TemplateError, ValueError) as exc:
+                    # A corrupt manifest (TemplateError) or unparseable TOML
+                    # (tomllib raises a ValueError subclass) must not abort the
+                    # run nor read as collectable — skip this candidate, fail
+                    # closed. (A pin/binding/retention parse error still aborts;
+                    # this narrower skip is only for an untrusted candidate
+                    # manifest, where deleting on its strength is the worse
+                    # outcome.)
+                    log(f"WARN: skipping failed candidate {run_id}: "
+                        f"untrusted manifest: {exc}")
+                    continue
+                if digest is None:
+                    # Failed-build candidate: no manifest, no image. Nothing to
+                    # collect — not an error, no rmi, no WARN, no audit event.
+                    continue
+                # The candidate payload (its config digest) is shared with a
+                # live generation when it is pinned under ANY template or has a
+                # promoted generation record under ANY template — a
+                # cache-identical rebuild reuses the same image_id. In that case
+                # the generation-retention path owns the payload; skip silently.
+                if digest in pinned_digests or digest in promoted_digests:
+                    continue
                 deletions.append(_delete_candidate_payload(
-                    layout, template, run_id, cdir, dry_run, rmi))
+                    layout, template, run_id, cdir, digest, dry_run, rmi,
+                    image_exists))
     return deletions
 
 
