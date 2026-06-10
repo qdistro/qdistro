@@ -407,8 +407,20 @@ def promote(silo: str, run_id: str | None = None, *,
 
     resolved_state_path = (
         state_path or (existing["state_path"] if existing else None)
-        or f"/var/lib/qdistro/silos/{silo}/state"
+        or layout.default_state_path(silo)
     )
+    # First promote owns state-tree creation: a templated launch hard-fails on
+    # a missing state_path (task 01), so the tree must exist (admin-owned, as a
+    # btrfs subvolume when possible) before the binding can name it. Creation
+    # precedes the binding commit; a state tree without a binding is harmless.
+    if existing is None:
+        try:
+            mechanism = qt.create_state_tree(resolved_state_path)
+        except OSError as exc:
+            return _refuse(layout, f"could not create state tree at "
+                           f"{resolved_state_path}: {exc}", silo=silo,
+                           template=template, generation=new_gen, run_id=run_id)
+        log(f"created state tree {resolved_state_path} (mechanism={mechanism})")
     return _apply(layout, silo, template, new_gen, cdir, existing, resolver,
                   resolved_state_path, now, mode="promote", run_id=run_id)
 

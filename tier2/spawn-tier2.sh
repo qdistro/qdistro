@@ -19,8 +19,15 @@
 #                          set, the image is the silo's active generation
 #                          DIGEST resolved from
 #                          /var/lib/qdistro/bindings/<silo>.toml (never the
-#                          :latest tag). A silo with no binding runs
-#                          untemplated; a non-digest binding is a hard error.
+#                          :latest tag), and the silo's state_path is
+#                          bind-mounted read-write at /home/admin so state
+#                          survives container restarts and generation flips.
+#                          A binding-resolved launch is the ONLY launch that
+#                          mounts real state, and a missing/non-dir
+#                          state_path is a hard error (no tmpfs fallback).
+#                          A silo with no binding runs untemplated (tmpfs
+#                          home, no state); a non-digest binding is a hard
+#                          error.
 #   TIER2_ADMIN_UID        Admin uid; default $(id -u) (usually 1000).
 #   TIER2_OUTER_DISPLAY    Outer Wayland socket basename in
 #                          $XDG_RUNTIME_DIR. Default $WAYLAND_DISPLAY,
@@ -206,6 +213,7 @@ command -v podman >/dev/null 2>&1 \
 # error with no tag fallback. A silo with no binding runs untemplated
 # (today's tag-based behaviour), logged so coverage is visible.
 TIER2_SILO="${TIER2_SILO:-}"
+STATE_PATH=""
 if [ -n "$TIER2_SILO" ]; then
     RESOLVER=()
     if command -v qdistro-resolve-binding >/dev/null 2>&1; then
@@ -218,16 +226,36 @@ if [ -n "$TIER2_SILO" ]; then
     fi
     [ "${#RESOLVER[@]}" -gt 0 ] \
         || fail "TIER2_SILO=$TIER2_SILO set but qdistro-resolve-binding not found"
-    resolved_gen="$("${RESOLVER[@]}" "$TIER2_SILO" --record)"
+    # ONE binding read: --launch-env emits GENERATION/TEMPLATE/STATE_PATH/
+    # FIRST_ACTIVATION as KEY=VALUE lines (no TOML parsing in bash, no second
+    # read racing a concurrent promote). --record commits the per-boot status
+    # + activation marker under the current ordering.
+    launch_env="$("${RESOLVER[@]}" "$TIER2_SILO" --record --launch-env)"
     resolve_rc=$?
     case "$resolve_rc" in
-        0)  # Defence in depth: never trust resolver stdout shape — only an
+        0)  resolved_gen=""
+            while IFS='=' read -r _k _v; do
+                case "$_k" in
+                    GENERATION)  resolved_gen="$_v" ;;
+                    STATE_PATH)  STATE_PATH="$_v" ;;
+                esac
+            done <<< "$launch_env"
+            # Defence in depth: never trust resolver stdout shape — only an
             # exact sha256 digest may become the launch image.
             if [[ ! "$resolved_gen" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 fail "resolver returned a non-digest for silo $TIER2_SILO: '$resolved_gen'"
             fi
             IMAGE="$resolved_gen"
-            echo "spawn-tier2: silo $TIER2_SILO resolved to generation $IMAGE" >&2 ;;
+            # A binding-resolved launch is the ONLY launch that mounts real
+            # state, and it must mount it: a missing/non-dir state_path is a
+            # hard error, never a silent tmpfs home (losing a session's state
+            # is worse than refusing). The state tree is created by promote;
+            # spawn-tier2 only verifies.
+            [ -n "$STATE_PATH" ] \
+                || fail "resolver returned no STATE_PATH for templated silo $TIER2_SILO"
+            [ -d "$STATE_PATH" ] \
+                || fail "state_path $STATE_PATH for silo $TIER2_SILO is missing or not a directory — refusing to launch a templated silo without its state"
+            echo "spawn-tier2: silo $TIER2_SILO resolved to generation $IMAGE (state=$STATE_PATH)" >&2 ;;
         3)  echo "spawn-tier2: silo $TIER2_SILO runs UNTEMPLATED (no binding); using $IMAGE" >&2 ;;
         *)  fail "binding resolution failed for silo $TIER2_SILO (rc=$resolve_rc) — refusing to launch (no tag fallback)" ;;
     esac
@@ -308,6 +336,7 @@ export TIER2_ADMIN_UID_RESOLVED="$ADMIN_UID"
 export TIER2_IMAGE="$IMAGE"
 export TIER2_CONTAINER="$CONTAINER"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
+export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
 export TIER2_PIDS_LIMIT_RESOLVED="$TIER2_PIDS_LIMIT_VAL"
 export TIER2_MEMORY_RESOLVED="$TIER2_MEMORY_VAL"
@@ -384,6 +413,19 @@ PODMAN_HARDENING=(
     --read-only
     --tmpfs=/tmp:size=64m,mode=1777
     --mount type=tmpfs,destination=/var/cache,tmpfs-size=16m,tmpfs-mode=0755,U
+)
+# Templated-silo persistent state. ONLY a binding-resolved launch mounts
+# real state (TIER2_STATE_PATH_RESOLVED is empty for candidate/validate/
+# untemplated launches — they keep the tmpfs home). The state bind is
+# emitted BEFORE the /home/admin/.cache tmpfs so .cache layers on top of it
+# (podman applies overlapping mounts parent-first). No `:U` and no chown:
+# state_path is admin-owned on the host and the container runs
+# --userns=keep-id, so the uids already line up; `:U` on persistent state
+# would rewrite ownership of a real home and is forbidden.
+if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
+    PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+fi
+PODMAN_HARDENING+=(
     --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U
     --tmpfs=/run:size=4m,mode=0755
 )
