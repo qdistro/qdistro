@@ -109,6 +109,8 @@ Design documents for the policy/resource layer:
   finalizers, and capability handles.
 - [silos.md](silos.md) — desktop workload definition, bootstrap, health checks,
   actions, rollback, and agent guardrails.
+- [templates.md](templates.md) — versioned software templates, candidate
+  validation, A/B promotion, and update containment.
 - [metadata.md](metadata.md) — labels, annotations, typed security metadata,
   lineage references, and audit references.
 - [attachments.md](attachments.md) — UI, filesystem, credential, app-state,

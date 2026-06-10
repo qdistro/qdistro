@@ -10,6 +10,12 @@ container, VM, browser profile, credential store, or a mix of those
 implementation pieces. The user-facing object is "this workload with this
 state and authority", not "this Unix account".
 
+A silo's software layer comes from a **template** — a versioned, cloneable
+installation with no config or data, referenced through a binding file and
+updated by candidate validation and A/B promotion rather than in-place
+mutation. See [templates.md](templates.md). The silo itself owns only its
+config, persistent state, and authority.
+
 The name comes from the older enterprise-architecture sense of a silo: a
 department, team, or tool keeps some data, workflow, login, key, cloud account,
 or operational authority separate from the rest of the organization. Sometimes
@@ -348,6 +354,45 @@ For GUI checks, prefer accessibility names, roles, window titles, and stable UI
 text. Vision and click-capable agents are allowed, but screenshots are evidence,
 not the strongest oracle.
 
+### Probes versus validations
+
+Checks split into two classes by cost and side effects, which dictates when
+they may run:
+
+- **Probes** are cheap, machine-evaluable, and run on timers against live
+  workloads. Categories `process`, `window`, `network`, `file`, `capability`
+  are probes.
+- **Validations** are expensive, agent/GUI-driven, and may have side effects
+  (launch the app, navigate, exercise save-reopen). Categories `ui` and
+  `account`, and bootstrap success criteria, are validations. They run only
+  at transitions — post-update, post-bootstrap, maintenance windows, or on
+  demand — against clones, test profiles, or test accounts, never against
+  live user state the owner is attached to.
+
+Each check declares a side-effect level:
+
+- `pure`: no process start; local metadata only.
+- `local-runtime`: starts a process, but no network and only disposable
+  writable dirs.
+- `remote-read`: contacts a remote endpoint with no intended mutation (note
+  that even reads change server-side last-seen and rate-limit state).
+- `stateful`: may alter local state; must run only on a clone or test
+  profile.
+
+Timers against live workloads may use only `pure` and explicitly approved
+`remote-read` checks. "Side-effect-free" is slippery — opening a browser
+profile mutates session files, safebrowsing DBs, and telemetry timestamps —
+so a check that starts the real app is at least `stateful`.
+
+Validations on account-bearing silos never clone a live-account profile:
+refresh-token rotation in the clone invalidates the real session. Use
+dedicated test accounts for template and app-level validation, and passive
+read-only liveness (is the existing window showing the right account?) for
+the real profile. Test accounts are best effort, not a universal
+requirement — IdPs flag automation, and MFA makes unattended validation
+flaky; for many consumer apps, validation is limited to local launch checks
+plus passive liveness.
+
 ## Host systemd Integration
 
 Every silo definition must declare how the host OS represents the silo in
@@ -414,6 +459,20 @@ Common action classes:
 - `delete`: remove the silo after finalizers and revocations complete.
 
 ## Rollback And Updates
+
+Templated workloads update through the promotion pipeline in
+[templates.md](templates.md): the update is applied to a candidate clone
+containing no user data, validated there, and atomically promoted by a
+binding flip at the next restart. A failed candidate never touches the
+active silo — recovery of the active workload is the absence of an action.
+A state snapshot is additionally taken at first activation under a new
+template generation, so rollback covers profile migration: old generation +
+pre-migration snapshot is the complete local undo.
+
+The in-place paths below remain for workloads whose template state boundary
+is `partial` or `false` (see templates.md boundary classes) — apps whose
+plugins, profiles, or updaters straddle the software/state line. They carry
+weaker claims and rely on snapshot-then-mutate.
 
 The silo definition must describe the update process. Desktop workloads do not
 all update the same way:
@@ -512,7 +571,7 @@ vaults, and remote infrastructure changes are usually not rollbackable by
 qdistro. At most, qdistro can stop, warn, preserve evidence, or run an explicit
 compensating action.
 
-The normal managed update path is:
+The fallback in-place managed update path (non-templated workloads only) is:
 
 1. Snapshot current silo state.
 2. Apply the app, package, profile, or definition update.

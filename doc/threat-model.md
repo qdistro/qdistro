@@ -69,3 +69,10 @@ per-user auth) only make sense once the model is clear.
 - **VMs exist for the real adversarial case.** The VM tiers on the
  [isolation ladder](isolation-tiers.md) are where containment hardens to
  actually-adversarial levels.
+- **Untrusted update code runs in empty rooms.** Vendor auto-updaters, npm
+ postinstall scripts, and unsigned plugin installers execute only inside
+ template candidate builds, which contain no secrets, credentials, or user
+ data by construction ([templates.md](templates.md)). They can poison the
+ candidate — the audit gate's job — but cannot steal. The narrow residual
+ is first-launch state migration, which runs in the real silo under a
+ declared network policy with a pre-migration snapshot.

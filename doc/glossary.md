@@ -103,6 +103,29 @@ containers plus shared resources. qdistro keeps `silo` to emphasize isolated
 state and cross-contamination boundaries without implying a VM or container
 implementation.
 
+## Template
+
+A versioned, cloneable software installation with no configuration and no
+user data. A silo references a template plus its own config and state; the
+analogy is the Qubes TemplateVM / AppVM split and the container image /
+volume split. See [templates.md](templates.md).
+
+Associated terms:
+
+- **Generation** — one immutable, digest-identified version of a template.
+  Bindings reference digests, never mutable names.
+- **Candidate** — a generation built or cloned for an update, validated in
+  isolation from real silo state. Candidates contain no secrets or user
+  data; untrusted installer code runs only here.
+- **Binding** — the per-silo TOML file mapping the silo to its active and
+  rollback generations. Promotion is an atomic rewrite of this file.
+- **Promotion** — flipping a silo's binding to a validated candidate at the
+  next restart. A candidate that fails pre-promotion checks never becomes
+  the user-visible launch target.
+- **Templates are `derived`** (recipe-backed, reproducible, backed up as
+  recipes) **or `artifact`** (golden images, irreproducible, backed up as
+  bytes and sealed before promotion).
+
 ## Session
 
 A dynamic Linux process and UI/execution context. A session begins when the
