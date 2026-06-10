@@ -331,17 +331,19 @@ def _build_binding(layout: qt.Layout, silo: str, template: str, new_gen: str,
 
 
 def _silo_running(silo: str) -> bool:
-    """Best-effort: is a tier-2 container for this silo currently running?
+    """Best-effort: is the tier-2 container for this silo currently running?
     A state restore must not race a live writer of state_path. The session
-    manager owns authoritative lifecycle; this is a defence-in-depth guard
-    (containers are named ``qdistro-tier2-<silo>-*`` by task 04's launcher)."""
+    manager owns authoritative lifecycle; this is a defence-in-depth guard.
+    Task 04's launcher names the container exactly ``qdistro-silo-<silo>``
+    (QD_CONTAINER in qdistro_session_manager._export_tier2_launch_env)."""
+    container = f"qdistro-silo-{silo}"
     proc = subprocess.run(
         ["podman", "ps", "--format", "{{.Names}}"],
         capture_output=True, text=True)
     if proc.returncode != 0:
         return False
-    needle = f"qdistro-tier2-{silo}"
-    return any(needle in ln for ln in proc.stdout.splitlines())
+    # Exact-name match (a running container is listed by its exact name).
+    return container in proc.stdout.split()
 
 
 def promote(silo: str, run_id: str | None = None, *,

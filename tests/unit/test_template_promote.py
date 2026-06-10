@@ -447,3 +447,27 @@ def test_crash_between_pins_and_binding_leaves_old_binding(tmp_path, monkeypatch
     assert promote.promote("dev-silo", "run-a", layout=layout, resolver=_no_resolver) == 0
     binding = qt.read_binding(layout.binding_file("dev-silo"))
     assert binding["active_generation"] == GEN_A
+
+
+def test_silo_running_matches_session_manager_container_name(monkeypatch):
+    """Regression (M2 fable BLOCKER): the default running-silo guard must
+    match the EXACT container name task 04's launcher uses
+    (qdistro-silo-<silo>), not a qdistro-tier2-<silo> name that never exists —
+    otherwise --restore-state could swap state under a live writer."""
+    class _Proc:
+        returncode = 0
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(promote.subprocess, "run",
+                        lambda *a, **k: _Proc("qdistro-silo-gmail\nother\n"))
+    assert promote._silo_running("gmail") is True
+    assert promote._silo_running("absent") is False
+
+    # podman failure (rc!=0) → conservatively "not running" (the stopped-silo
+    # precondition is enforced by the operator/session manager).
+    class _Fail:
+        returncode = 1
+        stdout = ""
+    monkeypatch.setattr(promote.subprocess, "run", lambda *a, **k: _Fail())
+    assert promote._silo_running("gmail") is False

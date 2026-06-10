@@ -127,16 +127,14 @@ def commit_activation_marker_and_audit(layout: qt.Layout, silo: str,
     return changed
 
 
-def record_activation(layout: qt.Layout, silo: str, generation: str,
-                      run_status_dir: str | None = None) -> bool:
-    """Back-compat composition for the plain ``--record`` status path (and
-    tests): per-boot status + marker commit, returning whether the activation
-    changed. This path does NOT take a pre-activation snapshot — that ordering
-    belongs to the launch anchor (``--launch-env``); the plain ``--record``
-    call is a status/restart convenience that must not be interposed before a
-    silo's first real launch."""
-    record_run_status(layout, silo, generation, run_status_dir)
-    return _commit_marker(layout, silo, generation)
+def write_activated_marker(layout: qt.Layout, silo: str, generation: str) -> None:
+    """Write the persistent activation marker directly. There is intentionally
+    no "record_activation" helper that commits the marker without a snapshot:
+    the marker is the pre-activation-snapshot obligation record and is
+    committed ONLY by the launch anchor (commit_activation_marker_and_audit)
+    after the snapshot. This bare writer exists for seeding a prior activation
+    in tests and for tooling that genuinely needs to set the marker."""
+    qt.atomic_write(activated_marker(layout, silo), generation + "\n", 0o600)
 
 
 def _read_resolved_binding(silo: str, layout: qt.Layout) -> tuple[int, dict | None]:
@@ -215,33 +213,42 @@ def resolve(silo: str, layout: qt.Layout | None = None,
     if record:
         # Status recording is advisory — never let a non-writable /run break
         # the launch. The digest resolution above is the load-bearing part.
-        # The plain --record path keeps M1 behaviour (status + marker + audit);
-        # the snapshot-gated ordering is the launch anchor's job
-        # (_launch_env_main), not this status/restart convenience.
+        # The plain --record path writes ONLY the per-boot run status: it must
+        # NOT commit the activation marker (M2 fable review), because the
+        # marker is the "pre-activation snapshot discharged" record and is
+        # committed exclusively by the launch anchor (_launch_env_main, the
+        # path spawn-tier2 actually drives) AFTER the snapshot. A plain
+        # --record committing the marker would let the next real launch skip
+        # the snapshot (first_activation would already read False).
         try:
             record_run_status(layout, silo, generation)
-            if not commit_activation_marker_and_audit(
-                    layout, silo, generation, binding["template"]):
-                log(f"silo={silo} already running generation={generation}")
         except OSError as exc:
-            log(f"WARN: could not record activation status for {silo}: {exc}")
+            log(f"WARN: could not record run status for {silo}: {exc}")
     return 0, generation
 
 
 def _activation_policy(layout: qt.Layout, template: str) -> str:
     """The template's pre-activation snapshot policy (strict|availability).
 
-    A missing or unreadable policy defaults to availability — we will not
-    refuse a launch for a silo whose policy we cannot read. A strict silo
-    always ships an authored policy with the key set, so this default only
-    relaxes the unknown case (logged)."""
+    Only a genuinely ABSENT policy defaults to availability (an untemplated-
+    policy silo never opted into strict). A present-but-corrupt or unreadable
+    (EACCES/EIO) policy must NOT silently downgrade a strict silo to
+    availability — it fails closed (the caller refuses the launch), matching
+    validate_template_policy's "a typo must fail loudly" rule (M2 fable
+    review)."""
+    path = layout.template_policy(template)
     try:
-        policy = qt.validate_template_policy(
-            qt.read_toml(layout.template_policy(template)))
-    except (qt.TemplateError, OSError, ValueError) as exc:
-        log(f"WARN: could not read activation_snapshot policy for "
-            f"{template!r} ({exc}); defaulting to availability")
+        raw = qt.read_toml(path)
+    except FileNotFoundError:
         return qt.DEFAULT_ACTIVATION_SNAPSHOT
+    except OSError as exc:
+        raise state_snapshot.StateSnapshotError(
+            f"cannot read activation_snapshot policy {path}: {exc}")
+    try:
+        policy = qt.validate_template_policy(raw)
+    except (qt.TemplateError, ValueError) as exc:
+        raise state_snapshot.StateSnapshotError(
+            f"invalid template policy {path}: {exc}")
     return qt.activation_snapshot_policy(policy)
 
 
@@ -271,8 +278,8 @@ def _launch_env_main(silo: str, layout: qt.Layout, record: bool) -> int:
         act_rollback = None
         if env["first_activation"]:
             outgoing = read_activated_marker(layout, silo)
-            policy = _activation_policy(layout, env["template"])
             try:
+                policy = _activation_policy(layout, env["template"])
                 result = state_snapshot.take_pre_activation_snapshot(
                     layout, silo,
                     incoming_generation=env["generation"],
@@ -280,12 +287,15 @@ def _launch_env_main(silo: str, layout: qt.Layout, record: bool) -> int:
                     template=env["template"],
                     state_path=env["state_path"],
                     policy=policy)
-            except state_snapshot.StrictSnapshotRefused as exc:
+            except state_snapshot.StateSnapshotError as exc:
+                # StrictSnapshotRefused (strict policy + snapshot failure) OR a
+                # present-but-unreadable/invalid policy (fail closed). Either
+                # way the new generation must NOT activate without protection.
                 log(f"FATAL: {exc}")
-                log("strict activation_snapshot policy: NOT activating the new "
-                    "generation without a state snapshot (marker uncommitted; "
-                    "next launch retries). Recovery: roll the binding back with "
-                    "--keep-state and fix storage, or an admin one-shot "
+                log("activation refused: NOT activating the new generation "
+                    "without a state snapshot (marker uncommitted; next launch "
+                    "retries). Recovery: roll the binding back with --keep-state "
+                    "and fix storage/policy, or an admin one-shot "
                     "--waive-activation-snapshot --reason <text>.")
                 return RC_SNAPSHOT_REFUSED
             if result.get("taken"):

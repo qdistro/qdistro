@@ -167,6 +167,11 @@ def test_binding_activated_emitted_on_change(tmp_path, monkeypatch):
     # monkeypatch (not a bare assignment) so RUN_STATUS_DIR is restored and
     # this test never pollutes module state for others (M1 review).
     monkeypatch.setattr(rbmod, "RUN_STATUS_DIR", run_dir)  # avoid writing /run
-    rc, gen = rb.resolve("dev-silo", layout=layout, record=True)
-    assert rc == 0 and gen == GEN
+    # Activation is recorded at the launch anchor (--launch-env --record), the
+    # path spawn-tier2 drives; the plain --record path writes run-status only
+    # (task 05 — the marker + audit are committed only after the pre-activation
+    # snapshot step). First-ever activation has no outgoing generation, so no
+    # snapshot is needed and binding.activated is emitted.
+    rc = rb._launch_env_main("dev-silo", layout, record=True)
+    assert rc == 0
     assert "template.binding.activated" in _audit_events(layout)

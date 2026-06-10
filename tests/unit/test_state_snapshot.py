@@ -173,7 +173,7 @@ def test_strict_failure_leaves_marker_uncommitted_and_retries(tmp_path, monkeypa
     _generation(layout, GEN_B)
     # Mark A as already activated (so B is a first_activation transition), and
     # make the snapshot fail by pointing state_path at a non-dir.
-    rb.record_activation(layout, silo, GEN_A, run_status_dir=str(tmp_path / "run"))
+    rb.write_activated_marker(layout, silo, GEN_A)
     _binding(layout, silo, active=GEN_B, prev=[GEN_A])
     # Remove the state dir so the strict snapshot fails.
     monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
@@ -202,7 +202,7 @@ def test_availability_flip_emits_single_activation_event(tmp_path, monkeypatch):
     _generation(layout, GEN_A)
     _generation(layout, GEN_B)
     # No state dir → the availability snapshot is unavailable (not a refusal).
-    rb.record_activation(layout, silo, GEN_A, run_status_dir=str(tmp_path / "run"))
+    rb.write_activated_marker(layout, silo, GEN_A)
     _binding(layout, silo, active=GEN_B, prev=[GEN_A])
     monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
 
@@ -221,6 +221,63 @@ def test_availability_flip_emits_single_activation_event(tmp_path, monkeypatch):
     assert activations[0].get("state_rollback") == "unavailable"
 
 
+def test_corrupt_policy_fails_closed_at_anchor(tmp_path, monkeypatch):
+    """M2 fable review: a present-but-invalid policy must NOT silently
+    downgrade a (possibly strict) silo to availability — it fails closed
+    (launch refused, marker uncommitted). An ABSENT policy still defaults to
+    availability."""
+    layout = _layout(tmp_path)
+    silo = "gmail"
+    _generation(layout, GEN_A)
+    _generation(layout, GEN_B)
+    _state(layout, silo, "A-PROFILE")
+    rb.write_activated_marker(layout, silo, GEN_A)
+    _binding(layout, silo, active=GEN_B, prev=[GEN_A])
+    monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
+    # Write a corrupt policy (missing the required [template].class).
+    os.makedirs(layout.templates_etc, exist_ok=True)
+    qt.write_toml_atomic(layout.template_policy(TEMPLATE),
+                         {"template": {"nonsense": 1}}, 0o644)
+    rc = rb._launch_env_main(silo, layout, record=True)
+    assert rc == rb.RC_SNAPSHOT_REFUSED
+    assert rb.read_activated_marker(layout, silo) == GEN_A  # uncommitted
+
+    # An absent policy → availability default → the snapshot is taken and the
+    # flip proceeds.
+    os.unlink(layout.template_policy(TEMPLATE))
+    rc2 = rb._launch_env_main(silo, layout, record=True)
+    assert rc2 == 0
+    assert rb.read_activated_marker(layout, silo) == GEN_B
+
+
+def test_gc_reaps_meta_less_partial_snapshot(tmp_path):
+    """M2 fable review: a crash between materializing the payload and writing
+    meta.toml leaks user state invisible to list/find/retention. GC reaps a
+    meta-less payload past the grace window; a fresh one is left alone."""
+    layout = _layout(tmp_path)
+    silo = "gmail"
+    snaps = ss.snapshots_dir(layout, silo)
+    # An old partial: payload, no meta, mtime well in the past.
+    old = os.path.join(snaps, "111-aaaa")
+    os.makedirs(os.path.join(old, "snapshot"), mode=0o700)
+    with open(os.path.join(old, "snapshot", "cookies"), "w") as fh:
+        fh.write("LEAKED")
+    old_mtime = 1000.0
+    os.utime(old, (old_mtime, old_mtime))
+    # A fresh partial (just created): must be left alone (mid-creation).
+    fresh = os.path.join(snaps, "222-bbbb")
+    os.makedirs(os.path.join(fresh, "snapshot"), mode=0o700)
+    now = old_mtime + gc._PARTIAL_SNAPSHOT_GRACE_SECONDS + 100
+    os.utime(fresh, (now, now))
+
+    deletions = gc.gc(layout=layout, now=now, rmi=lambda d: True,
+                      image_exists=lambda d: True)
+    reaped = [d for d in deletions if d.get("reason") == "partial-no-meta"]
+    assert len(reaped) == 1 and reaped[0]["snapshot_id"] == "111-aaaa"
+    assert not os.path.isdir(os.path.join(old, "snapshot"))     # reaped
+    assert os.path.isdir(os.path.join(fresh, "snapshot"))       # left alone
+
+
 def test_successful_snapshot_then_marker_committed(tmp_path, monkeypatch):
     layout = _layout(tmp_path)
     silo = "gmail"
@@ -228,7 +285,7 @@ def test_successful_snapshot_then_marker_committed(tmp_path, monkeypatch):
     _generation(layout, GEN_A)
     _generation(layout, GEN_B)
     _state(layout, silo, "A-PROFILE")
-    rb.record_activation(layout, silo, GEN_A, run_status_dir=str(tmp_path / "run"))
+    rb.write_activated_marker(layout, silo, GEN_A)
     _binding(layout, silo, active=GEN_B, prev=[GEN_A])
     monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
     rc = rb._launch_env_main(silo, layout, record=True)

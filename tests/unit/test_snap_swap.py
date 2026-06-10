@@ -260,7 +260,9 @@ def test_exchange_method_used_when_supported(tmp_path):
     snap = _mkstate(root, "snap", "A")
     result = ss.restore(snap, state, mechanism="copy", now=7000.0,
                         allow_exchange=True)
-    # tmpfs/ext4/btrfs all support RENAME_EXCHANGE; if the test fs does, the
-    # exchange path is taken. (A fs without it falls back, still correct.)
-    assert result["method"] in ("exchange", "two-rename")
+    # tmpfs/ext4/btrfs (pytest's tmp_path) all support RENAME_EXCHANGE, so the
+    # atomic exchange path MUST be the one taken — asserting only "one of the
+    # two" would be vacuous (restore can return nothing else). The skip above
+    # already excludes a host whose libc lacks renameat2.
+    assert result["method"] == "exchange"
     assert _read_sentinel(state) == "A"

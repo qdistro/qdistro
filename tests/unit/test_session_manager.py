@@ -727,33 +727,65 @@ def test_launch_env_round_trips_argv_with_single_quote(store, ops):
     assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == \
         ["chromium", "--user-agent=it's me"]
 
-    def test_stop_tier2_stops_unit_and_clears_env(self, store, ops):
-        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
-        store.start("browser1")
-        store.stop("browser1")
-        assert store.get("browser1").state == State.STOPPED
-        assert ("stop", "qdistro-tier2-silo@browser1.service") in ops.systemctl_calls
-        assert "browser1" not in ops.launch_envs
 
-    def test_loader_drops_tier2_row_with_bad_uid(self, ops, tmp_path):
-        # A hand-edited tier2-template row with a non-admin uid must be dropped
-        # (the loader rejects fake uids), not loaded with wrong privileges.
-        p = tmp_path / "silos.yaml"
-        p.write_text(
-            "silos:\n"
-            "  - name: browser1\n"
-            "    uid: 2001\n"
-            "    state: Stopped\n"
-            "    autostart: false\n"
-            "    created_at: 0\n"
-            "    last_change: 0\n"
-            "    kind: tier2-template\n"
-            "    launch:\n"
-            "      workload: browser\n"
-            "      template_silo: browser1\n"
-            "      network: none\n"
-            "      argv: [\"chromium\"]\n"
-        )
-        s = _SiloStore(ops, config_path=p)
-        with pytest.raises(UnknownSilo):
-            s.get("browser1")
+def test_stop_tier2_stops_unit_and_clears_env(store, ops):
+    # M2 fable review: this test and the bad-uid one below were accidentally
+    # nested inside the round-trip test above (they took `self` but lived in a
+    # module-level function body), so pytest never collected them. Dedented to
+    # module-level functions, they exercise the real stop dispatch + loader
+    # drop (the behaviour was already correct — only the tests were dead).
+    store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+    store.start("browser1")
+    store.stop("browser1")
+    assert store.get("browser1").state == State.STOPPED
+    assert ("stop", "qdistro-tier2-silo@browser1.service") in ops.systemctl_calls
+    assert "browser1" not in ops.launch_envs
+
+
+def test_loader_drops_tier2_row_with_bad_uid(ops, tmp_path):
+    # A hand-edited tier2-template row with a non-admin uid must be dropped
+    # (the loader rejects fake uids), not loaded with wrong privileges.
+    p = tmp_path / "silos.yaml"
+    p.write_text(
+        "silos:\n"
+        "  - name: browser1\n"
+        "    uid: 2001\n"
+        "    state: Stopped\n"
+        "    autostart: false\n"
+        "    created_at: 0\n"
+        "    last_change: 0\n"
+        "    kind: tier2-template\n"
+        "    launch:\n"
+        "      workload: browser\n"
+        "      template_silo: browser1\n"
+        "      network: none\n"
+        "      argv: [\"chromium\"]\n"
+    )
+    s = _SiloStore(ops, config_path=p)
+    with pytest.raises(UnknownSilo):
+        s.get("browser1")
+
+
+def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeypatch):
+    # M2 fable review: the schema-migration claim says the launch stanza
+    # round-trips through BOTH PyYAML and the tolerant fallback parser, but
+    # every other round-trip test goes through PyYAML. Mask `yaml` so
+    # _yaml_load takes the hand-rolled fallback path, and assert a
+    # tier2-template row (kind + nested launch incl. a JSON argv) survives.
+    import sys
+    s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+    s1.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+
+    monkeypatch.setitem(sys.modules, "yaml", None)   # force ImportError path
+    assert sm._yaml_load("silos: []\n") == {"silos": []}   # fallback engaged
+
+    s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+    silo = s2.get("browser1")
+    assert silo.kind == "tier2-template"
+    assert silo.uid == 1000
+    assert silo.launch["workload"] == "browser"
+    assert silo.launch["template_silo"] == "browser1"
+    assert silo.launch["network"] == "slirp4netns"
+    # argv is rendered as a JSON array; the fallback yields it verbatim and the
+    # loader normalises it back to a list.
+    assert list(silo.launch["argv"]) == ["chromium"]

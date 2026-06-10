@@ -30,6 +30,13 @@ import time
 
 import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_state_snapshot as state_snapshot
+
+# A snapshot dir that has a payload but no meta.toml is a partial left by a
+# crash between materializing the payload and writing its metadata. Reap it
+# once it is older than this grace window so an IN-PROGRESS snapshot (payload
+# written, meta about to be written) is never reaped mid-creation.
+_PARTIAL_SNAPSHOT_GRACE_SECONDS = 3600
 
 DEFAULT_RETENTION = {
     "keep_promoted_generations": 3,
@@ -258,19 +265,47 @@ def _collect_state_snapshots(layout: qt.Layout, now: float,
     if not os.path.isdir(silos_dir):
         return deletions
     for silo in sorted(os.listdir(silos_dir)):
-        snaps_dir = os.path.join(silos_dir, silo, "state-snapshots")
+        snaps_dir = os.path.join(silos_dir, silo,
+                                 state_snapshot.SNAPSHOT_DIRNAME)
         if not os.path.isdir(snaps_dir):
             continue
         for snap_id in sorted(os.listdir(snaps_dir)):
             sdir = os.path.join(snaps_dir, snap_id)
             meta_path = os.path.join(sdir, "meta.toml")
+            payload = os.path.join(sdir, "snapshot")
             if not os.path.isfile(meta_path):
+                # No meta. A leaked partial (payload written, crash before
+                # meta) holds user state invisible to list/find/retention —
+                # reap it once past the grace window, audited. (A dir with no
+                # payload either is being created or is already cleaned; leave
+                # it. Waiver files .waive-*.toml are not directories, so the
+                # isdir(payload) guard skips them.)
+                if (os.path.isdir(payload)
+                        and os.path.getmtime(sdir) < now - _PARTIAL_SNAPSHOT_GRACE_SECONDS):
+                    deletion = {"kind": "state-snapshot", "silo": silo,
+                                "template": None, "generation": None,
+                                "snapshot_id": snap_id,
+                                "reason": "partial-no-meta",
+                                "evidence_path": sdir, "deleted": False}
+                    if dry_run:
+                        log(f"DRY-RUN would reap partial state snapshot "
+                            f"{snap_id} for silo {silo} (payload, no meta)")
+                    else:
+                        _rm_snapshot_payload(payload)
+                        deletion["deleted"] = True
+                        audit.emit("template.gc.deleted", db_path=_audit_db(layout),
+                                   silo=silo, result="deleted",
+                                   reason="state-snapshot-partial",
+                                   evidence_path=sdir, kind="state-snapshot",
+                                   snapshot_id=snap_id)
+                        log(f"reaped partial (meta-less) state snapshot "
+                            f"{snap_id} for silo {silo}")
+                    deletions.append(deletion)
                 continue
             meta = qt.read_toml(meta_path)            # fail-closed on corrupt
             expires = meta.get("expires_at")
             if expires is None or _parse_expiry(expires) > now:
                 continue  # unexpired — still a rollback target
-            payload = os.path.join(sdir, "snapshot")
             if not os.path.isdir(payload):
                 continue  # already collected; audit metadata remains
             deletion = {"kind": "state-snapshot", "silo": silo,
