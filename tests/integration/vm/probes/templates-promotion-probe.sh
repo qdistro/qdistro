@@ -73,6 +73,39 @@ else:
 PY
 }
 
+# audit_has <event> <column> <value>  — assert the template audit DB has at
+# least one row matching event AND column==value. Uses python3 + the sqlite3
+# stdlib module (no sqlite3 CLI binary dependency). Exits 0 on a hit.
+audit_has() {
+    python3 - "$QDISTRO_VAR_DIR/audit/template_audit.sqlite" "$1" "$2" "$3" <<'PY'
+import sys, sqlite3, os
+db, event, col, val = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+if not os.path.isfile(db):
+    print("NO_DB"); sys.exit(1)
+con = sqlite3.connect(db)
+n = con.execute(
+    f"SELECT count(*) FROM template_audit WHERE event=? AND {col}=?",
+    (event, val)).fetchone()[0]
+sys.exit(0 if n else 1)
+PY
+}
+
+# audit_evidence_nonempty <event> <generation>  — assert a row for this
+# event+generation carries a non-empty evidence_path.
+audit_evidence_nonempty() {
+    python3 - "$QDISTRO_VAR_DIR/audit/template_audit.sqlite" "$1" "$2" <<'PY'
+import sys, sqlite3, os
+db, event, gen = sys.argv[1], sys.argv[2], sys.argv[3]
+if not os.path.isfile(db):
+    print("NO_DB"); sys.exit(1)
+con = sqlite3.connect(db)
+rows = con.execute(
+    "SELECT evidence_path FROM template_audit WHERE event=? AND generation=?",
+    (event, gen)).fetchall()
+sys.exit(0 if any(r[0] for r in rows) else 1)
+PY
+}
+
 ensure_policy() {
     install -d -m 0755 "$QDISTRO_ETC_DIR/templates" "$QDISTRO_VAR_DIR"
     if [ ! -f "$QDISTRO_ETC_DIR/templates/$TEMPLATE.toml" ]; then
@@ -184,8 +217,14 @@ CFG
         fail "failed-validation" "promote accepted a failed candidate"
     fi
     # the active binding for the real silo is UNTOUCHED, and a refusal was
-    # audited.
+    # audited (the template audit DB carries a promote.refused row for this
+    # run_id). python-systemd is not installed in the VM (the audit module
+    # falls back to structured stderr, captured by journald only under the
+    # systemd .service, not for a direct CLI run), so the DB row is the
+    # honest, implementable assertion here — see todo/fableplan/06-audit-events.md.
     [ "$(active_gen)" = "$before" ] || fail "failed-validation" "binding changed on failed promote"
+    audit_has template.promote.refused run_id "$rid" \
+        || fail "failed-validation" "no template.promote.refused audit row for $rid"
     echo "$rid" > "$TROOT/broken_rid"   # kept for the GC scenario
     pass "failed-validation"
 }
@@ -247,6 +286,100 @@ scenario_rollback() {
     pass "rollback"
 }
 
+# Positive coverage that `podman rmi` actually reclaims a PROMOTED generation
+# payload on real podman (the thing the build-time untag change exists for).
+# Self-contained: a throwaway cheap template "fp09-mini" (tumbleweed base +
+# bash/coreutils, single passing probe — layers are cached so builds are
+# quick) and a throwaway silo "fp09-gc-silo". Leaves genA/genB and the
+# fp09-silo binding untouched so the later crash-consistency scenario is
+# unaffected. Called from within scenario_gc_pin_safety before its
+# corrupt-pin (run-aborting) tail.
+GC_TEMPLATE="fp09-mini"
+GC_SILO="fp09-gc-silo"
+
+gc_mini_policy() {
+    # $1 = extra zypper package(s) to install (varies the recipe -> distinct
+    # digest). The probe PASSES (command: true), unlike tier2-broken.
+    local extra="$1" rdir="$TROOT/mini-$2"
+    mkdir -p "$rdir"
+    cat > "$rdir/Containerfile.$GC_TEMPLATE" <<CF
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \\
+ && zypper --non-interactive install --no-recommends bash coreutils $extra \\
+ && zypper clean --all
+CMD ["/bin/bash"]
+CF
+    cat > "$QDISTRO_ETC_DIR/templates/$GC_TEMPLATE.toml" <<CFG
+[template]
+class = "derived"
+[template.state_boundary]
+class = "recipe-derived-toolchain"
+enforced = "true"
+[template.build]
+containerfile = "$rdir/Containerfile.$GC_TEMPLATE"
+network_mode = "unrestricted"
+[[template.probe]]
+name = "bash-present"
+kind = "command"
+command = "true"
+timeout = 60
+CFG
+}
+
+gc_mini_build_validate_promote() {
+    # $1 = extra package, $2 = recipe tag. Echoes the promoted generation digest.
+    gc_mini_policy "$1" "$2"
+    local out rid
+    out="$(cli template-build "$GC_TEMPLATE" 2>/dev/null)" || { echo "BUILD_FAIL"; return 1; }
+    rid="$(echo "$out" | sed -n 's/^RUN_ID=//p')"
+    [ -n "$rid" ] || { echo "NO_RID"; return 1; }
+    cli template-validate "$rid" >/dev/null 2>&1 || { echo "VALIDATE_FAIL"; return 1; }
+    cli template-promote "$GC_SILO" "$rid" >/dev/null 2>&1 || { echo "PROMOTE_FAIL"; return 1; }
+    python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["active_generation"])' \
+        "$QDISTRO_VAR_DIR/bindings/$GC_SILO.toml"
+}
+
+scenario_gc_positive_deletion() {
+    # Promote gen X, then a DISTINCT gen Y (X drops to a rollback-window pin),
+    # expire X's pin, GC with keep=0 -> X's image is reclaimed; X's generation
+    # record (manifest + evidence) survives; Y (active, pinned) survives.
+    local genX genY
+    genX="$(gc_mini_build_validate_promote '' x)" \
+        || fail "gc-pin-safety" "fp09-mini gen X build/validate/promote failed ($genX)"
+    genY="$(gc_mini_build_validate_promote 'gzip' y)" \
+        || fail "gc-pin-safety" "fp09-mini gen Y build/validate/promote failed ($genY)"
+    [ "$genX" != "$genY" ] || fail "gc-pin-safety" "gen X digest == gen Y digest"
+    podman image exists "$genX" || fail "gc-pin-safety" "gen X image missing before GC"
+    # Expire X's rollback-window pin (legitimate test manipulation of the TOML
+    # expires_at field) so retention=0 can collect it.
+    local xpin="$QDISTRO_VAR_DIR/pins/$GC_TEMPLATE/$genX/rollback-window.toml"
+    [ -f "$xpin" ] || fail "gc-pin-safety" "gen X has no rollback-window pin after promoting Y"
+    sed -i 's/^expires_at = .*/expires_at = "2000-01-01T00:00:00Z"/' "$xpin"
+    # keep_promoted_generations=0: only the pin protects a generation now.
+    cat > "$QDISTRO_ETC_DIR/template-retention.toml" <<'RET'
+keep_promoted_generations = 0
+keep_promoted_generations_vm = 0
+failed_candidate_days = 7
+build_log_days = 180
+audit_evidence_years = 3
+RET
+    cli template-gc >/dev/null 2>&1 || fail "gc-pin-safety" "gc errored (positive-deletion pass)"
+    if podman image exists "$genX" 2>/dev/null; then
+        fail "gc-pin-safety" "promoted generation X payload was NOT reclaimed by rmi"
+    fi
+    podman image exists "$genY" || fail "gc-pin-safety" "active generation Y was collected!"
+    # X's generation record (manifest + evidence) outlives its payload.
+    [ -f "$QDISTRO_VAR_DIR/templates/$GC_TEMPLATE/generations/$genX/manifest.toml" ] \
+        || fail "gc-pin-safety" "gen X manifest deleted (evidence must outlive payload)"
+    [ -d "$QDISTRO_VAR_DIR/templates/$GC_TEMPLATE/generations/$genX/evidence" ] \
+        || fail "gc-pin-safety" "gen X evidence dir deleted"
+    # A gc.deleted audit row for X exists with a non-empty surviving evidence path.
+    audit_has template.gc.deleted generation "$genX" \
+        || fail "gc-pin-safety" "no template.gc.deleted audit row for gen X"
+    audit_evidence_nonempty template.gc.deleted "$genX" \
+        || fail "gc-pin-safety" "gc.deleted row for gen X has empty evidence_path"
+}
+
 scenario_gc_pin_safety() {
     local genA genB; genA="$(cat "$TROOT/genA")"; genB="$(cat "$TROOT/genB")"
     # Aggressive retention: keep 0 promoted generations.
@@ -268,18 +401,26 @@ RET
     [ -f "$QDISTRO_VAR_DIR/templates/$TEMPLATE/generations/$genA/manifest.toml" ] \
         || fail "gc-pin-safety" "A manifest deleted"
     # Failed candidate payload IS collected after its window, but its
-    # evidence survives. Age it out with failed_candidate_days = 0.
+    # evidence survives. Age it out with failed_candidate_days = 0. The
+    # candidate's payload is reclaimed by its manifest's generation_ref digest
+    # (the per-run candidate tag is untagged at build time, so asserting on the
+    # tag would be vacuous); assert on the DIGEST.
     local brid; brid="$(cat "$TROOT/broken_rid")"
     local bcdir="$QDISTRO_VAR_DIR/templates/tier2-broken/candidates/$brid"
+    local bdigest
+    bdigest="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["generation_ref"])' \
+               "$bcdir/manifest.toml")" || fail "gc-pin-safety" "no candidate manifest digest"
+    podman image exists "$bdigest" || fail "gc-pin-safety" "failed-candidate image missing pre-GC"
     sed -i 's/^failed_candidate_days = .*/failed_candidate_days = 0/' \
         "$QDISTRO_ETC_DIR/template-retention.toml"
     cli template-gc >/dev/null 2>&1 || fail "gc-pin-safety" "gc errored (failed-candidate pass)"
-    if podman image exists "qdistro-candidate/tier2-broken:$brid" 2>/dev/null; then
-        fail "gc-pin-safety" "failed candidate payload was not collected"
+    if podman image exists "$bdigest" 2>/dev/null; then
+        fail "gc-pin-safety" "failed candidate payload (digest $bdigest) was not collected"
     fi
     for ev in state build.log evidence/validation.toml; do
         [ -e "$bcdir/$ev" ] || fail "gc-pin-safety" "failed-candidate evidence $ev was deleted"
     done
+    scenario_gc_positive_deletion
     # a corrupt pin aborts the whole run (fail closed)
     printf 'owner_type = "silo"\n' > "$QDISTRO_VAR_DIR/pins/$TEMPLATE/$genA/active.toml"
     if cli template-gc >/dev/null 2>&1; then
