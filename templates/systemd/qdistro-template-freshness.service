@@ -1,0 +1,22 @@
+[Unit]
+Description=qdistro opportunistic template freshness rebuild
+Documentation=man:qdistro-template-freshness doc/templates.md
+# AC power is gated here at the unit level; the remaining opportunistic
+# conditions (idle, non-metered network, thermals, free space, the advisory
+# night window) are checked in-service. A missed window is NOT a failure —
+# the tool surfaces staleness instead and always exits 0 unless it errors.
+ConditionACPower=true
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Rootless podman builds run as the packaged admin account (uid 1000);
+# substitute at install time if the deployment uses a different admin user.
+User=admin
+Group=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/libexec/qdistro/qdistro-template-freshness
+NoNewPrivileges=true
+PrivateTmp=true
+Restart=no

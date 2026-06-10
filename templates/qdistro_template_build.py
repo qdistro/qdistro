@@ -177,17 +177,27 @@ def _normalize_digest(value: str) -> str:
 
 def build(template: str, layout: qt.Layout | None = None,
           no_cache: bool = False) -> int:
+    """Build a candidate; return the process exit code."""
+    return build_candidate(template, layout=layout, no_cache=no_cache)[0]
+
+
+def build_candidate(template: str, layout: qt.Layout | None = None,
+                    no_cache: bool = False) -> tuple[int, str | None]:
+    """Build a candidate; return (exit code, run_id). run_id is None when the
+    build fails before a candidate dir is created. Callers (the freshness
+    timer) need the exact run-id of the candidate they just built so they
+    validate that one, never whatever dir happens to have the newest mtime."""
     layout = layout or qt.Layout()
     audit_db = _audit_db(layout)
 
-    def _preflight_fail(reason: str, network_mode=None) -> int:
+    def _preflight_fail(reason: str, network_mode=None) -> tuple[int, None]:
         # A build attempt that fails before a candidate exists still carries
         # the audit contract: emit a failed build.finished.
         audit.emit("template.build.finished", db_path=audit_db,
                    template=template, result="failed", reason=reason,
                    network_mode=network_mode, duration=0.0)
         log(f"FATAL: {reason}")
-        return 2
+        return 2, None
 
     policy_path = layout.template_policy(template)
     if not os.path.isfile(policy_path):
@@ -214,8 +224,9 @@ def build(template: str, layout: qt.Layout | None = None,
     # Once the candidate dir exists, every failure must leave it marked
     # state=failed with its evidence — never an unmarked half-built dir.
     try:
-        return _run_build(template, run_id, candidate_dir, containerfile,
-                          network_mode, no_cache, audit_db)
+        rc = _run_build(template, run_id, candidate_dir, containerfile,
+                        network_mode, no_cache, audit_db)
+        return rc, run_id
     except Exception as exc:  # noqa: BLE001 — record evidence, fail closed
         with open(os.path.join(candidate_dir, "build.log"), "a", encoding="utf-8") as logf:
             logf.write(f"\n[template-build] FATAL: {exc!r}\n")
@@ -224,7 +235,7 @@ def build(template: str, layout: qt.Layout | None = None,
                    run_id=run_id, result="failed", reason=str(exc),
                    evidence_path=candidate_dir)
         log(f"FAIL: {exc}; evidence in {candidate_dir} (state=failed)")
-        return 1
+        return 1, run_id
 
 
 def _run_build(template: str, run_id: str, candidate_dir: str,

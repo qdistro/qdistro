@@ -1,0 +1,15 @@
+[Unit]
+Description=qdistro template freshness — opportunistic night-window timer
+
+[Timer]
+# Aim for the advisory 22:00–06:00 window: fire at 02:00 with a wide
+# randomized delay so concurrent machines spread out. If the window is
+# missed (laptop suspended), the in-service condition checks simply skip —
+# a missed freshness window is not a failure, so this is opportunistic.
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=3h
+Persistent=true
+Unit=qdistro-template-freshness.service
+
+[Install]
+WantedBy=timers.target
