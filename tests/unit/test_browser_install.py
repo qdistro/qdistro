@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -155,6 +156,78 @@ class TestFirefoxInstallModes:
         path = (tmp_path / ".mozilla/native-messaging-hosts/qdistro.json")
         body = json.loads(path.read_text())
         assert body["allowed_extensions"] == ["custom@x"]
+
+
+# ---- Firefox canonicalization (no third FF artifact) -------------
+
+# Sibling qdchrome-extension repo. It is Chromium-only: it must NOT ship
+# a Firefox manifest/build, because such a build historically declared
+# the SAME gecko id as the bundled extension (qdistro@qdistro.local) —
+# two distinct codebases under one authorized id. Resolved by removing
+# the qdchrome Firefox target; this guard keeps it from regressing.
+#
+# Resolution order (first hit wins):
+#  1. $QDCHROME_EXTENSION_REPO  — explicit override for CI/worktree runs.
+#  2. A qdchrome-extension sibling of *this* checkout (so a qdistro
+#     worktree validates against the adjacent qdchrome worktree, not a
+#     stale absolute checkout — avoids a brittle merge-ordering coupling).
+#  3. The well-known absolute workspace checkout (the common dev layout).
+def _qdchrome_repo_candidates() -> list[Path]:
+    cands: list[Path] = []
+    env = os.environ.get("QDCHROME_EXTENSION_REPO")
+    if env:
+        cands.append(Path(env))
+    here = Path(__file__).resolve()
+    # tests/unit/<file> -> repo root is parents[2]; its parent is the
+    # workspace dir that holds the sibling repos / worktrees.
+    for up in (here.parents[3], here.parents[2]):
+        cands.append(up / "qdchrome-extension")
+    cands.append(Path("/home/playai/doc/qdistro2/qdchrome-extension"))
+    return cands
+
+
+def _qdchrome_repo() -> Path | None:
+    return next(
+        (p for p in _qdchrome_repo_candidates() if p.is_dir()), None)
+
+
+class TestFirefoxArtifactCanonicalization:
+    """The two canonical Firefox artifacts (bundled, standalone) are the
+    only ones. qdchrome-extension must not reintroduce a third Firefox
+    build sharing the bundled id."""
+
+    def test_only_two_canonical_firefox_ids(self):
+        ids = set(bi.FIREFOX_MODE_IDS.values())
+        assert ids == {BUNDLED_GECKO_ID, STANDALONE_GECKO_ID}
+
+    def test_qdchrome_ships_no_firefox_manifest(self):
+        """Cross-repo guard: skipped only when the sibling repo isn't
+        checked out. qdchrome must be Chromium-only."""
+        repo = _qdchrome_repo()
+        if repo is None:
+            pytest.skip("qdchrome-extension repo not in tree")
+        assert not (repo / "manifest.firefox.json").exists(), (
+            "qdchrome-extension/manifest.firefox.json reappeared — it "
+            "collides with the bundled extension's qdistro@qdistro.local id")
+
+    def test_qdchrome_build_script_has_no_firefox_target(self):
+        repo = _qdchrome_repo()
+        if repo is None:
+            pytest.skip("qdchrome-extension repo not in tree")
+        build = repo / "scripts" / "build-extension.sh"
+        if not build.exists():
+            pytest.skip("qdchrome-extension build-extension.sh missing")
+        # Ignore comment lines: the explanatory header names the removed
+        # artifacts. Only live build statements should be checked.
+        code = "\n".join(
+            line for line in build.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#"))
+        for needle in ("firefox.xpi", "background.bundle.js",
+                       "manifest.firefox.json", "dist/firefox",
+                       "$DIST/firefox"):
+            assert needle not in code, (
+                f"qdchrome build-extension.sh still references {needle!r} — "
+                "this repo is Chromium-only")
 
 
 # ---- manifest rendering ------------------------------------------

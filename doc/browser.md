@@ -137,6 +137,29 @@ P0-1 fixed this path: the bridge parses argv at startup and treats the
 browser-supplied extension identity as authoritative. Stdio-provided extension
 identity is not trusted for policy.
 
+#### Firefox extension artifacts (two canonical, by install mode)
+
+There are **two** canonical Firefox extensions, deliberately distinct, each
+authorized by its own `qdistro-browser-install --firefox-mode`:
+
+| Mode | Source of truth | gecko id |
+|------|-----------------|----------|
+| `bundled` (default) | `browser_bridge/extension/` (MV2, shipped next to the installer) | `qdistro@qdistro.local` |
+| `standalone` | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` |
+
+`qdistro_browser_install.py` reads the bundled id from
+`browser_bridge/extension/manifest.firefox.json` and pins the standalone id as
+a cross-repo contract (asserted by the unit suite). The policy-match example
+below uses the **bundled** id because `bundled` is the default install mode —
+swap it for `qdistro-firefox@qdistro.local` only when matching a standalone
+install.
+
+The Chromium extension (`qdchrome-extension`) does **not** build a Firefox
+artifact: it formerly emitted an MV2 build under the same
+`qdistro@qdistro.local` id as the bundled extension — a drift trap (two
+distinct codebases, one id) — so that target was removed. Firefox ships from
+one of the two sources above only.
+
 ### 4. Daemon policy (Phase 9 — not implemented)
 
 Once Phase 9 daemons exist, the per-op polkit policy file
