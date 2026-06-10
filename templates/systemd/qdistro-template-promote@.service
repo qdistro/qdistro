@@ -1,0 +1,24 @@
+[Unit]
+Description=qdistro template promotion (binding flip) for silo %i
+Documentation=man:qdistro-template-promote doc/templates.md
+
+[Service]
+Type=oneshot
+# Promotion is owner-initiated — the admin "promote" button normally runs
+# the CLI directly. This unit is the systemd-surface equivalent: the admin
+# tool drops exactly one of PROMOTE_RUN_ID / PROMOTE_ROLLBACK into the env
+# file, then starts qdistro-template-promote@<silo>.service. Using a single
+# wrapper that forwards one named arg (never free-form argv) keeps the
+# systemd surface from passing both modes or malformed multi-token args.
+#
+# User/uid: the packaged admin account (uid 1000) owns the rootless podman
+# store shared with the launch path; substitute at install time if the
+# deployment uses a different admin account.
+User=admin
+Group=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+EnvironmentFile=/run/qdistro/promote-%i.env
+ExecStart=/usr/libexec/qdistro/qdistro-template-promote-unit %i
+NoNewPrivileges=true
+PrivateTmp=true
+Restart=no

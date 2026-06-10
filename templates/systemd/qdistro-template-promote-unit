@@ -1,0 +1,22 @@
+#!/bin/bash
+# Thin wrapper for qdistro-template-promote@.service. The admin tool sets
+# exactly one of PROMOTE_RUN_ID / PROMOTE_ROLLBACK in the unit's env file;
+# this forwards it as a single named argument so the systemd surface can
+# never pass both modes or free-form argv.
+set -euo pipefail
+
+silo="${1:?usage: qdistro-template-promote-unit <silo>}"
+promote=/usr/libexec/qdistro/qdistro-template-promote
+
+if [ -n "${PROMOTE_ROLLBACK:-}" ] && [ -n "${PROMOTE_RUN_ID:-}" ]; then
+    echo "promote-unit: set only one of PROMOTE_RUN_ID / PROMOTE_ROLLBACK" >&2
+    exit 2
+fi
+if [ -n "${PROMOTE_ROLLBACK:-}" ]; then
+    exec "$promote" "$silo" --rollback "$PROMOTE_ROLLBACK"
+fi
+if [ -n "${PROMOTE_RUN_ID:-}" ]; then
+    exec "$promote" "$silo" "$PROMOTE_RUN_ID"
+fi
+echo "promote-unit: neither PROMOTE_RUN_ID nor PROMOTE_ROLLBACK set" >&2
+exit 2
