@@ -128,6 +128,7 @@ virt-customize \
     --smp 4 \
     -a "$PARTIAL" \
     --run-command 'zypper -n --no-gpg-checks refresh' \
+    --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
     --run-command 'systemctl mask greetd.service 2>/dev/null || true' \
