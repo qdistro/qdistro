@@ -33,7 +33,8 @@ import time
 import qdistro_templates as qt
 import qdistro_template_audit as audit
 
-RUN_STATUS_DIR = "/run/qdistro/silo-generation"
+RUN_STATUS_DIR = os.environ.get("QDISTRO_RUN_STATUS_DIR",
+                                "/run/qdistro/silo-generation")
 
 
 def log(msg: str) -> None:
