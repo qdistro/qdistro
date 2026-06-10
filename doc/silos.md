@@ -359,9 +359,12 @@ not the strongest oracle.
 Checks split into two classes by cost and side effects, which dictates when
 they may run:
 
-- **Probes** are cheap, machine-evaluable, and run on timers against live
-  workloads. Categories `process`, `window`, `network`, `file`, `capability`
-  are probes.
+- **Probes** are cheap, machine-evaluable checks. Categories `process`,
+  `window`, `network`, `file`, `capability` are probes — but only probes
+  whose declared side-effect level is `pure` or approved `remote-read` may
+  run on timers against live workloads. `process` and `window` probes run
+  at startup, after actions, or in disposable runtimes unless explicitly
+  proven non-mutating.
 - **Validations** are expensive, agent/GUI-driven, and may have side effects
   (launch the app, navigate, exercise save-reopen). Categories `ui` and
   `account`, and bootstrap success criteria, are validations. They run only
@@ -465,9 +468,11 @@ Templated workloads update through the promotion pipeline in
 containing no user data, validated there, and atomically promoted by a
 binding flip at the next restart. A failed candidate never touches the
 active silo — recovery of the active workload is the absence of an action.
-A state snapshot is additionally taken at first activation under a new
-template generation, so rollback covers profile migration: old generation +
-pre-migration snapshot is the complete local undo.
+In the full template design a state snapshot is additionally taken at first
+activation under a new template generation, so rollback covers profile
+migration: old generation + pre-migration snapshot is the complete local
+undo. (First-activation snapshots are deferred past the first
+implementation slice; see templates.md §Status.)
 
 The in-place paths below remain for workloads whose template state boundary
 is `partial` or `false` (see templates.md boundary classes) — apps whose

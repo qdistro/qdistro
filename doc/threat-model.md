@@ -73,6 +73,7 @@ per-user auth) only make sense once the model is clear.
  postinstall scripts, and unsigned plugin installers execute only inside
  template candidate builds, which contain no secrets, credentials, or user
  data by construction ([templates.md](templates.md)). They can poison the
- candidate — the audit gate's job — but cannot steal. The narrow residual
+ candidate — the audit gate's job — but cannot reach user documents, live
+ sessions, or credentials: none exist there. The narrow residual
  is first-launch state migration, which runs in the real silo under a
  declared network policy with a pre-migration snapshot.

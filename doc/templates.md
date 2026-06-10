@@ -103,8 +103,11 @@ build → probes → validations → audit gate → parked-ready → flip at res
    by cloning the active generation and running the vendor updater inside it
    (artifact). The build environment contains no secrets, no credentials,
    and no user data — untrusted installer code (npm postinstall, vendor
-   updaters) executes only in this empty room. It can poison the candidate;
-   it cannot steal.
+   updaters) executes only in this empty room. It can poison the candidate
+   — the audit gate's job — but it cannot reach user documents, live
+   sessions, or registry tokens, because none exist in the build
+   environment. Credential-bearing deputies (the recording proxy) stay
+   outside the candidate, scoped and audited.
 2. **Probes.** Hermetic checks against the candidate in a minimal disposable
    runtime (not just a temp dir: GUI apps need D-Bus, fonts, GL, portals,
    a fake home). Process starts, window appears, basic smoke.
@@ -302,14 +305,16 @@ pipeline.
 
 ## Status
 
-The podman-image backend with the `tier2-dev` workload is the implemented
-slice: build/validate/promote one-shot services, digest-resolved bindings in
-`spawn-tier2`, pin-receipt GC, opportunistic freshness timer, and audit
-events, with integration tests covering digest pinning, failed-validation
-non-flips, and GC pin safety. Promotion is **manual**: candidates park with
-a validation summary and the owner flips. nix-closure and vm-artifact
-backends, the recording proxy beyond pip/npm registry scope, automated
-promotion policy, and the GUI validation framework follow the same contract
-and are tracked in the implementation plan. The OAuth grant vocabulary that
-auth-bearing validations will use is schema-only — see
-[auth-grants.md](auth-grants.md).
+This document is the specification; code follows it. The first slice under
+implementation (tracked in `todo/fableplan/`) is the podman-image backend
+with the `tier2-dev` workload: build/validate/promote one-shot services,
+digest-resolved bindings in `spawn-tier2`, pin-receipt GC, the
+opportunistic freshness timer, and audit events, with integration tests
+covering digest pinning, failed-validation non-flips, and GC pin safety.
+Promotion is **manual** in this slice: candidates park with a validation
+summary and the owner flips. First-activation state snapshots and
+activation network policy, the recording proxy, the nix-closure and
+vm-artifact backends, automated promotion policy, and the GUI validation
+framework follow the same contract and are deferred to later slices. The
+OAuth grant vocabulary for auth-bearing **workflows** is schema-only — see
+[auth-grants.md](auth-grants.md); validations never drive live auth.
