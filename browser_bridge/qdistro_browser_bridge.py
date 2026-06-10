@@ -149,7 +149,12 @@ def read_message(stream) -> dict | None:
     should exit). Raises ValueError on length-overflow per the
     Chrome native-messaging cap (1 MiB inbound to the host on
     Chromium; we accept up to 4 MiB so Firefox's larger payloads
-    don't trip an early-exit).
+    don't trip an early-exit), and on any frame whose top-level
+    JSON value is not an object (the wire contract is dict-shaped;
+    a bare scalar/array/null would otherwise raise AttributeError
+    deeper in deliver_reply/dispatch and crash the stdio loop).
+    json.loads's own JSONDecodeError is a ValueError subclass, so
+    malformed JSON surfaces on the same fail-closed path.
     """
     raw_len = stream.read(4)
     if not raw_len:
@@ -164,7 +169,11 @@ def read_message(stream) -> dict | None:
     if len(body) != n:
         raise ValueError(
             f"short body: expected {n}, got {len(body)}")
-    return json.loads(body.decode("utf-8"))
+    msg = json.loads(body.decode("utf-8"))
+    if not isinstance(msg, dict):
+        raise ValueError(
+            f"top-level JSON value is not an object: {type(msg).__name__}")
+    return msg
 
 
 def write_message(stream, payload: dict) -> None:

@@ -66,6 +66,55 @@ class TestFraming:
         else:
             raise AssertionError("expected ValueError")
 
+    @staticmethod
+    def _framed(raw: bytes) -> io.BytesIO:
+        """Length-prefix an arbitrary (possibly non-JSON-object) body."""
+        return io.BytesIO(struct.pack("<I", len(raw)) + raw)
+
+    def test_nonobject_scalar_raises(self):
+        # A bare JSON number is valid JSON but not a dict — the wire
+        # contract is object-shaped, so it must fail closed.
+        for body in (b"42", b"3.14", b"true", b"false", b'"hi"'):
+            try:
+                bb.read_message(self._framed(body))
+            except ValueError as e:
+                assert "not an object" in str(e), body
+            else:
+                raise AssertionError(f"expected ValueError for {body!r}")
+
+    def test_nonobject_array_raises(self):
+        try:
+            bb.read_message(self._framed(b"[1, 2, 3]"))
+        except ValueError as e:
+            assert "not an object" in str(e)
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_nonobject_null_raises(self):
+        # JSON null parses to Python None — must not be mistaken for EOF
+        # (which is signalled by a missing length prefix, not a frame).
+        try:
+            bb.read_message(self._framed(b"null"))
+        except ValueError as e:
+            assert "not an object" in str(e)
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_malformed_json_raises_valueerror(self):
+        # json.JSONDecodeError is a ValueError subclass, so a corrupt
+        # body surfaces on the same fail-closed path as the type guard.
+        try:
+            bb.read_message(self._framed(b"{not json"))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_object_still_roundtrips(self):
+        # The guard must not reject legitimate object frames.
+        msg = bb.read_message(self._framed(b'{"op": "qdistro.ping"}'))
+        assert msg == {"op": "qdistro.ping"}
+
 
 # ---- parent-chain identity ----
 
@@ -431,6 +480,27 @@ class TestMainLoop:
         stdout = io.BytesIO()
         rc = bb.main(stdin=stdin, stdout=stdout)
         assert rc == 2
+
+    def test_nonobject_frame_does_not_crash_loop(self, monkeypatch):
+        # A well-framed but non-object JSON value (the only thing the
+        # extension itself can inject) must elicit a frame_error reply
+        # and a clean exit(2) — not an uncaught AttributeError from
+        # deliver_reply/dispatch calling .get on a list/int.
+        monkeypatch.setattr(
+            bb, "verify_parent",
+            lambda: {"ppid": 1,
+                     "parent_exe": "/usr/lib64/firefox/firefox",
+                     "parent_selinux": "", "allowed": True})
+        for body in (b"[1, 2, 3]", b"42", b"null", b'"oops"'):
+            stdin = io.BytesIO(struct.pack("<I", len(body)) + body)
+            stdout = io.BytesIO()
+            rc = bb.main(stdin=stdin, stdout=stdout)
+            assert rc == bb.EXIT_FRAME_ERROR, body
+            stdout.seek(0)
+            reply = bb.read_message(stdout)
+            assert reply["ok"] is False, body
+            assert reply["error"] == "frame_error", body
+            assert "not an object" in reply["detail"], body
 
 
 # ---- subprocess end-to-end (proves argv + env-var fixes work in a
