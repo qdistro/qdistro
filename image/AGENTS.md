@@ -16,7 +16,7 @@ this file adds the build- and verify-pipeline specifics.
 | `verify.sh` | boots the built `.raw` rootlessly via `qemu:///session`, SSHes in over a `passt` port forward (host 2299 → guest 22), runs **journal-side assertions** (see below), captures `virsh screenshot` evidence. |
 | `install-test.sh` | boots the `.install.iso` against a blank 30 GiB target disk, drives the UEFI + GRUB menus via `virsh send-key`, watches kiwi-oem-dump write the image, then verifies the post-install reboot. |
 | `root/` | kiwi overlay tree. `etc/os-release.qdistro` is the branding override; `root/qdistro-src/` is rsynced source (gitignored). |
-| `keys/` | (gitignored) GPG signing keypair for the future RPM repo. Generate with `keys/gen-signing-key.sh`. |
+| `keys/` | (gitignored) future GPG signing keypair location for the RPM repo; the key-generation flow still needs to be created. |
 | `logs/` | (gitignored) per-run build / verify / install logs and screenshots. |
 
 ## How to run the full pipeline
