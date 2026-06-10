@@ -34,7 +34,7 @@ import qdistro_template_audit as audit
 # the plan: define ONCE, do not let implementers rediscover flags by
 # debugging). It does NOT include --user-data-dir/--screenshot/the URL —
 # each caller supplies those (page-open points the profile at a tmpfs; the
-# 06 login checks point it at the mounted state_path). Chromium's own sandbox
+# 06 login checks point it at the mounted profile dir). Chromium's own sandbox
 # needs userns/SUID it cannot get under cap-drop ALL + no-new-privileges, so
 # --no-sandbox is required and acceptable here: the disposable container IS
 # the sandbox (read-only, no caps, no network, no state).

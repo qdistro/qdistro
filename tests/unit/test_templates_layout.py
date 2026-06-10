@@ -437,7 +437,8 @@ def test_create_state_tree_rejects_newline_path(tmp_path):
 
 def test_require_state_path_rejects_control_chars():
     qt.require_state_path("/var/lib/qdistro/silos/s/state")  # ok
-    for bad in ["relative/path", "", "/has\nnewline", "/has\ttab", "/has\x7fdel"]:
+    for bad in ["relative/path", "", "/has\nnewline", "/has\ttab", "/has\x7fdel",
+                "/has:colon"]:  # ':' would corrupt the -v volume spec
         with pytest.raises(qt.TemplateError):
             qt.require_state_path(bad)
 

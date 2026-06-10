@@ -82,6 +82,12 @@ def require_state_path(value: object) -> str:
         raise TemplateError(
             "state_path must be a single line with no control characters "
             "(it crosses the KEY=VALUE launch-env boundary)")
+    # ':' would mis-split spawn-tier2's `-v <state_path>:/home/admin:rw`
+    # volume spec — refuse it at the trust boundary, not at launch.
+    if ":" in value:
+        raise TemplateError(
+            "state_path must not contain ':' (it would corrupt the bind-mount "
+            "volume spec)")
     return value
 
 

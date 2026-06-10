@@ -416,9 +416,12 @@ def promote(silo: str, run_id: str | None = None, *,
     if existing is None:
         try:
             mechanism = qt.create_state_tree(resolved_state_path)
-        except OSError as exc:
+        except (OSError, qt.TemplateError) as exc:
+            # TemplateError covers an invalid state_path (control char, ':',
+            # not-a-directory); route it through the audited refusal like
+            # every other failure rather than a bare FATAL.
             return _refuse(layout, f"could not create state tree at "
-                           f"{resolved_state_path}: {exc}", silo=silo,
+                           f"{resolved_state_path!r}: {exc}", silo=silo,
                            template=template, generation=new_gen, run_id=run_id)
         log(f"created state tree {resolved_state_path} (mechanism={mechanism})")
     return _apply(layout, silo, template, new_gen, cdir, existing, resolver,

@@ -86,6 +86,17 @@ for unit in "$SRC"/systemd/qdistro-template-*.service \
     install -m 0644 "$unit" "$SYSD/$(basename "$unit")"
 done
 
+# tmpfiles.d: /run/qdistro/silo-generation must exist admin-owned on every
+# boot so qdistro-resolve-binding --record can write the per-boot runtime
+# status + commit the activation marker (M1 review). Materialize it now too.
+if [ -f "$SRC/systemd/qdistro-templates-tmpfiles.conf" ]; then
+    install -d -m 0755 /usr/lib/tmpfiles.d
+    install -m 0644 "$SRC/systemd/qdistro-templates-tmpfiles.conf" \
+        /usr/lib/tmpfiles.d/qdistro-templates.conf
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-templates.conf \
+        2>/dev/null || true
+fi
+
 # On-disk model: dirs (security trees owner-only) + defaults.
 install -d -m 0755 /etc/qdistro/templates /var/lib/qdistro/templates
 install -d -m 0700 /var/lib/qdistro/bindings /var/lib/qdistro/pins \

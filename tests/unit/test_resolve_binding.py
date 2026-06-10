@@ -238,7 +238,10 @@ def test_main_launch_env_with_record_commits_marker(tmp_path, monkeypatch, capsy
     qt.ensure_skeleton(layout)
     _binding(layout, "dev-silo")
     monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
-    monkeypatch.setenv("QDISTRO_RUN_STATUS_DIR", str(tmp_path / "run"))
+    # RUN_STATUS_DIR is bound from the env at import time, so an env var here
+    # is ineffective — set the module attribute directly (and monkeypatch
+    # restores it, so this test never pollutes others).
+    monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
     assert rb.main(["dev-silo", "--record", "--launch-env"]) == 0
     out = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
     assert out["FIRST_ACTIVATION"] == "yes"

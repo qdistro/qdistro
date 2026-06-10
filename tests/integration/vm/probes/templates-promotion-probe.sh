@@ -566,6 +566,20 @@ scenario_candidate_isolation() {
     [ "$(cat "$statep/written" 2>/dev/null)" = "PERSISTED" ] \
         || fail "candidate-isolation" "written state not visible on the host state_path"
     rm -f "$statep/written"
+
+    # Untemplated/candidate launches mount NO state (plan-01: only a
+    # binding-resolved launch may mount state_path). Same hardened argv MINUS
+    # the state bind: /home/admin is the image's empty home, the sentinel is
+    # invisible — proving the bind, not the image, is what carries the state.
+    local untmpl
+    untmpl="$(podman run --rm --network=none --userns=keep-id --user "$STATE_USER" \
+              --read-only --tmpfs /tmp:rw,size=16m \
+              --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=8m,tmpfs-mode=0700,U \
+              "$genA" sh -c 'cat /home/admin/sentinel 2>/dev/null || echo NO-STATE')"
+    [ "$untmpl" = "NO-STATE" ] \
+        || fail "candidate-isolation" "an untemplated launch (no state bind) read silo state: '$untmpl'"
+    echo "$untmpl" | grep -q SECRET-STATE \
+        && fail "candidate-isolation" "untemplated launch leaked the state sentinel"
     # The .cache tmpfs (podman `,U`) must NOT have left a subuid-owned dir in
     # the persistent state (codex r1): create_state_tree pre-creates it as an
     # admin-owned 0700 mountpoint, so after launches it stays owned by us.

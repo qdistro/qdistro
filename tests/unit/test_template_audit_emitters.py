@@ -156,7 +156,7 @@ def test_promote_applied_carries_old_new_generation(tmp_path):
     assert applied["identity_revision"] == 2
 
 
-def test_binding_activated_emitted_on_change(tmp_path):
+def test_binding_activated_emitted_on_change(tmp_path, monkeypatch):
     layout = _layout(tmp_path)
     # promote to create a binding + generation record
     _validated_candidate(layout, "run-a", GEN)
@@ -164,7 +164,9 @@ def test_binding_activated_emitted_on_change(tmp_path):
                     resolver=lambda *a: (_ for _ in ()).throw(AssertionError))
     run_dir = str(tmp_path / "run")
     import qdistro_resolve_binding as rbmod
-    rbmod.RUN_STATUS_DIR = run_dir  # avoid writing /run
+    # monkeypatch (not a bare assignment) so RUN_STATUS_DIR is restored and
+    # this test never pollutes module state for others (M1 review).
+    monkeypatch.setattr(rbmod, "RUN_STATUS_DIR", run_dir)  # avoid writing /run
     rc, gen = rb.resolve("dev-silo", layout=layout, record=True)
     assert rc == 0 and gen == GEN
     assert "template.binding.activated" in _audit_events(layout)

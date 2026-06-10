@@ -36,10 +36,12 @@ network_mode = "unrestricted"
 # needs). Both required, both local-runtime (no network — the page-open probe
 # renders a file:// page written into its own tmpfs).
 [[template.probe]]
+# Non-trivial liveness: prove the packaged browser binary actually execs
+# (not just that the image runs a shell). page-open is the real render gate.
 name = "process-starts"
-kind = "process"
+kind = "command"
 class = "local-runtime"
-command = "true"
+command = "chromium --version"
 required = true
 timeout = 30
 
