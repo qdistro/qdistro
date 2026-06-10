@@ -57,6 +57,94 @@ def test_resolve_containerfile_shipped_recipe_exists():
     assert os.path.isfile(resolved)
 
 
+# --------------------------------------------------------------------------
+# build context resolution (fableplan2 task 02)
+# --------------------------------------------------------------------------
+
+def test_resolve_build_context_default_is_containerfile_dir(tmp_path):
+    cf = str(tmp_path / "recipes" / "Containerfile.x")
+    policy = {"template": {"build": {"containerfile": "Containerfile.x"}}}
+    assert build.resolve_build_context(policy, cf) == os.path.dirname(cf)
+
+
+def test_resolve_build_context_absolute_within_allowed(tmp_path, monkeypatch):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    monkeypatch.setattr(build, "CONTEXT_DIRS", (str(tmp_path),))
+    policy = {"template": {"build": {"containerfile": "c", "context": str(ctx)}}}
+    assert build.resolve_build_context(policy, "/x/c") == str(ctx)
+
+
+def test_resolve_build_context_absolute_outside_allowed_rejected(tmp_path, monkeypatch):
+    # An absolute context outside the allowlisted roots must be refused — it
+    # would let a policy sweep arbitrary host files into the empty-room build.
+    ctx = tmp_path / "evil"
+    ctx.mkdir()
+    monkeypatch.setattr(build, "CONTEXT_DIRS", ("/usr/lib/qdistro",))
+    monkeypatch.setattr(build, "RECIPES_DIRS", ("/usr/lib/qdistro/templates/recipes",))
+    policy = {"template": {"build": {"containerfile": "c", "context": str(ctx)}}}
+    with pytest.raises(qt.TemplateError, match="outside the allowed roots"):
+        build.resolve_build_context(policy, "/x/c")
+
+
+def test_resolve_build_context_absolute_missing(tmp_path):
+    policy = {"template": {"build": {"containerfile": "c",
+                                     "context": str(tmp_path / "nope")}}}
+    with pytest.raises(qt.TemplateError, match="not a directory"):
+        build.resolve_build_context(policy, "/x/c")
+
+
+def test_resolve_build_context_relative_searches_bases(tmp_path, monkeypatch):
+    base = tmp_path / "base"
+    (base / "tier2").mkdir(parents=True)
+    monkeypatch.setattr(build, "CONTEXT_DIRS", (str(base),))
+    policy = {"template": {"build": {"containerfile": "c", "context": "tier2"}}}
+    assert build.resolve_build_context(policy, "/x/c") == str(base / "tier2")
+
+
+def test_resolve_build_context_relative_unsafe_rejected(tmp_path):
+    policy = {"template": {"build": {"containerfile": "c", "context": "../etc"}}}
+    with pytest.raises(qt.TemplateError):
+        build.resolve_build_context(policy, "/x/c")
+
+
+def test_shipped_browser_recipe_and_context_resolve():
+    # The tier2-browser recipe resolves under the recipes dir and its
+    # context = "tier2" resolves to the in-tree tier2/ asset dir, which must
+    # carry the SHARED entrypoint.sh + weston.ini the recipe COPYs.
+    policy = qt.validate_template_policy(
+        qt.read_toml(_repo_path("templates/examples/tier2-browser.toml")))
+    cf = build.resolve_containerfile(policy)
+    assert cf.endswith("recipes/Containerfile.tier2-browser") and os.path.isfile(cf)
+    ctx = build.resolve_build_context(policy, cf)
+    assert os.path.isfile(os.path.join(ctx, "weston.ini"))
+    assert os.path.isfile(os.path.join(ctx, "entrypoint.sh"))
+
+
+def _repo_path(rel):
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo, rel)
+
+
+def test_shipped_browser_policy_validates_split_app_profile():
+    # fableplan2 task 02: the browser is split-app-profile / enforced=partial,
+    # and declares the page-open probe gate.
+    policy = qt.read_toml(_repo_path("templates/examples/tier2-browser.toml"))
+    assert qt.validate_template_policy(policy) is not None
+    tmpl = policy["template"]
+    assert tmpl["state_boundary"]["class"] == "split-app-profile"
+    assert tmpl["state_boundary"]["enforced"] == "partial"
+    assert tmpl["activation_snapshot"] == "strict"
+    probe_kinds = {p["kind"] for p in tmpl["probe"]}
+    assert "page-open" in probe_kinds
+    assert all(p["required"] for p in tmpl["probe"])
+    # TIER2_NETWORK is task-04's launch registry, NOT the binding/policy.
+    assert "network" not in tmpl and "network_mode" in tmpl["build"]
+    # The identity selector example carries the declared chromium package.
+    sel = qt.read_toml(_repo_path("templates/examples/identity-chromium.toml"))
+    assert sel["identity"]["executable"]["expected_package"] == "chromium"
+
+
 def test_file_digest(tmp_path):
     p = tmp_path / "f"
     p.write_bytes(b"hello")

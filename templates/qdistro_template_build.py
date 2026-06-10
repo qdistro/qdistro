@@ -38,6 +38,17 @@ RECIPES_DIRS = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes"),
 )
 
+# Base dirs a relative ``[template.build].context`` resolves against. A
+# recipe whose Containerfile COPYs assets that live elsewhere (e.g. the
+# tier2-browser recipe shares tier2/entrypoint.sh + tier2/weston.ini — one
+# source of truth, never hand-duplicated) declares ``context = "tier2"`` and
+# the builder uses that directory as the podman build context instead of the
+# Containerfile's own dir.
+CONTEXT_DIRS = (
+    "/usr/lib/qdistro",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
 # The empty room is enforced, not assumed. podman is run with an explicit
 # allowlisted environment so no host credential reaches the build: notably
 # *_PROXY (podman's default --http-proxy copies HTTP(S)_PROXY — which often
@@ -90,6 +101,45 @@ def resolve_containerfile(policy: dict) -> str:
     raise qt.TemplateError(
         f"containerfile {ref!r} not found under {RECIPES_DIRS}"
     )
+
+
+def resolve_build_context(policy: dict, containerfile: str) -> str:
+    """The podman build context dir. Defaults to the Containerfile's own dir
+    (today's behaviour); a policy may override it with
+    ``[template.build].context`` so a recipe can COPY shared assets that live
+    outside the recipes tree without hand-duplicating them.
+
+    The override is allowlisted to keep the empty-room story intact: the
+    resolved context (after realpath) must live under one of
+    :data:`CONTEXT_DIRS` or :data:`RECIPES_DIRS`, so a policy cannot point the
+    build context at an arbitrary host path (e.g. ``/`` or a home dir) and
+    sweep secrets into the build. A relative context resolves by name against
+    CONTEXT_DIRS; an absolute one must still fall inside an allowed root."""
+    ctx = policy["template"].get("build", {}).get("context")
+    if not ctx:
+        return os.path.dirname(containerfile)
+    allowed = tuple(os.path.realpath(b) for b in CONTEXT_DIRS + RECIPES_DIRS)
+
+    def _within_allowed(path: str) -> bool:
+        real = os.path.realpath(path)
+        return any(real == root or real.startswith(root + os.sep)
+                   for root in allowed)
+
+    if os.path.isabs(ctx):
+        if not os.path.isdir(ctx):
+            raise qt.TemplateError(f"build context {ctx} is not a directory")
+        if not _within_allowed(ctx):
+            raise qt.TemplateError(
+                f"build context {ctx} is outside the allowed roots "
+                f"{CONTEXT_DIRS} (would weaken the empty-room build)")
+        return ctx
+    qt.require_safe_name(ctx, "build context")
+    for base in CONTEXT_DIRS:
+        candidate = os.path.join(base, ctx)
+        if os.path.isdir(candidate) and _within_allowed(candidate):
+            return candidate
+    raise qt.TemplateError(
+        f"build context {ctx!r} not found under {CONTEXT_DIRS}")
 
 
 def file_digest(path: str) -> str:
@@ -208,12 +258,14 @@ def build_candidate(template: str, layout: qt.Layout | None = None,
                                f"path is derived-only in this slice")
     try:
         containerfile = resolve_containerfile(policy)
+        build_context = resolve_build_context(policy, containerfile)
         network_mode = declared_network_mode(policy)
     except qt.TemplateError as exc:
         return _preflight_fail(str(exc))
 
     run_id, candidate_dir = _make_candidate_dir(layout, template)
-    log(f"template={template} run_id={run_id} containerfile={containerfile}")
+    log(f"template={template} run_id={run_id} containerfile={containerfile} "
+        f"context={build_context}")
     # Inputs hash is known before the build runs, so a failed build still
     # records the input identity that was attempted.
     containerfile_digest = file_digest(containerfile)
@@ -225,7 +277,8 @@ def build_candidate(template: str, layout: qt.Layout | None = None,
     # state=failed with its evidence — never an unmarked half-built dir.
     try:
         rc = _run_build(template, run_id, candidate_dir, containerfile,
-                        containerfile_digest, network_mode, no_cache, audit_db)
+                        containerfile_digest, network_mode, no_cache, audit_db,
+                        build_context)
         return rc, run_id
     except Exception as exc:  # noqa: BLE001 — record evidence, fail closed
         with open(os.path.join(candidate_dir, "build.log"), "a", encoding="utf-8") as logf:
@@ -240,7 +293,8 @@ def build_candidate(template: str, layout: qt.Layout | None = None,
 
 def _run_build(template: str, run_id: str, candidate_dir: str,
                containerfile: str, containerfile_digest: str,
-               network_mode: str, no_cache: bool, audit_db: str) -> int:
+               network_mode: str, no_cache: bool, audit_db: str,
+               build_context: str | None = None) -> int:
     started = time.monotonic()
     # Candidate tag is unique per run-id so it never shadows another
     # candidate; the durable reference is the digest we resolve below.
@@ -252,7 +306,7 @@ def _run_build(template: str, run_id: str, candidate_dir: str,
            "--file", containerfile, "--tag", tag]
     if no_cache:
         cmd.append("--no-cache")
-    cmd.append(os.path.dirname(containerfile))
+    cmd.append(build_context or os.path.dirname(containerfile))
     build_command = shlex.join(cmd)
 
     log_path = os.path.join(candidate_dir, "build.log")

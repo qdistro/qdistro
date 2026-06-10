@@ -1,0 +1,55 @@
+# Authored policy for the tier2-browser template (fableplan2 task 02).
+# Installed to /etc/qdistro/templates/tier2-browser.toml.
+#
+# Honest boundary class (doc/templates.md): a browser is split-app-profile
+# with enforced = "partial". The image-packaged browser IS validated and
+# promoted by digest; the PROFILE contents (extensions, policies,
+# native-messaging manifests, caches) are protected only by the task-05
+# pre-activation snapshots and are NOT covered by candidate validation. The
+# slice must not market more than this.
+
+[template]
+class = "derived"
+# fableplan2 task 05 reads this: the browser silo takes a pre-activation
+# state snapshot strictly — if the snapshot cannot be taken, the new
+# generation does not activate (a software rollback without the matching
+# state snapshot can hand the old browser a profile it refuses).
+activation_snapshot = "strict"
+
+[template.state_boundary]
+class = "split-app-profile"
+enforced = "partial"
+
+[template.build]
+# Containerfile is resolved under the recipes dir; the build context is the
+# tier2/ asset dir so the recipe can COPY the SHARED entrypoint.sh +
+# weston.ini (one source of truth — never hand-duplicated; codex r1).
+containerfile = "Containerfile.tier2-browser"
+context = "tier2"
+# Plain egress during build (RPM Chromium + fonts + GTK). Honest until the
+# recording proxy lands; "unrestricted" keeps the claim true.
+network_mode = "unrestricted"
+
+# Probes run against the built candidate digest in the task-03 gui-runtime
+# (read-only rootfs, cap-drop ALL, no-new-privileges, --network=none, no real
+# state, but with the writable XDG_RUNTIME_DIR / shm / session bus a browser
+# needs). Both required, both local-runtime (no network — the page-open probe
+# renders a file:// page written into its own tmpfs).
+[[template.probe]]
+name = "process-starts"
+kind = "process"
+class = "local-runtime"
+command = "true"
+required = true
+timeout = 30
+
+[[template.probe]]
+# The headline gate: the candidate browser must actually RENDER a web page
+# (full-bleed colour + text in the recipe's guaranteed font) before it is
+# promotable. Pass = exit 0, a valid non-trivial, non-uniform PNG screenshot,
+# persisted as check evidence. Timeout generous (cold-start Chromium is slow).
+name = "page-open"
+kind = "page-open"
+class = "local-runtime"
+required = true
+timeout = 120
