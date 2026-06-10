@@ -145,10 +145,18 @@ for entry in "${INSTALLERS[@]}"; do
     set -- $entry
     installer="$1"
     src_dir="$2"
-    if [ -x "$installer" ]; then
-        log "  running $(basename "$installer") <- $src_dir"
-        bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
+    # Run via `bash` so a present-but-non-executable installer still runs — the
+    # executable bit must NOT be load-bearing bootstrap control flow. A
+    # `[ -x "$installer" ]` gate here once silently skipped the whole
+    # template/promotion slice (install-templates-for-vm.sh was committed 0644),
+    # so fresh VMs had no template CLIs yet bootstrap stayed green and the
+    # in-VM template suites could not have been validly passing. A MISSING
+    # installer is a hard error, never a silent skip.
+    if [ ! -f "$installer" ]; then
+        echo "[bootstrap] missing installer $installer"; exit 3
     fi
+    log "  running $(basename "$installer") <- $src_dir"
+    bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
 done
 
 # ---- 4b. Stage bats in-VM probes at /root/ ------------------------------
