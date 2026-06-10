@@ -27,6 +27,7 @@ import sys
 import time
 
 import qdistro_templates as qt
+import qdistro_template_audit as audit
 
 # How long the outgoing generation stays pinned as a rollback target.
 ROLLBACK_WINDOW_DAYS = int(os.environ.get("QDISTRO_ROLLBACK_WINDOW_DAYS", "14"))
@@ -34,6 +35,19 @@ ROLLBACK_WINDOW_DAYS = int(os.environ.get("QDISTRO_ROLLBACK_WINDOW_DAYS", "14"))
 
 def log(msg: str) -> None:
     print(f"[template-promote] {msg}", file=sys.stderr, flush=True)
+
+
+def _audit_db(layout: qt.Layout) -> str:
+    return os.path.join(layout.var, "audit", "template_audit.sqlite")
+
+
+def _refuse(layout: qt.Layout, reason: str, *, rc: int = 1, silo=None,
+            template=None, generation=None, run_id=None) -> int:
+    audit.emit("template.promote.refused", db_path=_audit_db(layout),
+               silo=silo, template=template, generation=generation,
+               run_id=run_id, result="refused", reason=reason)
+    log(f"REFUSED: {reason}")
+    return rc
 
 
 def _iso(epoch: float) -> str:
@@ -331,79 +345,95 @@ def promote(silo: str, run_id: str | None = None, *,
     # --- promote a validated candidate ---------------------------------
     found = _find_candidate(layout, run_id)
     if found is None:
-        log(f"FATAL: no candidate with run-id {run_id}")
-        return 2
+        # Generation is unknowable without a candidate; record the attempt.
+        return _refuse(layout, f"no candidate with run-id {run_id}", rc=2,
+                       silo=silo, run_id=run_id)
     template, cdir = found
     state = qt.candidate_state(cdir)
     if state != "validated":
-        log(f"REFUSED: candidate {run_id} is state={state!r}; only a "
-            f"'validated' candidate can be promoted")
-        return 1
+        return _refuse(layout, f"candidate {run_id} is state={state!r}; only a "
+                       f"'validated' candidate can be promoted",
+                       silo=silo, template=template, run_id=run_id)
 
     manifest = qt.read_manifest(os.path.join(cdir, "manifest.toml"))
     new_gen = qt.generation_ref(manifest)
+
+    # Now the full context is known — record the promotion request with the
+    # old (outgoing) and new generation and the current identity revision.
+    audit.emit("template.promote.requested", db_path=_audit_db(layout),
+               silo=silo, template=template, run_id=run_id, generation=new_gen,
+               new_generation=new_gen,
+               old_generation=existing["active_generation"] if existing else None,
+               identity_revision=existing["identity_revision"] if existing else None,
+               result="requested")
 
     # The validation report is mandatory and must belong to THIS candidate —
     # a forged/stale state marker with no (or a mismatched) report must not
     # become promotable.
     report_path = os.path.join(cdir, "evidence", "validation.toml")
     if not os.path.isfile(report_path):
-        log(f"REFUSED: candidate {run_id} has no validation report "
-            f"(state marker alone is not sufficient)")
-        return 1
+        return _refuse(layout, f"candidate {run_id} has no validation report "
+                       f"(state marker alone is not sufficient)",
+                       silo=silo, template=template, generation=new_gen, run_id=run_id)
     report = qt.read_toml(report_path)
     if (report.get("run_id") != manifest["run_id"]
             or report.get("template") != template
             or report.get("generation_ref") != new_gen):
-        log(f"REFUSED: validation report for {run_id} does not match the "
-            f"candidate manifest (run_id/template/generation_ref)")
-        return 1
+        return _refuse(layout, f"validation report for {run_id} does not match "
+                       f"the candidate manifest (run_id/template/generation_ref)",
+                       silo=silo, template=template, generation=new_gen, run_id=run_id)
     failed_required = [c for c in report.get("check", [])
                        if c.get("required") and c.get("result") == "fail"]
     if report.get("result") != "validated" or failed_required:
-        log(f"REFUSED: validation report for {run_id} is not clean "
-            f"(result={report.get('result')!r}, "
-            f"{len(failed_required)} failed required checks)")
-        return 1
+        return _refuse(layout, f"validation report for {run_id} is not clean "
+                       f"(result={report.get('result')!r}, "
+                       f"{len(failed_required)} failed required checks)",
+                       silo=silo, template=template, generation=new_gen, run_id=run_id)
 
     if existing and existing["template"] != template:
-        log(f"REFUSED: silo {silo} is bound to template "
-            f"{existing['template']!r}, candidate is {template!r}")
-        return 1
+        return _refuse(layout, f"silo {silo} is bound to template "
+                       f"{existing['template']!r}, candidate is {template!r}",
+                       silo=silo, template=template, generation=new_gen, run_id=run_id)
 
     resolved_state_path = (
         state_path or (existing["state_path"] if existing else None)
         or f"/var/lib/qdistro/silos/{silo}/state"
     )
     return _apply(layout, silo, template, new_gen, cdir, existing, resolver,
-                  resolved_state_path, now, mode="promote")
+                  resolved_state_path, now, mode="promote", run_id=run_id)
 
 
 def _do_rollback(layout: qt.Layout, silo: str, target: str, existing: dict | None,
                  resolver, now: float) -> int:
     qt.require_digest(target, "rollback generation")
     if existing is None:
-        log(f"REFUSED: silo {silo} has no binding to roll back")
-        return 1
+        return _refuse(layout, f"silo {silo} has no binding to roll back",
+                       silo=silo, generation=target)
     if target not in existing["previous_generations"]:
-        log(f"REFUSED: {target} is not in {silo}'s previous_generations")
-        return 1
+        return _refuse(layout, f"{target} is not in {silo}'s previous_generations",
+                       silo=silo, template=existing["template"], generation=target)
     template = existing["template"]
     gen_dir = layout.generation_dir(template, target)
     if not os.path.isdir(gen_dir):
-        log(f"REFUSED: no generation record at {gen_dir} for rollback target")
-        return 1
+        return _refuse(layout, f"no generation record at {gen_dir} for rollback target",
+                       silo=silo, template=template, generation=target)
+    audit.emit("template.promote.requested", db_path=_audit_db(layout),
+               silo=silo, template=template, generation=target,
+               new_generation=target, old_generation=existing["active_generation"],
+               identity_revision=existing["identity_revision"],
+               result="requested", reason="rollback")
     return _apply(layout, silo, template, target, None, existing, resolver,
                   existing["state_path"], now, mode="rollback")
 
 
 def _apply(layout: qt.Layout, silo: str, template: str, new_gen: str,
            candidate_dir: str | None, existing: dict | None, resolver,
-           state_path: str, now: float, mode: str) -> int:
+           state_path: str, now: float, mode: str, run_id: str | None = None) -> int:
     outgoing = existing["active_generation"] if existing else None
     if outgoing == new_gen:
-        log(f"REFUSED: {new_gen} is already the active generation for {silo}")
-        return 1
+        return _refuse(layout, f"{new_gen} is already the active generation "
+                       f"for {silo}", silo=silo, template=template,
+                       generation=new_gen, run_id=run_id)
 
     # Step 2: identity revalidation — fail closed BEFORE any pin/binding
     # write so a class change never leaves partial state.
@@ -411,8 +441,8 @@ def _apply(layout: qt.Layout, silo: str, template: str, new_gen: str,
         identity_records = revalidate_identity(
             layout, silo, template, new_gen, outgoing, resolver)
     except qt.TemplateError as exc:
-        log(f"REFUSED: {exc}")
-        return 1
+        return _refuse(layout, str(exc), silo=silo, template=template,
+                       generation=new_gen, run_id=run_id)
     identity_revision = (existing["identity_revision"] if existing else 0) + 1
 
     # Step 3: materialize the promoted generation record.
@@ -442,7 +472,16 @@ def _apply(layout: qt.Layout, silo: str, template: str, new_gen: str,
         _remove_pin(layout, template, outgoing, "active")
     _remove_pin(layout, template, new_gen, "rollback-window")
 
-    # Step 6: audit (template.promote.applied) is wired in task 06.
+    # Step 6: audit. template.promote.applied fires here (the flip happened);
+    # template.binding.activated fires later in the launch path (task 05) when
+    # the new generation first actually starts. Notify identity consumers via
+    # the audit event (cache hint), not a correctness mechanism.
+    audit.emit("template.promote.applied", db_path=_audit_db(layout),
+               silo=silo, template=template, generation=new_gen, run_id=run_id,
+               new_generation=new_gen, old_generation=outgoing,
+               identity_revision=identity_revision, result="applied", reason=mode,
+               evidence_path=os.path.join(layout.generation_dir(template, new_gen),
+                                          "evidence"))
     verb = "rolled back to" if mode == "rollback" else "promoted"
     log(f"OK: {silo} {verb} generation {new_gen} "
         f"(identity_revision={identity_revision}); outgoing={outgoing}")

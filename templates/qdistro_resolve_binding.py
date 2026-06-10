@@ -31,6 +31,7 @@ import sys
 import time
 
 import qdistro_templates as qt
+import qdistro_template_audit as audit
 
 RUN_STATUS_DIR = "/run/qdistro/silo-generation"
 
@@ -46,12 +47,14 @@ def activated_marker(layout: qt.Layout, silo: str) -> str:
 
 
 def record_activation(layout: qt.Layout, silo: str, generation: str,
-                      run_status_dir: str = RUN_STATUS_DIR) -> bool:
+                      run_status_dir: str | None = None) -> bool:
     """Record the running generation and report whether this is a new
     activation (resolved generation differs from the last recorded one).
 
     Returns True when the activation changed (caller emits
     template.binding.activated)."""
+    # Read the module default at call time so it stays overridable.
+    run_status_dir = run_status_dir or RUN_STATUS_DIR
     # Per-boot runtime status: which generation is running right now.
     os.makedirs(run_status_dir, exist_ok=True)
     qt.atomic_write(
@@ -106,7 +109,14 @@ def resolve(silo: str, layout: qt.Layout | None = None,
         try:
             changed = record_activation(layout, silo, generation)
             if changed:
-                # Anchor for template.binding.activated (task 06).
+                # The new generation is actually starting now — this is the
+                # anchor the first-activation state snapshot (deferred) hangs
+                # off of.
+                audit.emit("template.binding.activated",
+                           db_path=os.path.join(layout.var, "audit",
+                                                "template_audit.sqlite"),
+                           silo=silo, template=binding["template"],
+                           generation=generation, result="activated")
                 log(f"binding.activated silo={silo} generation={generation}")
             else:
                 log(f"silo={silo} already running generation={generation}")

@@ -22,6 +22,7 @@ import sys
 import time
 
 import qdistro_templates as qt
+import qdistro_template_audit as audit
 
 # A compile-and-run probe: write a tiny C program, compile it with the
 # toolchain in the candidate, run it, and require the sentinel on stdout.
@@ -128,30 +129,37 @@ def run_probe(image_ref: str, probe: dict, container_name: str) -> dict:
 
 def validate(run_id: str, layout: qt.Layout | None = None, runner=run_probe) -> int:
     layout = layout or qt.Layout()
+    audit_db = os.path.join(layout.var, "audit", "template_audit.sqlite")
+
+    def _refuse(reason: str, *, template=None, generation=None) -> int:
+        audit.emit("template.validate.finished", db_path=audit_db,
+                   template=template, run_id=run_id, generation=generation,
+                   result="refused", reason=reason, duration=0.0)
+        log(f"FATAL: {reason}")
+        return 2
+
     found = find_candidate(layout, run_id)
     if found is None:
-        log(f"FATAL: no candidate with run-id {run_id}")
-        return 2
+        return _refuse(f"no candidate with run-id {run_id}")
     template, cdir = found
     state = qt.candidate_state(cdir)
     if state != "built":
-        log(f"FATAL: candidate {run_id} is state={state!r}; only a 'built' "
-            f"candidate can be validated")
-        return 2
+        return _refuse(f"candidate {run_id} is state={state!r}; only a 'built' "
+                       f"candidate can be validated", template=template)
 
     manifest = qt.read_manifest(os.path.join(cdir, "manifest.toml"))
     if manifest.get("run_id") != run_id or manifest.get("template") != template:
         # The candidate dir and its manifest must agree on identity, or we
         # would validate the wrong digest under the wrong policy/evidence.
-        log(f"FATAL: candidate {run_id} manifest identity mismatch "
-            f"(run_id={manifest.get('run_id')!r} template={manifest.get('template')!r})")
-        return 2
+        return _refuse(f"candidate {run_id} manifest identity mismatch "
+                       f"(run_id={manifest.get('run_id')!r} "
+                       f"template={manifest.get('template')!r})", template=template)
     image_ref = qt.generation_ref(manifest)
     policy = qt.validate_template_policy(qt.read_toml(layout.template_policy(template)))
     probes = policy["template"].get("probe", [])
     if not probes:
-        log(f"FATAL: template {template} declares no probes")
-        return 2
+        return _refuse(f"template {template} declares no probes",
+                       template=template, generation=image_ref)
 
     evidence_dir = os.path.join(cdir, "evidence")
     os.makedirs(evidence_dir, exist_ok=True)
@@ -213,6 +221,15 @@ def validate(run_id: str, layout: qt.Layout | None = None, runner=run_probe) -> 
     qt.write_toml_atomic(os.path.join(cdir, "manifest.toml"),
                          qt.validate_manifest(manifest), 0o644)
     qt.set_candidate_state(cdir, "validated" if result == "validated" else "failed")
+
+    audit.emit("template.validate.finished", db_path=audit_db,
+               template=template, run_id=run_id, generation=image_ref,
+               result=result, duration=duration,
+               reason=(f"{report['checks_failed']}/{report['checks_total']} checks failed"
+                       if report["checks_failed"] else ""),
+               evidence_path=evidence_dir,
+               checks_total=report["checks_total"],
+               checks_failed=report["checks_failed"])
 
     if result == "validated":
         log(f"OK: candidate {run_id} validated ({len(checks)} probes passed)")

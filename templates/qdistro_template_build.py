@@ -29,6 +29,7 @@ import sys
 import time
 
 import qdistro_templates as qt
+import qdistro_template_audit as audit
 
 # Where shipped recipe Containerfiles live on the target. A policy's
 # ``containerfile`` may be a bare name (resolved here) or an absolute path.
@@ -54,6 +55,10 @@ _ALLOWED_BUILD_ENV = (
 
 def _clean_env() -> dict:
     return {k: os.environ[k] for k in _ALLOWED_BUILD_ENV if k in os.environ}
+
+
+def _audit_db(layout: qt.Layout) -> str:
+    return os.path.join(layout.var, "audit", "template_audit.sqlite")
 
 
 def log(msg: str) -> None:
@@ -173,36 +178,59 @@ def _normalize_digest(value: str) -> str:
 def build(template: str, layout: qt.Layout | None = None,
           no_cache: bool = False) -> int:
     layout = layout or qt.Layout()
-    policy_path = layout.template_policy(template)
-    if not os.path.isfile(policy_path):
-        log(f"FATAL: no policy at {policy_path}")
-        return 2
-    policy = qt.validate_template_policy(qt.read_toml(policy_path))
-    if policy["template"]["class"] != "derived":
-        log(f"FATAL: template {template} is not 'derived'; build path is "
-            f"derived-only in this slice")
+    audit_db = _audit_db(layout)
+
+    def _preflight_fail(reason: str, network_mode=None) -> int:
+        # A build attempt that fails before a candidate exists still carries
+        # the audit contract: emit a failed build.finished.
+        audit.emit("template.build.finished", db_path=audit_db,
+                   template=template, result="failed", reason=reason,
+                   network_mode=network_mode, duration=0.0)
+        log(f"FATAL: {reason}")
         return 2
 
-    containerfile = resolve_containerfile(policy)
-    network_mode = declared_network_mode(policy)
+    policy_path = layout.template_policy(template)
+    if not os.path.isfile(policy_path):
+        return _preflight_fail(f"no policy at {policy_path}")
+    policy = qt.validate_template_policy(qt.read_toml(policy_path))
+    if policy["template"]["class"] != "derived":
+        return _preflight_fail(f"template {template} is not 'derived'; build "
+                               f"path is derived-only in this slice")
+    try:
+        containerfile = resolve_containerfile(policy)
+        network_mode = declared_network_mode(policy)
+    except qt.TemplateError as exc:
+        return _preflight_fail(str(exc))
+
     run_id, candidate_dir = _make_candidate_dir(layout, template)
     log(f"template={template} run_id={run_id} containerfile={containerfile}")
+    # Inputs hash is known before the build runs, so a failed build still
+    # records the input identity that was attempted.
+    containerfile_digest = file_digest(containerfile)
+    audit.emit("template.build.started", db_path=audit_db, template=template,
+               run_id=run_id, network_mode=network_mode,
+               containerfile_digest=containerfile_digest)
 
     # Once the candidate dir exists, every failure must leave it marked
     # state=failed with its evidence — never an unmarked half-built dir.
     try:
         return _run_build(template, run_id, candidate_dir, containerfile,
-                          network_mode, no_cache)
+                          network_mode, no_cache, audit_db)
     except Exception as exc:  # noqa: BLE001 — record evidence, fail closed
         with open(os.path.join(candidate_dir, "build.log"), "a", encoding="utf-8") as logf:
             logf.write(f"\n[template-build] FATAL: {exc!r}\n")
         qt.set_candidate_state(candidate_dir, "failed")
+        audit.emit("template.build.finished", db_path=audit_db, template=template,
+                   run_id=run_id, result="failed", reason=str(exc),
+                   evidence_path=candidate_dir)
         log(f"FAIL: {exc}; evidence in {candidate_dir} (state=failed)")
         return 1
 
 
 def _run_build(template: str, run_id: str, candidate_dir: str,
-               containerfile: str, network_mode: str, no_cache: bool) -> int:
+               containerfile: str, network_mode: str, no_cache: bool,
+               audit_db: str) -> int:
+    started = time.monotonic()
     # Candidate tag is unique per run-id so it never shadows another
     # candidate; the durable reference is the digest we resolve below.
     tag = f"qdistro-candidate/{template}:{run_id}"
@@ -225,6 +253,11 @@ def _run_build(template: str, run_id: str, candidate_dir: str,
 
     if proc.returncode != 0:
         qt.set_candidate_state(candidate_dir, "failed")
+        audit.emit("template.build.finished", db_path=audit_db, template=template,
+                   run_id=run_id, result="failed", network_mode=network_mode,
+                   reason=f"podman build exit {proc.returncode}",
+                   duration=round(time.monotonic() - started, 3),
+                   evidence_path=candidate_dir)
         log(f"FAIL: podman build returned {proc.returncode}; evidence in "
             f"{candidate_dir} (state=failed)")
         return 1
@@ -242,6 +275,11 @@ def _run_build(template: str, run_id: str, candidate_dir: str,
         build_command=build_command, network_mode=network_mode,
     )
     qt.set_candidate_state(candidate_dir, "built")
+    audit.emit("template.build.finished", db_path=audit_db, template=template,
+               run_id=run_id, result="success", generation=image_id,
+               network_mode=network_mode,
+               duration=round(time.monotonic() - started, 3),
+               evidence_path=candidate_dir)
     log(f"OK: candidate {run_id} built; generation_ref={image_id} state=built")
     # Machine-parseable lines for callers (validate/promote orchestration).
     print(f"RUN_ID={run_id}")
