@@ -391,7 +391,11 @@ For hosts ready to fail closed, `deploy/etc/qdistro/broker-hardened.conf`
 sets `secctx_launcher_gated`, `lineage_enforce`, `identity_strict`, and
 `require_silo_active` to true. It is shipped as an explicit profile rather
 than replacing the default until all tier launchers publish broker launch
-records in the installed image.
+records in the installed image. (`require_silo_active` already defaults to
+true — the standard bootstrap installs the session manager alongside the
+broker, so a manager-query error fails the cross-uid relay closed unless a
+legacy bake sets `require_silo_active = false`; the hardened profile lists
+it for completeness.)
 
 Note: the **qdshell-mediated** clipboard / handoff gates already
 re-verify the underlying app identity per call via `VerifyClientIdentity`

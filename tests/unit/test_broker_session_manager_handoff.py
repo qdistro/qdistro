@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -157,3 +158,85 @@ class TestRelayGate:
         assert len(cb.errors) == 1
         err = cb.errors[0]
         assert "SiloManagerUnreachable" in err.get_dbus_name()
+
+
+class TestRequireSiloActiveDefault:
+    """The fail-closed default: an unset toggle means REQUIRE_SILO_ACTIVE
+    is on, so a session-manager error yields the "Unreachable" sentinel
+    rather than falling through to the legacy trust path.
+    """
+
+    def test_read_default_is_true(self):
+        # No env var, no readable broker.conf → fail closed.
+        with (mock.patch.dict("os.environ", {}, clear=True),
+              mock.patch.object(B, "_BROKER_CONF_PATH",
+                                "/nonexistent/qdistro/broker.conf")):
+            assert B._read_require_silo_active() is True
+
+    def test_read_env_false_overrides_to_fail_open(self):
+        with (mock.patch.dict(
+                "os.environ",
+                {"QDISTRO_BROKER_REQUIRE_SILO_ACTIVE": "0"}),
+              mock.patch.object(B, "_BROKER_CONF_PATH",
+                                "/nonexistent/qdistro/broker.conf")):
+            assert B._read_require_silo_active() is False
+
+    def test_read_env_true(self):
+        with mock.patch.dict(
+                "os.environ",
+                {"QDISTRO_BROKER_REQUIRE_SILO_ACTIVE": "1"}):
+            assert B._read_require_silo_active() is True
+
+    def test_read_conf_false_overrides_to_fail_open(self, tmp_path):
+        conf = tmp_path / "broker.conf"
+        conf.write_text("require_silo_active = false\n", encoding="utf-8")
+        with (mock.patch.dict("os.environ", {}, clear=True),
+              mock.patch.object(B, "_BROKER_CONF_PATH", str(conf))):
+            assert B._read_require_silo_active() is False
+
+    def test_read_env_invalid_value_fails_closed(self):
+        # A typo / unrecognized env value must NOT silently fail open.
+        for bad in ("ture", "2", "maybe", "enabled"):
+            with (mock.patch.dict(
+                    "os.environ",
+                    {"QDISTRO_BROKER_REQUIRE_SILO_ACTIVE": bad}),
+                  mock.patch.object(B, "_BROKER_CONF_PATH",
+                                    "/nonexistent/qdistro/broker.conf")):
+                assert B._read_require_silo_active() is True, bad
+
+    def test_read_conf_invalid_value_fails_closed(self, tmp_path):
+        # A typo in broker.conf must keep the gate closed, not open it.
+        conf = tmp_path / "broker.conf"
+        conf.write_text("require_silo_active = ture\n", encoding="utf-8")
+        with (mock.patch.dict("os.environ", {}, clear=True),
+              mock.patch.object(B, "_BROKER_CONF_PATH", str(conf))):
+            assert B._read_require_silo_active() is True
+
+    def test_silo_state_error_fails_closed_by_default(self, broker_factory):
+        # Drive the REAL _silo_state (not the stub override) with the
+        # default fail-closed posture: a session-manager DBus error must
+        # map to the "Unreachable" sentinel, which RelayMessage rejects.
+        broker = broker_factory()
+
+        def _boom(*_a, **_k):
+            raise B.dbus.DBusException(
+                "no session manager",
+                name="org.freedesktop.DBus.Error.ServiceUnknown")
+
+        with (mock.patch.object(B, "REQUIRE_SILO_ACTIVE", True),
+              mock.patch.object(B.dbus, "SystemBus", side_effect=_boom)):
+            assert Broker._silo_state(broker, 3000) == "Unreachable"
+
+    def test_silo_state_error_falls_through_when_disabled(self, broker_factory):
+        # With the escape hatch engaged (REQUIRE_SILO_ACTIVE off), the
+        # same error returns None → legacy trust fall-through.
+        broker = broker_factory()
+
+        def _boom(*_a, **_k):
+            raise B.dbus.DBusException(
+                "no session manager",
+                name="org.freedesktop.DBus.Error.ServiceUnknown")
+
+        with (mock.patch.object(B, "REQUIRE_SILO_ACTIVE", False),
+              mock.patch.object(B.dbus, "SystemBus", side_effect=_boom)):
+            assert Broker._silo_state(broker, 3000) is None

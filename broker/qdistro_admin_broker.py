@@ -163,9 +163,11 @@ USER_RELAY_SYSTEM_NAME_FMT = "org.qdistro.UserRelay.uid{uid}"
 
 # P02 session-manager gate. The broker asks the manager for the
 # target silo's state before letting a cross-uid relay proceed.
-# A missing/unknown manager means "no silo registry yet" → fall back
-# to the pre-P02 behaviour of trusting the target uid; an explicit
-# "not Active" answer is the load-bearing reject path.
+# An explicit "not Active" answer is the load-bearing reject path; a
+# manager error (offline/timeout/parse) refuses by default
+# (REQUIRE_SILO_ACTIVE, below) since the standard bootstrap always
+# ships the manager. A reachable manager with no row for the uid
+# falls through to the pre-P02 trust path (still admin-gated).
 SESSION_MANAGER_BUS_NAME = "org.qdistro.SessionManager1"
 SESSION_MANAGER_OBJ_PATH = "/org/qdistro/SessionManager1"
 SESSION_MANAGER_IFACE = "org.qdistro.SessionManager1"
@@ -173,20 +175,47 @@ SESSION_MANAGER_IFACE = "org.qdistro.SessionManager1"
 # When set, _silo_state errors (manager offline, timeout, parse error)
 # stop falling through to the legacy trust-the-uid path. Instead they
 # return the sentinel "Unreachable" which RelayMessage rejects with
-# SiloManagerUnreachable. Hosts that have rolled out the session
-# manager should flip this on; legacy bakes keep the fail-open default.
+# SiloManagerUnreachable.
+#
+# Default: fail-CLOSED (True). The standard qdistro bootstrap installs
+# and enables qdistro-session-manager alongside the broker
+# (scripts/install/qdistro-bootstrap.sh, fresh-vm-bootstrap.sh), so the
+# silo registry is reachable by construction; an error means something
+# is actually wrong and a cross-uid relay should be refused rather than
+# trusted. Operators on a legacy bake that ships the broker WITHOUT the
+# session manager can restore the old permissive behaviour with
+# QDISTRO_BROKER_REQUIRE_SILO_ACTIVE=0 or require_silo_active = false in
+# /etc/qdistro/broker.conf. (Note: this gate only fires on a manager
+# *error*; when the manager is reachable but simply has no row for the
+# target uid, _silo_state still returns None and the relay falls through
+# to the legacy trust path — and that path still requires per-message
+# admin approval.)
 # Read at broker start from $QDISTRO_BROKER_REQUIRE_SILO_ACTIVE or
 # /etc/qdistro/broker.conf (key = require_silo_active = true).
 _REQUIRE_SILO_ACTIVE_ENV = "QDISTRO_BROKER_REQUIRE_SILO_ACTIVE"
 _BROKER_CONF_PATH = "/etc/qdistro/broker.conf"
 
 
+_TRUE_TOKENS = ("1", "true", "yes", "on")
+_FALSE_TOKENS = ("0", "false", "no", "off")
+
+
 def _read_require_silo_active() -> bool:
+    # Fail-closed by default: only an explicitly recognized *false* token
+    # turns the gate off. An unrecognized value (typo like "ture", "2")
+    # must NOT silently fail open — it warns and keeps the closed default.
     val = os.environ.get(_REQUIRE_SILO_ACTIVE_ENV, "").strip().lower()
-    if val in ("1", "true", "yes", "on"):
+    if val in _TRUE_TOKENS:
         return True
-    if val in ("0", "false", "no", "off"):
+    if val in _FALSE_TOKENS:
         return False
+    if val:
+        print(
+            f"[broker] WARN {_REQUIRE_SILO_ACTIVE_ENV}={val!r} is not a "
+            f"recognized boolean; defaulting require_silo_active to ON "
+            f"(fail-closed)",
+            flush=True)
+        return True
     try:
         with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
             for raw in fh:
@@ -195,10 +224,21 @@ def _read_require_silo_active() -> bool:
                     continue
                 k, v = line.split("=", 1)
                 if k.strip() == "require_silo_active":
-                    return v.strip().lower() in ("1", "true", "yes", "on")
+                    cval = v.strip().lower()
+                    if cval in _TRUE_TOKENS:
+                        return True
+                    if cval in _FALSE_TOKENS:
+                        return False
+                    print(
+                        f"[broker] WARN {_BROKER_CONF_PATH}: "
+                        f"require_silo_active={cval!r} is not a recognized "
+                        f"boolean; defaulting to ON (fail-closed)",
+                        flush=True)
+                    return True
     except OSError:
         pass
-    return False
+    # No explicit setting → fail closed.
+    return True
 
 
 REQUIRE_SILO_ACTIVE = _read_require_silo_active()
@@ -788,6 +828,9 @@ class Broker(dbus.service.Object):
         # in journalctl at broker start.
         print(f"[broker] secctx_launcher_gated="
               f"{SECCTX_LAUNCHER_GATED}", flush=True)
+        print(f"[broker] require_silo_active={REQUIRE_SILO_ACTIVE} "
+              f"({'fail-closed' if REQUIRE_SILO_ACTIVE else 'fail-open/legacy'})",
+              flush=True)
         # Permission-lineage launch-record store (Phase 1). Trusted
         # launchers register via RegisterLaunch; gates resolve live pids
         # against it (Phase 2/3). Reaped once a minute alongside the
@@ -2716,14 +2759,18 @@ class Broker(dbus.service.Object):
 
         Called by RelayMessage; overridable by the broker test stub.
 
-        Fail-open vs fail-closed: the legacy (default) behaviour is to
-        return None on every error so RelayMessage falls through to
-        the pre-P02 trust path. Every fail-open branch logs a
+        Fail-open vs fail-closed: the default (REQUIRE_SILO_ACTIVE on)
+        is fail-CLOSED — every manager error returns "Unreachable" so
+        RelayMessage refuses the cross-uid relay. Both branches log a
         structured warning so operators auditing "why was this relay
-        allowed?" have a breadcrumb. Hosts can flip to fail-closed by
-        setting QDISTRO_BROKER_REQUIRE_SILO_ACTIVE=true or
-        require_silo_active=true in /etc/qdistro/broker.conf — then
-        every error becomes "Unreachable" and RelayMessage refuses.
+        refused/allowed?" have a breadcrumb. A legacy host that ships
+        the broker without the session manager can restore the old
+        permissive fall-through (return None on error → pre-P02 trust
+        path) with QDISTRO_BROKER_REQUIRE_SILO_ACTIVE=0 or
+        require_silo_active=false in /etc/qdistro/broker.conf. Note the
+        "manager reachable but no row" return below is always None
+        regardless of this toggle — that is a real registry answer, not
+        an error, and the relay still requires admin approval.
         """
         if int(target_uid) == ADMIN_UID:
             return "Active"

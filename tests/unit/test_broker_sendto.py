@@ -73,6 +73,15 @@ class _StubBroker(Broker):
         # If non-None, _relay_forward raises this instead of
         # recording. Useful for the "relay unreachable" path.
         self.forward_exc: BaseException | None = None
+        # Cross-uid silo gate: override the real session-manager lookup
+        # so the test never tries to bind to the system bus. Returns the
+        # target silo's state string ("Active" by default so cross-uid
+        # relays reach their real subject — action format, enqueue,
+        # scope). The P02 gate itself is covered by
+        # test_broker_session_manager_handoff.py; with the broker now
+        # failing CLOSED by default, leaving this unset would make the
+        # real _silo_state hit an absent session manager and refuse.
+        self._silo_state_override = lambda _uid: "Active"
 
     def set_peer(self, uid: int, pid: int = 100,
                  exe: str = "/usr/bin/peer", start: int = 0) -> None:
@@ -85,6 +94,9 @@ class _StubBroker(Broker):
 
     def _peer_info(self, sender, conn):
         return (self._peer_uid, self._peer_pid, self._peer_exe, self._peer_start)
+
+    def _silo_state(self, target_uid):  # type: ignore[override]
+        return self._silo_state_override(target_uid)
 
     def _relay_forward(self, target_uid, target_service, kind, payload):
         if self.forward_exc is not None:
