@@ -163,6 +163,13 @@ def _to_journald(event: str, fields: dict) -> None:
         _best_effort_stderr(f"[qdistro-template-audit] {message}")
 
 
+def _decision(result: str | None) -> bool:
+    # Classify by semantics, not string accident: refused/failed are denials;
+    # applied and deleted are successful, deliberate security actions (a GC
+    # deletion is an enforced retention action, not a denial).
+    return result not in ("refused", "failed")
+
+
 def _forward_to_broker(event: str, fields: dict) -> None:
     """Best-effort forward of a security-relevant decision into the broker
     audit table, mirroring the workflow audit forwarder. Never raises, and
@@ -175,7 +182,7 @@ def _forward_to_broker(event: str, fields: dict) -> None:
         sys.path.insert(0, broker_dir)
     try:
         from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
-        decision = fields.get("result") not in ("refused", "failed", "deleted")
+        decision = _decision(fields.get("result"))
         gen = fields.get("generation") or ""
         tmpl = fields.get("template") or ""
         AuditLog(BROKER_AUDIT_PATH).log(

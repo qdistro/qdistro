@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return build(args.template, no_cache=args.no_cache)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, OSError) as exc:
         log(f"FATAL: {exc}")
         return 2
 

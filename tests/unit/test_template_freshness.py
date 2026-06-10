@@ -138,6 +138,22 @@ def test_check_idle_idle_session_permits(monkeypatch):
     assert ok is True
 
 
+def test_night_window_is_advisory_not_blocking(tmp_path, monkeypatch):
+    # A daytime catch-up run (Persistent= timer) must proceed: night_window is
+    # reported for visibility but excluded from the all_ok gate.
+    layout = _layout(tmp_path)
+    monkeypatch.setattr(fresh, "check_ac_power", lambda: (True, "on AC"))
+    monkeypatch.setattr(fresh, "check_idle", lambda: (True, "idle"))
+    monkeypatch.setattr(fresh, "check_network", lambda: (True, "full"))
+    monkeypatch.setattr(fresh, "check_thermal", lambda: (True, "normal"))
+    monkeypatch.setattr(fresh, "check_free_space", lambda lay: (True, "plenty"))
+    monkeypatch.setattr(fresh, "in_night_window", lambda now: False)  # daytime
+    ok, results = fresh.evaluate_conditions(layout, 1_700_000_000.0)
+    assert ok is True, "night_window=false alone must not block the run"
+    night = [r for r in results if r["name"] == "night_window"][0]
+    assert night["ok"] is False, "night_window is still reported for visibility"
+
+
 def test_evaluate_conditions_force_overrides(tmp_path, monkeypatch):
     layout = _layout(tmp_path)
     monkeypatch.setattr(fresh, "check_free_space", lambda lay: (False, "low disk"))

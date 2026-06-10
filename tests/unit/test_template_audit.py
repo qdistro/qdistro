@@ -69,6 +69,16 @@ def test_migration_adds_columns_to_old_db(tmp_path):
     assert row["identity_revision"] == 2
 
 
+def test_decision_classifies_by_semantics():
+    # Successful security actions forward as decision=True; only refused/failed
+    # are denials. A GC deletion (result="deleted") is a deliberate enforced
+    # action, not a denial — it must NOT classify as decision=False.
+    assert audit._decision("applied") is True
+    assert audit._decision("deleted") is True
+    assert audit._decision("refused") is False
+    assert audit._decision("failed") is False
+
+
 def test_unknown_event_rejected(tmp_path):
     log = audit.TemplateAuditLog(_db(tmp_path))
     try:

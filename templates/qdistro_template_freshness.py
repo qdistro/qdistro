@@ -3,10 +3,12 @@ derived templates (todo/fableplan task 08).
 
 Freshness proves the recipe still builds from scratch; it never promotes.
 It is laptop-aware: a missed window is not a failure — staleness is
-surfaced instead. Conditions are checked at trigger (AC power is gated by
-the unit's ConditionACPower=; the rest are checked in-service): idle,
-trusted non-metered network, normal thermals, free space, an advisory
-night window.
+surfaced instead. The gating conditions are checked at trigger (AC power is
+gated by the unit's ConditionACPower=; the rest are checked in-service):
+idle, trusted non-metered network, normal thermals, free space. The night
+window (22:00–06:00) is advisory only — it is reported for visibility but
+does NOT gate the run, so a Persistent= catch-up fired during the day still
+proceeds once the real conditions pass.
 
 For each derived template whose last successful freshness build is older
 than ``desired_max_age`` (default 7d), this runs qdistro-template-build
@@ -149,21 +151,30 @@ def in_night_window(now: float) -> bool:
     return hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR
 
 
+# Conditions that gate the run. night_window is reported but excluded — it
+# is advisory, so a daytime catch-up still proceeds when these all pass.
+GATING_CONDITIONS = ("ac_power", "idle", "network", "thermal", "free_space")
+
+
 def evaluate_conditions(layout: qt.Layout, now: float,
                         force: bool = False) -> tuple[bool, list[dict]]:
-    """Run all condition checks. Returns (all_ok, results)."""
+    """Run all condition checks. Returns (all_ok, results).
+
+    The night_window result is included in `results` for status visibility
+    but is advisory: it never participates in `all_ok`."""
+    night = in_night_window(now)
     checks = [
         ("ac_power", check_ac_power()),
         ("idle", check_idle()),
         ("network", check_network()),
         ("thermal", check_thermal()),
         ("free_space", check_free_space(layout)),
-        ("night_window", (in_night_window(now),
-                          "advisory night window" if in_night_window(now)
+        ("night_window", (night,
+                          "advisory night window" if night
                           else "outside advisory night window")),
     ]
     results = [{"name": n, "ok": ok, "detail": d} for n, (ok, d) in checks]
-    all_ok = all(r["ok"] for r in results)
+    all_ok = all(r["ok"] for r in results if r["name"] in GATING_CONDITIONS)
     if force:
         return True, results
     return all_ok, results
@@ -307,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_freshness(desired_max_age=args.desired_max_age_days * 86400,
                       force=args.force)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, OSError) as exc:
         log(f"FATAL: {exc}")
         return 2
     # A missed window is not a failure: always exit 0 unless something

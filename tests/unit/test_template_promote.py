@@ -7,6 +7,7 @@ smoke + the VM bats suite."""
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -118,6 +119,69 @@ def test_main_rejects_both_modes():
     # argparse error exits nonzero via SystemExit.
     with pytest.raises(SystemExit):
         promote.main(["dev-silo", "run-a", "--rollback", GEN_A])
+
+
+def _refused_rows(layout):
+    import qdistro_template_audit as audit
+    db = os.path.join(layout.var, "audit", "template_audit.sqlite")
+    log = audit.TemplateAuditLog(db)
+    try:
+        return [r for r in log.recent() if r["event"] == "template.promote.refused"]
+    finally:
+        log.close()
+
+
+def test_resolver_timeout_refuses_with_audit_row(tmp_path):
+    # A hung identity probe must fail closed through the refusal path (nonzero
+    # + audited promote.refused), never escape as an unhandled traceback.
+    layout = _layout(tmp_path)
+    _validated_candidate(layout, "tier2-dev", "run-a", GEN_A)
+    _identity(layout, "dev-silo", "tool", expected_package="tool")
+
+    def hangs(image_ref, selector):
+        raise subprocess.TimeoutExpired(cmd="podman run", timeout=60)
+
+    rc = promote.promote("dev-silo", "run-a", layout=layout, resolver=hangs)
+    assert rc == 1
+    assert not os.path.isfile(layout.binding_file("dev-silo"))
+    assert _refused_rows(layout), "a probe timeout must record a promote.refused row"
+
+
+def test_resolve_selector_timeout_raises_template_error(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="podman run", timeout=60)
+    monkeypatch.setattr(promote.subprocess, "run", boom)
+    with pytest.raises(qt.TemplateError):
+        promote.resolve_selector("img", {"executable": {"path_in_template": "/usr/bin/tool"}})
+
+
+def test_resolve_selector_oserror_raises_template_error(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("podman")
+    monkeypatch.setattr(promote.subprocess, "run", boom)
+    with pytest.raises(qt.TemplateError):
+        promote.resolve_selector("img", {"executable": {"path_in_template": "/usr/bin/tool"}})
+
+
+def test_state_path_refused_on_existing_binding(tmp_path):
+    # --state-path may only be chosen on the first promote; once a binding
+    # exists it must be refused (side-effect-free), never rewrite the silo's
+    # only path to real state.
+    layout = _layout(tmp_path)
+    _validated_candidate(layout, "tier2-dev", "run-a", GEN_A)
+    _validated_candidate(layout, "tier2-dev", "run-b", GEN_B)
+    assert promote.promote("dev-silo", "run-a", layout=layout,
+                           resolver=_no_resolver,
+                           state_path="/custom/state") == 0
+    before = qt.read_binding(layout.binding_file("dev-silo"))
+    assert before["state_path"] == "/custom/state"
+    rc = promote.promote("dev-silo", "run-b", layout=layout, resolver=_no_resolver,
+                         state_path="/other/state")
+    assert rc == 1
+    after = qt.read_binding(layout.binding_file("dev-silo"))
+    assert after["active_generation"] == GEN_A, "binding unchanged"
+    assert after["state_path"] == "/custom/state", "state_path not rewritten"
+    assert _refused_rows(layout), "a --state-path override must record a refused row"
 
 
 # --------------------------------------------------------------------------

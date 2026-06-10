@@ -97,12 +97,21 @@ def resolve_selector(image_ref: str, selector: dict) -> dict:
     path_in_template = exe.get("path_in_template")
     if not path_in_template:
         raise qt.TemplateError("identity selector missing executable.path_in_template")
-    out = subprocess.run(
-        ["podman", "run", "--rm", "--network=none", "--read-only",
-         "--tmpfs", "/tmp", image_ref, "/bin/sh", "-c",
-         _selector_probe_script(path_in_template)],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        out = subprocess.run(
+            ["podman", "run", "--rm", "--network=none", "--read-only",
+             "--tmpfs", "/tmp", image_ref, "/bin/sh", "-c",
+             _selector_probe_script(path_in_template)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A hung identity probe must fail closed through the refusal path
+        # (audited), not escape as a traceback that skips the audit row.
+        raise qt.TemplateError(
+            f"identity probe for {path_in_template!r} timed out") from exc
+    except OSError as exc:
+        raise qt.TemplateError(
+            f"identity probe for {path_in_template!r} failed to run: {exc}") from exc
     fields = {}
     for line in out.stdout.splitlines():
         if "=" in line:
@@ -387,6 +396,15 @@ def promote(silo: str, run_id: str | None = None, *,
                        f"{existing['template']!r}, candidate is {template!r}",
                        silo=silo, template=template, generation=new_gen, run_id=run_id)
 
+    # --state-path sets the silo's only path to real state; it may only be
+    # chosen on the first promote. Refuse (side-effect-free) rather than
+    # silently rewriting an existing binding's state_path.
+    if state_path is not None and existing is not None:
+        return _refuse(layout, f"silo {silo} already has a binding with "
+                       f"state_path {existing['state_path']!r}; --state-path is "
+                       f"only allowed on the first promote",
+                       silo=silo, template=template, generation=new_gen, run_id=run_id)
+
     resolved_state_path = (
         state_path or (existing["state_path"] if existing else None)
         or f"/var/lib/qdistro/silos/{silo}/state"
@@ -439,7 +457,10 @@ def _apply(layout: qt.Layout, silo: str, template: str, new_gen: str,
     try:
         identity_records = revalidate_identity(
             layout, silo, template, new_gen, outgoing, resolver)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, subprocess.TimeoutExpired, OSError) as exc:
+        # A class change, a hung identity probe, or a missing probe binary all
+        # fail closed through the audited refusal path — never a traceback that
+        # skips the promote.refused row.
         return _refuse(layout, str(exc), silo=silo, template=template,
                        generation=new_gen, run_id=run_id)
     identity_revision = (existing["identity_revision"] if existing else 0) + 1
@@ -514,7 +535,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rollback", metavar="GENERATION_DIGEST", default=None,
                         help="flip back to a generation in previous_generations")
     parser.add_argument("--state-path", default=None,
-                        help="silo state mount (first promote only; default "
+                        help="silo state mount, settable only on the first "
+                             "promote (refused once a binding exists; default "
                              "/var/lib/qdistro/silos/<silo>/state)")
     args = parser.parse_args(argv)
     if args.rollback is None and args.run_id is None:
@@ -524,7 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return promote(args.silo, args.run_id, rollback=args.rollback,
                        state_path=args.state_path)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, OSError) as exc:
         log(f"FATAL: {exc}")
         return 2
 

@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return validate(args.run_id)
-    except qt.TemplateError as exc:
+    except (qt.TemplateError, OSError) as exc:
         log(f"FATAL: {exc}")
         return 2
 
