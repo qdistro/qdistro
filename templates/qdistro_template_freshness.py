@@ -83,7 +83,7 @@ def check_idle() -> tuple[bool, str]:
             props = subprocess.run(
                 ["loginctl", "show-session", sid, "-p", "Type", "-p", "IdleHint"],
                 capture_output=True, text=True, timeout=5)
-            kv = dict(l.split("=", 1) for l in props.stdout.splitlines() if "=" in l)
+            kv = dict(ln.split("=", 1) for ln in props.stdout.splitlines() if "=" in ln)
             if kv.get("Type") in ("x11", "wayland", "mir") and kv.get("IdleHint") == "no":
                 return False, f"graphical session {sid} active (not idle)"
         return True, "no active graphical session"
@@ -305,8 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--desired-max-age-days", type=int, default=7)
     args = parser.parse_args(argv)
     try:
-        summary = run_freshness(desired_max_age=args.desired_max_age_days * 86400,
-                                force=args.force)
+        run_freshness(desired_max_age=args.desired_max_age_days * 86400,
+                      force=args.force)
     except qt.TemplateError as exc:
         log(f"FATAL: {exc}")
         return 2

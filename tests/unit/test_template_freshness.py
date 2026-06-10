@@ -233,7 +233,7 @@ def test_run_validates_exact_built_candidate_not_newest_mtime(tmp_path):
     os.makedirs(stale)
     os.utime(stale, (now + 1000, now + 1000))
     validated = []
-    summary = fresh.run_freshness(
+    fresh.run_freshness(
         layout=layout, now=now, force=True,
         builder=lambda t: (0, "the-real-one"),
         validator=lambda run_id: (validated.append(run_id), 0)[1])

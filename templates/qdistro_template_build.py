@@ -225,7 +225,7 @@ def build_candidate(template: str, layout: qt.Layout | None = None,
     # state=failed with its evidence — never an unmarked half-built dir.
     try:
         rc = _run_build(template, run_id, candidate_dir, containerfile,
-                        network_mode, no_cache, audit_db)
+                        containerfile_digest, network_mode, no_cache, audit_db)
         return rc, run_id
     except Exception as exc:  # noqa: BLE001 — record evidence, fail closed
         with open(os.path.join(candidate_dir, "build.log"), "a", encoding="utf-8") as logf:
@@ -239,8 +239,8 @@ def build_candidate(template: str, layout: qt.Layout | None = None,
 
 
 def _run_build(template: str, run_id: str, candidate_dir: str,
-               containerfile: str, network_mode: str, no_cache: bool,
-               audit_db: str) -> int:
+               containerfile: str, containerfile_digest: str,
+               network_mode: str, no_cache: bool, audit_db: str) -> int:
     started = time.monotonic()
     # Candidate tag is unique per run-id so it never shadows another
     # candidate; the durable reference is the digest we resolve below.
@@ -275,7 +275,6 @@ def _run_build(template: str, run_id: str, candidate_dir: str,
 
     image_digest = _normalize_digest(_podman_inspect(tag, "{{.Digest}}"))
     image_id = _normalize_digest(_podman_inspect(tag, "{{.Id}}"))
-    containerfile_digest = file_digest(containerfile)
     qt.require_digest(image_id, "podman image id")
     qt.require_digest(image_digest, "podman image digest")
 
@@ -285,6 +284,12 @@ def _run_build(template: str, run_id: str, candidate_dir: str,
         containerfile=containerfile, containerfile_digest=containerfile_digest,
         build_command=build_command, network_mode=network_mode,
     )
+    # Drop the per-run candidate tag now that the digest is recorded: the
+    # immutable digest is the durable reference, and an untagged image lets
+    # GC reclaim it later with `podman rmi <digest>` (a multi-tagged image
+    # refuses by-digest removal). Best-effort — failure only delays GC.
+    subprocess.run(["podman", "untag", tag], env=_clean_env(),
+                   capture_output=True, text=True)
     qt.set_candidate_state(candidate_dir, "built")
     audit.emit("template.build.finished", db_path=audit_db, template=template,
                run_id=run_id, result="success", generation=image_id,

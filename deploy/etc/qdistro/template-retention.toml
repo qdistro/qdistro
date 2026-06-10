@@ -16,6 +16,11 @@ failed_candidate_days = 7
 
 # Build logs retained 180 days; audit evidence 3 years. Security-decision
 # evidence is kept indefinitely (never expressed as a day count).
+# NOTE: build_log_days and audit_evidence_years are declared and validated
+# but NOT yet enforced by qdistro-template-gc in this slice (it collects
+# generation/failed-candidate payloads only). Likewise a validated-but-
+# never-promoted (parked) candidate keeps its payload until promoted or its
+# template is retired. Both are tracked for later slices.
 build_log_days = 180
 audit_evidence_years = 3
 

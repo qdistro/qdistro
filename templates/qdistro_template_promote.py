@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +38,11 @@ def log(msg: str) -> None:
 
 def _audit_db(layout: qt.Layout) -> str:
     return os.path.join(layout.var, "audit", "template_audit.sqlite")
+
+
+def _image_exists(digest: str) -> bool:
+    return subprocess.run(["podman", "image", "exists", digest],
+                          capture_output=True).returncode == 0
 
 
 def _refuse(layout: qt.Layout, reason: str, *, rc: int = 1, silo=None,
@@ -76,6 +80,13 @@ def _selector_probe_script(path_in_template: str) -> str:
 
 def resolve_selector(image_ref: str, selector: dict) -> dict:
     """Resolve an identity selector inside the candidate image.
+
+    KNOWN GAP (this slice): the probe runs inside the candidate, so a
+    poisoned candidate could forge its output to slip a class change past
+    this gate. That is acceptable here because promotion is manual and the
+    untrusted-source audit gate is deferred (doc/templates.md); the robust
+    fix is host-side inspection (podman mount/cp + host rpm --root), cheap on
+    the podman-image backend, and is left to the audit-gate slice.
 
     Returns the executable's resolved path, content digest, owning package,
     whether the declared path is a symlink (wrapper), and the declared
@@ -196,31 +207,10 @@ def revalidate_identity(layout: qt.Layout, silo: str, template: str,
 # --------------------------------------------------------------------------
 
 def _atomic_copy(src: str, dst: str, mode: int = 0o644) -> None:
-    """Copy src to dst via a temp file + fsync + rename in dst's dir, so a
-    crash never leaves a partially written destination."""
+    """Copy src to dst atomically (temp + fsync + rename) so a crash never
+    leaves a partially written destination."""
     with open(src, "rb") as fh:
-        data = fh.read()
-    directory = os.path.dirname(dst) or "."
-    import tempfile
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
-    try:
-        with os.fdopen(fd, "wb") as out:
-            out.write(data)
-            out.flush()
-            os.fsync(out.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, dst)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    dir_fd = os.open(directory, os.O_DIRECTORY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        qt.atomic_write_bytes(dst, fh.read(), mode)
 
 
 def _manifest_already_materialized(man_dst: str) -> bool:
@@ -295,12 +285,13 @@ def _remove_pin(layout: qt.Layout, template: str, gen: str, reason: str) -> None
 
 def _retained_previous_count(layout: qt.Layout) -> int:
     """How many rollback targets to keep in the binding. Mirrors the
-    promoted-generation retention count; falls back to 3."""
-    try:
-        retention = qt.validate_retention(qt.read_toml(layout.retention_file))
-        return max(1, retention["keep_promoted_generations"])
-    except (qt.TemplateError, OSError, ValueError):
+    promoted-generation retention count. An absent file falls back to the
+    default; a present-but-corrupt file raises (same fail-closed discipline
+    as GC) rather than silently defaulting."""
+    if not os.path.isfile(layout.retention_file):
         return 3
+    retention = qt.validate_retention(qt.read_toml(layout.retention_file))
+    return max(1, retention["keep_promoted_generations"])
 
 
 def _build_binding(layout: qt.Layout, silo: str, template: str, new_gen: str,
@@ -332,7 +323,7 @@ def _build_binding(layout: qt.Layout, silo: str, template: str, new_gen: str,
 def promote(silo: str, run_id: str | None = None, *,
             rollback: str | None = None, layout: qt.Layout | None = None,
             resolver=resolve_selector, state_path: str | None = None,
-            now: float | None = None) -> int:
+            now: float | None = None, image_exists=_image_exists) -> int:
     layout = layout or qt.Layout()
     qt.require_safe_name(silo, "silo")
     now = time.time() if now is None else now
@@ -340,7 +331,8 @@ def promote(silo: str, run_id: str | None = None, *,
     existing = qt.read_binding(binding_path) if os.path.isfile(binding_path) else None
 
     if rollback is not None:
-        return _do_rollback(layout, silo, rollback, existing, resolver, now)
+        return _do_rollback(layout, silo, rollback, existing, resolver, now,
+                            image_exists)
 
     # --- promote a validated candidate ---------------------------------
     found = _find_candidate(layout, run_id)
@@ -404,7 +396,7 @@ def promote(silo: str, run_id: str | None = None, *,
 
 
 def _do_rollback(layout: qt.Layout, silo: str, target: str, existing: dict | None,
-                 resolver, now: float) -> int:
+                 resolver, now: float, image_exists) -> int:
     qt.require_digest(target, "rollback generation")
     if existing is None:
         return _refuse(layout, f"silo {silo} has no binding to roll back",
@@ -416,6 +408,13 @@ def _do_rollback(layout: qt.Layout, silo: str, target: str, existing: dict | Non
     gen_dir = layout.generation_dir(template, target)
     if not os.path.isdir(gen_dir):
         return _refuse(layout, f"no generation record at {gen_dir} for rollback target",
+                       silo=silo, template=template, generation=target)
+    # Evidence outlives payload: the generation record can survive a GC that
+    # already reclaimed the image. Refuse a rollback to an unlaunchable digest
+    # rather than flipping the binding to a target the silo can't start.
+    if not image_exists(target):
+        return _refuse(layout, f"rollback target {target} has no image payload "
+                       f"(collected past its rollback window); cannot launch it",
                        silo=silo, template=template, generation=target)
     audit.emit("template.promote.requested", db_path=_audit_db(layout),
                silo=silo, template=template, generation=target,

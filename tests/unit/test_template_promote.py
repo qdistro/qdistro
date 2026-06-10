@@ -305,7 +305,8 @@ def test_rollback_flips_back(tmp_path):
     promote.promote("dev-silo", "run-a", layout=layout, resolver=_no_resolver)
     promote.promote("dev-silo", "run-b", layout=layout, resolver=_no_resolver)
     # now active=B, previous=[A]; roll back to A
-    rc = promote.promote("dev-silo", rollback=GEN_A, layout=layout, resolver=_no_resolver)
+    rc = promote.promote("dev-silo", rollback=GEN_A, layout=layout,
+                         resolver=_no_resolver, image_exists=lambda d: True)
     assert rc == 0
     binding = qt.read_binding(layout.binding_file("dev-silo"))
     assert binding["active_generation"] == GEN_A
@@ -314,6 +315,24 @@ def test_rollback_flips_back(tmp_path):
     # both generations pinned during the window
     assert os.path.isfile(os.path.join(layout.pins_for("tier2-dev", GEN_A), "active.toml"))
     assert os.path.isfile(os.path.join(layout.pins_for("tier2-dev", GEN_B), "rollback-window.toml"))
+
+
+def test_rollback_refused_when_payload_collected(tmp_path):
+    # The generation record can outlive the image payload (evidence outlives
+    # payload). Rollback to a digest with no image must be refused, not flip
+    # the binding to an unlaunchable target.
+    layout = _layout(tmp_path)
+    _validated_candidate(layout, "tier2-dev", "run-a", GEN_A)
+    _validated_candidate(layout, "tier2-dev", "run-b", GEN_B)
+    promote.promote("dev-silo", "run-a", layout=layout, resolver=_no_resolver,
+                    image_exists=lambda d: True)
+    promote.promote("dev-silo", "run-b", layout=layout, resolver=_no_resolver,
+                    image_exists=lambda d: True)
+    # A's record exists but its image was GC'd -> rollback refused.
+    rc = promote.promote("dev-silo", rollback=GEN_A, layout=layout,
+                         resolver=_no_resolver, image_exists=lambda d: d != GEN_A)
+    assert rc == 1
+    assert qt.read_binding(layout.binding_file("dev-silo"))["active_generation"] == GEN_B
 
 
 def test_rollback_unknown_target_refused(tmp_path):

@@ -69,7 +69,9 @@ def _binding_actives(layout: qt.Layout) -> set[tuple[str, str]]:
     if not os.path.isdir(layout.bindings_dir):
         return actives
     for name in os.listdir(layout.bindings_dir):
-        if not name.endswith(".toml"):
+        # Skip atomic-write temp files a crash may have left behind; they are
+        # by construction never committed state and must not wedge GC.
+        if name.startswith(".tmp-") or not name.endswith(".toml"):
             continue
         binding = qt.read_binding(os.path.join(layout.bindings_dir, name))
         actives.add((binding["template"], binding["active_generation"]))
@@ -92,7 +94,7 @@ def build_pinned_set(layout: qt.Layout, now: float) -> set[tuple[str, str]]:
             if not os.path.isdir(gdir):
                 continue
             for pin_name in os.listdir(gdir):
-                if not pin_name.endswith(".toml"):
+                if pin_name.startswith(".tmp-") or not pin_name.endswith(".toml"):
                     continue
                 pin = qt.validate_pin(qt.read_toml(os.path.join(gdir, pin_name)))
                 # Reconcile the receipt's contents with its path: a valid but

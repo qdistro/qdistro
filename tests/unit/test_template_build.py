@@ -188,8 +188,9 @@ def test_build_passes_http_proxy_false_and_clean_env(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(cmd, *a, **k):
-        captured["cmd"] = cmd
-        captured["env"] = k.get("env")
+        if "build" in cmd:  # capture the build invocation, not the later untag
+            captured["cmd"] = cmd
+            captured["env"] = k.get("env")
         return type("P", (), {"returncode": 0})()
 
     monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@proxy:3128")

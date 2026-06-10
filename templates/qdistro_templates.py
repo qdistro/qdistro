@@ -191,7 +191,7 @@ def read_toml(path: str) -> dict:
         return tomllib.load(fh)
 
 
-def atomic_write(path: str, data: str, mode: int = 0o644) -> None:
+def atomic_write_bytes(path: str, data: bytes, mode: int = 0o644) -> None:
     """Write ``data`` to ``path`` via temp-file + rename in the same dir.
 
     The rename is atomic on POSIX, so a reader (the launch path, GC)
@@ -201,7 +201,7 @@ def atomic_write(path: str, data: str, mode: int = 0o644) -> None:
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".toml")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
@@ -218,6 +218,11 @@ def atomic_write(path: str, data: str, mode: int = 0o644) -> None:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+def atomic_write(path: str, data: str, mode: int = 0o644) -> None:
+    """Text wrapper around :func:`atomic_write_bytes`."""
+    atomic_write_bytes(path, data.encode("utf-8"), mode)
 
 
 def write_toml_atomic(path: str, obj: dict, mode: int = 0o644) -> None:
