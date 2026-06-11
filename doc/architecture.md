@@ -83,6 +83,13 @@ Regular users cannot `open()` device nodes for sensitive hardware. Enforcement
 is layered via SELinux policy and cgroup device whitelists on user sessions.
 PipeWire and polkit-gated services surface virtual equivalents.
 
+The direction of travel is to move hostile-input hardware off the host
+entirely: a dedicated VM owns the device and publishes a narrow high-level
+protocol ([device-silos.md](device-silos.md)). Printing is the first
+instance ([printing.md](printing.md)); the network stack is next
+([networking.md](networking.md)). Hardware that faces only local input
+(audio, camera, fingerprint) stays on the host under SELinux confinement.
+
 ## TTY sessions
 
 A user session can run as a **TTY session**:

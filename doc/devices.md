@@ -1,5 +1,11 @@
 # Devices and hardware
 
+The forward direction for hostile-input hardware (network, print/scan,
+eventually Bluetooth) is to move its management into device silos —
+dedicated VMs publishing narrow protocols; see
+[device-silos.md](device-silos.md). The rules below govern hardware that
+stays on the host.
+
 ## Admin owns all hardware
 
 Regular nested sessions cannot directly open device nodes for sensitive

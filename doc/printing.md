@@ -42,8 +42,10 @@ This is the same reasoning as the isolation ladder: the CUPS tier is tier 5
  + drivers. The shipped image is Tumbleweed Minimal-VM Cloud with `cups`,
  `cups-filters`, `cups-browsed`, `cups-pdf`, and `socat` (vsock bridge
  from CID-any:631 to the local `cupsd` unix socket).
-- **No user data.** Read-only OS image + tmpfs for the job spool. Nothing
- user-owned crosses the boundary.
+- **No durable user data.** Read-only OS image + tmpfs for the job spool.
+ Print jobs transit the VM, but nothing user-owned persists across a
+ rebuild — no secrets, credentials, or silo storage live there. This is
+ the device-silo pattern ([device-silos.md](device-silos.md)).
 - **No general network.** The virtio-net NIC is bridged to a **print-only
  VLAN** (if network printers exist) or only connected to the host via
  vsock (USB-only).

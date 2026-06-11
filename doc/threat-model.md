@@ -77,3 +77,51 @@ per-user auth) only make sense once the model is clear.
  sessions, or credentials: none exist there. The narrow residual
  is first-launch state migration, which runs in the real silo under a
  declared network policy with a pre-migration snapshot.
+
+## The host kernel API is not a secure surface
+
+Isolation tiers 0–3 (none / SELinux / podman / uid) all rest on the host
+kernel: one kernel LPE collapses them together. Netfilter-class
+*correctness* bugs (e.g. the iptables `!` rule mismatch) are a distinct
+failure class — the rule silently does not mean what its author thinks —
+and no amount of host hardening addresses it; only relocating the parsing
+does.
+
+Consequences:
+
+- Tiers 0–3 are honest about what they are: graduated *authority and
+ code* confinement sharing host-kernel fate. The VM tiers are where
+ containment survives a host-kernel-quality bug.
+- Hardware-facing parsing (802.11 frames, Bluetooth GATT, USB
+ descriptors, IPP) migrates off the host into **device silos**
+ ([device-silos.md](device-silos.md)) as those land — printing first
+ ([printing.md](printing.md)), network next
+ ([networking.md](networking.md)).
+
+## TCB process discipline
+
+The TCB processes (broker, session manager, locker, polkit agent) must
+follow two dom0-style rules, enforced per-process (the admin *uid* keeps
+NetworkManager until the net VM lands). Rule 1 is a **hardening
+target**: the current units do not yet set these directives; rollout
+(one service first, with policy-build tests) is tracked in
+`todo/fable-networking`.
+
+1. **No network access.** systemd `PrivateNetwork=yes` (or
+ `IPAddressDeny=any` + `RestrictAddressFamilies=AF_UNIX AF_NETLINK`)
+ on the unit, AND no inet-socket permissions in the process's SELinux
+ domain, backed by a `neverallow` assertion so the policy *build*
+ fails if a future module grants it (the tier-2 policy already uses
+ `neverallow` on network socket classes — same pattern). Precision
+ matters per process: `IPAddressDeny` covers IP traffic only, and
+ AF_UNIX / AF_VSOCK access is granted or denied separately — the
+ implementation names exact SELinux domains and socket classes,
+ including whether each process may use vsock. This does not shrink
+ the D-Bus inbound surface; it eliminates the "privileged code
+ fetches and parses something from the network" class and kills
+ exfiltration after a TCB compromise.
+2. **Envelope-only parsing.** TCB processes parse only size-capped
+ structured envelopes (JSON / D-Bus metadata) with identity taken from
+ kernel peer credentials, never from the payload. Anything richer —
+ HTML, images, archives — is parsed in an unprivileged worker. The
+ broker's `PageExtract` gate is the existing example of the pattern.

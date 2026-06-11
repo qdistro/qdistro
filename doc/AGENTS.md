@@ -126,6 +126,9 @@ Defaults:
 - New daemon → SELinux policy module added to `selinux/`. Permissive
   is acceptable during initial development; enforcing must be
   reached before the daemon ships.
+- New TCB process → no network access and envelope-only parsing.
+  See "TCB process discipline" in
+  [threat-model.md](threat-model.md).
 
 ## Testing patterns
 
