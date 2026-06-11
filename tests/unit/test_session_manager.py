@@ -1112,3 +1112,14 @@ class TestEgressReviewFixes:
         store.create("work", 2000)                # legacy (no egress)
         store.start("work")
         assert netns_name("work") not in ops.netns
+
+
+class TestNftBenign:
+    def test_add_existing_and_delete_missing_are_benign(self):
+        assert sm._nft_benign("Error: Could not process rule: File exists")
+        assert sm._nft_benign("Error: Could not process rule: No such file or directory")
+        assert sm._nft_benign("element does not exist")
+
+    def test_real_error_is_not_benign(self):
+        assert not sm._nft_benign("Error: syntax error, unexpected newline")
+        assert not sm._nft_benign("")

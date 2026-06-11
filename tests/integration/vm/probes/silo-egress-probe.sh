@@ -131,11 +131,24 @@ ip netns exec "$NS_WG" ping -c1 -W3 10.7.0.1 >/dev/null 2>&1 \
 pass "wg silo reaches the tunnel peer (10.7.0.1) when the tunnel is up"
 
 # 2c. The silo CANNOT reach a raw-WAN address — the only route is the tunnel,
-#     and the loopback server does not forward. (10.0.2.2 = QEMU slirp host.)
-if ip netns exec "$NS_WG" ping -c1 -W2 10.0.2.2 >/dev/null 2>&1; then
-    err "wg silo reached raw WAN 10.0.2.2 — egress is NOT tunnel-confined"
+#     and the loopback server does not forward. Use the VM's REAL default
+#     gateway as the WAN target, and require a POSITIVE CONTROL (the init netns
+#     CAN reach it) so this can't false-pass when the target is simply
+#     unreachable for unrelated reasons (codex #5). If there's no reachable
+#     gateway control, fall back to the deterministic routing-table proof (2a:
+#     the silo netns has no non-tunnel route at all).
+GW="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+if [ -n "$GW" ] && ping -c1 -W2 "$GW" >/dev/null 2>&1; then
+    note "WAN control: init netns reaches gateway $GW"
+    if ip netns exec "$NS_WG" ping -c1 -W2 "$GW" >/dev/null 2>&1; then
+        err "wg silo reached raw WAN $GW — egress is NOT tunnel-confined"
+    fi
+    pass "wg silo cannot reach raw WAN $GW (egress confined to the tunnel)"
+else
+    # No positive control available; 2a already proved there is no non-tunnel
+    # route in the silo netns, which is the deterministic guarantee.
+    pass "wg silo cannot reach raw WAN (egress confined to the tunnel)"
 fi
-pass "wg silo cannot reach raw WAN (egress confined to the tunnel)"
 
 # 2d. Per-silo resolver is the tunnel-side DNS, via the ip-netns-exec bind-mount.
 rs="$(ip netns exec "$NS_WG" cat /etc/resolv.conf 2>/dev/null)"
@@ -155,8 +168,11 @@ ip link set "$SRV_IF" down
 if ip netns exec "$NS_WG" ping -c1 -W2 10.7.0.1 >/dev/null 2>&1; then
     err "silo still reached 10.7.0.1 after the tunnel went down"
 fi
-if ip netns exec "$NS_WG" ping -c1 -W2 10.0.2.2 >/dev/null 2>&1; then
-    err "silo fell back to raw WAN after the tunnel went down (KILL-SWITCH BREACH)"
+# No raw-WAN fallback: the silo's only route is the (now-down) tunnel, so a
+# packet to the real gateway is encrypted to a dead endpoint and dropped —
+# never re-routed to the WAN. (GW from step 2c; safe even if empty.)
+if [ -n "${GW:-}" ] && ip netns exec "$NS_WG" ping -c1 -W2 "$GW" >/dev/null 2>&1; then
+    err "silo fell back to raw WAN ($GW) after tunnel-down (KILL-SWITCH BREACH)"
 fi
 pass "tunnel down => silo dark with no raw-WAN fallback (kill-switch by construction)"
 ip link set "$SRV_IF" up   # restore for any later step

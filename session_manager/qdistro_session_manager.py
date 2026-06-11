@@ -357,6 +357,15 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
 # System-side adapter
 # ---------------------------------------------------------------------------
 
+def _nft_benign(stderr: str) -> bool:
+    """True if an nft element add/delete error is a benign no-op for us:
+    adding an element that already exists, or deleting one that's absent."""
+    s = (stderr or "").lower()
+    return ("file exists" in s            # add-existing
+            or "no such file" in s        # delete-missing
+            or "does not exist" in s)
+
+
 class _SystemOps:
     """Real implementation of the side-effecting ops (useradd,
     userdel, cgroup writes, systemctl). Tests substitute a fake
@@ -587,13 +596,17 @@ class _SystemOps:
                        check=True)
 
     def addr_add(self, ns, ifname, address) -> None:
-        self._ip(ns, "addr", "add", address, "dev", ifname)
+        # `replace` (not `add`) so reattach() on a link-up is idempotent — a
+        # re-add of an existing address fails EEXIST (codex #6).
+        self._ip(ns, "addr", "replace", address, "dev", ifname)
 
     def route_add_default_dev(self, ns, ifname) -> None:
-        self._ip(ns, "route", "add", "default", "dev", ifname)
+        # `replace` so reattach is idempotent (a wg link bounce flushes the
+        # route; re-adding an existing one would fail).
+        self._ip(ns, "route", "replace", "default", "dev", ifname)
 
     def route_add_default_via(self, ns, gateway) -> None:
-        self._ip(ns, "route", "add", "default", "via", gateway)
+        self._ip(ns, "route", "replace", "default", "via", gateway)
 
     def ipv6_disable(self, ns, ifname) -> None:
         # Stop SLAAC handing a direct-egress silo a v6 path around the NAT.
@@ -636,29 +649,50 @@ class _SystemOps:
                         "peer", "name", str(peer_if)], check=True)
 
     def _nft_ensure_table(self) -> None:
-        # One dedicated table so per-silo changes never touch other firewall
-        # state. Two sets drive the rules; per-silo apply/teardown is just an
-        # element add/del. Created once; the `add`s below are not idempotent
-        # for rules, so we only build the scaffold when the table is absent.
-        present = subprocess.run(
+        # Self-healing + fail-closed (codex #1). A dedicated table so per-silo
+        # changes never touch other firewall state; two sets drive the rules and
+        # per-silo apply/teardown is just an element add/del. We VERIFY the
+        # backstop drop rule + masquerade rule are actually present (not merely
+        # that the table exists), and rebuild the scaffold if the table is
+        # missing or partial — a stale/partial table would otherwise silently
+        # disable the backstop. Raises on failure so the caller fails closed.
+        listing = subprocess.run(
             ["nft", "list", "table", "inet", self._NFT_TABLE],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        if present:
-            return
-        script = (
+            capture_output=True, text=True)
+        if (listing.returncode == 0
+                and "skuid @blocked_uids drop" in listing.stdout
+                and "@nat_subnets" in listing.stdout):
+            return                               # healthy
+        # (Re)build. `add table`/`add set` are idempotent and PRESERVE existing
+        # set elements, so other silos' backstop/nat entries survive a rebuild;
+        # we then delete+re-add each chain so its rule is present exactly once.
+        base = (
             f"add table inet {self._NFT_TABLE}\n"
             f"add set inet {self._NFT_TABLE} blocked_uids {{ type uid; }}\n"
             f"add set inet {self._NFT_TABLE} nat_subnets "
-            f"{{ type ipv4_addr; flags interval; }}\n"
+            f"{{ type ipv4_addr; flags interval; }}\n")
+        r = subprocess.run(["nft", "-f", "-"], input=base.encode(),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"nft egress scaffold (table/sets) failed: {r.stderr.strip()}")
+        for chain in ("out", "post"):
+            subprocess.run(["nft", "delete", "chain", "inet", self._NFT_TABLE,
+                            chain], check=False, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        chains = (
             f"add chain inet {self._NFT_TABLE} out "
             f"{{ type filter hook output priority 0; }}\n"
+            f"add rule inet {self._NFT_TABLE} out meta skuid @blocked_uids drop\n"
             f"add chain inet {self._NFT_TABLE} post "
             f"{{ type nat hook postrouting priority srcnat; }}\n"
-            f"add rule inet {self._NFT_TABLE} out meta skuid @blocked_uids drop\n"
             f"add rule inet {self._NFT_TABLE} post "
-            f"ip saddr @nat_subnets masquerade\n"
-        )
-        subprocess.run(["nft", "-f", "-"], input=script.encode(), check=True)
+            f"ip saddr @nat_subnets masquerade\n")
+        r = subprocess.run(["nft", "-f", "-"], input=chains.encode(),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"nft egress backstop rule install failed: {r.stderr.strip()}")
 
     def nft_skuid_drop(self, uid, enable) -> None:
         # Defense-in-depth backstop: drop traffic from a silo uid that runs in
@@ -666,19 +700,26 @@ class _SystemOps:
         # route topology is the primary kill-switch; this catches stragglers.
         self._nft_ensure_table()
         verb = "add" if enable else "delete"
-        # check=False: add-existing / delete-missing are both no-ops for us.
-        subprocess.run(
+        r = subprocess.run(
             ["nft", verb, "element", "inet", self._NFT_TABLE, "blocked_uids",
              "{", str(int(uid)), "}"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            capture_output=True, text=True)
+        # add-existing / delete-missing are benign no-ops; surface anything else
+        # so a genuinely failed backstop change is visible, not swallowed.
+        if r.returncode != 0 and not _nft_benign(r.stderr):
+            log.warning("nft backstop %s uid=%s failed: %s",
+                        verb, uid, r.stderr.strip())
 
     def nat_masquerade(self, subnet, enable) -> None:
         self._nft_ensure_table()
         verb = "add" if enable else "delete"
-        subprocess.run(
+        r = subprocess.run(
             ["nft", verb, "element", "inet", self._NFT_TABLE, "nat_subnets",
              "{", str(subnet), "}"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            capture_output=True, text=True)
+        if r.returncode != 0 and not _nft_benign(r.stderr):
+            log.warning("nft nat %s subnet=%s failed: %s",
+                        verb, subnet, r.stderr.strip())
 
     def write_netns_resolv(self, ns, nameservers) -> None:
         # `ip netns exec <ns>` bind-mounts /etc/netns/<ns>/resolv.conf over
@@ -1252,6 +1293,24 @@ class _SiloStore:
         except Exception as e:  # noqa: BLE001
             log.warning("netns_remove for %r failed: %s — continuing", name, e)
 
+    def _force_clear_egress(self, name: str, uid: int) -> None:
+        """Unconditionally clear ANY egress state for a silo (devices, the nft
+        skuid backstop, the per-netns resolver, the netns) regardless of its
+        current policy. Used when starting a legacy (egress=None) silo that has
+        stale state from a prior policy or a crash — _teardown_egress short-
+        circuits on egress=None, which is why this exists. Only invoked when a
+        stale netns is detected, so normal legacy silos pay nothing. Best-effort."""
+        ns = _egress.netns_name(name)
+        try:
+            self._egress.teardown(ns, uid, None, self._ops)
+        except Exception as e:  # noqa: BLE001
+            log.warning("forced egress clear for %r failed: %s — continuing",
+                        name, e)
+        try:
+            self._ops.netns_remove(ns)
+        except Exception as e:  # noqa: BLE001
+            log.warning("netns_remove for %r failed: %s — continuing", name, e)
+
     # ---- create / delete -----------------------------------------------
 
     def create(self, name: str, uid: int, *, autostart: bool = False,
@@ -1460,12 +1519,20 @@ class _SiloStore:
                             if self._is_netns_backed(silo):
                                 self._apply_egress(silo)
                             else:
-                                # Legacy silo: ensure no stale netns lingers from
-                                # a prior egress policy / crash-mid-stop, else
-                                # spawn-tier3 (which keys off netns existence)
-                                # would silently run it in a leftover dark netns.
-                                self._ops.netns_remove(
-                                    _egress.netns_name(silo.name))
+                                # Legacy silo (egress=None): if a netns lingers
+                                # from a prior policy / crash-mid-stop, FULLY
+                                # clear it — devices, the per-netns resolver,
+                                # AND the nft skuid backstop. A leftover backstop
+                                # element would drop this silo's traffic in the
+                                # init netns, leaving a legacy silo permanently
+                                # dark on host networking (codex #2); a leftover
+                                # netns would make spawn-tier3 run it in a stale
+                                # dark netns (Fable S5). Guarded on netns
+                                # existence so a normal legacy silo (the common
+                                # case) touches no netns/nft state at all.
+                                if self._ops.netns_exists(
+                                        _egress.netns_name(silo.name)):
+                                    self._force_clear_egress(silo.name, silo.uid)
                             unit = SILO_LAUNCHER_FMT.format(name=silo.name,
                                                             uid=silo.uid)
                         self._ops.systemctl_start(unit)

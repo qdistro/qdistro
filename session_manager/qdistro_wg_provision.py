@@ -148,6 +148,13 @@ def main(argv: "list[str] | None" = None) -> int:
         print("qdistro-wg-provision must run as root (stores the key pinned "
               "to root and writes /etc/qdistro/wg)", file=sys.stderr)
         return 1
+    if not args.pin_selinux:
+        # uid=0 alone means "any root process may read the key". Root is TCB, so
+        # this is acceptable, but a dedicated session-manager SELinux domain
+        # (none exists yet) should tighten it. Warn so the operator knows.
+        print("WARNING: storing the key pinned to uid=0 only (any root process "
+              "can read it). Pass --pin-selinux <session-manager domain> to "
+              "tighten once that domain exists.", file=sys.stderr)
     pub = provision(
         args.name, peer_public_key=args.peer_public_key,
         endpoint=args.endpoint, address=args.address, dns=args.dns,
