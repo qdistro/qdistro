@@ -877,11 +877,71 @@ def _default_tunnel_resolver(name: str) -> TunnelConfig:
     )
 
 
+# WireGuard key custody (task 3 Phase C). Per-tunnel private keys live in this
+# qdistro-pwd vault, pinned so only root (the session-manager — TCB) can read
+# them; they never land in a silo home. The public key / endpoint / address /
+# dns are non-secret and live in WG_CONFIG_DIR instead.
+WG_PWD_VAULT = "wireguard"
+PWD_BUS_NAME = "org.qdistro.Pwd1"
+PWD_OBJ_PATH = "/org/qdistro/Pwd1"
+
+
+def _wg_key_tag(name: str) -> str:
+    return f"wg/{name}/private-key"
+
+
+def _pwd_err_reason(e: Exception) -> str:
+    """Map a pwd D-Bus error to a short, retriable reason for the dark state."""
+    name = ""
+    getter = getattr(e, "get_dbus_name", None)
+    if callable(getter):
+        name = getter() or ""
+    name = name or type(e).__name__
+    if name.endswith("NotUnlocked"):
+        return "vault-locked"        # autostart before admin auth, or relock
+    if name.endswith("NotFound"):
+        return "no-key"
+    if name.endswith("PolicyError"):
+        return "pin-refused"
+    return "pwd-unavailable"
+
+
+def _pwd_getitem(vault: str, tag: str) -> str:
+    """Real D-Bus GetItem against qdistro-pwd on the system bus. Imported
+    lazily so headless unit tests (which inject a fake getter) need no bus."""
+    import dbus  # local import: optional dependency
+    bus = dbus.SystemBus()
+    proxy = bus.get_object(PWD_BUS_NAME, PWD_OBJ_PATH)
+    return str(proxy.GetItem(vault, tag, dbus_interface=PWD_BUS_NAME))
+
+
+class _PwdKeyProvider:
+    """Fetches a tunnel's WireGuard private key from qdistro-pwd. ANY failure
+    (locked/pre-auth vault, missing key, pin refusal, bus down) raises
+    KeyUnavailable so the silo comes up dark (retriable once the vault is
+    unlocked / the key is provisioned) rather than failing its start (B3). The
+    getter is injectable for tests."""
+
+    def __init__(self, getter=None):
+        self._getter = getter or _pwd_getitem
+
+    def __call__(self, name: str) -> str:
+        tag = _wg_key_tag(name)
+        try:
+            value = self._getter(WG_PWD_VAULT, tag)
+        except KeyUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001 — any pwd/bus failure -> dark
+            raise KeyUnavailable(_pwd_err_reason(e)) from e
+        if not value:
+            raise KeyUnavailable("empty key")
+        return value
+
+
 def _default_key_provider(name: str) -> str:
-    """Fetch a tunnel's WireGuard private key from qdistro-pwd. Phase A leaves
-    this unwired (raises KeyUnavailable so wg silos come up dark and safe);
-    Phase C wires the pwd GetItem call pinned to the session-manager."""
-    raise KeyUnavailable("wireguard key custody not yet wired (task 3 Phase C)")
+    """Default for a bare _SiloStore (headless tests): wg silos come up dark.
+    The daemon wires a live _PwdKeyProvider when it constructs the store."""
+    raise KeyUnavailable("wireguard key custody not wired (no pwd provider)")
 
 
 # ---------------------------------------------------------------------------
@@ -1849,6 +1909,10 @@ if dbus is not None:
                 config_path=config_path,
                 on_change=self._emit_changed,
                 audit=self.audit,
+                # Live key custody: fetch wg private keys from qdistro-pwd
+                # over D-Bus, pinned to root. A locked/pre-auth vault brings a
+                # wg silo up dark rather than failing its start (task 3 C/B3).
+                key_provider=_PwdKeyProvider(),
             )
             if autostart:
                 self.store.autostart_pass()
