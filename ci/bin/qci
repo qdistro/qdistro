@@ -691,9 +691,52 @@ gate_host() {
     # giant process. A single native segfault (e.g. a Qt teardown crash) then
     # fails only that batch instead of aborting the whole ~2300-test suite,
     # and the crash is attributable to a small file set. rc=1 if any batch fails.
-    c='rc=0; mapfile -t _f < <(find tests/unit -name "test_*.py" | sort); for ((_i=0; _i<${#_f[@]}; _i+=30)); do PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest "${_f[@]:_i:30}" || rc=1; done; exit $rc'
+    #
+    # Coverage (REPORT-ONLY): when pytest-cov is available, collect coverage
+    # across the run and emit a per-module report + uncovered-file list as a
+    # run artifact. No floor / no pass-rate gate — the coverage number informs
+    # but never gates the pipeline. Flags are passed at invocation time only;
+    # individual product repos' pyproject.toml are NOT edited.
+    c='rc=0
+if python3 -c "import pytest_cov" 2>/dev/null; then
+    # Erase any leftover .coverage from previous qci runs in this checkout so
+    # the reported percentage is scoped to this run only.  --cov-append is
+    # still passed so INTER-batch accumulation within a single run works.
+    rm -f .coverage .coverage-report.json
+    _COV_FLAGS="--cov=. --cov-report=term-missing --cov-report=json:.coverage-report.json --cov-append"
+else
+    _COV_FLAGS=""
+fi
+mapfile -t _f < <(find tests/unit -name "test_*.py" | sort)
+for ((_i=0; _i<${#_f[@]}; _i+=30)); do
+    PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest ${_COV_FLAGS} "${_f[@]:_i:30}" || rc=1
+done
+if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open(\".coverage-report.json\"))
+    tot = d.get(\"totals\", {})
+    pct = tot.get(\"percent_covered_display\", \"?\")
+    n_files = len(d.get(\"files\", {}))
+    missing = [f for f, v in d.get(\"files\", {}).items() if v.get(\"summary\", {}).get(\"missing_lines\", 0) > 0]
+    print(f\"COVERAGE-SUMMARY: {pct}% covered across {n_files} files\")
+    print(f\"UNCOVERED-FILES ({len(missing)} with missing lines):\")
+    for f in sorted(missing): print(f\"  {f}\")
+except Exception as e:
+    print(f\"coverage report parse error: {e}\", file=sys.stderr)
+" || true
+fi
+exit $rc'
     run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    # Publish coverage report as a run artifact when available.
+    if [ -f "$WORKSPACE/qdistro/.coverage-report.json" ]; then
+        cp "$WORKSPACE/qdistro/.coverage-report.json" "$RDIR/host/qdistro-coverage.json" 2>/dev/null || true
+        record_result host qdistro-coverage pass 0 pass coverage \
+            "$RDIR/host/qdistro-pytest.log" "coverage report (report-only, no floor)"
+    fi
 
     c="rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
     run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
@@ -732,11 +775,32 @@ gate_host() {
     run_logged host qterminator-pytest "$EXIT_HOST" pytest "$WORKSPACE/qterminator" "python3 -m pytest" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
+    # Extension repos: run tests + build. Coverage (REPORT-ONLY): when
+    # @vitest/coverage-v8 is installed, run a SEPARATE non-gating vitest
+    # --coverage step AFTER npm test to produce the coverage JSON artifact.
+    # npm test always runs first for gating — it is never replaced.  A missing
+    # coverage plugin is silently skipped and never gates the pipeline.
+    _ext_cov_artifact_cmd() {
+        # $1 = workspace dir, $2 = artifact dest dir (under $RDIR), $3 = repo label
+        local _extdir=$1 _destdir=$2 _label=$3
+        if [ -f "$_extdir/package.json" ] \
+            && node -e "require('$_extdir/node_modules/@vitest/coverage-v8/package.json')" 2>/dev/null; then
+            # Run coverage report-only; copy JSON artifact to run dir.
+            echo "npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json 2>/dev/null; _ec=\$?; [ -f coverage/coverage-final.json ] && mkdir -p \"$_destdir\" && cp coverage/coverage-final.json \"$_destdir/$_label-coverage.json\" || true; exit 0"
+        else
+            echo "true"
+        fi
+    }
     c="npm test && npm run build"
     run_logged host qdchrome-extension "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdchrome-extension" "$RDIR/host" "qdchrome-extension")"
+    run_logged host qdchrome-extension-coverage "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" "coverage (report-only)" || true
+    c="npm test && npm run build"
     run_logged host qdfirefox-extension "$EXIT_HOST" npm "$WORKSPACE/qdfirefox-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdfirefox-extension" "$RDIR/host" "qdfirefox-extension")"
+    run_logged host qdfirefox-extension-coverage "$EXIT_HOST" npm "$WORKSPACE/qdfirefox-extension" "$c" "coverage (report-only)" || true
 
     if [ "${QCI_ZOLA_SKIP_EXTERNAL:-0}" = 1 ]; then
         c="zola check --skip-external-links && zola build"
@@ -1502,10 +1566,46 @@ gate_selftest() {
         record_result selftest qci-bats skip 0 pass selftest "$log_path" "nested selftest invocation; suite already running (recursion guard)"
         return "$EXIT_OK"
     fi
+
+    # Entrypoint inventory check: verify every security-sensitive entry point
+    # in ci/entrypoint-inventory.tsv has a mapped test file that exists on
+    # disk. This is the mechanical guard that catches the P0 class of gap
+    # where a security-sensitive CLI/service ships with no test at all.
+    # The check is lightweight (a TSV read + file existence check) — it needs
+    # only bash and the TSV, NOT bats — so it runs BEFORE the bats early-returns
+    # to guarantee it always executes and always records a pass/fail/skip row
+    # regardless of bats availability.
+    local ep_log ep_rc ep_script
+    ep_log="$RDIR/selftest/entrypoint-inventory.log"
+    ep_script="$QCI_BIN_DIR/check-entrypoint-inventory.sh"
+    if [ -x "$ep_script" ]; then
+        {
+            echo "## entrypoint-inventory check"
+            echo "inventory: $QDISTRO_REPO/ci/entrypoint-inventory.tsv"
+            echo
+        } > "$ep_log"
+        "$ep_script" "$QDISTRO_REPO" >> "$ep_log" 2>&1
+        ep_rc=$?
+        if [ "$ep_rc" -eq 0 ]; then
+            record_result selftest entrypoint-inventory pass 0 pass selftest \
+                "$ep_log" "all entry-point->test mappings satisfied"
+        else
+            rc=$EXIT_BATS
+            record_result selftest entrypoint-inventory fail "$EXIT_BATS" bats selftest \
+                "$ep_log" "one or more entry-point test files are missing"
+        fi
+        log "selftest: entrypoint-inventory check exit=$ep_rc"
+    else
+        record_skip selftest entrypoint-inventory selftest \
+            "ci/bin/check-entrypoint-inventory.sh not found or not executable"
+        log "selftest: entrypoint-inventory check script not found (skip)"
+    fi
+
     if ! command -v bats >/dev/null 2>&1; then
         record_skip selftest qci-bats selftest "bats not installed; skipping qci runner self-test"
         log "selftest: bats not installed (skip)"
-        return "$EXIT_OK"
+        log "selftest: exit $rc"
+        return "$rc"
     fi
     local sf bats_files=()
     while IFS= read -r sf; do [ -n "$sf" ] && bats_files+=("$sf"); done \
@@ -1513,7 +1613,8 @@ gate_selftest() {
     if [ "${#bats_files[@]}" -eq 0 ]; then
         record_skip selftest qci-bats selftest "no tests/integration/qci/*.bats present"
         log "selftest: no qci self-test bats files found (skip)"
-        return "$EXIT_OK"
+        log "selftest: exit $rc"
+        return "$rc"
     fi
     {
         echo "## qci runner self-test (host-only, no VM)"
@@ -1533,6 +1634,7 @@ gate_selftest() {
         record_result selftest qci-bats fail "$EXIT_BATS" bats selftest "$log_path" "qci runner self-test failed"
     fi
     rm -rf "$sf_runs" 2>/dev/null || true
+
     log "selftest: exit $rc"
     return "$rc"
 }

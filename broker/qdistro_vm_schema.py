@@ -287,7 +287,10 @@ def validate_guest(guest: Any) -> ValidationResult:
     # locked revision (lineage anchor), and a named output. Without these the
     # build is not reproducible (doc/vm-definitions.md §Flake Contract,
     # §Build Lineage).
-    if language in _NIX_GUEST_LANGUAGES:
+    # Guard with isinstance: a non-string language value has already produced
+    # an error above; skipping the `in` check avoids TypeError on unhashable
+    # types (e.g. list) while remaining fail-closed (error already recorded).
+    if isinstance(language, str) and language in _NIX_GUEST_LANGUAGES:
         for fld in ("flakeRef", "lockRef", "output"):
             if not _is_nonempty_str(guest.get(fld)):
                 res.errors.append(
@@ -484,8 +487,8 @@ def _validate_image_definition(definition: Any) -> ValidationResult:
                 f"{type(val).__name__}"
             )
     # Nix-built images must record the locked inputs that make them
-    # reproducible.
-    if language in _NIX_GUEST_LANGUAGES:
+    # reproducible. Guard with isinstance for the same reason as validate_guest.
+    if isinstance(language, str) and language in _NIX_GUEST_LANGUAGES:
         for fld in ("flakeRef", "lockRef", "output"):
             if not _is_nonempty_str(definition.get(fld)):
                 res.errors.append(

@@ -31,6 +31,7 @@ quoted/hex-encoded values per the audit_log_user_message conventions.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -93,6 +94,17 @@ def parse_avc_line(line: str) -> dict[str, Any] | None:
     """
     if not line or "type=AVC" not in line:
         return None
+    # Truncate at the first newline: audispd delivers one record per line, so
+    # any embedded newline is either kernel padding or an injection attempt.
+    # Parsing past the first newline allows _ENVELOPE_RE.search (which scans
+    # the full string) to land on a *second* embedded record — which may carry
+    # an adversarially crafted scontext — rather than the legitimate first
+    # record. Truncating to the first line closes this injection window.
+    # This is a fail-closed change: a truncated line that is now too short to
+    # match the envelope pattern returns None, which is safe (record dropped).
+    nl = line.find("\n")
+    if nl != -1:
+        line = line[:nl]
     m = _ENVELOPE_RE.search(line)
     if not m:
         return None
@@ -138,21 +150,75 @@ def is_qdistro_subj_type(subj_type: str) -> bool:
     return bool(subj_type) and subj_type.startswith(_QDISTRO_PREFIX)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce *value* to int, returning *default* on any failure.
+
+    The kernel always emits bare decimal integers for pid/permissive, but an
+    adversarially crafted or malformed audit line may store a non-coercible
+    string (e.g. a quoted value, or a float like ``0.5``).  Falling back to
+    *default* (0) rather than propagating a ``ValueError``/``TypeError``
+    prevents the audispd plugin from crashing on a single malformed line and
+    dropping all subsequent audit records.
+
+    Note: hex strings like ``0x4d2`` are NOT handled by the float fallback
+    (``float("0x4d2")`` raises ``ValueError``), so they also return *default*.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError guards a non-finite float object passed directly
+        # (int(float("inf")) is undefined); strings never reach it here.
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError covers inputs like "inf", "Infinity", "1e999"
+            # where int(value) raises ValueError and int(float(value)) raises
+            # OverflowError (int(inf) is undefined).
+            return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce *value* to float, returning *default* on any failure.
+
+    Non-finite results (inf, -inf, nan) are normalised to *default* via
+    ``math.isfinite`` so that a hostile input like "inf" or "1e999" never
+    propagates downstream as a non-finite timestamp or numeric field.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(result):
+        return default
+    return result
+
+
 def avc_to_broker_args(rec: dict[str, Any]) -> dict[str, Any]:
     """Project a parsed AVC record onto the RecordSelinuxAvc D-Bus
     method's argument schema. All values come back as strings or
     ints; missing optional fields become empty string / 0 since
-    D-Bus has no nullable primitive."""
+    D-Bus has no nullable primitive.
+
+    Safe coercion is used for all numeric fields: a non-coercible value
+    (hostile input or kernel format drift) returns 0/0.0 rather than raising
+    so the broker call never silently drops a record due to a type error.
+    """
     return {
-        "scontext":   str(rec.get("scontext", "")),
-        "tcontext":   str(rec.get("tcontext", "")),
-        "tclass":     str(rec.get("tclass", "")),
-        "perms":      str(rec.get("perms", "")),
-        "verdict":    str(rec.get("verdict", "")),
-        "permissive": int(rec.get("permissive", 0)),
-        "pid":        int(rec.get("pid", 0)),
-        "comm":       str(rec.get("comm", "")),
-        "exe":        str(rec.get("exe", "")),
-        "path":       str(rec.get("path", "")),
-        "ts":         float(rec.get("ts", 0.0)),
+        "scontext":   str(rec.get("scontext", "") or ""),
+        "tcontext":   str(rec.get("tcontext", "") or ""),
+        "tclass":     str(rec.get("tclass", "") or ""),
+        "perms":      str(rec.get("perms", "") or ""),
+        "verdict":    str(rec.get("verdict", "") or ""),
+        "permissive": _safe_int(rec.get("permissive", 0)),
+        "pid":        _safe_int(rec.get("pid", 0)),
+        "comm":       str(rec.get("comm", "") or ""),
+        "exe":        str(rec.get("exe", "") or ""),
+        "path":       str(rec.get("path", "") or ""),
+        "ts":         _safe_float(rec.get("ts", 0.0)),
     }

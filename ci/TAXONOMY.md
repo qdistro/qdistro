@@ -105,3 +105,21 @@ carry it through verbatim. If an automatic retry loop is added to qci later,
 it should emit `retried=N` into `notes` (and may add a dedicated column);
 the report already passes `notes` through unchanged, so no report change is
 needed for the convention to be visible today.
+
+## Deferred P3 actions (out of scope for task 06)
+
+The following P3 items were explicitly deferred; they are recorded here so
+they are not lost:
+
+- **P3 action 3 — shared ruff blocking**: Extract the ruff lint invocation
+  into a shared helper and make it a hard gate failure rather than a warning.
+  Requires coordinating the ruff configuration across all product repos before
+  enabling as a blocker.
+
+- **P3 action 4 — refactor pytest loop**: Replace the hand-rolled batched
+  `for` loop in `gate_host()` with `pytest-xdist` or a cleaner dispatch.
+  Low risk, pure refactor; deferred to avoid churn during coverage rollout.
+
+- **P3 action 5 — self-hosted runner**: Provision and register a self-hosted
+  GitHub Actions runner for the qdistro suite so VM-gated tests can run in CI
+  without manual `qci run` invocations. Requires infra work outside this repo.

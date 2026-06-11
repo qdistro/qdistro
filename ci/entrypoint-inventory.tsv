@@ -1,0 +1,39 @@
+# qdistro security-sensitive entry-point -> test mapping.
+#
+# Purpose: mechanical guard that FAILS if a listed entry point has no mapped
+# test file that exists on disk. This catches the class of P0 gap where a
+# security-sensitive CLI/service ships with no test coverage at all.
+#
+# Checked by `qci selftest` via ci/bin/check-entrypoint-inventory.sh (which is
+# invoked from gate_selftest in qci). The check is ADDITIVE and BACKWARD-
+# COMPATIBLE: it only fails when a listed entry point's test_file is absent.
+# Adding a new row never breaks existing CI; removing a row narrows the guard
+# (don't do that without a reviewer sign-off).
+#
+# Columns (TAB-separated):
+#   entry_point    repo-relative path to the CLI/service script or binary
+#   test_file      repo-relative path to >=1 test file that covers this entry point
+#   why_sensitive  brief free-text rationale (for humans; not parsed)
+#
+# All entry-points listed here have tests as of the post-P0 state (2026-06-11).
+# The manifest reflects CURRENT reality: the P0 gaps are now covered.
+#
+entry_point	test_file	why_sensitive
+pwd/qdistro-pwd-get.py	tests/unit/test_pwd_approval_e2e.py	Credential retrieval CLI: runs as user, must enforce broker approval before returning any secret
+pwd/qdistro-pwd-get.py	tests/unit/test_pwd_approval_negative.py	Credential retrieval CLI: negative path (denial) must propagate; a silent fail would leak secrets
+pwd/qdistro_pwd_daemon.py	tests/unit/test_pwd_vault.py	Password daemon holds the vault unlock key; key derivation and storage must be correct
+pwd/qdistro_pwd_daemon.py	tests/unit/test_pwd_audit.py	Password daemon must audit every unlock attempt
+pwd/qdistro_pwd_daemon.py	tests/unit/test_pwd_polkit.py	Password daemon uses polkit for privilege check; bypass = credential leak
+pwd/qdistro_pwd_pinstash.py	tests/unit/test_pwd_pinstash.py	PIN stash holds user-derived key material; incorrect storage/retrieval leaks credentials
+pwd/qdistro_pwd_tpm.py	tests/unit/test_pwd_tpm.py	TPM-backed key sealing: incorrect PCR binding allows unsealing on untrusted boot state
+media/qdistro_media_exec.py	tests/unit/test_media_exec.py	Media exec client: executes binaries in the silo context; argv injection = privilege escalation
+media/qdistro_media_exec_client.py	tests/unit/test_media_exec.py	Media exec client bridge: cross-silo media launch, must validate source silo identity
+qsu/qsu.py	tests/unit/test_qsu.py	qsu (qdistro-sudo): runs commands as another user; bypass = privilege escalation
+qsu/qdistro_root_exec.py	tests/unit/test_qsu.py	Root exec helper used by qsu; direct escalation path
+browser_bridge/qdistro_browser_bridge.py	tests/unit/test_browser_bridge.py	Native-messaging host between browser extension and broker; injection = cross-origin data exfil
+browser_bridge/qdistro_browser_bridge_client.py	tests/unit/test_browser_bridge_client.py	Browser bridge client: sends requests on behalf of browser; must authenticate the extension
+session_manager/qdistro_silo_launch.py	tests/unit/test_silo_launch.py	Silo launch CLI: starts/stops containerised silos; wrong arity = silent stop failure
+broker/qdistro_admin_broker.py	tests/unit/test_broker_check_permission.py	Admin broker: the central policy decision point for all qdistro actions
+broker/qdistro_admin_broker.py	tests/unit/test_broker_record_selinux_avc.py	Admin broker: AVC recording path; mis-attribution = wrong silo blamed for a deny
+broker/qdistro_audisp_parser.py	tests/unit/test_audisp_parser.py	audispd plugin parser: processes UNTRUSTED kernel audit input; crash = silent audit loss
+broker/qdistro_vm_schema.py	tests/unit/test_vm_schema.py	VM silo manifest schema validator: fail-open = unauthorized guest service activation
