@@ -141,6 +141,20 @@ def _image_exists(image_ref: str) -> bool:
     return proc.returncode == 0
 
 
+def _image_status(image_ref: str) -> str:
+    # Tri-state existence for the cascade-guard protection loop, which must
+    # fail CLOSED: a `podman` runtime error (rc other than 0/1, e.g. a storage
+    # lock) must not read as "absent" and leave a pinned image unprotected.
+    # `podman image exists` returns 0 present, 1 absent; anything else = error.
+    proc = subprocess.run(["podman", "image", "exists", image_ref],
+                          capture_output=True, text=True)
+    if proc.returncode == 0:
+        return "present"
+    if proc.returncode == 1:
+        return "absent"
+    return "error"
+
+
 def _rmi(image_ref: str) -> bool:
     proc = subprocess.run(["podman", "rmi", image_ref],
                           capture_output=True, text=True)
@@ -207,6 +221,31 @@ def _all_promoted_generations(layout: qt.Layout) -> set[str]:
             if os.path.isdir(os.path.join(gens_dir, gen)):
                 promoted.add(gen)
     return promoted
+
+
+def _retention_survivor_digests(layout: qt.Layout, retention: dict) -> set[str]:
+    """The generation digests the retention pass KEEPS by count (the newest
+    keep-N per template). These are NOT pinned but are still kept, so they are
+    equally vulnerable to a cascading rmi of a child built FROM them and must
+    be cascade-protected too. Mirrors the keep-N window in the deletion loop
+    below (same sort key + _keep_count); kept here as a small, parallel read so
+    the protection set can be computed before any rmi."""
+    survivors: set[str] = set()
+    if not os.path.isdir(layout.templates_var):
+        return survivors
+    for template in os.listdir(layout.templates_var):
+        gens_dir = layout.generations_dir(template)
+        if not os.path.isdir(gens_dir):
+            continue
+        keep_n = _keep_count(retention, template)
+        if keep_n <= 0:
+            continue
+        gens = [(g, os.path.join(gens_dir, g)) for g in os.listdir(gens_dir)
+                if os.path.isdir(os.path.join(gens_dir, g))]
+        gens.sort(key=lambda gd: (os.path.getmtime(gd[1]), gd[0]), reverse=True)
+        for gen, _gen_dir in gens[:keep_n]:
+            survivors.add(gen)
+    return survivors
 
 
 def _delete_generation_payload(layout: qt.Layout, template: str, gen: str,
@@ -384,7 +423,7 @@ def _rm_snapshot_payload(path: str) -> None:
 
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
        now: float | None = None, rmi=_rmi, image_exists=_image_exists,
-       tag=_tag, untag=_untag) -> list[dict]:
+       tag=_tag, untag=_untag, image_status=_image_status) -> list[dict]:
     layout = layout or qt.Layout()
     now = time.time() if now is None else now
     retention = load_retention(layout)            # fail-closed
@@ -392,31 +431,31 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
     pinned_digests = _all_pinned_digests(pinned)
     promoted_digests = _all_promoted_generations(layout)
     deletions: list[dict] = []
-    # Cascade guard: protect every pinned generation image with a transient tag
-    # so a later `rmi` of a child (a failed candidate built FROM it, or an
-    # unpinned generation layered on it) cannot cascade-delete it. A pin guards
-    # the generation RECORD; only a tag guards the IMAGE from podman's
-    # untagged-parent cleanup. Skipped in dry-run (it deletes nothing).
+    # Cascade guard: protect every generation image the run will KEEP with a
+    # transient tag so a later `rmi` of a child (a failed candidate built FROM
+    # it, or a beyond-retention generation layered on it) cannot cascade-delete
+    # it. A pin guards the generation RECORD; only a tag guards the IMAGE from
+    # podman's untagged-parent cleanup. The kept set is pinned ∪ the keep-N
+    # retention survivors — a kept-by-count generation is just as exposed as a
+    # pinned one. Skipped in dry-run (it deletes nothing). FAIL CLOSED: if a
+    # kept image's existence is indeterminate, or it cannot be tagged, abort
+    # before any deletion rather than expose it to a cascade.
+    protect_digests = set(pinned_digests) | _retention_survivor_digests(
+        layout, retention)
     protect_tags: list[str] = []
     if not dry_run:
-        for digest in pinned_digests:
-            if image_exists(digest):
-                t = tag(digest)
-                if t is None:
-                    # Fail closed: a pinned generation image we could NOT
-                    # protect must never be left exposed to a cascading rmi
-                    # (that is the exact data-loss this guard prevents). Untag
-                    # what we already protected and abort before deleting
-                    # anything — a transient `podman tag` failure must not
-                    # silently degrade into "collect the pinned rollback
-                    # target's image too".
-                    for done in protect_tags:
-                        untag(done)
-                    raise qt.TemplateError(
-                        f"could not tag-protect pinned generation image "
-                        f"{digest} from GC cascade; aborting before any "
-                        f"deletion")
-                protect_tags.append(t)
+        for digest in protect_digests:
+            status = image_status(digest)
+            if status == "absent":
+                continue          # nothing to protect (no image on disk)
+            if status == "error" or (t := tag(digest)) is None:
+                for done in protect_tags:
+                    untag(done)
+                raise qt.TemplateError(
+                    f"could not tag-protect kept generation image {digest} "
+                    f"from GC cascade (image_status={status}); aborting before "
+                    f"any deletion")
+            protect_tags.append(t)
     try:
         deletions.extend(_gc_payloads(layout, retention, pinned, pinned_digests,
                                       promoted_digests, now, dry_run, rmi,

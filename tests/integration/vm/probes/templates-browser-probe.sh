@@ -537,10 +537,14 @@ scenario_state_isolation() {
             --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=8m,tmpfs-mode=0700,U \
             "$genA" sh -c 'cat /home/admin/profile/sentinel 2>/dev/null || echo NO-STATE')"
     [ "$seen" = "NO-STATE" ] || fail state-isolation "a candidate runtime read the silo profile sentinel: '$seen'"
-    # And its mountinfo carries no qdistro state mount.
+    # And its mountinfo carries no qdistro state mount. Guard the run itself:
+    # if the candidate container failed to start, $mounts would be empty and the
+    # grep would miss, passing the isolation check vacuously.
     local mounts
     mounts="$(podman run --rm --network=none --read-only --entrypoint= --tmpfs /tmp:rw,exec,size=64m \
-              "$genA" cat /proc/self/mountinfo 2>/dev/null)"
+              "$genA" cat /proc/self/mountinfo 2>/dev/null)" \
+        || fail state-isolation "candidate mountinfo run failed (cannot assert isolation)"
+    [ -n "$mounts" ] || fail state-isolation "candidate mountinfo was empty (run did not produce /proc/self/mountinfo)"
     echo "$mounts" | grep -qiE 'qdistro/(silos|bindings|pins)|'"$SILO" \
         && fail state-isolation "a candidate runtime has a qdistro state mount"
     podman exec "$CONTAINER" sh -c 'rm -f '"$PROFILE"'/sentinel' >/dev/null 2>&1 || true
@@ -589,6 +593,15 @@ scenario_update_flip() {
     dom="$(silo_chromium 60 "$(ua_for "$markerB")" "$url/home")"
     echo "$dom" | grep -qE 'LOGIN-OK-[0-9a-f]+' \
         || fail update-flip "A-era session cookie did not survive the flip to genB (dom: $(echo "$dom" | tr -d '\n' | head -c 200))"
+    # Plant a B-ERA-ONLY sentinel in the live profile. The A-era snapshot was
+    # taken BEFORE B's first write, so this file exists ONLY in B-era state —
+    # the rollback scenario uses it to prove `--restore-state` actually swaps
+    # content back to A (not merely leaves B-era state in place): it must be
+    # ABSENT from the restored profile and PRESENT in the displaced
+    # state-rejected-*. (The A-era cookie alone cannot prove this — it lives in
+    # both A-era and B-era state.)
+    podman exec "$CONTAINER" sh -c 'echo B-ERA-ONLY > '"$PROFILE"'/b-era-sentinel' \
+        || fail update-flip "could not plant the B-era sentinel"
     pass "update-flip"
 }
 
@@ -743,14 +756,24 @@ scenario_rollback() {
     local rev_after; rev_after="$(binding_get identity_revision)"
     [ "$rev_after" = "$((rev_before + 1))" ] || fail rollback "identity_revision did not bump ($rev_before -> $rev_after)"
     # The displaced genB-era state is kept aside as state-rejected-*.
-    ls -d "$STATE_PATH_DEFAULT"-rejected-* >/dev/null 2>&1 \
-        || ls -d /var/lib/qdistro/silos/"$SILO"/state-rejected-* >/dev/null 2>&1 \
-        || fail rollback "displaced genB state was not preserved as state-rejected-*"
+    local rej; rej="$(ls -d "$STATE_PATH_DEFAULT"-rejected-* 2>/dev/null; ls -d /var/lib/qdistro/silos/"$SILO"/state-rejected-* 2>/dev/null)"
+    rej="$(echo "$rej" | head -1)"
+    [ -n "$rej" ] || fail rollback "displaced genB state was not preserved as state-rejected-*"
+    # CONTENT proof (not just displacement): the B-ERA-ONLY sentinel planted in
+    # update-flip must be ABSENT from the restored (A-era) live state — proving
+    # --restore-state actually swapped content back to the A-era snapshot, not
+    # merely flipped the binding and left B-era state in place — and PRESENT in
+    # the displaced state-rejected-* (B-era state preserved, not lost). The
+    # A-era cookie alone can't prove this (it lives in both A- and B-era state).
+    [ -f "$rej/profile/b-era-sentinel" ] \
+        || fail rollback "B-era sentinel not in state-rejected-* (displaced B-era state was lost)"
     # Relaunch on genA: a FRESH login succeeds again AND the restored profile's
     # cookie reaches /home WITHOUT re-login.
     launch_silo rollback
     [ "$(container_image_digest)" = "$genA" ] \
         || fail rollback "silo not running genA after rollback (img=$(container_image_digest))"
+    podman exec "$CONTAINER" sh -c 'test ! -e '"$PROFILE"'/b-era-sentinel' \
+        || fail rollback "B-era sentinel leaked into the restored A-era profile (--restore-state did not swap content back to A)"
     # restored cookie -> /home OK without logging in:
     ensure_profile_free
     local dom; dom="$(silo_chromium 60 "$(ua_for "$markerA")" "$url/home")"
@@ -762,7 +785,20 @@ scenario_rollback() {
     ensure_profile_free
     dom="$(silo_chromium 60 "$(ua_for "$markerA")" "$url/home")"
     echo "$dom" | grep -qE 'LOGIN-OK-[0-9a-f]+' || fail rollback "fresh login on the rolled-back genA failed"
-    # Audit rows for the arc.
+    # Audit rows for the WHOLE arc (spec scenario 7): promote.applied for both
+    # the forward flip (->B) and the rollback (->A); the binding.activated that
+    # fired when B first launched; the pre-activation snapshot created (incoming
+    # B) and restored (outgoing A); and the earlier promote.refused.
+    audit_has template.promote.applied new_generation "$genB" \
+        || fail rollback "missing promote.applied audit row for the forward flip to genB"
+    audit_has template.promote.applied new_generation "$genA" \
+        || fail rollback "missing promote.applied audit row for the rollback to genA"
+    audit_has template.binding.activated generation "$genB" \
+        || fail rollback "missing binding.activated audit row for genB's first launch"
+    audit_has template.state_snapshot.created new_generation "$genB" \
+        || fail rollback "missing state_snapshot.created audit row (pre-activation snapshot on B)"
+    audit_has template.state_snapshot.restored new_generation "$genA" \
+        || fail rollback "missing state_snapshot.restored audit row (A-era state restored)"
     audit_has template.promote.refused run_id "$(cat "$STATE/broken_rid")" \
         || fail rollback "missing promote.refused audit row"
     pass "rollback"
@@ -784,8 +820,40 @@ RET
     local bcdir="/var/lib/qdistro/templates/$TEMPLATE/candidates/$brid"
     local bdigest; bdigest="$(python3 -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["generation_ref"])' "$bcdir/manifest.toml" 2>/dev/null)" \
         || fail gc "no broken-candidate manifest digest"
+    # The sabotaged payload must EXIST before gc, else its post-gc absence is a
+    # vacuous pass (an unrelated earlier disappearance would also satisfy it).
+    podman image exists "$bdigest" \
+        || fail gc "broken-candidate image $bdigest is absent BEFORE gc (cannot prove collection)"
+    # Spec scenario 8: an EXPIRED state snapshot is deleted (payload gone, only
+    # audit metadata kept) and drops out of rollback choices. Back-date one
+    # snapshot's OWN expiry to the past so gc collects it by its own window.
+    local snapdir="/var/lib/qdistro/silos/$SILO/state-snapshots"
+    local expid exppayload
+    expid="$(python3 - "$snapdir" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+ids = sorted(d for d in os.listdir(root)
+             if os.path.isfile(os.path.join(root, d, "meta.toml"))
+             and os.path.isdir(os.path.join(root, d, "snapshot"))) \
+      if os.path.isdir(root) else []
+if not ids:
+    sys.exit(0)
+sid = ids[0]           # oldest snapshot whose payload still exists
+meta = os.path.join(root, sid, "meta.toml")
+txt = open(meta).read()
+txt = re.sub(r'expires_at = "[^"]*"', 'expires_at = "2000-01-01T00:00:00Z"', txt)
+open(meta, "w").write(txt)
+print(sid)
+PY
+)"
+    [ -n "$expid" ] || fail gc "no state snapshot present to expire-test"
+    exppayload="$snapdir/$expid/snapshot"
+    [ -e "$exppayload" ] || fail gc "expired snapshot payload missing before gc"
+
     cli template-gc >/dev/null 2>&1 || fail gc "template-gc errored"
-    # A (rollback target / active) and B (rollback window) survive their pins.
+
+    # A (rollback target / active) and B (rollback window) survive their pins —
+    # NOT cascade-collected when the gen-B-derived broken candidate is rmi'd.
     podman image exists "$genA" || fail gc "active genA collected"
     podman image exists "$genB" || fail gc "pinned rollback target genB collected"
     if podman image exists "$bdigest" 2>/dev/null; then
@@ -794,6 +862,13 @@ RET
     for ev in state evidence/validation.toml; do
         [ -e "$bcdir/$ev" ] || fail gc "broken-candidate evidence $ev was deleted"
     done
+    # The expired snapshot's user-state PAYLOAD is gone, but its meta survives
+    # marked dead (honesty: no "evidence outlives payload" for user state), and
+    # it no longer offers itself as a restore choice.
+    [ ! -e "$exppayload" ] || fail gc "expired state snapshot payload was not collected"
+    python3 -c 'import sys,tomllib; m=tomllib.load(open(sys.argv[1],"rb")); sys.exit(0 if m.get("restore_eligible")=="false" and m.get("deleted_at") else 1)' \
+        "$snapdir/$expid/meta.toml" \
+        || fail gc "expired snapshot meta not marked restore_eligible=false + deleted_at"
     pass "gc"
 }
 

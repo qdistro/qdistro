@@ -80,6 +80,12 @@ def _noop_untag(_tag):
     pass
 
 
+def _status_present(_digest):
+    # Cascade-guard tri-state existence probe forced to "present" so the guard
+    # exercises its tagging path (the real _image_status shells out to podman).
+    return "present"
+
+
 def _candidate(layout, template, run_id, *, mtime, state="failed", gen=None):
     """A failed candidate dir. With gen=None it is a failed-BUILD candidate
     (no manifest, no image); with a digest it gets a valid candidate manifest
@@ -474,7 +480,7 @@ def test_pinned_generation_image_is_tag_protected_during_sweep(tmp_path):
         untagged.append(t)
     deleted, rmi = _collected_runner()
     gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
-          tag=tag, untag=untag)
+          tag=tag, untag=untag, image_status=_status_present)
     # the pinned (active) generation image was protected for the sweep...
     assert pinned_gen in tagged, "pinned generation image must be tag-protected"
     # ...and the protective tag was removed afterwards (no permanent tag leak).
@@ -514,5 +520,49 @@ def test_cascade_guard_fails_closed_when_tag_fails(tmp_path):
     deleted, rmi = _collected_runner()
     with pytest.raises(qt.TemplateError):
         gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
-              tag=lambda d: None, untag=_noop_untag)  # tag always fails
+              tag=lambda d: None, untag=_noop_untag,  # tag always fails
+              image_status=_status_present)
     assert deleted == [], "no rmi may run once a pinned image cannot be protected"
+
+
+def test_cascade_guard_fails_closed_on_image_status_error(tmp_path):
+    # If a kept image's existence is INDETERMINATE (podman errored, not a clean
+    # absent), GC must abort before any rmi rather than leave it unprotected.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0, failed_candidate_days=0), 0o644)
+    now = 1_700_000_000.0
+    pinned_gen, victim = _digest(1), _digest(2)
+    _gen(layout, "tier2-dev", pinned_gen, mtime=now - 200)
+    _binding(layout, "dev-silo", "tier2-dev", pinned_gen)
+    _candidate(layout, "tier2-dev", "20990101T000000Z-childcand",
+               mtime=now - 10_000_000, state="failed", gen=victim)
+    deleted, rmi = _collected_runner()
+    tagged = []
+    with pytest.raises(qt.TemplateError):
+        gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
+              tag=lambda d: tagged.append(d) or f"t:{d}", untag=_noop_untag,
+              image_status=lambda _d: "error")
+    assert deleted == [], "no rmi may run on an indeterminate kept-image probe"
+    assert tagged == [], "must not even attempt to tag once status is error"
+
+
+def test_keep_n_retention_survivor_is_tag_protected(tmp_path):
+    # SHOULD: the guard must protect keep-N retention survivors too, not only
+    # pinned digests — a kept-by-count generation is equally exposed to a
+    # cascading rmi of a child built FROM it.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=1, failed_candidate_days=0), 0o644)
+    now = 1_700_000_000.0
+    old_gen, kept_gen = _digest(1), _digest(2)
+    _gen(layout, "tier2-dev", old_gen, mtime=now - 300)    # beyond keep-1
+    _gen(layout, "tier2-dev", kept_gen, mtime=now - 100)   # newest -> kept by count
+    # no binding/pin: kept_gen survives ONLY by retention count, not a pin.
+    deleted, rmi = _collected_runner()
+    tagged = []
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
+          tag=lambda d: tagged.append(d) or f"t:{d}", untag=_noop_untag,
+          image_status=_status_present)
+    assert kept_gen in tagged, "keep-N survivor must be cascade-protected"
+    assert old_gen in deleted and kept_gen not in deleted

@@ -6,10 +6,13 @@
 # `systemctl start`s the unit; the unit runs THIS script as admin (the
 # privilege drop happens at the unit boundary — rootless podman runs as
 # admin). The script reads the exported launch stanza and execs spawn-tier2
-# in the FOREGROUND as the unit's main process: it IS the supervisor, so
-# `systemctl stop` (SIGTERM) propagates through spawn-tier2 to the podman
-# container, and the per-container runtime dir is cleaned only after the
-# container exits (spawn-tier2's existing trap). No `podman run -d`.
+# in the FOREGROUND as the unit's main process, and the per-container runtime
+# dir is cleaned after the container exits (spawn-tier2's trap). No
+# `podman run -d`. NB: a plain `systemctl stop` SIGTERM does NOT reliably stop
+# the container — rootless `podman run` in a non-tty context has sig-proxy off,
+# so conmon keeps the container alive outside this unit's cgroup. The unit's
+# ExecStop (`podman stop`) is what actually tears it down; see
+# qdistro-tier2-silo@.service.
 set -euo pipefail
 
 NAME="${1:?usage: qdistro-tier2-silo-launch <silo-name>}"

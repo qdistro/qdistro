@@ -23,10 +23,13 @@ PROBE="/root/templates-promotion-probe.sh"
 TROOT="/tmp/fp09-promotion"
 
 setup_file() {
-    vm_run "[ -f $PROBE ]" \
-        || fail_loud "probe not staged at $PROBE (fresh-vm-bootstrap.sh probes step)"
-    vm_run_admin "command -v podman >/dev/null" \
-        || fail_loud "podman not available for admin in the VM"
+    # vm_run/vm_run_admin call bats `run` internally and always return 0, so the
+    # precondition must `assert_success` (a `|| fail_loud` after them is dead —
+    # it never fires). Matches the templates-browser suite.
+    vm_run "[ -f $PROBE ]"
+    assert_success || fail_loud "probe not staged at $PROBE (fresh-vm-bootstrap.sh probes step)"
+    vm_run_admin "command -v podman >/dev/null"
+    assert_success || fail_loud "podman not available for admin in the VM"
     # Build + validate + promote the baseline generation A (slow, once).
     vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE setup"
     assert_success
