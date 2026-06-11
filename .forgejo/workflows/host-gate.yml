@@ -1,0 +1,133 @@
+# Self-hosted HOST-gate workflow for qdistro: runs `ci/bin/qci host` on a
+# self-hosted runner labelled `qdistro-host`.
+#
+# STATUS: SCAFFOLD / TEMPLATE. No `qdistro-host` runner is registered yet, so
+# this workflow does nothing until a human provisions one. See
+# ci/SELF-HOSTED-RUNNER.md for the full operator guide (why, toolchain,
+# registration, systemd unit, security posture, activation checklist).
+#
+# This is the HOST counterpart to qdshell's self-hosted `qdistro-vm` workflow
+# (.github/workflows/integration.yml): same self-hosted idiom, but the HOST gate
+# (no libvirt/VM) instead of the VM bats gate. Forgejo Actions reads both
+# .forgejo/workflows/ and .github/workflows/; this lives under .forgejo/ to mark
+# it Forgejo-specific.
+#
+# Setup (runner machine, one-time) — see ci/SELF-HOSTED-RUNNER.md:
+#   - openSUSE Tumbleweed + Python 3.13.
+#   - Toolchain qci host invokes: meson/ninja, pkg-config, C/C++ + Wayland/weston
+#     devel, ruff, mypy, node/npm, zola, Qt6 declarative tools, PyQt6/PySide6,
+#     pytest(+qt,+cov). (NO libvirt — that is the qdistro-vm runner.)
+#   - The full sibling-repo workspace laid out as WORKSPACE/<repo> (qdwin,
+#     qdshell, qdbrowser, qdgreeter, qdlocker, qfileman, qnotebook, qterminator,
+#     qdchrome-extension, qdfirefox-extension, qdistro-site) alongside qdistro.
+#   - forgejo-runner registered with label `qdistro-host`, run as a dedicated
+#     NON-root, non-libvirt uid via systemd. PR code is untrusted: keep the
+#     workspace ephemeral and the runner locked down.
+
+name: qdistro host gate (self-hosted)
+
+on:
+  # Manual trigger is the ONLY trigger enabled in the scaffold: bring a new
+  # runner up under workflow_dispatch, validate it green, lock it down, THEN
+  # enable the push trigger below.
+  workflow_dispatch: {}
+
+  # OPT-IN AUTO-TRIGGER — intentionally commented out so this template does NOT
+  # surprise-run against a runner that does not exist yet. Uncomment ONLY after a
+  # `qdistro-host` runner is registered AND validated (see the activation
+  # checklist in ci/SELF-HOSTED-RUNNER.md). Until then a push event would queue a
+  # job that no runner answers.
+  #
+  # push:
+  #   branches: [main]
+
+jobs:
+  host-gate:
+    runs-on: [self-hosted, qdistro-host]
+    timeout-minutes: 60
+    steps:
+      - name: checkout qdistro
+        uses: actions/checkout@v4
+        with:
+          path: qdistro
+
+      # Sibling repos required by `qci host` (qdwin/qdshell/... — see the layout
+      # table in ci/SELF-HOSTED-RUNNER.md). qci derives WORKSPACE as the PARENT
+      # of the qdistro checkout and expects every sibling as a direct child of
+      # that parent, so all checkouts share the same GITHUB_WORKSPACE parent.
+      #
+      # Each sibling lives in its OWN Codeberg org (codeberg.org/<repo>/<repo>),
+      # so the repository must be spelled explicitly — `github.repository_owner`
+      # would resolve to this repo's owner (qdistro) and miss them. Cloning 11
+      # repos fresh on every run is slow; a production runner is better served by
+      # a long-lived workspace with all repos pre-cloned and `git pull`ed per run
+      # (then these checkout steps can be dropped). They are `continue-on-error`
+      # so a transiently unreachable sibling reds only its own host rows, not the
+      # whole job — matching qdshell integration.yml's tolerant qdistro checkout.
+      - name: checkout qdwin
+        uses: actions/checkout@v4
+        with: { repository: qdwin/qdwin, path: qdwin }
+        continue-on-error: true
+      - name: checkout qdshell
+        uses: actions/checkout@v4
+        with: { repository: qdshell/qdshell, path: qdshell }
+        continue-on-error: true
+      - name: checkout qdbrowser
+        uses: actions/checkout@v4
+        with: { repository: qdbrowser/qdbrowser, path: qdbrowser }
+        continue-on-error: true
+      - name: checkout qdgreeter
+        uses: actions/checkout@v4
+        with: { repository: qdgreeter/qdgreeter, path: qdgreeter }
+        continue-on-error: true
+      - name: checkout qdlocker
+        uses: actions/checkout@v4
+        with: { repository: qdlocker/qdlocker, path: qdlocker }
+        continue-on-error: true
+      - name: checkout qfileman
+        uses: actions/checkout@v4
+        with: { repository: qfileman/qfileman, path: qfileman }
+        continue-on-error: true
+      - name: checkout qnotebook
+        uses: actions/checkout@v4
+        with: { repository: qnotebook/qnotebook, path: qnotebook }
+        continue-on-error: true
+      - name: checkout qterminator
+        uses: actions/checkout@v4
+        with: { repository: qterminator/qterminator, path: qterminator }
+        continue-on-error: true
+      - name: checkout qdchrome-extension
+        uses: actions/checkout@v4
+        with: { repository: qdchrome-extension/qdchrome-extension, path: qdchrome-extension }
+        continue-on-error: true
+      - name: checkout qdfirefox-extension
+        uses: actions/checkout@v4
+        with: { repository: qdfirefox-extension/qdfirefox-extension, path: qdfirefox-extension }
+        continue-on-error: true
+      - name: checkout qdistro-site
+        uses: actions/checkout@v4
+        with: { repository: qdistro-site/qdistro-site, path: qdistro-site }
+        continue-on-error: true
+
+      - name: show workspace + toolchain
+        run: |
+          echo "WORKSPACE (qci parent) = $(cd qdistro/.. && pwd)"
+          ls -1 "$(cd qdistro/.. && pwd)"
+          for t in python3 ruff mypy meson ninja pkg-config node npm zola; do
+              printf '%-12s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo MISSING)"
+          done
+
+      - name: qci host
+        run: |
+          set -euo pipefail
+          # qci derives all its paths from its own location; just invoke it.
+          ./qdistro/ci/bin/qci host
+
+      - name: upload qci run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qci-host-run
+          path: qdistro/ci/runs/host-*
+          retention-days: 14
+          if-no-files-found: ignore
