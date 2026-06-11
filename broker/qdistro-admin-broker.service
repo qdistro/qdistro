@@ -17,5 +17,26 @@ User=root
 StandardOutput=journal
 StandardError=journal
 
+# TCB no-network discipline (todo/fable-networking task 5, broker pilot;
+# doc/threat-model.md "TCB process discipline"). The broker is a root D-Bus
+# service that talks ONLY over AF_UNIX (the system bus socket + its hook
+# client/executor sockets, both filesystem paths) and reads /proc for caller
+# identity — it has NO legitimate reason to touch the network. Verified: no
+# AF_INET/AF_INET6/AF_VSOCK use anywhere in broker/*.py (only AF_UNIX +
+# SO_PEERCRED). AF_VSOCK is NOT needed (unlike the print proxy).
+#
+# PrivateNetwork=yes puts the broker in its own empty netns (loopback only):
+# AF_UNIX filesystem sockets are unaffected (they are not network-namespaced),
+# so D-Bus + the hook sockets keep working, but no real network is reachable.
+# RestrictAddressFamilies hard-caps socket(2) to AF_UNIX (+ AF_NETLINK for
+# glibc/glib local kernel queries) so an AF_INET socket cannot even be created
+# — defense in depth with the SELinux neverallow ratchet (selinux/broker).
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# A future-proofing tripwire: even though PrivateNetwork already isolates the
+# netns, deny all IP egress explicitly so an accidental future PrivateNetwork=no
+# regression still fails closed at the IP layer.
+IPAddressDeny=any
+
 [Install]
 WantedBy=multi-user.target

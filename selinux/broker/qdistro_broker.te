@@ -58,9 +58,19 @@
 ##   Caller modules (tier1, future tier2/3 .te) don't change between
 ##   phases — only this module's body shifts.
 ##
-##   Spec refs: doc/selinux.md §"Broker module split-out".
+##   0.5.0 (todo/fable-networking task 5, TCB no-network pilot): a
+##   neverallow ratchet pinning OFF every network socket class for
+##   qdistro_broker_t. The broker is AF_UNIX-only (system bus + hook
+##   sockets) and never touches the network; the systemd unit now also
+##   runs it under PrivateNetwork=yes + RestrictAddressFamilies. The
+##   neverallow makes a future `allow` that re-grants a net socket fail
+##   the POLICY BUILD (build ratchet), not silently widen the TCB —
+##   copies the tier-2 module's narrowing pattern.
+##
+##   Spec refs: doc/selinux.md §"Broker module split-out";
+##   doc/threat-model.md "TCB process discipline".
 ## </desc>
-policy_module(qdistro_broker, 0.4.1)
+policy_module(qdistro_broker, 0.5.0)
 
 ########################################
 #
@@ -212,3 +222,44 @@ optional_policy(`
 optional_policy(`
     fprintd_dbus_chat(qdistro_broker_t)
 ')
+
+########################################
+#
+# TCB no-network ratchet (task 5, broker pilot)
+#
+# The broker talks ONLY over AF_UNIX (the system bus socket + its hook
+# client/executor sockets, all filesystem paths) and reads /proc for
+# caller identity — it never touches the network, and AF_VSOCK is not
+# needed (unlike the print proxy). The systemd unit enforces this at
+# runtime (PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX
+# AF_NETLINK + IPAddressDeny=any); these neverallows enforce it at
+# POLICY BUILD time, so a future `allow qdistro_broker_t ...:tcp_socket`
+# (here or in a child module) fails `semodule`/checkmodule expansion
+# loudly instead of silently re-opening a network path in the TCB. Copies
+# the tier-2 module's narrowing pattern.
+#
+# These socket classes are kernel base classes; name them in a require so
+# the neverallow expression resolves regardless of what the joined
+# baseline references. (qdistro_broker_t is a plain application_domain —
+# it joins no network attribute — so none of these are granted today; the
+# neverallows guarantee they stay ungranted.)
+gen_require(`
+    class tcp_socket { create connect listen };
+    class udp_socket create;
+    class rawip_socket create;
+    class sctp_socket create;
+    class dccp_socket create;
+    class icmp_socket create;
+    class netlink_route_socket create;
+    class netlink_tcpdiag_socket create;
+    class packet_socket create;
+')
+neverallow qdistro_broker_t self:tcp_socket { create connect listen };
+neverallow qdistro_broker_t self:udp_socket create;
+neverallow qdistro_broker_t self:rawip_socket create;
+neverallow qdistro_broker_t self:sctp_socket create;
+neverallow qdistro_broker_t self:dccp_socket create;
+neverallow qdistro_broker_t self:icmp_socket create;
+neverallow qdistro_broker_t self:netlink_route_socket create;
+neverallow qdistro_broker_t self:netlink_tcpdiag_socket create;
+neverallow qdistro_broker_t self:packet_socket create;
