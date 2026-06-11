@@ -15,6 +15,10 @@
 
 load helpers
 
+# NB: vm_run()/vm_run_admin() call bats `run` internally (they set $status and
+# $output themselves), so they must be invoked BARE — wrapping them in another
+# `run` captures nothing and the assertions become vacuous. This matches the
+# working suites (pwd-print-recall.bats, templates-state-snapshot.bats).
 PROBE="/root/templates-promotion-probe.sh"
 TROOT="/tmp/fp09-promotion"
 
@@ -24,49 +28,49 @@ setup_file() {
     vm_run_admin "command -v podman >/dev/null" \
         || fail_loud "podman not available for admin in the VM"
     # Build + validate + promote the baseline generation A (slow, once).
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE setup"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE setup"
     assert_success
     assert_output_contains "PASS: setup"
 }
 
 @test "templates: digest pinning — binding pins a digest, a tag ref refuses launch" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE digest-pinning"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE digest-pinning"
     assert_success
     assert_output_contains "PASS: digest-pinning"
 }
 
 @test "templates: failed validation never flips the binding" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE failed-validation"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE failed-validation"
     assert_success
     assert_output_contains "PASS: failed-validation"
 }
 
 @test "templates: promotion flips only at restart" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE flip-at-restart"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE flip-at-restart"
     assert_success
     assert_output_contains "PASS: flip-at-restart"
 }
 
 @test "templates: rollback flips back, both generations pinned" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE rollback"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE rollback"
     assert_success
     assert_output_contains "PASS: rollback"
 }
 
 @test "templates: GC pin safety — pinned survive, corrupt pin aborts" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE gc-pin-safety"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE gc-pin-safety"
     assert_success
     assert_output_contains "PASS: gc-pin-safety"
 }
 
 @test "templates: crash consistency — a killed promote never leaves a partial binding" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE crash-consistency"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE crash-consistency"
     assert_success
     assert_output_contains "PASS: crash-consistency"
 }
 
 @test "templates: candidate isolation — no silo state reaches a candidate runtime" {
-    run vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE candidate-isolation"
+    vm_run_admin "QDISTRO_TEST_ROOT=$TROOT bash $PROBE candidate-isolation"
     assert_success
     assert_output_contains "PASS: candidate-isolation"
 }
