@@ -59,9 +59,25 @@ and warns against attaching clients directly to the hardware-facing
 qube. The design here combines both roles in one OpenWrt VM: on a
 single-tenant workstation the firewall protects silos from each
 other and the WAN, not from a hostile co-tenant, so the simpler
-topology may be acceptable. The Qubes research probe
-(`todo/fable-networking`) decides whether to keep one VM (and
-document the accepted risk) or adopt the split.
+topology is acceptable. The Qubes research probe
+(`todo/fable-networking/01-RESULTS.md`) settled this: **keep one
+VM.** None of Qubes' documented reasons for the split (it warns
+against running a VPN/DNS/IPS service in the same qube as the
+firewall) defends against a hostile co-tenant, which we do not
+have. The one surviving risk is firewall-policy integrity against a
+compromised *in-VM* network service: if the WireGuard stack is
+compromised it could in principle rewrite per-silo policy. We accept
+this because the fw4 ruleset is regenerated from host-side
+declarative sources on every boot (so in-VM tampering does not
+persist) and the VPN stack is ours, built, not user-supplied.
+**Trip-wire to split later:** if we ever run a user-supplied/third-
+party VPN stack, or compile *silo-supplied* firewall rules inside
+the VM, move the network service into its own VM so a compromise
+there cannot rewrite policy. The load-bearing Qubes lesson is not
+the VM count but the enforcement *location*: per-silo rules are
+enforced in the net VM, never in the silo, fail closed, and validate
+untrusted rule input (one bad rule once DoS'd every qube behind a
+Qubes net VM).
 
 ## Why OpenWrt, not a hand-rolled routing VM
 
