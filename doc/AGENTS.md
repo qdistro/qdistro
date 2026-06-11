@@ -26,15 +26,35 @@ This is qdistro's most consequential rule.
 - **Userspace is Python + Qt + QML.** Apps, the shell, the session
   manager, admin tools, SDK, daemons that talk over D-Bus. LLMs and
   humans modify these directly with no build-debug-rebuild cycle.
+- **Bash for glue.** VM driver scripts (`scripts/vm/`), image and
+  container build steps, bats integration tests. No policy logic in
+  shell — anything that makes a security decision is Python behind
+  D-Bus.
 - **C is acceptable only in the TCB.** That's qdwin (the
   compositor) and a small set of protocol-glue daemons in
   `daemons/`. Adding a new C component to the umbrella requires a
   written justification.
-- **No JavaScript, no Rust, no Go, no Lua** in new code unless the
-  existing ecosystem forces it (e.g. Electron webview content in
-  third-party apps, or a Quickshell QML file with embedded JS that
-  Quickshell expects). Adding a fourth language doubles every
-  contributor's context-switch cost.
+- **When extending C-based infrastructure, use the embedded
+  extension language the host already offers** rather than writing
+  more C. Example: Weston 15's lua-shell drives rule-based window
+  management from a runtime Lua script (a demo tiling shell ships
+  with it). The script is as transparent to agents as Python or QML,
+  and the C host stays untouched.
+- **Thin C++ may become necessary for some Qt 6 integration**
+  (custom QML types, Qt APIs without Python bindings). Keep it
+  bindings-only — thin C++ glue, thick Python/QML logic on top, no
+  product behaviour in C++ — and justify it in writing like new C.
+- **No other general-purpose languages** (JavaScript, Go, …) in new
+  code unless the existing ecosystem forces it (e.g. Electron
+  webview content in third-party apps, or a Quickshell QML file
+  with embedded JS that Quickshell expects). Every added language
+  multiplies contributor context-switch cost.
+
+The policy covers tests as much as product code: pytest for
+Python, bats for shell, markdown playbooks for GUI scenarios (see
+[Testing patterns](#testing-patterns)). A test an agent can't read
+and extend confidently is as much a liability as opaque product
+code.
 
 The rationale is in [overview.md](overview.md) and
 [compositor.md](compositor.md). The short form: if an LLM can't

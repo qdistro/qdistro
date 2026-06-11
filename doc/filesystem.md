@@ -149,10 +149,10 @@ Scheduled backup of configured subvolumes to a remote target.
 
 ### Encryption pipeline
 
-Pinned tool: **`rage-encryption`** (Rust port of age), packaged on
-Tumbleweed. Single static binary, age-format-compatible. Pinned over the
-Go `age` binary because the Rust implementation is easier to audit and
-ships as a single static binary on Tumbleweed without a Go runtime.
+Pinned tool: **`rage-encryption`**, packaged on Tumbleweed. Single
+static binary, age-format-compatible. Pinned over the upstream `age`
+binary because rage is easier to audit and ships as a single static
+binary on Tumbleweed without an extra language runtime.
 
 Idiom for export:
 

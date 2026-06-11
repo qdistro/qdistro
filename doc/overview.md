@@ -151,7 +151,12 @@ Exceptions are infrastructure where product behaviour does not live:
  and input.
 - PipeWire, systemd, kernel modules, libvirt/qemu — commodity C infra.
 - SIP-built Python bindings for C++ Qt libraries — thin C++ glue with thick
- pure-Python logic on top.
+ pure-Python logic on top. If a future Qt 6 feature has no Python binding
+ (e.g. a custom QML type), the same shape applies: thin C++ glue, no
+ product behaviour in C++.
+- Where C infrastructure offers an embedded extension language, extend it
+ there instead of in C — e.g. Weston 15's lua-shell scripts window
+ management in Lua (demo tiling shell included).
 
 The rule governs *product behaviour* (apps, shell, session manager, policy,
 SDK). Infrastructure uses whatever is best for its job; product code is always

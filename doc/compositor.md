@@ -113,7 +113,11 @@ Python + Qt modifiability for everything above it.
 - **In-process Weston extensions** — shell plugin, backends, any hot-path code
  Weston's main loop calls per-event or per-frame. Weston dlopens these as
  shared libraries and invokes C-ABI entry points. **C is the only credible
- choice**, and the C surface is kept small.
+ choice**, and the C surface is kept small. Where upstream Weston exposes an
+ embedded scripting hook instead — e.g. the lua-shell added in Weston 15,
+ which scripts rule-based window management in Lua and ships a demo tiling
+ shell — the script beats new C: it keeps the same runtime-editable
+ transparency as the Python layer.
 
 - **Out-of-process consumers and satellite tooling** — qdshell, per-uid
  policy tools, effects consumers, install-time bindings, tests, anything
