@@ -37,7 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # probes/ -> vm/ -> integration/ -> tests/ -> repo root (qdistro).
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 TEMPLATES_SRC=""
-for cand in /usr/libexec/qdistro "$REPO_ROOT/templates"; do
+for cand in /usr/libexec/qdistro "$REPO_ROOT/templates" \
+            /root/qdistro-src/qdistro/templates; do
     if [ -f "$cand/qdistro_template_build.py" ]; then TEMPLATES_SRC="$cand"; break; fi
 done
 
@@ -111,7 +112,8 @@ ensure_policy() {
     if [ ! -f "$QDISTRO_ETC_DIR/templates/$TEMPLATE.toml" ]; then
         # prefer the installed/in-tree example policy
         for p in /etc/qdistro/templates/$TEMPLATE.toml \
-                 "$REPO_ROOT/templates/examples/$TEMPLATE.toml"; do
+                 "$REPO_ROOT/templates/examples/$TEMPLATE.toml" \
+                 /root/qdistro-src/qdistro/templates/examples/$TEMPLATE.toml; do
             [ -f "$p" ] && { install -m 0644 "$p" "$QDISTRO_ETC_DIR/templates/$TEMPLATE.toml"; break; }
         done
     fi
