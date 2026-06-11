@@ -52,6 +52,21 @@ _STANDALONE_MANIFEST_CANDIDATES = [
 ]
 
 
+def _exists(path: Path) -> bool:
+    """Path.exists() that treats an inaccessible candidate as absent.
+
+    A stale absolute candidate under another user's home (e.g. the
+    original author's /home/playai/... checkout) makes Path.exists()
+    raise PermissionError on this host instead of returning False,
+    which would abort candidate resolution before the valid
+    sibling-checkout path is reached. Swallow OSError so resolution
+    falls through to the next candidate."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _gecko_id(path: Path) -> str:
     data = json.loads(path.read_text(encoding="utf-8"))
     return (data.get("browser_specific_settings", {})
@@ -120,7 +135,7 @@ class TestFirefoxInstallModes:
         installer never authorized the standalone id, so qdfirefox failed.
         """
         manifest = next(
-            (p for p in _STANDALONE_MANIFEST_CANDIDATES if p.exists()),
+            (p for p in _STANDALONE_MANIFEST_CANDIDATES if _exists(p)),
             None)
         if manifest is None:
             pytest.skip("qdfirefox-extension/manifest.json not in tree")
