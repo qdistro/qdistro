@@ -19,9 +19,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import re as _re
 import subprocess
 import sys
 from pathlib import Path
+
+# Same tunnel-name shape the egress backend accepts (egress wg:<name>): keep a
+# crafted name from escaping WG_CONFIG_DIR or producing a tag no silo can ref.
+_TUNNEL_NAME_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
 
 # Mirror the session-manager's constants without importing it (keeps this admin
 # tool independent of the daemon's heavy dbus import path).
@@ -102,6 +107,10 @@ def provision(name: str, *, peer_public_key: str, endpoint: str, address: str,
     """Provision tunnel `<name>`: generate the silo end's keypair, store its
     private key in pwd, write the non-secret conf. Returns the silo end's
     PUBLIC key (register it with the VPN provider). Deps are injectable."""
+    if not _TUNNEL_NAME_RE.match(name) or ".." in name:
+        raise ValueError(
+            f"invalid tunnel name {name!r} (lowercase alnum/_/-, "
+            f"must start alnum, <=31 chars)")
     if store_key is None:
         store_key = lambda n, k: _real_store_key(n, k, pin_selinux=pin_selinux)
     if write_conf is None:

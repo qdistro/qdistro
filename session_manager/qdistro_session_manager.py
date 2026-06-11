@@ -912,7 +912,11 @@ def _pwd_getitem(vault: str, tag: str) -> str:
     import dbus  # local import: optional dependency
     bus = dbus.SystemBus()
     proxy = bus.get_object(PWD_BUS_NAME, PWD_OBJ_PATH)
-    return str(proxy.GetItem(vault, tag, dbus_interface=PWD_BUS_NAME))
+    # Short timeout: this runs under the store lock during start(), so a hung
+    # qdistro-pwd must fail fast (-> KeyUnavailable -> dark) rather than stall
+    # every session-manager method for the default ~25s D-Bus timeout.
+    return str(proxy.GetItem(vault, tag, dbus_interface=PWD_BUS_NAME,
+                             timeout=5.0))
 
 
 class _PwdKeyProvider:
@@ -1194,8 +1198,21 @@ class _SiloStore:
                                    reason="dark:no-tunnel-config", caller=None)
                 return
             keyfn = self._key_provider
-        result = self._egress.apply(ns, silo.uid, policy, self._ops,
-                                    tunnel=tunnel, keyfn=keyfn)
+        try:
+            result = self._egress.apply(ns, silo.uid, policy, self._ops,
+                                        tunnel=tunnel, keyfn=keyfn)
+        except Exception as e:  # noqa: BLE001
+            # A transient bring-up failure (e.g. a boot-time endpoint-DNS race
+            # in `wg set`) must not fail the whole start — come up dark
+            # (retriable next start) with the backstop in place, never leaking.
+            log.warning("silo %r egress %s apply failed: %s — coming up dark",
+                        silo.name, silo.egress, e)
+            self._teardown_egress_devices(ns, silo.uid, policy)
+            self._egress.apply(ns, silo.uid, EgressPolicy.parse("none"),
+                               self._ops)
+            self._audit_record("egress-apply", silo.name, decision="allow",
+                               reason="dark:apply-failed", caller=None)
+            return
         reason = (f"dark:{result.pending}"
                   if result.dark and result.pending else silo.egress)
         if result.dark and result.pending:
@@ -1203,6 +1220,15 @@ class _SiloStore:
                         silo.name, silo.egress, result.pending)
         self._audit_record("egress-apply", silo.name, decision="allow",
                            reason=reason, caller=None)
+
+    def _teardown_egress_devices(self, ns: str, uid: int,
+                                 policy: "EgressPolicy") -> None:
+        # Best-effort device teardown (no netns removal) for the dark-fallback
+        # path: clear any half-configured device before re-applying `none`.
+        try:
+            self._egress.teardown(ns, uid, policy, self._ops)
+        except Exception as e:  # noqa: BLE001
+            log.warning("egress device teardown (dark fallback) failed: %s", e)
 
     def _teardown_egress(self, name: str, uid: int,
                          egress: str | None) -> None:
@@ -1361,8 +1387,7 @@ class _SiloStore:
                         f"silo {silo.name!r} is {silo.state}; stop it before "
                         f"changing egress (the new policy applies at next start)")
                 prev = silo.egress
-                if egress_norm == prev:
-                    return                       # idempotent; audit below
+                no_change = (egress_norm == prev)
                 silo.egress = egress_norm
                 try:
                     self.save()
@@ -1375,8 +1400,10 @@ class _SiloStore:
             self._audit_record("egress-configure", str(name), decision=decision,
                                reason=str(e), caller=caller)
             raise
+        reason = ("no-change" if no_change
+                  else f"{prev!r} -> {egress_norm!r}")
         self._audit_record("egress-configure", str(name), decision="allow",
-                           reason=f"{prev!r} -> {egress_norm!r}", caller=caller)
+                           reason=reason, caller=caller)
 
     # ---- start / stop / freeze / resume -------------------------------
 
@@ -1432,6 +1459,13 @@ class _SiloStore:
                             # No-op for legacy (egress=None) silos.
                             if self._is_netns_backed(silo):
                                 self._apply_egress(silo)
+                            else:
+                                # Legacy silo: ensure no stale netns lingers from
+                                # a prior egress policy / crash-mid-stop, else
+                                # spawn-tier3 (which keys off netns existence)
+                                # would silently run it in a leftover dark netns.
+                                self._ops.netns_remove(
+                                    _egress.netns_name(silo.name))
                             unit = SILO_LAUNCHER_FMT.format(name=silo.name,
                                                             uid=silo.uid)
                         self._ops.systemctl_start(unit)

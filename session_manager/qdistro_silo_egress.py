@@ -100,10 +100,23 @@ class EgressPolicy:
 def validate_egress(value: object) -> str | None:
     """Normalise the persisted ``Silo.egress`` field. ``None``/absent means the
     legacy un-managed state (no netns); any other value must parse to a valid
-    netns-backed policy. Returns the canonical string (or ``None``)."""
+    netns-backed policy. Returns the canonical string (or ``None``).
+
+    ``direct`` is **not yet supported** by the interim host backend and is
+    rejected here (the single chokepoint for create/load/set_egress): a working
+    ``direct`` needs IPv4 forwarding, a per-silo resolver that actually answers,
+    and a forward-filter to preserve silo<->silo isolation — none of which the
+    interim ships. Until then only ``none`` (default-deny) and ``wg:<name>``
+    are selectable. The dormant ``_apply_direct`` scaffold stays for task 4."""
     if value is None:
         return None
-    return EgressPolicy.parse(value).spec
+    policy = EgressPolicy.parse(value)
+    if policy.mode == EGRESS_DIRECT:
+        raise EgressError(
+            "direct egress is not yet implemented in the interim netns "
+            "backend (needs forwarding + a per-silo resolver + a "
+            "silo-isolation forward-filter); use 'none' or 'wg:<name>'")
+    return policy.spec
 
 
 @dataclass(frozen=True)
@@ -187,10 +200,18 @@ class EgressBackend:
         self._teardown_devices(ns, uid, ops)
         ops.link_up(ns, "lo")
         if policy.mode == EGRESS_NONE:
-            ops.remove_netns_resolv(ns)          # dark: no resolver at all
+            # Dark: no egress device + an EMPTY resolv (not absent — absent
+            # would make `ip netns exec` skip the bind-mount and the silo would
+            # read the HOST's /etc/resolv.conf, leaking the host's resolver IPs
+            # into a default-deny silo).
+            ops.write_netns_resolv(ns, [])
             ops.nft_skuid_drop(uid, True)        # backstop for stray processes
             return EgressResult(mode="none", dark=True)
         if policy.mode == EGRESS_DIRECT:
+            # Dormant: not reachable in the interim (validate_egress rejects
+            # `direct` before any policy can be persisted/applied). Kept as
+            # scaffolding for task 4; do NOT enable without forwarding + a
+            # real per-silo resolver + a silo-isolation forward-filter.
             return self._apply_direct(ns, uid, ops)
         if policy.mode == "wg":
             return self._apply_wg(ns, uid, ops, tunnel, keyfn)
@@ -200,7 +221,13 @@ class EgressBackend:
                  *, tunnel: "TunnelConfig | None" = None) -> None:
         """Reinstall the address + default route on a link-up (Probe 2 finding
         1: a wg link bounce flushes the route, not the address). Idempotent and
-        cheap; safe to call on every start/reconfigure."""
+        cheap; safe to call on every start/reconfigure.
+
+        NOTE: deliberately not wired to an event source yet — inside the netns
+        only root holds CAP_NET_ADMIN, so a silo process cannot bounce the wg
+        link, and any flap fails dark (closed). When a flap source exists (a
+        reconfigure/health path, or an `ip monitor` watcher), call this on
+        link-up; until then it is exercised only by unit tests."""
         if policy.mode == "wg" and tunnel is not None:
             self._bring_up_wg(ns, wg_ifname(uid), tunnel, ops)
 
@@ -226,12 +253,9 @@ class EgressBackend:
         try:
             key = keyfn(tunnel.name) if keyfn is not None else None
         except KeyUnavailable as e:
-            ops.nft_skuid_drop(uid, True)
-            return EgressResult(mode="wg", dark=True,
-                                pending=str(e) or "vault-locked")
+            return self._dark_wg(ns, uid, ops, str(e) or "vault-locked")
         if not key:
-            ops.nft_skuid_drop(uid, True)
-            return EgressResult(mode="wg", dark=True, pending="no-key")
+            return self._dark_wg(ns, uid, ops, "no-key")
         # Born in the INIT netns (None) so WireGuard binds its encrypted socket
         # there; configure BEFORE moving (avoids needing `ip netns exec wg`).
         ops.wg_add_dev(ifn)
@@ -244,6 +268,15 @@ class EgressBackend:
         ops.write_netns_resolv(ns, [tunnel.dns] if tunnel.dns else [])
         ops.nft_skuid_drop(uid, True)
         return EgressResult(mode="wg", dark=False)
+
+    def _dark_wg(self, ns, uid, ops, pending) -> EgressResult:
+        # A wg silo that can't bring its tunnel up (locked/pre-auth vault, no
+        # key) comes up dark + retriable: no egress device, the backstop on,
+        # and an EMPTY resolv so it can't fall back to the host resolver or a
+        # stale previous-tunnel resolver.
+        ops.write_netns_resolv(ns, [])
+        ops.nft_skuid_drop(uid, True)
+        return EgressResult(mode="wg", dark=True, pending=pending)
 
     def _bring_up_wg(self, ns, ifn, tunnel, ops) -> None:
         ops.addr_add(ns, ifn, tunnel.address)
@@ -275,7 +308,13 @@ class EgressBackend:
 
     def _teardown_devices(self, ns, uid, ops) -> None:
         # link_del is idempotent in the ops layer (ignores a missing device),
-        # so this is safe over a never-applied or half-applied netns.
-        ops.link_del(ns, wg_ifname(uid))
+        # so this is safe over a never-applied or half-applied netns. We must
+        # delete the wg device in BOTH the init netns and the silo netns: a
+        # `wg set` failure in _apply_wg (e.g. a boot-time endpoint-DNS race)
+        # leaves the device orphaned in the INIT netns *before* the move, and a
+        # successful apply leaves it in the silo netns. Missing either one wedges
+        # the next start on `ip link add wg-<uid>` -> EEXIST.
+        ops.link_del(None, wg_ifname(uid))     # init netns (pre-move / failed move)
+        ops.link_del(ns, wg_ifname(uid))       # silo netns (post-move)
         ops.link_del(ns, veth_silo_ifname(uid))
         ops.link_del(None, veth_host_ifname(uid))

@@ -150,8 +150,17 @@ class TestPolicyParse:
 
     def test_validate_egress_canonicalises(self):
         assert validate_egress("wg:work") == "wg:work"
+        assert validate_egress("none") == "none"
         with pytest.raises(EgressError):
             validate_egress("wg:Bad")
+
+    def test_validate_egress_rejects_direct(self):
+        # `direct` parses (valid future value) but is NOT yet supported by the
+        # interim backend, so validate_egress (the create/load/set chokepoint)
+        # refuses it — no half-built direct mode can be persisted/applied.
+        assert EgressPolicy.parse("direct").mode == "direct"
+        with pytest.raises(EgressError):
+            validate_egress("direct")
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +265,24 @@ class TestWgApply:
         seq = ops.ops_only()
         assert seq.index("link_del") < seq.index("wg_add_dev")
 
+    def test_teardown_deletes_init_netns_wg(self, backend, ops):
+        # B1: a `wg set` failure leaves the device orphaned in the INIT netns
+        # before the move; teardown MUST delete it there too, or the next start
+        # hits `ip link add wg-<uid>` -> EEXIST and wedges forever.
+        backend.teardown(NS, UID, EgressPolicy.parse("wg:work"), ops)
+        init_wg_deletes = [c for c in ops.calls
+                           if c == ("link_del", None, wg_ifname(UID))]
+        assert init_wg_deletes, "teardown must delete wg in the init netns"
+
+    def test_apply_recovers_from_orphaned_init_device(self, backend, ops):
+        # Simulate a prior failed apply that left wg-<uid> in the init netns,
+        # then a fresh apply: teardown-stale-first deletes it before re-adding.
+        ops.links.add((None, wg_ifname(UID)))     # orphan from a failed move
+        backend.apply(NS, UID, EgressPolicy.parse("wg:work"), ops,
+                      tunnel=TUN, keyfn=lambda n: "k")
+        seq = ops.ops_only()
+        assert seq.index("link_del") < seq.index("wg_add_dev")
+
 
 # ---------------------------------------------------------------------------
 # reattach (Probe 2 finding 1: reinstall addr+route on link-up)
@@ -284,7 +311,9 @@ class TestNone:
         assert "wg_add_dev" not in seq and "veth_create" not in seq
         assert "route_add_default_dev" not in seq
         assert "route_add_default_via" not in seq
-        assert NS not in ops.resolv                   # no resolver
+        # EMPTY resolv (not absent): an absent file makes `ip netns exec` skip
+        # the bind-mount, leaking the host's /etc/resolv.conf into the silo.
+        assert ops.resolv[NS] == []
         assert ops.skuid_drop[UID] is True            # backstop on
 
 

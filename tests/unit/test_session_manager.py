@@ -964,7 +964,13 @@ class TestEgressLifecycle:
     def test_legacy_silo_touches_no_netns(self, store, ops):
         store.create("work", 2000)               # egress=None
         store.start("work")
-        assert ops.egress_calls == []            # no netns for legacy silos
+        # Legacy silos are never placed in a netns: no create, no wg, no
+        # backstop. (start() does defensively netns_remove a possibly-stale
+        # qd-work, so egress_calls isn't strictly empty.)
+        assert "netns_create" not in ops.egress_ops()
+        assert "wg_add_dev" not in ops.egress_ops()
+        assert netns_name("work") not in ops.netns
+        assert 2000 not in ops.skuid
         assert ("start", "qdshell-session-work@2000.service") in ops.systemctl_calls
 
     def test_none_silo_comes_up_dark(self, egress_store, ops):
@@ -974,7 +980,7 @@ class TestEgressLifecycle:
         assert ns in ops.netns                   # netns created
         assert ops.skuid[2000] is True           # backstop on
         assert "wg_add_dev" not in ops.egress_ops()
-        assert ns not in ops.resolv              # dark: no resolver
+        assert ops.resolv[ns] == []              # dark: empty resolv (not host's)
 
     def test_wg_silo_brings_up_tunnel_before_launch(self, egress_store, ops):
         egress_store.create("work", 2000, egress="wg:work")
@@ -1059,3 +1065,50 @@ class TestSetEgress:
         egress_store.set_egress("work", "wg:work")
         egress_store.start("work")
         assert "wg_add_dev" in ops.egress_ops()
+
+
+class TestEgressReviewFixes:
+    """Regression tests for the dual-review fixes (Fable B1/B2 + should-fixes)."""
+
+    def test_set_egress_rejects_direct(self, store):
+        # direct is de-scoped in the interim backend; the mutation path refuses
+        # it (validate chokepoint) rather than persisting a half-built mode.
+        store.create("work", 2000)
+        with pytest.raises(BadArgument):
+            store.set_egress("work", "direct")
+
+    def test_create_rejects_direct(self, store):
+        with pytest.raises(BadArgument):
+            store.create("work", 2000, egress="direct")
+
+    def test_start_degrades_to_dark_on_apply_failure(self, ops, tmp_path):
+        # B1 follow-up: a transient bring-up failure (e.g. a boot-time endpoint
+        # DNS race in `wg set`) must come up dark, not fail the whole start.
+        class _FlakyBackend:
+            def __init__(self):
+                self.applied = []
+            def apply(self, ns, uid, policy, o, **kw):
+                self.applied.append(policy.spec)
+                if policy.mode == "wg":
+                    raise RuntimeError("wg set failed (endpoint DNS race)")
+                return type("R", (), {"dark": True, "pending": None,
+                                      "mode": "none"})()
+            def teardown(self, *a, **k):
+                pass
+        be = _FlakyBackend()
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml",
+                           egress_backend=be, tunnel_resolver=lambda n: _TUN,
+                           key_provider=lambda n: "k")
+        store.create("work", 2000, egress="wg:work")
+        store.start("work")                       # must NOT raise
+        assert store.get("work").state == State.ACTIVE
+        assert "wg:work" in be.applied and "none" in be.applied  # fell back dark
+
+    def test_legacy_start_removes_stale_netns(self, store, ops):
+        # S5: a legacy silo (egress=None) whose netns lingered from a prior
+        # policy/crash must have it removed on start, so spawn-tier3 (which keys
+        # off netns existence) can't run it in a leftover dark netns.
+        ops.netns.add(netns_name("work"))         # stale netns present
+        store.create("work", 2000)                # legacy (no egress)
+        store.start("work")
+        assert netns_name("work") not in ops.netns
