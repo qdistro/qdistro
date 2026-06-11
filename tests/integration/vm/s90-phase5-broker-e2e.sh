@@ -168,6 +168,10 @@ else
 fi
 
 # 13. 50 in a row — burst smoke
+# The broker caps each (uid, action) bucket at 50/sec. The earlier
+# notification assertions use the same notification.posted bucket, so
+# let that traffic age out before checking the exact 50-row boundary.
+sleep 2
 for i in $(seq 1 50); do
     bcall RecordNotification sssi "BurstApp" "burst-$$-$i" "b" 1 >/dev/null
 done
@@ -182,6 +186,7 @@ fi
 # octal escapes (\303\251 etc.) so we can't grep for "café" literally.
 # Instead: confirm the unique tag is present AND the octal escape for
 # 'é' (\303\251) appears alongside it.
+sleep 2
 UNIQ_UNI="bats-uni-$$"
 bcall RecordNotification sssi "App" "cafe-$UNIQ_UNI" "café-body" 1 >/dev/null
 out=$(bcall ListHistory i 3)
