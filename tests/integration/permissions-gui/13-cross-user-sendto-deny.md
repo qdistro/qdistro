@@ -53,16 +53,14 @@ $VMGUI "$VM" screenshot /tmp/13-s1-pending.png
 - `payload=deny_me_please` visible in the details line.
 - Buttons labeled `Approve` and `Deny` are present.
 
-### S2 — click Deny via OCR targeting
+### S2 — deny via keyboard
 
 ```bash
-# Runner:
-# 1. OCR /tmp/13-s1-pending.png.
-# 2. Find the bounding box of the visible text "Deny".
-# Expect exactly one button-sized hit (the scope picker has
-# no "Deny" label, only Approve/Deny buttons live at that
-# width); if multiple, pick the one next to "Approve".
-# 3. Click the center of that bounding box.
+# Mouse click delivery to Qt/XWayland windows is platform-blocked on
+# this template. Drive the Deny action through the virtual keyboard
+# path documented in AGENTS.md.
+$VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "admin approvals" windowactivate --sync'
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 2
 $VMGUI "$VM" screenshot /tmp/13-s2-denied.png
 ```
