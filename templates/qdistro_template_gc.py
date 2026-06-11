@@ -150,6 +150,38 @@ def _rmi(image_ref: str) -> bool:
     return True
 
 
+# Protective tagging (cascade guard). Generation images are stored UNTAGGED
+# (build drops the candidate tag so GC can `podman rmi <digest>`), and
+# `podman rmi <child>` cascade-deletes an UNTAGGED, otherwise-unreferenced
+# PARENT image. So collecting a failed candidate (or an unpinned generation)
+# that was built FROM a pinned generation would drag the pinned generation's
+# image down with it — silently losing a rollback target whose only protection
+# is a pin (the pin guards the RECORD, not the image's layer parentage). A tag
+# on the parent stops the cascade; GC tags every pinned generation image for
+# the duration of its rmi sweep and removes the tag afterwards.
+_PROTECT_REPO = "qdistro-gc-protect"
+
+
+def _protect_tag(digest: str) -> str:
+    # A unique, valid local tag derived from the digest hex (tags may not
+    # contain ':' beyond the repo:tag separator, so strip the algo prefix).
+    return f"{_PROTECT_REPO}:{digest.split(':')[-1]}"
+
+
+def _tag(digest: str) -> str | None:
+    tag = _protect_tag(digest)
+    proc = subprocess.run(["podman", "tag", digest, tag],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        log(f"WARN: podman tag {digest} {tag} failed: {proc.stderr.strip()}")
+        return None
+    return tag
+
+
+def _untag(tag: str) -> None:
+    subprocess.run(["podman", "untag", tag], capture_output=True, text=True)
+
+
 def _all_pinned_digests(pinned: set[tuple[str, str]]) -> set[str]:
     """Just the generation digests from the pinned (template, gen) set,
     flattened across templates. A candidate's payload (its config digest)
@@ -351,13 +383,53 @@ def _rm_snapshot_payload(path: str) -> None:
 
 
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
-       now: float | None = None, rmi=_rmi, image_exists=_image_exists) -> list[dict]:
+       now: float | None = None, rmi=_rmi, image_exists=_image_exists,
+       tag=_tag, untag=_untag) -> list[dict]:
     layout = layout or qt.Layout()
     now = time.time() if now is None else now
     retention = load_retention(layout)            # fail-closed
     pinned = build_pinned_set(layout, now)        # fail-closed
     pinned_digests = _all_pinned_digests(pinned)
     promoted_digests = _all_promoted_generations(layout)
+    deletions: list[dict] = []
+    # Cascade guard: protect every pinned generation image with a transient tag
+    # so a later `rmi` of a child (a failed candidate built FROM it, or an
+    # unpinned generation layered on it) cannot cascade-delete it. A pin guards
+    # the generation RECORD; only a tag guards the IMAGE from podman's
+    # untagged-parent cleanup. Skipped in dry-run (it deletes nothing).
+    protect_tags: list[str] = []
+    if not dry_run:
+        for digest in pinned_digests:
+            if image_exists(digest):
+                t = tag(digest)
+                if t is None:
+                    # Fail closed: a pinned generation image we could NOT
+                    # protect must never be left exposed to a cascading rmi
+                    # (that is the exact data-loss this guard prevents). Untag
+                    # what we already protected and abort before deleting
+                    # anything — a transient `podman tag` failure must not
+                    # silently degrade into "collect the pinned rollback
+                    # target's image too".
+                    for done in protect_tags:
+                        untag(done)
+                    raise qt.TemplateError(
+                        f"could not tag-protect pinned generation image "
+                        f"{digest} from GC cascade; aborting before any "
+                        f"deletion")
+                protect_tags.append(t)
+    try:
+        deletions.extend(_gc_payloads(layout, retention, pinned, pinned_digests,
+                                      promoted_digests, now, dry_run, rmi,
+                                      image_exists))
+    finally:
+        for t in protect_tags:
+            untag(t)
+    return deletions
+
+
+def _gc_payloads(layout: qt.Layout, retention: dict, pinned, pinned_digests,
+                 promoted_digests, now: float, dry_run: bool, rmi,
+                 image_exists) -> list[dict]:
     deletions: list[dict] = []
     # State-snapshot retention (task 05) is independent of the template payload
     # passes: expired user-state snapshots are collected by their own window,

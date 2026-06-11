@@ -67,6 +67,19 @@ def _exists_true(_ref):
     return True
 
 
+# The cascade-guard tag/untag are real-podman side effects (like rmi); inject
+# no-ops so the retention unit tests stay hermetic. A dedicated test below
+# verifies the guard wiring with recording fakes.
+def _noop_tag(digest):
+    # Return a truthy dummy tag: the cascade guard treats a None return as a
+    # tag FAILURE (and fail-closes), so a hermetic no-op must signal success.
+    return f"noop:{digest.split(':')[-1]}"
+
+
+def _noop_untag(_tag):
+    pass
+
+
 def _candidate(layout, template, run_id, *, mtime, state="failed", gen=None):
     """A failed candidate dir. With gen=None it is a failed-BUILD candidate
     (no manifest, no image); with a digest it gets a valid candidate manifest
@@ -101,7 +114,7 @@ def test_pinned_generation_survives_aggressive_retention(tmp_path):
     # pin the OLDEST with an unexpired rollback-window
     _pin(layout, "tier2-dev", a, "rollback-window", expires_at="2099-01-01T00:00:00Z")
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, tag=_noop_tag, untag=_noop_untag)
     # c kept by retention (newest), a kept by pin, b collected
     assert b in deleted
     assert a not in deleted and c not in deleted
@@ -118,7 +131,7 @@ def test_expired_rollback_pin_frees_generation(tmp_path):
     # a's rollback-window pin is EXPIRED -> a is collectable
     _pin(layout, "tier2-dev", a, "rollback-window", expires_at="2000-01-01T00:00:00Z")
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, tag=_noop_tag, untag=_noop_untag)
     assert a in deleted
 
 
@@ -131,7 +144,7 @@ def test_binding_active_generation_never_collected(tmp_path):
     _gen(layout, "tier2-dev", a, mtime=now - 100)
     _binding(layout, "dev-silo", "tier2-dev", a)
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, tag=_noop_tag, untag=_noop_untag)
     assert a not in deleted, "the live launch target must never be collected"
 
 
@@ -146,7 +159,7 @@ def test_stale_active_pin_does_not_protect(tmp_path):
     _gen(layout, "tier2-dev", a, mtime=now - 100)
     _pin(layout, "tier2-dev", a, "active")  # stale: no binding references a
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, tag=_noop_tag, untag=_noop_untag)
     assert a in deleted
 
 
@@ -200,7 +213,7 @@ def test_evidence_survives_payload_deletion(tmp_path):
     a = _digest(1)
     gen_dir = _gen(layout, "tier2-dev", a, mtime=now - 100)
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi)
+    gc.gc(layout=layout, now=now, rmi=rmi, tag=_noop_tag, untag=_noop_untag)
     assert a in deleted
     # manifest + evidence still on disk
     assert os.path.isfile(os.path.join(gen_dir, "manifest.toml"))
@@ -216,7 +229,7 @@ def test_failed_candidate_payload_collected_after_window(tmp_path):
     cdir = _candidate(layout, "tier2-dev", "run-old", mtime=now - 8 * 86400,
                       gen=payload)  # older than 7d, with a real payload digest
     deleted, rmi = _collected_runner()
-    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert any(d["kind"] == "candidate" and d["run_id"] == "run-old" for d in res)
     # the payload is reclaimed by the manifest's generation_ref digest, NOT a
     # per-run candidate tag (which the build untags immediately).
@@ -245,7 +258,7 @@ def test_recent_failed_candidate_kept(tmp_path):
     _candidate(layout, "tier2-dev", "run-new", mtime=now - 1 * 86400,
                gen=_digest(7))  # 1 day old
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert deleted == []
 
 
@@ -258,7 +271,7 @@ def test_failed_build_candidate_no_payload_no_rmi(tmp_path):
     now = 1_700_000_000.0
     _candidate(layout, "tier2-dev", "run-nobuild", mtime=now - 8 * 86400, gen=None)
     deleted, rmi = _collected_runner()
-    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert deleted == []
     assert not any(d["kind"] == "candidate" for d in res)
 
@@ -278,7 +291,7 @@ def test_failed_candidate_digest_pinned_under_other_template_not_collected(tmp_p
     # failed candidate under tier2-dev with the same payload digest
     _candidate(layout, "tier2-dev", "run-shared", mtime=now - 8 * 86400, gen=shared)
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert shared not in deleted
 
 
@@ -295,7 +308,7 @@ def test_failed_candidate_digest_with_promoted_record_not_collected(tmp_path):
     _gen(layout, "tier2-other", shared, mtime=now - 100)  # generation record exists
     _candidate(layout, "tier2-dev", "run-shared2", mtime=now - 8 * 86400, gen=shared)
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert shared not in deleted
 
 
@@ -339,7 +352,7 @@ def test_failed_candidate_corrupt_manifest_skipped_run_continues(tmp_path):
     _candidate(layout, "tier2-dev", "run-good", mtime=now - 8 * 86400,
                gen=good_payload)
     deleted, rmi = _collected_runner()
-    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     # corrupt one skipped, good one still collected
     assert good_payload in deleted
 
@@ -357,7 +370,7 @@ def test_failed_candidate_unparseable_manifest_skipped(tmp_path):
     qt.set_candidate_state(bad, "failed")
     os.utime(bad, (now - 8 * 86400, now - 8 * 86400))
     deleted, rmi = _collected_runner()
-    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true)
+    res = gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true, tag=_noop_tag, untag=_noop_untag)
     assert deleted == []
     assert not any(d.get("run_id") == "run-badtoml" for d in res)
 
@@ -433,3 +446,73 @@ def test_rmi_failure_writes_no_audit_row(tmp_path):
             assert [r for r in alog.recent() if r["event"] == "template.gc.deleted"] == []
         finally:
             alog.close()
+
+
+def test_pinned_generation_image_is_tag_protected_during_sweep(tmp_path):
+    # Cascade guard: generation images are stored UNTAGGED, and `podman rmi`
+    # of a child (a failed candidate built FROM a pinned generation) would
+    # cascade-delete the untagged parent. GC must tag every pinned generation
+    # image with existing payload for the duration of the rmi sweep and untag
+    # it afterwards. Verify the wiring with recording fakes.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0), 0o644)
+    now = 1_700_000_000.0
+    pinned_gen, victim = _digest(1), _digest(2)
+    _gen(layout, "tier2-dev", pinned_gen, mtime=now - 200)
+    _binding(layout, "dev-silo", "tier2-dev", pinned_gen)  # pinned (active)
+    # a failed candidate built FROM the pinned generation, expired -> collected
+    _candidate(layout, "tier2-dev", "20990101T000000Z-childcand",
+               mtime=now - 10_000_000, state="failed", gen=victim)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0, failed_candidate_days=0), 0o644)
+
+    tagged, untagged = [], []
+    def tag(d):
+        tagged.append(d); return f"qdistro-gc-protect:{d.split(':')[-1]}"
+    def untag(t):
+        untagged.append(t)
+    deleted, rmi = _collected_runner()
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
+          tag=tag, untag=untag)
+    # the pinned (active) generation image was protected for the sweep...
+    assert pinned_gen in tagged, "pinned generation image must be tag-protected"
+    # ...and the protective tag was removed afterwards (no permanent tag leak).
+    assert untagged == [f"qdistro-gc-protect:{pinned_gen.split(':')[-1]}"]
+    # the candidate child payload was still collected.
+    assert victim in deleted
+
+
+def test_cascade_guard_skipped_in_dry_run(tmp_path):
+    # dry-run deletes nothing, so it must not mutate tags either.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0), 0o644)
+    now = 1_700_000_000.0
+    a = _digest(1)
+    _gen(layout, "tier2-dev", a, mtime=now - 100)
+    _binding(layout, "dev-silo", "tier2-dev", a)
+    tagged = []
+    gc.gc(layout=layout, now=now, dry_run=True, rmi=lambda r: True,
+          image_exists=_exists_true, tag=lambda d: tagged.append(d) or "x",
+          untag=lambda t: None)
+    assert tagged == [], "dry-run must not tag/untag anything"
+
+
+def test_cascade_guard_fails_closed_when_tag_fails(tmp_path):
+    # If a pinned generation image cannot be tag-protected, GC must ABORT
+    # before any rmi rather than expose it to a cascading delete.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0, failed_candidate_days=0), 0o644)
+    now = 1_700_000_000.0
+    pinned_gen, victim = _digest(1), _digest(2)
+    _gen(layout, "tier2-dev", pinned_gen, mtime=now - 200)
+    _binding(layout, "dev-silo", "tier2-dev", pinned_gen)
+    _candidate(layout, "tier2-dev", "20990101T000000Z-childcand",
+               mtime=now - 10_000_000, state="failed", gen=victim)
+    deleted, rmi = _collected_runner()
+    with pytest.raises(qt.TemplateError):
+        gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
+              tag=lambda d: None, untag=_noop_untag)  # tag always fails
+    assert deleted == [], "no rmi may run once a pinned image cannot be protected"
