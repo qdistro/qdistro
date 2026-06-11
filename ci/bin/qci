@@ -655,15 +655,76 @@ gate_preflight() {
     return "$rc"
 }
 
-host_pytest_loop() {
-    cat <<'EOF'
-rc=0
-for t in tests/test_*.py; do
-    [ -e "$t" ] || continue
-    python3 -m pytest "$t" || rc=1
-done
-exit "$rc"
-EOF
+# ---------------------------------------------------------------------------
+# Shared host pytest-runner snippet generator (DRY).
+#
+# Every Python repo's host pytest step is emitted by THIS one function, so the
+# batching/segfault-isolation, env-pinning, and coverage logic live in a single
+# place instead of being re-hand-rolled per repo. It prints a bash snippet that
+# run_logged executes (via `bash -lc` after `cd $workdir`); the snippet always
+# `exit`s with rc=0 iff every pytest invocation it made returned 0.
+#
+# It is deliberately a thin, faithful generator: each caller passes the exact
+# parameters that reproduce that repo's PRE-EXISTING behaviour byte-for-byte
+# (same file discovery, same batching, same env, same flags). It introduces NO
+# behaviour change — see the per-repo BEFORE/AFTER trace in the commit message.
+#
+# Parameters (named, via local vars set by the caller-facing wrapper):
+#   _hp_discover : how test files are found. One of:
+#                    "all"            -> single pytest process over _hp_args
+#                                        (NO per-file loop; passes _hp_args
+#                                        straight to pytest, so pyproject
+#                                        testpaths apply when _hp_args is empty)
+#                    "glob:<pattern>" -> shell glob (non-recursive, unsorted),
+#                                        guarded so an empty glob is a no-op
+#                    "find:<expr>"    -> `find <expr> | sort` (recursive, sorted)
+#   _hp_batch    : files per pytest process. 1 = strict per-file; N = N-per-batch
+#                  (ignored for the "all" discover mode)
+#   _hp_env      : env-var prefix string prepended to each `python3 -m pytest`
+#                  (e.g. 'PYTEST_QT_API=pyqt6 QT_API=pyqt6 ...'); may be empty
+#   _hp_args     : extra args appended to each pytest invocation (e.g. coverage
+#                  flags, or for the "all" mode the test dir/selector); may be
+#                  empty
+#   _hp_pre      : optional shell prologue emitted before the loop (e.g. the
+#                  qdistro coverage-flag setup / stale-artifact cleanup)
+#   _hp_post     : optional shell epilogue emitted after the loop, before exit
+#                  (e.g. the qdistro coverage-summary printer)
+#
+# All values are interpolated literally into the snippet (callers control them;
+# they are not attacker-influenced), matching how host_ruff_cmd/host_mypy_cmd
+# already build their snippets.
+# ---------------------------------------------------------------------------
+host_pytest_cmd() {
+    local _hp_discover=$1 _hp_batch=${2:-1} _hp_env=${3:-} _hp_args=${4:-} _hp_pre=${5:-} _hp_post=${6:-}
+    local _pytest="${_hp_env:+$_hp_env }python3 -m pytest"
+
+    printf 'rc=0\n'
+    [ -n "$_hp_pre" ] && printf '%s\n' "$_hp_pre"
+
+    case "$_hp_discover" in
+        all)
+            # Single pytest process. _hp_args carries any dir/selector; when it
+            # is empty, pyproject testpaths apply (bare `python3 -m pytest`).
+            printf '%s%s || rc=1\n' "$_pytest" "${_hp_args:+ $_hp_args}"
+            ;;
+        glob:*)
+            # Non-recursive shell glob, unsorted, empty-glob-safe.
+            printf 'for t in %s; do\n' "${_hp_discover#glob:}"
+            printf '    [ -e "$t" ] || continue\n'
+            printf '    %s%s "$t" || rc=1\n' "$_pytest" "${_hp_args:+ $_hp_args}"
+            printf 'done\n'
+            ;;
+        find:*)
+            # Recursive find, sorted, batched (_hp_batch files per process).
+            printf 'mapfile -t _f < <(find %s | sort)\n' "${_hp_discover#find:}"
+            printf 'for ((_i=0; _i<${#_f[@]}; _i+=%s)); do\n' "$_hp_batch"
+            printf '    %s%s "${_f[@]:_i:%s}" || rc=1\n' "$_pytest" "${_hp_args:+ $_hp_args}" "$_hp_batch"
+            printf 'done\n'
+            ;;
+    esac
+
+    [ -n "$_hp_post" ] && printf '%s\n' "$_hp_post"
+    printf 'exit $rc\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -919,25 +980,22 @@ gate_host() {
     # run artifact. No floor / no pass-rate gate — the coverage number informs
     # but never gates the pipeline. Flags are passed at invocation time only;
     # individual product repos' pyproject.toml are NOT edited.
-    c='rc=0
-# ALWAYS clear any stale coverage artifact from a previous qci run in this
-# checkout BEFORE the run, regardless of pytest-cov availability. Otherwise a
-# leftover .coverage-report.json (e.g. from an earlier run where pytest-cov was
-# installed) could be picked up by the floor check below and silently satisfy a
-# positive floor even though THIS run produced no coverage. Scope the reported
-# percentage to this run only; --cov-append still accumulates INTER-batch within
-# a single run.
+    # Prologue: clear any stale coverage artifact from a previous qci run in
+    # this checkout BEFORE the run, regardless of pytest-cov availability.
+    # Otherwise a leftover .coverage-report.json (e.g. from an earlier run where
+    # pytest-cov was installed) could be picked up by the floor check below and
+    # silently satisfy a positive floor even though THIS run produced no
+    # coverage. Scope the reported percentage to this run only; --cov-append
+    # still accumulates INTER-batch within a single run.
+    local _qd_pre _qd_post
+    _qd_pre='# ALWAYS clear any stale coverage artifact (see comment above).
 rm -f .coverage .coverage-report.json
 if python3 -c "import pytest_cov" 2>/dev/null; then
     _COV_FLAGS="--cov=. --cov-report=term-missing --cov-report=json:.coverage-report.json --cov-append"
 else
     _COV_FLAGS=""
-fi
-mapfile -t _f < <(find tests/unit -name "test_*.py" | sort)
-for ((_i=0; _i<${#_f[@]}; _i+=30)); do
-    PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 python3 -m pytest ${_COV_FLAGS} "${_f[@]:_i:30}" || rc=1
-done
-if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
+fi'
+    _qd_post='if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
     python3 -c "
 import json, sys
 try:
@@ -952,8 +1010,13 @@ try:
 except Exception as e:
     print(f\"coverage report parse error: {e}\", file=sys.stderr)
 " || true
-fi
-exit $rc'
+fi'
+    # batch=30 recursive find (segfault isolation), PyQt6 env pinned, coverage
+    # flags spliced before the file list (unquoted, intentional word-splitting).
+    c=$(host_pytest_cmd \
+        'find:tests/unit -name "test_*.py"' 30 \
+        'PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1' \
+        '${_COV_FLAGS}' "$_qd_pre" "$_qd_post")
     run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
@@ -997,17 +1060,22 @@ exit $rc'
     run_logged host qdshell-local "$EXIT_HOST" qml "$WORKSPACE/qdshell" "$c" "qdshell build, qmltest, jstest (node), lint, format check"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_loop)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
+    # qdbrowser: strict per-file via the shared runner (batch=1 over the
+    # non-recursive tests/test_*.py glob) to bound QtWebEngine native residue.
+    run_logged host qdbrowser-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdbrowser" "$(host_pytest_cmd 'glob:tests/test_*.py' 1)" "qdbrowser pytest per file to reduce QtWebEngine residue"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qdgreeter-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdgreeter" "python3 -m pytest tests" ""; step_rc=$?
+    # qdgreeter/qdlocker/qfileman/qnotebook/qterminator: single-process run via
+    # the shared runner ("all" mode). The selector arg reproduces each repo's
+    # prior bare invocation (explicit dir, or empty => pyproject testpaths).
+    run_logged host qdgreeter-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdgreeter" "$(host_pytest_cmd all 0 '' tests)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "python3 -m pytest tests/unit" ""; step_rc=$?
+    run_logged host qdlocker-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdlocker" "$(host_pytest_cmd all 0 '' tests/unit)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qfileman" "python3 -m pytest" ""; step_rc=$?
+    run_logged host qfileman-pytest "$EXIT_HOST" pytest "$WORKSPACE/qfileman" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "python3 -m pytest" ""; step_rc=$?
+    run_logged host qnotebook-pytest "$EXIT_HOST" pytest "$WORKSPACE/qnotebook" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    run_logged host qterminator-pytest "$EXIT_HOST" pytest "$WORKSPACE/qterminator" "python3 -m pytest" ""; step_rc=$?
+    run_logged host qterminator-pytest "$EXIT_HOST" pytest "$WORKSPACE/qterminator" "$(host_pytest_cmd all)" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
     # Extension repos: run tests + build. Coverage (REPORT-ONLY): when

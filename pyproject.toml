@@ -6,6 +6,15 @@
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 python_files = ["test_*.py"]
+# Pin the Qt binding to PyQt6 in-repo (canonical selector; matches the sibling
+# repos, qdgreeter being the model). pytest-qt otherwise auto-imports PySide6
+# first if it is installed anywhere on the path, which loads PySide6's bundled
+# libQt6Core.so and then breaks the subsequent PyQt6 import with a missing
+# Qt_*_PRIVATE_API symbol error — silently SKIPPING the ~150 admin-app Qt
+# tests. qci ALSO injects PYTEST_QT_API/QT_API/QDISTRO_REQUIRE_PYQT6 as
+# defense-in-depth (the conftest turns the shadow into a hard failure); this
+# declaration is now the primary selector.
+qt_api = "pyqt6"
 # Marker vocabulary (shared with ci/TAXONOMY.md). These let the fast host
 # run deselect integration-grade tests that need real subprocesses/daemons:
 #
