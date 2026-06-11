@@ -215,7 +215,7 @@ if ! systemctl is-active --quiet qdistro-admin-broker.service 2>/dev/null; then
 fi
 systemctl is-active --quiet qdistro-admin-broker.service \
     || skip "qdistro-admin-broker.service did not start"
-SUB_VERDICT=$(dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
+SUB_VERDICT=$(runuser -u admin -- dbus-send --system --print-reply --dest=org.qdistro.AdminBroker1 \
     /org/qdistro/AdminBroker1 org.qdistro.AdminBroker1.CheckHandoffActivation \
     "string:vm-$VM_TAG" "string:admin" \
     "string:$APPID" "string:qdistro.admin.terminal" "string:$ENGINE" \
@@ -374,7 +374,7 @@ fi
 # needs a focused toplevel headless weston can't inject, so we assert
 # the AUTHORIZATION verdict that gates forwarding (the load-bearing
 # half) and note the focus-delivery half as a live-VM gap.
-INPUT_VERDICT=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
+INPUT_VERDICT=$(runuser -u admin -- dbus-send --system --print-reply --dest="$DBUS_DEST" \
     /org/qdistro/AdminBroker1 "$DBUS_IFACE.CheckHandoffActivation" \
     "string:admin" "string:vm-$VM_TAG" \
     "string:qdistro.admin.terminal" "string:$APPID" "string:qdistro.admin" \
