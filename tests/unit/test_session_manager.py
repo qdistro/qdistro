@@ -964,13 +964,13 @@ class TestEgressLifecycle:
     def test_legacy_silo_touches_no_netns(self, store, ops):
         store.create("work", 2000)               # egress=None
         store.start("work")
-        # Legacy silos are never placed in a netns: no create, no wg, no
-        # backstop. (start() does defensively netns_remove a possibly-stale
-        # qd-work, so egress_calls isn't strictly empty.)
+        # Legacy silos are never placed in a netns: no create, no wg. start()
+        # does a cheap unconditional backstop-clear (nft_skuid_drop False) to
+        # sweep any orphaned element, so the silo is explicitly NOT blocked.
         assert "netns_create" not in ops.egress_ops()
         assert "wg_add_dev" not in ops.egress_ops()
         assert netns_name("work") not in ops.netns
-        assert 2000 not in ops.skuid
+        assert ops.skuid.get(2000) is not True   # not dropped/blocked
         assert ("start", "qdshell-session-work@2000.service") in ops.systemctl_calls
 
     def test_none_silo_comes_up_dark(self, egress_store, ops):

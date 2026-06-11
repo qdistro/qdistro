@@ -673,7 +673,11 @@ class _SystemOps:
             f"{{ type ipv4_addr; flags interval; }}\n")
         r = subprocess.run(["nft", "-f", "-"], input=base.encode(),
                            capture_output=True, text=True)
-        if r.returncode != 0:
+        # `nft add` of an existing table/set is idempotent, but tolerate a
+        # benign "exists" just in case a partial table is present; fail closed
+        # on anything else (a broken scaffold must not silently disable the
+        # backstop).
+        if r.returncode != 0 and not _nft_benign(r.stderr):
             raise RuntimeError(
                 f"nft egress scaffold (table/sets) failed: {r.stderr.strip()}")
         for chain in ("out", "post"):
@@ -694,32 +698,49 @@ class _SystemOps:
             raise RuntimeError(
                 f"nft egress backstop rule install failed: {r.stderr.strip()}")
 
+    def _nft_table_present(self) -> bool:
+        return subprocess.run(
+            ["nft", "list", "table", "inet", self._NFT_TABLE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
     def nft_skuid_drop(self, uid, enable) -> None:
         # Defense-in-depth backstop: drop traffic from a silo uid that runs in
         # the INIT netns (a process that bypassed `ip netns exec`). The in-netns
         # route topology is the primary kill-switch; this catches stragglers.
-        self._nft_ensure_table()
+        if enable:
+            self._nft_ensure_table()
+        elif not self._nft_table_present():
+            # Removal never creates the table: a pristine legacy silo (no table)
+            # has nothing to clear, so this stays zero-cost (codex #3).
+            return
         verb = "add" if enable else "delete"
         r = subprocess.run(
             ["nft", verb, "element", "inet", self._NFT_TABLE, "blocked_uids",
              "{", str(int(uid)), "}"],
             capture_output=True, text=True)
-        # add-existing / delete-missing are benign no-ops; surface anything else
-        # so a genuinely failed backstop change is visible, not swallowed.
         if r.returncode != 0 and not _nft_benign(r.stderr):
-            log.warning("nft backstop %s uid=%s failed: %s",
-                        verb, uid, r.stderr.strip())
+            msg = f"nft backstop {verb} uid={uid} failed: {r.stderr.strip()}"
+            if enable:
+                # Fail closed: never run a silo whose containment backstop could
+                # not be installed (codex #1/NEW-2).
+                raise RuntimeError(msg)
+            log.warning("%s", msg)             # failed removal is fail-safe
 
     def nat_masquerade(self, subnet, enable) -> None:
-        self._nft_ensure_table()
+        if enable:
+            self._nft_ensure_table()
+        elif not self._nft_table_present():
+            return
         verb = "add" if enable else "delete"
         r = subprocess.run(
             ["nft", verb, "element", "inet", self._NFT_TABLE, "nat_subnets",
              "{", str(subnet), "}"],
             capture_output=True, text=True)
         if r.returncode != 0 and not _nft_benign(r.stderr):
-            log.warning("nft nat %s subnet=%s failed: %s",
-                        verb, subnet, r.stderr.strip())
+            msg = f"nft nat {verb} subnet={subnet} failed: {r.stderr.strip()}"
+            if enable:
+                raise RuntimeError(msg)
+            log.warning("%s", msg)
 
     def write_netns_resolv(self, ns, nameservers) -> None:
         # `ip netns exec <ns>` bind-mounts /etc/netns/<ns>/resolv.conf over
@@ -1527,9 +1548,18 @@ class _SiloStore:
                                 # init netns, leaving a legacy silo permanently
                                 # dark on host networking (codex #2); a leftover
                                 # netns would make spawn-tier3 run it in a stale
-                                # dark netns (Fable S5). Guarded on netns
-                                # existence so a normal legacy silo (the common
-                                # case) touches no netns/nft state at all.
+                                # dark netns (Fable S5).
+                                #
+                                # Always clear a possibly-orphaned backstop
+                                # element for this uid — cheap and never creates
+                                # the nft table, so a pristine legacy silo still
+                                # touches nothing, but an orphaned blocked_uids
+                                # entry (crash after netns_remove, before the
+                                # element delete) can't keep this silo dark
+                                # (codex #3).
+                                self._ops.nft_skuid_drop(silo.uid, False)
+                                # Full clear (devices + resolver + netns) only
+                                # when a stale netns actually lingers.
                                 if self._ops.netns_exists(
                                         _egress.netns_name(silo.name)):
                                     self._force_clear_egress(silo.name, silo.uid)
