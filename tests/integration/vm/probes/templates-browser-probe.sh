@@ -393,13 +393,19 @@ exec /usr/bin/podman "${args[@]}"
 WRAP
     chmod 0755 /usr/local/bin/podman
 
-    # The template audit DB lives at /var/lib/qdistro/audit/template_audit.sqlite;
-    # install-templates-for-vm.sh now creates audit/ admin-owned, but a VM
-    # bootstrapped before that fix would lack it (admin's audit writes would then
-    # degrade to stderr and the rows broken-update / rollback assert on never
-    # land). Belt-and-suspenders guard — idempotent if the installer already made it.
-    install -d -m 0755 -o admin -g admin /var/lib/qdistro/audit 2>/dev/null \
-        || install -d -m 0755 /var/lib/qdistro/audit
+    # The admin-run template CLIs (build/validate/promote/gc) write
+    # /var/lib/qdistro/audit/template_audit.sqlite, but that dir is the SHARED
+    # security audit store, created 0700 qdistro-pwd by install-pwd-for-vm.sh
+    # (the privileged daemons write their DBs there via root bypass; admin
+    # cannot). Rather than STEAL it (chown admin → an unprivileged user could
+    # unlink/replace the root/pwd audit DBs), make it sticky world-writable
+    # (1777, like /tmp): admin can create template_audit.sqlite, while the sticky
+    # bit stops it from unlinking pwd/broker DBs (still 0600, owner-only). Owner
+    # is left unchanged. This is a TEST-only accommodation in a disposable VM —
+    # production keeps the audit DB out of admin's hands (template audit there
+    # uses a private QDISTRO_VAR_DIR or the daemon's root-bypass writes).
+    install -d /var/lib/qdistro/audit
+    chmod 1777 /var/lib/qdistro/audit
 
     # The login site is a REAL system unit (Restart=always, no start-limit) so it
     # survives every admin login session AND a session-manager restart, holding
@@ -747,6 +753,11 @@ scenario_rollback() {
     # still be honoured at /home to prove the rollback.
     site_ctl "/__clearbreak" >/dev/null 2>&1 || true
     local rev_before; rev_before="$(binding_get identity_revision)"
+    # Snapshot the pre-existing state-rejected-* set so the content proof below
+    # asserts on the dir THIS rollback creates — not a stale one from an earlier
+    # run on a reused VM (deprovision edits silos.yaml only; it does not clean
+    # /var/lib/qdistro/silos/<silo>).
+    local rej_before; rej_before="$(ls -d "$STATE_PATH_DEFAULT"-rejected-* /var/lib/qdistro/silos/"$SILO"/state-rejected-* 2>/dev/null | sort)"
     # Stop the silo, then roll back to A WITH its state (the A-era snapshot).
     stop_silo
     cli template-promote "$SILO" --rollback "$genA" --restore-state >/dev/null 2>&1 \
@@ -755,10 +766,12 @@ scenario_rollback() {
     # identity_revision bumped.
     local rev_after; rev_after="$(binding_get identity_revision)"
     [ "$rev_after" = "$((rev_before + 1))" ] || fail rollback "identity_revision did not bump ($rev_before -> $rev_after)"
-    # The displaced genB-era state is kept aside as state-rejected-*.
-    local rej; rej="$(ls -d "$STATE_PATH_DEFAULT"-rejected-* 2>/dev/null; ls -d /var/lib/qdistro/silos/"$SILO"/state-rejected-* 2>/dev/null)"
-    rej="$(echo "$rej" | head -1)"
-    [ -n "$rej" ] || fail rollback "displaced genB state was not preserved as state-rejected-*"
+    # The displaced genB-era state is kept aside as a NEW state-rejected-* (the
+    # one this rollback just created, not a stale leftover).
+    local rej_after rej
+    rej_after="$(ls -d "$STATE_PATH_DEFAULT"-rejected-* /var/lib/qdistro/silos/"$SILO"/state-rejected-* 2>/dev/null | sort)"
+    rej="$(comm -13 <(printf '%s\n' "$rej_before") <(printf '%s\n' "$rej_after") | grep -v '^$' | head -1)"
+    [ -n "$rej" ] || fail rollback "rollback did not create a NEW state-rejected-* (displaced genB state not preserved)"
     # CONTENT proof (not just displacement): the B-ERA-ONLY sentinel planted in
     # update-flip must be ABSENT from the restored (A-era) live state — proving
     # --restore-state actually swapped content back to the A-era snapshot, not

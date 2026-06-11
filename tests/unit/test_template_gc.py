@@ -566,3 +566,26 @@ def test_keep_n_retention_survivor_is_tag_protected(tmp_path):
           image_status=_status_present)
     assert kept_gen in tagged, "keep-N survivor must be cascade-protected"
     assert old_gen in deleted and kept_gen not in deleted
+
+
+def test_kept_digest_not_collected_cross_template(tmp_path):
+    # SHOULD: a digest kept under template T1 (pinned/active) but ALSO present as
+    # a beyond-retention generation record under T2 must NOT be rmi'd by T2's
+    # loop — a direct `podman rmi <digest>` would delete the image out from
+    # under T1's pin. Mirrors the candidate-path digest guard.
+    layout = _layout(tmp_path)
+    qt.write_toml_atomic(layout.retention_file, dict(gc.DEFAULT_RETENTION,
+                         keep_promoted_generations=0), 0o644)
+    now = 1_700_000_000.0
+    shared, t2_only = _digest(1), _digest(2)
+    # T1 keeps `shared` (its active binding generation).
+    _gen(layout, "tier2-a", shared, mtime=now - 100)
+    _binding(layout, "silo-a", "tier2-a", shared)
+    # T2 has the SAME digest as a beyond-retention record, plus an unrelated one.
+    _gen(layout, "tier2-b", shared, mtime=now - 300)
+    _gen(layout, "tier2-b", t2_only, mtime=now - 200)
+    deleted, rmi = _collected_runner()
+    gc.gc(layout=layout, now=now, rmi=rmi, image_exists=_exists_true,
+          tag=_noop_tag, untag=_noop_untag, image_status=_status_present)
+    assert shared not in deleted, "a digest kept under another template must not be rmi'd"
+    assert t2_only in deleted, "a genuinely unpinned beyond-retention digest is still collected"

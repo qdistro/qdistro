@@ -485,9 +485,12 @@ class _SystemOps:
             # reads this file; the daemon runs as root, so a root-owned 0600 file
             # is unreadable by the launcher (the launch fails with "no launch
             # env"). Hand it to admin so the unit it is written FOR can read it.
-            # Best-effort: only root can chown, and the daemon is root in prod.
+            # Leave the group unchanged (-1): the second arg is a GID, not a
+            # second UID, and admin's primary gid is not guaranteed to equal
+            # ADMIN_UID. Best-effort: only root can chown, and the daemon is root
+            # in prod.
             try:
-                os.fchown(fd, ADMIN_UID, ADMIN_UID)
+                os.fchown(fd, ADMIN_UID, -1)
             except OSError:
                 pass
         finally:
@@ -1086,20 +1089,30 @@ class _SiloStore:
             if silo_kind == KIND_TIER2_TEMPLATE:
                 # Tier-2 templated silo: stopping its unit (whose ExecStop runs
                 # `podman stop` on the rootless container) is the whole teardown
-                # — no per-silo cgroup to freeze/kill/rmdir.
-                self._ops.systemctl_stop(
-                    TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
+                # — no per-silo cgroup to freeze/kill/rmdir. This branch owns its
+                # OWN error handling (the cgroup-path handlers below force
+                # STOPPED, which would be a lie here) and must never leave the
+                # silo wedged in STOPPING.
+                try:
+                    self._ops.systemctl_stop(
+                        TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
+                    survived = self._ops.tier2_silo_running(silo_name)
+                except Exception as e:  # noqa: BLE001
+                    # The stop machinery itself errored (subprocess OSError, a
+                    # missing systemctl/podman, ...). Fail closed: the container
+                    # may still be running, so force ACTIVE (honest, retryable)
+                    # and surface the error — do NOT report STOPPED.
+                    with self._lock:
+                        self._clear_stop_inflight(silo_name)
+                        self._force_state(silo, State.ACTIVE)
+                    raise SessionError(
+                        f"stop of tier-2 silo {silo_name!r} failed: {e}") from e
                 # FAIL CLOSED: systemctl_stop is check=False and the unit's
-                # ExecStop is best-effort, so a unit timeout, a podman failure,
-                # or a surviving rootless container would otherwise be reported
-                # as a successful stop — a lie that hides an orphaned container.
-                # Verify the stop took effect (unit inactive AND container gone)
-                # before clearing the env / reporting STOPPED. On failure force
-                # the silo back to ACTIVE (honest about the live container, and
-                # retryable) and raise — handled here, NOT by the cgroup-path
-                # error handlers below (which force STOPPED to unwedge a stuck
-                # tier-3 teardown).
-                if self._ops.tier2_silo_running(silo_name):
+                # ExecStop is best-effort, so a unit timeout / podman failure /
+                # surviving rootless container would otherwise be reported as a
+                # clean stop — a lie that hides an orphan. Report STOPPED only
+                # when the unit is inactive AND the container is gone.
+                if survived:
                     with self._lock:
                         self._clear_stop_inflight(silo_name)
                         self._force_state(silo, State.ACTIVE)
@@ -1108,7 +1121,16 @@ class _SiloStore:
                         f"effect: the launcher unit is still active or the "
                         f"container "
                         f"{TIER2_CONTAINER_FMT.format(name=silo_name)} survives")
-                self._ops.remove_launch_env(silo_name)
+                # The container is verified gone — the stop SUCCEEDED. Clearing
+                # the (now-stale) launch env is best-effort: a failure here must
+                # not flip the verified-stopped silo back to ACTIVE (the daemon
+                # rewrites the env on the next start anyway).
+                try:
+                    self._ops.remove_launch_env(silo_name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("remove_launch_env for %r failed after a "
+                                "verified stop: %s — leaving the stale env",
+                                silo_name, e)
                 with self._lock:
                     self._clear_stop_inflight(silo_name)
                     self._transition(silo, State.STOPPED)

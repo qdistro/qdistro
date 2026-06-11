@@ -458,8 +458,8 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
             protect_tags.append(t)
     try:
         deletions.extend(_gc_payloads(layout, retention, pinned, pinned_digests,
-                                      promoted_digests, now, dry_run, rmi,
-                                      image_exists))
+                                      promoted_digests, protect_digests, now,
+                                      dry_run, rmi, image_exists))
     finally:
         for t in protect_tags:
             untag(t)
@@ -467,8 +467,8 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
 
 
 def _gc_payloads(layout: qt.Layout, retention: dict, pinned, pinned_digests,
-                 promoted_digests, now: float, dry_run: bool, rmi,
-                 image_exists) -> list[dict]:
+                 promoted_digests, protect_digests, now: float, dry_run: bool,
+                 rmi, image_exists) -> list[dict]:
     deletions: list[dict] = []
     # State-snapshot retention (task 05) is independent of the template payload
     # passes: expired user-state snapshots are collected by their own window,
@@ -490,6 +490,13 @@ def _gc_payloads(layout: qt.Layout, retention: dict, pinned, pinned_digests,
             for i, (gen, _gen_dir) in enumerate(gens):
                 if (template, gen) in pinned:
                     continue  # untouchable, regardless of retention count
+                if gen in protect_digests:
+                    # The same image_id (a cache-identical rebuild) is kept under
+                    # ANOTHER template — `rmi`-ing it here by digest would delete
+                    # the image out from under that template's pin/keep-N (a
+                    # direct rmi removes a single-tagged image; the cascade tag
+                    # does not stop it). Mirrors the candidate-path digest guard.
+                    continue
                 if i < keep_n:
                     continue  # within the keep-N window
                 deletions.append(_delete_generation_payload(

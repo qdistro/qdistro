@@ -112,21 +112,24 @@ fi
 install -d -m 0755 /etc/qdistro/templates /var/lib/qdistro/templates
 install -d -m 0700 /var/lib/qdistro/bindings /var/lib/qdistro/pins \
     /var/lib/qdistro/identity
-# The template audit DB lives at /var/lib/qdistro/audit/template_audit.sqlite
-# (qdistro_template_audit default). promote/rollback/GC all write it as admin;
-# without the dir those writes degrade to stderr ("unable to open database
-# file") and the audit rows the rollback story depends on never land. Create
-# it admin-owned here — admin cannot mkdir under the root-owned parent.
+# NB: do NOT create or chown /var/lib/qdistro/audit here. It is the SHARED
+# security audit store (broker audit.sqlite, session_manager_audit.sqlite,
+# pwd_audit.sqlite, print) — install-pwd-for-vm.sh owns it 0700 qdistro-pwd and
+# warns that a blanket `chown -R` steals it. The template audit DB
+# (template_audit.sqlite) is written there by the privileged daemons via root
+# bypass; admin-run template CLIs that need their own audit point QDISTRO_VAR_DIR
+# at an admin-owned tree (as the promotion probe does). Handing the shared store
+# to admin would let an unprivileged user tamper with root/pwd audit trails and
+# would break pwd's ability to create its DB.
 # Silo state trees (fableplan2 task 01): admin-owned 0700 parent so the
 # first promote can create <silo>/state under it (a templated launch
 # hard-fails on a missing state_path — no silent tmpfs fallback).
 install -d -m 0700 /var/lib/qdistro/silos
-install -d -m 0755 /var/lib/qdistro/audit
 # admin owns the state trees (rootless podman + promote run as admin).
 # Recursive so a prior root-created nested path does not lock admin out.
 chown -R admin:admin /var/lib/qdistro/templates /var/lib/qdistro/bindings \
     /var/lib/qdistro/pins /var/lib/qdistro/identity \
-    /var/lib/qdistro/silos /var/lib/qdistro/audit 2>/dev/null || true
+    /var/lib/qdistro/silos 2>/dev/null || true
 
 if [ ! -f /etc/qdistro/template-retention.toml ] \
         && [ -f "$UMBRELLA/deploy/etc/qdistro/template-retention.toml" ]; then
