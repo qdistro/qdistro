@@ -69,9 +69,10 @@ def test_validate_emits_finished(tmp_path):
     qt.write_toml_atomic(os.path.join(cdir, "manifest.toml"), manifest, 0o644)
     qt.set_candidate_state(cdir, "built")
 
-    def runner(image_ref, probe, ctr):
+    def runner(image_ref, probe, ctr, evidence_dir=None):
         return {"name": probe["name"], "kind": probe["kind"], "class": "local-runtime",
-                "required": True, "result": "pass", "duration_seconds": 0.1, "reason": ""}
+                "required": True, "result": "pass", "duration_seconds": 0.1,
+                "reason": "", "artifacts": []}
 
     assert validate.validate(run_id, layout=layout, runner=runner) == 0
     assert "template.validate.finished" in _audit_events(layout)
@@ -155,7 +156,7 @@ def test_promote_applied_carries_old_new_generation(tmp_path):
     assert applied["identity_revision"] == 2
 
 
-def test_binding_activated_emitted_on_change(tmp_path):
+def test_binding_activated_emitted_on_change(tmp_path, monkeypatch):
     layout = _layout(tmp_path)
     # promote to create a binding + generation record
     _validated_candidate(layout, "run-a", GEN)
@@ -163,7 +164,14 @@ def test_binding_activated_emitted_on_change(tmp_path):
                     resolver=lambda *a: (_ for _ in ()).throw(AssertionError))
     run_dir = str(tmp_path / "run")
     import qdistro_resolve_binding as rbmod
-    rbmod.RUN_STATUS_DIR = run_dir  # avoid writing /run
-    rc, gen = rb.resolve("dev-silo", layout=layout, record=True)
-    assert rc == 0 and gen == GEN
+    # monkeypatch (not a bare assignment) so RUN_STATUS_DIR is restored and
+    # this test never pollutes module state for others (M1 review).
+    monkeypatch.setattr(rbmod, "RUN_STATUS_DIR", run_dir)  # avoid writing /run
+    # Activation is recorded at the launch anchor (--launch-env --record), the
+    # path spawn-tier2 drives; the plain --record path writes run-status only
+    # (task 05 — the marker + audit are committed only after the pre-activation
+    # snapshot step). First-ever activation has no outgoing generation, so no
+    # snapshot is needed and binding.activated is emitted.
+    rc = rb._launch_env_main("dev-silo", layout, record=True)
+    assert rc == 0
     assert "template.binding.activated" in _audit_events(layout)

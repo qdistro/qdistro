@@ -28,13 +28,14 @@ import logging
 import os
 import pwd
 import re as _re
+import shlex
 import shutil
 import signal
 import sqlite3
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -67,6 +68,33 @@ CGROUP_ROOT = Path("/sys/fs/cgroup/qdistro-silos")
 # whichever launcher the bake ships is fine — the session manager only
 # needs the unit name shape so it can `systemctl start` it.
 SILO_LAUNCHER_FMT = "qdshell-session-{name}@{uid}.service"
+# Tier-2 templated silos launch through their own unit, which runs
+# spawn-tier2 as admin (fableplan2 task 04). The session manager runs as
+# root; the unit boundary is where privileges drop to admin (rootless
+# podman must run as admin). One %i = the silo name.
+TIER2_SILO_LAUNCHER_FMT = "qdistro-tier2-silo@{name}.service"
+# The rootless container spawn-tier2 names for a tier-2 silo (mirrors the
+# daemon-exported QD_CONTAINER). Used to fail-closed-verify a stop actually
+# tore the container down (the unit going inactive is not sufficient: a
+# rootless container can survive its supervisor).
+TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
+
+# Silo kinds (fableplan2 task 04). tier3-user is today's implicit default
+# (a real Linux user, per-uid home/cgroup, tier-3 session launcher);
+# tier2-template is a templated podman silo whose launch-owner is admin and
+# whose state is the binding's state_path (created by promote, not useradd).
+KIND_TIER3_USER = "tier3-user"
+KIND_TIER2_TEMPLATE = "tier2-template"
+SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE)
+# The launch-owner uid a tier2-template row carries: admin, where rootless
+# podman runs. Not a fresh silo uid (no useradd/home/cgroup semantics).
+ADMIN_UID = 1000
+# Network modes a tier2-template launch may request (maps to TIER2_NETWORK).
+SILO_NETWORK_MODES = ("none", "slirp4netns")
+# Per-silo launch env the daemon writes for the tier-2 launcher unit to read
+# (the unit drops privileges to admin and runs spawn-tier2). Under /run so it
+# is tmpfs-backed and gone on reboot — the daemon rewrites it on each start.
+TIER2_LAUNCH_ENV_DIR = Path("/run/qdistro/silo-launch")
 
 # Reserved uid range. Admin = 1000; silos start at 2000 so the admin
 # account and the few system-fixed uids in qdistro (audisp = 990 etc.)
@@ -151,6 +179,12 @@ class Silo:
     # Wall-clock seconds; informational only.
     created_at: int = 0
     last_change: int = 0
+    # fableplan2 task 04: a tier3-user silo is a real Linux user (today's
+    # default); a tier2-template silo is a templated podman silo launched via
+    # spawn-tier2. The launch stanza is empty for tier3-user and carries
+    # {workload, argv, network, template_silo} for tier2-template.
+    kind: str = KIND_TIER3_USER
+    launch: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,6 +194,8 @@ class Silo:
             "autostart": bool(self.autostart),
             "created_at": int(self.created_at),
             "last_change": int(self.last_change),
+            "kind": self.kind,
+            "launch": dict(self.launch),
         }
 
 
@@ -196,6 +232,87 @@ def validate_uid(uid: int) -> int:
         raise BadArgument(
             f"uid must be in [{SILO_UID_MIN}, {SILO_UID_MAX}], got {uid_i}")
     return uid_i
+
+
+def validate_kind(kind: str) -> str:
+    if kind not in SILO_KINDS:
+        raise BadArgument(f"kind must be one of {SILO_KINDS}, got {kind!r}")
+    return kind
+
+
+def validate_silo_uid(uid: int, kind: str) -> int:
+    """A tier3-user silo's uid is a fresh silo uid (2000..60000); a
+    tier2-template silo's uid is the launch-owner admin uid (rootless podman
+    runs as admin). A fake/silo uid on a tier2-template row, or admin's uid on
+    a tier3-user row, is rejected — the loader must not smuggle the wrong
+    privilege semantics in."""
+    if kind == KIND_TIER2_TEMPLATE:
+        if int(uid) != ADMIN_UID:
+            raise BadArgument(
+                f"tier2-template silo uid must be the admin launch-owner "
+                f"({ADMIN_UID}), got {uid}")
+        return ADMIN_UID
+    return validate_uid(uid)
+
+
+# Tier-2 launch-stanza field names cross into TIER2_* env at spawn time and
+# the launcher unit reads them, so they are untrusted input: the workload
+# selects the seccomp profile and (legacy) image tag, argv is the app command
+# line, network maps to TIER2_NETWORK, template_silo to TIER2_SILO.
+_SAFE_TOKEN_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/=+-]*$")
+
+
+def validate_launch(kind: str, launch: object) -> dict[str, Any]:
+    """Validate (and normalise) a silo's launch stanza for its kind.
+
+    tier3-user carries no launch stanza (the tier-3 session launcher owns the
+    payload). tier2-template requires workload + template_silo + network, with
+    an optional argv; every value is constrained because it crosses into the
+    spawn-tier2 env / launcher unit."""
+    if kind == KIND_TIER3_USER:
+        if launch:
+            raise BadArgument(
+                "tier3-user silos carry no launch stanza (the tier-3 session "
+                "launcher owns the payload)")
+        return {}
+    if not isinstance(launch, dict):
+        raise BadArgument("tier2-template launch stanza must be a table")
+
+    def _tok(key: str, *, required: bool = True, default: str = "") -> str:
+        v = launch.get(key, default)
+        if not v:
+            if required:
+                raise BadArgument(f"tier2-template launch.{key} is required")
+            return default
+        if not isinstance(v, str) or not _SAFE_TOKEN_RE.match(v) or ".." in v:
+            raise BadArgument(f"tier2-template launch.{key} is unsafe: {v!r}")
+        return v
+
+    workload = _tok("workload")
+    template_silo = _tok("template_silo")
+    network = launch.get("network", "none")
+    if network not in SILO_NETWORK_MODES:
+        raise BadArgument(
+            f"tier2-template launch.network must be one of "
+            f"{SILO_NETWORK_MODES}, got {network!r}")
+    argv = launch.get("argv", [])
+    # PyYAML parses the rendered `argv: [...]` as a real list; the tolerant
+    # fallback parser yields the JSON-array text verbatim — normalise both.
+    if isinstance(argv, str):
+        try:
+            argv = json.loads(argv)
+        except json.JSONDecodeError as e:
+            raise BadArgument(f"tier2-template launch.argv not valid JSON: {e}")
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        raise BadArgument("tier2-template launch.argv must be a list of strings")
+    if any(("\n" in a or "\r" in a) for a in argv):
+        raise BadArgument("tier2-template launch.argv entries must be single-line")
+    return {
+        "workload": workload,
+        "template_silo": template_silo,
+        "network": network,
+        "argv": list(argv),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +473,38 @@ class _SystemOps:
                 return ln.endswith(" 1")
         return False
 
+    def write_launch_env(self, name: str, content: str) -> Path:
+        TIER2_LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
+        p = TIER2_LAUNCH_ENV_DIR / f"{name}.env"
+        tmp = p.with_suffix(".env.tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, content.encode())
+            os.fdatasync(fd)
+            # The launcher unit drops to admin (the rootless-podman owner) and
+            # reads this file; the daemon runs as root, so a root-owned 0600 file
+            # is unreadable by the launcher (the launch fails with "no launch
+            # env"). Hand it to admin so the unit it is written FOR can read it.
+            # Leave the group unchanged (-1): the second arg is a GID, not a
+            # second UID, and admin's primary gid is not guaranteed to equal
+            # ADMIN_UID. Best-effort: only root can chown, and the daemon is root
+            # in prod.
+            try:
+                os.fchown(fd, ADMIN_UID, -1)
+            except OSError:
+                pass
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)
+        return p
+
+    def remove_launch_env(self, name: str) -> None:
+        p = TIER2_LAUNCH_ENV_DIR / f"{name}.env"
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
     def systemctl_start(self, unit: str) -> None:
         subprocess.run(
             ["systemctl", "start", unit],
@@ -365,6 +514,32 @@ class _SystemOps:
         subprocess.run(
             ["systemctl", "stop", unit],
             check=False)
+
+    def tier2_silo_running(self, name: str) -> bool:
+        """True if a tier-2 stop did NOT fully take effect: the launcher unit
+        is still active, OR the rootless container still exists. The daemon is
+        root but the container is admin-owned rootless, so existence is checked
+        in admin's podman (the daemon can drop to admin via runuser). Used to
+        fail closed — never report STOPPED while a container may survive."""
+        unit = TIER2_SILO_LAUNCHER_FMT.format(name=name)
+        active = subprocess.run(["systemctl", "is-active", unit],
+                                capture_output=True, text=True).stdout.strip()
+        # Only a DEFINITIVELY not-running unit state (inactive/failed: the main
+        # process has exited) lets us proceed to the container check. Any active
+        # or transitional state — and any unrecognized/empty output (systemctl
+        # could not give a definitive answer) — is fail-closed "still running".
+        if active not in ("inactive", "failed"):
+            return True
+        container = TIER2_CONTAINER_FMT.format(name=name)
+        # `podman container exists` returns 0 when present, 1 when absent; run
+        # it as admin (the rootless owner). rc 0 = still running; rc 1 = gone;
+        # any OTHER rc means the check itself failed to run — fail closed and
+        # treat that as still running, never silently report a clean stop.
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "container", "exists", container],
+            capture_output=True)
+        return proc.returncode != 1
 
     def kill_pids(self, pids: Iterable[int], sig: int) -> None:
         for pid in pids:
@@ -543,13 +718,18 @@ class _SiloStore:
                 # (path traversal in shutil.rmtree, argv injection in
                 # useradd/userdel, etc.) or an out-of-range uid into
                 # the privileged code paths.
+                kind = row.get("kind", KIND_TIER3_USER)
                 try:
                     validate_name(name)
-                    validate_uid(uid)
+                    validate_kind(kind)
+                    # uid validation depends on kind (tier2-template carries
+                    # the admin launch-owner uid, tier3-user a fresh silo uid).
+                    validate_silo_uid(uid, kind)
+                    launch = validate_launch(kind, row.get("launch", {}) or {})
                 except BadArgument as e:
                     log.error(
                         "silos.yaml: dropping row with invalid "
-                        "name/uid: %s", e)
+                        "name/uid/kind/launch: %s", e)
                     continue
                 state = row.get("state", State.STOPPED)
                 if state not in State.ALL:
@@ -561,6 +741,8 @@ class _SiloStore:
                     autostart=bool(row.get("autostart", False)),
                     created_at=int(row.get("created_at", 0) or 0),
                     last_change=int(row.get("last_change", 0) or 0),
+                    kind=kind,
+                    launch=launch,
                 )
                 self._silos[name] = silo
 
@@ -681,29 +863,41 @@ class _SiloStore:
     # ---- create / delete -----------------------------------------------
 
     def create(self, name: str, uid: int, *, autostart: bool = False,
+               kind: str = KIND_TIER3_USER, launch: dict | None = None,
                caller: dict[str, Any] | None = None) -> Silo:
         try:
             validate_name(name)
-            validate_uid(uid)
+            validate_kind(kind)
+            validate_silo_uid(uid, kind)
+            launch_norm = validate_launch(kind, launch or {})
             with self._lock:
                 if name in self._silos:
                     raise SiloExists(f"silo {name!r} already exists")
-                for existing in self._silos.values():
-                    if existing.uid == uid:
+                if kind == KIND_TIER3_USER:
+                    # A tier-3 silo is a real Linux user: its uid must be
+                    # unique and it gets a home + state dir via useradd.
+                    for existing in self._silos.values():
+                        if existing.uid == uid and existing.kind == KIND_TIER3_USER:
+                            raise SiloExists(
+                                f"uid {uid} already in use by silo "
+                                f"{existing.name!r}")
+                    if self._ops.user_exists(name):
+                        raise SiloExists(f"system user {name!r} already exists")
+                    if self._ops.uid_exists(uid):
                         raise SiloExists(
-                            f"uid {uid} already in use by silo "
-                            f"{existing.name!r}")
-                if self._ops.user_exists(name):
-                    raise SiloExists(f"system user {name!r} already exists")
-                if self._ops.uid_exists(uid):
-                    raise SiloExists(f"uid {uid} already in use on this system")
-                self._ops.useradd(name, uid)
-                self._ops.make_state_dir(name, uid)
+                            f"uid {uid} already in use on this system")
+                    self._ops.useradd(name, uid)
+                    self._ops.make_state_dir(name, uid)
+                # else tier2-template: no useradd / no per-uid state dir — the
+                # launch-owner is admin (already exists, shared across template
+                # silos) and the silo's state is the binding's state_path,
+                # created by qdistro-template-promote, not here.
                 silo = Silo(
                     name=name, uid=int(uid), state=State.CREATED,
                     autostart=bool(autostart),
                     created_at=int(time.time()),
                     last_change=int(time.time()),
+                    kind=kind, launch=launch_norm,
                 )
                 self._silos[name] = silo
                 self.save()
@@ -766,6 +960,29 @@ class _SiloStore:
 
     # ---- start / stop / freeze / resume -------------------------------
 
+    def _export_tier2_launch_env(self, silo: Silo) -> None:
+        """Write the per-silo env the tier-2 launcher unit reads. The unit
+        drops to admin and runs spawn-tier2 with these — TIER2_SILO makes the
+        launch binding-resolved (the only launch that mounts real state) and
+        TIER2_NETWORK sets egress. argv is JSON so the launcher script can
+        re-split it without quoting hazards."""
+        lc = silo.launch
+        # shlex.quote EVERY value so the launcher can `set -a; . envfile`
+        # safely: the argv JSON contains spaces/brackets/double-quotes, and an
+        # argv entry may even contain a single quote (validate_launch allows
+        # it), which a naive single-quote wrapper could not represent.
+        # shlex.quote produces a correctly-escaped bash token for any string.
+        argv_json = json.dumps(lc.get("argv", []))
+        kv = [
+            ("TIER2_SILO", lc["template_silo"]),
+            ("TIER2_NETWORK", lc["network"]),
+            ("QD_WORKLOAD", lc["workload"]),
+            ("QD_CONTAINER", f"qdistro-silo-{silo.name}"),
+            ("QD_APP_ARGV_JSON", argv_json),
+        ]
+        lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
+        self._ops.write_launch_env(silo.name, "\n".join(lines))
+
     def start(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "started"
         try:
@@ -779,9 +996,18 @@ class _SiloStore:
                 else:
                     self._transition(silo, State.ACTIVE)
                     try:
-                        self._ops.cgroup_create(silo.name)
-                        unit = SILO_LAUNCHER_FMT.format(name=silo.name,
-                                                        uid=silo.uid)
+                        if silo.kind == KIND_TIER2_TEMPLATE:
+                            # Tier-2 templated silo: launch through its unit,
+                            # which runs spawn-tier2 as admin (rootless podman
+                            # manages its own cgroup, so no per-silo cgroup
+                            # here). The unit reads the launch stanza the
+                            # daemon exported (see _export_tier2_launch_env).
+                            self._export_tier2_launch_env(silo)
+                            unit = TIER2_SILO_LAUNCHER_FMT.format(name=silo.name)
+                        else:
+                            self._ops.cgroup_create(silo.name)
+                            unit = SILO_LAUNCHER_FMT.format(name=silo.name,
+                                                            uid=silo.uid)
                         self._ops.systemctl_start(unit)
                     except Exception as e:  # noqa: BLE001
                         # Roll back state on failure. _force_state emits
@@ -852,6 +1078,7 @@ class _SiloStore:
             # and claim the in-flight slot so concurrent stops wait.
             silo_name = silo.name
             silo_uid = silo.uid
+            silo_kind = silo.kind
             self._stopping_inflight.add(silo_name)
 
         # Phase 2: grace-period polling WITHOUT holding the store lock.
@@ -859,6 +1086,55 @@ class _SiloStore:
         # wait for processes to exit. The try/finally guarantees the
         # in-flight slot is cleared and waiters are woken on every exit.
         try:
+            if silo_kind == KIND_TIER2_TEMPLATE:
+                # Tier-2 templated silo: stopping its unit (whose ExecStop runs
+                # `podman stop` on the rootless container) is the whole teardown
+                # — no per-silo cgroup to freeze/kill/rmdir. This branch owns its
+                # OWN error handling (the cgroup-path handlers below force
+                # STOPPED, which would be a lie here) and must never leave the
+                # silo wedged in STOPPING.
+                try:
+                    self._ops.systemctl_stop(
+                        TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
+                    survived = self._ops.tier2_silo_running(silo_name)
+                except Exception as e:  # noqa: BLE001
+                    # The stop machinery itself errored (subprocess OSError, a
+                    # missing systemctl/podman, ...). Fail closed: the container
+                    # may still be running, so force ACTIVE (honest, retryable)
+                    # and surface the error — do NOT report STOPPED.
+                    with self._lock:
+                        self._clear_stop_inflight(silo_name)
+                        self._force_state(silo, State.ACTIVE)
+                    raise SessionError(
+                        f"stop of tier-2 silo {silo_name!r} failed: {e}") from e
+                # FAIL CLOSED: systemctl_stop is check=False and the unit's
+                # ExecStop is best-effort, so a unit timeout / podman failure /
+                # surviving rootless container would otherwise be reported as a
+                # clean stop — a lie that hides an orphan. Report STOPPED only
+                # when the unit is inactive AND the container is gone.
+                if survived:
+                    with self._lock:
+                        self._clear_stop_inflight(silo_name)
+                        self._force_state(silo, State.ACTIVE)
+                    raise SessionError(
+                        f"stop of tier-2 silo {silo_name!r} did not take "
+                        f"effect: the launcher unit is still active or the "
+                        f"container "
+                        f"{TIER2_CONTAINER_FMT.format(name=silo_name)} survives")
+                # The container is verified gone — the stop SUCCEEDED. Clearing
+                # the (now-stale) launch env is best-effort: a failure here must
+                # not flip the verified-stopped silo back to ACTIVE (the daemon
+                # rewrites the env on the next start anyway).
+                try:
+                    self._ops.remove_launch_env(silo_name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("remove_launch_env for %r failed after a "
+                                "verified stop: %s — leaving the stale env",
+                                silo_name, e)
+                with self._lock:
+                    self._clear_stop_inflight(silo_name)
+                    self._transition(silo, State.STOPPED)
+                return
             try:
                 unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
                 self._ops.systemctl_stop(unit)
@@ -1029,9 +1305,12 @@ def _yaml_load(text: str) -> Any:
         return yaml.safe_load(text)
     except ImportError:
         pass
-    # Hand-rolled parser for the file we generate.
+    # Hand-rolled parser for the file we generate. Handles flat scalar keys
+    # plus ONE nested mapping (`launch:`) whose children are 6-space-indented
+    # scalars — enough for the fableplan2 task-04 schema.
     data: dict[str, Any] = {"silos": []}
     cur: dict[str, Any] | None = None
+    cur_sub: dict[str, Any] | None = None
     in_silos = False
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -1044,17 +1323,33 @@ def _yaml_load(text: str) -> Any:
             continue
         if line.startswith("  - "):
             cur = {}
+            cur_sub = None
             data["silos"].append(cur)
             kv = line[4:].strip()
             if ":" in kv:
                 k, v = kv.split(":", 1)
                 cur[k.strip()] = _yaml_scalar(v.strip())
             continue
-        if line.startswith("    ") and cur is not None:
-            kv = line.strip()
-            if ":" in kv:
-                k, v = kv.split(":", 1)
-                cur[k.strip()] = _yaml_scalar(v.strip())
+        if cur is None:
+            continue
+        indent = len(line) - len(line.lstrip())
+        kv = line.strip()
+        if ":" not in kv and cur_sub is None:
+            continue
+        if indent >= 6 and cur_sub is not None:
+            k, v = kv.split(":", 1)
+            cur_sub[k.strip()] = _yaml_scalar(v.strip())
+            continue
+        if indent == 4:
+            k, v = kv.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            if k == "launch" and v == "":
+                cur_sub = {}
+                cur["launch"] = cur_sub
+            else:
+                cur_sub = None
+                cur[k] = _yaml_scalar(v)
     return data
 
 
@@ -1085,6 +1380,12 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
         "#       autostart: <bool>    # restart on daemon startup if true",
         "#       created_at: <int>    # epoch seconds",
         "#       last_change: <int>   # epoch seconds of last state change",
+        "#       kind: <tier3-user|tier2-template>",
+        "#       launch:              # tier2-template only:",
+        "#         workload: <str>    #   spawn-tier2 workload (seccomp/image)",
+        "#         template_silo: <str>  # TIER2_SILO (binding to resolve)",
+        "#         network: <none|slirp4netns>  # TIER2_NETWORK",
+        "#         argv: [<str>, ...] #   app argv after `--`",
         "#",
         "# This file is regenerated atomically on every state change.",
         "# Hand-editing while qdistro-session-manager is running will be",
@@ -1100,6 +1401,16 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
         out.append(f"    autostart: {'true' if r['autostart'] else 'false'}")
         out.append(f"    created_at: {int(r['created_at'])}")
         out.append(f"    last_change: {int(r['last_change'])}")
+        out.append(f"    kind: {r.get('kind', KIND_TIER3_USER)}")
+        launch = r.get("launch") or {}
+        if launch:
+            out.append("    launch:")
+            out.append(f"      workload: {launch['workload']}")
+            out.append(f"      template_silo: {launch['template_silo']}")
+            out.append(f"      network: {launch['network']}")
+            # argv as a JSON array: PyYAML parses it as a list; the fallback
+            # parser yields the text and validate_launch json.loads it.
+            out.append(f"      argv: {json.dumps(launch.get('argv', []))}")
     if rows:
         # Make sure trailing newline so editors don't complain.
         out.append("")
@@ -1239,6 +1550,32 @@ if dbus is not None:
             try:
                 self.store.create(str(name), int(uid), caller=caller)
                 log.info("CreateSilo name=%s uid=%d", name, int(uid))
+            except SessionError as e:
+                raise _to_dbus_exception(e)
+
+        @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def CreateTemplateSilo(self, name, workload, template_silo, network,
+                               sender=None, conn=None):
+            """Create a tier2-template silo (fableplan2 task 04): launch-owner
+            is admin, state is the binding's state_path (not a fresh user).
+            argv defaults to [workload]; a richer argv is set via silos.yaml."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("create", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                self.store.create(
+                    str(name), ADMIN_UID, kind=KIND_TIER2_TEMPLATE,
+                    launch={"workload": str(workload),
+                            "template_silo": str(template_silo),
+                            "network": str(network), "argv": []},
+                    caller=caller)
+                log.info("CreateTemplateSilo name=%s workload=%s silo=%s",
+                         name, workload, template_silo)
             except SessionError as e:
                 raise _to_dbus_exception(e)
 

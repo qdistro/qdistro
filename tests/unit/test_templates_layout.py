@@ -346,3 +346,109 @@ def test_candidate_state_marker(tmp_path):
     assert qt.candidate_state(cdir) == "validated"
     with pytest.raises(qt.TemplateError):
         qt.set_candidate_state(cdir, "bogus")
+
+
+# --------------------------------------------------------------------------
+# silo state tree (fableplan2 task 01)
+# --------------------------------------------------------------------------
+
+def test_create_state_tree_directory_mechanism(tmp_path):
+    # Host CI has no btrfs CLI on a plain tmpdir, so the directory mechanism
+    # is the path exercised here; the subvolume path is exercised in the VM.
+    state = str(tmp_path / "silos" / "dev-silo" / "state")
+    mechanism = qt.create_state_tree(state)
+    assert mechanism in qt.STATE_MECHANISMS
+    assert os.path.isdir(state)
+    # 0700: a silo's state is its private home.
+    assert (os.stat(state).st_mode & 0o777) == 0o700
+    meta = qt.read_state_meta(state)
+    assert meta["mechanism"] == mechanism
+    assert meta["state_path"] == state
+
+
+def test_create_state_tree_is_idempotent(tmp_path):
+    state = str(tmp_path / "silos" / "dev-silo" / "state")
+    first = qt.create_state_tree(state)
+    # A file written into the state survives a re-create (no clobber).
+    with open(os.path.join(state, "sentinel"), "w") as fh:
+        fh.write("KEEP")
+    again = qt.create_state_tree(state)
+    assert again == first
+    with open(os.path.join(state, "sentinel")) as fh:
+        assert fh.read() == "KEEP"
+
+
+def test_create_state_tree_refuses_non_directory(tmp_path):
+    state = str(tmp_path / "state")
+    with open(state, "w") as fh:
+        fh.write("not a dir")
+    with pytest.raises(qt.TemplateError, match="not a directory"):
+        qt.create_state_tree(state)
+
+
+def test_state_meta_path_is_sibling():
+    assert qt.state_meta_path("/var/lib/qdistro/silos/s/state") \
+        == "/var/lib/qdistro/silos/s/state.meta.toml"
+    # trailing slash tolerated
+    assert qt.state_meta_path("/a/state/") == "/a/state.meta.toml"
+
+
+def test_silos_dir_in_skeleton(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    assert os.path.isdir(layout.silos_dir)
+    assert (os.stat(layout.silos_dir).st_mode & 0o777) == 0o700
+
+
+def test_create_state_tree_precreates_cache_mountpoint(tmp_path):
+    # The launch path tmpfs-mounts /home/admin/.cache with podman `,U`; the
+    # mountpoint must already exist admin-owned 0700 so podman never creates
+    # and subuid-chowns it inside the persistent state (codex r1).
+    state = str(tmp_path / "silos" / "dev-silo" / "state")
+    qt.create_state_tree(state)
+    cache = os.path.join(state, ".cache")
+    assert os.path.isdir(cache)
+    assert (os.stat(cache).st_mode & 0o777) == 0o700
+
+
+def test_create_state_tree_adds_cache_to_preexisting_dir(tmp_path):
+    # codex r2: a pre-existing state dir (admin-precreated, or upgraded with
+    # metadata but no .cache) must STILL get the .cache mountpoint, or the
+    # launch path's `,U` tmpfs would subuid-pollute it.
+    state = str(tmp_path / "silos" / "dev-silo" / "state")
+    os.makedirs(state, mode=0o700)  # pre-existing, no .cache, no metadata
+    qt.create_state_tree(state)
+    cache = os.path.join(state, ".cache")
+    assert os.path.isdir(cache)
+    assert (os.stat(cache).st_mode & 0o777) == 0o700
+    # And again when metadata already exists (the early-return branch).
+    os.rmdir(cache)
+    qt.create_state_tree(state)
+    assert os.path.isdir(cache)
+
+
+def test_create_state_tree_rejects_newline_path(tmp_path):
+    # A control char in state_path would inject into the KEY=VALUE launch-env
+    # contract — refuse before creating anything.
+    bad = str(tmp_path / "state") + "\nGENERATION=sha256:" + "e" * 64
+    with pytest.raises(qt.TemplateError, match="single line|control"):
+        qt.create_state_tree(bad)
+
+
+def test_require_state_path_rejects_control_chars():
+    qt.require_state_path("/var/lib/qdistro/silos/s/state")  # ok
+    for bad in ["relative/path", "", "/has\nnewline", "/has\ttab", "/has\x7fdel",
+                "/has:colon"]:  # ':' would corrupt the -v volume spec
+        with pytest.raises(qt.TemplateError):
+            qt.require_state_path(bad)
+
+
+def test_validate_binding_rejects_control_char_state_path():
+    binding = {
+        "silo": "dev-silo", "template": "tier2-dev", "backend": "podman-image",
+        "active_generation": "sha256:" + "a" * 64, "previous_generations": [],
+        "state_path": "/var/lib/qdistro/silos/dev-silo/state\nGENERATION=x",
+        "activation_policy": "manual", "identity_revision": 1,
+    }
+    with pytest.raises(qt.TemplateError, match="single line|control"):
+        qt.validate_binding(binding)

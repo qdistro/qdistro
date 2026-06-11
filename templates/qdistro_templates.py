@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import tomllib
 from typing import Any
@@ -63,6 +65,30 @@ def require_safe_name(name: object, kind: str = "name") -> str:
             f"and contain no '..'"
         )
     return name
+
+
+def require_state_path(value: object) -> str:
+    """A silo's state_path must be an absolute, single-line path with no
+    control characters.
+
+    Single-line is load-bearing, not cosmetic: qdistro-resolve-binding
+    --launch-env emits ``STATE_PATH=<value>`` and spawn-tier2 parses stdout
+    line-by-line, so a newline (or other control char) in the path would let
+    a crafted/typo'd state_path inject extra KEY=VALUE records (e.g. a second
+    ``GENERATION=``) and subvert the resolved launch image."""
+    if not isinstance(value, str) or not value.startswith("/"):
+        raise TemplateError("state_path must be an absolute path")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise TemplateError(
+            "state_path must be a single line with no control characters "
+            "(it crosses the KEY=VALUE launch-env boundary)")
+    # ':' would mis-split spawn-tier2's `-v <state_path>:/home/admin:rw`
+    # volume spec — refuse it at the trust boundary, not at launch.
+    if ":" in value:
+        raise TemplateError(
+            "state_path must not contain ':' (it would corrupt the bind-mount "
+            "volume spec)")
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -273,6 +299,17 @@ class Layout:
     def identity_dir(self) -> str:
         return os.path.join(self.var, "identity")
 
+    @property
+    def silos_dir(self) -> str:
+        return os.path.join(self.var, "silos")
+
+    def silo_dir(self, silo: str) -> str:
+        require_safe_name(silo, "silo")
+        return os.path.join(self.silos_dir, silo)
+
+    def default_state_path(self, silo: str) -> str:
+        return os.path.join(self.silo_dir(silo), "state")
+
     def binding_file(self, silo: str) -> str:
         require_safe_name(silo, "silo")
         return os.path.join(self.bindings_dir, f"{silo}.toml")
@@ -313,6 +350,7 @@ SKELETON = (
     ("bindings_dir", 0o700),
     ("pins_dir", 0o700),
     ("identity_dir", 0o700),
+    ("silos_dir", 0o700),
 )
 
 
@@ -352,7 +390,31 @@ def validate_template_policy(policy: dict) -> dict:
             f"[template.state_boundary].enforced must be true|partial|false, "
             f"got {enforced!r}"
         )
+    # fableplan2 task 05: pre-activation snapshot policy. Optional (defaults to
+    # availability — a snapshot failure never wedges a silo that did not ask
+    # for strict protection), but a typo must fail loudly rather than silently
+    # downgrade a strict silo to availability.
+    snap_policy = tmpl.get("activation_snapshot")
+    if snap_policy is not None and snap_policy not in ("strict", "availability"):
+        raise TemplateError(
+            f"[template].activation_snapshot must be strict|availability, "
+            f"got {snap_policy!r}")
     return policy
+
+
+# fableplan2 task 05: the default when a template policy omits
+# activation_snapshot. Availability — never refuse a launch for a silo that
+# did not explicitly opt into strict pre-activation snapshots.
+DEFAULT_ACTIVATION_SNAPSHOT = "availability"
+
+
+def activation_snapshot_policy(policy: dict | None) -> str:
+    """The pre-activation snapshot policy for a validated template policy
+    dict, or the default when the policy (or the key) is absent."""
+    if not policy:
+        return DEFAULT_ACTIVATION_SNAPSHOT
+    return policy.get("template", {}).get(
+        "activation_snapshot", DEFAULT_ACTIVATION_SNAPSHOT)
 
 
 def validate_binding(binding: dict) -> dict:
@@ -377,11 +439,10 @@ def validate_binding(binding: dict) -> dict:
             f"binding.backend {binding['backend']!r} unsupported in this slice "
             f"(only podman-image)"
         )
-    # state_path is the silo's only path to real state; an empty or
-    # relative value would let a launch mount the wrong tree.
-    if not isinstance(binding["state_path"], str) \
-            or not binding["state_path"].startswith("/"):
-        raise TemplateError("binding.state_path must be an absolute path")
+    # state_path is the silo's only path to real state; an empty, relative,
+    # or control-char-bearing value would let a launch mount the wrong tree
+    # or inject into the KEY=VALUE launch-env contract.
+    require_state_path(binding["state_path"])
     if binding["activation_policy"] not in ("manual", "auto"):
         raise TemplateError(
             "binding.activation_policy must be manual|auto "
@@ -489,6 +550,115 @@ def read_manifest(path: str) -> dict:
 
 def write_pin(path: str, pin: dict) -> None:
     write_toml_atomic(path, validate_pin(pin), mode=0o600)
+
+
+# --------------------------------------------------------------------------
+# silo state tree (fableplan2 task 01)
+# --------------------------------------------------------------------------
+
+# A silo's persistent state lives at binding.state_path. The on-disk
+# mechanism (btrfs subvolume vs plain directory) is recorded in a metadata
+# file adjacent to the state dir so task 05's snapshot layer knows whether a
+# snapper/btrfs snapshot is possible without re-probing the filesystem. The
+# metadata is NOT in the binding: the binding is the launch-target schema and
+# stays minimal; the state mechanism is a property of the storage, not the
+# launch.
+STATE_MECHANISMS = ("subvolume", "directory")
+
+
+def state_meta_path(state_path: str) -> str:
+    """Path of the state-mechanism metadata file, a sibling of the state dir
+    (``/…/state`` → ``/…/state.meta.toml``)."""
+    return state_path.rstrip("/") + ".meta.toml"
+
+
+def read_state_meta(state_path: str) -> dict | None:
+    path = state_meta_path(state_path)
+    if not os.path.isfile(path):
+        return None
+    return read_toml(path)
+
+
+def _stat_fstype(path: str) -> str:
+    """Filesystem type of ``path`` (e.g. ``btrfs``) via stat(1), or ''.
+
+    Used only to decide whether to create a state dir as a btrfs subvolume;
+    a wrong answer downgrades to a plain directory (recorded honestly), never
+    a security decision."""
+    try:
+        out = subprocess.run(["stat", "-f", "-c", "%T", path],
+                             capture_output=True, text=True)
+    except OSError:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def create_state_tree(state_path: str, mode: int = 0o700) -> str:
+    """Create ``state_path`` as a btrfs subvolume when the filesystem
+    supports it (btrfs CLI present and the parent is btrfs), else a plain
+    directory, and write the mechanism metadata. Idempotent: an existing
+    state_path is verified (must be a directory) and its recorded mechanism
+    returned. Returns the mechanism (one of :data:`STATE_MECHANISMS`)."""
+    require_state_path(state_path)
+    parent = os.path.dirname(state_path.rstrip("/")) or "/"
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    if os.path.exists(state_path):
+        if not os.path.isdir(state_path):
+            raise TemplateError(
+                f"state_path {state_path} exists but is not a directory")
+        existing = read_state_meta(state_path)
+        if existing and existing.get("mechanism") in STATE_MECHANISMS:
+            mechanism = existing["mechanism"]
+        else:
+            # Pre-existing dir with no/invalid metadata: record it as a
+            # directory so the snapshot layer has an honest mechanism to read.
+            mechanism = "directory"
+            _write_state_meta(state_path, mechanism)
+        _ensure_cache_mountpoint(state_path)
+        return mechanism
+
+    mechanism = "directory"
+    btrfs = shutil.which("btrfs")
+    if btrfs and _stat_fstype(parent) == "btrfs":
+        rc = subprocess.run([btrfs, "subvolume", "create", state_path],
+                            capture_output=True, text=True)
+        if rc.returncode == 0:
+            mechanism = "subvolume"
+        else:
+            # Creation failed (e.g. no permission); fall back to a plain dir
+            # rather than refusing — the snapshot layer fails loudly later if
+            # a subvolume was required.
+            os.makedirs(state_path, mode=mode, exist_ok=True)
+    else:
+        os.makedirs(state_path, mode=mode, exist_ok=True)
+    os.chmod(state_path, mode)
+    _ensure_cache_mountpoint(state_path)
+    _write_state_meta(state_path, mechanism)
+    return mechanism
+
+
+def _ensure_cache_mountpoint(state_path: str) -> None:
+    """Pre-create ``<state_path>/.cache`` admin-owned 0700.
+
+    The launch path overlays a tmpfs here with podman's ``,U`` flag; if the
+    mountpoint did not already exist, podman would create it inside the
+    persistent state and ``,U``-chown it to a container subuid, leaving an
+    unremovable, wrongly owned dir in the silo's home (codex r1/r2). Doing it
+    on EVERY create_state_tree return — including the existing-tree branches
+    (an admin-precreated dir, or an upgraded tree with no .cache) — keeps the
+    tmpfs a pure runtime overlay over an admin-owned mountpoint."""
+    cache = os.path.join(state_path, ".cache")
+    os.makedirs(cache, mode=0o700, exist_ok=True)
+    os.chmod(cache, 0o700)
+
+
+def _write_state_meta(state_path: str, mechanism: str) -> None:
+    if mechanism not in STATE_MECHANISMS:
+        raise TemplateError(f"invalid state mechanism {mechanism!r}")
+    write_toml_atomic(state_meta_path(state_path), {
+        "state_path": state_path,
+        "mechanism": mechanism,
+    }, 0o600)
 
 
 def candidate_state(candidate_dir: str) -> str | None:

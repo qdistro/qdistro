@@ -170,17 +170,23 @@ def test_state_path_refused_on_existing_binding(tmp_path):
     layout = _layout(tmp_path)
     _validated_candidate(layout, "tier2-dev", "run-a", GEN_A)
     _validated_candidate(layout, "tier2-dev", "run-b", GEN_B)
+    # promote now creates the state tree on first promote, so the override
+    # must point somewhere creatable (under the test root), not a bare /custom.
+    custom = str(tmp_path / "custom-state")
+    other = str(tmp_path / "other-state")
     assert promote.promote("dev-silo", "run-a", layout=layout,
                            resolver=_no_resolver,
-                           state_path="/custom/state") == 0
+                           state_path=custom) == 0
     before = qt.read_binding(layout.binding_file("dev-silo"))
-    assert before["state_path"] == "/custom/state"
+    assert before["state_path"] == custom
+    assert os.path.isdir(custom), "first promote materialized the state tree"
     rc = promote.promote("dev-silo", "run-b", layout=layout, resolver=_no_resolver,
-                         state_path="/other/state")
+                         state_path=other)
     assert rc == 1
     after = qt.read_binding(layout.binding_file("dev-silo"))
     assert after["active_generation"] == GEN_A, "binding unchanged"
-    assert after["state_path"] == "/custom/state", "state_path not rewritten"
+    assert after["state_path"] == custom, "state_path not rewritten"
+    assert not os.path.exists(other), "refused override created no state tree"
     assert _refused_rows(layout), "a --state-path override must record a refused row"
 
 
@@ -197,7 +203,12 @@ def test_first_promote_creates_binding_and_active_pin(tmp_path):
     assert binding["active_generation"] == GEN_A
     assert binding["previous_generations"] == []
     assert binding["identity_revision"] == 1
-    assert binding["state_path"] == "/var/lib/qdistro/silos/dev-silo/state"
+    # Default state_path honors the layout var root (not a hardcoded
+    # /var/lib literal) and the state tree was materialized.
+    assert binding["state_path"] == layout.default_state_path("dev-silo")
+    assert os.path.isdir(binding["state_path"])
+    meta = qt.read_state_meta(binding["state_path"])
+    assert meta and meta["mechanism"] in qt.STATE_MECHANISMS
     # generation record materialized
     assert os.path.isfile(os.path.join(
         layout.generation_dir("tier2-dev", GEN_A), "manifest.toml"))
@@ -436,3 +447,27 @@ def test_crash_between_pins_and_binding_leaves_old_binding(tmp_path, monkeypatch
     assert promote.promote("dev-silo", "run-a", layout=layout, resolver=_no_resolver) == 0
     binding = qt.read_binding(layout.binding_file("dev-silo"))
     assert binding["active_generation"] == GEN_A
+
+
+def test_silo_running_matches_session_manager_container_name(monkeypatch):
+    """Regression (M2 fable BLOCKER): the default running-silo guard must
+    match the EXACT container name task 04's launcher uses
+    (qdistro-silo-<silo>), not a qdistro-tier2-<silo> name that never exists —
+    otherwise --restore-state could swap state under a live writer."""
+    class _Proc:
+        returncode = 0
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(promote.subprocess, "run",
+                        lambda *a, **k: _Proc("qdistro-silo-gmail\nother\n"))
+    assert promote._silo_running("gmail") is True
+    assert promote._silo_running("absent") is False
+
+    # podman failure (rc!=0) → conservatively "not running" (the stopped-silo
+    # precondition is enforced by the operator/session manager).
+    class _Fail:
+        returncode = 1
+        stdout = ""
+    monkeypatch.setattr(promote.subprocess, "run", lambda *a, **k: _Fail())
+    assert promote._silo_running("gmail") is False

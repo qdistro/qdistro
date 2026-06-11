@@ -507,6 +507,90 @@ scenario_candidate_isolation() {
             fail "candidate-isolation" "candidate runtime could read silo state"
         fi
     fi
+
+    # fableplan2 task 01: with REAL state now mountable, the isolation
+    # boundary gets STRICTLY STRONGER — prove the POSITIVE case (a
+    # binding-resolved launch DOES mount state at /home/admin, .cache stays
+    # tmpfs on top, and writes persist) alongside the negative case above (a
+    # candidate launch does NOT). The two together make "only a
+    # binding-resolved launch mounts real state" load-bearing, not vacuous.
+    #
+    # --launch-env is the single-read contract spawn-tier2 consumes: it must
+    # emit the state_path and a digest generation.
+    local le; le="$(cli resolve-binding "$SILO" --launch-env)" \
+        || fail "candidate-isolation" "--launch-env failed"
+    echo "$le" | grep -qE "^STATE_PATH=$statep$" \
+        || fail "candidate-isolation" "launch-env STATE_PATH != $statep: $le"
+    echo "$le" | grep -qE '^GENERATION=sha256:[0-9a-f]{64}$' \
+        || fail "candidate-isolation" "launch-env emitted no digest GENERATION: $le"
+
+    # Mirror spawn-tier2's NEW state-bind argv faithfully: state bind BEFORE
+    # the .cache tmpfs (so .cache layers on top), --userns=keep-id, and
+    # --user <admin> so the container uid maps to the host state owner
+    # (spawn-tier2 passes --user "$ADMIN_UID"; here the test's own uid plays
+    # admin). The bind is plain :rw — NO :z/:Z/:U, exactly as spawn-tier2.
+    #
+    # SELinux: silo state isolation in this slice is uid-based (keep-id), with
+    # a dedicated browser SELinux type listed as future work; the VM runs
+    # permissive during dev (doc/AGENTS.md) so the plain bind is reachable.
+    # On a host that enforces podman's container MCS labels, give the test
+    # fixture the container-accessible label a permissive VM / future policy
+    # would already carry — best-effort, never the assertion itself.
+    local STATE_USER; STATE_USER="$(id -u):$(id -g)"
+    chcon -t container_file_t -R "$statep" 2>/dev/null || true
+    podman_state() {
+        podman run --rm --network=none --userns=keep-id --user "$STATE_USER" \
+            --read-only --tmpfs /tmp:rw,size=16m \
+            -v "$statep:/home/admin:rw" \
+            --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=8m,tmpfs-mode=0700,U \
+            "$genA" "$@"
+    }
+    local seen; seen="$(podman_state sh -c 'cat /home/admin/sentinel 2>/dev/null')"
+    [ "$seen" = "SECRET-STATE" ] \
+        || fail "candidate-isolation" "binding-resolved launch could not read its own state (/home/admin/sentinel='$seen')"
+
+    # The shadowing regression check: /home/admin is the state bind AND
+    # /home/admin/.cache is still tmpfs on top of it.
+    local mi; mi="$(podman_state cat /proc/self/mountinfo 2>/dev/null)"
+    echo "$mi" | grep -qE ' /home/admin ' \
+        || fail "candidate-isolation" "/home/admin is not a mount (state bind missing)"
+    echo "$mi" | grep -E ' /home/admin/\.cache ' | grep -qi tmpfs \
+        || fail "candidate-isolation" "/home/admin/.cache is not tmpfs (shadowing regression)"
+
+    # State persists across container lifetimes (the whole point of the bind).
+    podman_state sh -c 'echo PERSISTED > /home/admin/written' \
+        || fail "candidate-isolation" "could not write into mounted state"
+    local persisted; persisted="$(podman_state sh -c 'cat /home/admin/written 2>/dev/null')"
+    [ "$persisted" = "PERSISTED" ] \
+        || fail "candidate-isolation" "state did not survive container restart"
+    [ "$(cat "$statep/written" 2>/dev/null)" = "PERSISTED" ] \
+        || fail "candidate-isolation" "written state not visible on the host state_path"
+    rm -f "$statep/written"
+
+    # Untemplated/candidate launches mount NO state (plan-01: only a
+    # binding-resolved launch may mount state_path). Same hardened argv MINUS
+    # the state bind: /home/admin is the image's empty home, the sentinel is
+    # invisible — proving the bind, not the image, is what carries the state.
+    local untmpl
+    untmpl="$(podman run --rm --network=none --userns=keep-id --user "$STATE_USER" \
+              --read-only --tmpfs /tmp:rw,size=16m \
+              --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=8m,tmpfs-mode=0700,U \
+              "$genA" sh -c 'cat /home/admin/sentinel 2>/dev/null || echo NO-STATE')"
+    [ "$untmpl" = "NO-STATE" ] \
+        || fail "candidate-isolation" "an untemplated launch (no state bind) read silo state: '$untmpl'"
+    echo "$untmpl" | grep -q SECRET-STATE \
+        && fail "candidate-isolation" "untemplated launch leaked the state sentinel"
+    # The .cache tmpfs (podman `,U`) must NOT have left a subuid-owned dir in
+    # the persistent state (codex r1): create_state_tree pre-creates it as an
+    # admin-owned 0700 mountpoint, so after launches it stays owned by us.
+    if [ -e "$statep/.cache" ]; then
+        local cache_uid; cache_uid="$(stat -c '%u' "$statep/.cache")"
+        [ "$cache_uid" = "$(id -u)" ] \
+            || fail "candidate-isolation" ".cache in persistent state owned by $cache_uid (expected $(id -u)) — subuid pollution"
+        local cache_mode; cache_mode="$(stat -c '%a' "$statep/.cache")"
+        [ "$cache_mode" = "700" ] \
+            || fail "candidate-isolation" ".cache mountpoint mode $cache_mode != 700"
+    fi
     pass "candidate-isolation"
 }
 

@@ -768,9 +768,17 @@ provision_template_dirs() {
     install -d -m 0700 /var/lib/qdistro/bindings
     install -d -m 0700 /var/lib/qdistro/pins
     install -d -m 0700 /var/lib/qdistro/identity
+    # Silo state trees (fableplan2 task 01). promote runs as User=admin and
+    # creates <silo>/state under here on first promote, so the parent must
+    # exist admin-owned — without it the first promote cannot create state on
+    # a real install, and a templated launch hard-fails on a missing
+    # state_path (no silent tmpfs fallback). 0700: a silo's state is its
+    # private home.
+    install -d -m 0700 /var/lib/qdistro/silos
     # Recursive so a prior root-created nested path does not lock admin out.
     chown -R admin:admin /var/lib/qdistro/templates /var/lib/qdistro/bindings \
-        /var/lib/qdistro/pins /var/lib/qdistro/identity 2>/dev/null || true
+        /var/lib/qdistro/pins /var/lib/qdistro/identity \
+        /var/lib/qdistro/silos 2>/dev/null || true
 
     # Global retention defaults — never clobber an operator's edited file.
     local retention_src="$REPO_ROOT/qdistro/deploy/etc/qdistro/template-retention.toml"

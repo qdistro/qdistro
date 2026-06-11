@@ -78,18 +78,36 @@ def test_resolve_digest_without_generation_record_is_hard_error(tmp_path):
         rb.resolve("dev-silo", layout=layout)
 
 
-def test_record_activation_change_detection(tmp_path):
+def test_run_status_and_marker_split(tmp_path):
+    # The ordering split (task 05): record_run_status writes the per-boot file
+    # only; _commit_marker does change-detected marker commits. Neither is the
+    # old conflated record_activation (removed — no marker-without-snapshot).
     layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
     qt.ensure_skeleton(layout)
     run_dir = str(tmp_path / "run")
-    assert rb.record_activation(layout, "dev-silo", GEN, run_status_dir=run_dir) is True
-    # status file written
-    assert os.path.isfile(os.path.join(run_dir, "dev-silo"))
-    # second time, same generation -> not a new activation
-    assert rb.record_activation(layout, "dev-silo", GEN, run_status_dir=run_dir) is False
-    # new generation -> activation change again
+    rb.record_run_status(layout, "dev-silo", GEN, run_status_dir=run_dir)
+    assert os.path.isfile(os.path.join(run_dir, "dev-silo"))   # status only
+    # marker change detection (no run-status side effect)
+    assert rb._commit_marker(layout, "dev-silo", GEN) is True
+    assert rb._commit_marker(layout, "dev-silo", GEN) is False   # same gen
     gen2 = "sha256:" + "b" * 64
-    assert rb.record_activation(layout, "dev-silo", gen2, run_status_dir=run_dir) is True
+    assert rb._commit_marker(layout, "dev-silo", gen2) is True
+
+
+def test_plain_record_writes_status_but_not_marker(tmp_path, monkeypatch):
+    # M2 fable review: the plain --record path must NOT commit the activation
+    # marker — that is the launch anchor's job after the snapshot. A plain
+    # --record committing it would let the next real launch skip the snapshot.
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
+    rc, gen = rb.resolve("dev-silo", layout=layout, record=True)
+    assert rc == 0 and gen == GEN
+    # per-boot status written...
+    assert os.path.isfile(os.path.join(str(tmp_path / "run"), "dev-silo"))
+    # ...but the marker is NOT committed.
+    assert not os.path.exists(rb.activated_marker(layout, "dev-silo"))
 
 
 def test_main_untemplated_exit_3(tmp_path, monkeypatch, capsys):
@@ -144,3 +162,119 @@ def test_main_unreadable_bindings_dir_exit_2(tmp_path, monkeypatch):
         assert rb.main(["dev-silo"]) == 2
     finally:
         os.chmod(layout.bindings_dir, 0o700)
+
+
+# --------------------------------------------------------------------------
+# --launch-env (fableplan2 task 01): one binding read → the launch path's
+# full input set, no second read that could race a concurrent promote.
+# --------------------------------------------------------------------------
+
+def test_launch_env_emits_all_fields(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    rc, env = rb.compute_launch_env("dev-silo", layout=layout)
+    assert rc == 0
+    assert env["generation"] == GEN
+    assert env["template"] == "tier2-dev"
+    assert env["state_path"] == "/var/lib/qdistro/silos/dev-silo/state"
+    # No prior marker → this is the first activation.
+    assert env["first_activation"] is True
+
+
+def test_launch_env_is_side_effect_free(tmp_path):
+    # compute_launch_env must NOT write the marker (task 05 commits it only
+    # after the pre-activation snapshot succeeds).
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    rb.compute_launch_env("dev-silo", layout=layout)
+    assert not os.path.exists(rb.activated_marker(layout, "dev-silo"))
+    # And still reports first_activation on the next call (marker not written).
+    _, env = rb.compute_launch_env("dev-silo", layout=layout)
+    assert env["first_activation"] is True
+
+
+def test_launch_env_first_activation_flips_after_marker(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    rb.write_activated_marker(layout, "dev-silo", GEN)
+    _, env = rb.compute_launch_env("dev-silo", layout=layout)
+    assert env["first_activation"] is False
+
+
+def test_launch_env_reads_binding_exactly_once(tmp_path, monkeypatch):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    calls = {"n": 0}
+    real = qt.read_binding
+
+    def counting(path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(qt, "read_binding", counting)
+    rb.compute_launch_env("dev-silo", layout=layout)
+    assert calls["n"] == 1
+
+
+def test_launch_env_untemplated_returns_3(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    rc, env = rb.compute_launch_env("dev-silo", layout=layout)
+    assert rc == 3 and env is None
+
+
+def test_launch_env_tag_binding_is_hard_error(tmp_path):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo", active="qdistro/tier2-dev:latest")
+    with pytest.raises(qt.TemplateError):
+        rb.compute_launch_env("dev-silo", layout=layout)
+
+
+def test_main_launch_env_prints_keyvalues(tmp_path, monkeypatch, capsys):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
+    assert rb.main(["dev-silo", "--launch-env"]) == 0
+    out = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert out["GENERATION"] == GEN
+    assert out["TEMPLATE"] == "tier2-dev"
+    assert out["STATE_PATH"] == "/var/lib/qdistro/silos/dev-silo/state"
+    assert out["FIRST_ACTIVATION"] == "yes"
+    # Without --record the marker is not committed.
+    assert not os.path.exists(rb.activated_marker(layout, "dev-silo"))
+
+
+def test_main_launch_env_with_record_commits_marker(tmp_path, monkeypatch, capsys):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo")
+    monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
+    # RUN_STATUS_DIR is bound from the env at import time, so an env var here
+    # is ineffective — set the module attribute directly (and monkeypatch
+    # restores it, so this test never pollutes others).
+    monkeypatch.setattr(rb, "RUN_STATUS_DIR", str(tmp_path / "run"))
+    assert rb.main(["dev-silo", "--record", "--launch-env"]) == 0
+    out = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert out["FIRST_ACTIVATION"] == "yes"
+    assert os.path.isfile(rb.activated_marker(layout, "dev-silo"))
+
+
+def test_main_launch_env_untemplated_exit_3(tmp_path, monkeypatch):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
+    assert rb.main(["dev-silo", "--launch-env"]) == 3
+
+
+def test_main_launch_env_tag_binding_exit_2(tmp_path, monkeypatch):
+    layout = qt.Layout(etc=str(tmp_path / "etc"), var=str(tmp_path / "var"))
+    qt.ensure_skeleton(layout)
+    _binding(layout, "dev-silo", active="latest")
+    monkeypatch.setenv("QDISTRO_VAR_DIR", str(tmp_path / "var"))
+    assert rb.main(["dev-silo", "--launch-env"]) == 2

@@ -123,6 +123,12 @@ echo "[bake]   (this is the slow step — typically 10–25 min)"
 # - We pass our own zypper invocation rather than --install <list>
 #   because we want explicit --no-recommends parity with the
 #   install-deps.sh runtime path.
+# - The GRUB console/text-payload reset mirrors
+#   build-baseweed-from-scratch.sh: the shim-free virtio-gpu-pci in the
+#   template domain has no VGA BIOS, so GRUB's default gfxterm hangs
+#   mode-setting it and the kernel never loads (qci vm-smoke timed out
+#   in vm_provision). Re-applied here so a baked rebuild from an older
+#   admin image without the fix still boots.
 virt-customize \
     --memsize 4096 \
     --smp 4 \
@@ -132,6 +138,9 @@ virt-customize \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
     --run-command 'systemctl mask greetd.service 2>/dev/null || true' \
+    --run-command 'sed -i -e "s/^GRUB_TERMINAL_OUTPUT=.*/GRUB_TERMINAL_OUTPUT=\"console\"/" /etc/default/grub; grep -q "^GRUB_TERMINAL_OUTPUT=" /etc/default/grub || echo "GRUB_TERMINAL_OUTPUT=\"console\"" >>/etc/default/grub' \
+    --run-command 'sed -i -e "s/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=\"text\"/" /etc/default/grub; grep -q "^GRUB_GFXPAYLOAD_LINUX=" /etc/default/grub || echo "GRUB_GFXPAYLOAD_LINUX=\"text\"" >>/etc/default/grub' \
+    --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
     --run-command 'zypper clean -a' \
     --run-command 'rm -rf /var/cache/zypp/* /tmp/* /var/tmp/* 2>/dev/null; true' \
     --run-command 'journalctl --vacuum-time=1s 2>/dev/null; true'

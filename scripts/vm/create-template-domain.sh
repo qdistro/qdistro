@@ -66,9 +66,16 @@ else
     # virtio-gpu-pci (no VGA-compat shim). max_outputs=1 mirrors the
     # single-head template; the guest sees one connector.
     VIDEO_XML="    <video><model type='none'/></video>"
+    # Pin the GPU to a high PCI slot (0x10). libvirt does NOT track devices
+    # added via <qemu:commandline>, so it freely assigns its managed devices
+    # (virtio-net etc.) from slot 0x2 up — and qemu then also auto-places this
+    # bare virtio-gpu-pci at the first free slot 0x2, colliding ("slot 2 not
+    # available for virtio-net-pci, in use by virtio-gpu-pci"). Slot 0x10 is
+    # past anything libvirt assigns, so the collision cannot occur on qemu
+    # builds that surface it.
     QEMU_CMDLINE_XML="  <qemu:commandline>
     <qemu:arg value='-device'/>
-    <qemu:arg value='virtio-gpu-pci,max_outputs=1'/>
+    <qemu:arg value='virtio-gpu-pci,max_outputs=1,bus=pci.0,addr=0x10'/>
   </qemu:commandline>"
     DOMAIN_NS=" xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"
 fi

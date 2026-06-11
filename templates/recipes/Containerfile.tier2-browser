@@ -1,0 +1,102 @@
+# tier2-browser — derived template whose payload is RPM Chromium on
+# Tumbleweed (fableplan2 task 02). Chromium (not Firefox) because the
+# login-regression demo (task 06) drives scripted headless page flows and
+# Chromium's --headless/--dump-dom/CDP can submit a form without a webdriver.
+#
+# This recipe is the tier2-weston-terminal runtime floor (weston + qdwin
+# runtime libs + the shared entrypoint + weston.ini) PLUS Chromium and the
+# GUI runtime a browser needs. It does NOT `FROM` the weston-terminal image
+# (that image is not a template generation); it rebuilds the floor inline so
+# the template system owns the whole payload by digest.
+#
+# Build context (codex r1): the build COPYs the SHARED tier2/entrypoint.sh
+# and tier2/weston.ini — one source of truth, never hand-duplicated. The
+# policy sets [template.build].context = "tier2" so qdistro-template-build
+# uses the tier2/ asset dir as the build context (the Containerfile itself is
+# discovered under the recipes dir).
+#
+# State boundary: split-app-profile / enforced = "partial". The
+# image-packaged browser is validated and promoted; the profile contents
+# (extensions, policies, native-messaging manifests, caches) are protected
+# only by the task-05 pre-activation snapshots and are NOT covered by
+# candidate validation.
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# Runtime floor + Chromium. --no-recommends keeps the closure tight; hard
+# RPM Requires (nss, the GTK stack Chromium links) are pulled regardless, but
+# the ones the slice depends on are listed explicitly so a base/repo change
+# surfaces as a build failure, not a blank page at runtime:
+#   - weston + libweston-14 + the wayland/Mesa/xkb libs: the nested-publisher
+#     floor (same as tier2-weston-terminal).
+#   - chromium: the browser payload.
+#   - libgtk-3-0: Chromium's GTK runtime (file dialogs, theming).
+#   - dbus-1 + dbus-1-daemon: the session bus libs + the dbus-run-session
+#     wrapper the GUI/page-open probe runs the browser under (Chromium
+#     expects a session bus; dbus-run-session ships in dbus-1-daemon, not
+#     dbus-1).
+#   - dejavu-fonts + fontconfig: fontconfig with ZERO fonts renders blank
+#     pages; DejaVu Sans is the deterministic font the probe page relies on.
+#   - libpipewire-0_3-0: the pixel-feed client libs (inner weston publisher).
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install --no-recommends \
+        weston \
+        libweston-14 \
+        libpipewire-0_3-0 \
+        libwayland-client0 \
+        libwayland-server0 \
+        Mesa-libGL1 \
+        Mesa-libEGL1 \
+        libxkbcommon0 \
+        xkeyboard-config \
+        coreutils \
+        chromium \
+        libgtk-3-0 \
+        dbus-1 \
+        dbus-1-daemon \
+        fontconfig \
+        dejavu-fonts \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# Minimal XDG desktop entry, surfaced as a badged launcher entry in qdshell
+# by tier2/podapps-scan.sh (each tier-2 image ships at least one .desktop
+# matching the workload name).
+RUN install -d -o root -g root -m 0755 /usr/share/applications \
+ && cat > /usr/share/applications/chromium.desktop <<'DESK' \
+ && chmod 0644 /usr/share/applications/chromium.desktop
+[Desktop Entry]
+Name=Chromium
+GenericName=Web Browser
+Comment=Chromium web browser (tier-2 templated silo)
+Exec=chromium
+Icon=chromium
+Type=Application
+Categories=Network;WebBrowser;
+Terminal=false
+DESK
+
+# Inner weston config (loads qdwin-shell.so + wayland/pipewire backends) and
+# the shared in-container entrypoint — the SAME files tier2-weston-terminal
+# uses, copied from the tier2/ build context.
+COPY weston.ini /etc/xdg/weston/weston.ini
+COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint
+
+# uid 1000 = admin on the host; --userns=keep-id maps it 1:1. A real silo run
+# overrides --user via spawn-tier2.
+USER 1000:1000
+WORKDIR /home/admin
+
+ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+CMD ["chromium"]
+
+# Generation marker, written LAST so it is genuinely the final cheap layer:
+# the per-build UUID intentionally changes every uncached build, so any layer
+# after it would also be invalidated. The 06 login-regression scenario keys
+# its fake server-side breakage on this value; 06 derives gen B by building
+# `FROM <A's digest>` with one RUN that overwrites this file, so the recipe
+# only has to write SOME marker.
+USER root
+RUN cat /proc/sys/kernel/random/uuid > /etc/qdistro-image-marker \
+ && chmod 0644 /etc/qdistro-image-marker
+USER 1000:1000

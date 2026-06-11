@@ -53,6 +53,22 @@ install -o root -g root -m 0644 "$SRC/qdshell-session@.service" \
 install -o root -g root -m 0755 "$SRC/qdshell-session-launcher" \
     "$LAUNCHER_HELPER"
 
+# fableplan2 task 04: the tier-2 templated-silo launcher unit + script (the
+# session manager runs `systemctl start qdistro-tier2-silo@<name>.service`,
+# which drops to admin and execs spawn-tier2) and the silo-launch CLI.
+install -o root -g root -m 0644 "$SRC/qdistro-tier2-silo@.service" \
+    /etc/systemd/system/qdistro-tier2-silo@.service
+install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-launch" \
+    "$DEST/qdistro-tier2-silo-launch"
+install -o root -g root -m 0644 "$SRC/qdistro_silo_launch.py" \
+    "$DEST/qdistro_silo_launch.py"
+cat >"$DEST/qdistro-silo-launch" <<EOF
+#!/bin/bash
+exec /usr/bin/python3 $DEST/qdistro_silo_launch.py "\$@"
+EOF
+chmod 0755 "$DEST/qdistro-silo-launch"
+ln -sf "$DEST/qdistro-silo-launch" /usr/local/bin/qdistro-silo-launch
+
 # Drop a per-silo symlink for every silo currently in
 # /etc/qdistro/silos.yaml. The session manager itself never
 # creates these — a future task will move this into CreateSilo

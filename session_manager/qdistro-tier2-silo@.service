@@ -1,0 +1,54 @@
+[Unit]
+Description=qdistro tier-2 templated silo %i
+# Referenced by qdistro_session_manager.TIER2_SILO_LAUNCHER_FMT
+# (qdistro-tier2-silo@<name>.service). The session manager (root) writes
+# /run/qdistro/silo-launch/<name>.env, then `systemctl start`s this unit;
+# the unit drops to admin and runs spawn-tier2 (rootless podman). This is
+# fableplan2 task 04's follow-up to the stubbed launcher wiring.
+After=qdistro-session-manager.service
+PartOf=qdistro-session-manager.service
+
+[Service]
+Type=simple
+# Drop to admin at the unit boundary: rootless podman must run as admin, not
+# root — and task 01's state bind assumes the rootless --userns=keep-id +
+# admin-owned state model, which a rootful (root) podman would break. The
+# launch env the daemon exported supplies TIER2_SILO (the binding to resolve
+# — the only launch that mounts real state), TIER2_NETWORK, the workload, the
+# container name, and the app argv.
+#
+# SECCTX PROVENANCE (known follow-up): qdistro-secctx-exec only takes its
+# trusted path when run as root or with a direct root (runuser/su/...) parent.
+# spawn-tier2 here runs as admin, so the outer connection is secctx-tagged
+# only under the dev override (QDWIN_SECCTX_OPEN=1 +
+# QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1) that the test VMs already set — the
+# SAME situation as the shipped PodApps tier-2 path (which also runs
+# spawn-tier2 as admin from qdshell). Production secctx provenance for
+# tier-2 silos is the plan's stated follow-up, not this slice; it must not be
+# "fixed" by running podman as root (that breaks the rootless state mount).
+User=admin
+ExecStart=/usr/libexec/qdistro/qdistro-tier2-silo-launch %i
+# Stop the container EXPLICITLY. Rootless `podman run` in a non-tty context
+# (this unit has no tty) does NOT proxy SIGTERM to the container — sig-proxy
+# defaults off without a tty — and conmon keeps the container alive in the
+# user manager scope, OUTSIDE this unit's cgroup. So a plain `systemctl stop`
+# would SIGTERM only the foreground supervisor (which dies), orphan the
+# container, and then time out on TimeoutStopSec. `podman stop` talks to
+# conmon directly and tears the container down; the supervisor's `podman run`
+# then returns and the unit exits cleanly. Best-effort (`-`): an already-gone
+# container must not fail the stop. The container is named qdistro-silo-<silo>
+# (the daemon's QD_CONTAINER), and the instance %i IS the silo name.
+ExecStop=-/usr/bin/podman stop -t 10 qdistro-silo-%i
+# A clean stop kills the container, so the supervising `podman run` returns
+# 143 (SIGTERM) or 137 (SIGKILL after the -t grace); treat those as success so
+# `systemctl stop` leaves the unit inactive, not failed (a failed unit would
+# need reset-failed before the next launch and reads as a spurious error).
+SuccessExitStatus=143 137
+# No Restart: a crashed browser silo should not be silently relaunched onto a
+# possibly-broken generation; the admin restarts it (which re-resolves the
+# binding) explicitly.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

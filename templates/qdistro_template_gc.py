@@ -30,6 +30,13 @@ import time
 
 import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_state_snapshot as state_snapshot
+
+# A snapshot dir that has a payload but no meta.toml is a partial left by a
+# crash between materializing the payload and writing its metadata. Reap it
+# once it is older than this grace window so an IN-PROGRESS snapshot (payload
+# written, meta about to be written) is never reaped mid-creation.
+_PARTIAL_SNAPSHOT_GRACE_SECONDS = 3600
 
 DEFAULT_RETENTION = {
     "keep_promoted_generations": 3,
@@ -134,6 +141,20 @@ def _image_exists(image_ref: str) -> bool:
     return proc.returncode == 0
 
 
+def _image_status(image_ref: str) -> str:
+    # Tri-state existence for the cascade-guard protection loop, which must
+    # fail CLOSED: a `podman` runtime error (rc other than 0/1, e.g. a storage
+    # lock) must not read as "absent" and leave a pinned image unprotected.
+    # `podman image exists` returns 0 present, 1 absent; anything else = error.
+    proc = subprocess.run(["podman", "image", "exists", image_ref],
+                          capture_output=True, text=True)
+    if proc.returncode == 0:
+        return "present"
+    if proc.returncode == 1:
+        return "absent"
+    return "error"
+
+
 def _rmi(image_ref: str) -> bool:
     proc = subprocess.run(["podman", "rmi", image_ref],
                           capture_output=True, text=True)
@@ -141,6 +162,38 @@ def _rmi(image_ref: str) -> bool:
         log(f"WARN: podman rmi {image_ref} failed: {proc.stderr.strip()}")
         return False
     return True
+
+
+# Protective tagging (cascade guard). Generation images are stored UNTAGGED
+# (build drops the candidate tag so GC can `podman rmi <digest>`), and
+# `podman rmi <child>` cascade-deletes an UNTAGGED, otherwise-unreferenced
+# PARENT image. So collecting a failed candidate (or an unpinned generation)
+# that was built FROM a pinned generation would drag the pinned generation's
+# image down with it — silently losing a rollback target whose only protection
+# is a pin (the pin guards the RECORD, not the image's layer parentage). A tag
+# on the parent stops the cascade; GC tags every pinned generation image for
+# the duration of its rmi sweep and removes the tag afterwards.
+_PROTECT_REPO = "qdistro-gc-protect"
+
+
+def _protect_tag(digest: str) -> str:
+    # A unique, valid local tag derived from the digest hex (tags may not
+    # contain ':' beyond the repo:tag separator, so strip the algo prefix).
+    return f"{_PROTECT_REPO}:{digest.split(':')[-1]}"
+
+
+def _tag(digest: str) -> str | None:
+    tag = _protect_tag(digest)
+    proc = subprocess.run(["podman", "tag", digest, tag],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        log(f"WARN: podman tag {digest} {tag} failed: {proc.stderr.strip()}")
+        return None
+    return tag
+
+
+def _untag(tag: str) -> None:
+    subprocess.run(["podman", "untag", tag], capture_output=True, text=True)
 
 
 def _all_pinned_digests(pinned: set[tuple[str, str]]) -> set[str]:
@@ -168,6 +221,31 @@ def _all_promoted_generations(layout: qt.Layout) -> set[str]:
             if os.path.isdir(os.path.join(gens_dir, gen)):
                 promoted.add(gen)
     return promoted
+
+
+def _retention_survivor_digests(layout: qt.Layout, retention: dict) -> set[str]:
+    """The generation digests the retention pass KEEPS by count (the newest
+    keep-N per template). These are NOT pinned but are still kept, so they are
+    equally vulnerable to a cascading rmi of a child built FROM them and must
+    be cascade-protected too. Mirrors the keep-N window in the deletion loop
+    below (same sort key + _keep_count); kept here as a small, parallel read so
+    the protection set can be computed before any rmi."""
+    survivors: set[str] = set()
+    if not os.path.isdir(layout.templates_var):
+        return survivors
+    for template in os.listdir(layout.templates_var):
+        gens_dir = layout.generations_dir(template)
+        if not os.path.isdir(gens_dir):
+            continue
+        keep_n = _keep_count(retention, template)
+        if keep_n <= 0:
+            continue
+        gens = [(g, os.path.join(gens_dir, g)) for g in os.listdir(gens_dir)
+                if os.path.isdir(os.path.join(gens_dir, g))]
+        gens.sort(key=lambda gd: (os.path.getmtime(gd[1]), gd[0]), reverse=True)
+        for gen, _gen_dir in gens[:keep_n]:
+            survivors.add(gen)
+    return survivors
 
 
 def _delete_generation_payload(layout: qt.Layout, template: str, gen: str,
@@ -242,8 +320,110 @@ def _delete_candidate_payload(layout: qt.Layout, template: str, run_id: str,
     return deletion
 
 
+def _collect_state_snapshots(layout: qt.Layout, now: float,
+                             dry_run: bool) -> list[dict]:
+    """Retention for fableplan2 task-05 pre-activation state snapshots.
+
+    A snapshot is deleted once its own ``expires_at`` (baked at creation =
+    created_at + rollback window) has passed. Deletion removes the snapshot
+    PAYLOAD and drops it from rollback choices; ONLY the audit metadata
+    (mechanism, source, generations, created/deleted times) is kept — this is
+    USER STATE, so the record must not imply the data survives. (The matching
+    pre-migration-snapshot pin shares the same expiry and lapses in step, so
+    the outgoing generation's image becomes collectable too.)"""
+    deletions: list[dict] = []
+    silos_dir = layout.silos_dir
+    if not os.path.isdir(silos_dir):
+        return deletions
+    for silo in sorted(os.listdir(silos_dir)):
+        snaps_dir = os.path.join(silos_dir, silo,
+                                 state_snapshot.SNAPSHOT_DIRNAME)
+        if not os.path.isdir(snaps_dir):
+            continue
+        for snap_id in sorted(os.listdir(snaps_dir)):
+            sdir = os.path.join(snaps_dir, snap_id)
+            meta_path = os.path.join(sdir, "meta.toml")
+            payload = os.path.join(sdir, "snapshot")
+            if not os.path.isfile(meta_path):
+                # No meta. A leaked partial (payload written, crash before
+                # meta) holds user state invisible to list/find/retention —
+                # reap it once past the grace window, audited. (A dir with no
+                # payload either is being created or is already cleaned; leave
+                # it. Waiver files .waive-*.toml are not directories, so the
+                # isdir(payload) guard skips them.)
+                if (os.path.isdir(payload)
+                        and os.path.getmtime(sdir) < now - _PARTIAL_SNAPSHOT_GRACE_SECONDS):
+                    deletion = {"kind": "state-snapshot", "silo": silo,
+                                "template": None, "generation": None,
+                                "snapshot_id": snap_id,
+                                "reason": "partial-no-meta",
+                                "evidence_path": sdir, "deleted": False}
+                    if dry_run:
+                        log(f"DRY-RUN would reap partial state snapshot "
+                            f"{snap_id} for silo {silo} (payload, no meta)")
+                    else:
+                        _rm_snapshot_payload(payload)
+                        deletion["deleted"] = True
+                        audit.emit("template.gc.deleted", db_path=_audit_db(layout),
+                                   silo=silo, result="deleted",
+                                   reason="state-snapshot-partial",
+                                   evidence_path=sdir, kind="state-snapshot",
+                                   snapshot_id=snap_id)
+                        log(f"reaped partial (meta-less) state snapshot "
+                            f"{snap_id} for silo {silo}")
+                    deletions.append(deletion)
+                continue
+            meta = qt.read_toml(meta_path)            # fail-closed on corrupt
+            expires = meta.get("expires_at")
+            if expires is None or _parse_expiry(expires) > now:
+                continue  # unexpired — still a rollback target
+            if not os.path.isdir(payload):
+                continue  # already collected; audit metadata remains
+            deletion = {"kind": "state-snapshot", "silo": silo,
+                        "template": meta.get("template"),
+                        "generation": meta.get("outgoing_generation"),
+                        "snapshot_id": snap_id, "reason": "snapshot-expired",
+                        "evidence_path": meta_path, "deleted": False}
+            if dry_run:
+                log(f"DRY-RUN would delete expired state snapshot {snap_id} for "
+                    f"silo {silo} (user state; audit metadata kept)")
+                deletions.append(deletion)
+                continue
+            _rm_snapshot_payload(payload)
+            # Honesty: keep the metadata as the audit record, mark it
+            # ineligible + when it was deleted; the user state itself is GONE.
+            meta["restore_eligible"] = "false"
+            meta["deleted_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               time.gmtime(now))
+            qt.write_toml_atomic(meta_path, meta, 0o600)
+            deletion["deleted"] = True
+            audit.emit("template.gc.deleted", db_path=_audit_db(layout),
+                       silo=silo, template=meta.get("template"),
+                       generation=meta.get("outgoing_generation"),
+                       result="deleted", reason="state-snapshot-expired",
+                       evidence_path=meta_path, kind="state-snapshot",
+                       snapshot_id=snap_id)
+            log(f"deleted expired state snapshot {snap_id} for silo {silo} "
+                f"(user state gone; audit metadata kept at {meta_path})")
+            deletions.append(deletion)
+    return deletions
+
+
+def _rm_snapshot_payload(path: str) -> None:
+    btrfs = subprocess.run(["sh", "-c", "command -v btrfs"],
+                           capture_output=True, text=True).stdout.strip()
+    if btrfs:
+        rc = subprocess.run([btrfs, "subvolume", "delete", path],
+                            capture_output=True, text=True)
+        if rc.returncode == 0:
+            return
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
-       now: float | None = None, rmi=_rmi, image_exists=_image_exists) -> list[dict]:
+       now: float | None = None, rmi=_rmi, image_exists=_image_exists,
+       tag=_tag, untag=_untag, image_status=_image_status) -> list[dict]:
     layout = layout or qt.Layout()
     now = time.time() if now is None else now
     retention = load_retention(layout)            # fail-closed
@@ -251,6 +431,50 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
     pinned_digests = _all_pinned_digests(pinned)
     promoted_digests = _all_promoted_generations(layout)
     deletions: list[dict] = []
+    # Cascade guard: protect every generation image the run will KEEP with a
+    # transient tag so a later `rmi` of a child (a failed candidate built FROM
+    # it, or a beyond-retention generation layered on it) cannot cascade-delete
+    # it. A pin guards the generation RECORD; only a tag guards the IMAGE from
+    # podman's untagged-parent cleanup. The kept set is pinned ∪ the keep-N
+    # retention survivors — a kept-by-count generation is just as exposed as a
+    # pinned one. Skipped in dry-run (it deletes nothing). FAIL CLOSED: if a
+    # kept image's existence is indeterminate, or it cannot be tagged, abort
+    # before any deletion rather than expose it to a cascade.
+    protect_digests = set(pinned_digests) | _retention_survivor_digests(
+        layout, retention)
+    protect_tags: list[str] = []
+    if not dry_run:
+        for digest in protect_digests:
+            status = image_status(digest)
+            if status == "absent":
+                continue          # nothing to protect (no image on disk)
+            if status == "error" or (t := tag(digest)) is None:
+                for done in protect_tags:
+                    untag(done)
+                raise qt.TemplateError(
+                    f"could not tag-protect kept generation image {digest} "
+                    f"from GC cascade (image_status={status}); aborting before "
+                    f"any deletion")
+            protect_tags.append(t)
+    try:
+        deletions.extend(_gc_payloads(layout, retention, pinned, pinned_digests,
+                                      promoted_digests, protect_digests, now,
+                                      dry_run, rmi, image_exists))
+    finally:
+        for t in protect_tags:
+            untag(t)
+    return deletions
+
+
+def _gc_payloads(layout: qt.Layout, retention: dict, pinned, pinned_digests,
+                 promoted_digests, protect_digests, now: float, dry_run: bool,
+                 rmi, image_exists) -> list[dict]:
+    deletions: list[dict] = []
+    # State-snapshot retention (task 05) is independent of the template payload
+    # passes: expired user-state snapshots are collected by their own window,
+    # keeping only audit metadata. Run it first so a silo with no template
+    # payloads (templates_var absent) still gets its snapshots reaped.
+    deletions.extend(_collect_state_snapshots(layout, now, dry_run))
     if not os.path.isdir(layout.templates_var):
         return deletions
 
@@ -266,6 +490,13 @@ def gc(layout: qt.Layout | None = None, *, dry_run: bool = False,
             for i, (gen, _gen_dir) in enumerate(gens):
                 if (template, gen) in pinned:
                     continue  # untouchable, regardless of retention count
+                if gen in protect_digests:
+                    # The same image_id (a cache-identical rebuild) is kept under
+                    # ANOTHER template — `rmi`-ing it here by digest would delete
+                    # the image out from under that template's pin/keep-N (a
+                    # direct rmi removes a single-tagged image; the cascade tag
+                    # does not stop it). Mirrors the candidate-path digest guard.
+                    continue
                 if i < keep_n:
                     continue  # within the keep-N window
                 deletions.append(_delete_generation_payload(

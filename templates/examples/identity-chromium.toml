@@ -1,0 +1,17 @@
+# Example app-identity selector for a tier2-browser silo (fableplan2 task
+# 02). Installed/created at /var/lib/qdistro/identity/<silo>/chromium.toml.
+#
+# qdistro-template-promote re-resolves every selector against the candidate
+# image before flipping the binding: a change of owning package, a missing
+# executable, or the declared path silently becoming a wrapper (symlink) is
+# an identity CLASS change and fails the promote closed. Routine updates
+# (same package, same path shape) revalidate automatically.
+
+[identity.executable]
+path_in_template = "/usr/bin/chromium"
+expected_package = "chromium"
+# A dedicated browser SELinux type is a FUTURE policy label, not an enforced
+# runtime fact in this slice: the selector merely carries the declared type
+# across generations (the class-change gate compares it generation to
+# generation). Empty = no declared type yet.
+selinux_type = ""
