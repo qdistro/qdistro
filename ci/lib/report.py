@@ -301,6 +301,41 @@ def status_counts(rows: list[dict[str, str]]) -> dict[str, int]:
     return counts
 
 
+# Notes substrings that mark a skip as a *dependency-missing* skip rather than
+# an expected-environment skip. These are called out explicitly so a
+# dependency gap can't hide behind a green-looking "mostly skipped" run.
+_DEP_MISSING_RE = re.compile(
+    r"(missing|not installed|not available|no module named|not configured|"
+    r"unavailable|not set|could not|cannot )",
+    re.IGNORECASE,
+)
+
+
+def category_breakdown(rows: list[dict[str, str]]) -> dict[str, dict[str, int]]:
+    """Per-category status tallies keyed by the taxonomy `category` column.
+
+    Rows from an older runner that predate the column (``category`` absent or
+    empty) are bucketed under ``"(uncategorized)"`` so the section degrades
+    gracefully and never crashes on a legacy results.tsv.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for row in rows:
+        cat = (row.get("category") or "").strip() or "(uncategorized)"
+        status = row.get("status", "unknown") or "unknown"
+        bucket = out.setdefault(cat, {})
+        bucket[status] = bucket.get(status, 0) + 1
+        bucket["total"] = bucket.get("total", 0) + 1
+    return out
+
+
+def dependency_missing_skips(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Skips whose notes look like a missing dependency (not an env skip)."""
+    return [
+        r for r in rows
+        if r.get("status") == "skip" and _DEP_MISSING_RE.search(r.get("notes", ""))
+    ]
+
+
 def generate_md(run_dir: Path) -> str:
     manifest = read_kv(run_dir / "manifest.txt")
     rows = read_tsv(run_dir / "results.tsv")
@@ -318,6 +353,42 @@ def generate_md(run_dir: Path) -> str:
     if counts:
         lines.append("- **results**: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     lines.append("")
+
+    # Confidence taxonomy breakdown (additive; see ci/TAXONOMY.md). Groups
+    # results by the per-row `category` column so a reader sees how the
+    # pass/fail/skip tally distributes across confidence bands (a vm row and a
+    # source_invariant row are NOT equally strong evidence). Emitted only when
+    # at least one row carries a category, so legacy runs render as before.
+    cats = category_breakdown(rows)
+    has_category = any(c != "(uncategorized)" for c in cats)
+    if cats and has_category:
+        lines.append("## Test categories")
+        lines.append("Per-category result tally. Categories are the shared "
+                     "confidence vocabulary documented in `ci/TAXONOMY.md`; "
+                     "this is reporting only — it gates nothing.")
+        lines.append("")
+        lines.append("| category | total | pass | fail | blocked | skip |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for cat in sorted(cats):
+            b = cats[cat]
+            lines.append(
+                f"| {cat} | {b.get('total', 0)} | {b.get('pass', 0)} | "
+                f"{b.get('fail', 0)} | {b.get('blocked', 0)} | "
+                f"{b.get('skip', 0)} |"
+            )
+        lines.append("")
+        dep_skips = dependency_missing_skips(rows)
+        if dep_skips:
+            lines.append("**Dependency-missing skips** (a missing dep is a "
+                         "bake/host regression, not an expected skip — install "
+                         "the dep, do not let it hide a gap):")
+            for row in dep_skips:
+                lines.append(
+                    f"- `{row.get('category', '')}` "
+                    f"{row.get('gate', '?')} / {row.get('subject', '?')}: "
+                    f"{row.get('notes', '')}"
+                )
+            lines.append("")
 
     if failures:
         lines.append("## Failures and blocked work")
@@ -385,14 +456,15 @@ def generate_md(run_dir: Path) -> str:
             lines.extend(block)
 
     lines.append("## All Results")
-    lines.append("| status | gate | subject | kind | exit | log | notes |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| status | gate | subject | category | kind | exit | log | notes |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for row in rows:
         log = md_link(run_dir, row.get("log", ""), "log")
         cols = [
             row.get("status", ""),
             row.get("gate", ""),
             row.get("subject", ""),
+            row.get("category", ""),
             row.get("kind", ""),
             row.get("exit_code", ""),
             log,
@@ -447,6 +519,14 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
         "exit_class": manifest.get("exit_class", ""),
         "workspace": manifest.get("workspace", ""),
         "counts": status_counts(rows),
+        # Per-category tally for machine consumers (additive; empty for legacy
+        # runs whose results.tsv predates the `category` column).
+        "categories": category_breakdown(rows),
+        "dependency_missing_skips": [
+            {"gate": r.get("gate", ""), "subject": r.get("subject", ""),
+             "category": r.get("category", ""), "notes": r.get("notes", "")}
+            for r in dependency_missing_skips(rows)
+        ],
         "first_failure": failures[0] if failures else None,
         "report_md": "report.md",
         "report_html": "report.html",
@@ -490,7 +570,7 @@ def generate_html(run_dir: Path, markdown: str) -> str:
             if not in_table:
                 body_lines.append("<table><tbody>")
                 in_table = True
-            tag = "th" if all(c in {"status", "gate", "subject", "kind", "exit", "log", "notes", "repo", "branch", "head", "dirty"} for c in cells) else "td"
+            tag = "th" if all(c in {"status", "gate", "subject", "category", "kind", "exit", "log", "notes", "repo", "branch", "head", "dirty", "total", "pass", "fail", "blocked", "skip"} for c in cells) else "td"
             body_lines.append("<tr>" + "".join(f"<{tag}>{linkify(c)}</{tag}>" for c in cells) + "</tr>")
         else:
             if in_table:

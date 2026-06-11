@@ -6,6 +6,17 @@
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 python_files = ["test_*.py"]
+# Marker vocabulary (shared with ci/TAXONOMY.md). These let the fast host
+# run deselect integration-grade tests that need real subprocesses/daemons:
+#
+#     python3 -m pytest -m "not slow and not needs_ssh"
+#
+# `cheat_aware` and `no_attest` are registered in tests/unit/conftest.py.
+markers = [
+  "slow: integration-grade test with real subprocesses or multi-second setup; deselect for the fast host subset with `-m 'not slow'`.",
+  "integration: exercises more than one component together (still in-process, no VM).",
+  "needs_ssh: requires ssh-agent/ssh-add/ssh-keygen on PATH; deselect with `-m 'not needs_ssh'`.",
+]
 # Promote module directories onto sys.path so tests can import
 # qdistro_admin_*, qdistro_polkit_*, qdistro_pwd_*, etc. directly.
 pythonpath = [

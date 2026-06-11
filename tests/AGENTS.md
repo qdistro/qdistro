@@ -32,6 +32,42 @@ test by making it pass is a coverage regression, not a fix.
 
 ## Unit tests (`tests/unit/`)
 
+### Markers and the fast subset
+
+The `unit` suite holds a few integration-grade tests that spin up real
+subprocesses (e.g. the ssh-agent relay tests). They are tagged so the fast
+host run can deselect them. The marker vocabulary is registered in
+`pyproject.toml` (`[tool.pytest.ini_options].markers`) and `conftest.py`,
+and is shared with `ci/TAXONOMY.md`:
+
+- `slow` — integration-grade test with real subprocesses or multi-second
+  setup.
+- `integration` — exercises more than one component together (still
+  in-process, no VM).
+- `needs_ssh` — requires `ssh-agent`/`ssh-add`/`ssh-keygen` on `PATH`.
+- `cheat_aware` / `no_attest` — registered in `conftest.py` (see below).
+
+Fast subset (skip the integration-grade tests on a host without ssh
+tooling or when you want a sub-second run):
+
+```bash
+python3 -m pytest -m "not slow and not needs_ssh"
+```
+
+Run `pytest --markers` to see the registered set; new markers go in
+`pyproject.toml` (or `conftest.py` for the programmatic ones) so
+`--strict-markers` stays clean.
+
+**De-flaking rule:** prefer a readiness signal (an `Event`, a poll for the
+condition you actually need — e.g. a server thread reaching its blocked
+state) over a fixed `time.sleep`. A sleep that merely *orders* threads or
+*approximates* "the other side is ready now" is a latent flake; replace it
+with a deterministic wait that asserts the precondition and fails loudly on
+timeout. Keep the SAME assertions — only make the readiness deterministic.
+A `sleep` that is itself the work under test (slowness deliberately
+injected into a fake to open a race window) is fine; leave it and add the
+relevant marker.
+
 - `conftest.py` wires `sys.path` so the per-component source dirs
   (`broker/`, `cli/`, `pwd/`, `workflow/`, `browser_bridge/`, …) import as
   top-level modules. Add a new `sys.path.insert` there when you test a new

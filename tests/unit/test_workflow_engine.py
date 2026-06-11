@@ -480,17 +480,74 @@ class TestTriggerRegistry:
                        config={"interval_seconds": 1.0}),
             cb,
         )
-        trigger.start()
-        assert trigger.active
 
-        import time
-        time.sleep(1.5)
-        trigger.stop()
-        assert not trigger.active
-        # Should have fired at least once.
+        # De-flaked (was: start() + time.sleep(1.5) + assert >=1 fire). The
+        # wall-clock sleep made this an integration-grade test in the unit
+        # suite and could flake under load. Instead we drive the watcher's
+        # timing deterministically with a one-shot stop-event stand-in: its
+        # .wait(delay) returns False once (so the real _run loop proceeds to
+        # fire the callback exactly once) then True (so the loop exits) —
+        # modelling "one interval elapsed" with no real sleep. The SAME
+        # post-conditions are asserted; only the timing is now deterministic.
+        waits: list[float] = []
+
+        class _OneShotStop:
+            def __init__(self):
+                self._fired = False
+
+            def is_set(self):
+                return self._fired
+
+            def set(self):
+                self._fired = True
+
+            def clear(self):
+                self._fired = False
+
+            def wait(self, delay):
+                waits.append(delay)
+                if self._fired:
+                    return True
+                self._fired = True  # arm stop for the next loop iteration
+                return False
+
+        trigger._stop_event = _OneShotStop()
+        trigger._active = True
+        trigger._run()  # real watcher loop body, synchronous, no thread/sleep
+
+        # Should have fired exactly once via the real loop body.
         assert len(calls) >= 1
         assert calls[0][0] == "test-cron"
         assert "trigger_type" in calls[0][1]
+        # The single fire was scheduled at the clamped 1s interval, pinning
+        # that the timing came from the schedule path, not an accidental loop.
+        assert waits and waits[0] == 1.0
+
+    def test_cron_trigger_thread_lifecycle(self):
+        """start() must really spawn the watcher thread and stop() join it.
+
+        The deterministic test above exercises _run() directly, so on its own
+        it would not catch a regression where start() failed to spawn the
+        thread (the trigger would silently never fire in production). This
+        bounded, sleep-free lifecycle check covers that gap: it asserts the
+        thread is alive after start() and reaped after stop(), without waiting
+        a full interval (first scheduled wait is ~1s, so no fire occurs here).
+        """
+        trigger = CronTrigger(
+            "test-cron-lifecycle",
+            TriggerDef(type=TriggerType.CRON,
+                       config={"interval_seconds": 1.0}),
+            lambda n, c: None,
+        )
+        trigger.start()
+        try:
+            assert trigger.active
+            assert trigger._thread is not None
+            assert trigger._thread.is_alive()
+        finally:
+            trigger.stop()
+        assert not trigger.active
+        assert trigger._thread is None
 
 
 # ======================================================================

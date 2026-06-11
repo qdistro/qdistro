@@ -87,8 +87,9 @@ latest_run_dir() {
     grep -q '^started_utc=' "$dir/manifest.txt"
     grep -q '^finished_utc=' "$dir/manifest.txt"
     grep -q '^command=' "$dir/manifest.txt"
-    # results.tsv has the stable 8-column header.
-    head -1 "$dir/results.tsv" | grep -qx 'gate	subject	status	exit_code	exit_class	kind	log	notes'
+    # results.tsv has the stable header: 8 core columns + the additive
+    # taxonomy `category` column (see ci/TAXONOMY.md).
+    head -1 "$dir/results.tsv" | grep -qx 'gate	subject	status	exit_code	exit_class	kind	log	notes	category'
     # Per-repo commit/dirty state is captured for the triage handoff.
     [ -f "$dir/repo-state.tsv" ]
     head -1 "$dir/repo-state.tsv" | grep -qx 'repo	branch	head	dirty_files	status_log'

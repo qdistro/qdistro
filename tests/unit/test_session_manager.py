@@ -491,10 +491,16 @@ class TestReviewFixups:
         assert store.get("work").state == State.ACTIVE
 
         # Make phase-2 teardown slow so the second caller is forced to
-        # wait on the in-flight slot.
+        # wait on the in-flight slot. `in_teardown` fires the instant t1 has
+        # entered the slow phase-2 stop, giving t2 a deterministic readiness
+        # signal to start (replaces a fixed `time.sleep(0.05)` that only
+        # *probably* ordered t1 first). The 0.3s here is the injected work the
+        # race is built around, not a scheduling guess — kept as-is.
         orig_stop = ops.systemctl_stop
+        in_teardown = threading.Event()
 
         def _slow_stop(unit):
+            in_teardown.set()
             _t.sleep(0.3)
             orig_stop(unit)
 
@@ -515,7 +521,9 @@ class TestReviewFixups:
         t1 = threading.Thread(target=_do_stop)
         t2 = threading.Thread(target=_do_stop)
         t1.start()
-        _t.sleep(0.05)  # ensure t1 enters phase 2 first
+        # Wait until t1 is actually inside phase-2 teardown before starting
+        # t2, so t2 deterministically races an in-flight stop.
+        assert in_teardown.wait(timeout=5), "t1 never entered phase-2 teardown"
         t2.start()
         t1.join(timeout=5)
         t2.join(timeout=5)

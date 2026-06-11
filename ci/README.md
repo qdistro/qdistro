@@ -32,6 +32,14 @@ qdistro/ci/runs/<gate>-<utc>-<pid>/
 commands, links to logs/artifacts, excerpts, and first-pass fix recommendations.
 For machine parsing, use `results.tsv`, `repo-state.tsv`, and `manifest.txt`.
 
+`results.tsv` carries a 9th `category` column placing each row in the shared
+**confidence taxonomy** (`unit`/`integration`/`gui`/`vm`/`source_invariant`/
+`fake_backend`/`real_backend`/`slow`). The report's *Test categories* section
+tallies results per category and calls out dependency-missing skips. This is
+reporting only — it gates nothing. See [`TAXONOMY.md`](TAXONOMY.md) for the
+canonical vocabulary, per-layer tagging (pytest markers / meson suites /
+vitest tags), and the per-suite relabel action items.
+
 ## Gates
 
 | Gate | Purpose |

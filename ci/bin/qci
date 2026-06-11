@@ -258,7 +258,7 @@ init_run() {
         done
         printf '\n'
     } > "$RDIR/manifest.txt"
-    printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\n' > "$RDIR/results.tsv"
+    printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\tcategory\n' > "$RDIR/results.tsv"
     printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
     : > "$RDIR/vm/created-vms.txt"
     collect_repo_state
@@ -331,13 +331,42 @@ abort_run() {
 trap 'abort_run INT' INT
 trap 'abort_run TERM' TERM
 
+# Map a result's gate + kind to the shared confidence-taxonomy category
+# documented in ci/TAXONOMY.md. This is an HONEST, coarse classification of
+# *what kind of evidence a row carries* — it adds no gate and changes no
+# pass/fail. The 9th `category` column is purely informational so report.md
+# can group counts/runtime/skips by confidence band. Unknown shapes fall back
+# to "unit" (the safe, lowest-claim bucket) rather than guessing higher.
+category_for() {
+    local gate=$1 kind=$2
+    case "$kind" in
+        vm|vm_provision|vm_boot|service) echo vm; return ;;
+        bats)                            echo integration; return ;;
+        gui|vision|image)                echo gui; return ;;
+    esac
+    case "$gate" in
+        bats)                            echo integration; return ;;
+        vm-smoke|snapshot-daily)         echo vm; return ;;
+        gui)                             echo gui; return ;;
+        host)                            echo unit; return ;;
+        preflight|selftest|affected|registry-check|edit-guard|cleanup|lint|lifecycle)
+                                         echo unit; return ;;
+    esac
+    echo unit
+}
+
 record_result() {
-    local gate=$1 subject=$2 status=$3 exit_code=$4 exit_class=$5 kind=$6 log_path=${7:-} notes=${8:-}
+    local gate=$1 subject=$2 status=$3 exit_code=$4 exit_class=$5 kind=$6 log_path=${7:-} notes=${8:-} category=${9:-}
     notes=${notes//$'\t'/ }
     notes=${notes//$'\n'/ }
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    # Derive the taxonomy category when the caller did not pass one (all
+    # current callers rely on this default; an explicit 9th arg can override
+    # for a row whose confidence differs from its gate/kind, e.g. a
+    # source_invariant or fake_backend suite).
+    [ -n "$category" ] || category=$(category_for "$gate" "$kind")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$status" "$exit_code" "$exit_class" "$kind" \
-        "$(rel_path "$log_path")" "$notes" >> "$RDIR/results.tsv"
+        "$(rel_path "$log_path")" "$notes" "$category" >> "$RDIR/results.tsv"
 }
 
 collect_repo_state() {
@@ -1122,7 +1151,7 @@ gate_bats() {
     local files=("$@")
     local rc=$EXIT_OK file base vm gate_rc log_path
     if [ "${#files[@]}" -eq 0 ]; then
-        while IFS= read -r file; do files+=("$file"); done < <(find "$WORKSPACE/qdistro/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+        while IFS= read -r file; do files+=("$file"); done < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
     fi
     if ! command -v bats >/dev/null 2>&1; then
         record_blocked bats bats "$EXIT_PREFLIGHT" bats "bats executable not found"
@@ -1152,7 +1181,7 @@ gate_bats() {
         mkdir -p "$(dirname "$log_path")"
         log "bats $base on $vm"
         (
-            cd "$WORKSPACE/qdistro" || exit 2
+            cd "$QDISTRO_REPO" || exit 2
             VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" bats "$file"
         ) > "$log_path" 2>&1
         gate_rc=$?

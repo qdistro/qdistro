@@ -100,11 +100,51 @@ def _ssh_add_list(sock: str, timeout: float = 8.0):
         capture_output=True, text=True, timeout=timeout)
 
 
+def _blocked_conn_count() -> int:
+    """Number of live relay serve threads process-wide. Snapshot this BEFORE
+    connecting so the wait below keys off an *increase*, not an absolute count
+    (a serve thread left alive by a prior test must not satisfy the signal)."""
+    return sum(1 for t in threading.enumerate()
+               if t.name == "ssh-agent-relay-conn" and t.is_alive())
+
+
+def _wait_for_blocked_conn(n: int = 1, *, baseline: int = 0,
+                           timeout: float = 8.0) -> None:
+    """Block until ``n`` NEW front connections (above ``baseline``) are parked
+    in the relay's serve loop (the deterministic readiness signal that replaces
+    a fixed sleep).
+
+    When a client connects to the fixed front socket the relay's
+    ``_accept_loop`` spawns a per-connection serve thread named
+    ``ssh-agent-relay-conn`` (see ``SshAgentRelay._accept_loop``). That
+    thread exists exactly once the connection has been accepted and is now
+    waiting (bounded) for ``set_target`` — precisely the "connected but
+    blocked, no target yet" state the old ``time.sleep`` was approximating.
+    Polling ``threading.enumerate()`` for that thread is race-free and
+    observes the real relay state instead of guessing a wall-clock delay.
+
+    Fails loudly (AssertionError) if the connection never reaches the relay
+    within ``timeout`` — a real bug, not a flake to be papered over.
+    """
+    target = baseline + n
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        serving = _blocked_conn_count()
+        if serving >= target:
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        f"relay never accepted {n} new connection(s) within {timeout}s "
+        f"(baseline {baseline}, saw {serving} ssh-agent-relay-conn thread(s))")
+
+
 # ----------------------------------------------------------------------
 # SshAgentRelay (transport)
 # ----------------------------------------------------------------------
 
 
+@pytest.mark.slow
+@pytest.mark.needs_ssh
 @pytest.mark.skipif(not _HAVE_SSH, reason="ssh tooling not available")
 class TestSshAgentRelay:
     def test_target_already_set_relays_immediately(self, tmp_path):
@@ -133,10 +173,14 @@ class TestSshAgentRelay:
             result["proc"] = _ssh_add_list(relay.front_path)
 
         try:
+            _base = _blocked_conn_count()
             t = threading.Thread(target=client, daemon=True)
             t.start()
-            # Give the client time to connect + block on the agent read.
-            time.sleep(1.0)
+            # Readiness signal (replaces a fixed time.sleep(1.0)): wait until
+            # the relay has actually accepted the connection and parked it in
+            # the serve loop waiting for a target — the exact "connected but
+            # blocked, no target yet" state this test needs before publishing.
+            _wait_for_blocked_conn(1, baseline=_base)
             assert t.is_alive(), "client should still be blocked, no target yet"
             # Now publish — simulates the engine's deliver_secret completing.
             relay.set_target(agent.sock)
@@ -284,9 +328,13 @@ class TestSshAgentRelay:
         def client():
             blocked["proc"] = _ssh_add_list(front, timeout=20.0)
 
+        _base = _blocked_conn_count()
         t = threading.Thread(target=client, daemon=True)
         t.start()
-        time.sleep(1.0)  # let it connect + block with no target
+        # Readiness signal (replaces a fixed time.sleep(1.0)): wait until the
+        # connection is parked in the serve loop with no target, so stop() is
+        # genuinely racing a blocked connection (the case under test).
+        _wait_for_blocked_conn(1, baseline=_base)
         started = time.monotonic()
         relay.stop()
         assert time.monotonic() - started < 5.0, "stop() hung on a blocked conn"
@@ -431,6 +479,8 @@ def _zero_coord_wf(runtime, hold_pid: int) -> WorkflowDef:
     )
 
 
+@pytest.mark.slow
+@pytest.mark.needs_ssh
 @pytest.mark.skipif(not _HAVE_SSH, reason="ssh tooling not available")
 class TestEngineRelayEndToEnd:
     def test_published_socket_reaches_relay_then_scrubbed(self, tmp_path):
@@ -468,9 +518,14 @@ class TestEngineRelayEndToEnd:
             result["proc"] = _ssh_add_list(front, timeout=10.0)
 
         try:
+            _base = _blocked_conn_count()
             ct = threading.Thread(target=client, daemon=True)
             ct.start()
-            time.sleep(0.5)  # let the client connect + block (no target yet)
+            # Readiness signal (replaces a fixed time.sleep(0.5)): wait until
+            # the client is parked in the relay serve loop with no target yet
+            # — the zero-coordination "connect before publish" shape — before
+            # starting the run that will publish the per-run agent.
+            _wait_for_blocked_conn(1, baseline=_base)
             rt = threading.Thread(target=do_run, daemon=True)
             rt.start()
             # The client should complete once deliver_secret publishes and
