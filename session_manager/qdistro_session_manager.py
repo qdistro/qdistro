@@ -39,6 +39,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+# Per-silo netns egress backend (interim per-silo VPN; todo/fable-networking
+# task 3). Pure module: the side-effecting ip/wg/nft/veth ops live on _SystemOps
+# below; this module owns only the policy + the kill-switch-by-construction
+# sequence. Import-cycle-free (it imports nothing from this module).
+import qdistro_silo_egress as _egress
+from qdistro_silo_egress import (
+    EgressBackend, EgressPolicy, KeyUnavailable, TunnelConfig, validate_egress,
+)
+
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
 try:
@@ -95,6 +104,18 @@ SILO_NETWORK_MODES = ("none", "slirp4netns")
 # (the unit drops privileges to admin and runs spawn-tier2). Under /run so it
 # is tmpfs-backed and gone on reboot — the daemon rewrites it on each start.
 TIER2_LAUNCH_ENV_DIR = Path("/run/qdistro/silo-launch")
+
+# Per-silo network-namespace egress (todo/fable-networking task 3), applied only
+# to tier3-user silos that carry an explicit `egress` policy. A silo with no
+# egress field keeps today's legacy host networking (no netns) for backward
+# compatibility; `none`/`direct`/`wg:<name>` opt it into the netns contract.
+# NETNS_RUN_DIR is the iproute2 convention (`ip netns` bind-targets here);
+# ETC_NETNS holds the per-netns resolv.conf that `ip netns exec` bind-mounts
+# over /etc/resolv.conf. WG_CONFIG_DIR holds non-secret per-tunnel config
+# (public key/endpoint/address/dns); the private key lives in qdistro-pwd.
+NETNS_RUN_DIR = Path("/run/netns")
+ETC_NETNS = Path("/etc/netns")
+WG_CONFIG_DIR = Path("/etc/qdistro/wg")
 
 # Reserved uid range. Admin = 1000; silos start at 2000 so the admin
 # account and the few system-fixed uids in qdistro (audisp = 990 etc.)
@@ -185,6 +206,11 @@ class Silo:
     # {workload, argv, network, template_silo} for tier2-template.
     kind: str = KIND_TIER3_USER
     launch: dict = field(default_factory=dict)
+    # Per-silo netns egress policy (todo/fable-networking task 3). None means
+    # the legacy un-managed state (no netns, host networking); a string
+    # ("none"|"direct"|"wg:<name>") opts the silo into the netns contract with
+    # "none" = default-deny. Only meaningful for tier3-user silos.
+    egress: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -196,6 +222,7 @@ class Silo:
             "last_change": int(self.last_change),
             "kind": self.kind,
             "launch": dict(self.launch),
+            "egress": self.egress,
         }
 
 
@@ -238,6 +265,17 @@ def validate_kind(kind: str) -> str:
     if kind not in SILO_KINDS:
         raise BadArgument(f"kind must be one of {SILO_KINDS}, got {kind!r}")
     return kind
+
+
+def _validate_egress_field(value: object) -> str | None:
+    """Validate/normalise the silo's egress policy at the session-manager
+    boundary. None = legacy un-managed (no netns). Translates the egress
+    module's EgressError into our BadArgument so callers/loaders catch one
+    type."""
+    try:
+        return validate_egress(value)
+    except _egress.EgressError as e:
+        raise BadArgument(str(e)) from e
 
 
 def validate_silo_uid(uid: int, kind: str) -> int:
@@ -505,6 +543,158 @@ class _SystemOps:
         except FileNotFoundError:
             pass
 
+    # ---- per-silo netns egress (todo/fable-networking task 3) -------------
+    #
+    # Thin side-effect wrappers over `ip`/`wg`/`nft`/sysctl, mirroring the
+    # cgroup_* methods: the pure EgressBackend (qdistro_silo_egress) decides the
+    # sequence; these just run it. A falsy `ns` means the init (host) netns.
+    # Not unit-tested directly (the fake records calls); exercised in the VM
+    # bats probe (task 3 Phase E).
+
+    _NFT_TABLE = "qdistro_egress"
+
+    def _ip(self, ns, *args, check=True) -> None:
+        cmd = ["ip"]
+        if ns:
+            cmd += ["-n", str(ns)]
+        cmd += [str(a) for a in args]
+        subprocess.run(cmd, check=check)
+
+    def netns_exists(self, ns: str) -> bool:
+        return (NETNS_RUN_DIR / str(ns)).exists()
+
+    def netns_create(self, ns: str) -> None:
+        # Idempotent: `ip netns add` errors if the name exists.
+        if not self.netns_exists(ns):
+            subprocess.run(["ip", "netns", "add", str(ns)], check=True)
+
+    def netns_remove(self, ns: str) -> None:
+        # Deleting the netns destroys every interface still inside it. Best
+        # effort: a missing netns is not an error.
+        subprocess.run(["ip", "netns", "del", str(ns)], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def link_up(self, ns, ifname) -> None:
+        self._ip(ns, "link", "set", ifname, "up")
+
+    def link_del(self, ns, ifname) -> None:
+        # Idempotent teardown: a missing device must not raise.
+        self._ip(ns, "link", "del", ifname, check=False)
+
+    def link_set_netns(self, ifname, ns) -> None:
+        # The device is in the init netns; move it into `ns`.
+        subprocess.run(["ip", "link", "set", str(ifname), "netns", str(ns)],
+                       check=True)
+
+    def addr_add(self, ns, ifname, address) -> None:
+        self._ip(ns, "addr", "add", address, "dev", ifname)
+
+    def route_add_default_dev(self, ns, ifname) -> None:
+        self._ip(ns, "route", "add", "default", "dev", ifname)
+
+    def route_add_default_via(self, ns, gateway) -> None:
+        self._ip(ns, "route", "add", "default", "via", gateway)
+
+    def ipv6_disable(self, ns, ifname) -> None:
+        # Stop SLAAC handing a direct-egress silo a v6 path around the NAT.
+        argv = ["sysctl", "-q", f"net.ipv6.conf.{ifname}.disable_ipv6=1"]
+        if ns:
+            argv = ["ip", "netns", "exec", str(ns)] + argv
+        subprocess.run(argv, check=False)
+
+    def wg_add_dev(self, ifname) -> None:
+        # Born in the init netns so WireGuard binds its encrypted UDP socket
+        # here; moved into the silo netns afterwards (kill-switch by
+        # construction — the silo netns then holds only this device + lo).
+        subprocess.run(["ip", "link", "add", str(ifname), "type", "wireguard"],
+                       check=True)
+
+    def wg_configure(self, ifname, *, private_key, peer_public_key, endpoint,
+                     allowed_ips, keepalive) -> None:
+        # Pass the private key via a pipe + /dev/fd/N so it never lands on disk
+        # (least of all a silo home). The read fd is inherited by `wg`.
+        r, w = os.pipe()
+        try:
+            os.write(w, (str(private_key).strip() + "\n").encode())
+            os.close(w)
+            w = -1
+            cmd = ["wg", "set", str(ifname),
+                   "private-key", f"/dev/fd/{r}",
+                   "peer", str(peer_public_key),
+                   "allowed-ips", str(allowed_ips),
+                   "endpoint", str(endpoint)]
+            if keepalive:
+                cmd += ["persistent-keepalive", str(int(keepalive))]
+            subprocess.run(cmd, check=True, pass_fds=(r,))
+        finally:
+            if w != -1:
+                os.close(w)
+            os.close(r)
+
+    def veth_create(self, host_if, peer_if) -> None:
+        subprocess.run(["ip", "link", "add", str(host_if), "type", "veth",
+                        "peer", "name", str(peer_if)], check=True)
+
+    def _nft_ensure_table(self) -> None:
+        # One dedicated table so per-silo changes never touch other firewall
+        # state. Two sets drive the rules; per-silo apply/teardown is just an
+        # element add/del. Created once; the `add`s below are not idempotent
+        # for rules, so we only build the scaffold when the table is absent.
+        present = subprocess.run(
+            ["nft", "list", "table", "inet", self._NFT_TABLE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if present:
+            return
+        script = (
+            f"add table inet {self._NFT_TABLE}\n"
+            f"add set inet {self._NFT_TABLE} blocked_uids {{ type uid; }}\n"
+            f"add set inet {self._NFT_TABLE} nat_subnets "
+            f"{{ type ipv4_addr; flags interval; }}\n"
+            f"add chain inet {self._NFT_TABLE} out "
+            f"{{ type filter hook output priority 0; }}\n"
+            f"add chain inet {self._NFT_TABLE} post "
+            f"{{ type nat hook postrouting priority srcnat; }}\n"
+            f"add rule inet {self._NFT_TABLE} out meta skuid @blocked_uids drop\n"
+            f"add rule inet {self._NFT_TABLE} post "
+            f"ip saddr @nat_subnets masquerade\n"
+        )
+        subprocess.run(["nft", "-f", "-"], input=script.encode(), check=True)
+
+    def nft_skuid_drop(self, uid, enable) -> None:
+        # Defense-in-depth backstop: drop traffic from a silo uid that runs in
+        # the INIT netns (a process that bypassed `ip netns exec`). The in-netns
+        # route topology is the primary kill-switch; this catches stragglers.
+        self._nft_ensure_table()
+        verb = "add" if enable else "delete"
+        # check=False: add-existing / delete-missing are both no-ops for us.
+        subprocess.run(
+            ["nft", verb, "element", "inet", self._NFT_TABLE, "blocked_uids",
+             "{", str(int(uid)), "}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def nat_masquerade(self, subnet, enable) -> None:
+        self._nft_ensure_table()
+        verb = "add" if enable else "delete"
+        subprocess.run(
+            ["nft", verb, "element", "inet", self._NFT_TABLE, "nat_subnets",
+             "{", str(subnet), "}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def write_netns_resolv(self, ns, nameservers) -> None:
+        # `ip netns exec <ns>` bind-mounts /etc/netns/<ns>/resolv.conf over
+        # /etc/resolv.conf for the spawned process tree — this is how a silo
+        # gets its one tunnel-bound resolver.
+        d = ETC_NETNS / str(ns)
+        d.mkdir(parents=True, exist_ok=True)
+        body = "".join(f"nameserver {n}\n" for n in nameservers)
+        (d / "resolv.conf").write_text(body)
+
+    def remove_netns_resolv(self, ns) -> None:
+        try:
+            (ETC_NETNS / str(ns) / "resolv.conf").unlink()
+        except FileNotFoundError:
+            pass
+
     def systemctl_start(self, unit: str) -> None:
         subprocess.run(
             ["systemctl", "start", unit],
@@ -659,6 +849,42 @@ class _AuditLog:
 
 
 # ---------------------------------------------------------------------------
+# Default egress tunnel-config / key providers (task 3)
+# ---------------------------------------------------------------------------
+
+def _default_tunnel_resolver(name: str) -> TunnelConfig:
+    """Load a tunnel's *non-secret* config from /etc/qdistro/wg/<name>.conf.
+    Minimal `key = value` lines: public_key, endpoint, address, dns (optional),
+    allowed_ips (optional), keepalive (optional). Raises on absent/invalid so
+    the silo comes up dark (retriable once the config lands)."""
+    path = WG_CONFIG_DIR / f"{name}.conf"
+    data: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        data[k.strip()] = v.strip()
+    ka = data.get("keepalive")
+    return TunnelConfig(
+        name=name,
+        peer_public_key=data["public_key"],
+        endpoint=data["endpoint"],
+        address=data["address"],
+        dns=data.get("dns") or None,
+        allowed_ips=data.get("allowed_ips", "0.0.0.0/0, ::/0"),
+        keepalive=int(ka) if ka else None,
+    )
+
+
+def _default_key_provider(name: str) -> str:
+    """Fetch a tunnel's WireGuard private key from qdistro-pwd. Phase A leaves
+    this unwired (raises KeyUnavailable so wg silos come up dark and safe);
+    Phase C wires the pwd GetItem call pinned to the session-manager."""
+    raise KeyUnavailable("wireguard key custody not yet wired (task 3 Phase C)")
+
+
+# ---------------------------------------------------------------------------
 # Core store (no D-Bus)
 # ---------------------------------------------------------------------------
 
@@ -675,10 +901,21 @@ class _SiloStore:
     def __init__(self, ops: _SystemOps,
                  config_path: Path = SILOS_CONFIG_PATH,
                  on_change: "callable | None" = None,
-                 audit: "_AuditLog | None" = None):
+                 audit: "_AuditLog | None" = None,
+                 egress_backend: "EgressBackend | None" = None,
+                 tunnel_resolver: "callable | None" = None,
+                 key_provider: "callable | None" = None):
         self._ops = ops
         self._config_path = Path(config_path)
         self._on_change = on_change
+        # Per-silo netns egress (task 3). The backend is pure; tunnel_resolver
+        # maps a tunnel name -> TunnelConfig (non-secret, from /etc/qdistro/wg),
+        # and key_provider maps a tunnel name -> private key (from qdistro-pwd),
+        # raising KeyUnavailable on a locked/pre-auth vault so the silo comes up
+        # dark instead of failing its start. All injectable for tests.
+        self._egress = egress_backend or EgressBackend()
+        self._tunnel_resolver = tunnel_resolver or _default_tunnel_resolver
+        self._key_provider = key_provider or _default_key_provider
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
         self._audit = audit
@@ -726,10 +963,14 @@ class _SiloStore:
                     # the admin launch-owner uid, tier3-user a fresh silo uid).
                     validate_silo_uid(uid, kind)
                     launch = validate_launch(kind, row.get("launch", {}) or {})
+                    # Re-validate egress on load too: a hand-edited silos.yaml
+                    # must not smuggle a bogus egress spec (e.g. an injected
+                    # tunnel name) into the privileged netns/wg path.
+                    egress = _validate_egress_field(row.get("egress"))
                 except BadArgument as e:
                     log.error(
                         "silos.yaml: dropping row with invalid "
-                        "name/uid/kind/launch: %s", e)
+                        "name/uid/kind/launch/egress: %s", e)
                     continue
                 state = row.get("state", State.STOPPED)
                 if state not in State.ALL:
@@ -743,6 +984,7 @@ class _SiloStore:
                     last_change=int(row.get("last_change", 0) or 0),
                     kind=kind,
                     launch=launch,
+                    egress=egress,
                 )
                 self._silos[name] = silo
 
@@ -860,16 +1102,86 @@ class _SiloStore:
             self._stopping_inflight.discard(name)
             self._stop_cv.notify_all()
 
+    # ---- per-silo netns egress (task 3) ---------------------------------
+
+    def _is_netns_backed(self, silo: Silo) -> bool:
+        # Only tier3-user silos with an explicit egress policy get a netns; a
+        # silo with egress=None keeps legacy host networking (backward compat).
+        return silo.kind == KIND_TIER3_USER and silo.egress is not None
+
+    def _apply_egress(self, silo: Silo) -> None:
+        """Bring up the silo's netns egress per its policy, BEFORE the launcher
+        unit, so the silo's processes (which enter the netns — Phase D) see the
+        right route + resolver from the first instant. A locked/pre-auth pwd
+        vault or missing tunnel config brings the silo up *dark* (netns present,
+        no egress device) — never fails the start (B3)."""
+        ns = _egress.netns_name(silo.name)
+        policy = EgressPolicy.parse(silo.egress)
+        self._ops.netns_create(ns)
+        tunnel = None
+        keyfn = None
+        if policy.mode == "wg":
+            try:
+                tunnel = self._tunnel_resolver(policy.tunnel)
+            except Exception as e:  # noqa: BLE001
+                # No/invalid tunnel config: come up dark (netns only), retriable
+                # once the config lands. Don't fail the launch.
+                log.warning("silo %r tunnel %r config unavailable: %s — dark",
+                            silo.name, policy.tunnel, e)
+                self._egress.apply(ns, silo.uid, EgressPolicy.parse("none"),
+                                   self._ops)
+                self._audit_record("egress-apply", silo.name, decision="allow",
+                                   reason="dark:no-tunnel-config", caller=None)
+                return
+            keyfn = self._key_provider
+        result = self._egress.apply(ns, silo.uid, policy, self._ops,
+                                    tunnel=tunnel, keyfn=keyfn)
+        reason = (f"dark:{result.pending}"
+                  if result.dark and result.pending else silo.egress)
+        if result.dark and result.pending:
+            log.warning("silo %r egress %s came up dark: %s",
+                        silo.name, silo.egress, result.pending)
+        self._audit_record("egress-apply", silo.name, decision="allow",
+                           reason=reason, caller=None)
+
+    def _teardown_egress(self, name: str, uid: int,
+                         egress: str | None) -> None:
+        """Best-effort egress + netns teardown. Never raises into the lifecycle
+        path — a teardown failure is logged, not fatal (the next start re-applies
+        teardown-stale-first, and delete removes the netns regardless)."""
+        if egress is None:
+            return
+        ns = _egress.netns_name(name)
+        try:
+            policy = EgressPolicy.parse(egress)
+        except _egress.EgressError:
+            policy = None
+        try:
+            self._egress.teardown(ns, uid, policy, self._ops)
+        except Exception as e:  # noqa: BLE001
+            log.warning("egress teardown for %r failed: %s — continuing",
+                        name, e)
+        try:
+            self._ops.netns_remove(ns)
+        except Exception as e:  # noqa: BLE001
+            log.warning("netns_remove for %r failed: %s — continuing", name, e)
+
     # ---- create / delete -----------------------------------------------
 
     def create(self, name: str, uid: int, *, autostart: bool = False,
                kind: str = KIND_TIER3_USER, launch: dict | None = None,
+               egress: str | None = None,
                caller: dict[str, Any] | None = None) -> Silo:
         try:
             validate_name(name)
             validate_kind(kind)
             validate_silo_uid(uid, kind)
             launch_norm = validate_launch(kind, launch or {})
+            egress_norm = _validate_egress_field(egress)
+            if egress_norm is not None and kind != KIND_TIER3_USER:
+                raise BadArgument(
+                    "egress policy is only valid for tier3-user silos "
+                    f"(got kind {kind!r})")
             with self._lock:
                 if name in self._silos:
                     raise SiloExists(f"silo {name!r} already exists")
@@ -898,6 +1210,7 @@ class _SiloStore:
                     created_at=int(time.time()),
                     last_change=int(time.time()),
                     kind=kind, launch=launch_norm,
+                    egress=egress_norm,
                 )
                 self._silos[name] = silo
                 self.save()
@@ -934,6 +1247,10 @@ class _SiloStore:
                 self._transition(silo, State.DELETING)
                 try:
                     self._ops.cgroup_remove(silo.name)
+                    # Idempotent egress/netns cleanup: stop() already tore it
+                    # down for the normal path, but a crash mid-stop could
+                    # leave a netns behind — never leak it past delete.
+                    self._teardown_egress(silo.name, silo.uid, silo.egress)
                     self._ops.remove_state_dir(silo.name)
                     self._ops.userdel(silo.name)
                 except Exception as e:  # noqa: BLE001
@@ -1006,14 +1323,25 @@ class _SiloStore:
                             unit = TIER2_SILO_LAUNCHER_FMT.format(name=silo.name)
                         else:
                             self._ops.cgroup_create(silo.name)
+                            # Bring up the per-silo netns egress BEFORE the
+                            # launcher, so the silo's processes (which enter the
+                            # netns) get the right route + resolver immediately.
+                            # No-op for legacy (egress=None) silos.
+                            if self._is_netns_backed(silo):
+                                self._apply_egress(silo)
                             unit = SILO_LAUNCHER_FMT.format(name=silo.name,
                                                             uid=silo.uid)
                         self._ops.systemctl_start(unit)
                     except Exception as e:  # noqa: BLE001
                         # Roll back state on failure. _force_state emits
                         # SiloChanged so the admin UI / PodApps don't stick
-                        # on "Active" after a failed launch.
+                        # on "Active" after a failed launch. Tear down any
+                        # egress we applied so a failed start leaves no
+                        # half-configured netns behind.
                         log.error("start of silo %r failed: %s", silo.name, e)
+                        if self._is_netns_backed(silo):
+                            self._teardown_egress(silo.name, silo.uid,
+                                                  silo.egress)
                         self._force_state(silo, State.STOPPED)
                         if isinstance(e, SessionError):
                             raise
@@ -1079,6 +1407,7 @@ class _SiloStore:
             silo_name = silo.name
             silo_uid = silo.uid
             silo_kind = silo.kind
+            silo_egress = silo.egress
             self._stopping_inflight.add(silo_name)
 
         # Phase 2: grace-period polling WITHOUT holding the store lock.
@@ -1185,6 +1514,11 @@ class _SiloStore:
                     # leftover dir on next daemon start).
                     log.error("cgroup rmdir for silo %r failed: %s "
                               "(cgroup may have leaked)", silo_name, e)
+                # Tear down the per-silo netns egress (devices, backstop,
+                # resolver) and remove the netns. Best-effort: never raises, so
+                # a teardown hiccup can't wedge the stop. No-op for legacy
+                # (egress=None) silos.
+                self._teardown_egress(silo_name, silo_uid, silo_egress)
             except SessionError:
                 # Already-typed errors propagate; force back to STOPPED
                 # so the silo isn't wedged in STOPPING.
@@ -1381,6 +1715,8 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
         "#       created_at: <int>    # epoch seconds",
         "#       last_change: <int>   # epoch seconds of last state change",
         "#       kind: <tier3-user|tier2-template>",
+        "#       egress: <none|direct|wg:NAME>  # tier3-user netns egress;",
+        "#                              # omit/null = legacy host net (no netns)",
         "#       launch:              # tier2-template only:",
         "#         workload: <str>    #   spawn-tier2 workload (seccomp/image)",
         "#         template_silo: <str>  # TIER2_SILO (binding to resolve)",
@@ -1402,6 +1738,11 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
         out.append(f"    created_at: {int(r['created_at'])}")
         out.append(f"    last_change: {int(r['last_change'])}")
         out.append(f"    kind: {r.get('kind', KIND_TIER3_USER)}")
+        # egress is optional: omit the line entirely for the legacy
+        # un-managed state (None) so existing rows round-trip unchanged.
+        egress = r.get("egress")
+        if egress is not None:
+            out.append(f"    egress: {egress}")
         launch = r.get("launch") or {}
         if launch:
             out.append("    launch:")

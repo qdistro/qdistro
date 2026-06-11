@@ -47,6 +47,7 @@ class _FakeOps:
         # (simulates the launcher exiting after SIGTERM). Tests that
         # exercise the SIGKILL fallback set this False.
         self.kill_drains = True
+        self._egress_init()
 
     # ---- queries ----------------------------------------------------------
 
@@ -126,6 +127,75 @@ class _FakeOps:
         if self.kill_drains:
             for name in list(self.cgroup_pids_map.keys()):
                 self.cgroup_pids_map[name] = []
+
+    # ---- per-silo netns egress (todo/fable-networking task 3) -------------
+    # Records the calls the EgressBackend makes so the lifecycle wiring
+    # (create→start→stop→delete) can be asserted without root or real netns.
+
+    def _egress_init(self):
+        self.netns: set[str] = set()
+        self.egress_calls: list[tuple] = []
+        self.resolv: dict[str, list[str]] = {}
+        self.skuid: dict[int, bool] = {}
+
+    def netns_create(self, ns: str) -> None:
+        self.egress_calls.append(("netns_create", ns))
+        self.netns.add(ns)
+
+    def netns_remove(self, ns: str) -> None:
+        self.egress_calls.append(("netns_remove", ns))
+        self.netns.discard(ns)
+
+    def netns_exists(self, ns: str) -> bool:
+        return ns in self.netns
+
+    def link_up(self, ns, ifname):
+        self.egress_calls.append(("link_up", ns, ifname))
+
+    def link_del(self, ns, ifname):
+        self.egress_calls.append(("link_del", ns, ifname))
+
+    def link_set_netns(self, ifname, ns):
+        self.egress_calls.append(("link_set_netns", ifname, ns))
+
+    def addr_add(self, ns, ifname, address):
+        self.egress_calls.append(("addr_add", ns, ifname, address))
+
+    def route_add_default_dev(self, ns, ifname):
+        self.egress_calls.append(("route_add_default_dev", ns, ifname))
+
+    def route_add_default_via(self, ns, gw):
+        self.egress_calls.append(("route_add_default_via", ns, gw))
+
+    def ipv6_disable(self, ns, ifname):
+        self.egress_calls.append(("ipv6_disable", ns, ifname))
+
+    def wg_add_dev(self, ifname):
+        self.egress_calls.append(("wg_add_dev", ifname))
+
+    def wg_configure(self, ifname, **kw):
+        self.egress_calls.append(("wg_configure", ifname, kw))
+
+    def veth_create(self, host_if, peer_if):
+        self.egress_calls.append(("veth_create", host_if, peer_if))
+
+    def nat_masquerade(self, subnet, enable):
+        self.egress_calls.append(("nat_masquerade", subnet, enable))
+
+    def nft_skuid_drop(self, uid, enable):
+        self.egress_calls.append(("nft_skuid_drop", uid, enable))
+        self.skuid[int(uid)] = bool(enable)
+
+    def write_netns_resolv(self, ns, nameservers):
+        self.egress_calls.append(("write_netns_resolv", ns, list(nameservers)))
+        self.resolv[ns] = list(nameservers)
+
+    def remove_netns_resolv(self, ns):
+        self.egress_calls.append(("remove_netns_resolv", ns))
+        self.resolv.pop(ns, None)
+
+    def egress_ops(self) -> list[str]:
+        return [c[0] for c in self.egress_calls]
 
 
 # ---------------------------------------------------------------------------
@@ -832,3 +902,113 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
     # argv is rendered as a JSON array; the fallback yields it verbatim and the
     # loader normalises it back to a list.
     assert list(silo.launch["argv"]) == ["chromium"]
+
+
+# ---------------------------------------------------------------------------
+# Per-silo netns egress lifecycle (todo/fable-networking task 3)
+# ---------------------------------------------------------------------------
+
+from qdistro_silo_egress import TunnelConfig, netns_name, wg_ifname  # noqa: E402
+
+_TUN = TunnelConfig(
+    name="work", peer_public_key="PUB=", endpoint="vpn.example:51820",
+    address="10.7.0.2/32", dns="10.7.0.1", keepalive=25)
+
+
+@pytest.fixture
+def egress_store(ops: _FakeOps, tmp_path: Path) -> _SiloStore:
+    # A store whose wg tunnel config + private key resolve successfully, so a
+    # `wg:` silo can come up live (not dark) in tests.
+    return _SiloStore(
+        ops, config_path=tmp_path / "silos.yaml",
+        tunnel_resolver=lambda name: _TUN,
+        key_provider=lambda name: "PRIVKEY=",
+    )
+
+
+class TestEgressField:
+    def test_create_persists_and_roundtrips(self, ops, tmp_path):
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        store.create("work", 2000, egress="wg:work")
+        assert store.get("work").egress == "wg:work"
+        # Reload from disk: egress survives the yaml round-trip.
+        store2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        assert store2.get("work").egress == "wg:work"
+
+    def test_default_egress_is_none_legacy(self, store):
+        # A silo created without egress is the legacy un-managed state.
+        assert store.create("work", 2000).egress is None
+
+    def test_invalid_egress_rejected(self, store):
+        with pytest.raises(BadArgument):
+            store.create("work", 2000, egress="wg:Bad Name")
+
+    def test_egress_rejected_on_tier2(self, store):
+        with pytest.raises(BadArgument):
+            store.create("browser1", 1000, kind="tier2-template",
+                         launch=dict(_LAUNCH), egress="none")
+
+    def test_loader_drops_bad_egress_row(self, ops, tmp_path):
+        cfg = tmp_path / "silos.yaml"
+        cfg.write_text(
+            "silos:\n"
+            "  - name: work\n    uid: 2000\n    state: Stopped\n"
+            "    autostart: false\n    created_at: 0\n    last_change: 0\n"
+            "    kind: tier3-user\n    egress: 'wg:Bad Name'\n")
+        store = _SiloStore(ops, config_path=cfg)
+        with pytest.raises(UnknownSilo):
+            store.get("work")          # the hand-edited bad row was dropped
+
+
+class TestEgressLifecycle:
+    def test_legacy_silo_touches_no_netns(self, store, ops):
+        store.create("work", 2000)               # egress=None
+        store.start("work")
+        assert ops.egress_calls == []            # no netns for legacy silos
+        assert ("start", "qdshell-session-work@2000.service") in ops.systemctl_calls
+
+    def test_none_silo_comes_up_dark(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="none")
+        egress_store.start("work")
+        ns = netns_name("work")
+        assert ns in ops.netns                   # netns created
+        assert ops.skuid[2000] is True           # backstop on
+        assert "wg_add_dev" not in ops.egress_ops()
+        assert ns not in ops.resolv              # dark: no resolver
+
+    def test_wg_silo_brings_up_tunnel_before_launch(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        eo = ops.egress_ops()
+        assert "wg_add_dev" in eo and "link_set_netns" in eo
+        # the wg device is created and moved before the launcher unit starts
+        assert ops.resolv[netns_name("work")] == ["10.7.0.1"]
+        # egress applied before systemctl start (processes see the tunnel first)
+        assert ops.egress_calls           # something happened
+        assert ops.systemctl_calls[-1][0] == "start"
+
+    def test_stop_tears_down_netns(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        egress_store.stop("work", grace_s=0)
+        ns = netns_name("work")
+        assert ns not in ops.netns               # netns removed on stop
+        assert ops.skuid[2000] is False          # backstop cleared
+
+    def test_delete_removes_netns_idempotent(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="none")
+        egress_store.start("work")
+        egress_store.stop("work", grace_s=0)
+        egress_store.delete("work")
+        assert netns_name("work") not in ops.netns
+
+    def test_wg_dark_when_key_unavailable(self, ops, tmp_path):
+        # Default key_provider raises KeyUnavailable -> silo starts dark, but
+        # the start still SUCCEEDS (B3: a locked vault must not fail the start).
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml",
+                           tunnel_resolver=lambda n: _TUN)  # default key_provider
+        store.create("work", 2000, egress="wg:work")
+        store.start("work")                      # must not raise
+        assert store.get("work").state == State.ACTIVE
+        assert "wg_add_dev" not in ops.egress_ops()
+        assert ops.skuid[2000] is True           # backstop still on
