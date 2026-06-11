@@ -1642,14 +1642,22 @@ class Broker(dbus.service.Object):
             if hook_resp is not None:
                 verdict = hook_resp.get("verdict")
                 reason = hook_resp.get("reason", "")[:256]
-                try:
-                    self.audit.log(
-                        action=action_s, uid=uid, pid=pid, exe=exe,
-                        decision=(verdict in ("allow", "transform")),
-                        scope=None,
-                        source=f"hook verdict={verdict} reason={reason}")
-                except Exception:  # noqa: BLE001
-                    pass
+                # Only audit an ACTIONABLE verdict. A non-None hook
+                # response with a missing/unknown verdict falls through to
+                # "unknown" (admin prompt) and must NOT write a
+                # decision=False row that reads like a deny — mirrors the
+                # _enqueue path, which audits only when a verdict decides.
+                if verdict in ("allow", "transform", "deny"):
+                    try:
+                        self.audit.log(
+                            caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                            action=action_s,
+                            decision=(verdict in ("allow", "transform")),
+                            scope=None, approver_uid=None,
+                            source=f"hook verdict={verdict} reason={reason}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[broker] qdistro.audit.failure: check_hook "
+                              f"path, reason={e!r}", flush=True)
                 if verdict in ("allow", "transform"):
                     return "allow"
                 if verdict == "deny":

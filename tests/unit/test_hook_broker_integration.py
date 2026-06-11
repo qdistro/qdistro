@@ -391,6 +391,47 @@ class TestCheckPermissionHooks:
         result = broker.CheckPermission("org.qdistro.test.check", {})
         assert result == "deny"
 
+    def test_check_permission_hook_allow_writes_audit_row(
+            self, tmp_path, rules_dir):
+        """The CheckPermission fast-path must audit hook verdicts.
+
+        Regression: _decide_check() called audit.log() with the wrong
+        keyword names (uid/pid/exe instead of caller_uid/caller_pid/
+        caller_exe and no approver_uid), so every call raised TypeError
+        that a bare `except: pass` swallowed — hook decisions reached via
+        CheckPermission left NO audit row.
+        """
+        mock = _MockHookClient(verdict={"verdict": "allow"})
+        broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
+        broker.set_peer(uid=USER_UID)
+        assert broker.CheckPermission("org.qdistro.test.checkaudit", {}) \
+            == "allow"
+
+        rows = broker.audit.recent(10)
+        assert len(rows) >= 1
+        last = rows[0]
+        assert last["action"] == "org.qdistro.test.checkaudit"
+        assert last["caller_uid"] == USER_UID
+        assert last["decision"] is True
+        assert "hook" in last["source"]
+
+    def test_check_permission_hook_deny_writes_audit_row(
+            self, tmp_path, rules_dir):
+        mock = _MockHookClient(
+            verdict={"verdict": "deny", "reason": "blocked"})
+        broker = _make_broker(tmp_path, rules_dir, hook_client=mock)
+        broker.set_peer(uid=USER_UID)
+        assert broker.CheckPermission(
+            "org.qdistro.test.checkaudit_deny", {}) == "deny"
+
+        rows = broker.audit.recent(10)
+        assert len(rows) >= 1
+        last = rows[0]
+        assert last["action"] == "org.qdistro.test.checkaudit_deny"
+        assert last["decision"] is False
+        assert "hook" in last["source"]
+        assert "blocked" in last["source"]
+
     def test_check_permission_hook_transform(self, tmp_path, rules_dir):
         mock = _MockHookClient(
             verdict={"verdict": "transform"})
