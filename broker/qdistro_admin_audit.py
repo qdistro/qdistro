@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 
 SCHEMA = """
@@ -76,6 +77,15 @@ def _migrate(conn) -> None:
 class AuditLog:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        # The broker shares one connection across threads
+        # (check_same_thread=False). sqlite3 forbids concurrent use of a
+        # single connection from multiple threads — overlapping calls
+        # raise sqlite3.InterfaceError ("bad parameter or other API
+        # misuse", i.e. SQLITE_MISUSE). DecideRequest performs the audit
+        # write OUTSIDE the broker's own lock, so concurrent decisions
+        # would race here and the broker would fail closed (deny). Serialise
+        # all connection access with our own lock.
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         # Restrictive umask so the db file is 0600 from byte 0
         old_umask = os.umask(0o077)
@@ -102,18 +112,19 @@ class AuditLog:
         else:
             import json
             argv_text = json.dumps(list(argv))
-        self._conn.execute(
-            """
-            INSERT INTO audit
-              (ts, caller_uid, caller_pid, caller_exe, action,
-               decision, scope, source, approver_uid, rule_path,
-               request_id, selinux_subj_type, argv)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (int(time.time()), caller_uid, caller_pid, caller_exe, action,
-             1 if decision else 0, scope, source, approver_uid, rule_path,
-             request_id, selinux_subj_type, argv_text),
-        )
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO audit
+                  (ts, caller_uid, caller_pid, caller_exe, action,
+                   decision, scope, source, approver_uid, rule_path,
+                   request_id, selinux_subj_type, argv)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (int(time.time()), caller_uid, caller_pid, caller_exe, action,
+                 1 if decision else 0, scope, source, approver_uid, rule_path,
+                 request_id, selinux_subj_type, argv_text),
+            )
 
     def recent(self, limit: int = 200) -> list[dict]:
         """Return the N most-recent audit rows as plain dicts.
@@ -124,17 +135,19 @@ class AuditLog:
         seconds; decision is 0/1; nullable columns come back as None.
         """
         limit = max(1, min(int(limit), 10000))
-        cur = self._conn.execute(
-            """
-            SELECT ts, caller_uid, caller_pid, caller_exe, action,
-                   decision, scope, source, approver_uid, rule_path,
-                   request_id, selinux_subj_type, argv
-            FROM audit ORDER BY ts DESC, id DESC LIMIT ?
-            """,
-            (limit,),
-        )
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT ts, caller_uid, caller_pid, caller_exe, action,
+                       decision, scope, source, approver_uid, rule_path,
+                       request_id, selinux_subj_type, argv
+                FROM audit ORDER BY ts DESC, id DESC LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
         out = []
-        for row in cur.fetchall():
+        for row in rows:
             (ts, uid, pid, exe, action, decision, scope, source,
              approver_uid, rule_path, request_id,
              selinux_subj_type, argv_text) = row
@@ -173,9 +186,11 @@ class AuditLog:
         if older_than_seconds < 0:
             raise ValueError(f"older_than_seconds must be >= 0, got {older_than_seconds}")
         cutoff = int(time.time()) - int(older_than_seconds)
-        cur = self._conn.execute(
-            "DELETE FROM audit WHERE ts < ?", (cutoff,))
-        return cur.rowcount or 0
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM audit WHERE ts < ?", (cutoff,))
+            return cur.rowcount or 0
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
