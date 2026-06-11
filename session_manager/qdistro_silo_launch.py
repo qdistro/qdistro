@@ -41,6 +41,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("silo", nargs="?", default=None)
     parser.add_argument("--stop", action="store_true",
                         help="stop the silo instead of starting it")
+    parser.add_argument("--grace", type=int, default=5,
+                        help="stop grace period in seconds (default 5; "
+                             "matches the daemon's DEFAULT_STOP_GRACE_S). NOTE: "
+                             "honoured only for tier-3 user silos (the SIGTERM "
+                             "kill window). A tier-2 templated silo is torn down "
+                             "by its unit's fixed ExecStop (podman stop -t 10), "
+                             "so --grace does not change its stop timeout.")
     parser.add_argument("--status", action="store_true",
                         help="print template/silo status and exit")
     parser.add_argument("--json", action="store_true",
@@ -57,7 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mgr = _session_manager()
         if args.stop:
-            mgr.StopSilo(args.silo)
+            # StopSilo's D-Bus signature is "si" (name + grace_s); the grace
+            # int is required or dbus-python raises "More items found in D-Bus
+            # signature than in Python arguments" and the stop silently fails.
+            mgr.StopSilo(args.silo, args.grace)
             print(f"stopped {args.silo}")
         else:
             mgr.StartSilo(args.silo)

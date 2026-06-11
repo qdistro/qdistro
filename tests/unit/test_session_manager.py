@@ -39,6 +39,10 @@ class _FakeOps:
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
+        # When True, a tier-2 stop's fail-closed verification reports the
+        # container/unit still running (simulates an ExecStop regression or a
+        # surviving rootless container) so the store must NOT report STOPPED.
+        self.tier2_stop_fails = False
         # When True, kill_pids drains cgroup_pids_map for that cgroup
         # (simulates the launcher exiting after SIGTERM). Tests that
         # exercise the SIGKILL fallback set this False.
@@ -102,6 +106,11 @@ class _FakeOps:
 
     def systemctl_stop(self, unit: str) -> None:
         self.systemctl_calls.append(("stop", unit))
+
+    def tier2_silo_running(self, name: str) -> bool:
+        # Fail-closed verification hook: True means the stop did NOT take
+        # effect (unit still active or container survives).
+        return self.tier2_stop_fails
 
     # tier2-template launch env (fableplan2 task 04)
     def write_launch_env(self, name: str, content: str):
@@ -697,6 +706,32 @@ class TestTier2TemplateKind:
         assert recovered["TIER2_NETWORK"] == "slirp4netns"
         assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == ["chromium"]
         assert recovered["QD_WORKLOAD"] == "browser"
+
+    def test_stop_tier2_clean(self, store, ops):
+        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        store.stop("browser1")
+        assert store.get("browser1").state == State.STOPPED
+        assert ("stop", "qdistro-tier2-silo@browser1.service") in ops.systemctl_calls
+        assert "browser1" not in ops.launch_envs   # env cleared on a clean stop
+
+    def test_stop_tier2_fails_closed_when_container_survives(self, store, ops):
+        # fail-closed: if the stop did not take effect (unit still active or
+        # the rootless container survives), the store must NOT report STOPPED
+        # and must surface an error — never a silent lie hiding an orphan.
+        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.start("browser1")
+        ops.tier2_stop_fails = True
+        with pytest.raises(sm.SessionError):
+            store.stop("browser1")
+        # honest + retryable: ACTIVE (the container may still be running), not
+        # STOPPED; the launch env is NOT torn down under the live container.
+        assert store.get("browser1").state == State.ACTIVE
+        assert "browser1" in ops.launch_envs
+        # a retry after the stop genuinely takes effect succeeds.
+        ops.tier2_stop_fails = False
+        store.stop("browser1")
+        assert store.get("browser1").state == State.STOPPED
 
 
 def _source_env_via_bash(env_text: str) -> dict:

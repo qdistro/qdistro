@@ -73,6 +73,11 @@ SILO_LAUNCHER_FMT = "qdshell-session-{name}@{uid}.service"
 # root; the unit boundary is where privileges drop to admin (rootless
 # podman must run as admin). One %i = the silo name.
 TIER2_SILO_LAUNCHER_FMT = "qdistro-tier2-silo@{name}.service"
+# The rootless container spawn-tier2 names for a tier-2 silo (mirrors the
+# daemon-exported QD_CONTAINER). Used to fail-closed-verify a stop actually
+# tore the container down (the unit going inactive is not sufficient: a
+# rootless container can survive its supervisor).
+TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
 
 # Silo kinds (fableplan2 task 04). tier3-user is today's implicit default
 # (a real Linux user, per-uid home/cgroup, tier-3 session launcher);
@@ -476,6 +481,15 @@ class _SystemOps:
         try:
             os.write(fd, content.encode())
             os.fdatasync(fd)
+            # The launcher unit drops to admin (the rootless-podman owner) and
+            # reads this file; the daemon runs as root, so a root-owned 0600 file
+            # is unreadable by the launcher (the launch fails with "no launch
+            # env"). Hand it to admin so the unit it is written FOR can read it.
+            # Best-effort: only root can chown, and the daemon is root in prod.
+            try:
+                os.fchown(fd, ADMIN_UID, ADMIN_UID)
+            except OSError:
+                pass
         finally:
             os.close(fd)
         os.replace(tmp, p)
@@ -497,6 +511,32 @@ class _SystemOps:
         subprocess.run(
             ["systemctl", "stop", unit],
             check=False)
+
+    def tier2_silo_running(self, name: str) -> bool:
+        """True if a tier-2 stop did NOT fully take effect: the launcher unit
+        is still active, OR the rootless container still exists. The daemon is
+        root but the container is admin-owned rootless, so existence is checked
+        in admin's podman (the daemon can drop to admin via runuser). Used to
+        fail closed — never report STOPPED while a container may survive."""
+        unit = TIER2_SILO_LAUNCHER_FMT.format(name=name)
+        active = subprocess.run(["systemctl", "is-active", unit],
+                                capture_output=True, text=True).stdout.strip()
+        # Only a DEFINITIVELY not-running unit state (inactive/failed: the main
+        # process has exited) lets us proceed to the container check. Any active
+        # or transitional state — and any unrecognized/empty output (systemctl
+        # could not give a definitive answer) — is fail-closed "still running".
+        if active not in ("inactive", "failed"):
+            return True
+        container = TIER2_CONTAINER_FMT.format(name=name)
+        # `podman container exists` returns 0 when present, 1 when absent; run
+        # it as admin (the rootless owner). rc 0 = still running; rc 1 = gone;
+        # any OTHER rc means the check itself failed to run — fail closed and
+        # treat that as still running, never silently report a clean stop.
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "container", "exists", container],
+            capture_output=True)
+        return proc.returncode != 1
 
     def kill_pids(self, pids: Iterable[int], sig: int) -> None:
         for pid in pids:
@@ -1043,19 +1083,37 @@ class _SiloStore:
         # wait for processes to exit. The try/finally guarantees the
         # in-flight slot is cleared and waiters are woken on every exit.
         try:
-            try:
-                if silo_kind == KIND_TIER2_TEMPLATE:
-                    # Tier-2 templated silo: stopping its unit (whose ExecStop
-                    # / SIGTERM stops the podman container via the spawn-tier2
-                    # supervisor) is the whole teardown — no per-silo cgroup to
-                    # freeze/kill/rmdir. Clear the exported launch env.
-                    self._ops.systemctl_stop(
-                        TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
-                    self._ops.remove_launch_env(silo_name)
+            if silo_kind == KIND_TIER2_TEMPLATE:
+                # Tier-2 templated silo: stopping its unit (whose ExecStop runs
+                # `podman stop` on the rootless container) is the whole teardown
+                # — no per-silo cgroup to freeze/kill/rmdir.
+                self._ops.systemctl_stop(
+                    TIER2_SILO_LAUNCHER_FMT.format(name=silo_name))
+                # FAIL CLOSED: systemctl_stop is check=False and the unit's
+                # ExecStop is best-effort, so a unit timeout, a podman failure,
+                # or a surviving rootless container would otherwise be reported
+                # as a successful stop — a lie that hides an orphaned container.
+                # Verify the stop took effect (unit inactive AND container gone)
+                # before clearing the env / reporting STOPPED. On failure force
+                # the silo back to ACTIVE (honest about the live container, and
+                # retryable) and raise — handled here, NOT by the cgroup-path
+                # error handlers below (which force STOPPED to unwedge a stuck
+                # tier-3 teardown).
+                if self._ops.tier2_silo_running(silo_name):
                     with self._lock:
                         self._clear_stop_inflight(silo_name)
-                        self._transition(silo, State.STOPPED)
-                    return
+                        self._force_state(silo, State.ACTIVE)
+                    raise SessionError(
+                        f"stop of tier-2 silo {silo_name!r} did not take "
+                        f"effect: the launcher unit is still active or the "
+                        f"container "
+                        f"{TIER2_CONTAINER_FMT.format(name=silo_name)} survives")
+                self._ops.remove_launch_env(silo_name)
+                with self._lock:
+                    self._clear_stop_inflight(silo_name)
+                    self._transition(silo, State.STOPPED)
+                return
+            try:
                 unit = SILO_LAUNCHER_FMT.format(name=silo_name, uid=silo_uid)
                 self._ops.systemctl_stop(unit)
                 # Capture pids defensively — cgroup_pids may raise on a
