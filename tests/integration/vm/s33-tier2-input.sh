@@ -148,8 +148,15 @@ fi
 
 BUTTON_LINE=""
 if [ -n "$INJECT_CMD" ]; then
+    # ydotoold listens on the non-default $RUNTIME_DIR/ydotool.sock (see
+    # its --socket-path in install-deps.sh); without YDOTOOL_SOCKET the
+    # ydotool client probes the default ~/.ydotool_socket and fails to
+    # connect (rc=2), so no button is ever injected and the test below
+    # misreports it as a forwarding regression. Sibling injector drivers
+    # (s60, s103) set this too.
     runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-        WAYLAND_DISPLAY=wayland-1 $INJECT_CMD >/dev/null 2>&1 &
+        WAYLAND_DISPLAY=wayland-1 \
+        YDOTOOL_SOCKET="$RUNTIME_DIR/ydotool.sock" $INJECT_CMD >/dev/null 2>&1 &
     INJECT_PID=$!
 
     deadline=$(( $(date +%s) + 8 ))

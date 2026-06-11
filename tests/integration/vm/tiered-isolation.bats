@@ -283,10 +283,15 @@ stage_vm_driver() {
     # selected RDP.
     #
     # The tier-4 stack (libvirt/qemu/waypipe) is an opt-in bake asset.
-    # Skip cleanly when absent so CI doesn't fail on minimal bakes.
-    vm_run "command -v virsh >/dev/null && command -v qemu-system-x86_64 >/dev/null && [ -e /dev/kvm ]"
+    # Skip cleanly when absent so CI doesn't fail on minimal bakes. The
+    # tier4-vm-guest domain TEMPLATE is a separate opt-in asset: the tools
+    # (virsh/qemu/kvm) can be present while the guest template is not, in
+    # which case the spawn driver fails with "tier4-vm-guest domain
+    # template not found". Require the template dir too so we skip rather
+    # than hard-fail on that bake.
+    vm_run "command -v virsh >/dev/null && command -v qemu-system-x86_64 >/dev/null && [ -e /dev/kvm ] && { [ -d /usr/share/qdistro/tier4-vm-guest ] || [ -d /tmp/tier4-vm-guest ]; }"
     if [[ "$status" -ne 0 ]]; then
-        skip "tier-4 stack (libvirt/qemu/kvm) not installed on this VM (opt-in bake)"
+        skip "tier-4 stack (libvirt/qemu/kvm + tier4-vm-guest template) not installed on this VM (opt-in bake)"
     fi
     stage_vm_driver "s42-tier4-spawn.sh"
     vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
@@ -457,7 +462,12 @@ stage_vm_driver() {
         skip "tier-4 secctx stack / wayland-info / dbus-send absent on this VM (opt-in bake)"
     fi
     assert_output_contains "PASS: outer admin compositor up"
-    assert_output_contains "PASS: qdwin advertises wp_security_context_manager_v1"
+    # The s110 waypipe-display driver verifies qdwin HIDES the secctx
+    # manager from ordinary admin clients (s110 emits the "hides..." PASS).
+    # The old assertion expected an "advertises..." PASS that NO driver
+    # emits — an orphaned string, so the test hard-failed even though s110
+    # itself passed 14/0.
+    assert_output_contains "PASS: qdwin hides wp_security_context_manager_v1 from ordinary admin client"
     assert_output_contains "PASS: qdwin emitted forwarded-toplevel secctx"
     assert_output_contains "PASS: missing-secctx client did NOT receive a tier-4 secctx tag (fail closed)"
     assert_output_contains "PASS: forged app-id"
