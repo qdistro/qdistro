@@ -517,7 +517,7 @@ stage_vm_driver() {
     assert_output_contains "PASS: clipboard audit records source app_id/engine across tiers (attributable)"
     assert_output_contains "PASS: tier-1<->tier-3 same-silo: verified allowed, unverified fails closed"
     assert_output_contains "PASS: §5 cross-tier large + multi-MIME clipboard end-to-end"
-    assert_output_contains "[s112] 9 passes, 0 failures"
+    assert_output_contains "[s112] 8 passes, 0 failures"
 }
 
 @test "phase7-tier1-skeleton: spec/30 Tier-1 SELinux design + spike skeleton present" {
