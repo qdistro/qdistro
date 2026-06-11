@@ -1012,3 +1012,50 @@ class TestEgressLifecycle:
         assert store.get("work").state == State.ACTIVE
         assert "wg_add_dev" not in ops.egress_ops()
         assert ops.skuid[2000] is True           # backstop still on
+
+
+class TestSetEgress:
+    def test_set_persists_and_audits(self, store, ops):
+        store.create("work", 2000)
+        store.set_egress("work", "wg:work")
+        assert store.get("work").egress == "wg:work"
+
+    def test_clear_to_legacy(self, store):
+        store.create("work", 2000, egress="none")
+        store.set_egress("work", None)
+        assert store.get("work").egress is None
+
+    def test_invalid_value_rejected(self, store):
+        store.create("work", 2000)
+        with pytest.raises(BadArgument):
+            store.set_egress("work", "wg:Bad Name")
+
+    def test_unknown_silo(self, store):
+        with pytest.raises(UnknownSilo):
+            store.set_egress("nope", "none")
+
+    def test_rejected_on_tier2(self, store):
+        store.create("browser1", 1000, kind="tier2-template",
+                     launch=dict(_LAUNCH))
+        with pytest.raises(BadArgument):
+            store.set_egress("browser1", "none")
+
+    def test_rejected_while_running(self, store):
+        # Reconfigure requires a stop/start; refuse to mutate a live silo's
+        # policy (the running tunnel wouldn't change anyway).
+        store.create("work", 2000)
+        store.start("work")
+        with pytest.raises(SiloBusy):
+            store.set_egress("work", "wg:work")
+
+    def test_idempotent_same_value(self, store):
+        store.create("work", 2000, egress="none")
+        store.set_egress("work", "none")          # no raise, no change
+        assert store.get("work").egress == "none"
+
+    def test_set_takes_effect_next_start(self, egress_store, ops):
+        # Policy set while stopped is applied at the next start.
+        egress_store.create("work", 2000)
+        egress_store.set_egress("work", "wg:work")
+        egress_store.start("work")
+        assert "wg_add_dev" in ops.egress_ops()

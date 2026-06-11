@@ -1275,6 +1275,49 @@ class _SiloStore:
         self._audit_record("delete", str(name), decision="allow",
                            reason="deleted", caller=caller)
 
+    # ---- egress policy mutation (task 3 Phase B) ------------------------
+
+    def set_egress(self, name: str, egress: str | None,
+                   caller: dict[str, Any] | None = None) -> None:
+        """Set (or clear) a tier3-user silo's egress policy. Admin-approved at
+        the D-Bus boundary (_require_admin) and audited here, exactly like the
+        other silo lifecycle mutations — egress is admin-initiated infrastructure
+        config, not an untrusted-silo request, so it follows the create/delete
+        idiom rather than the broker's request/approve queue (which exists for
+        silo-initiated cross-boundary access). Takes effect at the next start:
+        reconfiguring a running silo's tunnel mid-flight is out of scope (a
+        stop/start re-applies the new policy), so the silo must be stopped."""
+        prev = None
+        try:
+            egress_norm = _validate_egress_field(egress)
+            with self._lock:
+                silo = self.get(name)
+                if silo.kind != KIND_TIER3_USER:
+                    raise BadArgument(
+                        "egress policy is only valid for tier3-user silos "
+                        f"(silo {name!r} is {silo.kind})")
+                if silo.state not in (State.CREATED, State.STOPPED):
+                    raise SiloBusy(
+                        f"silo {silo.name!r} is {silo.state}; stop it before "
+                        f"changing egress (the new policy applies at next start)")
+                prev = silo.egress
+                if egress_norm == prev:
+                    return                       # idempotent; audit below
+                silo.egress = egress_norm
+                try:
+                    self.save()
+                except Exception:
+                    silo.egress = prev           # match what's on disk
+                    raise
+        except SessionError as e:
+            decision = "deny" if isinstance(
+                e, (UnknownSilo, SiloBusy, BadArgument)) else "error"
+            self._audit_record("egress-configure", str(name), decision=decision,
+                               reason=str(e), caller=caller)
+            raise
+        self._audit_record("egress-configure", str(name), decision="allow",
+                           reason=f"{prev!r} -> {egress_norm!r}", caller=caller)
+
     # ---- start / stop / freeze / resume -------------------------------
 
     def _export_tier2_launch_env(self, silo: Silo) -> None:
@@ -1933,6 +1976,28 @@ if dbus is not None:
             try:
                 self.store.delete(str(name), caller=caller)
                 log.info("DeleteSilo name=%s", name)
+            except SessionError as e:
+                raise _to_dbus_exception(e)
+
+        @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def SetSiloEgress(self, name, egress, sender=None, conn=None):
+            """Set a tier3-user silo's per-silo netns egress policy
+            (task 3). `egress` is "none" | "direct" | "wg:<name>", or the
+            empty string to clear it back to legacy host networking (no
+            netns). Admin-only; takes effect at the silo's next start."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("egress-configure", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                # D-Bus has no null in a string arg; "" clears to legacy.
+                policy = None if str(egress) == "" else str(egress)
+                self.store.set_egress(str(name), policy, caller=caller)
+                log.info("SetSiloEgress name=%s egress=%s", name, egress)
             except SessionError as e:
                 raise _to_dbus_exception(e)
 

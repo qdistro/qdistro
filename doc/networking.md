@@ -129,8 +129,25 @@ and one resolver; policy decides where they go.**
 The interim implementation honours the same contract without the
 VM: per-silo network namespaces on the host, with WireGuard's
 native netns support placing each silo's tunnel inside its
-namespace. When the net VM lands, the namespace's veth simply
-re-parents to a vif; silos do not notice.
+namespace. It is implemented as a per-silo `egress` policy on the
+session manager (`SetSiloEgress`, admin-only, audited): `none`
+(netns up, dark — default-deny), `direct` (per-silo routed veth +
+NAT), or `wg:<name>` (the silo's own tunnel). A silo with no egress
+policy keeps today's legacy host networking (no netns) for backward
+compatibility. The kill-switch for a `wg:` silo is *by construction*:
+the wg device is born in the init netns, moved into the silo netns,
+which then holds only `wg` + `lo` — no other egress device exists, so
+tunnel-down means no fallback route, and any resolver the silo uses is
+reachable only through the tunnel. See `todo/fable-networking/03-…`.
+
+When the net VM lands, the silo-facing shape is preserved — one
+default route, one resolver, both reconfigured by the infra owner
+across a restart — but it is not a literal byte-identical swap: a
+`wg:` silo's inside device is the tunnel itself (`wg-<uid>`), not a
+veth, so the net-VM cutover replaces the device kind, the silo's
+address, and the resolver IP. A `direct` silo's veth does re-parent
+to a vif more directly. Either way the change is on the infra side;
+the *contract* the silo sees does not.
 
 Threat delta, stated honestly: the interim path delivers the
 *contract* and the per-silo-VPN *feature*, but relocates nothing —

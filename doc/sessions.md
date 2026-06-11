@@ -209,6 +209,7 @@ method  StartSilo(s name)                → ()
 method  StopSilo(s name, i grace_s)      → ()
 method  FreezeSilo(s name)               → ()
 method  ResumeSilo(s name)               → ()
+method  SetSiloEgress(s name, s egress)  → ()   # "" | none | direct | wg:NAME
 method  ListSilos()                      → (s)   # JSON-encoded array
 signal  SiloChanged(s name, s state)
 ```
