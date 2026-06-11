@@ -39,6 +39,12 @@ install -d -o root -g root -m 0755 /sys/fs/cgroup/qdistro-silos 2>/dev/null || t
 install -d -o root -g root -m 0755 "$DEST"
 install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
     "$DEST/qdistro_session_manager.py"
+# Per-silo netns egress (todo/fable-networking task 3): the pure egress
+# backend imported by the daemon, plus the admin tunnel-provisioning helper.
+install -o root -g root -m 0755 "$SRC/qdistro_silo_egress.py" \
+    "$DEST/qdistro_silo_egress.py"
+install -o root -g root -m 0755 "$SRC/qdistro_wg_provision.py" \
+    "$DEST/qdistro_wg_provision.py"
 
 install -m 0644 "$SRC/org.qdistro.SessionManager1.conf" "$POLICY"
 install -m 0644 "$SRC/qdistro-session-manager.service" "$UNIT"
