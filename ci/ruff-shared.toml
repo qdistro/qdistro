@@ -1,0 +1,104 @@
+# Canonical, cross-repo ruff profile for the qdistro monorepo.
+#
+# This is the SINGLE source of truth applied uniformly by the qci host gate
+# (`gate_lint`) to every Python repo's package + tests dirs and to the qdistro
+# Python source dirs, via:
+#
+#     ruff check --config <abs>/ci/ruff-shared.toml <targets...>
+#
+# Sibling repos therefore do NOT need their own [tool.ruff] block — keeping the
+# profile here avoids cross-repo drift. (qfileman's local profile was the model
+# for this one; qdistro/pyproject.toml keeps only its E702 house-style note.)
+#
+# RATCHET SEMANTICS: this profile is calibrated to be GREEN on current `main`
+# across all targets (qdistro source + 6 sibling Python repos). The qci gate
+# auto-fixes nothing — it only blocks NEW violations. Many existing rule
+# classes had hundreds of pre-existing hits in sibling repos that this gate is
+# NOT allowed to mass-rewrite; rather than weaken the gate to "report only",
+# those specific noisy codes are listed under `ignore` as DEFERRED RATCHETS
+# (each annotated with its pre-existing count on calibration day, 2026-06-11).
+# Re-enable them one code at a time as the sibling repos are cleaned.
+#
+# Net effect today: the union E/F/W/I rule set is enforced MINUS the deferred
+# codes, which still catches e.g. bare-except (E722), comparison-to-None
+# (E711/E712), invalid escape sequences (W605), f-string/format bugs, syntax
+# errors, and import/name resolution problems outside the deferred subcodes.
+
+line-length = 100
+target-version = "py311"
+extend-exclude = ["build", "dist", ".venv", "*.egg-info", "__pycache__"]
+
+[lint]
+# Enforced families (calibrated green on current main):
+#   E  pycodestyle errors      F  pyflakes (real bugs)
+#   W  pycodestyle warnings     I  import sorting (isort)
+#
+# DEFERRED whole families (future ratchet — re-add to `select` once calibrated):
+#   B  flake8-bugbear  — 100+ pre-existing hits across siblings (B904/B905/B007/
+#                        B008/B006/B023…). qfileman already passes B locally;
+#                        re-add per-repo as each is triaged.
+#   UP pyupgrade       — 450+ pre-existing hits (UP045/UP035/UP037/UP006…). The
+#                        auto-fixes rewrite product code in sibling repos, which
+#                        this gate intentionally does NOT touch; re-add after a
+#                        reviewed sweep.
+select = ["E", "F", "W", "I"]
+
+ignore = [
+    # --- house-style ignores (intentional, not ratchets) ---
+    "E501",  # line length — formatter's job, not the linter's (qfileman idiom)
+    "E702",  # multiple statements on one line (semicolons) — qdistro house
+             # style stacks trivial Qt setup; see qdistro/pyproject.toml.
+    "E701",  # multiple statements on one line (colon) — same Qt-setup idiom.
+    "E731",  # lambda assignment — used deliberately in a few Qt slots.
+
+    # --- DEFERRED RATCHETS (pre-existing counts as of 2026-06-11) ---
+    # These are real codes we WANT to enforce, but the existing hits live in
+    # sibling repos this gate may not auto-fix. Remove an entry once that code
+    # is clean across all targets; the gate then starts blocking it.
+    "W293",  # blank-line-with-whitespace        (~600 hits; mostly siblings)
+    "W291",  # trailing-whitespace               (~4 hits)
+    "I001",  # unsorted-imports                  (~490 hits)
+    "F401",  # unused-import                     (~300 hits)
+    "F841",  # unused-variable                   (~64 hits)
+    "F811",  # redefined-while-unused            (~23 hits)
+    "F541",  # f-string-missing-placeholders     (~4 hits)
+    "F601",  # multi-value-repeated-key-literal  (1 hit)
+    # F821 (undefined-name) is NOT deferred globally — it is enforced and
+    # scoped-out per file below; see the NOTE + per-file-ignores section.
+    "E741",  # ambiguous-variable-name           (~82 hits)
+    "E402",  # module-import-not-at-top-of-file  (~64 hits)
+    "E401",  # multiple-imports-on-one-line      (1 hit, in broker; cosmetic)
+]
+# NOTE (F821): rather than DEFER undefined-name globally (which would mute
+# every new undefined-name across the whole tree — exactly the latent-bug class
+# we most want to catch), F821 is ENFORCED globally and scoped-out per file
+# below for the two pre-existing hits calibration surfaced:
+#   1. qdistro/pwd/qdistro_pwd_daemon.py — references `TpmAuthFailed` and
+#      `TpmBackendError` in `except` clauses that are never imported/defined; a
+#      real NameError would fire if those branches were hit. The fix (import/
+#      define those exception types) belongs in the pwd daemon and is tracked
+#      as a follow-up, NOT silently accepted as correct.
+#   2. qnotebook/qnotebook/window.py — a string parameter annotation
+#      "PageRef | None" whose `PageRef` is not imported into the module (it
+#      lives in qnotebook.notebook). Lower severity: with `from __future__
+#      import annotations` the string is never evaluated at runtime, so it is a
+#      latent typing-resolution issue, not a runtime NameError. The fix (add
+#      PageRef to window.py's existing `from .notebook import ...`) belongs in
+#      qnotebook and is likewise a tracked follow-up.
+# A NEW undefined-name in ANY OTHER file still blocks the gate.
+
+# NOTE on per-file-ignore globs: ruff matches these against each file's path
+# RELATIVE TO THE WORKING DIRECTORY (or absolute when the file is outside it),
+# NOT against the bare argument. The qci host gate always runs ruff from
+# $WORKSPACE/qdistro (see gate_host's `run_logged host qdistro-ruff ...`), so:
+#   - in-tree qdistro files are matched by their path under that dir, hence a
+#     "**/" glob reaches them (a bare "tests/*" anchored at root would NOT —
+#     that was an inert no-op and is dropped);
+#   - sibling repos live one level up ($WORKSPACE/<repo>), so their cwd-relative
+#     path begins "../<repo>/..." and the glob must spell that prefix.
+[lint.per-file-ignores]
+"**/tests/*" = ["B011"]      # asserts are intentional in tests (any repo)
+# F821 scoped-out for the two known pre-existing hits only (see NOTE above). A
+# new undefined-name in any OTHER file still blocks.
+"**/pwd/qdistro_pwd_daemon.py" = ["F821"]   # in-tree (under cwd)
+"../qnotebook/qnotebook/window.py" = ["F821"]  # sibling repo (one level up from cwd)

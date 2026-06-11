@@ -1,0 +1,35 @@
+# Per-project coverage FLOORS for the qci host gate (taxonomy-aware).
+#
+# Format (tab-separated):  project<TAB>floor_percent<TAB>note
+#   project      matches the coverage artifact label in gate_host:
+#                  qdistro              -> host/qdistro-coverage.json
+#                  qdchrome-extension   -> host/qdchrome-extension-coverage.json
+#                  qdfirefox-extension  -> host/qdfirefox-extension-coverage.json
+#   floor_percent integer minimum line-coverage %% required to PASS the gate.
+#                 0 == report-only (never blocks); a positive value BLOCKS the
+#                 gate when the measured coverage is strictly below it.
+#
+# RATCHET, NOT A CLIFF: each positive floor is set a few points BELOW the value
+# measured on current main (date in the note), so the gate is green today and
+# only fails on a regression. Raise a floor toward the measured value as the
+# suite stabilises.
+#
+# TAXONOMY-AWARENESS (see ci/TAXONOMY.md): the floor is meant to measure
+# real_backend / fake_backend *behavioural* coverage and EXCLUDE
+# source_invariant suites (which execute no product code and would otherwise
+# dilute or inflate the number). In the current pipeline this separation is
+# achieved STRUCTURALLY rather than by parsing categories out of the coverage
+# JSON: the qdistro coverage artifact is collected ONLY over `tests/unit`
+# (pytest --cov in gate_host), i.e. the in-process unit/fake_backend suites; the
+# source_invariant qdwin meson "tests" and the real_backend VM bats suites run
+# in *separate* gates that produce NO coverage JSON and therefore cannot move
+# this number. The extension coverage is likewise collected only over the vitest
+# run. LIMITATION: the coverage JSON carries no per-test taxonomy label, so a
+# finer fake-vs-real split within tests/unit is not available here; the floor is
+# applied to the whole tests/unit coverage number. Documented so it is not
+# mistaken for a per-category measurement.
+
+# project	floor	note
+qdistro	80	measured 88.38%% (41661/47140 lines, 265 files) over tests/unit on 2026-06-11 (batched --cov-append, all batches green); floor set ~8pt below as a ratchet to absorb batch-order/env variance. Raise toward 88 as the suite stabilises.
+qdchrome-extension	0	TODO calibrate from a clean vitest --coverage run; report-only for now.
+qdfirefox-extension	0	TODO calibrate from a clean vitest --coverage run; report-only for now.
