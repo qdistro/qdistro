@@ -560,7 +560,29 @@ echo "[tier3] $SILO (uid=$SILO_UID) → $BRIDGE_SOCK → $WAYLAND_DISPLAY" >&2
 echo "[tier3] app: $*" >&2
 echo "[tier3] logs: $CLIENT_LOG, $SERVER_LOG" >&2
 
-runuser -u "$SILO" -- env \
+# --- per-silo netns egress (todo/fable-networking task 3) ------------
+# If the session manager has placed this silo behind a network namespace
+# (an egress policy of none/direct/wg:NAME — see SetSiloEgress), enter it
+# for the silo-side process so its ONLY egress is the policy's device (wg
+# tunnel / routed veth / dark) — the kill-switch is by construction once
+# we are inside. `ip netns exec` also bind-mounts
+# /etc/netns/<ns>/resolv.conf over /etc/resolv.conf for the spawned tree,
+# giving the silo its one tunnel-bound resolver. The waypipe bridge socket
+# ($BRIDGE_SOCK) is a filesystem path, reachable across the netns boundary;
+# only the silo-side (waypipe server) enters the netns, the admin-side
+# waypipe client above stays in the init netns. A silo with no netns (the
+# legacy/un-managed state) runs exactly as before. The session manager's
+# init-netns nft backstop drops any silo-uid traffic that never entered
+# here, so a misconfigured launch fails closed (no egress) rather than
+# leaking to raw WAN.
+NETNS="qd-$SILO"
+NETNS_PREFIX=()
+if [ -e "/run/netns/$NETNS" ]; then
+    echo "[tier3] entering netns $NETNS for per-silo egress" >&2
+    NETNS_PREFIX=(ip netns exec "$NETNS")
+fi
+
+"${NETNS_PREFIX[@]}" runuser -u "$SILO" -- env \
     XDG_RUNTIME_DIR="$SILO_RUNTIME" \
     HOME="$SILO_HOME" \
     USER="$SILO" \
