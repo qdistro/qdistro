@@ -13,7 +13,8 @@ import pytest
 import qdistro_silo_egress as eg
 from qdistro_silo_egress import (
     EgressBackend, EgressError, EgressPolicy, KeyUnavailable, TunnelConfig,
-    validate_egress, wg_ifname, veth_host_ifname, veth_silo_ifname,
+    link_up_event, validate_egress, wg_ifname, veth_host_ifname,
+    veth_silo_ifname,
 )
 
 
@@ -31,6 +32,8 @@ class _RecordOps:
         self.resolv: dict[str, list[str]] = {}
         self.skuid_drop: dict[int, bool] = {}
         self.nat: dict[str, bool] = {}
+        self.ip_forward = False
+        self.dns: dict[str, tuple] = {}            # ns -> (host_if, host_ip)
 
     def _rec(self, *a):
         self.calls.append(a)
@@ -82,6 +85,19 @@ class _RecordOps:
     def nat_masquerade(self, subnet, enable):
         self._rec("nat_masquerade", subnet, enable)
         self.nat[subnet] = bool(enable)
+
+    # ---- direct: forwarding + per-silo resolver ----
+    def enable_ip_forward(self):
+        self._rec("enable_ip_forward")
+        self.ip_forward = True
+
+    def dns_start(self, ns, host_if, host_ip):
+        self._rec("dns_start", ns, host_if, host_ip)
+        self.dns[ns] = (host_if, host_ip)
+
+    def dns_stop(self, ns):
+        self._rec("dns_stop", ns)
+        self.dns.pop(ns, None)
 
     # ---- nft backstop / resolver ----
     def nft_skuid_drop(self, uid, enable):
@@ -154,13 +170,11 @@ class TestPolicyParse:
         with pytest.raises(EgressError):
             validate_egress("wg:Bad")
 
-    def test_validate_egress_rejects_direct(self):
-        # `direct` parses (valid future value) but is NOT yet supported by the
-        # interim backend, so validate_egress (the create/load/set chokepoint)
-        # refuses it — no half-built direct mode can be persisted/applied.
-        assert EgressPolicy.parse("direct").mode == "direct"
-        with pytest.raises(EgressError):
-            validate_egress("direct")
+    def test_validate_egress_accepts_direct(self):
+        # Opt 3-A completed `direct` (forwarding + per-silo resolver +
+        # forward-isolation), so the create/load/set chokepoint now accepts it
+        # and canonicalises to "direct".
+        assert validate_egress("direct") == "direct"
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +314,41 @@ class TestReattach:
 
 
 # ---------------------------------------------------------------------------
+# link_up_event: the pure parser feeding the reattach watcher (Opt 3-C)
+# ---------------------------------------------------------------------------
+
+class TestLinkUpEvent:
+    def test_admin_up_for_our_device(self):
+        line = "5: wg-2099: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 ..."
+        assert link_up_event(line, "wg-2099") is True
+
+    def test_down_is_not_up(self):
+        line = "5: wg-2099: <POINTOPOINT,NOARP> mtu 1420 state DOWN ..."
+        assert link_up_event(line, "wg-2099") is False
+
+    def test_other_device_ignored(self):
+        line = "3: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ..."
+        assert link_up_event(line, "wg-2099") is False
+
+    def test_deletion_ignored(self):
+        line = "Deleted 5: wg-2099: <POINTOPOINT,UP,LOWER_UP> mtu 1420 ..."
+        assert link_up_event(line, "wg-2099") is False
+
+    def test_lower_up_alone_is_not_admin_up(self):
+        # LOWER_UP without the bare UP flag must not count (token-exact match).
+        line = "5: wg-2099: <POINTOPOINT,NOARP,LOWER_UP> mtu 1420 ..."
+        assert link_up_event(line, "wg-2099") is False
+
+    def test_peer_suffix_device_matches(self):
+        line = "5: vpeer-2099@if4: <BROADCAST,UP,LOWER_UP> mtu 1500 ..."
+        assert link_up_event(line, "vpeer-2099") is True
+
+    def test_blank_or_garbage(self):
+        assert link_up_event("", "wg-2099") is False
+        assert link_up_event("nonsense", "wg-2099") is False
+
+
+# ---------------------------------------------------------------------------
 # none: dark by construction
 # ---------------------------------------------------------------------------
 
@@ -335,6 +384,24 @@ class TestDirect:
         assert ops.resolv[NS] == [host_ip]
         assert ops.nat[subnet] is True
 
+    def test_forwarding_and_per_silo_resolver(self, backend, ops):
+        # Opt 3-A: direct now enables host forwarding and starts a per-silo
+        # resolver pinned to the veth host address.
+        backend.apply(NS, UID, EgressPolicy.parse("direct"), ops)
+        host_ip, _silo_ip, _subnet = eg.direct_addrs(UID)
+        assert ops.ip_forward is True
+        assert ops.dns[NS] == (eg.veth_host_ifname(UID), host_ip)
+
+    def test_ip_forward_before_resolver_binds(self, backend, ops):
+        # Ordering matters: forwarding on first; the resolver only after the
+        # veth host end carries its address (so the bind to host_ip succeeds).
+        backend.apply(NS, UID, EgressPolicy.parse("direct"), ops)
+        seq = ops.ops_only()
+        assert seq.index("enable_ip_forward") < seq.index("veth_create")
+        host_ip, _silo_ip, _subnet = eg.direct_addrs(UID)
+        addr_i = seq.index("addr_add")               # first addr_add = host end
+        assert seq.index("dns_start") > addr_i
+
     def test_per_silo_subnets_disjoint(self):
         # Two different silos get non-overlapping /30s -> no L2 cross-talk.
         a = eg.direct_addrs(2001)
@@ -363,7 +430,15 @@ class TestTeardown:
         backend.teardown(NS, UID, None, ops)          # policy unknown
         assert ops.skuid_drop[UID] is False
 
-    def test_direct_teardown_disables_nat(self, backend, ops):
+    def test_direct_teardown_disables_nat_and_stops_resolver(self, backend, ops):
         backend.apply(NS, UID, EgressPolicy.parse("direct"), ops)
         backend.teardown(NS, UID, EgressPolicy.parse("direct"), ops)
         assert ops.nat[eg.direct_addrs(UID)[2]] is False
+        assert NS not in ops.dns                       # per-silo dnsmasq stopped
+
+    def test_force_clear_stops_resolver(self, backend, ops):
+        # The policy=None force-clear path (used when a legacy silo has stale
+        # state) must still stop a surviving per-silo dnsmasq.
+        backend.apply(NS, UID, EgressPolicy.parse("direct"), ops)
+        backend.teardown(NS, UID, None, ops)
+        assert NS not in ops.dns

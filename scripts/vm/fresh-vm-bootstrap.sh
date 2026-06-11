@@ -211,7 +211,7 @@ fi
 
 # ---- 5. Install SELinux policy modules (permissive by default) ----------
 log "installing SELinux policy modules (permissive)..."
-for pol in selinux/broker selinux/pwd selinux/tier1; do
+for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
         (cd "$pol" && bash install-policy.sh) || log "  WARN: $pol install failed"
     fi

@@ -12,6 +12,8 @@ Three layers, all headless (no bus, no root, no `wg`):
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from qdistro_pwd_identity import pin_match
@@ -139,3 +141,57 @@ class TestProvision:
         monkeypatch.setattr(sm, "WG_CONFIG_DIR", tmp_path)
         with pytest.raises(Exception):
             sm._default_tunnel_resolver("absent")
+
+
+# ---------------------------------------------------------------------------
+# 4. Pinning to the session-manager SELinux domain (Opt 3-B)
+# ---------------------------------------------------------------------------
+
+class TestPinToSessionManagerDomain:
+    def test_canonical_label_shape(self):
+        # The label must be a full SELinux context the pwd getpeercon path can
+        # match (user:role:type:level) naming the sessmgr type.
+        label = prov.SESSION_MANAGER_SELINUX_LABEL
+        assert label.count(":") == 3
+        assert "qdistro_sessmgr_t" in label
+
+    def test_pin_session_manager_flag_sets_canonical_label(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(prov.os, "geteuid", lambda: 0)
+        monkeypatch.setattr(prov, "provision",
+                            lambda name, **kw: captured.update(kw) or "PUB=")
+        rc = prov.main(["work", "--peer-public-key", "P=",
+                        "--endpoint", "vpn:51820", "--address", "10.7.0.2/32",
+                        "--pin-session-manager"])
+        assert rc == 0
+        assert captured["pin_selinux"] == prov.SESSION_MANAGER_SELINUX_LABEL
+
+    def test_pin_session_manager_conflicts_with_explicit_selinux(self,
+                                                                 monkeypatch):
+        monkeypatch.setattr(prov.os, "geteuid", lambda: 0)
+        monkeypatch.setattr(prov, "provision", lambda *a, **k: "PUB=")
+        rc = prov.main(["work", "--peer-public-key", "P=",
+                        "--endpoint", "vpn:51820", "--address", "10.7.0.2/32",
+                        "--pin-session-manager", "--pin-selinux", "other_t:s0"])
+        assert rc == 1
+
+    def test_real_store_key_forwards_pin_to_additem(self, monkeypatch):
+        calls = {}
+
+        class _Proxy:
+            def AddItem(self, vault, tag, value, pin_exe, pin_selinux,
+                        pin_uid, dbus_interface=None):
+                calls.update(vault=vault, tag=tag, pin_exe=pin_exe,
+                             pin_selinux=pin_selinux, pin_uid=pin_uid)
+
+        class _Bus:
+            def get_object(self, *a):
+                return _Proxy()
+
+        fake_dbus = type("_M", (), {"SystemBus": staticmethod(lambda: _Bus())})
+        monkeypatch.setitem(sys.modules, "dbus", fake_dbus)
+        prov._real_store_key("work", "SECRET=",
+                             pin_selinux=prov.SESSION_MANAGER_SELINUX_LABEL)
+        assert calls["pin_selinux"] == prov.SESSION_MANAGER_SELINUX_LABEL
+        assert calls["pin_uid"] == "0"               # uid pin always on
+        assert calls["tag"] == "wg/work/private-key"

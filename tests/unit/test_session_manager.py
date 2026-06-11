@@ -137,6 +137,7 @@ class _FakeOps:
         self.egress_calls: list[tuple] = []
         self.resolv: dict[str, list[str]] = {}
         self.skuid: dict[int, bool] = {}
+        self.watchers: list[tuple] = []           # live link-up watchers
 
     def netns_create(self, ns: str) -> None:
         self.egress_calls.append(("netns_create", ns))
@@ -181,6 +182,26 @@ class _FakeOps:
 
     def nat_masquerade(self, subnet, enable):
         self.egress_calls.append(("nat_masquerade", subnet, enable))
+
+    def enable_ip_forward(self):
+        self.egress_calls.append(("enable_ip_forward",))
+
+    def dns_start(self, ns, host_if, host_ip):
+        self.egress_calls.append(("dns_start", ns, host_if, host_ip))
+
+    def dns_stop(self, ns):
+        self.egress_calls.append(("dns_stop", ns))
+
+    def start_link_watcher(self, ns, ifname, on_up):
+        self.egress_calls.append(("start_link_watcher", ns, ifname))
+        handle = ("watch", ns, ifname, on_up)
+        self.watchers.append(handle)
+        return handle
+
+    def stop_link_watcher(self, handle):
+        self.egress_calls.append(("stop_link_watcher",))
+        if handle in self.watchers:
+            self.watchers.remove(handle)
 
     def nft_skuid_drop(self, uid, enable):
         self.egress_calls.append(("nft_skuid_drop", uid, enable))
@@ -1066,20 +1087,71 @@ class TestSetEgress:
         egress_store.start("work")
         assert "wg_add_dev" in ops.egress_ops()
 
+    def test_wg_start_starts_link_watcher_that_reattaches(self, egress_store,
+                                                          ops):
+        # Opt 3-C: a live wg silo gets a link-up watcher; firing it re-adds the
+        # default route (Probe 2 finding 1) via the pure backend.
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        assert "start_link_watcher" in ops.egress_ops()
+        assert ops.watchers, "no watcher handle registered"
+        _tag, _ns, _ifn, on_up = ops.watchers[-1]
+        n = len(ops.egress_calls)
+        on_up()                                    # simulate a wg link bounce
+        kinds = [c[0] for c in ops.egress_calls[n:]]
+        assert "route_add_default_dev" in kinds    # route re-installed on up
+
+    def test_dark_wg_starts_no_watcher(self, ops, tmp_path):
+        # A wg silo that comes up dark (no key) has no device to watch.
+        store = _SiloStore(ops, config_path=tmp_path / "s.yaml",
+                           tunnel_resolver=lambda n: _TUN)  # default key -> dark
+        store.create("work", 2000, egress="wg:work")
+        store.start("work")
+        assert "start_link_watcher" not in ops.egress_ops()
+        assert not ops.watchers
+
+    def test_stop_stops_link_watcher(self, egress_store, ops):
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        egress_store.stop("work")
+        assert ("stop_link_watcher",) in ops.egress_calls
+        assert not ops.watchers
+
+    def test_stale_watcher_callback_is_noop_after_stop(self, egress_store, ops):
+        # A link-up event that fires after the watcher was stopped (race past the
+        # join timeout, or after a restart under a new tunnel) must NOT re-attach
+        # stale state onto the torn-down netns (codex #5: generation guard).
+        egress_store.create("work", 2000, egress="wg:work")
+        egress_store.start("work")
+        _tag, _ns, _ifn, on_up = ops.watchers[-1]
+        egress_store.stop("work")                  # bumps the generation
+        n = len(ops.egress_calls)
+        on_up()                                    # a late link-up event
+        assert ops.egress_calls[n:] == []          # self-cancelled, no reattach
+
 
 class TestEgressReviewFixes:
     """Regression tests for the dual-review fixes (Fable B1/B2 + should-fixes)."""
 
-    def test_set_egress_rejects_direct(self, store):
-        # direct is de-scoped in the interim backend; the mutation path refuses
-        # it (validate chokepoint) rather than persisting a half-built mode.
+    def test_set_egress_accepts_direct(self, store):
+        # Opt 3-A completed `direct`, so the mutation path now persists it.
         store.create("work", 2000)
-        with pytest.raises(BadArgument):
-            store.set_egress("work", "direct")
+        store.set_egress("work", "direct")
+        assert store.get("work").egress == "direct"
 
-    def test_create_rejects_direct(self, store):
-        with pytest.raises(BadArgument):
-            store.create("work", 2000, egress="direct")
+    def test_create_accepts_direct(self, store):
+        s = store.create("work", 2000, egress="direct")
+        assert s.egress == "direct"
+
+    def test_direct_start_forwards_and_starts_resolver(self, egress_store, ops):
+        # End-to-end at the store level: starting a direct silo enables host
+        # forwarding and a per-silo resolver, and NATs its subnet.
+        egress_store.create("work", 2000, egress="direct")
+        egress_store.start("work")
+        seq = ops.egress_ops()
+        assert "enable_ip_forward" in seq
+        assert "dns_start" in seq
+        assert "nat_masquerade" in seq
 
     def test_start_degrades_to_dark_on_apply_failure(self, ops, tmp_path):
         # B1 follow-up: a transient bring-up failure (e.g. a boot-time endpoint

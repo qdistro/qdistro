@@ -8,8 +8,9 @@
 # loopback WireGuard peer pair — proving the kill-switch, DNS-no-leak,
 # none-dark, and legacy-unchanged contract properties without an external VPN.
 #
-# Requires the VM bake to provide wireguard-tools + nftables + the wireguard
-# kernel module (the probe fails loudly with an actionable message otherwise).
+# Requires the VM bake to provide wireguard-tools + nftables + dnsmasq + the
+# wireguard kernel module (the probe fails loudly with an actionable message
+# otherwise). dnsmasq backs the `direct`-egress per-silo resolver (Opt 3-A).
 load helpers
 
 stage_vm_driver() {
@@ -46,6 +47,15 @@ stage_vm_driver() {
     assert_output_contains "PASS: init-netns nft backstop drops stray uid-2099 traffic"
     assert_output_contains "PASS: tunnel down => silo dark with no raw-WAN fallback (kill-switch by construction)"
     assert_output_contains "PASS: none silo has no route and reaches nothing (default-deny)"
+    assert_output_contains "PASS: EgressBackend.apply(direct) brought up the routed silo netns"
+    assert_output_contains "PASS: direct silo forwards, routes via the veth gateway, resolves via"
+    assert_output_contains "PASS: direct silo per-silo resolver (dnsmasq) is listening on"
+    assert_output_contains "PASS: direct silo forwards to a non-bogon peer"
+    assert_output_contains "PASS: direct silo cannot reach another silo"
+    assert_output_contains "PASS: direct silo cannot reach the host (input chain protects host services)"
+    assert_output_contains "PASS: direct silo per-silo resolver answers DNS on"
+    assert_output_contains "PASS: nft fwd + input isolation rules are installed"
+    assert_output_contains "PASS: direct teardown stopped the resolver and dropped NAT/forward enrolment"
     assert_output_contains "PASS: two silos see only their own resolver (no cross-silo DNS leak)"
     assert_output_contains "PASS: teardown removed the egress devices and the nft backstop"
     assert_output_contains "PASS: legacy (egress unset) silo has no netns — host networking unchanged"

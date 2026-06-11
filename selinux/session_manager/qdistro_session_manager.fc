@@ -1,0 +1,18 @@
+# File contexts for the qdistro session manager.
+#
+# Phase 1 (0.1.0): labels the daemon .py so systemd's exec triggers the
+# init_daemon_domain transition into qdistro_sessmgr_t. The .py is
+# installed mode 0755 with a `#!/usr/bin/env python3` shebang and the
+# unit's ExecStart points at the script directly (not /usr/bin/python3 +
+# arg). The kernel takes the transition decision on the FIRST execve
+# target — the labelled .py — so the daemon lands in qdistro_sessmgr_t
+# regardless of the interpreter's own label (same reasoning as the
+# broker/pwd .fc files).
+#
+# Only the exec is labelled in Phase 1. The session manager's persistent
+# state (silos.yaml, session_audit.sqlite) and runtime dirs stay under
+# their existing types until the Phase-2 audit2allow harvest decides
+# which need dedicated types — keeping the permissive-rollout surface
+# minimal and the relabel list short.
+
+/usr/libexec/qdistro/qdistro_session_manager\.py    --  gen_context(system_u:object_r:qdistro_sessmgr_exec_t,s0)

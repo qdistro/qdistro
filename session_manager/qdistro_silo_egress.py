@@ -14,7 +14,14 @@ Egress policy (the ``Silo.egress`` field) has four states:
   * ``None`` / absent  -> legacy host networking, **no netns** (backward compat).
                           Handled by the *caller* (session-manager), not here.
   * ``"none"``         -> netns with ``lo`` only. Dark by construction. Default-deny.
-  * ``"direct"``       -> per-silo routed /30 veth to the host, NAT-masqueraded.
+  * ``"direct"``       -> per-silo routed /30 veth to the host, NAT-masqueraded,
+                          with host IPv4 forwarding, a per-silo resolver pinned to
+                          the veth host address, and nft isolation (a ``forward``
+                          rule + an ``input`` rule) so a ``direct`` silo reaches
+                          the WAN but **not** other silos, the host LAN, or the
+                          host's own services — only its resolver port on the
+                          gateway. (IPv6 is disabled on the silo veth, so there is
+                          no v6 path to filter.)
   * ``"wg:<name>"``    -> per-silo WireGuard tunnel; kill-switch by construction.
 
 Kill-switch by construction (wg): the wg device is created in the **init**
@@ -102,21 +109,15 @@ def validate_egress(value: object) -> str | None:
     legacy un-managed state (no netns); any other value must parse to a valid
     netns-backed policy. Returns the canonical string (or ``None``).
 
-    ``direct`` is **not yet supported** by the interim host backend and is
-    rejected here (the single chokepoint for create/load/set_egress): a working
-    ``direct`` needs IPv4 forwarding, a per-silo resolver that actually answers,
-    and a forward-filter to preserve silo<->silo isolation — none of which the
-    interim ships. Until then only ``none`` (default-deny) and ``wg:<name>``
-    are selectable. The dormant ``_apply_direct`` scaffold stays for task 4."""
+    All three netns-backed modes — ``none`` (default-deny), ``direct`` (NATed
+    WAN egress with a per-silo resolver + silo-isolation forward-filter), and
+    ``wg:<name>`` (the silo's own tunnel) — are selectable. ``direct`` was
+    de-scoped from the first task-3 landing and is now completed (Opt 3-A
+    follow-up): IPv4 forwarding, the dnsmasq-backed per-silo resolver, and the
+    nft forward-isolation rule all ship, so the dormant gate is removed."""
     if value is None:
         return None
-    policy = EgressPolicy.parse(value)
-    if policy.mode == EGRESS_DIRECT:
-        raise EgressError(
-            "direct egress is not yet implemented in the interim netns "
-            "backend (needs forwarding + a per-silo resolver + a "
-            "silo-isolation forward-filter); use 'none' or 'wg:<name>'")
-    return policy.spec
+    return EgressPolicy.parse(value).spec
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,31 @@ def veth_host_ifname(uid: int) -> str:
 
 def veth_silo_ifname(uid: int) -> str:
     return f"vpeer-{int(uid)}"
+
+
+def link_up_event(line: str, ifname: str) -> bool:
+    """Pure predicate over one ``ip monitor link`` output line: True iff it
+    reports ``ifname`` transitioning to admin-UP. Drives the reattach watcher
+    (Probe 2 finding 1: a wg link bounce flushes the default route but keeps the
+    address, so re-add the route on link-up). Reattach is idempotent + cheap, so
+    a borderline match is harmless; the cost of a *missed* up event is only that
+    a manual flap won't auto-heal (still fails closed, never open).
+
+    A monitor line looks like ``"<idx>: <ifname>[@peer]: <FLAGS> mtu ..."``; a
+    removal is prefixed ``Deleted``. We match the device exactly and require the
+    ``UP`` admin flag (not ``LOWER_UP``) to be set."""
+    s = line.strip()
+    if not s or s.startswith("Deleted"):
+        return False
+    parts = s.split(":", 2)
+    if len(parts) < 3:
+        return False
+    dev = parts[1].strip().split("@", 1)[0]
+    if dev != ifname:
+        return False
+    flags = parts[2].strip()
+    head = flags.split(">", 1)[0].lstrip("<")
+    return "UP" in head.split(",")
 
 
 def direct_addrs(uid: int) -> tuple[str, str, str]:
@@ -208,10 +234,6 @@ class EgressBackend:
             ops.nft_skuid_drop(uid, True)        # backstop for stray processes
             return EgressResult(mode="none", dark=True)
         if policy.mode == EGRESS_DIRECT:
-            # Dormant: not reachable in the interim (validate_egress rejects
-            # `direct` before any policy can be persisted/applied). Kept as
-            # scaffolding for task 4; do NOT enable without forwarding + a
-            # real per-silo resolver + a silo-isolation forward-filter.
             return self._apply_direct(ns, uid, ops)
         if policy.mode == "wg":
             return self._apply_wg(ns, uid, ops, tunnel, keyfn)
@@ -223,11 +245,15 @@ class EgressBackend:
         1: a wg link bounce flushes the route, not the address). Idempotent and
         cheap; safe to call on every start/reconfigure.
 
-        NOTE: deliberately not wired to an event source yet — inside the netns
-        only root holds CAP_NET_ADMIN, so a silo process cannot bounce the wg
-        link, and any flap fails dark (closed). When a flap source exists (a
-        reconfigure/health path, or an `ip monitor` watcher), call this on
-        link-up; until then it is exercised only by unit tests."""
+        Wired (Opt 3-C) to a per-silo ``ip netns exec <ns> ip monitor link``
+        watcher (``_SystemOps.start_link_watcher``): the store starts one for
+        each non-dark wg silo and calls this on every admin-UP event for the
+        ``wg-<uid>`` device (see ``link_up_event``). Inside the netns only root
+        holds CAP_NET_ADMIN, so a silo process still cannot bounce the link and
+        any flap fails dark (closed); the watcher only auto-heals a route flush
+        from a legitimate carrier/admin bounce. The watcher callback re-attaches
+        directly via this method (no store lock), so a teardown that stops +
+        joins the watcher can never deadlock against an in-flight reattach."""
         if policy.mode == "wg" and tunnel is not None:
             self._bring_up_wg(ns, wg_ifname(uid), tunnel, ops)
 
@@ -235,9 +261,12 @@ class EgressBackend:
                  ops) -> None:
         """Remove all egress devices + the backstop + resolver for this silo.
         Idempotent (safe on a never-applied or partially-applied netns)."""
-        self._teardown_devices(ns, uid, ops)
+        self._teardown_devices(ns, uid, ops)       # also stops a stale dnsmasq
         ops.nft_skuid_drop(uid, False)
         if policy is not None and policy.mode == EGRESS_DIRECT:
+            # Drop the NAT/forward-isolation enrolment (the @nat_subnets element
+            # drives both the masquerade and the isolation drops). The host
+            # ip_forward sysctl is left on — harmless and possibly shared.
             ops.nat_masquerade(direct_addrs(uid)[2], False)
         ops.remove_netns_resolv(ns)
 
@@ -289,6 +318,13 @@ class EgressBackend:
         host_if = veth_host_ifname(uid)
         peer_if = veth_silo_ifname(uid)
         host_ip, silo_ip, subnet = direct_addrs(uid)
+        # Host IPv4 forwarding so the routed veth can reach the WAN. The
+        # silo<->silo / silo<->LAN exposure this would otherwise open is closed
+        # by the nft `fwd` chain (keyed on @nat_subnets), installed by the ops
+        # layer's nft scaffold; the silo's enrolment in that set happens via
+        # nat_masquerade below, so the forward-isolation drop and the NAT rule
+        # turn on together.
+        ops.enable_ip_forward()
         ops.veth_create(host_if, peer_if)
         ops.addr_add(None, host_if, f"{host_ip}/30")   # init-netns host end
         ops.link_up(None, host_if)
@@ -298,8 +334,12 @@ class EgressBackend:
         ops.link_up(ns, peer_if)
         ops.route_add_default_via(ns, host_ip)
         ops.nat_masquerade(subnet, True)
-        # Resolver must listen on the veth host address — the host stub
-        # (127.0.0.53) is unreachable from the netns's own lo.
+        # Per-silo resolver that actually answers: a dnsmasq pinned to the veth
+        # host address (the host stub 127.0.0.53 is unreachable from the silo
+        # netns's own lo, and DNS to it would otherwise be the one thing the
+        # silo could NOT do). Started AFTER the host end has its address so the
+        # bind succeeds; the silo's resolv.conf then points at host_ip.
+        ops.dns_start(ns, host_if, host_ip)
         ops.write_netns_resolv(ns, [host_ip])
         ops.nft_skuid_drop(uid, True)
         return EgressResult(mode="direct", dark=False)
@@ -318,3 +358,9 @@ class EgressBackend:
         ops.link_del(ns, wg_ifname(uid))       # silo netns (post-move)
         ops.link_del(ns, veth_silo_ifname(uid))
         ops.link_del(None, veth_host_ifname(uid))
+        # Stop any per-silo `direct` dnsmasq here too — _teardown_devices runs
+        # both on teardown AND as apply()'s teardown-stale-first, so an
+        # apply(none) over a crashed `direct` silo (policy already flipped) can't
+        # leave the old resolver bound to a now-deleted veth address. Idempotent
+        # (no pidfile -> no-op).
+        ops.dns_stop(ns)

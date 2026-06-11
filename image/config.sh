@@ -108,7 +108,7 @@ for entry in "${INSTALLERS[@]}"; do
 done
 
 sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
-for pol in selinux/broker selinux/pwd selinux/tier1; do
+for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     if [ -d "$QD/$pol" ] && [ -x "$QD/$pol/install-policy.sh" ]; then
         # tier1 module references types defined by broker module; if it
         # loads first the AST resolves on the second pass at boot time.

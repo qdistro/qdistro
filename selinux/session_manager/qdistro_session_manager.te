@@ -1,0 +1,89 @@
+## <summary>qdistro session manager SELinux types.</summary>
+## <desc>
+##   Dedicated SELinux domain for qdistro-session-manager.service (the
+##   per-silo lifecycle + per-silo netns/WireGuard egress TCB).
+##
+##   Phase 1 (0.1.0, this version): PERMISSIVE rollout. It declares
+##   qdistro_sessmgr_t + qdistro_sessmgr_exec_t, labels the daemon exec
+##   (.fc), and installs the init_daemon_domain transition so the daemon
+##   runs in qdistro_sessmgr_t instead of a generic root domain. The
+##   process gets the qdistro_sessmgr_t LABEL even while the domain is
+##   permissive — that is the whole point of Phase 1: it gives
+##   qdistro-pwd a stable SELinux label to PIN the per-silo WireGuard
+##   private keys to (todo/fable-networking Opt 3-B), tightening custody
+##   from "any root process" (pin_uid=0) to "only the session-manager
+##   domain". getpeercon(3) on the pwd side returns the real label
+##   regardless of permissive, so the pin is effective immediately;
+##   permissive only means the daemon's OWN denials are logged, not
+##   enforced, so the rollout cannot wedge the lifecycle TCB.
+##
+##   The allow set below is the representative Phase-1 seed (dbus claim,
+##   pwd client, /proc caller-identity reads, subprocess exec). It is
+##   deliberately INCOMPLETE: the session manager drives a very wide
+##   privileged surface (ip/wg/nft/sysctl, useradd/userdel, systemctl,
+##   runuser->podman, cgroup v2, dnsmasq), so the enforcing allow set
+##   must come from an audit2allow harvest of a representative workload
+##   on real hardware (a full silo create/start/stop/egress matrix) —
+##   that harvest + dropping the permissive tag is Phase 2.
+##
+##   Spec refs: doc/selinux.md "Per-daemon module split";
+##   todo/fable-networking/03-interim-silo-netns-vpn.md (key custody);
+##   doc/networking.md "Per-silo VPN".
+## </desc>
+policy_module(qdistro_session_manager, 0.1.0)
+
+########################################
+#
+# Declarations
+#
+
+# Daemon process domain + labelled exec. init_daemon_domain wires the
+# systemd exec -> domain transition; the .fc labels the .py so the
+# transition fires on the first execve target (the script), independent
+# of the python interpreter's own label (same shebang reasoning as the
+# broker/pwd modules).
+type qdistro_sessmgr_t;
+type qdistro_sessmgr_exec_t;
+application_domain(qdistro_sessmgr_t, qdistro_sessmgr_exec_t)
+init_daemon_domain(qdistro_sessmgr_t, qdistro_sessmgr_exec_t)
+
+# Phase 1: permissive. The seed allow set below silences the most
+# common AVCs; the rest are harvested in Phase 2 before this tag drops.
+permissive qdistro_sessmgr_t;
+
+########################################
+#
+# Allow set (Phase 1 seed)
+#
+
+# D-Bus: claim org.qdistro.SessionManager1 on the system bus and act as
+# a client (it both serves its own API and calls qdistro-pwd).
+dbus_system_bus_client(qdistro_sessmgr_t)
+gen_require(`
+	class dbus acquire_svc;
+')
+allow qdistro_sessmgr_t system_dbusd_t:dbus acquire_svc;
+
+# Client of qdistro-pwd: GetItem on the wireguard vault to fetch a
+# tunnel's pinned private key. Wrapped so the module still loads where
+# the pwd module is absent (the .if is dropped into contrib by
+# install-policy.sh).
+optional_policy(`
+	qdistro_pwd_dbus_chat(qdistro_sessmgr_t)
+')
+
+# Caller-identity attestation: the daemon reads /proc/<pid>/{exe,stat,
+# cgroup,attr/current} of D-Bus peers (admin-gate + audit rows). Same
+# layered-identity reads the broker/pwd modules grant.
+domain_read_all_domains_state(qdistro_sessmgr_t)
+domain_getattr_all_domains(qdistro_sessmgr_t)
+allow qdistro_sessmgr_t self:capability sys_ptrace;
+
+# Subprocess fan-out: ip/wg/nft/sysctl/useradd/systemctl/runuser/dnsmasq
+# all live under /usr/bin and /usr/sbin and are exec'd directly.
+corecmd_exec_bin(qdistro_sessmgr_t)
+corecmd_exec_shell(qdistro_sessmgr_t)
+
+# GLib mainloop self-pipe + lifecycle signals.
+allow qdistro_sessmgr_t self:fifo_file rw_fifo_file_perms;
+allow qdistro_sessmgr_t self:process { signal sigkill sigchld getsched };

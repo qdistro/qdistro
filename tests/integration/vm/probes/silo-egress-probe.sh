@@ -31,7 +31,12 @@ NS_WG="qd-egtest"          # the wg: silo's netns
 NS_NONE="qd-egnone"        # the none silo's netns
 NS_A="qd-ega"              # DNS-leak test silo A
 NS_B="qd-egb"              # DNS-leak test silo B
+NS_DIR="qd-egdir"          # direct silo (forwarding + resolver + isolation)
+NS_DIR2="qd-egdir2"        # second direct silo (isolation target)
+NS_REMOTE="qd-egremote"    # TEST-NET peer (forwarded-path positive control)
 UID_WG=2099
+UID_DIR=2101               # direct silo uid (own /30 from the 10.128.0.0/9 pool)
+UID_DIR2=2102              # second direct silo uid (disjoint /30; isolation target)
 SRV_IF="wgsrv0"            # loopback "server" (tunnel far side), init netns
 SRV_PORT=51820
 CONF=/etc/qdistro/wg/egtest.conf
@@ -40,15 +45,28 @@ WORKDIR="$(mktemp -d)"
 _SAVED_IPFWD=""
 cleanup() {
     [ -n "$_SAVED_IPFWD" ] && sysctl -q -w "net.ipv4.ip_forward=$_SAVED_IPFWD" 2>/dev/null || true
+    # Stop any per-silo dnsmasq the direct step started (idempotent).
+    for _ns in "$NS_DIR" "$NS_DIR2"; do
+        _pf="/run/qdistro/silo-dns/$_ns.pid"
+        [ -f "$_pf" ] && kill "$(cat "$_pf" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$_pf" 2>/dev/null || true
+    done
     ip netns del "$NS_WG"   2>/dev/null || true
     ip netns del "$NS_NONE" 2>/dev/null || true
     ip netns del "$NS_A"    2>/dev/null || true
     ip netns del "$NS_B"    2>/dev/null || true
+    ip netns del "$NS_DIR"  2>/dev/null || true
+    ip netns del "$NS_DIR2" 2>/dev/null || true
+    ip netns del "$NS_REMOTE" 2>/dev/null || true
     ip link del "$SRV_IF"   2>/dev/null || true
+    ip link del "veth-$UID_DIR"  2>/dev/null || true
+    ip link del "veth-$UID_DIR2" 2>/dev/null || true
+    ip link del veth-remote 2>/dev/null || true
     nft delete table inet qdistro_egress 2>/dev/null || true
     rm -rf "$WORKDIR" "$CONF" \
         /etc/netns/"$NS_WG" /etc/netns/"$NS_NONE" \
-        /etc/netns/"$NS_A" /etc/netns/"$NS_B" 2>/dev/null || true
+        /etc/netns/"$NS_A" /etc/netns/"$NS_B" \
+        /etc/netns/"$NS_DIR" /etc/netns/"$NS_DIR2" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -58,6 +76,7 @@ trap cleanup EXIT
 [ "$(id -u)" = "0" ] || err "must run as root"
 command -v wg  >/dev/null || err "wg (wireguard-tools) not installed"
 command -v nft >/dev/null || err "nft (nftables) not installed"
+command -v dnsmasq >/dev/null || err "dnsmasq not installed (needed by direct egress)"
 [ -f "$PYLIB/qdistro_silo_egress.py" ] || err "egress module not at $PYLIB"
 modprobe wireguard 2>/dev/null || true
 ip link add probe-wgcheck type wireguard 2>/dev/null \
@@ -192,6 +211,141 @@ ip -n "$NS_NONE" route show default | grep -q . \
 ip netns exec "$NS_NONE" ping -c1 -W2 10.7.0.1 >/dev/null 2>&1 \
     && err "none silo reached the network (should be dark)"
 pass "none silo has no route and reaches nothing (default-deny)"
+
+# ---------------------------------------------------------------------------
+# Step 4b — direct egress: forwarding + per-silo resolver + silo-isolation
+# (Opt 3-A follow-up). apply(direct) enables IPv4 forwarding, builds the routed
+# /30 veth + NAT, starts a per-silo dnsmasq on the veth host address, and enrols
+# the silo in the nft isolation sets. We prove: the routed path actually
+# FORWARDS (positive control to a non-bogon TEST-NET peer), the silo CANNOT
+# reach another silo (forward-isolation) nor the host itself (input chain),
+# and the per-silo resolver actually ANSWERS.
+#
+# Forwarded-path positive control: a "remote" netns veth'd to the host with a
+# TEST-NET-3 (203.0.113.0/24, non-RFC1918) address. A silo->remote ping is a
+# real forwarded path the bogon drop does NOT cover, so its success isolates
+# "forwarding works" from the silo->silo failure below (which would otherwise
+# be indistinguishable from forwarding being broken entirely).
+# ---------------------------------------------------------------------------
+REMOTE_HOST_IP=203.0.113.1
+REMOTE_PEER_IP=203.0.113.2
+ip link add veth-remote type veth peer name vpeer-remote
+ip addr add "$REMOTE_HOST_IP/30" dev veth-remote
+ip link set veth-remote up
+ip netns add "$NS_REMOTE"
+ip link set vpeer-remote netns "$NS_REMOTE"
+ip -n "$NS_REMOTE" addr add "$REMOTE_PEER_IP/30" dev vpeer-remote
+ip -n "$NS_REMOTE" link set vpeer-remote up
+ip -n "$NS_REMOTE" link set lo up
+ip -n "$NS_REMOTE" route add default via "$REMOTE_HOST_IP"
+ip netns add "$NS_DIR"
+OUT="$(PYTHONPATH="$PYLIB" python3 - "$NS_DIR" "$UID_DIR" <<'PY'
+import sys
+from qdistro_silo_egress import EgressBackend, EgressPolicy, direct_addrs
+from qdistro_session_manager import _SystemOps
+ns, uid = sys.argv[1], int(sys.argv[2])
+EgressBackend().apply(ns, uid, EgressPolicy.parse("direct"), _SystemOps())
+h, s, _net = direct_addrs(uid)
+print(h, s)
+PY
+)" || err "EgressBackend.apply(direct) raised"
+DIR_HOST_IP="$(printf '%s' "$OUT" | awk '{print $1}')"
+DIR_SILO_IP="$(printf '%s' "$OUT" | awk '{print $2}')"
+[ -n "$DIR_HOST_IP" ] || err "apply(direct) produced no host address"
+pass "EgressBackend.apply(direct) brought up the routed silo netns"
+
+# 4b-i. host forwarding is on, the default route is the veth gateway, and the
+#       resolver is the veth host address (not 127.0.0.53).
+[ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ] \
+    || err "ip_forward not enabled after apply(direct)"
+ip -n "$NS_DIR" route show default | grep -q "via $DIR_HOST_IP" \
+    || err "direct silo default route is not via the veth gateway $DIR_HOST_IP"
+ip netns exec "$NS_DIR" grep -q "nameserver $DIR_HOST_IP" /etc/resolv.conf \
+    || err "direct silo resolver is not the veth host address $DIR_HOST_IP"
+pass "direct silo forwards, routes via the veth gateway, resolves via $DIR_HOST_IP"
+
+# 4b-ii. the per-silo dnsmasq actually listens on the veth host address:53.
+ss -H -ulpn 2>/dev/null | grep -q "$DIR_HOST_IP:53" \
+    || err "no per-silo dnsmasq listening on $DIR_HOST_IP:53"
+[ -f "/run/qdistro/silo-dns/$NS_DIR.pid" ] \
+    || err "per-silo dnsmasq pidfile missing for $NS_DIR"
+pass "direct silo per-silo resolver (dnsmasq) is listening on $DIR_HOST_IP:53"
+
+# 4b-iii. POSITIVE control: the silo CAN forward to a non-bogon peer (proves
+#         the routed/NAT/forward path works at all).
+ip netns exec "$NS_DIR" ping -c1 -W3 "$REMOTE_PEER_IP" >/dev/null 2>&1 \
+    || err "direct silo cannot forward to the TEST-NET peer $REMOTE_PEER_IP "\
+"(routing/NAT/forward broken — the isolation test below would false-pass)"
+pass "direct silo forwards to a non-bogon peer ($REMOTE_PEER_IP) — routing works"
+
+# 4b-iv. NEGATIVE: the silo CANNOT reach another silo (forward-isolation drop).
+ip netns add "$NS_DIR2"
+DIR2_SILO_IP="$(PYTHONPATH="$PYLIB" python3 - "$NS_DIR2" "$UID_DIR2" <<'PY'
+import sys
+from qdistro_silo_egress import EgressBackend, EgressPolicy, direct_addrs
+from qdistro_session_manager import _SystemOps
+ns, uid = sys.argv[1], int(sys.argv[2])
+EgressBackend().apply(ns, uid, EgressPolicy.parse("direct"), _SystemOps())
+print(direct_addrs(uid)[1])
+PY
+)" || err "apply(direct) for silo 2 raised"
+if ip netns exec "$NS_DIR" ping -c1 -W2 "$DIR2_SILO_IP" >/dev/null 2>&1; then
+    err "direct silo reached another silo ($DIR2_SILO_IP) — forward-isolation BREACH"
+fi
+pass "direct silo cannot reach another silo ($DIR2_SILO_IP) — forward-isolation holds"
+
+# 4b-v. NEGATIVE: the silo CANNOT reach the HOST itself except its resolver
+#       port (input chain). ICMP to the veth gateway must be dropped.
+if ip netns exec "$NS_DIR" ping -c1 -W2 "$DIR_HOST_IP" >/dev/null 2>&1; then
+    err "direct silo reached the host $DIR_HOST_IP via ICMP — input isolation BREACH"
+fi
+pass "direct silo cannot reach the host (input chain protects host services)"
+
+# 4b-vi. the per-silo resolver actually ANSWERS (not just a bound socket): send
+#        a real DNS query to host_ip:53 from inside the netns and accept ANY
+#        response (NOERROR/SERVFAIL/REFUSED all prove liveness without WAN).
+if ip netns exec "$NS_DIR" python3 - "$DIR_HOST_IP" <<'PY' ; then
+import socket, struct, sys
+ip = sys.argv[1]
+# minimal A query for "example.com."
+q = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+for part in (b"example", b"com"):
+    q += bytes([len(part)]) + part
+q += b"\x00" + struct.pack(">HH", 1, 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+s.sendto(q, (ip, 53))
+data, _ = s.recvfrom(512)
+sys.exit(0 if len(data) >= 2 and data[:2] == q[:2] else 2)
+PY
+    pass "direct silo per-silo resolver answers DNS on $DIR_HOST_IP:53"
+else
+    err "direct silo resolver did not answer a DNS query on $DIR_HOST_IP:53"
+fi
+
+# 4b-vii. the isolation rules are actually present (not an empty chain).
+nft list chain inet qdistro_egress fwd 2>/dev/null | grep -q "@nat_subnets" \
+    || err "nft fwd chain missing the @nat_subnets isolation rule"
+nft list chain inet qdistro_egress in 2>/dev/null | grep -q "dport 53" \
+    || err "nft input chain missing the resolver-port allow"
+pass "nft fwd + input isolation rules are installed"
+
+# 4b-viii. teardown stops the per-silo dnsmasq and drops the NAT/forward enrolment.
+for spec in "$NS_DIR:$UID_DIR" "$NS_DIR2:$UID_DIR2"; do
+    ns="${spec%%:*}"; u="${spec##*:}"
+    PYTHONPATH="$PYLIB" python3 - "$ns" "$u" <<'PY' || err "teardown(direct) raised"
+import sys
+from qdistro_silo_egress import EgressBackend, EgressPolicy
+from qdistro_session_manager import _SystemOps
+EgressBackend().teardown(sys.argv[1], int(sys.argv[2]),
+                         EgressPolicy.parse("direct"), _SystemOps())
+PY
+done
+ss -H -ulpn 2>/dev/null | grep -q "$DIR_HOST_IP:53" \
+    && err "per-silo dnsmasq still listening on $DIR_HOST_IP:53 after teardown"
+nft list set inet qdistro_egress nat_subnets 2>/dev/null | grep -q "10.128" \
+    && err "direct NAT subnet still enrolled after teardown"
+pass "direct teardown stopped the resolver and dropped NAT/forward enrolment"
 
 # ---------------------------------------------------------------------------
 # Step 5 — two silos, different resolvers, no cross-leak.

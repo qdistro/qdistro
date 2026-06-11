@@ -35,6 +35,14 @@ WG_PWD_VAULT = "wireguard"
 PWD_BUS_NAME = "org.qdistro.Pwd1"
 PWD_OBJ_PATH = "/org/qdistro/Pwd1"
 
+# Canonical SELinux label of the session-manager domain (selinux/session_manager
+# module, Opt 3-B). Pinning a wg key to this label tightens custody from "any
+# root process" (pin_uid=0) to "only the session-manager domain". Only effective
+# once that module is installed AND the daemon exec is relabelled+restarted
+# (install-policy.sh does both) — otherwise the daemon runs unconfined and the
+# pin would lock out its own reads, which is why it stays opt-in.
+SESSION_MANAGER_SELINUX_LABEL = "system_u:system_r:qdistro_sessmgr_t:s0"
+
 # Conf keys consumed by qdistro_session_manager._default_tunnel_resolver.
 _CONF_KEYS = ("public_key", "endpoint", "address", "dns", "allowed_ips",
               "keepalive")
@@ -78,8 +86,10 @@ def _real_keygen() -> tuple[str, str]:
 def _real_store_key(name: str, private_key: str, *,
                     pin_selinux: str = "") -> None:
     """Store the private key in qdistro-pwd, pinned to root (the
-    session-manager). pin_uid=0 is the gate; pin_selinux can tighten it once a
-    dedicated session-manager domain exists (none today)."""
+    session-manager). pin_uid=0 is the always-on gate; pin_selinux additionally
+    requires the caller to run in the session-manager's SELinux domain
+    (SESSION_MANAGER_SELINUX_LABEL, Opt 3-B) — pass it once that module is
+    installed to tighten custody beyond "any root process"."""
     import dbus  # local import: optional dependency
     bus = dbus.SystemBus()
     proxy = bus.get_object(PWD_BUS_NAME, PWD_OBJ_PATH)
@@ -143,18 +153,30 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--keepalive", type=int, default=25)
     ap.add_argument("--pin-selinux", default="",
                     help="optional SELinux label pin for key retrieval")
+    ap.add_argument("--pin-session-manager", action="store_true",
+                    help="pin the key to the session-manager SELinux domain "
+                         f"({SESSION_MANAGER_SELINUX_LABEL}); requires the "
+                         "selinux/session_manager module to be installed")
     args = ap.parse_args(argv)
+    if args.pin_session_manager:
+        if args.pin_selinux and args.pin_selinux != SESSION_MANAGER_SELINUX_LABEL:
+            print("error: --pin-session-manager conflicts with an explicit "
+                  "--pin-selinux", file=sys.stderr)
+            return 1
+        args.pin_selinux = SESSION_MANAGER_SELINUX_LABEL
     if os.geteuid() != 0:
         print("qdistro-wg-provision must run as root (stores the key pinned "
               "to root and writes /etc/qdistro/wg)", file=sys.stderr)
         return 1
     if not args.pin_selinux:
         # uid=0 alone means "any root process may read the key". Root is TCB, so
-        # this is acceptable, but a dedicated session-manager SELinux domain
-        # (none exists yet) should tighten it. Warn so the operator knows.
+        # this is acceptable, but the session-manager SELinux domain
+        # (selinux/session_manager, Opt 3-B) tightens it to that one domain.
+        # Warn so the operator knows the stronger pin is available.
         print("WARNING: storing the key pinned to uid=0 only (any root process "
-              "can read it). Pass --pin-selinux <session-manager domain> to "
-              "tighten once that domain exists.", file=sys.stderr)
+              "can read it). Pass --pin-session-manager to tighten to the "
+              "session-manager SELinux domain (install selinux/session_manager "
+              "first).", file=sys.stderr)
     pub = provision(
         args.name, peer_public_key=args.peer_public_key,
         endpoint=args.endpoint, address=args.address, dns=args.dns,

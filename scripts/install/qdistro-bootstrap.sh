@@ -1610,7 +1610,7 @@ install_selinux_policies() {
     fi
     sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
     cd "$REPO_ROOT/qdistro"
-    for pol in selinux/broker selinux/pwd selinux/tier1; do
+    for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
             (cd "$pol" && bash install-policy.sh) || warn "$pol install failed"

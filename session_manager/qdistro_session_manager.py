@@ -116,6 +116,11 @@ TIER2_LAUNCH_ENV_DIR = Path("/run/qdistro/silo-launch")
 NETNS_RUN_DIR = Path("/run/netns")
 ETC_NETNS = Path("/etc/netns")
 WG_CONFIG_DIR = Path("/etc/qdistro/wg")
+# Per-silo `direct`-egress resolver: one dnsmasq pinned to each direct silo's
+# veth host address, pid-tracked here so teardown can stop exactly that
+# instance. tmpfs-backed (/run) so it is gone on reboot — a fresh start
+# re-spawns it (Opt 3-A follow-up).
+SILO_DNS_RUN_DIR = Path("/run/qdistro/silo-dns")
 
 # Reserved uid range. Admin = 1000; silos start at 2000 so the admin
 # account and the few system-fixed uids in qdistro (audisp = 990 etc.)
@@ -659,10 +664,14 @@ class _SystemOps:
         listing = subprocess.run(
             ["nft", "list", "table", "inet", self._NFT_TABLE],
             capture_output=True, text=True)
+        out = listing.stdout
         if (listing.returncode == 0
-                and "skuid @blocked_uids drop" in listing.stdout
-                and "@nat_subnets" in listing.stdout):
-            return                               # healthy
+                and "skuid @blocked_uids drop" in out            # out chain rule
+                and "hook input" in out                          # host-protect
+                and "@nat_subnets ip daddr" in out               # fwd drop rule
+                and "masquerade" in out):                        # post rule
+            return                               # healthy (rules present, not
+            #                                      merely the chains)
         # (Re)build. `add table`/`add set` are idempotent and PRESERVE existing
         # set elements, so other silos' backstop/nat entries survive a rebuild;
         # we then delete+re-add each chain so its rule is present exactly once.
@@ -680,14 +689,54 @@ class _SystemOps:
         if r.returncode != 0 and not _nft_benign(r.stderr):
             raise RuntimeError(
                 f"nft egress scaffold (table/sets) failed: {r.stderr.strip()}")
-        for chain in ("out", "post"):
+        for chain in ("out", "in", "fwd", "post"):
             subprocess.run(["nft", "delete", "chain", "inet", self._NFT_TABLE,
                             chain], check=False, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
+        # The set of destinations a `direct` silo must NOT reach: every other
+        # silo's /30 (all from 10.128.0.0/9 ⊂ 10/8), the host's own LAN, plus
+        # bogons that are local/management surfaces — link-local 169.254/16
+        # (incl. the 169.254.169.254 cloud metadata endpoint) and CGNAT
+        # 100.64/10. IPv6 needs no rule here: _apply_direct disables IPv6 on the
+        # silo veth and we never enable IPv6 forwarding, so a direct silo has no
+        # IPv6 path at all. Multicast/loopback are not routable off-host.
+        _BOGON = ("{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "
+                  "169.254.0.0/16, 100.64.0.0/10 }")
+        # `in`:  protect the HOST itself. Forwarding only covers transit
+        #        traffic; a silo's packet to a host-local address (the veth
+        #        gateway beyond :53, the host LAN IP, sshd, any 0.0.0.0-bound
+        #        daemon) is local delivery via the INPUT hook, NOT forward. So
+        #        drop silo->host except the one resolver port and return
+        #        traffic. Keyed on @nat_subnets, so wg/legacy silos and normal
+        #        host clients are untouched (policy accept).
+        # `fwd`: silo-isolation. Allow established/return + silo->public WAN
+        #        (falls through to accept), DROP silo->bogon (silo<->silo +
+        #        silo<->LAN) AND anyone->silo new connections (a LAN host that
+        #        adds a route to 10.128/9 cannot initiate into a silo). The
+        #        silo's own dnsmasq (veth host .1) is local delivery, not
+        #        forward, so it is not caught here. A base chain with `policy
+        #        accept` cannot weaken other tables (nft requires ALL base
+        #        chains to accept).
         chains = (
             f"add chain inet {self._NFT_TABLE} out "
             f"{{ type filter hook output priority 0; }}\n"
             f"add rule inet {self._NFT_TABLE} out meta skuid @blocked_uids drop\n"
+            f"add chain inet {self._NFT_TABLE} in "
+            f"{{ type filter hook input priority filter; policy accept; }}\n"
+            f"add rule inet {self._NFT_TABLE} in ct state established,related "
+            f"accept\n"
+            f"add rule inet {self._NFT_TABLE} in ip saddr @nat_subnets "
+            f"udp dport 53 accept\n"
+            f"add rule inet {self._NFT_TABLE} in ip saddr @nat_subnets "
+            f"tcp dport 53 accept\n"
+            f"add rule inet {self._NFT_TABLE} in ip saddr @nat_subnets drop\n"
+            f"add chain inet {self._NFT_TABLE} fwd "
+            f"{{ type filter hook forward priority filter; policy accept; }}\n"
+            f"add rule inet {self._NFT_TABLE} fwd ct state established,related "
+            f"accept\n"
+            f"add rule inet {self._NFT_TABLE} fwd ip saddr @nat_subnets "
+            f"ip daddr {_BOGON} drop\n"
+            f"add rule inet {self._NFT_TABLE} fwd ip daddr @nat_subnets drop\n"
             f"add chain inet {self._NFT_TABLE} post "
             f"{{ type nat hook postrouting priority srcnat; }}\n"
             f"add rule inet {self._NFT_TABLE} post "
@@ -741,6 +790,150 @@ class _SystemOps:
             if enable:
                 raise RuntimeError(msg)
             log.warning("%s", msg)
+
+    def enable_ip_forward(self) -> None:
+        # Host-global IPv4 forwarding so a `direct` silo's routed veth can reach
+        # the WAN. Idempotent; left enabled once set (a re-disable would break
+        # other direct silos, and `=1` is inert on a workstation that does no
+        # other routing — the silo-isolation it would expose is closed by the
+        # nft `fwd` chain). Fail-closed: if the sysctl write fails the direct
+        # apply raises and the silo comes up dark.
+        subprocess.run(["sysctl", "-q", "net.ipv4.ip_forward=1"], check=True)
+
+    def _dns_pidfile(self, ns) -> Path:
+        return SILO_DNS_RUN_DIR / f"{ns}.pid"
+
+    def dns_start(self, ns, host_if, host_ip) -> None:
+        # Per-silo `direct` resolver: a dnsmasq bound to ONLY the veth host
+        # address, forwarding to the host's configured upstreams
+        # (/etc/resolv.conf, read at start). Runs in the init netns (where the
+        # veth host end lives).
+        #
+        # `--listen-address` + `--bind-interfaces` binds EXACTLY host_ip and
+        # nothing else. We deliberately do NOT pass `--interface=`: with
+        # `--interface` dnsmasq auto-adds the loopback interface and binds
+        # 127.0.0.1:53 too, so a SECOND direct silo's dnsmasq would collide on
+        # loopback and fail to start (and it would also contend with any host
+        # 127.0.0.1:53 service). listen-address alone never auto-adds loopback.
+        # conf-file=/dev/null ignores host dnsmasq.d drop-ins so a silo resolver
+        # can't inherit DHCP or extra listen addresses. Raises (-> dark) if
+        # dnsmasq is absent or cannot bind — a direct silo with no working
+        # resolver fails closed rather than coming up half-built.
+        SILO_DNS_RUN_DIR.mkdir(parents=True, exist_ok=True)
+        self.dns_stop(ns)                          # waits for the old pid to exit
+        subprocess.run(
+            ["dnsmasq",
+             "--conf-file=/dev/null",
+             f"--pid-file={self._dns_pidfile(ns)}",
+             f"--listen-address={host_ip}",
+             "--bind-interfaces",
+             "--except-interface=lo",
+             "--no-hosts",
+             "--no-dhcp-interface=*",
+             "--cache-size=150"],
+            check=True)
+
+    def dns_stop(self, ns) -> None:
+        # Idempotent: a missing/garbage pidfile, an already-dead pid, or an
+        # EPERM are all non-fatal — teardown must never raise on a best-effort
+        # resolver stop. SYNCHRONOUS: we wait for the old dnsmasq to actually
+        # exit before returning so a quick dns_start re-bind of the same address
+        # cannot race the dying instance (EADDRINUSE under --bind-interfaces).
+        pidfile = self._dns_pidfile(ns)
+        try:
+            pid = int(pidfile.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return
+        # Only signal if the pid is genuinely our per-silo dnsmasq (pidfile path
+        # on its argv) — guards against a reused pid after a daemon crash.
+        cmdline = b""
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read()
+        except OSError:
+            pid = None  # process gone; just drop the stale pidfile
+        if pid is not None and (
+                b"dnsmasq" in cmdline and str(pidfile).encode() in cmdline):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pid = None
+            else:
+                # Bounded wait for exit (the dnsmasq daemonized, so it is not our
+                # child and cannot be waitpid'd — poll instead).
+                for _ in range(20):                 # ~1s total
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    except PermissionError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+        try:
+            pidfile.unlink()
+        except FileNotFoundError:
+            pass
+
+    def start_link_watcher(self, ns, ifname, on_up):
+        """Spawn a daemon thread running `ip netns exec <ns> ip monitor link`
+        and invoke `on_up()` each time `ifname` reports an admin-UP event — the
+        link-up event source for EgressBackend.reattach (Probe 2 finding 1: a wg
+        link bounce flushes the default route but keeps the address). Returns an
+        opaque handle for stop_link_watcher.
+
+        `on_up` runs in the watcher thread and MUST NOT take the store lock (it
+        re-attaches directly via the pure backend), so a teardown that joins
+        this thread cannot deadlock. Best-effort: a watcher that fails to start
+        only means a manual flap won't auto-heal (still fails closed)."""
+        try:
+            proc = subprocess.Popen(
+                ["ip", "netns", "exec", str(ns), "ip", "monitor", "link"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError as e:
+            log.warning("link watcher for %s/%s could not start: %s",
+                        ns, ifname, e)
+            return None
+
+        def _run():
+            try:
+                for line in proc.stdout:           # blocks until a line or EOF
+                    if _egress.link_up_event(line, str(ifname)):
+                        try:
+                            on_up()
+                        except Exception as e:     # noqa: BLE001
+                            log.warning("link-up reattach for %s failed: %s",
+                                        ifname, e)
+            except Exception as e:  # noqa: BLE001 — watcher must never crash
+                log.warning("link watcher for %s/%s stopped: %s",
+                            ns, ifname, e)
+
+        t = threading.Thread(target=_run, name=f"linkwatch-{ns}", daemon=True)
+        t.start()
+        return (proc, t)
+
+    def stop_link_watcher(self, handle) -> None:
+        """Terminate the `ip monitor` subprocess (which EOFs the reader loop)
+        and join the thread. Idempotent; safe on a None/dead handle."""
+        if not handle:
+            return
+        proc, t = handle
+        try:
+            proc.terminate()
+        except Exception as e:  # noqa: BLE001
+            log.warning("link watcher terminate failed: %s", e)
+        try:
+            proc.wait(timeout=2)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        t.join(timeout=2)
 
     def write_netns_resolv(self, ns, nameservers) -> None:
         # `ip netns exec <ns>` bind-mounts /etc/netns/<ns>/resolv.conf over
@@ -1042,6 +1235,20 @@ class _SiloStore:
         self._egress = egress_backend or EgressBackend()
         self._tunnel_resolver = tunnel_resolver or _default_tunnel_resolver
         self._key_provider = key_provider or _default_key_provider
+        # Per-silo link-up watchers (Opt 3-C): name -> opaque handle from
+        # _SystemOps.start_link_watcher. One per running, non-dark wg silo; its
+        # callback re-attaches addr+route on a wg-<uid> link bounce without
+        # taking _lock. Per-name access is serialized by the silo state machine
+        # (a given silo's start/stop/delete never overlap), and the start vs.
+        # phase-2 teardown of *different* silos touch different keys; dict ops
+        # are atomic under the GIL, so no extra lock is needed here.
+        self._watchers: dict[str, Any] = {}
+        # Monotonic per-silo generation. Bumped on every watcher start AND stop;
+        # the watcher callback captures its generation and no-ops if it no longer
+        # matches — so a callback still in flight when stop_link_watcher's join
+        # times out (or after the same silo restarts under a different tunnel)
+        # cannot re-attach stale addr/route onto a torn-down/repurposed netns.
+        self._watcher_gen: dict[str, int] = {}
         # Durable forensic sink. None disables auditing (e.g. tests that
         # don't care). Audit writes never raise into the lifecycle path.
         self._audit = audit
@@ -1243,6 +1450,7 @@ class _SiloStore:
         no egress device) — never fails the start (B3)."""
         ns = _egress.netns_name(silo.name)
         policy = EgressPolicy.parse(silo.egress)
+        self._stop_egress_watcher(silo.name)       # clear any stale watcher
         self._ops.netns_create(ns)
         tunnel = None
         keyfn = None
@@ -1280,8 +1488,51 @@ class _SiloStore:
         if result.dark and result.pending:
             log.warning("silo %r egress %s came up dark: %s",
                         silo.name, silo.egress, result.pending)
+        elif policy.mode == "wg" and not result.dark:
+            # Live tunnel: watch wg-<uid> for a link bounce and re-attach its
+            # default route (Opt 3-C). A dark silo has no device to watch.
+            self._start_egress_watcher(silo.name, ns, silo.uid, policy, tunnel)
         self._audit_record("egress-apply", silo.name, decision="allow",
                            reason=reason, caller=None)
+
+    def _start_egress_watcher(self, name: str, ns: str, uid: int,
+                              policy: "EgressPolicy",
+                              tunnel: "TunnelConfig | None") -> None:
+        """Start a link-up watcher for a live wg silo; its callback re-attaches
+        addr+route via the pure backend (no _lock — see reattach's docstring).
+        Captures the immutable (ns, uid, policy, tunnel) + a generation token so
+        the callback needs no store state and self-cancels if it is stale."""
+        self._stop_egress_watcher(name)            # bumps the generation
+        backend, ops = self._egress, self._ops
+        gen = self._watcher_gen.get(name, 0)
+
+        def _on_up() -> None:
+            # Self-cancel a stale callback (teardown/restart bumped the gen):
+            # never re-attach onto a netns that may be torn down or repurposed.
+            if self._watcher_gen.get(name) != gen:
+                return
+            backend.reattach(ns, uid, policy, ops, tunnel=tunnel)
+
+        try:
+            handle = ops.start_link_watcher(ns, _egress.wg_ifname(uid), _on_up)
+        except Exception as e:  # noqa: BLE001 — a missing watcher fails closed
+            log.warning("could not start link watcher for %r: %s", name, e)
+            return
+        if handle is not None:
+            self._watchers[name] = handle
+
+    def _stop_egress_watcher(self, name: str) -> None:
+        # Bump the generation FIRST so any callback that fires while we tear the
+        # watcher down (or that is already mid-flight past the join timeout)
+        # sees the mismatch and no-ops before touching netns state.
+        self._watcher_gen[name] = self._watcher_gen.get(name, 0) + 1
+        handle = self._watchers.pop(name, None)
+        if handle is None:
+            return
+        try:
+            self._ops.stop_link_watcher(handle)
+        except Exception as e:  # noqa: BLE001
+            log.warning("stopping link watcher for %r failed: %s", name, e)
 
     def _teardown_egress_devices(self, ns: str, uid: int,
                                  policy: "EgressPolicy") -> None:
@@ -1297,6 +1548,7 @@ class _SiloStore:
         """Best-effort egress + netns teardown. Never raises into the lifecycle
         path — a teardown failure is logged, not fatal (the next start re-applies
         teardown-stale-first, and delete removes the netns regardless)."""
+        self._stop_egress_watcher(name)
         if egress is None:
             return
         ns = _egress.netns_name(name)
@@ -1321,6 +1573,7 @@ class _SiloStore:
         stale state from a prior policy or a crash — _teardown_egress short-
         circuits on egress=None, which is why this exists. Only invoked when a
         stale netns is detected, so normal legacy silos pay nothing. Best-effort."""
+        self._stop_egress_watcher(name)
         ns = _egress.netns_name(name)
         try:
             self._egress.teardown(ns, uid, None, self._ops)

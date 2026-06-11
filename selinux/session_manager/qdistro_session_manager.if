@@ -1,0 +1,52 @@
+## <summary>qdistro session manager policy interfaces.</summary>
+
+########################################
+## <summary>
+##	Authorise a domain to make dbus calls against the qdistro
+##	session manager (org.qdistro.SessionManager1). Phase 1 (module
+##	0.1.0): the daemon exec is labelled qdistro_sessmgr_exec_t and
+##	systemd-started runs as qdistro_sessmgr_t, so this interface
+##	allows send_msg directly against the session-manager domain
+##	(plus the obligatory dbus daemon proxy edges - without those the
+##	dbus daemon refuses to forward even when both endpoints allow).
+##	Mirrors qdistro_broker_dbus_chat; admin tooling is the caller.
+## </summary>
+## <param name="domain">
+##	<summary>Domain calling session-manager methods.</summary>
+## </param>
+#
+interface(`qdistro_sessmgr_dbus_chat',`
+	gen_require(`
+		type system_dbusd_t;
+		type qdistro_sessmgr_t;
+	')
+	# Avoid backticks/apostrophes in these comments: m4 sees quote
+	# characters inside .if files even when preceded by # (no
+	# shell-style comment skip), and unbalanced quotes break the m4
+	# expansion of any caller .te (same caveat as qdistro_broker.if).
+	allow $1 qdistro_sessmgr_t:dbus send_msg;
+	allow qdistro_sessmgr_t $1:dbus send_msg;
+	allow system_dbusd_t qdistro_sessmgr_t:dbus send_msg;
+	allow qdistro_sessmgr_t system_dbusd_t:dbus send_msg;
+')
+
+########################################
+## <summary>
+##	Authorise the session-manager domain to make dbus calls against
+##	a target daemon - the inverse direction, for callers that want
+##	to let the session manager reach their service. Today only used
+##	to document the pwd client edge (the pwd module exports its own
+##	qdistro_pwd_dbus_chat, which this module already calls), kept
+##	here so future callers have a stable hook.
+## </summary>
+## <param name="domain">
+##	<summary>Domain the session manager calls into.</summary>
+## </param>
+#
+interface(`qdistro_sessmgr_dbus_client',`
+	gen_require(`
+		type qdistro_sessmgr_t;
+	')
+	allow qdistro_sessmgr_t $1:dbus send_msg;
+	allow $1 qdistro_sessmgr_t:dbus send_msg;
+')
