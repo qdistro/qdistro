@@ -668,7 +668,7 @@ class _SystemOps:
         if (listing.returncode == 0
                 and "skuid @blocked_uids drop" in out            # out chain rule
                 and "hook input" in out                          # host-protect
-                and "@nat_subnets ip daddr" in out               # fwd drop rule
+                and "@nat_subnets ip daddr" in out               # forward drop rule
                 and "masquerade" in out):                        # post rule
             return                               # healthy (rules present, not
             #                                      merely the chains)
@@ -680,7 +680,7 @@ class _SystemOps:
             f"add set inet {self._NFT_TABLE} blocked_uids {{ type uid; }}\n"
             f"add set inet {self._NFT_TABLE} nat_subnets "
             f"{{ type ipv4_addr; flags interval; }}\n")
-        r = subprocess.run(["nft", "-f", "-"], input=base.encode(),
+        r = subprocess.run(["nft", "-f", "-"], input=base,
                            capture_output=True, text=True)
         # `nft add` of an existing table/set is idempotent, but tolerate a
         # benign "exists" just in case a partial table is present; fail closed
@@ -689,7 +689,10 @@ class _SystemOps:
         if r.returncode != 0 and not _nft_benign(r.stderr):
             raise RuntimeError(
                 f"nft egress scaffold (table/sets) failed: {r.stderr.strip()}")
-        for chain in ("out", "in", "fwd", "post"):
+        # NB: the forward-hook chain is named `forward`, not `fwd` — `fwd` is a
+        # reserved nft keyword (the netdev fwd verdict) and fails to parse as a
+        # chain identifier (nft v1.1.6).
+        for chain in ("out", "in", "forward", "post"):
             subprocess.run(["nft", "delete", "chain", "inet", self._NFT_TABLE,
                             chain], check=False, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
@@ -709,7 +712,7 @@ class _SystemOps:
         #        drop silo->host except the one resolver port and return
         #        traffic. Keyed on @nat_subnets, so wg/legacy silos and normal
         #        host clients are untouched (policy accept).
-        # `fwd`: silo-isolation. Allow established/return + silo->public WAN
+        # `forward`: silo-isolation. Allow established/return + silo->public WAN
         #        (falls through to accept), DROP silo->bogon (silo<->silo +
         #        silo<->LAN) AND anyone->silo new connections (a LAN host that
         #        adds a route to 10.128/9 cannot initiate into a silo). The
@@ -730,18 +733,18 @@ class _SystemOps:
             f"add rule inet {self._NFT_TABLE} in ip saddr @nat_subnets "
             f"tcp dport 53 accept\n"
             f"add rule inet {self._NFT_TABLE} in ip saddr @nat_subnets drop\n"
-            f"add chain inet {self._NFT_TABLE} fwd "
+            f"add chain inet {self._NFT_TABLE} forward "
             f"{{ type filter hook forward priority filter; policy accept; }}\n"
-            f"add rule inet {self._NFT_TABLE} fwd ct state established,related "
+            f"add rule inet {self._NFT_TABLE} forward ct state established,related "
             f"accept\n"
-            f"add rule inet {self._NFT_TABLE} fwd ip saddr @nat_subnets "
+            f"add rule inet {self._NFT_TABLE} forward ip saddr @nat_subnets "
             f"ip daddr {_BOGON} drop\n"
-            f"add rule inet {self._NFT_TABLE} fwd ip daddr @nat_subnets drop\n"
+            f"add rule inet {self._NFT_TABLE} forward ip daddr @nat_subnets drop\n"
             f"add chain inet {self._NFT_TABLE} post "
             f"{{ type nat hook postrouting priority srcnat; }}\n"
             f"add rule inet {self._NFT_TABLE} post "
             f"ip saddr @nat_subnets masquerade\n")
-        r = subprocess.run(["nft", "-f", "-"], input=chains.encode(),
+        r = subprocess.run(["nft", "-f", "-"], input=chains,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(
@@ -796,7 +799,7 @@ class _SystemOps:
         # the WAN. Idempotent; left enabled once set (a re-disable would break
         # other direct silos, and `=1` is inert on a workstation that does no
         # other routing — the silo-isolation it would expose is closed by the
-        # nft `fwd` chain). Fail-closed: if the sysctl write fails the direct
+        # nft `forward` chain). Fail-closed: if the sysctl write fails the direct
         # apply raises and the silo comes up dark.
         subprocess.run(["sysctl", "-q", "net.ipv4.ip_forward=1"], check=True)
 

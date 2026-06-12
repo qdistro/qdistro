@@ -320,7 +320,7 @@ class EgressBackend:
         host_ip, silo_ip, subnet = direct_addrs(uid)
         # Host IPv4 forwarding so the routed veth can reach the WAN. The
         # silo<->silo / silo<->LAN exposure this would otherwise open is closed
-        # by the nft `fwd` chain (keyed on @nat_subnets), installed by the ops
+        # by the nft `forward` chain (keyed on @nat_subnets), installed by the ops
         # layer's nft scaffold; the silo's enrolment in that set happens via
         # nat_masquerade below, so the forward-isolation drop and the NAT rule
         # turn on together.

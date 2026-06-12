@@ -324,8 +324,8 @@ else
 fi
 
 # 4b-vii. the isolation rules are actually present (not an empty chain).
-nft list chain inet qdistro_egress fwd 2>/dev/null | grep -q "@nat_subnets" \
-    || err "nft fwd chain missing the @nat_subnets isolation rule"
+nft list chain inet qdistro_egress forward 2>/dev/null | grep -q "@nat_subnets" \
+    || err "nft forward chain missing the @nat_subnets isolation rule"
 nft list chain inet qdistro_egress in 2>/dev/null | grep -q "dport 53" \
     || err "nft input chain missing the resolver-port allow"
 pass "nft fwd + input isolation rules are installed"

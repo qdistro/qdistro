@@ -67,10 +67,40 @@
 ##   the POLICY BUILD (build ratchet), not silently widen the TCB —
 ##   copies the tier-2 module's narrowing pattern.
 ##
+##   0.6.0 (todo/fable-networking task 5, VM-verified 2026-06-12):
+##   CORRECT the 0.5.0 ratchet. VM assertion-checking (semodule with
+##   semanage.conf expand-check=1) showed two defects: (1) the 0.5.0
+##   comment claimed qdistro_broker_t "joins no network attribute" — it
+##   was FALSE: the module called auth_use_pam(), which pulls the domain
+##   into nsswitch_domain (via auth_use_nsswitch) and grants
+##   self:{tcp,udp,netlink_route}_socket create. So the tcp/udp/
+##   netlink_route neverallows were UNSATISFIABLE — the clean module
+##   failed to load under expand-check=1. (2) With the distro default
+##   expand-check=0, module neverallows are not checked at all, so the
+##   0.5.0 assertions were cosmetic AND the loaded policy silently
+##   granted the broker tcp/udp sockets via nsswitch_domain.
+##   Root cause: auth_use_pam was the WRONG interface. The broker does no
+##   PAM authentication — D-Bus peers are kernel-authenticated by
+##   SO_PEERCRED; it only does NSS passwd/group *lookups*
+##   (pwd.getpwnam/getpwuid, grp.getgrnam) for caller identity. Fix:
+##   replace auth_use_pam(qdistro_broker_t) with auth_read_passwd() (read
+##   of passwd_file_t — both /etc/passwd and /etc/group carry that type),
+##   which does NOT join nsswitch_domain. That makes the FULL neverallow
+##   over EVERY network socket class satisfiable again, so SELinux now
+##   genuinely asserts the broker has no inet/raw/netlink-route sockets —
+##   not just defence-in-depth on the exotic classes. The systemd layer
+##   (PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX AF_NETLINK ->
+##   AF_INET socket() EAFNOSUPPORT, VM-verified) remains the primary
+##   runtime guarantee. The build ratchet only has teeth under assertion
+##   checking, so its test drives semodule with expand-check=1
+##   (s56b-broker-no-network); VM-verified the clean module loads with 0
+##   qdistro_broker_t neverallow violations and the broker still resolves
+##   caller identity under enforcing with auth_read_passwd alone.
+##
 ##   Spec refs: doc/selinux.md §"Broker module split-out";
 ##   doc/threat-model.md "TCB process discipline".
 ## </desc>
-policy_module(qdistro_broker, 0.5.0)
+policy_module(qdistro_broker, 0.6.0)
 
 ########################################
 #
@@ -208,20 +238,25 @@ gen_require(`
 allow qdistro_broker_t qdistro_pwd_audit_t:dir  manage_dir_perms;
 allow qdistro_broker_t qdistro_pwd_audit_t:file manage_file_perms;
 
-# Optional: PAM / login1 / fprintd integration for the admin-approval
-# auth path. Wrapped in optional_policy() so the module loads cleanly
-# on hosts without those refpolicy modules.
-optional_policy(`
-    auth_use_pam(qdistro_broker_t)
-')
+# Caller-identity resolution. The broker maps uids<->names for its audit
+# trail + rules engine via pwd.getpwnam/getpwuid + grp.getgrnam (NSS). On
+# this image /etc/passwd and /etc/group are both passwd_file_t, so
+# auth_read_passwd (read-only on passwd_file_t, plus init_dbus_chat for
+# nss-systemd's varlink/D-Bus path) covers both.
+#
+# The broker does NOT do PAM authentication — D-Bus peers are kernel-
+# authenticated via SO_PEERCRED, not pam_authenticate — so it deliberately
+# does NOT call auth_use_pam(). auth_use_pam pulls the domain into
+# nsswitch_domain (via auth_use_nsswitch) AND force-grants
+# self:{tcp,udp,netlink_route}_socket create, which would defeat the
+# no-network neverallow below (and made the 0.5.0 ratchet unsatisfiable).
+auth_read_passwd(qdistro_broker_t)
 
-optional_policy(`
-    systemd_dbus_chat_logind(qdistro_broker_t)
-')
-
-optional_policy(`
-    fprintd_dbus_chat(qdistro_broker_t)
-')
+# (0.6.0) The 0.5.0 module also carried optional systemd_dbus_chat_logind() and
+# fprintd_dbus_chat() blocks "for the admin-approval auth path". The broker has
+# no code path that chats logind or fprintd (no login1/fprintd references in
+# broker/*.py) — that integration lives in the approval app, not the broker —
+# so they are dropped for least privilege.
 
 ########################################
 #
@@ -229,20 +264,31 @@ optional_policy(`
 #
 # The broker talks ONLY over AF_UNIX (the system bus socket + its hook
 # client/executor sockets, all filesystem paths) and reads /proc for
-# caller identity — it never touches the network, and AF_VSOCK is not
-# needed (unlike the print proxy). The systemd unit enforces this at
-# runtime (PrivateNetwork=yes + RestrictAddressFamilies=AF_UNIX
-# AF_NETLINK + IPAddressDeny=any); these neverallows enforce it at
-# POLICY BUILD time, so a future `allow qdistro_broker_t ...:tcp_socket`
-# (here or in a child module) fails `semodule`/checkmodule expansion
-# loudly instead of silently re-opening a network path in the TCB. Copies
-# the tier-2 module's narrowing pattern.
+# caller identity. AF_VSOCK is not needed (unlike the print proxy). The
+# ACTUAL no-network guarantee is the systemd unit: PrivateNetwork=yes +
+# RestrictAddressFamilies=AF_UNIX AF_NETLINK + IPAddressDeny=any, under
+# which an AF_INET socket() fails EAFNOSUPPORT (VM-verified). SELinux is
+# defence-in-depth on top of that.
+#
+# Scope of the neverallow: EVERY network socket class. This is satisfiable
+# only because the domain joins NO network attribute — in particular it
+# uses auth_read_passwd (file read), NOT auth_use_pam, so it is NOT a
+# member of nsswitch_domain and does not inherit nsswitch_domain's
+# self:{tcp,udp,netlink_route}_socket create grants (the defect that made
+# the 0.5.0 ratchet both cosmetic and unsatisfiable — see the 0.6.0
+# changelog). A future `allow qdistro_broker_t self:tcp_socket create`
+# (here or in a child module) — or any interface that re-joins
+# nsswitch_domain — then fails `semodule` expansion *when assertion
+# checking is enabled* (semanage expand-check=1). The distro default is
+# expand-check=0, under which module neverallows are NOT checked, so the
+# build ratchet only has teeth under assertion checking; the no-network
+# test (s56b-broker-no-network) drives expand-check=1 explicitly and
+# proves the clean module is neverallow-satisfiable + an injected forbidden
+# allow is rejected. Copies the tier-2 module's narrowing pattern.
 #
 # These socket classes are kernel base classes; name them in a require so
 # the neverallow expression resolves regardless of what the joined
-# baseline references. (qdistro_broker_t is a plain application_domain —
-# it joins no network attribute — so none of these are granted today; the
-# neverallows guarantee they stay ungranted.)
+# baseline references.
 gen_require(`
     class tcp_socket { create connect listen };
     class udp_socket create;
