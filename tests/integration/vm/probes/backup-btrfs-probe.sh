@@ -199,43 +199,37 @@ cmd_incremental_send() {
     pass incremental-send
 }
 
-cmd_incremental_restore_collision() {
-    # KNOWN LIMITATION (surfaced by this VM lane; masked by the host tar stub):
-    # cmd_restore receives every seq into the SAME --dest under the SAME
-    # subvolume name, so the second (incremental) `btrfs receive` aborts with
-    # "File exists" — incremental CHAINS cannot be restored on real btrfs.
-    # The full path (single seq) restores fine; see restore-full.
-    # This test PINS the current failure so a fix flips it green and is tracked
-    # in 06-backup-dr-draft.md §6. Do NOT read this as "incremental works".
+cmd_incremental_restore_chain() {
+    # REGRESSION GUARD for 06-backup-dr-draft.md §6 finding F-A: restore a full
+    # 2-seq chain (full seq0 + incremental seq1) on REAL btrfs. The host tar stub
+    # masked this — it overwrites the same dir, so it never hit the original
+    # same-name `btrfs receive` collision ("File exists"). The CLI now receives
+    # each incremental ANCESTOR into a per-seq staging subvol (btrfs locates the
+    # parent by UUID fs-wide) and the FINAL seq straight into --dest, exposing the
+    # restored state under the stable name. The restored subvol must therefore
+    # equal the seq1 source (which carries `newfile` from incremental-send), NOT
+    # the seq0 base.
     local dest="$MNT/incr-restore"
-    # idempotent rerun: the seq-0 receive leaves a read-only subvol that rm -rf
-    # cannot delete — clean it explicitly so we exercise a FRESH dest and the
-    # failure we pin is the seq0->seq1 collision, not a stale-state artifact.
+    # idempotent rerun: a received subvol is read-only; rm -rf cannot remove it.
     btrfs subvolume delete "$dest/data" >/dev/null 2>&1 || true
     rm -rf "$dest"; mkdir -p "$dest"
-    if RESTORE data "$dest" --checkpoint-seq 1 2>"$WORK/incr.err"; then
-        fail incremental-restore-collision \
-            "incremental chain restore unexpectedly SUCCEEDED — if the CLI was \
-fixed to give received subvols unique per-seq names, update this lane to assert \
-the restored chain diffs equal to the seq1 source instead of asserting failure"
-    fi
-    # The FULL seq-0 send must have been received FIRST (proves we reached the
-    # incremental step and hit the same-name collision, not a seq-0 failure).
+    RESTORE data "$dest" --checkpoint-seq 1 2>"$WORK/incr.err" \
+        || fail incremental-restore-chain \
+            "incremental chain restore failed: $(tr '\n' ' ' < "$WORK/incr.err")"
+    # the received target is a REAL btrfs subvolume (not a plain dir)
     btrfs subvolume show "$dest/data" >/dev/null 2>&1 \
-        || fail incremental-restore-collision \
-            "seq-0 was not received before the failure (stale state?): \
-$(tr '\n' ' ' < "$WORK/incr.err")"
-    # The CLI must have failed specifically on the seq-1 incremental blob...
-    grep -q "RESTORE FAILED on data-1.btrfs.age" "$WORK/incr.err" \
-        || fail incremental-restore-collision \
-            "restore did not fail on the seq-1 incremental blob: \
-$(tr '\n' ' ' < "$WORK/incr.err")"
-    # ...with the known same-name btrfs receive collision.
-    grep -qiE 'File exists|already exists' "$WORK/incr.err" \
-        || fail incremental-restore-collision \
-            "seq-1 failure was not the known same-name receive collision: \
-$(tr '\n' ' ' < "$WORK/incr.err")"
-    pass incremental-restore-collision
+        || fail incremental-restore-chain "restored target is not a btrfs subvolume"
+    # final state == seq1 source (the incremental was actually applied)
+    diff -r "$MNT/snap1/data" "$dest/data" \
+        || fail incremental-restore-chain "restored chain != seq1 source"
+    # the seq1-only file proves it is the incremental state, not the seq0 base
+    [ -f "$dest/data/newfile" ] \
+        || fail incremental-restore-chain "restored chain is missing the seq1 increment (newfile)"
+    # the intermediate ancestor staging must be cleaned up — only the final
+    # state is kept under --dest
+    [ ! -e "$dest/.qd-restore-chain" ] \
+        || fail incremental-restore-chain "intermediate chain staging was not cleaned up"
+    pass incremental-restore-chain
 }
 
 cmd_teardown() {
@@ -261,7 +255,7 @@ case "${1:-}" in
     fail-corrupt) cmd_fail_corrupt ;;
     fail-nosigner) cmd_fail_nosigner ;;
     incremental-send) cmd_incremental_send ;;
-    incremental-restore-collision) cmd_incremental_restore_collision ;;
+    incremental-restore-chain) cmd_incremental_restore_chain ;;
     teardown) cmd_teardown ;;
-    *) echo "usage: $0 {setup|full-backup|verify-clean|restore-full|fail-corrupt|fail-nosigner|incremental-send|incremental-restore-collision|teardown}" >&2; exit 2 ;;
+    *) echo "usage: $0 {setup|full-backup|verify-clean|restore-full|fail-corrupt|fail-nosigner|incremental-send|incremental-restore-chain|teardown}" >&2; exit 2 ;;
 esac

@@ -80,12 +80,13 @@ teardown_file() {
     assert_output_contains "PASS: incremental-send"
 }
 
-@test "backup-btrfs: KNOWN LIMITATION — incremental chain restore collides on real btrfs (same-name receive)" {
-    # Pins the current failure (the host tar stub masks it). When the CLI is
-    # taught to give received subvolumes unique per-seq names, this flips green
-    # and the probe's guidance says to convert it to a positive chain-diff
-    # assertion. Tracked in 06-backup-dr-draft.md §6.
-    vm_run "bash $PROBE incremental-restore-collision"
+@test "backup-btrfs: incremental chain restore yields the seq1 state under the stable name (F-A fixed)" {
+    # Regression guard for 06-backup-dr-draft.md §6 finding F-A: the CLI now
+    # receives each incremental ancestor into a per-seq staging subvol and the
+    # final seq straight into --dest, so a 2-seq chain restores cleanly and the
+    # result diffs equal to the seq1 source (the host tar stub masked the old
+    # same-name receive collision).
+    vm_run "bash $PROBE incremental-restore-chain"
     assert_success
-    assert_output_contains "PASS: incremental-restore-collision"
+    assert_output_contains "PASS: incremental-restore-chain"
 }

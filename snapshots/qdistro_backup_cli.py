@@ -288,9 +288,92 @@ def cmd_verify(args) -> int:
 # restore
 # --------------------------------------------------------------------------
 
+def _verified_receive(mf, entry: dict, out_dir: str, staging: str,
+                      identity_file: str, receive_argv: list[str]) -> bool:
+    """Receive ONE blob into receive_argv's dest from a PRIVATE verified copy:
+    copy the blob locally, re-hash it there (closing the verify/receive TOCTOU
+    when out-dir is attacker-mediated storage), then decrypt+receive that copy.
+    Returns True on success; prints the failure and returns False on error."""
+    src = os.path.join(out_dir, entry["blob"])
+    local = os.path.join(staging, entry["blob"])
+    try:
+        shutil.copyfile(src, local)
+        if mf.sha256_file(local) != entry["sha256"]:
+            raise BackupError(
+                f"{entry['blob']}: sha256 changed since verification "
+                "(target tampering?)")
+        _decrypt_to_receiver(local, identity_file, receive_argv)
+        return True
+    except (BackupError, OSError) as e:
+        print(f"RESTORE FAILED on {entry['blob']}: {e}", file=sys.stderr)
+        return False
+    finally:
+        try:
+            os.unlink(local)
+        except OSError:
+            pass
+
+
+def _delete_received(delete_cmd: list[str], path: str) -> None:
+    """Remove a restored intermediate subvolume. A real btrfs received subvol
+    needs ``btrfs subvolume delete`` (a plain rmtree cannot unlink a subvol
+    root); a stubbed/dir restore (no btrfs) falls back to a recursive remove.
+    Best-effort — the final restored state already lives under --dest."""
+    try:
+        subprocess.run(delete_cmd + [path], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _real_subdirs(path: str) -> list[str]:
+    """Names directly under ``path`` that are real directories, NOT symlinks.
+    Returns [] on any error. Symlink-safe: when --dest is attacker-mediated
+    storage, a planted symlink under the staging dir must never be followed
+    (else a recursive delete escapes the staging tree)."""
+    try:
+        with os.scandir(path) as it:
+            return [e.name for e in it
+                    if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+
+
+def _purge_chain_dir(chain_dir: str, delete_cmd: list[str]) -> None:
+    """Drop the per-seq ancestor staging dir and every received subvol under it.
+    Received subvols are read-only, so a bare rmtree cannot unlink them — each is
+    removed via _delete_received first. Best-effort and idempotent: run it both
+    BEFORE staging (to clear a leftover from a crashed prior run — otherwise the
+    stale subvol re-triggers the very same-name receive collision this restore
+    path avoids) and AFTER, to leave only the final state under --dest. Only
+    touches ``chain_dir`` (a name reserved by restore), never the restored
+    subvolume itself, and never follows a symlink out of the staging tree."""
+    if os.path.islink(chain_dir):
+        # Tampering: a symlink where our staging dir should be. Unlink the link
+        # itself (not its target) and stop — never descend through it.
+        try:
+            os.unlink(chain_dir)
+        except OSError:
+            pass
+        return
+    if not os.path.isdir(chain_dir):
+        return
+    for seq_name in _real_subdirs(chain_dir):
+        seq_dir = os.path.join(chain_dir, seq_name)
+        for child in _real_subdirs(seq_dir):
+            # Only real directories (a received subvol IS a directory, never a
+            # symlink) are handed to the subvol-aware deleter; symlinks are left
+            # for the final rmtree, which unlinks them without following.
+            _delete_received(delete_cmd, os.path.join(seq_dir, child))
+    shutil.rmtree(chain_dir, ignore_errors=True)
+
+
 def cmd_restore(args) -> int:
     mf = _load_manifest()
     receive_base = shlex.split(args.receive_cmd)
+    delete_base = shlex.split(args.subvol_delete_cmd)
     try:
         _require_signing(args.allowed_signers, args.identity,
                          args.insecure_no_verify)
@@ -315,32 +398,46 @@ def cmd_restore(args) -> int:
         print(f"RESTORE ABORTED: {e}", file=sys.stderr)
         return 1
 
-    receive_argv = receive_base + [args.dest]
-    # Receive from a PRIVATE verified copy: copy each blob locally, re-hash it
-    # there, then decrypt+receive that copy. Closes the verify/receive TOCTOU
-    # when out-dir is attacker-mediated storage.
+    # ``order`` is oldest->newest: a full send then each incremental. On real
+    # btrfs, ``btrfs receive`` names the received subvolume after the SENT
+    # snapshot's basename, which is identical across runs (e.g. "data"), so
+    # receiving the whole chain into one dest collides on the second seq
+    # ("File exists"). Receive each incremental ANCESTOR into its own per-seq
+    # staging subdir on the same filesystem as --dest (btrfs still locates each
+    # parent by UUID filesystem-wide, so the delta applies); receive the FINAL
+    # seq straight into --dest, exposing the restored state under the stable
+    # name (a single-seq full restore has no ancestors and is byte-for-byte the
+    # old path). The ancestors are then dropped — only the final state is kept.
+    *ancestors, final = order
+    chain_dir = os.path.join(args.dest, ".qd-restore-chain")
     staging = tempfile.mkdtemp(prefix="qdistro-restore-")
     try:
-        for entry in order:
-            src = os.path.join(args.out_dir, entry["blob"])
-            local = os.path.join(staging, entry["blob"])
+        if ancestors:
+            # Clear any chain dir left by a crashed prior run before reusing it.
+            _purge_chain_dir(chain_dir, delete_base)
+        for i, entry in enumerate(ancestors):
+            seq_dir = os.path.join(chain_dir, str(i))
             try:
-                shutil.copyfile(src, local)
-                if mf.sha256_file(local) != entry["sha256"]:
-                    raise BackupError(
-                        f"{entry['blob']}: sha256 changed since verification "
-                        "(target tampering?)")
-                _decrypt_to_receiver(local, args.identity_file, receive_argv)
-            except (BackupError, OSError) as e:
+                os.makedirs(seq_dir, exist_ok=True)
+            except OSError as e:
                 print(f"RESTORE FAILED on {entry['blob']}: {e}", file=sys.stderr)
                 return 1
-            finally:
-                try:
-                    os.unlink(local)
-                except OSError:
-                    pass
+            if not _verified_receive(mf, entry, args.out_dir, staging,
+                                     args.identity_file,
+                                     receive_base + [seq_dir]):
+                return 1
+        if not _verified_receive(mf, final, args.out_dir, staging,
+                                 args.identity_file,
+                                 receive_base + [args.dest]):
+            return 1
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        # Drop the intermediate received subvolumes; the restored state now
+        # lives under --dest and no longer depends on them. Only touched when
+        # there were ancestors, so a single-seq full restore leaves --dest
+        # byte-for-byte as the pre-fix code did.
+        if ancestors:
+            _purge_chain_dir(chain_dir, delete_base)
     print(f"RESTORE OK: subvol {args.subvol} -> {args.dest}")
     return 0
 
@@ -393,6 +490,9 @@ def _build_argparser() -> argparse.ArgumentParser:
     r.add_argument("--identity-file", required=True,
                    help="rage identity for decryption")
     r.add_argument("--receive-cmd", default="btrfs receive")
+    r.add_argument("--subvol-delete-cmd", default="btrfs subvolume delete",
+                   help="how to drop intermediate received subvols of an "
+                        "incremental chain (injectable for the stub lane)")
     _add_verify_flags(r)
     r.set_defaults(fn=cmd_restore)
 
