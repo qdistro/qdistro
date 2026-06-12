@@ -98,6 +98,83 @@ class TestConditionEval:
 
 
 # ----------------------------------------------------------------------
+# F1 (pure-logic edge tables) — the condition matcher primitives directly.
+# The tests above drive them through evaluate(); these pin the matchers'
+# own list-vs-scalar / glob / basename / name-resolution edges so a
+# regression in a primitive is caught even if evaluate()'s plumbing hides it.
+# ----------------------------------------------------------------------
+
+
+class TestConditionMatchers:
+    # ``want`` may be a scalar or a list; a list matches if ANY element does.
+    # Numeric-only cells are hermetic: ints and numeric strings resolve to
+    # themselves without any NSS lookup. Name resolution (which DOES hit NSS)
+    # is exercised separately below with a stubbed resolver.
+    @pytest.mark.parametrize("actual,want,expected", [
+        (1000, 1000, True),                 # scalar int
+        (1000, "1000", True),               # numeric string resolves to int
+        (1000, [999, 1000], True),          # list, second element matches
+        (1000, [999, 1001], False),         # list, none match
+        (1000, [], False),                  # empty list never matches
+    ])
+    def test_match_uid_numeric(self, actual, want, expected):
+        assert condition_eval._match_uid(actual, want) is expected
+
+    @pytest.mark.parametrize("actual,want,expected", [
+        (0, 0, True),                       # scalar int
+        (0, "0", True),                     # numeric string (gid/uid symmetry)
+        (0, [5, 0], True),                  # list, second element matches
+        (0, [5, 7], False),                 # list, none match
+        (0, [], False),                     # empty list never matches
+    ])
+    def test_match_gid_numeric(self, actual, want, expected):
+        assert condition_eval._match_gid(actual, want) is expected
+
+    def test_match_uid_name_resolution(self, monkeypatch):
+        # Hermetic stub: only "admin" (and the literal int) resolve; any other
+        # name resolves to None. Pins that a name resolves+matches, an unknown
+        # name fails closed, and a mixed list matches on the resolvable member.
+        monkeypatch.setattr(condition_eval._pi, "resolve_uid_name",
+                            lambda v: 1000 if v in ("admin", 1000) else None)
+        assert condition_eval._match_uid(1000, "admin") is True
+        assert condition_eval._match_uid(1000, "ghost") is False
+        assert condition_eval._match_uid(1000, ["ghost", 1000]) is True
+        assert condition_eval._match_uid(1000, ["ghost"]) is False
+
+    def test_match_gid_name_resolution(self, monkeypatch):
+        monkeypatch.setattr(condition_eval._pi, "resolve_gid_name",
+                            lambda v: 0 if v in ("root", 0) else None)
+        assert condition_eval._match_gid(0, "root") is True
+        assert condition_eval._match_gid(0, "ghost") is False
+        assert condition_eval._match_gid(0, ["ghost", "root"]) is True
+
+    @pytest.mark.parametrize("actual,want,expected", [
+        ("abc", "abc", True),               # exact
+        ("abc", "a*", True),                # wildcard
+        ("abc", "A*", False),               # fnmatch is case-sensitive here
+        ("abc", ["x*", "a*"], True),        # list, one pattern matches
+        ("abc", ["x*", "y*"], False),       # list, none match
+        ("abc", [], False),                 # empty list
+        ("system.slice/qdistro-1.scope", "system.slice/qdistro-*", True),
+    ])
+    def test_match_glob(self, actual, want, expected):
+        assert condition_eval._match_glob(actual, want) is expected
+
+    # argv0 matches on the FULL path OR the basename, so a bare program-name
+    # pattern catches an absolute argv0 and a path-glob still works.
+    @pytest.mark.parametrize("actual,want,expected", [
+        ("/usr/bin/python3", "python3", True),      # basename pattern
+        ("/usr/bin/python3", "py*", True),          # basename glob
+        ("/usr/bin/python3", "/usr/bin/*", True),   # full-path glob
+        ("/usr/bin/python3", "bash", False),        # neither
+        ("/usr/bin/python3", ["a", "py*"], True),   # list, basename glob hits
+        ("python3", "python3", True),               # already-bare argv0
+    ])
+    def test_match_argv0(self, actual, want, expected):
+        assert condition_eval._match_argv0(actual, want) is expected
+
+
+# ----------------------------------------------------------------------
 # F1/F7 — conditions gate the run (no secret delivered on reject)
 # ----------------------------------------------------------------------
 
