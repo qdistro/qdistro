@@ -36,6 +36,18 @@
 # SPDX-License-Identifier: MIT
 set -eo pipefail
 
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+SPAWN_COMMON="$SCRIPT_DIR/../../lib/spawn-common.sh"
+if [ ! -r "$SPAWN_COMMON" ] && [ -r /usr/lib/qdistro/spawn-common.sh ]; then
+    SPAWN_COMMON=/usr/lib/qdistro/spawn-common.sh
+fi
+if [ ! -r "$SPAWN_COMMON" ]; then
+    echo "[tier1] FAIL: spawn-common.sh not found (looked near $SCRIPT_DIR and /usr/lib/qdistro)" >&2
+    exit 5
+fi
+. "$SPAWN_COMMON"
+
 if [ "$#" -lt 3 ] || [ "$2" != "--" ]; then
     cat >&2 <<EOF
 usage: $0 <silo> -- <app...>
@@ -64,6 +76,8 @@ USE_SECCTX="${TIER1_USE_SECCTX:-1}"
 ENGINE="${TIER1_SECCTX_ENGINE:-qdistro.tier1}"
 APPID="${TIER1_SECCTX_APPID:-qdistro.tier1.$SILO}"
 TITLE_PREFIX="${TIER1_TITLE_PREFIX:-[tier1:$SILO] }"
+ADMIN_UID="$(id -u)"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
 
 # Per-app private state directory, relabelled to qdistro_tier1_config_t
 # by restorecon (spec/30 §"Filesystem labelling strategy" type-not-mount).
@@ -179,6 +193,10 @@ fi
 
 CMD=("$TIER1_EXEC" --)
 CMD+=("$@")
+INSTANCE_ID="tier1-$SILO-$$"
+LAUNCHREC_PATH=""
+LAUNCHREC_TOKEN=""
+LAUNCHREC_FILE_ID=""
 
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
     if [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
@@ -191,9 +209,13 @@ if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; th
             qdistro-secctx-exec
             --sandbox-engine "$ENGINE"
             --app-id "$APPID"
-            --instance-id "tier1-$SILO-$$"
+            --instance-id "$INSTANCE_ID"
             --
         )
+        LAUNCHREC_TOKEN="$(gen_launch_token "[tier1] FAIL")"
+        LAUNCHREC_FILE_ID="$(gen_launch_token "[tier1] FAIL")"
+        LAUNCHREC_PATH="$RUNTIME_DIR/qdistro-tier1-launchrec-$LAUNCHREC_FILE_ID.pid"
+        rm -f "$LAUNCHREC_PATH"
         CMD=("${SECCTX_CMD[@]}" "${CMD[@]}")
     fi
 fi
@@ -204,5 +226,17 @@ fi
 # Title prefix for chrome differentiation when secctx isn't used or
 # qdshell hasn't been extended with the tier-1 silo regex yet.
 # qdshell parse_silo_from_title fallback consumes "[<silo>] " prefix.
-exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
-    "${CMD[@]}"
+if [ -n "$LAUNCHREC_PATH" ]; then
+    env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" \
+        QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH" \
+        QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN" \
+        "${CMD[@]}" &
+    child_pid=$!
+    qd_register_secctx_launch_record \
+        "$SILO" "$ENGINE" "$APPID" "$INSTANCE_ID" "tier1" \
+        "$LAUNCHREC_PATH" "$LAUNCHREC_TOKEN" "tier1"
+    wait "$child_pid"
+    exit $?
+fi
+
+exec env QDISTRO_TIER1_TITLE_PREFIX="$TITLE_PREFIX" "${CMD[@]}"

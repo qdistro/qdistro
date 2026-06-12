@@ -146,6 +146,9 @@ IMAGE="qdistro/tier2-${WORKLOAD}:latest"
 USE_SECCTX="${TIER2_USE_SECCTX:-1}"
 ENGINE="${TIER2_SECCTX_ENGINE:-qdistro.tier2}"
 SECCTX_APPID="${TIER2_SECCTX_APPID:-${CONTAINER}/${APP_NAME}}"
+LAUNCHREC_PATH=""
+LAUNCHREC_TOKEN=""
+LAUNCHREC_FILE_ID=""
 
 # Hardening defaults — secure, override via env for special workloads.
 TIER2_NETWORK_VAL="${TIER2_NETWORK:-none}"
@@ -533,7 +536,14 @@ if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; th
         echo "             QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
         bash -c "$WRAPPER_BODY" &
     else
-        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 qdistro-secctx-exec \
+        LAUNCHREC_TOKEN="$(gen_launch_token "spawn-tier2")"
+        LAUNCHREC_FILE_ID="$(gen_launch_token "spawn-tier2")"
+        LAUNCHREC_PATH="$RUNTIME_DIR/qdistro-tier2-launchrec-$LAUNCHREC_FILE_ID.pid"
+        rm -f "$LAUNCHREC_PATH"
+        QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+        QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH" \
+        QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN" \
+        qdistro-secctx-exec \
             --sandbox-engine "$ENGINE" \
             --app-id "$SECCTX_APPID" \
             --instance-id "$LAUNCH_TOKEN" \
@@ -546,6 +556,12 @@ else
     bash -c "$WRAPPER_BODY" &
 fi
 child_pid=$!
+
+if [ -n "$LAUNCHREC_PATH" ]; then
+    qd_register_secctx_launch_record \
+        "${TIER2_SILO:-$CONTAINER}" "$ENGINE" "$SECCTX_APPID" "$LAUNCH_TOKEN" "tier2" \
+        "$LAUNCHREC_PATH" "$LAUNCHREC_TOKEN" "tier2"
+fi
 
 # --- detached test mode (TIER2_DETACH=1) -------------------------------
 # Supervised detach (codex r1/r2): NOT `podman run -d` — under secctx-exec

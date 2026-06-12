@@ -152,6 +152,63 @@ qd_emit_event() {
 }
 
 # ---------------------------------------------------------------------
+# qd_register_secctx_launch_record SILO ENGINE APPID INSTANCE NAMESPACE
+#                                  LAUNCHREC_PATH LAUNCHREC_TOKEN LABEL
+#
+# Best-effort permission-lineage registration for root launchers that
+# wrapped an inner command with qdistro-secctx-exec. The wrapper publishes
+# the inner child pid to QDISTRO_LAUNCH_RECORD_PATH; this helper validates
+# the matching token and asks the broker to bind live pid -> silo.
+#
+# A failed registration must never block the launch: under
+# lineage_enforce=true the affected permission path simply stays
+# default-deny because the broker has no verified launch record.
+qd_register_secctx_launch_record() {
+    local silo="$1" engine="$2" appid="$3" instance="$4" namespace="$5"
+    local launchrec_path="$6" launchrec_token="$7" label="${8:-lineage}"
+    local inner_pid="" inner_token="" _
+
+    [ -n "$launchrec_path" ] || return 0
+    [ -n "$launchrec_token" ] || return 0
+    if ! command -v dbus-send >/dev/null 2>&1; then
+        echo "[$label] WARN lineage: dbus-send not found; skipping launch-record registration" >&2
+        return 0
+    fi
+
+    for _ in $(seq 1 20); do
+        if [ -s "$launchrec_path" ]; then
+            read -r inner_pid inner_token < "$launchrec_path" || true
+            case "$inner_pid" in ''|*[!0-9]*) inner_pid="" ;; esac
+            if [ -n "$inner_pid" ] && [ "$inner_token" = "$launchrec_token" ]; then
+                break
+            fi
+            inner_pid=""
+        fi
+        sleep 0.1
+    done
+
+    if [ -z "$inner_pid" ] || ! kill -0 "$inner_pid" 2>/dev/null; then
+        echo "[$label] WARN lineage: no inner pid published; skipping launch-record registration" >&2
+        rm -f "$launchrec_path" 2>/dev/null || true
+        return 0
+    fi
+
+    if dbus-send --system --print-reply \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.RegisterLaunch \
+        string:"$silo" string:"$engine" string:"$appid" \
+        string:"$instance" string:"" uint64:"$inner_pid" \
+        string:"$namespace" uint64:0 >/dev/null 2>&1; then
+        echo "[$label] lineage: registered pid=$inner_pid as silo=$silo" >&2
+    else
+        echo "[$label] WARN lineage: RegisterLaunch failed for pid=$inner_pid (lineage-gated permissions stay default-deny)" >&2
+    fi
+    rm -f "$launchrec_path" 2>/dev/null || true
+    return 0
+}
+
+# ---------------------------------------------------------------------
 # qd_free_space_check BASE_DISK TARGET_DIR HEADROOM_BYTES
 #
 # Fail-closed free-space budget precheck for a qcow2 linked-clone overlay.

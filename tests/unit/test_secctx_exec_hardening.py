@@ -29,15 +29,35 @@ def test_secctx_exec_validates_identity_shapes_before_wayland_bind():
 
 def test_launch_record_publication_is_exclusive_runtime_file():
     src = SECCTX_C.read_text(encoding="utf-8")
+    common = (ROOT / "lib/spawn-common.sh").read_text(encoding="utf-8")
     tier3 = (ROOT / "tier3/spawn-tier3.sh").read_text(encoding="utf-8")
     assert "path_under_runtime" in src
     assert "O_EXCL" in src
     assert "O_NOFOLLOW" in src
     assert "QDISTRO_LAUNCH_RECORD_TOKEN" in src
+    assert "qd_register_secctx_launch_record()" in common
+    assert "launchrec_token" in common
+    assert "org.qdistro.AdminBroker1.RegisterLaunch" in common
+    assert "inner_token\" = \"$launchrec_token" in common
     assert "QDISTRO_LAUNCH_RECORD_TOKEN" in tier3
     assert 'INNER_TOKEN" = "$LAUNCHREC_TOKEN' in tier3
     assert 'LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier3-launchrec-$LAUNCHREC_TOKEN.pid"' not in tier3
     assert "fopen(lr_path" not in src
+
+
+def test_tier1_tier2_register_secctx_launch_records():
+    tier1 = (ROOT / "selinux/tier1/spawn-tier1.sh").read_text(encoding="utf-8")
+    tier2 = (ROOT / "tier2/spawn-tier2.sh").read_text(encoding="utf-8")
+
+    assert 'LAUNCHREC_PATH="$RUNTIME_DIR/qdistro-tier1-launchrec-$LAUNCHREC_FILE_ID.pid"' in tier1
+    assert "QDISTRO_LAUNCH_RECORD_PATH=\"$LAUNCHREC_PATH\"" in tier1
+    assert "QDISTRO_LAUNCH_RECORD_TOKEN=\"$LAUNCHREC_TOKEN\"" in tier1
+    assert '"$SILO" "$ENGINE" "$APPID" "$INSTANCE_ID" "tier1"' in tier1
+
+    assert 'LAUNCHREC_PATH="$RUNTIME_DIR/qdistro-tier2-launchrec-$LAUNCHREC_FILE_ID.pid"' in tier2
+    assert "QDISTRO_LAUNCH_RECORD_PATH=\"$LAUNCHREC_PATH\"" in tier2
+    assert "QDISTRO_LAUNCH_RECORD_TOKEN=\"$LAUNCHREC_TOKEN\"" in tier2
+    assert '"${TIER2_SILO:-$CONTAINER}" "$ENGINE" "$SECCTX_APPID" "$LAUNCH_TOKEN" "tier2"' in tier2
 
 
 def test_spawn_scripts_mark_trusted_secctx_launches():

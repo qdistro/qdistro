@@ -12,7 +12,7 @@ SPAWN = ROOT / "selinux" / "tier1" / "spawn-tier1.sh"
 def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("basename", "env", "mkdir", "readlink", "tr"):
+    for name in ("basename", "dirname", "env", "id", "mkdir", "readlink", "tr"):
         target = Path("/usr/bin") / name
         if not target.exists():
             target = Path("/bin") / name
