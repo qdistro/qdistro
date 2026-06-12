@@ -2541,7 +2541,7 @@ class MainWindow(QMainWindow):
             "action": action,
             "exe": exe,
             "scope": self._get_active_scope(),
-            "rationale": f"Auto-generated rule from history entry",
+            "rationale": "Auto-generated rule from history entry",
         }
 
         dialog = RuleEditorDialog(self.broker, rule_data, self)

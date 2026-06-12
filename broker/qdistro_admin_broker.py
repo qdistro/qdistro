@@ -3472,7 +3472,9 @@ class Broker(dbus.service.Object):
                 f"SaveRule restricted to admin/root; got uid {admin_uid}",
                 name=BUS_NAME + ".AccessDenied",
             )
-        import re, tempfile, shutil
+        import re
+        import tempfile
+        import shutil
         if not re.fullmatch(r"[A-Za-z0-9_-]+\.yaml", filename):
             raise dbus.DBusException(
                 f"SaveRule: filename {filename!r} must match "
@@ -3509,7 +3511,7 @@ class Broker(dbus.service.Object):
             errs = check.load_errors()
             if errs:
                 raise dbus.DBusException(
-                    f"SaveRule: rule validation failed: " + "; ".join(errs),
+                    "SaveRule: rule validation failed: " + "; ".join(errs),
                     name=BUS_NAME + ".RulesEngineRefused",
                 )
         # Write to whichever directory this broker's RulesEngine

@@ -147,7 +147,7 @@ class TestBrowserDaemonInstall:
         assert "could not globally enable browser daemon user units" in script
         assert "exit 3" in script
         for name in ("downloads", "mpris", "notifications", "compositor"):
-            assert f"qdistro_${{daemon}}_daemon.py" in script
+            assert "qdistro_${daemon}_daemon.py" in script
             assert f"qdistro-{name}.service" in script
             assert f"qdistro-{name}.service" in script
         assert "systemctl --global enable" in script
