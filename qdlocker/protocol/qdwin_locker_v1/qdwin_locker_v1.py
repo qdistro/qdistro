@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import enum
 
+from pywayland.protocol.wayland import WlSurface
 from pywayland.protocol_core import (
     Argument,
     ArgumentType,
@@ -16,7 +17,6 @@ from pywayland.protocol_core import (
     Resource,
 )
 
-from pywayland.protocol.wayland import WlSurface
 from .qdwin_locker_surface_v1 import QdwinLockerSurfaceV1
 
 

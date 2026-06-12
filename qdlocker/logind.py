@@ -231,8 +231,8 @@ class LogindWatcher:
 
     async def _main(self) -> None:
         try:
-            from dbus_next.aio import MessageBus
             from dbus_next import BusType
+            from dbus_next.aio import MessageBus
         except ImportError:
             log.warning("dbus-next not installed; logind lid/suspend lock unavailable")
             return

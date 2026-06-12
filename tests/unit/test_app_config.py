@@ -23,8 +23,6 @@ import tomllib
 from types import SimpleNamespace
 
 import pytest
-
-from qdlocker import app
 from qdlocker.app import (
     _DEFAULT_CONFIG,
     _read_toml_no_follow,
@@ -32,6 +30,7 @@ from qdlocker.app import (
     _validate_config,
 )
 
+from qdlocker import app
 
 # ---- _system_config_is_trusted --------------------------------------------
 

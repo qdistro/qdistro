@@ -32,7 +32,6 @@ import types
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
 from qdlocker.wayland import LockerClient, LockerEvents
 
 # ---------------------------------------------------------------------------

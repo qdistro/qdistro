@@ -10,7 +10,6 @@ directly — they do not touch a wl_display.
 from __future__ import annotations
 
 import pytest
-
 from qdlocker.idle import IdleWatcher
 
 

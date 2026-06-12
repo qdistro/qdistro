@@ -18,9 +18,9 @@ import asyncio
 import os
 
 import pytest
+from qdlocker.logind import REASON_SUSPEND, LogindWatcher
 
 from qdlocker import logind
-from qdlocker.logind import LogindWatcher, REASON_SUSPEND
 
 
 class FakeManager:

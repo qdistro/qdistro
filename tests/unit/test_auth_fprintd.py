@@ -22,7 +22,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("USER", "tester")
 
 import pytest
-
 from qdlocker.auth import AuthBackend, AuthOutcome
 
 

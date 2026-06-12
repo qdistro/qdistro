@@ -331,8 +331,8 @@ class AuthBackend(QObject):
         # emit so a stale match delivered after the next lock is dropped.
         generation = self._current_generation()
         try:
-            from dbus_next.aio import MessageBus
             from dbus_next import BusType
+            from dbus_next.aio import MessageBus
         except ImportError:
             log.warning("dbus-next not installed; fingerprint disabled")
             self._record_fprintd_failure(environmental=True, generation=generation)
