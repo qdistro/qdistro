@@ -133,6 +133,26 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q 'zypper -n "${gpg_flags\[@\]}" refresh' "$BOOT"
 }
 
+@test "hardening: bootstrap source/package fetches use authenticated transport (no plaintext http://)" {
+    # Release/daily-driver invariant (security-hardening carry-forward
+    # "Bootstrap and packaging" + 03/R2): the bootstrap must not fetch root
+    # code, repos, or packages over non-TLS http://. The release installer
+    # uses TLS exclusively today (sibling repos clone from https://codeberg.org;
+    # disposable http:// VM staging lives ONLY in the separate
+    # install-*-for-vm.sh dev helpers, never here). So the invariant is simple
+    # and absolute: NO plaintext `http://` on any non-comment line of the
+    # bootstrap. A regression that adds an http:// mirror/repo/staging URL to
+    # the release path trips this. (If a future dev-only http path is ever
+    # genuinely needed here, move it into a dev-gated helper and revisit.)
+    run grep -nE '^[[:space:]]*[^#].*http://|^[^#]*http://' "$BOOT"
+    [ "$status" -ne 0 ] || { echo "plaintext http:// in bootstrap:"$'\n'"$output" >&2; return 1; }
+
+    # Positive control: the sibling-repo URL resolver emits TLS git remotes,
+    # so the test fails if the resolver is gutted rather than only on http://.
+    run grep -vE '^[[:space:]]*#' "$BOOT"
+    echo "$output" | grep -q "https://codeberg.org"
+}
+
 @test "hardening: tier5 secctx wrapper is fail-closed by default" {
     SPAWN="$REPO_ROOT/tier5-vm/spawn-tier5.sh"
     grep -q "TIER5_USE_SECCTX:-1" "$SPAWN"
