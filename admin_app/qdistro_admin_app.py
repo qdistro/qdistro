@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
     QStandardItem, QStandardItemModel,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
     QMainWindow, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
     QSpinBox, QSplitter, QStackedWidget, QStyle, QTableView, QTabWidget,
@@ -54,9 +54,35 @@ MAX_HISTORY_ENTRIES = 100
 # (no symlinks, no ../, no /etc/passwd surprises). Matches the broker's
 # default `RulesEngine` directory.
 RULES_DIR = "/etc/qdistro/rules.d"
+FIREFOX_CONTAINERS_ACTION = "qdistro.browser.containers.cross_uid:containers.*"
+FIREFOX_CONTAINERS_RULE_PREFIX = "firefox-containers-cross-user-uid"
 
 
 _log = logging.getLogger("qdistro.admin_app")
+
+
+def _firefox_containers_rule_filename(uid: int) -> str:
+    return f"{FIREFOX_CONTAINERS_RULE_PREFIX}{int(uid)}.yaml"
+
+
+def _firefox_containers_rule_yaml(uid: int) -> str:
+    uid_i = int(uid)
+    return (
+        f"- name: {FIREFOX_CONTAINERS_RULE_PREFIX}{uid_i}\n"
+        "  decision: allow\n"
+        "  match:\n"
+        f"    uid: {uid_i}\n"
+        f"    action: {FIREFOX_CONTAINERS_ACTION}\n"
+        "  rationale: Enable admin cross-user Firefox container relay\n"
+    )
+
+
+def _is_firefox_containers_rule(rule: dict, uid: int) -> bool:
+    return (
+        str(rule.get("decision", "")) == "allow"
+        and int(rule.get("uid", -1)) == int(uid)
+        and str(rule.get("action", "")) == FIREFOX_CONTAINERS_ACTION
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2721,6 +2747,24 @@ class RulesTab(QWidget):
         self.model.setHorizontalHeaderLabels(list(self.COLUMNS))
         self.table.setModel(self.model)
 
+        feature_row = QHBoxLayout()
+        self.firefox_uid_spin = QSpinBox()
+        self.firefox_uid_spin.setObjectName("firefox_containers_uid")
+        self.firefox_uid_spin.setRange(1, 999999)
+        self.firefox_uid_spin.setValue(2000)
+        self.firefox_containers_toggle = QCheckBox(
+            "Firefox containers cross-user opt-in")
+        self.firefox_containers_toggle.setObjectName(
+            "firefox_containers_cross_user_toggle")
+        self.firefox_containers_toggle.setToolTip(
+            "Creates an allow rule for qdistro.browser.containers.cross_uid:containers.* "
+            "for the selected uid.")
+        feature_row.addWidget(QLabel("Target uid"))
+        feature_row.addWidget(self.firefox_uid_spin)
+        feature_row.addWidget(self.firefox_containers_toggle)
+        feature_row.addStretch()
+        self._rules_cache: list[dict] = []
+
         btns = QHBoxLayout()
         self.btn_add_rule = QPushButton("Add Rule"); self.btn_add_rule.setObjectName("btn_add_rule")
         self.btn_edit_rule = QPushButton("Edit Rule"); self.btn_edit_rule.setObjectName("btn_edit_rule")
@@ -2734,6 +2778,7 @@ class RulesTab(QWidget):
         btns.addStretch()
 
         lay = QVBoxLayout(self)
+        lay.addLayout(feature_row)
         lay.addWidget(self.table)
         lay.addLayout(btns)
 
@@ -2742,6 +2787,10 @@ class RulesTab(QWidget):
         self.btn_delete_rule.clicked.connect(self._on_delete_rule)
         self.btn_reload.clicked.connect(self._on_reload)
         self.btn_refresh.clicked.connect(self.refresh)
+        self.firefox_uid_spin.valueChanged.connect(
+            self._sync_firefox_containers_toggle)
+        self.firefox_containers_toggle.toggled.connect(
+            self._on_firefox_containers_toggled)
 
         # Live-update: subscribe to broker's RulesReloaded signal so
         # the table re-populates when rules change on disk (inotify,
@@ -2763,6 +2812,7 @@ class RulesTab(QWidget):
                                 f"Couldn't list rules.\n\n{label}")
             return
         self.model.removeRows(0, self.model.rowCount())
+        self._rules_cache = list(rules)
         for r in rules:
             # Convert None values to readable format
             uid_str = str(r["uid"]) if r["uid"] != -1 else "any"
@@ -2784,6 +2834,42 @@ class RulesTab(QWidget):
                 it.setEditable(False)
             self.model.appendRow(items)
         self.table.resizeColumnsToContents()
+        self._sync_firefox_containers_toggle()
+
+    def _firefox_containers_rule_for_uid(self, uid: int) -> dict | None:
+        for rule in self._rules_cache:
+            if _is_firefox_containers_rule(rule, uid):
+                return rule
+        return None
+
+    def _sync_firefox_containers_toggle(self) -> None:
+        enabled = self._firefox_containers_rule_for_uid(
+            self.firefox_uid_spin.value()) is not None
+        old = self.firefox_containers_toggle.blockSignals(True)
+        try:
+            self.firefox_containers_toggle.setChecked(enabled)
+        finally:
+            self.firefox_containers_toggle.blockSignals(old)
+
+    def _on_firefox_containers_toggled(self, checked: bool) -> None:
+        uid = self.firefox_uid_spin.value()
+        try:
+            if checked:
+                self.broker.save_rule(
+                    _firefox_containers_rule_filename(uid),
+                    _firefox_containers_rule_yaml(uid))
+            else:
+                rule = self._firefox_containers_rule_for_uid(uid)
+                if rule is not None:
+                    self.broker.delete_rule(
+                        str(rule.get("source_path", "")),
+                        str(rule.get("name", "")))
+            self.refresh()
+        except dbus.DBusException as e:
+            _title, label = _friendly_broker_error(e)
+            QMessageBox.critical(
+                self, "Firefox containers opt-in failed", label)
+            self.refresh()
 
     def _selected_row(self) -> dict | None:
         idx = self.table.currentIndex()

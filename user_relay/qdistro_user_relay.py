@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 import dbus
 import dbus.service
@@ -68,6 +69,44 @@ EXCLUDED_NAMES = frozenset({
 # once per name. 250ms is short enough to feel instant in the launcher,
 # long enough to swallow a typical startup burst.
 RECEIVER_CHANGE_DEBOUNCE_MS = 250
+
+CONTAINERS_CROSS_UID_ACTION_PREFIX = "qdistro.browser.containers.cross_uid:"
+CONTAINERS_CROSS_UID_EXE = "qdistro-user-relay"
+
+_BROKER_DIR = Path(__file__).resolve().parent.parent / "broker"
+if str(_BROKER_DIR) not in sys.path:
+    sys.path.insert(0, str(_BROKER_DIR))
+
+
+def _rules_dir() -> str:
+    return os.environ.get("QDISTRO_RULES_DIR", "/etc/qdistro/rules.d")
+
+
+def _containers_cross_uid_allowed(uid: int, op: str,
+                                  rules_dir: str | None = None) -> tuple[bool, str]:
+    """Return whether cross-uid Firefox container relay is opted in.
+
+    The opt-in is an ordinary broker rule so it is visible in the admin app's
+    Rules tab and survives the same reload/audit workflow. Missing rules,
+    malformed rules, and explicit deny all fail closed.
+    """
+    if not op.startswith("containers."):
+        return True, "not-containers-op"
+    try:
+        from qdistro_admin_rules import RulesEngine  # type: ignore[import-not-found]
+        engine = RulesEngine(rules_dir or _rules_dir())
+        if engine.load_errors():
+            return False, "rules-load-error"
+        action = f"{CONTAINERS_CROSS_UID_ACTION_PREFIX}{op}"
+        rule = engine.match(uid=int(uid), action=action,
+                            exe=CONTAINERS_CROSS_UID_EXE)
+    except Exception:  # noqa: BLE001
+        return False, "rules-unavailable"
+    if rule is None:
+        return False, "no-opt-in-rule"
+    if rule.decision != "allow":
+        return False, "denied-by-rule"
+    return True, f"allowed-by:{rule.name}"
 
 
 def _is_receiver_name_change(name: str, old_owner: str,
@@ -175,6 +214,13 @@ class UserRelay(dbus.service.Object):
         op_s = str(op)
         if not op_s:
             reply = {"ok": False, "error": "missing_op"}
+            _audit("forward_bridge_op", sender, op_s, "-", reply)
+            return json.dumps(reply)
+        allowed, reason = _containers_cross_uid_allowed(self._uid, op_s)
+        if not allowed:
+            reply = {"ok": False, "error": "feature_not_enabled",
+                     "feature": "firefox-containers-cross-user",
+                     "detail": reason}
             _audit("forward_bridge_op", sender, op_s, "-", reply)
             return json.dumps(reply)
         try:

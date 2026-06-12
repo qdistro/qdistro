@@ -37,10 +37,14 @@ from qdistro_admin_app import (  # noqa: E402
     BrokerBridge,
     CacheTab,
     DetailPane,
+    FIREFOX_CONTAINERS_ACTION,
+    FIREFOX_CONTAINERS_RULE_PREFIX,
     HistoryTab,
     MainWindow,
     RuleEditorDialog,
     RulesTab,
+    _firefox_containers_rule_filename,
+    _firefox_containers_rule_yaml,
 )
 
 
@@ -87,6 +91,7 @@ def _make_stub_broker():
         },
     ]
     broker.save_rule.return_value = "/etc/qdistro/rules.d/new.yaml"
+    broker.delete_rule.return_value = (True, 0, [])
     # Editing an existing rule fetches the verbatim on-disk YAML via the
     # broker's GetRuleSource RPC (comments + unknown keys preserved). The
     # stub returns text keyed by source_path so the editor loads raw text
@@ -258,6 +263,61 @@ class TestRulesTab:
         tab = RulesTab(broker)
 
         assert tab.btn_reload is not None
+
+    def test_firefox_containers_toggle_present(self, qapp):
+        broker = _make_stub_broker()
+        tab = RulesTab(broker)
+        assert tab.firefox_containers_toggle.objectName() == \
+            "firefox_containers_cross_user_toggle"
+        assert tab.firefox_uid_spin.objectName() == "firefox_containers_uid"
+
+    def test_firefox_containers_toggle_syncs_from_rule(self, qapp):
+        broker = _make_stub_broker()
+        broker.list_rules.return_value.append({
+            "name": f"{FIREFOX_CONTAINERS_RULE_PREFIX}2000",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/firefox-containers.yaml",
+            "uid": 2000,
+            "action": FIREFOX_CONTAINERS_ACTION,
+            "exe": "",
+            "scope": "",
+            "rationale": "Enable admin cross-user Firefox container relay",
+        })
+        tab = RulesTab(broker)
+        tab.refresh()
+        assert tab.firefox_containers_toggle.isChecked()
+
+    def test_firefox_containers_toggle_save_rule(self, qapp):
+        broker = _make_stub_broker()
+        broker.list_rules.return_value = []
+        tab = RulesTab(broker)
+        tab.refresh()
+        tab.firefox_uid_spin.setValue(3000)
+        tab.firefox_containers_toggle.setChecked(True)
+
+        broker.save_rule.assert_called_with(
+            _firefox_containers_rule_filename(3000),
+            _firefox_containers_rule_yaml(3000))
+
+    def test_firefox_containers_toggle_delete_rule(self, qapp):
+        broker = _make_stub_broker()
+        broker.list_rules.return_value = [{
+            "name": f"{FIREFOX_CONTAINERS_RULE_PREFIX}2000",
+            "decision": "allow",
+            "source_path": "/etc/qdistro/rules.d/firefox-containers.yaml",
+            "uid": 2000,
+            "action": FIREFOX_CONTAINERS_ACTION,
+            "exe": "",
+            "scope": "",
+            "rationale": "Enable admin cross-user Firefox container relay",
+        }]
+        tab = RulesTab(broker)
+        tab.refresh()
+        tab.firefox_containers_toggle.setChecked(False)
+
+        broker.delete_rule.assert_called_with(
+            "/etc/qdistro/rules.d/firefox-containers.yaml",
+            f"{FIREFOX_CONTAINERS_RULE_PREFIX}2000")
         assert tab.btn_reload.objectName() == "btn_reload_rules"
 
     def test_reload_calls_broker(self, qapp):

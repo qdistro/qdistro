@@ -120,8 +120,9 @@ def _patch_dbus_interface(monkeypatch):
 # would try to attach to an actual connection. UserRelay's methods
 # only touch self._bus which we inject.
 class _StubUserRelay(R.UserRelay):
-    def __init__(self, bus):
+    def __init__(self, bus, uid=2000):
         self._bus = bus
+        self._uid = uid
 
 
 # --- ListLocalReceivers ---------------------------------------------------
@@ -231,6 +232,12 @@ class TestForwardBrowserBridgeOp:
     runs as the target user; cross-uid callers reach it on the system
     bus and the relay turns around to call the bridge on the user's
     session bus. See qdistro/doc/firefox-containers.md."""
+
+    @pytest.fixture(autouse=True)
+    def _allow_containers_feature(self, monkeypatch):
+        monkeypatch.setattr(
+            R, "_containers_cross_uid_allowed",
+            lambda uid, op: (True, "test-allow"))
 
     def _relay(self, *, bridges: dict[int, _FakeBridge] | None = None):
         bridges = bridges or {}
@@ -480,6 +487,70 @@ class TestForwardBrowserBridgeOp:
             ("containers.create",
              '{"name": "Banking", "color": "red", "icon": "dollar"}'),
         ]
+
+
+class TestFirefoxContainersOptInGate:
+    def test_missing_opt_in_rule_denies(self, tmp_path):
+        ok, why = R._containers_cross_uid_allowed(
+            2000, "containers.list", str(tmp_path))
+        assert ok is False
+        assert why == "no-opt-in-rule"
+
+    def test_allow_rule_enables_containers_ops(self, tmp_path):
+        (tmp_path / "firefox-containers.yaml").write_text("""
+- name: firefox-containers-uid2000
+  decision: allow
+  match:
+    uid: 2000
+    action: qdistro.browser.containers.cross_uid:containers.*
+  rationale: test
+""")
+        ok, why = R._containers_cross_uid_allowed(
+            2000, "containers.create", str(tmp_path))
+        assert ok is True
+        assert why == "allowed-by:firefox-containers-uid2000"
+
+    def test_deny_rule_beats_later_allow(self, tmp_path):
+        (tmp_path / "00-deny.yaml").write_text("""
+- name: deny-containers
+  decision: deny
+  match:
+    uid: 2000
+    action: qdistro.browser.containers.cross_uid:containers.*
+""")
+        (tmp_path / "99-allow.yaml").write_text("""
+- name: allow-containers
+  decision: allow
+  match:
+    uid: 2000
+    action: qdistro.browser.containers.cross_uid:containers.*
+""")
+        ok, why = R._containers_cross_uid_allowed(
+            2000, "containers.list", str(tmp_path))
+        assert ok is False
+        assert why == "denied-by-rule"
+
+    def test_non_containers_op_unchanged(self, tmp_path):
+        ok, why = R._containers_cross_uid_allowed(
+            2000, "qdistro.ping", str(tmp_path))
+        assert ok is True
+        assert why == "not-containers-op"
+
+    def test_forward_denies_without_feature_opt_in(self, monkeypatch):
+        monkeypatch.setattr(
+            R, "_containers_cross_uid_allowed",
+            lambda uid, op: (False, "no-opt-in-rule"))
+        bridge = _FakeBridge(next_reply={"ok": True})
+        bus = _FakeBus(names=["org.qdistro.BrowserBridge.1234"])
+        bus.objects[("org.qdistro.BrowserBridge.1234",
+                     R.BRIDGE_OBJ_PATH)] = bridge
+        relay = _StubUserRelay(bus, uid=2000)
+        reply = json.loads(relay.ForwardBrowserBridgeOp(
+            "containers.list", "{}", '{"any": true}'))
+        assert reply["ok"] is False
+        assert reply["error"] == "feature_not_enabled"
+        assert reply["feature"] == "firefox-containers-cross-user"
+        assert bridge.calls == []
 
 
 # --- _friendly_name edge cases --------------------------------------------

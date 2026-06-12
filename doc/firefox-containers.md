@@ -1,8 +1,8 @@
 # Firefox containers (contextual identities)
 
 > **First version 2026-05-16.** Wire shape pinned, own-uid round-trip
-> tested, cross-uid relay (Option B) landed. Remaining open work is
-> the per-feature admin opt-in UI — tracked in the Status table.
+> tested, cross-uid relay (Option B) landed. The v1 cross-user path is
+> gated by an admin-authored opt-in rule exposed in the admin app Rules tab.
 
 Firefox's **Multi-Account Containers** primitive (`browser.contextualIdentities`)
 gives each Firefox profile a set of colour/icon-tagged cookie stores.
@@ -126,8 +126,8 @@ running as **the same uid** as the Firefox process calls
 `containers.*` directly through the session bus
 (`org.qdistro.BrowserBridge.<ppid>.RequestTabs`).
 
-A daemon running as **a different uid** (typically admin daemons, the
-admin panel, recall ingest) reaches the same op via the user-relay's
+A daemon running as **a different uid** (typically admin daemons or the
+admin panel) reaches the same op via the user-relay's
 system-bus surface (`UserRelay.ForwardBrowserBridgeOp`). Three options
 were considered; the implementation choice is recorded in the
 "Decision" subsection below.
@@ -139,6 +139,18 @@ Default: admin cannot list user X's containers. Admin must enable
 "Containers in admin panel" in the per-user-browser toggle UI before
 *any* admin daemon can reach `containers.list` for that
 user-browser.
+
+In v1 the toggle is represented as a broker rules file, visible and
+editable in the admin app's Rules tab:
+
+```yaml
+- name: firefox-containers-cross-user-uid2000
+  decision: allow
+  match:
+    uid: 2000
+    action: qdistro.browser.containers.cross_uid:containers.*
+  rationale: Enable admin cross-user Firefox container relay
+```
 
 When enabled, the routing still has to happen — see B/C below.
 
@@ -180,8 +192,13 @@ identically to bridge-side `ok:false` replies:
 Authorization is the **system-bus peer-uid policy** on
 `org.qdistro.UserRelay.uid<NNNN>` — same model as the existing
 `UserRelay.Forward` for notifications. No new authn surface inside the
-relay. Test coverage: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp`
-(12 cases).
+relay. For `containers.*`, the relay additionally reads the broker ruleset
+and requires an allow rule for
+`qdistro.browser.containers.cross_uid:<op>` and the target uid; missing,
+malformed, or deny rules return `{"ok": false, "error":
+"feature_not_enabled"}` before any bridge is selected. Test coverage:
+`tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` plus
+`TestFirefoxContainersOptInGate`.
 
 Trade-off accepted: the relay turns into a generic browser-bridge
 proxy. The narrow `Forward(kind, payload)` precedent does NOT carry
@@ -213,7 +230,7 @@ the broker layer adds enough operational complexity for write ops
 and left the option open to escalate writes to broker mediation if a
 real abuse vector surfaces. Each user-browser still has to be opted
 into "Containers in admin panel" before any cross-uid call lands;
-that toggle is Option A's gate and stays in place.
+that toggle is Option A's gate and is enforced by `qdistro-user-relay`.
 
 ## Security model
 
@@ -307,13 +324,13 @@ forward-compatible regardless of which routing option above wins:
 | qdfirefox-extension `tabs.open` | Accepts `cookie_store_id` end-to-end. |
 | qdfirefox-extension `cookies.export` | Sends `cookie_store_id`; bridge preserves it in the export payload. |
 | Bridge own-uid round-trip | **Pinned 2026-05-16** by `tests/unit/test_browser_bridge_phase9.py::TestContainersRequest`. The bridge routes `containers.*` through the existing `enqueue_inbound_request` machinery; no per-op handler is required, only the `*.reply` registrations in `DEFAULT_HANDLERS`. |
-| Cross-user relay | **Landed 2026-05-16** as `UserRelay.ForwardBrowserBridgeOp` (Option B). Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` (17 cases). |
+| Cross-user relay | **Landed 2026-05-16**, v1-gated 2026-06-12: `UserRelay.ForwardBrowserBridgeOp` (Option B) requires a broker allow rule for `containers.*`. Tests: `tests/unit/test_user_relay.py::TestForwardBrowserBridgeOp` + `TestFirefoxContainersOptInGate`. |
 | Daemon client helper | **Landed 2026-05-16** as `qdistro_browser_bridge_client.call_bridge` (own-uid) / `call_via_relay` (cross-uid). Tests: `tests/unit/test_browser_bridge_client.py` (23 cases). |
-| First consumer | **Landed 2026-05-16**: `qdistro_recall_admin` (`recall/qdistro_recall_admin.py`) — `list_user_containers` + `list_user_tabs` building blocks, and `annotate_with_live_tabs(rows, uid)` joins historical recall rows with the user's currently-open tabs by exact URL match. Tests: `tests/unit/test_recall_admin.py` (13 cases). |
-| CLI | **Landed 2026-05-16**: `qdistro-recall-admin` (`cli/qdistro_recall_admin_cli.py`) with `containers --uid N`, `tabs --uid N`, and `search <query> --uid N [--silo S]` subcommands. Requires root (reads `/var/lib/qdistro/recall` and calls the system-bus relay). `--uid` keys the live-tab join via the relay; `--silo` is the recall-DB-layout key — they're distinct because the relay keys on uid while recall keys on silo name. `search` annotates each row with `[live: w<window> t<tab>]` and emits `{"ok": true, "rows": [...], "live": {"ok": bool, "error": str}}` in `--json` mode so consumers can programmatically detect a relay failure. Exit codes: 0 success, 1 usage/relay failure (read subcommands), 2 search annotation failed (recall results still printed) / unknown silo / malformed FTS query. Tests: `tests/unit/test_recall_admin_cli.py` (28 cases). |
-| Cross-user admin opt-in | **Not implemented.** Per-feature toggle row in the admin panel still gates whether a cross-uid call is allowed for a given user-browser. UI doesn't exist yet for any Phase-9 feature. |
+| First consumer | Post-v1. The earlier Recall admin consumer is dormant while Recall is cut. |
+| CLI | Post-v1. The earlier `qdistro-recall-admin` path is dormant while Recall is cut. |
+| Cross-user admin opt-in | **Landed 2026-06-12**: Rules tab has a "Firefox containers cross-user opt-in" checkbox keyed by target uid; it saves/deletes the allow rule consumed by the relay. Tests: `tests/unit/test_admin_rules_tab.py`. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
-| Cross-user gate | Per-feature opt-in toggle row in the admin panel — UI doesn't exist yet for any of the Phase-9 features; this adds a "Containers" row. |
+| Cross-user gate | Enforced by `qdistro-user-relay` against broker rules; default-deny when no opt-in rule exists. |
 | Audit | Bridge-side journal logging follows the existing `qdistro-browser-bridge` pattern; consumer-side audit lives in whichever daemon ends up calling it. |
 
 ## Files
