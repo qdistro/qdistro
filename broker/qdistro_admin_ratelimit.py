@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from threading import Lock
+from typing import Callable
 
 
 DEFAULT_LIMIT = 50
@@ -38,7 +39,7 @@ class RateLimiter:
     def __init__(self, *, limit: int = DEFAULT_LIMIT,
                  window_s: float = DEFAULT_WINDOW_S,
                  max_keys: int = DEFAULT_MAX_KEYS,
-                 now: "callable[[], float] | None" = None):
+                 now: "Callable[[], float] | None" = None):
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         if window_s <= 0:

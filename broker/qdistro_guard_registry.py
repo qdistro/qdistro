@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable
+from typing import Any, Callable, Iterable, cast
 
 from qdistro_metadata_schema import RESERVED_GUARDS
 
@@ -460,7 +460,10 @@ def propagate_guards(*input_guard_sets: object) -> frozenset[str]:
         if s is None:
             continue
         try:
-            out.update(g for g in s if isinstance(g, str))
+            # s is typed `object` (callers may pass junk); the try/except is the
+            # real runtime guard against a non-iterable. Cast so mypy accepts
+            # the iteration — a genuine non-iterable still raises TypeError here.
+            out.update(g for g in cast(Iterable[Any], s) if isinstance(g, str))
         except TypeError:
             continue
     return frozenset(out)

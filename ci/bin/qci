@@ -758,11 +758,11 @@ host_ruff_targets() {
 }
 
 # mypy target list. NARROW by design: only the cleanest security-sensitive
-# dirs. broker/ is deferred (22 pre-existing errors, see ci/mypy.ini); add it
-# here once they are fixed.
+# dirs. broker/ joined the gate once its 22 Optional/None-narrowing +
+# assignment-type errors were fixed at the source (02/S7).
 host_mypy_targets() {
     local d
-    for d in cli browser_bridge; do
+    for d in cli browser_bridge broker; do
         [ -d "$QDISTRO_REPO/$d" ] && printf '%s\n' "$QDISTRO_REPO/$d"
     done
 }

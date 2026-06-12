@@ -1633,7 +1633,7 @@ class Broker(dbus.service.Object):
         # timeout is capped at HOOK_CALL_TIMEOUT_S which is 4s on
         # the executor side). Treat errors as "unknown" (fall through).
         try:
-            hook_event = dict(_sanitize_details(details))
+            hook_event: dict[str, Any] = dict(_sanitize_details(details))
             hook_event["caller_uid"] = uid
             hook_event["caller_pid"] = pid
             hook_event["caller_exe"] = exe
@@ -2939,7 +2939,7 @@ class Broker(dbus.service.Object):
         # and we don't want to hold the lock during it.
         if not one_shot and matched_rule is None and cached_row is None:
             try:
-                hook_event = dict(clean_details)
+                hook_event: dict[str, Any] = dict(clean_details)
                 hook_event["caller_uid"] = uid
                 hook_event["caller_pid"] = pid
                 hook_event["caller_exe"] = exe

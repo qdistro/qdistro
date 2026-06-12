@@ -35,7 +35,7 @@ sites.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TypeGuard
 
 from qdistro_metadata_schema import (
     MetadataSchemaError,
@@ -117,7 +117,7 @@ def _valid_digest(digest: Any) -> bool:
     return len(body) >= _DIGEST_MIN_HEX
 
 
-def _is_nonempty_str(value: Any) -> bool:
+def _is_nonempty_str(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and value != ""
 
 

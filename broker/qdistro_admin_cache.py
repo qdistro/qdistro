@@ -181,17 +181,20 @@ def _match_row_argv(row_kind: str, row_value: str, row_argv: str,
         return row_value == exe
     if row_kind in ("argv_exact", "basename", "prefix") and not argv:
         return False
+    # Past the guard above, the argv_exact/basename/prefix branches only run
+    # with a truthy argv (a falsy one already returned False); `argv or []`
+    # keeps mypy happy without changing behaviour.
     if row_kind == "argv_exact":
         if row_value != exe:
             return False
-        return list(argv) == _decode_pattern(row_argv)
+        return list(argv or []) == _decode_pattern(row_argv)
     if row_kind == "basename":
         return row_argv == _argv_basename(argv)
     if row_kind == "prefix":
         prefix = _decode_pattern(row_argv)
         if not prefix:
             return False
-        actual = list(argv)
+        actual = list(argv or [])
         return actual[: len(prefix)] == prefix
     return False
 

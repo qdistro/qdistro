@@ -313,6 +313,17 @@ def _jload(text: Optional[str]) -> frozenset[str]:
     return frozenset(v for v in data if isinstance(v, str))
 
 
+def _require_rowid(cur: sqlite3.Cursor) -> int:
+    """Return the rowid of the row a just-executed INSERT created. sqlite's
+    Cursor.lastrowid is typed Optional[int] (it is None when no INSERT ran);
+    every caller here has just run a single-row INSERT, so a None would be a
+    real invariant violation, not an expected value — raise loudly."""
+    rid = cur.lastrowid
+    if rid is None:
+        raise LineageStoreError("INSERT produced no rowid")
+    return rid
+
+
 @dataclass(frozen=True)
 class Entity:
     """A recorded entity (PROV Entity / enterprise data asset)."""
@@ -666,7 +677,7 @@ class LineageStore:
                            :conflict_classes,:integrity,:status,:facets,:created_at,:seal)""",
                 {**payload, "seal": seal},
             )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def record_activity(self, act: Activity) -> int:
         if act.kind not in ACTIVITY_KINDS:
@@ -706,7 +717,7 @@ class LineageStore:
                     subject=act.aid, fact="activity.verdict", value=act.verdict,
                     asserted_by="broker", authority="broker-derived",
                 )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def end_activity(self, aid: str, verdict: Optional[str] = None,
                      ended_at: Optional[int] = None) -> None:
@@ -746,7 +757,7 @@ class LineageStore:
                 "VALUES (:gid,:kind,:name,:created_at,:seal)",
                 {**payload, "seal": seal},
             )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def record_edge(self, predicate: str, subject: str, obj: str,
                     activity: Optional[str] = None) -> int:
@@ -764,7 +775,7 @@ class LineageStore:
                 "VALUES (:predicate,:subject,:object,:activity,:created_at,:seal)",
                 {**payload, "seal": seal},
             )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def record_assertion(self, *, subject: str, fact: str, value: Any,
                          asserted_by: str, authority: str) -> int:
@@ -790,7 +801,7 @@ class LineageStore:
                 ":created_at,:seal)",
                 {**payload, "seal": seal},
             )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def record_receipt(self, *, entity: str, kind: str,
                        locator: Optional[str] = None, digest: Optional[str] = None,
@@ -814,7 +825,7 @@ class LineageStore:
                 "VALUES (:entity,:kind,:locator,:digest,:payload,:created_at,:seal)",
                 {**row, "seal": seal},
             )
-        return cur.lastrowid
+        return _require_rowid(cur)
 
     def record_mapping(self, *, map_id: str, activity: str, mapping_kind: str,
                        confidence: str, inputs: Iterable[tuple[str, Optional[str]]],
@@ -869,7 +880,7 @@ class LineageStore:
         ).fetchone()
         if row is None:
             return None
-        facets = {}
+        facets: dict[str, Any] = {}
         if row[9]:
             try:
                 facets = json.loads(row[9]) or {}

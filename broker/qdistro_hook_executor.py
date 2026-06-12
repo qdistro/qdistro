@@ -387,8 +387,8 @@ def _start_inotify_watcher(hook_dir: str, loader: HookLoader,
                 # Debounce: sleep briefly, then reload everything.
                 time.sleep(0.2)
                 errs = loader.reload_all()
-                for e in errs:
-                    _log(f"[hook-executor] inotify-reload error: {e}")
+                for err in errs:
+                    _log(f"[hook-executor] inotify-reload error: {err}")
 
     t = threading.Thread(target=_watch, daemon=True, name="hook-inotify")
     t.start()
@@ -423,7 +423,7 @@ def _handle_connection(conn: socket.socket, loader: HookLoader) -> None:
             # Invoke hooks.
             result = loader.call_hooks(action, event)
             if result is None:
-                resp = {"verdict": None}
+                resp: dict[str, Any] = {"verdict": None}
             else:
                 act = result.get("action")
                 if act == "allow":
