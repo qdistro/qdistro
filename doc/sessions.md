@@ -221,6 +221,12 @@ transient `Stopping` / `Deleting` states followed by the resting
 `Stopped` / row-deletion; treat unknown state strings as "transient,
 wait."
 
+The qdshell lock screen consumes the same `ListSilos` rows for the
+non-suppressible network-egress indicator. Active tier-3 rows with
+`egress: null` are shown as legacy host egress, `direct` and `wg:NAME`
+are shown by their policy, and `none` is treated as intentionally dark.
+The indicator refreshes on `SiloChanged` and by a safety-net poll.
+
 Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
 `NotAuthorized`, plus a `Generic` fallback for unexpected
