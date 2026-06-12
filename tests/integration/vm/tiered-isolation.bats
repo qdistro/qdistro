@@ -709,6 +709,22 @@ stage_vm_driver() {
     assert_output_contains "PASS: 0 new denials — qdistro_broker.te 0.3.0 covers the enforcing workload"
 }
 
+@test "phase7-session-manager-enforcing: S6 — qdistro_sessmgr_t lifecycle AVC budget" {
+    # S6 VM half: flip SELinux to enforcing, restart the session manager
+    # under qdistro_sessmgr_t, run the representative s101 lifecycle
+    # workload, and fail on any new qdistro_sessmgr_t AVCs.
+    stage_vm_driver "s63-session-manager-enforcing.sh"
+    vm_run "curl -s -o /tmp/s63.sh http://10.0.2.2:8768/s63-session-manager-enforcing.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
+    if [[ "$output" == *"SKIP:"* ]]; then
+        skip "session-manager enforcing not enabled in this bake (policy/config/transport prereq missing)"
+    fi
+    assert_success
+    assert_output_contains "PASS: SELinux mode now Enforcing"
+    assert_output_contains "PASS: session manager running pid="
+    assert_output_contains "PASS: session lifecycle probe succeeded under enforcing"
+    assert_output_contains "PASS: 0 new denials — qdistro_session_manager policy covers the lifecycle workload"
+}
+
 
 @test "phase7-qsu-argv-scopes: tasks(069/072) — argv-aware scopes round-trip end-to-end" {
     # Closes the qsu argv-aware approval flow: cache backend (task 069)
