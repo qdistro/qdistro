@@ -73,6 +73,14 @@ class _FakeOps:
         # when set to an exception, it raises that (simulates podman missing).
         self.disp_remove_fails = False
         self.disp_remove_raises: BaseException | None = None
+        # token -> list of container names carrying that qdistro_tier2_token
+        # label (for the DisposeByToken resolution tests). A list models the
+        # podman filter result, including the should-never-happen >1 match.
+        self.disp_token_map: dict[str, list[str]] = {}
+        # When set to an exception, disp_containers_by_token raises it
+        # (simulates a podman/runuser lookup failure — must fail closed, never
+        # be read as "already gone").
+        self.disp_token_lookup_raises: BaseException | None = None
         self._egress_init()
 
     # ---- queries ----------------------------------------------------------
@@ -101,6 +109,15 @@ class _FakeOps:
 
     def disp_container_list(self) -> list[str]:
         return list(self.disp_containers)
+
+    def disp_containers_by_token(self, token: str) -> list[str]:
+        if self.disp_token_lookup_raises is not None:
+            raise self.disp_token_lookup_raises
+        # Mirror the real ops: only containers that are ALSO in disp_containers
+        # (i.e. carry qdistro_disposable=1) resolve, so a token mapped to a
+        # non-disposable name returns [] just as the dual label filter would.
+        return [n for n in self.disp_token_map.get(token, [])
+                if n in self.disp_containers]
 
     def disp_container_remove(self, name: str) -> bool:
         if self.disp_remove_raises is not None:
@@ -1680,3 +1697,112 @@ class TestDispose:
         ops.disp_containers = [_GOOD_DISP]
         store = self._store(ops, tmp_path, audit=None)
         assert store.dispose(_GOOD_DISP) is True
+
+
+# A well-formed per-spawn launch token (32 lowercase hex, == the qdwin window
+# instanceId == the container qdistro_tier2_token label).
+_GOOD_TOKEN = "0123456789abcdef0123456789abcdef"
+
+
+class TestDisposeByToken:
+    """dispose_by_token resolves the launch token (window instanceId) to a
+    container and tears it down — the taskbar's join when it holds a token but
+    not the container name."""
+    def _store(self, ops, tmp_path, audit=None):
+        return _SiloStore(ops, config_path=tmp_path / "silos.yaml", audit=audit)
+
+    def test_resolves_token_and_disposes(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_token_map = {_GOOD_TOKEN: [_GOOD_DISP]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        caller = {"uid": 1000, "pid": 7, "exe": "/usr/bin/qs"}
+        assert store.dispose_by_token(_GOOD_TOKEN, caller=caller) is True
+        assert ops.disp_removed == [_GOOD_DISP]
+        assert _GOOD_DISP not in ops.disp_containers
+        # The token->name join is recorded under 'dispose-by-token'...
+        join = [r for r in audit.rows if r["action"] == "dispose-by-token"]
+        assert join and join[-1]["decision"] == "allow"
+        assert _GOOD_DISP in join[-1]["reason"]
+        # ...and the concrete teardown under 'dispose' with the RESOLVED name.
+        teardown = [r for r in audit.rows if r["action"] == "dispose"]
+        assert teardown and teardown[-1]["silo"] == _GOOD_DISP
+        assert teardown[-1]["decision"] == "allow"
+
+    @pytest.mark.parametrize("bad", [
+        "DEADBEEF",                         # uppercase (regex is lowercase)
+        "short",                            # too short (<8 hex)
+        "g0123456789abcdef",                # non-hex char
+        "0123; rm -rf /",                   # injection-ish
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",  # 65 > 64
+        "",
+    ])
+    def test_malformed_token_is_badargument_fail_closed(self, ops, tmp_path, bad):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_token_map = {bad: [_GOOD_DISP]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadArgument):
+            store.dispose_by_token(bad)
+        # Never reached a podman filter or remove.
+        assert ops.disp_removed == []
+        assert audit.rows[-1]["action"] == "dispose-by-token"
+        assert audit.rows[-1]["decision"] == "deny"
+
+    def test_no_match_is_idempotent_success(self, ops, tmp_path):
+        # Token resolves to nothing (already closed/--rm'd/reaped): teardown
+        # request is satisfied -> True, audited allow, no remove attempted.
+        ops.disp_containers = []
+        ops.disp_token_map = {}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        assert store.dispose_by_token(_GOOD_TOKEN) is True
+        assert ops.disp_removed == []
+        row = audit.rows[-1]
+        assert row["action"] == "dispose-by-token"
+        assert row["decision"] == "allow"
+
+    def test_ambiguous_match_is_badstate_no_removal(self, ops, tmp_path):
+        # >1 live container for one token must never happen; if it does, refuse
+        # rather than guess which to remove.
+        other = "disp-pdf-20260612-151900"
+        ops.disp_containers = [_GOOD_DISP, other]
+        ops.disp_token_map = {_GOOD_TOKEN: [_GOOD_DISP, other]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadState):
+            store.dispose_by_token(_GOOD_TOKEN)
+        assert ops.disp_removed == []
+        assert audit.rows[-1]["decision"] == "error"
+
+    def test_token_for_nondisposable_label_resolves_to_nothing(self, ops, tmp_path):
+        # Defence in depth: a token whose only match is an UNLABELLED (non-
+        # disposable) container resolves to [] (the dual label filter), so the
+        # teardown is a no-op success and never removes the admin container.
+        ops.disp_containers = []                       # carries no disp label
+        ops.disp_token_map = {_GOOD_TOKEN: ["qdistro-silo-browser"]}
+        store = self._store(ops, tmp_path, audit=_RecordingAudit())
+        assert store.dispose_by_token(_GOOD_TOKEN) is True
+        assert ops.disp_removed == []
+
+    def test_remove_oserror_maps_to_badstate(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_token_map = {_GOOD_TOKEN: [_GOOD_DISP]}
+        ops.disp_remove_raises = FileNotFoundError("podman")
+        store = self._store(ops, tmp_path, audit=_RecordingAudit())
+        with pytest.raises(BadState):
+            store.dispose_by_token(_GOOD_TOKEN)
+
+    def test_lookup_failure_fails_closed_not_already_gone(self, ops, tmp_path):
+        # A podman/runuser lookup failure must NOT be read as "already gone"
+        # (that would fail OPEN: report a live container as torn down). It is a
+        # BadState, audited error, with no removal attempted.
+        ops.disp_token_lookup_raises = OSError("podman storage locked")
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadState):
+            store.dispose_by_token(_GOOD_TOKEN)
+        assert ops.disp_removed == []
+        row = audit.rows[-1]
+        assert row["action"] == "dispose-by-token"
+        assert row["decision"] == "error"

@@ -66,6 +66,20 @@ def test_secctx_appid_rejects_bad_token():
         disp.disposable_secctx_appid("xyz")  # not hex / too short
 
 
+def test_is_disposable_token():
+    # Accepts a well-formed per-spawn launch token (8..64 lowercase hex).
+    assert disp.is_disposable_token("0123456789abcdef0123456789abcdef")
+    assert disp.is_disposable_token("deadbeef")
+    # Rejects: uppercase, too short, non-hex, oversized, injection-ish, non-str.
+    assert not disp.is_disposable_token("DEADBEEF")
+    assert not disp.is_disposable_token("short")
+    assert not disp.is_disposable_token("g0123456789abcdef")
+    assert not disp.is_disposable_token("a" * 65)
+    assert not disp.is_disposable_token("0123; rm -rf /")
+    assert not disp.is_disposable_token("")
+    assert not disp.is_disposable_token(None)  # type: ignore[arg-type]
+
+
 def test_dispose_action():
     assert disp.dispose_action("pdf") == "qdistro.dispose.spawn:pdf"
     with pytest.raises(disp.DisposableError):

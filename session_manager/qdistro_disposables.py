@@ -92,6 +92,15 @@ def is_disposable_appid(app_id: str) -> bool:
     return bool(_TOKEN_RE.fullmatch(app_id[len(SECCTX_APPID_PREFIX):]))
 
 
+def is_disposable_token(token: str) -> bool:
+    """True iff ``token`` is a well-formed per-spawn launch token (the random
+    hex in ``qdistro_tier2_token`` / qdwin ``instanceId``). The dispose-by-token
+    teardown surface validates the caller-supplied token with this BEFORE it
+    ever reaches a podman label filter, so a malformed/oversized/injection-ish
+    value is rejected at the door (fail-closed), never passed downstream."""
+    return bool(isinstance(token, str) and _TOKEN_RE.fullmatch(token))
+
+
 def dispose_action(workload: str) -> str:
     """The broker spawn-gate action for a disposable workload."""
     validate_workload(workload)

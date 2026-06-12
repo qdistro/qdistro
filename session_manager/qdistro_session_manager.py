@@ -1038,6 +1038,35 @@ class _SystemOps:
             return []
         return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
 
+    def disp_containers_by_token(self, token: str) -> list[str]:
+        """Names of disposable containers carrying the per-spawn
+        ``qdistro_tier2_token=<token>`` label. BOTH labels are required in the
+        filter (qdistro_disposable=1 AND the token) so this can only ever
+        resolve one of OUR disposables — an admin/native container that merely
+        reuses the token value as a label is excluded by the disposable label,
+        exactly as the sweep is. The caller (dispose_by_token) has already
+        validated the token shape, but a list (not a bare name) is returned so
+        the caller can fail closed on the should-never-happen >1 match.
+
+        Raises OSError if the lookup ITSELF fails (podman missing, runuser
+        failure, rootless-storage error). This is deliberately NOT folded into
+        an empty list: for an explicit teardown surface, "the lookup failed"
+        must never be read as "no such disposable / already gone" — that would
+        fail OPEN (report a live container as torn down). Mirrors
+        ``container_exists``, which separates rc==1 (gone) from a failed check."""
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "ps", "-a",
+             "--filter", "label=qdistro_disposable=1",
+             "--filter", f"label=qdistro_tier2_token={token}",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise OSError(
+                f"podman ps by-token failed (rc={proc.returncode}): "
+                f"{proc.stderr.strip()}")
+        return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
     def disp_container_remove(self, name: str) -> bool:
         """Force-remove a disposable container in admin's rootless podman.
         Returns True on success (or already-gone)."""
@@ -2358,6 +2387,58 @@ class _SiloStore:
         log.info("dispose %r -> %s", name, "removed" if ok else "FAILED")
         return ok
 
+    def dispose_by_token(self, token: str,
+                         caller: dict[str, Any] | None = None) -> bool:
+        """Tear down a disposable identified by its per-spawn launch token
+        (the qdwin window ``instanceId`` == the container ``qdistro_tier2_token``
+        label). This is the join the taskbar 'Dispose' action uses: a window
+        exposes its instanceId but not the container name, so it asks the
+        session manager to resolve token -> container -> teardown.
+
+        Fail-closed at every step: a malformed token is a BadArgument (it
+        never reaches a podman filter); an ambiguous match (>1 live container
+        for one token — a should-never-happen) is a BadState rather than a
+        guess at which to remove; the resolved name is re-validated by
+        ``dispose`` before any rm. A token that resolves to NOTHING means the
+        disposable is already gone (closed/--rm'd/reaped) — that is success
+        for a teardown request, so this returns True idempotently and audits
+        it. A FAILED lookup (podman/runuser error) is NOT 'already gone': it is
+        a BadState, so the surface never fails open. Every outcome is audited
+        under action ``dispose-by-token`` (the concrete removal is additionally
+        audited under ``dispose`` with the resolved container name)."""
+        if not _disp.is_disposable_token(token):
+            self._audit_record("dispose-by-token", str(token), decision="deny",
+                               reason="malformed launch token", caller=caller)
+            raise BadArgument(f"malformed disposable token: {token!r}")
+        try:
+            names = self._ops.disp_containers_by_token(token)
+        except OSError as e:
+            self._audit_record("dispose-by-token", str(token), decision="error",
+                               reason=f"lookup errored: {e}", caller=caller)
+            raise BadState(f"dispose-by-token {token!r} lookup failed: {e}")
+        if len(names) > 1:
+            self._audit_record("dispose-by-token", str(token), decision="error",
+                               reason=f"ambiguous: {len(names)} containers",
+                               caller=caller)
+            raise BadState(
+                f"token {token!r} matched {len(names)} containers; refusing")
+        if not names:
+            # Already gone: nothing to remove. Idempotent success for a
+            # teardown request (matches dispose()'s already-gone semantics).
+            self._audit_record("dispose-by-token", str(token), decision="allow",
+                               reason="no live disposable (already gone)",
+                               caller=caller)
+            log.info("dispose_by_token %r -> already gone", token)
+            return True
+        # Record the token->container join, then delegate to dispose(name): it
+        # re-validates the resolved name is a well-formed disp-* (defence in
+        # depth) and audits the concrete removal under action 'dispose'. The
+        # two rows together let a forensic reader correlate a window's
+        # instanceId (== the token) with the container that was removed.
+        self._audit_record("dispose-by-token", str(token), decision="allow",
+                           reason=f"resolved to {names[0]}", caller=caller)
+        return self.dispose(names[0], caller=caller)
+
     def autostart_pass(self) -> list[str]:
         """Called once at daemon startup. For each silo whose
         persisted state is Active OR whose autostart flag is true,
@@ -2860,6 +2941,29 @@ if dbus is not None:
             try:
                 ok = bool(self.store.dispose(str(name), caller=caller))
                 log.info("Dispose name=%s -> %s", name, ok)
+                return ok
+            except SessionError as e:
+                raise _to_dbus_exception(e)
+
+        @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def DisposeByToken(self, token, sender=None, conn=None):
+            """Tear down a disposable by its per-spawn launch token — the join
+            the taskbar uses when it holds a window's ``instanceId`` but not the
+            container name (instanceId == the container's qdistro_tier2_token
+            label). Admin-only and fail-closed: the store rejects a malformed
+            token, refuses an ambiguous match, re-validates the resolved name,
+            and treats a no-match as already-gone. Returns True if it is gone."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("dispose-by-token", token, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                ok = bool(self.store.dispose_by_token(str(token), caller=caller))
+                log.info("DisposeByToken token=%s -> %s", token, ok)
                 return ok
             except SessionError as e:
                 raise _to_dbus_exception(e)
