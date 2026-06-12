@@ -655,7 +655,9 @@ Historical fix-plan details were pruned from the public repo. Summary:
   `scripting.executeScript`, pwd-fill is a static content script) were dropped,
   and a `tests/manifest.test.js` closed-set/absent/host-pin pins the minimal
   surface against silent regrowth. The bundled `browser_bridge/extension` copy
-  still carries the two and is tracked as a follow-up.
+  is now aligned too: its manifests also drop `activeTab` and `webNavigation`,
+  and `browser_bridge/extension/tests/manifest.permissions.test.js` pins the
+  absent permissions, host grants, and empty optional-permission buckets.
 - **P0-6 — deferred to release-engineering.** CRX signing key custody,
   `update.xml` hosting, and the Windows AD/Azure-AD enrollment requirement are
   distribution concerns, not bridge-security defects; they are tracked in

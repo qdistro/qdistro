@@ -136,10 +136,11 @@ except Exception:  # noqa: BLE001 — fail closed if readers are unavailable
 # daemons carried an independent full-matrix default). The bridge keeps only
 # its env-override policy in ``_resolve_allowlist`` below and delegates the
 # baseline + opt-in resolution to ``resolve_parent_exes``.
-from qdistro_browser_allowlist import (  # noqa: E402
-    ALLOWLIST_CONFIG_PATH,
-    resolve_parent_exes,
-)
+import qdistro_browser_allowlist as _browser_allowlist  # noqa: E402
+
+ALLOWLIST_CONFIG_PATH = _browser_allowlist.ALLOWLIST_CONFIG_PATH
+DEFAULT_ALLOWED_PARENT_EXES = _browser_allowlist.DEFAULT_ALLOWED_PARENT_EXES
+resolve_parent_exes = _browser_allowlist.resolve_parent_exes
 
 # ---- length-prefix framing ---------------------------------------
 
