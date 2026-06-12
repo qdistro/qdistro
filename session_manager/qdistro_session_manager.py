@@ -45,7 +45,11 @@ from typing import Any, Iterable
 # sequence. Import-cycle-free (it imports nothing from this module).
 import qdistro_silo_egress as _egress
 from qdistro_silo_egress import (
-    EgressBackend, EgressPolicy, KeyUnavailable, TunnelConfig, validate_egress,
+    EgressBackend,
+    EgressPolicy,
+    KeyUnavailable,
+    TunnelConfig,
+    validate_egress,
 )
 
 BUS_NAME = "org.qdistro.SessionManager1"
@@ -2400,8 +2404,8 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
 
 try:
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 except ImportError:  # pragma: no cover - exercised on hosts without dbus
     dbus = None  # type: ignore[assignment]

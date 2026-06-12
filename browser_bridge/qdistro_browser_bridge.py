@@ -1658,7 +1658,7 @@ def _inbound_caller_authorized(conn, sender: str) -> tuple[bool, str]:
     if not sender:
         return False, "no-sender"
     try:
-        from jeepney import new_method_call, MessageType, DBusAddress
+        from jeepney import DBusAddress, MessageType, new_method_call
     except ImportError:
         return False, "jeepney-missing"
 
@@ -1716,7 +1716,7 @@ def inbound_dbus_serve(ppid: int, out_stream,
       ``RequestTabs(s op, s args_json) -> s reply_json``
     """
     try:
-        from jeepney import (MessageType, new_method_return, new_error)
+        from jeepney import MessageType, new_error, new_method_return
         from jeepney.bus_messages import message_bus
         from jeepney.io.blocking import open_dbus_connection
     except ImportError:

@@ -60,8 +60,9 @@ ignore = [
     # qdistro + the 6 sibling repos): W291 (4), F541 (5), F601 (1, a real
     # repeated-dict-key bug in qterminator config), E401 (1), W293 (600,
     # blank-line whitespace — 591 plain + 9 docstring-internal, all
-    # whitespace-only). The gate now blocks new occurrences of these.
-    "I001",  # unsorted-imports                  (~490 hits)
+    # whitespace-only); I001 (506, unsorted-imports — `ruff --fix` import-sort
+    # sweep, mechanical, no behaviour change; verified py_compile + targeted
+    # suites green per repo). The gate now blocks new occurrences of these.
     "F401",  # unused-import                     (~300 hits)
     "F841",  # unused-variable                   (~64 hits)
     "F811",  # redefined-while-unused            (~23 hits)

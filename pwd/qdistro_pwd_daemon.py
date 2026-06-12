@@ -52,38 +52,77 @@ import urllib.parse
 from typing import Any
 
 import dbus
-import dbus.service
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
-
-from qdistro_pwd_vault import (  # type: ignore[import-not-found]
-    DEFAULT_VAULT_DIR, VAULT_FORMAT_VERSION_TPM,
-    VaultBadPassword, VaultDuplicate, VaultIntegrityError, VaultNotFound,
-    add_item, create_vault, create_vault_tpm, delete_item, get_item_payload,
-    get_item_pins, get_tpm_seal_meta, list_items, list_vaults, rotate_vault,
-    rotate_vault_tpm, unlock_vault, unlock_vault_tpm, vault_version,
+from qdistro_pwd_audit import PwdAuditLog  # type: ignore[import-not-found]
+from qdistro_pwd_fprint import (  # type: ignore[import-not-found]
+    admin_username as fprint_admin_username,
+)
+from qdistro_pwd_fprint import (
+    is_fprintd_available as fprint_is_available,
+)
+from qdistro_pwd_fprint import (
+    verify as fprint_verify,
 )
 from qdistro_pwd_identity import (  # type: ignore[import-not-found]
-    snapshot_caller, pin_match,
-)
-from qdistro_pwd_audit import PwdAuditLog  # type: ignore[import-not-found]
-from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-    TpmAuthFailed, TpmBackendError, TpmUnavailable,
-    configured_pcrs, lookup_backend, select_backend,
-)
-from qdistro_pwd_polkit import (  # type: ignore[import-not-found]
-    PolkitDenied, PolkitNoAgent, check_unlock as polkit_check_unlock,
+    pin_match,
+    snapshot_caller,
 )
 from qdistro_pwd_pinstash import (  # type: ignore[import-not-found]
     DEFAULT_STASH_PATH as PORTAL_PIN_STASH_PATH,
-    MAX_PIN_BYTES as PORTAL_PIN_MAX_BYTES,
-    PinStashError, stash_meta as portal_pin_meta,
-    stash_pin as portal_pin_stash, unseal_pin as portal_pin_unseal,
 )
-from qdistro_pwd_fprint import (  # type: ignore[import-not-found]
-    admin_username as fprint_admin_username,
-    is_fprintd_available as fprint_is_available,
-    verify as fprint_verify,
+from qdistro_pwd_pinstash import (
+    MAX_PIN_BYTES as PORTAL_PIN_MAX_BYTES,
+)
+from qdistro_pwd_pinstash import (
+    PinStashError,
+)
+from qdistro_pwd_pinstash import (
+    stash_meta as portal_pin_meta,
+)
+from qdistro_pwd_pinstash import (
+    stash_pin as portal_pin_stash,
+)
+from qdistro_pwd_pinstash import (
+    unseal_pin as portal_pin_unseal,
+)
+from qdistro_pwd_polkit import (  # type: ignore[import-not-found]
+    PolkitDenied,
+    PolkitNoAgent,
+)
+from qdistro_pwd_polkit import (
+    check_unlock as polkit_check_unlock,
+)
+from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
+    TpmAuthFailed,
+    TpmBackendError,
+    TpmUnavailable,
+    configured_pcrs,
+    lookup_backend,
+    select_backend,
+)
+from qdistro_pwd_vault import (  # type: ignore[import-not-found]
+    DEFAULT_VAULT_DIR,
+    VAULT_FORMAT_VERSION_TPM,
+    VaultBadPassword,
+    VaultDuplicate,
+    VaultIntegrityError,
+    VaultNotFound,
+    add_item,
+    create_vault,
+    create_vault_tpm,
+    delete_item,
+    get_item_payload,
+    get_item_pins,
+    get_tpm_seal_meta,
+    list_items,
+    list_vaults,
+    rotate_vault,
+    rotate_vault_tpm,
+    unlock_vault,
+    unlock_vault_tpm,
+    vault_version,
 )
 
 BUS_NAME = "org.qdistro.Pwd1"

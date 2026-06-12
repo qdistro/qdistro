@@ -48,8 +48,8 @@ from pathlib import Path
 from typing import Any
 
 import dbus
-import dbus.service
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 # Shared /proc identity readers (anti-PID-reuse starttime anchor, exe

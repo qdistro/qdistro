@@ -49,7 +49,10 @@ import sys
 from typing import Any, Callable
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
-    browser_label, caller_advisory, daemon_forward_allowed, read_proc_ppid,
+    browser_label,
+    caller_advisory,
+    daemon_forward_allowed,
+    read_proc_ppid,
     username_for_uid,
 )
 
@@ -311,8 +314,8 @@ def _jeepney_bridge_call(bridge_bus_name: str, op: str,
 
 def _main() -> int:  # pragma: no cover - requires a live session bus
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

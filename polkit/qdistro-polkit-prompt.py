@@ -58,8 +58,15 @@ def _qt_prompt(action: str, message: str) -> str | None:
     """Open a small modal Qt dialog and return the entered password,
     or None on cancel / Escape / window-close."""
     from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
-                                 QFormLayout, QLabel, QLineEdit, QVBoxLayout)
+    from PyQt6.QtWidgets import (
+        QApplication,
+        QDialog,
+        QDialogButtonBox,
+        QFormLayout,
+        QLabel,
+        QLineEdit,
+        QVBoxLayout,
+    )
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
     dlg = QDialog()
     dlg.setWindowTitle("Authentication Required")

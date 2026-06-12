@@ -32,12 +32,12 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Callable
 
+from cron_parser import CronExpr, CronParseError  # type: ignore[import-not-found]
 from workflow_schema import (  # type: ignore[import-not-found]
     TriggerDef,
     TriggerType,
     WorkflowDef,
 )
-from cron_parser import CronExpr, CronParseError  # type: ignore[import-not-found]
 
 logger = logging.getLogger("qdistro.workflow.triggers")
 

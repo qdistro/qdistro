@@ -37,7 +37,6 @@ from typing import Any
 
 import dbus
 
-
 POLKIT_BUS = "org.freedesktop.PolicyKit1"
 POLKIT_PATH = "/org/freedesktop/PolicyKit1/Authority"
 POLKIT_IFC = "org.freedesktop.PolicyKit1.Authority"

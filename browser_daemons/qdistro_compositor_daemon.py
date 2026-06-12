@@ -187,8 +187,8 @@ def handle_release(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
 
 def _main() -> int:  # pragma: no cover - requires a live session bus + logind
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

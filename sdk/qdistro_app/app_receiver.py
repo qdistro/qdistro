@@ -35,8 +35,8 @@ from typing import Callable, Iterable
 from . import (
     APP1_IFACE,
     APP1_OBJ_PATH,
-    AppReceiver,
     DEFAULT_KIND,
+    AppReceiver,
     list_receivers,
     send_to,
 )

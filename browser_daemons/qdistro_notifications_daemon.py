@@ -49,7 +49,8 @@ import sys
 from typing import Any, Callable
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
-    browser_bridge_allowed, username_for_uid,
+    browser_bridge_allowed,
+    username_for_uid,
 )
 
 BUS_NAME = "org.qdistro.Notifications"
@@ -194,8 +195,8 @@ def handle_show(req: dict[str, Any], *, caller_uid: int, caller_pid: int,
 
 def _main() -> int:  # pragma: no cover - requires a live session bus
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

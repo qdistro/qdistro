@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-import struct
 import socket
+import struct
 from typing import Any
 
 # Match the broker's bound to keep memory consumption bounded.

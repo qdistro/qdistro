@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 
+
 # Engine import — try installed path first, fall back to in-tree.
 def _load_eng():
     try:

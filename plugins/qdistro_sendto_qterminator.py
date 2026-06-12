@@ -43,12 +43,10 @@ except Exception as e:  # pragma: no cover - defensive
     _QDISTRO_OK = False
     _IMPORT_ERR = f"{type(e).__name__}: {e}"
 
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QCursor
 from PyQt6.QtWidgets import QMenu, QMessageBox
-
 from qterminator.plugin import MenuProvider
-
 
 SERVICE_FMT = "org.qdistro.Qterminator.uid{uid}"
 

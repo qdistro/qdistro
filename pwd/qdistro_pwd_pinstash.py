@@ -37,10 +37,12 @@ import time
 from typing import Any, Callable
 
 from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-    TpmAuthFailed, TpmBackend, TpmBackendError, TpmUnavailable,
+    TpmAuthFailed,
+    TpmBackend,
+    TpmBackendError,
+    TpmUnavailable,
     configured_pcrs,
 )
-
 
 PIN_STASH_FORMAT_VERSION = 1
 # Lives under /var/lib/qdistro/vaults/ because the daemon's qdistro-pwd

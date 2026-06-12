@@ -37,7 +37,8 @@ import sys
 from typing import Any, Callable
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
-    daemon_forward_allowed, username_for_uid,
+    daemon_forward_allowed,
+    username_for_uid,
 )
 
 BUS_NAME = "org.qdistro.Downloads"
@@ -228,8 +229,8 @@ def _default_runner(argv: list[str], uid: int,
 
 def _main() -> int:  # pragma: no cover - requires a live session bus
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

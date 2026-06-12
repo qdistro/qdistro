@@ -37,6 +37,7 @@ import os
 import sys
 import time
 
+
 # Lazy engine import — mirrors qdistro_recall_cli's resolution so
 # tests can drop a fake on sys.path.
 def _load_engine():

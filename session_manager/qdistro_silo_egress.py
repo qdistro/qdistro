@@ -41,8 +41,8 @@ depth: it catches any silo-uid process that was launched **outside** the netns
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re as _re
+from dataclasses import dataclass
 
 # uid range mirrors qdistro_session_manager.SILO_UID_MIN/MAX; duplicated as a
 # module-local constant so this stays import-cycle-free.

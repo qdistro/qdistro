@@ -116,7 +116,6 @@ import subprocess
 import tempfile
 from typing import Any, Protocol
 
-
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -546,9 +545,9 @@ class MockBackend:
         return out
 
     def unseal(self, blob: dict[str, Any], auth_pin: bytes) -> bytes:
+        from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-        from cryptography.exceptions import InvalidTag
         salt = _b64d(blob["salt"])
         nonce = _b64d(blob["nonce"])
         ct = _b64d(blob["ciphertext"])

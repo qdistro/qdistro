@@ -24,7 +24,6 @@ from collections import deque
 from threading import Lock
 from typing import Callable
 
-
 DEFAULT_LIMIT = 50
 DEFAULT_WINDOW_S = 1.0
 # Per-process cap on distinct (uid, action) keys tracked. A hostile

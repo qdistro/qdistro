@@ -68,8 +68,8 @@ from __future__ import annotations
 
 import re
 import sys
-from urllib.parse import quote
 from typing import Any, Callable
+from urllib.parse import quote
 
 import qdistro_proc_identity as pi  # type: ignore[import-not-found]
 import qdistro_resolver as resolver_mod  # type: ignore[import-not-found]
@@ -399,8 +399,8 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
     import signal
 
     import dbus
-    import dbus.service
     import dbus.mainloop.glib
+    import dbus.service
     from gi.repository import GLib
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)

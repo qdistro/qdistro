@@ -57,8 +57,8 @@ import signal
 import sys
 
 import dbus
-import dbus.service
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 PORTAL_BUS_NAME = "org.qdistro.PortalSecret"

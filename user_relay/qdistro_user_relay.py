@@ -25,8 +25,8 @@ import sys
 from pathlib import Path
 
 import dbus
-import dbus.service
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 BUS_NAME = "org.qdistro.UserRelay"

@@ -14,9 +14,9 @@ Root-only (writes to /var/lib/qdistro/...).
 from __future__ import annotations
 
 import argparse
-import stat
 import os
 import sqlite3
+import stat
 import sys
 import time
 

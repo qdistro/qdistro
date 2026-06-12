@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from qdistro_silo_egress import EgressPolicy, EgressError
+from qdistro_silo_egress import EgressError, EgressPolicy
 
 # Base subnet block for per-silo L3 nets (matches Probe 2's 10.10.x.0/24).
 _SUBNET_PREFIX = "10.10"

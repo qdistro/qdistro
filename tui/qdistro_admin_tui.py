@@ -17,13 +17,6 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from rich.text import Text  # noqa: E402
-from textual.app import App, ComposeResult  # noqa: E402
-from textual.binding import Binding  # noqa: E402
-from textual.containers import Horizontal  # noqa: E402
-from textual.screen import ModalScreen  # noqa: E402
-from textual.widgets import DataTable, Footer, Header, Static  # noqa: E402
-
 from broker_client import (  # noqa: E402
     BrokerClient,
     DBusBrokerClient,
@@ -31,7 +24,13 @@ from broker_client import (  # noqa: E402
     broker_error_label,
     log_broker_error,
 )
+from rich.text import Text  # noqa: E402
 from silo_colors import chip_for_uid  # noqa: E402
+from textual.app import App, ComposeResult  # noqa: E402
+from textual.binding import Binding  # noqa: E402
+from textual.containers import Horizontal  # noqa: E402
+from textual.screen import ModalScreen  # noqa: E402
+from textual.widgets import DataTable, Footer, Header, Static  # noqa: E402
 
 # Same vocabulary as the GUI / broker. Dict for O(1) label lookup that
 # can't raise StopIteration if a stale key sneaks in.

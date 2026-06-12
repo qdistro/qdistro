@@ -291,7 +291,9 @@ def unlock_vault_tpm(vault_dir: str, name: str, pin: bytes,
             f"{exc}") from exc
     # Import lazily to keep the v1 path decoupled from the TPM module.
     from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-        TpmAuthFailed, TpmBackendError, TpmUnavailable,
+        TpmAuthFailed,
+        TpmBackendError,
+        TpmUnavailable,
     )
     try:
         master_key = backend.unseal(blob, pin)
@@ -397,7 +399,9 @@ def rotate_vault_tpm(vault_dir: str, name: str,
             f"vault {name!r} sealed by backend {old_backend_name!r}: "
             f"{exc}") from exc
     from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-        TpmAuthFailed, TpmBackendError, TpmUnavailable,
+        TpmAuthFailed,
+        TpmBackendError,
+        TpmUnavailable,
     )
     try:
         master_key = old_backend.unseal(old_blob, old_pin)

@@ -30,7 +30,6 @@ import os
 import socket
 import sys
 
-
 SOCKET_PATH = "/run/qdistro-root-exec/sock"
 
 

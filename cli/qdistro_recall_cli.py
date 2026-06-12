@@ -20,6 +20,7 @@ import os
 import sys
 import time
 
+
 # Engine import mirrors qdistro_app.recall — try installed path
 # first, fall back to in-tree.
 def _load_engine():

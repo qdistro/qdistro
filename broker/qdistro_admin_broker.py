@@ -26,17 +26,16 @@ import time
 from typing import Any
 
 import dbus
-import dbus.service
 import dbus.mainloop.glib
-from gi.repository import GLib, Gio
-
-from qdistro_admin_cache import ApprovalCache  # type: ignore[import-not-found]
+import dbus.service
+import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+from gi.repository import Gio, GLib
 from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
+from qdistro_admin_cache import ApprovalCache  # type: ignore[import-not-found]
 from qdistro_admin_ratelimit import RateLimiter  # type: ignore[import-not-found]
 from qdistro_admin_rules import RulesEngine  # type: ignore[import-not-found]
 from qdistro_audisp_parser import is_qdistro_subj_type  # type: ignore[import-not-found]
 from qdistro_hook_client import HookClient  # type: ignore[import-not-found]
-import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
 from qdistro_launch_record import LaunchRecordStore  # type: ignore[import-not-found]
 from qdistro_resolver import resolve_subject  # type: ignore[import-not-found]
 
@@ -958,9 +957,9 @@ class Broker(dbus.service.Object):
                 return
             if wf_dir not in sys.path:
                 sys.path.insert(0, wf_dir)
-            from workflow_engine import WorkflowEngine
             from audit_logger import WorkflowAuditLogger
             from pwd_secret_source import PwdSecretSource
+            from workflow_engine import WorkflowEngine
             wf_audit = WorkflowAuditLogger(broker_audit=self.audit)
             # Zero-coordination git-signing relay (OPT-IN, off by default).
             # When QDISTRO_SIGN_AGENT_RELAY names a fixed per-user agent
@@ -3473,8 +3472,8 @@ class Broker(dbus.service.Object):
                 name=BUS_NAME + ".AccessDenied",
             )
         import re
-        import tempfile
         import shutil
+        import tempfile
         if not re.fullmatch(r"[A-Za-z0-9_-]+\.yaml", filename):
             raise dbus.DBusException(
                 f"SaveRule: filename {filename!r} must match "

@@ -22,19 +22,49 @@ from datetime import datetime
 import dbus
 import dbus.mainloop.glib
 import dbus.service
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal, QObject, QTimer
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
-    QStandardItem, QStandardItemModel,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
-    QMainWindow, QMessageBox, QProgressDialog, QPushButton, QRadioButton,
-    QSpinBox, QSplitter, QStackedWidget, QStyle, QTableView, QTabWidget,
-    QTextEdit, QVBoxLayout, QWidget,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QRadioButton,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QStyle,
+    QSystemTrayIcon,
+    QTableView,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
