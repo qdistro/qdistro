@@ -304,9 +304,49 @@ def status_counts(rows: list[dict[str, str]]) -> dict[str, int]:
 # Notes substrings that mark a skip as a *dependency-missing* skip rather than
 # an expected-environment skip. These are called out explicitly so a
 # dependency gap can't hide behind a green-looking "mostly skipped" run.
+#
+# Anchored to the runners' ACTUAL dependency-missing vocabulary, taken from the
+# live skip-emitting sites (qci gate, helpers.bash, the vm probes): "<tool> not
+# installed", "missing shellcheck/bats", "optional tool missing", "no module
+# named", "<file> not found", "dbus-send absent", "dbus-python not importable",
+# "python3 needed for scan", "not configured".
+#
+# The earlier broad terms (`could not` / `cannot ` / `unavailable` / `not set`)
+# were dropped, AND bare `not available` is deliberately NOT a marker: live
+# EXPECTED-ENVIRONMENT skips use exactly those phrasings — "could not connect to
+# display", "cannot acquire wl_seat", "wl_seat unavailable", "DISPLAY not set",
+# "legacy qdshell ctrl-socket not available", "nested KVM not available in VM" —
+# so matching them mislabelled benign env skips as dependency gaps. `missing` is
+# matched only adjacent to a dependency noun (either order) so a content skip
+# like "missing headings" is not caught. Test: tests/unit/test_ci_report.py.
+_DEP_NOUN = (r"dep|dependenc|tool|binar|program|command|executable|module|"
+             r"package|interpreter|file|header|library|runtime")
+# Known external tools the gates name directly in "missing <tool>" /
+# "<tool> not installed" skips. Bare tool names are needed only for the
+# "missing <tool>" form (e.g. "missing shellcheck/bats"); the name-agnostic
+# markers below ("not installed", "absent", "not importable") cover the rest.
+_DEP_TOOL = (r"shellcheck|bats|node|npm|ruff|mypy|zola|python3?|pip|"
+             r"dbus-send|dbus-python|systemctl|systemd-run|busctl|jq|cmake|"
+             r"meson|ninja|virsh|podman|qemu-img|nft|"
+             # SELinux probe tooling (used with "<tool> absent")
+             r"semodule|sesearch|audit2allow|ausearch")
 _DEP_MISSING_RE = re.compile(
-    r"(missing|not installed|not available|no module named|not configured|"
-    r"unavailable|not set|could not|cannot )",
+    r"("
+    r"not installed"
+    r"|not importable"
+    r"|not configured"
+    r"|no module named"
+    r"|not found"
+    r"|needed (?:for|by)\b"
+    rf"|missing (?:{_DEP_NOUN}|{_DEP_TOOL})"
+    # "<tool|noun> [is/are] missing|absent". Both `missing` and `absent` are
+    # scoped to a tool/dep noun (NOT bare): live env/state skips also say
+    # "absent" ("$IMAGE absent", "renderD128 absent", "tier-5 base disk
+    # absent"), so a bare match would re-flag benign rows. The leading \b stops
+    # a noun stem matching mid-word ("profile absent" must not match via
+    # "file").
+    rf"|\b(?:{_DEP_NOUN}|{_DEP_TOOL})s? (?:is |are )?(?:missing|absent)\b"
+    r")",
     re.IGNORECASE,
 )
 
