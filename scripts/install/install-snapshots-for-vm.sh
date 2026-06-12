@@ -27,6 +27,18 @@ DEST_LIB_QDISTRO=/usr/libexec/qdistro
 DEST_BIN=/usr/local/bin
 DEST_SYSD=/etc/systemd/system
 
+# The signed-manifest backup CLI encrypts blobs via `rage` ($QDISTRO_RAGE,
+# default "rage"). rage-encryption (Rust age impl) provides /usr/bin/rage +
+# rage-keygen. install-deps.sh bakes it into the image; install it here too so
+# a freshly bootstrapped VM (cloned from a pre-rage bake) still has the backup
+# encryptor present. Best-effort: a network hiccup here is surfaced loudly by
+# the backup-btrfs-e2e.bats setup, not silently swallowed by skipping the lane.
+if ! command -v rage >/dev/null 2>&1; then
+    zypper -n --no-gpg-checks install rage-encryption >/dev/null 2>&1 \
+        || echo "[install-snapshots] WARN: rage-encryption install failed; " \
+                "backups cannot encrypt until 'rage' is present" >&2
+fi
+
 install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_BIN" "$DEST_SYSD"
 
 install -m 0644 "$SRC/qdistro_snapshots.py"       "$DEST_LIB_QDISTRO/"

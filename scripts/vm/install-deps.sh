@@ -38,6 +38,12 @@ QDISTRO_PKGS=(
   python313-jeepney
   python313-PyYAML
   python313-cryptography
+  # rage (Rust age impl): the backup CLI (snapshots/qdistro_backup_cli.py)
+  # encrypts every blob through `rage -e | ... | rage -d` ($QDISTRO_RAGE,
+  # default "rage"). The package is `rage-encryption` (provides /usr/bin/rage
+  # + rage-keygen); without it backups/restores cannot encrypt and the real
+  # btrfs backup lane (tests/integration/vm/backup-btrfs-e2e.bats) cannot run.
+  rage-encryption
   tpm2.0-tools
   sqlite3
   libselinux-devel selinux-policy-devel
