@@ -11,17 +11,27 @@ broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
 `xdg_toplevel`; nested/container/VM paths advertise inner windows through
 `qdwin_nested_manager_v1.advertise_toplevel`.
 
-| Tier | Mechanism | Seamless? |
-|-------------------|-------------------------------------------------------------|-----------|
-| 0. none | Direct Wayland client of admin compositor | Yes |
-| 1. SELinux | LSM restrictions, same Wayland connection | Yes |
-| 2. podman | User namespace; container has a nested compositor | Yes |
-| 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes |
-| 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes |
-| 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes |
-| 6. Remote machine | Separate physical machine; remote-output | No |
+| Tier | Mechanism | Seamless? | v1 status |
+|-------------------|-------------------------------------------------------------|-----------|-----------|
+| 0. none | Direct Wayland client of admin compositor | Yes | Shipped |
+| 1. SELinux | LSM restrictions, same Wayland connection | Yes | Shipped |
+| 2. podman | User namespace; container has a nested compositor | Yes | Shipped |
+| 3. Different user | Separate uid; waypipe bridges `wl_display` | Yes | Shipped |
+| 4. VM whole-window| KVM + libvirt + waypipe (nested qdwin) | Yes | **Experimental** |
+| 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes | **Experimental** |
+| 6. Remote machine | Separate physical machine; remote-output | No | Post-v1 |
 
 **Default tier for new user-silo apps:** tier 1.
+
+> **v1 supported ladder is tiers 0–3** (decision D3,
+> `todo/decisions/v1-release-scope-2026-06-12.md`). **Tiers 4 and 5 ship as
+> EXPERIMENTAL in v1** — the design is fixed and the plumbing reuses the
+> tier-2/3 primitives, but the VM-backed paths are not part of the v1 security
+> guarantee, are not exercised by the release test battery, and may fail or
+> regress without a supported recovery path. Use them only for evaluation. See
+> the per-tier **Experimental status** banners below for prerequisites and the
+> unsupported-failure list. Tier 6 (remote machine) is post-v1 and documented
+> for posture only.
 
 ## Tier 0 — none
 
@@ -236,6 +246,16 @@ drivers.
 
 ## Tier 4 — whole-VM windowed
 
+> **Experimental in v1 (D3).** Not part of the v1 security guarantee and not
+> exercised by the release test battery.
+> **Prerequisites:** `libvirt` + `qemu` from `openSUSE-Tumbleweed-Oss`,
+> hardware virtualization (KVM) enabled, and a guest image carrying `waypipe`
+> + a nested qdwin. **Unsupported failure modes (no recovery path in v1):**
+> waypipe-over-vsock disconnect leaving an orphaned viewer toplevel; guest
+> qdwin crash; secctx tag not applied if `qdistro-secctx-exec` wrapping is
+> skipped; clipboard/gate behaviour under guest compromise; GPU/virgl
+> instability. Treat tier-4 silos as evaluation-only.
+
 **libvirt + QEMU + waypipe** (nested qdwin in the guest) as one chromed peer toplevel,
 mirroring tier 2's container pattern.
 
@@ -274,6 +294,16 @@ a declarative guest definition, lock reference, build lineage, and qdistro
 runtime policy.
 
 ## Tier 5 — per-app VM windowed (Linux guest)
+
+> **Experimental in v1 (D3).** Not part of the v1 security guarantee and not
+> exercised by the release test battery.
+> **Prerequisites:** the tier-4 stack plus an in-guest `qdistro-tier5-publisher`
+> listening on `AF_VSOCK` and a host `waypipe client --socket vsock://…` per
+> app launch. **Unsupported failure modes (no recovery path in v1):** vsock
+> port exhaustion / collision across many per-app launches; publisher crash
+> orphaning host waypipe clients; secctx tag missing if not applied at
+> vsock-accept; per-app audio/input multiplex stalls. Treat tier-5 silos as
+> evaluation-only.
 
 **waypipe over `AF_VSOCK`.** A plumbing-only extension of the existing
 tier-3 wrapper.

@@ -1,5 +1,13 @@
 # Phone integration
 
+> **Status:** planned post-v1. The phone companion is cut from the v1 release
+> (decision D4, `todo/decisions/v1-release-scope-2026-06-12.md`): v1 ships no
+> presence attestation, no phone second-factor, no phone approver UI, and no
+> window projection / camera input. The pairing/presence code stays in the
+> tree but the release bootstrap profile does not install or enable any of it,
+> and no v1 security promise depends on a paired phone. Everything below is the
+> design bar for bringing the companion back after v1.
+
 Android phone (iOS best-effort) as a trusted peripheral for qdistro. Primary
 uses:
 

@@ -138,6 +138,19 @@ two flavours, both behind admin-app confirm dialogs:
 
 ## Backup — `btrfs send | rage -e | ssh destination`
 
+> **v1 status: shipped.** `snapshots/qdistro_backup_cli.py` orchestrates
+> backup / verify / restore over `rage` with argv lists (no shell), driven by
+> the `qdistro-backup.service` + `qdistro-backup.timer` units. Every run writes
+> a per-run, hash-chained, `ssh-keygen -Y`-signed manifest
+> (`snapshots/qdistro_backup_manifest.py`). **Restore and verify fail closed:**
+> they REFUSE without `--allowed-signers` unless `--insecure-no-verify` is
+> given; restore loads the whole manifest chain, signature-verifies each entry,
+> runs the strictly-increasing chain check, then receives. Covered by
+> `tests/unit/test_backup_manifest.py`, `tests/unit/test_vault_recovery.py`,
+> and the host-runnable `tests/integration/backup-e2e.bats`. The raw idioms
+> below are the underlying transport; production goes through the CLI so the
+> manifest/verify gate is never bypassed.
+
 Scheduled backup of configured subvolumes to a remote target.
 
 - `qdistro-backup.service` (systemd timer) triggers daily.
@@ -162,7 +175,9 @@ btrfs send -p <parent-snap> <ro-snap> \
  | ssh <host> 'cat > /backups/<subvol>/<ts>.btrfs.age'
 ```
 
-Idiom for restore:
+Idiom for restore (the transport `qdistro_backup_cli.py restore` performs
+*after* it has signature-verified the manifest chain — do not run it
+standalone, which skips the verify gate):
 
 ```bash
 ssh <host> 'cat /backups/<subvol>/<ts>.btrfs.age' \

@@ -139,6 +139,17 @@ order:
 - A state snapshot is taken at **first activation**, not just at update
   time, so the rollback unit covers the migration: old generation +
   pre-migration snapshot = the full local undo.
+  - **Snapshot storage (decision D9,
+    `todo/decisions/v1-release-scope-2026-06-12.md`):** the pre-migration
+    snapshot is a **sibling directory** of the state subvolume, not a
+    `.snapshots` child of it. A child snapshot directory cannot survive the
+    `RENAME_EXCHANGE` the promotion flip uses to swap state generations
+    atomically — the exchange would carry the child away with the old
+    generation. A sibling subvolume is outside the exchanged path, so it
+    remains a stable rollback target. This is the committed v1 mechanism; the
+    earlier snapper-first instruction is retired (qdistro drives the btrfs
+    subvolume snapshot directly rather than going through Snapper for the
+    template state path).
 - First launch runs under the narrowest declared network mode the app is
   expected to survive (migrations can write remote state; sync clients can
   propagate corruption to the cloud before local validation fails):

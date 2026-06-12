@@ -9,6 +9,14 @@ Status: design (target state). Three states, documented separately:
    Ships per-silo VPN before any VM exists.
 3. **Target** — the OpenWrt net VM described here.
 
+> **v1 ships state 2 (interim host-netns backend).** The OpenWrt net VM
+> (state 3) is post-v1. What the interim backend does **not** protect against
+> is stated honestly under [The silo-facing contract](#the-silo-facing-contract):
+> Wi-Fi (802.11) parsing, DHCP/DNS handling, and netfilter correctness all
+> remain on the host kernel and root daemons until the net VM lands. v1's
+> network promise is the silo-facing contract (one route, one resolver,
+> per-silo policy) and the per-silo-VPN kill-switch — not host-stack isolation.
+
 Implementation is planned in `todo/fable-networking` (umbrella
 tracker), starting with research probes into Qubes sys-net and
 OpenWrt under KVM. Claims below marked *(probe)* are design
