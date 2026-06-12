@@ -384,7 +384,6 @@ def test_poll_loop_calls_flush_each_iteration():
     outbound requests reach the compositor promptly."""
     client = _make_poll_client()
     flush_count = []
-    original_flush = client._display.flush
 
     def counting_flush():
         flush_count.append(1)
