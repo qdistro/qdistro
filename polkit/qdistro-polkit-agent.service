@@ -16,5 +16,12 @@ RestartSec=3
 # Subprocess prompt path — agent spawns this on PAM auth.
 Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
 
+# TCB no-network discipline. The agent talks to polkitd, qdistro-broker,
+# fprintd/PAM, and its local prompt over AF_UNIX/system facilities only;
+# it has no legitimate IP/vsock egress path.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+
 [Install]
 WantedBy=graphical-session.target

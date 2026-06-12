@@ -105,11 +105,13 @@ follow two dom0-style rules, enforced per-process (the admin *uid* keeps
 NetworkManager until the net VM lands). Rule 1 is now
 **shipped-with-exceptions**, not merely aspirational: the broker pilot
 landed with VM-verified SELinux `neverallow` coverage and a systemd
-runtime negative (`EAFNOSUPPORT`). The remaining TCB daemons
-(session-manager, qdlocker, polkit agent) are still exceptions until
-the same pattern lands for each; release tracking lives in
-`todo/fable-release/02-security-gate.md` S5. Do not treat the broker
-pilot as evidence for those other domains.
+runtime negative (`EAFNOSUPPORT`). The polkit agent and qdlocker also
+ship systemd runtime no-network directives plus host tripwires, but
+still need the SELinux `neverallow`/VM-negative half. The session
+manager remains an explicit exception while it owns the netvm
+ubus-over-HTTP control client (`session_manager/qdistro_netvm_client.py`).
+Release tracking lives in `todo/fable-release/02-security-gate.md` S5.
+Do not treat the broker pilot as evidence for those other domains.
 
 1. **No network access.** systemd `PrivateNetwork=yes` (or
  `IPAddressDeny=any` + `RestrictAddressFamilies=AF_UNIX AF_NETLINK`)
