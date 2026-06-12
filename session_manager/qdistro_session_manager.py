@@ -55,16 +55,25 @@ from qdistro_silo_egress import (
 
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
+def _resolve_admin_uid() -> int:
+    """Resolve the deployment admin uid, failing closed if it is absent."""
+    admin_user = os.environ.get("QDISTRO_ADMIN_USER", "admin")
+    try:
+        return int(pwd.getpwnam(admin_user).pw_uid)
+    except KeyError as e:
+        raise RuntimeError(
+            f"configured admin user {admin_user!r} does not exist; "
+            "set QDISTRO_ADMIN_USER to an existing account"
+        ) from e
+
+
 # The AUTHZ admin uid: the only uid permitted to call privileged D-Bus
 # methods (see _require_admin). Resolved env-aware (QDISTRO_ADMIN_USER, then
 # the "admin" user) so a deployment whose admin is not uid 1000 still works.
-# This is a DIFFERENT concept from the tier2 launch-owner uid below; keeping
-# them separate names stops the two from silently diverging (02/S11).
-try:
-    ADMIN_UID = pwd.getpwnam(
-        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
-except KeyError:
-    ADMIN_UID = 1000
+# Missing admin users fail closed at import instead of silently authorizing
+# uid 1000. This is a DIFFERENT concept from the tier2 launch-owner uid below;
+# keeping them separate names stops the two from silently diverging (02/S11).
+ADMIN_UID = _resolve_admin_uid()
 
 # Where per-silo broker state lives. The dir for each silo is owned
 # by the silo's uid and is mode 0700 so other uids cannot peek.

@@ -10,11 +10,15 @@ swapped.
 """
 from __future__ import annotations
 
+import os
 import signal
 import time
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("QDISTRO_ADMIN_USER", "root")
+
 import qdistro_session_manager as sm
 from qdistro_session_manager import (
     _STATE_TRANSITIONS,
@@ -970,13 +974,14 @@ class TestTier2TemplateKind:
             sm.validate_kind("bogus")
 
     def test_tier2_uid_must_be_admin(self):
-        assert sm.validate_silo_uid(1000, "tier2-template") == 1000
+        admin_uid = sm.TIER2_LAUNCH_OWNER_UID
+        assert sm.validate_silo_uid(admin_uid, "tier2-template") == admin_uid
         with pytest.raises(BadArgument):
-            sm.validate_silo_uid(2001, "tier2-template")
+            sm.validate_silo_uid(admin_uid + 1, "tier2-template")
         # tier3 still uses the silo range; admin uid is rejected there.
         assert sm.validate_silo_uid(2001, "tier3-user") == 2001
         with pytest.raises(BadArgument):
-            sm.validate_silo_uid(1000, "tier3-user")
+            sm.validate_silo_uid(admin_uid, "tier3-user")
 
     def test_validate_launch_rejects_tier3_stanza(self):
         assert sm.validate_launch("tier3-user", {}) == {}
@@ -1001,7 +1006,8 @@ class TestTier2TemplateKind:
             sm.validate_launch("tier2-template", bad)
 
     def test_create_tier2_no_useradd(self, store, ops):
-        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
         silo = store.get("browser1")
         assert silo.kind == "tier2-template"
         assert silo.launch["template_silo"] == "browser1"
@@ -1048,15 +1054,58 @@ class TestTier2TemplateKind:
         assert rej.returncode != 0
         assert "launch-owner" in rej.stderr
 
+    def test_admin_uid_missing_explicit_user_fails_closed(self):
+        import subprocess
+        import sys
+
+        sm_dir = str(Path(sm.__file__).resolve().parent)
+        env = dict(
+            os.environ,
+            QDISTRO_ADMIN_USER="qdistro-no-such-admin-user",
+            PYTHONPATH=sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", "import qdistro_session_manager"],
+            env=env, capture_output=True, text=True)
+        assert res.returncode != 0
+        assert "qdistro-no-such-admin-user" in res.stderr
+        assert "does not exist" in res.stderr
+        assert "1000" not in res.stderr
+
+    def test_admin_uid_missing_default_admin_fails_closed(self):
+        import subprocess
+        import sys
+
+        sm_dir = str(Path(sm.__file__).resolve().parent)
+        env = dict(os.environ)
+        env.pop("QDISTRO_ADMIN_USER", None)
+        env["PYTHONPATH"] = (
+            sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        res = subprocess.run(
+            [sys.executable, "-c",
+             "import pwd\n"
+             "def missing_admin(name):\n"
+             "    if name == 'admin':\n"
+             "        raise KeyError(name)\n"
+             "    return pwd._orig_getpwnam(name)\n"
+             "pwd._orig_getpwnam = pwd.getpwnam\n"
+             "pwd.getpwnam = missing_admin\n"
+             "import qdistro_session_manager\n"],
+            env=env, capture_output=True, text=True)
+        assert res.returncode != 0
+        assert "configured admin user 'admin' does not exist" in res.stderr
+        assert "1000" not in res.stderr
+
     def test_schema_round_trips_tier2(self, ops, tmp_path):
         s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
-        s1.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        s1.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                  kind="tier2-template", launch=dict(_LAUNCH))
         s1.create("dev1", 2001)  # a plain tier3 silo alongside
         # Reload from the persisted file into a fresh store + ops.
         s2 = _SiloStore(_FakeOps(), config_path=tmp_path / "silos.yaml")
         b = s2.get("browser1")
         assert b.kind == "tier2-template"
-        assert b.uid == 1000
+        assert b.uid == sm.TIER2_LAUNCH_OWNER_UID
         assert b.launch == {"workload": "browser", "template_silo": "browser1",
                             "network": "slirp4netns", "argv": ["chromium"]}
         assert s2.get("dev1").kind == "tier3-user"
@@ -1139,7 +1188,8 @@ class TestTier2TemplateKind:
         assert str(old_admin_uid) in text
 
     def test_start_tier2_exports_env_and_starts_unit(self, store, ops):
-        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
         store.start("browser1")
         assert store.get("browser1").state == State.ACTIVE
         # Started the tier-2 unit, NOT the tier-3 session launcher; no cgroup.
@@ -1157,7 +1207,8 @@ class TestTier2TemplateKind:
         assert recovered["QD_WORKLOAD"] == "browser"
 
     def test_stop_tier2_clean(self, store, ops):
-        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
         store.start("browser1")
         store.stop("browser1")
         assert store.get("browser1").state == State.STOPPED
@@ -1168,7 +1219,8 @@ class TestTier2TemplateKind:
         # fail-closed: if the stop did not take effect (unit still active or
         # the rootless container survives), the store must NOT report STOPPED
         # and must surface an error — never a silent lie hiding an orphan.
-        store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template", launch=dict(_LAUNCH))
         store.start("browser1")
         ops.tier2_stop_fails = True
         with pytest.raises(sm.SessionError):
@@ -1202,7 +1254,7 @@ def _source_env_via_bash(env_text: str) -> dict:
 def test_launch_env_round_trips_argv_with_single_quote(store, ops):
     # codex r2: an argv entry with a single quote must survive shlex.quote +
     # bash sourcing (a naive single-quote wrapper would corrupt it).
-    store.create("b2", 1000, kind="tier2-template", launch={
+    store.create("b2", sm.TIER2_LAUNCH_OWNER_UID, kind="tier2-template", launch={
         "workload": "browser", "template_silo": "b2", "network": "none",
         "argv": ["chromium", "--user-agent=it's me"]})
     store.start("b2")
@@ -1218,7 +1270,8 @@ def test_stop_tier2_stops_unit_and_clears_env(store, ops):
     # module-level function body), so pytest never collected them. Dedented to
     # module-level functions, they exercise the real stop dispatch + loader
     # drop (the behaviour was already correct — only the tests were dead).
-    store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+    store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                 kind="tier2-template", launch=dict(_LAUNCH))
     store.start("browser1")
     store.stop("browser1")
     assert store.get("browser1").state == State.STOPPED
@@ -1258,7 +1311,8 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
     # tier2-template row (kind + nested launch incl. a JSON argv) survives.
     import sys
     s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
-    s1.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
+    s1.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+              kind="tier2-template", launch=dict(_LAUNCH))
 
     monkeypatch.setitem(sys.modules, "yaml", None)   # force ImportError path
     assert sm._yaml_load("silos: []\n") == {
@@ -1268,7 +1322,7 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
     s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
     silo = s2.get("browser1")
     assert silo.kind == "tier2-template"
-    assert silo.uid == 1000
+    assert silo.uid == sm.TIER2_LAUNCH_OWNER_UID
     assert silo.launch["workload"] == "browser"
     assert silo.launch["template_silo"] == "browser1"
     assert silo.launch["network"] == "slirp4netns"
@@ -1318,7 +1372,8 @@ class TestEgressField:
 
     def test_egress_rejected_on_tier2(self, store):
         with pytest.raises(BadArgument):
-            store.create("browser1", 1000, kind="tier2-template",
+            store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                         kind="tier2-template",
                          launch=dict(_LAUNCH), egress="none")
 
     def test_loader_drops_bad_egress_row(self, ops, tmp_path):
@@ -1414,7 +1469,8 @@ class TestSetEgress:
             store.set_egress("nope", "none")
 
     def test_rejected_on_tier2(self, store):
-        store.create("browser1", 1000, kind="tier2-template",
+        store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
+                     kind="tier2-template",
                      launch=dict(_LAUNCH))
         with pytest.raises(BadArgument):
             store.set_egress("browser1", "none")
