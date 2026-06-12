@@ -183,6 +183,7 @@ class TestCheckPermissionResolution:
     @pytest.mark.parametrize("action", [
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+        "qdistro.dispose.spawn:pdf",
     ])
     def test_tier_spawn_ignores_cache_without_rule(self, broker, action):
         broker.cache.store(NON_ADMIN_UID, action, PEER_EXE,
@@ -193,6 +194,7 @@ class TestCheckPermissionResolution:
     @pytest.mark.parametrize("action", [
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+        "qdistro.dispose.spawn:pdf",
     ])
     def test_tier_spawn_rule_allow_still_allows(self, broker, rules_dir, action):
         _write_rule(rules_dir, decision="allow",

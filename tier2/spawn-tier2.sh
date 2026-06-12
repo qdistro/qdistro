@@ -115,12 +115,27 @@ usage() {
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     usage; exit 0
 fi
-if [ "$#" -lt 4 ]; then
-    usage >&2; exit 1
+
+# --disposable: a throwaway tier-2 silo (07-disposables-plan P1). No
+# container-name positional — the name is generated as disp-<workload>-<ts>;
+# the home is tmpfs (no persist), the broker gate is qdistro.dispose.spawn:,
+# and the secctx app_id is qdistro.disp.<token>.
+DISPOSABLE=0
+if [ "${1:-}" = "--disposable" ]; then
+    DISPOSABLE=1; shift
 fi
 
-CONTAINER="$1"; shift
-WORKLOAD="$1"; shift
+if [ "$DISPOSABLE" = 1 ]; then
+    # disposable: <workload> -- <app> [args...]   (no container name)
+    if [ "$#" -lt 3 ]; then usage >&2; exit 1; fi
+    WORKLOAD="$1"; shift
+    CONTAINER=""   # generated once WORKLOAD is validated (below)
+else
+    # persistent: <container> <workload> -- <app> [args...]
+    if [ "$#" -lt 4 ]; then usage >&2; exit 1; fi
+    CONTAINER="$1"; shift
+    WORKLOAD="$1"; shift
+fi
 if [ "$1" != "--" ]; then
     echo "spawn-tier2: expected '--' before app argv, got '$1'" >&2
     usage >&2; exit 1
@@ -132,6 +147,34 @@ if [ "$#" -lt 1 ]; then
 fi
 APP_ARGV=("$@")
 APP_NAME="${APP_ARGV[0]##*/}"
+
+# --- disposable identity (07-disposables-plan P1, D15) -------------------
+if [ "$DISPOSABLE" = 1 ]; then
+    # A disposable never mounts persistent state — refuse a silo binding.
+    if [ -n "${TIER2_SILO:-}" ]; then
+        echo "spawn-tier2: --disposable is incompatible with TIER2_SILO" \
+             "(a throwaway silo has no persistent state)" >&2
+        exit 1
+    fi
+    # Workload becomes part of a container name + a broker action: constrain.
+    # A bash [[ =~ ]] test matches the WHOLE string (not line-by-line like
+    # grep), so an embedded newline can't smuggle a second token past it.
+    if ! [[ "$WORKLOAD" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+        echo "spawn-tier2: invalid disposable workload '$WORKLOAD'" \
+             "(want ^[a-z0-9][a-z0-9-]{0,62}\$)" >&2
+        exit 1
+    fi
+    DISP_TS="$(date +%Y%m%d-%H%M%S)"
+    CONTAINER="disp-${WORKLOAD}-${DISP_TS}"
+    # Same-second collision: append a short random hex suffix (D15).
+    if command -v podman >/dev/null 2>&1 \
+       && podman container exists "$CONTAINER" 2>/dev/null; then
+        CONTAINER="${CONTAINER}-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+    fi
+    # Per-launch secctx token -> app_id qdistro.disp.<token>.
+    DISP_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    TIER2_SECCTX_APPID="qdistro.disp.${DISP_TOKEN}"
+fi
 
 ADMIN_UID="${TIER2_ADMIN_UID:-$(id -u)}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
@@ -149,6 +192,29 @@ SECCTX_APPID="${TIER2_SECCTX_APPID:-${CONTAINER}/${APP_NAME}}"
 LAUNCHREC_PATH=""
 LAUNCHREC_TOKEN=""
 LAUNCHREC_FILE_ID=""
+
+# Broker spawn-gate action. Disposable spawn uses qdistro.dispose.spawn:
+# (a rules-only, fail-closed namespace in the broker, same as tier2.spawn).
+if [ "$DISPOSABLE" = 1 ]; then
+    SPAWN_ACTION="qdistro.dispose.spawn:${WORKLOAD}"
+else
+    SPAWN_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${APP_NAME}"
+fi
+
+# Test/inspection hook: dump the resolved launch plan and exit 0 BEFORE the
+# image/socket checks, the broker call, podman, or secctx — lets the host
+# test suite assert the disposable identity + gate without a live broker,
+# podman image, or wayland socket.
+if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
+    printf 'DISPOSABLE=%s\n' "$DISPOSABLE"
+    printf 'CONTAINER=%s\n' "$CONTAINER"
+    printf 'WORKLOAD=%s\n' "$WORKLOAD"
+    printf 'APP_ID=%s\n' "$SECCTX_APPID"
+    printf 'ENGINE=%s\n' "$ENGINE"
+    printf 'SPAWN_ACTION=%s\n' "$SPAWN_ACTION"
+    printf 'STATE=%s\n' "${TIER2_SILO:-none}"
+    exit 0
+fi
 
 # Hardening defaults — secure, override via env for special workloads.
 TIER2_NETWORK_VAL="${TIER2_NETWORK:-none}"
@@ -287,8 +353,10 @@ fi
 
 # Mandatory broker spawn-action gate (S4). Tier-2 launch is a security
 # boundary, so only explicit admin-authored rules may authorize it. Cache
-# rows and hook verdicts are ignored by the broker for this namespace.
-SPAWN_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${APP_NAME}"
+# rows and hook verdicts are ignored by the broker for this namespace — the
+# disposable namespace (qdistro.dispose.spawn:) is in the same rules-only,
+# fail-closed set in the broker. SPAWN_ACTION was resolved with the launch
+# identity above.
 if ! command -v dbus-send >/dev/null 2>&1; then
     fail "dbus-send not found; broker authorization required"
 fi
@@ -380,6 +448,7 @@ export TIER2_PERCONT_DIR="$PERCONT_DIR"
 export TIER2_ADMIN_UID_RESOLVED="$ADMIN_UID"
 export TIER2_IMAGE="$IMAGE"
 export TIER2_CONTAINER="$CONTAINER"
+export TIER2_DISPOSABLE_RESOLVED="$DISPOSABLE"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
 export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
@@ -469,6 +538,20 @@ PODMAN_HARDENING=(
 # would rewrite ownership of a real home and is forbidden.
 if [ -n "${TIER2_STATE_PATH_RESOLVED:-}" ]; then
     PODMAN_HARDENING+=( -v "$TIER2_STATE_PATH_RESOLVED:/home/admin:rw" )
+elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
+    # Disposable home is a WRITABLE tmpfs (07-plan "tmpfs home"): the app can
+    # run, but every byte lives in RAM and is discarded on teardown by
+    # construction (tmpfs + --rm — never the persistent host fs). This is the
+    # enumerated writable surface; persistent volume attachments are denied
+    # to disp-* silos by broker policy.
+    PODMAN_HARDENING+=(
+        --mount type=tmpfs,destination=/home/admin,tmpfs-size=256m,tmpfs-mode=0700,U
+        # Authoritative disposable marker: the session-manager reaper lists +
+        # filters by THIS label (not the name shape), so it can never reap an
+        # admin container that merely happens to be named disp-*. The name
+        # regex stays as defence-in-depth on the remove path.
+        --label qdistro_disposable=1
+    )
 fi
 PODMAN_HARDENING+=(
     --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U

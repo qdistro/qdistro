@@ -1611,9 +1611,13 @@ class Broker(dbus.service.Object):
         if rule is not None:
             return "allow" if rule.decision == "allow" else "deny"
         # Tier launch is rules-only: a stale approval cache row or hook
-        # verdict must not mint a new sandboxed process.
+        # verdict must not mint a new sandboxed process. Disposable spawn
+        # (qdistro.dispose.spawn:<workload>) joins the same fail-closed set
+        # — a throwaway silo is still a sandboxed process and must not be
+        # minted off a cached/hook verdict (07-disposables-plan P1).
         if action_s.startswith(("qdistro.tier1.spawn:",
-                                "qdistro.tier2.spawn:")):
+                                "qdistro.tier2.spawn:",
+                                "qdistro.dispose.spawn:")):
             return "unknown"
         # An authenticated sandboxed (tier-2) caller must not be
         # auto-decided by an argv-blind forever/forever_exe grant minted

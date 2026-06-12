@@ -43,6 +43,7 @@ from typing import Any, Iterable
 # task 3). Pure module: the side-effecting ip/wg/nft/veth ops live on _SystemOps
 # below; this module owns only the policy + the kill-switch-by-construction
 # sequence. Import-cycle-free (it imports nothing from this module).
+import qdistro_disposables as _disp
 import qdistro_silo_egress as _egress
 from qdistro_silo_egress import (
     EgressBackend,
@@ -1009,6 +1010,36 @@ class _SystemOps:
              "--", "podman", "container", "exists", container],
             capture_output=True)
         return proc.returncode != 1
+
+    def disp_container_list(self) -> list[str]:
+        """Names of containers carrying the disposable label
+        (qdistro_disposable=1) in admin's rootless podman. Filtering by the
+        spawn-time LABEL — not the name shape — is what makes the sweep
+        forgery-resistant: an admin container merely *named* disp-* has no
+        such label and is never listed (the name regex on the remove path is
+        a second, defence-in-depth check). Returns [] on any failure (the
+        sweep is best-effort and must not crash startup)."""
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "ps", "-a",
+             "--filter", "label=qdistro_disposable=1",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            return []
+        return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+    def disp_container_remove(self, name: str) -> bool:
+        """Force-remove a disposable container in admin's rootless podman.
+        Returns True on success (or already-gone)."""
+        if not _disp.is_disposable_container(name):
+            # Defence in depth: never let a non-disposable name reach rm -f.
+            raise ValueError(f"refusing to reap non-disposable name {name!r}")
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "rm", "-f", name],
+            capture_output=True)
+        return proc.returncode == 0
 
     def kill_pids(self, pids: Iterable[int], sig: int) -> None:
         for pid in pids:
@@ -2234,6 +2265,47 @@ class _SiloStore:
                 log.warning("reaping orphan cgroup %r failed: %s", name, e)
         return reaped
 
+    def reap_disposable_containers(self) -> list[str]:
+        """Force-remove every disposable (disp-*) container at a session
+        boundary (07-disposables-plan P1 lifecycle). A disposable must never
+        outlive its session: `podman run --rm` discards one on its inner
+        process exit, but a crash/leak (the inner weston SIGKILLed, the host
+        rebooted mid-run) can strand a disp-* container with a tmpfs home that
+        the host reboot already emptied. This is the forgery-resistant sweep:
+        it removes ONLY well-formed disp-* names (is_disposable_container),
+        so an admin-created container is never collateral. Best-effort; a
+        failed removal is logged and retried next startup. Returns reaped
+        names."""
+        reaped: list[str] = []
+        try:
+            names = self._ops.disp_container_list()
+        except Exception as e:  # noqa: BLE001
+            log.warning("disposable sweep: container list failed: %s", e)
+            return reaped
+        for name in _disp.disp_sweep_targets(names):
+            try:
+                if self._ops.disp_container_remove(name):
+                    reaped.append(name)
+                    log.info("reaped disposable container %r", name)
+                else:
+                    log.warning("reaping disposable %r failed (will retry "
+                                "next startup)", name)
+            except (OSError, ValueError) as e:
+                log.warning("reaping disposable %r failed: %s", name, e)
+        return reaped
+
+    def dispose(self, name: str) -> bool:
+        """Explicit lease release / teardown for one disposable (the taskbar
+        'dispose' action, a workflow-step completion, an idle-timeout). Drives
+        teardown from the session manager rather than relying on the GUI
+        window close alone, so windowless/background disposables are also
+        torn down. Returns True if the container is gone afterward."""
+        if not _disp.is_disposable_container(name):
+            raise ValueError(f"not a disposable container: {name!r}")
+        ok = self._ops.disp_container_remove(name)
+        log.info("dispose %r -> %s", name, "removed" if ok else "FAILED")
+        return ok
+
     def autostart_pass(self) -> list[str]:
         """Called once at daemon startup. For each silo whose
         persisted state is Active OR whose autostart flag is true,
@@ -2245,6 +2317,9 @@ class _SiloStore:
         # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
         # before we (re)start silos (02/S14a). Runs lock-free internally.
         self.reap_orphan_cgroups()
+        # A disposable must not survive a session boundary; sweep any disp-*
+        # containers stranded by a crash/reboot before (re)starting silos.
+        self.reap_disposable_containers()
         started: list[str] = []
         with self._lock:
             for silo in list(self._silos.values()):
