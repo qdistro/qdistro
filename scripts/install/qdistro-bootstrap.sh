@@ -1411,6 +1411,21 @@ chain_step_known() {
     installer_chain_names | grep -qxF "$1"
 }
 
+# chain_step_dev_only <name> — return 0 if <name> names an installer-chain
+# step for a feature that is CUT from v1 and must therefore be laid down only
+# in the disposable dev profile, never in daily-driver/release. Today this is
+# just `phone` (decision D4: the phone companion is cut from v1; no v1 promise
+# depends on it). Keeping it installable under --profile=dev lets the post-v1
+# feature still be developed/tested without shipping it on real installs.
+CHAIN_DEV_ONLY_STEPS="phone"
+chain_step_dev_only() {
+    local s
+    for s in $CHAIN_DEV_ONLY_STEPS; do
+        [ "$1" = "$s" ] && return 0
+    done
+    return 1
+}
+
 # chain_state_completed — print the recorded-complete step names (one per
 # line) from $CHAIN_STATE_FILE, or nothing if the file is absent/empty.
 # Blank lines and lines beginning with '#' are ignored.
@@ -1536,6 +1551,13 @@ install_python_modules() {
                     continue
                 fi ;;
         esac
+        # D4 cut-feature gate: a dev-only step (e.g. phone) is laid down only
+        # under --profile=dev. In daily-driver/release it is skipped entirely,
+        # so the release install never carries phone-companion code.
+        if chain_step_dev_only "$name" && ! is_dev; then
+            log "  -> [$name] skipped in '$QDISTRO_PROFILE' profile (cut from v1, dev-only)"
+            continue
+        fi
         run_installer_step "$name" "$installer" "$QD$src_suffix"
     done < <(installer_chain_entries)
 }

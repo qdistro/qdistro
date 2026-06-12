@@ -3,15 +3,15 @@
 > **Status:** planned post-v1. The phone companion is cut from the v1 release
 > (decision D4, `todo/decisions/v1-release-scope-2026-06-12.md`): v1 ships no
 > presence attestation, no phone second-factor, no phone approver UI, and no
-> window projection / camera input. The bootstrap installer chain still lays
-> down the phone components (`scripts/install/install-phone-for-vm.sh`), but it
-> does **not** enable them: `qdistro-phone.service` is `ConditionPathExists`-
-> gated on `/etc/qdistro/phone/qdistro-phone.conf`, which a v1 install never
-> creates, so the daemon stays inert and nothing phone-related runs. No v1
-> security promise depends on a paired phone. (Follow-up to fully honor D4:
-> gate the `phone` installer step out of the hardened/release profiles so the
-> code is not even laid down — tracked as a bootstrap-profile hardening item.)
-> Everything below is the design bar for bringing the companion back after v1.
+> window projection / camera input. The bootstrap installer chain marks
+> `phone` a **dev-only step** (`CHAIN_DEV_ONLY_STEPS`): under the
+> daily-driver/release profiles it is skipped entirely, so a v1 install never
+> lays down phone-companion code. Only `--profile=dev` installs it (for
+> continued post-v1 development), and even there `qdistro-phone.service` stays
+> `ConditionPathExists`-gated on `/etc/qdistro/phone/qdistro-phone.conf` (never
+> created), so the daemon is inert. No v1 security promise depends on a paired
+> phone. Everything below is the design bar for bringing the companion back
+> after v1.
 
 Android phone (iOS best-effort) as a trusted peripheral for qdistro. Primary
 uses:

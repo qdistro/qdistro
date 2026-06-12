@@ -133,6 +133,29 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q 'zypper -n "${gpg_flags\[@\]}" refresh' "$BOOT"
 }
 
+@test "hardening: phone (cut from v1, D4) installer step is gated to the dev profile" {
+    # Decision D4 cuts the phone companion from v1; the release/daily-driver
+    # bootstrap must NOT lay down phone code. The chain marks `phone` dev-only
+    # and the chain loop skips dev-only steps unless is_dev.
+    grep -qE 'CHAIN_DEV_ONLY_STEPS=.*phone' "$BOOT"
+    grep -qF 'chain_step_dev_only "$name" && ! is_dev' "$BOOT"
+    # The gate is live: `phone` is still a real chain entry (gating a
+    # nonexistent step would be a silent no-op).
+    grep -qE '^phone\|scripts/install/install-phone-for-vm\.sh' "$BOOT"
+    # Behavioural: the gate predicate skips phone in a hardened profile and
+    # admits it under dev (re-evaluated against the file's own definitions).
+    run bash -c '
+        QDISTRO_PROFILE=daily-driver
+        eval "$(awk "/^CHAIN_DEV_ONLY_STEPS=/,/^}/" "'"$BOOT"'")"
+        is_dev() { [ "${QDISTRO_PROFILE:-daily-driver}" = "dev" ]; }
+        chain_step_dev_only phone && ! is_dev && echo HARDENED_SKIP
+        QDISTRO_PROFILE=dev
+        chain_step_dev_only phone && is_dev && echo DEV_INSTALL
+    '
+    [[ "$output" == *HARDENED_SKIP* ]] || { echo "phone not skipped in hardened: $output" >&2; return 1; }
+    [[ "$output" == *DEV_INSTALL* ]]   || { echo "phone not admitted in dev: $output" >&2; return 1; }
+}
+
 @test "hardening: bootstrap source/package fetches use authenticated transport (no plaintext http://)" {
     # Release/daily-driver invariant (security-hardening carry-forward
     # "Bootstrap and packaging" + 03/R2): the bootstrap must not fetch root
