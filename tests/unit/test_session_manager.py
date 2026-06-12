@@ -15,13 +15,20 @@ import time
 from pathlib import Path
 
 import pytest
-
 import qdistro_session_manager as sm
 from qdistro_session_manager import (
-    BadArgument, BadState, Silo, SiloBusy, SiloExists, State, UnknownSilo,
-    _SiloStore, _STATE_TRANSITIONS, validate_name, validate_uid,
+    _STATE_TRANSITIONS,
+    BadArgument,
+    BadState,
+    Silo,
+    SiloBusy,
+    SiloExists,
+    State,
+    UnknownSilo,
+    _SiloStore,
+    validate_name,
+    validate_uid,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake side-effect adapter
@@ -1055,6 +1062,82 @@ class TestTier2TemplateKind:
         assert s2.get("dev1").kind == "tier3-user"
         assert s2.get("dev1").launch == {}
 
+    def test_load_quarantines_tier2_wrong_admin_uid(self, ops, tmp_path,
+                                                    caplog):
+        cfg = tmp_path / "silos.yaml"
+        old_admin_uid = sm.TIER2_LAUNCH_OWNER_UID + 1
+        cfg.write_text(
+            "silos:\n"
+            "  - name: oldbrowser\n"
+            f"    uid: {old_admin_uid}\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 1\n"
+            "    last_change: 2\n"
+            "    kind: tier2-template\n"
+            "    launch:\n"
+            "      workload: browser\n"
+            "      template_silo: oldbrowser\n"
+            "      network: none\n"
+            "      argv: [\"chromium\"]\n"
+        )
+        import logging as _logging
+        with caplog.at_level(_logging.ERROR):
+            store = _SiloStore(ops, config_path=cfg)
+
+        assert store.list_silos() == []
+        assert any("quarantining tier2-template row" in r.message
+                   for r in caplog.records)
+
+        # A later lifecycle save must not silently erase the row. It remains
+        # outside the live `silos:` set, preserved for manual admin repair.
+        store.create("dev1", 2001)
+        text = cfg.read_text()
+        assert "quarantined_silos:" in text
+        assert "oldbrowser" in text
+        assert str(old_admin_uid) in text
+
+        reloaded = _SiloStore(ops, config_path=cfg)
+        assert [s.name for s in reloaded.list_silos()] == ["dev1"]
+        reloaded.save()
+        text2 = cfg.read_text()
+        assert "quarantined_silos:" in text2
+        assert "oldbrowser" in text2
+        assert str(old_admin_uid) in text2
+
+    def test_quarantine_survives_fallback_parser_reload(self, ops, tmp_path,
+                                                        monkeypatch):
+        cfg = tmp_path / "silos.yaml"
+        old_admin_uid = sm.TIER2_LAUNCH_OWNER_UID + 1
+        cfg.write_text(
+            "silos:\n"
+            "  - name: oldbrowser\n"
+            f"    uid: {old_admin_uid}\n"
+            "    state: Stopped\n"
+            "    autostart: false\n"
+            "    created_at: 1\n"
+            "    last_change: 2\n"
+            "    kind: tier2-template\n"
+            "    launch:\n"
+            "      workload: browser\n"
+            "      template_silo: oldbrowser\n"
+            "      network: none\n"
+            "      argv: [\"chromium\"]\n"
+        )
+        store = _SiloStore(ops, config_path=cfg)
+        store.create("dev1", 2001)
+        assert "oldbrowser" in cfg.read_text()
+
+        import sys
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        reloaded = _SiloStore(ops, config_path=cfg)
+        assert [s.name for s in reloaded.list_silos()] == ["dev1"]
+        reloaded.save()
+        text = cfg.read_text()
+        assert "quarantined_silos:" in text
+        assert "oldbrowser" in text
+        assert str(old_admin_uid) in text
+
     def test_start_tier2_exports_env_and_starts_unit(self, store, ops):
         store.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
         store.start("browser1")
@@ -1178,7 +1261,9 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
     s1.create("browser1", 1000, kind="tier2-template", launch=dict(_LAUNCH))
 
     monkeypatch.setitem(sys.modules, "yaml", None)   # force ImportError path
-    assert sm._yaml_load("silos: []\n") == {"silos": []}   # fallback engaged
+    assert sm._yaml_load("silos: []\n") == {
+        "silos": [], "quarantined_silos": [],
+    }   # fallback engaged
 
     s2 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
     silo = s2.get("browser1")

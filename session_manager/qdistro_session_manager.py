@@ -1309,6 +1309,10 @@ class _SiloStore:
         self._audit = audit
         self._lock = threading.RLock()
         self._silos: dict[str, Silo] = {}
+        # Rows from silos.yaml that are unsafe to activate but important not
+        # to erase on the next save. Today this is used for tier2-template
+        # rows whose owner uid belongs to a previous admin account.
+        self._quarantined_silo_rows: list[dict[str, Any]] = []
         # Names with a lock-free lifecycle write currently in flight: a stop()
         # in its phase-2 teardown, or a freeze()/resume() doing its blocking
         # cgroup.freeze write outside the store lock (02/S14b). Any conflicting
@@ -1326,11 +1330,13 @@ class _SiloStore:
     def load(self) -> None:
         with self._lock:
             self._silos = {}
+            self._quarantined_silo_rows = []
             if not self._config_path.exists():
                 return
             data = _yaml_load(self._config_path.read_text())
             if not isinstance(data, dict):
                 return
+            self._quarantined_silo_rows = _load_quarantined_silo_rows(data)
             for row in (data.get("silos") or []):
                 if not isinstance(row, dict):
                     continue
@@ -1350,6 +1356,24 @@ class _SiloStore:
                 try:
                     validate_name(name)
                     validate_kind(kind)
+                    if (kind == KIND_TIER2_TEMPLATE
+                            and int(uid) != TIER2_LAUNCH_OWNER_UID):
+                        launch = validate_launch(
+                            kind, row.get("launch", {}) or {})
+                        egress = _validate_egress_field(row.get("egress"))
+                        quarantined = dict(row)
+                        quarantined["launch"] = launch
+                        quarantined["egress"] = egress
+                        quarantined["_quarantine_reason"] = (
+                            "tier2-template owner uid "
+                            f"{int(uid)} != current admin uid "
+                            f"{TIER2_LAUNCH_OWNER_UID}")
+                        self._quarantined_silo_rows.append(quarantined)
+                        log.error(
+                            "silos.yaml: quarantining tier2-template row "
+                            "%r: owner uid %s != current admin uid %s",
+                            name, uid, TIER2_LAUNCH_OWNER_UID)
+                        continue
                     # uid validation depends on kind (tier2-template carries
                     # the admin launch-owner uid, tier3-user a fresh silo uid).
                     validate_silo_uid(uid, kind)
@@ -1382,7 +1406,7 @@ class _SiloStore:
     def save(self) -> None:
         with self._lock:
             rows = [s.to_dict() for s in self._silos.values()]
-            text = _silos_yaml_render(rows)
+            text = _silos_yaml_render(rows, self._quarantined_silo_rows)
             self._config_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
             fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -2376,23 +2400,31 @@ def _yaml_load(text: str) -> Any:
     # Hand-rolled parser for the file we generate. Handles flat scalar keys
     # plus ONE nested mapping (`launch:`) whose children are 6-space-indented
     # scalars — enough for the fableplan2 task-04 schema.
-    data: dict[str, Any] = {"silos": []}
+    data: dict[str, Any] = {"silos": [], "quarantined_silos": []}
     cur: dict[str, Any] | None = None
     cur_sub: dict[str, Any] | None = None
-    in_silos = False
+    section: str | None = None
     for raw in text.splitlines():
         line = raw.rstrip()
         if not line or line.lstrip().startswith("#"):
             continue
         if line.startswith("silos:"):
-            in_silos = True
+            section = "silos"
             continue
-        if not in_silos:
+        if line.startswith("quarantined_silos:"):
+            section = "quarantined_silos"
+            continue
+        if line and not line.startswith(" "):
+            section = None
+            cur = None
+            cur_sub = None
+            continue
+        if section is None:
             continue
         if line.startswith("  - "):
             cur = {}
             cur_sub = None
-            data["silos"].append(cur)
+            data[section].append(cur)
             kv = line[4:].strip()
             if ":" in kv:
                 k, v = kv.split(":", 1)
@@ -2421,6 +2453,27 @@ def _yaml_load(text: str) -> Any:
     return data
 
 
+def _load_quarantined_silo_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in (data.get("quarantined_silos") or []):
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("row_json")
+        if not isinstance(raw, str):
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        reason = item.get("reason")
+        if isinstance(reason, str):
+            row["_quarantine_reason"] = reason
+        rows.append(row)
+    return rows
+
+
 def _yaml_scalar(v: str) -> Any:
     if v == "" or v == "~" or v.lower() == "null":
         return None
@@ -2429,7 +2482,10 @@ def _yaml_scalar(v: str) -> Any:
     if v.lower() == "false":
         return False
     if v.startswith('"') and v.endswith('"'):
-        return v[1:-1]
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            return v[1:-1]
     try:
         return int(v)
     except ValueError:
@@ -2437,7 +2493,10 @@ def _yaml_scalar(v: str) -> Any:
     return v
 
 
-def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
+def _silos_yaml_render(
+        rows: list[dict[str, Any]],
+        quarantined_rows: list[dict[str, Any]] | None = None,
+) -> str:
     """Pin the exact schema so a test can assert on the bytes."""
     out = [
         "# qdistro-session-manager persistence file. Schema:",
@@ -2456,6 +2515,9 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
         "#         template_silo: <str>  # TIER2_SILO (binding to resolve)",
         "#         network: <none|slirp4netns>  # TIER2_NETWORK",
         "#         argv: [<str>, ...] #   app argv after `--`",
+        "#   quarantined_silos:",
+        "#     - reason: <str>        # rows preserved but not loaded",
+        "#       row_json: <json>     # original row for manual repair",
         "#",
         "# This file is regenerated atomically on every state change.",
         "# Hand-editing while qdistro-session-manager is running will be",
@@ -2488,6 +2550,17 @@ def _silos_yaml_render(rows: list[dict[str, Any]]) -> str:
             out.append(f"      argv: {json.dumps(launch.get('argv', []))}")
     if rows:
         # Make sure trailing newline so editors don't complain.
+        out.append("")
+    quarantined_rows = quarantined_rows or []
+    if quarantined_rows:
+        out.append("quarantined_silos:")
+        for r in quarantined_rows:
+            reason = str(r.get("_quarantine_reason", "invalid row"))
+            row = {k: v for k, v in r.items()
+                   if not str(k).startswith("_quarantine_")}
+            out.append(f"  - reason: {json.dumps(reason)}")
+            row_json = json.dumps(row, sort_keys=True)
+            out.append(f"    row_json: {json.dumps(row_json)}")
         out.append("")
     return "\n".join(out)
 
