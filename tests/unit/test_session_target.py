@@ -110,3 +110,27 @@ def test_execstart_dir_stays_unprefixed_and_documents_installer_rewrite():
         "qdlocker.service must document the installer ExecStart rewrite contract "
         "so the unit is never copied verbatim into a --prefix=/usr install."
     )
+
+
+def test_no_network_runtime_hardening():
+    cp = _parse_unit()
+    assert cp.get("Service", "PrivateNetwork", fallback="") == "yes"
+    assert cp.get("Service", "IPAddressDeny", fallback="") == "any"
+    families = cp.get("Service", "RestrictAddressFamilies", fallback="")
+    assert "AF_UNIX" in families
+    assert "AF_INET" not in families
+    assert "AF_INET6" not in families
+    assert "AF_VSOCK" not in families
+
+
+def test_sources_stay_unix_only():
+    offenders = []
+    for py in (ROOT / "qdlocker").glob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        for family in ("AF_INET", "AF_INET6", "AF_VSOCK"):
+            if f"socket.{family}" in text:
+                offenders.append(f"{py.name}:socket.{family}")
+    assert not offenders, (
+        "qdlocker must stay AF_UNIX-only for the no-network discipline; "
+        f"found {offenders}"
+    )
