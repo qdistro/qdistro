@@ -80,10 +80,12 @@ ignore = [
 #   2. qnotebook/qnotebook/window.py — `PageRef` is now imported from
 #      qnotebook.notebook.
 # A new undefined-name blocks the gate in any *linted* file — i.e. the dirs in
-# host_ruff_targets() (ci/bin/qci). That list does NOT yet include plugins/ or
-# scripts/; plugins/qdistro_sendto_{qnotebook,qterminator}.py currently carry
-# pre-existing F821 hits (except-name referenced in an immediately-invoked
-# lambda — not a runtime bug) that must be cleared before those dirs are added.
+# host_ruff_targets() (ci/bin/qci). As of 2026-06-12 that list now INCLUDES
+# qdistro plugins/ and scripts/: the four pre-existing F821 hits in
+# plugins/qdistro_sendto_{qnotebook,qterminator}.py (the except-name `e`
+# captured in an immediately-invoked lambda — not a runtime bug, but flagged
+# because the binding is unbound at block exit) were rewritten to reference `e`
+# directly, and both dirs lint clean under this profile.
 
 # NOTE on per-file-ignore globs: ruff matches these against each file's path
 # RELATIVE TO THE WORKING DIRECTORY (or absolute when the file is outside it),

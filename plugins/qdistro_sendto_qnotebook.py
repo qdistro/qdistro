@@ -74,8 +74,14 @@ class _RelayWorker(QThread):
             self.done.emit(True, f"delivered to uid={self._target_uid} "
                                  f"({self._target_service})")
         except Exception as e:  # noqa: BLE001
-            name = getattr(e, "get_dbus_name", lambda: type(e).__name__)()
-            msg = getattr(e, "get_dbus_message", lambda: str(e))()
+            # Prefer the dbus-exception accessors when present; fall back to the
+            # generic type/str. Reference `e` directly (not via a lambda that
+            # captures the except-binding, which is unbound at block exit — and
+            # which ruff flags F821).
+            get_name = getattr(e, "get_dbus_name", None)
+            get_msg = getattr(e, "get_dbus_message", None)
+            name = get_name() if callable(get_name) else type(e).__name__
+            msg = get_msg() if callable(get_msg) else str(e)
             self.done.emit(False, f"{name}: {msg}")
 
 
