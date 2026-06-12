@@ -1381,7 +1381,7 @@ class PwdDaemon(dbus.service.Object):
         try:
             payload = get_item_payload(
                 VAULT_DIR, vault, bytes(self._unlocked[vault]["key"]), tag)
-        except VaultIntegrityError as e:
+        except VaultIntegrityError:
             self._audit.record("fill-confirm", vault, item_tag=tag,
                                decision="deny", reason="integrity-fail",
                                caller=caller, **actx)
@@ -1442,9 +1442,6 @@ class PwdDaemon(dbus.service.Object):
         url = req.get("url")
         username = req.get("username")
         password = req.get("password")
-        extension_id = req.get("extension_id") or ""
-        parent_exe = req.get("parent_exe") or ""
-
         # Self-reported extension/silo context for the audit row. NB:
         # _request_app_context only reads extension_id / silo / app_context
         # keys — never `password` — so credential material can't leak into

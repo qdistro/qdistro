@@ -4519,7 +4519,7 @@ def main():
         return
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
+    _name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
     broker = Broker(bus)
     print(f"[qdistro-admin-broker] listening on {BUS_NAME} {OBJ_PATH}", flush=True)
     try:

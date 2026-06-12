@@ -219,7 +219,6 @@ def _pump(a: socket.socket, b: socket.socket) -> None:
     """Bidirectional byte copy between a and b until EOF / error."""
     a.setblocking(False)
     b.setblocking(False)
-    fds = [a.fileno(), b.fileno()]
     open_ = {a.fileno(): a, b.fileno(): b}
     peer_of = {a.fileno(): b, b.fileno(): a}
     try:
