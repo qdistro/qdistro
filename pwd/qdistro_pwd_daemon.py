@@ -68,7 +68,8 @@ from qdistro_pwd_identity import (  # type: ignore[import-not-found]
 )
 from qdistro_pwd_audit import PwdAuditLog  # type: ignore[import-not-found]
 from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-    TpmUnavailable, configured_pcrs, lookup_backend, select_backend,
+    TpmAuthFailed, TpmBackendError, TpmUnavailable,
+    configured_pcrs, lookup_backend, select_backend,
 )
 from qdistro_pwd_polkit import (  # type: ignore[import-not-found]
     PolkitDenied, PolkitNoAgent, check_unlock as polkit_check_unlock,

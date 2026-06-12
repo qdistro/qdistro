@@ -34,11 +34,18 @@ class _FakeOps:
         self.cgroups: set[str] = set()
         self.cgroup_pids_map: dict[str, list[int]] = {}
         self.cgroup_frozen: dict[str, bool] = {}
+        # Names whose cgroup_remove should raise EBUSY (simulates a task
+        # stuck in D-state at stop time → the rmdir leaks the dir).
+        self.cgroup_remove_ebusy: set[str] = set()
+        # When True, cgroup_freeze raises (simulates a wedged kernel write).
+        self.cgroup_freeze_should_fail = False
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
+        # Snapshot of self.cgroup_frozen taken on each kill_pids call.
+        self.frozen_at_kill: dict[str, bool] = {}
         # When True, a tier-2 stop's fail-closed verification reports the
         # container/unit still running (simulates an ExecStop regression or a
         # surviving rootless container) so the store must NOT report STOPPED.
@@ -84,11 +91,21 @@ class _FakeOps:
         return Path("/sys/fs/cgroup/qdistro-silos") / name
 
     def cgroup_remove(self, name: str) -> None:
+        # When this name is staged to fail, raise EBUSY (as the kernel does
+        # when cgroup.procs is non-empty) so tests can exercise the leak path.
+        if name in getattr(self, "cgroup_remove_ebusy", set()):
+            import errno
+            raise OSError(errno.EBUSY, "Device or resource busy")
         self.cgroups.discard(name)
         self.cgroup_pids_map.pop(name, None)
         self.cgroup_frozen.pop(name, None)
 
+    def cgroup_list(self) -> list[str]:
+        return list(self.cgroups)
+
     def cgroup_freeze(self, name: str, frozen: bool) -> None:
+        if self.cgroup_freeze_should_fail:
+            raise OSError("cgroup.freeze write failed (simulated)")
         self.cgroup_frozen[name] = bool(frozen)
 
     def cgroup_pids(self, name: str) -> list[int]:
@@ -122,6 +139,12 @@ class _FakeOps:
         self.launch_envs.pop(name, None)
 
     def kill_pids(self, pids, sig: int) -> None:
+        # Snapshot which cgroups are frozen at the moment we signal — a kill
+        # against a frozen cgroup is undeliverable, so stop() must have thawed
+        # first. Lets tests assert the pre-thaw actually landed before SIGTERM
+        # (the post-stop frozen dict is cleared by cgroup_remove, so checking it
+        # after the fact is vacuous).
+        self.frozen_at_kill = dict(self.cgroup_frozen)
         for pid in pids:
             self.killed.append((int(pid), int(sig)))
         if self.kill_drains:
@@ -420,6 +443,192 @@ class TestLifecycle:
         store.freeze("work")
         store.stop("work", grace_s=0)
         assert ops.cgroup_frozen.get("work", False) is False
+        assert store.get("work").state == State.STOPPED
+
+
+# ---------------------------------------------------------------------------
+# 02/S14 — orphan-cgroup reaping + freeze/resume lock scope
+# ---------------------------------------------------------------------------
+
+class TestS14OrphanCgroup:
+    def test_stop_ebusy_leaks_then_startup_reaps(self, ops, tmp_path):
+        """02/S14a: a stop() whose cgroup rmdir hits EBUSY leaves the dir
+        behind (forcing STOPPED), and the next startup sweep reclaims it once
+        the tasks have exited. The old comment claimed autostart papered it
+        over, but autostart only STARTS silos — nothing reaped the dir."""
+        cfg = tmp_path / "silos.yaml"
+        store = _SiloStore(ops, config_path=cfg)
+        store.create("work", 2000)
+        store.start("work")
+        assert "work" in ops.cgroups
+        # Stop, but the rmdir hits EBUSY (a task stuck in D at stop time).
+        ops.cgroup_remove_ebusy = {"work"}
+        store.stop("work", grace_s=0)
+        assert store.get("work").state == State.STOPPED
+        assert "work" in ops.cgroups, "the cgroup dir leaked (expected)"
+
+        # Daemon restart: the stuck task is gone, the dir is now unpopulated.
+        ops.cgroup_remove_ebusy = set()
+        ops.cgroup_pids_map["work"] = []
+        store2 = _SiloStore(ops, config_path=cfg)
+        reaped = store2.reap_orphan_cgroups()
+        assert "work" in reaped
+        assert "work" not in ops.cgroups
+
+    def test_reap_skips_live_and_populated(self, ops, tmp_path):
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        store.create("live", 2000)
+        store.start("live")                       # ACTIVE → must not be reaped
+        ops.cgroups.add("ghost")                  # orphan, still has a task
+        ops.cgroup_pids_map["ghost"] = [4321]
+        ops.cgroups.add("dead")                   # orphan, empty → reap
+        ops.cgroup_pids_map["dead"] = []
+        reaped = store.reap_orphan_cgroups()
+        assert reaped == ["dead"]
+        assert "live" in ops.cgroups
+        assert "ghost" in ops.cgroups
+
+    def test_autostart_runs_the_sweep(self, ops, tmp_path):
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+        ops.cgroups.add("dead")                   # leftover from a prior boot
+        ops.cgroup_pids_map["dead"] = []
+        store.autostart_pass()
+        assert "dead" not in ops.cgroups
+
+
+class TestS14FreezeLockScope:
+    def test_freeze_write_failure_leaves_active(self, store, ops):
+        """02/S14b: the cgroup.freeze write runs outside the store lock and the
+        ACTIVE→FROZEN transition is deferred until it succeeds; a failed write
+        leaves the silo cleanly ACTIVE (it never lies about being FROZEN)."""
+        store.create("work", 2000)
+        store.start("work")
+        ops.cgroup_freeze_should_fail = True
+        with pytest.raises(OSError):
+            store.freeze("work")
+        assert store.get("work").state == State.ACTIVE
+
+    def test_resume_write_failure_leaves_frozen(self, store, ops):
+        """Symmetric: a failed unfreeze write leaves the silo FROZEN."""
+        store.create("work", 2000)
+        store.start("work")
+        store.freeze("work")
+        ops.cgroup_freeze_should_fail = True
+        with pytest.raises(OSError):
+            store.resume("work")
+        assert store.get("work").state == State.FROZEN
+
+    def test_stop_thaws_even_when_state_says_active(self, store, ops):
+        """02/S14b (codex r3 edge): stop() thaws the cgroup unconditionally, so
+        a silo whose physical cgroup is frozen while store state reads ACTIVE
+        (e.g. a freeze() whose write landed but whose save() then failed) still
+        gets thawed before SIGTERM, never SIGTERMing a frozen, undeliverable
+        process set."""
+        store.create("work", 2000)
+        store.start("work")
+        ops.cgroup_frozen["work"] = True          # divergence: frozen, ACTIVE
+        store.stop("work", grace_s=0)
+        # Load-bearing: the cgroup must have been thawed BEFORE the kill (a
+        # frozen process never receives the signal). Checking cgroup_frozen
+        # after stop is vacuous — cgroup_remove clears it regardless.
+        assert ops.frozen_at_kill.get("work") is False
+        assert store.get("work").state == State.STOPPED
+
+    def test_freeze_reentrant_stop_from_on_change(self, ops, tmp_path):
+        """02/S14b re-entrancy (codex round-2): if an on_change handler
+        re-enters stop() when it observes FROZEN, the freeze's cgroup write
+        must already have completed and the in-flight claim must already be
+        cleared — so the re-entrant stop neither deadlocks nor tears down a
+        half-frozen silo. Regression guard: with the transition emitted before
+        the write (or before the claim is cleared), frozen_write_seen would be
+        None/False here and the silo would be torn down mid-write."""
+        observed: dict = {}
+        store = None  # captured by the closure; reassigned below before use
+
+        def on_change(n, s):
+            if s == State.FROZEN and not observed.get("done"):
+                observed["frozen_write_seen"] = ops.cgroup_frozen.get(n)
+                observed["done"] = True
+                store.stop(n, grace_s=0)      # re-enter on the same thread
+
+        store = _SiloStore(ops, config_path=tmp_path / "silos.yaml",
+                           on_change=on_change)
+        store.create("work", 2000)
+        store.start("work")
+        # Run in a worker so a clear/transition-ordering regression (which
+        # deadlocks on _stop_cv.wait()) surfaces as a failed join, not a hang
+        # that only the CI job timeout would catch.
+        import threading
+        t = threading.Thread(target=lambda: store.freeze("work"))
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), "freeze() deadlocked under re-entrant stop()"
+        assert observed.get("frozen_write_seen") is True
+        assert store.get("work").state == State.STOPPED
+
+    def test_lock_released_during_freeze_write(self, store, ops):
+        """The blocking cgroup.freeze write must NOT hold the store lock: a
+        wedged write may not stall read-only callers like list_silos()."""
+        import threading
+        store.create("work", 2000)
+        store.start("work")
+        in_write = threading.Event()
+        release = threading.Event()
+        orig = ops.cgroup_freeze
+
+        def blocking(name, frozen):
+            in_write.set()
+            assert release.wait(5), "test deadlock: writer never released"
+            return orig(name, frozen)
+
+        ops.cgroup_freeze = blocking
+        t = threading.Thread(target=lambda: store.freeze("work"))
+        t.start()
+        try:
+            assert in_write.wait(5), "freeze never reached the cgroup write"
+            # The writer is parked inside cgroup_freeze. A lock-taking read
+            # must still complete promptly — proving _lock is not held.
+            done = threading.Event()
+            threading.Thread(
+                target=lambda: (store.list_silos(), done.set())).start()
+            assert done.wait(5), "list_silos blocked → lock held during write"
+        finally:
+            release.set()
+            t.join(5)
+        assert store.get("work").state == State.FROZEN
+
+    def test_stop_waits_for_inflight_freeze(self, store, ops):
+        """02/S14b serialization: with freeze() parked inside its lock-free
+        cgroup.freeze write, a concurrent stop() for the same silo must BLOCK
+        on the in-flight claim until freeze finishes — never tear the silo
+        down mid-freeze (the TOCTOU both reviewers flagged)."""
+        import threading
+        store.create("work", 2000)
+        store.start("work")
+        in_write = threading.Event()
+        release = threading.Event()
+        orig = ops.cgroup_freeze
+
+        def parked(name, frozen):
+            if frozen:                      # park only the freeze(True) write
+                in_write.set()
+                assert release.wait(5), "test deadlock: freeze never released"
+            return orig(name, frozen)
+
+        ops.cgroup_freeze = parked
+        tf = threading.Thread(target=lambda: store.freeze("work"))
+        tf.start()
+        assert in_write.wait(5), "freeze never reached the cgroup write"
+
+        stop_done = threading.Event()
+        threading.Thread(target=lambda: (
+            store.stop("work", grace_s=0), stop_done.set())).start()
+        # stop() must be parked on the in-flight claim while freeze holds it.
+        assert not stop_done.wait(0.5), "stop() raced an in-flight freeze"
+
+        release.set()
+        tf.join(5)
+        assert stop_done.wait(5), "stop() never completed after freeze released"
         assert store.get("work").state == State.STOPPED
 
 
@@ -773,6 +982,41 @@ class TestTier2TemplateKind:
     def test_create_tier2_rejects_non_admin_uid(self, store):
         with pytest.raises(BadArgument):
             store.create("browser1", 2001, kind="tier2-template", launch=dict(_LAUNCH))
+
+    def test_admin_uid_is_env_aware_not_hardcoded_1000(self):
+        """02/S11: the authz admin uid and the tier2 launch-owner uid both
+        follow QDISTRO_ADMIN_USER. Regression: a hardcoded `ADMIN_UID = 1000`
+        in the tier2 section shadowed the env-aware lookup, locking out any
+        admin whose uid != 1000 and disagreeing with the tier2 launch path.
+
+        Driven in a subprocess so the env-resolved module globals are fresh
+        (they are computed at import) without polluting the shared module."""
+        import os
+        import subprocess
+        import sys
+
+        sm_dir = str(Path(sm.__file__).resolve().parent)
+        env = dict(
+            os.environ,
+            QDISTRO_ADMIN_USER="root",  # uid 0, env-aware, deliberately != 1000
+            PYTHONPATH=sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        )
+        out = subprocess.check_output(
+            [sys.executable, "-c",
+             "import qdistro_session_manager as m;"
+             "print(m.ADMIN_UID, m.TIER2_LAUNCH_OWNER_UID,"
+             " m.validate_silo_uid(0, m.KIND_TIER2_TEMPLATE))"],
+            env=env, text=True).split()
+        assert out == ["0", "0", "0"], out  # NOT 1000
+
+        # And the old hardcoded owner (1000) is now rejected when admin != 1000.
+        rej = subprocess.run(
+            [sys.executable, "-c",
+             "import qdistro_session_manager as m;"
+             "m.validate_silo_uid(1000, m.KIND_TIER2_TEMPLATE)"],
+            env=env, capture_output=True, text=True)
+        assert rej.returncode != 0
+        assert "launch-owner" in rej.stderr
 
     def test_schema_round_trips_tier2(self, ops, tmp_path):
         s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")

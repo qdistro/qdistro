@@ -12,7 +12,6 @@ faked.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,69 +23,17 @@ from qdistro_session_manager import (
 
 
 # ---------------------------------------------------------------------------
-# Fake side-effect adapter (same shape as test_session_manager._FakeOps)
+# Fake side-effect adapter
 # ---------------------------------------------------------------------------
-
-class _FakeOps:
-    def __init__(self):
-        self.users: dict[str, int] = {}
-        self.cgroups: set[str] = set()
-        self.cgroup_pids_map: dict[str, list[int]] = {}
-        self.cgroup_frozen: dict[str, bool] = {}
-        self.useradd_should_fail = False
-        self.kill_drains = True
-
-    def user_exists(self, name: str) -> bool:
-        return name in self.users
-
-    def uid_exists(self, uid: int) -> bool:
-        return int(uid) in self.users.values()
-
-    def useradd(self, name: str, uid: int) -> None:
-        if self.useradd_should_fail:
-            raise subprocess.CalledProcessError(1, ["useradd", name])
-        self.users[name] = int(uid)
-
-    def userdel(self, name: str) -> None:
-        self.users.pop(name, None)
-
-    def make_state_dir(self, name: str, uid: int):
-        return Path("/var/lib/qdistro/silos") / name
-
-    def remove_state_dir(self, name: str) -> None:
-        pass
-
-    def cgroup_create(self, name: str):
-        self.cgroups.add(name)
-        self.cgroup_pids_map.setdefault(name, [])
-        return Path("/sys/fs/cgroup/qdistro-silos") / name
-
-    def cgroup_remove(self, name: str) -> None:
-        self.cgroups.discard(name)
-        self.cgroup_pids_map.pop(name, None)
-        self.cgroup_frozen.pop(name, None)
-
-    def cgroup_freeze(self, name: str, frozen: bool) -> None:
-        self.cgroup_frozen[name] = bool(frozen)
-
-    def cgroup_pids(self, name: str) -> list[int]:
-        return list(self.cgroup_pids_map.get(name, []))
-
-    def cgroup_is_populated(self, name: str) -> bool:
-        return bool(self.cgroup_pids_map.get(name))
-
-    def systemctl_start(self, unit: str) -> None:
-        for name in list(self.cgroups):
-            if unit.startswith(f"qdshell-session-{name}@"):
-                self.cgroup_pids_map.setdefault(name, []).append(99000)
-
-    def systemctl_stop(self, unit: str) -> None:
-        pass
-
-    def kill_pids(self, pids, sig: int) -> None:
-        if self.kill_drains:
-            for name in list(self.cgroup_pids_map.keys()):
-                self.cgroup_pids_map[name] = []
+#
+# Reuse the canonical _FakeOps from test_session_manager rather than a local
+# copy. The local copy predated the per-silo netns egress wiring (it lacked
+# nft_skuid_drop and the netns/link methods start() now calls), so every
+# lifecycle audit test that needed a *started* silo failed with AttributeError
+# — i.e. the start/stop/freeze/resume audit rows were never actually exercised.
+# Importing the single source of truth keeps this suite honest as the ops
+# surface grows.
+from test_session_manager import _FakeOps  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

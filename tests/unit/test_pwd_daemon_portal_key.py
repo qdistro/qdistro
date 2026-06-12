@@ -155,6 +155,45 @@ def test_portal_backend_rejects_operand_python_flags(monkeypatch, tmp_path):
     assert d._portal_backend_allowed(1234) == (False, "not-portal-backend")
 
 
+def test_auto_unlock_tpm_auth_failed_maps_to_bad_password(staged, monkeypatch):
+    """02/S2 regression: a TpmAuthFailed raised while unsealing the stashed
+    PIN must surface as PwdBadPassword. Before the fix, ``TpmAuthFailed`` was
+    never imported into the daemon module, so this branch raised NameError
+    (a different, security-relevant failure) instead of denying cleanly."""
+    daemon, vd, audit_path = staged
+    monkeypatch.setattr(daemon, "_require_admin", lambda sender: None)
+    monkeypatch.setattr(d, "PORTAL_REQUIRE_FPRINT", False)
+
+    def _boom(*a, **k):
+        raise d.TpmAuthFailed("seal blob tampered / PCR mismatch")
+    monkeypatch.setattr(d, "portal_pin_unseal", _boom)
+
+    with pytest.raises(d.PwdBadPassword):
+        daemon.AutoUnlockPortalKeys(sender=":1.5")
+    deny = [r for r in daemon._audit.tail(10)
+            if r["op"] == "portal-auto-unlock" and r["decision"] == "deny"]
+    assert deny and deny[0]["reason"].startswith("tpm-auth:")
+
+
+def test_auto_unlock_tpm_backend_error_maps_to_integrity_error(
+        staged, monkeypatch):
+    """02/S2 regression: TpmBackendError must surface as PwdIntegrityError,
+    not NameError."""
+    daemon, vd, audit_path = staged
+    monkeypatch.setattr(daemon, "_require_admin", lambda sender: None)
+    monkeypatch.setattr(d, "PORTAL_REQUIRE_FPRINT", False)
+
+    def _boom(*a, **k):
+        raise d.TpmBackendError("tpm2_unseal exited 1")
+    monkeypatch.setattr(d, "portal_pin_unseal", _boom)
+
+    with pytest.raises(d.PwdIntegrityError):
+        daemon.AutoUnlockPortalKeys(sender=":1.5")
+    deny = [r for r in daemon._audit.tail(10)
+            if r["op"] == "portal-auto-unlock" and r["decision"] == "deny"]
+    assert deny and deny[0]["reason"].startswith("tpm-error:")
+
+
 def test_get_portal_key_locked_raises(staged):
     daemon, vd, _ = staged
     with patch.object(daemon, "_peer_info", return_value=(1500, 1234)):

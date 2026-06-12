@@ -50,6 +50,11 @@ from qdistro_silo_egress import (
 
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
+# The AUTHZ admin uid: the only uid permitted to call privileged D-Bus
+# methods (see _require_admin). Resolved env-aware (QDISTRO_ADMIN_USER, then
+# the "admin" user) so a deployment whose admin is not uid 1000 still works.
+# This is a DIFFERENT concept from the tier2 launch-owner uid below; keeping
+# them separate names stops the two from silently diverging (02/S11).
 try:
     ADMIN_UID = pwd.getpwnam(
         os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
@@ -95,9 +100,13 @@ TIER2_CONTAINER_FMT = "qdistro-silo-{name}"
 KIND_TIER3_USER = "tier3-user"
 KIND_TIER2_TEMPLATE = "tier2-template"
 SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE)
-# The launch-owner uid a tier2-template row carries: admin, where rootless
-# podman runs. Not a fresh silo uid (no useradd/home/cgroup semantics).
-ADMIN_UID = 1000
+# The launch-owner uid a tier2-template row carries: the admin user where
+# rootless podman runs. Not a fresh silo uid (no useradd/home/cgroup
+# semantics). Resolved the same env-aware way as the authz ADMIN_UID above
+# (they are the same user today), but a DISTINCT name: previously this was a
+# hardcoded `ADMIN_UID = 1000` that shadowed the env-aware authz lookup and
+# locked out any admin whose uid != 1000 (02/S11).
+TIER2_LAUNCH_OWNER_UID = ADMIN_UID
 # Network modes a tier2-template launch may request (maps to TIER2_NETWORK).
 SILO_NETWORK_MODES = ("none", "slirp4netns")
 # Per-silo launch env the daemon writes for the tier-2 launcher unit to read
@@ -290,11 +299,11 @@ def validate_silo_uid(uid: int, kind: str) -> int:
     a tier3-user row, is rejected — the loader must not smuggle the wrong
     privilege semantics in."""
     if kind == KIND_TIER2_TEMPLATE:
-        if int(uid) != ADMIN_UID:
+        if int(uid) != TIER2_LAUNCH_OWNER_UID:
             raise BadArgument(
                 f"tier2-template silo uid must be the admin launch-owner "
-                f"({ADMIN_UID}), got {uid}")
-        return ADMIN_UID
+                f"({TIER2_LAUNCH_OWNER_UID}), got {uid}")
+        return TIER2_LAUNCH_OWNER_UID
     return validate_uid(uid)
 
 
@@ -500,6 +509,14 @@ class _SystemOps:
             # swallowing leaks the cgroup directory.
             p.rmdir()
 
+    def cgroup_list(self) -> list[str]:
+        # Names of the per-silo cgroup dirs that currently exist under the
+        # hierarchy root. Used by the startup orphan sweep (02/S14a) to find
+        # leftover dirs from a stop() whose rmdir hit EBUSY.
+        if not CGROUP_ROOT.exists():
+            return []
+        return [p.name for p in CGROUP_ROOT.iterdir() if p.is_dir()]
+
     def cgroup_freeze(self, name: str, frozen: bool) -> None:
         p = CGROUP_ROOT / name / "cgroup.freeze"
         p.write_text("1\n" if frozen else "0\n")
@@ -539,10 +556,10 @@ class _SystemOps:
             # env"). Hand it to admin so the unit it is written FOR can read it.
             # Leave the group unchanged (-1): the second arg is a GID, not a
             # second UID, and admin's primary gid is not guaranteed to equal
-            # ADMIN_UID. Best-effort: only root can chown, and the daemon is root
-            # in prod.
+            # the owner uid. Best-effort: only root can chown, and the daemon
+            # is root in prod.
             try:
-                os.fchown(fd, ADMIN_UID, -1)
+                os.fchown(fd, TIER2_LAUNCH_OWNER_UID, -1)
             except OSError:
                 pass
         finally:
@@ -1257,11 +1274,14 @@ class _SiloStore:
         self._audit = audit
         self._lock = threading.RLock()
         self._silos: dict[str, Silo] = {}
-        # Names with a stop() currently in its phase-2 teardown (running
-        # without the store lock). A concurrent stop() for the same silo
-        # waits on _stop_cv until the in-flight one finishes, then re-checks
-        # state — so it observes the final result instead of returning
-        # success prematurely. Guarded by _lock.
+        # Names with a lock-free lifecycle write currently in flight: a stop()
+        # in its phase-2 teardown, or a freeze()/resume() doing its blocking
+        # cgroup.freeze write outside the store lock (02/S14b). Any conflicting
+        # lifecycle mutation for the same silo waits on _stop_cv until the
+        # in-flight one finishes, then re-checks state — so freeze/resume/stop
+        # for one silo are serialized even though none of them holds _lock
+        # across its kernel write. Guarded by _lock. (Named *_stopping_* for
+        # history; it now covers freeze/resume too.)
         self._stopping_inflight: set[str] = set()
         self._stop_cv = threading.Condition(self._lock)
         self.load()
@@ -1789,6 +1809,19 @@ class _SiloStore:
                             unit = TIER2_SILO_LAUNCHER_FMT.format(name=silo.name)
                         else:
                             self._ops.cgroup_create(silo.name)
+                            # cgroup_create reuses an existing dir (exist_ok).
+                            # A crash between resume()'s ACTIVE transition and
+                            # its unfreeze write (02/S14b), or between freeze
+                            # and a stop, can leave that reused cgroup frozen —
+                            # which would silently freeze every process we are
+                            # about to start. Thaw defensively on (re)start.
+                            # Best-effort: a fresh cgroup is already thawed.
+                            try:
+                                self._ops.cgroup_freeze(silo.name, False)
+                            except Exception as e:  # noqa: BLE001
+                                log.warning("cgroup thaw on start of %r "
+                                            "failed: %s — continuing",
+                                            silo.name, e)
                             # Bring up the per-silo netns egress BEFORE the
                             # launcher, so the silo's processes (which enter the
                             # netns) get the right route + resolver immediately.
@@ -1883,17 +1916,10 @@ class _SiloStore:
             if silo.state not in (State.ACTIVE, State.FROZEN):
                 raise BadState(
                     f"cannot stop silo {silo.name!r} in state {silo.state}")
-            # If frozen we must thaw before SIGTERM has any effect.
-            if silo.state == State.FROZEN:
-                try:
-                    self._ops.cgroup_freeze(silo.name, False)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("cgroup_freeze(False) for %r failed during "
-                                "stop pre-thaw: %s — continuing",
-                                silo.name, e)
             self._transition(silo, State.STOPPING)
             # Snapshot the immutable identifiers we need outside the lock,
-            # and claim the in-flight slot so concurrent stops wait.
+            # and claim the in-flight slot so concurrent stop/freeze/resume
+            # for this silo wait (02/S14b).
             silo_name = silo.name
             silo_uid = silo.uid
             silo_kind = silo.kind
@@ -1905,6 +1931,24 @@ class _SiloStore:
         # wait for processes to exit. The try/finally guarantees the
         # in-flight slot is cleared and waiters are woken on every exit.
         try:
+            # Thaw before SIGTERM has any effect on a (cgroup-backed) silo.
+            # Done lock-free here, not in phase 1 (02/S14b): a wedged
+            # cgroup.freeze must not stall every method. UNCONDITIONAL (not
+            # gated on was_frozen): writing cgroup.freeze=0 is idempotent on an
+            # already-thawed cgroup, and this also covers the divergence edge
+            # where store state reads ACTIVE but the physical cgroup is frozen
+            # (e.g. a freeze() whose cgroup write succeeded but whose save()
+            # then failed — codex review r3). Best-effort — a thaw failure is
+            # logged, not fatal; the in-flight claim above keeps a concurrent
+            # freeze() from re-freezing underneath us. Tier-2 templated silos
+            # have no per-silo cgroup, so skip them.
+            if silo_kind != KIND_TIER2_TEMPLATE:
+                try:
+                    self._ops.cgroup_freeze(silo_name, False)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("cgroup_freeze(False) for %r failed during "
+                                "stop pre-thaw: %s — continuing",
+                                silo_name, e)
             if silo_kind == KIND_TIER2_TEMPLATE:
                 # Tier-2 templated silo: stopping its unit (whose ExecStop runs
                 # `podman stop` on the rootless container) is the whole teardown
@@ -1999,11 +2043,14 @@ class _SiloStore:
                     # The cgroup is still populated — kernel didn't reap
                     # in time, or one of the processes is stuck in D.
                     # Log loudly so the leak is visible; transition to
-                    # STOPPED anyway so the admin can retry stop or
-                    # delete (the autostart sweep will paper over the
-                    # leftover dir on next daemon start).
+                    # STOPPED anyway so the admin can retry stop or delete.
+                    # The leftover dir is reclaimed by reap_orphan_cgroups()
+                    # at the next daemon startup once its tasks have exited
+                    # (02/S14a — previously this comment claimed the autostart
+                    # sweep papered it over, but that path only STARTS silos).
                     log.error("cgroup rmdir for silo %r failed: %s "
-                              "(cgroup may have leaked)", silo_name, e)
+                              "(cgroup leaked; reaped at next startup)",
+                              silo_name, e)
                 # Tear down the per-silo netns egress (devices, backstop,
                 # resolver) and remove the netns. Best-effort: never raises, so
                 # a teardown hiccup can't wedge the stop. No-op for legacy
@@ -2041,17 +2088,63 @@ class _SiloStore:
             with self._lock:
                 self._clear_stop_inflight(silo_name)
 
+    def _await_inflight_locked(self, name: str) -> "Silo":
+        """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
+        write is in flight for *name*, then return the current silo. Raises
+        UnknownSilo if the silo is deleted while we wait. Caller must hold
+        _lock and must not yet have claimed the slot."""
+        silo = self.get(name)
+        while silo.name in self._stopping_inflight:
+            self._stop_cv.wait()
+            silo = self._silos.get(name)
+            if silo is None:
+                raise UnknownSilo(f"no such silo {name!r}")
+        return silo
+
     def freeze(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "frozen"
         try:
+            # stop()'s idiom (02/S14b): under the lock, validate and CLAIM the
+            # per-silo in-flight slot — but do NOT transition yet. Then do the
+            # BLOCKING cgroup.freeze write WITHOUT the lock (a wedged write must
+            # not stall ListSilos), and only on success flip ACTIVE→FROZEN.
+            #
+            # Two races this ordering closes:
+            #  - cross-thread: a competing stop() blocks on the in-flight claim
+            #    (stop()'s phase-1 already waits on _stopping_inflight) until we
+            #    finish, so it can't tear the silo down mid-write.
+            #  - re-entrant: the state-change emit (on_change → may re-enter
+            #    stop() on this thread) happens in the final _transition, AFTER
+            #    the write settled AND the marker was cleared — so a re-entrant
+            #    stop observes a fully-frozen silo with no stale claim, never a
+            #    half-applied one. Deferring the transition also means a failed
+            #    write leaves the silo cleanly ACTIVE with no rollback needed.
             with self._lock:
-                silo = self.get(name)
+                silo = self._await_inflight_locked(name)
                 if silo.state == State.FROZEN:
-                    # idempotent — audit after releasing the lock.
                     reason = "already frozen (idempotent)"
+                    target = None
+                elif silo.state != State.ACTIVE:
+                    raise BadState(
+                        f"cannot freeze silo {silo.name!r} in state "
+                        f"{silo.state}")
                 else:
-                    self._transition(silo, State.FROZEN)
-                    self._ops.cgroup_freeze(silo.name, True)
+                    self._stopping_inflight.add(silo.name)
+                    target = silo
+            if target is not None:
+                ok = False
+                try:
+                    self._ops.cgroup_freeze(name, True)
+                    ok = True
+                finally:
+                    with self._lock:
+                        # Clear the claim + notify BEFORE _transition emits, so
+                        # a re-entrant stop() from on_change can't deadlock on a
+                        # marker only this thread can clear (stop()'s rule).
+                        self._clear_stop_inflight(name)
+                        cur = self._silos.get(name)
+                        if ok and cur is target and cur.state == State.ACTIVE:
+                            self._transition(cur, State.FROZEN)
         except Exception as e:  # noqa: BLE001
             decision = "deny" if isinstance(
                 e, (UnknownSilo, BadState)) else "error"
@@ -2064,18 +2157,33 @@ class _SiloStore:
     def resume(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "resumed"
         try:
+            # Same lock + in-flight + defer-the-transition discipline as
+            # freeze() (02/S14b): claim under the lock, run the blocking
+            # cgroup.freeze(False) write lock-free, flip FROZEN→ACTIVE only on
+            # success (no rollback needed; a failed unfreeze leaves it FROZEN).
             with self._lock:
-                silo = self.get(name)
+                silo = self._await_inflight_locked(name)
                 if silo.state == State.ACTIVE:
-                    # idempotent — audit after releasing the lock.
                     reason = "already active (idempotent)"
+                    target = None
                 elif silo.state != State.FROZEN:
                     raise BadState(
                         f"cannot resume silo {silo.name!r} in state "
                         f"{silo.state}")
                 else:
-                    self._ops.cgroup_freeze(silo.name, False)
-                    self._transition(silo, State.ACTIVE)
+                    self._stopping_inflight.add(silo.name)
+                    target = silo
+            if target is not None:
+                ok = False
+                try:
+                    self._ops.cgroup_freeze(name, False)
+                    ok = True
+                finally:
+                    with self._lock:
+                        self._clear_stop_inflight(name)
+                        cur = self._silos.get(name)
+                        if ok and cur is target and cur.state == State.FROZEN:
+                            self._transition(cur, State.ACTIVE)
         except Exception as e:  # noqa: BLE001
             decision = "deny" if isinstance(
                 e, (UnknownSilo, BadState)) else "error"
@@ -2087,6 +2195,41 @@ class _SiloStore:
 
     # ---- startup recovery ----------------------------------------------
 
+    def reap_orphan_cgroups(self) -> list[str]:
+        """Reclaim leftover per-silo cgroup dirs whose tasks have since exited.
+
+        Closes the stop()-path leak (02/S14a): when cgroup_remove hit EBUSY
+        (a task stuck in D-state at stop time) the dir was left behind on the
+        promise that "the autostart sweep papers it over" — but autostart only
+        STARTS silos, it never cleaned a dir. This is that sweep, run once at
+        startup. A dir is reaped only when it is now UNPOPULATED and does not
+        belong to a silo we are about to (re)start as ACTIVE/FROZEN (those dirs
+        are reused by start()). Best-effort: a still-populated or unremovable
+        dir is logged and left for the next startup. Returns reaped names."""
+        with self._lock:
+            live = {s.name for s in self._silos.values()
+                    if s.state in (State.ACTIVE, State.FROZEN)}
+        reaped: list[str] = []
+        try:
+            names = self._ops.cgroup_list()
+        except Exception as e:  # noqa: BLE001
+            log.warning("orphan-cgroup sweep: cgroup_list failed: %s", e)
+            return reaped
+        for name in names:
+            if name in live:
+                continue
+            try:
+                if self._ops.cgroup_is_populated(name):
+                    log.warning("orphan cgroup %r still populated; "
+                                "not reaping (will retry next startup)", name)
+                    continue
+                self._ops.cgroup_remove(name)
+                reaped.append(name)
+                log.info("reaped orphan cgroup %r", name)
+            except OSError as e:
+                log.warning("reaping orphan cgroup %r failed: %s", name, e)
+        return reaped
+
     def autostart_pass(self) -> list[str]:
         """Called once at daemon startup. For each silo whose
         persisted state is Active OR whose autostart flag is true,
@@ -2095,6 +2238,9 @@ class _SiloStore:
         Active — admin can refreeze after the reboot if desired,
         but a frozen silo across a reboot is an invariant we don't
         try to preserve (the cgroup is gone)."""
+        # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
+        # before we (re)start silos (02/S14a). Runs lock-free internally.
+        self.reap_orphan_cgroups()
         started: list[str] = []
         with self._lock:
             for silo in list(self._silos.values()):
@@ -2404,7 +2550,7 @@ if dbus is not None:
                 raise _to_dbus_exception(e)
             try:
                 self.store.create(
-                    str(name), ADMIN_UID, kind=KIND_TIER2_TEMPLATE,
+                    str(name), TIER2_LAUNCH_OWNER_UID, kind=KIND_TIER2_TEMPLATE,
                     launch={"workload": str(workload),
                             "template_silo": str(template_silo),
                             "network": str(network), "argv": []},

@@ -63,29 +63,26 @@ ignore = [
     "F811",  # redefined-while-unused            (~23 hits)
     "F541",  # f-string-missing-placeholders     (~4 hits)
     "F601",  # multi-value-repeated-key-literal  (1 hit)
-    # F821 (undefined-name) is NOT deferred globally — it is enforced and
-    # scoped-out per file below; see the NOTE + per-file-ignores section.
+    # F821 (undefined-name) is NOT deferred globally — it is enforced with no
+    # scope-outs; see the NOTE below.
     "E741",  # ambiguous-variable-name           (~82 hits)
     "E402",  # module-import-not-at-top-of-file  (~64 hits)
     "E401",  # multiple-imports-on-one-line      (1 hit, in broker; cosmetic)
 ]
 # NOTE (F821): rather than DEFER undefined-name globally (which would mute
 # every new undefined-name across the whole tree — exactly the latent-bug class
-# we most want to catch), F821 is ENFORCED globally and scoped-out per file
-# below for the two pre-existing hits calibration surfaced:
-#   1. qdistro/pwd/qdistro_pwd_daemon.py — references `TpmAuthFailed` and
-#      `TpmBackendError` in `except` clauses that are never imported/defined; a
-#      real NameError would fire if those branches were hit. The fix (import/
-#      define those exception types) belongs in the pwd daemon and is tracked
-#      as a follow-up, NOT silently accepted as correct.
-#   2. qnotebook/qnotebook/window.py — a string parameter annotation
-#      "PageRef | None" whose `PageRef` is not imported into the module (it
-#      lives in qnotebook.notebook). Lower severity: with `from __future__
-#      import annotations` the string is never evaluated at runtime, so it is a
-#      latent typing-resolution issue, not a runtime NameError. The fix (add
-#      PageRef to window.py's existing `from .notebook import ...`) belongs in
-#      qnotebook and is likewise a tracked follow-up.
-# A NEW undefined-name in ANY OTHER file still blocks the gate.
+# we most want to catch), F821 is ENFORCED globally with NO scope-outs. The two
+# pre-existing hits calibration surfaced were fixed at the source (02/S2):
+#   1. qdistro/pwd/qdistro_pwd_daemon.py — `TpmAuthFailed`/`TpmBackendError` are
+#      now imported from qdistro_pwd_tpm (a real NameError would otherwise fire
+#      when those `except` branches caught a TPM failure).
+#   2. qnotebook/qnotebook/window.py — `PageRef` is now imported from
+#      qnotebook.notebook.
+# A new undefined-name blocks the gate in any *linted* file — i.e. the dirs in
+# host_ruff_targets() (ci/bin/qci). That list does NOT yet include plugins/ or
+# scripts/; plugins/qdistro_sendto_{qnotebook,qterminator}.py currently carry
+# pre-existing F821 hits (except-name referenced in an immediately-invoked
+# lambda — not a runtime bug) that must be cleared before those dirs are added.
 
 # NOTE on per-file-ignore globs: ruff matches these against each file's path
 # RELATIVE TO THE WORKING DIRECTORY (or absolute when the file is outside it),
@@ -98,7 +95,3 @@ ignore = [
 #     path begins "../<repo>/..." and the glob must spell that prefix.
 [lint.per-file-ignores]
 "**/tests/*" = ["B011"]      # asserts are intentional in tests (any repo)
-# F821 scoped-out for the two known pre-existing hits only (see NOTE above). A
-# new undefined-name in any OTHER file still blocks.
-"**/pwd/qdistro_pwd_daemon.py" = ["F821"]   # in-tree (under cwd)
-"../qnotebook/qnotebook/window.py" = ["F821"]  # sibling repo (one level up from cwd)
