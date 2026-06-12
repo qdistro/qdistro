@@ -2993,15 +2993,15 @@ class RulesTab(QWidget):
 
 class RuleEditorDialog(QDialog):
     """Dialog for creating/editing rules with YAML editor."""
-    
+
     def __init__(self, broker: BrokerBridge, rule_data: dict, parent=None):
         super().__init__(parent)
         self.broker = broker
         self.rule_data = rule_data
         self.setWindowTitle("Edit Rule")
-        
+
         layout = QVBoxLayout(self)
-        
+
         # Filename input
         filename_layout = QHBoxLayout()
         filename_layout.addWidget(QLabel("Filename:"))
@@ -3012,16 +3012,16 @@ class RuleEditorDialog(QDialog):
             self.filename_line.setText(os.path.basename(rule_data["source_path"]))
         filename_layout.addWidget(self.filename_line)
         layout.addLayout(filename_layout)
-        
+
         # YAML editor
         yaml_label = QLabel("Rule Definition (YAML):")
         layout.addWidget(yaml_label)
-        
+
         self.yaml_editor = QTextEdit(self)
         self.yaml_editor.setMinimumHeight(300)
         self.yaml_editor.setMaximumHeight(500)
         layout.addWidget(self.yaml_editor)
-        
+
         # Decide what to load into the editor:
         #   - Editing an existing rule (source_path set): fetch the RAW
         #     on-disk YAML via the broker so comments and any keys the
@@ -3071,7 +3071,7 @@ class RuleEditorDialog(QDialog):
             layout.addWidget(warn_label)
 
         self.yaml_editor.setPlainText(yaml_content)
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -3080,10 +3080,10 @@ class RuleEditorDialog(QDialog):
         button_layout.addWidget(btn_ok)
         button_layout.addWidget(btn_cancel)
         layout.addLayout(button_layout)
-        
+
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
-    
+
     def _generate_yaml_from_rule(self, rule_data: dict) -> str:
         """Generate YAML string from rule data dictionary.
 

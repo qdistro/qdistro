@@ -58,9 +58,9 @@ ignore = [
     #
     # RE-ENABLED 2026-06-12 (04/F7 ratchet step, all cleared to zero across
     # qdistro + the 6 sibling repos): W291 (4), F541 (5), F601 (1, a real
-    # repeated-dict-key bug in qterminator config), E401 (1). The gate now
-    # blocks new occurrences of these.
-    "W293",  # blank-line-with-whitespace        (~600 hits; mostly siblings)
+    # repeated-dict-key bug in qterminator config), E401 (1), W293 (600,
+    # blank-line whitespace — 591 plain + 9 docstring-internal, all
+    # whitespace-only). The gate now blocks new occurrences of these.
     "I001",  # unsorted-imports                  (~490 hits)
     "F401",  # unused-import                     (~300 hits)
     "F841",  # unused-variable                   (~64 hits)
