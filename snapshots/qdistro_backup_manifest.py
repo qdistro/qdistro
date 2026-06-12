@@ -74,10 +74,10 @@ def _safe_component(value: str, what: str) -> str:
     if not value or not isinstance(value, str):
         raise ManifestError(f"{what} must be a non-empty string")
     if "/" in value or "\\" in value or value in (".", "..") \
-            or value.startswith("."):
+            or value.startswith(".") or value.startswith("-"):
         raise ManifestError(
             f"{what} {value!r} must be a single path component "
-            "(no '/', '\\', '..', or leading '.')")
+            "(no '/', '\\', '..', or leading '.'/'-')")
     return value
 
 

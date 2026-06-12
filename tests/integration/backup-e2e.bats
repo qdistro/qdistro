@@ -63,6 +63,21 @@ EOS
 	chmod +x "$WORK/bin/fake-btrfs-send" "$WORK/bin/fake-btrfs-receive"
 	export SEND="$WORK/bin/fake-btrfs-send"
 	export RECV="$WORK/bin/fake-btrfs-receive"
+
+	# --- snapshot stubs for the DRIVER lane (cp -a == "snapshot -r") ---
+	cat > "$WORK/bin/fake-snapshot" <<'EOS'
+#!/bin/bash
+# fake-snapshot <source> <dest>   (a recursive copy stands in for a RO snapshot)
+exec cp -a "$1" "$2"
+EOS
+	cat > "$WORK/bin/fake-snapshot-del" <<'EOS'
+#!/bin/bash
+exec rm -rf "$1"
+EOS
+	chmod +x "$WORK/bin/fake-snapshot" "$WORK/bin/fake-snapshot-del"
+	export SNAP="$WORK/bin/fake-snapshot"
+	export SNAPDEL="$WORK/bin/fake-snapshot-del"
+	export BKSVC="$REPO/snapshots/qdistro_backup_service.py"
 }
 
 teardown_file() {
@@ -199,4 +214,117 @@ RESTORE() { python3 "$BK" restore --out-dir "$1" --subvol "$2" --dest "$3" \
 	rm "$R/remote/manifest-0.json" "$R/remote/manifest-0.json.sig"
 	run VERIFY "$R/remote" --checkpoint-seq 1
 	[ "$status" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# DRIVER lane (qdistro_backup_service): the live daily-service path. A TOML
+# backup.conf drives a SUBVOL SET through driver-owned snapshots + the engine +
+# a stage-then-push to a local-directory "remote", with real rage + real signed
+# manifests. btrfs is tar-stubbed and the snapshot is a cp -a (same argv shape);
+# real btrfs send/receive + real ssh transport are the VM residual.
+# ---------------------------------------------------------------------------
+
+# write_conf <dir>  — a 2-subvol config (one plain + one collector) into <dir>
+write_conf() {
+	local d="$1"
+	mkdir -p "$d/src/data" "$d/etcq" "$d/remote" "$d/state"
+	echo "alpha" > "$d/src/data/f1"
+	echo "silos.yaml body" > "$d/etcq/silos.yaml"
+	cat > "$d/backup.conf" <<EOF
+host_id = "drv-host"
+recipients = "$RECIPIENTS"
+sign_key = "$SIGN_KEY"
+remote = "$d/remote"
+state_dir = "$d/state"
+[[subvol]]
+name = "data"
+source = "$d/src/data"
+[[subvol]]
+name = "metadata"
+collector = true
+paths = ["$d/etcq"]
+EOF
+}
+
+DRV() {
+	python3 "$BKSVC" run --config "$1/backup.conf" \
+		--snapshot-cmd "$SNAP" --snapshot-delete-cmd "$SNAPDEL" \
+		--subvol-create-cmd "mkdir -p" --send-cmd "$SEND" "${@:2}"
+}
+
+@test "driver: one run signs a multi-subvol manifest onto the remote" {
+	local D="$BATS_TEST_TMPDIR/d1"; write_conf "$D"
+	run DRV "$D" --now 1700000000
+	[ "$status" -eq 0 ]
+	[ -f "$D/remote/data-0.btrfs.age" ]
+	[ -f "$D/remote/metadata-0.btrfs.age" ]
+	[ -f "$D/remote/manifest-0.json" ]
+	[ -f "$D/remote/manifest-0.json.sig" ]
+	# local state advanced + the manifest mirrored into the local store
+	run grep -q '"seq": 0' "$D/state/state.json"
+	[ "$status" -eq 0 ]
+	[ -f "$D/state/manifests/manifest-0.json" ]
+}
+
+@test "driver: run verifies + restores back to the source bytes" {
+	local D="$BATS_TEST_TMPDIR/d2"; write_conf "$D"
+	DRV "$D" --now 1700000000 >/dev/null
+	run VERIFY "$D/remote" --checkpoint-seq 0
+	[ "$status" -eq 0 ]
+	run RESTORE "$D/remote" data "$D/restore"
+	[ "$status" -eq 0 ]
+	run diff -r "$D/src/data" "$D/restore/data"
+	[ "$status" -eq 0 ]
+}
+
+@test "driver: second run is an incremental chain with real parent lineage" {
+	local D="$BATS_TEST_TMPDIR/d3"; write_conf "$D"
+	DRV "$D" --now 1700000000 >/dev/null
+	echo "beta" > "$D/src/data/f2"          # mutate, then seq 1
+	run DRV "$D" --now 1700000100
+	[ "$status" -eq 0 ]
+	run grep -q '"parent_blob":"data-0.btrfs.age"' "$D/remote/manifest-1.json"
+	[ "$status" -eq 0 ]
+	run grep -q '"seq": 1' "$D/state/state.json"
+	[ "$status" -eq 0 ]
+	# seq-0 snapshot pruned after the successful seq-1 run; seq-1 kept as parent
+	[ ! -d "$D/state/snapshots/0" ]
+	[ -d "$D/state/snapshots/1/data" ]
+	run VERIFY "$D/remote" --checkpoint-seq 1
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"2 manifest"* ]]
+}
+
+@test "driver: a failed push does NOT advance state (atomic, retry-safe)" {
+	local D="$BATS_TEST_TMPDIR/d4"; write_conf "$D"
+	# Point the remote at a path the driver cannot create (parent is a file).
+	printf 'x' > "$D/blocker"
+	sed -i "s#^remote = .*#remote = \"$D/blocker/remote\"#" "$D/backup.conf"
+	run DRV "$D" --now 1700000000
+	[ "$status" -ne 0 ]
+	[ ! -f "$D/state/state.json" ]          # never advanced
+	# this seq's snapshots were cleaned up so a retry re-takes them
+	[ ! -d "$D/state/snapshots/0" ]
+}
+
+@test "driver: a malformed backup.conf aborts (fail-closed)" {
+	local D="$BATS_TEST_TMPDIR/d5"; mkdir -p "$D"
+	echo "host_id = " > "$D/backup.conf"    # invalid TOML
+	run DRV "$D" --now 1700000000
+	[ "$status" -ne 0 ]
+}
+
+@test "driver: a missing local prev-manifest fails closed (no chain fork)" {
+	local D="$BATS_TEST_TMPDIR/d6"; write_conf "$D"
+	DRV "$D" --now 1700000000 >/dev/null          # seq 0
+	# Lose the local chain anchor, then a second run MUST refuse rather than
+	# emit a seq-1 manifest with prev=null that forks the remote forever.
+	rm -f "$D/state/manifests/manifest-0.json"
+	echo beta > "$D/src/data/f2"
+	run DRV "$D" --now 1700000100
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"refusing to break the chain"* ]]
+	[ ! -f "$D/remote/manifest-1.json" ]          # nothing emitted
+	run grep -q '"seq": 0' "$D/state/state.json"  # state not advanced
+	[ "$status" -eq 0 ]
 }

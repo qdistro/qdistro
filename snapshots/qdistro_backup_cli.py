@@ -226,36 +226,121 @@ def _require_signing(allowed_signers, identity, insecure):
         raise BackupError("--allowed-signers requires --identity")
 
 
-def _load_chain(mf, out_dir: str, allowed_signers, identity, insecure
+def _load_chain(mf, out_dirs: list[str], allowed_signers, identity, insecure
                 ) -> list[dict]:
-    """Discover manifest-<seq>.json in out_dir, parse + signature-verify each,
-    sort by seq, and run verify_chain. Returns the chain oldest-first."""
-    paths = []
-    for entry in os.listdir(out_dir):
-        if MANIFEST_RE.match(entry):
-            paths.append(os.path.join(out_dir, entry))
-    if not paths:
-        raise BackupError(f"no manifest-<seq>.json files in {out_dir}")
-    manifests = []
-    for path in paths:
-        with open(path, "rb") as f:
-            canonical = f.read()
-        manifest = mf.parse_manifest(canonical)
-        if allowed_signers:
-            sig_path = path + ".sig"
-            if not os.path.isfile(sig_path):
-                raise BackupError(f"signature missing for {os.path.basename(path)}")
-            with open(sig_path) as f:
-                sig = f.read()
-            if not mf.verify_signature(canonical, sig, allowed_signers,
-                                       identity or ""):
-                raise BackupError(
-                    f"signature verification FAILED for "
-                    f"{os.path.basename(path)}")
-        manifests.append(manifest)
-    manifests.sort(key=lambda m: m["seq"])
+    """Discover manifest-<seq>.json across ALL out_dirs, parse + signature-
+    verify each, dedupe by seq, enforce a single host_id, sort by seq, and run
+    verify_chain. Returns the chain oldest-first.
+
+    Multi-target (06 §4): a restore may pull manifests from several supplied
+    --out-dir locations (e.g. an owner-side manifest store plus a per-subvol
+    remote blob layout). Fail closed on ambiguity rather than silently picking
+    one:
+      - the same seq present in two dirs with DIFFERENT canonical bytes is
+        fatal (a hostile target trying to fork the chain); byte-identical
+        duplicates are deduped,
+      - manifests from more than one host_id are never combined into one chain.
+    """
+    by_seq: dict[int, dict] = {}
+    seq_bytes: dict[int, bytes] = {}
+    for out_dir in out_dirs:
+        try:
+            names = os.listdir(out_dir)
+        except OSError as e:
+            raise BackupError(f"cannot list --out-dir {out_dir!r}: {e}") from e
+        for entry in names:
+            if not MANIFEST_RE.match(entry):
+                continue
+            path = os.path.join(out_dir, entry)
+            with open(path, "rb") as f:
+                canonical = f.read()
+            manifest = mf.parse_manifest(canonical)
+            if allowed_signers:
+                sig_path = path + ".sig"
+                if not os.path.isfile(sig_path):
+                    raise BackupError(f"signature missing for {entry}")
+                with open(sig_path) as f:
+                    sig = f.read()
+                if not mf.verify_signature(canonical, sig, allowed_signers,
+                                           identity or ""):
+                    raise BackupError(
+                        f"signature verification FAILED for {entry}")
+            seq = manifest["seq"]
+            if seq in seq_bytes:
+                if seq_bytes[seq] != canonical:
+                    raise BackupError(
+                        f"conflicting manifests for seq {seq} across "
+                        "--out-dirs (chain fork?)")
+                continue   # byte-identical duplicate — keep the first
+            seq_bytes[seq] = canonical
+            by_seq[seq] = manifest
+    if not by_seq:
+        raise BackupError(
+            f"no manifest-<seq>.json files in {', '.join(out_dirs)}")
+    host_ids = {m["host_id"] for m in by_seq.values()}
+    if len(host_ids) > 1:
+        raise BackupError(
+            "refusing to combine manifests from multiple hosts: "
+            f"{sorted(host_ids)}")
+    manifests = [by_seq[s] for s in sorted(by_seq)]
     mf.verify_chain(manifests)
     return manifests
+
+
+def _files_identical(a: str, b: str) -> bool:
+    """True iff two files have the same size and sha256. Used only to decide
+    whether a blob present under two --out-dirs is a benign duplicate."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+    except OSError:
+        return False
+    import qdistro_backup_manifest as _m  # type: ignore
+    try:
+        return _m.sha256_file(a) == _m.sha256_file(b)
+    except OSError:
+        return False
+
+
+def _blob_index(out_dirs: list[str]) -> dict[str, str]:
+    """Map each blob basename (``*.btrfs.age``) to the single out_dir holding
+    it. A blob present under several dirs is allowed ONLY if every copy is
+    byte-identical (same size + sha256); a differing copy is fatal (target
+    substitution). The authoritative size/sha256-vs-manifest check stays in
+    verify_blobs — this only resolves WHERE each blob lives + rejects forks."""
+    index: dict[str, str] = {}
+    for d in out_dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".btrfs.age"):
+                continue
+            p = os.path.join(d, name)
+            if not os.path.isfile(p):
+                continue
+            if name in index and index[name] != d:
+                if not _files_identical(os.path.join(index[name], name), p):
+                    raise BackupError(
+                        f"blob {name!r} differs between {index[name]!r} and "
+                        f"{d!r} (target substitution?)")
+                continue   # identical duplicate — keep the first dir
+            index.setdefault(name, d)
+    return index
+
+
+def _verify_blobs_multi(mf, manifest: dict, index: dict[str, str]) -> list[str]:
+    """verify_blobs across a multi-dir blob index: resolve each entry's dir
+    from ``index`` then run the engine's per-dir size+sha256 check there."""
+    problems: list[str] = []
+    for e in manifest["entries"]:
+        d = index.get(e["blob"])
+        if d is None:
+            problems.append(f"{e['blob']}: missing")
+            continue
+        problems += mf.verify_blobs({"entries": [e]}, d)
+    return problems
 
 
 def cmd_verify(args) -> int:
@@ -271,9 +356,10 @@ def cmd_verify(args) -> int:
         else:
             print("WARNING: no --checkpoint-seq; rollback to an older signed "
                   "set is NOT detectable", file=sys.stderr)
+        index = _blob_index(args.out_dir)
         problems = []
         for m in chain:
-            problems += mf.verify_blobs(m, args.out_dir)
+            problems += _verify_blobs_multi(mf, m, index)
         if problems:
             for p in problems:
                 print(f"BLOB PROBLEM: {p}", file=sys.stderr)
@@ -289,13 +375,15 @@ def cmd_verify(args) -> int:
 # restore
 # --------------------------------------------------------------------------
 
-def _verified_receive(mf, entry: dict, out_dir: str, staging: str,
+def _verified_receive(mf, entry: dict, src_dir: str, staging: str,
                       identity_file: str, receive_argv: list[str]) -> bool:
     """Receive ONE blob into receive_argv's dest from a PRIVATE verified copy:
     copy the blob locally, re-hash it there (closing the verify/receive TOCTOU
-    when out-dir is attacker-mediated storage), then decrypt+receive that copy.
-    Returns True on success; prints the failure and returns False on error."""
-    src = os.path.join(out_dir, entry["blob"])
+    when the source is attacker-mediated storage), then decrypt+receive that
+    copy. ``src_dir`` is the blob's resolved location (multi-target: the dir
+    the blob index mapped it to). Returns True on success; prints the failure
+    and returns False on error."""
+    src = os.path.join(src_dir, entry["blob"])
     local = os.path.join(staging, entry["blob"])
     try:
         shutil.copyfile(src, local)
@@ -387,9 +475,10 @@ def cmd_restore(args) -> int:
             print("WARNING: no --checkpoint-seq; rollback to an older signed "
                   "set is NOT detectable", file=sys.stderr)
         # Full blob verification before receiving ANYTHING.
+        index = _blob_index(args.out_dir)
         problems = []
         for m in chain:
-            problems += mf.verify_blobs(m, args.out_dir)
+            problems += _verify_blobs_multi(mf, m, index)
         if problems:
             for p in problems:
                 print(f"BLOB PROBLEM: {p}", file=sys.stderr)
@@ -423,11 +512,11 @@ def cmd_restore(args) -> int:
             except OSError as e:
                 print(f"RESTORE FAILED on {entry['blob']}: {e}", file=sys.stderr)
                 return 1
-            if not _verified_receive(mf, entry, args.out_dir, staging,
+            if not _verified_receive(mf, entry, index[entry["blob"]], staging,
                                      args.identity_file,
                                      receive_base + [seq_dir]):
                 return 1
-        if not _verified_receive(mf, final, args.out_dir, staging,
+        if not _verified_receive(mf, final, index[final["blob"]], staging,
                                  args.identity_file,
                                  receive_base + [args.dest]):
             return 1
@@ -480,12 +569,14 @@ def _build_argparser() -> argparse.ArgumentParser:
     b.set_defaults(fn=cmd_backup)
 
     v = sub.add_parser("verify", help="verify manifest chain signature + blobs")
-    v.add_argument("--out-dir", required=True)
+    v.add_argument("--out-dir", action="append", required=True,
+                   help="repeatable; manifest/blob location(s) to combine")
     _add_verify_flags(v)
     v.set_defaults(fn=cmd_verify)
 
     r = sub.add_parser("restore", help="verify then receive a subvol chain")
-    r.add_argument("--out-dir", required=True)
+    r.add_argument("--out-dir", action="append", required=True,
+                   help="repeatable; manifest/blob location(s) to combine")
     r.add_argument("--subvol", required=True)
     r.add_argument("--dest", required=True)
     r.add_argument("--identity-file", required=True,

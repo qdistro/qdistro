@@ -635,8 +635,9 @@ install_packages_ubuntu() {
         libguestfs-tools
         # storage
         sqlite3 socat
-        # btrfs / snapshots
-        btrfs-progs snapper
+        # btrfs / snapshots (rsync: the backup-service metadata collector +
+        # ssh transport in snapshots/qdistro_backup_service.py)
+        btrfs-progs snapper rsync
         # quickshell — typically not in main archive yet; warn if absent
         quickshell
         # python3-dbus-next for qdlocker

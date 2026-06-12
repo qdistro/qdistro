@@ -44,6 +44,11 @@ QDISTRO_PKGS=(
   # + rage-keygen); without it backups/restores cannot encrypt and the real
   # btrfs backup lane (tests/integration/vm/backup-btrfs-e2e.bats) cannot run.
   rage-encryption
+  # rsync: the backup-service driver's metadata collector
+  # (snapshots/qdistro_backup_service.py) stages the config-file set with
+  # `rsync -aHAX --delete`, and the ssh transport pushes blobs via rsync -e ssh.
+  # Without it the daily backup's collector subvol fails.
+  rsync
   tpm2.0-tools
   sqlite3
   libselinux-devel selinux-policy-devel

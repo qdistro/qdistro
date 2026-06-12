@@ -1,31 +1,38 @@
 [Unit]
-Description=qdistro encrypted snapshot export (spec/19 Phase-8 MVP)
-# Triggered by qdistro-backup.timer (daily). Reads its inputs
-# from /etc/qdistro/backup.conf:
-#   QDISTRO_BACKUP_SNAP=/.snapshots/<num>/snapshot
-#   QDISTRO_BACKUP_PARENT=/.snapshots/<prev>/snapshot     # optional
-#   QDISTRO_BACKUP_RECIPIENTS=/etc/qdistro/backup-recipients.txt
-#   QDISTRO_BACKUP_SSH=user@backup-host
-#   QDISTRO_BACKUP_REMOTE=snap.btrfs.age
+Description=qdistro signed-manifest backup (06-backup-dr §2-§4)
+# Triggered by qdistro-backup.timer (daily). Drives the signed-manifest engine
+# over the SUBVOLUME SET in /etc/qdistro/backup.conf (TOML) — see
+# qdistro_backup_service.py. Local seq/manifest state + driver-owned RO
+# snapshots + stage-then-push to the configured remote; the run only advances
+# state after the remote durably holds (and reads back matching) the new run.
 #
-# When backup.conf is absent the unit ConditionPathExists-skips,
-# so a vanilla install doesn't fail.
+# When backup.conf is absent the unit ConditionPathExists-skips, so a vanilla
+# install doesn't fail. The OLD env-var qdistro-snap-export CLI stays installed
+# for compatibility/debugging but is no longer the live path.
 ConditionPathExists=/etc/qdistro/backup.conf
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/qdistro/backup.conf
-ExecStart=/usr/local/bin/qdistro-snap-export run \
-    --snap ${QDISTRO_BACKUP_SNAP} \
-    ${QDISTRO_BACKUP_PARENT:+--parent ${QDISTRO_BACKUP_PARENT}} \
-    --recipients ${QDISTRO_BACKUP_RECIPIENTS} \
-    --ssh ${QDISTRO_BACKUP_SSH} \
-    --remote ${QDISTRO_BACKUP_REMOTE}
-# Sandbox: read-only access to all of /, except /.snapshots which
-# we read; /etc/qdistro for the env file; ssh key under
-# /root/.ssh; and stdout for journal.
+ExecStart=/usr/local/bin/qdistro-backup-run run --config /etc/qdistro/backup.conf
+# Runs as root: `btrfs subvolume snapshot` needs CAP_SYS_ADMIN, and the backup
+# must read every configured silo/metadata source. NoNewPrivileges keeps it
+# from gaining more than it starts with; we do NOT restrict CapabilityBoundingSet
+# (that would drop CAP_SYS_ADMIN and break snapshotting).
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadOnlyPaths=/.snapshots
+# Sources (silo homes, /etc/qdistro) are READ; nothing under /home is written.
+ProtectHome=read-only
+# The driver writes ONLY under its state tree: local seq/manifest state, the RO
+# snapshots it takes, the metadata-collector stage, and the encrypted staging
+# dir it pushes from. StateDirectory CREATES /var/lib/qdistro/backup (0700) if
+# absent and makes it writable through ProtectSystem=strict — so a fresh install
+# starts without a manual mkdir. If backup.conf overrides state_dir/snapshot_dir/
+# scratch_dir/collect_dir to a path OUTSIDE /var/lib/qdistro/backup, add it to a
+# ReadWritePaths= line here too.
+StateDirectory=qdistro/backup
+StateDirectoryMode=0700
+# ssh/rsync transport (a 'user@host:/path' remote) reads the ssh key + signing
+# key under /root and may update known_hosts. A local-directory remote needs its
+# parent added to ReadWritePaths instead. Left read-only by default (ProtectSystem
+# =strict covers /root); the VM transport lane tunes this for real ssh.
 PrivateTmp=true

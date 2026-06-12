@@ -1,0 +1,60 @@
+# /etc/qdistro/backup.conf — qdistro signed-manifest backup (06-backup-dr §2-§4).
+# Copy this to /etc/qdistro/backup.conf and edit it to ENABLE the daily backup
+# (qdistro-backup.service ConditionPathExists-skips until backup.conf exists).
+# Parsed as TOML by qdistro-backup-run. See qdistro_backup_service.py.
+
+# Stable identifier for THIS machine. Stamped into every manifest; a restore
+# refuses to combine manifests from different host_ids.
+host_id = "workstation-1"
+
+# age recipients file (one age1... per line) the blobs are encrypted to. The
+# matching age IDENTITY (decrypt key) must live OFF this machine for DR.
+recipients = "/etc/qdistro/backup-recipients.txt"
+
+# Where the run is published: a local directory / mounted share, OR an ssh
+# target "user@host:/path" (rsync -e ssh). Blobs upload first; the per-seq
+# signed manifest is the LAST thing written (the commit marker).
+remote = "user@nas.example:/backups/workstation-1"
+
+# ssh-ed25519 PRIVATE key that signs each manifest (ssh-keygen -Y sign). It must
+# NOT live on the backup target. REQUIRED: the daily service refuses to run
+# without it, because the fail-closed verify/restore path rejects an unsigned
+# manifest — an unsigned daily backup would be silently un-restorable.
+sign_key = "/etc/qdistro/backup-sign-ed25519"
+# allowed_signers + sign_identity are recorded for local verify/restore rehearsal
+# (the same pin restore uses). The authoritative copy lives off-machine.
+# allowed_signers = "/etc/qdistro/backup-allowed-signers"
+# sign_identity   = "owner@example"
+
+# Operational state (last seq + the local manifest chain anchor), the RO
+# snapshots the driver takes, the metadata-collector stage, and the encrypted
+# staging dir it pushes from. All default under state_dir; override only if you
+# need them on a specific filesystem (the unit's ReadWritePaths must then match).
+# state_dir    = "/var/lib/qdistro/backup"
+# snapshot_dir = "/var/lib/qdistro/backup/snapshots"
+# scratch_dir  = "/var/lib/qdistro/backup/staging"
+# collect_dir  = "/var/lib/qdistro/backup/collect"
+
+# --- the subvolume set ---------------------------------------------------------
+# Each [[subvol]] is one entry in every manifest. A plain subvol points at a live
+# btrfs subvolume the driver snapshots read-only; a collector subvol stages a
+# config-file set into a directory that is then snapshot+sent like any other.
+
+[[subvol]]
+name = "alice-home"
+source = "/home/.snapshots/silos/alice"
+
+# Machine-rebuild metadata (06 §2). v1 collector is config-only — it does NOT
+# raw-copy hot sqlite/audit DBs (a known consistency risk; that coverage is a
+# fast-follow). Add the vault recovery bundle here once wired.
+[[subvol]]
+name = "metadata"
+collector = true
+paths = [
+    "/etc/qdistro",
+    "/var/lib/qdistro/bindings",
+    "/var/lib/qdistro/pins",
+    "/var/lib/qdistro/identity",
+    "/etc/snapper/configs",
+]
+exclude = ["*.sock", "*.lock"]
