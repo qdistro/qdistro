@@ -1,0 +1,43 @@
+#!/bin/sh
+# task 4 piece 1 — first-boot seed for the qdistro-netvm image. uci-defaults
+# scripts run ONCE on first boot (procd deletes them after a 0 exit), so this
+# is the declarative "configure on bake" step that can't live in a static file.
+#
+# It (1) installs the baseline egress config as the live config, (2) points
+# uhttpd's ubus handler at /ubus on the mgmt vif only, and (3) creates the
+# scoped rpcd login bound to the qdistro-netvm-admin ACL group. The control
+# plane is reachable from the host-only mgmt network and nowhere else.
+set -e
+
+# 1. Seed live config from the read-only baseline (the apply helper keeps it in
+#    sync afterwards; this just makes first boot match).
+for pkg in network firewall dhcp; do
+	if [ -f "/etc/qdistro-netvm/baseline/$pkg" ]; then
+		cp "/etc/qdistro-netvm/baseline/$pkg" "/etc/config/$pkg"
+	fi
+done
+
+# 2. uhttpd: expose ubus at /ubus, but bind the listeners to the mgmt IP so the
+#    control plane is NOT reachable from WAN or any silo vif.
+uci -q set uhttpd.main.ubus_prefix='/ubus'
+uci -q delete uhttpd.main.listen_http
+uci -q add_list uhttpd.main.listen_http='192.168.97.1:80'
+uci -q delete uhttpd.main.listen_https
+uci -q add_list uhttpd.main.listen_https='192.168.97.1:443'
+uci commit uhttpd
+
+# 3. rpcd: a scoped admin login. read/write reference the qdistro-netvm-admin
+#    ACL group (shipped in acl.d/qdistro-netvm.json) and NOTHING ELSE — the
+#    host client gets exactly the ubus objects that group names. The password
+#    is a system-account credential the host rotates on provisioning (broker-
+#    delivered, never baked): the placeholder below points rpcd at the
+#    'qdistro-admin' unix account, which the host sets via the guest agent.
+uci -q delete rpcd.@login[0]                # drop the default root '*' login
+l="$(uci add rpcd login)"
+uci set "rpcd.$l.username=qdistro-admin"
+uci set "rpcd.$l.password=\$p\$qdistro-admin"
+uci add_list "rpcd.$l.read=qdistro-netvm-admin"
+uci add_list "rpcd.$l.write=qdistro-netvm-admin"
+uci commit rpcd
+
+exit 0

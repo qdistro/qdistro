@@ -105,8 +105,17 @@ class TestPBR:
 class TestResolver:
     def test_each_silo_gets_its_own_dnsmasq_instance(self):
         merged = compile_all([_wg(0, "a"), _wg(1, "b")])
-        assert "config dnsmasq 'silo0'" in merged["dhcp"]
-        assert "config dnsmasq 'silo1'" in merged["dhcp"]
+        assert "config dnsmasq 'silo0_dns'" in merged["dhcp"]
+        assert "config dnsmasq 'silo1_dns'" in merged["dhcp"]
+
+    def test_dnsmasq_instance_name_differs_from_dhcp_pool(self):
+        # The dnsmasq instance and dhcp pool are different UCI section types;
+        # sharing a name is a fatal `uci` parse error. The pool keeps the
+        # interface name and references the suffixed instance.
+        dhcp = compile_silo(_wg(0))["dhcp"]
+        assert "config dnsmasq 'silo0_dns'" in dhcp
+        assert "config dhcp 'silo0'" in dhcp
+        assert "option instance 'silo0_dns'" in dhcp
 
     def test_wg_resolver_upstream_is_tunnel_dns(self):
         dhcp = compile_silo(_wg(0))["dhcp"]

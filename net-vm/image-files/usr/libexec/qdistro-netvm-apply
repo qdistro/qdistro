@@ -1,0 +1,71 @@
+#!/bin/sh
+# task 4 piece 1 — regenerate the per-silo egress config from declarative
+# sources and reload, the net-VM analogue of the interim backend applying netns
+# rules. Each managed package file is rebuilt as
+#
+#     /etc/config/<pkg>  =  baseline/<pkg>  +  silos/<pkg>.uci
+#
+# baseline/* ships in the read-only image (wan, lan, the mgmt vif, the wan/vpn
+# fw4 zones, the default-deny posture); silos/*.uci is the host-compiled
+# per-silo overlay delivered by qdistro.netvm.egress_reload. Full regeneration
+# (not in-place edits) makes the result a pure function of the declarative
+# inputs — in-VM tampering never persists across a reload, matching the
+# "config regenerated from host-side declarative sources" recovery story.
+#
+# Raw config files are written directly (NOT via `uci commit`): netifd/fw4 read
+# the files; bypassing uci's staging keeps the output byte-deterministic.
+set -eu
+
+OVERLAY=/etc/qdistro-netvm
+# Stage every assembled package under its REAL name first and validate all of
+# them (`uci -c <dir> show <pkg>` parses the file at <dir>/<pkg>). Only if all
+# parse do we swap them into /etc/config — a malformed fragment must never
+# half-apply or brick a package; it fails closed on the current config.
+SCRATCH=/tmp/qdistro-netvm-stage
+rm -rf "$SCRATCH"
+mkdir -p "$SCRATCH"
+
+staged=""
+for pkg in network firewall dhcp; do
+	base="$OVERLAY/baseline/$pkg"
+	frag="$OVERLAY/silos/$pkg.uci"
+	[ -f "$base" ] || continue
+	out="$SCRATCH/$pkg"
+	cat "$base" > "$out"
+	if [ -f "$frag" ] && [ -s "$frag" ]; then
+		printf '\n' >> "$out"
+		cat "$frag" >> "$out"
+	fi
+	if ! uci -c "$SCRATCH" -q show "$pkg" >/dev/null 2>&1; then
+		echo "assembled $pkg failed to parse; keeping current config" >&2
+		exit 1
+	fi
+	staged="$staged $pkg"
+done
+
+for pkg in $staged; do
+	cp "$SCRATCH/$pkg" "/etc/config/$pkg"
+	chmod 0644 "/etc/config/$pkg"
+done
+rm -rf "$SCRATCH"
+
+# Reload in dependency order. netifd first (interfaces/routes), then fw4
+# (zones/forwardings/PBR = the kill-switch), then dnsmasq (per-silo resolvers).
+# A reload FAILURE is an apply failure: the new config files are already on
+# disk, so if fw4/netifd refuse them the running ruleset is stale relative to
+# the policy we were told to enforce — reporting success there would leave a
+# more-permissive (or simply wrong) firewall live. Fail closed and non-zero so
+# egress_reload returns applied:false and the caller knows enforcement did not
+# take (codex finding 3).
+reload_config || { echo "reload_config failed" >&2; exit 1; }
+if ! fw4 reload >/dev/null 2>&1; then
+	echo "fw4 reload failed — firewall/kill-switch not updated" >&2
+	exit 1
+fi
+# dnsmasq reload is best-effort per instance but a hard failure still matters
+# (a silo's resolver would be stale); treat a non-zero as apply failure too.
+if ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
+	echo "dnsmasq reload failed — per-silo resolvers not updated" >&2
+	exit 1
+fi
+echo "qdistro-netvm-apply: ok"

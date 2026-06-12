@@ -1,0 +1,45 @@
+config defaults
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option synflood_protect '1'
+
+# WAN: masqueraded uplink. Default-deny input/forward; the per-silo compiled
+# fragments add 'direct' silos' forwarding to here. wg silos NEVER forward here.
+config zone
+	option name 'wan'
+	list network 'wan'
+	list network 'wan6'
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option masq '1'
+	option mtu_fix '1'
+
+# VPN umbrella zone: every per-silo WireGuard interface (wg_<name>) is a member
+# by device glob, so the compiler's "silo -> vpn" forwarding reaches the tunnel
+# without the fragment having to edit this zone. masq for the tunnel egress.
+config zone
+	option name 'vpn'
+	list device 'wg_+'
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+	option masq '1'
+
+# Management: the control-plane network. Input ACCEPT so the host reaches
+# uhttpd/rpcd; never forwarded anywhere (the control plane is not a transit
+# path), and silos are not on this network.
+config zone
+	option name 'mgmt'
+	list network 'mgmt'
+	option input 'ACCEPT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+
+config rule
+	option name 'mgmt-dhcp-dns'
+	option src 'mgmt'
+	option proto 'tcp udp'
+	option dest_port '53 67 80'
+	option target 'ACCEPT'

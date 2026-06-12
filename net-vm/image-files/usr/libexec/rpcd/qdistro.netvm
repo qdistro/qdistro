@@ -1,0 +1,148 @@
+#!/bin/sh
+# task 4 piece 1/3 — in-VM rpcd object `qdistro.netvm` (the host-side
+# qdistro_netvm_client's counterpart). An rpcd shell plugin: rpcd loads every
+# executable in /usr/libexec/rpcd/ and exposes it as a ubus object named after
+# the file. Methods:
+#
+#   egress_reload {config:{network,firewall,dhcp}}
+#       Persist the host-compiled per-silo egress UCI fragments
+#       (qdistro_netvm_uci.compile_all output) as the managed overlay, then
+#       regenerate /etc/config/{network,firewall,dhcp} = baseline + fragment
+#       and reload netifd/fw4/dnsmasq. The kill-switch lives in the COMPILED
+#       fw4 (default-deny forward), so a reload can only re-pin egress, never
+#       silently open WAN.
+#
+#   wifi_join {device,ssid,encryption,key?}
+#       Validate the (untrusted) SSID/key here — at the hostile-input boundary,
+#       before they reach wpa_supplicant — then set the radio's STA config and
+#       reload wifi.
+#
+# The scoped rpcd ACL (acl.d/qdistro-netvm.json) is the least-privilege
+# boundary; this script does the work the ACL authorises and nothing more.
+#
+# Pin the C locale so the [:print:] / character-class checks below are ASCII-
+# deterministic: under a UTF-8 locale [:print:] admits non-ASCII "printable"
+# bytes, which would let a non-ASCII SSID/passphrase slip past the boundary.
+export LC_ALL=C
+. /usr/share/libubox/jshn.sh
+
+OVERLAY=/etc/qdistro-netvm
+APPLY=/usr/libexec/qdistro-netvm-apply
+
+fail() {  # fail <message>
+	json_init
+	json_add_boolean applied 0
+	json_add_string error "$1"
+	json_dump
+	exit 0          # ubus call succeeded; the result reports the failure
+}
+
+case "$1" in
+list)
+	# Advertise methods + their argument signatures (types via sample values).
+	cat <<-'EOF'
+	{
+	  "egress_reload": { "config": {} },
+	  "wifi_join": { "device": "", "ssid": "", "encryption": "", "key": "" }
+	}
+	EOF
+	;;
+call)
+	case "$2" in
+	egress_reload)
+		input="$(cat)"
+		json_load "$input" 2>/dev/null || fail "request is not valid JSON"
+		json_select config 2>/dev/null || fail "missing 'config' object"
+		mkdir -p "$OVERLAY/silos"
+		# Only the three known packages; an unknown key is silently ignored
+		# (the host client already rejects them — defence in depth).
+		for pkg in network firewall dhcp; do
+			json_get_var frag "$pkg"
+			# Empty/absent fragment ⇒ that package has no silo content.
+			printf '%s' "${frag:-}" > "$OVERLAY/silos/$pkg.uci"
+		done
+		json_select ..
+		if "$APPLY" >/tmp/qdistro-netvm-apply.log 2>&1; then
+			json_init
+			json_add_boolean applied 1
+			json_dump
+		else
+			fail "apply failed: $(tail -n1 /tmp/qdistro-netvm-apply.log)"
+		fi
+		;;
+	wifi_join)
+		input="$(cat)"
+		json_load "$input" 2>/dev/null || fail "request is not valid JSON"
+		json_get_var device device
+		json_get_var ssid ssid
+		json_get_var encryption encryption
+		json_get_var key key
+		# --- validate ALL untrusted input at the boundary, before any of it
+		#     reaches uci / wpa_supplicant ---
+		# device: a radio section name; strict charset so it is never a regex
+		# or uci-path metacharacter (codex finding 5).
+		case "$device" in
+		"" ) fail "missing device";;
+		*[!A-Za-z0-9_-]* ) fail "invalid device name";;
+		esac
+		# ssid: 802.11 SSID is <=32 bytes; reject control/NUL/newline bytes.
+		[ -n "$ssid" ] || fail "missing ssid"
+		case "$ssid" in *[![:print:]]*) fail "ssid has non-printable/non-ASCII bytes";; esac
+		[ "${#ssid}" -le 32 ] || fail "ssid exceeds 32 bytes"
+		# key: a WPA passphrase is 8..63 printable ASCII, or a raw 64-hex PSK.
+		# Reject control chars and anything outside those forms (codex finding 4).
+		case "$encryption" in
+		none) ;;
+		psk2|psk|sae|psk2+sae)
+			[ -n "$key" ] || fail "encryption $encryption needs a key"
+			case "$key" in *[![:print:]]*) fail "key has non-printable/non-ASCII bytes";; esac
+			klen=${#key}
+			# The case expression is already "key is all hex" (true via the *)
+			# arm only when no non-hex byte is present), so it must NOT be
+			# negated — negating it rejected every valid 64-hex PSK (VM-caught).
+			if [ "$klen" -eq 64 ] && \
+			   case "$key" in *[!0-9A-Fa-f]*) false;; *) true;; esac; then
+				: # raw 64-hex PSK
+			elif [ "$klen" -ge 8 ] && [ "$klen" -le 63 ]; then
+				: # passphrase
+			else
+				fail "psk key must be 8-63 printable chars or 64 hex"
+			fi
+			;;
+		*) fail "unsupported encryption: $encryption";;
+		esac
+		# device must be a configured radio (exact uci lookup, no regex).
+		[ -n "$(uci -q get "wireless.$device.type")" ] || fail "no such radio: $device"
+		# Find this radio's wifi-iface by exact string compare over the
+		# uci-supplied (trusted) section names — never by interpolating the
+		# untrusted device into a sed pattern.
+		sec=""
+		for s in $(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+			[ "$(uci -q get "wireless.$s.device")" = "$device" ] && { sec="$s"; break; }
+		done
+		[ -n "$sec" ] || sec="$(uci add wireless wifi-iface)"
+		uci set "wireless.$sec.device=$device"
+		uci set "wireless.$sec.mode=sta"
+		uci set "wireless.$sec.ssid=$ssid"
+		uci set "wireless.$sec.encryption=$encryption"
+		if [ "$encryption" = none ]; then
+			uci -q delete "wireless.$sec.key"
+		else
+			uci set "wireless.$sec.key=$key"
+		fi
+		uci commit wireless
+		if wifi reload "$device" >/tmp/qdistro-netvm-wifi.log 2>&1; then
+			json_init
+			json_add_boolean joined 1
+			json_add_string ssid "$ssid"
+			json_dump
+		else
+			fail "wifi reload failed: $(tail -n1 /tmp/qdistro-netvm-wifi.log)"
+		fi
+		;;
+	*)
+		fail "unknown method $2"
+		;;
+	esac
+	;;
+esac

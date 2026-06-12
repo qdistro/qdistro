@@ -1,0 +1,86 @@
+<!-- task 4 piece 2 — qdistro-netvm libvirt domain template (OpenWrt net VM).
+     Substituted by install-netvm.sh:
+       __VM_NAME__     domain name (default: qdistro-netvm)
+       __MEM_KIB__     memory in KiB (default 262144 = 256 MiB; Probe 2 idle
+                       footprint was ~48 MiB fully configured)
+       __MGMT_MAC__    management vif MAC — the host-only control-plane link
+       __WAN_MAC__     WAN uplink vif MAC
+       __MGMT_NET__    libvirt network name carrying the mgmt vif
+       __DISK_PATH__   guest disk image (qcow2 linked-clone of the OpenWrt base)
+
+     Every device here MUST be declared in netvm-manifest.json — install-netvm.sh
+     runs qdistro_netvm_manifest.assert_activatable() on this rendered XML before
+     `virsh define`, and refuses to define a domain that exposes anything the
+     manifest does not name (doc/vm-definitions.md §Runtime Policy).
+
+     Architecture (doc/networking.md):
+       - Headless. NO <graphics>/<video> — OpenWrt is infrastructure, driven
+         over its control plane, not a UI surface. A framebuffer here would be
+         undeclared attack surface; the manifest guard rejects it.
+       - mgmt vif: a host-only libvirt network. The host's admin app / session
+         manager speak rpcd JSON-RPC over HTTP to uhttpd-mod-ubus on this vif
+         (Probe 2's transport decision). Silos are NEVER attached to this
+         network — the control plane is unreachable from silo nets.
+       - WAN uplink: `user` (SLIRP) by default so the rig boots without host
+         bridges; install-netvm.sh / the NM-handoff step (piece 5) replaces it
+         with a <hostdev> PCI passthrough of the real NIC (or a USB Wi-Fi
+         dongle) once NetworkManager has released it. Those hostdevs must be on
+         the manifest's pciPassthrough / usbHostdevAllow allowlist.
+       - per-silo vifs are NOT in this template: they are hot-attached as silos
+         start (the net-VM analogue of the interim backend's per-silo netns
+         veth), each with a MAC under the manifest's siloVifPrefix. attach-time
+         validation reuses the same manifest guard.
+       - qemu-guest-agent channel for host-side recovery (config reseed,
+         link-up reattach) without exposing a shell on the control plane.
+  -->
+<domain type='kvm'>
+  <name>__VM_NAME__</name>
+  <memory unit='KiB'>__MEM_KIB__</memory>
+  <currentMemory unit='KiB'>__MEM_KIB__</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='pci' model='pcie-root'/>
+    <controller type='virtio-serial' index='0'/>
+    <!-- mgmt vif: host-only control-plane network. rpcd JSON-RPC over HTTP
+         (uhttpd-mod-ubus) is reachable from the host on this network only. -->
+    <interface type='network'>
+      <source network='__MGMT_NET__'/>
+      <mac address='__MGMT_MAC__'/>
+      <model type='virtio'/>
+    </interface>
+    <!-- WAN uplink. SLIRP placeholder; piece 5 swaps in the PCI/USB NIC
+         hostdev after NetworkManager releases it. -->
+    <interface type='user'>
+      <mac address='__WAN_MAC__'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <memballoon model='virtio'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>

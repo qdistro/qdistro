@@ -1,0 +1,23 @@
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+# Management vif (eth0 = first domain <interface>, the host-only mgmt network).
+# The rpcd JSON-RPC control plane is reachable from the host on this IP only;
+# silos are never attached to this network.
+config interface 'mgmt'
+	option device 'eth0'
+	option proto 'static'
+	option ipaddr '192.168.97.1'
+	option netmask '255.255.255.0'
+
+# WAN uplink (eth1). SLIRP/passthrough NIC depending on the domain; DHCP client.
+config interface 'wan'
+	option device 'eth1'
+	option proto 'dhcp'
+
+config interface 'wan6'
+	option device 'eth1'
+	option proto 'dhcpv6'

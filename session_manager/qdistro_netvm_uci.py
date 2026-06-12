@@ -215,8 +215,17 @@ def compile_dhcp(s: SiloNet) -> str:
     """``/etc/config/dhcp`` fragments: a per-silo dnsmasq instance bound to the
     silo interface, with its upstream set by policy (tunnel DNS for wg, the
     configured upstream for direct, none for a dark silo). One instance per silo
-    => no cross-silo resolver leak."""
-    instance = f"silo{s.index}"
+    => no cross-silo resolver leak.
+
+    The dnsmasq instance and the dhcp pool MUST NOT share a UCI section name:
+    they are different section types, and UCI rejects two same-named sections of
+    different type in one package ("section of different type overwrites prior
+    section with same name") — a parse error that bricks the whole ``dhcp``
+    package. The dhcp pool keeps the silo's interface name (``silo<i>``); the
+    dnsmasq instance is suffixed ``_dns`` and the pool references it via
+    ``option instance``. (Found applying real output to live ``uci``; the pure
+    golden test never fed the text to a parser.)"""
+    instance = f"silo{s.index}_dns"
     servers: list[str] = []
     if s.policy.mode == "wg" and s.wg_dns:
         servers = [s.wg_dns]

@@ -1,0 +1,32 @@
+{
+  "name": "qdistro-netvm",
+  "_comment": "Declarative source of truth for what the OpenWrt net VM may expose. install-netvm.sh refuses to `virsh define` a domain XML that carries any device or service not declared here (doc/vm-definitions.md §Runtime Policy). The host-side control-plane client is bounded by exposedServices; the per-silo egress UCI is compiled by qdistro_netvm_uci and pushed via qdistro.netvm.egress_reload.",
+
+  "controlPlane": {
+    "transport": "rpcd-http",
+    "endpoint": "http://192.168.97.1:80/ubus",
+    "mgmtMac": "52:54:00:9c:00:01",
+    "aclGroup": "qdistro-netvm-admin"
+  },
+
+  "interfaces": {
+    "wanMac": "52:54:00:9c:00:02",
+    "recoveryMac": "52:54:00:9c:00:03",
+    "siloVifPrefix": "52:54:00:9c:01:",
+    "maxSiloVifs": 64
+  },
+
+  "exposedServices": [
+    { "object": "system", "methods": ["board"] },
+    { "object": "network.interface", "methods": ["dump", "status"] },
+    { "object": "network.interface.wan", "methods": ["status"] },
+    { "object": "network.device", "methods": ["status"] },
+    { "object": "iwinfo", "methods": ["scan", "info", "devices"] },
+    { "object": "qdistro.netvm", "methods": ["egress_reload", "wifi_join"] }
+  ],
+
+  "usbHostdevAllow": [],
+  "pciPassthrough": [],
+
+  "graphics": false
+}

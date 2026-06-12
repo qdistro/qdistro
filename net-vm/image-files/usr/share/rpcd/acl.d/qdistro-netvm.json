@@ -1,0 +1,20 @@
+{
+  "qdistro-netvm-admin": {
+    "description": "qdistro net-VM control plane — scoped admin (task 4)",
+    "read": {
+      "ubus": {
+        "qdistro.netvm": ["egress_reload", "wifi_join"],
+        "system": ["board"],
+        "network.interface": ["dump", "status"],
+        "network.interface.wan": ["status"],
+        "network.device": ["status"],
+        "iwinfo": ["scan", "info", "devices"]
+      }
+    },
+    "write": {
+      "ubus": {
+        "qdistro.netvm": ["egress_reload", "wifi_join"]
+      }
+    }
+  }
+}
