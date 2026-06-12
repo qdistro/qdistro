@@ -102,10 +102,14 @@ Consequences:
 
 The TCB processes (broker, session manager, locker, polkit agent) must
 follow two dom0-style rules, enforced per-process (the admin *uid* keeps
-NetworkManager until the net VM lands). Rule 1 is a **hardening
-target**: the current units do not yet set these directives; rollout
-(one service first, with policy-build tests) is tracked in
-`todo/fable-networking`.
+NetworkManager until the net VM lands). Rule 1 is now
+**shipped-with-exceptions**, not merely aspirational: the broker pilot
+landed with VM-verified SELinux `neverallow` coverage and a systemd
+runtime negative (`EAFNOSUPPORT`). The remaining TCB daemons
+(session-manager, qdlocker, polkit agent) are still exceptions until
+the same pattern lands for each; release tracking lives in
+`todo/fable-release/02-security-gate.md` S5. Do not treat the broker
+pilot as evidence for those other domains.
 
 1. **No network access.** systemd `PrivateNetwork=yes` (or
  `IPAddressDeny=any` + `RestrictAddressFamilies=AF_UNIX AF_NETLINK`)
