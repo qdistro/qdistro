@@ -12,7 +12,7 @@ Integration.
 > [firefox-containers.md](firefox-containers.md). Most desktop integrations
 > below remain specified/planned Phase-9 work.
 >
-> P0-1, P0-2, and P0-3 are landed. P0-4..P0-6 remain open deployment or
+> P0-1, P0-2, P0-3, and P0-4 are landed. P0-5/P0-6 remain open deployment or
 > policy decisions; see the defect index. Recall capture is cut from v1, so
 > `recall.push` is not registered in the bridge dispatch table.
 
@@ -25,29 +25,57 @@ launches through `xdg-desktop-portal` or `flatpak-spawn`, defeating the
 bridge's `getppid()` parent-exe identity check.
 
 The bridge fails closed with a `parent_not_allowed` error when its parent
-isn't on the allowlist. The current default allowlist
-(`ALLOWED_PARENT_EXES` in `qdistro_browser_bridge.py`) is:
+isn't on the allowlist. The allowlist (`_resolve_allowlist()` in
+`qdistro_browser_bridge.py`) has a **default-on baseline** and a set of
+**admin-opt-in optional browsers** (P0-4):
 
-| Browser | Path |
-|---|---|
-| Firefox | `/usr/lib64/firefox/firefox`, `/usr/lib/firefox/firefox` |
-| Chromium | `/usr/bin/chromium`, `/usr/bin/chromium-browser` |
-| Chrome | `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable` |
-| Edge | `/usr/bin/microsoft-edge`, `/usr/bin/microsoft-edge-stable` |
-| Brave | `/usr/bin/brave-browser`, `/usr/bin/brave` |
-| Vivaldi | `/usr/bin/vivaldi`, `/usr/bin/vivaldi-stable` |
+| Browser | Path | Default |
+|---|---|---|
+| Firefox | `/usr/lib64/firefox/firefox`, `/usr/lib/firefox/firefox` | on |
+| Chromium | `/usr/bin/chromium`, `/usr/bin/chromium-browser` | on |
+| Chrome | `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable` | **opt-in** |
+| Edge | `/usr/bin/microsoft-edge`, `/usr/bin/microsoft-edge-stable` | **opt-in** |
+| Brave | `/usr/bin/brave-browser`, `/usr/bin/brave` | **opt-in** |
+| Vivaldi | `/usr/bin/vivaldi`, `/usr/bin/vivaldi-stable` | **opt-in** |
 
-All entries are default-on; there is no opt-in mechanism in the current
-build. If Brave/Vivaldi/Chrome/Edge should require explicit admin opt-in,
-that is a code change in `_resolve_allowlist()` — not currently the case.
-Snap/Flatpak users see "qdistro browser integration is not supported on
-sandboxed browsers — install the RPM build."
+Firefox and Chromium are trusted parents out of the box. Chrome, Edge,
+Brave, and Vivaldi are **default-off**; the bridge rejects them as parents
+until an admin opts each family in (P0-4 fix, mirroring the F4
+firefox-containers opt-in). The opt-in surface is a **root-owned** config
+file, `/etc/qdistro/browser-bridge-allowlist.conf`, with one browser key
+per non-comment line:
 
-> **Known defect (P0-2).** `_resolve_allowlist()` honors a
-> `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` environment variable that lets any
+```
+# Optional browser families this machine trusts as bridge parents.
+brave
+chrome
+```
+
+Valid keys: `chrome`, `brave`, `vivaldi`, `edge`. The bridge runs as the
+(unprivileged) browser-child uid, so the config is honored **only** when
+it is a regular file (not a symlink) owned by root and not group/other
+writable — otherwise it is ignored fail-closed and the baseline applies,
+so the bridge's own uid can never widen its trust boundary (the same
+lesson P0-2 applied to the rejected `QDISTRO_BROWSER_BRIDGE_ALLOWLIST`
+env var). Snap/Flatpak users see "qdistro browser integration is not
+supported on sandboxed browsers — install the RPM build."
+
+> **Scope note.** P0-4's opt-in lives in the *bridge entry gate*
+> (`_resolve_allowlist()`), the authoritative barrier against a non-browser
+> program exec'ing the bridge. The browser daemons' separate
+> process-identity attestation (`BROWSER_PARENT_EXES` in
+> `qdistro_browser_daemon_identity.py`) still carries the full historical
+> matrix; aligning that secondary check to the same opt-in is a tracked
+> follow-up, not part of the entry-gate fix.
+
+> **P0-2 (closed).** `_resolve_allowlist()` once honored a
+> `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` environment variable that let any
 > process in the bridge's launch environment replace the allowlist
-> entirely. The doc previously described the allowlist as the trust
-> boundary; the env-var override is a hole.
+> entirely. That override is gone: the legacy variable now hard-errors,
+> and only `QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST` under
+> `QDISTRO_TEST_MODE=1` is accepted (test-only). The opt-in config above
+> follows the same principle — the bridge's own unprivileged uid can
+> never widen the trust boundary.
 
 ## Architecture
 
@@ -90,8 +118,10 @@ trust. The **bridge process** is where OS-level identity attaches.
 ### 1. Parent process verification (implemented, Phase 8)
 
 The bridge calls `getppid()`, reads `/proc/<ppid>/exe`, and gates dispatch
-on `exe in ALLOWED_PARENT_EXES`. This is the trust anchor: only a real
-browser binary on the allowlist may invoke the bridge.
+on membership in the effective allowlist (`_resolve_allowlist()` — the
+Firefox+Chromium baseline plus any admin-opted-in optional browsers; see
+the support matrix above). This is the trust anchor: only a real browser
+binary on the allowlist may invoke the bridge.
 
 `/proc/<ppid>/attr/current` (SELinux label) is also read but is **audit
 information only** — there is no enforcement gate keyed on the label.
@@ -581,7 +611,7 @@ Historical fix-plan details were pruned from the public repo. Summary:
 | P0-1 | `extension_id` read from stdio (untrusted) instead of argv (kernel-attested) | High | ✅ landed (commit `0c3a7a8`) |
 | P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High | ✅ landed (commit `0c3a7a8`) |
 | P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
-| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | bounded by D5 freeze + F4 opt-in; allowlist opt-in is post-v1 — see note |
+| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | ✅ landed — optional browsers default-off, admin opt-in via root-owned `/etc/qdistro/browser-bridge-allowlist.conf` (see note) |
 | P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | bounded by D5 freeze (surface frozen) — see note |
 | P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | → deferred to release-engineering (`03`) |
 
@@ -601,9 +631,15 @@ Historical fix-plan details were pruned from the public repo. Summary:
   admin opt-in** via a broker rule (F4, `04-feature-completion.md`), and the
   op surface is frozen so the allowlist's breadth cannot grow new capability.
   The sensitive handlers remain gated by their existing intent-token / identity
-  checks regardless of which allowlisted browser hosts the bridge; a per-feature
-  opt-in for the default-on parent-browser allowlist itself stays a post-v1
-  hardening item.
+  checks regardless of which allowlisted browser hosts the bridge.
+  **Update (landed):** the parent-browser allowlist opt-in is no longer
+  deferred — Chrome/Edge/Brave/Vivaldi are now default-OFF and require an
+  admin to opt each family in via the root-owned
+  `/etc/qdistro/browser-bridge-allowlist.conf` (`_resolve_allowlist()`),
+  mirroring the F4 firefox-containers opt-in. Firefox + Chromium remain the
+  default-on baseline. The config is honored only when root-owned and not
+  group/other-writable, so the bridge's own unprivileged uid cannot widen the
+  trust boundary (the P0-2 lesson). See the "Browser support matrix" section.
 - **P0-5 — bounded by the freeze.** With the op set frozen, the extension's
   declared-permission surface cannot grow in v1; tightening the manifests to
   declare exactly the shipped ops they use remains worthwhile but is no longer

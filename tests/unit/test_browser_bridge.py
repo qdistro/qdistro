@@ -230,13 +230,150 @@ class TestAllowlistEnvBypass:
         out = bb._resolve_allowlist()
         assert out == ("/opt/test-bin", "/opt/other-bin")
 
-    def test_default_allowlist_when_unset(self, monkeypatch):
+    def test_default_allowlist_when_unset(self, monkeypatch, tmp_path):
+        # P0-4: with no opt-in config the effective allowlist is the
+        # Firefox+Chromium baseline only — the optional browsers
+        # (chrome/brave/vivaldi/edge) are NOT trusted parents by default.
         monkeypatch.delenv(
             "QDISTRO_BROWSER_BRIDGE_ALLOWLIST", raising=False)
         monkeypatch.delenv(
             "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST", raising=False)
-        out = bb._resolve_allowlist()
-        assert out is bb.ALLOWED_PARENT_EXES
+        out = bb._resolve_allowlist(
+            config_path=str(tmp_path / "absent.conf"))
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+
+# ---- P0-4: optional-browser allowlist is admin opt-in -----------------
+
+class TestOptionalBrowserOptIn:
+    """The Brave/Vivaldi/Chrome/Edge parents are default-OFF; an admin
+    opts each one in via a root-owned config file. Mirrors the F4
+    firefox-containers opt-in: a trust-widening capability stays off
+    until an admin authors a root-owned policy artifact.
+    """
+
+    OPTIONAL_EXES = (
+        "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+        "/usr/bin/brave", "/usr/bin/brave-browser",
+        "/usr/bin/vivaldi", "/usr/bin/vivaldi-stable",
+        "/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+    )
+
+    def _write(self, tmp_path, text):
+        cfg = tmp_path / "browser-bridge-allowlist.conf"
+        cfg.write_text(text, encoding="utf-8")
+        return cfg
+
+    def test_optional_browsers_denied_by_default(self):
+        # Baseline contains Firefox + Chromium, never the optionals.
+        for exe in self.OPTIONAL_EXES:
+            assert exe not in bb.DEFAULT_ALLOWED_PARENT_EXES
+        assert "/usr/lib64/firefox/firefox" in bb.DEFAULT_ALLOWED_PARENT_EXES
+        assert "/usr/bin/chromium" in bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_optin_adds_only_named_browser(self, tmp_path):
+        cfg = self._write(tmp_path, "brave\n")
+        # Honor the file as if root-owned by binding trusted_uid to us.
+        out = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        assert "/usr/bin/brave" in out
+        assert "/usr/bin/brave-browser" in out
+        # Chrome/Vivaldi/Edge stay denied — opt-in is per-browser.
+        assert "/usr/bin/google-chrome" not in out
+        assert "/usr/bin/vivaldi" not in out
+        assert "/usr/bin/microsoft-edge" not in out
+        # Baseline still present.
+        assert "/usr/lib64/firefox/firefox" in out
+
+    def test_optin_multiple_with_comments_and_blanks(self, tmp_path):
+        cfg = self._write(
+            tmp_path,
+            "# optional browsers this admin trusts\n"
+            "chrome\n"
+            "\n"
+            "  EDGE   # case-insensitive, trailing comment\n")
+        out = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        assert "/usr/bin/google-chrome" in out
+        assert "/usr/bin/microsoft-edge-stable" in out
+        assert "/usr/bin/brave" not in out
+
+    def test_unknown_key_ignored(self, tmp_path):
+        cfg = self._write(tmp_path, "brave\nnetscape\n")
+        out = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        assert "/usr/bin/brave" in out
+        # No crash, no spurious entries from the unknown key.
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES + (
+            "/usr/bin/brave", "/usr/bin/brave-browser")
+
+    def test_wrong_owner_rejected_failclosed(self, tmp_path):
+        # The crux: a config NOT owned by the trusted uid is ignored, so
+        # the bridge's own (unprivileged) uid cannot widen its trust
+        # boundary by writing this file. trusted_uid=0 while the test
+        # file is owned by us models "user-written, must be ignored".
+        cfg = self._write(tmp_path, "brave\nchrome\nvivaldi\nedge\n")
+        assert os.stat(cfg).st_uid != 0  # test sanity
+        out = bb._resolve_allowlist(config_path=str(cfg), trusted_uid=0)
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_group_or_other_writable_rejected(self, tmp_path):
+        cfg = self._write(tmp_path, "brave\n")
+        os.chmod(cfg, 0o664)  # group-writable
+        out = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_symlink_rejected(self, tmp_path):
+        real = self._write(tmp_path, "brave\n")
+        link = tmp_path / "link.conf"
+        link.symlink_to(real)
+        out = bb._resolve_allowlist(
+            config_path=str(link), trusted_uid=os.geteuid())
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_fifo_rejected_and_does_not_block(self, tmp_path):
+        # A non-regular file (here a FIFO) with otherwise-acceptable
+        # owner+mode must be rejected by the regular-file check — and the
+        # O_NONBLOCK open must NOT hang the bridge on a reader-less FIFO.
+        fifo = tmp_path / "browser-bridge-allowlist.conf"
+        os.mkfifo(fifo, 0o644)
+        out = bb._resolve_allowlist(
+            config_path=str(fifo), trusted_uid=os.geteuid())
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_malformed_utf8_failclosed(self, tmp_path):
+        # A decode error must fail closed to the baseline, never raise.
+        cfg = tmp_path / "browser-bridge-allowlist.conf"
+        cfg.write_bytes(b"brave\xff\nchrome\n")
+        out = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_absent_config_is_baseline(self, tmp_path):
+        out = bb._resolve_allowlist(
+            config_path=str(tmp_path / "nope.conf"),
+            trusted_uid=os.geteuid())
+        assert out == bb.DEFAULT_ALLOWED_PARENT_EXES
+
+    def test_opted_in_browser_passes_verify_parent(self, tmp_path):
+        # End-to-end: an opted-in Brave parent is `allowed`; a
+        # not-opted-in Vivaldi parent is not.
+        cfg = self._write(tmp_path, "brave\n")
+        allow = bb._resolve_allowlist(
+            config_path=str(cfg), trusted_uid=os.geteuid())
+        ident_ok = bb.verify_parent(
+            ppid_fn=lambda: 4242,
+            exe_reader=lambda _p: "/usr/bin/brave",
+            selinux_reader=lambda _p: "",
+            allowlist=allow, argv=[])
+        assert ident_ok["allowed"] is True
+        ident_deny = bb.verify_parent(
+            ppid_fn=lambda: 4242,
+            exe_reader=lambda _p: "/usr/bin/vivaldi",
+            selinux_reader=lambda _p: "",
+            allowlist=allow, argv=[])
+        assert ident_deny["allowed"] is False
 
 
 # ---- argv-derived extension identity (P0-1) ----
