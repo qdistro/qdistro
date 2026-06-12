@@ -125,3 +125,21 @@ target**: the current units do not yet set these directives; rollout
  kernel peer credentials, never from the payload. Anything richer —
  HTML, images, archives — is parsed in an unprivileged worker. The
  broker's `PageExtract` gate is the existing example of the pattern.
+
+## Residual risk register
+
+- **qdwin output-manager pre-shell mutation:** before qdshell binds,
+  `zwlr_output_manager_v1` apply/test mutation is admitted for
+  `allowed_uid`, and for the explicit test posture `allowed_uid == -1`;
+  after qdshell binds, mutation is shell-only by client or same pid+uid.
+  Pinned by `qdwin_om_mutation_allowed()` in `qdwin-logic-unit`.
+- **qdwin secctx helper root-launcher attestation:** when the helper's
+  direct parent is verified uid 0 and has stable `/proc` starttime, an
+  unreadable parent `/proc/<pid>/exe` basename is accepted because root
+  launcher executables can be structurally unreadable to unprivileged
+  qdwin. Pinned by `qdwin_secctx_root_launcher_attested()` in
+  `qdwin-logic-unit`.
+- **qdwin layer-shell pre-shell bind:** before qdshell binds,
+  `zwlr_layer_shell_v1` may bind for `allowed_uid`; after qdshell binds,
+  the shell client or same pid+uid path is required. Pinned by
+  `qdwin_layershell_pre_shell_uid_allowed()` in `qdwin-logic-unit`.
