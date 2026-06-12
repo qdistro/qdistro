@@ -162,3 +162,20 @@ Do not treat the broker pilot as evidence for those other domains.
   silo presence/activity side-channel (no input contents, no pixels). Out of
   the S1 capture-gate scope and not yet gated; tracked for a future
   per-class visibility row in `qdwin_global_visible`. Not yet pinned.
+- **qdwin `zwlr_output_manager_v1` enumeration ungated:** every client (any
+  silo) may bind the output manager to enumerate head names / modes /
+  geometry. Only the *mutation* path (apply/test) is gated (see the
+  pre-shell mutation entry above); enumeration is intentionally open so any
+  tool can read the display layout. This leaks display topology across
+  silos — the same low-severity metadata side-channel class as
+  `ext_idle_notifier_v1`, no input contents or pixels. Not gated; tracked
+  with the same future per-class visibility work.
+- **qdwin global-filter classify default-ORDINARY:** the `qdwin_global_visible`
+  matrix is fail-closed for an unknown *kind*, but the live filter feeds it
+  `qdwin_classify_global`, which returns `QDWIN_GLOBAL_ORDINARY` (visible to
+  every client) for any global it does not recognise by pointer identity. A
+  **new privileged libweston global therefore fails OPEN** until given an
+  explicit classify row — the S1 gate covers the five enumerated kinds, not a
+  whole-inventory enumeration. The remediation is the advertised-global
+  inventory sweep tracked in `todo/fable-release` 02-security-gate.md S1
+  (one classify row per advertised global). Not yet pinned.
