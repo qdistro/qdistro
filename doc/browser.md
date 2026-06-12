@@ -591,14 +591,16 @@ Historical fix-plan details were pruned from the public repo. Summary:
   freezes the v1 bridge op set: no NEW ops are added for v1, and `recall.push`
   is removed (D2). It does **not** mean the bridge dispatches only `qdistro.ping`
   — the registered dispatch table still includes the existing Phase-8 /
-  session ops (`qdistro.handshake`, `qdistro.heartbeat.ack`) and the
-  token-gated handlers documented per-op above (`pwd.fill` / `pwd.save`,
-  `page.extract`, `cookies.export`, `clipboard.*`, the MPRIS / downloads /
-  notifications / screenlock relays). What changes for P0-4: the one
+  session ops (`qdistro.handshake`, `qdistro.heartbeat.ack`), the
+  intent-token-gated handlers (`INTENT_TOKEN_REQUIRED_OPS`: `pwd.fill` /
+  `pwd.fill_confirm` / `pwd.save`, `page.extract`, `cookies.export`,
+  `clipboard.set`), and the identity-gated 9e relays (`mpris.publish`,
+  `downloads.notify`, `notifications.show`, `screenlock.inhibit` / `.release`)
+  which forward after `_identity_gate()` only. What changes for P0-4: the one
   cross-silo path, `containers.*` cross-uid forwarding, is now **default-deny /
   admin opt-in** via a broker rule (F4, `04-feature-completion.md`), and the
   op surface is frozen so the allowlist's breadth cannot grow new capability.
-  The sensitive handlers remain gated by their existing intent-token / broker
+  The sensitive handlers remain gated by their existing intent-token / identity
   checks regardless of which allowlisted browser hosts the bridge; a per-feature
   opt-in for the default-on parent-browser allowlist itself stays a post-v1
   hardening item.
