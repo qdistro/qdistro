@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from . import (
     APP1_IFACE,

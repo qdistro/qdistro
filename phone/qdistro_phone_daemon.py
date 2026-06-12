@@ -26,11 +26,9 @@ MVP.
 from __future__ import annotations
 
 import argparse
-import getpass
 import http.server
 import json
 import os
-import socket
 import socketserver
 import sqlite3
 import sys

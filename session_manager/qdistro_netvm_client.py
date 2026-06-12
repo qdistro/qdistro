@@ -40,7 +40,6 @@ the stock ubus objects Probe 2 proved.
 from __future__ import annotations
 
 import json
-import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -176,7 +175,7 @@ class NetVMClient:
                 raw = resp.read(self.max_response_bytes + 1)
         except urllib.error.URLError as e:
             raise NetVMTransportError(f"POST {self.base_url}: {e}") from e
-        except (TimeoutError, socket.timeout) as e:
+        except TimeoutError as e:
             raise NetVMTransportError(f"POST {self.base_url} timed out") from e
         if len(raw) > self.max_response_bytes:
             raise NetVMTransportError(

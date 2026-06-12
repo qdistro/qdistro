@@ -106,7 +106,7 @@ def _derive_kek(password: bytes, salt: bytes) -> bytes:
 
 def _aad_for(vault_name: str, tag: str) -> bytes:
     """Bind ciphertext to its identity. Swapping entries fails decrypt."""
-    return f"{vault_name}\x00{tag}".encode("utf-8")
+    return f"{vault_name}\x00{tag}".encode()
 
 
 class VaultLocked(Exception):
@@ -180,7 +180,7 @@ def _atomic_write(path: str, body: dict[str, Any]) -> None:
 def _load(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
         raise VaultNotFound(f"no vault at {path}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         body = json.load(f)
     if body.get("version") not in SUPPORTED_VAULT_VERSIONS:
         raise VaultIntegrityError(

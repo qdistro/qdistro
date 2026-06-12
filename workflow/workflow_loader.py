@@ -9,7 +9,6 @@ graceful degradation on parse errors.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
 from workflow_schema import WorkflowDef  # type: ignore[import-not-found]
@@ -119,7 +118,7 @@ class WorkflowLoader:
             total_bytes += size
 
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
             except Exception as e:  # noqa: BLE001
                 self._errors.append(f"{path}: parse failed: {e}")

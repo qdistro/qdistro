@@ -191,7 +191,7 @@ def sign_manifest(canonical: bytes, key_path: str,
     payload on stdin; we pass it directly (no temp payload file)."""
     proc = subprocess.run(
         ["ssh-keygen", "-Y", "sign", "-f", key_path, "-n", namespace],
-        input=canonical, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        input=canonical, capture_output=True,
         check=False)
     if proc.returncode != 0:
         raise ManifestError(
@@ -218,7 +218,7 @@ def verify_signature(canonical: bytes, signature: str,
         proc = subprocess.run(
             ["ssh-keygen", "-Y", "verify", "-f", allowed_signers_path,
              "-I", identity, "-n", namespace, "-s", sig_path],
-            input=canonical, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            input=canonical, capture_output=True,
             check=False)
         return proc.returncode == 0
     finally:

@@ -46,7 +46,6 @@ import pwd as _pwd_mod
 import re
 import secrets
 import signal
-import sys
 import time
 import urllib.parse
 from typing import Any
@@ -331,7 +330,7 @@ def _read_proc_cmdline(pid: int) -> list[str]:
 
 def _read_proc_ppid(pid: int) -> int | None:
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("PPid:"):
                     return int(line.split()[1])
@@ -349,7 +348,7 @@ def _read_proc_exe(pid: int) -> str:
 
 def _read_proc_cgroup(pid: int) -> list[str]:
     try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
             paths = []
             for line in f:
                 parts = line.rstrip("\n").split(":", 2)
@@ -613,9 +612,9 @@ class PwdDaemon(dbus.service.Object):
         except VaultDuplicate as e:
             self._audit.record("create", str(name),
                                decision="deny", reason=str(e))
-            raise PwdDuplicate(str(e))
+            raise PwdDuplicate(str(e)) from e
         except ValueError as e:
-            raise PwdPolicyError(str(e))
+            raise PwdPolicyError(str(e)) from e
         self._audit.record("create", str(name), decision="allow",
                            reason="vault created (v1/scrypt)")
         return True
@@ -638,11 +637,11 @@ class PwdDaemon(dbus.service.Object):
         except VaultDuplicate as e:
             self._audit.record("create", str(name),
                                decision="deny", reason=str(e))
-            raise PwdDuplicate(str(e))
+            raise PwdDuplicate(str(e)) from e
         except ValueError as e:
-            raise PwdPolicyError(str(e))
+            raise PwdPolicyError(str(e)) from e
         except TpmUnavailable as e:
-            raise PwdPolicyError(f"TPM unavailable: {e}")
+            raise PwdPolicyError(f"TPM unavailable: {e}") from e
         self._audit.record("create", str(name), decision="allow",
                            reason=f"vault created (v2/tpm:{backend.name})")
         return True
@@ -659,7 +658,7 @@ class PwdDaemon(dbus.service.Object):
         try:
             return vault_version(VAULT_DIR, str(name))
         except VaultNotFound as e:
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="a{sv}")
     def VaultInfo(self, name: str) -> dict:
@@ -667,7 +666,7 @@ class PwdDaemon(dbus.service.Object):
         try:
             v = vault_version(VAULT_DIR, str(name))
         except VaultNotFound as e:
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
         out: dict = {
             "version":     dbus.Int32(v),
             "tpm_backend": dbus.String(""),
@@ -955,7 +954,7 @@ class PwdDaemon(dbus.service.Object):
         except (VaultDuplicate, VaultNotFound, ValueError) as e:
             self._audit.record("add", vault, item_tag=tag,
                                decision="error", reason=str(e))
-            raise PwdPolicyError(str(e))
+            raise PwdPolicyError(str(e)) from e
         self._audit.record("add", vault, item_tag=tag,
                            decision="allow", reason="item upserted")
         return True
@@ -969,7 +968,7 @@ class PwdDaemon(dbus.service.Object):
         try:
             ok = delete_item(VAULT_DIR, vault, tag)
         except VaultNotFound as e:
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
         self._audit.record("delete", vault, item_tag=tag,
                            decision="allow" if ok else "error",
                            reason="deleted" if ok else "absent")
@@ -982,7 +981,7 @@ class PwdDaemon(dbus.service.Object):
         try:
             return [self._wrap_item_meta(it) for it in list_items(VAULT_DIR, str(vault))]
         except VaultNotFound as e:
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
 
     @staticmethod
     def _wrap_item_meta(it: dict[str, Any]) -> dict[str, Any]:
@@ -1019,7 +1018,7 @@ class PwdDaemon(dbus.service.Object):
             self._audit.record("get", vault, item_tag=tag,
                                decision="deny", reason="no-such-item",
                                caller=caller)
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
         ok, reason = pin_match(pins, caller)
         if not ok:
             self._audit.record("get", vault, item_tag=tag,
@@ -1033,7 +1032,7 @@ class PwdDaemon(dbus.service.Object):
             self._audit.record("get", vault, item_tag=tag,
                                decision="deny", reason="integrity-fail",
                                caller=caller)
-            raise PwdIntegrityError(str(e))
+            raise PwdIntegrityError(str(e)) from e
         self._audit.record("get", vault, item_tag=tag,
                            decision="allow", reason=reason, caller=caller)
         return payload.decode("utf-8")
@@ -1055,9 +1054,9 @@ class PwdDaemon(dbus.service.Object):
             payload = get_item_payload(
                 VAULT_DIR, vault, bytes(self._unlocked[vault]["key"]), tag)
         except VaultNotFound as e:
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
         except VaultIntegrityError as e:
-            raise PwdIntegrityError(str(e))
+            raise PwdIntegrityError(str(e)) from e
         self._audit.record("get-admin", vault, item_tag=tag,
                            decision="allow", reason="admin-bypass",
                            caller=caller)
@@ -1111,12 +1110,12 @@ class PwdDaemon(dbus.service.Object):
             self._audit.record("deliver-workflow", vault, item_tag=tag,
                                decision="deny", reason="no-such-item",
                                caller=caller)
-            raise PwdNotFound(str(e))
+            raise PwdNotFound(str(e)) from e
         except VaultIntegrityError as e:
             self._audit.record("deliver-workflow", vault, item_tag=tag,
                                decision="deny", reason="integrity-fail",
                                caller=caller)
-            raise PwdIntegrityError(str(e))
+            raise PwdIntegrityError(str(e)) from e
         self._audit.record("deliver-workflow", vault, item_tag=tag,
                            decision="allow", reason=f"run={run_id}",
                            caller=caller)
@@ -1812,7 +1811,7 @@ class PwdDaemon(dbus.service.Object):
             self._audit.record("portal-get", PORTAL_KEYS_VAULT,
                                item_tag=tag, decision="deny",
                                reason="integrity-fail", caller=caller)
-            raise PwdIntegrityError(str(e))
+            raise PwdIntegrityError(str(e)) from e
         # Auto-provision a fresh per-app key. Tag is admin-readable so
         # admin can inspect / revoke individual app keys.
         new_key = os.urandom(PORTAL_KEY_BYTES)
@@ -1835,7 +1834,7 @@ class PwdDaemon(dbus.service.Object):
                                    item_tag=tag, decision="deny",
                                    reason=f"provision-fail:{e}",
                                    caller=caller)
-                raise PwdPolicyError(f"portal-key provision failed: {e}")
+                raise PwdPolicyError(f"portal-key provision failed: {e}") from e
         self._audit.record("portal-get", PORTAL_KEYS_VAULT,
                            item_tag=tag, decision="allow",
                            reason="provisioned", caller=caller)

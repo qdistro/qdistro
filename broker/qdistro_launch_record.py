@@ -44,8 +44,8 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 # Default record lifetime. Generous — a silo app can run for hours — but
 # bounded so the table can't grow without limit and stale records age out.

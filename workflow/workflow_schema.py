@@ -11,18 +11,18 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class TriggerType(str, Enum):
+class TriggerType(StrEnum):
     PROCESS_SPAWN = "process_spawn"
     CRON = "cron"
     DBUS_SIGNAL = "dbus_signal"
     QBUS_EVENT = "qbus_event"
 
 
-class StepType(str, Enum):
+class StepType(StrEnum):
     DELIVER_SECRET = "deliver_secret"
     WAIT_FOR_PROCESS = "wait_for_process"
     RUN_HOOK = "run_hook"
@@ -30,7 +30,7 @@ class StepType(str, Enum):
     CALL_BROKER = "call_broker"
 
 
-class RunState(str, Enum):
+class RunState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     FAILED = "failed"
@@ -52,11 +52,11 @@ class TriggerDef:
             raise ValueError("trigger must have a 'type' field")
         try:
             trigger_type = TriggerType(str(raw_type))
-        except ValueError:
+        except ValueError as e:
             valid = [t.value for t in TriggerType]
             raise ValueError(
                 f"trigger.type must be one of {valid}, got {raw_type!r}"
-            )
+            ) from e
         config = {k: v for k, v in data.items() if k != "type"}
         return TriggerDef(type=trigger_type, config=config)
 
@@ -100,11 +100,11 @@ class StepDef:
             raw_type = found
         try:
             step_type = StepType(str(raw_type))
-        except ValueError:
+        except ValueError as e:
             valid = [t.value for t in StepType]
             raise ValueError(
                 f"step type must be one of {valid}, got {raw_type!r}"
-            )
+            ) from e
         return StepDef(type=step_type, name=step_name, config=config)
 
 

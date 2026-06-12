@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from typing import Iterable
+from collections.abc import Iterable
 
 # Domains tagged like spec/29 secctx labels. Spec/17 §"Pwd-manager
 # exclusion" calls these out as hard-coded.
@@ -227,7 +227,7 @@ def search(
     rows = conn.execute(sql, args).fetchall()
     cols = ("id", "ts", "source", "user", "app_id", "exe",
             "secctx", "url", "title", "text")
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(zip(cols, r, strict=True)) for r in rows]
 
 
 def list_recent(
@@ -248,7 +248,7 @@ def list_recent(
     rows = conn.execute(sql, args).fetchall()
     cols = ("id", "ts", "source", "user", "app_id", "exe",
             "secctx", "url", "title", "text")
-    return [dict(zip(cols, r)) for r in rows]
+    return [dict(zip(cols, r, strict=True)) for r in rows]
 
 
 def purge_older_than(conn: sqlite3.Connection,

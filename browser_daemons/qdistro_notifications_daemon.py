@@ -46,7 +46,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
     browser_bridge_allowed,
@@ -94,10 +95,10 @@ class NotificationPolicy:
         self._rules = rules or []
 
     @classmethod
-    def load(cls, path: str | None = None) -> "NotificationPolicy":
+    def load(cls, path: str | None = None) -> NotificationPolicy:
         path = path or _default_policy_path()
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 doc = json.load(f)
             rules = doc.get("rules") if isinstance(doc, dict) else None
             if not isinstance(rules, list):

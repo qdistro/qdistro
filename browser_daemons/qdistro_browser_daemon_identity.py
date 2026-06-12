@@ -112,7 +112,7 @@ def read_proc_cmdline(pid: int) -> list[str]:
 
 def read_proc_ppid(pid: int) -> int | None:
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("PPid:"):
                     return int(line.split()[1])

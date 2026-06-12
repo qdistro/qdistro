@@ -196,8 +196,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -398,7 +397,7 @@ class RulesEngine:
                 break
             total_bytes += size
             try:
-                with open(path, "r") as f:
+                with open(path) as f:
                     data = yaml.safe_load(f)
             except Exception as e:  # noqa: BLE001
                 self._errors.append(f"{path}: parse failed: {e}")

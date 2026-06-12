@@ -50,8 +50,8 @@ def _parse_field(spec: str, lo: int, hi: int, *, is_dow: bool = False) -> frozen
             base, _, step_s = part.partition("/")
             try:
                 step = int(step_s)
-            except ValueError:
-                raise CronParseError(f"bad step {step_s!r} in {part!r}")
+            except ValueError as e:
+                raise CronParseError(f"bad step {step_s!r} in {part!r}") from e
             if step <= 0:
                 raise CronParseError(f"step must be positive in {part!r}")
         else:
@@ -63,13 +63,13 @@ def _parse_field(spec: str, lo: int, hi: int, *, is_dow: bool = False) -> frozen
             a_s, _, b_s = base.partition("-")
             try:
                 start, end = int(a_s), int(b_s)
-            except ValueError:
-                raise CronParseError(f"bad range {base!r}")
+            except ValueError as e:
+                raise CronParseError(f"bad range {base!r}") from e
         else:
             try:
                 start = end = int(base)
-            except ValueError:
-                raise CronParseError(f"bad value {base!r}")
+            except ValueError as e:
+                raise CronParseError(f"bad value {base!r}") from e
 
         if start > end:
             raise CronParseError(f"range start > end in {base!r}")

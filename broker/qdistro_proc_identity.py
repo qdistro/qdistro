@@ -83,7 +83,7 @@ def read_uid(pid: int) -> int | None:
     """Real uid from ``/proc/<pid>/status``, or ``None`` if the process is
     gone / the field is unreadable."""
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("Uid:"):
                     parts = line.split()
@@ -111,7 +111,7 @@ def read_cgroup(pid: int) -> str:
     """The cgroup-v2 unified path (last ``0::`` line of
     ``/proc/<pid>/cgroup``), else the first non-empty line, else ``""``."""
     try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
             lines = [ln.rstrip("\n") for ln in f.readlines()]
     except OSError:
         return ""
@@ -152,7 +152,7 @@ def read_identity(pid: int) -> dict[str, Any] | None:
     can't honestly supply; the string fields degrade to ``""``."""
     ident: dict[str, Any] = {}
     try:
-        with open(f"/proc/{pid}/status", "r", encoding="ascii",
+        with open(f"/proc/{pid}/status", encoding="ascii",
                   errors="replace") as f:
             for line in f:
                 if line.startswith("Uid:"):
@@ -177,7 +177,7 @@ def read_identity(pid: int) -> dict[str, Any] | None:
     except OSError:
         ident["exe"] = ""
     try:
-        with open(f"/proc/{pid}/comm", "r", encoding="utf-8",
+        with open(f"/proc/{pid}/comm", encoding="utf-8",
                   errors="replace") as f:
             ident["comm"] = f.read().strip()
     except OSError:

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import os
 import pwd as _pwd_mod
-from typing import Any
 
 import dbus
 

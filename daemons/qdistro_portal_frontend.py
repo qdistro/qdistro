@@ -68,7 +68,8 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import quote
 
 import qdistro_proc_identity as pi  # type: ignore[import-not-found]
@@ -489,7 +490,7 @@ def _main() -> int:  # pragma: no cover - requires a live silo session bus
             token = re.sub(r"[^A-Za-z0-9_]+", "_", token)[:128]
             return token
 
-        def _new_request(self, sender, options=None) -> "_Request":
+        def _new_request(self, sender, options=None) -> _Request:
             self._req_seq += 1
             token = self._handle_token(options) or f"qdistro_{self._req_seq}"
             base = sender.replace(":", "").replace(".", "_") or "x"

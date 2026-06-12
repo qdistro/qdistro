@@ -66,8 +66,9 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any
 
 # --------------------------------------------------------------------------
 # Controlled vocabularies (doc/lineage.md §Vocabulary, §Storage)
@@ -294,14 +295,14 @@ CREATE TABLE IF NOT EXISTS lineage_chain (
 # --------------------------------------------------------------------------
 
 
-def _jset(values: Optional[Iterable[str]]) -> str:
+def _jset(values: Iterable[str] | None) -> str:
     """Encode a set-of-strings field deterministically (sorted, de-duped)."""
     if not values:
         return "[]"
     return json.dumps(sorted({v for v in values if isinstance(v, str)}))
 
 
-def _jload(text: Optional[str]) -> frozenset[str]:
+def _jload(text: str | None) -> frozenset[str]:
     if not text:
         return frozenset()
     try:
@@ -330,12 +331,12 @@ class Entity:
 
     eid: str
     kind: str
-    digest: Optional[str] = None
-    locator: Optional[str] = None
+    digest: str | None = None
+    locator: str | None = None
     guards: frozenset[str] = frozenset()
     compartments: frozenset[str] = frozenset()
     conflict_classes: frozenset[str] = frozenset()
-    integrity: Optional[str] = None
+    integrity: str | None = None
     status: str = "active"
     facets: dict[str, Any] = field(default_factory=dict)
     created_at: int = 0
@@ -347,20 +348,20 @@ class Activity:
 
     aid: str
     kind: str
-    chokepoint: Optional[str] = None
-    action_version: Optional[str] = None
+    chokepoint: str | None = None
+    action_version: str | None = None
     host_class: str = "unknown"
-    network_egress: Optional[str] = None
-    verdict: Optional[str] = None
+    network_egress: str | None = None
+    verdict: str | None = None
     started_at: int = 0
-    ended_at: Optional[int] = None
+    ended_at: int | None = None
 
 
 @dataclass(frozen=True)
 class Agent:
     gid: str
     kind: str
-    name: Optional[str] = None
+    name: str | None = None
     created_at: int = 0
 
 
@@ -386,7 +387,7 @@ class LineageStore:
     be owned by the broker process, not shared across processes for writes.
     """
 
-    def __init__(self, db_path: str, *, now: Optional[Any] = None):
+    def __init__(self, db_path: str, *, now: Any | None = None):
         self.db_path = db_path
         self._now = now or (lambda: int(time.time()))
         parent = os.path.dirname(db_path)
@@ -490,7 +491,7 @@ class LineageStore:
     @staticmethod
     def _seal_value(prev: str, tbl: str, body: str) -> str:
         return hashlib.sha256(
-            f"{prev}\x1f{tbl}\x1f{body}".encode("utf-8")
+            f"{prev}\x1f{tbl}\x1f{body}".encode()
         ).hexdigest()
 
     def _seal(self, tbl: str, payload: dict[str, Any]) -> str:
@@ -517,7 +518,7 @@ class LineageStore:
     #: reused to mask a different (or still-live) row.
     _TOMBSTONE = "__tombstone__"
 
-    def verify_chain(self, expected_head: Optional[str] = None) -> bool:
+    def verify_chain(self, expected_head: str | None = None) -> bool:
         """Walk the global ledger in ``seq`` order, recompute each seal, and
         confirm every still-live sealed row matches its sealed body. Returns
         ``False`` on any tampering it can detect.
@@ -604,7 +605,7 @@ class LineageStore:
         )
 
     @staticmethod
-    def _parse_tombstone(body: str) -> Optional[tuple[int, str, str]]:
+    def _parse_tombstone(body: str) -> tuple[int, str, str] | None:
         parts = body.split("\x1f", 2)
         if len(parts) != 3:
             return None
@@ -644,7 +645,7 @@ class LineageStore:
         col_list = ", ".join(cols)
         out: Counter = Counter()
         for r in self._conn.execute(f"SELECT {col_list} FROM {tbl}").fetchall():
-            out[json.dumps(dict(zip(cols, r)), sort_keys=True,
+            out[json.dumps(dict(zip(cols, r, strict=True)), sort_keys=True,
                            separators=(",", ":"))] += 1
         return out
 
@@ -719,8 +720,8 @@ class LineageStore:
                 )
         return _require_rowid(cur)
 
-    def end_activity(self, aid: str, verdict: Optional[str] = None,
-                     ended_at: Optional[int] = None) -> None:
+    def end_activity(self, aid: str, verdict: str | None = None,
+                     ended_at: int | None = None) -> None:
         """Stamp a long-running activity's end time and final verdict.
 
         ``ended_at`` updates the unsealed convenience column. A non-None
@@ -760,7 +761,7 @@ class LineageStore:
         return _require_rowid(cur)
 
     def record_edge(self, predicate: str, subject: str, obj: str,
-                    activity: Optional[str] = None) -> int:
+                    activity: str | None = None) -> int:
         if predicate not in EDGE_PREDICATES:
             raise LineageStoreError(
                 f"unknown edge predicate {predicate!r} (allowed: {sorted(EDGE_PREDICATES)})"
@@ -804,8 +805,8 @@ class LineageStore:
         return _require_rowid(cur)
 
     def record_receipt(self, *, entity: str, kind: str,
-                       locator: Optional[str] = None, digest: Optional[str] = None,
-                       payload: Optional[dict[str, Any]] = None) -> int:
+                       locator: str | None = None, digest: str | None = None,
+                       payload: dict[str, Any] | None = None) -> int:
         """Record an artifact-adjacent receipt pointer (doc/lineage.md §Storage
         "Artifact-adjacent records"). Receipts reference central records and are
         not sufficient integrity by themselves."""
@@ -828,9 +829,9 @@ class LineageStore:
         return _require_rowid(cur)
 
     def record_mapping(self, *, map_id: str, activity: str, mapping_kind: str,
-                       confidence: str, inputs: Iterable[tuple[str, Optional[str]]],
-                       outputs: Iterable[tuple[str, Optional[str]]],
-                       handler_version: Optional[str] = None) -> None:
+                       confidence: str, inputs: Iterable[tuple[str, str | None]],
+                       outputs: Iterable[tuple[str, str | None]],
+                       handler_version: str | None = None) -> None:
         """Record a data-mapping (doc/lineage.md §Data Mapping). ``inputs`` and
         ``outputs`` are ``(entity_eid, selector)`` pairs. Only ``broker-derived``
         and ``trusted-tool`` confidences may later narrow guard propagation —
@@ -869,7 +870,7 @@ class LineageStore:
 
     # -- readers -----------------------------------------------------------
 
-    def get_entity(self, eid: str) -> Optional[Entity]:
+    def get_entity(self, eid: str) -> Entity | None:
         """Return the latest recorded snapshot for ``eid`` (entities are
         append-only; the highest-id row is the current security snapshot)."""
         row = self._conn.execute(
@@ -954,7 +955,7 @@ class LineageStore:
                         "payload": body, "created_at": int(ts)})
         return out
 
-    def assertions_for(self, eid: str, *, authority: Optional[str] = None) -> list[dict]:
+    def assertions_for(self, eid: str, *, authority: str | None = None) -> list[dict]:
         """All assertions about a subject, optionally filtered to one authority
         tier — e.g. ``authority='broker-derived'`` to separate policy-bearing
         facts from advisory app-reported facets (doc/lineage.md §Authority)."""

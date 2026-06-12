@@ -106,8 +106,9 @@ import struct
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # Shared /proc identity readers (anti-PID-reuse starttime anchor, exe
 # resolution). Lives under broker/; add it to sys.path so the inbound
@@ -137,7 +138,6 @@ except Exception:  # noqa: BLE001 — fail closed if readers are unavailable
 # baseline + opt-in resolution to ``resolve_parent_exes``.
 from qdistro_browser_allowlist import (  # noqa: E402
     ALLOWLIST_CONFIG_PATH,
-    DEFAULT_ALLOWED_PARENT_EXES,
     resolve_parent_exes,
 )
 
@@ -293,7 +293,7 @@ def read_parent_selinux(ppid: int) -> str:
     disabled or the file is unreadable.
     """
     try:
-        with open(f"/proc/{ppid}/attr/current", "r",
+        with open(f"/proc/{ppid}/attr/current",
                   encoding="utf-8") as f:
             return f.read().strip("\x00 \n")
     except OSError:
@@ -510,7 +510,7 @@ def _compute_token_hmac(request_id: str, ts: float, op: str,
     for another extension.
     """
     s = secret if secret is not None else _SESSION_SECRET
-    msg = f"{request_id}|{ts}|{op}".encode("utf-8")
+    msg = f"{request_id}|{ts}|{op}".encode()
     return hmac.new(s, msg, hashlib.sha256).hexdigest()
 
 

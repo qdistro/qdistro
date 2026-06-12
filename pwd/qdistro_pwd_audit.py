@@ -121,7 +121,7 @@ class PwdAuditLog:
                 "caller_uid", "caller_pid", "caller_exe", "caller_sha",
                 "caller_selinux", "caller_cgroup", "origin", "app_id",
                 "app_context")
-        return [dict(zip(cols, r)) for r in rows]
+        return [dict(zip(cols, r, strict=True)) for r in rows]
 
     def close(self) -> None:
         try:

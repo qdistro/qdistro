@@ -98,7 +98,7 @@ class PrintAuditLog:
                 "FROM print_audit ORDER BY id DESC LIMIT ?",
                 (int(limit),))
             cols = [c[0] for c in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
         finally:
             con.close()
 

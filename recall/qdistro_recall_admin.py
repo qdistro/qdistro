@@ -31,7 +31,7 @@ name; see ``doc/firefox-containers.md``.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
 
 import qdistro_browser_bridge_client as _client
 

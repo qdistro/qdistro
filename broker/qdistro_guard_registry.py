@@ -34,9 +34,10 @@ dataclasses, no third-party dependency.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable, Iterable, cast
+from typing import Any, cast
 
 from qdistro_metadata_schema import RESERVED_GUARDS
 
@@ -175,7 +176,7 @@ class FlowEndpoint:
     conflict_classes: frozenset[str] = frozenset()
 
     @classmethod
-    def from_security(cls, security: object) -> "FlowEndpoint":
+    def from_security(cls, security: object) -> FlowEndpoint:
         """Build an endpoint from a manifest ``security`` mapping (tolerant of
         ``None``/missing/non-list fields — those become empty sets)."""
 

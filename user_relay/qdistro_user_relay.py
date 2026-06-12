@@ -354,7 +354,7 @@ class UserRelay(dbus.service.Object):
             raise dbus.DBusException(
                 f"Forward to {service_s!r} failed: {e}",
                 name=BUS_NAME + ".ForwardFailed",
-            )
+            ) from e
 
     @dbus.service.signal(BUS_NAME, signature="i")
     def LocalReceiversChanged(self, uid):

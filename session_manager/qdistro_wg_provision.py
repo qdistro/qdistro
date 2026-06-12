@@ -138,7 +138,7 @@ def provision(name: str, *, peer_public_key: str, endpoint: str, address: str,
     return public_key
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="qdistro-wg-provision",
         description="Provision a per-silo WireGuard tunnel (task 3).")

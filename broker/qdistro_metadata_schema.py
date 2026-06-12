@@ -99,7 +99,7 @@ class ValidationResult:
     def ok(self) -> bool:
         return not self.errors
 
-    def merge(self, other: "ValidationResult") -> "ValidationResult":
+    def merge(self, other: ValidationResult) -> ValidationResult:
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
         return self

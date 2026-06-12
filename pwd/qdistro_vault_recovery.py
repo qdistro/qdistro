@@ -89,7 +89,7 @@ def _derive_kek(passphrase: bytes, salt: bytes, n: int, r: int, p: int) -> bytes
 def _aad(label: str) -> bytes:
     """Bind the ciphertext to the bundle label so a bundle cannot be passed
     off as a different one."""
-    return f"qdistro-recovery\x00{label}".encode("utf-8")
+    return f"qdistro-recovery\x00{label}".encode()
 
 
 def export_recovery_bundle(master_key: bytes, passphrase: bytes,
@@ -196,7 +196,7 @@ def write_recovery_bundle(path: str, master_key: bytes, passphrase: bytes,
 def read_recovery_bundle(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
         raise RecoveryIntegrityError(f"no recovery bundle at {path}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         try:
             return json.load(f)
         except ValueError as e:

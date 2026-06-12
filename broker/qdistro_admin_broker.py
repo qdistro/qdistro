@@ -216,7 +216,7 @@ def _read_require_silo_active() -> bool:
             flush=True)
         return True
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:
@@ -263,7 +263,7 @@ def _read_secctx_launcher_gated() -> bool:
     if val in ("0", "false", "no", "off"):
         return False
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:
@@ -305,7 +305,7 @@ def _read_lineage_enforce() -> bool:
     if val in ("0", "false", "no", "off"):
         return False
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:
@@ -343,7 +343,7 @@ def _read_identity_strict() -> bool:
     if val in ("0", "false", "no", "off"):
         return False
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:
@@ -372,7 +372,7 @@ def _read_hooks_enabled() -> bool:
     if val in ("1", "true", "yes", "on"):
         return True
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:
@@ -1460,11 +1460,11 @@ class Broker(dbus.service.Object):
         try:
             pid_i = int(target_pid)
             expected_start = int(target_starttime)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
             raise dbus.DBusException(
                 "target_pid and target_starttime must be integers",
                 name=BUS_NAME + ".BadArgument",
-            )
+            ) from e
         if pid_i <= 0:
             raise dbus.DBusException(
                 f"invalid target_pid {pid_i}",
@@ -2841,7 +2841,7 @@ class Broker(dbus.service.Object):
                 raise dbus.DBusException(
                     f"relay not running for uid {target_uid} "
                     f"({relay_name} unowned)",
-                    name=BUS_NAME + ".TargetNotReady")
+                    name=BUS_NAME + ".TargetNotReady") from e
             raise
 
     def _enqueue(self, uid: int, pid: int, exe: str, start_time: int,
@@ -3314,7 +3314,7 @@ class Broker(dbus.service.Object):
                     f"Audit log unavailable; decision not recorded ({e}). "
                     "Request denied.",
                     name=BUS_NAME + ".AuditUnavailable",
-                )
+                ) from e
 
         # Cache writes only happen on allow, and only after audit has
         # succeeded — we never extend trust past a failed audit.
@@ -3445,7 +3445,7 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 f"cache.gc failed: {e}",
                 name=BUS_NAME + ".CacheGcFailed",
-            )
+            ) from e
         print(f"[broker] cache.gc on-demand: {n} rows deleted by "
               f"admin_uid={admin_uid}", flush=True)
         return int(n)
@@ -3476,7 +3476,6 @@ class Broker(dbus.service.Object):
                 name=BUS_NAME + ".AccessDenied",
             )
         import re
-        import shutil
         import tempfile
         if not re.fullmatch(r"[A-Za-z0-9_-]+\.yaml", filename):
             raise dbus.DBusException(
@@ -3603,7 +3602,7 @@ class Broker(dbus.service.Object):
                     raise dbus.DBusException(
                         f"DeleteRule: aborting, audit log write failed: {e}",
                         name=BUS_NAME + ".RulesEngineRefused",
-                    )
+                    ) from e
 
         if admin_uid not in (0, ADMIN_UID):
             _audit(False, reason=f"refused: non-admin uid {admin_uid}",
@@ -3663,7 +3662,7 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 f"DeleteRule: cannot open rules dir {rules_real}: {e}",
                 name=BUS_NAME + ".RulesEngineRefused",
-            )
+            ) from e
         try:
             # Re-check by-fd that the basename entry is not a symlink and
             # is a regular file at unlink time, then unlink relative to
@@ -3679,7 +3678,7 @@ class Broker(dbus.service.Object):
                     f"DeleteRule: rule entry {basename} vanished or is "
                     f"inaccessible at unlink time: {e}",
                     name=BUS_NAME + ".RulesEngineRefused",
-                )
+                ) from e
             if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
                 _audit(False,
                        reason="refused: entry changed to symlink/non-regular",
@@ -3702,7 +3701,7 @@ class Broker(dbus.service.Object):
                 raise dbus.DBusException(
                     f"DeleteRule: unlink of {basename} failed: {e}",
                     name=BUS_NAME + ".RulesEngineRefused",
-                )
+                ) from e
         finally:
             os.close(dir_fd)
 
@@ -3818,7 +3817,7 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 f"GetRuleSource: cannot open rules dir {rules_real}: {e}",
                 name=BUS_NAME + ".RulesEngineRefused",
-            )
+            ) from e
         try:
             try:
                 file_fd = os.open(
@@ -3827,7 +3826,7 @@ class Broker(dbus.service.Object):
                 raise dbus.DBusException(
                     f"GetRuleSource: cannot open rule {basename}: {e}",
                     name=BUS_NAME + ".RulesEngineRefused",
-                )
+                ) from e
             import stat as _stat
             st = os.fstat(file_fd)
             if not _stat.S_ISREG(st.st_mode):
@@ -4180,7 +4179,7 @@ class Broker(dbus.service.Object):
             raise dbus.DBusException(
                 f"ListPrintAudit: {e}",
                 name=BUS_NAME + ".PrintAuditError",
-            )
+            ) from e
         out = []
         for r in rows:
             out.append({
@@ -4388,7 +4387,7 @@ class Broker(dbus.service.Object):
         except ImportError as e:
             raise dbus.DBusException(
                 f"qdistro_snapshots module unavailable: {e}",
-                name=BUS_NAME + ".SnapperUnavailable")
+                name=BUS_NAME + ".SnapperUnavailable") from e
         try:
             sb = dbus.SystemBus()
             obj = sb.get_object("org.opensuse.Snapper",
@@ -4400,7 +4399,7 @@ class Broker(dbus.service.Object):
         except Exception as e:
             raise dbus.DBusException(
                 f"failed to bind org.opensuse.Snapper: {e}",
-                name=BUS_NAME + ".SnapperUnavailable")
+                name=BUS_NAME + ".SnapperUnavailable") from e
         cli = SnapperClient(_xport)
         self._snapper_cached = cli
         return cli
@@ -4431,7 +4430,7 @@ class Broker(dbus.service.Object):
         except Exception as e:
             raise dbus.DBusException(
                 f"SnapshotBefore failed: {e}",
-                name=BUS_NAME + ".SnapshotFailed")
+                name=BUS_NAME + ".SnapshotFailed") from e
         return int(n)
 
     @dbus.service.method(BUS_NAME, in_signature="s",

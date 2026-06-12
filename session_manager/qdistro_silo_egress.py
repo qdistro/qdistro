@@ -80,7 +80,7 @@ class EgressPolicy:
     tunnel: str | None = None      # tunnel name iff mode == "wg"
 
     @classmethod
-    def parse(cls, spec: object) -> "EgressPolicy":
+    def parse(cls, spec: object) -> EgressPolicy:
         if not isinstance(spec, str) or not spec:
             raise EgressError(f"egress must be a non-empty string, got {spec!r}")
         if spec == EGRESS_NONE:
@@ -218,7 +218,7 @@ class EgressBackend:
     ``ns`` arguments to ops use ``None`` (or "") to mean the **init** netns."""
 
     def apply(self, ns: str, uid: int, policy: EgressPolicy, ops,
-              *, tunnel: "TunnelConfig | None" = None,
+              *, tunnel: TunnelConfig | None = None,
               keyfn=None) -> EgressResult:
         """Bring the silo netns to the requested egress state. Idempotent:
         teardown-stale-first so a re-apply over a half-configured or restart-
@@ -240,7 +240,7 @@ class EgressBackend:
         raise EgressError(f"unknown egress mode {policy.mode!r}")
 
     def reattach(self, ns: str, uid: int, policy: EgressPolicy, ops,
-                 *, tunnel: "TunnelConfig | None" = None) -> None:
+                 *, tunnel: TunnelConfig | None = None) -> None:
         """Reinstall the address + default route on a link-up (Probe 2 finding
         1: a wg link bounce flushes the route, not the address). Idempotent and
         cheap; safe to call on every start/reconfigure.
@@ -257,7 +257,7 @@ class EgressBackend:
         if policy.mode == "wg" and tunnel is not None:
             self._bring_up_wg(ns, wg_ifname(uid), tunnel, ops)
 
-    def teardown(self, ns: str, uid: int, policy: "EgressPolicy | None",
+    def teardown(self, ns: str, uid: int, policy: EgressPolicy | None,
                  ops) -> None:
         """Remove all egress devices + the backstop + resolver for this silo.
         Idempotent (safe on a never-applied or partially-applied netns)."""

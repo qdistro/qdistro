@@ -113,9 +113,9 @@ def _run_with_timeout(fn, args, timeout):
     future = _hook_call_pool.submit(fn, *args)
     try:
         return future.result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
+    except concurrent.futures.TimeoutError as e:
         future.cancel()
-        raise _HookTimeout(f"hook timed out after {timeout}s")
+        raise _HookTimeout(f"hook timed out after {timeout}s") from e
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +521,7 @@ def serve(hook_dir: str = HOOK_DIR,
         while not stop_event.is_set():
             try:
                 conn, _ = srv.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 if stop_event.is_set():

@@ -127,8 +127,7 @@ class HookClient:
             if verdict is None:
                 return None
             return resp
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError,
-                socket.timeout, ConnectionRefusedError):
+        except (TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError, ConnectionRefusedError):
             return None
         finally:
             try:

@@ -26,7 +26,7 @@ Apps wire themselves via the higher-level ``register_app`` helper in
 from __future__ import annotations
 
 import os
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 import dbus
 import dbus.service

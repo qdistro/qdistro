@@ -46,7 +46,8 @@ from __future__ import annotations
 import json
 import re
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
     browser_label,

@@ -22,15 +22,15 @@ environments without them (the cgroup/cron watchers don't need them).
 """
 from __future__ import annotations
 
-import fnmatch
 import glob
 import logging
 import os
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 from cron_parser import CronExpr, CronParseError  # type: ignore[import-not-found]
 from workflow_schema import (  # type: ignore[import-not-found]
@@ -183,7 +183,7 @@ class ProcessSpawnTrigger(BaseTrigger):
         procs_file = os.path.join(cgroup_dir, "cgroup.procs")
         pids: set[int] = set()
         try:
-            with open(procs_file, "r", encoding="ascii") as f:
+            with open(procs_file, encoding="ascii") as f:
                 for line in f:
                     line = line.strip()
                     if line.isdigit():

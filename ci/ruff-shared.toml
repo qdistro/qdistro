@@ -33,15 +33,8 @@ extend-exclude = ["build", "dist", ".venv", "*.egg-info", "__pycache__"]
 #   E  pycodestyle errors      F  pyflakes (real bugs)
 #   W  pycodestyle warnings     I  import sorting (isort)
 #
-# DEFERRED whole families (future ratchet — re-add to `select` once calibrated):
-#   B  flake8-bugbear  — 100+ pre-existing hits across siblings (B904/B905/B007/
-#                        B008/B006/B023…). qfileman already passes B locally;
-#                        re-add per-repo as each is triaged.
-#   UP pyupgrade       — 450+ pre-existing hits (UP045/UP035/UP037/UP006…). The
-#                        auto-fixes rewrite product code in sibling repos, which
-#                        this gate intentionally does NOT touch; re-add after a
-#                        reviewed sweep.
-select = ["E", "F", "W", "I"]
+#   B  flake8-bugbear       UP pyupgrade
+select = ["E", "F", "W", "I", "B", "UP"]
 
 ignore = [
     # --- house-style ignores (intentional, not ratchets) ---
@@ -56,19 +49,18 @@ ignore = [
     # sibling repos this gate may not auto-fix. Remove an entry once that code
     # is clean across all targets; the gate then starts blocking it.
     #
-    # RE-ENABLED 2026-06-12 (04/F7 ratchet step, all cleared to zero across
+    # RE-ENABLED 2026-06-12 (04/F7 ratchet steps, all cleared to zero across
     # qdistro + the 6 sibling repos): W291 (4), F541 (5), F601 (1, a real
     # repeated-dict-key bug in qterminator config), E401 (1), W293 (600,
     # blank-line whitespace — 591 plain + 9 docstring-internal, all
     # whitespace-only); I001 (506, unsorted-imports — `ruff --fix` import-sort
     # sweep, mechanical, no behaviour change; verified py_compile + targeted
     # suites green per repo); F811 (~23, duplicate imports); F841 (64, unused
-    # locals). The gate now blocks new occurrences of these.
-    "F401",  # unused-import                     (~300 hits)
+    # locals); F401 (290 + pyupgrade follow-up stale imports), E741 (82),
+    # E402 (61 explicit late-import noqas), B (bugbear) and UP (pyupgrade).
+    # The gate now blocks new occurrences of these.
     # F821 (undefined-name) is NOT deferred globally — it is enforced with no
     # scope-outs; see the NOTE below.
-    "E741",  # ambiguous-variable-name           (~82 hits)
-    "E402",  # module-import-not-at-top-of-file  (~64 hits)
 ]
 # NOTE (F821): rather than DEFER undefined-name globally (which would mute
 # every new undefined-name across the whole tree — exactly the latent-bug class

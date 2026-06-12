@@ -35,9 +35,10 @@ import sqlite3
 import subprocess
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # Per-silo netns egress backend (interim per-silo VPN; todo/fable-networking
 # task 3). Pure module: the side-effecting ip/wg/nft/veth ops live on _SystemOps
@@ -281,8 +282,8 @@ def validate_name(name: str) -> str:
 def validate_uid(uid: int) -> int:
     try:
         uid_i = int(uid)
-    except (TypeError, ValueError):
-        raise BadArgument(f"uid must be an integer, got {uid!r}")
+    except (TypeError, ValueError) as e:
+        raise BadArgument(f"uid must be an integer, got {uid!r}") from e
     if uid_i < SILO_UID_MIN or uid_i > SILO_UID_MAX:
         raise BadArgument(
             f"uid must be in [{SILO_UID_MIN}, {SILO_UID_MAX}], got {uid_i}")
@@ -368,7 +369,7 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
         try:
             argv = json.loads(argv)
         except json.JSONDecodeError as e:
-            raise BadArgument(f"tier2-template launch.argv not valid JSON: {e}")
+            raise BadArgument(f"tier2-template launch.argv not valid JSON: {e}") from e
     if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
         raise BadArgument("tier2-template launch.argv must be a list of strings")
     if any(("\n" in a or "\r" in a) for a in argv):
@@ -1187,7 +1188,7 @@ class _AuditLog:
                 (limit,)).fetchall()
         cols = ("id", "ts", "action", "silo", "decision", "reason",
                 "caller_uid", "caller_pid", "caller_exe")
-        return [dict(zip(cols, r)) for r in rows]
+        return [dict(zip(cols, r, strict=True)) for r in rows]
 
     def close(self) -> None:
         try:
@@ -1312,11 +1313,11 @@ class _SiloStore:
 
     def __init__(self, ops: _SystemOps,
                  config_path: Path = SILOS_CONFIG_PATH,
-                 on_change: "callable | None" = None,
-                 audit: "_AuditLog | None" = None,
-                 egress_backend: "EgressBackend | None" = None,
-                 tunnel_resolver: "callable | None" = None,
-                 key_provider: "callable | None" = None):
+                 on_change: callable | None = None,
+                 audit: _AuditLog | None = None,
+                 egress_backend: EgressBackend | None = None,
+                 tunnel_resolver: callable | None = None,
+                 key_provider: callable | None = None):
         self._ops = ops
         self._config_path = Path(config_path)
         self._on_change = on_change
@@ -1480,8 +1481,8 @@ class _SiloStore:
         with self._lock:
             try:
                 return self._silos[name]
-            except KeyError:
-                raise UnknownSilo(f"no such silo {name!r}")
+            except KeyError as e:
+                raise UnknownSilo(f"no such silo {name!r}") from e
 
     def list_silos(self) -> list[Silo]:
         with self._lock:
@@ -1616,8 +1617,8 @@ class _SiloStore:
                            reason=reason, caller=None)
 
     def _start_egress_watcher(self, name: str, ns: str, uid: int,
-                              policy: "EgressPolicy",
-                              tunnel: "TunnelConfig | None") -> None:
+                              policy: EgressPolicy,
+                              tunnel: TunnelConfig | None) -> None:
         """Start a link-up watcher for a live wg silo; its callback re-attaches
         addr+route via the pure backend (no _lock — see reattach's docstring).
         Captures the immutable (ns, uid, policy, tunnel) + a generation token so
@@ -1655,7 +1656,7 @@ class _SiloStore:
             log.warning("stopping link watcher for %r failed: %s", name, e)
 
     def _teardown_egress_devices(self, ns: str, uid: int,
-                                 policy: "EgressPolicy") -> None:
+                                 policy: EgressPolicy) -> None:
         # Best-effort device teardown (no netns removal) for the dark-fallback
         # path: clear any half-configured device before re-applying `none`.
         try:
@@ -2185,7 +2186,7 @@ class _SiloStore:
             with self._lock:
                 self._clear_stop_inflight(silo_name)
 
-    def _await_inflight_locked(self, name: str) -> "Silo":
+    def _await_inflight_locked(self, name: str) -> Silo:
         """Wait (on _stop_cv, with _lock held) until no lock-free lifecycle
         write is in flight for *name*, then return the current silo. Raises
         UnknownSilo if the silo is deleted while we wait. Caller must hold
@@ -2379,7 +2380,7 @@ class _SiloStore:
         except OSError as e:
             self._audit_record("dispose", str(name), decision="error",
                                reason=f"remove errored: {e}", caller=caller)
-            raise BadState(f"dispose {name!r} failed: {e}")
+            raise BadState(f"dispose {name!r} failed: {e}") from e
         self._audit_record("dispose", str(name),
                            decision="allow" if ok else "error",
                            reason="removed" if ok else "podman rm failed",
@@ -2415,7 +2416,7 @@ class _SiloStore:
         except OSError as e:
             self._audit_record("dispose-by-token", str(token), decision="error",
                                reason=f"lookup errored: {e}", caller=caller)
-            raise BadState(f"dispose-by-token {token!r} lookup failed: {e}")
+            raise BadState(f"dispose-by-token {token!r} lookup failed: {e}") from e
         if len(names) > 1:
             self._audit_record("dispose-by-token", str(token), decision="error",
                                reason=f"ambiguous: {len(names)} containers",
@@ -2720,7 +2721,7 @@ if dbus is not None:
                 dbus_iface = dbus.Interface(bus_obj, "org.freedesktop.DBus")
                 return int(dbus_iface.GetConnectionUnixUser(sender))
             except Exception as e:  # noqa: BLE001
-                raise NotAuthorized(f"could not resolve caller uid: {e}")
+                raise NotAuthorized(f"could not resolve caller uid: {e}") from e
 
         def _peer_caller(self, sender, conn) -> dict[str, Any]:
             """Resolve the calling peer's (uid, pid, exe) for the audit
@@ -2788,12 +2789,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("create", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.create(str(name), int(uid), caller=caller)
                 log.info("CreateSilo name=%s uid=%d", name, int(uid))
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="ssss", out_signature="",
                              sender_keyword="sender",
@@ -2808,7 +2809,7 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("create", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.create(
                     str(name), TIER2_LAUNCH_OWNER_UID, kind=KIND_TIER2_TEMPLATE,
@@ -2819,7 +2820,7 @@ if dbus is not None:
                 log.info("CreateTemplateSilo name=%s workload=%s silo=%s",
                          name, workload, template_silo)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              sender_keyword="sender",
@@ -2830,12 +2831,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("delete", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.delete(str(name), caller=caller)
                 log.info("DeleteSilo name=%s", name)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="ss", out_signature="",
                              sender_keyword="sender",
@@ -2850,14 +2851,14 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("egress-configure", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 # D-Bus has no null in a string arg; "" clears to legacy.
                 policy = None if str(egress) == "" else str(egress)
                 self.store.set_egress(str(name), policy, caller=caller)
                 log.info("SetSiloEgress name=%s egress=%s", name, egress)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              sender_keyword="sender",
@@ -2868,12 +2869,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("start", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.start(str(name), caller=caller)
                 log.info("StartSilo name=%s", name)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="si", out_signature="",
                              sender_keyword="sender",
@@ -2884,12 +2885,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("stop", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.stop(str(name), int(grace_s), caller=caller)
                 log.info("StopSilo name=%s grace_s=%d", name, int(grace_s))
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              sender_keyword="sender",
@@ -2900,12 +2901,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("freeze", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.freeze(str(name), caller=caller)
                 log.info("FreezeSilo name=%s", name)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="",
                              sender_keyword="sender",
@@ -2916,12 +2917,12 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("resume", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 self.store.resume(str(name), caller=caller)
                 log.info("ResumeSilo name=%s", name)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
                              sender_keyword="sender",
@@ -2937,13 +2938,13 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose", name, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 ok = bool(self.store.dispose(str(name), caller=caller))
                 log.info("Dispose name=%s -> %s", name, ok)
                 return ok
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
                              sender_keyword="sender",
@@ -2960,13 +2961,13 @@ if dbus is not None:
                 self._require_admin(sender, conn)
             except SessionError as e:
                 self._audit_refusal("dispose-by-token", token, caller, e)
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             try:
                 ok = bool(self.store.dispose_by_token(str(token), caller=caller))
                 log.info("DisposeByToken token=%s -> %s", token, ok)
                 return ok
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
 
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s")
         def ListSilos(self):
@@ -2984,7 +2985,7 @@ if dbus is not None:
             try:
                 self._require_admin(sender, conn)
             except SessionError as e:
-                raise _to_dbus_exception(e)
+                raise _to_dbus_exception(e) from e
             if self.audit is None:
                 return json.dumps([])
             lim = int(limit) if int(limit) > 0 else 100

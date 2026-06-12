@@ -104,7 +104,7 @@ class QdistroSendToPlugin(MenuProvider):
     def __init__(self):
         super().__init__()
         self._window = None
-        self._receiver: "qdistro_app.AppReceiver | None" = None
+        self._receiver: qdistro_app.AppReceiver | None = None
         self._workers: list[_RelayWorker] = []  # keep alive
 
     # ------------------------------------------------------------------

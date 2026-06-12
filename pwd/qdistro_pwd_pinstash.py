@@ -34,12 +34,11 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from qdistro_pwd_tpm import (  # type: ignore[import-not-found]
-    TpmAuthFailed,
     TpmBackend,
-    TpmBackendError,
     TpmUnavailable,
     configured_pcrs,
 )

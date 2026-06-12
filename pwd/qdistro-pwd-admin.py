@@ -37,7 +37,6 @@ import argparse
 import getpass
 import os
 import sys
-from typing import Any
 
 import dbus
 

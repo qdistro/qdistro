@@ -16,7 +16,7 @@ output is layered on top per-deployment.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 ACTION_PREFIX = "qdistro.print.discover."
 

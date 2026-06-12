@@ -45,21 +45,18 @@ Security:
 """
 from __future__ import annotations
 
-import grp
 import json
 import os
 import pwd
 import re
 import select
 import shutil
-import signal
 import socket
 import struct
 import subprocess
 import sys
 import syslog
 import threading
-from typing import Any
 
 import dbus
 import dbus.mainloop.glib  # noqa: F401 — ensures glib is imported before bus access
@@ -148,7 +145,7 @@ def _read_identity_strict() -> bool:
     if val in ("0", "false", "no", "off"):
         return False
     try:
-        with open(_BROKER_CONF_PATH, "r", encoding="utf-8") as fh:
+        with open(_BROKER_CONF_PATH, encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.split("#", 1)[0].strip()
                 if not line or "=" not in line:

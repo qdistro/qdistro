@@ -37,7 +37,8 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from qdistro_browser_daemon_identity import (  # type: ignore[import-not-found]
     browser_bridge_allowed,

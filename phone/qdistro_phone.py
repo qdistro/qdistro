@@ -32,10 +32,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import time
 from collections import deque
-from typing import Iterable
 
 # Default service UUID a paired qdistro-companion (or a KDE Connect
 # Android instance with bluetooth backend on) advertises.

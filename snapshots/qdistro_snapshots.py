@@ -35,7 +35,8 @@ Spec/19 explicitly notes there is NO ``GetDiff`` method — diff is
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 # Userdata key the broker sets on every qdistro-originated snapshot
 # so admin-app's Snapshots tab can highlight them vs. Snapper's

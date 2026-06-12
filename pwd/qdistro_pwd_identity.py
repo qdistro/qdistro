@@ -78,7 +78,7 @@ def read_proc_selinux(pid: int) -> str:
 
 def read_proc_cgroup(pid: int) -> str:
     try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
             lines = [ln.rstrip("\n") for ln in f.readlines()]
         unified = next(
             (ln.split("::", 1)[1] for ln in lines if ln.startswith("0::")),

@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
 
 from qdistro_guard_registry import (
     FlowContext,
@@ -103,9 +103,9 @@ class ChokepointResult:
     output_guards: frozenset[str]
     output_compartments: frozenset[str]
     output_conflict_classes: frozenset[str]
-    output_integrity: Optional[str]
+    output_integrity: str | None
     activity_aid: str
-    output_eid: Optional[str]
+    output_eid: str | None
 
     @property
     def denied(self) -> bool:
@@ -121,16 +121,16 @@ def record_chokepoint(
     *,
     chokepoint: str,
     inputs: Sequence[ChokepointInput],
-    destination: Optional[FlowEndpoint] = None,
-    processing: Optional[ProcessingDescriptor] = None,
-    output_eid: Optional[str] = None,
+    destination: FlowEndpoint | None = None,
+    processing: ProcessingDescriptor | None = None,
+    output_eid: str | None = None,
     output_kind: str = "artifact",
-    output_digest: Optional[str] = None,
-    output_locator: Optional[str] = None,
-    agent_gid: Optional[str] = None,
-    action_version: Optional[str] = None,
-    trusted_mapping: Optional[dict] = None,
-    now: Optional[int] = None,
+    output_digest: str | None = None,
+    output_locator: str | None = None,
+    agent_gid: str | None = None,
+    action_version: str | None = None,
+    trusted_mapping: dict | None = None,
+    now: int | None = None,
 ) -> ChokepointResult:
     """Evaluate + record one chokepoint flow.
 
@@ -203,7 +203,7 @@ def record_chokepoint(
     # Integrity becomes "mixed" when the flow combines >1 distinct compartment
     # under a shared conflict class (doc/guards.md §Cross-silo "mixed derivative").
     distinct_compartments = {c for i in inputs for c in i.endpoint.compartments}
-    output_integrity: Optional[str] = None
+    output_integrity: str | None = None
     if len(distinct_compartments) > 1 and union_conflicts:
         output_integrity = "mixed"
 
@@ -212,7 +212,7 @@ def record_chokepoint(
     # chain-valid but incomplete lineage. store.transaction() is re-entrant, so
     # the per-record_* txns join this outer scope.
     aid = _gen_id("activity")
-    out_eid: Optional[str] = None
+    out_eid: str | None = None
     with store.transaction():
         # 3. Record the activity (with effective processing host).
         store.record_activity(
@@ -295,16 +295,16 @@ def declassify(
     store: LineageStore,
     *,
     source_eid: str,
-    output_eid: Optional[str] = None,
+    output_eid: str | None = None,
     output_kind: str = "export",
-    output_digest: Optional[str] = None,
+    output_digest: str | None = None,
     residual_guards: Sequence[str] = (),
     residual_compartments: Sequence[str] = (),
     residual_conflict_classes: Sequence[str] = (),
     authority_gid: str,
-    transform: Optional[str] = None,
-    agent_gid: Optional[str] = None,
-    now: Optional[int] = None,
+    transform: str | None = None,
+    agent_gid: str | None = None,
+    now: int | None = None,
 ) -> str:
     """Record a declassification workflow (doc/guards.md §Declassification,
     doc/lineage.md §Contamination "Sanitize/export is not lineage erasure").

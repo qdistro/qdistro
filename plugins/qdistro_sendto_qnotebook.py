@@ -95,7 +95,7 @@ class Plugin:
 
     def __init__(self) -> None:
         self._window = None
-        self._receiver: "qdistro_app.AppReceiver | None" = None
+        self._receiver: qdistro_app.AppReceiver | None = None
         self._workers: list[_RelayWorker] = []
 
     # ------------------------------------------------------------------

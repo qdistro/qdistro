@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Protocol
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"

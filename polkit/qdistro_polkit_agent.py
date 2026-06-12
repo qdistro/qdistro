@@ -48,7 +48,6 @@ import subprocess
 import sys
 import syslog
 import threading
-from typing import Optional
 
 import dbus
 import dbus.mainloop.glib
@@ -150,7 +149,7 @@ def load_method_config(path: str = DEFAULT_CONFIG_PATH) -> list[tuple[str, str]]
     """
     out: list[tuple[str, str]] = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for ln in f:
                 ln = ln.strip()
                 if not ln or ln.startswith("#"):
@@ -234,7 +233,7 @@ def save_user_config(entries: list[tuple[str, str]],
 
 def select_method(action_id: str,
                   config: list[tuple[str, str]],
-                  env: Optional[dict] = None) -> str:
+                  env: dict | None = None) -> str:
     """Pick an auth method for a polkit action.
 
     Priority:
@@ -279,7 +278,7 @@ def _pam_authenticate(user: str, password: str,
 
 def _prompt_password(action_id: str, message: str,
                      prompt_bin: str = DEFAULT_PROMPT_BIN,
-                     env: Optional[dict] = None) -> Optional[str]:
+                     env: dict | None = None) -> str | None:
     """Spawn the qdistro-polkit-prompt subprocess to read the admin's
     password. Returns the password string on success, or None if the
     user cancelled or the prompt is unavailable.
@@ -379,7 +378,7 @@ class QdistroPolkitAgent(dbus.service.Object):
     """polkit authentication agent — PAM / fprintd / broker dispatch."""
 
     def __init__(self, bus, path: str,
-                 config: Optional[list[tuple[str, str]]] = None):
+                 config: list[tuple[str, str]] | None = None):
         super().__init__(bus, path)
         self._sysbus = dbus.SystemBus()
         self._broker = None

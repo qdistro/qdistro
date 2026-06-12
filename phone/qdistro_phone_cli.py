@@ -143,7 +143,7 @@ def cmd_decisions(args) -> int:
     ).fetchall()
     conn.close()
     cols = ("id", "ts", "request_id", "decision", "expires_at", "phone_id")
-    out = [dict(zip(cols, r)) for r in rows]
+    out = [dict(zip(cols, r, strict=True)) for r in rows]
     if args.json:
         print(json.dumps(out, indent=2))
     else:

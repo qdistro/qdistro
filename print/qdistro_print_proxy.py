@@ -94,7 +94,7 @@ BUFSIZE = 64 * 1024
 _AUDIT_LOG = None  # type: ignore[var-annotated]
 
 
-def _audit() -> "PrintAuditLog | None":  # noqa: F821 — forward ref
+def _audit() -> PrintAuditLog | None:  # noqa: F821 — forward ref
     global _AUDIT_LOG
     if _AUDIT_LOG is None:
         try:
