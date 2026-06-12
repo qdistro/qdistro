@@ -581,26 +581,32 @@ Historical fix-plan details were pruned from the public repo. Summary:
 | P0-1 | `extension_id` read from stdio (untrusted) instead of argv (kernel-attested) | High | ✅ landed (commit `0c3a7a8`) |
 | P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High | ✅ landed (commit `0c3a7a8`) |
 | P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
-| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | ✅ resolved by D5+F4 — see note |
-| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | ✅ moot under D5 — see note |
+| P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | bounded by D5 freeze + F4 opt-in; allowlist opt-in is post-v1 — see note |
+| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | bounded by D5 freeze (surface frozen) — see note |
 | P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | → deferred to release-engineering (`03`) |
 
 **P0-4/5/6 disposition (D5 op-set freeze + D2 Recall cut, 2026-06-12):**
 
-- **P0-4 — resolved.** Decision D5 freezes the v1 bridge op set at the
-  *shipped* ops, which (given D2) is `qdistro.ping` + the Firefox
-  `containers.*` relay. `ping` terminates at the bridge and carries no
-  capability, so an allowlisted Brave/Vivaldi/Chrome/Edge can do nothing
-  beyond it. The one cross-silo path, `containers.*` cross-uid forwarding, is
-  now **default-deny / admin opt-in** via a broker rule (F4,
-  `04-feature-completion.md`). The default-on parent-browser allowlist is
-  therefore no longer a meaningful v1 attack surface; expanding it stays a
-  post-v1 decision when new ops are added.
-- **P0-5 — moot for v1.** With the op set frozen at `ping` + `containers.*`
-  there are no ops "past `ping`" for an extension manifest to declare in v1
-  (the `containers.*` relay is Firefox-native, not an extension permission).
-  Declaring manifest permissions becomes real work again only when the op set
-  is unfrozen post-v1.
+- **P0-4 — bounded by the op-set freeze + F4, not eliminated.** Decision D5
+  freezes the v1 bridge op set: no NEW ops are added for v1, and `recall.push`
+  is removed (D2). It does **not** mean the bridge dispatches only `qdistro.ping`
+  — the registered dispatch table still includes the existing Phase-8 /
+  session ops (`qdistro.handshake`, `qdistro.heartbeat.ack`) and the
+  token-gated handlers documented per-op above (`pwd.fill` / `pwd.save`,
+  `page.extract`, `cookies.export`, `clipboard.*`, the MPRIS / downloads /
+  notifications / screenlock relays). What changes for P0-4: the one
+  cross-silo path, `containers.*` cross-uid forwarding, is now **default-deny /
+  admin opt-in** via a broker rule (F4, `04-feature-completion.md`), and the
+  op surface is frozen so the allowlist's breadth cannot grow new capability.
+  The sensitive handlers remain gated by their existing intent-token / broker
+  checks regardless of which allowlisted browser hosts the bridge; a per-feature
+  opt-in for the default-on parent-browser allowlist itself stays a post-v1
+  hardening item.
+- **P0-5 — bounded by the freeze.** With the op set frozen, the extension's
+  declared-permission surface cannot grow in v1; tightening the manifests to
+  declare exactly the shipped ops they use remains worthwhile but is no longer
+  a moving target. It becomes live work again only when the op set is unfrozen
+  post-v1.
 - **P0-6 — deferred to release-engineering.** CRX signing key custody,
   `update.xml` hosting, and the Windows AD/Azure-AD enrollment requirement are
   distribution concerns, not bridge-security defects; they are tracked in

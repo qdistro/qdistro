@@ -138,18 +138,29 @@ two flavours, both behind admin-app confirm dialogs:
 
 ## Backup — `btrfs send | rage -e | ssh destination`
 
-> **v1 status: shipped.** `snapshots/qdistro_backup_cli.py` orchestrates
-> backup / verify / restore over `rage` with argv lists (no shell), driven by
-> the `qdistro-backup.service` + `qdistro-backup.timer` units. Every run writes
-> a per-run, hash-chained, `ssh-keygen -Y`-signed manifest
-> (`snapshots/qdistro_backup_manifest.py`). **Restore and verify fail closed:**
-> they REFUSE without `--allowed-signers` unless `--insecure-no-verify` is
-> given; restore loads the whole manifest chain, signature-verifies each entry,
-> runs the strictly-increasing chain check, then receives. Covered by
-> `tests/unit/test_backup_manifest.py`, `tests/unit/test_vault_recovery.py`,
-> and the host-runnable `tests/integration/backup-e2e.bats`. The raw idioms
-> below are the underlying transport; production goes through the CLI so the
-> manifest/verify gate is never bypassed.
+> **v1 status: shipped, in two pieces that are not yet wired together.**
+> 1. **Scheduled export** runs on the `qdistro-backup.timer` →
+>    `qdistro-backup.service` units, which execute the legacy encrypted-export
+>    pipeline `qdistro-snap-export run` (`snapshots/qdistro_snap_export_cli.py`,
+>    the `btrfs send | rage -e | ssh` flow below). The unit is
+>    `ConditionPathExists`-gated on `/etc/qdistro/backup.conf`, so a vanilla
+>    install does not back up until configured.
+> 2. **Signed-manifest verify + restore (DR)** is the separate, shipped
+>    `snapshots/qdistro_backup_cli.py` (over `qdistro_backup_manifest.py`):
+>    per-run, hash-chained, `ssh-keygen -Y`-signed manifests, with restore and
+>    verify that **fail closed** — they REFUSE without `--allowed-signers`
+>    unless `--insecure-no-verify` is given; restore loads the whole manifest
+>    chain, signature-verifies each entry, runs the strictly-increasing chain
+>    check, then receives. Covered by `tests/unit/test_backup_manifest.py`,
+>    `tests/unit/test_vault_recovery.py`, and the host-runnable
+>    `tests/integration/backup-e2e.bats`.
+>
+> **Remaining gap:** the scheduled timer still drives the *unmanifested* legacy
+> export; wiring the timer to emit + verify signed manifests (so scheduled
+> runs and DR share one tamper-evident object) is tracked in
+> `todo/fable-release/03-release-engineering.md` (R1). Run the DR CLI directly
+> for verify/restore; do not run the raw restore idiom below standalone (it
+> skips the verify gate).
 
 Scheduled backup of configured subvolumes to a remote target.
 
