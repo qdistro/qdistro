@@ -62,10 +62,10 @@ ignore = [
     # blank-line whitespace — 591 plain + 9 docstring-internal, all
     # whitespace-only); I001 (506, unsorted-imports — `ruff --fix` import-sort
     # sweep, mechanical, no behaviour change; verified py_compile + targeted
-    # suites green per repo). The gate now blocks new occurrences of these.
+    # suites green per repo); F811 (~23, duplicate imports). The gate now
+    # blocks new occurrences of these.
     "F401",  # unused-import                     (~300 hits)
     "F841",  # unused-variable                   (~64 hits)
-    "F811",  # redefined-while-unused            (~23 hits)
     # F821 (undefined-name) is NOT deferred globally — it is enforced with no
     # scope-outs; see the NOTE below.
     "E741",  # ambiguous-variable-name           (~82 hits)

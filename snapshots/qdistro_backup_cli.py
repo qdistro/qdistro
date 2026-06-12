@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 
+
 # Manifest engine — installed path first, then in-tree (mirrors the export
 # CLI's _load_eng pattern).
 def _load_manifest():
