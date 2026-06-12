@@ -307,6 +307,51 @@ def unlock_vault_tpm(vault_dir: str, name: str, pin: bytes,
     return master_key
 
 
+def reseal_vault_with_master_key(vault_dir: str, name: str,
+                                 master_key: bytes, pin: bytes,
+                                 tpm_backend, pcrs: str | None = None) -> None:
+    """Re-seal an existing v2 vault's master key into a (new) TPM, preserving
+    its items. The recovery path of 06-backup-dr §3.4: on a fresh machine the
+    restored ``.vault`` file carries the items (encrypted under the master
+    key) plus an OLD tpm_seal blob that the new TPM cannot unseal; recover the
+    master key from the recovery bundle (qdistro_vault_recovery) and call this
+    to bind it to the new machine's TPM.
+
+    The items are NOT touched — they are encrypted under ``master_key``, which
+    is unchanged; only the tpm_seal section is replaced."""
+    if tpm_backend is None:
+        raise ValueError("reseal_vault_with_master_key requires a TPM backend")
+    if len(master_key) != MASTER_KEY_BYTES:
+        raise VaultIntegrityError(
+            f"master key has wrong length {len(master_key)}")
+    path = vault_path(vault_dir, name)
+    body = _load(path)
+    if body["version"] != VAULT_FORMAT_VERSION_TPM:
+        raise VaultIntegrityError(
+            f"vault {name!r} is version {body['version']}; reseal targets "
+            "v2 TPM-sealed vaults")
+    # Verify the candidate master key against an existing item BEFORE
+    # committing — otherwise a wrong recovered key (e.g. the wrong recovery
+    # bundle) reseals cleanly but leaves every item undecryptable, and any
+    # later add_item writes under the wrong key (split-brain vault). The
+    # items are AES-GCM sealed with the master key + per-item AAD, so one
+    # successful decrypt proves the key is the vault's.
+    items = body.get("items") or []
+    if items:
+        probe = items[0]
+        try:
+            AESGCM(master_key).decrypt(
+                _b64d(probe["nonce"]), _b64d(probe["ciphertext"]),
+                _aad_for(name, probe["tag"]))
+        except Exception as exc:
+            raise VaultIntegrityError(
+                f"master key does not match vault {name!r} (wrong recovery "
+                "bundle/passphrase?); refusing to reseal") from exc
+    blob = tpm_backend.seal(master_key, pin, pcrs=pcrs)
+    body["tpm_seal"] = {"backend": tpm_backend.name, "blob": blob}
+    _atomic_write(path, body)
+
+
 def rotate_vault(vault_dir: str, name: str,
                  old_password: bytes, new_password: bytes) -> None:
     """Rotate a v1/scrypt vault's password without re-encrypting items.
