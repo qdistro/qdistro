@@ -612,7 +612,7 @@ Historical fix-plan details were pruned from the public repo. Summary:
 | P0-2 | `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` env-var bypasses the trust boundary | High | ✅ landed (commit `0c3a7a8`) |
 | P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
 | P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | ✅ landed — optional browsers default-off, admin opt-in via root-owned `/etc/qdistro/browser-bridge-allowlist.conf` (see note) |
-| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | bounded by D5 freeze (surface frozen) — see note |
+| P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | ✅ standalone manifests tightened to the minimal serviced-op set + closed-set test (bundled copy follow-up) — see note |
 | P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | → deferred to release-engineering (`03`) |
 
 **P0-4/5/6 disposition (D5 op-set freeze + D2 Recall cut, 2026-06-12):**
@@ -640,11 +640,18 @@ Historical fix-plan details were pruned from the public repo. Summary:
   default-on baseline. The config is honored only when root-owned and not
   group/other-writable, so the bridge's own unprivileged uid cannot widen the
   trust boundary (the P0-2 lesson). See the "Browser support matrix" section.
-- **P0-5 — bounded by the freeze.** With the op set frozen, the extension's
-  declared-permission surface cannot grow in v1; tightening the manifests to
-  declare exactly the shipped ops they use remains worthwhile but is no longer
-  a moving target. It becomes live work again only when the op set is unfrozen
-  post-v1.
+- **P0-5 — bounded by the freeze; tightening landed.** With the op set frozen,
+  the extension's declared-permission surface cannot grow in v1; tightening the
+  manifests to declare exactly the shipped ops they use remains worthwhile but
+  is no longer a moving target. It becomes live work again only when the op set
+  is unfrozen post-v1. **Update (landed):** the standalone extension manifests
+  (`qdchrome-extension`, `qdfirefox-extension`) now declare the minimal set the
+  serviced ops use — `activeTab` (redundant with the `<all_urls>` host grant +
+  `tabs`) and `webNavigation` (no navigation listener; page.extract injects via
+  `scripting.executeScript`, pwd-fill is a static content script) were dropped,
+  and a `tests/manifest.test.js` closed-set/absent/host-pin pins the minimal
+  surface against silent regrowth. The bundled `browser_bridge/extension` copy
+  still carries the two and is tracked as a follow-up.
 - **P0-6 — deferred to release-engineering.** CRX signing key custody,
   `update.xml` hosting, and the Windows AD/Azure-AD enrollment requirement are
   distribution concerns, not bridge-security defects; they are tracked in
