@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import socket
-import struct
 import sys
 import time
 from unittest.mock import MagicMock
@@ -20,7 +19,7 @@ from unittest.mock import MagicMock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from qdlocker import ctrl as ctrl_mod
 from qdlocker.controller import LockController
 from qdlocker.ctrl import CtrlSocket, peer_uid

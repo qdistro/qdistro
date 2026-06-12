@@ -205,7 +205,7 @@ class CtrlSocket(QObject):
         while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 if not self._stop.is_set():

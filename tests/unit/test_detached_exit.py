@@ -21,7 +21,6 @@ patched LockerClient / QGuiApplication so app.exec() returns immediately.
 from __future__ import annotations
 
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

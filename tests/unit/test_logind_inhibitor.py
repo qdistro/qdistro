@@ -15,7 +15,6 @@ so the system does not suspend with pre-lock content still on screen.
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
 from qdlocker import logind

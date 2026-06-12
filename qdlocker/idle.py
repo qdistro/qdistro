@@ -27,7 +27,7 @@ all other failures raise.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 log = logging.getLogger("qdlocker.idle")
 
@@ -37,8 +37,8 @@ class IdleWatcher:
         if timeout_ms <= 0:
             raise ValueError(f"timeout_ms must be > 0, got {timeout_ms}")
         self.timeout_ms = timeout_ms
-        self._on_idle: Optional[Callable[[], None]] = None
-        self._on_resume: Optional[Callable[[], None]] = None
+        self._on_idle: Callable[[], None] | None = None
+        self._on_resume: Callable[[], None] | None = None
         self._display = None
         self._display_lock = None
         self._idle_notifier = None

@@ -25,11 +25,8 @@ No real WAYLAND_DISPLAY socket is needed.
 from __future__ import annotations
 
 import os
-import select
 import threading
-import time
-import types
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 import pytest
 from qdlocker.wayland import LockerClient, LockerEvents
@@ -548,7 +545,6 @@ def test_disconnect_clears_display_ref():
 def test_disconnect_tolerates_display_exception(caplog):
     """If display.disconnect() raises (e.g. broken pipe), disconnect()
     must still clear _display and not propagate the exception."""
-    import logging
 
     client = _make_client()
     client._display.disconnect.side_effect = OSError("broken pipe")

@@ -54,7 +54,7 @@ import asyncio
 import logging
 import os
 import threading
-from typing import Callable, Optional
+from collections.abc import Callable
 
 log = logging.getLogger("qdlocker.logind")
 
@@ -72,7 +72,7 @@ class LogindWatcher:
     def __init__(
         self,
         on_lock: Callable[[int], None],
-        on_unlock: Optional[Callable[[], None]] = None,
+        on_unlock: Callable[[], None] | None = None,
     ) -> None:
         """on_lock(reason) is invoked from the asyncio thread when
         logind signals Session.Lock or PrepareForSleep(start=True).
@@ -80,14 +80,14 @@ class LogindWatcher:
         with QueuedConnection)."""
         self._on_lock = on_lock
         self._on_unlock = on_unlock
-        self._thread: Optional[threading.Thread] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._stop_event: Optional[asyncio.Event] = None
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_event: asyncio.Event | None = None
         # Set (on the asyncio loop) when the compositor confirms it has
         # entered the locked state. Created inside the loop thread.
-        self._lock_confirmed: Optional[asyncio.Event] = None
+        self._lock_confirmed: asyncio.Event | None = None
         # Held delay-inhibitor fd (an int). None when not held.
-        self._inhibit_fd: Optional[int] = None
+        self._inhibit_fd: int | None = None
         # The Manager interface proxy, used to (re)acquire the inhibitor.
         self._mgr = None
 
@@ -212,7 +212,7 @@ class LogindWatcher:
                 self._lock_confirmed.wait(), _LOCK_CONFIRM_TIMEOUT_S
             )
             log.info("lock confirmed before suspend; releasing inhibitor")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "lock not confirmed within %.1fs; releasing inhibitor "
                 "so suspend can proceed (lock was still requested)",

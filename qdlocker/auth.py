@@ -346,7 +346,7 @@ class AuthBackend(QObject):
                 MessageBus(bus_type=BusType.SYSTEM).connect(),
                 timeout=self._fprintd_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("fprintd system-bus connect timed out; falling back")
             self._record_fprintd_failure(environmental=True, generation=generation)
             return
@@ -369,7 +369,7 @@ class AuthBackend(QObject):
                     ),
                     timeout=self._fprintd_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("fprintd Manager introspect timed out; falling back")
                 self._record_fprintd_failure(environmental=True, generation=generation)
                 return
@@ -388,7 +388,7 @@ class AuthBackend(QObject):
                     mgr.call_get_default_device(),  # type: ignore[attr-defined]
                     timeout=self._fprintd_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("fprintd GetDefaultDevice timed out; falling back")
                 self._record_fprintd_failure(environmental=True, generation=generation)
                 return
@@ -410,7 +410,7 @@ class AuthBackend(QObject):
                     bus.introspect("net.reactivated.Fprint", dev_path),
                     timeout=self._fprintd_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("fprintd Device introspect timed out; falling back")
                 self._record_fprintd_failure(environmental=True, generation=generation)
                 return
@@ -465,7 +465,7 @@ class AuthBackend(QObject):
                         dev.call_verify_start("any"),  # type: ignore[attr-defined]
                         timeout=self._fprintd_timeout,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     log.warning("fprintd claim/verify-start timed out; falling back")
                     result = "env_fail"
 
@@ -474,7 +474,7 @@ class AuthBackend(QObject):
                         result_future, timeout=self._fprintd_timeout
                     )
                     result = "match" if matched else "no_match"
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Verify-result timeout: no finger seen in time. Real
                 # (non-environmental) — counts toward the strike threshold.
                 log.info("fprintd verify timeout")

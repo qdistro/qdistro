@@ -13,8 +13,8 @@ import os
 import stat
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from PyQt6.QtCore import (
     QCoreApplication,

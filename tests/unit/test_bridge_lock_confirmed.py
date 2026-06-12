@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtGui import QGuiApplication
 from qdlocker.app import WaylandBridge
 
