@@ -150,15 +150,14 @@ class TestResponseConformance:
         errors = ops.validate_response("qdistro.handshake", resp)
         assert not errors, f"Validation errors: {errors}"
 
-    def test_recall_push_missing_text(self):
-        resp = self._dispatch("recall.push", {"text": ""})
+    def test_recall_push_removed_for_v1(self):
+        resp = self._dispatch("recall.push", {"text": "x"})
         assert resp.get("ok") is False
-        assert resp.get("error") == "missing_text"
+        assert resp.get("error") == "unknown_op"
 
-    def test_recall_push_error_in_schema(self):
+    def test_recall_push_absent_from_schema(self):
         schema = ops.get_schema("recall.push")
-        assert schema is not None
-        assert "missing_text" in schema.error_codes
+        assert schema is None
 
     def test_pwd_fill_missing_url(self):
         # Need a valid intent token first.
@@ -245,7 +244,7 @@ class TestResponseConformance:
 
     def test_denied_identity_returns_error(self):
         """All ops must return parent_not_allowed for a denied identity."""
-        for op_name in ("qdistro.ping", "recall.push", "pwd.fill"):
+        for op_name in ("qdistro.ping", "pwd.fill"):
             resp = self._dispatch(op_name, identity=_denied_identity())
             assert resp.get("ok") is False
             assert resp.get("error") == "parent_not_allowed", (
@@ -269,14 +268,9 @@ class TestRequestValidation:
         errors = ops.validate_request("qdistro.ping", {})
         assert not errors
 
-    def test_recall_push_requires_text(self):
+    def test_recall_push_is_unknown(self):
         errors = ops.validate_request("recall.push", {})
-        assert any("text" in e for e in errors)
-
-    def test_recall_push_valid(self):
-        errors = ops.validate_request("recall.push", {
-            "text": "hello world"})
-        assert not errors
+        assert any("unknown op" in e for e in errors)
 
     def test_pwd_fill_requires_url_and_token(self):
         errors = ops.validate_request("pwd.fill", {})
@@ -361,8 +355,8 @@ class TestRequestValidation:
         assert any("unknown op" in e for e in errors)
 
     def test_type_mismatch_detected(self):
-        errors = ops.validate_request("recall.push", {"text": 42})
-        assert any("expected str" in e for e in errors)
+        errors = ops.validate_request("tabs.close", {"tab_id": "42"})
+        assert any("expected int" in e for e in errors)
 
     def test_bool_rejected_for_int_field(self):
         """bool is a subclass of int in Python; the validator must

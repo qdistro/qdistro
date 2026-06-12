@@ -1,5 +1,4 @@
-"""Tests for qdistro_app.recall + qdistro_recall_cli + recall.push
-bridge dispatch.
+"""Tests for dormant Recall internals and the v1 capture cut.
 
 The SDK module routes through the engine module that lives at
 recall/qdistro_recall_ingest.py. We rebind the engine import
@@ -56,41 +55,17 @@ bb = _load_module(
 # ---- SDK push_text_snapshot --------------------------------------
 
 class TestSdk:
-    def test_push_writes_db(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
-        rowid = recall_sdk.push_text_snapshot(
-            "hello world from sdk", user="admin",
-            url="https://qdistro.example/x")
-        assert rowid >= 1
-        # Confirm the file landed in the expected per-day path.
-        dbs = list(tmp_path.rglob("*.db"))
-        assert len(dbs) == 1
-        # Open + count.
-        import sqlite3
-        conn = sqlite3.connect(str(dbs[0]))
-        n = conn.execute(
-            "SELECT COUNT(*) FROM recall_entries").fetchone()[0]
-        assert n == 1
-
-    def test_push_pwd_domain_refused(self, tmp_path, monkeypatch):
+    def test_push_disabled_for_v1(self, tmp_path, monkeypatch):
         monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
         try:
             recall_sdk.push_text_snapshot(
-                "pwd UI text",
-                user="admin", secctx="qdistro:pwd:ui")
-        except _eng.PwdDomainRefused:
+                "hello world from sdk", user="admin",
+                url="https://qdistro.example/x")
+        except recall_sdk.RecallDisabled:
             pass
         else:
-            raise AssertionError("expected PwdDomainRefused")
-
-    def test_push_empty_raises(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
-        try:
-            recall_sdk.push_text_snapshot("   ", user="admin")
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("expected ValueError")
+            raise AssertionError("expected RecallDisabled")
+        assert list(tmp_path.rglob("*.db")) == []
 
     def test_exclude_fields_stub(self):
         out = recall_sdk.exclude_fields(["pwd-input", "card-cvv"])
@@ -167,110 +142,16 @@ class TestCli:
 # ---- Bridge recall.push dispatch ---------------------------------
 
 class TestBridgeRecallPush:
-    def test_recall_push_inserts_via_default_impl(
-            self, tmp_path, monkeypatch):
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
+    def test_recall_push_is_not_registered_for_v1(self, tmp_path):
         identity = {
             "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
             "parent_selinux": "", "allowed": True,
         }
-        # P0-3: bridge no longer accepts msg.user; destination is
-        # derived from the bridge process's own UID
-        # (getpass.getuser()).
-        msg = {"op": "recall.push",
-               "text": "page snapshot text",
-               "url": "https://qdistro.example/page"}
-        # Reset any test-injected impl.
-        bb._recall_push_impl = None
-        resp = bb.dispatch(msg, identity)
-        assert resp.get("ok") is True, resp
-        assert resp.get("op") == "recall.push", resp
-        assert resp.get("row_id") >= 1, resp
-        # The row lands under the test runner's user — proving the
-        # bridge ignored any potential msg.user spoofing.
-        import getpass
-        assert resp.get("user") == getpass.getuser(), resp
-        import sqlite3
-        dbs = list(tmp_path.rglob("*.db"))
-        assert len(dbs) == 1
-        conn = sqlite3.connect(str(dbs[0]))
-        n = conn.execute(
-            "SELECT COUNT(*) FROM recall_entries").fetchone()[0]
-        assert n == 1
-
-    def test_recall_push_ignores_spoofed_user_field(
-            self, tmp_path, monkeypatch):
-        """P0-3 regression: a stdio-supplied user field must not steer
-        the destination directory. The bridge MUST derive user from
-        its own kernel-attested UID, not from extension JSON."""
-        import getpass
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
-        identity = {
-            "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
-            "parent_selinux": "", "allowed": True,
-        }
-        bb._recall_push_impl = None
-        resp = bb.dispatch(
-            {"op": "recall.push",
-             "text": "spoof attempt",
-             # A compromised extension cannot steer the row into
-             # another user's recall directory.
-             "user": "victim-user"},
-            identity)
-        assert resp.get("ok") is True, resp
-        assert resp.get("user") == getpass.getuser(), resp
-        assert "victim-user" not in str(resp.get("db", ""))
-
-    def test_recall_push_pwd_domain_refused_via_dispatch(
-            self, tmp_path, monkeypatch):
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
-        identity = {
-            "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
-            "parent_selinux": "", "allowed": True,
-        }
-        msg = {"op": "recall.push",
-               "text": "pwd field text",
-               "secctx": "qdistro:pwd:fill"}
-        bb._recall_push_impl = None
-        resp = bb.dispatch(msg, identity)
-        assert resp.get("ok") is False, resp
-        assert resp.get("error") == "pwd_domain_refused", resp
-
-    def test_recall_push_missing_text(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("QDISTRO_RECALL_ROOT", str(tmp_path))
-        identity = {"ppid": 1, "parent_exe": "/usr/bin/chromium",
-                    "parent_selinux": "", "allowed": True}
-        bb._recall_push_impl = None
-        resp = bb.dispatch({"op": "recall.push"}, identity)
-        assert resp.get("ok") is False, resp
-        assert resp.get("error") == "missing_text", resp
-
-    def test_recall_push_test_impl_override(self):
-        identity = {"ppid": 1, "parent_exe": "/x", "parent_selinux": "",
-                    "allowed": True}
-        called = []
-
-        def stub(msg, ident, text):
-            called.append((msg, ident, text))
-            return {"ok": True, "row_id": 123}
-
-        bb._recall_push_impl = stub
-        try:
-            resp = bb.dispatch(
-                {"op": "recall.push", "text": "x"}, identity)
-        finally:
-            bb._recall_push_impl = None
-        assert resp.get("row_id") == 123, resp
-        assert called and called[0][2] == "x"
-
-    def test_recall_push_denied_when_parent_not_allowed(self):
-        identity = {"ppid": 1, "parent_exe": "/no/such",
-                    "parent_selinux": "", "allowed": False}
-        bb._recall_push_impl = None
         resp = bb.dispatch(
             {"op": "recall.push", "text": "x"}, identity)
         assert resp.get("ok") is False, resp
-        assert resp.get("error") == "parent_not_allowed", resp
+        assert resp.get("error") == "unknown_op", resp
+        assert list(tmp_path.rglob("*.db")) == []
 
 
 # ---- Daemon (TTL reaper) ------------------------------------------

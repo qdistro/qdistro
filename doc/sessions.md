@@ -90,7 +90,7 @@ Lock-time defaults:
 | Virtual input / accessibility control | require unlock unless a specific workflow says otherwise |
 | Running games | keep process alive; rendering may pause or lose DRM depending on TTY state |
 | VR / immersive session | prefer presence/idle policy, not desktop lock alone |
-| Recall viewing | revoke viewer grant and clear decrypted results |
+| Recall viewing (post-v1; cut from v1) | revoke viewer grant and clear decrypted results |
 
 The lock UI must show non-suppressible indicators for live microphone,
 camera, screencast/screen capture, system-audio capture, virtual input or

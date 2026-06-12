@@ -1,9 +1,13 @@
-"""qdistro_app.recall — SDK helpers for spec/17 §step 0 MVP.
+"""qdistro_app.recall — dormant SDK helpers for post-v1 Recall.
+
+Recall capture is cut from qdistro v1. This module remains importable so
+applications that probe for the SDK do not fail at import time, but capture
+entry points fail closed until the viewer/query grant model returns.
 
 Two surfaces:
 
 - ``push_text_snapshot(content, *, ...)`` — write a text entry to
-  the calling user's per-day recall DB.
+  the calling user's per-day recall DB. Disabled for v1.
 - ``exclude_fields(widget_ids)`` — Phase-9 stub. The actual exclusion
   is enforced at the WM (the only producer with non-bypassable
   visibility into focused widgets); the SDK signature is here only
@@ -17,16 +21,13 @@ DBus. The path layout matches spec/17 §step 0:
 Tests override the root via ``QDISTRO_RECALL_ROOT`` so they don't
 touch /var.
 
-Pwd-domain exclusion is enforced via ``qdistro_recall_ingest.is_pwd_domain``;
-SDK callers are advisory per spec/17 §"Pwd-manager exclusion".
+Pwd-domain exclusion remains in the dormant engine, but no v1 caller should
+reach it through this SDK.
 """
 from __future__ import annotations
 
-import getpass
 import os
-import sqlite3
 import sys
-import time
 
 # We import the engine module via path manipulation so this module
 # is importable both:
@@ -64,6 +65,10 @@ def _load_engine():
 DEFAULT_ROOT = "/var/lib/qdistro/recall"
 
 
+class RecallDisabled(RuntimeError):
+    """Raised when v1 code attempts to capture Recall data."""
+
+
 def _resolve_root(root: str | None) -> str:
     if root:
         return root
@@ -83,29 +88,13 @@ def push_text_snapshot(
         root: str | None = None,
         source: str = "sdk",
 ) -> int:
-    """Push a text snapshot to recall. Returns the new row id.
+    """Push a text snapshot to recall. Disabled for v1.
 
-    ``content`` must be non-empty. ``user`` defaults to the current
-    ``getpass.getuser()`` (the SDK runs in the user's process).
-    Pwd-domain entries (``secctx`` matches a qdistro:pwd domain or
-    ``app_id`` is in PWD_APP_IDS) raise PwdDomainRefused — callers
-    decide whether to swallow or surface.
+    The dormant implementation is intentionally not reachable from v1
+    application code: Recall capture and viewing return post-v1 only after
+    the separate viewer/query grant model ships.
     """
-    eng = _load_engine()
-    user = user or getpass.getuser()
-    rt = _resolve_root(root)
-    path = eng.db_path_for(rt, user)
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    conn = eng.open_db(path)
-    try:
-        rowid = eng.push_text(
-            conn, user=user, text=content, source=source,
-            app_id=app_id, secctx=secctx, url=url, title=title)
-    finally:
-        conn.close()
-    return rowid
+    raise RecallDisabled("Recall capture is disabled in qdistro v1")
 
 
 def exclude_fields(widget_ids):

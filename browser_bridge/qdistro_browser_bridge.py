@@ -5,7 +5,8 @@ Per doc/browser.md §"Phase-8 MVP scope" + todo/browser/01-bridge-phase9.md.
 Phase-8 closed the architectural seam: the browser launches us as a
 native-messaging host, we read 4-byte length-prefixed JSON on stdin, we
 verify our parent is an allowlisted RPM browser binary, and we
-round-trip ``qdistro.ping`` and ``recall.push``.
+round-trip ``qdistro.ping``. ``recall.push`` is deliberately absent from
+the v1 dispatch table because Recall capture is cut from v1.
 
 Phase-9 (this module) adds the richer dispatch surface described in
 ``todo/browser/01-bridge-phase9.md``:
@@ -339,97 +340,6 @@ def _handle_ping(msg: dict, identity: dict) -> dict:
     }
 
 
-def _handle_recall_push(msg: dict, identity: dict) -> dict:
-    """recall.push — text snapshot ingest from the WebExtension.
-
-    Spec/17 §step 0 MVP: extension captures page text + URL on
-    meaningful navigation/content change and ships it through the
-    bridge. The bridge rejects pwd-domain pushes locally (advisory
-    layer per spec/17 §"Pwd-manager exclusion") and otherwise
-    inserts via the recall engine into the calling user's per-day DB.
-
-    Optional ``QDISTRO_RECALL_ROOT`` env var override is honored so
-    bats can drive this against a tmpdir.
-    """
-    text = msg.get("text") or ""
-    if not isinstance(text, str) or not text.strip():
-        return {"ok": False, "error": "missing_text"}
-    # Defer the import: the bridge module is in the
-    # qdistro_browser_bridge package; the recall engine + SDK live
-    # under a separate prefix. Tests can monkey-patch
-    # `_recall_push_impl` to skip the engine.
-    impl = _recall_push_impl
-    if impl is None:
-        impl = _default_recall_push_impl
-    return impl(msg, identity, text)
-
-
-def _default_recall_push_impl(msg: dict, identity: dict,
-                              text: str) -> dict:
-    """Default recall-push backend: write to the per-day SQLite DB
-    via qdistro_recall_ingest. Imported lazily so the bridge can
-    run on hosts where recall isn't installed (the qdistro.ping op
-    still works).
-
-    The destination user is **always** the bridge process's own UID
-    via ``getpass.getuser()``. The bridge inherits the browser's UID,
-    so this is the kernel-attested caller. P0-3 removed the previous
-    ``msg.get("user")`` field — accepting that from the extension
-    payload was a cross-silo write primitive (a compromised extension
-    in user A's browser could write rows tagged as user B).
-    """
-    import getpass
-    candidates = [
-        "/usr/libexec/qdistro/qdistro_recall_ingest.py",
-        os.path.join(os.path.dirname(__file__),
-                     "..", "recall",
-                     "qdistro_recall_ingest.py"),
-    ]
-    eng = None
-    for path in candidates:
-        path = os.path.abspath(path)
-        if os.path.isfile(path):
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "qdistro_recall_ingest", path)
-            eng = importlib.util.module_from_spec(spec)
-            sys.modules["qdistro_recall_ingest"] = eng
-            spec.loader.exec_module(eng)
-            break
-    if eng is None:
-        return {"ok": False, "error": "recall_engine_missing"}
-    user = getpass.getuser()
-    root = (os.environ.get("QDISTRO_RECALL_ROOT", "").strip()
-            or "/var/lib/qdistro/recall")
-    db_path = eng.db_path_for(root, user)
-    parent = os.path.dirname(db_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    conn = eng.open_db(db_path)
-    try:
-        try:
-            rowid = eng.push_text(
-                conn, user=user, text=text, source="bridge",
-                app_id=str(msg.get("app_id") or "") or None,
-                exe=identity.get("parent_exe") or None,
-                secctx=str(msg.get("secctx") or "") or None,
-                url=str(msg.get("url") or "") or None,
-                title=str(msg.get("title") or "") or None,
-            )
-        except eng.PwdDomainRefused as refused:
-            return {"ok": False, "error": "pwd_domain_refused",
-                    "detail": str(refused)[:200]}
-    finally:
-        conn.close()
-    return {"ok": True, "row_id": int(rowid),
-            "user": user, "db": db_path}
-
-
-# Tests override this by assigning a callable; production paths
-# leave it None so the lazy default impl runs.
-_recall_push_impl: Callable[[dict, dict, str], dict] | None = None
-
-
 # =====================================================================
 # Phase-9 infrastructure
 # =====================================================================
@@ -451,7 +361,7 @@ HEARTBEAT_MAX_MISSES: int = 3
 INTENT_TOKEN_TTL_S: float = 5.0
 # Ops that REQUIRE a valid intent token before they will be served.
 # Anything not in this set bypasses token validation (e.g. ping,
-# recall.push, heartbeat ack).
+# heartbeat ack).
 INTENT_TOKEN_REQUIRED_OPS: frozenset[str] = frozenset({
     "pwd.fill", "pwd.fill_confirm", "pwd.save", "cookies.export",
     "page.extract", "clipboard.set",
@@ -817,7 +727,6 @@ def _strip_identity(reply: dict) -> dict:
 #   * qdistro.ping       — _handle_ping(); identity fields re-stamped by
 #                          dispatch (pong/echo are the handler's own).
 #   * qdistro.handshake  — _handle_handshake() return dict.
-#   * recall.push        — _default_recall_push_impl() return dict.
 #   * pwd.fill           — qdistro-pwd Fill: credentials + fill_token.
 #   * pwd.fill_confirm   — qdistro-pwd FillConfirm: credentials.
 #   * pwd.save           — qdistro-pwd Save: envelope only.
@@ -849,7 +758,6 @@ _REPLY_SCHEMA: dict[str, frozenset[str]] = {
         "session_secret_hex", "token_ttl_s", "hmac_algo",
         "token_canonical",
     }),
-    "recall.push": frozenset({"row_id", "user", "db"}),
     "pwd.fill": frozenset({"credentials", "fill_token"}),
     "pwd.fill_confirm": frozenset({"credentials"}),
     "pwd.save": frozenset(),
@@ -1904,7 +1812,6 @@ def inbound_dbus_serve(ppid: int, out_stream,
 
 DEFAULT_HANDLERS: dict[str, Callable[[dict, dict], dict]] = {
     "qdistro.ping": _handle_ping,
-    "recall.push": _handle_recall_push,
     # 9a
     "pwd.fill": _handle_pwd_fill,
     "pwd.fill_confirm": _handle_pwd_fill_confirm,

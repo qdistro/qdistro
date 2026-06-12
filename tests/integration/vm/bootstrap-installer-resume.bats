@@ -42,7 +42,6 @@ setup() {
         install-portal-backend-for-vm.sh
         install-phone-for-vm.sh
         install-print-proxy-for-vm.sh
-        install-recall-for-vm.sh
         install-snapshots-for-vm.sh
         install-tier3-for-vm.sh
         install-tier4-host-for-vm.sh
@@ -83,7 +82,7 @@ _trace_scripts() { awk '{print $1}' "$TRACE"; }
 
 # --- baseline: full chain runs in order, state file records every step ----
 
-@test "full chain: all 15 steps run in order and each is recorded in state" {
+@test "full chain: all 14 v1 steps run in order and each is recorded in state" {
     _run_chain ''
     [ "$status" -eq 0 ]
     # Exact ordered set of scripts that ran.
@@ -98,7 +97,6 @@ install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
 install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
-install-recall-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
 install-tier4-host-for-vm.sh
@@ -118,7 +116,6 @@ browser-bridge
 portal-backend
 phone
 print
-recall
 snapshots
 tier3
 tier4-host
@@ -135,16 +132,15 @@ tier5b"
     [ "$output" = "0" ]
 }
 
-# --- per-step src-dir argument is correct (portal/recall/tiers use QD root) -
+# --- per-step src-dir argument is correct (portal/tiers use QD root) -
 
 @test "step src-dir args: subdir steps get \$QD/<subdir>, root steps get \$QD" {
     _run_chain ''
     [ "$status" -eq 0 ]
     grep -qx "install-broker-for-qdwin.sh $FAKE_QD/broker" "$TRACE"
     grep -qx "install-session-manager.sh $FAKE_QD/session_manager" "$TRACE"
-    # portal-backend / recall / tier3 / tier4-host / tier5 / tier5b -> bare QD
+    # portal-backend / tier3 / tier4-host / tier5 / tier5b -> bare QD
     grep -qx "install-portal-backend-for-vm.sh $FAKE_QD" "$TRACE"
-    grep -qx "install-recall-for-vm.sh $FAKE_QD" "$TRACE"
     grep -qx "install-tier3-for-vm.sh $FAKE_QD" "$TRACE"
 }
 
@@ -161,7 +157,6 @@ tier5b"
 install-portal-backend-for-vm.sh
 install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
-install-recall-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
 install-tier4-host-for-vm.sh
@@ -191,7 +186,6 @@ install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
 install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
-install-recall-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
 install-tier4-host-for-vm.sh
@@ -205,7 +199,7 @@ install-tier5b-for-vm.sh"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run bash -c 'wc -l < "'"$TRACE"'"'
-    [ "$(echo "$output" | tr -d ' ')" = "15" ]
+    [ "$(echo "$output" | tr -d ' ')" = "14" ]
     grep -q "install-broker-for-qdwin.sh" "$TRACE"
     grep -q "install-tier5b-for-vm.sh" "$TRACE"
 }

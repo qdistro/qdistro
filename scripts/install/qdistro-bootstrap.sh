@@ -1393,7 +1393,6 @@ browser-bridge|scripts/install/install-browser-bridge-for-vm.sh|/browser_bridge
 portal-backend|scripts/install/install-portal-backend-for-vm.sh|
 phone|scripts/install/install-phone-for-vm.sh|/phone
 print|scripts/install/install-print-proxy-for-vm.sh|/print
-recall|scripts/install/install-recall-for-vm.sh|
 snapshots|scripts/install/install-snapshots-for-vm.sh|/snapshots
 tier3|scripts/install/install-tier3-for-vm.sh|
 tier4-host|scripts/install/install-tier4-host-for-vm.sh|

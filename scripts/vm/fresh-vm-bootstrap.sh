@@ -137,7 +137,6 @@ INSTALLERS=(
     "scripts/install/install-portal-backend-for-vm.sh  $QD"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-    "scripts/install/install-recall-for-vm.sh          $QD"
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
     "scripts/install/install-templates-for-vm.sh       $QD"
 )

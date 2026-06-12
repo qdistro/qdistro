@@ -1,5 +1,11 @@
 # Recall (continuous activity capture and search)
 
+> **Status:** planned post-v1. Recall is cut from the v1 release: capture is
+> disabled, `recall.push` is not a registered browser-bridge op, and the
+> release bootstrap profile does not install or enable the Recall timer/service.
+> The viewer/query grant model below is retained as the bar for bringing Recall
+> back after v1.
+
 A time-indexed, searchable archive of what the user has been looking at, so
 they can later search for "that thing I was reading yesterday" or "the PR I
 reviewed last week." Integrated with the window manager (screenshots +
@@ -129,9 +135,9 @@ and audio are separate opt-ins. The default should be narrow and visible.
 ```
 
 The WM is the only screenshot source. The SDK + browser bridge are the text
-sources. Subunit tracking is the structural-event source. Today the browser
-bridge can write `recall.push` rows directly; the planned service makes that
-write path explicit and centralizes indexing/query policy.
+sources. Subunit tracking is the structural-event source. In v1 these capture
+paths are disabled; when Recall returns, the planned service makes the write
+path explicit and centralizes indexing/query policy.
 
 ## Indexing
 
@@ -176,7 +182,7 @@ lineage. See [workflows.md](workflows.md#export-and-declassification).
  surface, or separate viewer process, but decrypted results stay out of the
  normal admin workflow.
 
-## Apps opt in via the SDK
+## Apps opt in via the SDK (post-v1)
 
 ```python
 qdistro_app.recall.enable()
@@ -185,10 +191,11 @@ qdistro_app.recall.exclude_fields([widget_ids...])
 qdistro_app.recall.push_text_snapshot(content)
 ```
 
-The app decides when content has changed meaningfully and pushes. The SDK
+The app decides when content has changed meaningfully and pushes. In v1 the
+SDK import remains available, but capture calls fail closed. Post-v1 the SDK
 handles throttling, encryption, and forwarding.
 
-## Browser extension opt-in
+## Browser extension opt-in (post-v1)
 
 The extension exposes a qdistro-recall preference:
 
@@ -197,7 +204,7 @@ The extension exposes a qdistro-recall preference:
 - Incognito: auto-excluded, not configurable.
 
 The extension captures page text + URL on meaningful navigation / content
-change.
+change only after Recall is reintroduced post-v1.
 
 ## Exclusion config
 

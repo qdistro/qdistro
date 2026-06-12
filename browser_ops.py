@@ -104,32 +104,6 @@ HANDSHAKE = OpSchema(
     error_codes=_IDENTITY_GATE_ERRORS,
 )
 
-# -- recall.push ---------------------------------------------------------
-
-RECALL_PUSH = OpSchema(
-    op="recall.push",
-    doc="Text snapshot ingest from the WebExtension.",
-    direction="stdio",
-    request_fields=(
-        _f("text", "str", doc="Page text to ingest"),
-    ),
-    optional_request_fields=(
-        _f("url", "str", required=False),
-        _f("title", "str", required=False),
-        _f("app_id", "str", required=False),
-        _f("secctx", "str", required=False),
-    ),
-    response_fields=(
-        _f("ok", "bool"),
-        _f("row_id", "int", required=False),
-        _f("user", "str", required=False),
-        _f("db", "str", required=False),
-    ),
-    error_codes=_IDENTITY_GATE_ERRORS + (
-        "missing_text", "recall_engine_missing", "pwd_domain_refused",
-    ),
-)
-
 # -- pwd.fill ------------------------------------------------------------
 
 PWD_FILL = OpSchema(
@@ -613,7 +587,7 @@ OP_REGISTRY: dict[str, OpSchema] = {}
 
 # Primary ops (bridge handles these directly).
 for _schema in (
-    PING, HANDSHAKE, RECALL_PUSH,
+    PING, HANDSHAKE,
     PWD_FILL, PWD_FILL_CONFIRM, PWD_SAVE,
     PAGE_EXTRACT, COOKIES_EXPORT,
     MPRIS_PUBLISH, DOWNLOADS_NOTIFY, NOTIFICATIONS_SHOW,
@@ -649,7 +623,7 @@ def all_op_names() -> frozenset[str]:
 # enqueue_inbound_request, not through the dispatch table) and planned
 # ops (history.search, bookmarks.search, media.status) are excluded.
 BRIDGE_DISPATCH_OPS: frozenset[str] = frozenset({
-    "qdistro.ping", "recall.push",
+    "qdistro.ping",
     "pwd.fill", "pwd.fill_confirm", "pwd.save",
     "page.extract", "cookies.export",
     "qdistro.handshake",

@@ -7,13 +7,14 @@ transport, qdistro surfaces browser state in the desktop — history, tabs,
 MPRIS media, downloads, share-to — analogous to KDE's Plasma Browser
 Integration.
 
-> **Status snapshot.** The bridge implements `qdistro.ping`, `recall.push`,
-> and the Firefox `containers.*` relay path documented in
+> **Status snapshot.** The v1 bridge implements `qdistro.ping` and the
+> Firefox `containers.*` relay path documented in
 > [firefox-containers.md](firefox-containers.md). Most desktop integrations
 > below remain specified/planned Phase-9 work.
 >
 > P0-1, P0-2, and P0-3 are landed. P0-4..P0-6 remain open deployment or
-> policy decisions; see the defect index.
+> policy decisions; see the defect index. Recall capture is cut from v1, so
+> `recall.push` is not registered in the bridge dispatch table.
 
 ## Supported-browser matrix
 
@@ -209,14 +210,15 @@ caller's resolved identity (parent exe, parent SELinux label,
 extension_id as currently self-asserted, caller UID/username). Used by
 the install flow to verify end-to-end connectivity.
 
-### `recall.push` — Phase 8 (implemented)
+### `recall.push` — post-v1 (disabled in v1)
 
-Text snapshot ingest from the extension. Writes to the per-day SQLite
-database under `/var/lib/qdistro/recall/<user>/` (or the per-user dir
-when no daemon is configured).
+Text snapshot ingest from the extension is deliberately disabled for v1.
+The dormant Recall engine remains in the source tree, but the bridge does
+not register `recall.push`, the shared op registry omits it, and the release
+bootstrap profile does not install the Recall timer/service.
 
-P0-3 fixed the former cross-silo write hazard: the destination user is derived
-from the kernel-attested identity chain, not from an extension-supplied field.
+When Recall returns, the destination user must still be derived from the
+kernel-attested identity chain, not from an extension-supplied field.
 
 ### `pwd.fill` / `pwd.save` — Phase 9a (not implemented)
 
@@ -318,7 +320,7 @@ starts when the extension calls `chrome.runtime.connectNative(name)` and
 exits when the port closes. There is no per-message spawn. Within that
 lifetime:
 
-- **Outbound-only ops** (`qdistro.ping`, `recall.push`, future
+- **Outbound-only ops** (`qdistro.ping`, future
  `pwd.fill`, `pwd.save`, `page.extract`, `cookies.export`) — extension
  initiates, bridge responds, port may close immediately if the extension
  chooses one-shot `sendNativeMessage` or stay open if it uses
@@ -564,11 +566,8 @@ Each operation is logged at the point where it terminates:
  daemon, following the precedent in `pwd/qdistro_pwd_audit.py`
  (columns: `caller_uid`, `caller_pid`, `caller_exe`, `caller_selinux`,
  `caller_cgroup`, op name, decision, timestamp).
-- Ops that terminate at the bridge itself (today: `qdistro.ping` and
- `recall.push`) are logged by the bridge to the journal with tag
- `qdistro-browser-bridge`. `recall.push`'s database write is logged by
- the bridge, not by a downstream daemon — there is no
- `qdistro-recall` daemon involved in the default-impl write path.
+- Ops that terminate at the bridge itself (today: `qdistro.ping`) are
+ logged by the bridge to the journal with tag `qdistro-browser-bridge`.
 
 The admin panel shows per-user-per-browser activity: operation,
 timestamp, decision, identity chain.

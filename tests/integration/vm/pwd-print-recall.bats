@@ -141,22 +141,19 @@ setup() {
     assert_output_contains "PASS: §spec/14 Phase-8 MVP browser-bridge in-VM probe"
 }
 
-@test "phase8-recall-probe: spec/17 §step 0 — recall ingest + search + reaper end-to-end" {
+@test "v1-recall-cut-probe: Recall capture/viewer surfaces are disabled" {
     if ! vm_run "test -f /root/s67-recall-probe.sh && echo HAVE_SCRIPT"; then
-        fail_loud "s67 script absent (rerun fresh-vm-bootstrap.sh after recall task)"
+        fail_loud "s67 script absent (rerun fresh-vm-bootstrap.sh after Recall cut task)"
     fi
     vm_run "bash /root/s67-recall-probe.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
-        fail_loud "recall surfaces not installed (legacy bake)"
+        fail_loud "recall cut probe skipped (legacy bake)"
     fi
-    assert_output_contains "PASS: recall surfaces installed"
-    assert_output_contains "PASS: SDK push_text_snapshot inserts a row"
-    assert_output_contains "PASS: host CLI search returns SDK-pushed text"
-    assert_output_contains "PASS: bridge recall.push refuses pwd-domain entries"
-    assert_output_contains "PASS: bridge recall.push inserts a row visible to host CLI search"
-    assert_output_contains "PASS: reaper purges old + drops empty DBs"
-    assert_output_contains "PASS: §spec/17 §step 0 MVP recall ingest probe"
+    assert_output_contains "PASS: Recall timer/service not installed in v1 profile"
+    assert_output_contains "PASS: bridge recall.push is not registered"
+    assert_output_contains "PASS: SDK push_text_snapshot fails closed when present"
+    assert_output_contains "PASS: v1 Recall cut probe"
 }
 
 @test "phase8-snapshots-probe: spec/19 — Snapper bridge engine + qdistro-snap-export + qdistro-backup unit" {
