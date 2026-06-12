@@ -1611,9 +1611,10 @@ class Broker(dbus.service.Object):
         )
         if rule is not None:
             return "allow" if rule.decision == "allow" else "deny"
-        # Tier-1 launch is rules-only: a stale approval cache row or hook
+        # Tier launch is rules-only: a stale approval cache row or hook
         # verdict must not mint a new sandboxed process.
-        if action_s.startswith("qdistro.tier1.spawn:"):
+        if action_s.startswith(("qdistro.tier1.spawn:",
+                                "qdistro.tier2.spawn:")):
             return "unknown"
         # An authenticated sandboxed (tier-2) caller must not be
         # auto-decided by an argv-blind forever/forever_exe grant minted

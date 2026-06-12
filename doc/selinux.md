@@ -408,6 +408,14 @@ reply is an explicit `allow`. Broker errors, missing D-Bus tooling,
 empty replies, `unknown`, and `deny` all block launch. Expected Tier-1
 apps therefore need admin-authored allow rules in
 `/etc/qdistro/rules.d/`.
+
+Tier-2 podman spawn authorization is mandatory on the same fail-closed
+model. Before `spawn-tier2.sh` creates the per-container runtime dir or
+execs podman, it calls broker `CheckPermission` with action
+`qdistro.tier2.spawn:<workload>/<app-basename>` and requires an explicit
+`allow`. Binding-resolved template launches still use the digest/state
+resolver for image correctness; the spawn rule authorizes the workload/app
+launch intent.
 For this action namespace, broker `CheckPermission` is rules-only:
 approval-cache rows and hook verdicts do not authorize launch.
 

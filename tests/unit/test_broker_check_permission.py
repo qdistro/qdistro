@@ -180,15 +180,21 @@ class TestCheckPermissionResolution:
         broker.set_peer(uid=NON_ADMIN_UID)
         assert broker.CheckPermission(STREAM_ACTION, {}) == "deny"
 
-    def test_tier1_spawn_ignores_cache_without_rule(self, broker):
-        action = "qdistro.tier1.spawn:/usr/bin/true"
+    @pytest.mark.parametrize("action", [
+        "qdistro.tier1.spawn:/usr/bin/true",
+        "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+    ])
+    def test_tier_spawn_ignores_cache_without_rule(self, broker, action):
         broker.cache.store(NON_ADMIN_UID, action, PEER_EXE,
                            "forever", True, ADMIN_UID)
         broker.set_peer(uid=NON_ADMIN_UID)
         assert broker.CheckPermission(action, {}) == "unknown"
 
-    def test_tier1_spawn_rule_allow_still_allows(self, broker, rules_dir):
-        action = "qdistro.tier1.spawn:/usr/bin/true"
+    @pytest.mark.parametrize("action", [
+        "qdistro.tier1.spawn:/usr/bin/true",
+        "qdistro.tier2.spawn:weston-terminal/weston-terminal",
+    ])
+    def test_tier_spawn_rule_allow_still_allows(self, broker, rules_dir, action):
         _write_rule(rules_dir, decision="allow",
                     action=action, uid=NON_ADMIN_UID)
         broker.rules.reload()

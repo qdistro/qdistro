@@ -176,6 +176,14 @@ The container's nested compositor (qdwin-shell.so) connects to the
 outer admin compositor's Wayland socket and advertises each inner
 toplevel via `qdwin_nested_manager_v1`.
 
+`spawn-tier2.sh` gates every launch through broker `CheckPermission`
+before it creates the per-container runtime dir or runs podman. The
+action is `qdistro.tier2.spawn:<workload>/<app-basename>` and only an
+explicit rules-file `allow` launches; broker errors, missing D-Bus
+tooling, `unknown`, `deny`, empty replies, and malformed replies fail
+closed. This spawn namespace is rules-only: approval-cache rows and hook
+verdicts do not authorize creating a new tier-2 sandbox.
+
 Tier-2 is the **first tier with first-class qdshell launcher integration**
 (badged app icons, click-to-launch, placeholder taskbar entry on cold
 start). The full design — image-per-workload model, secctx contract,

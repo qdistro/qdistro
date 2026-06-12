@@ -285,6 +285,42 @@ if [ ! -f "$QDWIN_SHELL_SO" ]; then
     fail "qdwin-shell.so not found at $QDWIN_SHELL_SO (set TIER2_QDWIN_SHELL_SO)"
 fi
 
+# Mandatory broker spawn-action gate (S4). Tier-2 launch is a security
+# boundary, so only explicit admin-authored rules may authorize it. Cache
+# rows and hook verdicts are ignored by the broker for this namespace.
+SPAWN_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${APP_NAME}"
+if ! command -v dbus-send >/dev/null 2>&1; then
+    fail "dbus-send not found; broker authorization required"
+fi
+set +e
+BROKER_OUTPUT=$(dbus-send --system --print-reply=literal \
+    --dest=org.qdistro.AdminBroker1 \
+    /org/qdistro/AdminBroker1 \
+    org.qdistro.AdminBroker1.CheckPermission \
+    "string:$SPAWN_ACTION" \
+    "dict:string:string:" 2>&1)
+BROKER_STATUS=$?
+set -e
+BROKER_REPLY=$(printf '%s' "$BROKER_OUTPUT" | tr -d ' \t\n')
+if [ "$BROKER_STATUS" -ne 0 ]; then
+    fail "broker authorization failed for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION')"
+fi
+case "$BROKER_REPLY" in
+    allow|string\"allow\")
+        [ "${TIER2_DEBUG:-0}" = "1" ] && \
+            echo "spawn-tier2: broker allowed spawn of ${WORKLOAD}/${APP_NAME}" >&2
+        ;;
+    deny|string\"deny\")
+        fail "broker denied spawn of ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' decision=deny)"
+        ;;
+    unknown|string\"unknown\"|"")
+        fail "broker has no allow rule for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' decision=unknown)"
+        ;;
+    *)
+        fail "broker returned unsupported verdict for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' reply='$BROKER_REPLY')"
+        ;;
+esac
+
 # --- per-container runtime dir + cleanup trap ----------------------------
 # This is the load-bearing isolation step: the container only sees an
 # initially-empty /run/user/<uid>, so dbus, pulse, gpg-agent, ssh-agent
