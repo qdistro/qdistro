@@ -138,7 +138,15 @@ Do not treat the broker pilot as evidence for those other domains.
   `zwlr_output_manager_v1` apply/test mutation is admitted for
   `allowed_uid`, and for the explicit test posture `allowed_uid == -1`;
   after qdshell binds, mutation is shell-only by client or same pid+uid.
-  Pinned by `qdwin_om_mutation_allowed()` in `qdwin-logic-unit`.
+  The decision is **snapshotted at manager-bind time** (`mgr->may_mutate`)
+  and inherited by configuration objects, so a manager that bound during
+  the pre-shell window (under `allowed_uid`, or under the `-1` open
+  posture) **retains** mutation capability for the life of the resource
+  even after qdshell later binds. The per-call policy is pinned by
+  `qdwin_om_mutation_allowed()` in `qdwin-logic-unit`; the bind-time
+  snapshot (`mgr->may_mutate`) and config inheritance that produce the
+  persistence are pinned by the `output-manager-gate` source-invariant
+  test (`qdwin/test_output_manager_gate.py`).
 - **qdwin secctx helper root-launcher attestation:** when the helper's
   direct parent is verified uid 0 and has stable `/proc` starttime, an
   unreadable parent `/proc/<pid>/exe` basename is accepted because root
@@ -149,3 +157,8 @@ Do not treat the broker pilot as evidence for those other domains.
   `zwlr_layer_shell_v1` may bind for `allowed_uid`; after qdshell binds,
   the shell client or same pid+uid path is required. Pinned by
   `qdwin_layershell_pre_shell_uid_allowed()` in `qdwin-logic-unit`.
+- **qdwin `ext_idle_notifier_v1` ungated:** silo clients may bind the idle
+  notifier and observe seat idle/resume transitions — a low-severity cross-
+  silo presence/activity side-channel (no input contents, no pixels). Out of
+  the S1 capture-gate scope and not yet gated; tracked for a future
+  per-class visibility row in `qdwin_global_visible`. Not yet pinned.
