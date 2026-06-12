@@ -27,7 +27,6 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from qdlocker import app as app_mod
 
 

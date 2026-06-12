@@ -21,10 +21,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
+from qdlocker import ctrl as ctrl_mod
 from qdlocker.controller import LockController
 from qdlocker.ctrl import CtrlSocket, peer_uid
-
-from qdlocker import ctrl as ctrl_mod
 
 
 @pytest.fixture(scope="session")
