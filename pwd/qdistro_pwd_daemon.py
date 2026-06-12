@@ -166,23 +166,57 @@ PORTAL_BACKEND_UNIT = os.environ.get(
     "QDISTRO_PWD_PORTAL_UNIT",
     "qdistro-pwd-portal.service")
 
-BROWSER_PARENT_EXES = tuple(
-    p for p in os.environ.get(
-        "QDISTRO_PWD_BROWSER_PARENT_EXES",
-        ":".join((
-            "/usr/lib64/firefox/firefox",
-            "/usr/lib/firefox/firefox",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/brave",
-            "/usr/bin/brave-browser",
-            "/usr/bin/vivaldi",
-            "/usr/bin/vivaldi-stable",
-            "/usr/bin/microsoft-edge",
-            "/usr/bin/microsoft-edge-stable",
-        ))).split(":") if p)
+# Trusted parent-browser exes for the bridge-identity gate. Resolved
+# through the SAME shared module the bridge entry gate uses
+# (``qdistro_browser_allowlist``, P0-4 follow-up) so this defense-in-depth
+# gate cannot drift wider than the entry gate: the optional browsers
+# (Chrome/Brave/Vivaldi/Edge) count as a valid bridge parent only when an
+# admin has opted them in via the root-owned config; Firefox+Chromium is the
+# always-trusted baseline.
+#
+# Imported defensively (mirroring the bridge's qdistro_proc_identity guard):
+# if the module is absent the gate falls back to the Firefox+Chromium
+# BASELINE — the narrowest, fail-closed set — never the historical full
+# matrix. ``QDISTRO_PWD_BROWSER_PARENT_EXES``, when set, REPLACES the
+# resolved set entirely (the historical test/non-RPM escape hatch).
+try:
+    import qdistro_browser_allowlist as _browser_allowlist  # type: ignore
+except Exception:  # noqa: BLE001 — fail closed to the baseline if unavailable
+    _browser_allowlist = None  # type: ignore[assignment]
+
+_BROWSER_BASELINE_PARENT_EXES: tuple[str, ...] = (
+    "/usr/lib64/firefox/firefox",
+    "/usr/lib/firefox/firefox",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+)
+
+_BROWSER_PARENT_EXES_ENV_OVERRIDE: tuple[str, ...] | None = (
+    tuple(
+        p for p in os.environ["QDISTRO_PWD_BROWSER_PARENT_EXES"].split(":")
+        if p)
+    if os.environ.get("QDISTRO_PWD_BROWSER_PARENT_EXES") is not None
+    else None)
+
+
+def _resolve_browser_parent_exes() -> tuple[str, ...]:
+    """Effective trusted parent-browser exes for the pwd bridge gate.
+
+    Env override (full replacement) wins; otherwise the shared module's
+    baseline + admin opt-in; otherwise the Firefox+Chromium baseline,
+    fail-closed. Read live at gate time so an opt-in config edit applies
+    without restarting the daemon.
+    """
+    if _BROWSER_PARENT_EXES_ENV_OVERRIDE is not None:
+        return _BROWSER_PARENT_EXES_ENV_OVERRIDE
+    if _browser_allowlist is not None:
+        return _browser_allowlist.resolve_parent_exes()
+    try:
+        import qdistro_browser_allowlist as allowlist  # type: ignore
+    except Exception:  # noqa: BLE001 — still fail closed if unavailable
+        return _BROWSER_BASELINE_PARENT_EXES
+    globals()["_browser_allowlist"] = allowlist
+    return allowlist.resolve_parent_exes()
 
 PORTAL_REQUIRE_FPRINT = os.environ.get(
     "QDISTRO_PORTAL_REQUIRE_FPRINT", "0").lower() in ("1", "true", "yes")
@@ -381,7 +415,7 @@ def _browser_bridge_allowed(pid: int) -> tuple[bool, str]:
     if ppid is None:
         return False, "parent-unreadable"
     parent_exe = _read_proc_exe(ppid)
-    allowed = {os.path.realpath(p) for p in BROWSER_PARENT_EXES}
+    allowed = {os.path.realpath(p) for p in _resolve_browser_parent_exes()}
     if os.path.realpath(parent_exe) not in allowed:
         return False, "parent-not-browser"
     return True, "browser-bridge"

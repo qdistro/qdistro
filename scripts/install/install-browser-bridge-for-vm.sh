@@ -68,7 +68,12 @@ install -d -m 0755 \
     "$DEST_LIB_QDISTRO" "$DEST_LIB_BIN" "$DEST_BIN" "$DEST_SHARE" \
     "$DEST_USER_SYSD"
 
-# Module + install module.
+# Module + install module. qdistro_browser_allowlist.py is the shared
+# parent-exe allowlist + admin opt-in resolver imported by BOTH the bridge
+# entry gate AND the 9e/pwd daemon identity gates (P0-4 follow-up), so it
+# must land alongside them — the daemons import it defensively and fall back
+# to the Firefox+Chromium baseline if it is missing.
+install -m 0644 "$SRC/qdistro_browser_allowlist.py" "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_browser_bridge.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_browser_install.py" "$DEST_LIB_QDISTRO/"
 

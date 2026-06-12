@@ -252,6 +252,7 @@ check_glob_req "broker python module"  "/usr/libexec/qdistro/*.py"
 check_req     "qsu compiled binary"    /usr/local/bin/qsu
 check_opt     "browser-bridge exec stub" /usr/lib/qdistro/browser-bridge
 check_opt     "browser-bridge host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
+check_opt     "browser-allowlist shared module" /usr/libexec/qdistro/qdistro_browser_allowlist.py
 check_opt     "browser-install CLI"    /usr/local/bin/qdistro-browser-install
 
 echo

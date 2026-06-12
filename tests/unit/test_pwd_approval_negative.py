@@ -35,16 +35,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "pwd"))
 
 import qdistro_pwd_daemon as d
 from qdistro_pwd_audit import PwdAuditLog  # type: ignore
 from qdistro_pwd_vault import (  # type: ignore
-    add_item, create_vault, get_item_pins, unlock_vault,
+    add_item,
+    create_vault,
+    get_item_pins,
+    unlock_vault,
 )
 
 # Capture the genuine attestation function before any fixture stubs it out,
@@ -380,9 +383,10 @@ class TestSpoofedBridgeAttestation:
 
     def _install_proc(self, monkeypatch, *, cmdline, ppid, parent_exe):
         # Hermetic: pin the script + allowlist rather than relying on the
-        # env-derived BROWSER_PARENT_EXES captured at import time.
+        # env-derived parent-exe override captured at import time.
         monkeypatch.setattr(d, "BROWSER_BRIDGE_SCRIPT", self.SCRIPT)
-        monkeypatch.setattr(d, "BROWSER_PARENT_EXES", (BROWSER_EXE,))
+        monkeypatch.setattr(
+            d, "_BROWSER_PARENT_EXES_ENV_OVERRIDE", (BROWSER_EXE,))
         monkeypatch.setattr(d, "_read_proc_cmdline", lambda _pid: cmdline)
         monkeypatch.setattr(d, "_read_proc_ppid", lambda _pid: ppid)
         monkeypatch.setattr(
@@ -490,7 +494,8 @@ class TestSpoofedBridgeAttestation:
         token = _mint_token(daemon)
         # Now swap in the REAL attestation with a spoofed (shell) parent.
         monkeypatch.setattr(d, "BROWSER_BRIDGE_SCRIPT", self.SCRIPT)
-        monkeypatch.setattr(d, "BROWSER_PARENT_EXES", (BROWSER_EXE,))
+        monkeypatch.setattr(
+            d, "_BROWSER_PARENT_EXES_ENV_OVERRIDE", (BROWSER_EXE,))
         monkeypatch.setattr(d, "_browser_bridge_allowed", _REAL_BRIDGE_ALLOWED)
         monkeypatch.setattr(d, "_read_proc_cmdline",
                             lambda _pid: ["python3", self.SCRIPT])

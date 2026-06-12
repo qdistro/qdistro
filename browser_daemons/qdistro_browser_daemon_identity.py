@@ -39,26 +39,55 @@ BROWSER_BRIDGE_SCRIPT = os.environ.get(
     "QDISTRO_BROWSER_BRIDGE_SCRIPT",
     "/usr/libexec/qdistro/qdistro_browser_bridge.py")
 
-# Allowlisted parent-browser exes. Same default matrix as the bridge's
-# ALLOWED_PARENT_EXES (qdistro_browser_bridge.py) and the pwd daemon's
-# BROWSER_PARENT_EXES. Overridable for tests.
-BROWSER_PARENT_EXES = tuple(
-    p for p in os.environ.get(
-        "QDISTRO_BROWSER_PARENT_EXES",
-        ":".join((
-            "/usr/lib64/firefox/firefox",
-            "/usr/lib/firefox/firefox",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/brave",
-            "/usr/bin/brave-browser",
-            "/usr/bin/vivaldi",
-            "/usr/bin/vivaldi-stable",
-            "/usr/bin/microsoft-edge",
-            "/usr/bin/microsoft-edge-stable",
-        ))).split(":") if p)
+# Shared parent-browser allowlist (P0-4 follow-up). The trusted parent set
+# is resolved through the SAME module the bridge entry gate uses
+# (``qdistro_browser_allowlist``) so this defense-in-depth gate cannot drift
+# wider than the gate that already rejected an un-opted-in parent before any
+# forward reached us. The optional browsers (Chrome/Brave/Vivaldi/Edge) are
+# admitted only when an admin has opted them in via the root-owned config;
+# the Firefox+Chromium baseline is always trusted.
+#
+# Both the bridge and the pwd daemon import this module; it installs
+# alongside them under /usr/libexec/qdistro/. We import defensively (the
+# same pattern the bridge uses for qdistro_proc_identity): if the module is
+# somehow absent, fall back to the Firefox+Chromium BASELINE — the
+# narrowest, fail-closed set — never the historical full matrix.
+try:
+    import qdistro_browser_allowlist as _allowlist  # type: ignore
+except Exception:  # noqa: BLE001 — fail closed to the baseline if unavailable
+    _allowlist = None  # type: ignore[assignment]
+
+_BASELINE_PARENT_EXES: tuple[str, ...] = (
+    "/usr/lib64/firefox/firefox",
+    "/usr/lib/firefox/firefox",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+)
+
+# Optional full-override escape hatch for tests / non-RPM layouts. When
+# ``QDISTRO_BROWSER_PARENT_EXES`` is set it REPLACES the resolved set
+# entirely (the historical behaviour); when unset the effective set is the
+# baseline + admin opt-in, read live at gate time so an opt-in config edit
+# takes effect without restarting the daemon.
+_PARENT_EXES_ENV_OVERRIDE: tuple[str, ...] | None = (
+    tuple(p for p in os.environ["QDISTRO_BROWSER_PARENT_EXES"].split(":") if p)
+    if os.environ.get("QDISTRO_BROWSER_PARENT_EXES") is not None
+    else None)
+
+
+def resolve_parent_exes() -> tuple[str, ...]:
+    """Effective trusted parent-browser exes for the daemon identity gate.
+
+    Resolution order: an explicit ``QDISTRO_BROWSER_PARENT_EXES`` override
+    (full replacement) wins; otherwise the shared module's baseline +
+    admin-opt-in resolution; otherwise (module unavailable) the
+    Firefox+Chromium baseline, fail-closed.
+    """
+    if _PARENT_EXES_ENV_OVERRIDE is not None:
+        return _PARENT_EXES_ENV_OVERRIDE
+    if _allowlist is not None:
+        return _allowlist.resolve_parent_exes()
+    return _BASELINE_PARENT_EXES
 
 # Valueless interpreter flags tolerated before the executed script. A
 # flag that consumes the following token as an operand (-c/-m/-W/-X …)
@@ -121,7 +150,7 @@ def browser_bridge_allowed(
     allowed_parents = {
         os.path.realpath(p)
         for p in (parent_exes if parent_exes is not None
-                  else BROWSER_PARENT_EXES)
+                  else resolve_parent_exes())
     }
     cmdline = cmdline_reader(pid)
     # Locate the executed script: skip argv[0] (interpreter) and any

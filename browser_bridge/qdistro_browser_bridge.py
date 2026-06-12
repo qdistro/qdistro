@@ -126,47 +126,20 @@ except Exception:  # noqa: BLE001 — fail closed if readers are unavailable
 # out for v1. Tests override via QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST
 # under QDISTRO_TEST_MODE=1 (read by _resolve_allowlist below).
 #
-# Default-on baseline: Firefox + Chromium are the two browser families
-# qdistro supports out of the box, always trusted as bridge parents.
-DEFAULT_ALLOWED_PARENT_EXES: tuple[str, ...] = (
-    "/usr/lib64/firefox/firefox",
-    "/usr/lib/firefox/firefox",   # 32-bit / non-/lib64 distros
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
+# The baseline (Firefox+Chromium), the admin-opt-in optional browsers
+# (Chrome/Brave/Vivaldi/Edge), the root-owned opt-in config path, and the
+# fd-based opt-in reader/resolver now live in the shared
+# ``qdistro_browser_allowlist`` module (which sits in this same directory) so
+# the bridge entry gate and the 9e/pwd daemons' process-identity gates
+# resolve the SAME set by construction (the P0-4 follow-up — previously the
+# daemons carried an independent full-matrix default). The bridge keeps only
+# its env-override policy in ``_resolve_allowlist`` below and delegates the
+# baseline + opt-in resolution to ``resolve_parent_exes``.
+from qdistro_browser_allowlist import (  # noqa: E402
+    ALLOWLIST_CONFIG_PATH,
+    DEFAULT_ALLOWED_PARENT_EXES,
+    resolve_parent_exes,
 )
-
-# Optional parent browsers (P0-4). Chrome, Brave, Vivaldi, and Edge are
-# accepted as bridge parents ONLY when an admin opts each one in — they
-# are default-OFF. This mirrors the F4 firefox-containers opt-in: a
-# capability that widens the trust boundary is off until an admin
-# authors a root-owned policy artifact to enable it. The parent-exe
-# allowlist IS the bridge's trust boundary, so a malicious program
-# exec'ing the bridge while claiming to be one of these browsers is
-# rejected until the admin has explicitly trusted that browser family.
-OPTIONAL_PARENT_EXES: dict[str, tuple[str, ...]] = {
-    "chrome":  ("/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"),
-    "brave":   ("/usr/bin/brave", "/usr/bin/brave-browser"),
-    "vivaldi": ("/usr/bin/vivaldi", "/usr/bin/vivaldi-stable"),
-    "edge":    ("/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"),
-}
-
-# The full historical matrix (baseline + every optional browser), kept
-# for reference and for the browser daemons' identity attestation, which
-# is a separate process-identity check (not the bridge entry gate). It
-# is NO LONGER the effective default — the optional browsers require
-# admin opt-in (P0-4).
-ALLOWED_PARENT_EXES: tuple[str, ...] = DEFAULT_ALLOWED_PARENT_EXES + tuple(
-    exe for exes in OPTIONAL_PARENT_EXES.values() for exe in exes)
-
-# Root-owned opt-in config for the optional browsers above. One browser
-# key per non-comment line (``chrome`` / ``brave`` / ``vivaldi`` /
-# ``edge``); ``#`` starts a comment. Absent or empty => baseline only.
-# The bridge runs as the (unprivileged) browser-child uid, so the file
-# is honored ONLY when it is a root-owned regular file that is not
-# group/other-writable — the bridge must never let its own uid widen its
-# trust boundary (the same lesson P0-2 applied to the env-var override).
-ALLOWLIST_CONFIG_PATH = "/etc/qdistro/browser-bridge-allowlist.conf"
-
 
 # ---- length-prefix framing ---------------------------------------
 
@@ -213,100 +186,12 @@ def write_message(stream, payload: dict) -> None:
 
 
 # ---- parent-chain identity check ---------------------------------
-
-def _audit_allowlist_config(path: str, decision: str, reason: str) -> None:
-    """Audit an allowlist-config trust decision to stderr (journal).
-
-    Writes to stderr, never stdout — stdout is the native-messaging wire.
-    """
-    sys.stderr.write(
-        f"qdistro-browser-bridge: allowlist-config {path!r} "
-        f"decision={decision} reason={reason}\n")
-    sys.stderr.flush()
-
-
-def _read_optin_browser_keys(
-        config_path: str = ALLOWLIST_CONFIG_PATH,
-        trusted_uid: int = 0,
-) -> tuple[str, ...]:
-    """Return the optional-browser keys an admin has opted into.
-
-    Reads ``config_path`` (default the root-owned allowlist config). Each
-    non-blank, non-``#`` line names one optional browser
-    (``chrome`` / ``brave`` / ``vivaldi`` / ``edge``); ``#`` begins a
-    comment. Unknown keys are ignored (audited). Returns ``()`` when the
-    file is absent.
-
-    Fail-closed trust gate: the config is honored ONLY if it is a
-    **regular file** (not a symlink/FIFO/device) owned by ``trusted_uid``
-    (root in production) and **not group/other-writable**. A wrong owner,
-    a group/other-writable mode, a non-regular file, or any read/decode
-    error yields ``()`` — the bridge falls back to the Firefox+Chromium
-    baseline rather than let a non-admin widen its trust boundary. The
-    ``trusted_uid`` parameter exists so tests can exercise both the
-    honored and the rejected path without running as root.
-
-    The gate is **fd-based**: the path is opened ``O_NOFOLLOW`` (no
-    final-component symlink), ``O_NONBLOCK`` (a planted FIFO can't block
-    the open), and all owner/mode/regular-file checks run on the opened
-    object via ``fstat`` — so there is no lstat→open TOCTOU and the bytes
-    read are provably the bytes that passed the checks.
-    """
-    try:
-        fd = os.open(
-            config_path,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    except FileNotFoundError:
-        return ()            # absent => baseline (the common case)
-    except OSError as e:
-        # ELOOP (final-component symlink, O_NOFOLLOW) and friends land here.
-        _audit_allowlist_config(config_path, "ignored", f"open failed: {e}")
-        return ()
-    f = None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            _audit_allowlist_config(
-                config_path, "ignored",
-                "not a regular file (symlink/fifo/device?)")
-            return ()
-        if st.st_uid != int(trusted_uid):
-            _audit_allowlist_config(
-                config_path, "ignored",
-                f"owner uid {st.st_uid} != trusted {int(trusted_uid)}")
-            return ()
-        if st.st_mode & 0o022:
-            _audit_allowlist_config(
-                config_path, "ignored",
-                f"group/other-writable mode {stat.S_IMODE(st.st_mode):#o}")
-            return ()
-        f = os.fdopen(fd, "r", encoding="utf-8")
-        fd = -1              # the file object owns the descriptor now
-        raw_lines = f.read().splitlines()
-    except (OSError, UnicodeError, ValueError) as e:
-        _audit_allowlist_config(config_path, "ignored", f"read error: {e}")
-        return ()
-    finally:
-        try:
-            if f is not None:
-                f.close()
-            elif fd >= 0:
-                os.close(fd)
-        except OSError:
-            pass
-    keys: list[str] = []
-    for raw in raw_lines:
-        line = raw.split("#", 1)[0].strip().lower()
-        if not line:
-            continue
-        if line in OPTIONAL_PARENT_EXES:
-            if line not in keys:
-                keys.append(line)
-        else:
-            _audit_allowlist_config(
-                config_path, "skip-key", f"unknown browser key {line!r}")
-    return tuple(keys)
-
+#
+# The fd-based opt-in reader + audit helper live in
+# qdistro_browser_allowlist. _resolve_allowlist keeps the bridge-only
+# env-override policy here and delegates the baseline + admin opt-in
+# resolution to the shared resolve_parent_exes, so the bridge and the
+# 9e/pwd daemons can never diverge on which browsers are trusted.
 
 def _resolve_allowlist(
         config_path: str = ALLOWLIST_CONFIG_PATH,
@@ -325,7 +210,8 @@ def _resolve_allowlist(
     Absent the test override, the result is the default-on
     Firefox+Chromium baseline plus whichever optional browsers
     (``chrome`` / ``brave`` / ``vivaldi`` / ``edge``) an admin has opted
-    into via the root-owned ``config_path`` (P0-4). With no opt-in
+    into via the root-owned ``config_path`` (P0-4) — resolved by the shared
+    :func:`qdistro_browser_allowlist.resolve_parent_exes`. With no opt-in
     config the optional browsers are rejected as bridge parents.
     """
     legacy = os.environ.get(
@@ -343,10 +229,7 @@ def _resolve_allowlist(
                 "QDISTRO_BROWSER_BRIDGE_ALLOWLIST_TEST requires "
                 "QDISTRO_TEST_MODE=1")
         return tuple(p for p in override.split(":") if p)
-    allow = list(DEFAULT_ALLOWED_PARENT_EXES)
-    for key in _read_optin_browser_keys(config_path, trusted_uid):
-        allow.extend(OPTIONAL_PARENT_EXES[key])
-    return tuple(allow)
+    return resolve_parent_exes(config_path, trusted_uid)
 
 
 # ---- extension-identity from kernel-attested argv (P0-1) ----------

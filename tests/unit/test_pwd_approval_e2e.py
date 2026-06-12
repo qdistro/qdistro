@@ -71,10 +71,9 @@ import os
 import sys
 import time
 from pathlib import Path
-
-import pytest
 from unittest.mock import patch
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Module loading — bridge by spec (matches test_pwd_fill_bridge.py), daemon
@@ -92,9 +91,10 @@ sys.path.insert(0, str(_REPO / "pwd"))
 import qdistro_pwd_daemon as d  # noqa: E402
 from qdistro_pwd_audit import PwdAuditLog  # type: ignore  # noqa: E402
 from qdistro_pwd_vault import (  # type: ignore  # noqa: E402
-    add_item, create_vault, unlock_vault,
+    add_item,
+    create_vault,
+    unlock_vault,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixed identities for the happy path.
@@ -268,7 +268,7 @@ def _attest_real(monkeypatch, dmn, *, peer_pid=PEER_PID,
     data by patching only the three proc readers it calls. The bridge
     script path must be on the daemon's allowlist."""
     monkeypatch.setattr(d, "BROWSER_BRIDGE_SCRIPT", BRIDGE_SCRIPT)
-    monkeypatch.setattr(d, "BROWSER_PARENT_EXES", (BROWSER_EXE,))
+    monkeypatch.setattr(d, "_BROWSER_PARENT_EXES_ENV_OVERRIDE", (BROWSER_EXE,))
     cmd = cmdline if cmdline is not None else ["python3", BRIDGE_SCRIPT]
     monkeypatch.setattr(d, "_read_proc_cmdline",
                         lambda pid: cmd if pid == peer_pid else [])

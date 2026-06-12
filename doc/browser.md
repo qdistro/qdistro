@@ -60,13 +60,17 @@ lesson P0-2 applied to the rejected `QDISTRO_BROWSER_BRIDGE_ALLOWLIST`
 env var). Snap/Flatpak users see "qdistro browser integration is not
 supported on sandboxed browsers — install the RPM build."
 
-> **Scope note.** P0-4's opt-in lives in the *bridge entry gate*
-> (`_resolve_allowlist()`), the authoritative barrier against a non-browser
-> program exec'ing the bridge. The browser daemons' separate
-> process-identity attestation (`BROWSER_PARENT_EXES` in
-> `qdistro_browser_daemon_identity.py`) still carries the full historical
-> matrix; aligning that secondary check to the same opt-in is a tracked
-> follow-up, not part of the entry-gate fix.
+> **Scope note (follow-up landed).** P0-4's opt-in lives in the *bridge
+> entry gate* (`_resolve_allowlist()`), the authoritative barrier against a
+> non-browser program exec'ing the bridge. The browser daemons' separate
+> process-identity attestation and the pwd daemon's bridge gate now resolve
+> the trusted parent set through the **same** shared module
+> (`qdistro_browser_allowlist.resolve_parent_exes()`), so those
+> defense-in-depth gates can no longer drift wider than the entry gate — an
+> optional browser is rejected as a parent until an admin opts it in, at
+> every gate. (Previously they carried an independent default-ON full matrix;
+> not a leak, because the entry gate already rejected an un-opted-in parent
+> before any forward, but the boundaries are now aligned by construction.)
 
 > **P0-2 (closed).** `_resolve_allowlist()` once honored a
 > `QDISTRO_BROWSER_BRIDGE_ALLOWLIST` environment variable that let any
