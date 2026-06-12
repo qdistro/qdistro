@@ -17,13 +17,17 @@ for pkg in network firewall dhcp; do
 	fi
 done
 
-# 2. uhttpd: expose ubus at /ubus, but bind the listeners to the mgmt IP so the
-#    control plane is NOT reachable from WAN or any silo vif.
+# 2. uhttpd: expose ubus at /ubus, bound to the mgmt IP ONLY so the control
+#    plane is unreachable from WAN or any silo vif. HTTP only — the mgmt network
+#    is host-only, and the base ships no TLS provider (see build PACKAGES). Drop
+#    the default https listener so uhttpd doesn't try to serve TLS it can't.
 uci -q set uhttpd.main.ubus_prefix='/ubus'
 uci -q delete uhttpd.main.listen_http
 uci -q add_list uhttpd.main.listen_http='192.168.97.1:80'
 uci -q delete uhttpd.main.listen_https
-uci -q add_list uhttpd.main.listen_https='192.168.97.1:443'
+uci -q delete uhttpd.main.cert
+uci -q delete uhttpd.main.key
+uci -q set uhttpd.main.redirect_https='0'
 uci commit uhttpd
 
 # 3. rpcd: a scoped admin login. read/write reference the qdistro-netvm-admin

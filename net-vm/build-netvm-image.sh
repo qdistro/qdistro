@@ -38,10 +38,16 @@ PACKAGES="${QDISTRO_NETVM_PACKAGES:-\
 uhttpd uhttpd-mod-ubus rpcd rpcd-mod-file rpcd-mod-iwinfo \
 wireguard-tools kmod-wireguard ip-full \
 dnsmasq-full firewall4 nftables kmod-nft-core \
-luci-ssl-openssl}"
+luci}"
 # dnsmasq-full replaces the default dnsmasq for the multi-instance / ipset
 # features the per-silo resolvers use; it conflicts with `dnsmasq`, hence the
 # explicit "-dnsmasq" removal below.
+#
+# Plain `luci` (HTTP, the human escape hatch on the host-only mgmt vif), NOT
+# `luci-ssl-openssl`: the openssl variant pulls libustream-openssl which clashes
+# with the base image's libustream-mbedtls on /lib/libustream-ssl.so (a real
+# `make image` failure). The control plane is rpcd JSON-RPC over HTTP on a
+# host-only network, so no TLS provider is needed in the base.
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -105,7 +111,13 @@ SRC_IMG="$(ls "$IB_DIR"/bin/targets/"$TARGET"/*generic-squashfs-combined-efi.img
 [ -n "$SRC_IMG" ] || { echo "[netvm-build] no combined image produced" >&2; exit 4; }
 
 RAW="$WORK/netvm.img"
-gunzip -c "$SRC_IMG" > "$RAW"
+# OpenWrt appends a metadata trailer to the gzip stream, so gunzip prints
+# "trailing garbage ignored" and exits 2 even though the image decompressed
+# fine. Tolerate that specific case (validate the output is non-empty) instead
+# of letting `set -e` abort a successful build.
+if ! gunzip -c "$SRC_IMG" > "$RAW" 2>/dev/null; then
+    [ -s "$RAW" ] || { echo "[netvm-build] decompress failed: $SRC_IMG" >&2; exit 4; }
+fi
 # OpenWrt's squashfs rootfs_data overlay is FIXED-SIZE; growing the raw disk
 # does not enlarge it (Probe 2 step 6). The package set above fits the default
 # overlay; if it ever overflows, switch the profile to an ext4 image + growpart.
