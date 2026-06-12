@@ -693,3 +693,133 @@ class TestCompositorDaemon:
         assert len(reclaimed) == 1
         assert reclaimed[0]["handle"] == 10
         assert st.get("0:2") is not None
+
+
+# =====================================================================
+# Pure-logic edge tables (F6) — branches the per-daemon suites above
+# exercise only on their happy path. Direct, hermetic, mutation-sensitive.
+# =====================================================================
+
+class TestBrowserLabelTable:
+    """Full ``browser_label`` mapping — the per-daemon tests only pin
+    firefox/chrome/brave/empty; the remaining recognised exes are pinned
+    here (basename lowercased, substring match against the needle table)
+    so renaming a label or dropping an entry trips an assertion."""
+
+    @pytest.mark.parametrize("exe,label", [
+        ("/usr/lib64/firefox/firefox", "firefox"),
+        ("/usr/bin/chromium", "chromium"),
+        ("/usr/bin/chromium-browser", "chromium"),
+        # google-chrome* and a bare chrome basename both resolve to chrome.
+        ("/usr/bin/google-chrome-stable", "chrome"),
+        ("/opt/google/chrome/chrome", "chrome"),
+        ("/usr/bin/brave-browser", "brave"),
+        ("/usr/bin/vivaldi-stable", "vivaldi"),
+        ("/usr/bin/microsoft-edge-stable", "edge"),
+        ("/usr/bin/edge", "edge"),
+        # Unrecognised / empty -> the D-Bus-safe sentinel.
+        ("/usr/bin/lynx", "unknown"),
+        ("", "unknown"),
+    ])
+    def test_label(self, exe, label):
+        assert ident.browser_label(exe) == label
+
+
+class TestBuildMetadata:
+    """``build_metadata`` is only ever asserted through the publish happy
+    path (title+artist+trackid). These pin the conditional xesam keys and
+    the trackid derivation directly."""
+
+    def test_all_fields_emitted(self):
+        meta = mpris.build_metadata(
+            {"title": "T", "artist": "A", "album": "Alb", "tab_id": 7},
+            "qdistro.root.firefox")
+        assert meta["xesam:title"] == "T"
+        assert meta["xesam:artist"] == ["A"]  # artist is a LIST per spec
+        assert meta["xesam:album"] == "Alb"
+        assert meta["mpris:trackid"].endswith("/7")
+
+    def test_empty_fields_omitted_not_emitted_blank(self):
+        # Missing/blank title, artist, album must be absent keys, not ""/[]
+        # — an MPRIS client distinguishes "no metadata" from "empty string".
+        meta = mpris.build_metadata({"tab_id": 1}, "k")
+        assert "xesam:title" not in meta
+        assert "xesam:artist" not in meta
+        assert "xesam:album" not in meta
+        assert set(meta) == {"mpris:trackid"}
+
+    def test_missing_tab_id_defaults_to_zero(self):
+        meta = mpris.build_metadata({"title": "x"}, "qdistro.root.firefox")
+        assert meta["mpris:trackid"].endswith("/0")
+
+    def test_trackid_sanitises_dirty_player_key_and_tab(self):
+        # A player_key / tab carrying path or D-Bus-illegal characters must
+        # not leak into the object-path trackid: each is sanitised to
+        # [A-Za-z0-9_] SEPARATELY, then joined with exactly one slash. Pin
+        # the exact result so a regression that stops replacing slashes (so
+        # the body grows a second separator) flips this assertion.
+        meta = mpris.build_metadata(
+            {"title": "x", "tab_id": "../etc"}, "a/b.c!d")
+        assert meta["mpris:trackid"] == "/org/qdistro/mpris/a_b_c_d/etc"
+        body = meta["mpris:trackid"][len("/org/qdistro/mpris/"):]
+        # Exactly one delimiter slash; neither segment carries a slash.
+        assert body.count("/") == 1
+        key_seg, tab_seg = body.split("/")
+        assert "/" not in key_seg and "/" not in tab_seg
+
+
+class TestNotificationPolicyEdges:
+    """Branches of ``_origin_matches`` / ``NotificationPolicy.decide`` the
+    daemon suite leaves implicit."""
+
+    def test_empty_pattern_never_matches(self):
+        assert notifications._origin_matches("", "anything") is False
+        assert notifications._origin_matches("   ", "anything") is False
+
+    def test_exact_match_is_case_insensitive(self):
+        assert notifications._origin_matches(
+            "Example.COM", "example.com") is True
+        assert notifications._origin_matches(
+            "example.com", "evil.example.com") is False
+
+    def test_explicit_allow_user_rule_reports_user_rule(self):
+        # A user rule with decision:"allow" must allow AND tag user_rule
+        # (distinct from the default_allow fall-through), so a later
+        # origin-only deny cannot override an explicit per-user allow.
+        # Order origin-deny FIRST so a single-pass first-match impl would
+        # return (False, origin_rule); only the real two-pass scan (all
+        # user rules before any origin-only rule) yields the user allow.
+        policy = notifications.NotificationPolicy([
+            {"origin": "site.example", "decision": "deny"},
+            {"user": "root", "origin": "site.example", "decision": "allow"},
+        ])
+        allowed, reason = policy.decide("root", "site.example")
+        assert allowed is True
+        assert reason == "user_rule"
+
+    def test_user_rule_origin_mismatch_falls_through(self):
+        # The user matches but its origin does not; evaluation must fall
+        # through to the origin-only pass, not stop at the user rule.
+        policy = notifications.NotificationPolicy([
+            {"user": "root", "origin": "other.example", "decision": "deny"},
+            {"origin": "site.example", "decision": "deny"},
+        ])
+        allowed, reason = policy.decide("root", "site.example")
+        assert allowed is False
+        assert reason == "origin_rule"
+
+    def test_malformed_rule_entries_skipped(self):
+        # Non-dict garbage in the rules list must be skipped, not crash,
+        # and must not shadow a valid later rule.
+        policy = notifications.NotificationPolicy([
+            "not-a-dict", 42, None,
+            {"origin": "bad.example", "decision": "deny"},
+        ])
+        assert policy.decide("u", "bad.example") == (False, "origin_rule")
+        assert policy.decide("u", "ok.example") == (True, "default_allow")
+
+    def test_default_decision_is_allow_when_unspecified(self):
+        # A rule that matches but omits "decision" defaults to allow.
+        policy = notifications.NotificationPolicy([
+            {"origin": "site.example"}])
+        assert policy.decide("u", "site.example") == (True, "origin_rule")
