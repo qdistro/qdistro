@@ -34,6 +34,13 @@ class CronParseError(ValueError):
 def _parse_field(spec: str, lo: int, hi: int, *, is_dow: bool = False) -> frozenset[int]:
     """Parse one cron field into the explicit set of matching values."""
     values: set[int] = set()
+    # Day-of-week accepts 7 as an alias for Sunday (0) — including as a range
+    # ENDPOINT, so "5-7" = Fri,Sat,Sun and "1-7" = the whole week. The alias is
+    # applied to the EXPANDED values, not to start/end before expansion;
+    # collapsing 7->0 first would turn "5-7" into the invalid range 5-0 and
+    # "0-7" into just {0}. Wildcard upper bound stays `hi` (6); 7 only ever
+    # enters via an explicit value/range and immediately maps back to 0.
+    parse_hi = 7 if is_dow else hi
     for part in spec.split(","):
         part = part.strip()
         if not part:
@@ -64,17 +71,14 @@ def _parse_field(spec: str, lo: int, hi: int, *, is_dow: bool = False) -> frozen
             except ValueError:
                 raise CronParseError(f"bad value {base!r}")
 
-        if is_dow:
-            # Normalise 7 -> 0 (both mean Sunday).
-            start = 0 if start == 7 else start
-            end = 0 if end == 7 else end
         if start > end:
             raise CronParseError(f"range start > end in {base!r}")
-        if start < lo or end > hi:
+        if start < lo or end > parse_hi:
             raise CronParseError(
-                f"value out of bounds [{lo},{hi}] in {part!r}"
+                f"value out of bounds [{lo},{parse_hi}] in {part!r}"
             )
-        values.update(range(start, end + 1, step))
+        for v in range(start, end + 1, step):
+            values.add(0 if (is_dow and v == 7) else v)
 
     return frozenset(values)
 

@@ -21,7 +21,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "workflow"))
 
 from workflow_schema import TriggerDef, TriggerType  # noqa: E402
-from cron_parser import CronExpr, CronParseError  # noqa: E402
+from cron_parser import CronExpr, CronParseError, _parse_field  # noqa: E402
 from trigger_registry import (  # noqa: E402
     CronTrigger,
     DBusSignalTrigger,
@@ -90,13 +90,61 @@ class TestCronParser:
         "* * * * * *",      # too many fields
         "60 * * * *",       # minute out of bounds
         "* 24 * * *",       # hour out of bounds
+        "* * 0 * *",        # day-of-month below 1
+        "* * 32 * *",       # day-of-month above 31
+        "* * * 0 *",        # month below 1
+        "* * * 13 *",       # month above 12
+        "* * * * 8",        # day-of-week above 7
+        "* * * * 5-8",      # dow range endpoint above 7
         "*/0 * * * *",      # zero step
+        "*/-1 * * * *",     # negative step
         "5-1 * * * *",      # inverted range
         "abc * * * *",      # non-numeric
+        "1,,3 * * * *",     # empty list term
+        "-5 * * * *",       # bare leading dash
+        "1- * * * *",       # range missing end
+        "",                 # empty expression
+        "   ",              # whitespace-only expression
     ])
     def test_invalid_expressions(self, expr):
         with pytest.raises(CronParseError):
             CronExpr(expr)
+
+    # ---- day-of-week range/alias edge table ----------------------------------
+    # Regression pin: 7 is a Sunday alias even as a RANGE ENDPOINT. Collapsing
+    # 7->0 before expanding the range used to make "1-7" / "5-7" raise
+    # (range start > end) and "0-7" yield only {0} — so a common schedule like
+    # "Mon-Sun" silently failed to parse and the trigger fell back to interval.
+    @pytest.mark.parametrize("field,expected_dows", [
+        ("0",   {0}),
+        ("7",   {0}),            # 7 alias for Sunday
+        ("0-6", {0, 1, 2, 3, 4, 5, 6}),
+        ("0-7", {0, 1, 2, 3, 4, 5, 6}),   # whole week (7 == 0, dedup)
+        ("1-7", {0, 1, 2, 3, 4, 5, 6}),   # Mon..Sun -> whole week
+        ("5-7", {0, 5, 6}),               # Fri, Sat, Sun
+        ("6-7", {0, 6}),                  # Sat, Sun
+        ("1-5", {1, 2, 3, 4, 5}),         # weekdays unaffected
+        ("*",   {0, 1, 2, 3, 4, 5, 6}),
+        ("*/2", {0, 2, 4, 6}),
+        ("0,7", {0}),                     # both spellings of Sunday
+    ])
+    def test_dow_range_and_alias_table(self, field, expected_dows):
+        c = CronExpr(f"0 0 * * {field}")
+        assert set(c.dows) == expected_dows
+
+    # ---- valid-expansion edge table ------------------------------------------
+    @pytest.mark.parametrize("field,lo,hi,expected", [
+        ("*/15", 0, 59, {0, 15, 30, 45}),
+        ("1-30/2", 0, 59, set(range(1, 31, 2))),
+        ("0-59/20", 0, 59, {0, 20, 40}),
+        ("5/2", 0, 59, {5}),              # step on a single base is just the base
+        ("59", 0, 59, {59}),              # upper boundary value
+        ("0", 0, 59, {0}),                # lower boundary value
+        ("1,2,3", 0, 59, {1, 2, 3}),
+        ("1, 2 , 3", 0, 59, {1, 2, 3}),   # whitespace in list tolerated
+    ])
+    def test_field_expansion_table(self, field, lo, hi, expected):
+        assert set(_parse_field(field, lo, hi)) == expected
 
 
 # ======================================================================
