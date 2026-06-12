@@ -2294,15 +2294,34 @@ class _SiloStore:
                 log.warning("reaping disposable %r failed: %s", name, e)
         return reaped
 
-    def dispose(self, name: str) -> bool:
+    def dispose(self, name: str,
+                caller: dict[str, Any] | None = None) -> bool:
         """Explicit lease release / teardown for one disposable (the taskbar
         'dispose' action, a workflow-step completion, an idle-timeout). Drives
         teardown from the session manager rather than relying on the GUI
         window close alone, so windowless/background disposables are also
-        torn down. Returns True if the container is gone afterward."""
+        torn down. Returns True if the container is gone afterward.
+
+        Name-validated + fail-closed: only a well-formed ``disp-*`` name
+        (is_disposable_container) ever reaches the container remove, so this can
+        never tear down an admin/native container that merely shares the prefix.
+        A bad name is a BadArgument and a failed/errored remove a BadState — both
+        clean D-Bus errors — and every attempt (deny/allow/error) is audited."""
         if not _disp.is_disposable_container(name):
-            raise ValueError(f"not a disposable container: {name!r}")
-        ok = self._ops.disp_container_remove(name)
+            self._audit_record("dispose", str(name), decision="deny",
+                               reason="not a disposable container",
+                               caller=caller)
+            raise BadArgument(f"not a disposable container: {name!r}")
+        try:
+            ok = self._ops.disp_container_remove(name)
+        except OSError as e:
+            self._audit_record("dispose", str(name), decision="error",
+                               reason=f"remove errored: {e}", caller=caller)
+            raise BadState(f"dispose {name!r} failed: {e}")
+        self._audit_record("dispose", str(name),
+                           decision="allow" if ok else "error",
+                           reason="removed" if ok else "podman rm failed",
+                           caller=caller)
         log.info("dispose %r -> %s", name, "removed" if ok else "FAILED")
         return ok
 
@@ -2738,6 +2757,28 @@ if dbus is not None:
             try:
                 self.store.resume(str(name), caller=caller)
                 log.info("ResumeSilo name=%s", name)
+            except SessionError as e:
+                raise _to_dbus_exception(e)
+
+        @dbus.service.method(BUS_NAME, in_signature="s", out_signature="b",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def Dispose(self, name, sender=None, conn=None):
+            """Explicitly tear down one disposable container by name (the M4
+            taskbar 'Dispose' action). Admin-only and name-validated: the store
+            rejects anything that is not a well-formed disp-* name, so this is a
+            lease-teardown surface for disposables only, never a back door to
+            remove an admin/native container. Returns True if it is gone."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("dispose", name, caller, e)
+                raise _to_dbus_exception(e)
+            try:
+                ok = bool(self.store.dispose(str(name), caller=caller))
+                log.info("Dispose name=%s -> %s", name, ok)
+                return ok
             except SessionError as e:
                 raise _to_dbus_exception(e)
 

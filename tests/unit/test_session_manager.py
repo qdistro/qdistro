@@ -54,6 +54,14 @@ class _FakeOps:
         # (simulates the launcher exiting after SIGTERM). Tests that
         # exercise the SIGKILL fallback set this False.
         self.kill_drains = True
+        # Disposable (disp-*) containers in admin's rootless podman, and a
+        # record of remove calls (for the Dispose teardown tests).
+        self.disp_containers: list[str] = []
+        self.disp_removed: list[str] = []
+        # When True, disp_container_remove reports podman-rm failure (rc!=0);
+        # when set to an exception, it raises that (simulates podman missing).
+        self.disp_remove_fails = False
+        self.disp_remove_raises: BaseException | None = None
         self._egress_init()
 
     # ---- queries ----------------------------------------------------------
@@ -77,6 +85,21 @@ class _FakeOps:
             import subprocess
             raise subprocess.CalledProcessError(1, ["userdel", name])
         self.users.pop(name, None)
+
+    # ---- disposable containers --------------------------------------------
+
+    def disp_container_list(self) -> list[str]:
+        return list(self.disp_containers)
+
+    def disp_container_remove(self, name: str) -> bool:
+        if self.disp_remove_raises is not None:
+            raise self.disp_remove_raises
+        self.disp_removed.append(name)
+        if self.disp_remove_fails:
+            return False
+        if name in self.disp_containers:
+            self.disp_containers.remove(name)
+        return True
 
     def make_state_dir(self, name: str, uid: int):
         self.state_dirs[name] = (int(uid), int(uid), 0o700)
@@ -1439,3 +1462,80 @@ class TestNftBenign:
     def test_real_error_is_not_benign(self):
         assert not sm._nft_benign("Error: syntax error, unexpected newline")
         assert not sm._nft_benign("")
+
+
+# ---------------------------------------------------------------------------
+# Disposable teardown (P2b — the Dispose D-Bus lease-release surface)
+# ---------------------------------------------------------------------------
+
+class _RecordingAudit:
+    """Minimal _AuditLog stand-in: records every row the store writes so a
+    test can assert the decision/reason without a sqlite backend."""
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    def record(self, action, silo, *, decision, reason, caller):
+        self.rows.append(dict(action=action, silo=silo, decision=decision,
+                              reason=reason, caller=caller))
+
+
+_GOOD_DISP = "disp-pdf-20260612-151828"
+
+
+class TestDispose:
+    def _store(self, ops, tmp_path, audit=None):
+        return _SiloStore(ops, config_path=tmp_path / "silos.yaml", audit=audit)
+
+    def test_removes_a_disposable_and_audits_allow(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        caller = {"uid": 1000, "pid": 42, "exe": "/usr/bin/qs"}
+        assert store.dispose(_GOOD_DISP, caller=caller) is True
+        assert ops.disp_removed == [_GOOD_DISP]
+        assert _GOOD_DISP not in ops.disp_containers
+        row = audit.rows[-1]
+        assert row["action"] == "dispose"
+        assert row["decision"] == "allow"
+        assert row["caller"] == caller
+
+    @pytest.mark.parametrize("bad", [
+        "qdistro-silo-browser",        # a persistent silo container
+        "disp-pdf",                    # missing the timestamp shape
+        "disposable",                  # merely starts with the letters
+        "disp-pdf-20260612-151828; rm -rf /",  # injection-ish, not disp-shaped
+        "",
+    ])
+    def test_rejects_non_disposable_name_fail_closed(self, ops, tmp_path, bad):
+        ops.disp_containers = [bad] if bad else []
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadArgument):
+            store.dispose(bad)
+        # The non-disposable name NEVER reached the container remove.
+        assert ops.disp_removed == []
+        assert audit.rows[-1]["decision"] == "deny"
+
+    def test_podman_rm_failure_returns_false_and_audits_error(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_remove_fails = True
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        assert store.dispose(_GOOD_DISP) is False
+        assert ops.disp_removed == [_GOOD_DISP]   # attempted
+        assert audit.rows[-1]["decision"] == "error"
+
+    def test_remove_oserror_maps_to_badstate(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_remove_raises = FileNotFoundError("podman")
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadState):
+            store.dispose(_GOOD_DISP)
+        assert audit.rows[-1]["decision"] == "error"
+
+    def test_dispose_without_audit_is_noop_safe(self, ops, tmp_path):
+        # audit=None disables the durable sink; dispose must still work.
+        ops.disp_containers = [_GOOD_DISP]
+        store = self._store(ops, tmp_path, audit=None)
+        assert store.dispose(_GOOD_DISP) is True
