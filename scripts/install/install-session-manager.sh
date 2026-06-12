@@ -39,6 +39,11 @@ install -d -o root -g root -m 0755 /sys/fs/cgroup/qdistro-silos 2>/dev/null || t
 install -d -o root -g root -m 0755 "$DEST"
 install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
     "$DEST/qdistro_session_manager.py"
+# Disposables backend (M3): the pure tier-2 --disposable helper imported by
+# the daemon at startup (qdistro_session_manager.py: `import qdistro_disposables`).
+# Without this the daemon ModuleNotFoundErrors and crash-loops on boot.
+install -o root -g root -m 0755 "$SRC/qdistro_disposables.py" \
+    "$DEST/qdistro_disposables.py"
 # Per-silo netns egress (todo/fable-networking task 3): the pure egress
 # backend imported by the daemon, plus the admin tunnel-provisioning helper.
 install -o root -g root -m 0755 "$SRC/qdistro_silo_egress.py" \
