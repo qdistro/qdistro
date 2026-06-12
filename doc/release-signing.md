@@ -63,8 +63,11 @@ scripts/install/gen-source-manifest.sh \
    once the manifest carries any active line it MUST verify:
    `verify-source-manifest.sh <manifest> <sig> <keyring> [expected-signer]`
    (gpgv signature, optional gpgv-key binding, + `gen-source-manifest.sh --lint`
-   shape). Missing keyring/sig or a bad signature is fatal — root never runs
-   unverified code. The manifest + sig are copied into a root-owned 0700 dir and
+   shape). Missing keyring/sig or a bad signature is fatal — root will not clone,
+   pin-check, build, or install any source tree until the manifest verifies (the
+   gate covers the *source*; the privileged bootstrap script itself runs before
+   it and is not verified by it). The manifest + sig are copied into a root-owned
+   0700 dir and
    verified there, and every later pin/field read comes from that verified copy
    (closes the TOCTOU window when the bootstrap runs out of a user-owned tree).
 
