@@ -71,6 +71,17 @@ real_manifest_pin() {
     '
 }
 
+# Call an arbitrary no-arg-or-args bootstrap function with SOURCE_MANIFEST
+# pointed at $1; remaining args are passed to the function named $2.
+real_boot_fn() {
+    local manifest="$1" fn="$2"; shift 2
+    QDISTRO_SOURCE_MANIFEST="$manifest" bash -c '
+        set -euo pipefail
+        . "'"$BOOT"'" >/dev/null 2>&1
+        '"$fn"' "$@"
+    ' _ "$@"
+}
+
 # --- syntax -------------------------------------------------------------
 @test "gen: generator is valid bash" {
     run bash -n "$GEN"
@@ -275,10 +286,184 @@ real_manifest_pin() {
     [[ "$output" == *"duplicate pin"* ]]
 }
 
-@test "lint: rejects a line with a stray third field" {
+@test "lint: rejects a bare (non key=value) trailing field" {
     local mf="$WORK/extra.txt"
     printf 'qdistro\t%040d\textra\n' 0 > "$mf"
     run "$GEN" --lint "$mf"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"<repo> <40-hex-sha>"* ]]
+    [[ "$output" == *"not key=value"* ]]
+}
+
+# --- extended release-metadata fields (tag=/artifact=/signer=) ----------
+@test "lint: accepts tag=/artifact=/signer= fields after the SHA" {
+    local mf="$WORK/ext.txt"
+    {
+        printf 'qdistro\t%040d\ttag=v1.0.0\n' 0
+        printf 'qdwin\t%040d\tartifact=sha256:%064d signer=0xDEADBEEFCAFE\n' 1 0
+        printf 'qdshell\t%040d\ttag=qdshell-1.2 artifact=sha512:%0128d signer=rel@qdistro.invalid\n' 2 0
+    } > "$mf"
+    run "$GEN" --lint "$mf"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "lint: extension fields do not change the parsed pin (manifest_pin reads \$2)" {
+    local mf="$WORK/ext2.txt"
+    printf 'qdistro\t%040d\ttag=v1.0.0 signer=0xABCD\n' 7 > "$mf"
+    local pin
+    pin="$(real_manifest_pin "$mf" qdistro)"
+    [ "$pin" = "$(printf '%040d' 7)" ] || { echo "pin was '$pin'" >&2; return 1; }
+}
+
+@test "lint: rejects an unknown field key" {
+    local mf="$WORK/badkey.txt"
+    printf 'qdistro\t%040d\tbranch=main\n' 0 > "$mf"
+    run "$GEN" --lint "$mf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown field key"* ]]
+}
+
+@test "lint: rejects a malformed artifact digest" {
+    local mf="$WORK/badart.txt"
+    printf 'qdistro\t%040d\tartifact=sha256:nothex\n' 0 > "$mf"
+    run "$GEN" --lint "$mf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed"* ]]
+}
+
+@test "lint: rejects a duplicate field key on one line" {
+    local mf="$WORK/dupkey.txt"
+    printf 'qdistro\t%040d\ttag=a tag=b\n' 0 > "$mf"
+    run "$GEN" --lint "$mf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate"* ]]
+}
+
+@test "lint: a field value is NOT glob-expanded against the cwd" {
+    # Regression guard for `read -ra` vs `set -- \$raw`: with `set --`, the token
+    # `tag=*` would glob-expand to a real file named `tag=v1.0.0` in the cwd and
+    # the line would WRONGLY lint clean, diverging from the bootstrap awk (which
+    # never globs). With read -ra the token stays `tag=*` -> malformed -> reject.
+    local d="$WORK/globdir"; mkdir -p "$d"
+    : > "$d/tag=v1.0.0"    # decoy a glob could match
+    local mf="$d/m.txt"
+    printf 'qdistro\t%040d\ttag=*\n' 0 > "$mf"
+    cd "$d"                # lint runs with this as cwd
+    run "$GEN" --lint "$mf"
+    [ "$status" -ne 0 ] || { echo "tag=* must not glob-expand to the decoy file" >&2; return 1; }
+    [[ "$output" == *"malformed"* ]] || { echo "$output" >&2; return 1; }
+}
+
+@test "gen: --tags emits tag= for a tagged HEAD and --signer stamps every line" {
+    stub_all
+    git -C "$WORK/qdistro" tag v9.9.9
+    local mf="$WORK/m.txt"
+    run "$GEN" --repo-root "$WORK" --tags --signer 0xFEEDFACE -o "$mf"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    # The tagged repo carries tag=; every non-comment line carries signer=.
+    grep -qE "^qdistro	${EXPECTED[qdistro]} tag=v9.9.9" "$mf" \
+        || { echo "missing tag= on qdistro line:"; grep qdistro "$mf" >&2; return 1; }
+    local n_lines n_signed
+    n_lines="$(awk '/^[[:space:]]*#/{next} NF' "$mf" | wc -l)"
+    n_signed="$(grep -c 'signer=0xFEEDFACE' "$mf")"
+    [ "$n_lines" -eq "$n_signed" ] || { echo "signed $n_signed of $n_lines lines" >&2; return 1; }
+    # And the result still lints clean + round-trips through the parser.
+    run "$GEN" --lint "$mf"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "gen: --require-tags fails when HEAD is untagged" {
+    stub_all
+    run "$GEN" --repo-root "$WORK" --require-tags
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no exact-match tag"* ]]
+}
+
+@test "gen: --artifact pins a per-repo digest; unknown repo/format rejected" {
+    stub_all
+    local mf="$WORK/art.txt"
+    run "$GEN" --repo-root "$WORK" --artifact "qdwin=sha256:$(printf '%064d' 0)" -o "$mf"
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    grep -qE "^qdwin	${EXPECTED[qdwin]} artifact=sha256:0{64}$" "$mf" \
+        || { echo "missing artifact= on qdwin:"; grep qdwin "$mf" >&2; return 1; }
+    run "$GEN" --repo-root "$WORK" --artifact "nope=sha256:$(printf '%064d' 0)"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unknown repo"* ]]
+    run "$GEN" --repo-root "$WORK" --artifact "qdwin=sha256:short"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"well-formed"* ]]
+}
+
+# --- bootstrap-side readers (manifest_field / manifest_has_pins) --------
+@test "boot: manifest_field reads tag=/signer= (and is empty when absent)" {
+    local mf="$WORK/f.txt"
+    printf 'qdistro\t%040d\ttag=v1.0.0 signer=0xABCD\nqdwin\t%040d\n' 0 1 > "$mf"
+    [ "$(real_boot_fn "$mf" manifest_field qdistro tag)" = "v1.0.0" ]
+    [ "$(real_boot_fn "$mf" manifest_field qdistro signer)" = "0xABCD" ]
+    # qdwin has no fields; qdistro has no artifact -> both empty.
+    [ -z "$(real_boot_fn "$mf" manifest_field qdwin tag)" ]
+    [ -z "$(real_boot_fn "$mf" manifest_field qdistro artifact)" ]
+}
+
+@test "boot: manifest_has_pins true only for a populated manifest" {
+    local empty="$WORK/empty.txt" pinned="$WORK/pinned.txt"
+    printf '# only a comment\n#qdistro 000\n' > "$empty"
+    run real_boot_fn "$empty" manifest_has_pins
+    [ "$status" -ne 0 ] || { echo "stub manifest should have no pins" >&2; return 1; }
+    printf 'qdistro\t%040d\ttag=v1.0.0\n' 0 > "$pinned"
+    run real_boot_fn "$pinned" manifest_has_pins
+    [ "$status" -eq 0 ] || { echo "pinned manifest should report pins" >&2; return 1; }
+}
+
+# --- verify_repo_pin tag consistency ------------------------------------
+@test "boot: verify_repo_pin accepts a manifest tag that matches the pin" {
+    stub_all
+    git -C "$WORK/qdistro" tag v1.2.3   # tag points at the pinned HEAD
+    local mf="$WORK/m.txt"
+    printf 'qdistro\t%s\ttag=v1.2.3\n' "${EXPECTED[qdistro]}" > "$mf"
+    run bash -c '
+        set -euo pipefail
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        . "'"$BOOT"'" >/dev/null 2>&1
+        verify_repo_pin qdistro
+    '
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    [[ "$output" == *"(tag v1.2.3)"* ]] || { echo "$output" >&2; return 1; }
+}
+
+@test "boot: verify_repo_pin REJECTS an unsafe tag shape (lint-bypass defence)" {
+    stub_all
+    # A hand-edited / lint-bypassed manifest with a refspec-y tag must be
+    # refused before it ever reaches `git refs/tags/$tag`.
+    local mf="$WORK/m.txt"
+    printf 'qdistro\t%s\ttag=bad:ref\n' "${EXPECTED[qdistro]}" > "$mf"
+    run bash -c '
+        set -euo pipefail
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        . "'"$BOOT"'" >/dev/null 2>&1
+        verify_repo_pin qdistro
+    '
+    [ "$status" -ne 0 ] || { echo "unsafe tag must be rejected" >&2; return 1; }
+    [[ "$output" == *"not a safe tag name"* ]] || { echo "$output" >&2; return 1; }
+}
+
+@test "boot: verify_repo_pin is FATAL when the manifest tag != the pin" {
+    stub_all
+    # Create a tag on a DIFFERENT commit than the pinned one.
+    ( cd "$WORK/qdistro"; printf 'x\n' > x; git add x; git commit -q -m other; git tag v1.2.3 )
+    local other; other="$(git -C "$WORK/qdistro" rev-parse v1.2.3)"
+    [ "$other" != "${EXPECTED[qdistro]}" ]
+    local mf="$WORK/m.txt"
+    # Pin the ORIGINAL commit but claim tag v1.2.3 (which is on 'other').
+    printf 'qdistro\t%s\ttag=v1.2.3\n' "${EXPECTED[qdistro]}" > "$mf"
+    run bash -c '
+        set -euo pipefail
+        export QDISTRO_PROFILE=release QDISTRO_REPO_ROOT="'"$WORK"'" QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        REPO_ROOT="'"$WORK"'"; SOURCE_MANIFEST="'"$mf"'"
+        . "'"$BOOT"'" >/dev/null 2>&1
+        verify_repo_pin qdistro
+    '
+    [ "$status" -ne 0 ] || { echo "expected fatal tag mismatch" >&2; return 1; }
+    [[ "$output" == *"tag 'v1.2.3' resolves to"* ]] || { echo "$output" >&2; return 1; }
 }

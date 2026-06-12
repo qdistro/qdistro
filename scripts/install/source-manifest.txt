@@ -1,7 +1,13 @@
 # qdistro source manifest — pinned commit SHAs for bootstrap source builds.
 #
 # Format (one repo per line, TAB- or space-separated):
-#   <repo>  <40-hex-commit-sha>
+#   <repo>  <40-hex-commit-sha>  [tag=<tag>] [artifact=<algo>:<hex>] [signer=<id>]
+# The trailing key=value fields are OPTIONAL release metadata (any order); the
+# bare `<repo> <sha>` form stays valid. See doc/release-signing.md.
+#
+# A populated manifest must be detach-signed by a published release key; in a
+# hardened profile the bootstrap verifies that signature (verify_manifest_
+# signature -> verify-source-manifest.sh) BEFORE any root clone/build.
 #
 # Used by scripts/install/qdistro-bootstrap.sh in the HARDENED profiles
 # (daily-driver / release). Before any root `meson install` / `pip install`
@@ -18,8 +24,9 @@
 # rather than silently build from whatever HEAD happens to be — fill in the
 # real SHAs (e.g. via your release tooling) before a hardened install.
 #
-# Example (replace the SHAs with the real release commits):
-# qdistro      0000000000000000000000000000000000000000
+# Example (replace the SHAs with the real release commits; the first line
+# also shows the optional tag=/artifact=/signer= release-metadata fields):
+# qdistro      0000000000000000000000000000000000000000 tag=v1.0.0 signer=0xRELEASEKEYFINGERPRINT
 # qdwin        0000000000000000000000000000000000000000
 # qdshell      0000000000000000000000000000000000000000
 # qdlocker     0000000000000000000000000000000000000000

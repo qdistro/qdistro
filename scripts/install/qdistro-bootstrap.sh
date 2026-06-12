@@ -315,6 +315,12 @@ parse_args() {
             --repo-root)         shift; REPO_ROOT="$1" ;;
             --branch=*)          BRANCH="${1#*=}" ;;
             --branch)            shift; BRANCH="$1" ;;
+            --release-keyring=*) RELEASE_KEYRING="${1#*=}" ;;
+            --release-keyring)   shift; RELEASE_KEYRING="$1" ;;
+            --manifest-sig=*)    SOURCE_MANIFEST_SIG="${1#*=}" ;;
+            --manifest-sig)      shift; SOURCE_MANIFEST_SIG="$1" ;;
+            --release-signer=*)  RELEASE_SIGNER="${1#*=}" ;;
+            --release-signer)    shift; RELEASE_SIGNER="$1" ;;
             --yes|-y)            ASSUME_YES=1 ;;
             --noninteractive)    NONINTERACTIVE=1 ;;
             --skip-packages)     SKIP_PACKAGES=1 ;;
@@ -982,10 +988,23 @@ repo_present() {
 # not run `meson install` / root `pip install` from an unpinned, unverified
 # tree. dev installs may skip it (shallow branch clones).
 SOURCE_MANIFEST="${QDISTRO_SOURCE_MANIFEST:-$SCRIPT_DIR/source-manifest.txt}"
+# Detached OpenPGP signature over the manifest + the gpgv keyring of published
+# release public keys. When the manifest carries real pins, a hardened install
+# verifies the signature with these BEFORE any clone/build runs as root (see
+# verify_manifest_signature). Defaults sit next to the manifest/script so a
+# published release tree ships them in place; both overridable.
+SOURCE_MANIFEST_SIG="${QDISTRO_SOURCE_MANIFEST_SIG:-$SOURCE_MANIFEST.sig}"
+RELEASE_KEYRING="${QDISTRO_RELEASE_KEYRING:-$SCRIPT_DIR/qdistro-release-keyring.gpg}"
+# Optional expected signer identity: a FULL 40-hex OpenPGP fingerprint
+# (optionally 0x-prefixed). When set, the verifier binds the manifest to this
+# key by matching gpgv's actual VALIDSIG fingerprint — NOT the in-document
+# advisory `signer=` field.
+RELEASE_SIGNER="${QDISTRO_RELEASE_SIGNER:-}"
 
 # manifest_pin <repo> — print the pinned 40-hex SHA for <repo>, or empty if
 # the repo is absent / the manifest does not exist. Lines: `repo <sha>`,
-# '#' comments and blanks ignored.
+# '#' comments and blanks ignored. Reads only $2, so the optional trailing
+# `key=value` release-metadata fields are invisible here.
 manifest_pin() {
     local repo="$1"
     [ -f "$SOURCE_MANIFEST" ] || return 0
@@ -993,6 +1012,96 @@ manifest_pin() {
         /^[[:space:]]*#/ {next}
         $1==r { print $2; exit }
     ' "$SOURCE_MANIFEST"
+}
+
+# manifest_field <repo> <key> — print the value of the trailing `key=value`
+# release-metadata field (tag/artifact/signer) on <repo>'s manifest line, or
+# empty if absent. Scans fields 3+ for an exact `<key>=` prefix.
+manifest_field() {
+    local repo="$1" key="$2"
+    [ -f "$SOURCE_MANIFEST" ] || return 0
+    awk -v r="$repo" -v k="$key" '
+        /^[[:space:]]*#/ {next}
+        $1==r {
+            for (i = 3; i <= NF; i++) {
+                eq = index($i, "=")
+                if (eq > 1 && substr($i, 1, eq - 1) == k) {
+                    print substr($i, eq + 1); exit
+                }
+            }
+            exit
+        }
+    ' "$SOURCE_MANIFEST"
+}
+
+# manifest_has_pins — true (0) if the manifest exists and has at least one
+# ACTIVE (non-comment, non-blank) line. The shipped stub is all comments, so
+# this is false until a release populates it — which is exactly when the
+# signature gate must engage. Deliberately matches ANY active line (not just a
+# well-formed 40-hex pin) so a populated-but-malformed manifest still trips the
+# gate fail-closed rather than reaching a clone before verify_repo_pin rejects.
+manifest_has_pins() {
+    [ -f "$SOURCE_MANIFEST" ] || return 1
+    awk '
+        /^[[:space:]]*#/ {next}
+        /^[[:space:]]*$/ {next}
+        {found=1; exit}
+        END {exit found ? 0 : 1}
+    ' "$SOURCE_MANIFEST"
+}
+
+# verify_manifest_signature — in hardened profiles, before ANY source clone or
+# root build, require that a populated manifest is signed by a published
+# release key. No-op under dev, and a no-op when the manifest carries no active
+# lines (the shipped stub) — verify_repo_pin then fails loud per-repo as before.
+# FATAL when the manifest is populated but the signature/keyring is missing or
+# does not verify.
+#
+# To close a TOCTOU window (the bootstrap may run as root out of a user-owned
+# sibling checkout), the manifest + signature are copied into a root-owned 0700
+# scratch dir, verified there, and SOURCE_MANIFEST is repointed at the verified
+# copy so every later manifest_pin / manifest_field reads exactly what gpgv
+# checked. Idempotent: subsequent calls see the already-verified copy.
+VERIFIED_MANIFEST=""
+verify_manifest_signature() {
+    is_dev && return 0
+    [ -n "$VERIFIED_MANIFEST" ] && return 0   # already verified this run
+    manifest_has_pins || return 0             # unpopulated stub: nothing to verify yet
+
+    local verifier="$SCRIPT_DIR/verify-source-manifest.sh"
+    [ -x "$verifier" ] || die "manifest is pinned but the verifier is missing/!x: $verifier"
+    command -v gpgv >/dev/null 2>&1 || die "gpgv not found; cannot verify the signed source manifest (install gnupg) in '$QDISTRO_PROFILE' profile"
+    [ -f "$RELEASE_KEYRING" ] || die "manifest is pinned but no release keyring at $RELEASE_KEYRING (publish it or set QDISTRO_RELEASE_KEYRING); hardened profiles refuse to build from an unsigned manifest"
+    [ -f "$SOURCE_MANIFEST_SIG" ] || die "manifest is pinned but no detached signature at $SOURCE_MANIFEST_SIG (set QDISTRO_SOURCE_MANIFEST_SIG)"
+
+    # Snapshot manifest + sig into a private scratch dir and verify the COPY.
+    # The scratch dir's PARENT must not be attacker-writable, else a same-uid
+    # user could rename/replace our root-owned 0700 dir after verification and
+    # before the later reads. So we DELIBERATELY avoid qd_private_runtime_dir
+    # (it prefers $XDG_RUNTIME_DIR, e.g. a user-owned /run/user/1000 under sudo)
+    # and root our mktemp under /run (root-owned, not user-writable) or, failing
+    # that, the sticky $TMPDIR/tmp where only the owner can replace entries.
+    # Use literal /tmp (sticky) — NOT $TMPDIR — for the fallback, so a preserved
+    # attacker-controlled TMPDIR can't reintroduce a user-owned non-sticky parent.
+    local base priv mcopy scopy
+    if [ -d /run ] && [ -w /run ]; then base=/run; else base=/tmp; fi
+    priv="$(mktemp -d "$base/qdistro-manifest.XXXXXX")" || die "could not create a private scratch dir for manifest verification"
+    chmod 0700 "$priv"
+    mcopy="$priv/source-manifest.txt"; scopy="$priv/source-manifest.txt.sig"
+    cp -- "$SOURCE_MANIFEST" "$mcopy" || die "failed to snapshot manifest for verification"
+    cp -- "$SOURCE_MANIFEST_SIG" "$scopy" || die "failed to snapshot manifest signature"
+    chmod 0600 "$mcopy" "$scopy" 2>/dev/null || true
+
+    log "verifying signed source manifest before any clone/build..."
+    # RELEASE_SIGNER, if set, is checked AUTHORITATIVELY against gpgv's signing
+    # key by the verifier (not against any in-document signer= field).
+    "$verifier" "$mcopy" "$scopy" "$RELEASE_KEYRING" "$RELEASE_SIGNER" \
+        || die "source manifest signature/format verification FAILED; refusing to clone or build as root"
+
+    # All later reads come from the verified copy (TOCTOU-closed).
+    SOURCE_MANIFEST="$mcopy"
+    VERIFIED_MANIFEST="$mcopy"
+    log "  source manifest signature OK"
 }
 
 # verify_repo_pin <repo> — in hardened profiles, ensure the checkout at
@@ -1020,6 +1129,36 @@ verify_repo_pin() {
         || die "$repo: failed to check out pinned commit $pin"
     head="$(git -C "$REPO_ROOT/$repo" rev-parse HEAD 2>/dev/null || true)"
     [ "$head" = "$pin" ] || die "$repo: HEAD ($head) != pinned $pin after checkout"
+
+    # If the manifest records a release tag for this repo, the tag must resolve
+    # to the pinned commit. A MISMATCH is tamper-evidence (the manifest claims
+    # tag T == commit C, the repo disagrees) and is FATAL. An ABSENT tag is only
+    # a WARN: the commit pin is the cryptographic anchor; the tag is advisory
+    # metadata that a shallow clone may simply not carry.
+    local tag tag_commit
+    tag="$(manifest_field "$repo" tag)"
+    if [ -n "$tag" ]; then
+        # Defence-in-depth: the signed-manifest linter already constrains tag
+        # shape, but this value flows into `git ... refs/tags/$tag` — re-check it
+        # here so a lint-bypassed/hand-edited manifest cannot smuggle a refspec
+        # ('..', ':', leading '-' or '/') into a fetch/rev-parse.
+        if ! printf '%s' "$tag" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/+-]*$' \
+           || [ "${tag#*..}" != "$tag" ]; then
+            die "$repo: manifest tag '$tag' is not a safe tag name (lint bypassed or hand-edited manifest)"
+        fi
+        if ! git -C "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null 2>&1; then
+            git -C "$REPO_ROOT/$repo" fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+        fi
+        tag_commit="$(git -C "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+        if [ -z "$tag_commit" ]; then
+            warn "  $repo: manifest records tag '$tag' but it is absent from the checkout (commit pin $pin still enforced)"
+        elif [ "$tag_commit" != "$pin" ]; then
+            die "$repo: manifest tag '$tag' resolves to $tag_commit but the pinned commit is $pin (tampered manifest or moved tag)"
+        else
+            log "  $repo: verified at pinned commit $pin (tag $tag)"
+            return 0
+        fi
+    fi
     log "  $repo: verified at pinned commit $pin"
 }
 
@@ -1059,8 +1198,22 @@ fetch_repo() {
 }
 
 fetch_sources() {
+    # Gate: a populated manifest must be signature-verified BEFORE any root
+    # clone OR build. This runs FIRST — even with --skip-sources, since the
+    # build phase still root-installs from $REPO_ROOT. No-op under dev / for the
+    # unpopulated stub manifest.
+    verify_manifest_signature
+
     if [ -n "$SKIP_SOURCES" ]; then
         log "skipping source acquisition (--skip-sources)"
+        # Pre-staged checkouts are still root-built: verify each PRESENT repo is
+        # at its manifest pin before any build runs (no-op under dev).
+        if ! is_dev; then
+            local repo
+            for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
+                repo_present "$repo" && verify_repo_pin "$repo"
+            done
+        fi
         return 0
     fi
     install -d -m 0755 "$REPO_ROOT"
