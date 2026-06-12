@@ -943,9 +943,11 @@ gate_host() {
 
     # BLOCKING static lint + narrow type check, before the (slow) test suites so
     # a lint break is reported fast. Both use the shared profiles in ci/ and are
-    # calibrated green on current main. Run from $WORKSPACE/qdistro so the
-    # per-file-ignore globs resolve relative to that dir (see ruff-shared.toml);
-    # the targets are absolute paths spanning qdistro + sibling repos.
+    # calibrated green on current main. Run from $QDISTRO_REPO (the actual
+    # qdistro checkout, NOT a name-hardcoded $WORKSPACE/qdistro — so a worktree
+    # named anything else still works) so the per-file-ignore globs resolve
+    # relative to that dir (see ruff-shared.toml); the targets are absolute
+    # paths spanning qdistro + sibling repos.
     #
     # A MISSING tool must NOT redden the gate, but it also must NOT masquerade as
     # a clean lint run: probe for the tool FIRST (in the same bash -lc login
@@ -953,13 +955,13 @@ gate_host() {
     # and record an explicit SKIP row when absent, instead of the run_logged
     # step's in-snippet `exit 0` landing as an indistinguishable PASS.
     if bash -lc "command -v ruff >/dev/null 2>&1"; then
-        run_logged host qdistro-ruff "$EXIT_HOST" lint "$WORKSPACE/qdistro" "$(host_ruff_cmd)" "shared ruff profile (blocking)"; step_rc=$?
+        run_logged host qdistro-ruff "$EXIT_HOST" lint "$QDISTRO_REPO" "$(host_ruff_cmd)" "shared ruff profile (blocking)"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
         record_skip host qdistro-ruff lint "ruff not installed; blocking lint skipped"
     fi
     if bash -lc "command -v mypy >/dev/null 2>&1"; then
-        run_logged host qdistro-mypy "$EXIT_HOST" lint "$WORKSPACE/qdistro" "$(host_mypy_cmd)" "narrow mypy: cli+browser_bridge (blocking)"; step_rc=$?
+        run_logged host qdistro-mypy "$EXIT_HOST" lint "$QDISTRO_REPO" "$(host_mypy_cmd)" "narrow mypy: cli+browser_bridge (blocking)"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
         record_skip host qdistro-mypy lint "mypy not installed; blocking type check skipped"
@@ -1017,13 +1019,13 @@ fi'
         'find:tests/unit -name "test_*.py"' 30 \
         'PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1' \
         '${_COV_FLAGS}' "$_qd_pre" "$_qd_post")
-    run_logged host qdistro-pytest "$EXIT_HOST" pytest "$WORKSPACE/qdistro" "$c" "qdistro unit tests"; step_rc=$?
+    run_logged host qdistro-pytest "$EXIT_HOST" pytest "$QDISTRO_REPO" "$c" "qdistro unit tests"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
     # Publish the coverage report as a run artifact WHEN AVAILABLE (report-only
     # artifact row). The artifact copy is conditional on the JSON existing...
-    if [ -f "$WORKSPACE/qdistro/.coverage-report.json" ]; then
-        cp "$WORKSPACE/qdistro/.coverage-report.json" "$RDIR/host/qdistro-coverage.json" 2>/dev/null || true
+    if [ -f "$QDISTRO_REPO/.coverage-report.json" ]; then
+        cp "$QDISTRO_REPO/.coverage-report.json" "$RDIR/host/qdistro-coverage.json" 2>/dev/null || true
         record_result host qdistro-coverage pass 0 pass coverage \
             "$RDIR/host/qdistro-pytest.log" "coverage report (report-only artifact)"
     fi
