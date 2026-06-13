@@ -1,0 +1,33 @@
+[Unit]
+Description=qdistro backup verify-only restore rehearsal (06-backup-dr §3.3)
+# Triggered by qdistro-backup-verify.timer (weekly). Runs a NON-DESTRUCTIVE,
+# READ-ONLY-against-the-target rehearsal: pull the remote manifest chain + blobs,
+# verify the signatures + hash chain + per-subvol blob lineage + freshness vs the
+# local seq anchor, and FAIL LOUDLY (non-zero exit -> unit failed -> journal) on
+# a broken chain, missing/corrupt blob, bad signature, or a remote rolled back
+# below the local anchor. It NEVER writes the remote and NEVER advances any seq
+# (a backup that has never been restore-verified is Schrodinger's backup).
+#
+# Shares /etc/qdistro/backup.conf with qdistro-backup.service; ConditionPathExists
+# -skips on a vanilla install. allowed_signers + sign_identity MUST be set in
+# backup.conf or the rehearsal refuses (a rehearsal that skips signature
+# verification is theatre).
+ConditionPathExists=/etc/qdistro/backup.conf
+
+[Service]
+Type=oneshot
+# Default rehearsal is sig + chain + full-chain blob-hash verification only; it
+# does NOT receive (no root btrfs op, no rage identity needed for the core).
+# To additionally dry-run `btrfs receive` into a throwaway scratch subvol, add
+# --rehearse-receive --identity-file <rage-id> here (needs CAP_SYS_ADMIN + btrfs).
+ExecStart=/usr/local/bin/qdistro-backup-run rehearse --config /etc/qdistro/backup.conf
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The rehearsal writes ONLY a private temp dir under its scratch_dir (pulled
+# manifests/blobs, deleted on exit). StateDirectory makes /var/lib/qdistro/backup
+# writable through ProtectSystem=strict (shared with the backup service). If
+# backup.conf overrides state_dir/scratch_dir outside it, add ReadWritePaths.
+StateDirectory=qdistro/backup
+StateDirectoryMode=0700
+PrivateTmp=true

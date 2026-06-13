@@ -46,7 +46,7 @@ source = "/home/.snapshots/silos/alice"
 
 # Machine-rebuild metadata (06 §2). v1 collector is config-only — it does NOT
 # raw-copy hot sqlite/audit DBs (a known consistency risk; that coverage is a
-# fast-follow). Add the vault recovery bundle here once wired.
+# fast-follow).
 [[subvol]]
 name = "metadata"
 collector = true
@@ -58,3 +58,27 @@ paths = [
     "/etc/snapper/configs",
 ]
 exclude = ["*.sock", "*.lock"]
+
+# --- vault recovery bundle into the collector (06 §3.4 / §2c) -----------------
+# Folds the recovery-critical material into the named collector subvol's
+# recovery/ subdir so a bare-metal restore has everything to VERIFY + restore.
+# The daily service is UNATTENDED: it only COPIES already-exported, public-or-
+# encrypted files (validated FAIL-CLOSED — symlinks, loose perms, wrong owner, or
+# any private-key marker are HARD-refused) and GENERATES static docs (manifest
+# schema, restore runbook, a redacted non-secret config echo). It NEVER touches
+# the recovery passphrase or the live vault master key.
+#
+# What goes in (all NON-secret): the ENCRYPTED vault recovery bundle (scrypt+
+# AES-GCM(master_key) to the owner recovery passphrase — ciphertext only; the
+# passphrase lives in the owner's head/safe), the PUBLIC allowed_signers, the
+# PUBLIC age recipients. NEVER: sign_key, the age private identity, the
+# passphrase, or any private key (the gate refuses them).
+#
+# Export the encrypted bundle out-of-band (owner-driven, needs the passphrase):
+#   qdistro vault-recovery export  ->  /etc/qdistro/recovery/vault-recovery.json
+# [recovery]
+# collector = "metadata"                              # an existing collector
+# bundle    = "/etc/qdistro/recovery/vault-recovery.json"
+# allowed_signers = "/etc/qdistro/backup-allowed-signers"
+# recipients      = "/etc/qdistro/backup-recipients.txt"
+# service_owner_uid = 0    # accept files owned by root (0) or this uid

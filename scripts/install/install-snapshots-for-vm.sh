@@ -51,6 +51,7 @@ install -m 0644 "$SRC/qdistro_snap_export_cli.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_manifest.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_cli.py"       "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_service.py"   "$DEST_LIB_QDISTRO/"
+install -m 0644 "$SRC/qdistro_backup_recovery.py"  "$DEST_LIB_QDISTRO/"
 
 cat >"$DEST_BIN/qdistro-snap-export" <<'CLI'
 #!/bin/bash
@@ -73,6 +74,9 @@ chmod 0755 "$DEST_BIN/qdistro-backup-run"
 
 install -m 0644 "$SRC/qdistro-backup.service" "$DEST_SYSD/qdistro-backup.service"
 install -m 0644 "$SRC/qdistro-backup.timer"   "$DEST_SYSD/qdistro-backup.timer"
+# Weekly verify-only restore rehearsal (06 §3.3) — read-only, fails loudly.
+install -m 0644 "$SRC/qdistro-backup-verify.service" "$DEST_SYSD/qdistro-backup-verify.service"
+install -m 0644 "$SRC/qdistro-backup-verify.timer"   "$DEST_SYSD/qdistro-backup-verify.timer"
 
 # Operator template — copying it to /etc/qdistro/backup.conf is what ENABLES the
 # daily backup (the unit ConditionPathExists-skips until then). Never overwrite a

@@ -1,0 +1,11 @@
+[Unit]
+Description=qdistro backup verify-only restore rehearsal — weekly timer
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=2h
+Persistent=true
+Unit=qdistro-backup-verify.service
+
+[Install]
+WantedBy=timers.target

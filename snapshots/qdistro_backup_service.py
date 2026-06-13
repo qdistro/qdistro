@@ -161,6 +161,7 @@ def load_config(path: str) -> dict:
     _require(isinstance(subvols_raw, list) and bool(subvols_raw),
              "at least one [[subvol]] is required")
     seen: set[str] = set()
+    collector_names: set[str] = set()
     subvols: list[dict] = []
     for s in subvols_raw:
         _require(isinstance(s, dict), "each [[subvol]] must be a table")
@@ -168,6 +169,8 @@ def load_config(path: str) -> dict:
         _require(name not in seen, f"duplicate subvol name {name!r}")
         seen.add(name)
         collector = bool(s.get("collector", False))
+        if collector:
+            collector_names.add(name)
         if collector:
             paths = s.get("paths")
             _require(isinstance(paths, list) and bool(paths) and
@@ -185,6 +188,41 @@ def load_config(path: str) -> dict:
                      f"subvol {name!r} needs a 'source' subvolume path")
             subvols.append({"name": name, "collector": False, "source": source})
 
+    # Optional [recovery] table (06-backup-dr §3.4): fold the recovery-critical
+    # material (encrypted vault bundle + PUBLIC verification material + generated
+    # docs) into a NAMED collector subvol. The daily service only COPIES an
+    # already-exported encrypted bundle + PUBLIC files (validated fail-closed)
+    # and generates static docs — it never sees the recovery passphrase or the
+    # live vault master key.
+    recovery = None
+    rec_raw = raw.get("recovery")
+    if rec_raw is not None:
+        _require(isinstance(rec_raw, dict), "[recovery] must be a table")
+        into = rec_raw.get("collector")
+        _require(isinstance(into, str) and into in collector_names,
+                 "[recovery].collector must name an existing collector "
+                 f"[[subvol]] (have: {sorted(collector_names)})")
+        bundle = rec_raw.get("bundle")
+        _require(bundle is None or (isinstance(bundle, str) and bool(bundle)),
+                 "[recovery].bundle must be a path string")
+        rec_allowed = rec_raw.get("allowed_signers")
+        _require(rec_allowed is None or (isinstance(rec_allowed, str) and bool(rec_allowed)),
+                 "[recovery].allowed_signers must be a path string")
+        rec_recipients = rec_raw.get("recipients")
+        _require(rec_recipients is None or (isinstance(rec_recipients, str) and bool(rec_recipients)),
+                 "[recovery].recipients must be a path string")
+        owner_uid = rec_raw.get("service_owner_uid")
+        _require(owner_uid is None or (isinstance(owner_uid, int)
+                 and not isinstance(owner_uid, bool) and owner_uid >= 0),
+                 "[recovery].service_owner_uid must be a non-negative int")
+        recovery = {
+            "collector": into,
+            "bundle": bundle,
+            "allowed_signers": rec_allowed,
+            "recipients": rec_recipients,
+            "service_owner_uid": owner_uid,
+        }
+
     return {
         "host_id": host_id,
         "recipients": recipients,
@@ -197,6 +235,7 @@ def load_config(path: str) -> dict:
         "scratch_dir": scratch_dir,
         "collect_dir": collect_dir,
         "subvols": subvols,
+        "recovery": recovery,
     }
 
 
@@ -329,6 +368,20 @@ class LocalDirTarget:
             return None
         return mf.sha256_file(p)
 
+    def listdir(self) -> list[str]:
+        """READ-ONLY: names present at the remote root (for the rehearsal to
+        discover the manifest set). Returns [] if the remote is absent."""
+        try:
+            return [n for n in os.listdir(self.path)
+                    if os.path.isfile(os.path.join(self.path, n))]
+        except OSError:
+            return []
+
+    def get(self, name: str, local_path: str) -> None:
+        """READ-ONLY download: copy a remote artifact to ``local_path`` for the
+        rehearsal's private verification. Never writes the remote."""
+        shutil.copyfile(os.path.join(self.path, name), local_path)
+
 
 class SshTarget:
     """user@host:/path — rsync -e <ssh> push + ssh remote ops. The argv shape is
@@ -392,6 +445,25 @@ class SshTarget:
             return None
         out = proc.stdout.decode("utf-8", "replace").split()
         return out[0] if out else None
+
+    def listdir(self) -> list[str]:
+        """READ-ONLY: list regular files at the remote base via ssh. `find`
+        keeps it to plain basenames; failure (absent dir) yields []."""
+        proc = subprocess.run(
+            self.ssh_base + [self.host, "find", self.base, "-maxdepth", "1",
+                             "-type", "f", "-printf", "%f\\n"],
+            stdout=subprocess.PIPE, check=False)
+        if proc.returncode != 0:
+            return []
+        return [ln for ln in proc.stdout.decode("utf-8", "replace").split("\n")
+                if ln]
+
+    def get(self, name: str, local_path: str) -> None:
+        """READ-ONLY download via rsync (pull direction). Never writes the
+        remote."""
+        argv = self.rsync_base + ["-e", " ".join(self.ssh_base),
+                                  self._remote(name), local_path]
+        subprocess.run(argv, check=True)
 
 
 def make_target(remote: str, rsync_cmd: str, ssh_cmd: str):
@@ -477,6 +549,53 @@ def collect_metadata(sv: dict, dest: str, rsync_cmd: str,
     return dest
 
 
+def materialise_recovery(rec: dict, cfg: dict, dest: str) -> None:
+    """Fold the recovery-critical material (06 §3.4) into ``dest/recovery/``
+    AFTER the collector has staged its config set into ``dest``. ``dest`` is the
+    named collector subvol's stage. Copies the validated (public/encrypted)
+    inputs through the fail-closed gate, then writes the generated docs. Any
+    validation failure aborts the run (fail closed) — never ship a backup that
+    leaked a secret or silently dropped recovery material.
+
+    The copy writes EXACTLY the bytes validate_recovery_input returned (read
+    from the validated fd), so the bytes checked are the bytes stored (no
+    TOCTOU between validate and copy)."""
+    recmod = _load_mod("qdistro_backup_recovery")
+    recovery_dir = os.path.join(dest, "recovery")
+    # Fresh rebuild each run (the collector cleared dest's children already, but
+    # recovery/ is written here after that, so clear it explicitly too).
+    if os.path.isdir(recovery_dir) and not os.path.islink(recovery_dir):
+        shutil.rmtree(recovery_dir, ignore_errors=True)
+    os.makedirs(recovery_dir, exist_ok=True)
+    os.chmod(recovery_dir, 0o700)
+    owner_uid = rec.get("service_owner_uid")
+
+    def _copy_validated(src_path: str | None, kind: str, out_name: str) -> None:
+        if not src_path:
+            return
+        data = recmod.validate_recovery_input(
+            src_path, kind, service_owner_uid=owner_uid)
+        out = os.path.join(recovery_dir, out_name)
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+
+    _copy_validated(rec.get("bundle"), "recovery_bundle", "vault-recovery.json")
+    _copy_validated(rec.get("allowed_signers"), "allowed_signers",
+                    "allowed_signers")
+    _copy_validated(rec.get("recipients"), "recipients", "recipients")
+
+    def _write_doc(name: str, text: str) -> None:
+        out = os.path.join(recovery_dir, name)
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    _write_doc("manifest-schema.txt", recmod.MANIFEST_SCHEMA_DOC)
+    _write_doc("RESTORE-RUNBOOK.txt", recmod.RESTORE_RUNBOOK_DOC)
+    _write_doc("config-redacted.txt", recmod.redacted_config_text(cfg))
+
+
 # --------------------------------------------------------------------------
 # the run
 # --------------------------------------------------------------------------
@@ -543,6 +662,12 @@ def cmd_run(args) -> int:
                 source = collect_metadata(
                     sv, os.path.join(cfg["collect_dir"], name), args.rsync_cmd,
                     args.subvol_create_cmd)
+                # Fold the recovery bundle + docs into this collector if the
+                # [recovery] table targets it. AFTER collect_metadata so the
+                # recovery/ subdir survives that step's fresh-rebuild clear.
+                rec = cfg.get("recovery")
+                if rec and rec["collector"] == name:
+                    materialise_recovery(rec, cfg, source)
             else:
                 source = sv["source"]
                 if not os.path.exists(source):
@@ -734,6 +859,192 @@ def _durable_copy(src: str, dst: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# rehearse — weekly verify-only restore rehearsal (06-backup-dr §3.3)
+# --------------------------------------------------------------------------
+
+MANIFEST_RE_NAME = "manifest-"
+
+
+def _pull_remote_chain(target, work: str) -> list[int]:
+    """READ-ONLY: copy EVERY manifest-<seq>.json (+ .sig) the remote holds DOWN
+    into ``work``, plus discover which seqs exist. Returns the sorted seq list.
+    Never writes the remote. The chain is then verified from ``work`` (the
+    pulled-from-REMOTE copy) so the rehearsal cannot false-green off the local
+    manifest store."""
+    seqs: list[int] = []
+    names = target.listdir()
+    for name in names:
+        if not (name.startswith(MANIFEST_RE_NAME) and name.endswith(".json")):
+            continue
+        mid = name[len(MANIFEST_RE_NAME):-len(".json")]
+        if not mid.isdigit():
+            continue
+        seqs.append(int(mid))
+        target.get(name, os.path.join(work, name))
+        # The .sig is required for verification; pull it if present (a missing
+        # sig is caught by the engine's signature gate, which fails closed).
+        sig = name + ".sig"
+        if sig in names:
+            target.get(sig, os.path.join(work, sig))
+    return sorted(seqs)
+
+
+def cmd_rehearse(args) -> int:
+    """Weekly NON-DESTRUCTIVE, READ-ONLY rehearsal (06 §3.3). Pulls the remote
+    manifest chain + blobs into a private temp dir, verifies signatures + chain
+    + freshness-vs-local-anchor + EVERY blob in restore_order for EVERY subvol,
+    and optionally dry-run receives a subvol's chain into a throwaway scratch
+    subvol. Never writes the remote, never advances any seq. Exits non-zero
+    (LOUD) on any failure so systemd marks the unit failed."""
+    cfg = load_config(args.config)
+    mf = _load_mod("qdistro_backup_manifest")
+    cli = _load_mod("qdistro_backup_cli")
+
+    # Signature verification is MANDATORY for a rehearsal — a rehearsal that
+    # skips it is theatre. Fail closed if allowed_signers/sign_identity absent.
+    allowed = cfg.get("allowed_signers")
+    identity = cfg.get("sign_identity")
+    if not allowed or not identity:
+        print("REHEARSAL FAILED: allowed_signers + sign_identity must be set in "
+              "backup.conf (a rehearsal cannot skip signature verification)",
+              file=sys.stderr)
+        return 1
+
+    # Freshness anchor: the on-machine state.json seq (operational anti-
+    # truncation — the remote must not be BEHIND what we last pushed). This is
+    # NOT the off-machine owner DR checkpoint; it is the automated self-check.
+    state = State(cfg["state_dir"], cfg["host_id"])
+    state.load()
+    local_seq = state.last_seq
+
+    target = make_target(cfg["remote"], args.rsync_cmd, args.ssh_cmd)
+    work = tempfile.mkdtemp(prefix="qdistro-rehearse-", dir=_scratch_parent(cfg))
+    try:
+        seqs = _pull_remote_chain(target, work)
+        if not seqs:
+            print("REHEARSAL FAILED: no manifests at the remote "
+                  f"{cfg['remote']!r}", file=sys.stderr)
+            return 1
+        # Freshness: remote must not have rolled back / been truncated below the
+        # local anchor. local_seq == -1 (no backups yet) skips this check — but
+        # if the remote ALREADY shows backups while local state is gone, the
+        # automated anti-rollback self-check has silently lost its anchor; say so
+        # LOUDLY (the off-machine --checkpoint-seq stays the real DR anti-rollback
+        # root, but a lost local anchor must not pass unremarked).
+        newest_remote = seqs[-1]
+        if local_seq < 0:
+            print("REHEARSAL WARNING: local state.json anchor is absent while the "
+                  f"remote holds {len(seqs)} manifest(s) — the on-machine "
+                  "anti-rollback self-check is disabled this run (restore the "
+                  "local state or rely on the off-machine checkpoint)",
+                  file=sys.stderr)
+        elif newest_remote < local_seq:
+            print(f"REHEARSAL FAILED: newest remote seq {newest_remote} < local "
+                  f"anchor seq {local_seq} (rollback/truncation?)",
+                  file=sys.stderr)
+            return 1
+
+        # Load + signature-verify + verify_chain from the PULLED remote copy.
+        try:
+            chain = cli._load_chain(mf, [work], allowed, identity, False)
+        except (cli.BackupError, mf.ManifestError) as e:
+            print(f"REHEARSAL FAILED: chain/signature verification: {e}",
+                  file=sys.stderr)
+            return 1
+
+        # Pull EVERY blob the chain references, then hash-verify the FULL
+        # restore_order for EVERY subvol (a missing/corrupt ANCESTOR blob must
+        # fail — not just the newest). Default coverage; no sampling.
+        wanted: dict[str, dict] = {}
+        for m in chain:
+            for ent in m["entries"]:
+                wanted[ent["blob"]] = ent
+        for blob in wanted:
+            try:
+                target.get(blob, os.path.join(work, blob))
+            except (OSError, subprocess.CalledProcessError):
+                print(f"REHEARSAL FAILED: blob {blob} not retrievable from "
+                      "remote (dropped/missing?)", file=sys.stderr)
+                return 1
+
+        subvol_names = sorted({e["subvol"] for m in chain for e in m["entries"]})
+        problems: list[str] = []
+        for name in subvol_names:
+            try:
+                order = mf.restore_order(chain, name)
+            except mf.ManifestError as e:
+                print(f"REHEARSAL FAILED: subvol {name!r} chain: {e}",
+                      file=sys.stderr)
+                return 1
+            problems += mf.verify_blobs({"entries": order}, work)
+        if problems:
+            for p in problems:
+                print(f"REHEARSAL BLOB PROBLEM: {p}", file=sys.stderr)
+            print(f"REHEARSAL FAILED: {len(problems)} blob problem(s)",
+                  file=sys.stderr)
+            return 1
+
+        # OPTIONAL dry-run receive: receive ONE subvol's full restore_order into
+        # a throwaway scratch subvol under state_dir, then destroy it. Off by
+        # default (needs root+btrfs+the rage identity).
+        if args.rehearse_receive:
+            rc = _rehearse_receive(args, cfg, cli, mf, work, chain, subvol_names)
+            if rc != 0:
+                return rc
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    print(json.dumps({
+        "rehearsal": "ok", "manifests": len(chain),
+        "newest_seq": chain[-1]["seq"], "local_anchor_seq": local_seq,
+        "subvols": subvol_names,
+        "received": bool(args.rehearse_receive)}))
+    return 0
+
+
+def _rehearse_receive(args, cfg, cli, mf, work: str, chain: list,
+                      subvol_names: list[str]) -> int:
+    """Dry-run receive a subvol's verified chain into an isolated scratch parent
+    under state_dir, then delete every received subvol + the scratch parent.
+    Never touches live state / --dest / seq. Returns 0 on success."""
+    if not args.identity_file:
+        print("REHEARSAL FAILED: --rehearse-receive needs --identity-file "
+              "(the rage decrypt key)", file=sys.stderr)
+        return 1
+    target_subvol = args.rehearse_subvol or subvol_names[0]
+    if target_subvol not in subvol_names:
+        print(f"REHEARSAL FAILED: --rehearse-subvol {target_subvol!r} not in "
+              f"the chain {subvol_names}", file=sys.stderr)
+        return 1
+    scratch_parent = os.path.join(cfg["state_dir"], "rehearsal-scratch")
+    # Symlink-safe pre-clean of any crashed-run leftover, then fresh dir.
+    delete_base = shlex.split(args.snapshot_delete_cmd)
+    cli._purge_chain_dir(scratch_parent, delete_base)
+    _mkdir_private(scratch_parent)
+    receive_base = shlex.split(args.receive_cmd)
+    try:
+        order = mf.restore_order(chain, target_subvol)
+        for i, entry in enumerate(order):
+            seq_dir = os.path.join(scratch_parent, str(i))
+            os.makedirs(seq_dir, exist_ok=True)
+            staging = tempfile.mkdtemp(prefix="qdistro-rehearse-recv-")
+            try:
+                ok = cli._verified_receive(
+                    mf, entry, work, staging, args.identity_file,
+                    receive_base + [seq_dir])
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+            if not ok:
+                print(f"REHEARSAL FAILED: dry-run receive of {entry['blob']} "
+                      "into scratch failed", file=sys.stderr)
+                return 1
+    finally:
+        # Always tear the scratch subvols down — they are throwaway.
+        cli._purge_chain_dir(scratch_parent, delete_base)
+    return 0
+
+
+# --------------------------------------------------------------------------
 # argparse
 # --------------------------------------------------------------------------
 
@@ -755,12 +1066,33 @@ def _build_argparser() -> argparse.ArgumentParser:
     r.add_argument("--rsync-cmd", default="rsync -aHAX")
     r.add_argument("--ssh-cmd", default="ssh")
     r.set_defaults(fn=cmd_run)
+
+    # rehearse — weekly verify-only restore rehearsal (06 §3.3). READ-ONLY
+    # against the remote; never advances state.
+    h = sub.add_parser("rehearse",
+                       help="verify-only restore rehearsal (read-only, no "
+                            "state mutation) — fails loudly on any problem")
+    h.add_argument("--config", default=DEFAULT_CONFIG)
+    h.add_argument("--rsync-cmd", default="rsync -aHAX")
+    h.add_argument("--ssh-cmd", default="ssh")
+    # Optional dry-run receive (off by default; needs root+btrfs+rage identity).
+    h.add_argument("--rehearse-receive", action="store_true",
+                   help="also dry-run `btrfs receive` a subvol's chain into a "
+                        "throwaway scratch subvol (then destroy it)")
+    h.add_argument("--rehearse-subvol", default=None,
+                   help="which subvol to dry-run receive (default: first)")
+    h.add_argument("--identity-file", default=None,
+                   help="rage decrypt identity (required with --rehearse-receive)")
+    h.add_argument("--receive-cmd", default="btrfs receive")
+    h.add_argument("--snapshot-delete-cmd", default="btrfs subvolume delete",
+                   help="how to drop scratch received subvols (injectable)")
+    h.set_defaults(fn=cmd_rehearse)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
-    if args.now is None:
+    if getattr(args, "now", "unset") is None:
         args.now = int(time.time())
     try:
         return args.fn(args)
