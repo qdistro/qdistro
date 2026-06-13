@@ -110,6 +110,7 @@ Usage:
   qci image [--root <extracted-tree>] [--idempotency] [--no-boot]
   qci registry-check
   qci release-manifest
+  qci bootstrap-release-profile
   qci affected [--changed-from <ref>] [--run] [--vm <name>] [<path> ...]
   qci edit-guard [--changed-from <ref>] [--allow-test-edits] [<path> ...]
   qci replay <scenario> <vm>
@@ -147,6 +148,13 @@ Notes:
               manifest or a missing keyring => blocked (dev host has no release
               pins/key yet), NOT failed; a populated-but-divergent manifest
               (wrong commit / dirty tree / moved tag) => EXIT_RELEASE (15).
+  qci bootstrap-release-profile  Enforce the hardened/release bootstrap contract
+              (R2) HOST-ONLY (no VM): runs the host-static bats that pin no
+              `--no-gpg-checks` / no `NOPASSWD: ALL` outside dev and source
+              pinned + signature-verified before any root clone/build
+              (bootstrap-hardening / source-manifest-signature / gen-source-
+              manifest). A `not ok`, a bats crash, or a vacuous 0-test run =>
+              EXIT_RELEASE (15); missing bats => blocked.
   qci affected  Map changed file paths to the qci gates that should run, using
               tests/registry.tsv plus conservative path-prefix rules. Paths not
               covered by either map to the FULL gate set (fail-safe: an unknown
@@ -2056,7 +2064,7 @@ gate_registry_check() {
         log "registry-check: no registry.tsv"
         return "$EXIT_OK"
     fi
-    local known_gates="host bats gui image vm-smoke release-manifest"
+    local known_gates="host bats gui image vm-smoke release-manifest bootstrap-release-profile"
     local line path gate rest rows=0 bad=0
     {
         echo "## registry-check (PILOT — advisory, not enforced)"
@@ -2332,6 +2340,104 @@ EOF
     return "$EXIT_RELEASE"
 }
 
+# Minimum non-skipped passing tests required from each SHIPPED bootstrap
+# release-contract suite — an erosion guard so a 32-test contract suite cannot be
+# silently gutted to a stub and still pass the gate. Tracks the current suites;
+# bump alongside intentional test removals. Unknown names (synthetic test
+# fixtures, or an operator-narrowed list) require only >=1 real pass.
+release_contract_floor() {
+    case "$1" in
+        bootstrap-hardening.bats)        echo 32 ;;
+        source-manifest-signature.bats)  echo 18 ;;
+        gen-source-manifest.bats)        echo 32 ;;
+        *)                               echo 1 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# qci bootstrap-release-profile gate (R2; 05-agent-test-plan.md §A
+# "bootstrap-release-profile gate"). Enforces the hardened/release bootstrap
+# contract — no `--no-gpg-checks`, no `NOPASSWD: ALL` outside the dev profile,
+# and source checkouts pinned + signature-verified BEFORE any root clone/build.
+# Those invariants are already pinned by host-STATIC bats (no VM): this gate runs
+# them HOST-ONLY so the release battery enforces the bootstrap contract without
+# B1, distinct from the VM-bound `qci bats` lane. A `not ok`, a non-zero bats
+# exit, OR a vacuous (0-test) run is a hard FAIL — a renamed/emptied contract
+# suite must not pass silently.
+# ---------------------------------------------------------------------------
+gate_bootstrap_release_profile() {
+    local log_path="$RDIR/bootstrap-release-profile/gate.log"
+    mkdir -p "$(dirname "$log_path")"
+    : > "$log_path"
+
+    # The host-static bats that pin the bootstrap release contract. Dir + list
+    # are env-overridable (tests point them at fixtures; an operator could narrow
+    # the set), defaulting to the shipped release-contract suites.
+    local bdir="${QCI_BOOTSTRAP_RELEASE_BATS_DIR:-$QDISTRO_REPO/tests/integration/vm}"
+    local files="${QCI_BOOTSTRAP_RELEASE_BATS:-bootstrap-hardening.bats source-manifest-signature.bats gen-source-manifest.bats}"
+
+    if ! command -v bats >/dev/null 2>&1; then
+        record_blocked bootstrap-release-profile bats "$EXIT_PREFLIGHT" bats "bats executable not found" "$log_path"
+        log "bootstrap-release-profile: bats not found"
+        return "$EXIT_OK"
+    fi
+
+    local fail=0 seen=0 f path out brc plan npass nfail nskip nreal floor
+    for f in $files; do
+        seen=$((seen + 1))
+        path="$bdir/$f"
+        if [ ! -f "$path" ]; then
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "release-contract bats missing: $path"
+            printf 'FAIL  %s: file missing\n' "$f" >> "$log_path"
+            fail=1; continue
+        fi
+        { echo; echo "## $f"; } >> "$log_path"
+        out=$(VM_NAME="${VM_NAME:-qci-bootstrap-release}" bats --tap "$path" 2>>"$log_path"); brc=$?
+        printf '%s\n' "$out" >> "$log_path"
+        # TAP: a passing line is `ok N ...`; a skipped one is `ok N ... # skip`;
+        # a failure is `not ok N ...`; the plan is `1..N`. Skips do NOT count as
+        # verified passes for a RELEASE CONTRACT — a skipped assertion is not run.
+        plan=$(printf '%s\n' "$out" | sed -n 's/^1\.\.\([0-9][0-9]*\)$/\1/p' | head -1)
+        npass=$(printf '%s\n' "$out" | grep -cE '^ok ')
+        nfail=$(printf '%s\n' "$out" | grep -cE '^not ok ')
+        nskip=$(printf '%s\n' "$out" | grep -ciE '^ok [0-9]+.*# *skip')
+        nreal=$((npass - nskip))
+        floor=$(release_contract_floor "$f")
+        if [ "$nfail" -ne 0 ]; then
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "$nfail failing / $npass passing"
+            fail=1
+        elif [ "$brc" -ne 0 ]; then
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "bats exited $brc with no parsed failures (crash/error?)"
+            fail=1
+        elif [ -z "$plan" ] || [ "$plan" -ne "$((npass + nfail))" ]; then
+            # No plan, or fewer reported results than declared => a partial run or
+            # a crash mid-suite. A release contract must run to completion.
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "TAP plan '${plan:-none}' != reported $((npass + nfail)) (partial run / crash?)"
+            fail=1
+        elif [ "$nskip" -ne 0 ]; then
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "$nskip skipped contract test(s) — a release contract must RUN, not skip"
+            fail=1
+        elif [ "$nreal" -lt "$floor" ]; then
+            # Erosion guard: a shipped contract suite gutted down to a stub
+            # (e.g. 32 tests -> 1) would otherwise pass. Pin a per-suite floor.
+            record_result bootstrap-release-profile "$f" fail "$EXIT_RELEASE" release bats "$log_path" "$nreal passing < floor $floor — contract suite eroded (or bump the floor in release_contract_floor)"
+            fail=1
+        else
+            record_result bootstrap-release-profile "$f" pass 0 pass bats "$log_path" "$nreal passing (>= floor $floor), 0 failing/skipped"
+            printf 'OK    %s: %s passing (floor %s)\n' "$f" "$nreal" "$floor" >> "$log_path"
+        fi
+    done
+
+    if [ "$seen" -eq 0 ]; then
+        record_result bootstrap-release-profile suites fail "$EXIT_RELEASE" release bats "$log_path" "no contract suites selected (empty/whitespace QCI_BOOTSTRAP_RELEASE_BATS)"
+        fail=1
+    fi
+
+    log "bootstrap-release-profile: $([ "$fail" -eq 0 ] && echo PASS || echo FAIL)"
+    [ "$fail" -eq 0 ] && return "$EXIT_OK"
+    return "$EXIT_RELEASE"
+}
+
 # ---------------------------------------------------------------------------
 # qci image gate. (a) static image-content checklist first (fail fast,
 # no VM); then (b) boot-verify + install-test. The boot/install stages
@@ -2518,8 +2624,8 @@ offline_should_skip_external() {
 # part of the widen-to-full set). GATE_ORDER is the stable emission order and
 # includes selftest, which a ci/* or tests/integration/qci/* change selects
 # explicitly.
-ALL_GATES="lint host image vm-smoke bats gui"
-GATE_ORDER="selftest lint host release-manifest image vm-smoke bats gui"
+ALL_GATES="lint host release-manifest bootstrap-release-profile image vm-smoke bats gui"
+GATE_ORDER="selftest lint host release-manifest bootstrap-release-profile image vm-smoke bats gui"
 
 affected_gates_for_path() {
     # Prints zero or more gate tokens (one per line) for a single path.
@@ -2549,6 +2655,17 @@ affected_gates_for_path() {
         scripts/install/gen-source-manifest.sh|\
         scripts/install/verify-source-manifest.sh)
             printf 'release-manifest\n' ;;
+        # The bootstrap installer + its profile lib -> the host-only release
+        # bootstrap-profile gate (and release-manifest, since the manifest
+        # parser/verify-before-build wiring lives in the bootstrap).
+        scripts/install/qdistro-bootstrap.sh|\
+        scripts/install/lib/qdistro-profile.sh)
+            printf 'bootstrap-release-profile\nrelease-manifest\n' ;;
+        # Bootstrap release-contract bats -> the host-only bootstrap-profile gate.
+        tests/integration/vm/bootstrap-hardening.bats|\
+        tests/integration/vm/source-manifest-signature.bats|\
+        tests/integration/vm/gen-source-manifest.bats)
+            printf 'bootstrap-release-profile\n' ;;
         # bats VM integration tests.
         tests/integration/vm/*.bats)
             printf 'bats\n' ;;
@@ -2664,6 +2781,7 @@ run_one_gate() {
         bats)     gate_bats "$vm"; step_rc=$? ;;
         gui)      gate_gui "$vm"; step_rc=$? ;;
         release-manifest) gate_release_manifest; step_rc=$? ;;
+        bootstrap-release-profile) gate_bootstrap_release_profile; step_rc=$? ;;
         *)        record_blocked affected "$gate" "$EXIT_USAGE" args "unknown gate token in affected set"; step_rc=$EXIT_USAGE ;;
     esac
     return "$step_rc"
@@ -3080,6 +3198,8 @@ gate_full() {
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_release_manifest; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_bootstrap_release_profile; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_vm_smoke ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_bats ""; step_rc=$?
@@ -3133,6 +3253,8 @@ main() {
             gate_registry_check; rc=$?; finish_run "$rc" ;;
         release-manifest)
             gate_release_manifest; rc=$?; finish_run "$rc" ;;
+        bootstrap-release-profile)
+            gate_bootstrap_release_profile; rc=$?; finish_run "$rc" ;;
         affected)
             local changed_from="" do_run=0 affected_vm="" affected_paths=()
             while [ $# -gt 0 ]; do

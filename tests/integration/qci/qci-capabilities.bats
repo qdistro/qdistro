@@ -55,7 +55,7 @@ affected_gates() {
 @test "affected: unknown path fails safe to the FULL gate set" {
     run affected_gates some/unknown/component/file.cpp
     [ "$status" -eq 0 ]
-    [ "$output" = "lint host image vm-smoke bats gui" ]
+    [ "$output" = "lint host release-manifest bootstrap-release-profile image vm-smoke bats gui" ]
 }
 
 @test "affected: ci/ prefix selects selftest+lint+host" {
@@ -72,6 +72,23 @@ affected_gates() {
     run affected_gates scripts/install/verify-source-manifest.sh
     [ "$status" -eq 0 ]
     [ "$output" = "release-manifest" ]
+}
+
+@test "affected: the bootstrap installer selects both release gates" {
+    run affected_gates scripts/install/qdistro-bootstrap.sh
+    [ "$status" -eq 0 ]
+    # GATE_ORDER orders release-manifest before bootstrap-release-profile.
+    [ "$output" = "release-manifest bootstrap-release-profile" ]
+}
+
+@test "affected: a bootstrap-contract bats selects only the host-only profile gate" {
+    run affected_gates tests/integration/vm/bootstrap-hardening.bats
+    [ "$status" -eq 0 ]
+    [ "$output" = "bootstrap-release-profile" ]   # specific rule beats generic vm/*.bats
+    # A non-contract vm bats still maps to the VM bats lane.
+    run affected_gates tests/integration/vm/broker-e2e.bats
+    [ "$status" -eq 0 ]
+    [ "$output" = "bats" ]
 }
 
 @test "affected: qci self-test bats selects selftest" {
@@ -102,7 +119,7 @@ affected_gates() {
     run affected_gates README.md todo/notes.md docs/x.md
     [ "$status" -eq 0 ]
     # Must NOT silently skip coverage: widen to full instead of emitting "".
-    [ "$output" = "lint host image vm-smoke bats gui" ]
+    [ "$output" = "lint host release-manifest bootstrap-release-profile image vm-smoke bats gui" ]
 }
 
 @test "affected: mixed paths are de-duplicated and ordered by GATE_ORDER" {
@@ -116,7 +133,7 @@ affected_gates() {
 @test "affected: no paths at all fails safe to FULL set" {
     run affected_gates
     [ "$status" -eq 0 ]
-    [ "$output" = "lint host image vm-smoke bats gui" ]
+    [ "$output" = "lint host release-manifest bootstrap-release-profile image vm-smoke bats gui" ]
 }
 
 @test "affected: mapping log + manifest record the selected gates" {
