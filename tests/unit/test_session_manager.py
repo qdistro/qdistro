@@ -10,6 +10,7 @@ swapped.
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -2274,30 +2275,62 @@ class TestDispLeaseCandidates:
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         return ops
 
-    def test_parses_us_separated_rows(self, monkeypatch):
-        # Real podman renders an absent {{.Label "x"}} as an EMPTY field, which
-        # the parser passes through verbatim (parse_lease_seconds maps it to
-        # None downstream); a populated row carries the raw label strings.
-        sep = "\x1f"
-        rows = sep.join(["disp-pdf-20260612-151828", _LEASE_TOK, "300",
-                         "1000"]) + "\n" + \
-            sep.join(["disp-x-20260612-152000", "", "", ""]) + "\n"
+    def test_parses_json_rows(self, monkeypatch):
+        # Parsed from `podman ps --format json`: a populated row carries the raw
+        # label strings; an ABSENT label is null -> None (parse_lease_seconds maps
+        # None to None downstream, so the candidate is skipped).
+        rows = json.dumps([
+            {"Names": ["disp-pdf-20260612-151828"],
+             "Labels": {"qdistro_tier2_token": _LEASE_TOK,
+                        "qdistro_lease_ttl": "300",
+                        "qdistro_lease_created": "1000"}},
+            {"Names": ["disp-x-20260612-152000"], "Labels": {}},
+        ])
         ops = self._ops_with_podman(monkeypatch, rows)
         cands = ops.disp_lease_candidates()
         assert cands[0] == {"name": "disp-pdf-20260612-151828",
                             "token": _LEASE_TOK, "ttl": "300",
                             "created": "1000"}
         assert cands[1] == {"name": "disp-x-20260612-152000",
-                            "token": "", "ttl": "", "created": ""}
+                            "token": None, "ttl": None, "created": None}
 
     def test_returns_empty_on_podman_failure(self, monkeypatch):
         ops = self._ops_with_podman(monkeypatch, "", returncode=125)
         assert ops.disp_lease_candidates() == []
 
-    def test_skips_malformed_rows(self, monkeypatch):
-        # A row without exactly 4 US-separated fields is skipped (podman noise).
-        ops = self._ops_with_podman(monkeypatch, "only-one-field\n\n")
+    def test_skips_malformed_json(self, monkeypatch):
+        # Garbled JSON (a truncated stream) fails closed for the whole pass.
+        ops = self._ops_with_podman(monkeypatch, '[{"Names": ["disp-')
         assert ops.disp_lease_candidates() == []
+
+    def test_empty_array_is_no_candidates(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "[]")
+        assert ops.disp_lease_candidates() == []
+
+    def test_label_value_with_newline_cannot_forge_a_record(self, monkeypatch):
+        # The injection the US/splitlines parse was vulnerable to: a label value
+        # carrying a newline + a fake disp-* name + an expired lease. Under JSON
+        # the newline is escaped inside ONE record's label value — it cannot
+        # spill into a second forged record. The genuine row is parsed intact;
+        # the embedded bytes are confined to the (here non-token) label value.
+        forged = ("x\n" + json.dumps(["disp-evil-20200101-000000"]).strip("[]")
+                  + "\x1f300\x1f1000")
+        rows = json.dumps([
+            {"Names": ["disp-pdf-20260612-151828"],
+             "Labels": {"qdistro_tier2_token": _LEASE_TOK,
+                        "qdistro_lease_ttl": forged,
+                        "qdistro_lease_created": "1000"}},
+        ])
+        ops = self._ops_with_podman(monkeypatch, rows)
+        cands = ops.disp_lease_candidates()
+        # Exactly ONE candidate (the real one); the forged bytes stay CONFINED to
+        # the genuine row's ttl VALUE — they never became a second record whose
+        # NAME is disp-evil. No candidate is named disp-evil, and the forged ttl
+        # is non-integer so parse_lease_seconds will reject it (never reaped).
+        assert len(cands) == 1
+        assert cands[0]["name"] == "disp-pdf-20260612-151828"
+        assert all(c["name"] != "disp-evil-20200101-000000" for c in cands)
+        assert "disp-evil" in cands[0]["ttl"]  # confined to the value, harmless
 
     def test_enumeration_timeout_returns_empty(self, monkeypatch):
         ops = sm._SystemOps()
@@ -2320,26 +2353,32 @@ class TestDispProctreeCandidates:
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         return ops
 
-    def test_parses_us_separated_rows(self, monkeypatch):
-        sep = "\x1f"
-        rows = sep.join(["disp-agent-20260612-151828", _LEASE_TOK, "1",
-                         "1000", "30"]) + "\n" + \
-            sep.join(["disp-x-20260612-152000", "", "1", "1000", ""]) + "\n"
+    def test_parses_json_rows(self, monkeypatch):
+        rows = json.dumps([
+            {"Names": ["disp-agent-20260612-151828"],
+             "Labels": {"qdistro_tier2_token": _LEASE_TOK,
+                        "qdistro_lease_proctree": "1",
+                        "qdistro_lease_created": "1000",
+                        "qdistro_lease_proctree_grace": "30"}},
+            {"Names": ["disp-x-20260612-152000"],
+             "Labels": {"qdistro_lease_proctree": "1",
+                        "qdistro_lease_created": "1000"}},
+        ])
         ops = self._ops_with_podman(monkeypatch, rows)
         cands = ops.disp_proctree_candidates()
         assert cands[0] == {"name": "disp-agent-20260612-151828",
                             "token": _LEASE_TOK, "proctree": "1",
                             "created": "1000", "grace": "30"}
         assert cands[1] == {"name": "disp-x-20260612-152000",
-                            "token": "", "proctree": "1",
-                            "created": "1000", "grace": ""}
+                            "token": None, "proctree": "1",
+                            "created": "1000", "grace": None}
 
     def test_returns_empty_on_podman_failure(self, monkeypatch):
         ops = self._ops_with_podman(monkeypatch, "", returncode=125)
         assert ops.disp_proctree_candidates() == []
 
-    def test_skips_malformed_rows(self, monkeypatch):
-        ops = self._ops_with_podman(monkeypatch, "only-one-field\n\n")
+    def test_skips_malformed_json(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, '{"not": "a list"}')
         assert ops.disp_proctree_candidates() == []
 
     def test_enumeration_timeout_returns_empty(self, monkeypatch):
@@ -2398,6 +2437,324 @@ class TestDispContainerRemoveTimeout:
         ops = sm._SystemOps()
         with pytest.raises(ValueError):
             ops.disp_container_remove("qdistro-silo-browser")
+
+
+class TestDispLiveTokensFailClosed:
+    """disp_live_tokens feeds the export-staging ORPHAN sweep, which DELETES
+    every staging dir whose token is NOT in the returned set. So a parse FAILURE
+    must map to None ("skip the pass"), NEVER to an empty set — an empty-on-error
+    set would delete a LIVE disposable's not-yet-imported artifacts (fail-OPEN
+    data loss). A genuine empty array IS an empty set (safe to reap orphans)."""
+    def _ops(self, monkeypatch, stdout, returncode=0):
+        ops = sm._SystemOps()
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        return ops
+
+    def test_genuine_empty_array_is_empty_set(self, monkeypatch):
+        # No disposables: a real `[]` -> empty set (safe to reap every orphan).
+        assert self._ops(monkeypatch, "[]").disp_live_tokens() == set()
+
+    def test_all_well_formed_tokens_yield_the_full_set(self, monkeypatch):
+        tok2 = "f" * 32
+        raw = json.dumps([
+            {"Names": ["disp-a-20260612-151828"],
+             "Labels": {"qdistro_tier2_token": _LEASE_TOK}},
+            {"Names": ["disp-b-20260612-152000"],
+             "Labels": {"qdistro_tier2_token": tok2}},
+        ])
+        assert self._ops(monkeypatch, raw).disp_live_tokens() == {_LEASE_TOK,
+                                                                  tok2}
+
+    @pytest.mark.parametrize("bad_label", [
+        {"qdistro_tier2_token": "NOTHEX"},   # garbled token on a live record
+        {},                                  # absent token on a live record
+        {"qdistro_tier2_token": None},       # null token
+    ])
+    def test_any_record_without_a_clean_token_skips_the_pass(
+            self, monkeypatch, bad_label):
+        # All-or-nothing: a live disposable ALWAYS has a hex token, so a record
+        # that can't yield one means the enumeration is untrustworthy -> None
+        # (skip), NEVER a smaller set (which would delete the un-accounted live
+        # disposable's staging dir). Mixed with a good record, the WHOLE pass is
+        # still None — an incomplete set is as dangerous as an empty one here.
+        raw = json.dumps([
+            {"Names": ["disp-a-20260612-151828"],
+             "Labels": {"qdistro_tier2_token": _LEASE_TOK}},   # good
+            {"Names": ["disp-b-20260612-152000"], "Labels": bad_label},  # bad
+        ])
+        assert self._ops(monkeypatch, raw).disp_live_tokens() is None
+
+    def test_non_dict_record_skips_the_pass(self, monkeypatch):
+        raw = json.dumps([{"Names": ["disp-a-20260612-151828"],
+                           "Labels": {"qdistro_tier2_token": _LEASE_TOK}}, 42])
+        assert self._ops(monkeypatch, raw).disp_live_tokens() is None
+
+    def test_array_of_non_dicts_skips_the_pass(self, monkeypatch):
+        # The structurally-wrong [1,2,3] case: a valid JSON list whose records
+        # are not dicts -> None (not an empty set).
+        assert self._ops(monkeypatch, "[1, 2, 3]").disp_live_tokens() is None
+
+    @pytest.mark.parametrize("stdout", [
+        "",                          # blank rc=0 stream
+        "   ",                       # whitespace
+        '[{"Names": ["disp-',        # TRUNCATED json (the regression vector)
+        "level=warning msg=blah",    # a stray log line on stdout, not json
+        '{"not": "a list"}',         # valid json but not an array
+        "null",                      # json null
+    ])
+    def test_unparseable_or_non_list_returns_none_not_empty_set(
+            self, monkeypatch, stdout):
+        # MUST be None, NOT set() — None tells the sweep to SKIP (never delete a
+        # live disposable's staging dir on a garbled/truncated rc=0 stream).
+        assert self._ops(monkeypatch, stdout).disp_live_tokens() is None
+
+    def test_rc_nonzero_returns_none(self, monkeypatch):
+        assert self._ops(monkeypatch, "", returncode=125).disp_live_tokens() \
+            is None
+
+    def test_timeout_returns_none(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def boom(argv, **kw):
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        monkeypatch.setattr(sm.subprocess, "run", boom)
+        assert ops.disp_live_tokens() is None
+
+
+_FULL_ID = "a" * 64
+_OTHER_ID = "b" * 64
+_DISP = "disp-pdf-20260612-151828"
+
+
+def _cg_in(cid):
+    return ("0::/user.slice/user-1006.slice/user@1006.service/user.slice/"
+            f"libpod-{cid}.scope\n")
+
+
+class TestStuckDescendantCleanup:
+    """After a timed-out `podman rm -f`, the cleanup SIGKILLs ONLY this
+    container's cgroup-verified HOST pids — never an unrelated host process, and
+    it never wedges the worker (everything bounded + fail-safe). These drive the
+    real _SystemOps wiring (inspect-id / top-hpid / /proc cgroup / os.kill) with
+    a fake subprocess + fake /proc + recorded kills."""
+
+    def _wire(self, monkeypatch, *, full_id, top_out, cgroups,
+              rm_times_out=True):
+        """full_id: the inspect {{.Id}} result. top_out: `podman top hpid comm`
+        stdout. cgroups: {hostpid: /proc cgroup text or None}. rm always TIMES
+        OUT first (the trigger), then the retry rm succeeds."""
+        ops = sm._SystemOps()
+        killed: list[tuple[int, int]] = []
+        rm_calls = {"n": 0}
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=full_id,
+                                             stderr="")
+            if "top" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=top_out,
+                                             stderr="")
+            if argv[-3:-1] == ["rm", "-f"] or ("rm" in argv and "-f" in argv):
+                rm_calls["n"] += 1
+                if rm_calls["n"] == 1 and rm_times_out:
+                    raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        def fake_kill(pid, sig):
+            killed.append((pid, sig))
+
+        def fake_open(path, *a, **kw):
+            import io
+            m = str(path)
+            if m.startswith("/proc/") and m.endswith("/cgroup"):
+                pid = int(m.split("/")[2])
+                txt = cgroups.get(pid)
+                if txt is None:
+                    raise OSError("no such process")
+                return io.StringIO(txt)
+            raise AssertionError(f"unexpected open {path!r}")
+
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        monkeypatch.setattr(sm.os, "kill", fake_kill)
+        monkeypatch.setattr("builtins.open", fake_open)
+        return ops, killed
+
+    def test_kills_only_cgroup_verified_host_pids(self, monkeypatch):
+        # 2001 + 2002 are in THIS container's cgroup -> killed. 2003 is in
+        # ANOTHER container's cgroup (an unrelated host process that happens to
+        # surface) -> NEVER killed. 2004 has an unreadable cgroup -> skipped.
+        top = "HPID COMMAND\n2001 sleep\n2002 conmon\n2003 sleep\n2004 x\n"
+        cgroups = {2001: _cg_in(_FULL_ID), 2002: _cg_in(_FULL_ID),
+                   2003: _cg_in(_OTHER_ID), 2004: None}
+        ops, killed = self._wire(monkeypatch, full_id=_FULL_ID, top_out=top,
+                                 cgroups=cgroups)
+        assert ops.disp_container_remove(_DISP) is False  # still retryable
+        pids = sorted(p for p, _ in killed)
+        assert pids == [2001, 2002]
+        assert all(sig == signal.SIGKILL for _, sig in killed)
+
+    def test_no_full_id_means_no_kill(self, monkeypatch):
+        # inspect returns a non-full id -> the cleanup refuses to kill anything
+        # (no authorization anchor). Fail-safe.
+        top = "HPID COMMAND\n2001 sleep\n"
+        ops, killed = self._wire(monkeypatch, full_id="short",
+                                 top_out=top, cgroups={2001: _cg_in(_FULL_ID)})
+        assert ops.disp_container_remove(_DISP) is False
+        assert killed == []
+
+    def test_top_unusable_kills_nothing(self, monkeypatch):
+        # A malformed top row -> parse_podman_top_hpids None -> no kills.
+        top = "HPID COMMAND\nnot-a-pid sleep\n"
+        ops, killed = self._wire(monkeypatch, full_id=_FULL_ID, top_out=top,
+                                 cgroups={})
+        assert ops.disp_container_remove(_DISP) is False
+        assert killed == []
+
+    def test_all_pids_in_other_container_kills_nothing(self, monkeypatch):
+        # Every host pid surfaced belongs to a DIFFERENT container's cgroup ->
+        # nothing is ours -> nothing is killed (the #1 hazard: no collateral).
+        top = "HPID COMMAND\n2001 sleep\n2002 sleep\n"
+        cgroups = {2001: _cg_in(_OTHER_ID), 2002: _cg_in(_OTHER_ID)}
+        ops, killed = self._wire(monkeypatch, full_id=_FULL_ID, top_out=top,
+                                 cgroups=cgroups)
+        assert ops.disp_container_remove(_DISP) is False
+        assert killed == []
+
+    def test_cleanup_never_raises_even_if_top_errors(self, monkeypatch):
+        # If `podman top` itself raises, the cleanup swallows it and the remove
+        # still returns False (the worker must never be wedged by a cleanup).
+        ops = sm._SystemOps()
+        rm_calls = {"n": 0}
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=_FULL_ID,
+                                             stderr="")
+            if "top" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            if "rm" in argv:
+                rm_calls["n"] += 1
+                if rm_calls["n"] == 1:
+                    raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        assert ops.disp_container_remove(_DISP) is False
+
+    def test_successful_rm_skips_cleanup_entirely(self, monkeypatch):
+        # The happy path: rm succeeds first try -> NO inspect/top/kill at all.
+        ops = sm._SystemOps()
+        seen: list[str] = []
+
+        def fake_run(argv, **kw):
+            seen.append(" ".join(str(a) for a in argv))
+            return types.SimpleNamespace(returncode=0, stdout=_FULL_ID,
+                                         stderr="")
+        # rm succeeds (rc 0) on the first call; but note _disp_container_full_id
+        # runs an inspect BEFORE rm — that is the only pre-rm call, and on rm
+        # success the cleanup never runs (no top/kill).
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        killed = []
+        monkeypatch.setattr(sm.os, "kill", lambda p, s: killed.append((p, s)))
+        assert ops.disp_container_remove(_DISP) is True
+        assert killed == []
+        assert not any("top" in c for c in seen)
+
+    def test_proc_cgroup_read_is_bounded_against_a_wedged_dstate_task(
+            self, monkeypatch):
+        # m1: a /proc/<pid>/cgroup read on a D-state task can block in the kernel
+        # with NO bound -> would wedge the single-flight worker. The read is run
+        # in a reader thread joined with a deadline; a hung read -> None -> the
+        # pid is treated as unverifiable and NEVER killed (fail-safe), and the
+        # call returns promptly instead of hanging.
+        import time as _t
+        ops = sm._SystemOps()
+
+        def hung_open(path, *a, **kw):
+            if str(path).endswith("/cgroup"):
+                _t.sleep(30)   # simulate a kernel-blocked procfs read
+            raise AssertionError("unexpected open")
+        monkeypatch.setattr("builtins.open", hung_open)
+        start = _t.monotonic()
+        # Use the short timeout directly so the test is fast + deterministic.
+        assert ops._read_proc_cgroup(2001, timeout=0.2) is None
+        assert _t.monotonic() - start < 5.0   # returned promptly, did not hang
+
+    def test_huge_pid_does_not_abort_kill_loop(self, monkeypatch):
+        # m2: an out-of-range pid raises OverflowError from os.kill (not OSError).
+        # It must be caught so a later VERIFIED straggler is still killed. (In
+        # practice a huge pid's cgroup read fails so it never reaches the kill
+        # set; this hardens the loop directly.)
+        huge = 10 ** 30
+        top = f"HPID COMMAND\n{huge} x\n2002 sleep\n"
+        cgroups = {huge: _cg_in(_FULL_ID), 2002: _cg_in(_FULL_ID)}
+        ops, killed = self._wire(monkeypatch, full_id=_FULL_ID, top_out=top,
+                                 cgroups=cgroups)
+
+        real_kill_targets = []
+
+        def fake_kill(pid, sig):
+            if pid == huge:
+                raise OverflowError("Python int too large to convert to C long")
+            real_kill_targets.append(pid)
+        monkeypatch.setattr(sm.os, "kill", fake_kill)
+        assert ops.disp_container_remove(_DISP) is False
+        # The huge pid raised OverflowError but the loop continued and killed 2002.
+        assert real_kill_targets == [2002]
+
+    def test_aggregate_cgroup_read_is_bounded_by_pid_cap(self, monkeypatch):
+        # A container reporting MANY host pids must not serialise unbounded
+        # cgroup reads: at most _STUCK_CLEANUP_MAX_PIDS are inspected. Reads
+        # beyond the cap are never attempted, so those pids are excluded from the
+        # kill set (fail-safe). Here all pids ARE in our cgroup, but only the
+        # first cap-many can be killed.
+        n = sm._STUCK_CLEANUP_MAX_PIDS + 50
+        pids = list(range(3000, 3000 + n))
+        top = "HPID COMMAND\n" + "".join(f"{p} x\n" for p in pids)
+        reads: list[int] = []
+
+        ops = sm._SystemOps()
+        killed: list[int] = []
+        rm_calls = {"n": 0}
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=_FULL_ID,
+                                             stderr="")
+            if "top" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=top, stderr="")
+            if "rm" in argv:
+                rm_calls["n"] += 1
+                if rm_calls["n"] == 1:
+                    raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        import io
+
+        def fake_open(path, *a, **kw):
+            m = str(path)
+            if m.startswith("/proc/") and m.endswith("/cgroup"):
+                pid = int(m.split("/")[2])
+                reads.append(pid)
+                return io.StringIO(_cg_in(_FULL_ID))
+            raise AssertionError(f"unexpected open {path!r}")
+
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        monkeypatch.setattr(sm.os, "kill", lambda p, s: killed.append(p))
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert ops.disp_container_remove(_DISP) is False
+        # No more than the cap of cgroup reads were ever attempted...
+        assert len(reads) <= sm._STUCK_CLEANUP_MAX_PIDS
+        # ...and at most the cap of kills happened (the rest are left for the
+        # next sweep — fail-safe, never an unbounded serial scan).
+        assert len(killed) <= sm._STUCK_CLEANUP_MAX_PIDS
+        assert killed == pids[:sm._STUCK_CLEANUP_MAX_PIDS]
 
 
 class TestLeaseSweepScheduler:

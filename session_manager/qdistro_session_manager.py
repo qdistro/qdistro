@@ -128,6 +128,17 @@ def _lease_sweep_interval() -> int:
 # cgroup-v2 hierarchy root for silo scopes. One subdir per silo;
 # cgroup.freeze controls Freeze/Resume.
 CGROUP_ROOT = Path("/sys/fs/cgroup/qdistro-silos")
+# Stuck-descendant cleanup (after a timed-out `podman rm -f`): caps so the
+# cleanup is bounded in AGGREGATE, not just per-call. Each /proc/<pid>/cgroup
+# read is individually time-bounded, but a container with very many wedged
+# D-state host pids would otherwise serialise N bounded reads into an N*timeout
+# wall-clock — re-wedging the single-flight sweep worker with a longer fuse. So
+# inspect at most this many host pids, and abandon the cleanup once the total
+# cgroup-read budget is spent (the unread pids are simply not killed this pass —
+# fail-safe; the next sweep retries). A real disposable has a tiny process tree,
+# so these caps only ever bite the pathological/hostile case.
+_STUCK_CLEANUP_MAX_PIDS = 128
+_STUCK_CLEANUP_BUDGET_S = 10.0
 # Per-silo launcher unit. The placeholder mirrors qdwin-session-launcher;
 # whichever launcher the bake ships is fine — the session manager only
 # needs the unit name shape so it can `systemctl start` it.
@@ -1110,27 +1121,24 @@ class _SystemOps:
         ``qdistro_disposable=1`` label, exactly like the boot reaper, so an
         admin container merely *named* disp-* is never listed.
 
-        Returns RAW strings as podman emits them (an absent label renders as the
-        literal ``<no value>``); ALL parsing/validation lives in the pure
+        Returns RAW label strings as podman emits them (an absent label becomes
+        ``None``); ALL parsing/validation lives in the pure
         ``qdistro_disposables`` helpers so it is unit-testable without podman.
-        Fields are split on US (0x1f), which cannot occur in a container name,
-        a hex token, or an integer label. Returns [] on ANY failure or timeout
-        (best-effort: a wedged podman must slow a leak sweep, never crash the
-        daemon — the boundary reaper is the backstop)."""
-        sep = "\x1f"
-        fmt = sep.join((
-            "{{.Names}}",
-            '{{.Label "qdistro_tier2_token"}}',
-            '{{.Label "qdistro_lease_ttl"}}',
-            '{{.Label "qdistro_lease_created"}}',
-        ))
+        Parsed from ``--format json`` (not a separator-joined Go-template line):
+        every label value is JSON-escaped, so an adversarial label value
+        (embedded newline/NUL/control/quote/the old US byte) can NEVER inject a
+        fake field or spill into a forged record — ``json.loads`` is the single
+        trust boundary, the name/token/lease gates remain the authority on what
+        is reaped. Returns [] on ANY failure or timeout (best-effort: a wedged
+        podman must slow a leak sweep, never crash the daemon — the boundary
+        reaper is the backstop)."""
         try:
             proc = subprocess.run(
                 ["runuser", "-u",
                  os.environ.get("QDISTRO_ADMIN_USER", "admin"),
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
-                 "--format", fmt],
+                 "--format", "json"],
                 capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             log.warning("lease sweep: candidate enumeration failed: %s", e)
@@ -1139,19 +1147,15 @@ class _SystemOps:
             log.warning("lease sweep: podman ps rc=%d: %s",
                         proc.returncode, proc.stderr.strip())
             return []
-        out: list[dict] = []
-        for ln in proc.stdout.splitlines():
-            if not ln.strip():
-                continue
-            parts = ln.split(sep)
-            if len(parts) != 4:
-                # A name/token cannot contain US; a malformed row is podman
-                # noise — skip it (the pure helper would reject it anyway).
-                continue
-            name, token, ttl, created = parts
-            out.append({"name": name, "token": token,
-                        "ttl": ttl, "created": created})
-        return out
+        rows = _disp.parse_podman_ps_json(
+            proc.stdout,
+            ["qdistro_tier2_token", "qdistro_lease_ttl",
+             "qdistro_lease_created"])
+        return [{"name": r["name"],
+                 "token": r["qdistro_tier2_token"],
+                 "ttl": r["qdistro_lease_ttl"],
+                 "created": r["qdistro_lease_created"]}
+                for r in rows]
 
     def disp_proctree_candidates(self) -> list[dict]:
         """Live disposables plus the metadata the process-tree-empty sweep needs:
@@ -1161,20 +1165,13 @@ class _SystemOps:
         ``qdistro_disposable=1`` label exactly like the TTL candidate read, so an
         admin container merely *named* disp-* is never listed.
 
-        Returns RAW strings as podman emits them (an absent label renders as the
-        literal ``<no value>`` or ``""``); ALL parsing/validation lives in the
-        pure ``qdistro_disposables`` helpers. Fields are split on US (0x1f), which
-        cannot occur in a name, a hex token, or an integer/boolean label. Returns
-        [] on ANY failure or timeout — the sweep is best-effort (a wedged podman
-        must slow the leak sweep, never crash the daemon)."""
-        sep = "\x1f"
-        fmt = sep.join((
-            "{{.Names}}",
-            '{{.Label "qdistro_tier2_token"}}',
-            '{{.Label "qdistro_lease_proctree"}}',
-            '{{.Label "qdistro_lease_created"}}',
-            '{{.Label "qdistro_lease_proctree_grace"}}',
-        ))
+        Returns RAW label strings as podman emits them (an absent label becomes
+        ``None``); ALL parsing/validation lives in the pure
+        ``qdistro_disposables`` helpers. Parsed from ``--format json`` (not a
+        separator-joined Go-template line) so an adversarial label value can
+        never inject a field or forge a record — see disp_lease_candidates.
+        Returns [] on ANY failure or timeout — the sweep is best-effort (a wedged
+        podman must slow the leak sweep, never crash the daemon)."""
         try:
             proc = subprocess.run(
                 ["runuser", "-u",
@@ -1182,7 +1179,7 @@ class _SystemOps:
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
                  "--filter", "label=qdistro_lease_proctree=1",
-                 "--format", fmt],
+                 "--format", "json"],
                 capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             log.warning("proctree sweep: candidate enumeration failed: %s", e)
@@ -1191,17 +1188,16 @@ class _SystemOps:
             log.warning("proctree sweep: podman ps rc=%d: %s",
                         proc.returncode, proc.stderr.strip())
             return []
-        out: list[dict] = []
-        for ln in proc.stdout.splitlines():
-            if not ln.strip():
-                continue
-            parts = ln.split(sep)
-            if len(parts) != 5:
-                continue
-            name, token, proctree, created, grace = parts
-            out.append({"name": name, "token": token, "proctree": proctree,
-                        "created": created, "grace": grace})
-        return out
+        rows = _disp.parse_podman_ps_json(
+            proc.stdout,
+            ["qdistro_tier2_token", "qdistro_lease_proctree",
+             "qdistro_lease_created", "qdistro_lease_proctree_grace"])
+        return [{"name": r["name"],
+                 "token": r["qdistro_tier2_token"],
+                 "proctree": r["qdistro_lease_proctree"],
+                 "created": r["qdistro_lease_created"],
+                 "grace": r["qdistro_lease_proctree_grace"]}
+                for r in rows]
 
     def disp_container_top_pids(self, name: str) -> str | None:
         """Raw ``podman top <name> pid comm`` output for a disposable, or ``None``
@@ -1271,20 +1267,207 @@ class _SystemOps:
         it is NOT raised, keeping the bool contract every caller already relies
         on (dispose() audits a False as 'podman rm failed', the reaper retries
         next boot). OSError (podman/runuser missing) still propagates as
-        before."""
+        before.
+
+        Stuck-descendant cleanup: if ``podman rm -f`` TIMES OUT the container may
+        still be alive with a stuck descendant tree (a hung container child,
+        conmon, pasta, slirp4netns) holding resources, so the next sweep
+        re-wedges the same way and the resources leak. After a timeout we run a
+        bounded, fail-safe ``_cleanup_stuck_descendants`` that SIGKILLs ONLY this
+        container's cgroup-verified payload host pids (never an unrelated host
+        process), then return False (still retryable). The cleanup never raises
+        and is itself bounded, so the single-flight worker can never wedge."""
         if not _disp.is_disposable_container(name):
             # Defence in depth: never let a non-disposable name reach rm -f.
             raise ValueError(f"refusing to reap non-disposable name {name!r}")
+        # Resolve the FULL container id BEFORE the rm: a timed-out rm may leave
+        # the container in a state where a later inspect is harder, and the id is
+        # the authorization anchor for the post-timeout cleanup. Best-effort and
+        # bounded — a failed/empty id simply disables the cleanup (fail-safe).
+        full_id = self._disp_container_full_id(name)
         try:
             proc = subprocess.run(
                 ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
                  "--", "podman", "rm", "-f", name],
                 capture_output=True, timeout=30)
         except subprocess.TimeoutExpired:
-            log.warning("podman rm -f %r timed out; treating as a failed "
-                        "(retryable) removal", name)
+            log.warning("podman rm -f %r timed out; cleaning up stuck "
+                        "descendants then treating as a failed (retryable) "
+                        "removal", name)
+            try:
+                self._cleanup_stuck_descendants(name, full_id)
+            except Exception as e:  # noqa: BLE001
+                # The cleanup is best-effort defence in depth; it must NEVER turn
+                # a timed-out remove into a worker-killing exception.
+                log.warning("stuck-descendant cleanup for %r errored: %s",
+                            name, e)
             return False
         return proc.returncode == 0
+
+    def _disp_container_full_id(self, name: str) -> str | None:
+        """The full (64-hex) container id of a disposable, via a bounded
+        ``podman inspect --format {{.Id}}``, or ``None`` on any failure / a
+        non-full-id result. The id is the authorization anchor for the
+        stuck-descendant cleanup (a host pid is only killable if its cgroup
+        carries the exact ``libpod-<id>.scope`` component), so a missing/garbled
+        id disables the kill entirely (fail-safe). Name-validated as defence in
+        depth so a non-disposable name never reaches inspect."""
+        if not _disp.is_disposable_container(name):
+            return None
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "inspect", "--format", "{{.Id}}", name],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("stuck-descendant cleanup: inspect %r id failed: %s",
+                        name, e)
+            return None
+        if proc.returncode != 0:
+            return None
+        cid = proc.stdout.strip()
+        return cid if _disp.is_full_container_id(cid) else None
+
+    def _disp_container_host_pids(self, name: str) -> list[int] | None:
+        """The HOST pids of a disposable's processes, via a bounded
+        ``podman top <name> hpid comm``, or ``None`` if unusable (=> no cleanup).
+        ``hpid`` is podman's explicit HOST pid descriptor — the ONLY pids it is
+        ever safe to ``os.kill`` from the host (the container-namespace ``pid``
+        would map to an unrelated host process). Parsed by the pure
+        ``parse_podman_top_hpids`` (fail-closed on any malformed row).
+        Name-validated as defence in depth."""
+        if not _disp.is_disposable_container(name):
+            return None
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "top", name, "hpid", "comm"],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("stuck-descendant cleanup: top %r hpid failed: %s",
+                        name, e)
+            return None
+        if proc.returncode != 0:
+            return None
+        return _disp.parse_podman_top_hpids(proc.stdout)
+
+    @staticmethod
+    def _read_proc_cgroup(pid: int, timeout: float = 2.0) -> str | None:
+        """Read ``/proc/<pid>/cgroup`` (host-side), or ``None`` if it cannot be
+        read (the process exited, permission denied) OR the read does not
+        complete within ``timeout`` seconds. ``None`` makes the pid UNVERIFIABLE
+        so it is never killed (fail-safe).
+
+        The timeout matters: this cleanup exists to handle a STUCK descendant, and
+        a task wedged in uninterruptible D-state (or behind a stuck FUSE/network
+        mount) can make a procfs read block in the kernel with no bound — which
+        would hang the single-flight sweep worker (the very wedge this whole
+        milestone removes). A procfs cgroup read is normally served from cached
+        task data and returns instantly; the bound only ever fires on the
+        pathological wedged case, where skipping the pid (NOT killing it) is the
+        correct fail-safe. Implemented with a short-lived reader thread joined
+        with a deadline so a stuck read can never block the worker (a leaked
+        daemon thread on the rare wedge is acceptable; wedging the sweep is not)."""
+        result: list[str | None] = [None]
+
+        def _read() -> None:
+            try:
+                with open(f"/proc/{int(pid)}/cgroup") as f:
+                    result[0] = f.read()
+            except OSError:
+                result[0] = None
+
+        t = threading.Thread(target=_read, name="cgroup-read", daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            log.warning("stuck-descendant cleanup: /proc/%d/cgroup read did not "
+                        "complete in %.1fs; skipping pid (fail-safe)",
+                        pid, timeout)
+            return None
+        return result[0]
+
+    def _cleanup_stuck_descendants(self, name: str,
+                                   full_id: str | None) -> list[int]:
+        """SIGKILL the stuck HOST descendants of a disposable whose ``podman rm
+        -f`` timed out — but ONLY pids provably inside this container's cgroup
+        (``libpod-<full_id>.scope`` as an exact component). Returns the pids it
+        killed (for tests / logging).
+
+        Fail-safe at every step: no full id, no host pids, or a pid whose cgroup
+        does not carry the exact scope component -> that pid is NOT killed. The
+        pure ``stuck_descendant_kill_set`` makes the safety decision; this method
+        only does the bounded reads and the kills. After killing, a single
+        bounded best-effort ``podman rm -f`` retry is attempted (its result does
+        not change the caller's False — the next sweep is the durable retry)."""
+        if not _disp.is_full_container_id(full_id):
+            log.warning("stuck-descendant cleanup for %r: no full container id; "
+                        "skipping (no kill on an unverifiable identity)", name)
+            return []
+        hpids = self._disp_container_host_pids(name)
+        if not hpids:
+            # None (unusable top) or [] (no payload pids visible) -> nothing to
+            # do; the rm retry below may still free a wedged state.
+            self._disp_rm_retry(name)
+            return []
+        # Bound the AGGREGATE cgroup-read time: cap the pid count and stop reading
+        # once the total budget is spent (a wedged D-state pid can burn its full
+        # per-read deadline, and N of them would serialise into N*deadline). An
+        # unread pid is simply omitted from cgroup_by_pid -> excluded from the
+        # kill set (fail-safe; the next sweep retries). This keeps the cleanup —
+        # and therefore the single-flight worker — bounded even on a hostile or
+        # pathological process tree.
+        if len(hpids) > _STUCK_CLEANUP_MAX_PIDS:
+            log.warning("stuck-descendant cleanup for %r: %d host pids exceeds "
+                        "cap %d; inspecting the first %d only",
+                        name, len(hpids), _STUCK_CLEANUP_MAX_PIDS,
+                        _STUCK_CLEANUP_MAX_PIDS)
+        cgroup_by_pid: dict[int, str | None] = {}
+        deadline = time.monotonic() + _STUCK_CLEANUP_BUDGET_S
+        for pid in hpids[:_STUCK_CLEANUP_MAX_PIDS]:
+            if time.monotonic() >= deadline:
+                log.warning("stuck-descendant cleanup for %r: cgroup-read budget "
+                            "%.1fs spent; not inspecting remaining pids "
+                            "(fail-safe, next sweep retries)", name,
+                            _STUCK_CLEANUP_BUDGET_S)
+                break
+            cgroup_by_pid[pid] = self._read_proc_cgroup(pid)
+        targets = _disp.stuck_descendant_kill_set(hpids, cgroup_by_pid, full_id)
+        killed: list[int] = []
+        for pid in targets:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except ProcessLookupError:
+                pass  # already gone — fine
+            except (OSError, OverflowError) as e:
+                # OverflowError: an out-of-C-int-range pid. Unreachable in
+                # practice (its /proc/<pid>/cgroup read fails -> it is excluded
+                # from the verified kill set above) but caught so a single bad
+                # pid can NEVER abort the loop and skip later verified stragglers.
+                log.warning("stuck-descendant cleanup for %r: kill(%d) failed: "
+                            "%s", name, pid, e)
+        if killed:
+            log.info("stuck-descendant cleanup for %r SIGKILLed %d verified "
+                     "host pid(s): %s", name, len(killed), killed)
+        # One bounded best-effort rm retry now that the stragglers are gone; the
+        # caller still returns False (the next sweep is the durable retry).
+        self._disp_rm_retry(name)
+        return killed
+
+    def _disp_rm_retry(self, name: str) -> None:
+        """A single bounded, best-effort ``podman rm -f`` retry used by the
+        stuck-descendant cleanup. Swallows every failure/timeout — it must never
+        raise (the caller is already returning False; the periodic sweep is the
+        durable retry)."""
+        try:
+            subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "rm", "-f", name],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.debug("stuck-descendant cleanup for %r: rm retry failed: %s",
+                      name, e)
 
     def kill_pids(self, pids: Iterable[int], sig: int) -> None:
         for pid in pids:
@@ -1379,7 +1562,7 @@ class _SystemOps:
                 ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
-                 "--format", '{{.Label "qdistro_tier2_token"}}'],
+                 "--format", "json"],
                 capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             log.warning("export staging sweep: token list failed: %s", e)
@@ -1388,8 +1571,53 @@ class _SystemOps:
             log.warning("export staging sweep: podman ps rc=%d: %s",
                         proc.returncode, proc.stderr.strip())
             return None
-        return {ln.strip() for ln in proc.stdout.splitlines()
-                if _disp.is_disposable_token(ln.strip())}
+        # CRITICAL fail-closed asymmetry (unlike the lease/proctree sweeps, which
+        # consume candidates to ADD reap targets so an empty/partial list is
+        # harmless): this set is consumed by reap_export_staging, which DELETES
+        # every staging dir whose token is NOT in the set. So an INCOMPLETE set is
+        # as dangerous as an empty one — a live disposable DROPPED from the set
+        # loses its not-yet-imported artifacts (fail-OPEN data loss). The query
+        # must therefore be ALL-OR-NOTHING: only a clean enumeration in which
+        # EVERY record yields a well-formed token is authoritative; any structural
+        # surprise -> None ("skip this pass"), never a partial set.
+        #
+        # This is stricter than the lease/proctree consumers (which use
+        # parse_podman_ps_json's []-on-error and per-record skip on purpose,
+        # because skipping only ever SPARES a leak there). Here a record that does
+        # not produce a valid token is NOT silently skipped — a live disposable
+        # always carries a hex qdistro_tier2_token (stamped at spawn), so a
+        # record without one means the enumeration is untrustworthy, and trusting
+        # it would authorize a delete.
+        try:
+            data = json.loads(proc.stdout)
+        except (ValueError, TypeError) as e:
+            log.warning("export staging sweep: podman ps json unparseable "
+                        "(treating as failure, NOT 'no disposables'): %s", e)
+            return None
+        if not isinstance(data, list):
+            log.warning("export staging sweep: podman ps json not a list "
+                        "(treating as failure, NOT 'no disposables')")
+            return None
+        tokens: set[str] = set()
+        for rec in data:
+            if not isinstance(rec, dict):
+                log.warning("export staging sweep: non-dict record in podman ps "
+                            "json (treating as failure, NOT 'no disposables')")
+                return None
+            labels = rec.get("Labels")
+            tok = labels.get("qdistro_tier2_token") if isinstance(labels, dict) \
+                else None
+            if not isinstance(tok, str) or not _disp.is_disposable_token(tok):
+                # A live disposable ALWAYS has a well-formed hex token; a record
+                # without one means we cannot fully account for the live set, so
+                # the whole pass is untrustworthy -> skip (never delete on a
+                # partial picture).
+                log.warning("export staging sweep: live disposable record with "
+                            "no well-formed token (skipping pass to avoid "
+                            "deleting a live staging dir)")
+                return None
+            tokens.add(tok)
+        return tokens
 
 
 # ---------------------------------------------------------------------------

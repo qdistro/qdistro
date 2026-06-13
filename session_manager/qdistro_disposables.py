@@ -19,6 +19,7 @@ one is a crash/leak). See qdistro_session_manager.reap_disposable_containers.
 """
 from __future__ import annotations
 
+import json
 import re
 
 DISP_PREFIX = "disp-"
@@ -394,3 +395,235 @@ def is_workflow_id(workflow_id: object) -> bool:
     downstream. Same conservative lowercase token shape as a workload."""
     return bool(isinstance(workflow_id, str)
                 and _WORKFLOW_ID_RE.fullmatch(workflow_id))
+
+
+# ---------------------------------------------------------------------------
+# Robust ``podman ps --format json`` row parsing — pure, fail-closed
+# ---------------------------------------------------------------------------
+#
+# The sweep candidate enumerations read ``podman ps -a --format json`` rather
+# than a Go-template line joined by a separator. ``--format json`` emits a
+# single JSON array whose every label value is JSON-ESCAPED (embedded newlines,
+# NUL, control chars, quotes, tabs, unicode, and the old US separator are all
+# encoded), so an attacker-controlled label value can NOT inject a fake field or
+# spill into a forged record the way a literal newline could under a
+# ``splitlines()`` + ``split(sep)`` parse. ``json.loads`` is the single trust
+# boundary; ALL semantic validation (name shape, hex token, lease ints, opt-in)
+# still happens in the helpers above, so a garbled-but-well-escaped value maps to
+# a SKIP exactly as before.
+
+
+def parse_podman_ps_json(raw: object, label_keys: list[str]) -> list[dict]:
+    """Parse ``podman ps -a --format json`` output into one normalized
+    ``{"name": <str>, <label_key>: <str|None>, ...}`` dict per usable record.
+
+    ``label_keys`` are the podman label names to pull (e.g.
+    ``["qdistro_tier2_token", "qdistro_lease_ttl"]``); each is exposed verbatim
+    in the result dict (the caller re-maps to its candidate key names). A label
+    that is absent / null / not a string becomes ``None`` (rendered downstream by
+    the existing fail-closed parsers as "skip").
+
+    Fail-closed:
+    - ``json.loads`` failure, a non-``str``/``bytes`` input, or a top-level value
+      that is not a list -> ``[]`` (the whole pass yields no candidates; the
+      caller treats this like a podman failure and the boundary reaper backstops).
+    - A single malformed RECORD (not a dict, no usable ``Names``) is SKIPPED — it
+      does NOT poison the rest of the array.
+
+    Name extraction tolerates both the modern shape (``Names`` is a non-empty
+    list of strings — the first entry is the canonical name) and a defensive
+    fallback (``Names`` is a plain string, or a singular ``Name`` string) for
+    podman-version tolerance. A record whose name is not a non-empty string is
+    skipped (no row without a name ever reaches the name-shape gate).
+
+    The returned ``name`` is whatever podman reported (RAW, unvalidated here):
+    ``is_disposable_container`` downstream is the authority on whether it is one
+    of ours. This keeps a forged ``Names`` value from being silently "accepted"
+    — it just flows to the same gate every name flows to."""
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            return []
+    if not isinstance(raw, str):
+        return []
+    s = raw.strip()
+    if not s:
+        return []
+    try:
+        data = json.loads(s)
+    except (ValueError, TypeError):
+        # Malformed/garbled JSON: fail closed for the whole pass. A truncated or
+        # injected stream must never be parsed "best-effort" into partial rows.
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[dict] = []
+    for rec in data:
+        if not isinstance(rec, dict):
+            continue  # skip a malformed record; never poison the array
+        name = _ps_record_name(rec)
+        if name is None:
+            continue
+        labels = rec.get("Labels")
+        if not isinstance(labels, dict):
+            labels = {}
+        row: dict = {"name": name}
+        for key in label_keys:
+            v = labels.get(key)
+            # Only a genuine string label value passes through; anything else
+            # (None/null, int, nested object, a non-string key collision) becomes
+            # None so the downstream int/opt-in/token parsers SKIP it.
+            row[key] = v if isinstance(v, str) else None
+        out.append(row)
+    return out
+
+
+def _ps_record_name(rec: dict) -> str | None:
+    """Extract the canonical container name from a ``podman ps --format json``
+    record, or ``None`` if there is no usable name. Modern podman renders
+    ``Names`` as a non-empty list of strings; a defensive fallback accepts a
+    plain-string ``Names`` or a singular ``Name``. A non-string / empty name is
+    rejected (``None``) so no nameless row reaches the name-shape gate."""
+    names = rec.get("Names")
+    if isinstance(names, list):
+        for n in names:
+            if isinstance(n, str) and n:
+                return n
+        return None
+    if isinstance(names, str) and names:
+        return names
+    name = rec.get("Name")
+    if isinstance(name, str) and name:
+        return name
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Stuck-podman-descendant cleanup — pure host-PID kill-candidate decision
+# ---------------------------------------------------------------------------
+#
+# After a ``podman rm -f <disp>`` TIMES OUT (the M1 wedge guard returns False),
+# the container may still be alive with a stuck descendant tree (a hung
+# container child, conmon, pasta, slirp4netns) holding resources, so the next
+# sweep re-wedges the same way and the resources leak. The cleanup SIGKILLs the
+# container's PAYLOAD host PIDs — but ONLY host PIDs that are provably this
+# container's, verified via the cgroup membership of each pid. These pure helpers
+# carry the safety decision (which host pids are killable given the full
+# container id + each pid's /proc/<pid>/cgroup text) so it is unit-fuzzable with
+# hostile inputs and never touches a host process that is not this container's.
+#
+# Critical invariants:
+# - Operate on HOST pids only (``podman top hpid``), NEVER container-namespace
+#   pids (``podman top pid``): killing a container-ns pid host-side would target
+#   an UNRELATED host process.
+# - A pid is killable ONLY if its cgroup text contains the FULL 64-hex container
+#   id as a distinct ``libpod-<id>.scope`` path component (not a loose
+#   substring) — an exact-component match has effectively no accidental
+#   false-positive surface.
+# - Ambiguity (unreadable/blank cgroup, no exact-component match, a malformed id,
+#   a non-positive pid) -> NOT killable (skip). Fail-safe: never kill on a guess.
+
+# A podman/libpod container id is a 64-char lowercase hex string.
+_FULL_CTR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def is_full_container_id(cid: object) -> bool:
+    """True iff ``cid`` is a well-formed full (64 hex) podman container id. The
+    cgroup-membership check requires the FULL id (a short/truncated id could
+    appear by chance and weaken the exact-component match), so this gates the id
+    before it is ever used to authorize a kill."""
+    return bool(isinstance(cid, str) and _FULL_CTR_ID_RE.fullmatch(cid))
+
+
+def parse_podman_top_hpids(top_output: object) -> list[int] | None:
+    """Parse ``podman top <ctr> hpid comm`` output into a list of HOST pids, or
+    ``None`` if the output is unusable (=> the caller does NO cleanup —
+    fail-safe). ``hpid`` is podman's explicit HOST pid descriptor; these are the
+    only pids it is ever safe to ``os.kill`` from the host.
+
+    podman top prints a header (``HPID  COMMAND``) then one row per process. We
+    require a non-empty table; every DATA row's first whitespace-field must be a
+    clean positive base-10 integer (pid 0 / negatives are rejected — never a
+    kill target). A header-only table yields ``[]`` (no payload pids visible — a
+    legitimate "nothing to clean up"). Any malformed row -> ``None`` (refuse the
+    whole cleanup rather than kill a partial, possibly-misparsed set)."""
+    if not isinstance(top_output, str):
+        return None
+    lines = [ln for ln in top_output.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    pids: list[int] = []
+    for ln in lines[1:]:  # skip the header row
+        parts = ln.split(None, 1)
+        if not parts:
+            return None
+        pid_s = parts[0]
+        if not pid_s.isdigit():
+            return None
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            return None
+        if pid <= 0:  # pid 0 is the kernel/"every process"; never a target
+            return None
+        pids.append(pid)
+    return pids
+
+
+def cgroup_belongs_to_container(cgroup_text: object, full_id: object) -> bool:
+    """True iff the ``/proc/<pid>/cgroup`` text proves the pid lives inside the
+    container whose full id is ``full_id`` — i.e. some cgroup path contains the
+    exact component ``libpod-<full_id>.scope``. This is the authorization for a
+    SIGKILL, so it is deliberately strict:
+
+    - ``full_id`` must be a well-formed full container id (else -> False).
+    - The match is on a distinct PATH COMPONENT ``libpod-<id>.scope`` (split on
+      ``/``), NOT a loose substring — a malicious delegated cgroup path that
+      merely *embeds* the id as part of a longer name does not authorize a kill.
+    - Unreadable/blank/non-str cgroup text -> False (skip; never kill on a guess).
+
+    Conservative by design: a legitimate descendant whose cgroup placement does
+    not carry the scope component (a podman-version/config quirk) is SKIPPED
+    rather than killed — a missed straggler is retried next sweep, but an
+    unrelated process is NEVER killed."""
+    if not is_full_container_id(full_id):
+        return False
+    if not isinstance(cgroup_text, str):
+        return False
+    scope = f"libpod-{full_id}.scope"
+    for ln in cgroup_text.splitlines():
+        # A v2 line is "0::/path"; a v1 line is "N:ctrl:/path". The path is the
+        # final colon-separated field. Match the scope as a whole '/'-component.
+        path = ln.rsplit(":", 1)[-1]
+        for comp in path.split("/"):
+            if comp == scope:
+                return True
+    return False
+
+
+def stuck_descendant_kill_set(
+        hpids: object, cgroup_by_pid: dict, full_id: object) -> list[int]:
+    """The host pids it is SAFE to SIGKILL to clean up a stuck disposable, given:
+    ``hpids`` (host pids from ``parse_podman_top_hpids`` — ``None`` => no
+    cleanup), ``cgroup_by_pid`` ({pid: /proc/<pid>/cgroup text or None if it
+    could not be read}), and the container's ``full_id``.
+
+    A pid is included ONLY if it is a positive int AND its recorded cgroup text
+    proves container membership via ``cgroup_belongs_to_container``. Everything
+    else is excluded (fail-safe). ``full_id`` not a full container id, or
+    ``hpids`` ``None`` -> ``[]`` (refuse all cleanup — never kill on an
+    unverifiable identity). Pure: no I/O, no ``os.kill``; the caller does the
+    bounded reads and the kills."""
+    if hpids is None or not is_full_container_id(full_id):
+        return []
+    if not isinstance(hpids, (list, tuple)):
+        return []
+    targets: list[int] = []
+    for pid in hpids:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        cg = cgroup_by_pid.get(pid) if isinstance(cgroup_by_pid, dict) else None
+        if cgroup_belongs_to_container(cg, full_id):
+            targets.append(pid)
+    return targets
