@@ -1,0 +1,42 @@
+#!/bin/bash
+# qdistro-tier2-silo-stop <silo-name> — ExecStop of
+# qdistro-tier2-silo@<name>.service.
+#
+# The unit now runs as ROOT (so spawn-tier2's root-launcher mode can stamp the
+# secctx wire tag — see qdistro-tier2-silo@.service). The container itself runs
+# in the ADMIN user's rootless podman, so a root `podman stop` would query
+# root's empty store and never find qdistro-silo-<name>, orphaning it. This
+# helper resolves the configured admin user (QDISTRO_ADMIN_USER, default admin),
+# fails closed on a missing user or uid 0, and drops to that uid with the right
+# XDG_RUNTIME_DIR so `podman stop` reaches the admin-rootless conmon.
+#
+# The unit invokes us with `-` (best-effort): an already-gone container or a
+# transient error must not fail `systemctl stop` (the daemon re-verifies the
+# container is actually gone via tier2_silo_running and fails closed itself if
+# it survives). We still exit nonzero on a hard error so the journal records it.
+set -u
+
+NAME="${1:?usage: qdistro-tier2-silo-stop <silo-name>}"
+
+ADMIN_USER="${QDISTRO_ADMIN_USER:-admin}"
+ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
+if [ -z "$ADMIN_UID" ]; then
+    echo "tier2-silo-stop: admin user '$ADMIN_USER' does not exist" \
+         "(set QDISTRO_ADMIN_USER) — cannot stop qdistro-silo-$NAME" >&2
+    exit 3
+fi
+if [ "$ADMIN_UID" = "0" ]; then
+    # Refuse to "stop" via root's store — that would silently no-op while the
+    # admin-rootless container lives on. Fail closed.
+    echo "tier2-silo-stop: resolved admin uid 0 for '$ADMIN_USER' — refusing" \
+         "(rootless podman must run as a non-root uid)" >&2
+    exit 3
+fi
+
+PODMAN="$(command -v podman || echo /usr/bin/podman)"
+
+# Drop to admin with the admin runtime dir so podman talks to the admin's
+# rootless conmon. -t 10 mirrors the prior ExecStop grace.
+exec runuser -u "$ADMIN_USER" -- env \
+    XDG_RUNTIME_DIR="/run/user/${ADMIN_UID}" \
+    "$PODMAN" stop -t 10 "qdistro-silo-${NAME}"

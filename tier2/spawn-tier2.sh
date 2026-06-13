@@ -206,6 +206,32 @@ else
     pm() { podman "$@"; }
 fi
 
+# as_admin_run: route a NON-podman host helper through the admin identity in
+# root-launcher mode, bare otherwise. Used for the two pre-wrapper steps that
+# would otherwise change identity (admin -> root) under the root unit and break
+# the admin-owned-state / admin-caller invariants the persistent silo path
+# (TIER2_SILO) relies on (codex design review, fixes 2 + 3):
+#   - qdistro-resolve-binding --record: writes the per-boot status file
+#     /run/qdistro/silo-generation/<silo> + the activation marker under the
+#     admin-owned 0700 /var/lib/qdistro/bindings; running it as root would
+#     leave root-owned files in an admin-owned tree and emit the
+#     template.binding.activated audit under the wrong identity.
+#   - the broker CheckPermission gate: deployments may carry uid-scoped
+#     qdistro.tier2.spawn rules keyed on the admin uid; a root caller would
+#     miss them and be (fail-closed) DENIED. Dropping to admin keeps the
+#     broker seeing the SAME caller uid the User=admin unit presented.
+# The disposable path never sets TIER2_SILO and its broker rules are
+# action-only, so this shim is a no-op-equivalent there (the gate still runs
+# as admin, which is strictly more correct than the prior root caller).
+if [ "$ROOT_LAUNCHER" = 1 ]; then
+    as_admin_run() {
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/${_root_admin_uid}" "$@"
+    }
+else
+    as_admin_run() { "$@"; }
+fi
+
 # --- disposable identity (07-disposables-plan P1, D15) -------------------
 if [ "$DISPOSABLE" = 1 ]; then
     # A disposable never mounts persistent state — refuse a silo binding.
@@ -752,7 +778,12 @@ if [ -n "$TIER2_SILO" ]; then
     # FIRST_ACTIVATION as KEY=VALUE lines (no TOML parsing in bash, no second
     # read racing a concurrent promote). --record commits the per-boot status
     # + activation marker under the current ordering.
-    launch_env="$("${RESOLVER[@]}" "$TIER2_SILO" --record --launch-env)"
+    # In root-launcher mode this MUST run as admin (see as_admin_run): it
+    # writes /run/qdistro/silo-generation/<silo> + the activation marker into
+    # the admin-owned binding tree and emits the activation audit. Running it
+    # as root would leave root-owned files in an admin-owned 0700 dir and
+    # mis-attribute the audit.
+    launch_env="$(as_admin_run "${RESOLVER[@]}" "$TIER2_SILO" --record --launch-env)"
     resolve_rc=$?
     case "$resolve_rc" in
         0)  resolved_gen=""
@@ -812,7 +843,12 @@ fi
 # (no set +e/-e toggle that could leak `-e` into the rest of the script).
 broker_gate() {
     local _action="$1" _label="$2" _out _status _reply
-    _out=$(dbus-send --system --print-reply=literal \
+    # In root-launcher mode the gate runs as admin (as_admin_run): the broker
+    # authorizes on the CALLER uid, and deployments may carry uid-scoped
+    # qdistro.tier2.spawn rules keyed on the admin uid. A root caller would
+    # miss them and be fail-closed DENIED, so we present the admin uid the
+    # User=admin unit used to. In the default path as_admin_run is a no-op.
+    _out=$(as_admin_run dbus-send --system --print-reply=literal \
         --dest=org.qdistro.AdminBroker1 \
         /org/qdistro/AdminBroker1 \
         org.qdistro.AdminBroker1.CheckPermission \

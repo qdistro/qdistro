@@ -100,11 +100,17 @@ install -o root -g root -m 0755 "$SRC/qdshell-session-launcher" \
 
 # fableplan2 task 04: the tier-2 templated-silo launcher unit + script (the
 # session manager runs `systemctl start qdistro-tier2-silo@<name>.service`,
-# which drops to admin and execs spawn-tier2) and the silo-launch CLI.
+# which runs spawn-tier2 in root-launcher mode — root parent for the secctx
+# wire tag, podman/resolver/broker dropped to admin) and the silo-launch CLI.
 install -o root -g root -m 0644 "$SRC/qdistro-tier2-silo@.service" \
     /etc/systemd/system/qdistro-tier2-silo@.service
 install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-launch" \
     "$DEST/qdistro-tier2-silo-launch"
+# ExecStop helper: the unit runs as root, so stopping the admin-rootless
+# container must drop to the configured admin user. Resolves QDISTRO_ADMIN_USER
+# and fails closed on a missing user / uid 0.
+install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-stop" \
+    "$DEST/qdistro-tier2-silo-stop"
 install -o root -g root -m 0644 "$SRC/qdistro_silo_launch.py" \
     "$DEST/qdistro_silo_launch.py"
 cat >"$DEST/qdistro-silo-launch" <<EOF
