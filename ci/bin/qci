@@ -69,6 +69,19 @@ FINALIZING=0
 QCI_OFFLINE="${QCI_OFFLINE:-0}"
 [ "$QCI_OFFLINE" = 1 ] && export QCI_OFFLINE
 
+# QCI_RELEASE=1 is the release-profile mode (05-agent-test-plan.md §A): "green"
+# for the RC battery means ZERO blocked rows, not just zero failed rows. A
+# `blocked` row in a release-relevant gate (a missing prerequisite — no built
+# image, no test VM, an unpopulated/unsigned manifest) is recorded `blocked`
+# and exits 0 in normal mode; under QCI_RELEASE=1 it escalates the run to
+# EXIT_RELEASE so a missing prerequisite cannot pass as success at RC. Scoped to
+# the gates whose blocked rows mean "the release was not actually exercised";
+# infra gates (preflight/selftest/lint/registry-check/affected/edit-guard) and
+# the D1-dropped `image` gate are intentionally excluded.
+QCI_RELEASE="${QCI_RELEASE:-0}"
+[ "$QCI_RELEASE" = 1 ] && export QCI_RELEASE
+QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile in-place-upgrade"
+
 # QCI_ALLOW_TEST_EDITS=1 sanctions edits to the `qci edit-guard` protected
 # paths (tests/**, ci/prompts/**, selinux/**). Same effect as the
 # --allow-test-edits flag. Default 0: a protected edit FAILS the guard.
@@ -203,6 +216,16 @@ Environment:
                             podman/container/browser SLIRP-NAT egress audit is a
                             VM task (see todo); this is the env gate + the
                             test-annotation hook.
+  QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` row in
+                            a release-relevant gate (vm-smoke / bats / gui /
+                            release-manifest / bootstrap-release-profile /
+                            in-place-upgrade) is FATAL, not exit-0. "Green" then
+                            means zero blocked rows — a missing prerequisite (no
+                            built image/VM, an unpopulated/unsigned manifest)
+                            cannot pass as success. Escalates an otherwise-passing
+                            run to EXIT_RELEASE (15); a real failure keeps its own
+                            class. Infra gates and the D1-dropped `image` gate are
+                            excluded.
 EOF
 }
 
@@ -311,6 +334,26 @@ finish_run() {
     local rc=$1
     FINALIZING=1
     [ -n "$RDIR" ] || exit "$rc"
+    # Release-profile escalation (QCI_RELEASE=1): a `blocked` row in a
+    # release-relevant gate means the release was not actually exercised — fail
+    # closed. Only escalates a run that otherwise PASSED (rc==0); a real failure
+    # already carries its own exit class and takes precedence. The offending
+    # rows are recorded so the report shows WHY.
+    if [ "${QCI_RELEASE:-0}" = 1 ] && [ -f "$RDIR/results.tsv" ]; then
+        local blocked_rows
+        blocked_rows=$(awk -F'\t' -v g="$QCI_RELEASE_FATAL_GATES" '
+            BEGIN { n = split(g, a, " "); for (i = 1; i <= n; i++) fatal[a[i]] = 1 }
+            NR > 1 && $3 == "blocked" && ($1 in fatal) { print $1 "/" $2 }
+        ' "$RDIR/results.tsv")
+        if [ -n "$blocked_rows" ]; then
+            local blocked_count
+            blocked_count=$(printf '%s\n' "$blocked_rows" | grep -c .)
+            record_result release-profile blocked-rows fail "$EXIT_RELEASE" release release "" \
+                "QCI_RELEASE=1: $blocked_count blocked row(s) in release-relevant gates are fatal: $(printf '%s' "$blocked_rows" | tr '\n' ' ')"
+            log "release-profile: $blocked_count blocked row(s) fatal under QCI_RELEASE=1"
+            [ "$rc" -eq 0 ] && rc=$EXIT_RELEASE
+        fi
+    fi
     kv finished_utc "$(now_utc)"
     kv exit_code "$rc"
     kv exit_class "$(exit_class_name "$rc")"
@@ -2013,7 +2056,7 @@ gate_registry_check() {
         log "registry-check: no registry.tsv"
         return "$EXIT_OK"
     fi
-    local known_gates="host bats gui image vm-smoke"
+    local known_gates="host bats gui image vm-smoke release-manifest"
     local line path gate rest rows=0 bad=0
     {
         echo "## registry-check (PILOT — advisory, not enforced)"
@@ -2476,7 +2519,7 @@ offline_should_skip_external() {
 # includes selftest, which a ci/* or tests/integration/qci/* change selects
 # explicitly.
 ALL_GATES="lint host image vm-smoke bats gui"
-GATE_ORDER="selftest lint host image vm-smoke bats gui"
+GATE_ORDER="selftest lint host release-manifest image vm-smoke bats gui"
 
 affected_gates_for_path() {
     # Prints zero or more gate tokens (one per line) for a single path.
@@ -2499,6 +2542,13 @@ affected_gates_for_path() {
         # Image build / packaging inputs.
         image/*)
             printf 'image\n' ;;
+        # Release source-manifest + its R1 tooling -> the release-manifest gate.
+        # (NB: source-manifest.txt must be matched here, ahead of the generic
+        # *.txt "no gate" rule below.)
+        scripts/install/source-manifest.txt|\
+        scripts/install/gen-source-manifest.sh|\
+        scripts/install/verify-source-manifest.sh)
+            printf 'release-manifest\n' ;;
         # bats VM integration tests.
         tests/integration/vm/*.bats)
             printf 'bats\n' ;;
@@ -2613,6 +2663,7 @@ run_one_gate() {
         vm-smoke) gate_vm_smoke "$vm"; step_rc=$? ;;
         bats)     gate_bats "$vm"; step_rc=$? ;;
         gui)      gate_gui "$vm"; step_rc=$? ;;
+        release-manifest) gate_release_manifest; step_rc=$? ;;
         *)        record_blocked affected "$gate" "$EXIT_USAGE" args "unknown gate token in affected set"; step_rc=$EXIT_USAGE ;;
     esac
     return "$step_rc"
@@ -3026,6 +3077,8 @@ gate_full() {
     local rc=$EXIT_OK step_rc
     gate_preflight || return $?
     gate_host; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    gate_release_manifest; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_vm_smoke ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc

@@ -65,6 +65,15 @@ affected_gates() {
     [ "$output" = "selftest lint host" ]
 }
 
+@test "affected: source-manifest + R1 tooling select the release-manifest gate" {
+    run affected_gates scripts/install/source-manifest.txt
+    [ "$status" -eq 0 ]
+    [ "$output" = "release-manifest" ]   # NOT the generic *.txt 'no gate' rule
+    run affected_gates scripts/install/verify-source-manifest.sh
+    [ "$status" -eq 0 ]
+    [ "$output" = "release-manifest" ]
+}
+
 @test "affected: qci self-test bats selects selftest" {
     run affected_gates tests/integration/qci/qci-runner-contract.bats
     [ "$status" -eq 0 ]

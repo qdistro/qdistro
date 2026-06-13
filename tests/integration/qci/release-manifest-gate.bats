@@ -150,6 +150,23 @@ row_note_has() {
     row_is version-consistency pass
 }
 
+@test "release-manifest: QCI_RELEASE=1 does NOT escalate a fully-signed complete green run" {
+    make_core
+    git -C "$RR/qdistro" tag v1.0.0
+    git -C "$RR/qdwin" tag v1.0.0
+    git -C "$RR/qdshell" tag v1.0.0
+    printf 'qdistro %s tag=v1.0.0\nqdwin %s tag=v1.0.0\nqdshell %s tag=v1.0.0\n' \
+        "$P_qdistro" "$P_qdwin" "$P_qdshell" > "$MANIFEST"
+    sign_manifest
+    export QDISTRO_RELEASE_KEYRING="$RR/keyring.gpg"
+    export QDISTRO_MANIFEST_SIG="$MANIFEST.sig"
+    export QDISTRO_RELEASE_SIGNER="$FPR"
+    QCI_RELEASE=1 run_gate                  # release-profile mode, but no blocked rows
+    [ "$status" -eq 0 ] || { echo "status=$status: $output" >&2; cat "$RESULTS" >&2; return 1; }
+    run awk -F'\t' '$1=="release-profile"{print; f=1} END{exit f?1:0}' "$RESULTS"
+    [ "$status" -eq 0 ]                     # no release-profile escalation row recorded
+}
+
 @test "release-manifest: default-adjacent .sig is found without QDISTRO_MANIFEST_SIG" {
     make_core
     base_manifest
