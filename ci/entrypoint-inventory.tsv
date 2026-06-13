@@ -26,6 +26,7 @@ pwd/qdistro_pwd_daemon.py	tests/unit/test_pwd_audit.py	Password daemon must audi
 pwd/qdistro_pwd_daemon.py	tests/unit/test_pwd_polkit.py	Password daemon uses polkit for privilege check; bypass = credential leak
 pwd/qdistro_pwd_pinstash.py	tests/unit/test_pwd_pinstash.py	PIN stash holds user-derived key material; incorrect storage/retrieval leaks credentials
 pwd/qdistro_pwd_tpm.py	tests/unit/test_pwd_tpm.py	TPM-backed key sealing: incorrect PCR binding allows unsealing on untrusted boot state
+pwd/qdistro_vault_recovery_export.py	tests/unit/test_vault_recovery_export.py	Owner-side vault recovery export: encrypts the vault MASTER KEY; weak crypto / plaintext leak / unsafe output path = total credential compromise
 media/qdistro_media_exec.py	tests/unit/test_media_exec.py	Media exec client: executes binaries in the silo context; argv injection = privilege escalation
 media/qdistro_media_exec_client.py	tests/unit/test_media_exec.py	Media exec client bridge: cross-silo media launch, must validate source silo identity
 qsu/qsu.py	tests/unit/test_qsu.py	qsu (qdistro-sudo): runs commands as another user; bypass = privilege escalation

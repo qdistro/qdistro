@@ -13,6 +13,9 @@
 #   /usr/libexec/qdistro/qdistro_pwd_audit.py
 #   /usr/local/bin/qdistro-pwd-admin               # admin CLI
 #   /usr/local/bin/qdistro-pwd-get                 # app CLI
+#   /usr/local/bin/qdistro-vault-recovery          # owner-side recovery export
+#   /usr/libexec/qdistro/qdistro_vault_recovery.py        # bundle crypto/writer
+#   /usr/libexec/qdistro/qdistro_vault_recovery_export.py # export tool impl
 #   /etc/dbus-1/system.d/org.qdistro.Pwd1.conf
 #   /etc/systemd/system/qdistro-pwd.service
 #   /var/lib/qdistro/vaults/                       # 0700 root:root
@@ -101,6 +104,11 @@ install -m 0644 "$SRC/qdistro_pwd_polkit.py"   "$DEST_LIB/"
 install -m 0755 "$SRC/qdistro_pwd_portal.py"   "$DEST_LIB/"
 install -m 0644 "$SRC/qdistro_pwd_pinstash.py" "$DEST_LIB/"
 install -m 0644 "$SRC/qdistro_pwd_fprint.py"   "$DEST_LIB/"
+# Vault recovery bundle: the crypto/writer module + the owner-side export tool
+# (06-backup-dr §3.4). The export tool imports qdistro_vault_recovery (bundle
+# crypto) and qdistro_pwd_vault (master-key unlock) from this same dir.
+install -m 0644 "$SRC/qdistro_vault_recovery.py"        "$DEST_LIB/"
+install -m 0644 "$SRC/qdistro_vault_recovery_export.py" "$DEST_LIB/"
 
 # Phase-8.3 portal Secret backend (per-user session daemon).
 install -m 0644 "$SRC/qdistro-pwd-portal.service" \
@@ -147,6 +155,9 @@ fi
 # CLIs without .py suffix so `qdistro-pwd-get gmail` reads naturally.
 install -m 0755 "$SRC/qdistro-pwd-admin.py" "$DEST_BIN/qdistro-pwd-admin"
 install -m 0755 "$SRC/qdistro-pwd-get.py"   "$DEST_BIN/qdistro-pwd-get"
+# Owner-side `qdistro vault-recovery export` (06-backup-dr §3.4). Thin wrapper;
+# implementation is qdistro_vault_recovery_export.py in $DEST_LIB.
+install -m 0755 "$SRC/qdistro-vault-recovery.py" "$DEST_BIN/qdistro-vault-recovery"
 
 # D-Bus policy + systemd unit.
 install -m 0644 "$SRC/org.qdistro.Pwd1.conf" "$DEST_DBUS/org.qdistro.Pwd1.conf"

@@ -75,7 +75,10 @@ exclude = ["*.sock", "*.lock"]
 # passphrase, or any private key (the gate refuses them).
 #
 # Export the encrypted bundle out-of-band (owner-driven, needs the passphrase):
-#   qdistro vault-recovery export  ->  /etc/qdistro/recovery/vault-recovery.json
+#   qdistro-vault-recovery export --vault main \
+#       --out /etc/qdistro/recovery/vault-recovery.json
+# (encrypts the live vault master key to an owner recovery passphrase; writes a
+#  ciphertext-only 0600 bundle. NEVER stores the passphrase or master key.)
 # [recovery]
 # collector = "metadata"                              # an existing collector
 # bundle    = "/etc/qdistro/recovery/vault-recovery.json"
