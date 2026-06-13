@@ -311,17 +311,25 @@ def parse_podman_top_pids(top_output: object) -> list[tuple[int, str]] | None:
 def proctree_empty(top_output: object,
                    pid1_comm: str = PROCTREE_PID1_COMM) -> bool:
     """True iff a disposable's inner process tree has collapsed to the compositor
-    PID1 alone — the *only* remaining process is PID 1 and its command is exactly
+    PID1 alone — the *only* remaining process is PID 1 and its command BASENAME is
     ``pid1_comm`` (``weston``). No allowlist of weston helpers: their presence is
     weston-version/config dependent, so an allowlist could mis-read a missing
     helper as "empty"; requiring PID1-ONLY is unambiguous and has zero
     false-positive surface from any unknown helper/client/workload process.
 
+    The PID1 command is matched on its BASENAME (``/usr/bin/weston`` and a bare
+    ``weston`` both match): ``podman top <ctr> comm`` normally renders the bare
+    command name, but matching the basename is robust to a path-form rendering
+    without weakening the guard (only PID 1 is ever compared, and an inner client
+    never runs as PID 1). It is NOT a substring/prefix match — ``weston-foo``
+    would NOT match ``weston``.
+
     Fail-closed (returns ``False`` => the candidate is NOT reaped) on: unparseable
     output (``parse_podman_top_pids`` ``None``), MORE than one process row,
-    multiple/zero PID-1 rows, or a PID1 command that is not exactly ``pid1_comm``.
-    Honesty: a ``True`` here means "only the compositor PID1 remains; no
-    client/helper/workload process is visible", NOT a true OS-level empty tree."""
+    multiple/zero PID-1 rows, or a PID1 command whose basename is not exactly
+    ``pid1_comm``. Honesty: a ``True`` here means "only the compositor PID1
+    remains; no client/helper/workload process is visible", NOT a true OS-level
+    empty tree."""
     rows = parse_podman_top_pids(top_output)
     if rows is None:
         return False

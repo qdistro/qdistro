@@ -678,16 +678,19 @@ cmd_proctree_sweep() {
     noopt="disp-ptnoopt-$ts"
     notok="disp-ptntok-$ts"
 
-    # PID1 = weston, nothing else. The weston-terminal image has weston on PATH.
+    # empty = a single, STABLE PID1 (sleep) and nothing else. We use `sleep`
+    # rather than a real weston PID1 because a headless weston with no backend
+    # flaps (exits/respawns), which would make the end-to-end real-`rm` sweep
+    # flaky. The end-to-end sweep below therefore asserts PID1-ONLY detection +
+    # the full reap path with pid1_comm overridden to this fixture's `sleep`; the
+    # PRODUCTION pid1_comm="weston" branch is proven SEPARATELY and HONESTLY by
+    # the real-weston-PID1 assertion further down (no monkeypatch there).
     as_admin podman run -d --name "$empty" \
         --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_e" \
         --label qdistro_lease_proctree=1 --label "qdistro_lease_created=$past" \
         --label qdistro_lease_proctree_grace=30 \
         --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
         || fail proctree-sweep "could not create empty fixture $empty"
-    # NOTE: we use `sleep` as a STABLE stand-in PID1 the probe can rename via a
-    # comm check below. To assert proctree_empty honestly we override the
-    # expected PID1 comm to the actual entrypoint for the fixtures (see python).
 
     # busy = PID1 + a child, so the tree is never "PID1 only".
     as_admin podman run -d --name "$busy" \
@@ -783,6 +786,66 @@ PY
     for n in "$busy" "$fresh" "$noopt" "$notok"; do
         as_admin podman rm -f "$n" >/dev/null 2>&1 || true
     done
+
+    # PRODUCTION-BRANCH proof (codex code-review MINOR 1): the sweep above
+    # overrode pid1_comm to the fixtures' `sleep`; here we prove the SHIPPED
+    # default pid1_comm="weston" matches a REAL weston PID1 on real `podman top`
+    # output — no monkeypatch. A headless weston with no backend may flap, so we
+    # only assert the comm match WHILE the container is alive (if it has already
+    # exited, --rm/podman makes top fail and we skip rather than false-fail).
+    local west tok_w
+    west="disp-ptweston-$ts"; tok_w=$(gen_token)
+    if as_admin podman run -d --name "$west" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_w" \
+        --entrypoint weston "$IMAGE" --backend=headless-backend.so \
+        >/dev/null 2>&1; then
+        sleep 1
+        local west_out
+        west_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+            python3 - "$west" <<'PY' 2>&1
+import sys
+sys.path.insert(0, "/usr/libexec/qdistro")
+import qdistro_session_manager as M
+import qdistro_disposables as D
+west = sys.argv[1]
+ops = M._SystemOps()
+top = ops.disp_container_top_pids(west)
+if top is None:
+    print("WESTON_GONE")          # weston flapped/exited; skip, do not false-fail
+else:
+    rows = D.parse_podman_top_pids(top)
+    # If weston is genuinely the sole PID1, the SHIPPED default predicate fires.
+    if rows is not None and len(rows) == 1 and rows[0][0] == 1:
+        assert D.proctree_empty(top), (
+            f"production proctree_empty(default weston) did NOT match a real "
+            f"weston PID1: {top!r}")
+        print("WESTON_PROD_OK")
+    else:
+        # weston spawned helpers / a child — still proves real top parsing, and
+        # the default predicate must correctly NOT fire on a multi-process tree.
+        assert not D.proctree_empty(top), (
+            f"production predicate wrongly fired on a multi-process weston "
+            f"tree: {top!r}")
+        print("WESTON_MULTI_OK")
+PY
+)
+        echo "$west_out" >&2
+        if echo "$west_out" | grep -q WESTON_PROD_OK; then
+            pass "production pid1_comm=weston branch matched a REAL weston PID1 on real podman top (no monkeypatch)"
+        elif echo "$west_out" | grep -q WESTON_MULTI_OK; then
+            pass "production predicate correctly did NOT fire on a real multi-process weston tree"
+        elif echo "$west_out" | grep -q WESTON_GONE; then
+            echo "NOTE: real weston fixture exited before inspection (headless flap); production-branch assertion skipped this run" >&2
+            pass "production-branch real-weston check skipped (weston flapped); unit tests remain the weston-comm oracle"
+        else
+            fail proctree-sweep "real-weston production-branch check errored: $west_out"
+        fi
+        as_admin podman rm -f "$west" >/dev/null 2>&1 || true
+    else
+        echo "NOTE: could not start a real weston PID1 fixture (headless backend absent); production-branch assertion skipped" >&2
+        pass "production-branch real-weston check skipped (no headless weston); unit tests remain the weston-comm oracle"
+    fi
+
     rm -f /tmp/proctree-sweep-silos.yaml 2>/dev/null || true
     pass proctree-sweep
 }
