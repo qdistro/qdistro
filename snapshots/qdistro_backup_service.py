@@ -332,8 +332,10 @@ class LocalDirTarget:
 
 class SshTarget:
     """user@host:/path — rsync -e <ssh> push + ssh remote ops. The argv shape is
-    built by the methods below (covered by a host unit test); real execution is
-    the VM residual (no ssh on the headless dev host)."""
+    covered by a host unit test, the real execution paths (ensure/put/commit/
+    sha256) by a host unit test against fake ssh/rsync shims, and the fully-real
+    rsync-over-ssh transport end-to-end by the VM lane
+    tests/integration/vm/backup-ssh-e2e.bats (a throwaway localhost sshd)."""
 
     def __init__(self, spec: str, rsync_cmd: str, ssh_cmd: str):
         self.host, self.base = spec.split(":", 1)
@@ -373,6 +375,15 @@ class SshTarget:
         subprocess.run(self.ssh_base + [self.host, "mv",
                        f"{self.base.rstrip('/')}/{name}.upload.tmp",
                        f"{self.base.rstrip('/')}/{name}"], check=True)
+        # Remote durability barrier. The manifest is the LAST artifact written
+        # (commit marker), so a remote `sync` here flushes the blobs, signature,
+        # manifest, AND the directory rename to the target's stable storage
+        # before the driver's readback returns and it advances + prunes local
+        # state. Without this, a target crash AFTER the bytes are readable-over-
+        # ssh but BEFORE they hit disk would lose the just-advanced seq while
+        # local state moved on (codex review). `sync` is POSIX and global, so it
+        # covers every preceding write in one round trip; fail-closed (check).
+        subprocess.run(self.ssh_base + [self.host, "sync"], check=True)
 
     def sha256(self, name: str) -> str | None:
         proc = subprocess.run(self._sha256_argv(name),

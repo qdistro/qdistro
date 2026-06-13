@@ -139,6 +139,91 @@ class TestTargetSelection:
             svc.make_target("-oProxyCommand=evil:/b", "rsync", "ssh")
 
 
+class TestSshTargetExecution:
+    """Drive the SshTarget's REAL subprocess paths (ensure/put/commit/sha256)
+    against tiny fake `ssh`/`rsync` shims that emulate a remote as a local
+    directory. This locks down the actual execution — the mv-based commit
+    publish and the `sha256sum`-output parsing — not just the argv shape, so a
+    regression in those (which the VM lane proves over real ssh) is also caught
+    on the headless host. The fakes accept the EXACT argv the target builds:
+        ssh  <host> mkdir -p <dir>      | ssh <host> mv <a> <b> | ssh <host> sha256sum <path>
+        rsync ... -e <ssh-words> <src> <host>:<dst>
+    treating <host>: as a no-op prefix so paths land in a local 'remote' root.
+    """
+
+    def _shims(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        # Fake ssh: strips the leading ssh options + host token, runs the rest
+        # as a plain local command (mkdir/mv/sha256sum all operate on real local
+        # paths because the probe's remote path == a local path under tmp).
+        ssh = bindir / "ssh"
+        oplog = bindir / "ops.log"
+        ssh.write_text(
+            "#!/bin/bash\n"
+            "# skip ssh options until we hit the host token (no leading '-')\n"
+            "while [[ \"$1\" == -* ]]; do\n"
+            "  # options like -i/-p/-o take an argument; -F too. consume both.\n"
+            "  case \"$1\" in -i|-p|-o|-F) shift 2 ;; *) shift ;; esac\n"
+            "done\n"
+            "shift   # drop the host token\n"
+            f"echo \"$1\" >> {oplog}   # record the remote op (mkdir/mv/sync/...)\n"
+            "exec \"$@\"\n")
+        ssh.chmod(0o755)
+        self._oplog = oplog
+        # Fake rsync: last two args are <src> and <host>:<dst>; copy locally.
+        rsync = bindir / "rsync"
+        rsync.write_text(
+            "#!/bin/bash\n"
+            "args=(\"$@\")\n"
+            "src=\"${args[-2]}\"\n"
+            "dst=\"${args[-1]}\"\n"
+            "dst=\"${dst#*:}\"   # strip 'host:' prefix\n"
+            "cp -- \"$src\" \"$dst\"\n")
+        rsync.chmod(0o755)
+        return str(ssh), str(rsync)
+
+    def test_ssh_target_round_trips_over_fake_ssh_rsync(self, tmp_path):
+        ssh, rsync = self._shims(tmp_path)
+        remote_root = tmp_path / "remote"
+        # bare local path as the "remote dir"; host token is a placeholder.
+        spec = f"fakehost:{remote_root}/dest"
+        t = svc.make_target(spec, f"{rsync} -aHAX", ssh)
+        assert isinstance(t, svc.SshTarget)
+
+        t.ensure()                                   # ssh ... mkdir -p <dir>
+        assert (remote_root / "dest").is_dir()
+
+        blob = tmp_path / "blob.bin"
+        blob.write_bytes(b"hello-ssh-transport")
+        t.put(str(blob), "blob.bin")                 # rsync push
+        landed = remote_root / "dest" / "blob.bin"
+        assert landed.read_bytes() == b"hello-ssh-transport"
+
+        # readback (sha256sum over ssh) must equal the real local hash and parse
+        # the FIRST whitespace field of `sha256sum`'s "<hash>  <path>" output.
+        mf = svc._load_mod("qdistro_backup_manifest")
+        assert t.sha256("blob.bin") == mf.sha256_file(str(blob))
+        assert t.sha256("does-not-exist") is None    # remote sha256sum fails -> None
+
+        # commit() must upload to <name>.upload.tmp then `ssh mv` to <name>,
+        # leaving NO .upload.tmp behind (the atomic publish of the commit marker).
+        manifest = tmp_path / "manifest-0.json"
+        manifest.write_bytes(b'{"seq":0}')
+        t.commit(str(manifest), "manifest-0.json")
+        published = remote_root / "dest" / "manifest-0.json"
+        assert published.read_bytes() == b'{"seq":0}'
+        assert not (remote_root / "dest" / "manifest-0.json.upload.tmp").exists()
+
+        # commit() must end with a REMOTE durability barrier (`ssh <host> sync`)
+        # so the published bytes are crash-durable on the target before the
+        # driver reads them back and advances local state (codex review).
+        ops = self._oplog.read_text().split()
+        assert "mv" in ops and "sync" in ops
+        assert ops.index("sync") > ops.index("mv"), \
+            "the remote sync must run AFTER the publish mv (flushes the rename)"
+
+
 class TestState:
     def _state(self, tmp_path):
         return svc.State(str(tmp_path / "state"), "h1")
