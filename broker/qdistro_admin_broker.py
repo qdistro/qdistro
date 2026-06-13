@@ -1615,9 +1615,15 @@ class Broker(dbus.service.Object):
         # (qdistro.dispose.spawn:<workload>) joins the same fail-closed set
         # — a throwaway silo is still a sandboxed process and must not be
         # minted off a cached/hook verdict (07-disposables-plan P1).
+        # Open-in-disposable (qdistro.dispose.open:<class>) is the same:
+        # routing an untrusted input into a throwaway is a class-level
+        # security decision that only an explicit admin rule may authorize —
+        # a cache row or hook verdict must never mint an open
+        # (07-disposables-plan P2).
         if action_s.startswith(("qdistro.tier1.spawn:",
                                 "qdistro.tier2.spawn:",
-                                "qdistro.dispose.spawn:")):
+                                "qdistro.dispose.spawn:",
+                                "qdistro.dispose.open:")):
             return "unknown"
         # An authenticated sandboxed (tier-2) caller must not be
         # auto-decided by an argv-blind forever/forever_exe grant minted

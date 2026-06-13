@@ -184,6 +184,10 @@ class TestCheckPermissionResolution:
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
         "qdistro.dispose.spawn:pdf",
+        # open-in-disposable (07-plan P2): the class-level open gate joins the
+        # same rules-only / fail-closed set — a cache row must NOT mint an open.
+        "qdistro.dispose.open:agent-scratch",
+        "qdistro.dispose.open:text/plain",  # mime-class with a '/' in the suffix
     ])
     def test_tier_spawn_ignores_cache_without_rule(self, broker, action):
         broker.cache.store(NON_ADMIN_UID, action, PEER_EXE,
@@ -195,6 +199,8 @@ class TestCheckPermissionResolution:
         "qdistro.tier1.spawn:/usr/bin/true",
         "qdistro.tier2.spawn:weston-terminal/weston-terminal",
         "qdistro.dispose.spawn:pdf",
+        "qdistro.dispose.open:agent-scratch",
+        "qdistro.dispose.open:text/plain",
     ])
     def test_tier_spawn_rule_allow_still_allows(self, broker, rules_dir, action):
         _write_rule(rules_dir, decision="allow",
@@ -202,6 +208,36 @@ class TestCheckPermissionResolution:
         broker.rules.reload()
         broker.set_peer(uid=NON_ADMIN_UID)
         assert broker.CheckPermission(action, {}) == "allow"
+
+    def test_dispose_open_no_rule_is_unknown(self, broker):
+        """The hostile-class containment rests on this: an unruled open action
+        is refused (fail-closed), never minted."""
+        broker.set_peer(uid=NON_ADMIN_UID)
+        assert broker.CheckPermission(
+            "qdistro.dispose.open:pdf", {}) == "unknown"
+
+    @pytest.mark.cheat_aware(
+        protects="qdistro.dispose.open:<class> is rules-only — a hook verdict "
+                 "or cache row must never authorize routing an untrusted input "
+                 "into a disposable",
+        severity="critical",
+        cheats=[
+            "drop qdistro.dispose.open: from the rules-only prefix set so a "
+            "hook/cache verdict can mint an open",
+            "expect 'allow' instead of 'unknown'",
+        ],
+        consequence="a stale cache row or a hook mints an open-in-disposable "
+                    "the admin never authorized, bypassing the class policy "
+                    "axis (including the hostile-class gate)",
+    )
+    def test_dispose_open_is_rules_only_not_cache(self, broker):
+        """An open action with a cached allow but no rule still resolves to
+        'unknown' — proving it is in the rules-only fail-closed set."""
+        action = "qdistro.dispose.open:url-preview-known-origin"
+        broker.cache.store(NON_ADMIN_UID, action, PEER_EXE,
+                           "forever", True, ADMIN_UID)
+        broker.set_peer(uid=NON_ADMIN_UID)
+        assert broker.CheckPermission(action, {}) == "unknown"
 
 
 # --- exe sensitivity (cache keys on exe via argv_exact) -------------------

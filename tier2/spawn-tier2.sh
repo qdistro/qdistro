@@ -348,12 +348,170 @@ LAUNCHREC_PATH=""
 LAUNCHREC_TOKEN=""
 LAUNCHREC_FILE_ID=""
 
+# Resolve this script's directory early — the open-in-disposable class resolver
+# (below) and the spawn-common sourcing (further down) both need it.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+
 # Broker spawn-gate action. Disposable spawn uses qdistro.dispose.spawn:
 # (a rules-only, fail-closed namespace in the broker, same as tier2.spawn).
 if [ "$DISPOSABLE" = 1 ]; then
     SPAWN_ACTION="qdistro.dispose.spawn:${WORKLOAD}"
 else
     SPAWN_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${APP_NAME}"
+fi
+
+# --- open-in-disposable: trusted-path class gate + RO input (07-plan P2) ---
+# This is the LOAD-BEARING enforcement the codex design review made a hard
+# condition: the qdistro.dispose.open:<class> gate and the read-only input
+# attachment are bound TOGETHER in the trusted launch path, never in the SDK.
+#
+#   TIER2_OPEN_CLASS=<class>   the open class (registry key). When set we
+#                              resolve it from the disposable-class registry,
+#                              enforce its enablement (min_tier) gate, pin the
+#                              workload + network to the class, and add a SECOND
+#                              mandatory broker gate (qdistro.dispose.open:<class>).
+#   TIER2_RO_INPUT=<path>      a single host file/dir to bind READ-ONLY into the
+#                              disposable at /mnt/input/<basename> (D7
+#                              mounts-not-copies). REQUIRES TIER2_OPEN_CLASS — an
+#                              input may never be attached without a resolved,
+#                              admin-authorized open class.
+#
+# Fail-closed everywhere: unknown/disabled class, malformed registry, a
+# class→workload mismatch, a missing/invalid input path, or an unsupported
+# bind shape all refuse BEFORE podman runs.
+OPEN_CLASS="${TIER2_OPEN_CLASS:-}"
+RO_INPUT="${TIER2_RO_INPUT:-}"
+OPEN_ACTION=""
+RO_INPUT_REAL=""
+RO_INPUT_BASENAME=""
+RO_INPUT_KIND=""
+
+# An input with no class is refused: the class is the policy axis that
+# authorizes routing untrusted bytes into a throwaway. (Reverse is allowed: an
+# open class may legitimately have no input — e.g. an agent scratch pod.)
+if [ -n "$RO_INPUT" ] && [ -z "$OPEN_CLASS" ]; then
+    echo "spawn-tier2: TIER2_RO_INPUT set without TIER2_OPEN_CLASS —" \
+         "an input may not be attached without an authorized open class" >&2
+    exit 2
+fi
+
+if [ -n "$OPEN_CLASS" ]; then
+    # open-in-disposable is a disposable-only flow.
+    if [ "$DISPOSABLE" != 1 ]; then
+        echo "spawn-tier2: TIER2_OPEN_CLASS requires --disposable" >&2
+        exit 2
+    fi
+    # Locate the registry resolver module (dev tree, then installed layout).
+    CLASSES_RESOLVER=()
+    if [ -f "$SCRIPT_DIR/../session_manager/qdistro_disposable_classes.py" ]; then
+        CLASSES_RESOLVER=(python3
+            "$SCRIPT_DIR/../session_manager/qdistro_disposable_classes.py")
+    elif [ -f /usr/libexec/qdistro/qdistro_disposable_classes.py ]; then
+        CLASSES_RESOLVER=(python3
+            /usr/libexec/qdistro/qdistro_disposable_classes.py)
+    else
+        echo "spawn-tier2: qdistro_disposable_classes.py not found" \
+             "(open-in-disposable cannot resolve the class registry)" >&2
+        exit 2
+    fi
+    # TRUSTED registry path (codex code-review MAJOR): the class registry is the
+    # load-bearing source for the class->workload, class->network, and min_tier
+    # decisions, so it MUST be the admin-owned installed file — never a
+    # caller-selected one. We pass --registry explicitly so the resolver's
+    # QDISTRO_DISPOSABLE_CLASSES env default (which an app could set to a forged
+    # registry redefining agent-scratch to network=egress + a hostile workload)
+    # is NOT honoured in the shipped path. A test-only override
+    # (TIER2_DISPOSABLE_CLASSES_TEST) is honoured ONLY when explicitly set, so
+    # the host unit tests + the VM probe can point at an in-tree registry without
+    # opening the production path to env spoofing.
+    CLASSES_REGISTRY="${TIER2_DISPOSABLE_CLASSES_TEST:-/etc/qdistro/disposable-classes.toml}"
+    # Resolve + enablement-gate the class. Exit codes are authoritative:
+    # 0 enabled, 3 unknown, 4 disabled (hostile-class/min_tier), 5 malformed.
+    # (The script has no `set -e`, so the resolver's exit status is captured
+    # directly — no set toggle that could leak `-e` into the rest of the run.)
+    _OPEN_ERRF="$(mktemp 2>/dev/null || echo /tmp/.qd-openclass.$$)"
+    OPEN_PLAN="$("${CLASSES_RESOLVER[@]}" --resolve "$OPEN_CLASS" \
+        --registry "$CLASSES_REGISTRY" 2>"$_OPEN_ERRF")"
+    OPEN_RC=$?
+    OPEN_ERR="$(cat "$_OPEN_ERRF" 2>/dev/null)"; rm -f "$_OPEN_ERRF" 2>/dev/null
+    case "$OPEN_RC" in
+        0) : ;;
+        3) echo "spawn-tier2: unknown open class '$OPEN_CLASS' — refusing ($OPEN_ERR)" >&2; exit 2 ;;
+        4) echo "spawn-tier2: open class '$OPEN_CLASS' is DISABLED at this tier" \
+                "(hostile-class / min_tier gate) — refusing ($OPEN_ERR)" >&2; exit 2 ;;
+        5) echo "spawn-tier2: disposable-class registry is malformed — refusing all opens ($OPEN_ERR)" >&2; exit 2 ;;
+        *) echo "spawn-tier2: open-class resolve failed (rc=$OPEN_RC) — refusing ($OPEN_ERR)" >&2; exit 2 ;;
+    esac
+    # Parse the KEY=VALUE plan the resolver printed.
+    CLASS_WORKLOAD=""; CLASS_NETWORK=""; OPEN_ACTION=""
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            WORKLOAD)    CLASS_WORKLOAD="$_v" ;;
+            NETWORK)     CLASS_NETWORK="$_v" ;;
+            OPEN_ACTION) OPEN_ACTION="$_v" ;;
+        esac
+    done <<< "$OPEN_PLAN"
+    # The class pins the workload: the caller-supplied WORKLOAD must equal the
+    # registry's. Otherwise an allow rule for one workload could be paired with
+    # an unrelated open class (the codex class/workload-binding condition).
+    if [ "$CLASS_WORKLOAD" != "$WORKLOAD" ]; then
+        echo "spawn-tier2: open class '$OPEN_CLASS' maps to workload" \
+             "'$CLASS_WORKLOAD' but the spawn workload is '$WORKLOAD' —" \
+             "class/workload mismatch, refusing" >&2
+        exit 2
+    fi
+    # The class pins the network mode: 'none' -> --network none, 'egress' ->
+    # the slirp4netns egress contract. The trusted path SETS it from the class
+    # (a caller cannot widen a 'none' class to egress via TIER2_NETWORK).
+    case "$CLASS_NETWORK" in
+        none)   TIER2_NETWORK="none" ;;
+        egress) TIER2_NETWORK="slirp4netns" ;;
+        *) echo "spawn-tier2: open class '$OPEN_CLASS' has invalid network '$CLASS_NETWORK'" >&2; exit 2 ;;
+    esac
+    [ -n "$OPEN_ACTION" ] || { echo "spawn-tier2: resolver returned no OPEN_ACTION for '$OPEN_CLASS'" >&2; exit 2; }
+
+    # --- validate + canonicalize the RO input (D7) -----------------------
+    if [ -n "$RO_INPUT" ]; then
+        case "$RO_INPUT" in
+            /*) : ;;
+            *) echo "spawn-tier2: TIER2_RO_INPUT must be an absolute path (got '$RO_INPUT')" >&2; exit 2 ;;
+        esac
+        # Canonicalize (resolve symlinks) so we mount a stable real path and a
+        # stable basename — avoids a symlink-swap surprise at mount time.
+        RO_INPUT_REAL="$(readlink -f -- "$RO_INPUT" 2>/dev/null || true)"
+        [ -n "$RO_INPUT_REAL" ] && [ -e "$RO_INPUT_REAL" ] \
+            || { echo "spawn-tier2: TIER2_RO_INPUT '$RO_INPUT' does not exist (after canonicalization)" >&2; exit 2; }
+        # The canonical path becomes the SOURCE of a colon-delimited podman -v
+        # spec (source:target:options), so a ':' or a control byte in it could
+        # make the spec ambiguous (codex code-review minor). Reject both in the
+        # source path AND the basename before building the bind. (Newlines also
+        # can't survive a podman arg; reject all control bytes 0x00-0x1f.)
+        case "$RO_INPUT_REAL" in
+            *:*) echo "spawn-tier2: refusing input path containing ':' ('$RO_INPUT_REAL') — ambiguous podman volume spec" >&2; exit 2 ;;
+        esac
+        if printf '%s' "$RO_INPUT_REAL" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+            echo "spawn-tier2: refusing input path with control characters" >&2; exit 2
+        fi
+        if [ -f "$RO_INPUT_REAL" ]; then
+            RO_INPUT_KIND="file"
+        elif [ -d "$RO_INPUT_REAL" ]; then
+            RO_INPUT_KIND="dir"
+        else
+            echo "spawn-tier2: TIER2_RO_INPUT '$RO_INPUT' is neither a regular file nor a directory — refusing" >&2
+            exit 2
+        fi
+        RO_INPUT_BASENAME="$(basename -- "$RO_INPUT_REAL")"
+        # Sanitize the basename: a single path component, no traversal, no
+        # slash, not . or .., no ':' (colon-delimited spec), no control bytes —
+        # it becomes the in-container mount target leaf.
+        case "$RO_INPUT_BASENAME" in
+            ""|"."|".."|*/*|*:*) echo "spawn-tier2: refusing unsafe input basename '$RO_INPUT_BASENAME'" >&2; exit 2 ;;
+        esac
+        if printf '%s' "$RO_INPUT_BASENAME" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+            echo "spawn-tier2: refusing input basename with control characters" >&2; exit 2
+        fi
+    fi
 fi
 
 # Test/inspection hook: dump the resolved launch plan and exit 0 BEFORE the
@@ -373,6 +531,13 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'LEASE_PROCTREE=%s\n' "${DISP_LEASE_PROCTREE:-none}"
     printf 'LEASE_PROCTREE_GRACE=%s\n' "${DISP_LEASE_PROCTREE_GRACE:-none}"
     printf 'LEASE_WORKFLOW=%s\n' "${DISP_LEASE_WORKFLOW:-none}"
+    printf 'OPEN_CLASS=%s\n' "${OPEN_CLASS:-none}"
+    printf 'OPEN_ACTION=%s\n' "${OPEN_ACTION:-none}"
+    printf 'NETWORK=%s\n' "${TIER2_NETWORK:-none}"
+    printf 'RO_INPUT_REAL=%s\n' "${RO_INPUT_REAL:-none}"
+    printf 'RO_INPUT_KIND=%s\n' "${RO_INPUT_KIND:-none}"
+    printf 'RO_INPUT_TARGET=%s\n' \
+        "$([ -n "${RO_INPUT_BASENAME:-}" ] && printf '/mnt/input/%s' "$RO_INPUT_BASENAME" || printf 'none')"
     exit 0
 fi
 
@@ -415,8 +580,7 @@ TIER2_ALLOW_PRIVESC_VAL="${TIER2_ALLOW_PRIVESC:-0}"
 # `^[0-9a-f]{32}$` to ignore podman's "<no value>" sentinel and any
 # other label noise.
 # shellcheck source=../lib/spawn-common.sh
-SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# SCRIPT_PATH / SCRIPT_DIR were resolved early (above the open-class gate).
 SPAWN_COMMON="$SCRIPT_DIR/../lib/spawn-common.sh"
 if [ ! -r "$SPAWN_COMMON" ] && [ -r /usr/lib/qdistro/spawn-common.sh ]; then
     SPAWN_COMMON=/usr/lib/qdistro/spawn-common.sh
@@ -534,43 +698,58 @@ if [ ! -f "$QDWIN_SHELL_SO" ]; then
     fail "qdwin-shell.so not found at $QDWIN_SHELL_SO (set TIER2_QDWIN_SHELL_SO)"
 fi
 
-# Mandatory broker spawn-action gate (S4). Tier-2 launch is a security
-# boundary, so only explicit admin-authored rules may authorize it. Cache
-# rows and hook verdicts are ignored by the broker for this namespace — the
-# disposable namespace (qdistro.dispose.spawn:) is in the same rules-only,
-# fail-closed set in the broker. SPAWN_ACTION was resolved with the launch
-# identity above.
+# Mandatory broker gate(s). Tier-2 launch is a security boundary, so only
+# explicit admin-authored rules may authorize it. Cache rows and hook verdicts
+# are ignored by the broker for the qdistro.{tier2,dispose}.spawn: AND
+# qdistro.dispose.open: namespaces — all in the same rules-only, fail-closed
+# set in the broker. A non-allow verdict (deny / unknown / empty / unsupported /
+# dbus error) fails closed.
 if ! command -v dbus-send >/dev/null 2>&1; then
     fail "dbus-send not found; broker authorization required"
 fi
-set +e
-BROKER_OUTPUT=$(dbus-send --system --print-reply=literal \
-    --dest=org.qdistro.AdminBroker1 \
-    /org/qdistro/AdminBroker1 \
-    org.qdistro.AdminBroker1.CheckPermission \
-    "string:$SPAWN_ACTION" \
-    "dict:string:string:" 2>&1)
-BROKER_STATUS=$?
-set -e
-BROKER_REPLY=$(printf '%s' "$BROKER_OUTPUT" | tr -d ' \t\n')
-if [ "$BROKER_STATUS" -ne 0 ]; then
-    fail "broker authorization failed for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION')"
+# broker_gate <action> <human-label> — refuses unless the broker says "allow".
+# The script runs without `set -e`, so the dbus exit status is captured directly
+# (no set +e/-e toggle that could leak `-e` into the rest of the script).
+broker_gate() {
+    local _action="$1" _label="$2" _out _status _reply
+    _out=$(dbus-send --system --print-reply=literal \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
+        "string:$_action" \
+        "dict:string:string:" 2>&1)
+    _status=$?
+    _reply=$(printf '%s' "$_out" | tr -d ' \t\n')
+    if [ "$_status" -ne 0 ]; then
+        fail "broker authorization failed for $_label (action='$_action')"
+    fi
+    case "$_reply" in
+        allow|string\"allow\")
+            if [ "${TIER2_DEBUG:-0}" = "1" ]; then
+                echo "spawn-tier2: broker allowed $_label (action='$_action')" >&2
+            fi
+            ;;
+        deny|string\"deny\")
+            fail "broker denied $_label (action='$_action' decision=deny)" ;;
+        unknown|string\"unknown\"|"")
+            fail "broker has no allow rule for $_label (action='$_action' decision=unknown)" ;;
+        *)
+            fail "broker returned unsupported verdict for $_label (action='$_action' reply='$_reply')" ;;
+    esac
+}
+
+# Gate 1: the spawn gate (always). SPAWN_ACTION resolved with the launch
+# identity above.
+broker_gate "$SPAWN_ACTION" "${WORKLOAD}/${APP_NAME}"
+
+# Gate 2: the OPEN gate (only for open-in-disposable). This is the class-level
+# policy axis the codex review required be enforced in the trusted path — a
+# spawn-gate allow for the workload does NOT by itself authorize routing an
+# untrusted input into the throwaway; the admin must ALSO allow
+# qdistro.dispose.open:<class>. Both gates must pass.
+if [ -n "$OPEN_ACTION" ]; then
+    broker_gate "$OPEN_ACTION" "open-class ${OPEN_CLASS}"
 fi
-case "$BROKER_REPLY" in
-    allow|string\"allow\")
-        [ "${TIER2_DEBUG:-0}" = "1" ] && \
-            echo "spawn-tier2: broker allowed spawn of ${WORKLOAD}/${APP_NAME}" >&2
-        ;;
-    deny|string\"deny\")
-        fail "broker denied spawn of ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' decision=deny)"
-        ;;
-    unknown|string\"unknown\"|"")
-        fail "broker has no allow rule for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' decision=unknown)"
-        ;;
-    *)
-        fail "broker returned unsupported verdict for ${WORKLOAD}/${APP_NAME} (action='$SPAWN_ACTION' reply='$BROKER_REPLY')"
-        ;;
-esac
 
 # --- per-container runtime dir + cleanup trap ----------------------------
 # This is the load-bearing isolation step: the container only sees an
@@ -662,6 +841,13 @@ export TIER2_CPUS_RESOLVED="$TIER2_CPUS_VAL"
 export TIER2_KEEP_CAPS_RESOLVED="$TIER2_KEEP_CAPS_VAL"
 export TIER2_ALLOW_PRIVESC_RESOLVED="$TIER2_ALLOW_PRIVESC_VAL"
 export TIER2_SECCOMP_PROFILE_RESOLVED="$TIER2_SECCOMP_PROFILE"
+# Open-in-disposable RO input (07-plan P2 / D7): the canonicalized host path,
+# its kind, and the in-container basename, all validated + admin-gated above.
+# Empty unless TIER2_OPEN_CLASS+TIER2_RO_INPUT opted in. The wrapper binds it
+# READ-ONLY (nosuid/nodev/noexec) under /mnt/input.
+export TIER2_RO_INPUT_REAL_RESOLVED="${RO_INPUT_REAL:-}"
+export TIER2_RO_INPUT_KIND_RESOLVED="${RO_INPUT_KIND:-}"
+export TIER2_RO_INPUT_BASENAME_RESOLVED="${RO_INPUT_BASENAME:-}"
 APP_ARGV_JOINED="$(printf '%q ' "${APP_ARGV[@]}")"
 export TIER2_APP_ARGV_JOINED="$APP_ARGV_JOINED"
 
@@ -827,6 +1013,23 @@ PODMAN_HARDENING+=(
     --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U
     --tmpfs=/run:size=4m,mode=0755
 )
+# Open-in-disposable RO input (07-plan P2 / D7 mounts-not-copies). A single
+# host file/dir, validated + admin-gated by the parent before podman, bound
+# READ-ONLY under /mnt/input/<basename>. Hardening on the bind itself:
+#   ro       — the disposable cannot write back (D7: output leaves only via a
+#              future brokered export, never an in-place edit of the source).
+#   nosuid   — a setuid bit on the (untrusted) input cannot escalate.
+#   nodev    — no device nodes honoured from the input.
+#   noexec   — the input bytes cannot be executed in-place.
+#   rprivate — the bind is private (mount events do not propagate either way).
+# The container already runs --read-only rootfs + no-new-privileges; this is
+# the only writable-shaped path into it from the host and it is read-only.
+if [ -n "${TIER2_RO_INPUT_REAL_RESOLVED:-}" ]; then
+    _ro_target="/mnt/input/${TIER2_RO_INPUT_BASENAME_RESOLVED}"
+    PODMAN_HARDENING+=(
+        -v "${TIER2_RO_INPUT_REAL_RESOLVED}:${_ro_target}:ro,nosuid,nodev,noexec,rprivate"
+    )
+fi
 # --memory and --cpus only when explicitly requested — both require
 # delegation of the corresponding cgroup v2 controller to admin'"'"'s
 # user slice (see header). Without it the container fails to start.

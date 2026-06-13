@@ -1,0 +1,71 @@
+# Disposable-class registry (07-disposables-plan P2 — open-in-disposable).
+#
+# Maps an "open class" (a mime-class or url-class) to the disposable it opens
+# in: which tier-2 image `workload` to launch, the `network` mode, and the
+# `min_tier` enablement gate. Parsed by
+# session_manager/qdistro_disposable_classes.py; installed to
+# /etc/qdistro/disposable-classes.toml. Each enabled class still needs an
+# explicit broker allow rule for `qdistro.dispose.open:<class>` before it can
+# actually open (rules-only / fail-closed namespace, same as dispose.spawn).
+#
+# *** SAFETY — hostile classes stay OFF ***
+# A tier-2 podman disposable shares the host kernel: it contains accidents and
+# blast radius, NOT a hostile-document parser adversary. So the hostile-input
+# classes (pdf / office / archive) carry `min_tier = 4` and are DISABLED until
+# P3 ships VM-tier disposables (MAX_AVAILABLE_TIER rises to 4). The parser also
+# enforces a CODE-LEVEL floor (HOSTILE_CLASS_MIN_TIER) so these three can never
+# be lowered to tier 2 by editing this file. Only low-risk classes are enabled
+# at tier 2: agent scratch pods, text/plain viewers, and url-preview for a
+# known-benign origin.
+
+# --- enabled (tier-2, low-risk) -----------------------------------------
+
+# Agent scratch pod: a throwaway shell/terminal a workflow or LLM agent gets to
+# work in. weston-terminal is the shipped tier-2 image. No network.
+[classes."agent-scratch"]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+network = "none"
+
+# Plain-text viewer: open a text/plain file read-only in a disposable. No
+# network, no scripting surface. (Workload image is forward work — the registry
+# is policy; the spawn path fails cleanly at image-exists until it is built.)
+[classes."text/plain"]
+workload = "text-viewer"
+tier = 2
+min_tier = 2
+network = "none"
+
+# URL preview for a KNOWN-benign origin only: gets the silo-egress contract
+# (one route, one resolver, default-deny). A disposable never inherits the
+# requester's egress. url:unknown-origin is intentionally NOT enabled here.
+[classes."url-preview-known-origin"]
+workload = "url-preview"
+tier = 2
+min_tier = 2
+network = "egress"
+
+# --- DISABLED (hostile input — VM-tier only, P3) ------------------------
+# These parse but resolve to ClassDisabled at the tier-2 default (min_tier 4 >
+# MAX_AVAILABLE_TIER 2). The HOSTILE_CLASS_MIN_TIER floor in the parser refuses
+# any attempt to lower min_tier/tier below 4. They flip on only when P3 raises
+# MAX_AVAILABLE_TIER and a VM-tier image for them exists.
+
+[classes.pdf]
+workload = "pdf-viewer"
+tier = 4
+min_tier = 4
+network = "none"
+
+[classes.office]
+workload = "office-viewer"
+tier = 4
+min_tier = 4
+network = "none"
+
+[classes.archive]
+workload = "archive-extractor"
+tier = 4
+min_tier = 4
+network = "none"

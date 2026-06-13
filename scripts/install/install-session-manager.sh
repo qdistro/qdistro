@@ -44,6 +44,19 @@ install -o root -g root -m 0755 "$SRC/qdistro_session_manager.py" \
 # Without this the daemon ModuleNotFoundErrors and crash-loops on boot.
 install -o root -g root -m 0755 "$SRC/qdistro_disposables.py" \
     "$DEST/qdistro_disposables.py"
+# Open-in-disposable class registry parser (P2): the pure resolver the trusted
+# spawn path (qdistro-tier2-spawn) shells out to for the qdistro.dispose.open
+# gate + workload/network pinning, and the SDK helper uses to map a class to its
+# workload. Shipped alongside qdistro_disposables (it imports it).
+install -o root -g root -m 0755 "$SRC/qdistro_disposable_classes.py" \
+    "$DEST/qdistro_disposable_classes.py"
+# The class registry itself (admin-editable local policy). Only installed if
+# absent so an admin's edits survive re-install; the floor invariant in the
+# parser keeps hostile classes off regardless of edits.
+if [ ! -f /etc/qdistro/disposable-classes.toml ]; then
+    install -o root -g root -m 0644 "$SRC/disposable-classes.toml" \
+        /etc/qdistro/disposable-classes.toml
+fi
 # Per-silo netns egress (todo/fable-networking task 3): the pure egress
 # backend imported by the daemon, plus the admin tunnel-provisioning helper.
 install -o root -g root -m 0755 "$SRC/qdistro_silo_egress.py" \

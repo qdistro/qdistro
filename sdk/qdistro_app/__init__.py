@@ -26,6 +26,8 @@ Apps wire themselves via the higher-level ``register_app`` helper in
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from collections.abc import Callable, Iterable
 
 import dbus
@@ -33,6 +35,12 @@ import dbus.service
 
 _BUS_NAME = "org.qdistro.AdminBroker1"
 _OBJ_PATH = "/org/qdistro/AdminBroker1"
+
+# The shipped trusted launch path for tier-2 / disposable silos. The SDK helper
+# below execs it; the binary re-does every gate (class resolution, the
+# qdistro.dispose.open: broker gate, the RO-input validation) so the SDK is a
+# convenience layer, never the security boundary.
+_TIER2_SPAWN_BIN = "qdistro-tier2-spawn"
 
 APP1_IFACE = "org.qdistro.App1"
 APP1_OBJ_PATH = "/org/qdistro/App1"
@@ -63,6 +71,139 @@ def request(action: str, details: dict | None = None, *,
     rid = int(broker.RequestPermission(str(action), details or {}, dbus_interface=_BUS_NAME))
     allowed = broker.WaitForDecision(rid, dbus_interface=_BUS_NAME, timeout=float(timeout))
     return bool(allowed)
+
+
+class OpenInDisposableError(RuntimeError):
+    """open_in_disposable() could not launch the disposable (class disabled /
+    unknown, input invalid, broker refused, or the spawn binary failed). The
+    message carries the spawn binary's stderr where available."""
+
+
+def open_in_disposable(path: str, *, class_name: str,
+                       spawn_bin: str | None = None,
+                       extra_env: dict[str, str] | None = None) -> dict:
+    """Open ``path`` read-only inside a fresh tier-2 disposable for ``class_name``
+    (07-disposables-plan P2 — "open this thing in a disposable").
+
+    This is a thin convenience over the SHIPPED trusted launch binary
+    (``qdistro-tier2-spawn --disposable``). The binary — NOT this helper — is
+    the security boundary: it resolves ``class_name`` from the disposable-class
+    registry (enforcing the ``min_tier`` hostile-class gate), pins the workload
+    + network from the class, validates the input, calls the broker
+    ``qdistro.dispose.open:<class>`` gate (rules-only / fail-closed), and binds
+    the input read-only under ``/mnt/input/<basename>``. A compromised caller
+    that skips this helper still hits every one of those gates in the binary.
+
+    ``path`` must be an existing absolute file or directory. Raises
+    :class:`OpenInDisposableError` on any failure (the class is disabled/unknown,
+    the input is invalid, the broker refuses, or the binary errors); the
+    container is launched in the background (it owns its own lifecycle / lease),
+    and a dict of the parsed ``KEY=VALUE`` launch contract
+    (``LAUNCH_TOKEN``/``CONTAINER``/``IMAGE``/``APP_ID``) is returned on success.
+
+    The class registry is consulted SERVER-SIDE by the binary; we deliberately
+    do not re-implement the gate here (a second copy could drift and lie). We do
+    a cheap client-side path sanity check so an obvious mistake fails fast with a
+    clear error before paying a process spawn.
+    """
+    if not isinstance(path, str) or not path:
+        raise OpenInDisposableError("path must be a non-empty string")
+    if not os.path.isabs(path):
+        raise OpenInDisposableError(f"path must be absolute: {path!r}")
+    real = os.path.realpath(path)
+    if not os.path.exists(real):
+        raise OpenInDisposableError(f"path does not exist: {path!r}")
+    if not (os.path.isfile(real) or os.path.isdir(real)):
+        raise OpenInDisposableError(
+            f"path is neither a regular file nor a directory: {path!r}")
+    if not isinstance(class_name, str) or not class_name:
+        raise OpenInDisposableError("class_name must be a non-empty string")
+
+    binary = spawn_bin or shutil.which(_TIER2_SPAWN_BIN) or _TIER2_SPAWN_BIN
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update({str(k): str(v) for k, v in extra_env.items()})
+    env["TIER2_OPEN_CLASS"] = class_name
+    env["TIER2_RO_INPUT"] = real
+
+    # The binary's signature is `--disposable <workload> -- <app> [args]`, so we
+    # must name the workload. We resolve it from the SHIPPED class registry (no
+    # second registry copy in the SDK). This is NOT a trust point: the binary
+    # re-validates that the class's registry workload equals this one and
+    # refuses on a mismatch.
+    workload, app_argv = _resolve_open_workload(class_name, env)
+
+    cmd = [binary, "--disposable", workload, "--", *app_argv]
+    try:
+        # Background: the disposable owns its own lifecycle (window-close + --rm,
+        # or a TTL lease). We capture the pre-exec stdout contract by running
+        # with TIER2_DETACH so the binary emits the contract then returns.
+        env["TIER2_DETACH"] = "1"
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                              timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise OpenInDisposableError(
+            f"failed to launch {binary}: {e}") from e
+    if proc.returncode != 0:
+        raise OpenInDisposableError(
+            f"{binary} refused/failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip()}")
+    contract: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            if k in ("LAUNCH_TOKEN", "CONTAINER", "IMAGE", "APP_ID"):
+                contract[k] = v
+    return contract
+
+
+def _resolve_open_workload(class_name: str,
+                           env: dict[str, str]) -> tuple[str, list[str]]:
+    """Ask the shipped class-registry resolver for the workload backing
+    ``class_name`` (so the SDK doesn't carry a second copy of the registry).
+    Returns ``(workload, app_argv)``. Raises :class:`OpenInDisposableError` if
+    the class is unknown/disabled or the registry is malformed (the resolver's
+    non-zero exit). The binary re-validates server-side regardless."""
+    resolver = None
+    candidates = []
+    override = env.get("QDISTRO_DISPOSABLE_CLASSES_RESOLVER")
+    if override:
+        candidates.append(override)
+    candidates.append("/usr/libexec/qdistro/qdistro_disposable_classes.py")
+    for cand in candidates:
+        if os.path.exists(cand):
+            resolver = cand
+            break
+    if resolver is None:
+        raise OpenInDisposableError(
+            "disposable-class registry resolver not installed "
+            "(/usr/libexec/qdistro/qdistro_disposable_classes.py)")
+    try:
+        proc = subprocess.run(
+            ["python3", resolver, "--resolve", class_name],
+            env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise OpenInDisposableError(f"class resolve failed: {e}") from e
+    if proc.returncode != 0:
+        raise OpenInDisposableError(
+            f"class {class_name!r} is not openable "
+            f"(resolver rc={proc.returncode}): {proc.stderr.strip()}")
+    workload = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("WORKLOAD="):
+            workload = line.partition("=")[2]
+            break
+    if not workload:
+        raise OpenInDisposableError(
+            f"resolver returned no workload for class {class_name!r}")
+    # Default app argv: the workload's own entrypoint. For the shipped
+    # weston-terminal scratch workload this is the terminal; richer classes
+    # (text-viewer, url-preview) ship their own image entrypoint, so an empty
+    # app argv would be wrong — we run the workload name as the app, matching
+    # how the image's PATH exposes it. Callers needing a specific argv can use
+    # qdistro-tier2-spawn directly.
+    return workload, [workload]
 
 
 def _resolve_silo() -> str:
