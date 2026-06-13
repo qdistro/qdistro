@@ -1,0 +1,260 @@
+{
+	"defaultAction": "SCMP_ACT_ERRNO",
+	"defaultErrnoRet": 38,
+	"comment": "Custom seccomp profile for the tier-2 text-viewer container (open class text/plain). Deny-by-default; same allowlist as weston-terminal (bash + weston + weston-terminal + wayland client libs + coreutils) plus `less` (which uses the same read/write/openat/ioctl/poll set already allowed). Network=none at the podman level, so the allowed socket syscalls only reach the wayland/pipewire AF_UNIX sockets.",
+	"archMap": [
+		{
+			"architecture": "SCMP_ARCH_X86_64",
+			"subArchitectures": [
+				"SCMP_ARCH_X86",
+				"SCMP_ARCH_X32"
+			]
+		},
+		{
+			"architecture": "SCMP_ARCH_AARCH64",
+			"subArchitectures": [
+				"SCMP_ARCH_ARM"
+			]
+		}
+	],
+	"syscalls": [
+		{
+			"comment": "Process lifecycle and job control (setpgid/setsid needed by bash job control, set_robust_list/rseq by glibc/pthread init, pidfd_open/pidfd_send_signal by libudev via weston)",
+			"names": [
+				"clone",
+				"clone3",
+				"execve",
+				"exit",
+				"exit_group",
+				"wait4",
+				"waitid",
+				"getpid",
+				"getppid",
+				"gettid",
+				"set_tid_address",
+				"set_robust_list",
+				"rseq",
+				"prctl",
+				"arch_prctl",
+				"setpgid",
+				"getpgid",
+				"getpgrp",
+				"setsid",
+				"getsid",
+				"pidfd_open",
+				"pidfd_send_signal",
+				"sched_yield",
+				"sched_getaffinity",
+				"sched_setaffinity"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Memory management",
+			"names": [
+				"mmap",
+				"munmap",
+				"mprotect",
+				"mremap",
+				"brk",
+				"madvise"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "File I/O. flock needed by libwayland-server for socket lock files. fsync by libglib. close_range by glibc/libglib (modern close-on-exec). statfs by bash.",
+			"names": [
+				"openat",
+				"close",
+				"close_range",
+				"read",
+				"write",
+				"readv",
+				"writev",
+				"lseek",
+				"pread64",
+				"pwrite64",
+				"fcntl",
+				"flock",
+				"fsync",
+				"dup",
+				"dup2",
+				"dup3",
+				"pipe",
+				"pipe2",
+				"fstat",
+				"newfstatat",
+				"statx",
+				"fstatfs",
+				"statfs",
+				"access",
+				"faccessat",
+				"faccessat2",
+				"readlink",
+				"readlinkat",
+				"getcwd",
+				"chdir",
+				"fchdir"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Directory operations",
+			"names": [
+				"getdents64",
+				"mkdir",
+				"mkdirat",
+				"rmdir",
+				"unlink",
+				"unlinkat",
+				"rename",
+				"renameat",
+				"renameat2"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Socket (wayland client/server, pipewire). socketpair needed by weston for internal IPC. Network=none at the podman level prevents AF_INET/AF_INET6 even though the syscall is allowed.",
+			"names": [
+				"socket",
+				"socketpair",
+				"connect",
+				"bind",
+				"listen",
+				"accept",
+				"accept4",
+				"sendmsg",
+				"recvmsg",
+				"sendto",
+				"recvfrom",
+				"getsockname",
+				"getpeername",
+				"getsockopt",
+				"setsockopt",
+				"shutdown"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Epoll/poll (weston event loop). epoll_pwait/epoll_pwait2 used by glibc >= 2.35 and libwayland.",
+			"names": [
+				"epoll_create1",
+				"epoll_ctl",
+				"epoll_wait",
+				"epoll_pwait",
+				"epoll_pwait2",
+				"poll",
+				"ppoll",
+				"select",
+				"pselect6"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Signal handling (rt_sigsuspend needed by bash wait builtin, rt_sigpending by signal-safe cleanup paths)",
+			"names": [
+				"rt_sigaction",
+				"rt_sigprocmask",
+				"rt_sigreturn",
+				"rt_sigsuspend",
+				"rt_sigpending",
+				"kill",
+				"tgkill",
+				"sigaltstack"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Time and timers (weston event loop, animations)",
+			"names": [
+				"clock_gettime",
+				"clock_getres",
+				"gettimeofday",
+				"nanosleep",
+				"clock_nanosleep",
+				"timerfd_create",
+				"timerfd_settime",
+				"timerfd_gettime"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "User/group IDs. The set* variants are needed by podman's --userns=keep-id uid mapping; they are neutered by --cap-drop=ALL (no CAP_SETUID/SETGID) and --security-opt=no-new-privileges. getresuid/getresgid used by bash.",
+			"names": [
+				"getuid",
+				"geteuid",
+				"getgid",
+				"getegid",
+				"getgroups",
+				"getresuid",
+				"getresgid",
+				"setuid",
+				"setgid",
+				"setgroups",
+				"setreuid",
+				"setregid"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Misc: ioctl (terminal, DRM), futex (glibc threading), getrandom (weston), eventfd/signalfd (event loops), memfd/ftruncate/fallocate (wayland SHM), chmod/chown/umask (coreutils), inotify (weston config watch), prlimit64/getrlimit/setrlimit (glibc, bash ulimit). chown/fchown* neutered by --cap-drop=ALL (no CAP_CHOWN).",
+			"names": [
+				"ioctl",
+				"uname",
+				"futex",
+				"getrandom",
+				"eventfd",
+				"eventfd2",
+				"signalfd4",
+				"memfd_create",
+				"ftruncate",
+				"fallocate",
+				"chmod",
+				"fchmod",
+				"fchmodat",
+				"chown",
+				"fchown",
+				"fchownat",
+				"umask",
+				"inotify_init1",
+				"inotify_add_watch",
+				"inotify_rm_watch",
+				"prlimit64",
+				"getrlimit",
+				"setrlimit",
+				"getrusage"
+			],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
+			"comment": "Explicitly denied high-risk syscalls (return EPERM, not ENOSYS like the default, so callers cannot mistake the deny for 'kernel too old'). Listed individually so auditors can see exactly what is blocked and why.",
+			"names": [
+				"ptrace",
+				"process_vm_readv",
+				"process_vm_writev",
+				"keyctl",
+				"add_key",
+				"request_key",
+				"io_uring_setup",
+				"io_uring_enter",
+				"io_uring_register",
+				"userfaultfd",
+				"perf_event_open",
+				"bpf",
+				"kexec_load",
+				"kexec_file_load",
+				"mount",
+				"umount2",
+				"pivot_root",
+				"swapon",
+				"swapoff",
+				"reboot",
+				"init_module",
+				"finit_module",
+				"delete_module"
+			],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 1
+		}
+	]
+}

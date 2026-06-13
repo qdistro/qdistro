@@ -1,0 +1,36 @@
+#!/bin/bash
+# text-viewer-pager — the program weston-terminal's `--shell=` execs for the
+# text-viewer workload. weston-terminal runs --shell=<prog> with NO arguments,
+# so the file to page is passed in QDISTRO_TEXTVIEWER_FILE (set by text-viewer).
+#
+# It pages the read-only input with `less` in a NON-raw mode: control bytes are
+# shown as caret notation (^[), never interpreted as terminal escapes, so an
+# attacker-controlled file cannot drive the terminal. The path is passed to
+# `less` ONLY as an argv element (no shell -c), so a hostile filename is inert.
+set -u
+
+log() { printf '[text-viewer-pager] %s\n' "$*" >&2; }
+
+FILE="${QDISTRO_TEXTVIEWER_FILE:-}"
+if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+    log "no readable input file (QDISTRO_TEXTVIEWER_FILE='$FILE')"
+    # Keep the terminal open briefly so the user sees the message rather than a
+    # window that flashes and vanishes.
+    sleep 5
+    exit 2
+fi
+
+# less with NO -r/-R: control chars render as caret notation, never executed.
+# --chop-long-lines avoids wrap surprises; -N adds (read-only) line numbers.
+# LESSSECURE=1 disables less's shell-out / pipe / edit features defensively.
+if command -v less >/dev/null 2>&1; then
+    export LESSSECURE=1
+    exec less -N --chop-long-lines -- "$FILE"
+fi
+
+# Fallback: cat -v also escapes control bytes; loop a trivial pager so the
+# window stays up. (cat -v then a blocking read keeps the terminal alive.)
+log "WARN: less not found; using cat -v"
+cat -v -- "$FILE"
+printf '\n[text-viewer] end of file — press Enter to close]\n'
+read -r _ || true

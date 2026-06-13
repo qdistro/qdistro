@@ -1,0 +1,68 @@
+#!/bin/bash
+# text-viewer — the tier-2 `text-viewer` workload app (open class text/plain).
+#
+# The disposable spawn path (tier2/spawn-tier2.sh, open-in-disposable flow)
+# binds the user's chosen file READ-ONLY at /mnt/input/<basename> with
+# ro,nosuid,nodev,noexec,rprivate, then exec's THIS script (the SDK passes the
+# bare workload name `text-viewer` as the app argv — no file argument). So the
+# viewer DISCOVERS the single read-only file under /mnt/input and pages it in a
+# weston-terminal running `less` (reusing the already-proven weston-terminal
+# binary instead of pulling in a GUI toolkit — codex design GO).
+#
+# Security envelope (all enforced by the spawn path, NOT this script):
+#   - --cap-drop=ALL, --security-opt=no-new-privileges, --read-only rootfs,
+#     tmpfs home, --network none, custom seccomp (text-viewer.json).
+# This script adds defence-in-depth: fail closed unless EXACTLY one regular file
+# is present, never recurse, never execute the input, and run `less` in a
+# NON-raw mode (via the text-viewer-pager helper) so attacker-controlled bytes
+# in the file cannot drive terminal escape sequences. weston-terminal's
+# `--shell=<prog>` execs a single program with NO args, so the chosen file is
+# handed to the pager helper through an env var (never a shell string), keeping
+# spaces/newlines/metachars in the filename inert.
+set -u
+
+INPUT_DIR=/mnt/input
+
+log() { printf '[text-viewer] %s\n' "$*" >&2; }
+
+if [ ! -d "$INPUT_DIR" ]; then
+    log "FATAL: $INPUT_DIR not mounted — nothing to view"
+    exit 2
+fi
+
+# Discover EXACTLY one regular file directly under /mnt/input (the spawn path
+# mounts a single file at /mnt/input/<basename>; we never walk subtrees). Use a
+# glob over the leaf only — no `find -exec`, no recursion. A symlink leaf is
+# rejected (defence in depth vs a swapped target); a directory input or 0/>1
+# files fail closed.
+shopt -s nullglob dotglob
+candidates=()
+for entry in "$INPUT_DIR"/*; do
+    if [ -L "$entry" ]; then
+        log "FATAL: refusing symlink in input ($entry)"
+        exit 2
+    fi
+    if [ -f "$entry" ]; then
+        candidates+=("$entry")
+    fi
+done
+shopt -u nullglob dotglob
+
+if [ "${#candidates[@]}" -eq 0 ]; then
+    log "FATAL: no regular file found under $INPUT_DIR (directory input is unsupported by text-viewer)"
+    exit 2
+fi
+if [ "${#candidates[@]}" -gt 1 ]; then
+    log "FATAL: expected exactly one file under $INPUT_DIR, found ${#candidates[@]} — refusing"
+    exit 2
+fi
+
+FILE="${candidates[0]}"
+log "viewing: $FILE"
+
+# weston-terminal --shell=<prog> runs <prog> instead of a login shell, with NO
+# arguments. We point it at the pager helper and pass the discovered file via
+# QDISTRO_TEXTVIEWER_FILE in the environment (inherited by the spawned shell
+# program) — the filename is never embedded in a shell command string.
+export QDISTRO_TEXTVIEWER_FILE="$FILE"
+exec weston-terminal --maximized --shell=/usr/local/bin/text-viewer-pager

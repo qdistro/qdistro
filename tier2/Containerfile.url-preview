@@ -1,0 +1,86 @@
+# Tier-2 url-preview image (open class url-preview-known-origin). A MINIMAL,
+# sandboxed NETWORK METADATA / TEXT preview of a single known-origin URL — NOT a
+# browser or visual web renderer (codex design GO; a rich renderer is residual).
+# It reads one URL from a read-only file at /mnt/input/<basename>, validates it
+# strictly, fetches bounded response headers + a capped text body with `curl`
+# over the class-pinned egress network, sanitizes the bytes, and pages the
+# result in a weston-terminal/less.
+#
+# Built by tier2/make-tier2-image.sh; produces qdistro/tier2-url-preview:latest.
+#
+# Security envelope is enforced ENTIRELY by the host spawn path
+# (tier2/spawn-tier2.sh): --cap-drop=ALL, --security-opt=no-new-privileges,
+# --read-only rootfs + tmpfs scratch, --userns=keep-id, custom seccomp
+# (tier2/seccomp/url-preview.json), and --network slirp4netns (egress) PINNED by
+# the url-preview-known-origin class (a caller cannot widen/narrow it). The image
+# ships ONLY the workload binaries + weston runtime + curl. qdwin-shell.so is
+# bind-mounted at run time (not baked), same as the other tier-2 images.
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# Runtime deps: the weston stack (nested compositor + qdwin-shell.so publisher;
+# the `weston` package ships the `weston-terminal` binary used as the pager host,
+# same as the weston-terminal image) + `less` (the pager) + curl +
+# ca-certificates (the bounded fetch — https needs the CA bundle).
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install --no-recommends \
+        weston \
+        libweston-14 \
+        libpipewire-0_3-0 \
+        libwayland-client0 \
+        libwayland-server0 \
+        Mesa-libGL1 \
+        Mesa-libEGL1 \
+        libxkbcommon0 \
+        xkeyboard-config \
+        coreutils \
+        less \
+        curl \
+        ca-certificates \
+ && update-ca-certificates 2>/dev/null || true \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# Audit + strip setuid/setgid bits from the final image (defence in depth —
+# curl/ca-certificates pull in nothing setuid by default, but fail LOUDLY if a
+# future base change does, so it is caught here, not in production).
+RUN found="$(find / -xdev -type f -perm /6000 2>/dev/null || true)"; \
+    if [ -n "$found" ]; then \
+        echo "stripping setuid/setgid bits from:"; echo "$found"; \
+        echo "$found" | xargs -r chmod a-s; \
+    fi; \
+    remain="$(find / -xdev -type f -perm /6000 2>/dev/null || true)"; \
+    if [ -n "$remain" ]; then echo "FATAL: setuid/setgid bits remain: $remain" >&2; exit 1; fi
+
+# Minimal XDG desktop entry.
+RUN install -d -o root -g root -m 0755 /usr/share/applications \
+ && cat > /usr/share/applications/url-preview.desktop <<'DESK' \
+ && chmod 0644 /usr/share/applications/url-preview.desktop
+[Desktop Entry]
+Name=URL Preview
+GenericName=URL Metadata Preview
+Comment=Bounded text/headers preview of a known-origin URL in a tier-2 disposable
+Exec=url-preview
+Icon=text-html
+Type=Application
+Categories=Network;
+Terminal=false
+DESK
+
+# Inner weston config (loads qdwin-shell.so + wayland/pipewire backends).
+COPY weston.ini /etc/xdg/weston/weston.ini
+
+# In-container entrypoint (shared, workload-agnostic).
+COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+# The workload app + the shared pager helper (reused from text-viewer).
+COPY workload/url-preview /usr/local/bin/url-preview
+COPY workload/text-viewer-pager /usr/local/bin/text-viewer-pager
+RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint \
+                /usr/local/bin/url-preview \
+                /usr/local/bin/text-viewer-pager
+
+# uid 1000 = admin on the host; --userns=keep-id maps it 1:1.
+USER 1000:1000
+WORKDIR /home/admin
+
+ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+CMD ["url-preview"]

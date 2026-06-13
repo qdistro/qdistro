@@ -1,0 +1,84 @@
+# Tier-2 text-viewer image (open class text/plain). A MINIMAL sandboxed viewer
+# that pages a single read-only file mounted at /mnt/input/<basename> in a
+# weston-terminal running `less` (NON-raw, so attacker bytes can't drive the
+# terminal). It reuses the already-proven weston-terminal binary instead of a
+# GUI toolkit — smallest attack surface, codex design GO.
+#
+# Built by tier2/make-tier2-image.sh; produces qdistro/tier2-text-viewer:latest.
+#
+# Security envelope is enforced ENTIRELY by the host spawn path
+# (tier2/spawn-tier2.sh): --cap-drop=ALL, --security-opt=no-new-privileges,
+# --read-only rootfs + tmpfs scratch, --network none (pinned by the text/plain
+# class), --userns=keep-id, custom seccomp (tier2/seccomp/text-viewer.json).
+# The image ships ONLY the workload binaries + the weston runtime. qdwin-shell.so
+# is bind-mounted at run time (not baked), same as weston-terminal.
+FROM registry.opensuse.org/opensuse/tumbleweed:latest
+
+# Runtime deps: identical weston stack to the weston-terminal image (so the
+# nested compositor + qdwin-shell.so publisher behave the same). The `weston`
+# package ships the `weston-terminal` binary (the viewer host) — same as the
+# weston-terminal image, which also installs only `weston`. Plus `less` (the
+# pager). No network tooling — text/plain is a network=none class.
+RUN zypper --non-interactive --gpg-auto-import-keys refresh \
+ && zypper --non-interactive install --no-recommends \
+        weston \
+        libweston-14 \
+        libpipewire-0_3-0 \
+        libwayland-client0 \
+        libwayland-server0 \
+        Mesa-libGL1 \
+        Mesa-libEGL1 \
+        libxkbcommon0 \
+        xkeyboard-config \
+        coreutils \
+        less \
+ && zypper clean --all \
+ && rm -rf /var/cache/zypp/* /var/log/*.log
+
+# Audit + strip setuid/setgid bits from the final image (defence in depth —
+# no-new-privileges already blocks escalation, but a disposable viewer needs no
+# setuid binary at all). Fail the build LOUDLY if any survive so a future base
+# change that pulls one in is caught here, not in production.
+RUN found="$(find / -xdev -type f -perm /6000 2>/dev/null || true)"; \
+    if [ -n "$found" ]; then \
+        echo "stripping setuid/setgid bits from:"; echo "$found"; \
+        echo "$found" | xargs -r chmod a-s; \
+    fi; \
+    remain="$(find / -xdev -type f -perm /6000 2>/dev/null || true)"; \
+    if [ -n "$remain" ]; then echo "FATAL: setuid/setgid bits remain: $remain" >&2; exit 1; fi
+
+# Minimal XDG desktop entry — surfaced as a badged launcher entry in qdshell
+# via tier2/podapps-scan.sh.
+RUN install -d -o root -g root -m 0755 /usr/share/applications \
+ && cat > /usr/share/applications/text-viewer.desktop <<'DESK' \
+ && chmod 0644 /usr/share/applications/text-viewer.desktop
+[Desktop Entry]
+Name=Text Viewer
+GenericName=Text File Viewer
+Comment=Read-only viewer for a text file opened in a tier-2 disposable
+Exec=text-viewer
+Icon=text-x-generic
+Type=Application
+Categories=Utility;TextEditor;
+Terminal=false
+DESK
+
+# Inner weston config (loads qdwin-shell.so + wayland/pipewire backends).
+COPY weston.ini /etc/xdg/weston/weston.ini
+
+# In-container entrypoint (shared, workload-agnostic): starts inner weston, then
+# exec's the app argv (here `text-viewer`).
+COPY entrypoint.sh /usr/local/bin/qdistro-tier2-entrypoint
+# The workload app + its pager helper.
+COPY workload/text-viewer /usr/local/bin/text-viewer
+COPY workload/text-viewer-pager /usr/local/bin/text-viewer-pager
+RUN chmod 0755 /usr/local/bin/qdistro-tier2-entrypoint \
+                /usr/local/bin/text-viewer \
+                /usr/local/bin/text-viewer-pager
+
+# uid 1000 = admin on the host; --userns=keep-id maps it 1:1.
+USER 1000:1000
+WORKDIR /home/admin
+
+ENTRYPOINT ["/usr/local/bin/qdistro-tier2-entrypoint"]
+CMD ["text-viewer"]

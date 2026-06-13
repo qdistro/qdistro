@@ -521,6 +521,15 @@ if [ -n "$OPEN_CLASS" ]; then
              "class/workload mismatch, refusing" >&2
         exit 2
     fi
+    # The class also pins the app argv. This is load-bearing for open classes
+    # whose workload script is the sanitizer/policy boundary (for example
+    # url-preview validates URL shape, disables redirects, bounds curl, and
+    # escapes terminal output). A caller may choose the workload position only
+    # because the CLI shape needs it before the registry is resolved; it may NOT
+    # pair an authorized class with arbitrary argv inside that egress/text image.
+    # Direct custom argv remains available only when TIER2_OPEN_CLASS is absent.
+    APP_ARGV=("$WORKLOAD")
+    APP_NAME="$WORKLOAD"
     # The class pins the network mode: 'none' -> --network none, 'egress' ->
     # the slirp4netns egress contract. The trusted path SETS it from the class
     # (a caller cannot widen a 'none' class to egress via TIER2_NETWORK).

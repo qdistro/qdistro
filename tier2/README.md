@@ -63,8 +63,34 @@ Each workload ships its own image:
 | Image                            | Workload      |
 |----------------------------------|---------------|
 | `qdistro/tier2-weston-terminal`  | weston-terminal (bats minimum) |
+| `qdistro/tier2-text-viewer`      | text-viewer (open class `text/plain`, network none) |
+| `qdistro/tier2-url-preview`      | url-preview (open class `url-preview-known-origin`, network egress) |
 | `qdistro/tier2-firefox`          | firefox       |
 | `qdistro/tier2-libreoffice`      | libreoffice   |
+
+### text-viewer / url-preview workload images
+
+Two open-in-disposable workloads ship their own image + a deny-by-default
+seccomp profile (`tier2/seccomp/<workload>.json`). The workload binaries live
+in `tier2/workload/`:
+
+- **text-viewer** (`text/plain` class, network **none**): pages the single
+  read-only file mounted at `/mnt/input/<basename>` in a weston-terminal running
+  `less` in a NON-raw mode (control bytes shown as caret notation, never
+  executed). Fails closed unless exactly one regular file is present; never
+  recurses; the filename is passed argv-only (no shell interpolation). Reuses the
+  proven weston-terminal binary — no GUI toolkit.
+- **url-preview** (`url-preview-known-origin` class, network **egress**): a
+  bounded NETWORK METADATA / TEXT preview (NOT a browser / visual renderer). It
+  reads ONE URL from the read-only `/mnt/input` file, validates it strictly
+  (http/https only, single line, length-capped, no creds, no control bytes/
+  whitespace), fetches bounded response headers + a capped body with `curl`
+  (connect/total timeouts, `--max-filesize`, **no redirect following**, `-q` so
+  no curlrc), escapes all control bytes (`cat -v`), and pages the sanitized
+  result. "Known-origin" is a POLICY claim enforced upstream by the
+  broker-authorized caller + the `qdistro.dispose.open:` gate; the container
+  enforces URL SHAPE + bounded fetches only (an origin allowlist is residual).
+  A rich visual renderer (headless chromium / webkit) is an explicit residual.
 
 Rationale: smaller images, faster start, no shared mutable state
 between workloads, simpler attack surface per image. The qdshell

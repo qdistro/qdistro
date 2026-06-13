@@ -603,6 +603,20 @@ def test_open_class_pins_network_egress(tmp_path: Path) -> None:
     assert plan["NETWORK"] == "slirp4netns"
 
 
+def test_open_class_pins_app_argv_to_workload(tmp_path: Path) -> None:
+    """The trusted open path must not let a caller pair an authorized open class
+    with arbitrary argv inside that workload image. This is load-bearing for
+    classes like url-preview, whose workload script performs URL validation,
+    fetch bounds, redirect policy, and output sanitization."""
+    result = _run_open(tmp_path, open_class="url-preview-known-origin",
+                       workload="url-preview", dbus_mode="allow",
+                       open_verdict="allow", record_podman=True)
+    assert result.returncode == 0, result.stderr
+    argv = (tmp_path / "podman-argv").read_text().split()
+    assert argv[-1] == "url-preview", argv
+    assert "weston-terminal" not in argv
+
+
 def test_open_requires_disposable(tmp_path: Path) -> None:
     """TIER2_OPEN_CLASS on a non-disposable (persistent) spawn is refused."""
     runtime = tmp_path / "runtime"

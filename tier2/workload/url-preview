@@ -1,0 +1,188 @@
+#!/bin/bash
+# url-preview — the tier-2 `url-preview` workload app (open class
+# url-preview-known-origin). A MINIMAL, sandboxed NETWORK METADATA / TEXT
+# preview — NOT a browser or visual web renderer (codex design GO; a rich
+# renderer is an explicit residual).
+#
+# The disposable spawn path binds a single read-only file at
+# /mnt/input/<basename> containing ONE url; the SDK execs the bare workload name
+# `url-preview` (no argument), so this script DISCOVERS the file, reads the URL,
+# validates it STRICTLY, fetches bounded response metadata + a capped text body
+# with `curl` over the class-pinned slirp4netns egress, SANITIZES the bytes
+# (escape control sequences so attacker output can't drive the terminal), and
+# pages the result in a weston-terminal/less.
+#
+# "Known-origin" is a POLICY claim enforced upstream: the broker-authorized
+# caller chose to write this URL into the input file and authorized the
+# qdistro.dispose.open:url-preview-known-origin gate. This container does NOT
+# carry an origin allowlist; it only enforces URL SHAPE (http/https, no creds,
+# single line, bounded length) and bounded, non-following fetches. (A registry
+# origin allowlist is a residual.)
+#
+# Security envelope is enforced by the spawn path: --cap-drop=ALL,
+# no-new-privileges, --read-only rootfs + tmpfs, --userns=keep-id, custom
+# seccomp (url-preview.json), and --network slirp4netns (egress) PINNED by the
+# class (a caller cannot widen it; a 'none' class cannot reach here).
+set -u
+
+INPUT_DIR=/mnt/input
+OUT=/tmp/url-preview.out          # tmpfs (the spawn path mounts /tmp tmpfs)
+MAX_URL_LEN=2048                  # generous cap; rejects absurd inputs
+CURL_CONNECT_TIMEOUT=10
+CURL_MAX_TIME=30
+CURL_MAX_FILESIZE=1048576         # 1 MiB hard cap on the downloaded body
+BODY_BYTES=65536                  # show at most 64 KiB of body in the preview
+
+log() { printf '[url-preview] %s\n' "$*" >&2; }
+
+die_window() {
+    # Show the error in the terminal window (not just stderr, which the user
+    # never sees) so a refused preview is visible, then exit non-zero.
+    local msg="$1"
+    log "$msg"
+    {
+        printf 'url-preview: %s\n' "$msg"
+        printf '\n[press Enter to close]\n'
+    } > "$OUT" 2>/dev/null || true
+    show_and_exit 2
+}
+
+# Render $OUT in a weston-terminal pager and exit with $1. Uses the same
+# env-passed, non-raw `less` approach as text-viewer (no filename in a shell
+# string; control bytes shown as caret notation — the body is already escaped
+# below, this is belt-and-suspenders).
+show_and_exit() {
+    local rc="$1"
+    export QDISTRO_TEXTVIEWER_FILE="$OUT"
+    exec weston-terminal --maximized --shell=/usr/local/bin/text-viewer-pager
+    exit "$rc"   # only reached if exec fails
+}
+
+if [ ! -d "$INPUT_DIR" ]; then
+    die_window "$INPUT_DIR not mounted — no URL to preview"
+fi
+
+# Discover EXACTLY one regular file under /mnt/input (single leaf, no recursion).
+shopt -s nullglob dotglob
+candidates=()
+for entry in "$INPUT_DIR"/*; do
+    if [ -L "$entry" ]; then die_window "refusing symlink in input ($entry)"; fi
+    if [ -f "$entry" ]; then candidates+=("$entry"); fi
+done
+shopt -u nullglob dotglob
+[ "${#candidates[@]}" -eq 1 ] \
+    || die_window "expected exactly one url file under $INPUT_DIR, found ${#candidates[@]}"
+URL_FILE="${candidates[0]}"
+
+# Read the URL: FIRST line only, bounded length. A multi-line file is refused
+# (a url file is one url). Reject empty / control bytes / whitespace-only.
+# `read -r` stops at the first newline; we then reject if there is MORE content.
+IFS= read -r URL < "$URL_FILE" || true
+# A second read must hit EOF — otherwise the file had >1 line; refuse.
+if IFS= read -r _extra < <(tail -n +2 -- "$URL_FILE"); then
+    die_window "url file has more than one line — refusing (expected a single url)"
+fi
+# Trim surrounding ASCII whitespace only (no locale surprises).
+URL="${URL#"${URL%%[![:space:]]*}"}"
+URL="${URL%"${URL##*[![:space:]]}"}"
+
+if [ -z "$URL" ]; then
+    die_window "url file is empty"
+fi
+if [ "${#URL}" -gt "$MAX_URL_LEN" ]; then
+    die_window "url too long (${#URL} > $MAX_URL_LEN)"
+fi
+# Reject ANY control byte (incl. embedded NUL is impossible in a bash var, but
+# tabs/CR/escape are) — the url must be printable ASCII-ish on one line.
+if printf '%s' "$URL" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    die_window "url contains control characters — refusing"
+fi
+# Reject whitespace anywhere inside the url (a valid url is percent-encoded).
+case "$URL" in
+    *[[:space:]]*) die_window "url contains whitespace — refusing" ;;
+esac
+# Scheme: http or https ONLY (lowercase). Rejects file:, javascript:, data:,
+# ftp:, gopher:, etc. — the case-glob anchors at the start.
+case "$URL" in
+    http://*|https://*) : ;;
+    *) die_window "url scheme not http/https — refusing ('${URL%%:*}:')" ;;
+esac
+# Reject embedded credentials (user:pass@host) — the authority (between :// and
+# the first / ? #) must not contain '@'.
+authority="${URL#*://}"
+authority="${authority%%/*}"
+authority="${authority%%\?*}"
+authority="${authority%%#*}"
+case "$authority" in
+    "") die_window "url has empty host — refusing" ;;
+    *@*) die_window "url contains embedded credentials (user@host) — refusing" ;;
+esac
+# A bare '@' or control already handled; basic host sanity: at least one char,
+# no backslash, no two consecutive dots that would be a malformed host.
+case "$authority" in
+    *[\\]*) die_window "url host contains a backslash — refusing" ;;
+esac
+
+log "previewing url: $URL"
+
+# --- bounded fetch (fix 4) ----------------------------------------------------
+# Headers first (-I would HEAD; some origins disallow HEAD, so we GET with
+# --dump-header but cap the body). Explicit bounds:
+#   -q                    ignore any curlrc (no surprise config)
+#   --proto =http,https   restrict the protocol even after parse
+#   --proto-redir         (n/a — redirects disabled below)
+#   --location is OFF     do NOT follow redirects (fix 3): a 30x is shown, not
+#                         chased, so the preview can't be bounced to file:// etc.
+#   --connect-timeout / --max-time   bound the network wait
+#   --max-filesize        hard server-side-advertised size cap
+#   --no-keepalive        one-shot
+#   --silent --show-error capture errors without a progress bar
+# The URL is passed as a single argv value after `--` (no shell -c).
+HDR=/tmp/url-preview.hdr
+BODY=/tmp/url-preview.body
+rm -f "$HDR" "$BODY" "$OUT" 2>/dev/null || true
+
+curl_rc=0
+curl \
+    -q \
+    --proto '=http,https' \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_MAX_TIME" \
+    --max-filesize "$CURL_MAX_FILESIZE" \
+    --no-keepalive \
+    --silent --show-error \
+    --dump-header "$HDR" \
+    --output "$BODY" \
+    -- "$URL" 2>/tmp/url-preview.err || curl_rc=$?
+
+# --- sanitize + assemble preview (fix 5) -------------------------------------
+# Headers + body are attacker-controlled. Escape ALL control bytes to caret
+# notation with `cat -v` so no terminal escape sequence reaches the pager. Cap
+# the body to BODY_BYTES. Then page the assembled, already-escaped $OUT (less is
+# additionally run NON-raw, so this is belt-and-suspenders).
+{
+    printf '=== url-preview ===\n'
+    printf 'URL : %s\n' "$URL"
+    printf 'curl exit: %s\n' "$curl_rc"
+    if [ -s /tmp/url-preview.err ]; then
+        printf '\n--- curl error ---\n'
+        cat -v -- /tmp/url-preview.err
+    fi
+    printf '\n--- response headers ---\n'
+    if [ -s "$HDR" ]; then cat -v -- "$HDR"; else printf '(none)\n'; fi
+    printf '\n--- response body (first %s bytes, control chars escaped) ---\n' "$BODY_BYTES"
+    if [ -s "$BODY" ]; then
+        head -c "$BODY_BYTES" -- "$BODY" | cat -v
+        printf '\n'
+        bsz=$(wc -c < "$BODY" 2>/dev/null || echo 0)
+        if [ "${bsz:-0}" -gt "$BODY_BYTES" ]; then
+            printf '\n[...truncated: %s bytes total, showing first %s...]\n' "$bsz" "$BODY_BYTES"
+        fi
+    else
+        printf '(empty)\n'
+    fi
+    printf '\n[end of preview]\n'
+} > "$OUT" 2>/dev/null
+
+rm -f "$HDR" "$BODY" /tmp/url-preview.err 2>/dev/null || true
+show_and_exit 0
