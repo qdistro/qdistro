@@ -26,7 +26,10 @@ Apps wire themselves via the higher-level ``register_app`` helper in
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
+import secrets
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable
@@ -34,8 +37,29 @@ from collections.abc import Callable, Iterable
 import dbus
 import dbus.service
 
+log = logging.getLogger("qdistro_app")
+
 _BUS_NAME = "org.qdistro.AdminBroker1"
 _OBJ_PATH = "/org/qdistro/AdminBroker1"
+
+# The session manager's D-Bus surface (SYSTEM bus) — the workflow-runner
+# teardown method ``DisposeByWorkflow`` lives here, NOT on the AdminBroker.
+_SM_BUS_NAME = "org.qdistro.SessionManager1"
+_SM_OBJ_PATH = "/org/qdistro/SessionManager1"
+_SM_IFACE = "org.qdistro.SessionManager1"
+
+# A workflow lease id rides in a podman label + a podman --filter value, so the
+# daemon (qdistro_disposables.is_workflow_id) and spawn-tier2.sh both constrain
+# it to this conservative lowercase token shape. The SDK MUST validate any id it
+# stamps into ``QDISTRO_DISPOSABLE_WORKFLOW``: spawn-tier2.sh *silently ignores*
+# an invalid value, which would spawn an UNTAGGED disposable that no
+# DisposeByWorkflow can ever reap — a silent leak. So an invalid id is a hard
+# error here, BEFORE any spawn. Kept byte-identical to the daemon's regex.
+_WORKFLOW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+
+# The env var spawn-tier2.sh reads to opt a disposable into a workflow group
+# (stamping the ``qdistro_lease_workflow=<id>`` podman label).
+WORKFLOW_ENV = "QDISTRO_DISPOSABLE_WORKFLOW"
 
 # The shipped trusted launch path for tier-2 / disposable silos. The SDK helper
 # below execs it; the binary re-does every gate (class resolution, the
@@ -47,6 +71,12 @@ APP1_IFACE = "org.qdistro.App1"
 APP1_OBJ_PATH = "/org/qdistro/App1"
 
 DEFAULT_TIMEOUT_S = 600
+
+# Best-effort cleanup-path D-Bus timeout. The context-manager exit teardown
+# (WorkflowRun / step __exit__) must not block a process for the full 600s
+# default per group if the daemon is wedged — exit is best-effort and swallows
+# errors anyway, so a short reply timeout caps the worst case at O(steps)*this.
+CLEANUP_TIMEOUT_S = 30
 
 # Kind sentinel used when the sender calls the kind-less ``ReceivePayload``
 # variant. Receivers see this exactly as if the sender had passed
@@ -228,6 +258,256 @@ def notify_edit_ready(target_uid: int, target_service: str, receipt: dict, *,
     }, sort_keys=True)
     return send_to(target_uid, target_service, EDIT_READY_KIND, payload,
                    timeout=timeout)
+
+
+# ---- workflow-runner consumer (07-disposables-plan §Lifecycle "workflow step
+# completed") --------------------------------------------------------------
+#
+# The disposable teardown surface is SHIPPED + VM-proven: the admin-gated
+# ``org.qdistro.SessionManager1.DisposeByWorkflow(s)->i`` reaps every disposable
+# carrying the shared ``qdistro_lease_workflow=<id>`` podman label (stamped at
+# spawn when ``QDISTRO_DISPOSABLE_WORKFLOW=<id>`` is set). This is the missing
+# CONSUMER: a thin runner that (a) generates/accepts a workflow id, (b) opens
+# step disposables tagged into that group (reusing ``open_in_disposable`` /
+# ``open_for_edit`` — never a second spawn path), and (c) on step completion OR
+# context exit (including an exception unwind) calls DisposeByWorkflow so the
+# group is torn down. The daemon stays the security boundary: it validates /
+# audits / fail-closes, so this layer is convenience + lifecycle glue only.
+
+
+def _validate_workflow_id(workflow_id: object) -> str:
+    """Return ``workflow_id`` iff it is a well-formed workflow lease id, else
+    raise ``ValueError``. The SDK validates client-side because spawn-tier2.sh
+    *silently ignores* an invalid ``QDISTRO_DISPOSABLE_WORKFLOW``: an invalid id
+    would spawn an UNTAGGED disposable that no DisposeByWorkflow can reap — a
+    silent leak the daemon cannot catch. Kept byte-identical to the daemon's
+    ``is_workflow_id`` regex so the SDK never stamps an id the daemon rejects."""
+    if not isinstance(workflow_id, str) or not _WORKFLOW_ID_RE.fullmatch(workflow_id):
+        raise ValueError(
+            f"invalid workflow id {workflow_id!r}: want "
+            r"^[a-z0-9][a-z0-9-]{0,127}$")
+    return workflow_id
+
+
+def generate_workflow_id(prefix: str = "wf") -> str:
+    """Mint a fresh, regex-valid workflow id ``<prefix>-<16 hex>``.
+
+    ``prefix`` is normalised/validated so the whole id satisfies the daemon's
+    128-char lowercase-token shape; a 16-hex-char random suffix makes collisions
+    between concurrent runs negligible. Raises ``ValueError`` if ``prefix`` is
+    not a valid leading token or the result would exceed the length cap."""
+    token = secrets.token_hex(8)  # 16 hex chars
+    p = str(prefix)
+    # The prefix itself must be a valid id head; the common caller mistakes
+    # (empty / uppercase / leading-dash / illegal byte / overlong) are caught
+    # here rather than producing a malformed id that silently fails to tag. A
+    # trailing dash IS accepted by the regex (it's a label value, not a name), so
+    # ``wf-`` -> ``wf--<token>`` is intentionally valid.
+    if not _WORKFLOW_ID_RE.fullmatch(p):
+        raise ValueError(
+            f"invalid workflow id prefix {prefix!r}: want "
+            r"^[a-z0-9][a-z0-9-]{0,127}$")
+    wid = f"{p}-{token}"
+    return _validate_workflow_id(wid)
+
+
+def _session_bus():
+    """Return the system bus the SessionManager1 surface lives on. A seam so
+    unit tests can monkeypatch a fake bus without a real system D-Bus."""
+    return dbus.SystemBus()
+
+
+def dispose_workflow(workflow_id: str, *, bus=None,
+                     timeout: float = DEFAULT_TIMEOUT_S) -> int:
+    """Tear down EVERY disposable in the ``workflow_id`` group by calling
+    ``org.qdistro.SessionManager1.DisposeByWorkflow`` on the SYSTEM bus. Returns
+    the count torn down (0 idempotently when none carry the id).
+
+    This is the EXPLICIT teardown surface: it PROPAGATES errors (a malformed id
+    is a client-side ``ValueError`` before any wire call; a daemon refusal /
+    fail-closed BadState surfaces as a ``dbus.DBusException``) because a caller
+    that asked for teardown should learn it did not complete. The context-manager
+    exit paths (:class:`WorkflowRun` / step) deliberately SWALLOW teardown errors
+    instead, so a best-effort cleanup never masks an in-flight user exception.
+
+    The daemon is the boundary: it admin-gates, validates the id again, audits,
+    and does not report clean success on a partial teardown — so this helper adds
+    no second policy copy, only the wire call + client-side fail-fast."""
+    _validate_workflow_id(workflow_id)
+    conn = bus if bus is not None else _session_bus()
+    obj = conn.get_object(_SM_BUS_NAME, _SM_OBJ_PATH)
+    iface = dbus.Interface(obj, _SM_IFACE)
+    return int(iface.DisposeByWorkflow(str(workflow_id), timeout=float(timeout)))
+
+
+class _WorkflowStep:
+    """A per-step disposable subgroup with its OWN workflow id. Opening a
+    disposable via the step tags it into the step's group, so the step's exit
+    tears down only what that step spawned. A container carries exactly ONE
+    ``qdistro_lease_workflow`` label, so a step disposable carries the STEP id
+    (not the parent's) — the parent's exit therefore sweeps every step id it
+    minted (see :class:`WorkflowRun`)."""
+
+    def __init__(self, run: WorkflowRun, step_id: str):
+        self._run = run
+        self._id = _validate_workflow_id(step_id)
+        self._disposed = False
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    def open_in_disposable(self, path: str, *, class_name: str, **kw) -> dict:
+        return _open_tagged(self._id, path, class_name=class_name, **kw)
+
+    def open_for_edit(self, path: str, *, class_name: str, request_silo: str,
+                      **kw) -> dict:
+        return _open_tagged(self._id, path, class_name=class_name,
+                            request_silo=request_silo, _edit=True, **kw)
+
+    def dispose(self, *, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+        """Explicit early teardown of this step's group. Propagates errors."""
+        n = dispose_workflow(self._id, bus=self._run._bus, timeout=timeout)
+        self._disposed = True
+        return n
+
+    def __enter__(self) -> _WorkflowStep:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Best-effort: tear down this step's group, swallowing teardown errors so
+        # a cleanup failure never masks an in-flight user exception. The parent
+        # run's final sweep is idempotent, so a swallowed failure here is retried
+        # by the parent (and the daemon already audits every attempt).
+        self._run._teardown_quietly(self._id)
+        self._disposed = True
+        return False  # never suppress the user's exception
+
+
+class WorkflowRun:
+    """Groups the disposables a workflow (and its steps) spawn under workflow
+    ids, and guarantees teardown on context exit — including an exception unwind.
+
+    Minimal, ergonomic use::
+
+        with WorkflowRun() as wf:                 # mints a fresh id
+            wf.open_in_disposable(path, class_name="agent-scratch")
+            with wf.step() as st:                 # a distinct sub-group
+                st.open_in_disposable(other, class_name="agent-scratch")
+            # st exit -> DisposeByWorkflow(st.id)
+        # wf exit -> DisposeByWorkflow for wf.id AND every step id it minted
+
+    Disposables opened directly on the run carry ``wf.id``; those opened on a
+    step carry the step's distinct id (one label per container). On exit the run
+    tears down its own group AND every step id it created (idempotent — a step
+    that already exited is a 0-count re-call), so a step that raised mid-launch,
+    or a disposable whose spawn errored AFTER the container was created, is still
+    reaped by the by-label group teardown the daemon performs. Exit swallows
+    teardown errors so cleanup never masks the user's exception; the explicit
+    :meth:`dispose` / step ``dispose`` surfaces PROPAGATE errors."""
+
+    def __init__(self, workflow_id: str | None = None, *, bus=None):
+        self._id = (generate_workflow_id() if workflow_id is None
+                    else _validate_workflow_id(workflow_id))
+        self._bus = bus
+        # Every step id we minted (so exit can sweep each — step containers carry
+        # the step id, not wf.id). Insertion-ordered; values never popped so a
+        # double-dispose is just an idempotent re-call.
+        self._step_ids: list[str] = []
+        self._step_n = 0
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def step_ids(self) -> tuple[str, ...]:
+        return tuple(self._step_ids)
+
+    def open_in_disposable(self, path: str, *, class_name: str, **kw) -> dict:
+        return _open_tagged(self._id, path, class_name=class_name, **kw)
+
+    def open_for_edit(self, path: str, *, class_name: str, request_silo: str,
+                      **kw) -> dict:
+        return _open_tagged(self._id, path, class_name=class_name,
+                            request_silo=request_silo, _edit=True, **kw)
+
+    def step(self, name: str | None = None) -> _WorkflowStep:
+        """Begin a step: a distinct sub-group with its own workflow id. ``name``
+        (if given) is woven into the id for readable audit lines; otherwise a
+        running counter is used. The id is length-capped to satisfy the daemon's
+        128-char regex (the parent prefix is truncated if needed so the step
+        suffix always fits)."""
+        self._step_n += 1
+        suffix = f"s{self._step_n}"
+        if name:
+            n = re.sub(r"[^a-z0-9-]", "-", str(name).lower()).strip("-")
+            if n:
+                suffix = f"{suffix}-{n}"
+        # Cap the whole id at 128 chars: trim the parent-id head, never the
+        # suffix (which carries the step identity). +1 for the joining dash.
+        head_max = 128 - len(suffix) - 1
+        if head_max < 1:
+            # Pathological: suffix alone (from a huge name) would blow the cap —
+            # fall back to a fresh standalone id rather than a malformed one.
+            step_id = generate_workflow_id("wfstep")
+        else:
+            head = self._id[:head_max].rstrip("-") or self._id[:1]
+            step_id = _validate_workflow_id(f"{head}-{suffix}")
+        self._step_ids.append(step_id)
+        return _WorkflowStep(self, step_id)
+
+    def dispose(self, *, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+        """Explicitly tear down the run's OWN group (not the step subgroups —
+        use the step's ``dispose`` or let exit sweep them). Propagates errors."""
+        return dispose_workflow(self._id, bus=self._bus, timeout=timeout)
+
+    def _teardown_quietly(self, workflow_id: str) -> None:
+        """Tear down one group, swallowing+logging any error (the cleanup-path
+        contract: never raise, never mask an in-flight exception). Uses the short
+        cleanup-path timeout so a wedged daemon can't block exit for the full
+        600s default per group."""
+        try:
+            dispose_workflow(workflow_id, bus=self._bus,
+                             timeout=CLEANUP_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            log.warning("workflow teardown of %r failed (swallowed): %s",
+                        workflow_id, e)
+
+    def __enter__(self) -> WorkflowRun:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Sweep every step group we minted, then the run's own group. All
+        # by-label + idempotent, so a step that already exited cleanly is a
+        # 0-count re-call and a spawn-that-errored-mid-launch is still reaped.
+        # Swallow each so cleanup never masks the user's exception.
+        for sid in self._step_ids:
+            self._teardown_quietly(sid)
+        self._teardown_quietly(self._id)
+        return False  # never suppress the user's exception
+
+
+def _open_tagged(workflow_id: str, path: str, *, class_name: str,
+                 request_silo: str | None = None, _edit: bool = False,
+                 extra_env: dict[str, str] | None = None,
+                 **kw) -> dict:
+    """Open a disposable tagged into ``workflow_id`` by injecting the
+    ``QDISTRO_DISPOSABLE_WORKFLOW`` env var, then delegating to the existing
+    spawn helper (NO second spawn path). The runner OWNS the tag: a caller's
+    ``extra_env`` is merged FIRST, then the workflow var is set unconditionally,
+    so a caller cannot override (or accidentally clear) the tracked id and strand
+    an untagged — unreapable — disposable."""
+    _validate_workflow_id(workflow_id)
+    env = dict(extra_env) if extra_env else {}
+    # Runner-owned: stamp last so it always wins over any caller value.
+    env[WORKFLOW_ENV] = workflow_id
+    if _edit:
+        if not request_silo:
+            raise OpenInDisposableError("request_silo must be a non-empty string")
+        return open_for_edit(path, class_name=class_name,
+                             request_silo=request_silo, extra_env=env, **kw)
+    return open_in_disposable(path, class_name=class_name, extra_env=env, **kw)
 
 
 def _resolve_open_workload(class_name: str,
