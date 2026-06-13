@@ -131,32 +131,32 @@ tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
 # can fetch it before unpacking anything.
 cp "$REPO/scripts/vm/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 
-log "stage 4b: starting host HTTP server on 0.0.0.0:8765..."
-# A stale server from a prior test run will likely serve from a
-# different staging dir (or be bound to 127.0.0.1 only, unreachable
-# from the VM's SLIRP NAT view at 10.0.2.2). Take ownership of the
-# port: if it's bound, kill the holder and rebind from $STAGE.
-if ss -tln 2>/dev/null | awk '{print $4}' | grep -q ':8765$'; then
-    log "stage 4b: port 8765 already bound; reclaiming..."
-    PIDS=$(ss -tlnp 2>/dev/null | awk '/:8765 / { for(i=1;i<=NF;i++) if (match($i, /pid=([0-9]+)/, m)) print m[1] }' | sort -u)
-    if [ -n "$PIDS" ]; then
-        kill $PIDS 2>/dev/null || true
-        sleep 0.5
-    fi
-fi
+# Use a per-run EPHEMERAL port + a log inside the per-user $STAGE dir
+# rather than a fixed host-wide port (8765) and a fixed /tmp path. On a
+# shared host, multiple users running this script collide on both: a
+# /tmp/spin-http.log owned by another uid is unwritable (sticky /tmp),
+# and port 8765 may already be held by another user's server we cannot
+# kill — and the guest's 10.0.2.2:8765 would then hit THAT server.
+# Picking a free port per run and serving the log from $STAGE makes
+# concurrent multi-user runs independent.
+SPIN_HTTP_PORT="${SPIN_HTTP_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1]); s.close()')}"
+log "stage 4b: starting host HTTP server on 0.0.0.0:$SPIN_HTTP_PORT..."
 # Bind on 0.0.0.0 so the VM (which reaches us via 10.0.2.2 over SLIRP
 # NAT) can connect. Restricting to 127.0.0.1 is unreachable from the
 # guest.
-(cd "$STAGE" && python3 -m http.server 8765 --bind 0.0.0.0 >/tmp/spin-http.log 2>&1) &
+(cd "$STAGE" && python3 -m http.server "$SPIN_HTTP_PORT" --bind 0.0.0.0 >"$STAGE/spin-http.log" 2>&1) &
 HTTP_PID=$!
 sleep 1
 
+STAGE_URL="http://10.0.2.2:$SPIN_HTTP_PORT"
 log "stage 5: running fresh-vm-bootstrap.sh in VM..."
-"$SCRIPT_DIR/vm-exec" "$VM" "wget -q -O /root/fresh-vm-bootstrap.sh http://10.0.2.2:8765/fresh-vm-bootstrap.sh" >&2 \
-    || { log "ERROR: failed to fetch bootstrap script (port 8765 reachable?)"; exit 3; }
+"$SCRIPT_DIR/vm-exec" "$VM" "wget -q -O /root/fresh-vm-bootstrap.sh $STAGE_URL/fresh-vm-bootstrap.sh" >&2 \
+    || { log "ERROR: failed to fetch bootstrap script (port $SPIN_HTTP_PORT reachable?)"; exit 3; }
 
-# Bootstrap fetches the three tarballs and runs the build.
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_VM_PASSWORD='$QDISTRO_VM_PASSWORD' bash /root/fresh-vm-bootstrap.sh" >&2
+# Bootstrap fetches the three tarballs and runs the build. Pass the
+# per-run staging URL so the in-VM bootstrap fetches from THIS run's
+# server (its default is the old fixed http://10.0.2.2:8765).
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_VM_PASSWORD='$QDISTRO_VM_PASSWORD' bash /root/fresh-vm-bootstrap.sh" >&2
 
 # Stage 6: verify the session came up.
 # wayland-1 is the core "compositor came up" signal — fatal on miss.
