@@ -634,7 +634,7 @@ release_vm() {
         printf 'preserved_failed_vm=%s\n' "$vm" >> "$RDIR/manifest.txt"
         # This overlay's backing chain may point at a per-run golden; keep the
         # golden disk(s) so the preserved VM stays bootable for triage.
-        [ "${#RUN_GOLDEN_DISKS[@]:-0}" -gt 0 ] && GOLDEN_PRESERVE=1
+        [ "${#RUN_GOLDEN_DISKS[@]}" -gt 0 ] && GOLDEN_PRESERVE=1
         local preserved_state notes
         if [ "${QCI_KEEP_FAILED_VM_RUNNING:-0}" = 1 ]; then
             log "  QCI_KEEP_FAILED_VM_RUNNING=1 — leaving $vm running"
@@ -724,9 +724,12 @@ wait_for_shutoff() {
 # workers skip the build. Idempotent. Returns EXIT_VM_PROVISION on any failure
 # (caller should fail the gate fast — no silent fallback to per-worker build).
 ensure_run_golden() {
-    local profile=$1 spinner gvm gdisk log rc
+    local profile=$1 spinner gvm gdisk log rc tier2_images=0
     case "$profile" in
-        bats) [ -n "$RUN_GOLDEN_BATS" ] && return 0; spinner=spin-test-vm.sh ;;
+        # Pre-bake the tier-2 podman images into the bats golden so every cloned
+        # bats worker inherits them and the tier-2 drivers skip their cold
+        # `podman build` hot path (see fresh-vm-bootstrap.sh §8).
+        bats) [ -n "$RUN_GOLDEN_BATS" ] && return 0; spinner=spin-test-vm.sh; tier2_images=1 ;;
         gui)  [ -n "$RUN_GOLDEN_GUI" ]  && return 0; spinner=spin-test-vm-gui.sh ;;
         *) return 1 ;;
     esac
@@ -736,6 +739,7 @@ ensure_run_golden() {
     # Full build (QCI_RUN_GOLDEN_BACKING unset => normal bootstrap path).
     QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
     QCI_RUN_GOLDEN_BACKING="" \
+    QDISTRO_BUILD_TIER2_IMAGES="$tier2_images" \
         "$VM_TOOLS/$spinner" "qci-golden-$profile" > "$log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then

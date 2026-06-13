@@ -46,12 +46,34 @@ bigger cause is item 3.
 
 ## 3. Too-short tier2/tier5 in-driver readiness windows under contention
 The tier-2 drivers use 15s/30s readiness windows (container start, inner
-toplevel) that **overrun under 14-way CPU contention + cold first-run podman
-image builds** (measured 5m43s wall for 17.7s CPU). This — not the port bug — was
-codex's ~60% root cause of `tiered-isolation`/`tier2-hardening-lockin` failures.
-Fix options (combine): pre-bake the tier-2 podman images into `baseweed-baked`
-so first-run build isn't in the hot path; scale the in-driver waits
-(build-aware); and/or cap concurrency for the heavy tier2/tier5 tests.
+toplevel) that **overran under 14-way CPU contention + cold first-run podman
+image builds** (measured 5m43s wall for 17.7s CPU) — codex's ~60% root cause.
+
+**DONE (2026-06-13): pre-bake the tier-2 podman images (the dominant cause).**
+Removed the cold `podman build` (Tumbleweed pull + zypper install) from the
+worker hot path: `fresh-vm-bootstrap.sh` §8 gains a `QDISTRO_BUILD_TIER2_IMAGES`
+gate that builds all 3 workload images (weston-terminal, text-viewer,
+url-preview) as admin (rootless), verifies the tags, FATAL on failure (no silent
+fallback to the flaky path). `spin-test-vm.sh` forwards the flag; `qci
+ensure_run_golden` sets it for the **bats golden only**, so every cloned worker
+inherits the images as shared CoW backing. Drivers keep their on-demand build as
+a fallback for non-prebaked VMs. VM-verified: golden pre-built + verified all 3
+tags; a cloned worker had the images and s40 SKIPPED its cold build. Also fixed a
+latent qci bug (`${#RUN_GOLDEN_DISKS[@]:-0}` → `${#RUN_GOLDEN_DISKS[@]}`; the bad
+substitution meant `GOLDEN_PRESERVE` never set → a preserved failed VM's golden
+was deleted, breaking triage).
+
+**DEFERRED — readiness-window scaling (B1) / heavy-file concurrency cap (c).**
+With the cold build gone, there's no fresh evidence the 15s/30s post-spawn
+windows are still too tight: the validating run's s40 actually failed on a
+**pre-existing broker-policy product bug** (`spawn-tier2: broker has no allow
+rule for weston-terminal`, decision=unknown — a bake/product gap, out of scope),
+not a timeout. Per codex: ship the prebake alone; revisit window scaling only
+after the product blockers clear and the tier2/tier5 files can be re-measured
+under normal `qci` contention. If they still flake without cold builds, do B1
+(raise 15s→45s / 30s→60s in s32/s33/s34/s40/s59 ×2 copies) **with validation**,
+or prefer (c) capping concurrency for the genuinely heavy files if the data shows
+contention rather than service-startup variance.
 
 ## 4. GUI golden image (phase 2)
 Extend the per-run golden (item done for bats) to the `gui` gate. Build one gui

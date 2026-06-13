@@ -508,6 +508,37 @@ if [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = "1" ]; then
     fi
 fi
 
+# Pre-build the tier-2 podman workload images into admin's rootless store so the
+# tier-2 bats drivers (s32/s40/s33/s34/s59, wlimg-e2e) don't pay a cold
+# `podman build` — a Tumbleweed pull + zypper install, ~5-6 min wall under CI
+# contention — inside their readiness hot path (the #1 cause of tiered-isolation
+# / tier2-hardening-lockin flakiness). Built AS admin (uid 1000) to match the
+# drivers' `runuser -u admin -- podman` rootless store. Opt-in: the bats per-run
+# golden sets the gate, so every cloned worker inherits the images as shared CoW
+# backing blocks. Failure here is FATAL when opted in — silently falling back to
+# the per-worker on-demand build is exactly the flaky path this removes.
+if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
+    if [ ! -x "$SRC/qdistro/tier2/make-tier2-image.sh" ]; then
+        log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
+        exit 1
+    fi
+    log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
+    if ! runuser -u admin -- bash "$SRC/qdistro/tier2/make-tier2-image.sh"; then
+        log "  ERROR: tier-2 image pre-build failed"
+        exit 1
+    fi
+    # Verify each expected tag actually landed in admin's store. A partial build
+    # (script exits 0 but one tag missing) would silently leave the on-demand
+    # path for that workload.
+    for _w in weston-terminal text-viewer url-preview; do
+        if ! runuser -u admin -- podman image exists "qdistro/tier2-${_w}:latest"; then
+            log "  ERROR: expected image qdistro/tier2-${_w}:latest missing after pre-build"
+            exit 1
+        fi
+    done
+    log "  tier-2 images pre-built: weston-terminal, text-viewer, url-preview"
+fi
+
 log "bootstrap complete."
 log "session was started by §7d; if it failed, restart with:"
 log "  runuser -l admin -c 'systemctl --user restart noctalia-shell.service'"
