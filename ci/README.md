@@ -48,8 +48,8 @@ vitest tags), and the per-suite relabel action items.
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
 | `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, qdwin/qdshell meson/QML checks, and the Zola site. |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
-| `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. By default each file gets a fresh disposable VM. |
-| `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. |
+| `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
+| `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. The agent scenarios run **in parallel** (one disposable VM each). |
 | `full` | Run `preflight`, `host`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
@@ -74,6 +74,41 @@ Create the daily snapshot VM requested by the CI policy:
 qdistro/ci/bin/qci snapshot-daily
 # default VM name: qdistro-daily-$(date -u +%F)
 ```
+
+## Parallelism & per-run golden image
+
+The `bats` and `gui` gates run their disposable VMs **concurrently** in a bounded
+pool. Each VM is ~4 GiB RAM + `QDWIN_VM_VCPUS` (default 4) vCPUs, so RAM is the
+binding constraint; CPU is intentionally overprovisioned.
+
+- **bats concurrency** auto-selects a tier from host RAM + logical CPUs:
+  minimal `≤32 GiB → 4`, medium `≥56 GiB & ≥10 cores → 10`, high
+  `≥90 GiB & ≥12 cores → 16`. The value is clamped by **current** `MemAvailable`
+  (`(avail−6)/5`, ~5 GiB/VM) so a busy host can't be overcommitted.
+- **gui concurrency** defaults to **8** (heavier VMs + one agent process each),
+  same RAM clamp.
+
+**Per-run golden image:** the expensive part of provisioning is building
+qdwin/qdshell from current source (`fresh-vm-bootstrap.sh`, ~150–310 s per VM).
+Instead of paying that on every VM, the `bats` gate builds the compositor **once
+per run** into a golden qcow2 (`qci-golden-bats-*.qcow2`), then every worker
+clones that golden and **skips the build** (per-VM provisioning drops to ~10 s).
+The golden is built from *current* source each run (still fresh), cleaned up at
+run end, and preserved only if a failed worker that references it is preserved.
+(GUI golden is planned — see `ci/ci-hardening-todo.md`.)
+
+### Environment knobs
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `QCI_JOBS` | auto-tier | Override bats pool concurrency (still RAM-clamped). |
+| `QCI_GUI_JOBS` | 8 | Override gui pool concurrency (still RAM-clamped). |
+| `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
+| `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
+| `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
+
+A per-task timing breakdown (provision vs work seconds per file/scenario) is
+written to `<run-dir>/timings.tsv` for spotting outliers.
 
 ## Agent-assisted GUI scenarios
 

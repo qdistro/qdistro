@@ -53,34 +53,86 @@ for sib in qdwin qdshell qnotebook; do
     fi
 done
 
-# Stage 1.
-if [ ! -f "$IMG/baseweed-admin.qcow2" ]; then
-    log "stage 1: building baseweed-admin.qcow2 from scratch (~5-10 min)..."
-    bash "$REPO/scripts/vm/build-baseweed-from-scratch.sh" >&2
-else
-    log "stage 1: baseweed-admin.qcow2 already present"
-fi
+# Stages 1/2 build the SHARED baseweed images. Under parallel spins, multiple
+# workers must not enter the build scripts at once (they share partial-file
+# names and would clobber each other). Serialize behind a host flock and
+# re-check inside the lock so only the first worker builds; the rest wait, then
+# see the images present. The fast path (images already exist) still pays only a
+# lock acquire.
+mkdir -p "$IMG"
+exec 9>"$IMG/.baseweed-build.lock"
+if flock -w 2400 9; then
+    # Stage 1.
+    if [ ! -f "$IMG/baseweed-admin.qcow2" ]; then
+        log "stage 1: building baseweed-admin.qcow2 from scratch (~5-10 min)..."
+        bash "$REPO/scripts/vm/build-baseweed-from-scratch.sh" >&2
+    else
+        log "stage 1: baseweed-admin.qcow2 already present"
+    fi
 
-# Stage 2.
-if [ ! -f "$IMG/baseweed-baked.qcow2" ]; then
-    log "stage 2: baking dependencies onto overlay (~15-25 min)..."
-    bash "$REPO/scripts/vm/build-baked-baseweed.sh" >&2
+    # Stage 2.
+    if [ ! -f "$IMG/baseweed-baked.qcow2" ]; then
+        log "stage 2: baking dependencies onto overlay (~15-25 min)..."
+        bash "$REPO/scripts/vm/build-baked-baseweed.sh" >&2
+    else
+        log "stage 2: baseweed-baked.qcow2 already present"
+    fi
+    flock -u 9
 else
-    log "stage 2: baseweed-baked.qcow2 already present"
+    log "WARN: could not acquire baseweed build lock within 40 min; proceeding (images assumed present)"
 fi
+exec 9>&-
 
 # Stage 3.
-log "stage 3: cloning a fresh VM from baked..."
-VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+if [ -n "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
+    log "stage 3: cloning a fresh VM from run-golden ($QCI_RUN_GOLDEN_BACKING)..."
+    VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" \
+            --from-run-golden="$QCI_RUN_GOLDEN_BACKING" | tail -1)
+else
+    log "stage 3: cloning a fresh VM from baked..."
+    VM=$(bash "$REPO/scripts/vm/clone-baseweed.sh" "$PREFIX" --from-baked | tail -1)
+fi
 log "    VM = $VM"
+
+# From here on the VM exists but qci does NOT yet know about it (the caller only
+# registers it after this script prints the name on success). So if we fail or
+# get interrupted before that handoff, WE must tear the VM down or it leaks as a
+# running domain + overlay. SPUN_OK gates that teardown; it is set to 1 just
+# before the final success output. The trap also tidies $STAGE / the HTTP server
+# (both may be unset this early — guarded).
+SPUN_OK=0
+_SPIN_CLEANED=0
+cleanup_spin() {
+    [ "$_SPIN_CLEANED" = 1 ] && return 0   # idempotent: signal trap + EXIT trap
+    _SPIN_CLEANED=1
+    [ -n "${STAGE:-}" ] && rm -rf "$STAGE" 2>/dev/null || true
+    [ -n "${HTTP_PID:-}" ] && kill "$HTTP_PID" 2>/dev/null || true
+    if [ "$SPUN_OK" != 1 ] && [ -n "${VM:-}" ]; then
+        log "spin failed/interrupted before handoff — tearing down $VM"
+        virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
+        virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
+            || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
+        rm -f "$IMG/$VM.qcow2" 2>/dev/null || true
+    fi
+}
+trap cleanup_spin EXIT
+# On a signal, clean up and EXIT IMMEDIATELY (nonzero) — do NOT fall through and
+# keep running with a torn-down VM, which would let the script reach SPUN_OK=1 /
+# exit 0 and make qci register a VM that no longer exists. The exit re-fires the
+# EXIT trap, but the _SPIN_CLEANED guard makes that second call a no-op.
+trap 'cleanup_spin; exit 130' INT TERM
 
 log "    starting + waiting for guest agent..."
 virsh -c qemu:///session start "$VM" >/dev/null 2>&1 || true
 "$SCRIPT_DIR/vm-start-and-wait" "$VM" >&2
 
+# Stages 4-5 (source staging + in-guest fresh-vm-bootstrap build) are SKIPPED
+# when cloning from a run-golden: the golden disk already contains the built
+# compositor. We only boot + verify in that case. The body below is unindented
+# but enclosed by this guard (bash ignores indentation).
+if [ -z "${QCI_RUN_GOLDEN_BACKING:-}" ]; then
 # Stage 4: tarball the three sibling repos and serve over SLIRP.
 STAGE="$(mktemp -d -t qdistro-stage.XXXXXX)"
-trap 'rm -rf "$STAGE"; [ -n "${HTTP_PID:-}" ] && kill "$HTTP_PID" 2>/dev/null || true' EXIT
 
 log "stage 4a: tarballing qdistro, qdwin, qdshell..."
 # `build-*` excludes match by basename anywhere in the tree; the
@@ -135,14 +187,37 @@ cp "$REPO/scripts/vm/fresh-vm-bootstrap.sh" "$STAGE/fresh-vm-bootstrap.sh"
 # kill — and the guest's 10.0.2.2:8765 would then hit THAT server.
 # Picking a free port per run and serving the log from $STAGE makes
 # concurrent multi-user runs independent.
-SPIN_HTTP_PORT="${SPIN_HTTP_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1]); s.close()')}"
-log "stage 4b: starting host HTTP server on 0.0.0.0:$SPIN_HTTP_PORT..."
-# Bind on 0.0.0.0 so the VM (which reaches us via 10.0.2.2 over SLIRP
-# NAT) can connect. Restricting to 127.0.0.1 is unreachable from the
-# guest.
-(cd "$STAGE" && python3 -m http.server "$SPIN_HTTP_PORT" --bind 0.0.0.0 >"$STAGE/spin-http.log" 2>&1) &
+# Start the staging HTTP server on a kernel-assigned free port with NO
+# probe/race window: Python binds port 0 (kernel picks a free port) and serves
+# from that exact live socket, printing the actual bound port on stdout. There
+# is no bind-probe-then-close gap, so concurrent parallel spins can never pick
+# the same port or fetch each other's tarballs. Bind 0.0.0.0 so the guest
+# reaches us via 10.0.2.2 over SLIRP NAT (127.0.0.1 is unreachable from guest).
+PORT_FILE="$STAGE/http-port"
+: > "$PORT_FILE"
+(
+    cd "$STAGE" || exit 1
+    exec python3 -c '
+import http.server, socketserver, sys
+socketserver.TCPServer.allow_reuse_address = False
+httpd = socketserver.TCPServer(("0.0.0.0", 0), http.server.SimpleHTTPRequestHandler)
+sys.stdout.write(str(httpd.server_address[1]) + "\n"); sys.stdout.flush()
+httpd.serve_forever()
+' > "$PORT_FILE" 2>"$STAGE/spin-http.log"
+) &
 HTTP_PID=$!
-sleep 1
+SPIN_HTTP_PORT=""
+for _ in $(seq 1 50); do
+    SPIN_HTTP_PORT=$(head -1 "$PORT_FILE" 2>/dev/null | tr -dc '0-9')
+    [ -n "$SPIN_HTTP_PORT" ] && break
+    kill -0 "$HTTP_PID" 2>/dev/null || break   # server died before binding
+    sleep 0.2
+done
+if [ -z "$SPIN_HTTP_PORT" ]; then
+    log "ERROR: staging HTTP server failed to bind a port"
+    exit 3
+fi
+log "stage 4b: host HTTP server on 0.0.0.0:$SPIN_HTTP_PORT (pid $HTTP_PID)"
 
 STAGE_URL="http://10.0.2.2:$SPIN_HTTP_PORT"
 log "stage 5: running fresh-vm-bootstrap.sh in VM..."
@@ -153,6 +228,8 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 # per-run staging URL so the in-VM bootstrap fetches from THIS run's
 # server (its default is the old fixed http://10.0.2.2:8765).
 "$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' bash /root/fresh-vm-bootstrap.sh" >&2
+
+fi  # end stages 4-5 (skipped in run-golden mode)
 
 # Stage 6: verify the session came up.
 # wayland-1 is the core "compositor came up" signal — fatal on miss.
@@ -181,5 +258,11 @@ else
     log "WARN: qdlocker.sock missing (known qdlocker env bug; fix in flight)"
 fi
 
+# Success: emit the VM name FIRST, then mark SPUN_OK so the EXIT trap won't tear
+# it down. Ordering matters — qci only trusts a clean (rc=0) exit, so if we are
+# interrupted before SPUN_OK=1 (the last statement) it stays 0 and the trap
+# reclaims the VM, which is exactly what we want since the caller will treat the
+# interrupted spin as a provisioning failure.
 log "ready. VM:"
 echo "$VM"
+SPUN_OK=1

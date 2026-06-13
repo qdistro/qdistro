@@ -25,19 +25,31 @@ bats tests/integration/vm/s5c-stream-input.bats
 
 ### Parallel multi-VM run (one VM per .bats file)
 
+The `bats` gate spins one disposable VM per `.bats` file and runs them in
+parallel. Concurrency auto-sizes to host resources via three tiers — minimal
+(≤32 GiB → 4), medium (~64 GiB + ≥10 cores → 10), high (≥90 GiB + ≥12 cores →
+16) — RAM-clamped so VMs never oversubscribe memory. Set `QCI_JOBS=N` to
+override. Each VM gets `QDWIN_VM_VCPUS` (default 4) vCPUs; CPU is intentionally
+overprovisioned since RAM is the binding constraint.
+
 ```bash
 # Pre-bake deps so every clone skips zypper install-deps:
-scripts/vm/build-baked-baseweed.sh # one-time, ~15-30 min
+scripts/vm/build-baked-baseweed.sh   # one-time, ~15-30 min
 
-# Run all phase{6.5,6.6,7}.bats in parallel on three fresh clones:
-tests/integration/vm/run-parallel.sh # default: 3-way concurrency, --from-baked
+# Run the whole bats gate in parallel (auto-sized concurrency):
+ci/bin/qci bats
 
-# Subset / serialised:
-tests/integration/vm/run-parallel.sh --jobs 1 tiered-isolation.bats
-tests/integration/vm/run-parallel.sh --keep compositor-shell.bats # keep VMs after pass
+# Run a subset of files (still parallelised across them):
+ci/bin/qci bats tests/integration/vm/tiered-isolation.bats
 
-# Fall back to plain baseweed (slow zypper on every worker):
-tests/integration/vm/run-parallel.sh --no-baked
+# A single file:
+ci/bin/qci bats --file tests/integration/vm/compositor-shell.bats
+
+# Force a specific concurrency:
+QCI_JOBS=4 ci/bin/qci bats
+
+# Pin all files onto one pre-existing VM (serial, no disposable clones):
+ci/bin/qci bats --vm my-test
 ```
 
 ### Enforcing-mode pass (phase7-tier1-enforcing + phase7-broker-enforcing)

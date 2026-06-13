@@ -209,7 +209,11 @@ pytest
 # each test VM; spin-test-vm.sh auto-creates it on first run.
 export QDWIN_VM_TEMPLATE=qdistro-template
 scripts/vm/spin-test-vm.sh my-test
-tests/integration/vm/run-parallel.sh
+
+# The `bats` gate spins one disposable VM per test file and runs them in
+# parallel, auto-sizing concurrency to host RAM/cores (set QCI_JOBS=N to
+# override). Single file: `ci/bin/qci bats --file <path>`.
+ci/bin/qci bats
 ```
 
 For host prerequisites (libvirt, qemu-kvm, group membership), see

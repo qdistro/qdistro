@@ -215,6 +215,16 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     fi
 fi
 
+# 3b. Pin the canonical test credentials on the baked overlay so a rebuild can
+# never inherit a stale/old password from baseweed-admin. The fixed qdistro
+# test VM password is Pa_ssw0rd45 (see doc/AGENTS.md / README.md). Done
+# unconditionally (the tier-5 upload above is conditional).
+echo "[bake] pinning admin + root password (Pa_ssw0rd45)..."
+virt-customize -a "$PARTIAL" \
+    --password "admin:password:Pa_ssw0rd45" \
+    --password "root:password:Pa_ssw0rd45" \
+    >/dev/null
+
 # 4. Sparsify in-place to reclaim zero blocks libguestfs left behind.
 echo "[bake] sparsifying overlay..."
 virt-sparsify --in-place "$PARTIAL" 2>/dev/null || true

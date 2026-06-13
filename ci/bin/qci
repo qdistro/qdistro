@@ -55,6 +55,17 @@ GATE=""
 EXPLICIT_VM=""
 KEEP_FAILED_DEFAULT=1
 CREATED_VMS=()
+# Per-run "golden" backing disks: the compositor is built ONCE per run into a
+# golden qcow2, then every disposable worker VM clones from it (skipping the
+# expensive in-guest fresh-vm-bootstrap build). These hold the golden DISK paths
+# (not domains — the golden domain is undefined after a clean shutdown so its
+# disk is a stable read-only backing). Tracked separately from CREATED_VMS so
+# release_vm/worker cleanup never touches them.
+RUN_GOLDEN_BATS=""
+RUN_GOLDEN_GUI=""
+RUN_GOLDEN_DISKS=()
+GOLDEN_INFLIGHT_VMS=()   # golden VMs mid-build (for interrupt cleanup)
+GOLDEN_PRESERVE=0        # set if a preserved failed worker may back-reference a golden
 FINALIZING=0
 
 # QCI_OFFLINE=1 forces a host-only / no-egress posture for VM tests:
@@ -307,6 +318,7 @@ init_run() {
     } > "$RDIR/manifest.txt"
     printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\tcategory\n' > "$RDIR/results.tsv"
     printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
+    printf 'gate\tsubject\tprovision_s\twork_s\ttotal_s\trc\tvm\n' > "$RDIR/timings.tsv"
     : > "$RDIR/vm/created-vms.txt"
     collect_repo_state
     record_offline_source
@@ -341,6 +353,8 @@ finish_run() {
     local rc=$1
     FINALIZING=1
     [ -n "$RDIR" ] || exit "$rc"
+    # Reclaim per-run golden backing disks (kept if a failed worker was preserved).
+    cleanup_run_goldens
     # Release-profile escalation (QCI_RELEASE=1): a `blocked` row in a
     # release-relevant gate means the release was not actually exercised — fail
     # closed. Only escalates a run that otherwise PASSED (rc==0); a real failure
@@ -389,6 +403,17 @@ abort_run() {
         while IFS= read -r vm; do
             [ -n "$vm" ] && release_vm "$vm" "$EXIT_RUNNER"
         done < "$RDIR/vm/created-vms.txt"
+        # Reap any golden still MID-BUILD (domain alive) — an interrupted golden
+        # is useless. Promoted goldens have no domain and are reclaimed by
+        # cleanup_run_goldens inside finish_run (honouring GOLDEN_PRESERVE).
+        local g gd
+        for g in "${GOLDEN_INFLIGHT_VMS[@]:-}"; do
+            [ -n "$g" ] && "${VIRSH[@]}" dominfo "$g" >/dev/null 2>&1 || continue
+            gd=$(vm_disk_path "$g" 2>/dev/null || true)
+            "${VIRSH[@]}" destroy "$g" >/dev/null 2>&1 || true
+            "${VIRSH[@]}" undefine "$g" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$g" >/dev/null 2>&1 || true
+            [ -n "$gd" ] && safe_rm_overlay "$gd" >/dev/null 2>&1 || true
+        done
         record_result lifecycle "$sig" fail "$EXIT_RUNNER" runner signal "" "run interrupted"
         finish_run "$EXIT_RUNNER"
     fi
@@ -544,7 +569,15 @@ acquire_vm() {
     if [ "$gate" = gui ]; then
         spinner=spin-test-vm-gui.sh
     fi
+    # If a per-run golden has been built for this gate's family, clone from it
+    # (the spinner then skips fresh-vm-bootstrap). Empty => normal full build.
+    local golden_backing=""
+    case "$gate" in
+        bats|bats-*) golden_backing="$RUN_GOLDEN_BATS" ;;
+        gui|gui-*)   golden_backing="$RUN_GOLDEN_GUI" ;;
+    esac
     QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+    QCI_RUN_GOLDEN_BACKING="$golden_backing" \
         "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -599,6 +632,9 @@ release_vm() {
         # Escape hatch: QCI_KEEP_FAILED_VM_RUNNING=1 leaves it running as before.
         log "preserving failed VM $vm"
         printf 'preserved_failed_vm=%s\n' "$vm" >> "$RDIR/manifest.txt"
+        # This overlay's backing chain may point at a per-run golden; keep the
+        # golden disk(s) so the preserved VM stays bootable for triage.
+        [ "${#RUN_GOLDEN_DISKS[@]:-0}" -gt 0 ] && GOLDEN_PRESERVE=1
         local preserved_state notes
         if [ "${QCI_KEEP_FAILED_VM_RUNNING:-0}" = 1 ]; then
             log "  QCI_KEEP_FAILED_VM_RUNNING=1 — leaving $vm running"
@@ -669,6 +705,104 @@ vm_disk_path() {
     fi
     [ -n "$disk" ] || return 1
     printf '%s\n' "$disk"
+}
+
+# Poll until a domain reaches 'shut off' (or timeout). Returns 0 on success.
+wait_for_shutoff() {
+    local vm=$1 timeout=${2:-120} i
+    for ((i = 0; i < timeout; i++)); do
+        [ "$("${VIRSH[@]}" domstate "$vm" 2>/dev/null)" = "shut off" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Build the per-run golden image for a gate family ONCE: spin a full VM (normal
+# fresh-vm-bootstrap build of current source), then sync + clean shutdown +
+# integrity check, then undefine the domain KEEPING its disk. That disk becomes
+# the read-only backing every worker clones from (QCI_RUN_GOLDEN_BACKING), so
+# workers skip the build. Idempotent. Returns EXIT_VM_PROVISION on any failure
+# (caller should fail the gate fast — no silent fallback to per-worker build).
+ensure_run_golden() {
+    local profile=$1 spinner gvm gdisk log rc
+    case "$profile" in
+        bats) [ -n "$RUN_GOLDEN_BATS" ] && return 0; spinner=spin-test-vm.sh ;;
+        gui)  [ -n "$RUN_GOLDEN_GUI" ]  && return 0; spinner=spin-test-vm-gui.sh ;;
+        *) return 1 ;;
+    esac
+    log="$RDIR/vm/golden-$profile.log"
+    mkdir -p "$(dirname "$log")"
+    log "building per-run golden ($profile): one-time compositor build for this run"
+    # Full build (QCI_RUN_GOLDEN_BACKING unset => normal bootstrap path).
+    QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+    QCI_RUN_GOLDEN_BACKING="" \
+        "$VM_TOOLS/$spinner" "qci-golden-$profile" > "$log" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "run-golden build failed (rc=$rc)"
+        return "$EXIT_VM_PROVISION"
+    fi
+    gvm=$(grep -E "^qci-golden-$profile-[A-Za-z0-9._-]+$" "$log" | tail -n 1 | tr -d '[:space:]')
+    [ -n "$gvm" ] || gvm=$(tail -n 1 "$log" | tr -d '[:space:]')
+    if [ -z "$gvm" ]; then
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "golden spinner produced no VM name"
+        return "$EXIT_VM_PROVISION"
+    fi
+    GOLDEN_INFLIGHT_VMS+=("$gvm")          # so abort_run can reap a half-built golden
+    gdisk=$(vm_disk_path "$gvm" || true)
+    if [ -z "$gdisk" ]; then
+        "${VIRSH[@]}" destroy "$gvm" >/dev/null 2>&1 || true
+        "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "could not resolve golden disk path"
+        return "$EXIT_VM_PROVISION"
+    fi
+    # Quiesce: sync in-guest, clean shutdown, wait for shut off.
+    "$VM_TOOLS/vm-exec" "$gvm" "sync" >/dev/null 2>&1 || true
+    "${VIRSH[@]}" shutdown "$gvm" >/dev/null 2>&1 || true
+    if ! wait_for_shutoff "$gvm" 180; then
+        log "golden $profile did not shut down cleanly within 180s; failing (not using a crash-consistent backing)"
+        "${VIRSH[@]}" destroy "$gvm" >/dev/null 2>&1 || true
+        "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
+        safe_rm_overlay "$gdisk" >/dev/null 2>&1 || true
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "golden did not quiesce"
+        return "$EXIT_VM_PROVISION"
+    fi
+    # Integrity guardrail on the qcow2 metadata before using it as a backing.
+    if command -v qemu-img >/dev/null 2>&1 && ! qemu-img check "$gdisk" >/dev/null 2>&1; then
+        log "golden $profile failed qemu-img check; failing"
+        "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
+        safe_rm_overlay "$gdisk" >/dev/null 2>&1 || true
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "golden qemu-img check failed"
+        return "$EXIT_VM_PROVISION"
+    fi
+    # Undefine the domain but KEEP the disk — it is now an immutable backing.
+    "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
+    case "$profile" in
+        bats) RUN_GOLDEN_BATS="$gdisk" ;;
+        gui)  RUN_GOLDEN_GUI="$gdisk" ;;
+    esac
+    RUN_GOLDEN_DISKS+=("$gdisk")
+    kv "golden_${profile}_disk" "$gdisk"
+    log "per-run golden ($profile) ready: $gdisk (workers will clone from it)"
+    return 0
+}
+
+# Remove golden backing disks at end of run — but ONLY once no worker overlay
+# can still reference them. If a failed worker was PRESERVED for triage, its
+# overlay's backing chain points at the golden, so we keep the golden too.
+cleanup_run_goldens() {
+    local d
+    for d in "${RUN_GOLDEN_DISKS[@]:-}"; do
+        [ -n "$d" ] || continue
+        if [ "$GOLDEN_PRESERVE" = 1 ]; then
+            log "preserving golden backing $d (a failed worker overlay was preserved and references it)"
+            printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
+            continue
+        fi
+        if safe_rm_overlay "$d"; then
+            log "removed per-run golden $d"
+        fi
+    done
 }
 
 collect_vm_artifacts() {
@@ -1444,65 +1578,142 @@ python3 -m pytest tests/ui -v"
     return "$rc"
 }
 
+# How many GUI scenarios to run concurrently. GUI VMs are heavier than bats
+# (nested KVM + compositor) and each spawns its own agent (QCI_AGENT_CMD)
+# process, so this is capped separately from bats. Default 8; QCI_GUI_JOBS
+# overrides. RAM-clamped like the bats pool.
+gui_job_count() {
+    local jobs ram_gb ram_cap
+    if [ -n "${QCI_GUI_JOBS:-}" ] && [ "${QCI_GUI_JOBS}" -ge 1 ] 2>/dev/null; then
+        jobs=$QCI_GUI_JOBS
+    else
+        jobs=8
+    fi
+    # Clamp by current MemAvailable (reclaimable cache included), not MemTotal.
+    ram_gb=$(awk '/^MemAvailable:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+    [ -n "$ram_gb" ] && [ "$ram_gb" -gt 0 ] 2>/dev/null \
+        || ram_gb=$(awk '/^MemTotal:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+    [ -n "$ram_gb" ] 2>/dev/null || ram_gb=8
+    ram_cap=$(( (ram_gb - 6) / 5 ))
+    [ "$ram_cap" -lt 1 ] && ram_cap=1
+    [ "$jobs" -gt "$ram_cap" ] && jobs=$ram_cap
+    [ "$jobs" -lt 1 ] && jobs=1
+    printf '%s\n' "$jobs"
+}
+
+# Run one GUI agent scenario on its own fresh disposable VM, record the result +
+# timing, then release the VM. Self-contained for backgrounded pool execution.
+# Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
+gui_run_scenario() {
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2
+    rel=${scenario#$WORKSPACE/}
+    t0=$(date +%s)
+    if [ -n "$provided" ]; then
+        vm=$provided
+    else
+        vm=$(acquire_vm "gui-$(safe_name "$rel")" "") || {
+            record_result gui "$rel" fail "$EXIT_VM_PROVISION" vm_provision vm "" "GUI VM creation failed"
+            record_timing gui "$rel" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
+            return "$EXIT_VM_PROVISION"
+        }
+        own=1
+    fi
+    t1=$(date +%s)
+    prompt="$RDIR/agent-notes/$(safe_name "$rel").prompt.md"
+    log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
+    mkdir -p "$(dirname "$log_path")"
+    write_agent_prompt "$vm" "$scenario" "$prompt"
+    log "agent scenario $rel on $vm"
+    run_agent_command "$prompt" "$log_path"
+    agent_rc=$?
+    status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
+    case "$status:$agent_rc" in
+        PASS:0|UNKNOWN:0)
+            record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed" ;;
+        SKIP:*)
+            record_result gui "$rel" skip 0 pass agent "$log_path" "agent scenario skipped" ;;
+        FAIL:*|ERROR:*)
+            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent status=$status rc=$agent_rc"
+            frc=$EXIT_GUI ;;
+        *)
+            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc status=$status"
+            frc=$EXIT_GUI ;;
+    esac
+    t2=$(date +%s)
+    collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
+    [ "$own" = 1 ] && release_vm "$vm" "$frc"
+    record_timing gui "$rel" "$((t1 - t0))" "$((t2 - t1))" "$((t2 - t0))" "$frc" "$vm"
+    return "$frc"
+}
+
 gate_gui() {
-    local explicit=${1:-} vm rc=$EXIT_OK scenario prompt log_path rel status agent_rc require step_rc legacy_ctrl=0 nested_kvm=0 noctalia_shell=0
+    local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 noctalia_shell=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
-    vm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
-    kv vm "$vm"
-    if "$VM_TOOLS/vm-exec" "$vm" "runuser -u admin -- sh -c 'echo list | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | head -1 | grep -qx \"ok list\"'" >/dev/null 2>&1; then
+    # A single "session" VM is used for the capability probe + the per-session
+    # sub-gates (executable smokes, qdshell-ui vision). The agent SCENARIOS then
+    # each run on their own disposable VM in a parallel pool below.
+    svm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
+    kv vm "$svm"
+    if "$VM_TOOLS/vm-exec" "$svm" "runuser -u admin -- sh -c 'echo list | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | head -1 | grep -qx \"ok list\"'" >/dev/null 2>&1; then
         legacy_ctrl=1
     fi
-    if "$VM_TOOLS/vm-exec" "$vm" "test -e /dev/kvm" >/dev/null 2>&1; then
+    if "$VM_TOOLS/vm-exec" "$svm" "test -e /dev/kvm" >/dev/null 2>&1; then
         nested_kvm=1
     fi
-    if "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && pgrep -a noctalia-shell >/dev/null" >/dev/null 2>&1; then
+    if "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && pgrep -a noctalia-shell >/dev/null" >/dev/null 2>&1; then
         noctalia_shell=1
     fi
 
-    run_qdwin_executable_gui_smokes "$vm"; step_rc=$?
+    run_qdwin_executable_gui_smokes "$svm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
     # Authoritatively probe noctalia-shell.service (the deployed qs unit) +
     # the wayland-1 socket rather than relying solely on the pgrep-based
     # noctalia_shell flag, which matches the broader scenario gating.
     local qdshell_session=0
-    if [ "$noctalia_shell" = 1 ] || "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active noctalia-shell.service qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
+    if [ "$noctalia_shell" = 1 ] || "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active noctalia-shell.service qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
         qdshell_session=1
     fi
     if [ "$qdshell_session" = 1 ]; then
-        # qdshell quickshell session is live on wayland-1 — run the vision
-        # harness against it (drives IPC + virsh-screenshot of the VM).
-        gate_qdshell_ui_agent "$vm"; step_rc=$?
+        gate_qdshell_ui_agent "$svm"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
-        # labwc-only VM profile (e.g. spin-test-vm-gui): no qdshell session to
-        # screenshot. Skip with a precise reason rather than fail or silently
-        # pass — matches how the other qdshell/noctalia scenarios are gated.
         record_result gui qdshell-ui skip 0 pass vision "" \
             "qdshell/noctalia session not active on wayland-1 in this VM profile; vision harness needs a live qdshell session"
     fi
 
+    # The session VM has done its job (capability probe + per-session sub-gates).
+    # When NO explicit VM was given, free it before the per-scenario pool so its
+    # RAM is available to workers. With an explicit --vm, keep it: scenarios run
+    # serially ON that VM (preserving the old `qci gui --vm` contract — the probed
+    # VM and the scenario VM must be the same one).
+    if [ -z "$explicit" ]; then
+        collect_vm_artifacts "$svm" gui
+        release_vm "$svm" "$rc"
+    fi
+
+    # Partition scenarios: those gated out by this VM profile are recorded as
+    # skips up front (no VM spent). The capability flags are identical across
+    # GUI VMs (same spin profile), so the probe on the session VM applies to
+    # every worker VM. The rest run one-VM-each in a parallel pool.
+    local to_run=() log_path
     while IFS= read -r scenario; do
         rel=${scenario#$WORKSPACE/}
+        log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
+        mkdir -p "$(dirname "$log_path")"
         # QCI_OFFLINE annotation hook: registry network=external GUI scenarios
         # self-skip in offline mode. The registry key is qdistro-repo-relative.
         if [ "$QCI_OFFLINE" = 1 ] && offline_should_skip_external "${scenario#$QDISTRO_REPO/}"; then
             record_result gui "$rel" skip 0 pass agent "" "QCI_OFFLINE=1: registry network=external; skipped"
             continue
         fi
-        prompt="$RDIR/agent-notes/$(safe_name "$rel").prompt.md"
-        log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
-        mkdir -p "$(dirname "$log_path")"
-        write_agent_prompt "$vm" "$scenario" "$prompt"
         case "$rel" in
             qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
                 if [ "$legacy_ctrl" != 1 ]; then
                     {
                         echo "Skipped legacy qdwin markdown scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: /run/user/1000/qdshell.sock is absent; current qdistro GUI session is Quickshell/noctalia based."
-                        echo "Use executable qdwin agent smokes and qdistro/tests/integration/qdwin-noctalia/*.md until these legacy scenarios are ported off the qdshell ctrl-socket."
                     } > "$log_path"
                     record_result gui "$rel" skip 0 pass agent "$log_path" "legacy qdshell ctrl-socket not available"
                     continue
@@ -1515,7 +1726,6 @@ gate_gui() {
                 if [ "$nested_kvm" != 1 ]; then
                     {
                         echo "Skipped nested-VM GUI scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: /dev/kvm is absent inside the session VM; this scenario requires nested KVM."
                     } > "$log_path"
@@ -1528,7 +1738,6 @@ gate_gui() {
                 if [ "$noctalia_shell" != 1 ]; then
                     {
                         echo "Skipped qdshell/noctalia GUI scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
@@ -1540,7 +1749,6 @@ gate_gui() {
                 if [ "$noctalia_shell" != 1 ]; then
                     {
                         echo "Skipped qdwin/noctalia GUI scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
@@ -1552,7 +1760,6 @@ gate_gui() {
                 if [ "$noctalia_shell" != 1 ]; then
                     {
                         echo "Skipped qdlocker GUI scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; qdlocker GUI tests require the qdwin/noctalia session, while this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
@@ -1564,7 +1771,6 @@ gate_gui() {
                 if [ -z "${VM_SSH_PORT:-}" ]; then
                     {
                         echo "Skipped SSH-only SELinux GUI scenario."
-                        echo "VM: $vm"
                         echo "Scenario: $scenario"
                         echo "Reason: VM_SSH_PORT is not set; this scenario explicitly requires SSH transport because qemu-guest-agent cannot set SELinux enforcing mode."
                     } > "$log_path"
@@ -1574,10 +1780,8 @@ gate_gui() {
                 ;;
         esac
         if [ -z "${QCI_AGENT_CMD:-}" ]; then
-            status=blocked
             {
                 echo "QCI_AGENT_CMD is not set."
-                echo "Prompt: $prompt"
                 echo "Scenario: $scenario"
             } > "$log_path"
             if [ "$require" = 1 ]; then
@@ -1588,37 +1792,142 @@ gate_gui() {
             fi
             continue
         fi
-        log "agent scenario $rel"
-        run_agent_command "$prompt" "$log_path"
-        agent_rc=$?
-        status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
-        case "$status:$agent_rc" in
-            PASS:0|UNKNOWN:0)
-                record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed"
-                ;;
-            SKIP:*)
-                record_result gui "$rel" skip 0 pass agent "$log_path" "agent scenario skipped"
-                ;;
-            FAIL:*|ERROR:*)
-                record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent status=$status rc=$agent_rc"
-                [ "$rc" -eq 0 ] && rc=$EXIT_GUI
-                ;;
-            *)
-                record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc status=$status"
-                [ "$rc" -eq 0 ] && rc=$EXIT_GUI
-                ;;
-        esac
+        to_run+=("$scenario")
     done < <(agent_scenarios)
 
-    collect_vm_artifacts "$vm" gui
-    release_vm "$vm" "$rc"
+    if [ "${#to_run[@]}" -gt 0 ]; then
+        local frc
+        if [ -n "$explicit" ]; then
+            # Explicit --vm: run every scenario serially ON that VM (single-tenant
+            # GUI session), then release it once at the end.
+            for scenario in "${to_run[@]}"; do
+                gui_run_scenario "$scenario" "$svm"
+                frc=$?
+                [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+            done
+            collect_vm_artifacts "$svm" gui
+            release_vm "$svm" "$rc"
+        else
+            # Disposable: parallel pool, one fresh GUI VM per scenario.
+            local jobs running=0
+            jobs=$(gui_job_count)
+            log "gui gate: ${#to_run[@]} agent scenarios on disposable VMs, up to $jobs in parallel (set QCI_GUI_JOBS to override)"
+            for scenario in "${to_run[@]}"; do
+                gui_run_scenario "$scenario" &
+                running=$((running + 1))
+                if [ "$running" -ge "$jobs" ]; then
+                    wait -n; frc=$?
+                    [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+                    running=$((running - 1))
+                fi
+            done
+            while [ "$running" -gt 0 ]; do
+                wait -n; frc=$?
+                [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+                running=$((running - 1))
+            done
+        fi
+    elif [ -n "$explicit" ]; then
+        # No runnable scenarios but we kept the explicit session VM — release it.
+        collect_vm_artifacts "$svm" gui
+        release_vm "$svm" "$rc"
+    fi
     return "$rc"
+}
+
+# Append one per-task timing row. Single-line O_APPEND is atomic, so this is
+# safe to call from concurrent background workers. Columns:
+#   gate  subject  provision_s  work_s  total_s  rc  vm
+# provision_s = VM acquire/boot time; work_s = test/agent run; total_s = sum.
+record_timing() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$RDIR/timings.tsv"
+}
+
+# Pick how many disposable bats VMs to run concurrently. Each VM is ~4 GiB RAM
+# + QDWIN_VM_VCPUS vCPUs, so RAM is the binding constraint (CPU is safe to
+# overprovision). Three tiers, auto-selected from host RAM + logical CPUs:
+#   minimal  (<=32 GiB / few cores) -> 4
+#   medium   (~64 GiB, >=10 cores)  -> 10
+#   high     (>=90 GiB, >=12 cores) -> 16
+# QCI_JOBS overrides outright. The chosen value is RAM-clamped so VMs can never
+# oversubscribe memory regardless of tier.
+bats_job_count() {
+    local jobs ram_gb avail_gb cores ram_cap
+    # Tier selection uses MemTotal (the machine's class); the safety clamp uses
+    # MemAvailable (current headroom incl. reclaimable cache) so a busy host
+    # can't be overcommitted even though the machine is nominally large.
+    ram_gb=$(awk '/^MemTotal:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+    [ -n "$ram_gb" ] 2>/dev/null || ram_gb=8
+    avail_gb=$(awk '/^MemAvailable:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+    [ -n "$avail_gb" ] && [ "$avail_gb" -gt 0 ] 2>/dev/null || avail_gb=$ram_gb
+    if [ -n "${QCI_JOBS:-}" ] && [ "${QCI_JOBS}" -ge 1 ] 2>/dev/null; then
+        jobs=$QCI_JOBS
+    else
+        cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)
+        if   [ "$ram_gb" -ge 90 ] && [ "$cores" -ge 12 ]; then jobs=16   # high
+        elif [ "$ram_gb" -ge 56 ] && [ "$cores" -ge 10 ]; then jobs=10   # medium
+        else                                                   jobs=4    # minimal
+        fi
+    fi
+    # RAM safety clamp: ~5 GiB/VM, keep ~6 GiB for the host. Clamps even a
+    # QCI_JOBS override so a typo can't oversubscribe memory.
+    ram_cap=$(( (avail_gb - 6) / 5 ))
+    [ "$ram_cap" -lt 1 ] && ram_cap=1
+    [ "$jobs" -gt "$ram_cap" ] && jobs=$ram_cap
+    [ "$jobs" -lt 1 ] && jobs=1
+    printf '%s\n' "$jobs"
+}
+
+# Run one bats file against an already-up VM; collect artifacts and record the
+# pass/fail row. Returns 0 on pass, EXIT_BATS on failure. Does NOT acquire or
+# release the VM — the caller owns its lifecycle. Safe to run backgrounded:
+# every shared write (results.tsv, manifest.txt, the per-file log, the per-VM
+# artifact dir) is either a single-line O_APPEND or a path unique to this VM.
+bats_run_one() {
+    local vm=$1 file=$2 base log_path gate_rc
+    base=$(basename "$file")
+    log_path="$RDIR/bats/$base.log"
+    mkdir -p "$(dirname "$log_path")"
+    log "bats $base on $vm"
+    (
+        cd "$QDISTRO_REPO" || exit 2
+        VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" bats "$file"
+    ) > "$log_path" 2>&1
+    gate_rc=$?
+    collect_vm_artifacts "$vm" "bats-${base%.bats}"
+    if [ "$gate_rc" -eq 0 ]; then
+        record_result bats "$base" pass 0 pass bats "$log_path" "VM=$vm"
+        return 0
+    fi
+    record_result bats "$base" fail "$EXIT_BATS" bats bats "$log_path" "VM=$vm raw_rc=$gate_rc"
+    return "$EXIT_BATS"
+}
+
+# Acquire a fresh disposable VM, run one bats file on it, then release it.
+# Self-contained so it can run as a backgrounded pool worker. Returns EXIT_BATS
+# on test failure, EXIT_VM_PROVISION if the VM could not be created, else 0.
+bats_run_disposable() {
+    local file=$1 base vm frc t0 t1 t2
+    base=$(basename "$file")
+    t0=$(date +%s)
+    vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
+        record_timing bats "$base" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
+        return "$EXIT_VM_PROVISION"
+    }
+    t1=$(date +%s)
+    bats_run_one "$vm" "$file"
+    frc=$?
+    t2=$(date +%s)
+    release_vm "$vm" "$frc"
+    record_timing bats "$base" "$((t1 - t0))" "$((t2 - t1))" "$((t2 - t0))" "$frc" "$vm"
+    return "$frc"
 }
 
 gate_bats() {
     local explicit=${1:-}; shift || true
     local files=("$@")
-    local rc=$EXIT_OK file base vm gate_rc log_path
+    local rc=$EXIT_OK file base frc running jobs
     if [ "${#files[@]}" -eq 0 ]; then
         while IFS= read -r file; do files+=("$file"); done < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
     fi
@@ -1626,42 +1935,62 @@ gate_bats() {
         record_blocked bats bats "$EXIT_PREFLIGHT" bats "bats executable not found"
         return "$EXIT_PREFLIGHT"
     fi
+
+    # Filter out offline-skipped files up front (cheap; no VM, no worker slot).
+    # QCI_OFFLINE annotation hook: if the registry marks this test's network
+    # column 'external', skip it in offline mode rather than let it try (and
+    # fail) to reach the network. Tests not in the registry see QCI_OFFLINE=1 in
+    # their env and are expected to self-skip.
+    local run_files=()
     for file in "${files[@]}"; do
         base=$(basename "$file")
-        # QCI_OFFLINE annotation hook: if the registry marks this test's
-        # network column 'external', skip it in offline mode rather than let
-        # it try (and fail) to reach the network. Tests not in the registry
-        # see QCI_OFFLINE=1 in their env and are expected to self-skip.
-        local rel_test="tests/integration/vm/$base"
-        if offline_should_skip_external "$rel_test"; then
+        if offline_should_skip_external "tests/integration/vm/$base"; then
             record_result bats "$base" skip 0 pass bats "" "QCI_OFFLINE=1: registry network=external; skipped"
             continue
         fi
-        if [ -n "$explicit" ]; then
-            vm="$explicit"
-            validate_vm bats "$vm" || return "$EXIT_VM_PROVISION"
-        else
-            vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
-                [ "$rc" -eq 0 ] && rc=$EXIT_VM_PROVISION
-                continue
-            }
+        run_files+=("$file")
+    done
+    [ "${#run_files[@]}" -eq 0 ] && return "$rc"
+
+    # Explicit VM: every file shares one caller-provided VM, so they MUST run
+    # serially (the in-VM session/sockets are single-tenant).
+    if [ -n "$explicit" ]; then
+        validate_vm bats "$explicit" || return "$EXIT_VM_PROVISION"
+        for file in "${run_files[@]}"; do
+            bats_run_one "$explicit" "$file"
+            frc=$?
+            [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+        done
+        return "$rc"
+    fi
+
+    # Build the per-run golden ONCE (compositor built from current source), so
+    # every worker clones it and skips the in-guest build. Fail the gate fast if
+    # the golden can't be built — do not silently fall back to per-worker builds.
+    # Opt out with QCI_NO_GOLDEN=1 (workers then each run the full bootstrap).
+    if [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
+        ensure_run_golden bats || return "$EXIT_VM_PROVISION"
+    fi
+
+    # Disposable VMs: run a bounded pool of one-VM-per-file workers in parallel.
+    # Concurrency is capped at `jobs` via `wait -n` (reap one worker before
+    # launching the next once at capacity).
+    jobs=$(bats_job_count)
+    log "bats gate: ${#run_files[@]} files on disposable VMs, up to $jobs in parallel (set QCI_JOBS to override)"
+    running=0
+    for file in "${run_files[@]}"; do
+        bats_run_disposable "$file" &
+        running=$((running + 1))
+        if [ "$running" -ge "$jobs" ]; then
+            wait -n; frc=$?
+            [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+            running=$((running - 1))
         fi
-        log_path="$RDIR/bats/$base.log"
-        mkdir -p "$(dirname "$log_path")"
-        log "bats $base on $vm"
-        (
-            cd "$QDISTRO_REPO" || exit 2
-            VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" bats "$file"
-        ) > "$log_path" 2>&1
-        gate_rc=$?
-        collect_vm_artifacts "$vm" "bats-${base%.bats}"
-        if [ "$gate_rc" -eq 0 ]; then
-            record_result bats "$base" pass 0 pass bats "$log_path" "VM=$vm"
-        else
-            record_result bats "$base" fail "$EXIT_BATS" bats bats "$log_path" "VM=$vm raw_rc=$gate_rc"
-            [ "$rc" -eq 0 ] && rc=$EXIT_BATS
-        fi
-        [ -z "$explicit" ] && release_vm "$vm" "$gate_rc"
+    done
+    while [ "$running" -gt 0 ]; do
+        wait -n; frc=$?
+        [ "$frc" -ne 0 ] && [ "$rc" -eq 0 ] && rc=$frc
+        running=$((running - 1))
     done
     return "$rc"
 }

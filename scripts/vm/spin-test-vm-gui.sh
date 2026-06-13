@@ -34,7 +34,7 @@ echo "[gui-spin] step 1/3: spin-test-vm.sh $PREFIX (broker layer)" >&2
 # stderr to console, stdout to a variable.
 VM=$(bash "$SCRIPT_DIR/spin-test-vm.sh" "$PREFIX" 2>&1 | tee /dev/stderr | tail -1)
 
-if ! echo "$VM" | grep -qE "^${PREFIX}-[0-9]+-[0-9]+$"; then
+if ! echo "$VM" | grep -qE "^${PREFIX}-[0-9]+-[0-9]+(-[0-9]+)*$"; then
     echo "[gui-spin] could not parse VM name from spin-test-vm.sh output: '$VM'" >&2
     exit 1
 fi

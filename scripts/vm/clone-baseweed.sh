@@ -36,11 +36,15 @@ PREFIX=""
 GPU=0
 FROM_BAKED=0
 FROM_ENFORCING=0
+FROM_GOLDEN=""
 for arg in "$@"; do
     case "$arg" in
         --gpu)                   GPU=1 ;;
         --from-baked)            FROM_BAKED=1 ;;
         --from-enforcing-baked)  FROM_ENFORCING=1 ;;
+        # Per-run golden backing: an already-built qcow2 (compositor built once
+        # per run) used as the backing for this clone, skipping fresh-vm-bootstrap.
+        --from-run-golden=*)     FROM_GOLDEN="${arg#*=}" ;;
         --*)
             echo "ERROR: unknown flag '$arg'" >&2; exit 2 ;;
         *)
@@ -59,12 +63,28 @@ if [ "$FROM_BAKED" = 1 ] && [ "$FROM_ENFORCING" = 1 ]; then
     echo "ERROR: --from-baked and --from-enforcing-baked are mutually exclusive" >&2
     exit 2
 fi
+if [ -n "$FROM_GOLDEN" ] && { [ "$FROM_BAKED" = 1 ] || [ "$FROM_ENFORCING" = 1 ]; }; then
+    echo "ERROR: --from-run-golden is mutually exclusive with --from-baked/--from-enforcing-baked" >&2
+    exit 2
+fi
+if [ -n "$FROM_GOLDEN" ]; then
+    case "$FROM_GOLDEN" in
+        /*) : ;;
+        *) echo "ERROR: --from-run-golden requires an absolute path (got '$FROM_GOLDEN')" >&2; exit 2 ;;
+    esac
+fi
 
-VM="${PREFIX}-$(date +%y%m%d-%H%M)"
+# Name must be unique even when many VMs are cloned in the same minute
+# (parallel qci). Seconds + this process's PID + $RANDOM make a same-second
+# collision effectively impossible; PID is unique across concurrent clones.
+VM="${PREFIX}-$(date +%y%m%d-%H%M%S)-$$-$RANDOM"
 TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}"
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
-if [ "$FROM_ENFORCING" = 1 ]; then
+if [ -n "$FROM_GOLDEN" ]; then
+    BACKING="$FROM_GOLDEN"
+    BACKING_NAME=run-golden
+elif [ "$FROM_ENFORCING" = 1 ]; then
     BACKING="$IMG/baseweed-enforcing-baked.qcow2"
     BACKING_NAME=baseweed-enforcing-baked
 elif [ "$FROM_BAKED" = 1 ]; then
@@ -110,6 +130,10 @@ qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
 #      the VM is reached via SSH (qga is denied under enforcing).
 if [ "$FROM_ENFORCING" = 1 ]; then
     : # no-op: enforcing config is already baked in
+elif [ -n "$FROM_GOLDEN" ]; then
+    : # no-op: the run-golden was built from baseweed-baked, which is already
+      # permissive — skip the per-clone libguestfs launch (a hot-path cost once
+      # the compile is removed).
 else
     virt-customize --no-network -a "$IMG/${VM}.qcow2" \
         --edit '/etc/selinux/config:s/SELINUX=enforcing/SELINUX=permissive/' \
@@ -120,11 +144,17 @@ fi
 NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
     $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 
+# vCPU count for the clone. Default 4 — CPU is safe to overprovision across
+# parallel VMs (RAM is the binding constraint), so we give each VM more cores
+# than the 2-vcpu template without reducing how many run concurrently.
+VCPUS="${QDWIN_VM_VCPUS:-4}"
+
 XML=$(virsh -c qemu:///session dumpxml "$TEMPLATE" --inactive)
 XML=$(printf '%s' "$XML" \
     | sed -e "s|<name>$TEMPLATE</name>|<name>$VM</name>|" \
           -e '/<uuid>/d' \
           -e "/<mac address=/c\\      <mac address='$NEW_MAC'/>" \
+          -e "s|<vcpu[^>]*>[0-9]\{1,\}</vcpu>|<vcpu placement='static'>${VCPUS}</vcpu>|" \
           -e "s|$TEMPLATE.qcow2|${VM}.qcow2|g")
 
 # Strip any pre-existing <backingStore> blocks from the template's
