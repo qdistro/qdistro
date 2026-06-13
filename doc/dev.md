@@ -262,6 +262,59 @@ format:
 - **`mypy`** optional; add if typing needs are complex.
 - Don't add black or flake8 — ruff covers both.
 
+## Editor / agent LSP setup (optional)
+
+Host-side convenience only — **not** required to build, test, or run
+qdistro. It wires up Language Server Protocol servers so editors and LLM
+agents (Claude Code, etc.) get diagnostics, go-to-definition, and
+references across the four languages in this tree: Python, QML, Bash, C.
+
+Language servers (install once on the host):
+
+| Language | Server                 | Install                                            |
+|----------|------------------------|----------------------------------------------------|
+| Python   | `pyright-langserver`   | `npm i -g pyright` (or `pip install basedpyright`)  |
+| Bash     | `bash-language-server` | `npm i -g bash-language-server`                     |
+| C        | `clangd`               | `sudo zypper install clang-tools`                   |
+| QML      | `qmlls6`               | ships with the Qt6 declarative tools               |
+
+`clangd` only resolves cross-file includes when it finds a
+`compile_commands.json`. meson emits one — symlink it to the source root:
+
+```sh
+(cd daemons && meson setup build)        # writes build/compile_commands.json
+ln -sf build/compile_commands.json daemons/compile_commands.json
+```
+
+### Claude Code
+
+Claude Code does **not** auto-detect language servers — register them in a
+local plugin at `~/.claude/skills/local-lsp/.claude-plugin/plugin.json`:
+
+```json
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "local-lsp",
+  "version": "0.1.0",
+  "description": "Local language servers for Python, Bash, C, and QML",
+  "lspServers": {
+    "python": { "command": "pyright-langserver", "args": ["--stdio"],
+                "extensionToLanguage": { ".py": "python", ".pyi": "python" } },
+    "bash":   { "command": "bash-language-server", "args": ["start"],
+                "extensionToLanguage": { ".sh": "shellscript", ".bash": "shellscript" } },
+    "c":      { "command": "clangd", "args": ["--background-index"],
+                "extensionToLanguage": { ".c": "c", ".h": "c" } },
+    "qml":    { "command": "qmlls6",
+                "extensionToLanguage": { ".qml": "qml" } }
+  }
+}
+```
+
+Run `/reload-plugins` (or restart) to load it; verify with
+`claude plugin list`. No MCP servers are needed for qdistro work — LSP
+covers in-codebase intelligence, while MCP is for external systems
+(databases, issue trackers) the repo doesn't depend on.
+
 ## Documentation
 
 - Man pages under `doc/`. At minimum: `<app>.1` (usage) and
