@@ -566,9 +566,15 @@ acquire_vm() {
     log_path="$RDIR/vm/spin-$gate.log"
     log "creating disposable VM for $gate"
     spinner=spin-test-vm.sh
-    if [ "$gate" = gui ]; then
-        spinner=spin-test-vm-gui.sh
-    fi
+    # Match the per-scenario workers too: gui_run_scenario acquires VMs as
+    # `gui-<scenario>`, not bare `gui`. An exact `= gui` test here left every
+    # per-scenario GUI worker on the broker-only spin-test-vm.sh — no labwc/lxqt,
+    # no work/work2 users, no admin app / TUI / approvals CLI — so the GUI agent
+    # scenarios all ERRORed on "broker-only VM, missing GUI components". Use the
+    # same gui|gui-* glob as the golden_backing case just below.
+    case "$gate" in
+        gui|gui-*) spinner=spin-test-vm-gui.sh ;;
+    esac
     # If a per-run golden has been built for this gate's family, clone from it
     # (the spinner then skips fresh-vm-bootstrap). Empty => normal full build.
     local golden_backing=""
