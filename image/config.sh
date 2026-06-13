@@ -256,6 +256,18 @@ if [ -f "$SRC/qdlocker/systemd/qdlocker.service" ]; then
 else
     echo "[qdistro-image]   WARN: qdlocker.service not synced — locker absent from session"
 fi
+# Dedicated screen-unlock PAM service (harden-qdlocker 01+03). The unit's
+# qdshell-path drop-in points QDLOCKER_PAM_SERVICE at `qdlocker`, so ship the
+# matching /etc/pam.d/qdlocker from the synced source. It includes
+# common-account for well-formed account management and enforces an explicit
+# pam_faillock brute-force lockout (deny=5, unlock_time=10), decoupled from the
+# borrowed `login` stack.
+if [ -f "$SRC/qdlocker/pam/qdlocker" ]; then
+    install -m 0644 -o root -g root "$SRC/qdlocker/pam/qdlocker" /etc/pam.d/qdlocker
+    echo "[qdistro-image] /etc/pam.d/qdlocker installed (dedicated unlock PAM + faillock lockout)"
+else
+    echo "[qdistro-image]   WARN: qdlocker/pam/qdlocker not synced — unlock PAM service absent"
+fi
 # Wire qdshell + qdlocker into qdwin-session.target.wants/ so the target
 # pulls them in. (The target unit also declares Wants= for both, but the
 # .wants symlinks are how `systemctl enable` would normally materialize

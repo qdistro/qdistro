@@ -1750,8 +1750,21 @@ install_qdlocker_service() {
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<'EOF'
 [Service]
 Environment=QDLOCKER_QDSHELL_PATH=/usr/share/quickshell/qdshell
-Environment=QDLOCKER_PAM_SERVICE=login
+Environment=QDLOCKER_PAM_SERVICE=qdlocker
 EOF
+
+    # Dedicated screen-unlock PAM service (harden-qdlocker 01+03): the unit
+    # points QDLOCKER_PAM_SERVICE at `qdlocker` (drop-in above), so ship the
+    # matching /etc/pam.d/qdlocker from the fetched source tree. It includes
+    # common-account for well-formed account management and enforces an
+    # explicit pam_faillock brute-force lockout (deny=5, unlock_time=10),
+    # decoupled from the borrowed `login` stack.
+    if [ -f "$locker_src/pam/qdlocker" ]; then
+        install -m 0644 -o root -g root "$locker_src/pam/qdlocker" /etc/pam.d/qdlocker
+        log "  installed /etc/pam.d/qdlocker (dedicated unlock PAM + faillock lockout)"
+    else
+        warn "qdlocker pam/qdlocker not found; screen-unlock will fall back to its default PAM service"
+    fi
     runuser -l admin -c 'systemctl --user daemon-reload' 2>/dev/null || true
     if runuser -l admin -c 'systemctl --user enable qdlocker.service' 2>/dev/null; then
         log "qdlocker service installed and enabled for admin"

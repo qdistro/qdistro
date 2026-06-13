@@ -383,8 +383,15 @@ if [ -d "$SRC/qdlocker/qdlocker" ]; then
     cat > /etc/systemd/user/qdlocker.service.d/qdshell-path.conf <<EOF
 [Service]
 Environment=QDLOCKER_QDSHELL_PATH=/usr/share/quickshell/qdshell
-Environment=QDLOCKER_PAM_SERVICE=login
+Environment=QDLOCKER_PAM_SERVICE=qdlocker
 EOF
+
+    # Dedicated screen-unlock PAM service (harden-qdlocker 01+03): explicit
+    # pam_faillock brute-force lockout, decoupled from the `login` stack.
+    if [ -f "$SRC/qdlocker/pam/qdlocker" ]; then
+        install -m 0644 -o root -g root "$SRC/qdlocker/pam/qdlocker" /etc/pam.d/qdlocker
+        log "  installed /etc/pam.d/qdlocker (dedicated unlock PAM + faillock lockout)"
+    fi
 
     runuser -l admin -c 'systemctl --user daemon-reload' || true
     runuser -l admin -c 'systemctl --user enable qdlocker.service' || true
