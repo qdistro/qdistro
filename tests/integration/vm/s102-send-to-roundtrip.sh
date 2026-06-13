@@ -145,12 +145,13 @@ start_receiver() {
         python3 /tmp/s102/receiver.py "$friendly" \
         >"/tmp/s102/$friendly.log" 2>&1 &
     echo $! >"/tmp/s102/$friendly.pid"
-    # Wait up to 5s for the ready file.
-    for _ in $(seq 1 50); do
+    # Wait up to 20s for the ready file. On loaded CI VMs the D-Bus name
+    # can be claimed shortly after the old 5s harness timeout fired.
+    for _ in $(seq 1 200); do
         [ -f "/tmp/s102/ready-$friendly.txt" ] && return 0
         sleep 0.1
     done
-    err "$friendly receiver did not register within 5s (log: /tmp/s102/$friendly.log)"
+    err "$friendly receiver did not register within 20s (log: /tmp/s102/$friendly.log)"
 }
 
 # Make sure uid 2000 has a session bus available — start the user

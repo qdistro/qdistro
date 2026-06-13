@@ -72,6 +72,14 @@ echo "work2:${QDISTRO_VM_PASSWORD:-kruger}" | chpasswd
 # 2. qdistro-test-permission helper.
 install -m 0755 "$SRC/tests/unit/test_permission.py" \
                 /usr/local/bin/qdistro-test-permission
+PY_SITE=$(/usr/bin/python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+install -d -m 0755 "$PY_SITE/qdistro_app"
+for _sdk_py in "$SRC/sdk/qdistro_app"/*.py; do
+    install -m 0644 "$_sdk_py" "$PY_SITE/qdistro_app/"
+done
+/usr/bin/python3 - <<'PY'
+import qdistro_app  # noqa: F401
+PY
 
 # 3. start-admin-app / start-admin-tui launchers.
 install -m 0755 "$SRC/deploy/start-admin-app.sh" \

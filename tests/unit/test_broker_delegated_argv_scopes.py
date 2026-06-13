@@ -80,12 +80,13 @@ def _enqueue_delegated(broker: _StubBroker, *, claim_uid: int,
                        claim_pid: int = 1234,
                        claim_exe: str = "/usr/bin/qsu",
                        action: str = "qsu.exec:root",
+                       target_user: str = "root",
                        argv: list[str] | None = None) -> int:
     """Mimic RequestPermissionAs: route an _enqueue with delegated=True
     and the claimed peer identity from a root delegator.
 
     Returns the request id."""
-    details = {"target_user": "root"}
+    details = {"target_user": target_user}
     for i, a in enumerate(argv or []):
         details[f"argv[{i:02d}]"] = a
     # Delegator must be root for RequestPermissionAs; bypass the
@@ -340,6 +341,32 @@ class TestArgvAwareScopesPermitted:
             ["/usr/bin/apt-get", "install", "foo"])
         assert diff is None, \
             "forever_argv leaked to a different argv tuple — qsu argv-leak regression"
+
+    def test_forever_argv_persists_for_non_root_target_user(self, broker):
+        """Scenario 51 shape: qsu -u work stores a durable row under the
+        target-specific action key, not qsu.exec:root."""
+        broker.set_peer(uid=ADMIN_UID)
+        rid = _enqueue_delegated(
+            broker,
+            claim_uid=ADMIN_UID,
+            claim_exe="/usr/local/bin/qsu",
+            action="qsu.exec:work",
+            target_user="work",
+            argv=["/usr/bin/id"],
+        )
+        broker.DecideRequest(rid, "allow", "forever_argv")
+
+        rows = broker.cache.list_all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["caller_uid"] == ADMIN_UID
+        assert row["action"] == "qsu.exec:work"
+        assert row["scope"] == "forever_argv"
+        assert row["match_kind"] == "argv_exact"
+        assert broker.cache.lookup_detail(
+            ADMIN_UID, "qsu.exec:root", "/usr/local/bin/qsu",
+            ["/usr/bin/id"],
+        ) is None
 
     def test_forever_basename_matches_alt_path(self, broker):
         """forever_basename: same basename(argv[0]) any path."""

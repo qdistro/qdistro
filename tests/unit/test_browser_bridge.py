@@ -262,6 +262,7 @@ class TestOptionalBrowserOptIn:
     def _write(self, tmp_path, text):
         cfg = tmp_path / "browser-bridge-allowlist.conf"
         cfg.write_text(text, encoding="utf-8")
+        cfg.chmod(0o644)
         return cfg
 
     def test_optional_browsers_denied_by_default(self):
@@ -346,6 +347,7 @@ class TestOptionalBrowserOptIn:
         # A decode error must fail closed to the baseline, never raise.
         cfg = tmp_path / "browser-bridge-allowlist.conf"
         cfg.write_bytes(b"brave\xff\nchrome\n")
+        cfg.chmod(0o644)
         out = bb._resolve_allowlist(
             config_path=str(cfg), trusted_uid=os.geteuid())
         assert out == bb.DEFAULT_ALLOWED_PARENT_EXES

@@ -19,7 +19,7 @@ setup() {
     BOOT="$REPO_ROOT/scripts/install/qdistro-bootstrap.sh"
 
     # Fake qdistro source tree: $FAKE_QD acts as $REPO_ROOT/qdistro. Install a
-    # stub for every chain installer that appends "<name-or-basename> <srcdir>"
+    # stub for every chain installer that appends "<basename> <srcdir>"
     # to $TRACE and exits 0 (success → recorded by chain_state_record).
     FAKE_ROOT="$BATS_TEST_TMPDIR/src"
     FAKE_QD="$FAKE_ROOT/qdistro"
@@ -80,9 +80,9 @@ _run_chain() {
 # Extract the by-script trace (basenames only, in order).
 _trace_scripts() { awk '{print $1}' "$TRACE"; }
 
-# --- baseline: full chain runs in order, state file records every step ----
+# --- baseline: release-profile chain runs in order, state records each step ----
 
-@test "full chain: all 14 v1 steps run in order and each is recorded in state" {
+@test "full chain: all release-profile steps run in order and each is recorded in state" {
     _run_chain ''
     [ "$status" -eq 0 ]
     # Exact ordered set of scripts that ran.
@@ -95,7 +95,6 @@ install-pwd-for-vm.sh
 install-qsu-for-vm.sh
 install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
-install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
@@ -114,7 +113,6 @@ pwd
 qsu
 browser-bridge
 portal-backend
-phone
 print
 snapshots
 tier3
@@ -155,7 +153,6 @@ tier5b"
     run _trace_scripts
     expected="install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
-install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
@@ -176,7 +173,7 @@ install-tier5b-for-vm.sh"
     [ "$status" -eq 0 ]
     # qsu skipped ...
     ! grep -q "install-qsu-for-vm.sh" "$TRACE"
-    # ... but everything else ran, in order, 14 steps total.
+    # ... but every other release-profile step ran, in order.
     run _trace_scripts
     expected="install-broker-for-qdwin.sh
 install-session-manager.sh
@@ -184,7 +181,6 @@ install-polkit-agent-for-vm.sh
 install-pwd-for-vm.sh
 install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
-install-phone-for-vm.sh
 install-print-proxy-for-vm.sh
 install-snapshots-for-vm.sh
 install-tier3-for-vm.sh
@@ -199,7 +195,7 @@ install-tier5b-for-vm.sh"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run bash -c 'wc -l < "'"$TRACE"'"'
-    [ "$(echo "$output" | tr -d ' ')" = "14" ]
+    [ "$(echo "$output" | tr -d ' ')" = "13" ]
     grep -q "install-broker-for-qdwin.sh" "$TRACE"
     grep -q "install-tier5b-for-vm.sh" "$TRACE"
 }
@@ -230,14 +226,14 @@ install-tier5b-for-vm.sh"
 
 # --- --rerun-step: runs exactly one step --------------------------------
 
-@test "rerun-step: runs EXACTLY the named step and nothing else" {
-    _run_chain 'RERUN_STEP=phone'
+@test "rerun-step: runs EXACTLY the named release-profile step and nothing else" {
+    _run_chain 'RERUN_STEP=print'
     [ "$status" -eq 0 ]
     run _trace_scripts
-    [ "$output" = "install-phone-for-vm.sh" ]
+    [ "$output" = "install-print-proxy-for-vm.sh" ]
     # State file records exactly that one.
     run cat "$STATE_DIR/installer-chain.state"
-    [ "$output" = "phone" ]
+    [ "$output" = "print" ]
 }
 
 @test "rerun-step: first step in the chain works too" {

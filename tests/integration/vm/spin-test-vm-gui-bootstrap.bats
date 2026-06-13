@@ -58,6 +58,13 @@ in_file() {
     in_file "/usr/local/bin/qdistro-test-permission" "$GUI_SPIN"
 }
 
+@test "gui-spin: installs qdistro_app SDK for qdistro-test-permission" {
+    in_file "sysconfig.get_paths()['purelib']" "$GUI_SPIN"
+    in_file '$PY_SITE/qdistro_app' "$GUI_SPIN"
+    in_file '$SRC/sdk/qdistro_app' "$GUI_SPIN"
+    in_file "import qdistro_app" "$GUI_SPIN"
+}
+
 @test "gui-spin: installs qdistro-start-admin-app launcher" {
     in_file "/usr/local/bin/qdistro-start-admin-app" "$GUI_SPIN"
 }

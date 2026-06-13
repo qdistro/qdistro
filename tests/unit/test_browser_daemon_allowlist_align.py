@@ -58,6 +58,7 @@ class TestSharedResolver:
     def test_optin_adds_only_named_browser(self, tmp_path):
         cfg = tmp_path / "allow.conf"
         cfg.write_text("chrome\n", encoding="utf-8")
+        cfg.chmod(0o644)
         out = alw.resolve_parent_exes(
             config_path=str(cfg), trusted_uid=os.geteuid())
         assert _CHROME in out
@@ -194,6 +195,7 @@ class TestNoDriftAcrossGates:
         # Same chrome opt-in everywhere => same resolved set.
         cfg = tmp_path / "allow.conf"
         cfg.write_text("chrome\n", encoding="utf-8")
+        cfg.chmod(0o644)
         uid = os.geteuid()
         bridge_optin = bb._resolve_allowlist(
             config_path=str(cfg), trusted_uid=uid)
