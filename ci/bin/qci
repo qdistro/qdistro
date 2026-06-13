@@ -163,7 +163,12 @@ Environment:
   QCI_AGENT_CMD            Command used for markdown GUI scenarios.
                             It receives the generated prompt file as argv[1],
                             unless the value contains {prompt}.
-  QCI_KEEP_FAILED_VM=1      Preserve failed disposable VMs (default).
+  QCI_KEEP_FAILED_VM=1      Preserve failed disposable VMs (default). Preserved
+                            VMs are hibernated (managedsave) so they stop
+                            consuming RAM/CPU; `virsh start <vm>` resumes them
+                            for triage.
+  QCI_KEEP_FAILED_VM_RUNNING=1  Leave preserved failed VMs RUNNING instead of
+                            hibernating them (old behaviour; uses host RAM).
   QCI_DELETE_FAILED_VM=1    Destroy failed disposable VMs after artifacts.
   QCI_FORCE_PROTECTED_VM=1  Permit explicit qdistro-daily* VM targets.
   QCI_ALLOW_TEST_EDITS=1    Sanction edits to protected paths (tests/**,
@@ -518,17 +523,50 @@ release_vm() {
         return 0
     }
     if [ "$rc" -ne 0 ] && [ "${QCI_DELETE_FAILED_VM:-0}" != 1 ] && [ "${QCI_KEEP_FAILED_VM:-$KEEP_FAILED_DEFAULT}" = 1 ]; then
+        # Preserve the failed VM for debugging, but do NOT leave it running.
+        # A long multi-VM gate (bats spins one disposable VM per file) would
+        # otherwise pile up a 4 GB running guest per failure and exhaust host
+        # RAM. First try to hibernate via `managedsave` (saves live guest state
+        # to a file and stops the domain, so `virsh start <vm>` resumes the
+        # exact failed state). NOTE: the qdistro-template CPU is
+        # host-passthrough with migratable='off' (the invtsc flag is
+        # non-migratable), and managedsave uses the migration path — so for
+        # these VMs managedsave fails and we fall back to a plain power-off
+        # (destroy). Either way the definition + overlay disk are preserved and
+        # `virsh start <vm>` brings the VM back for triage (a powered-off VM
+        # boots fresh from disk; on-disk logs/journals are intact). RAM/CPU are
+        # freed in both cases. Artifacts were already pulled by the caller's
+        # collect_vm_artifacts before release_vm runs.
+        # Escape hatch: QCI_KEEP_FAILED_VM_RUNNING=1 leaves it running as before.
         log "preserving failed VM $vm"
         printf 'preserved_failed_vm=%s\n' "$vm" >> "$RDIR/manifest.txt"
-        record_result lifecycle "$vm" skip 0 pass vm "" "failed VM preserved for debugging"
+        local preserved_state notes
+        if [ "${QCI_KEEP_FAILED_VM_RUNNING:-0}" = 1 ]; then
+            log "  QCI_KEEP_FAILED_VM_RUNNING=1 — leaving $vm running"
+            preserved_state=running
+            notes="failed VM preserved (left running) for debugging"
+        elif "${VIRSH[@]}" managedsave "$vm" >/dev/null 2>&1; then
+            log "  hibernated $vm (managedsave) — resume with: virsh -c qemu:///session start $vm"
+            preserved_state=hibernated
+            notes="failed VM hibernated (managedsave) for debugging; virsh start to resume"
+        else
+            "${VIRSH[@]}" destroy "$vm" >/dev/null 2>&1 || true
+            log "  managedsave failed; powered off $vm (disk preserved) — restart with: virsh -c qemu:///session start $vm"
+            preserved_state=powered_off
+            notes="failed VM powered off (disk preserved) for debugging; virsh start to inspect"
+        fi
+        printf 'preserved_failed_vm_state=%s\n' "$preserved_state" >> "$RDIR/manifest.txt"
+        record_result lifecycle "$vm" skip 0 pass vm "" "$notes"
         return 0
     fi
     log "destroying VM $vm"
     local disk
     disk=$(vm_disk_path "$vm" || true)
     "${VIRSH[@]}" destroy "$vm" >/dev/null 2>&1 || true
-    "${VIRSH[@]}" undefine "$vm" --remove-all-storage >/dev/null 2>&1 || {
-        "${VIRSH[@]}" undefine "$vm" --nvram >/dev/null 2>&1 || true
+    # --managed-save: a previously-hibernated failed VM has a managedsave image;
+    # undefine refuses to remove it otherwise.
+    "${VIRSH[@]}" undefine "$vm" --remove-all-storage --managed-save >/dev/null 2>&1 || {
+        "${VIRSH[@]}" undefine "$vm" --nvram --managed-save >/dev/null 2>&1 || true
     }
     # On qemu:///session, `undefine --remove-all-storage` returns 0 but does NOT
     # delete the overlay qcow2 (it is not a pool-tracked managed volume), so the
@@ -1683,7 +1721,9 @@ gate_cleanup() {
             echo "would destroy $name disk=$disk" >> "$log_path"
         else
             "${VIRSH[@]}" destroy "$name" >/dev/null 2>&1 || true
-            "${VIRSH[@]}" undefine "$name" --remove-all-storage >> "$log_path" 2>&1 || {
+            # --managed-save: hibernated failed VMs carry a managedsave image
+            # that undefine must be told to remove.
+            "${VIRSH[@]}" undefine "$name" --remove-all-storage --managed-save >> "$log_path" 2>&1 || {
                 echo "FAIL undefine $name" >> "$log_path"
                 rc=$EXIT_RUNNER
             }

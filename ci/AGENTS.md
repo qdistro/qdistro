@@ -42,6 +42,57 @@ You are running or triaging local CI for the qdistro umbrella checkout.
 5. If a VM failed and was preserved, use the VM name from `manifest.txt` and the
    linked artifacts before rerunning anything broad.
 
+## Debugging a failed run
+
+Start from the artifacts, not from a fresh VM. The run directory under
+`qdistro/ci/runs/<gate>-<utc>-<pid>/` already holds most of what you need.
+
+1. **See what failed.** `qci report --latest` / open `report.md` (or `.html`);
+   for machine parsing read `results.tsv` (`gate  subject  status  exit_code
+   exit_class  kind  log  notes  category`). `qci triage --latest` and
+   `qci list-runs` help locate the run. Each failing row links its log under the
+   run dir; journals/screenshots/per-scenario artifacts are in `journals/`,
+   `screenshots/`, `gui/`, `vm/`, and `bats/`.
+
+2. **Find the preserved VM.** Failed disposable VMs are kept for debugging.
+   `manifest.txt` records `preserved_failed_vm=<name>` and
+   `preserved_failed_vm_state=<hibernated|powered_off|running>`; the
+   `lifecycle` rows in `results.tsv` say the same.
+
+3. **Wake the VM — it is hibernated, not running.** To stop preserved failed
+   VMs from exhausting host RAM (a long `bats` run spins one disposable VM per
+   file), qci hibernates each failed VM with `virsh managedsave` instead of
+   leaving it running. Resume the exact failed state with:
+
+   ```bash
+   virsh -c qemu:///session start <vm>     # restores hibernated/powered-off state
+   ```
+
+   `hibernated` resumes the live guest where it failed; `powered_off` boots
+   fresh from the preserved disk — the on-disk logs/journals are intact either
+   way. In practice qci VMs are `powered_off`: the `qdistro-template` CPU is
+   host-passthrough with a non-migratable `invtsc` flag, so `managedsave`
+   (which uses the migration path) fails and qci falls back to power-off. Set
+   `QCI_KEEP_FAILED_VM_RUNNING=1` on the run to keep failed VMs running instead.
+
+4. **Inspect inside the VM** (after `virsh start`), via
+   `scripts/vm/vm-exec <vm> '<cmd>'` (root over qemu-guest-agent):
+   `journalctl -b --no-pager`, `systemctl --user --machine=admin@.host status
+   <unit>`, check `/run/user/1000/wayland-*` and the relevant sockets,
+   `scripts/vm/vm-gui <vm> screenshot` for visual state. Save anything new under
+   the run dir, never only in `/tmp`.
+
+5. **Rerun narrowly against the preserved VM**, not the whole gate:
+   `qci replay <scenario> --vm <vm>`, `qci bats --vm <vm> --file <f.bats>`, or
+   `qci gui --vm <vm> --scenario <path.md>`. An explicit `--vm` is never
+   auto-deleted on pass.
+
+6. **Clean up when done.** `qci cleanup` (honours `--dry-run`/`--age-hours`)
+   removes stale `qci-*` VMs and their managedsave images; never touches
+   `qdistro-daily*`. Manually: `virsh -c qemu:///session destroy <vm>` then
+   `virsh -c qemu:///session undefine <vm> --remove-all-storage --managed-save`
+   (the `--managed-save` flag is required to undefine a hibernated VM).
+
 ## Visual scenario flow
 
 `qci gui` creates one prompt per markdown scenario under
