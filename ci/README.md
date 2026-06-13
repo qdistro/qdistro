@@ -106,6 +106,9 @@ run end, and preserved only if a failed worker that references it is preserved.
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |
+| `QDISTRO_VM_EXEC_TIMEOUT` | 1800 | Overall deadline (s) for a single `vm-exec` in-guest command; on timeout the guest process tree is killed and `vm-exec` exits 124. `0` = unbounded. |
+| `QDISTRO_VM_AGENT_RPC_TIMEOUT` | 30 | Host-side cap (s) per `virsh qemu-agent-command` RPC, so a wedged agent call can't outlast the deadline above. `0` = unbounded. |
+| `QD_VM_START_MAX_WAIT` | 300 | Backstop cap (s) on guest-agent readiness in `vm-start-and-wait` (raised from 120 for parallel boot contention). |
 
 A per-task timing breakdown (provision vs work seconds per file/scenario) is
 written to `<run-dir>/timings.tsv` for spotting outliers.

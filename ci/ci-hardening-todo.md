@@ -8,18 +8,22 @@ and reviewing the harness with subagents + codex.
 
 Ordered by priority.
 
-## 1. `vm-exec` overall deadline  (MUST-FIX)
-`scripts/vm/vm-exec` (~lines 43–81) polls `guest-exec-status` in a `while true`
-with **no overall timeout** — it only bails after 5 consecutive *agent
-unreachable* errors. A wedged/CPU-starved in-guest command makes it poll
-forever, holding a parallel worker slot. This actually happened live:
-`tier2-silo-secctx-wiretag.bats` hung the whole run for **36 min** (a
-never-exiting `weston-terminal` spawn) until the poller was killed by hand.
-Fix: add `QDISTRO_VM_EXEC_TIMEOUT` (generous default **1800s** — the slowest
-legit work item observed was 1031s, so 900s would false-kill). On timeout, do an
-in-guest `kill -TERM`/`-KILL` of the PID and exit non-zero with the command +
-elapsed seconds. Also consider raising `vm-start-and-wait` `MAX_WAIT` 120→300 for
-parallel boot contention.
+## 1. `vm-exec` overall deadline  (MUST-FIX)  — DONE 2026-06-13
+`scripts/vm/vm-exec` polled `guest-exec-status` in a `while true` with **no
+overall timeout** — it only bailed after 5 consecutive *agent unreachable*
+errors. A wedged/CPU-starved in-guest command made it poll forever, holding a
+parallel worker slot (`tier2-silo-secctx-wiretag.bats` hung a run for 36 min).
+Fixed: `QDISTRO_VM_EXEC_TIMEOUT` (default **1800s**; the slowest legit work item
+observed was 1031s) bounds the poll loop via bash `SECONDS`; on expiry it does an
+in-guest **descendant-tree** kill (BFS over `ps --ppid`, collect-then-signal so
+reparenting can't hide children — `pkill -P` alone leaked them in testing) and
+exits **124** with the command + elapsed seconds. Also added
+`QDISTRO_VM_AGENT_RPC_TIMEOUT` (default 30s) wrapping every
+`virsh qemu-agent-command` in host-side `timeout` — without it the `SECONDS`
+check can't fire while blocked in a command substitution (codex's main finding).
+`vm-start-and-wait` `MAX_WAIT` raised 120→300 (`QD_VM_START_MAX_WAIT`).
+VM-verified (normal path + exec'd / backgrounded / grandchild kills) and
+codex-reviewed.
 
 ## 2. Fixed-port driver-stager collision  (`:8768` / `:8765`)
 `tiered-isolation.bats` (local `stage_vm_driver`, ~22–41), `tier2-hardening-lockin.bats`

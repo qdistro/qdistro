@@ -15,6 +15,61 @@ if [ -z "$VM_NAME" ] || [ -z "$CMD" ]; then
     exit 1
 fi
 
+# Overall deadline (seconds) for the in-guest command. A wedged/CPU-starved
+# command (e.g. a never-exiting weston-terminal spawn) would otherwise make the
+# status poller below loop forever, holding a parallel CI worker slot. Default
+# is generous (1800s): the slowest legitimate work item observed in a full
+# parallel `qci full` run was ~1031s, so a tighter window would false-kill.
+TIMEOUT=${QDISTRO_VM_EXEC_TIMEOUT:-1800}
+if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_TIMEOUT must be a non-negative integer, got: $TIMEOUT" >&2
+    exit 1
+fi
+
+# Per-RPC host-side cap. The overall SECONDS deadline below cannot fire while the
+# shell is blocked inside a `virsh qemu-agent-command` command substitution, so a
+# single wedged agent RPC could still hang forever. Bound each RPC with
+# `timeout` so the poll loop always regains control to re-check the deadline.
+AGENT_RPC_TIMEOUT=${QDISTRO_VM_AGENT_RPC_TIMEOUT:-30}
+if ! [[ "$AGENT_RPC_TIMEOUT" =~ ^[0-9]+$ ]]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_AGENT_RPC_TIMEOUT must be a non-negative integer, got: $AGENT_RPC_TIMEOUT" >&2
+    exit 1
+fi
+
+# Single guest-agent RPC, bounded by AGENT_RPC_TIMEOUT (0 = unbounded). On timeout
+# `timeout` exits 124, which callers treat like any other virsh failure.
+agent_rpc() {
+    if [ "$AGENT_RPC_TIMEOUT" -gt 0 ]; then
+        timeout "${AGENT_RPC_TIMEOUT}s" virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$1"
+    else
+        virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$1"
+    fi
+}
+
+# Best-effort in-guest kill of a guest-exec'd PID and its whole descendant tree.
+# We collect the full descendant set by BFS over ps(ppid) BEFORE signalling, so
+# that reparenting (children of a dying shell get reparented to init) can't hide
+# any process — we then signal each collected PID directly, TERM then KILL.
+# Fire-and-forget: we don't wait for status since we're abandoning the command.
+KILL_TREE_SH='p=__PID__; list=$p; queue=$p
+while [ -n "$queue" ]; do
+  next=
+  for q in $queue; do
+    for k in $(ps -o pid= --ppid "$q" 2>/dev/null); do
+      case " $list " in *" $k "*) ;; *) list="$list $k"; next="$next $k";; esac
+    done
+  done
+  queue=$next
+done
+kill -TERM $list 2>/dev/null; sleep 2; kill -KILL $list 2>/dev/null; true'
+kill_guest_pid() {
+    local p=$1 sh kjson
+    sh=${KILL_TREE_SH//__PID__/$p}
+    kjson=$(jq -nc --arg cmd "$sh" \
+        '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":false}}')
+    agent_rpc "$kjson" >/dev/null 2>&1 || true
+}
+
 # 1. Send the command. Build the qga JSON with jq so embedded quotes,
 #    backslashes, and newlines in $CMD survive a round-trip through
 #    virsh -> qemu-guest-agent -> /bin/sh -c. The previous form
@@ -23,7 +78,7 @@ fi
 #    failure with `invalid string sequence`).
 EXEC_JSON=$(jq -nc --arg cmd "$CMD" \
     '{execute:"guest-exec",arguments:{path:"/bin/sh",arg:["-c",$cmd],"capture-output":true}}')
-RESPONSE=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$EXEC_JSON")
+RESPONSE=$(agent_rpc "$EXEC_JSON")
 
 if echo "$RESPONSE" | grep -q "error"; then
     echo "[vm-exec] ERROR: Failed to start command: $RESPONSE" >&2
@@ -40,11 +95,18 @@ fi
 # 3. Wait until command completes (exitcode is set)
 WAIT_COUNT=0
 ERROR_COUNT=0
+SECONDS=0
 while true; do
+    if [ "$TIMEOUT" -gt 0 ] && [ "$SECONDS" -ge "$TIMEOUT" ]; then
+        echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${SECONDS}s); killing guest PID $PID: $CMD" >&2
+        kill_guest_pid "$PID"
+        exit 124
+    fi
+
     set +e
     STATUS_JSON=$(jq -nc --argjson pid "$PID" \
         '{execute:"guest-exec-status",arguments:{pid:$pid}}')
-    RESULT=$(virsh -c qemu:///session qemu-agent-command "$VM_NAME" "$STATUS_JSON")
+    RESULT=$(agent_rpc "$STATUS_JSON")
     VIRSH_EXIT=$?
     set -e
 

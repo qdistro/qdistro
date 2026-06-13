@@ -31,7 +31,12 @@ else
     echo "VM '$VM_NAME' is already running"
 fi
 
-MAX_WAIT=120
+# Backstop cap on guest-agent readiness. The serial fail-fast watcher (below)
+# normally decides far sooner; this only bounds the wait when no serial source
+# is configured. Default raised 120->300 because under parallel boot contention
+# (many VMs starting at once in `qci full`) a legit boot can exceed 120s.
+# Override with QD_VM_START_MAX_WAIT.
+MAX_WAIT="${QD_VM_START_MAX_WAIT:-300}"
 WAITED=0
 
 # Optionally launch the concurrent serial fail-fast watcher. It races the
