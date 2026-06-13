@@ -43,6 +43,38 @@ admin authenticates and the machine lock is cleared.
 > parity-test overlay. P01 made qdgreeter functional and made qdwin
 > the actual compositor greetd boots; LXQt+labwc demoted to tty4.
 
+### Greeter keyboard grab and `_greeter` input access
+
+On eglfs (the tty3 boot path has no compositor of its own), qdgreeter reads
+the keyboard by opening a raw evdev device and taking an **exclusive grab**
+(`EVIOCGRAB`) before Qt starts — so every pre-auth keystroke is routed through
+the greeter, not leaked to a background VT. Properties of this surface, which is
+**accepted and bounded**, not a hole to close:
+
+- The grab is held for the greeter's whole lifetime and the greeter **exits on
+  successful auth** (`controller.succeeded → app.quit`), at which point greetd
+  starts the user session. The grab is **released explicitly** — `EVIOCGRAB 0`
+  plus an fd close on `succeeded`/`aboutToQuit` and in a `finally` around the
+  event loop (`qdgreeter/app.py`, `_RawKeyboardBridge.release`) — rather than
+  relying only on implicit process-exit cleanup. It grabs **one** device (the
+  first candidate that succeeds), not every input node.
+- `_greeter` is an unprivileged system user (`useradd --system`, `nologin`,
+  `/nonexistent` home), so the blast radius of holding the grab is small.
+- `_greeter` gets read access to `/dev/input/*` via static **`input`-group**
+  membership (`enable-qdgreeter.sh` / `qdistro-bootstrap.sh`:
+  `usermod -aG video,render,input,tty _greeter`). Seat-scoped logind `uaccess`
+  device ACLs do **not** apply here: those grant the *active logind session's*
+  user on a seat, but qdgreeter runs as a **seatless greetd system service**
+  with no logind session of its own. The `input` group is therefore the minimum
+  mechanism the platform actually offers for a raw-evdev greeter, and is
+  documented here as an accepted, bounded surface.
+- Narrower device scoping (a udev rule granting only `_greeter` the keyboard
+  event nodes, or a systemd `DeviceAllow=`/`SupplementaryGroups=` on the greetd
+  unit) may be considered **per-appliance, only after hardware-specific
+  testing**: a mis-scoped rule across keyboards/USB-hubs/initramfs timing can
+  brick keyboard login on tty3 (the only graphical login), so it is not folded
+  into the base image.
+
 ## PyQt locker
 
 The locker is a **subsystem of the admin compositor**, not a separate
