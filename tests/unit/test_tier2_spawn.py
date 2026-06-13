@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -63,22 +64,29 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
 
     if dbus_mode is not None:
         dbus = bindir / "dbus-send"
-        # When FAKE_OPEN_VERDICT is set and THIS call carries a
-        # qdistro.dispose.open: action, the fake returns that verdict instead
-        # of FAKE_DBUS_MODE — letting a test allow the spawn gate but deny the
-        # open gate (or vice-versa). The action-expectation check is skipped on
-        # an open call so the two distinct gate actions don't trip it.
+        # When FAKE_OPEN_VERDICT / FAKE_EXPORT_VERDICT is set and THIS call
+        # carries a qdistro.dispose.open: / qdistro.dispose.export: action, the
+        # fake returns that verdict instead of FAKE_DBUS_MODE — letting a test
+        # allow the spawn gate but deny the open/export gate (or vice-versa). The
+        # action-expectation check is skipped on an open/export call so the
+        # distinct gate actions don't trip it.
         dbus.write_text(
             "#!/bin/sh\n"
             "is_open=0\n"
+            "is_export=0\n"
             "for arg in \"$@\"; do\n"
-            "  case \"$arg\" in string:qdistro.dispose.open:*) is_open=1 ;; esac\n"
+            "  case \"$arg\" in\n"
+            "    string:qdistro.dispose.open:*) is_open=1 ;;\n"
+            "    string:qdistro.dispose.export:*) is_export=1 ;;\n"
+            "  esac\n"
             "done\n"
             "if [ \"$is_open\" = 1 ] && [ -n \"$FAKE_OPEN_VERDICT\" ]; then\n"
             "  mode=\"$FAKE_OPEN_VERDICT\"\n"
+            "elif [ \"$is_export\" = 1 ] && [ -n \"$FAKE_EXPORT_VERDICT\" ]; then\n"
+            "  mode=\"$FAKE_EXPORT_VERDICT\"\n"
             "else\n"
             "  mode=\"$FAKE_DBUS_MODE\"\n"
-            "  if [ -n \"$FAKE_EXPECT_ACTION\" ] && [ \"$is_open\" = 0 ]; then\n"
+            "  if [ -n \"$FAKE_EXPECT_ACTION\" ] && [ \"$is_open\" = 0 ] && [ \"$is_export\" = 0 ]; then\n"
             "    found=0\n"
             "    for arg in \"$@\"; do\n"
             "      [ \"$arg\" = \"string:$FAKE_EXPECT_ACTION\" ] && found=1\n"
@@ -422,6 +430,9 @@ def _run_open(
     ro_input: str | None = None,
     dbus_mode: str | None = "allow",
     open_verdict: str | None = None,
+    export_verdict: str | None = None,
+    request_silo: str | None = None,
+    staging_base: str | None = None,
     print_plan: bool = False,
     record_podman: bool = False,
     extra_env: dict[str, str] | None = None,
@@ -451,6 +462,12 @@ def _run_open(
         })
         if open_verdict is not None:
             env["FAKE_OPEN_VERDICT"] = open_verdict
+        if export_verdict is not None:
+            env["FAKE_EXPORT_VERDICT"] = export_verdict
+        if request_silo is not None:
+            env["TIER2_REQUEST_SILO"] = request_silo
+        if staging_base is not None:
+            env["TIER2_EXPORT_STAGING_BASE"] = staging_base
         if ro_input is not None:
             env["TIER2_RO_INPUT"] = ro_input
         if print_plan:
@@ -687,3 +704,97 @@ def test_open_ignores_caller_registry_env(tmp_path: Path) -> None:
         # the trusted weston-terminal mapping was used.
     finally:
         sock.close()
+
+
+# --- export-back (07-disposables-plan P2 / D7 copy-exception) -------------
+
+def test_open_no_request_silo_no_export(tmp_path: Path) -> None:
+    """An export-capable class opened WITHOUT a request silo stays a normal
+    disposable: no /mnt/output, export disabled (opt-in per launch)."""
+    result = _run_open(tmp_path, print_plan=True)  # agent-scratch, no request silo
+    assert result.returncode == 0, result.stderr
+    plan = _plan(result)
+    assert plan["EXPORT"] == "false"
+    assert plan["OUTPUT_TARGET"] == "none"
+    assert plan["REQUEST_SILO"] == "none"
+
+
+def test_open_export_plan(tmp_path: Path) -> None:
+    """An export-capable class + a request silo enables export: the plan carries
+    EXPORT=true, the export action, the request silo, and the /mnt/output target."""
+    result = _run_open(tmp_path, request_silo="work", print_plan=True)
+    assert result.returncode == 0, result.stderr
+    plan = _plan(result)
+    assert plan["EXPORT"] == "true"
+    assert plan["EXPORT_ACTION"] == "qdistro.dispose.export:agent-scratch"
+    assert plan["REQUEST_SILO"] == "work"
+    assert plan["OUTPUT_TARGET"] == "/mnt/output"
+
+
+def test_request_silo_for_non_export_class_refused(tmp_path: Path) -> None:
+    """text/plain is not export-capable; a request silo on it is refused rather
+    than silently dropping the caller's export intent."""
+    result = _run_open(tmp_path, open_class="text/plain", workload="text-viewer",
+                       request_silo="work", print_plan=True)
+    assert result.returncode == 2
+    assert "not export-capable" in result.stderr
+
+
+def test_export_invalid_request_silo_refused(tmp_path: Path) -> None:
+    result = _run_open(tmp_path, request_silo="../evil", print_plan=True)
+    assert result.returncode == 2
+    assert "invalid TIER2_REQUEST_SILO" in result.stderr
+
+
+def test_export_gate_denied_refuses(tmp_path: Path) -> None:
+    """Spawn + open gates allow but the export gate is unruled (unknown) — the
+    spawn must refuse. Proves the export gate is enforced independently."""
+    result = _run_open(tmp_path, dbus_mode="allow", request_silo="work",
+                       export_verdict="unknown")
+    assert result.returncode == 2
+    assert "qdistro.dispose.export:agent-scratch" in result.stderr
+    assert "LAUNCH_TOKEN=" not in result.stdout
+
+
+def test_export_missing_staging_base_fails_closed(tmp_path: Path) -> None:
+    """When export is enabled but the staging base is absent (a packaging gap),
+    the spawn fails closed rather than auto-creating a possibly-racing dir."""
+    result = _run_open(tmp_path, dbus_mode="allow", request_silo="work",
+                       export_verdict="allow",
+                       staging_base=str(tmp_path / "no-such-base"))
+    assert result.returncode == 2
+    assert "staging base" in result.stderr
+
+
+def test_export_rw_bind_and_labels_in_podman_argv(tmp_path: Path) -> None:
+    """End to end (fake podman): export enabled -> a per-token staging payload is
+    created, bound RW,nosuid,nodev,noexec at /mnt/output, and the container
+    carries the qdistro_export / qdistro_request_silo / qdistro_open_class labels.
+    meta.json is written OUTSIDE the bound payload dir."""
+    base = tmp_path / "staging"
+    base.mkdir()
+    result = _run_open(tmp_path, dbus_mode="allow", open_verdict="allow",
+                       export_verdict="allow", request_silo="work",
+                       staging_base=str(base), record_podman=True)
+    assert result.returncode == 0, result.stderr
+    token = ""
+    for ln in result.stdout.splitlines():
+        if ln.startswith("LAUNCH_TOKEN="):
+            token = ln.partition("=")[2]
+    assert token, result.stdout
+    payload = base / token / "payload"
+    assert payload.is_dir(), "per-token payload dir not created"
+    meta = base / token / "meta.json"
+    assert meta.is_file(), "meta.json not written"
+    # meta is OUTSIDE the bound payload dir (the container can't reach it).
+    assert not (payload / "meta.json").exists()
+    meta_obj = json.loads(meta.read_text())
+    assert meta_obj["request_silo"] == "work"
+    assert meta_obj["open_class"] == "agent-scratch"
+    assert meta_obj["launch_token"] == token
+
+    argv = (tmp_path / "podman-argv").read_text()
+    assert f"{payload}:/mnt/output:rw,nosuid,nodev,noexec,rprivate" in argv
+    assert "qdistro_export=1" in argv
+    assert "qdistro_request_silo=work" in argv
+    assert "qdistro_open_class=agent-scratch" in argv

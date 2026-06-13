@@ -32,6 +32,7 @@ import shlex
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -44,6 +45,8 @@ from typing import Any
 # task 3). Pure module: the side-effecting ip/wg/nft/veth ops live on _SystemOps
 # below; this module owns only the policy + the kill-switch-by-construction
 # sequence. Import-cycle-free (it imports nothing from this module).
+import qdistro_disposable_classes as _dispclasses
+import qdistro_disposable_export as _dispexport
 import qdistro_disposables as _disp
 import qdistro_silo_egress as _egress
 from qdistro_silo_egress import (
@@ -90,6 +93,14 @@ SILOS_CONFIG_PATH = Path("/etc/qdistro/silos.yaml")
 # which silo and when" has one obvious place to look. SQLite, append-
 # only, 0600.
 SILOS_AUDIT_PATH = Path("/var/lib/qdistro/audit/session_manager_audit.sqlite")
+# Root-controlled base for disposable export-back staging (07-disposables-plan P2
+# / D7 copy-exception). spawn-tier2 creates a per-launch <base>/<token>/{meta.json,
+# payload/} here; payload/ is the disposable's only RW host surface. The importer
+# promotes payload/ into the requesting silo and removes the staging on success; a
+# boot sweep reaps orphans whose token has no live disposable. Created with fixed
+# ownership/mode at install (install-session-manager.sh). Overridable for tests.
+EXPORT_STAGING_BASE = Path(
+    os.environ.get("QDISTRO_EXPORT_STAGING_BASE", "/var/lib/qdistro/disposable-export"))
 # Disposable TTL-lease sweep cadence (seconds). The periodic in-daemon sweep
 # reaps disposables whose spawn-authored lease has elapsed (07 §Lifecycle). A
 # value <= 0 disables the timer entirely. The sweep itself only acts on
@@ -1286,6 +1297,100 @@ class _SystemOps:
                 # may succeed if we drop into a higher-priv context.
                 log.warning("kill(%d, %d) PermissionError", pid, sig)
 
+    # ---- export-back (07-disposables-plan P2 / D7 copy-exception) ------
+
+    def broker_check_permission(self, action: str) -> str:
+        """Ask the admin broker for its verdict on ``action`` and return the raw
+        decision string ("allow" / "deny" / "unknown"), or "" on ANY failure
+        (fail-closed — the caller treats anything but "allow" as refused). Used to
+        re-check the rules-only qdistro.dispose.export:<class> gate at IMPORT, the
+        actual data crossing (the spawn-time gate guarded the write surface). The
+        session manager runs as root on the system bus, so it may call the broker
+        directly; a bounded timeout keeps an import from hanging on a wedged
+        broker."""
+        try:
+            proc = subprocess.run(
+                ["dbus-send", "--system", "--print-reply=literal",
+                 "--dest=org.qdistro.AdminBroker1",
+                 "/org/qdistro/AdminBroker1",
+                 "org.qdistro.AdminBroker1.CheckPermission",
+                 f"string:{action}", "dict:string:string:"],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("export gate: broker CheckPermission(%s) failed: %s",
+                        action, e)
+            return ""
+        if proc.returncode != 0:
+            log.warning("export gate: broker CheckPermission(%s) rc=%d: %s",
+                        action, proc.returncode, proc.stderr.strip())
+            return ""
+        # Literal reply may render as `allow` or `string "allow"`; normalize.
+        return proc.stdout.replace("string", "").replace('"', "").strip()
+
+    def export_resolve_state_path(self, silo: str) -> str | None:
+        """Resolve a requesting silo's state_path READ-ONLY (no --record) via the
+        installed qdistro-resolve-binding. Returns the state_path for a templated
+        silo, or ``None`` if the silo is UNTEMPLATED (no binding, resolver rc 3) —
+        an untemplated target has no durable home, so the importer refuses it.
+        Raises OSError on a hard resolver failure (so 'lookup failed' is never read
+        as 'untemplated'). The silo name was shape-validated by the caller before
+        it reaches this argv."""
+        resolver = None
+        for cand in ("qdistro-resolve-binding",
+                     "/usr/libexec/qdistro/qdistro-resolve-binding"):
+            if shutil.which(cand) or os.path.exists(cand):
+                resolver = cand
+                break
+        if resolver is None:
+            raise OSError("qdistro-resolve-binding not installed (cannot resolve "
+                          "export target silo)")
+        try:
+            proc = subprocess.run(
+                [resolver, str(silo), "--launch-env"],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise OSError(f"resolve-binding {silo!r} failed: {e}") from e
+        if proc.returncode == 3:
+            return None  # untemplated silo — no binding
+        if proc.returncode != 0:
+            raise OSError(
+                f"resolve-binding {silo!r} rc={proc.returncode}: "
+                f"{proc.stderr.strip()}")
+        for ln in proc.stdout.splitlines():
+            if ln.startswith("STATE_PATH="):
+                return ln.partition("=")[2].strip()
+        raise OSError(f"resolve-binding {silo!r} returned no STATE_PATH")
+
+    def disp_live_tokens(self) -> set[str] | None:
+        """The set of per-spawn tokens of live disposable containers (the
+        ``qdistro_tier2_token`` label on every ``qdistro_disposable=1`` container).
+        Used by the export-staging orphan sweep to tell which staging dirs still
+        back a live disposable.
+
+        Returns ``None`` (NOT an empty set) on ANY failure — a failed "which are
+        live?" query must never be read as "none are live", because the consumer
+        DELETES every staging dir not in this set: an empty-on-error result would
+        fail OPEN and destroy a user's not-yet-imported artifacts. ``None`` tells
+        the sweep to skip this pass entirely (mirrors disp_containers_by_token,
+        which raises rather than returning [] for the same fail-open reason). An
+        empty SET genuinely means "no live disposables" (safe to reap orphans)."""
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--format", '{{.Label "qdistro_tier2_token"}}'],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("export staging sweep: token list failed: %s", e)
+            return None
+        if proc.returncode != 0:
+            log.warning("export staging sweep: podman ps rc=%d: %s",
+                        proc.returncode, proc.stderr.strip())
+            return None
+        return {ln.strip() for ln in proc.stdout.splitlines()
+                if _disp.is_disposable_token(ln.strip())}
+
 
 # ---------------------------------------------------------------------------
 # Durable audit log
@@ -1512,10 +1617,14 @@ class _SiloStore:
                  audit: _AuditLog | None = None,
                  egress_backend: EgressBackend | None = None,
                  tunnel_resolver: callable | None = None,
-                 key_provider: callable | None = None):
+                 key_provider: callable | None = None,
+                 export_staging_base: Path = EXPORT_STAGING_BASE):
         self._ops = ops
         self._config_path = Path(config_path)
         self._on_change = on_change
+        # Root-controlled base for disposable export-back staging (injectable for
+        # tests so a real /var/lib path is never touched).
+        self._export_staging_base = Path(export_staging_base)
         # Per-silo netns egress (task 3). The backend is pure; tunnel_resolver
         # maps a tunnel name -> TunnelConfig (non-secret, from /etc/qdistro/wg),
         # and key_provider maps a tunnel name -> private key (from qdistro-pwd),
@@ -2708,6 +2817,268 @@ class _SiloStore:
         log.info("dispose_by_workflow %r -> reaped %d", workflow_id, reaped)
         return reaped
 
+    # ---- export-back (07-disposables-plan P2 / D7 copy-exception) ------
+
+    def _export_staging_dir(self, token: str) -> Path:
+        return self._export_staging_base / token
+
+    def import_from_disposable(self, token: str,
+                               caller: dict[str, Any] | None = None,
+                               now: float | None = None) -> dict:
+        """Promote a disposable's staged artifacts back into the requesting silo
+        (07-disposables-plan P2, the D7 copy-exception). Returns the lineage
+        receipt dict (the D-Bus layer JSON-encodes it).
+
+        Fail-closed and ordered for safety (codex design review):
+        1. malformed token -> BadArgument (it never reaches a path/filter).
+        2. ABSENT staging dir -> clean zero-file receipt (the class was never
+           export-enabled or the disposable never opted in — nothing to import).
+        3. The disposable container is force-disposed FIRST (dispose_by_token) and
+           confirmed gone, so a LIVE disposable cannot race the read / grow a file
+           mid-copy. A still-live container after that -> BadState.
+        4. meta.json must be a present, regular, parseable file with token-matching
+           launch_token + a request_silo + an open_class — a present staging dir
+           with missing/corrupt meta is BadState (NOT 'nothing to import').
+        5. The open class must still be export-capable in the registry, AND the
+           broker must still allow qdistro.dispose.export:<class> (re-checked here:
+           import is the actual data crossing) — else BadState (fail-closed).
+        6. The request silo must resolve (read-only) to a real templated state_path
+           that exists — an untemplated/unknown target is refused (BadState): there
+           is no durable, silo-owned home to land in.
+        7. The promoter is all-or-nothing + defensive; a policy/IO failure leaves
+           the silo untouched. On success the staging is removed (one-shot).
+        Every outcome is audited under action ``dispose-export``."""
+        now = time.time() if now is None else now
+        if not _disp.is_disposable_token(token):
+            self._audit_record("dispose-export", str(token), decision="deny",
+                               reason="malformed launch token", caller=caller)
+            raise BadArgument(f"malformed disposable token: {token!r}")
+
+        staging = self._export_staging_dir(token)
+        # (2) Absent staging dir: a clean no-op. lstat (no symlink follow): a
+        # symlink at the staging path is suspicious -> treat as corrupt (BadState).
+        try:
+            st = os.lstat(staging)
+        except FileNotFoundError:
+            self._audit_record("dispose-export", str(token), decision="allow",
+                               reason="no export staging (nothing to import)",
+                               caller=caller)
+            log.info("import_from_disposable %r -> no staging (0 files)", token)
+            return {"version": _dispexport.RECEIPT_VERSION, "launch_token": token,
+                    "files": [], "request_silo": None, "open_class": None,
+                    "dest": None}
+        except OSError as e:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason=f"staging lstat failed: {e}", caller=caller)
+            raise BadState(f"export staging for {token!r} unreadable: {e}") from e
+        if not stat.S_ISDIR(st.st_mode):
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason="staging path is not a directory",
+                               caller=caller)
+            raise BadState(f"export staging for {token!r} is not a directory")
+
+        # (3) Finalize the throwaway BEFORE reading its output, so it cannot race
+        # the copy. dispose_by_token is idempotent + fail-closed; then confirm no
+        # live container backs the token.
+        self.dispose_by_token(token, caller=caller)
+        try:
+            still = self._ops.disp_containers_by_token(token)
+        except OSError as e:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason=f"post-dispose lookup failed: {e}",
+                               caller=caller)
+            raise BadState(
+                f"could not confirm disposable {token!r} is gone: {e}") from e
+        if still:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason=f"disposable still live: {still}",
+                               caller=caller)
+            raise BadState(
+                f"disposable {token!r} still live after dispose; refusing import")
+
+        # (4) Read + validate the launcher-written meta. A present staging dir with
+        # missing/corrupt/non-regular meta is BadState (the container can't touch
+        # meta — it is outside the bind — so a bad meta means real corruption).
+        meta = self._read_export_meta(staging, token, caller)
+
+        open_class = meta["open_class"]
+        request_silo = meta["request_silo"]
+
+        # (5) Re-validate export is still allowed: registry export-capability AND
+        # the rules-only broker export gate (import is the real crossing).
+        try:
+            cls = _dispclasses.resolve_from_registry(open_class)
+        except _dispclasses.RegistryError as e:
+            self._audit_record("dispose-export", request_silo, decision="error",
+                               reason=f"registry malformed: {e}", caller=caller)
+            raise BadState(f"disposable-class registry unreadable: {e}") from e
+        except (_dispclasses.UnknownClass, _dispclasses.ClassDisabled) as e:
+            self._audit_record("dispose-export", request_silo, decision="deny",
+                               reason=f"class {open_class!r} not importable: {e}",
+                               caller=caller)
+            raise BadState(
+                f"open class {open_class!r} is not importable: {e}") from e
+        if not cls.export:
+            self._audit_record("dispose-export", request_silo, decision="deny",
+                               reason=f"class {open_class!r} export=false",
+                               caller=caller)
+            raise BadState(f"open class {open_class!r} is not export-capable")
+        try:
+            gate = _dispclasses.export_action(open_class)
+        except _dispclasses.RegistryError as e:
+            raise BadState(f"invalid open class {open_class!r}: {e}") from e
+        verdict = self._ops.broker_check_permission(gate)
+        if verdict != "allow":
+            self._audit_record("dispose-export", request_silo, decision="deny",
+                               reason=f"broker export gate {gate}={verdict or 'unknown'}",
+                               caller=caller)
+            raise BadState(
+                f"broker did not allow {gate} (verdict={verdict or 'unknown'})")
+
+        # (6) Resolve the requesting silo's state_path READ-ONLY; refuse an
+        # untemplated/unknown target (no durable home) — the routing trust anchor.
+        try:
+            state_path = self._ops.export_resolve_state_path(request_silo)
+        except OSError as e:
+            self._audit_record("dispose-export", request_silo, decision="error",
+                               reason=f"state-path resolve failed: {e}",
+                               caller=caller)
+            raise BadState(
+                f"could not resolve export target silo {request_silo!r}: {e}") from e
+        if not state_path:
+            self._audit_record("dispose-export", request_silo, decision="deny",
+                               reason="requesting silo is untemplated (no state)",
+                               caller=caller)
+            raise BadState(
+                f"export target silo {request_silo!r} is untemplated — refusing "
+                f"(no durable home to land artifacts in)")
+        try:
+            dst = os.stat(state_path)
+        except OSError as e:
+            self._audit_record("dispose-export", request_silo, decision="error",
+                               reason=f"state_path stat failed: {e}", caller=caller)
+            raise BadState(
+                f"export target state_path {state_path!r} unusable: {e}") from e
+        if not stat.S_ISDIR(dst.st_mode):
+            self._audit_record("dispose-export", request_silo, decision="error",
+                               reason="state_path is not a directory", caller=caller)
+            raise BadState(f"export target state_path {state_path!r} not a dir")
+
+        # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
+        payload = str(staging / "payload")
+        try:
+            receipt = _dispexport.promote_export(
+                payload, state_path, meta=meta, now_epoch=now,
+                owner_uid=dst.st_uid, owner_gid=dst.st_gid)
+        except _dispexport.ExportError as e:
+            self._audit_record("dispose-export", request_silo, decision="error",
+                               reason=f"promotion failed: {e}", caller=caller)
+            raise BadState(f"export-back promotion failed: {e}") from e
+
+        # One-shot: remove the staging now the import is durable.
+        self._remove_export_staging(token)
+        self._audit_record(
+            "dispose-export", request_silo, decision="allow",
+            reason=f"imported {len(receipt.get('files', []))} file(s) from "
+                   f"{open_class} -> {receipt.get('dest')}",
+            caller=caller)
+        log.info("import_from_disposable %r -> %d file(s) into %s",
+                 token, len(receipt.get("files", [])), receipt.get("dest"))
+        return receipt
+
+    def _read_export_meta(self, staging: Path, token: str,
+                          caller: dict[str, Any] | None) -> dict:
+        """Read + validate <staging>/meta.json (launcher-written, outside the
+        container bind). A missing/non-regular/unparseable meta, or one whose
+        launch_token does not match, is BadState — present staging with bad meta is
+        corruption, never 'nothing to import'."""
+        meta_path = staging / "meta.json"
+        try:
+            mst = os.lstat(meta_path)
+        except FileNotFoundError as e:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason="staging present but meta.json missing",
+                               caller=caller)
+            raise BadState(
+                f"export staging {token!r} has no meta.json (corrupt)") from e
+        except OSError as e:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason=f"meta lstat failed: {e}", caller=caller)
+            raise BadState(f"export meta for {token!r} unreadable: {e}") from e
+        if not stat.S_ISREG(mst.st_mode):
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason="meta.json is not a regular file",
+                               caller=caller)
+            raise BadState(f"export meta for {token!r} is not a regular file")
+        try:
+            with open(meta_path, "rb") as f:
+                meta = json.loads(f.read())
+        except (OSError, ValueError) as e:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason=f"meta.json unparseable: {e}", caller=caller)
+            raise BadState(f"export meta for {token!r} unparseable: {e}") from e
+        if not isinstance(meta, dict):
+            raise BadState(f"export meta for {token!r} is not an object")
+        if meta.get("launch_token") != token:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason="meta launch_token mismatch", caller=caller)
+            raise BadState(f"export meta token mismatch for {token!r}")
+        silo = meta.get("request_silo")
+        oc = meta.get("open_class")
+        if not isinstance(silo, str) or not silo \
+           or not isinstance(oc, str) or not oc:
+            self._audit_record("dispose-export", str(token), decision="error",
+                               reason="meta missing request_silo/open_class",
+                               caller=caller)
+            raise BadState(f"export meta for {token!r} missing required fields")
+        return meta
+
+    def _remove_export_staging(self, token: str) -> None:
+        try:
+            shutil.rmtree(self._export_staging_dir(token))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("could not remove export staging for %r: %s", token, e)
+
+    def reap_export_staging(self) -> list[str]:
+        """Boot/session-stop orphan sweep for export staging: remove every
+        <base>/<token>/ whose token no longer backs a LIVE disposable container
+        (the disposable crashed/closed without an import). Mirrors the disposable
+        container reaper. Best-effort: a failure is logged, never fatal. Only
+        well-formed token dirs are considered; anything else is left untouched.
+        Returns reaped tokens."""
+        base = self._export_staging_base
+        try:
+            entries = os.listdir(base)
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            log.warning("export staging sweep: cannot list %s: %s", base, e)
+            return []
+        # Fail-CLOSED: if we cannot reliably enumerate live disposables, SKIP the
+        # sweep entirely rather than treat "query failed" as "none live" — the
+        # latter would rmtree every staging dir, destroying a user's not-yet-
+        # imported artifacts. None == query failed; an empty set == genuinely none.
+        live = self._ops.disp_live_tokens()
+        if live is None:
+            log.warning("export staging sweep: live-token query failed; "
+                        "skipping sweep (keeping all staging)")
+            return []
+        reaped: list[str] = []
+        for name in entries:
+            if not _disp.is_disposable_token(name):
+                continue  # never touch a non-token dir
+            if name in live:
+                continue  # still backs a live disposable — leave it for import
+            try:
+                shutil.rmtree(base / name)
+                reaped.append(name)
+                log.info("reaped orphan export staging %r", name)
+            except OSError as e:
+                log.warning("reaping export staging %r failed: %s", name, e)
+        return reaped
+
     # Caller stamped on a lease-triggered teardown so an audit reader can tell a
     # session-manager-initiated reap (the wall clock crossed the lease) from an
     # admin's explicit Dispose. The discriminator lives in ``exe`` because that
@@ -2855,6 +3226,9 @@ class _SiloStore:
         # A disposable must not survive a session boundary; sweep any disp-*
         # containers stranded by a crash/reboot before (re)starting silos.
         self.reap_disposable_containers()
+        # Reap export-back staging orphaned by a disposable that crashed/closed
+        # without an import (its payload has no live container to back it).
+        self.reap_export_staging()
         started: list[str] = []
         with self._lock:
             for silo in list(self._silos.values()):
@@ -3394,6 +3768,35 @@ if dbus is not None:
                                                        caller=caller))
                 log.info("DisposeByWorkflow id=%s -> reaped %d", workflow_id, n)
                 return n
+            except SessionError as e:
+                raise _to_dbus_exception(e) from e
+
+        @dbus.service.method(BUS_NAME, in_signature="s", out_signature="s",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def ImportFromDisposable(self, token, sender=None, conn=None):
+            """Promote a disposable's staged artifacts back into the requesting
+            silo (07-disposables-plan P2, the D7 copy-exception) and return the
+            lineage receipt as JSON. Admin-only and fail-closed: the store
+            rejects a malformed token, force-disposes the throwaway BEFORE reading
+            its output (so a live disposable cannot race the copy), refuses unless
+            the open class is still export-capable AND the broker still allows
+            qdistro.dispose.export:<class>, and refuses an untemplated/unknown
+            target silo. An absent staging dir is a clean zero-file receipt. The
+            promoter is a defensive minimal parser (regular-files-only,
+            all-or-nothing, caps, O_NOFOLLOW); staging is removed on success."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("dispose-export", token, caller, e)
+                raise _to_dbus_exception(e) from e
+            try:
+                receipt = self.store.import_from_disposable(
+                    str(token), caller=caller)
+                log.info("ImportFromDisposable token=%s -> %d file(s)",
+                         token, len(receipt.get("files", [])))
+                return json.dumps(receipt)
             except SessionError as e:
                 raise _to_dbus_exception(e) from e
 

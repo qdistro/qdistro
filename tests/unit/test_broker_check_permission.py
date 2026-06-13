@@ -188,6 +188,9 @@ class TestCheckPermissionResolution:
         # same rules-only / fail-closed set — a cache row must NOT mint an open.
         "qdistro.dispose.open:agent-scratch",
         "qdistro.dispose.open:text/plain",  # mime-class with a '/' in the suffix
+        # export-back (07-plan P2 / D7 copy-exception): promoting bytes OUT of a
+        # throwaway is also rules-only — a cache row must NOT mint an export.
+        "qdistro.dispose.export:agent-scratch",
     ])
     def test_tier_spawn_ignores_cache_without_rule(self, broker, action):
         broker.cache.store(NON_ADMIN_UID, action, PEER_EXE,
@@ -201,6 +204,7 @@ class TestCheckPermissionResolution:
         "qdistro.dispose.spawn:pdf",
         "qdistro.dispose.open:agent-scratch",
         "qdistro.dispose.open:text/plain",
+        "qdistro.dispose.export:agent-scratch",
     ])
     def test_tier_spawn_rule_allow_still_allows(self, broker, rules_dir, action):
         _write_rule(rules_dir, decision="allow",

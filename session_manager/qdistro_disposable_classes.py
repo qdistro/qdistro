@@ -60,6 +60,13 @@ MAX_AVAILABLE_TIER = 2
 # refused, and a cache row / hook verdict can never mint an open.
 OPEN_ACTION_PREFIX = "qdistro.dispose.open:"
 
+# The action namespace the broker gates export-BACK on (07-disposables-plan P2,
+# the D7 copy-exception). Same rules-only / fail-closed treatment as the open
+# gate: no admin rule means refused, and a cache row / hook verdict can never
+# mint an export. Gated at BOTH spawn (the persistent host-write surface) and
+# import (the actual data crossing).
+EXPORT_ACTION_PREFIX = "qdistro.dispose.export:"
+
 # Installed registry path. spawn-tier2's trusted open-gate and the SDK helper
 # both read this unless overridden (env QDISTRO_DISPOSABLE_CLASSES).
 REGISTRY_PATH_DEFAULT = "/etc/qdistro/disposable-classes.toml"
@@ -73,7 +80,7 @@ _VALID_NETWORK = frozenset(("none", "egress"))
 
 # Keys a class table may carry. An unknown key is a typo (``min_teir``) that
 # could silently default-enable a hostile class — reject it (fail-closed).
-_ALLOWED_KEYS = frozenset(("workload", "tier", "min_tier", "network"))
+_ALLOWED_KEYS = frozenset(("workload", "tier", "min_tier", "network", "export"))
 # A min_tier we substitute when a class omits it: higher than any real tier, so
 # the class is DISABLED. We never default a missing min_tier to an enabled
 # value. (Belt and suspenders: the loader rejects a missing min_tier outright;
@@ -118,6 +125,14 @@ class DisposableClass:
     tier: int
     min_tier: int
     network: str
+    # Whether a disposable opened for this class may return artifacts to the
+    # requesting silo via the brokered export-back path (07-disposables-plan P2,
+    # the D7 copy-exception). Default FALSE: a class produces no output surface
+    # unless it explicitly opts in. Even an export=true class still needs an
+    # admin broker rule (qdistro.dispose.export:<class>) at BOTH spawn and import
+    # — this flag is the package/admin policy axis; the broker rule is the
+    # per-deployment authorization, exactly like open=registry + dispose.open=rule.
+    export: bool = False
 
     def is_enabled(self, max_tier: int = MAX_AVAILABLE_TIER) -> bool:
         return self.min_tier <= max_tier
@@ -200,9 +215,18 @@ def _parse_class(name: str, table: object) -> DisposableClass:
             f"class {name!r}: network {network!r} not one of "
             f"{sorted(_VALID_NETWORK)}")
 
+    # export: optional, defaults to the secure False (no output surface). Must be
+    # a real TOML boolean — a quoted "true" or an int is rejected rather than
+    # coerced, so a typo can never silently grant an export surface (fail-closed).
+    export = table.get("export", False)
+    if not isinstance(export, bool):
+        raise RegistryError(
+            f"class {name!r}: export must be a boolean (true/false), "
+            f"got {export!r}")
+
     return DisposableClass(
         name=name, workload=workload, tier=tier, min_tier=min_tier,
-        network=network)
+        network=network, export=export)
 
 
 def load_classes(path: str | Path) -> dict[str, DisposableClass]:
@@ -269,6 +293,16 @@ def open_action(class_name: str) -> str:
     return f"{OPEN_ACTION_PREFIX}{class_name}"
 
 
+def export_action(class_name: str) -> str:
+    """The broker export-gate action for a class: ``qdistro.dispose.export:<class>``.
+
+    Same validation as :func:`open_action` so a malformed name can never be
+    smuggled into the action string."""
+    if not _valid_class_name(class_name):
+        raise RegistryError(f"invalid class name {class_name!r}")
+    return f"{EXPORT_ACTION_PREFIX}{class_name}"
+
+
 def resolve_class(name: str, classes: dict[str, DisposableClass], *,
                   max_tier: int = MAX_AVAILABLE_TIER) -> DisposableClass:
     """Return the :class:`DisposableClass` for ``name``, enforcing the
@@ -306,8 +340,9 @@ def _main(argv: list[str]) -> int:
     """Tiny CLI for the trusted bash launch path (spawn-tier2.sh).
 
     ``--resolve <class>`` prints ``WORKLOAD=<w>``/``NETWORK=<n>``/``TIER=<t>``/
-    ``OPEN_ACTION=<a>`` KEY=VALUE lines and exits 0 IFF the class is in the
-    registry AND enabled at the current max tier. Exit codes:
+    ``OPEN_ACTION=<a>``/``EXPORT=<true|false>``/``EXPORT_ACTION=<a>`` KEY=VALUE
+    lines and exits 0 IFF the class is in the registry AND enabled at the current
+    max tier. Exit codes:
       0  enabled       -> KEY=VALUE plan on stdout
       3  unknown class
       4  class disabled (hostile-class gate / min_tier)
@@ -349,6 +384,8 @@ def _main(argv: list[str]) -> int:
     print(f"NETWORK={cls.network}")
     print(f"TIER={cls.tier}")
     print(f"OPEN_ACTION={open_action(cls.name)}")
+    print(f"EXPORT={'true' if cls.export else 'false'}")
+    print(f"EXPORT_ACTION={export_action(cls.name)}")
     return 0
 
 

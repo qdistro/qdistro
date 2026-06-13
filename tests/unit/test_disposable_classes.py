@@ -336,3 +336,73 @@ def test_cli_resolve_malformed_exit5(tmp_path):
          "--resolve", "pdf", "--registry", str(bad)],
         capture_output=True, text=True)
     assert out.returncode == 5
+
+
+# --- export-back field (07-disposables-plan P2 / D7 copy-exception) ---------
+
+def test_export_defaults_false(tmp_path):
+    reg = _write(tmp_path, """
+[classes.noexport]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+""")
+    cls = C.load_classes(reg)["noexport"]
+    assert cls.export is False
+
+
+def test_export_true_parsed(tmp_path):
+    reg = _write(tmp_path, """
+[classes.withexport]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+""")
+    assert C.load_classes(reg)["withexport"].export is True
+
+
+def test_export_non_bool_rejected(tmp_path):
+    """A quoted/int export is rejected (fail-closed) — a typo can never silently
+    grant an export surface."""
+    reg = _write(tmp_path, """
+[classes.bad]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = "true"
+""")
+    with pytest.raises(C.RegistryError):
+        C.load_classes(reg)
+
+
+def test_shipped_agent_scratch_is_export_capable():
+    classes = C.load_classes(SHIPPED_REGISTRY)
+    assert classes["agent-scratch"].export is True
+    # text/plain + url-preview are NOT export-capable in the shipped registry.
+    assert classes["text/plain"].export is False
+    assert classes["url-preview-known-origin"].export is False
+
+
+def test_export_action_shape():
+    assert C.export_action("agent-scratch") == "qdistro.dispose.export:agent-scratch"
+    with pytest.raises(C.RegistryError):
+        C.export_action("../evil")
+
+
+def test_resolver_cli_emits_export_lines(tmp_path):
+    import subprocess
+    import sys
+    reg = _write(tmp_path, """
+[classes."agent-scratch"]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+""")
+    out = subprocess.run(
+        [sys.executable, str(C.__file__), "--resolve", "agent-scratch",
+         "--registry", str(reg)],
+        capture_output=True, text=True, check=True).stdout
+    assert "EXPORT=true" in out
+    assert "EXPORT_ACTION=qdistro.dispose.export:agent-scratch" in out

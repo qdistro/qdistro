@@ -57,6 +57,27 @@ if [ ! -f /etc/qdistro/disposable-classes.toml ]; then
     install -o root -g root -m 0644 "$SRC/disposable-classes.toml" \
         /etc/qdistro/disposable-classes.toml
 fi
+# Export-back promoter (P2 / D7 copy-exception): the defensive host-side importer
+# the daemon imports (qdistro_session_manager.py: `import qdistro_disposable_export`).
+# Without it the daemon ModuleNotFoundErrors and crash-loops on boot.
+install -o root -g root -m 0755 "$SRC/qdistro_disposable_export.py" \
+    "$DEST/qdistro_disposable_export.py"
+# Root-controlled base for export-back staging. The PARENT (/var/lib/qdistro) is
+# root:root 0755, so admin cannot replace this entry with a symlink (no write on
+# the parent); the dir itself is admin-owned 0700 so the admin tier-2 launcher can
+# create per-token <token>/{meta.json,payload/} subtrees the keep-id disposable
+# writes. The importer (root) verifies it is a real dir before use; the boot sweep
+# reaps orphans. Resolve the admin identity (default 'admin') for ownership.
+_qd_admin_user="${QDISTRO_ADMIN_USER:-admin}"
+if id "$_qd_admin_user" >/dev/null 2>&1; then
+    install -d -o "$_qd_admin_user" -g "$_qd_admin_user" -m 0700 \
+        /var/lib/qdistro/disposable-export
+else
+    echo "install-session-manager: WARN: admin user '$_qd_admin_user' absent;" \
+         "creating /var/lib/qdistro/disposable-export root-owned (export-back" \
+         "will fail until it is chowned to the admin uid)" >&2
+    install -d -o root -g root -m 0700 /var/lib/qdistro/disposable-export
+fi
 # Per-silo netns egress (todo/fable-networking task 3): the pure egress
 # backend imported by the daemon, plus the admin tunnel-provisioning helper.
 install -o root -g root -m 0755 "$SRC/qdistro_silo_egress.py" \

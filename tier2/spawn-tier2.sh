@@ -387,6 +387,26 @@ RO_INPUT_REAL=""
 RO_INPUT_BASENAME=""
 RO_INPUT_KIND=""
 
+# --- export-back (07-disposables-plan P2 / D7 copy-exception) -------------
+# When the resolved open class declares EXPORT=true, the disposable gets a
+# per-launch host staging dir bound READ-WRITE at /mnt/output so the user/app
+# can drop artifacts to be promoted back into the REQUESTING silo. This is a new
+# persistent host-write surface, so it is gated TWICE by the broker
+# (qdistro.dispose.export:<class>): once here at spawn (the surface) and again at
+# import (the actual data crossing, in the session manager). The launcher writes
+# meta.json OUTSIDE the bind (the container can never see/forge the request silo
+# or class). The staging base is created root-controlled at install.
+REQUEST_SILO="${TIER2_REQUEST_SILO:-}"
+EXPORT_ENABLED=0
+EXPORT_GATE_ACTION=""
+EXPORT_STAGING_BASE="${TIER2_EXPORT_STAGING_BASE:-/var/lib/qdistro/disposable-export}"
+EXPORT_STAGING_DIR=""
+EXPORT_PAYLOAD_DIR=""
+# Silo name shape mirrors templates.require_safe_name
+# (^[A-Za-z0-9][A-Za-z0-9_.-]* with no '..'); it becomes a binding-file path
+# component at import, so constrain it before it is ever trusted as routing.
+_REQUEST_SILO_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$'
+
 # An input with no class is refused: the class is the policy axis that
 # authorizes routing untrusted bytes into a throwaway. (Reverse is allowed: an
 # open class may legitimately have no input — e.g. an agent scratch pod.)
@@ -445,11 +465,14 @@ if [ -n "$OPEN_CLASS" ]; then
     esac
     # Parse the KEY=VALUE plan the resolver printed.
     CLASS_WORKLOAD=""; CLASS_NETWORK=""; OPEN_ACTION=""
+    CLASS_EXPORT=""; EXPORT_ACTION=""
     while IFS='=' read -r _k _v; do
         case "$_k" in
-            WORKLOAD)    CLASS_WORKLOAD="$_v" ;;
-            NETWORK)     CLASS_NETWORK="$_v" ;;
-            OPEN_ACTION) OPEN_ACTION="$_v" ;;
+            WORKLOAD)      CLASS_WORKLOAD="$_v" ;;
+            NETWORK)       CLASS_NETWORK="$_v" ;;
+            OPEN_ACTION)   OPEN_ACTION="$_v" ;;
+            EXPORT)        CLASS_EXPORT="$_v" ;;
+            EXPORT_ACTION) EXPORT_ACTION="$_v" ;;
         esac
     done <<< "$OPEN_PLAN"
     # The class pins the workload: the caller-supplied WORKLOAD must equal the
@@ -470,6 +493,33 @@ if [ -n "$OPEN_CLASS" ]; then
         *) echo "spawn-tier2: open class '$OPEN_CLASS' has invalid network '$CLASS_NETWORK'" >&2; exit 2 ;;
     esac
     [ -n "$OPEN_ACTION" ] || { echo "spawn-tier2: resolver returned no OPEN_ACTION for '$OPEN_CLASS'" >&2; exit 2; }
+
+    # --- export-back enablement (07-plan P2 / D7 copy-exception) ---------
+    # Export-back is OPT-IN PER LAUNCH: a caller asks for it by supplying
+    # TIER2_REQUEST_SILO (the silo to promote results into). An export-capable
+    # class with NO request silo is just a normal disposable (no /mnt/output) — so
+    # an ordinary agent-scratch open keeps working unchanged. When the caller DOES
+    # opt in, the class must be export-capable (registry export=true) AND pass the
+    # spawn-time broker export gate; otherwise refuse rather than silently drop the
+    # caller's export intent. The request silo is shape-validated here; its
+    # existence as a templated silo + its state_path are re-resolved (read-only) at
+    # IMPORT — that is the routing trust anchor (a spawn-time string is not
+    # authority on its own).
+    if [ -n "$REQUEST_SILO" ]; then
+        if [ "$CLASS_EXPORT" != "true" ]; then
+            echo "spawn-tier2: TIER2_REQUEST_SILO set but open class '$OPEN_CLASS'" \
+                 "is not export-capable (export=false) — refusing" >&2
+            exit 2
+        fi
+        [ -n "$EXPORT_ACTION" ] || { echo "spawn-tier2: resolver returned no EXPORT_ACTION for '$OPEN_CLASS'" >&2; exit 2; }
+        if ! [[ "$REQUEST_SILO" =~ $_REQUEST_SILO_RE ]] || [[ "$REQUEST_SILO" == *..* ]]; then
+            echo "spawn-tier2: invalid TIER2_REQUEST_SILO '$REQUEST_SILO'" \
+                 "(want ${_REQUEST_SILO_RE} with no '..')" >&2
+            exit 2
+        fi
+        EXPORT_ENABLED=1
+        EXPORT_GATE_ACTION="$EXPORT_ACTION"
+    fi
 
     # --- validate + canonicalize the RO input (D7) -----------------------
     if [ -n "$RO_INPUT" ]; then
@@ -533,6 +583,10 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'LEASE_WORKFLOW=%s\n' "${DISP_LEASE_WORKFLOW:-none}"
     printf 'OPEN_CLASS=%s\n' "${OPEN_CLASS:-none}"
     printf 'OPEN_ACTION=%s\n' "${OPEN_ACTION:-none}"
+    printf 'EXPORT=%s\n' "$([ "$EXPORT_ENABLED" = 1 ] && printf 'true' || printf 'false')"
+    printf 'EXPORT_ACTION=%s\n' "${EXPORT_GATE_ACTION:-none}"
+    printf 'REQUEST_SILO=%s\n' "${REQUEST_SILO:-none}"
+    printf 'OUTPUT_TARGET=%s\n' "$([ "$EXPORT_ENABLED" = 1 ] && printf '/mnt/output' || printf 'none')"
     printf 'NETWORK=%s\n' "${TIER2_NETWORK:-none}"
     printf 'RO_INPUT_REAL=%s\n' "${RO_INPUT_REAL:-none}"
     printf 'RO_INPUT_KIND=%s\n' "${RO_INPUT_KIND:-none}"
@@ -751,6 +805,15 @@ if [ -n "$OPEN_ACTION" ]; then
     broker_gate "$OPEN_ACTION" "open-class ${OPEN_CLASS}"
 fi
 
+# Gate 3: the EXPORT gate (only when the open class is export-capable). Binding a
+# writable /mnt/output surface into a disposable that may return bytes to a real
+# silo is a class-level decision an admin must explicitly allow — registry
+# export=true alone does not grant it (07-disposables-plan P2 / D7 copy-exception).
+# Re-checked at IMPORT time (the actual data crossing) by the session manager.
+if [ "$EXPORT_ENABLED" = 1 ]; then
+    broker_gate "$EXPORT_GATE_ACTION" "export-class ${OPEN_CLASS}"
+fi
+
 # --- per-container runtime dir + cleanup trap ----------------------------
 # This is the load-bearing isolation step: the container only sees an
 # initially-empty /run/user/<uid>, so dbus, pulse, gpg-agent, ssh-agent
@@ -805,6 +868,58 @@ cleanup_percont() {
 }
 trap cleanup_percont EXIT
 
+# --- export-back staging tree (07-plan P2 / D7 copy-exception) -----------
+# Created here (LAUNCH_TOKEN now exists) and DELIBERATELY NOT in cleanup_percont:
+# the payload must survive the disposable's teardown so the requesting silo can
+# import it afterwards. The session-manager importer removes it on a successful
+# one-shot import; a boot/session-stop sweep reaps an orphan whose token has no
+# live container. Layout per token:
+#   <base>/<token>/meta.json   launcher-written, OUTSIDE the bind (the container
+#                              can never see/forge the request silo or class)
+#   <base>/<token>/payload/    the ONLY path bound RW into the container
+# The base is root-controlled and created at install (a PACKAGING GAP if absent —
+# fail closed rather than auto-create, which could race a symlink in).
+if [ "$EXPORT_ENABLED" = 1 ]; then
+    if [ ! -d "$EXPORT_STAGING_BASE" ] || [ -L "$EXPORT_STAGING_BASE" ]; then
+        fail "export staging base $EXPORT_STAGING_BASE missing or a symlink — refusing export (PACKAGING GAP: install-session-manager.sh creates it root/admin-owned)"
+    fi
+    EXPORT_STAGING_DIR="$EXPORT_STAGING_BASE/$LAUNCH_TOKEN"
+    EXPORT_PAYLOAD_DIR="$EXPORT_STAGING_DIR/payload"
+    # Owned by admin so the --userns=keep-id container (inner admin == host admin)
+    # can write payload/. In root-launcher mode the script is root; create as
+    # admin via runuser. meta.json is written by the same identity, one level
+    # ABOVE payload/, so it is never inside the container's RW bind.
+    if [ "$ROOT_LAUNCHER" = 1 ]; then stg_run() { runuser -u "$ADMIN_USER" -- "$@"; }
+    else stg_run() { "$@"; }; fi
+    stg_run mkdir -p -m 0700 "$EXPORT_PAYLOAD_DIR" \
+        || fail "could not create export staging dir $EXPORT_PAYLOAD_DIR"
+    # meta.json: written by python (json.dumps) so an odd input basename cannot
+    # break JSON. python opens+writes the file itself (the redirect would be done
+    # by the root parent shell and mis-own it), so it lands owned by the staging
+    # identity. input_basename is null when there was no RO input.
+    stg_run python3 - "$EXPORT_STAGING_DIR/meta.json" "$LAUNCH_TOKEN" \
+        "$REQUEST_SILO" "$OPEN_CLASS" "$WORKLOAD" "$CONTAINER" \
+        "$(date +%s)" "${RO_INPUT_BASENAME:-}" <<'PYMETA'
+import json, os, sys
+path, token, silo, oc, workload, container, created, inp = sys.argv[1:9]
+meta = {
+    "version": 1,
+    "launch_token": token,
+    "request_silo": silo,
+    "open_class": oc,
+    "workload": workload,
+    "container": container,
+    "created": int(created),
+    "input_basename": inp if inp else None,
+}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(meta, f, sort_keys=True)
+PYMETA
+    [ -f "$EXPORT_STAGING_DIR/meta.json" ] \
+        || fail "could not write export meta.json for token $LAUNCH_TOKEN"
+fi
+
 # Make WAYLAND_DISPLAY visible to podman's `-e WAYLAND_DISPLAY` (no
 # value) forwarding. If we go through qdistro-secctx-exec next, the
 # wrapper rewrites WAYLAND_DISPLAY in our child env to wayland-secctx-NN
@@ -848,6 +963,14 @@ export TIER2_SECCOMP_PROFILE_RESOLVED="$TIER2_SECCOMP_PROFILE"
 export TIER2_RO_INPUT_REAL_RESOLVED="${RO_INPUT_REAL:-}"
 export TIER2_RO_INPUT_KIND_RESOLVED="${RO_INPUT_KIND:-}"
 export TIER2_RO_INPUT_BASENAME_RESOLVED="${RO_INPUT_BASENAME:-}"
+# Export-back staging (07-plan P2 / D7 copy-exception): the host payload dir bound
+# READ-WRITE under /mnt/output, plus the request silo + open class stamped as
+# immutable container labels (forensics; meta.json remains the authoritative
+# source the importer reads). Empty unless an export-capable open class opted in.
+export TIER2_EXPORT_ENABLED_RESOLVED="$EXPORT_ENABLED"
+export TIER2_EXPORT_PAYLOAD_DIR_RESOLVED="${EXPORT_PAYLOAD_DIR:-}"
+export TIER2_REQUEST_SILO_RESOLVED="${REQUEST_SILO:-}"
+export TIER2_OPEN_CLASS_RESOLVED="${OPEN_CLASS:-}"
 APP_ARGV_JOINED="$(printf '%q ' "${APP_ARGV[@]}")"
 export TIER2_APP_ARGV_JOINED="$APP_ARGV_JOINED"
 
@@ -887,6 +1010,10 @@ SECCTX_ENV_PASS=(
     "TIER2_KEEP_CAPS_RESOLVED=$TIER2_KEEP_CAPS_RESOLVED"
     "TIER2_ALLOW_PRIVESC_RESOLVED=$TIER2_ALLOW_PRIVESC_RESOLVED"
     "TIER2_SECCOMP_PROFILE_RESOLVED=$TIER2_SECCOMP_PROFILE_RESOLVED"
+    "TIER2_EXPORT_ENABLED_RESOLVED=$TIER2_EXPORT_ENABLED_RESOLVED"
+    "TIER2_EXPORT_PAYLOAD_DIR_RESOLVED=$TIER2_EXPORT_PAYLOAD_DIR_RESOLVED"
+    "TIER2_REQUEST_SILO_RESOLVED=$TIER2_REQUEST_SILO_RESOLVED"
+    "TIER2_OPEN_CLASS_RESOLVED=$TIER2_OPEN_CLASS_RESOLVED"
     "TIER2_APP_ARGV_JOINED=$TIER2_APP_ARGV_JOINED"
     "TIER2_DEBUG=${TIER2_DEBUG:-0}"
 )
@@ -1008,6 +1135,18 @@ elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
     if [ -n "${TIER2_LEASE_WORKFLOW_RESOLVED:-}" ]; then
         PODMAN_HARDENING+=( --label "qdistro_lease_workflow=${TIER2_LEASE_WORKFLOW_RESOLVED}" )
     fi
+    # Export-back labels (07-plan P2 / D7 copy-exception): forensics + a
+    # defence-in-depth join. The IMPORTER does NOT trust these for routing — it
+    # reads the launcher-written meta.json (outside the container) — but they let
+    # a forensic reader correlate a container with its request silo / open class,
+    # and the boot sweep uses qdistro_export to find staging to reap.
+    if [ "${TIER2_EXPORT_ENABLED_RESOLVED:-0}" = "1" ]; then
+        PODMAN_HARDENING+=(
+            --label "qdistro_export=1"
+            --label "qdistro_request_silo=${TIER2_REQUEST_SILO_RESOLVED}"
+            --label "qdistro_open_class=${TIER2_OPEN_CLASS_RESOLVED}"
+        )
+    fi
 fi
 PODMAN_HARDENING+=(
     --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U
@@ -1028,6 +1167,23 @@ if [ -n "${TIER2_RO_INPUT_REAL_RESOLVED:-}" ]; then
     _ro_target="/mnt/input/${TIER2_RO_INPUT_BASENAME_RESOLVED}"
     PODMAN_HARDENING+=(
         -v "${TIER2_RO_INPUT_REAL_RESOLVED}:${_ro_target}:ro,nosuid,nodev,noexec,rprivate"
+    )
+fi
+# Export-back output (07-plan P2 / D7 copy-exception): the per-launch host
+# staging payload dir bound READ-WRITE under /mnt/output so the disposable can
+# drop artifacts to be promoted back to the requesting silo. Only present when an
+# export-capable open class opted in (triple-gated: registry export=true + the
+# spawn-time AND import-time qdistro.dispose.export:<class> broker rules). The
+# bind is the ONLY writable host path into the container besides the tmpfs home:
+#   nosuid/nodev/noexec — the disposable cannot stage a setuid/device/executable
+#                         payload that means anything on the host side.
+#   rprivate            — mount events do not propagate either way.
+# The importer treats everything written here as HOSTILE (regular-files-only,
+# all-or-nothing, caps, O_NOFOLLOW) and only reads it after the container is gone.
+if [ "${TIER2_EXPORT_ENABLED_RESOLVED:-0}" = "1" ] \
+   && [ -n "${TIER2_EXPORT_PAYLOAD_DIR_RESOLVED:-}" ]; then
+    PODMAN_HARDENING+=(
+        -v "${TIER2_EXPORT_PAYLOAD_DIR_RESOLVED}:/mnt/output:rw,nosuid,nodev,noexec,rprivate"
     )
 fi
 # --memory and --cpus only when explicitly requested — both require

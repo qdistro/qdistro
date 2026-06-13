@@ -22,11 +22,21 @@
 
 # Agent scratch pod: a throwaway shell/terminal a workflow or LLM agent gets to
 # work in. weston-terminal is the shipped tier-2 image. No network.
+#
+# export = true: artifacts the agent drops in /mnt/output may be promoted back to
+# the requesting silo via the brokered export-back path (07-disposables-plan P2,
+# the D7 copy-exception) — a scratch pod's whole purpose is to produce a result a
+# workflow wants returned. This flag is ONLY the package/admin policy axis: an
+# actual export still needs an admin broker rule
+# (qdistro.dispose.export:agent-scratch) at BOTH spawn and import (rules-only /
+# fail-closed), and the import promoter is a defensive minimal parser
+# (regular-files-only, all-or-nothing, caps, no symlink/device/subdir).
 [classes."agent-scratch"]
 workload = "weston-terminal"
 tier = 2
 min_tier = 2
 network = "none"
+export = true
 
 # Plain-text viewer: open a text/plain file read-only in a disposable. No
 # network, no scripting surface. (Workload image is forward work — the registry

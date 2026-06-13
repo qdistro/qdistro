@@ -1619,11 +1619,15 @@ class Broker(dbus.service.Object):
         # routing an untrusted input into a throwaway is a class-level
         # security decision that only an explicit admin rule may authorize —
         # a cache row or hook verdict must never mint an open
-        # (07-disposables-plan P2).
+        # (07-disposables-plan P2). Export-back (qdistro.dispose.export:<class>)
+        # joins the set too: promoting bytes OUT of a throwaway into a real silo
+        # (the D7 copy-exception) is a class-level decision only an explicit
+        # admin rule may authorize — never a cached/hook verdict.
         if action_s.startswith(("qdistro.tier1.spawn:",
                                 "qdistro.tier2.spawn:",
                                 "qdistro.dispose.spawn:",
-                                "qdistro.dispose.open:")):
+                                "qdistro.dispose.open:",
+                                "qdistro.dispose.export:")):
             return "unknown"
         # An authenticated sandboxed (tier-2) caller must not be
         # auto-decided by an argv-blind forever/forever_exe grant minted
