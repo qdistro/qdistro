@@ -45,8 +45,8 @@ ExecStart=/usr/libexec/qdistro/qdistro-tier2-silo-launch %i
 # Because this unit now runs as root, ExecStop must DROP to admin to reach the
 # admin-rootless container — a root `podman stop` would query root's empty
 # store and never find qdistro-silo-<name>, orphaning it. The drop + the
-# QDISTRO_ADMIN_USER/uid resolution + fail-closed (no uid 0) live in the helper
-# qdistro-tier2-silo-stop (the admin uid is not a literal we can put in %i).
+# fixed admin uid resolution + fail-closed (no uid 0) live in the helper
+# qdistro-tier2-silo-stop.
 # Best-effort (`-`): an already-gone container must not fail the stop. The
 # container is named qdistro-silo-<silo> and the instance %i IS the silo name.
 ExecStop=-/usr/libexec/qdistro/qdistro-tier2-silo-stop %i

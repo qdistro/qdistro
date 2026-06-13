@@ -285,7 +285,7 @@ cmd_import_flow() {
     _make_staging "$bad_silo_tok" "$REQUEST_SILO" "$OPEN_CLASS"
 
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+    py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 - "$good_tok" "$bad_silo_tok" <<PY 2>&1
 import sys
@@ -335,7 +335,7 @@ PY
         r=$(broker_check "qdistro.dispose.export:${OPEN_CLASS}"); [ "$r" = "unknown" ] && break; sleep 0.25
     done
     [ "$r" = "unknown" ] || fail import-flow "export gate not unknown after rule removal (got '$r')"
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+    py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$bad_silo_tok" <<PY 2>&1
 import os, sys
 sys.path.insert(0, "$LIBEXEC")
@@ -459,7 +459,7 @@ cmd_edit_import() {
     local etok; etok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     _make_edit_staging "$etok" "$REQUEST_SILO" "$OPEN_CLASS" "/tmp/whatever.txt"
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+    py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$etok" <<PY 2>&1
 import os, sys
 sys.path.insert(0, "$LIBEXEC")
@@ -614,7 +614,7 @@ cmd_import_land_templated() {
 
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     _make_staging "$tok" "$silo" "$OPEN_CLASS" "result.txt=hello-from-disposable"
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+    py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$state" "$ADMIN_UID" <<PY 2>&1
 import os, re, sys
 sys.path.insert(0, "$LIBEXEC")
@@ -663,7 +663,7 @@ cmd_edit_land_templated() {
 
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     _make_edit_staging "$tok" "$silo" "$OPEN_CLASS" "$src_real" "out=EDITED-BY-DISPOSABLE"
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+    py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$src" "$ADMIN_UID" <<PY 2>&1
 import os, sys
 sys.path.insert(0, "$LIBEXEC")

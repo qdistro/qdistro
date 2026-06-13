@@ -2,7 +2,7 @@
 # §6.6 S5 full — locker auth smoke: PAM password path + ctrl-socket
 # type/submit + fprintd graceful-degradation + idle_lock_hint wiring.
 #
-# Expects admin's password to be ${QDISTRO_VM_PASSWORD} on baseweed
+# Expects admin's password to be Pa_ssw0rd45 on baseweed
 # clones. PAM service stack is "login" by default; override via
 # QDSHELL_PAM_SERVICE.
 #
@@ -23,7 +23,7 @@ SHLOG=/home/admin/s14-qdshell.log
 INI=/home/admin/.config/weston.ini
 CTRL=/run/user/1000/qdshell-s14.sock
 PAM_SERVICE=${QDSHELL_PAM_SERVICE:-login}
-JAN_PASSWORD=${JAN_PASSWORD:-${QDISTRO_VM_PASSWORD:?}}
+JAN_PASSWORD=${JAN_PASSWORD:-'Pa_ssw0rd45'}
 BAD_PASSWORD=${BAD_PASSWORD:-NOT_THE_PASSWORD}
 
 pgrep -x pipewire >/dev/null || { echo "ERROR: pipewire not running"; exit 1; }

@@ -260,9 +260,6 @@ def test_promote_all_or_nothing_one_bad_entry(tmp_path):
 # Store.import_from_disposable — fail-closed paths with a minimal fake ops
 # ---------------------------------------------------------------------------
 
-# The daemon resolves the admin uid at import; point it at an account that
-# exists on the dev host (mirrors test_session_manager.py).
-os.environ.setdefault("QDISTRO_ADMIN_USER", "root")
 import qdistro_session_manager as sm  # noqa: E402
 from qdistro_session_manager import BadArgument, BadState  # noqa: E402
 

@@ -19,16 +19,12 @@
 #   <parent>/qnotebook/
 #
 # Usage:
-#   QDISTRO_VM_PASSWORD=<pw> QDWIN_VM_TEMPLATE=<template-domain> \
-#     scripts/vm/spin-test-vm.sh [<prefix>]
+#   QDWIN_VM_TEMPLATE=<template-domain> scripts/vm/spin-test-vm.sh [<prefix>]
 #
 # Default prefix is "qd-test"; VM name (with timestamp suffix) is
 # printed on the last stdout line.
 
 set -euo pipefail
-
-: "${QDISTRO_VM_PASSWORD:=admin}"
-export QDISTRO_VM_PASSWORD
 
 # QDWIN_VM_TEMPLATE: optional. clone-baseweed.sh dumps this domain's
 # XML and substitutes name + disk path + MAC for each new test VM.
@@ -156,7 +152,7 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 # Bootstrap fetches the three tarballs and runs the build. Pass the
 # per-run staging URL so the in-VM bootstrap fetches from THIS run's
 # server (its default is the old fixed http://10.0.2.2:8765).
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_VM_PASSWORD='$QDISTRO_VM_PASSWORD' bash /root/fresh-vm-bootstrap.sh" >&2
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' bash /root/fresh-vm-bootstrap.sh" >&2
 
 # Stage 6: verify the session came up.
 # wayland-1 is the core "compositor came up" signal — fatal on miss.

@@ -189,8 +189,7 @@ Notes:
               refused unless QCI_FORCE_PROTECTED_VM=1.
 
 Environment:
-  QDISTRO_VM_PASSWORD       Password baked into prebaked qdistro VMs
-                            (default: admin).
+  QDWIN_VM_TEMPLATE         Override template domain for disposable test VMs.
   QCI_RUNS_DIR             Artifact directory, default qdistro/ci/runs.
   QCI_AGENT_CMD            Command used for markdown GUI scenarios.
                             It receives the generated prompt file as argv[1],
@@ -539,16 +538,13 @@ acquire_vm() {
         printf '%s\n' "$explicit"
         return 0
     fi
-    : "${QDISTRO_VM_PASSWORD:=admin}"
-    export QDISTRO_VM_PASSWORD
     log_path="$RDIR/vm/spin-$gate.log"
     log "creating disposable VM for $gate"
     spinner=spin-test-vm.sh
     if [ "$gate" = gui ]; then
         spinner=spin-test-vm-gui.sh
     fi
-    QDISTRO_VM_PASSWORD="$QDISTRO_VM_PASSWORD" \
-        QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+    QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
         "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -731,7 +727,6 @@ gate_preflight() {
     check_required "vm-start-and-wait" "[ -x '$VM_TOOLS/vm-start-and-wait' ]"
     check_required "spin-test-vm.sh" "[ -x '$VM_TOOLS/spin-test-vm.sh' ]"
     check_required "baseweed-baked image" "test -f '${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}/baseweed-baked.qcow2'"
-    check_optional "QDISTRO_VM_PASSWORD" "test -n \"\${QDISTRO_VM_PASSWORD:-}\""
     check_optional "bats" "command -v bats"
     check_optional "ruff" "command -v ruff"
     check_optional "mypy" "command -v mypy"

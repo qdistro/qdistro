@@ -160,12 +160,15 @@ require() {
 # `curl … | bash` choke on `<!DOCTYPE HTML>`. Detecting a stale server
 # (port-bound but serving wrong root) by content-sniff is fragile, so
 # we always kill anything on 8765 and spawn fresh — costs ~200ms but
-# is deterministic. PID is written to /tmp/qdistro-bats-http.pid for
-# teardown / debugging.
+# is deterministic. Logs and PID files are per-run/per-user so parallel
+# developers cannot trip over root-owned leftovers in /tmp.
 stage_http_8765() {
     local stage_dir="$1"
     [[ -d "$stage_dir" ]] || { echo "stage_http_8765: not a dir: $stage_dir" >&2; return 1; }
     pkill -f "python3 -m http.server 8765" 2>/dev/null || true
+    local state_dir="${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}"
+    local log_path="$state_dir/qdistro-bats-http-$(id -u)-8765.log"
+    local pid_path="$state_dir/qdistro-bats-http-$(id -u)-8765.pid"
     local i
     for ((i=0; i<20; i++)); do
         ss -tln 2>/dev/null | grep -q ":8765 " || break
@@ -174,8 +177,8 @@ stage_http_8765() {
     (
         cd "$stage_dir" || exit 1
         nohup python3 -m http.server 8765 \
-            >/tmp/qdistro-bats-http.log 2>&1 </dev/null 3>&- 4>&- 5>&- &
-        echo $! >/tmp/qdistro-bats-http.pid
+            >"$log_path" 2>&1 </dev/null 3>&- 4>&- 5>&- &
+        echo $! >"$pid_path"
         disown "$!" 2>/dev/null || true
     )
     for ((i=0; i<30; i++)); do

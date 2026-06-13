@@ -26,12 +26,8 @@ load helpers
     # command-line limit. The driver runs as root (faillock tally files are
     # root-relevant) and sleeps 12s past unlock_time=10, so keep the timeout
     # generous.
-    # Pass QDISTRO_VM_PASSWORD (admin's password on baseweed clones, default
-    # "admin") into the guest so the driver can exercise a real successful
-    # unlock — the baseline + after-unlock_time assertions need it.
-    local vmpw="${QDISTRO_VM_PASSWORD:-admin}"
     b64="$(base64 -w0 "$driver")"
-    vm_run "echo '$b64' | base64 -d > /tmp/qdlocker-faillock.sh && chmod +x /tmp/qdlocker-faillock.sh && QDISTRO_VM_PASSWORD='$vmpw' timeout 120 bash /tmp/qdlocker-faillock.sh 2>&1"
+    vm_run "echo '$b64' | base64 -d > /tmp/qdlocker-faillock.sh && chmod +x /tmp/qdlocker-faillock.sh && timeout 120 bash /tmp/qdlocker-faillock.sh 2>&1"
     assert_success
 
     # Load-bearing assertions: the correct password authenticates when

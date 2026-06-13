@@ -44,8 +44,8 @@ ENV_FILE="${ENV_DIR}/${NAME}.env"
 # be in our trusted computing base: a regular file owned BY US (the sourcing
 # euid) and NOT writable by group or other. In production that means root-owned
 # 0600 — admin (or anyone non-root) must not be able to plant or rewrite it, or
-# they could redirect QDISTRO_ADMIN_USER's runuser target, or run ARBITRARY
-# root code via the source. The check is euid-relative (owner == our euid) so it
+# they could run ARBITRARY root code via the source. The check is euid-relative
+# (owner == our euid) so it
 # is correct both in prod (euid 0 -> owner must be root) and under unprivileged
 # host tests (euid test-user -> owner must be that user); the admin-plants /
 # root-sources attack is blocked because admin's uid != root's euid 0. Fail
@@ -77,9 +77,8 @@ require_trusted_env() {
 require_trusted_env "$ENV_FILE"
 # The env file is single-quoted KEY='VALUE' written by the daemon (trusted,
 # now ownership-verified above). `set -a` exports everything it defines so the
-# Python argv splitter (a subprocess) sees QD_WORKLOAD/QD_APP_ARGV_JSON,
-# spawn-tier2 sees TIER2_SILO/TIER2_NETWORK, and the admin resolution below
-# sees the daemon-validated QDISTRO_ADMIN_USER.
+# Python argv splitter (a subprocess) sees QD_WORKLOAD/QD_APP_ARGV_JSON, and
+# spawn-tier2 sees TIER2_SILO/TIER2_NETWORK.
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -109,24 +108,24 @@ for cand in /usr/bin/qdistro-tier2-spawn \
 done
 [ -n "$SPAWN" ] || { echo "tier2-silo-launch: spawn-tier2 not found" >&2; exit 5; }
 
-# Resolve the admin uid spawn-tier2's root-launcher mode drops podman/resolver/
-# broker to. QDISTRO_ADMIN_USER comes from the launch env the daemon exported
-# above (the daemon stamps its VALIDATED canonical admin user into the env
-# file, so a non-default-admin deployment is honoured without the helper
-# inheriting the daemon's process env). The `:-admin` default only applies to a
-# legacy env file that predates this stamping (or a default-admin install).
-# Fail closed: a missing user or uid 0 means we cannot run rootless-as-admin,
-# so we must NOT launch (no un-tagged fallback).
-ADMIN_USER="${QDISTRO_ADMIN_USER:-admin}"
+# Resolve the fixed admin uid spawn-tier2's root-launcher mode drops
+# podman/resolver/broker to. Fail closed: a missing user or uid 0 means we
+# cannot run rootless-as-admin, so we must NOT launch (no un-tagged fallback).
+ADMIN_USER="admin"
 ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
 [ -n "$ADMIN_UID" ] || {
     echo "tier2-silo-launch: admin user '$ADMIN_USER' does not exist" \
-         "(set QDISTRO_ADMIN_USER) — refusing to launch silo $NAME un-tagged" >&2
+         "— refusing to launch silo $NAME un-tagged" >&2
     exit 6
 }
 [ "$ADMIN_UID" != "0" ] || {
     echo "tier2-silo-launch: admin user '$ADMIN_USER' resolves to uid 0 —" \
          "rootless podman needs a non-root uid; refusing to launch silo $NAME" >&2
+    exit 6
+}
+[ "$ADMIN_UID" = "1000" ] || {
+    echo "tier2-silo-launch: admin user '$ADMIN_USER' resolves to uid $ADMIN_UID —" \
+         "qdistro requires admin uid 1000; refusing to launch silo $NAME" >&2
     exit 6
 }
 

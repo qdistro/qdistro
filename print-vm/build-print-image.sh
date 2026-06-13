@@ -266,7 +266,7 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'echo "qdistro-print" >/etc/hostname' \
     --run-command "sed -i 's/\\bquiet\\b//g; s/GRUB_CMDLINE_LINUX_DEFAULT=\"\\(.*\\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\\1 earlyprintk=ttyS0,115200\"/' /etc/default/grub" \
     --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
-    --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
+    --root-password 'password:Pa_ssw0rd45' \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
     >/dev/null
 

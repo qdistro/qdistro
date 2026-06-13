@@ -4,7 +4,7 @@
 # automated, no hand-installed artifacts.
 #
 # Output: $IMG/baseweed-admin.qcow2 — a 25 GB qcow2 with:
-#   - admin user uid 1000, password ${QDISTRO_VM_PASSWORD}, sudo NOPASSWD
+#   - admin user uid 1000, fixed test password, sudo NOPASSWD
 #   - qemu-guest-agent enabled (so vm-exec works first boot)
 #   - SELinux permissive (per memory selinux_permissive_required.md)
 #   - GRUB graphics handoff disabled (GRUB_TERMINAL_OUTPUT=console,
@@ -29,7 +29,7 @@
 # hand-built baseweed.qcow2 artifact.
 #
 # Usage:
-#   QDISTRO_VM_PASSWORD=xxx ./build-baseweed-from-scratch.sh [--force]
+#   ./build-baseweed-from-scratch.sh [--force]
 #
 # Time budget: ~5–10 min (one-time download + resize + customize).
 
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-: "${QDISTRO_VM_PASSWORD:?must export QDISTRO_VM_PASSWORD}"
+VM_PASSWORD='Pa_ssw0rd45'
 
 IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 CACHE_DIR="$HOME/.cache/qdistro"
@@ -92,10 +92,10 @@ virt-customize \
     --memsize 2048 \
     --smp 2 \
     -a "$PARTIAL" \
-    --root-password "password:${QDISTRO_VM_PASSWORD}" \
+    --root-password "password:${VM_PASSWORD}" \
     --run-command 'getent passwd admin >/dev/null || useradd -m -u 1000 -U -s /bin/bash admin' \
     --run-command 'getent group wheel >/dev/null && usermod -aG wheel admin || true' \
-    --run-command "echo 'admin:${QDISTRO_VM_PASSWORD}' | chpasswd" \
+    --run-command "echo 'admin:${VM_PASSWORD}' | chpasswd" \
     --run-command "echo 'admin ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/99-admin && chmod 0440 /etc/sudoers.d/99-admin" \
     --run-command 'zypper -n --no-gpg-checks refresh' \
     --run-command 'zypper -n install --no-recommends qemu-guest-agent' \

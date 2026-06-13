@@ -36,7 +36,7 @@ QDISTRO_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 REPO_PARENT=$(dirname "$QDISTRO_DIR")
 INSTALLER="$SCRIPT_DIR/bare-metal-install.sh"
 
-VM_PASSWORD="${QDISTRO_VM_PASSWORD:-test123}"
+VM_PASSWORD='Pa_ssw0rd45'
 ADMIN_PW="${BAREMETAL_ADMIN_PW:-adminpass}"
 USER_NAME="${BAREMETAL_USER_NAME:-alice}"
 USER_PW="${BAREMETAL_USER_PW:-userpass}"

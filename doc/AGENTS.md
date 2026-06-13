@@ -171,9 +171,8 @@ Driver tools live in `scripts/vm/`:
 VM names must end with a `YYMMDD-HHMM` timestamp suffix to avoid
 collisions across parallel test runs.
 
-The standard test password is `kruger`. The standard admin uid
-is `jan` (uid 1000). The spec calls the admin role "admin" but the
-actual OS account is `jan`.
+The standard test password is `Pa_ssw0rd45`. The standard admin OS
+account is `admin` (uid 1000).
 
 ## What not to do
 

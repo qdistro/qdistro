@@ -205,6 +205,15 @@ run_as_admin() {
         "$@"
 }
 
+domain_xml_tmpfile() {
+    local prefix="$1"
+    local runtime="$3"
+    local dir="$runtime/qdistro-tier5-domainxml"
+
+    run_as_admin install -d -m 0700 "$dir" || return 1
+    run_as_admin mktemp "$dir/${prefix}.XXXXXX.xml"
+}
+
 NO_GPU="${TIER5_NO_GPU:-1}"
 DEBUG="${TIER5_DEBUG:-0}"
 

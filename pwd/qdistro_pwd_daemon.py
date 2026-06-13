@@ -127,10 +127,12 @@ from qdistro_pwd_vault import (  # type: ignore[import-not-found]
 BUS_NAME = "org.qdistro.Pwd1"
 OBJ_PATH = "/org/qdistro/Pwd1"
 try:
-    ADMIN_UID = _pwd_mod.getpwnam(
-        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
-except KeyError:
-    ADMIN_UID = 1000
+    ADMIN_UID = _pwd_mod.getpwnam("admin").pw_uid
+except KeyError as e:
+    raise RuntimeError("fixed admin user 'admin' does not exist") from e
+if ADMIN_UID != 1000:
+    raise RuntimeError(
+        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
 
 VAULT_DIR = os.environ.get("QDISTRO_PWD_VAULT_DIR", DEFAULT_VAULT_DIR)
 AUDIT_DB = os.environ.get(

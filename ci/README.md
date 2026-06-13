@@ -57,7 +57,6 @@ vitest tags), and the per-suite relabel action items.
 ## Typical run
 
 ```bash
-export QDISTRO_VM_PASSWORD='...'
 qdistro/ci/bin/qci full
 ```
 
@@ -72,7 +71,6 @@ QCI_DELETE_FAILED_VM=1 qdistro/ci/bin/qci full
 Create the daily snapshot VM requested by the CI policy:
 
 ```bash
-export QDISTRO_VM_PASSWORD='...'
 qdistro/ci/bin/qci snapshot-daily
 # default VM name: qdistro-daily-$(date -u +%F)
 ```

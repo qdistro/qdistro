@@ -6,16 +6,13 @@
 # secctx wire tag — see qdistro-tier2-silo@.service). The container itself runs
 # in the ADMIN user's rootless podman, so a root `podman stop` would query
 # root's empty store and never find qdistro-silo-<name>, orphaning it. This
-# helper resolves the configured admin user (QDISTRO_ADMIN_USER), fails closed
-# on a missing user or uid 0, and drops to that uid with the right
+# helper resolves the fixed admin user, fails closed on a missing user or uid 0,
+# and drops to that uid with the right
 # XDG_RUNTIME_DIR so `podman stop` reaches the admin-rootless conmon.
 #
-# QDISTRO_ADMIN_USER reaches us via the per-silo launch env the daemon exported
-# (/run/qdistro/silo-launch/<name>.env) — the SAME source the launch helper
-# uses — so a non-default-admin deployment is honoured (the templated unit does
-# NOT inherit the daemon's process env). We source it BEST-EFFORT: a missing env
-# file at stop time (it may legitimately race a reboot/cleanup) falls back to
-# the helper's own env / the `admin` default, because ExecStop is already
+# The per-silo launch env file is sourced only for silo/container metadata.
+# A missing env file at stop time (it may legitimately race a reboot/cleanup)
+# falls back to the fixed `admin` account, because ExecStop is already
 # best-effort (`-`) and the daemon performs the authoritative post-stop
 # `tier2_silo_running` verification. But a PRESENT env file must be safe to
 # source as root (root-owned, non-group/other-writable) — a tampered file is a
@@ -33,7 +30,7 @@ NAME="${1:?usage: qdistro-tier2-silo-stop <silo-name>}"
 ENV_DIR="${QDISTRO_SILO_LAUNCH_ENV_DIR:-/run/qdistro/silo-launch}"
 ENV_FILE="${ENV_DIR}/${NAME}.env"
 
-# Best-effort pull of QDISTRO_ADMIN_USER from the daemon-written launch env.
+# Best-effort source of the daemon-written launch env.
 # SECURITY: we run as ROOT, so `.`-sourcing is root code execution — only source
 # a file that is a regular file owned BY US (the sourcing euid, root in prod) and
 # NOT group/other-writable. The check is euid-relative so it is correct in prod
@@ -71,11 +68,11 @@ if [ -e "$ENV_FILE" ]; then
     set +a
 fi
 
-ADMIN_USER="${QDISTRO_ADMIN_USER:-admin}"
+ADMIN_USER="admin"
 ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
 if [ -z "$ADMIN_UID" ]; then
     echo "tier2-silo-stop: admin user '$ADMIN_USER' does not exist" \
-         "(set QDISTRO_ADMIN_USER) — cannot stop qdistro-silo-$NAME" >&2
+         "— cannot stop qdistro-silo-$NAME" >&2
     exit 3
 fi
 if [ "$ADMIN_UID" = "0" ]; then
@@ -83,6 +80,11 @@ if [ "$ADMIN_UID" = "0" ]; then
     # admin-rootless container lives on. Fail closed.
     echo "tier2-silo-stop: resolved admin uid 0 for '$ADMIN_USER' — refusing" \
          "(rootless podman must run as a non-root uid)" >&2
+    exit 3
+fi
+if [ "$ADMIN_UID" != "1000" ]; then
+    echo "tier2-silo-stop: admin user '$ADMIN_USER' resolves to uid $ADMIN_UID —" \
+         "qdistro requires admin uid 1000; cannot stop qdistro-silo-$NAME" >&2
     exit 3
 fi
 

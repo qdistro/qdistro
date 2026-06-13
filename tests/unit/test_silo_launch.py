@@ -71,10 +71,9 @@ def test_launch_helper_admin_resolution_is_fail_closed_in_source() -> None:
 
 def test_stop_helper_fails_closed_on_uid_0(tmp_path: Path) -> None:
     """ExecStop must drop to a NON-root admin uid to reach the admin-rootless
-    container. If the configured admin resolves to uid 0 it must refuse rather
+    container. If the fixed admin resolves to uid 0 it must refuse rather
     than 'stop' against root's empty store (which would orphan the container)."""
     env = _farm_with_id(tmp_path, id_output="0")
-    env["QDISTRO_ADMIN_USER"] = "root"
     res = subprocess.run(
         ["/bin/bash", str(_STOP), "work"],
         env=env, capture_output=True, text=True, check=False, timeout=30)
@@ -84,7 +83,6 @@ def test_stop_helper_fails_closed_on_uid_0(tmp_path: Path) -> None:
 
 def test_stop_helper_fails_closed_on_missing_admin_user(tmp_path: Path) -> None:
     env = _farm_with_id(tmp_path, id_output=None)
-    env["QDISTRO_ADMIN_USER"] = "nope"
     res = subprocess.run(
         ["/bin/bash", str(_STOP), "work"],
         env=env, capture_output=True, text=True, check=False, timeout=30)
@@ -101,14 +99,13 @@ def test_helpers_are_executable_shell() -> None:
 
 
 # --------------------------------------------------------------------------
-# QDISTRO_ADMIN_USER env-file propagation (this milestone).
+# fixed admin-user launch env behavior.
 #
-# The daemon stamps the validated admin user into the per-silo launch env file
-# (/run/qdistro/silo-launch/<name>.env, root-owned 0600); both helpers SOURCE it
-# (the source of truth for which uid to drop podman/resolver/broker to), so a
-# non-default-admin deployment is honoured without the templated unit inheriting
-# the daemon's process env. Because the helpers `.`-source the file AS ROOT, they
-# refuse a file not owned by the sourcing uid or group/other-writable (root TCB).
+# The daemon writes per-silo launch metadata into
+# /run/qdistro/silo-launch/<name>.env (root-owned 0600); both helpers SOURCE it
+# for silo/container metadata. The admin user itself is fixed to `admin`.
+# Because the helpers `.`-source the file AS ROOT, they refuse a file not owned
+# by the sourcing uid or group/other-writable (root TCB).
 #
 # Host tests run unprivileged, so they redirect the env dir
 # (QDISTRO_SILO_LAUNCH_ENV_DIR, a TEST-ONLY override) into a tmp dir and write
@@ -148,8 +145,7 @@ def _farm(tmp_path: Path, *, users: dict[str, str] | None = None,
     return farm, env
 
 
-def _write_env_file(tmp_path: Path, name: str, *, admin_user: str | None,
-                    mode: int = 0o600) -> Path:
+def _write_env_file(tmp_path: Path, name: str, *, mode: int = 0o600) -> Path:
     """Write a per-silo launch env file (test-user-owned) under a redirected env
     dir, mirroring the daemon's shlex-quoted KEY='VALUE' lines."""
     env_dir = tmp_path / "silo-launch"
@@ -162,8 +158,6 @@ def _write_env_file(tmp_path: Path, name: str, *, admin_user: str | None,
         "QD_CONTAINER='qdistro-silo-work'",
         "QD_APP_ARGV_JSON='[\"browser\"]'",
     ]
-    if admin_user is not None:
-        lines.append(f"QDISTRO_ADMIN_USER='{admin_user}'")
     f.write_text("\n".join(lines) + "\n")
     f.chmod(mode)
     return f
@@ -211,55 +205,21 @@ def _run_stop(tmp_path: Path, name: str, env: dict[str, str]):
         env=env, capture_output=True, text=True, check=False, timeout=30)
 
 
-def test_launch_resolves_nondefault_admin_from_env_file(tmp_path: Path) -> None:
-    """A non-default admin user stamped in the env file is resolved and reaches
-    spawn-tier2 as TIER2_ADMIN_UID — the whole point of the propagation."""
-    _write_env_file(tmp_path, "work", admin_user="alice")
-    farm, env = _farm(tmp_path, users={"alice": "4242"})
+def test_launch_resolves_fixed_admin(tmp_path: Path) -> None:
+    _write_env_file(tmp_path, "work")
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
     rec = _recording_spawn(farm)
-    # Drop QDISTRO_ADMIN_USER from the PROCESS env so ONLY the env file supplies
-    # it (proves the file is the source of truth, not inherited env).
-    env.pop("QDISTRO_ADMIN_USER", None)
     res = _run_launch(tmp_path, "work", env)
     assert res.returncode == 0, res.stderr
     recorded = rec.read_text()
     assert "TIER2_ROOT_LAUNCHER=1" in recorded
-    assert "TIER2_ADMIN_UID=4242" in recorded, recorded
+    assert "TIER2_ADMIN_UID=1000" in recorded, recorded
 
 
-def test_launch_env_file_overrides_process_env_admin(tmp_path: Path) -> None:
-    """The env file is the SOURCE OF TRUTH: even a (hostile) caller-supplied
-    QDISTRO_ADMIN_USER in the process env must NOT override the daemon's stamped
-    value — the sourced file wins."""
-    _write_env_file(tmp_path, "work", admin_user="alice")
-    farm, env = _farm(tmp_path, users={"alice": "4242", "evil": "9"})
-    rec = _recording_spawn(farm)
-    env["QDISTRO_ADMIN_USER"] = "evil"   # caller tries to redirect
-    res = _run_launch(tmp_path, "work", env)
-    assert res.returncode == 0, res.stderr
-    recorded = rec.read_text()
-    assert "TIER2_ADMIN_UID=4242" in recorded, recorded   # alice, not evil
-    assert "TIER2_ADMIN_UID=9" not in recorded
-
-
-def test_launch_defaults_to_admin_when_env_file_omits_it(tmp_path: Path) -> None:
-    """Back-compat: a legacy env file WITHOUT QDISTRO_ADMIN_USER (and no process
-    env) falls back to the literal `admin`."""
-    _write_env_file(tmp_path, "work", admin_user=None)
-    farm, env = _farm(tmp_path, users={"admin": "1000"})
-    rec = _recording_spawn(farm)
-    env.pop("QDISTRO_ADMIN_USER", None)
-    res = _run_launch(tmp_path, "work", env)
-    assert res.returncode == 0, res.stderr
-    assert "TIER2_ADMIN_UID=1000" in rec.read_text()
-
-
-def test_launch_fails_closed_on_missing_admin_in_env_file(tmp_path: Path) -> None:
-    """A non-existent admin user stamped in the env file -> exit 6, no spawn."""
-    _write_env_file(tmp_path, "work", admin_user="nosuchadmin")
+def test_launch_fails_closed_on_missing_admin(tmp_path: Path) -> None:
+    _write_env_file(tmp_path, "work")
     farm, env = _farm(tmp_path, users={}, missing=True)
     rec = _recording_spawn(farm)
-    env.pop("QDISTRO_ADMIN_USER", None)
     res = _run_launch(tmp_path, "work", env)
     assert res.returncode == 6, (res.returncode, res.stderr)
     assert "does not exist" in res.stderr
@@ -270,8 +230,8 @@ def test_launch_fails_closed_on_missing_admin_in_env_file(tmp_path: Path) -> Non
 def test_launch_refuses_group_or_other_writable_env_file(tmp_path: Path) -> None:
     """Root TCB: the helper `.`-sources the file as root, so a group/other-
     writable file (a non-owner could rewrite it) must be REFUSED, never sourced."""
-    f = _write_env_file(tmp_path, "work", admin_user="alice", mode=0o660)
-    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    f = _write_env_file(tmp_path, "work", mode=0o660)
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
     _recording_spawn(farm)
     res = _run_launch(tmp_path, "work", env)
     assert res.returncode != 0
@@ -283,11 +243,9 @@ def test_launch_refuses_group_or_other_writable_env_file(tmp_path: Path) -> None
     assert "writable" in res.stderr
 
 
-def test_stop_resolves_nondefault_admin_from_env_file(tmp_path: Path) -> None:
-    """The stop helper sources the SAME env file so it drops to the same admin —
-    assert it runuser's to the env-file admin (captured by a recording runuser)."""
-    _write_env_file(tmp_path, "work", admin_user="alice")
-    farm, env = _farm(tmp_path, users={"alice": "4242"})
+def test_stop_uses_fixed_admin(tmp_path: Path) -> None:
+    _write_env_file(tmp_path, "work")
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
     # Recording runuser captures its `-u <user>` target.
     rec = farm / "runuser-record"
     fake_runuser = farm / "runuser"
@@ -296,34 +254,32 @@ def test_stop_resolves_nondefault_admin_from_env_file(tmp_path: Path) -> None:
         f'printf "%s\\n" "$2" >"{rec}"\n'   # $1=-u $2=<user>
         'exit 0\n')
     fake_runuser.chmod(0o755)
-    env.pop("QDISTRO_ADMIN_USER", None)
     res = _run_stop(tmp_path, "work", env)
     assert res.returncode == 0, res.stderr
-    assert rec.read_text().strip() == "alice"
+    assert rec.read_text().strip() == "admin"
 
 
 def test_stop_missing_env_file_falls_back_best_effort(tmp_path: Path) -> None:
     """A MISSING env file at stop time is best-effort: the helper falls back to
-    the process env / default rather than failing (ExecStop is best-effort and
-    the daemon re-verifies). Here the process env supplies a valid admin."""
+    the fixed admin rather than failing (ExecStop is best-effort and the daemon
+    re-verifies)."""
     # No env file written.
-    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
     rec = farm / "runuser-record"
     fake_runuser = farm / "runuser"
     fake_runuser.write_text(
         "#!/bin/bash\n" f'printf "%s\\n" "$2" >"{rec}"\nexit 0\n')
     fake_runuser.chmod(0o755)
-    env["QDISTRO_ADMIN_USER"] = "alice"
     res = _run_stop(tmp_path, "work", env)
     assert res.returncode == 0, res.stderr
-    assert rec.read_text().strip() == "alice"
+    assert rec.read_text().strip() == "admin"
 
 
 def test_stop_refuses_unsafe_env_file(tmp_path: Path) -> None:
     """Root TCB: a PRESENT but group/other-writable env file is a hard fail for
     the stop helper too (someone planted/rewrote it)."""
-    _write_env_file(tmp_path, "work", admin_user="alice", mode=0o666)
-    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    _write_env_file(tmp_path, "work", mode=0o666)
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
     res = _run_stop(tmp_path, "work", env)
     assert res.returncode != 0
     assert "writable" in res.stderr, res.stderr

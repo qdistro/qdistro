@@ -53,7 +53,7 @@ running the TUI). Both list panes are empty.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c 'python3 /usr/local/bin/qdistro-test-permission \
+sudo -u work bash -c '/usr/local/bin/qdistro-test-permission \
   >/tmp/35-work.log 2>&1 & echo $! >/tmp/35-work.pid'
 EOF
 )

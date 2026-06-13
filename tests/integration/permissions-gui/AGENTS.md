@@ -39,7 +39,7 @@ and return a report.
  `start`, `screenshot [file]`, `click x y`, `type <text>`,
  `key <keysym>` — implemented via virsh screenshot + xdotool in
  XWayland (labwc Wayland; `DISPLAY=:0` XWayland is available).
-- VM user password is `$QDISTRO_VM_PASSWORD` for `admin` and `work`.
+- VM user password is `Pa_ssw0rd45` for `admin` and `work`.
 
 ## Hard-learned pitfalls (read before running commands)
 

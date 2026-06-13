@@ -335,7 +335,7 @@ cmd_reaper_sweep() {
     # qdistro_disposables.disp_sweep_targets (name-shape selection) +
     # _SystemOps.disp_container_remove (real `podman rm -f`, name-guarded).
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    py_out=$(XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 - "$orphan" "$keep" "$dispkeep" "$forged" <<PY 2>&1
 import sys
 sys.path.insert(0, "$LIBEXEC")
@@ -544,7 +544,7 @@ cmd_lease_sweep() {
         || fail lease-sweep "could not create forged-name fixture $forged"
 
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    py_out=$(XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 - "$exp" "$fresh" "$nolease" "$notoken" "$forged" <<PY 2>&1
 import sys, time
 sys.path.insert(0, "$LIBEXEC")
@@ -722,7 +722,7 @@ cmd_proctree_sweep() {
         || fail proctree-sweep "could not create no-token fixture $notok"
 
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    py_out=$(XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 - "$empty" "$busy" "$fresh" "$noopt" "$notok" <<PY 2>&1
 import sys
 sys.path.insert(0, "$LIBEXEC")
@@ -804,7 +804,7 @@ PY
         >/dev/null 2>&1; then
         sleep 1
         local west_out
-        west_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        west_out=$(XDG_RUNTIME_DIR="$RUNTIME_DIR" \
             python3 - "$west" <<'PY' 2>&1
 import sys
 sys.path.insert(0, "/usr/libexec/qdistro")
@@ -887,7 +887,7 @@ cmd_workflow_dispose() {
         || fail workflow-dispose "could not create fixture $c"
 
     local py_out
-    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    py_out=$(XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 - "$wf" "$a" "$b" <<PY 2>&1
 import sys
 sys.path.insert(0, "$LIBEXEC")

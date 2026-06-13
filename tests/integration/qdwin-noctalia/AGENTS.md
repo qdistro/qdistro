@@ -22,7 +22,7 @@ Same orchestrator/runner split as the sibling harness.
 - Resolution: 1920×1080 (set in `weston.ini` `[output]`).
 - Backend: `drm-backend.so` with `renderer=pixman` (no GL — virtio-gpu
  in our VMs has no accel3d; Mesa GLES backend segfaults).
-- Auth: admin / $QDISTRO_VM_PASSWORD; admin user must be in `video,input,render,seat`
+- Auth: admin / `Pa_ssw0rd45`; admin user must be in `video,input,render,seat`
  groups; `seatd.service` must be running on the VM.
 
 ## Helper script

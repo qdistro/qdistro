@@ -59,46 +59,14 @@ from qdistro_silo_egress import (
 
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
-def _resolve_admin_uid() -> int:
-    """Resolve the deployment admin uid, failing closed if it is absent."""
-    admin_user = os.environ.get("QDISTRO_ADMIN_USER", "admin")
-    try:
-        return int(pwd.getpwnam(admin_user).pw_uid)
-    except KeyError as e:
-        raise RuntimeError(
-            f"configured admin user {admin_user!r} does not exist; "
-            "set QDISTRO_ADMIN_USER to an existing account"
-        ) from e
-
-
-# The AUTHZ admin uid: the only uid permitted to call privileged D-Bus
-# methods (see _require_admin). Resolved env-aware (QDISTRO_ADMIN_USER, then
-# the "admin" user) so a deployment whose admin is not uid 1000 still works.
-# Missing admin users fail closed at import instead of silently authorizing
-# uid 1000. This is a DIFFERENT concept from the tier2 launch-owner uid below;
-# keeping them separate names stops the two from silently diverging (02/S11).
-ADMIN_UID = _resolve_admin_uid()
-
-
-def _resolve_admin_user_name(uid: int) -> str:
-    """The canonical passwd name for the validated admin uid. Used to stamp
-    QDISTRO_ADMIN_USER into the tier-2 launch env so the launcher/stop helpers
-    resolve the SAME identity the daemon authz-trusts (binding the helper's
-    runuser target to the daemon's validated uid, not a raw env alias that
-    could drift). Fail closed: a uid with no passwd entry must not silently
-    yield an empty/garbage admin user the helpers would refuse anyway."""
-    try:
-        return pwd.getpwuid(int(uid)).pw_name
-    except KeyError as e:
-        raise RuntimeError(
-            f"admin uid {uid} has no passwd entry; cannot resolve the "
-            "canonical admin user name for the tier-2 launch env"
-        ) from e
-
-
-# Canonical admin user name (derived from the validated ADMIN_UID, NOT the raw
-# QDISTRO_ADMIN_USER env string) the daemon stamps into the tier-2 launch env.
-ADMIN_USER_NAME = _resolve_admin_user_name(ADMIN_UID)
+ADMIN_USER_NAME = "admin"
+try:
+    ADMIN_UID = int(pwd.getpwnam(ADMIN_USER_NAME).pw_uid)
+except KeyError as e:
+    raise RuntimeError("fixed admin user 'admin' does not exist") from e
+if ADMIN_UID != 1000:
+    raise RuntimeError(
+        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
 
 # Where per-silo broker state lives. The dir for each silo is owned
 # by the silo's uid and is mode 0700 so other uids cannot peek.
@@ -184,10 +152,8 @@ KIND_TIER2_TEMPLATE = "tier2-template"
 SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE)
 # The launch-owner uid a tier2-template row carries: the admin user where
 # rootless podman runs. Not a fresh silo uid (no useradd/home/cgroup
-# semantics). Resolved the same env-aware way as the authz ADMIN_UID above
-# (they are the same user today), but a DISTINCT name: previously this was a
-# hardcoded `ADMIN_UID = 1000` that shadowed the env-aware authz lookup and
-# locked out any admin whose uid != 1000 (02/S11).
+# semantics). Kept as a distinct name for the tier2 launch schema, but it is
+# deliberately aligned with the fixed deployment admin uid.
 TIER2_LAUNCH_OWNER_UID = ADMIN_UID
 # Network modes a tier2-template launch may request (maps to TIER2_NETWORK).
 SILO_NETWORK_MODES = ("none", "slirp4netns")
@@ -1092,7 +1058,7 @@ class _SystemOps:
         # any OTHER rc means the check itself failed to run — fail closed and
         # treat that as still running, never silently report a clean stop.
         proc = subprocess.run(
-            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+            ["runuser", "-u", ADMIN_USER_NAME,
              "--", "podman", "container", "exists", container],
             capture_output=True)
         return proc.returncode != 1
@@ -1106,7 +1072,7 @@ class _SystemOps:
         a second, defence-in-depth check). Returns [] on any failure (the
         sweep is best-effort and must not crash startup)."""
         proc = subprocess.run(
-            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+            ["runuser", "-u", ADMIN_USER_NAME,
              "--", "podman", "ps", "-a",
              "--filter", "label=qdistro_disposable=1",
              "--format", "{{.Names}}"],
@@ -1132,7 +1098,7 @@ class _SystemOps:
         fail OPEN (report a live container as torn down). Mirrors
         ``container_exists``, which separates rc==1 (gone) from a failed check."""
         proc = subprocess.run(
-            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+            ["runuser", "-u", ADMIN_USER_NAME,
              "--", "podman", "ps", "-a",
              "--filter", "label=qdistro_disposable=1",
              "--filter", f"label=qdistro_tier2_token={token}",
@@ -1165,7 +1131,7 @@ class _SystemOps:
         try:
             proc = subprocess.run(
                 ["runuser", "-u",
-                 os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 ADMIN_USER_NAME,
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
                  "--format", "json"],
@@ -1205,7 +1171,7 @@ class _SystemOps:
         try:
             proc = subprocess.run(
                 ["runuser", "-u",
-                 os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 ADMIN_USER_NAME,
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
                  "--filter", "label=qdistro_lease_proctree=1",
@@ -1242,7 +1208,7 @@ class _SystemOps:
             return None
         try:
             proc = subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "top", name, "pid", "comm"],
                 capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
@@ -1269,7 +1235,7 @@ class _SystemOps:
         read as 'no such disposables / already gone' (that would fail OPEN).
         Mirrors ``disp_containers_by_token``."""
         proc = subprocess.run(
-            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+            ["runuser", "-u", ADMIN_USER_NAME,
              "--", "podman", "ps", "-a",
              "--filter", "label=qdistro_disposable=1",
              "--filter", f"label=qdistro_lease_workflow={workflow_id}",
@@ -1317,7 +1283,7 @@ class _SystemOps:
         full_id = self._disp_container_full_id(name)
         try:
             proc = subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "rm", "-f", name],
                 capture_output=True, timeout=30)
         except subprocess.TimeoutExpired:
@@ -1346,7 +1312,7 @@ class _SystemOps:
             return None
         try:
             proc = subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "inspect", "--format", "{{.Id}}", name],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as e:
@@ -1370,7 +1336,7 @@ class _SystemOps:
             return None
         try:
             proc = subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "top", name, "hpid", "comm"],
                 capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as e:
@@ -1492,7 +1458,7 @@ class _SystemOps:
         durable retry)."""
         try:
             subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "rm", "-f", name],
                 capture_output=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as e:
@@ -1589,7 +1555,7 @@ class _SystemOps:
         empty SET genuinely means "no live disposables" (safe to reap orphans)."""
         try:
             proc = subprocess.run(
-                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                ["runuser", "-u", ADMIN_USER_NAME,
                  "--", "podman", "ps", "-a",
                  "--filter", "label=qdistro_disposable=1",
                  "--format", "json"],
@@ -2428,11 +2394,7 @@ class _SiloStore:
         spawn-tier2 (root-launcher mode) with these — TIER2_SILO makes the
         launch binding-resolved (the only launch that mounts real state) and
         TIER2_NETWORK sets egress. argv is JSON so the launcher script can
-        re-split it without quoting hazards. QDISTRO_ADMIN_USER carries the
-        daemon's VALIDATED admin identity into the launch + stop helpers, which
-        run in the templated unit's own env (it does NOT inherit the daemon's
-        env), so a non-default-admin deployment no longer silently falls back to
-        the literal `admin` and fails closed."""
+        re-split it without quoting hazards."""
         lc = silo.launch
         # shlex.quote EVERY value so the launcher can `set -a; . envfile`
         # safely: the argv JSON contains spaces/brackets/double-quotes, and an
@@ -2446,10 +2408,6 @@ class _SiloStore:
             ("QD_WORKLOAD", lc["workload"]),
             ("QD_CONTAINER", f"qdistro-silo-{silo.name}"),
             ("QD_APP_ARGV_JSON", argv_json),
-            # The canonical admin user (derived from the validated ADMIN_UID,
-            # not a raw env alias) the launch/stop helpers resolve + drop podman/
-            # resolver/broker to. Single source of truth = this daemon.
-            ("QDISTRO_ADMIN_USER", ADMIN_USER_NAME),
         ]
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
         self._ops.write_launch_env(silo.name, "\n".join(lines))

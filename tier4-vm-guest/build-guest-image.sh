@@ -44,9 +44,9 @@ set -euo pipefail
 # - Baking a debug root password is OPT-IN via the environment flag
 #       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD  (default 1)
 #   DEFAULT = 1 (bake the password) to preserve existing test-VM
-#   workflows that log in with QDISTRO_VM_PASSWORD. Set it to 0 for a
+#   workflows that log in with the fixed qdistro test VM password. Set it to 0 for a
 #   HARDENED / production build: no root password is baked and
-#   QDISTRO_VM_PASSWORD is not required. With the flag at 1 the
+#   no test VM password is required. With the flag at 1 the
 #   virt-customize argument set is unchanged from historical behavior.
 QDISTRO_GUEST_BAKE_DEBUG_PASSWORD="${QDISTRO_GUEST_BAKE_DEBUG_PASSWORD:-1}"
 
@@ -77,12 +77,10 @@ Reqs:
   freerdp-devel, winpr-devel, pipewire-devel.
 
 Env:
-  QDISTRO_VM_PASSWORD  Root password baked into the image. Mandatory unless
-                       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0.
   QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
-                       1 (default) bakes the debug root password from
-                       QDISTRO_VM_PASSWORD; 0 = hardened build, no password
-                       baked. Either way the output image is 0640 root:root.
+                       1 (default) bakes the fixed debug root password;
+                       0 = hardened build, no password baked. Either way
+                       the output image is 0640 root:root.
 EOF
 }
 
@@ -115,11 +113,7 @@ for tool in virt-customize qemu-img wget meson ninja; do
         exit 2
     }
 done
-if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ] && [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
-    echo "[tier4-guest-build] FAIL: set QDISTRO_VM_PASSWORD env var (root pw for the guest)" >&2
-    echo "[tier4-guest-build]       or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a hardened build with no baked password" >&2
-    exit 2
-fi
+VM_PASSWORD='Pa_ssw0rd45'
 if [ -z "$QDWIN_SRC" ] || [ ! -f "$QDWIN_SRC/meson.build" ]; then
     echo "[tier4-guest-build] FAIL: --qdwin-src '$QDWIN_SRC' does not contain a meson.build" >&2
     exit 2
@@ -350,7 +344,7 @@ PW_ARGS=()
 PW_FILE=""
 if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ]; then
     PW_FILE="$WORK/root-pw"
-    (umask 077 && printf '%s\n' "${QDISTRO_VM_PASSWORD:?QDISTRO_VM_PASSWORD must be set (or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)}" >"$PW_FILE")
+    (umask 077 && printf '%s\n' "$VM_PASSWORD" >"$PW_FILE")
     chmod 0600 "$PW_FILE"
     # trap already covers $WORK, but be explicit: scrub the password file
     # on exit even if the trap is somehow bypassed.

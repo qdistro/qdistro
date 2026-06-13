@@ -78,17 +78,13 @@ write_launch_env() {
     # Mirror the daemon's _export_tier2_launch_env exactly (single-quoted
     # KEY='VALUE'). The daemon ALWAYS sets a non-empty template_silo for a
     # tier2-template silo, so TIER2_SILO == the silo name (binding-resolved).
-    # The daemon also stamps QDISTRO_ADMIN_USER (its validated canonical admin
-    # user) — the helpers source THIS as the single source of truth for which
-    # uid to drop podman/resolver/broker to. Arg 1 overrides it (default $ADMIN)
-    # so fail-closed scenarios can drive a bad admin user THROUGH the env file,
-    # exactly as a real non-default-admin deployment would.
+    # The admin identity is fixed to `admin`; this env file carries only silo
+    # launch metadata.
     #
     # SECURITY: the launch + stop helpers `.`-source this file AS ROOT, so it
     # must be root-owned and non-group/other-writable or they refuse it. The
     # daemon writes it root-owned 0600; mirror that here (the env-file dir is
     # tmpfs /run, the file 0600 root:root).
-    local admin_user="${1:-$ADMIN}"
     install -d -m 0755 "$LAUNCH_ENV_DIR"
     local f="$LAUNCH_ENV_DIR/${SILO}.env"
     cat >"$f" <<EOF
@@ -97,7 +93,6 @@ TIER2_NETWORK='none'
 QD_WORKLOAD='${WORKLOAD}'
 QD_CONTAINER='qdistro-silo-${SILO}'
 QD_APP_ARGV_JSON='["${WORKLOAD}"]'
-QDISTRO_ADMIN_USER='${admin_user}'
 EOF
     chown 0:0 "$f"
     chmod 0600 "$f"

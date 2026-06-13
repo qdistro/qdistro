@@ -2030,20 +2030,9 @@ main() {
 
     # Step 20 (opt-in): tier-4 guest base image bake
     if [ -n "$BUILD_TIER4_BASE" ]; then
-        # build-guest-image.sh requires QDISTRO_VM_PASSWORD (the root password
-        # baked into the tier-4 guest image). If it is unset the helper fails
-        # deep inside, surfacing as an opaque non-fatal warning. Precheck it
-        # here and skip early with a clear, actionable message — consistent with
-        # this opt-in step's warn-and-continue behavior (a missing prerequisite
-        # for an opt-in build should not abort the whole bootstrap).
-        if [ -z "${QDISTRO_VM_PASSWORD:-}" ]; then
-            warn "skipping tier-4 base build (--tier4-base): QDISTRO_VM_PASSWORD is unset"
-            warn "  set QDISTRO_VM_PASSWORD (the root password for the tier-4 guest image) and re-run with --tier4-base"
-        else
-            log "building tier-4 guest base image (--tier4-base)..."
-            bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
-                || warn "tier-4 base build failed; tier-4 VM apps will not work"
-        fi
+        log "building tier-4 guest base image (--tier4-base)..."
+        bash "$REPO_ROOT/qdistro/tier4-vm-guest/build-guest-image.sh" \
+            || warn "tier-4 base build failed; tier-4 VM apps will not work"
     fi
 
     # Step 21: Smoke check

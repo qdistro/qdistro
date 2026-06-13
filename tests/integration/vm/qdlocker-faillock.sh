@@ -16,7 +16,7 @@
 # shared http server), so the test is safe to run concurrently with other
 # VM gates.
 #
-# The correct password is $QDISTRO_VM_PASSWORD (the baseweed-clone
+# The correct password is Pa_ssw0rd45 (the baseweed-clone
 # convention; the bats wrapper passes it into the VM). Policy: deny=5,
 # unlock_time=10.
 #
@@ -33,7 +33,7 @@
 
 set -eo pipefail
 
-GOOD_PASSWORD=${QDISTRO_VM_PASSWORD:-admin}
+GOOD_PASSWORD='Pa_ssw0rd45'
 BAD_PASSWORD=NOT_THE_PASSWORD
 USER=admin
 
@@ -77,13 +77,13 @@ echo "PASS: provisioned /etc/pam.d/qdlocker present with faillock lines"
 # This is the guard that catches a PAM stack which rejects valid passwords
 # (e.g. a faillock authfail line reached on success): without a working
 # baseline, step 3's "refused while locked" would be meaningless. Also pins
-# admin's password to QDISTRO_VM_PASSWORD (the baseweed-clone convention).
+# admin's password to Pa_ssw0rd45 (the baseweed-clone convention).
 faillock --user "$USER" --reset || true
 OUT=$(pam_auth "$GOOD_PASSWORD")
 [ "$OUT" = "OK" ] || {
     echo "FAIL: correct password did NOT authenticate against the qdlocker"
     echo "  service when unlocked (got: $OUT) — the PAM stack is broken or"
-    echo "  admin's password != \$QDISTRO_VM_PASSWORD."
+    echo "  admin's password != fixed qdistro test VM password."
     cat /etc/pam.d/qdlocker
     exit 3
 }

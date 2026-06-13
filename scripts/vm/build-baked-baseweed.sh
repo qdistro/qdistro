@@ -63,8 +63,7 @@ PARTIAL="$IMG/baseweed-baked.qcow2.partial"
 
 if [ ! -f "$BASE" ]; then
     echo "ERROR: $BASE not found." >&2
-    echo "       Build it first with: QDISTRO_VM_PASSWORD=... \\" >&2
-    echo "         $SCRIPT_DIR/build-baseweed-from-scratch.sh" >&2
+    echo "       Build it first with: $SCRIPT_DIR/build-baseweed-from-scratch.sh" >&2
     exit 1
 fi
 if [ -f "$BAKED" ] && [ "$FORCE" -ne 1 ]; then
@@ -195,7 +194,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command "mv /usr/local/bin/$(basename "$PUBLISHER_TMP") /usr/local/bin/qdistro-tier5-publisher.sh" \
                 --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
                 --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
-                --root-password "password:${QDISTRO_VM_PASSWORD:?}" \
+                --root-password "password:Pa_ssw0rd45" \
                 --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
                 --run-command 'zypper clean -a' \
                 >/dev/null

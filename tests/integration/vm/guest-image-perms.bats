@@ -13,7 +13,7 @@
 #   3. default mode (flag unset/1) -> --root-password is passed to
 #      virt-customize (unchanged historical behavior).
 #   4. hardened mode (flag=0)      -> NO --root-password is passed, and
-#      QDISTRO_VM_PASSWORD is not required, and the image is still 0640.
+#      no test VM password is required, and the image is still 0640.
 #
 # These are pure host-side unit tests: NO real image build, NO sudo, NO VM.
 # Every heavy / privileged external (virt-*, qemu-img, wget, meson, ninja,
@@ -132,18 +132,16 @@ vc_has_rootpw() {
 #
 # Calling convention: run_tN [VAR=val ...]   (pairs only; builder args fixed)
 #
-# Hermetic env: a real qdistro dev host exports QDISTRO_VM_PASSWORD (and may
-# export QDISTRO_GUEST_BAKE_DEBUG_PASSWORD) in the operator's shell. We MUST
-# scrub both before each run so a test that means "no password set" actually
-# sees none — otherwise the inherited password masks the guard. The per-test
-# KV pairs are exported AFTER the scrub, so only the test's intent applies.
+# Hermetic env: a real qdistro dev host may export
+# QDISTRO_GUEST_BAKE_DEBUG_PASSWORD in the operator's shell. Scrub it before
+# each run so only the test's intent applies.
 #
 # We hand the KV pairs + the full command line to a single `bash -c` (rather
 # than `run env <pairs> bash ...`, which under bats `run` mangles the empty-
 # pair case). The empty-pair case is then a plain scrubbed `bash <builder>`.
 _run_builder() {  # <n-pairs> <pair...> <builder> <builder-args...>
     run bash -c '
-        unset QDISTRO_VM_PASSWORD QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
+        unset QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
         n="$1"; shift
         i=0
         while [ "$i" -lt "$n" ]; do export "$1"; shift; i=$((i+1)); done
@@ -170,7 +168,7 @@ run_t5b() {
 # ---- tier-4-guest ----------------------------------------------------------
 
 @test "tier4: default mode bakes root password and writes 0640" {
-    run_t4 QDISTRO_VM_PASSWORD=secret
+    run_t4
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     vc_has_rootpw      || { echo "expected --root-password in default mode" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST4" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
@@ -179,23 +177,16 @@ run_t5b() {
 }
 
 @test "tier4: hardened mode (flag=0) bakes NO password, still 0640, no pw needed" {
-    # Deliberately do NOT set QDISTRO_VM_PASSWORD.
     run_t4 QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     ! vc_has_rootpw    || { echo "hardened mode must NOT bake a password" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST4" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
 }
 
-@test "tier4: default mode requires QDISTRO_VM_PASSWORD" {
-    run_t4
-    [ "$status" -ne 0 ]
-    [[ "$output" == *QDISTRO_VM_PASSWORD* ]]
-}
-
 # ---- tier-5 ----------------------------------------------------------------
 
 @test "tier5: default mode bakes root password and writes 0640" {
-    run_t5 QDISTRO_VM_PASSWORD=secret
+    run_t5
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     vc_has_rootpw      || { echo "expected --root-password in default mode" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST5" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
@@ -212,7 +203,7 @@ run_t5b() {
 # ---- tier-5b ---------------------------------------------------------------
 
 @test "tier5b: default mode bakes root password and writes 0640" {
-    run_t5b QDISTRO_VM_PASSWORD=secret
+    run_t5b
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     vc_has_rootpw      || { echo "expected --root-password in default mode" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST5B" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
@@ -224,12 +215,6 @@ run_t5b() {
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
     ! vc_has_rootpw    || { echo "hardened mode must NOT bake a password" >&2; cat "$CMDLOG" >&2; return 1; }
     chmod_on_dest 640 "$DEST5B" || { echo "dest not chmod 0640" >&2; cat "$CMDLOG" >&2; return 1; }
-}
-
-@test "tier5b: default mode requires QDISTRO_VM_PASSWORD" {
-    run_t5b
-    [ "$status" -ne 0 ]
-    [[ "$output" == *QDISTRO_VM_PASSWORD* ]]
 }
 
 # ---- cross-script contract consistency -------------------------------------

@@ -41,10 +41,12 @@ POLKIT_PATH = "/org/freedesktop/PolicyKit1/Authority"
 POLKIT_IFC = "org.freedesktop.PolicyKit1.Authority"
 
 try:
-    ADMIN_UID = _pwd_mod.getpwnam(
-        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
-except KeyError:
-    ADMIN_UID = 1000
+    ADMIN_UID = _pwd_mod.getpwnam("admin").pw_uid
+except KeyError as e:
+    raise RuntimeError("fixed admin user 'admin' does not exist") from e
+if ADMIN_UID != 1000:
+    raise RuntimeError(
+        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
 
 ACTION_UNLOCK = "org.qdistro.pwd.unlock"
 

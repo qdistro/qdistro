@@ -67,8 +67,8 @@ install -o root -g root -m 0755 "$SRC/qdistro_disposable_export.py" \
 # the parent); the dir itself is admin-owned 0700 so the admin tier-2 launcher can
 # create per-token <token>/{meta.json,payload/} subtrees the keep-id disposable
 # writes. The importer (root) verifies it is a real dir before use; the boot sweep
-# reaps orphans. Resolve the admin identity (default 'admin') for ownership.
-_qd_admin_user="${QDISTRO_ADMIN_USER:-admin}"
+# reaps orphans.
+_qd_admin_user="admin"
 if id "$_qd_admin_user" >/dev/null 2>&1; then
     install -d -o "$_qd_admin_user" -g "$_qd_admin_user" -m 0700 \
         /var/lib/qdistro/disposable-export
@@ -107,8 +107,8 @@ install -o root -g root -m 0644 "$SRC/qdistro-tier2-silo@.service" \
 install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-launch" \
     "$DEST/qdistro-tier2-silo-launch"
 # ExecStop helper: the unit runs as root, so stopping the admin-rootless
-# container must drop to the configured admin user. Resolves QDISTRO_ADMIN_USER
-# and fails closed on a missing user / uid 0.
+# container must drop to the fixed admin user and fail closed on a missing
+# user / uid 0.
 install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-stop" \
     "$DEST/qdistro-tier2-silo-stop"
 install -o root -g root -m 0644 "$SRC/qdistro_silo_launch.py" \

@@ -23,9 +23,9 @@
 # - Baking a debug root password is OPT-IN via the environment flag
 #       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD  (default 1)
 #   DEFAULT = 1 (bake the password) to preserve the existing test-VM
-#   workflows that log in over the serial console with QDISTRO_VM_PASSWORD.
+#   workflows that log in over the serial console with the fixed qdistro test VM password.
 #   Set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0 for a HARDENED / production
-#   build: no root password is baked and QDISTRO_VM_PASSWORD is not required.
+#   build: no root password is baked and no test VM password is required.
 #   When the flag is 1 the virt-customize argument set is byte-identical to
 #   the historical behavior, so any deterministic output is unchanged unless
 #   the operator explicitly opts into the hardened path.
@@ -61,12 +61,10 @@ Reqs:
   virt-customize, qemu-img, wget. zypper install libguestfs guestfs-tools qemu-tools.
 
 Env:
-  QDISTRO_VM_PASSWORD  Root password baked into the image. Mandatory unless
-                       QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0.
   QDISTRO_GUEST_BAKE_DEBUG_PASSWORD
-                       1 (default) bakes the debug root password from
-                       QDISTRO_VM_PASSWORD; 0 = hardened build, no password
-                       baked. Either way the output image is 0640 root:root.
+                       1 (default) bakes the fixed debug root password;
+                       0 = hardened build, no password baked. Either way
+                       the output image is 0640 root:root.
 EOF
 }
 
@@ -169,7 +167,7 @@ chmod 0755 "$PUBLISHER"
 # password; the hardened path (flag=0) bakes none.
 PW_ARGS=()
 if [ "$QDISTRO_GUEST_BAKE_DEBUG_PASSWORD" = "1" ]; then
-    PW_ARGS=(--root-password "password:${QDISTRO_VM_PASSWORD:?QDISTRO_VM_PASSWORD must be set (or set QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)}")
+    PW_ARGS=(--root-password 'password:Pa_ssw0rd45')
     echo "[tier5-build] baking debug root password (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=1)"
 else
     echo "[tier5-build] HARDENED build: no root password baked (QDISTRO_GUEST_BAKE_DEBUG_PASSWORD=0)"

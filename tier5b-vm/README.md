@@ -57,7 +57,7 @@ inside the guest as a separate task.
 ## Build + run
 
 ```sh
-sudo QDISTRO_VM_PASSWORD=xxx ./build-guest-image.sh --app firefox
+sudo ./build-guest-image.sh --app firefox
 sudo ./spawn-tier5b.sh --vm ff-$$ --app firefox
 ```
 

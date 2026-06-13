@@ -203,8 +203,8 @@ LICENSE             GPL-3.0-or-later
 pytest
 
 # Integration tests require a libvirt session + a built test VM.
-# QDISTRO_VM_PASSWORD is the password baked into the cloned VM's
-# user accounts (defaults to "admin" if unset).
+# The fixed qdistro test VM password is baked into the cloned VM's
+# user accounts.
 # QDWIN_VM_TEMPLATE is the libvirt domain whose XML is cloned for
 # each test VM; spin-test-vm.sh auto-creates it on first run.
 export QDWIN_VM_TEMPLATE=qdistro-template

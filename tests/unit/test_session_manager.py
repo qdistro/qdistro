@@ -19,8 +19,6 @@ from pathlib import Path
 
 import pytest
 
-os.environ.setdefault("QDISTRO_ADMIN_USER", "root")
-
 import qdistro_session_manager as sm
 from qdistro_session_manager import (
     _STATE_TRANSITIONS,
@@ -1105,82 +1103,11 @@ class TestTier2TemplateKind:
         with pytest.raises(BadArgument):
             store.create("browser1", 2001, kind="tier2-template", launch=dict(_LAUNCH))
 
-    def test_admin_uid_is_env_aware_not_hardcoded_1000(self):
-        """02/S11: the authz admin uid and the tier2 launch-owner uid both
-        follow QDISTRO_ADMIN_USER. Regression: a hardcoded `ADMIN_UID = 1000`
-        in the tier2 section shadowed the env-aware lookup, locking out any
-        admin whose uid != 1000 and disagreeing with the tier2 launch path.
-
-        Driven in a subprocess so the env-resolved module globals are fresh
-        (they are computed at import) without polluting the shared module."""
-        import os
-        import subprocess
-        import sys
-
-        sm_dir = str(Path(sm.__file__).resolve().parent)
-        env = dict(
-            os.environ,
-            QDISTRO_ADMIN_USER="root",  # uid 0, env-aware, deliberately != 1000
-            PYTHONPATH=sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
-        )
-        out = subprocess.check_output(
-            [sys.executable, "-c",
-             "import qdistro_session_manager as m;"
-             "print(m.ADMIN_UID, m.TIER2_LAUNCH_OWNER_UID,"
-             " m.validate_silo_uid(0, m.KIND_TIER2_TEMPLATE))"],
-            env=env, text=True).split()
-        assert out == ["0", "0", "0"], out  # NOT 1000
-
-        # And the old hardcoded owner (1000) is now rejected when admin != 1000.
-        rej = subprocess.run(
-            [sys.executable, "-c",
-             "import qdistro_session_manager as m;"
-             "m.validate_silo_uid(1000, m.KIND_TIER2_TEMPLATE)"],
-            env=env, capture_output=True, text=True)
-        assert rej.returncode != 0
-        assert "launch-owner" in rej.stderr
-
-    def test_admin_uid_missing_explicit_user_fails_closed(self):
-        import subprocess
-        import sys
-
-        sm_dir = str(Path(sm.__file__).resolve().parent)
-        env = dict(
-            os.environ,
-            QDISTRO_ADMIN_USER="qdistro-no-such-admin-user",
-            PYTHONPATH=sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
-        )
-        res = subprocess.run(
-            [sys.executable, "-c", "import qdistro_session_manager"],
-            env=env, capture_output=True, text=True)
-        assert res.returncode != 0
-        assert "qdistro-no-such-admin-user" in res.stderr
-        assert "does not exist" in res.stderr
-        assert "1000" not in res.stderr
-
-    def test_admin_uid_missing_default_admin_fails_closed(self):
-        import subprocess
-        import sys
-
-        sm_dir = str(Path(sm.__file__).resolve().parent)
-        env = dict(os.environ)
-        env.pop("QDISTRO_ADMIN_USER", None)
-        env["PYTHONPATH"] = (
-            sm_dir + os.pathsep + os.environ.get("PYTHONPATH", ""))
-        res = subprocess.run(
-            [sys.executable, "-c",
-             "import pwd\n"
-             "def missing_admin(name):\n"
-             "    if name == 'admin':\n"
-             "        raise KeyError(name)\n"
-             "    return pwd._orig_getpwnam(name)\n"
-             "pwd._orig_getpwnam = pwd.getpwnam\n"
-             "pwd.getpwnam = missing_admin\n"
-             "import qdistro_session_manager\n"],
-            env=env, capture_output=True, text=True)
-        assert res.returncode != 0
-        assert "configured admin user 'admin' does not exist" in res.stderr
-        assert "1000" not in res.stderr
+    def test_admin_uid_is_fixed_1000(self):
+        assert sm.ADMIN_USER_NAME == "admin"
+        assert sm.ADMIN_UID == 1000
+        assert sm.TIER2_LAUNCH_OWNER_UID == 1000
+        assert sm.validate_silo_uid(1000, sm.KIND_TIER2_TEMPLATE) == 1000
 
     def test_schema_round_trips_tier2(self, ops, tmp_path):
         s1 = _SiloStore(ops, config_path=tmp_path / "silos.yaml")
@@ -1291,13 +1218,7 @@ class TestTier2TemplateKind:
         assert recovered["TIER2_NETWORK"] == "slirp4netns"
         assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == ["chromium"]
         assert recovered["QD_WORKLOAD"] == "browser"
-        # The daemon stamps its VALIDATED canonical admin user (derived from
-        # ADMIN_UID, not the raw env string) so the launch/stop helpers — which
-        # run in the templated unit's env, NOT the daemon's — resolve the right
-        # identity for a non-default-admin deployment. The test harness sets
-        # QDISTRO_ADMIN_USER=root (uid 0 -> pw_name "root").
-        assert recovered["QDISTRO_ADMIN_USER"] == sm.ADMIN_USER_NAME
-        assert recovered["QDISTRO_ADMIN_USER"] == "root"
+        assert "QDISTRO_ADMIN_USER" not in recovered
 
     def test_stop_tier2_clean(self, store, ops):
         store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
@@ -1335,7 +1256,7 @@ def _source_env_via_bash(env_text: str) -> dict:
         fh.write(env_text)
         path = fh.name
     keys = ["TIER2_SILO", "TIER2_NETWORK", "QD_WORKLOAD", "QD_CONTAINER",
-            "QD_APP_ARGV_JSON", "QDISTRO_ADMIN_USER"]
+            "QD_APP_ARGV_JSON"]
     script = (f"set -a; . {path}; set +a; "
               + "; ".join(f'printf "%s\\0" "${{{k}}}"' for k in keys))
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,

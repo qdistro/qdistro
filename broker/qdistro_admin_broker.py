@@ -41,15 +41,14 @@ from qdistro_resolver import resolve_subject  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
-# Discover the admin UID at startup. QDISTRO_ADMIN_USER overrides the
-# username for images where the admin account has a non-standard UID;
-# it does NOT rename the admin role (D-Bus policies still reference
-# user="admin", and changing that requires updating the .conf files).
+# qdistro is single-tenant: the admin role is the fixed admin account.
 try:
-    ADMIN_UID = _pwd_mod.getpwnam(
-        os.environ.get("QDISTRO_ADMIN_USER", "admin")).pw_uid
-except KeyError:
-    ADMIN_UID = 1000
+    ADMIN_UID = _pwd_mod.getpwnam("admin").pw_uid
+except KeyError as e:
+    raise RuntimeError("fixed admin user 'admin' does not exist") from e
+if ADMIN_UID != 1000:
+    raise RuntimeError(
+        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
 
