@@ -26,7 +26,6 @@ from qdistro_session_manager import (
     _STATE_TRANSITIONS,
     BadArgument,
     BadState,
-    Silo,
     SiloBusy,
     SiloExists,
     State,
@@ -1292,6 +1291,13 @@ class TestTier2TemplateKind:
         assert recovered["TIER2_NETWORK"] == "slirp4netns"
         assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == ["chromium"]
         assert recovered["QD_WORKLOAD"] == "browser"
+        # The daemon stamps its VALIDATED canonical admin user (derived from
+        # ADMIN_UID, not the raw env string) so the launch/stop helpers — which
+        # run in the templated unit's env, NOT the daemon's — resolve the right
+        # identity for a non-default-admin deployment. The test harness sets
+        # QDISTRO_ADMIN_USER=root (uid 0 -> pw_name "root").
+        assert recovered["QDISTRO_ADMIN_USER"] == sm.ADMIN_USER_NAME
+        assert recovered["QDISTRO_ADMIN_USER"] == "root"
 
     def test_stop_tier2_clean(self, store, ops):
         store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
@@ -1329,13 +1335,13 @@ def _source_env_via_bash(env_text: str) -> dict:
         fh.write(env_text)
         path = fh.name
     keys = ["TIER2_SILO", "TIER2_NETWORK", "QD_WORKLOAD", "QD_CONTAINER",
-            "QD_APP_ARGV_JSON"]
+            "QD_APP_ARGV_JSON", "QDISTRO_ADMIN_USER"]
     script = (f"set -a; . {path}; set +a; "
               + "; ".join(f'printf "%s\\0" "${{{k}}}"' for k in keys))
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                          check=True)
     vals = out.stdout.split("\0")
-    return dict(zip(keys, vals))
+    return dict(zip(keys, vals, strict=False))
 
 
 def test_launch_env_round_trips_argv_with_single_quote(store, ops):
@@ -1349,6 +1355,31 @@ def test_launch_env_round_trips_argv_with_single_quote(store, ops):
     recovered = _source_env_via_bash(ops.launch_envs["b2"])
     assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == \
         ["chromium", "--user-agent=it's me"]
+
+
+def test_real_write_launch_env_is_owner_restricted_no_admin_chown(tmp_path,
+                                                                  monkeypatch):
+    """Security: the launch env is `.`-sourced by the now-root launch helper, so
+    it must stay in root's TCB — written 0600 and NOT chowned away to the admin
+    uid (the old behaviour, unsafe once the unit became User=root). Tests run
+    unprivileged so fchown(0,0) EPERMs (the file stays owned by the test user ==
+    the creating/sourcing uid, which is exactly the euid-relative guard's
+    contract); we assert the mode is 0600 and the writer no longer hands the
+    file to a DIFFERENT uid."""
+    import os as _os
+    import stat as _stat
+    monkeypatch.setattr(sm, "TIER2_LAUNCH_ENV_DIR", tmp_path / "silo-launch")
+    real_ops = sm._SystemOps()
+    p = real_ops.write_launch_env("work", "TIER2_SILO='work'\n")
+    st = _os.stat(p)
+    assert _stat.S_IMODE(st.st_mode) == 0o600, oct(st.st_mode)
+    # The file is owned by the creating (test) uid — NOT chowned to some other
+    # uid. In prod (root) that is root:root; here it is the test user.
+    assert st.st_uid == _os.getuid()
+    # And the source has no lingering chown to the admin/launch-owner uid.
+    src = (sm.__file__ and open(sm.__file__).read()) or ""
+    assert "fchown(fd, TIER2_LAUNCH_OWNER_UID" not in src, \
+        "write_launch_env must not chown the root-sourced env file to admin"
 
 
 def test_stop_tier2_stops_unit_and_clears_env(store, ops):
@@ -1422,7 +1453,7 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
 # Per-silo netns egress lifecycle (todo/fable-networking task 3)
 # ---------------------------------------------------------------------------
 
-from qdistro_silo_egress import TunnelConfig, netns_name, wg_ifname  # noqa: E402
+from qdistro_silo_egress import TunnelConfig, netns_name  # noqa: E402
 
 _TUN = TunnelConfig(
     name="work", peer_public_key="PUB=", endpoint="vpn.example:51820",

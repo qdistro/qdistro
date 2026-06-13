@@ -78,14 +78,29 @@ write_launch_env() {
     # Mirror the daemon's _export_tier2_launch_env exactly (single-quoted
     # KEY='VALUE'). The daemon ALWAYS sets a non-empty template_silo for a
     # tier2-template silo, so TIER2_SILO == the silo name (binding-resolved).
+    # The daemon also stamps QDISTRO_ADMIN_USER (its validated canonical admin
+    # user) — the helpers source THIS as the single source of truth for which
+    # uid to drop podman/resolver/broker to. Arg 1 overrides it (default $ADMIN)
+    # so fail-closed scenarios can drive a bad admin user THROUGH the env file,
+    # exactly as a real non-default-admin deployment would.
+    #
+    # SECURITY: the launch + stop helpers `.`-source this file AS ROOT, so it
+    # must be root-owned and non-group/other-writable or they refuse it. The
+    # daemon writes it root-owned 0600; mirror that here (the env-file dir is
+    # tmpfs /run, the file 0600 root:root).
+    local admin_user="${1:-$ADMIN}"
     install -d -m 0755 "$LAUNCH_ENV_DIR"
-    cat >"$LAUNCH_ENV_DIR/${SILO}.env" <<EOF
+    local f="$LAUNCH_ENV_DIR/${SILO}.env"
+    cat >"$f" <<EOF
 TIER2_SILO='${SILO}'
 TIER2_NETWORK='none'
 QD_WORKLOAD='${WORKLOAD}'
 QD_CONTAINER='qdistro-silo-${SILO}'
 QD_APP_ARGV_JSON='["${WORKLOAD}"]'
+QDISTRO_ADMIN_USER='${admin_user}'
 EOF
+    chown 0:0 "$f"
+    chmod 0600 "$f"
 }
 
 clean_silo() {
@@ -330,11 +345,12 @@ cmd_fail_closed() {
     clean_silo
     local out err rc
 
-    write_launch_env
-
-    # (a) helper with a non-existent admin user must EXIT NONZERO + mint nothing.
+    # (a) launch helper with a non-existent admin user (driven THROUGH the env
+    #     file — the source of truth — exactly as a real non-default-admin
+    #     deployment would) must EXIT NONZERO + mint nothing.
+    write_launch_env nosuchadmin
     out=$(mktemp); err=$(mktemp)
-    QDISTRO_ADMIN_USER=nosuchadmin "$LAUNCH_HELPER" "$SILO" >"$out" 2>"$err"
+    "$LAUNCH_HELPER" "$SILO" >"$out" 2>"$err"
     rc=$?
     [ "$rc" -ne 0 ] \
         || { echo "--- stdout ---" >&2; cat "$out" >&2; \
@@ -344,18 +360,46 @@ cmd_fail_closed() {
     grep -q 'LAUNCH_TOKEN=' "$out" \
         && fail fail-closed "helper emitted a LAUNCH_TOKEN despite the refusal — it spawned"
     rm -f "$out" "$err"
-    pass "launch helper refuses a missing admin user (no un-tagged spawn)"
+    pass "launch helper refuses a missing admin user FROM THE ENV FILE (no un-tagged spawn)"
 
     # (b) the stop helper must refuse uid 0 (would orphan the admin container).
+    #     Again driven through the env file so the env-file resolution path is
+    #     what refuses (root resolves to uid 0).
+    write_launch_env root
     out=$(mktemp); err=$(mktemp)
-    QDISTRO_ADMIN_USER=root "$STOP_HELPER" "$SILO" >"$out" 2>"$err"
+    "$STOP_HELPER" "$SILO" >"$out" 2>"$err"
     rc=$?
     [ "$rc" -ne 0 ] \
         || fail fail-closed "stop helper SUCCEEDED for uid-0 admin (would 'stop' root's empty store, orphaning the admin container)"
     grep -q 'uid 0' "$err" \
         || { cat "$err" >&2; fail fail-closed "stop helper did not refuse uid 0 with the expected message"; }
     rm -f "$out" "$err"
-    pass "stop helper refuses an admin user that resolves to uid 0"
+    pass "stop helper refuses an admin user (from env file) that resolves to uid 0"
+
+    # (b2) SECURITY: a launch env file NOT owned by root (admin-writable) must be
+    #      REFUSED, never `.`-sourced as root. Plant an admin-owned env file and
+    #      assert both helpers refuse it.
+    write_launch_env
+    chown "$ADMIN":"$ADMIN" "$LAUNCH_ENV_DIR/${SILO}.env" 2>/dev/null || true
+    out=$(mktemp); err=$(mktemp)
+    "$LAUNCH_HELPER" "$SILO" >"$out" 2>"$err"
+    rc=$?
+    [ "$rc" -ne 0 ] \
+        || fail fail-closed "launch helper SOURCED an admin-owned env file as root (rc=0) — root TCB breach"
+    grep -qi 'not root\|refusing to source' "$err" \
+        || { cat "$err" >&2; fail fail-closed "launch helper did not refuse the non-root-owned env file"; }
+    rm -f "$out" "$err"
+    out=$(mktemp); err=$(mktemp)
+    "$STOP_HELPER" "$SILO" >"$out" 2>"$err"
+    rc=$?
+    [ "$rc" -ne 0 ] \
+        || fail fail-closed "stop helper SOURCED an admin-owned env file as root (rc=0) — root TCB breach"
+    grep -qi 'not\|refusing to source' "$err" \
+        || { cat "$err" >&2; fail fail-closed "stop helper did not refuse the non-root-owned env file"; }
+    rm -f "$out" "$err"
+    # Restore a safe (root-owned) env file for any later steps.
+    write_launch_env
+    pass "launch + stop helpers REFUSE a non-root-owned (admin-writable) launch env (root TCB)"
 
     # (c) spawn-tier2 root-launcher gate still fails closed when it cannot stamp
     #     (TIER2_USE_SECCTX=0) — defence at the spawn layer too.

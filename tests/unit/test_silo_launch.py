@@ -61,6 +61,12 @@ def test_launch_helper_admin_resolution_is_fail_closed_in_source() -> None:
     exec_idx = src.rindex("exec env")
     guard_idx = src.index("ADMIN_UID=\"$(id -u")
     assert guard_idx < exec_idx, "admin-uid guard must precede the spawn exec"
+    # Root-TCB: the env file is `.`-sourced as root, so the helper must verify
+    # ownership/mode BEFORE sourcing — a refactor must not drop this guard.
+    assert "require_trusted_env" in src
+    src_idx = src.index('. "$ENV_FILE"')
+    assert src.index("require_trusted_env \"$ENV_FILE\"") < src_idx, \
+        "the trusted-env guard must run BEFORE the source"
 
 
 def test_stop_helper_fails_closed_on_uid_0(tmp_path: Path) -> None:
@@ -71,8 +77,7 @@ def test_stop_helper_fails_closed_on_uid_0(tmp_path: Path) -> None:
     env["QDISTRO_ADMIN_USER"] = "root"
     res = subprocess.run(
         ["/bin/bash", str(_STOP), "work"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, check=False, timeout=30)
+        env=env, capture_output=True, text=True, check=False, timeout=30)
     assert res.returncode != 0
     assert "uid 0" in res.stderr
 
@@ -82,8 +87,7 @@ def test_stop_helper_fails_closed_on_missing_admin_user(tmp_path: Path) -> None:
     env["QDISTRO_ADMIN_USER"] = "nope"
     res = subprocess.run(
         ["/bin/bash", str(_STOP), "work"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, check=False, timeout=30)
+        env=env, capture_output=True, text=True, check=False, timeout=30)
     assert res.returncode != 0
     assert "does not exist" in res.stderr
 
@@ -94,6 +98,235 @@ def test_helpers_are_executable_shell() -> None:
         assert p.stat().st_mode & stat.S_IXUSR, f"{p} not executable"
         head = p.read_text().splitlines()[0]
         assert head.startswith("#!/bin/bash"), head
+
+
+# --------------------------------------------------------------------------
+# QDISTRO_ADMIN_USER env-file propagation (this milestone).
+#
+# The daemon stamps the validated admin user into the per-silo launch env file
+# (/run/qdistro/silo-launch/<name>.env, root-owned 0600); both helpers SOURCE it
+# (the source of truth for which uid to drop podman/resolver/broker to), so a
+# non-default-admin deployment is honoured without the templated unit inheriting
+# the daemon's process env. Because the helpers `.`-source the file AS ROOT, they
+# refuse a file not owned by the sourcing uid or group/other-writable (root TCB).
+#
+# Host tests run unprivileged, so they redirect the env dir
+# (QDISTRO_SILO_LAUNCH_ENV_DIR, a TEST-ONLY override) into a tmp dir and write
+# the env file owned by the test user (== the sourcing uid; the euid-relative
+# guard is satisfied). A fake `id` resolves `id -u <user>` for chosen users while
+# deferring the bare `id -u` euid self-check to the real id, and a recording fake
+# spawn captures the env the launch helper hands spawn-tier2.
+# --------------------------------------------------------------------------
+
+def _farm(tmp_path: Path, *, users: dict[str, str] | None = None,
+          missing: bool = False) -> tuple[Path, dict[str, str]]:
+    """A PATH front dir with a fake `id` (and, for the launch helper, a recording
+    fake spawn). `users` maps a username -> the uid `id -u <name>` should print;
+    an unlisted name (or any name when `missing` is True) makes `id -u <name>`
+    fail (rc 1, no output) — a non-existent admin user. The BARE `id -u` (euid
+    self-check) always defers to the real id so the guard sees the true caller."""
+    farm = tmp_path / "bin"
+    farm.mkdir()
+    users = users or {}
+    # Build a case arm per known user; default arm fails (missing user).
+    arms = "\n".join(
+        f'        {u}) printf "%s\\n" "{uid}"; exit 0 ;;' for u, uid in users.items()
+    )
+    fake_id = farm / "id"
+    fake_id.write_text(
+        "#!/bin/bash\n"
+        '# Bare `id -u` (euid self-check) -> real id (true caller uid).\n'
+        'if [ "$1" = "-u" ] && [ "$#" -eq 1 ]; then exec /usr/bin/id -u; fi\n'
+        'if [ "$1" = "-u" ] && [ "$#" -eq 2 ]; then\n'
+        + ("    exit 1\n" if missing else
+           "    case \"$2\" in\n" + arms + "\n        *) exit 1 ;;\n    esac\n")
+        + 'fi\n'
+        'exec /usr/bin/id "$@"\n')
+    fake_id.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{farm}:{env.get('PATH', '')}"
+    return farm, env
+
+
+def _write_env_file(tmp_path: Path, name: str, *, admin_user: str | None,
+                    mode: int = 0o600) -> Path:
+    """Write a per-silo launch env file (test-user-owned) under a redirected env
+    dir, mirroring the daemon's shlex-quoted KEY='VALUE' lines."""
+    env_dir = tmp_path / "silo-launch"
+    env_dir.mkdir(exist_ok=True)
+    f = env_dir / f"{name}.env"
+    lines = [
+        "TIER2_SILO='work'",
+        "TIER2_NETWORK='none'",
+        "QD_WORKLOAD='browser'",
+        "QD_CONTAINER='qdistro-silo-work'",
+        "QD_APP_ARGV_JSON='[\"browser\"]'",
+    ]
+    if admin_user is not None:
+        lines.append(f"QDISTRO_ADMIN_USER='{admin_user}'")
+    f.write_text("\n".join(lines) + "\n")
+    f.chmod(mode)
+    return f
+
+
+def _recording_spawn(farm: Path) -> Path:
+    """Install a fake spawn-tier2 at /usr/bin/qdistro-tier2-spawn's FIRST helper
+    candidate path is absolute, so we cannot front it on PATH. Instead the launch
+    helper's THIRD candidate is <dir>/../tier2/spawn-tier2.sh; we cannot redirect
+    that either. So we front `env` — the launch helper execs `env TIER2_*=.. SPAWN
+    ..` and a recording `env` captures the resolved TIER2_ADMIN_UID without
+    running the real spawn."""
+    fake_env = farm / "env"
+    rec = farm / "spawn-record"
+    fake_env.write_text(
+        "#!/bin/bash\n"
+        f'rec="{rec}"\n'
+        '# Record every NAME=VALUE assignment arg (TIER2_ROOT_LAUNCHER, '
+        'TIER2_ADMIN_UID, ...) then STOP before exec-ing the real spawn.\n'
+        ': >"$rec"\n'
+        'for a in "$@"; do\n'
+        '    case "$a" in\n'
+        '        *=*) printf "%s\\n" "$a" >>"$rec" ;;\n'
+        '        *) break ;;\n'
+        '    esac\n'
+        'done\n'
+        'exit 0\n')
+    fake_env.chmod(0o755)
+    return rec
+
+
+def _run_launch(tmp_path: Path, name: str, env: dict[str, str]):
+    env = dict(env)
+    env["QDISTRO_SILO_LAUNCH_ENV_DIR"] = str(tmp_path / "silo-launch")
+    return subprocess.run(
+        ["/bin/bash", str(_LAUNCH), name],
+        env=env, capture_output=True, text=True, check=False, timeout=30)
+
+
+def _run_stop(tmp_path: Path, name: str, env: dict[str, str]):
+    env = dict(env)
+    env["QDISTRO_SILO_LAUNCH_ENV_DIR"] = str(tmp_path / "silo-launch")
+    return subprocess.run(
+        ["/bin/bash", str(_STOP), name],
+        env=env, capture_output=True, text=True, check=False, timeout=30)
+
+
+def test_launch_resolves_nondefault_admin_from_env_file(tmp_path: Path) -> None:
+    """A non-default admin user stamped in the env file is resolved and reaches
+    spawn-tier2 as TIER2_ADMIN_UID — the whole point of the propagation."""
+    _write_env_file(tmp_path, "work", admin_user="alice")
+    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    rec = _recording_spawn(farm)
+    # Drop QDISTRO_ADMIN_USER from the PROCESS env so ONLY the env file supplies
+    # it (proves the file is the source of truth, not inherited env).
+    env.pop("QDISTRO_ADMIN_USER", None)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    recorded = rec.read_text()
+    assert "TIER2_ROOT_LAUNCHER=1" in recorded
+    assert "TIER2_ADMIN_UID=4242" in recorded, recorded
+
+
+def test_launch_env_file_overrides_process_env_admin(tmp_path: Path) -> None:
+    """The env file is the SOURCE OF TRUTH: even a (hostile) caller-supplied
+    QDISTRO_ADMIN_USER in the process env must NOT override the daemon's stamped
+    value — the sourced file wins."""
+    _write_env_file(tmp_path, "work", admin_user="alice")
+    farm, env = _farm(tmp_path, users={"alice": "4242", "evil": "9"})
+    rec = _recording_spawn(farm)
+    env["QDISTRO_ADMIN_USER"] = "evil"   # caller tries to redirect
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    recorded = rec.read_text()
+    assert "TIER2_ADMIN_UID=4242" in recorded, recorded   # alice, not evil
+    assert "TIER2_ADMIN_UID=9" not in recorded
+
+
+def test_launch_defaults_to_admin_when_env_file_omits_it(tmp_path: Path) -> None:
+    """Back-compat: a legacy env file WITHOUT QDISTRO_ADMIN_USER (and no process
+    env) falls back to the literal `admin`."""
+    _write_env_file(tmp_path, "work", admin_user=None)
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
+    rec = _recording_spawn(farm)
+    env.pop("QDISTRO_ADMIN_USER", None)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    assert "TIER2_ADMIN_UID=1000" in rec.read_text()
+
+
+def test_launch_fails_closed_on_missing_admin_in_env_file(tmp_path: Path) -> None:
+    """A non-existent admin user stamped in the env file -> exit 6, no spawn."""
+    _write_env_file(tmp_path, "work", admin_user="nosuchadmin")
+    farm, env = _farm(tmp_path, users={}, missing=True)
+    rec = _recording_spawn(farm)
+    env.pop("QDISTRO_ADMIN_USER", None)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 6, (res.returncode, res.stderr)
+    assert "does not exist" in res.stderr
+    assert not rec.exists() or rec.read_text() == "", \
+        "spawn must NOT have run for a missing admin user"
+
+
+def test_launch_refuses_group_or_other_writable_env_file(tmp_path: Path) -> None:
+    """Root TCB: the helper `.`-sources the file as root, so a group/other-
+    writable file (a non-owner could rewrite it) must be REFUSED, never sourced."""
+    f = _write_env_file(tmp_path, "work", admin_user="alice", mode=0o660)
+    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    _recording_spawn(farm)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode != 0
+    assert "writable" in res.stderr, res.stderr
+    # And other-writable too.
+    f.chmod(0o606)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode != 0
+    assert "writable" in res.stderr
+
+
+def test_stop_resolves_nondefault_admin_from_env_file(tmp_path: Path) -> None:
+    """The stop helper sources the SAME env file so it drops to the same admin —
+    assert it runuser's to the env-file admin (captured by a recording runuser)."""
+    _write_env_file(tmp_path, "work", admin_user="alice")
+    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    # Recording runuser captures its `-u <user>` target.
+    rec = farm / "runuser-record"
+    fake_runuser = farm / "runuser"
+    fake_runuser.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$2" >"{rec}"\n'   # $1=-u $2=<user>
+        'exit 0\n')
+    fake_runuser.chmod(0o755)
+    env.pop("QDISTRO_ADMIN_USER", None)
+    res = _run_stop(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    assert rec.read_text().strip() == "alice"
+
+
+def test_stop_missing_env_file_falls_back_best_effort(tmp_path: Path) -> None:
+    """A MISSING env file at stop time is best-effort: the helper falls back to
+    the process env / default rather than failing (ExecStop is best-effort and
+    the daemon re-verifies). Here the process env supplies a valid admin."""
+    # No env file written.
+    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    rec = farm / "runuser-record"
+    fake_runuser = farm / "runuser"
+    fake_runuser.write_text(
+        "#!/bin/bash\n" f'printf "%s\\n" "$2" >"{rec}"\nexit 0\n')
+    fake_runuser.chmod(0o755)
+    env["QDISTRO_ADMIN_USER"] = "alice"
+    res = _run_stop(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    assert rec.read_text().strip() == "alice"
+
+
+def test_stop_refuses_unsafe_env_file(tmp_path: Path) -> None:
+    """Root TCB: a PRESENT but group/other-writable env file is a hard fail for
+    the stop helper too (someone planted/rewrote it)."""
+    _write_env_file(tmp_path, "work", admin_user="alice", mode=0o666)
+    farm, env = _farm(tmp_path, users={"alice": "4242"})
+    res = _run_stop(tmp_path, "work", env)
+    assert res.returncode != 0
+    assert "writable" in res.stderr, res.stderr
 
 
 class _RecordingMgr:

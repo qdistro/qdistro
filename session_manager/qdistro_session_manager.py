@@ -79,6 +79,27 @@ def _resolve_admin_uid() -> int:
 # keeping them separate names stops the two from silently diverging (02/S11).
 ADMIN_UID = _resolve_admin_uid()
 
+
+def _resolve_admin_user_name(uid: int) -> str:
+    """The canonical passwd name for the validated admin uid. Used to stamp
+    QDISTRO_ADMIN_USER into the tier-2 launch env so the launcher/stop helpers
+    resolve the SAME identity the daemon authz-trusts (binding the helper's
+    runuser target to the daemon's validated uid, not a raw env alias that
+    could drift). Fail closed: a uid with no passwd entry must not silently
+    yield an empty/garbage admin user the helpers would refuse anyway."""
+    try:
+        return pwd.getpwuid(int(uid)).pw_name
+    except KeyError as e:
+        raise RuntimeError(
+            f"admin uid {uid} has no passwd entry; cannot resolve the "
+            "canonical admin user name for the tier-2 launch env"
+        ) from e
+
+
+# Canonical admin user name (derived from the validated ADMIN_UID, NOT the raw
+# QDISTRO_ADMIN_USER env string) the daemon stamps into the tier-2 launch env.
+ADMIN_USER_NAME = _resolve_admin_user_name(ADMIN_UID)
+
 # Where per-silo broker state lives. The dir for each silo is owned
 # by the silo's uid and is mode 0700 so other uids cannot peek.
 SILOS_STATE_DIR = Path("/var/lib/qdistro/silos")
@@ -611,16 +632,25 @@ class _SystemOps:
         try:
             os.write(fd, content.encode())
             os.fdatasync(fd)
-            # The launcher unit drops to admin (the rootless-podman owner) and
-            # reads this file; the daemon runs as root, so a root-owned 0600 file
-            # is unreadable by the launcher (the launch fails with "no launch
-            # env"). Hand it to admin so the unit it is written FOR can read it.
-            # Leave the group unchanged (-1): the second arg is a GID, not a
-            # second UID, and admin's primary gid is not guaranteed to equal
-            # the owner uid. Best-effort: only root can chown, and the daemon
-            # is root in prod.
+            # SECURITY (root TCB): this file is `.`-sourced by
+            # qdistro-tier2-silo-launch, which now runs as ROOT (the
+            # root-launcher topology — the unit is User=root so spawn-tier2 can
+            # stamp the secctx wire tag). Shell `.` of a file is code execution
+            # AS the sourcing user, so the file MUST stay in root's trusted
+            # computing base: root-owned, mode 0600, NOT writable by the admin
+            # uid (or any non-root principal). The daemon runs as root, so the
+            # file is root-owned on creation; we deliberately do NOT chown it to
+            # the admin uid (the pre-root-launcher unit dropped to admin to read
+            # it; the launch helper no longer does — it is the only reader and
+            # it runs as root). The helpers ALSO self-defend, refusing to source
+            # a file that is not root-owned + non-group/other-writable. Re-assert
+            # owner root:root and mode 0600 explicitly so a permissive root umask
+            # at open() time cannot widen the file. Best-effort: only root can
+            # chown, and the daemon is root in prod (tests run unprivileged and
+            # tolerate the EPERM).
             try:
-                os.fchown(fd, TIER2_LAUNCH_OWNER_UID, -1)
+                os.fchown(fd, 0, 0)
+                os.fchmod(fd, 0o600)
             except OSError:
                 pass
         finally:
@@ -2394,11 +2424,15 @@ class _SiloStore:
     # ---- start / stop / freeze / resume -------------------------------
 
     def _export_tier2_launch_env(self, silo: Silo) -> None:
-        """Write the per-silo env the tier-2 launcher unit reads. The unit
-        drops to admin and runs spawn-tier2 with these — TIER2_SILO makes the
+        """Write the per-silo env the tier-2 launcher unit reads. The unit runs
+        spawn-tier2 (root-launcher mode) with these — TIER2_SILO makes the
         launch binding-resolved (the only launch that mounts real state) and
         TIER2_NETWORK sets egress. argv is JSON so the launcher script can
-        re-split it without quoting hazards."""
+        re-split it without quoting hazards. QDISTRO_ADMIN_USER carries the
+        daemon's VALIDATED admin identity into the launch + stop helpers, which
+        run in the templated unit's own env (it does NOT inherit the daemon's
+        env), so a non-default-admin deployment no longer silently falls back to
+        the literal `admin` and fails closed."""
         lc = silo.launch
         # shlex.quote EVERY value so the launcher can `set -a; . envfile`
         # safely: the argv JSON contains spaces/brackets/double-quotes, and an
@@ -2412,6 +2446,10 @@ class _SiloStore:
             ("QD_WORKLOAD", lc["workload"]),
             ("QD_CONTAINER", f"qdistro-silo-{silo.name}"),
             ("QD_APP_ARGV_JSON", argv_json),
+            # The canonical admin user (derived from the validated ADMIN_UID,
+            # not a raw env alias) the launch/stop helpers resolve + drop podman/
+            # resolver/broker to. Single source of truth = this daemon.
+            ("QDISTRO_ADMIN_USER", ADMIN_USER_NAME),
         ]
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
         self._ops.write_launch_env(silo.name, "\n".join(lines))
