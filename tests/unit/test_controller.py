@@ -85,7 +85,7 @@ def test_successful_outcome_emits_unlocked(qapp, auth):
     ctrl = LockController(auth)
     sink = []
     ctrl.unlocked.connect(lambda: sink.append(True))
-    auth.outcome.emit(AuthOutcome.SUCCESS)
+    auth.outcome.emit((AuthOutcome.SUCCESS, auth._current_generation()))
     QCoreApplication.processEvents()
     assert sink == [True]
 
@@ -95,7 +95,7 @@ def test_failed_outcome_clears_text_and_emits_failed(qapp, auth):
     ctrl._current_text = "wrongpw"
     sink = []
     ctrl.failed.connect(lambda: sink.append(True))
-    auth.outcome.emit(AuthOutcome.FAILED)
+    auth.outcome.emit((AuthOutcome.FAILED, auth._current_generation()))
     QCoreApplication.processEvents()
     assert sink == [True]
     assert ctrl.currentText == ""
@@ -140,6 +140,66 @@ def test_tagged_success_unlocks(qapp, auth):
     QCoreApplication.processEvents()
     assert sink == [True]
     assert ctrl._unlocked is True
+
+
+@pytest.mark.cheat_aware(
+    protects="every auth outcome must be tagged (AuthOutcome, generation); a "
+    "bare untagged AuthOutcome is dropped so it cannot bypass the anti-replay "
+    "generation check",
+    severity="critical",
+    cheats=[
+        "accept a bare untagged AuthOutcome as a valid outcome",
+        "emit a tagged tuple instead of testing the bare untagged path",
+        "compare generation with <= instead of exact-match equality",
+    ],
+    consequence="a future/refactored backend's untagged SUCCESS bypasses the "
+    "anti-replay generation check and unlocks the screen without the "
+    "stale-outcome guard — an unlock-without-auth bypass",
+)
+def test_untagged_success_is_dropped(qapp, auth):
+    ctrl = LockController(auth)
+    sink = []
+    ctrl.unlocked.connect(lambda: sink.append(True))
+    # A bare untagged outcome must never unlock the screen.
+    auth.outcome.emit(AuthOutcome.SUCCESS)
+    QCoreApplication.processEvents()
+    assert sink == [], "untagged SUCCESS leaked through and unlocked"
+    assert ctrl._unlocked is False
+
+
+def test_untagged_failed_is_dropped(qapp, auth):
+    ctrl = LockController(auth)
+    ctrl._current_text = "wrongpw"
+    fails = []
+    ctrl.failed.connect(lambda: fails.append(True))
+    auth.outcome.emit(AuthOutcome.FAILED)
+    QCoreApplication.processEvents()
+    assert fails == [], "untagged FAILED flashed a spurious failure"
+    assert ctrl.currentText == "wrongpw"
+    assert ctrl.showFailure is False
+
+
+def test_malformed_tuples_are_dropped(qapp, auth):
+    ctrl = LockController(auth)
+    unlocks = []
+    fails = []
+    ctrl.unlocked.connect(lambda: unlocks.append(True))
+    ctrl.failed.connect(lambda: fails.append(True))
+    # Wrong arity, non-int generation, and a bool generation are all
+    # malformed and dropped. The bool case matters because bool subclasses
+    # int: with the current generation at 0, a stray (SUCCESS, False) would
+    # slip past an isinstance(_, int) check (False == 0) and unlock.
+    auth.outcome.emit((AuthOutcome.SUCCESS,))
+    QCoreApplication.processEvents()
+    auth.outcome.emit((AuthOutcome.SUCCESS, "0"))
+    QCoreApplication.processEvents()
+    assert auth._current_generation() == 0  # so (SUCCESS, False) would match gen 0
+    auth.outcome.emit((AuthOutcome.SUCCESS, False))
+    QCoreApplication.processEvents()
+    assert unlocks == [], "malformed outcome leaked through and unlocked"
+    assert fails == []
+    assert ctrl._unlocked is False
+    assert ctrl.showFailure is False
 
 
 @pytest.mark.cheat_aware(

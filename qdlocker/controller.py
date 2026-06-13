@@ -166,28 +166,40 @@ class LockController(QObject):
             self._set_show_info(True)
 
     def _on_auth_outcome(self, payload: object) -> None:
-        # Outcomes from the real backend arrive tagged with the session
-        # generation they belong to: (AuthOutcome, generation). Bare
-        # AuthOutcome values (legacy callers / test stubs) are treated as
-        # untagged and always accepted.
-        generation: int | None = None
-        if isinstance(payload, tuple):
-            outcome, generation = payload  # type: ignore[assignment]
-        else:
-            outcome = payload  # type: ignore[assignment]
+        # Outcomes from the real backend always arrive tagged with the
+        # session generation they belong to: (AuthOutcome, generation).
+        # Strictly reject anything else — an untagged or malformed outcome
+        # would bypass the anti-replay generation check below, so drop it
+        # and stay locked (fail closed).
+        # `type(...) is int` deliberately rejects bool: bool subclasses int,
+        # so isinstance(True, int) is True and a stray (AuthOutcome.SUCCESS,
+        # True) would otherwise validate and unlock whenever the current
+        # generation happens to be 1 (True == 1). Demand a real int.
+        if (
+            not isinstance(payload, tuple)
+            or len(payload) != 2
+            or not isinstance(payload[0], AuthOutcome)
+            or type(payload[1]) is not int
+        ):
+            log.warning(
+                "dropping untagged/malformed auth outcome (type=%s); "
+                "expected (AuthOutcome, int)",
+                type(payload).__name__,
+            )
+            return
+        outcome, generation = payload
 
         # Drop a stale outcome from a superseded lock session: a slow PAM
         # or fprintd worker may deliver its result after the next lock
         # already bumped the generation. Acting on it would corrupt the
         # fresh session's state.
-        if generation is not None:
-            current = self._auth._current_generation()
-            if generation != current:
-                log.info(
-                    "dropping stale auth outcome %s (gen=%s, current=%s)",
-                    getattr(outcome, "name", outcome), generation, current,
-                )
-                return
+        current = self._auth._current_generation()
+        if generation != current:
+            log.info(
+                "dropping stale auth outcome %s (gen=%s, current=%s)",
+                getattr(outcome, "name", outcome), generation, current,
+            )
+            return
 
         # Drop a losing outcome that raced in after this lock already
         # unlocked (e.g. PAM FAILED arriving just after fprintd SUCCESS in
