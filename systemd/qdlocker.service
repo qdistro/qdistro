@@ -65,10 +65,12 @@ Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
 # location; hardcoding /usr/lib/python3.11 broke on Python 3.13.
 Environment=PYTHONNOUSERSITE=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-# openSUSE's common-auth stack is an include fragment and fails account
-# management when used as a standalone PAM service. Use the same
-# login-style PAM path verified for admin password unlocks.
-Environment=QDLOCKER_PAM_SERVICE=login
+# Dedicated /etc/pam.d/qdlocker service (shipped from this repo's pam/
+# dir): it `include`s common-account for well-formed account management
+# (a standalone common-auth fragment fails account management on its own)
+# and adds an explicit pam_faillock brute-force lockout. Decoupling from
+# the borrowed `login` stack makes the unlock policy explicit.
+Environment=QDLOCKER_PAM_SERVICE=qdlocker
 # Pin WAYLAND_DISPLAY + XDG_RUNTIME_DIR explicitly: the test-VM linger
 # session doesn't import them into the user manager environment, so we
 # set them here, mirroring noctalia-shell.service.

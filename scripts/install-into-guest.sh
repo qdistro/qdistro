@@ -139,6 +139,7 @@ virt-customize -a "$IMG" \
     --copy-in "$TMPDIR/qdistro-fprintd-fake:/usr/libexec/" \
     --copy-in "$TMPDIR/qdistro-fprintd-fake.service:/etc/systemd/system/" \
     --copy-in "$REPO/systemd/qdlocker.service:/etc/systemd/user/" \
+    --run-command 'install -m 0644 -o root -g root /opt/qdlocker/pam/qdlocker /etc/pam.d/qdlocker' \
     --run-command 'install -d -o admin -g users /home/admin/.config/systemd/user/default.target.wants' \
     --run-command 'ln -snf /etc/systemd/user/qdlocker.service /home/admin/.config/systemd/user/default.target.wants/qdlocker.service' \
     >/dev/null
