@@ -257,6 +257,29 @@ teardown_file() {
     assert_output_contains "PASS: §Phase-7 tier-3 silo chrome differentiation end-to-end"
 }
 
+@test "phase7-tier3-lineage-register: spawn-tier3 auto-registers a launch record (02/S3d)" {
+    # 02/S3d evidence: the registration half of permission lineage for tier-3.
+    # spawn-tier3.sh (root) reads the inner waypipe-client pid published by
+    # qdistro-secctx-exec and calls the broker's RegisterLaunch, binding
+    # (pid,starttime)->silo, so enforce mode can resolve a cross-silo source pid
+    # to its record instead of failing closed. The driver runs under
+    # `lineage_enforce = true` (a broker.conf flag, NOT SELinux enforcing — safe
+    # over qga) and restores the prior posture in its own trap.
+    stage_vm_driver "s60-tier3-lineage-register.sh"
+    vm_run "curl -fsS -o /tmp/s60.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s60-tier3-lineage-register.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-3 stack (waypipe / weston-terminal / qdistro-secctx-exec / user1 silo / broker audit db) not available on this VM"
+    fi
+    assert_output_contains "PASS: tier3 prerequisites present"
+    assert_output_contains "PASS: broker up (enforce posture set)"
+    # Load-bearing: the registration line can only appear if spawn-tier3 read
+    # the secctx-exec inner pid and the broker RegisterLaunch re-verified it.
+    assert_output_contains "PASS: spawn-tier3 logged the launch-record registration for silo=user1"
+    # The broker persisted the record as an auditable qdistro.lineage.register row.
+    assert_output_contains "PASS: broker recorded qdistro.lineage.register:user1"
+}
+
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
     stage_vm_driver "s40-secctx.sh"
     vm_run "curl -fsS -o /tmp/s40.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s40-secctx.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"

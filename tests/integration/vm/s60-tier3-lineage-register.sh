@@ -29,7 +29,10 @@ skip() { echo "SKIP: $*"; exit 0; }
 AUDIT_DB=/var/lib/qdistro/audit/audit.sqlite
 BROKER_CONF=/etc/qdistro/broker.conf
 SPAWN_PID=""
-ENFORCE_WAS_SET=""
+# The exact `lineage_enforce` line found before the test (empty if none), so
+# cleanup can restore the VM's prior posture verbatim.
+PRIOR_ENFORCE_LINE=""
+ENFORCE_CAPTURED=0
 TRAP_FIRED=0
 cleanup() {
     [ "$TRAP_FIRED" -eq 1 ] && return 0
@@ -37,9 +40,14 @@ cleanup() {
     [ -n "$SPAWN_PID" ] && kill -TERM "$SPAWN_PID" 2>/dev/null || true
     [ -n "$SPAWN_PID" ] && wait    "$SPAWN_PID" 2>/dev/null || true
     pkill -u user1 -x weston-terminal 2>/dev/null || true
-    # Restore the broker's pre-test enforce posture.
-    if [ "$ENFORCE_WAS_SET" = "0" ]; then
+    # Restore the broker's pre-test lineage_enforce posture EXACTLY — the prior
+    # line if there was one, or its absence — then restart so the running broker
+    # matches. Only touch broker.conf if we actually captured the prior state
+    # (i.e. got far enough to modify it), so an early-prereq exit is a no-op.
+    if [ "$ENFORCE_CAPTURED" = "1" ]; then
+        install -d -m 0755 /etc/qdistro 2>/dev/null || true
         sed -i '/^lineage_enforce/d' "$BROKER_CONF" 2>/dev/null || true
+        [ -n "$PRIOR_ENFORCE_LINE" ] && echo "$PRIOR_ENFORCE_LINE" >> "$BROKER_CONF"
         systemctl restart qdistro-admin-broker.service 2>/dev/null || true
     fi
     rm -f /tmp/s60-spawn.log 2>/dev/null || true
@@ -73,16 +81,21 @@ pass "tier3 prerequisites present"
 # --- 2. enforce mode -------------------------------------------------
 # RegisterLaunch is wired unconditionally (the record is always written so
 # enforce can be flipped without relaunching apps), but we run under enforce
-# so the test reflects the production posture being validated.
-if grep -q "^lineage_enforce" "$BROKER_CONF" 2>/dev/null; then
-    ENFORCE_WAS_SET="1"
-else
-    ENFORCE_WAS_SET="0"
-    install -d -m 0755 /etc/qdistro
-    echo "lineage_enforce = true" >> "$BROKER_CONF"
-    systemctl restart qdistro-admin-broker.service
-    sleep 1
-fi
+# so the test reflects the production posture being validated. Capture the
+# prior lineage_enforce line (if any) for exact restoration, then set it true
+# UNCONDITIONALLY (replacing any prior true/false value) and (re)start the
+# broker. This must not be conditional on a line already existing: a caller —
+# e.g. the tiered-isolation.bats wrapper, whose setup() stops the broker before
+# every test — needs the broker actually RUNNING under enforce here, and a VM
+# whose broker.conf already carried `lineage_enforce = false` must still end up
+# enforcing rather than silently testing the wrong posture.
+PRIOR_ENFORCE_LINE=$(grep '^lineage_enforce' "$BROKER_CONF" 2>/dev/null || true)
+ENFORCE_CAPTURED=1
+install -d -m 0755 /etc/qdistro
+sed -i '/^lineage_enforce/d' "$BROKER_CONF" 2>/dev/null || true
+echo "lineage_enforce = true" >> "$BROKER_CONF"
+systemctl restart qdistro-admin-broker.service
+sleep 1
 pass "broker up (enforce posture set)"
 
 # Baseline count of register rows for user1 so we assert a NEW one appears.
