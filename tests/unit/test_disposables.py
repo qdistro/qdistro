@@ -255,3 +255,162 @@ def test_lease_sweep_targets_missing_keys_are_skipped():
     # crashed on.
     assert disp.lease_sweep_targets([{"name": "disp-x-20260612-151828"}],
                                     9_000_000_000.0) == []
+
+
+# ---- process-tree-empty lease pure helpers ---------------------------
+
+@pytest.mark.parametrize("raw,want", [
+    ("1", True),
+    (" 1 ", True),
+    ("\t1\n", True),
+    (1, True),
+    (True, True),
+    # Fail-closed -> not opted in:
+    ("0", False),
+    (0, False),
+    (False, False),
+    ("", False),
+    ("<no value>", False),
+    (None, False),
+    ("yes", False),
+    ("true", False),
+    ("11", False),
+    (2, False),
+    (["1"], False),
+])
+def test_lease_opt_in(raw, want):
+    assert disp.lease_opt_in(raw) is want
+
+
+@pytest.mark.parametrize("out,want", [
+    # Header + a single PID1 weston row -> [(1,"weston")]
+    ("PID   COMMAND\n1     weston\n", [(1, "weston")]),
+    # Path-form command preserved verbatim (basename match happens in
+    # proctree_empty, not here).
+    ("PID COMMAND\n1 /usr/bin/weston\n", [(1, "/usr/bin/weston")]),
+    # Multiple rows.
+    ("PID COMMAND\n1 weston\n42 weston-terminal\n",
+     [(1, "weston"), (42, "weston-terminal")]),
+    # A command descriptor itself may be a single token even if it had args;
+    # split(None,1) keeps the remainder as one comm field.
+    ("PID COMMAND\n1 weston --foo bar\n", [(1, "weston --foo bar")]),
+    # Fail-closed -> None (caller SKIPs):
+    ("", None),                         # empty
+    ("   \n  \n", None),                # blank
+    ("PID COMMAND\n", None),            # header only, no process row
+    ("PID COMMAND\nweston\n", None),    # row missing the PID field
+    ("PID COMMAND\nxx weston\n", None), # non-integer PID
+    ("PID COMMAND\n1\n", None),         # PID with no comm
+    ("PID COMMAND\n-1 weston\n", None), # negative (isdigit rejects '-')
+    (None, None),                       # wrong type
+    (123, None),
+])
+def test_parse_podman_top_pids(out, want):
+    assert disp.parse_podman_top_pids(out) == want
+
+
+@pytest.mark.parametrize("out,want", [
+    # Only PID1 weston remains -> empty.
+    ("PID COMMAND\n1 weston\n", True),
+    ("PID COMMAND\n1 /usr/bin/weston\n", True),  # basename match
+    # Not empty: an inner client still running.
+    ("PID COMMAND\n1 weston\n42 weston-terminal\n", False),
+    # Not empty: PID1 is not weston (should-never-happen, fail-closed).
+    ("PID COMMAND\n1 bash\n", False),
+    # The sole row is not PID1 (podman oddity) -> fail-closed.
+    ("PID COMMAND\n7 weston\n", False),
+    # Unparseable -> fail-closed False.
+    ("", False),
+    ("PID COMMAND\n", False),
+    (None, False),
+])
+def test_proctree_empty(out, want):
+    assert disp.proctree_empty(out) is want
+
+
+def test_proctree_empty_custom_pid1_comm():
+    assert disp.proctree_empty("PID COMMAND\n1 sway\n", pid1_comm="sway") is True
+    assert disp.proctree_empty("PID COMMAND\n1 weston\n", pid1_comm="sway") is False
+
+
+@pytest.mark.parametrize("now,created,grace,want", [
+    # created unknown -> fail-safe never elapsed.
+    (10_000.0, None, 30, False),
+    # within grace -> not elapsed.
+    (1020.0, 1000, 30, False),
+    (1029.0, 1000, 30, False),
+    # at/past grace -> elapsed.
+    (1030.0, 1000, 30, True),
+    (5000.0, 1000, 30, True),
+    # grace None -> default (30).
+    (1029.0, 1000, None, False),
+    (1030.0, 1000, None, True),
+    # negative grace -> treated as the default, not "no grace".
+    (1010.0, 1000, -5, False),
+    (1030.0, 1000, -5, True),
+    # clock jumped backwards (negative age) -> clamp to not elapsed.
+    (500.0, 1000, 30, False),
+])
+def test_proctree_grace_elapsed(now, created, grace, want):
+    assert disp.proctree_grace_elapsed(now, created, grace) is want
+
+
+_PTOK = "0123456789abcdef0123456789abcdef"
+
+
+def _pcand(name, token=_PTOK, proctree="1", created="1000", grace="30"):
+    return {"name": name, "token": token, "proctree": proctree,
+            "created": created, "grace": grace}
+
+
+def test_proctree_candidate_eligible_happy_path():
+    # disp-* name, valid token, proctree opt-in, created old enough past grace.
+    cand = _pcand("disp-agent-20260612-151828")
+    assert disp.proctree_candidate_eligible(cand, now_epoch=2000.0) is True
+
+
+@pytest.mark.parametrize("cand,now", [
+    # not opted in -> ineligible
+    (_pcand("disp-agent-20260612-151828", proctree="0"), 2000.0),
+    (_pcand("disp-agent-20260612-151828", proctree="<no value>"), 2000.0),
+    # within grace -> ineligible (mid-startup protection)
+    (_pcand("disp-agent-20260612-151828"), 1010.0),
+    # created absent/malformed -> ineligible (cannot judge age)
+    (_pcand("disp-agent-20260612-151828", created="<no value>"), 9e9),
+    (_pcand("disp-agent-20260612-151828", created="x"), 9e9),
+    # bad token -> ineligible
+    (_pcand("disp-agent-20260612-151828", token="NOTHEX"), 9e9),
+    (_pcand("disp-agent-20260612-151828", token="<no value>"), 9e9),
+    # non-disp name -> ineligible (never collateral)
+    (_pcand("qdistro-silo-browser"), 9e9),
+    (_pcand("disp-x-20260612-151828\nevil"), 9e9),
+])
+def test_proctree_candidate_ineligible(cand, now):
+    assert disp.proctree_candidate_eligible(cand, now_epoch=now) is False
+
+
+def test_proctree_candidate_missing_keys_skipped():
+    assert disp.proctree_candidate_eligible({"name": "disp-x-20260612-151828"},
+                                            now_epoch=9e9) is False
+
+
+@pytest.mark.parametrize("wid,want", [
+    ("step-1", True),
+    ("a", True),
+    ("wf-2026-06-13-abc", True),
+    ("0build", True),
+    ("x" * 128, True),
+    # Fail-closed:
+    ("", False),
+    ("-leading", False),
+    ("UPPER", False),
+    ("has space", False),
+    ("semi;colon", False),
+    ("x" * 129, False),       # too long
+    ("wf$", False),
+    (None, False),
+    (123, False),
+    (["step-1"], False),
+])
+def test_is_workflow_id(wid, want):
+    assert disp.is_workflow_id(wid) is want

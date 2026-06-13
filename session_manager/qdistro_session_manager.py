@@ -1142,6 +1142,108 @@ class _SystemOps:
                         "ttl": ttl, "created": created})
         return out
 
+    def disp_proctree_candidates(self) -> list[dict]:
+        """Live disposables plus the metadata the process-tree-empty sweep needs:
+        the container name, its per-spawn token label, the opt-in
+        ``qdistro_lease_proctree`` marker, the ``qdistro_lease_created`` anchor,
+        and the optional ``qdistro_lease_proctree_grace``. Enumerated by the
+        ``qdistro_disposable=1`` label exactly like the TTL candidate read, so an
+        admin container merely *named* disp-* is never listed.
+
+        Returns RAW strings as podman emits them (an absent label renders as the
+        literal ``<no value>`` or ``""``); ALL parsing/validation lives in the
+        pure ``qdistro_disposables`` helpers. Fields are split on US (0x1f), which
+        cannot occur in a name, a hex token, or an integer/boolean label. Returns
+        [] on ANY failure or timeout — the sweep is best-effort (a wedged podman
+        must slow the leak sweep, never crash the daemon)."""
+        sep = "\x1f"
+        fmt = sep.join((
+            "{{.Names}}",
+            '{{.Label "qdistro_tier2_token"}}',
+            '{{.Label "qdistro_lease_proctree"}}',
+            '{{.Label "qdistro_lease_created"}}',
+            '{{.Label "qdistro_lease_proctree_grace"}}',
+        ))
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u",
+                 os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--filter", "label=qdistro_lease_proctree=1",
+                 "--format", fmt],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("proctree sweep: candidate enumeration failed: %s", e)
+            return []
+        if proc.returncode != 0:
+            log.warning("proctree sweep: podman ps rc=%d: %s",
+                        proc.returncode, proc.stderr.strip())
+            return []
+        out: list[dict] = []
+        for ln in proc.stdout.splitlines():
+            if not ln.strip():
+                continue
+            parts = ln.split(sep)
+            if len(parts) != 5:
+                continue
+            name, token, proctree, created, grace = parts
+            out.append({"name": name, "token": token, "proctree": proctree,
+                        "created": created, "grace": grace})
+        return out
+
+    def disp_container_top_pids(self, name: str) -> str | None:
+        """Raw ``podman top <name> pid comm`` output for a disposable, or ``None``
+        on any failure/timeout. Read host-side (no exec into the hardened
+        container). The process-tree-empty predicate parses this with the pure
+        ``parse_podman_top_pids`` / ``proctree_empty`` helpers; ``None`` here maps
+        to a SKIP (fail-closed: a podman error must never be read as 'tree
+        empty'). Bounded by ``timeout`` so the single-flight sweep worker cannot
+        wedge on a stuck container. Name-validated as defence in depth so a
+        non-disposable name can never reach ``podman top``."""
+        if not _disp.is_disposable_container(name):
+            return None
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "top", name, "pid", "comm"],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("proctree sweep: podman top %r failed: %s", name, e)
+            return None
+        if proc.returncode != 0:
+            log.warning("proctree sweep: podman top %r rc=%d: %s",
+                        name, proc.returncode, proc.stderr.strip())
+            return None
+        return proc.stdout
+
+    def disp_containers_by_workflow(self, workflow_id: str) -> list[str]:
+        """Names of disposable containers carrying the per-step
+        ``qdistro_lease_workflow=<workflow_id>`` label. BOTH labels are required
+        in the filter (qdistro_disposable=1 AND the workflow id) so this can only
+        ever resolve OUR disposables — an admin/native container that merely
+        reuses the id value as a label is excluded by the disposable label,
+        exactly as the by-token lookup is. A workflow step may have spawned
+        SEVERAL disposables, so a list (possibly >1) is the expected result.
+
+        Raises OSError if the lookup ITSELF fails (podman missing, runuser
+        failure, rootless-storage error) — deliberately NOT folded into an empty
+        list: for an explicit teardown surface, 'the lookup failed' must never be
+        read as 'no such disposables / already gone' (that would fail OPEN).
+        Mirrors ``disp_containers_by_token``."""
+        proc = subprocess.run(
+            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+             "--", "podman", "ps", "-a",
+             "--filter", "label=qdistro_disposable=1",
+             "--filter", f"label=qdistro_lease_workflow={workflow_id}",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise OSError(
+                f"podman ps by-workflow failed (rc={proc.returncode}): "
+                f"{proc.stderr.strip()}")
+        return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
     def disp_container_remove(self, name: str) -> bool:
         """Force-remove a disposable container in admin's rootless podman.
         Returns True on success (or already-gone), False on a failed/timed-out
@@ -2533,6 +2635,79 @@ class _SiloStore:
                            reason=f"resolved to {names[0]}", caller=caller)
         return self.dispose(names[0], caller=caller)
 
+    def dispose_by_workflow(self, workflow_id: str,
+                            caller: dict[str, Any] | None = None) -> int:
+        """Tear down EVERY disposable a workflow step spawned, keyed on the shared
+        ``qdistro_lease_workflow=<workflow_id>`` label (07-disposables-plan
+        §Lifecycle "workflow step completed"). The teardown surface a workflow
+        runner calls on step completion: a step may have spawned several
+        disposables (or the runner restarted and lost the per-spawn tokens), so a
+        single grouped teardown is the minimal correct surface. Returns the count
+        of containers torn down.
+
+        Fail-closed at every step, mirroring ``dispose_by_token``: a malformed id
+        is a BadArgument (it never reaches a podman filter); a FAILED lookup
+        (podman/runuser error) is a BadState, NOT 'no disposables / already gone'
+        (which would fail OPEN); every resolved name is re-validated by
+        ``dispose`` before any rm. A 0-match result is idempotent success
+        (returns 0). CRUCIALLY (cond 8): if ANY matched container fails to
+        dispose, this does NOT report clean success — after attempting all, it
+        raises BadState so a caller never treats a partial teardown as complete.
+        Every outcome is audited under action ``dispose-by-workflow`` (each
+        concrete removal is additionally audited under ``dispose``)."""
+        if not _disp.is_workflow_id(workflow_id):
+            self._audit_record("dispose-by-workflow", str(workflow_id),
+                               decision="deny", reason="malformed workflow id",
+                               caller=caller)
+            raise BadArgument(f"malformed workflow id: {workflow_id!r}")
+        try:
+            names = self._ops.disp_containers_by_workflow(workflow_id)
+        except OSError as e:
+            self._audit_record("dispose-by-workflow", str(workflow_id),
+                               decision="error", reason=f"lookup errored: {e}",
+                               caller=caller)
+            raise BadState(
+                f"dispose-by-workflow {workflow_id!r} lookup failed: {e}") from e
+        if not names:
+            # No disposables carry this id (already closed/--rm'd/reaped, or none
+            # ever opted in): a teardown request with nothing to do is satisfied.
+            self._audit_record("dispose-by-workflow", str(workflow_id),
+                               decision="allow",
+                               reason="no live disposables (already gone)",
+                               caller=caller)
+            log.info("dispose_by_workflow %r -> 0 (already gone)", workflow_id)
+            return 0
+        self._audit_record("dispose-by-workflow", str(workflow_id),
+                           decision="allow",
+                           reason=f"resolved to {len(names)} container(s)",
+                           caller=caller)
+        reaped = 0
+        failures: list[str] = []
+        for name in names:
+            # Delegate each to dispose(): re-validates the disp-* name shape
+            # (defence in depth) and audits the concrete removal under 'dispose'.
+            # Best-effort across the group — one bad container must not strand the
+            # rest — but a failure is recorded so the method fails overall.
+            try:
+                if self.dispose(name, caller=caller):
+                    reaped += 1
+                else:
+                    failures.append(name)
+            except SessionError as e:
+                log.warning("dispose-by-workflow: dispose(%r) failed: %s",
+                            name, e)
+                failures.append(name)
+        if failures:
+            self._audit_record(
+                "dispose-by-workflow", str(workflow_id), decision="error",
+                reason=f"reaped {reaped}/{len(names)}; failed: {failures}",
+                caller=caller)
+            raise BadState(
+                f"dispose-by-workflow {workflow_id!r}: reaped {reaped}/"
+                f"{len(names)}, failed to dispose {failures}")
+        log.info("dispose_by_workflow %r -> reaped %d", workflow_id, reaped)
+        return reaped
+
     # Caller stamped on a lease-triggered teardown so an audit reader can tell a
     # session-manager-initiated reap (the wall clock crossed the lease) from an
     # admin's explicit Dispose. The discriminator lives in ``exe`` because that
@@ -2587,6 +2762,82 @@ class _SiloStore:
                 log.warning("lease sweep: dispose(%r) errored: %s", name, e)
         if reaped:
             log.info("lease sweep reaped %d expired disposable(s): %s",
+                     len(reaped), reaped)
+        return reaped
+
+    # Distinct from LEASE_CALLER so an audit reader can tell a process-tree-empty
+    # reap (the inner tree collapsed to weston alone) apart from a TTL reap (the
+    # wall clock crossed the max-lifetime). The discriminator lives in ``exe`` —
+    # the only caller field _AuditLog persists — and the concrete removal's
+    # 'dispose' row carries it, so caller_exe is the durable join (cond 6).
+    PROCTREE_CALLER = {"uid": 0, "pid": None, "exe": "session-manager:lease-proctree"}
+
+    def sweep_empty_proctrees(self, now: float | None = None,
+                              candidates: list[dict] | None = None,
+                              caller: dict[str, Any] | None = None) -> list[str]:
+        """In-session process-tree-empty leak backstop (07-disposables-plan
+        §Lifecycle "last toplevel closed AND process tree empty"). Reap every
+        OPT-IN (``qdistro_lease_proctree=1``) disposable whose inner process tree
+        has collapsed to the compositor PID1 (weston) alone — no remaining
+        client/helper/workload — past its grace window, by delegating to
+        ``dispose()`` (name re-validated, audited).
+
+        HONESTY: with ``podman run --rm``, PID1 exit already auto-removes the
+        container, so this targets the leak where weston lingers as an EMPTY
+        compositor after every inner client exited (PID1 never exits on its own).
+        A ``True`` proctree-empty decision means "only the compositor PID1
+        remains; no client/helper/workload process is visible", NOT a true
+        OS-level empty process tree. It is OPT-IN per the workload contract "no
+        new work will be launched once the tree empties"; interactive disposables
+        (the default) never carry the label and are never touched here.
+
+        Two-phase + fail-closed: phase 1 selects eligible candidates on metadata
+        alone (``proctree_candidate_eligible`` — disp-* name, valid token,
+        proctree opt-in, parseable created, age past grace); phase 2 does the
+        more expensive ``podman top`` ONLY for those, reaping only when
+        ``proctree_empty`` is unambiguously True. Any ``podman top`` failure /
+        unparseable output / extra process / wrong PID1 command => SKIP (never
+        reap on a guess).
+
+        Best-effort and crash-proof like ``sweep_expired_leases``: NEVER raises (a
+        periodic GLib timer drives it), one failure does not abort the rest, and
+        it does NOT hold ``self._lock`` (disposables are external podman objects;
+        ``dispose()`` holds no lock). The caller runs it single-flight on a worker
+        thread."""
+        if now is None:
+            now = time.time()
+        if candidates is None:
+            try:
+                candidates = self._ops.disp_proctree_candidates()
+            except Exception as e:  # noqa: BLE001
+                log.warning("proctree sweep: candidate enumeration errored: %s",
+                            e)
+                return []
+        caller = caller if caller is not None else dict(self.PROCTREE_CALLER)
+        reaped: list[str] = []
+        for cand in candidates:
+            if not _disp.proctree_candidate_eligible(cand, now):
+                continue
+            name = cand["name"]
+            # Phase 2: the expensive per-container process inspection, ONLY for an
+            # eligible candidate. A podman-top failure or any non-PID1-only state
+            # is a SKIP — never a reap.
+            try:
+                top = self._ops.disp_container_top_pids(name)
+            except Exception as e:  # noqa: BLE001
+                log.warning("proctree sweep: top(%r) errored: %s", name, e)
+                continue
+            if not _disp.proctree_empty(top):
+                continue
+            try:
+                if self.dispose(name, caller=caller):
+                    reaped.append(name)
+            except SessionError as e:
+                log.warning("proctree sweep: dispose(%r) failed: %s", name, e)
+            except Exception as e:  # noqa: BLE001
+                log.warning("proctree sweep: dispose(%r) errored: %s", name, e)
+        if reaped:
+            log.info("proctree sweep reaped %d empty-tree disposable(s): %s",
                      len(reaped), reaped)
         return reaped
 
@@ -3119,6 +3370,33 @@ if dbus is not None:
             except SessionError as e:
                 raise _to_dbus_exception(e) from e
 
+        @dbus.service.method(BUS_NAME, in_signature="s", out_signature="u",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def DisposeByWorkflow(self, workflow_id, sender=None, conn=None):
+            """Tear down EVERY disposable a workflow step spawned, keyed on the
+            shared qdistro_lease_workflow=<id> label — the surface a workflow
+            runner calls on step completion (07-disposables-plan §Lifecycle
+            "workflow step completed"). Admin-only and fail-closed: the store
+            rejects a malformed id, fails closed (BadState) on a lookup error
+            rather than reporting 'already gone', re-validates every resolved
+            name, and — crucially — does NOT report clean success if any matched
+            container failed to dispose. Returns the count torn down (0 when none
+            carried the id, idempotently)."""
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("dispose-by-workflow", workflow_id, caller, e)
+                raise _to_dbus_exception(e) from e
+            try:
+                n = int(self.store.dispose_by_workflow(str(workflow_id),
+                                                       caller=caller))
+                log.info("DisposeByWorkflow id=%s -> reaped %d", workflow_id, n)
+                return n
+            except SessionError as e:
+                raise _to_dbus_exception(e) from e
+
         @dbus.service.method(BUS_NAME, in_signature="", out_signature="s")
         def ListSilos(self):
             rows = [s.to_dict() for s in self.store.list_silos()]
@@ -3198,10 +3476,23 @@ class _LeaseSweepScheduler:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def _run_lease_sweeps(mgr):
+    """Run BOTH periodic disposable lease sweeps in sequence on the worker
+    thread: the TTL max-lifetime backstop and the process-tree-empty backstop.
+    Each is independently best-effort and crash-proof (neither raises), so a
+    failure in one never starves the other. Sharing one single-flight worker (one
+    scheduler) means two sweeps of the same kind never overlap and a slow TTL pass
+    cannot race a proctree pass to remove + double-audit the same container."""
+    mgr.store.sweep_expired_leases()
+    mgr.store.sweep_empty_proctrees()
+
+
 def _install_lease_sweep(mgr):  # pragma: no cover - VM/daemon only
-    """Register the periodic disposable TTL-lease sweep on the GLib main loop
-    via a single-flight _LeaseSweepScheduler. No-op (returns None) when the
-    interval is <= 0 or GLib is unavailable. Returns the scheduler otherwise."""
+    """Register the periodic disposable lease sweeps (TTL + process-tree-empty) on
+    the GLib main loop via a single-flight _LeaseSweepScheduler. No-op (returns
+    None) when the interval is <= 0 or GLib is unavailable. Returns the scheduler
+    otherwise. The two sweeps share one scheduler so they run single-flight
+    together (never overlapping, never double-reaping)."""
     interval = _lease_sweep_interval()
     if interval <= 0:
         log.info("disposable lease sweep disabled "
@@ -3210,9 +3501,10 @@ def _install_lease_sweep(mgr):  # pragma: no cover - VM/daemon only
     if GLib is None:
         log.warning("GLib unavailable; disposable lease sweep not installed")
         return None
-    sched = _LeaseSweepScheduler(lambda: mgr.store.sweep_expired_leases())
+    sched = _LeaseSweepScheduler(lambda: _run_lease_sweeps(mgr))
     GLib.timeout_add_seconds(interval, sched.tick)
-    log.info("disposable TTL-lease sweep every %ds", interval)
+    log.info("disposable lease sweeps (TTL + proctree-empty) every %ds",
+             interval)
     return sched
 
 

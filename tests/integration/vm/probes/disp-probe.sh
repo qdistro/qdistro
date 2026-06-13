@@ -591,13 +591,298 @@ PY
     pass lease-sweep
 }
 
+cmd_proctree_spawn_labels() {
+    # Prove the SHIPPED spawn stamps the process-tree + workflow lease labels on
+    # the REAL container when their opt-in knobs are set (the spawn-side half of
+    # the new predicates; the daemon-side reap is cmd_proctree_sweep, the
+    # workflow teardown is cmd_workflow_dispose).
+    clean_disp
+    local out err container l_pt l_grace l_created l_wf
+    out=$(mktemp); err=$(mktemp); container=""; SPAWN_PID=""
+    # shellcheck disable=SC2317
+    _psl_cleanup() {
+        [ -n "${container:-}" ] && as_admin podman rm -f "$container" >/dev/null 2>&1
+        [ -n "${SPAWN_PID:-}" ] && kill "$SPAWN_PID" 2>/dev/null
+        rm -f "$out" "$err" 2>/dev/null
+        return 0
+    }
+    trap _psl_cleanup EXIT
+
+    as_admin env QDISTRO_DISPOSABLE_LEASE_PROCTREE=1 \
+        QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE=45 \
+        QDISTRO_DISPOSABLE_WORKFLOW=wfstep-1 \
+        "$SPAWN" --disposable "$WORKLOAD" -- weston-terminal \
+        >"$out" 2>"$err" &
+    SPAWN_PID=$!
+    for _ in $(seq 1 60); do
+        container=$(awk -F= '/^CONTAINER=/{print $2; exit}' "$out" 2>/dev/null)
+        [ -n "$container" ] && as_admin podman container exists "$container" 2>/dev/null && break
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$container" ] && as_admin podman container exists "$container" 2>/dev/null \
+        || { echo "--- spawn stderr ---" >&2; cat "$err" >&2; \
+             fail proctree-spawn-labels "disposable container never appeared"; }
+
+    l_pt=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_proctree"}}' "$container" 2>/dev/null)
+    [ "$l_pt" = "1" ] \
+        || fail proctree-spawn-labels "qdistro_lease_proctree label '$l_pt' != 1"
+    pass "shipped spawn stamped qdistro_lease_proctree=1"
+    l_grace=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_proctree_grace"}}' "$container" 2>/dev/null)
+    [ "$l_grace" = "45" ] \
+        || fail proctree-spawn-labels "qdistro_lease_proctree_grace label '$l_grace' != 45"
+    pass "shipped spawn stamped qdistro_lease_proctree_grace=45"
+    # The created anchor must be stamped because proctree was opted in (even with
+    # NO TTL) — it is the shared age anchor for the grace window.
+    l_created=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_created"}}' "$container" 2>/dev/null)
+    [[ "$l_created" =~ ^[0-9]+$ ]] \
+        || fail proctree-spawn-labels "qdistro_lease_created '$l_created' not stamped for a proctree-only lease"
+    pass "shipped spawn stamped qdistro_lease_created (shared anchor) without a TTL"
+    l_wf=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_workflow"}}' "$container" 2>/dev/null)
+    [ "$l_wf" = "wfstep-1" ] \
+        || fail proctree-spawn-labels "qdistro_lease_workflow label '$l_wf' != wfstep-1"
+    pass "shipped spawn stamped qdistro_lease_workflow=wfstep-1"
+
+    as_admin podman rm -f "$container" >/dev/null 2>&1 || true
+    container=""
+    pass proctree-spawn-labels
+}
+
+cmd_proctree_sweep() {
+    # Drive the REAL daemon-side process-tree-empty machinery against real
+    # podman: _SystemOps.disp_proctree_candidates (label read) +
+    # disp_container_top_pids (real `podman top`) + proctree_empty +
+    # _SiloStore.sweep_empty_proctrees -> dispose() -> real `podman rm -f`.
+    #
+    # The fixtures are plain `podman run` containers whose PID1 is the image's
+    # weston entrypoint:
+    #   empty   = ONLY weston (PID1) running        -> REAP (past grace)
+    #   busy    = weston + a child sleep            -> keep (tree not empty)
+    #   fresh   = empty tree but created NOW        -> keep (within grace)
+    #   noopt   = empty tree but no proctree label  -> keep (not opted in)
+    #   notok   = empty tree, opted in, NO token    -> keep (token guard)
+    clean_disp
+    local ts now past tok_e tok_b tok_f tok_n
+    ts=$(date +%Y%m%d-%H%M%S)
+    now=$(date +%s); past=$(( now - 1000 ))
+    tok_e=$(gen_token); tok_b=$(gen_token); tok_f=$(gen_token); tok_n=$(gen_token)
+
+    local empty busy fresh noopt notok
+    empty="disp-ptempty-$ts"
+    busy="disp-ptbusy-$ts"
+    fresh="disp-ptfresh-$ts"
+    noopt="disp-ptnoopt-$ts"
+    notok="disp-ptntok-$ts"
+
+    # PID1 = weston, nothing else. The weston-terminal image has weston on PATH.
+    as_admin podman run -d --name "$empty" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_e" \
+        --label qdistro_lease_proctree=1 --label "qdistro_lease_created=$past" \
+        --label qdistro_lease_proctree_grace=30 \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail proctree-sweep "could not create empty fixture $empty"
+    # NOTE: we use `sleep` as a STABLE stand-in PID1 the probe can rename via a
+    # comm check below. To assert proctree_empty honestly we override the
+    # expected PID1 comm to the actual entrypoint for the fixtures (see python).
+
+    # busy = PID1 + a child, so the tree is never "PID1 only".
+    as_admin podman run -d --name "$busy" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_b" \
+        --label qdistro_lease_proctree=1 --label "qdistro_lease_created=$past" \
+        --entrypoint sh "$IMAGE" -c 'sleep 600 & sleep 600' >/dev/null 2>&1 \
+        || fail proctree-sweep "could not create busy fixture $busy"
+    # fresh = PID1-only but created NOW (within grace) -> survives.
+    as_admin podman run -d --name "$fresh" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_f" \
+        --label qdistro_lease_proctree=1 --label "qdistro_lease_created=$now" \
+        --label qdistro_lease_proctree_grace=100000 \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail proctree-sweep "could not create fresh fixture $fresh"
+    # noopt = PID1-only, past created, but NOT opted in -> never enumerated.
+    as_admin podman run -d --name "$noopt" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_n" \
+        --label "qdistro_lease_created=$past" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail proctree-sweep "could not create no-opt fixture $noopt"
+    # notok = opted in, past created, PID1-only, but NO token label -> guard skip.
+    as_admin podman run -d --name "$notok" \
+        --label qdistro_disposable=1 \
+        --label qdistro_lease_proctree=1 --label "qdistro_lease_created=$past" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail proctree-sweep "could not create no-token fixture $notok"
+
+    local py_out
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        python3 - "$empty" "$busy" "$fresh" "$noopt" "$notok" <<PY 2>&1
+import sys
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+import qdistro_disposables as D
+empty, busy, fresh, noopt, notok = sys.argv[1:6]
+ops = M._SystemOps()
+
+# Real label read: opted-in fixtures are enumerated; noopt is NOT (the
+# qdistro_lease_proctree=1 --filter excludes it), proving the opt-in gate.
+cands = {c["name"]: c for c in ops.disp_proctree_candidates()}
+assert empty in cands and busy in cands and fresh in cands and notok in cands, \
+    f"opted-in fixtures missing from proctree candidates: {list(cands)}"
+assert noopt not in cands, f"{noopt!r} (not opted in) was wrongly enumerated"
+print("ENUM_OK")
+
+# Real podman top: the empty fixture's tree is PID1-only; the busy fixture has a
+# child. These fixtures' PID1 comm is the entrypoint ('sleep'/'sh'), not weston,
+# so we assert proctree_empty against the ACTUAL entrypoint comm to prove the
+# PID1-ONLY discrimination honestly on real podman output.
+top_e = ops.disp_container_top_pids(empty)
+top_b = ops.disp_container_top_pids(busy)
+assert top_e and top_b, "podman top returned nothing"
+# empty: exactly one process row, PID1 = sleep.
+assert D.proctree_empty(top_e, pid1_comm="sleep"), f"empty tree not detected: {top_e!r}"
+# busy: more than one process -> NOT empty under any pid1_comm.
+assert not D.proctree_empty(top_b, pid1_comm="sh"), f"busy tree wrongly empty: {top_b!r}"
+print("TOP_OK")
+
+# Drive the REAL store sweep end to end. The shipped predicate uses pid1_comm=
+# 'weston'; our fixtures' PID1 is 'sleep'/'sh', so the shipped sweep would find
+# NONE empty (PID1 comm mismatch is fail-closed). To exercise the full reap path
+# (eligibility -> top -> proctree_empty -> dispose -> real rm) we monkeypatch the
+# expected PID1 comm to 'sleep' for THIS run only, matching the empty fixture.
+import qdistro_session_manager as _M
+_orig = D.proctree_empty
+D.proctree_empty = lambda out, pid1_comm=D.PROCTREE_PID1_COMM: _orig(out, pid1_comm="sleep")
+try:
+    store = _M._SiloStore(ops, config_path=_M.Path("/tmp/proctree-sweep-silos.yaml"))
+    reaped = store.sweep_empty_proctrees()
+finally:
+    D.proctree_empty = _orig
+assert reaped == [empty], f"proctree sweep reaped {reaped!r}, expected exactly [{empty!r}]"
+print("SWEEP_OK")
+PY
+)
+    echo "$py_out" >&2
+    echo "$py_out" | grep -q ENUM_OK  || fail proctree-sweep "disp_proctree_candidates did not enumerate opted-in fixtures / excluded the non-opted-in one"
+    echo "$py_out" | grep -q TOP_OK   || fail proctree-sweep "real podman top / proctree_empty did not discriminate PID1-only from a busy tree"
+    echo "$py_out" | grep -q SWEEP_OK || fail proctree-sweep "sweep_empty_proctrees did not reap EXACTLY the empty-tree disposable"
+    pass "proctree sweep: real label read + real podman top discriminated PID1-only, reaped only the empty-tree disposable"
+
+    # Ground truth: only the empty-tree one is gone; every guard-skipped fixture
+    # (busy / within-grace / not-opted-in / no-token) survived.
+    as_admin podman container exists "$empty" 2>/dev/null \
+        && fail proctree-sweep "empty-tree disposable $empty survived the sweep"
+    local n
+    for n in "$busy" "$fresh" "$noopt" "$notok"; do
+        as_admin podman container exists "$n" 2>/dev/null \
+            || fail proctree-sweep "guard-skipped fixture $n was wrongly reaped (MUST survive)"
+    done
+    pass "busy / within-grace / not-opted-in / no-token fixtures all survived"
+
+    for n in "$busy" "$fresh" "$noopt" "$notok"; do
+        as_admin podman rm -f "$n" >/dev/null 2>&1 || true
+    done
+    rm -f /tmp/proctree-sweep-silos.yaml 2>/dev/null || true
+    pass proctree-sweep
+}
+
+cmd_workflow_dispose() {
+    # Drive the REAL DisposeByWorkflow teardown against real podman:
+    # _SystemOps.disp_containers_by_workflow (dual-label filter) +
+    # _SiloStore.dispose_by_workflow -> dispose() -> real `podman rm -f`. A
+    # workflow step that spawned SEVERAL disposables tears them ALL down with one
+    # call keyed on the shared qdistro_lease_workflow=<id> label.
+    clean_disp
+    local ts wf other_wf tok1 tok2 tok3
+    ts=$(date +%Y%m%d-%H%M%S)
+    wf="wfgroup-$ts"; other_wf="wfother-$ts"
+    tok1=$(gen_token); tok2=$(gen_token); tok3=$(gen_token)
+
+    local a b c
+    a="disp-wfa-$ts"   # in the group -> torn down
+    b="disp-wfb-$ts"   # in the group -> torn down
+    c="disp-wfc-$ts"   # DIFFERENT workflow id -> survives
+
+    as_admin podman run -d --name "$a" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok1" \
+        --label "qdistro_lease_workflow=$wf" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail workflow-dispose "could not create fixture $a"
+    as_admin podman run -d --name "$b" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok2" \
+        --label "qdistro_lease_workflow=$wf" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail workflow-dispose "could not create fixture $b"
+    as_admin podman run -d --name "$c" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok3" \
+        --label "qdistro_lease_workflow=$other_wf" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail workflow-dispose "could not create fixture $c"
+
+    local py_out
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        python3 - "$wf" "$a" "$b" <<PY 2>&1
+import sys
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+wf, a, b = sys.argv[1:4]
+ops = M._SystemOps()
+
+# Dual-label filter resolves EXACTLY the two group members (the other-workflow
+# container is excluded by the workflow id, and only qdistro_disposable=1
+# containers are ever considered).
+names = sorted(ops.disp_containers_by_workflow(wf))
+assert names == sorted([a, b]), f"by-workflow resolved {names!r}, expected {sorted([a,b])!r}"
+print("RESOLVE_OK")
+
+store = M._SiloStore(ops, config_path=M.Path("/tmp/wf-dispose-silos.yaml"))
+n = store.dispose_by_workflow(wf)
+assert n == 2, f"dispose_by_workflow reaped {n}, expected 2"
+print("DISPOSE_OK")
+
+# Malformed id never reaches a filter -> BadArgument.
+try:
+    store.dispose_by_workflow("Bad Id!")
+    print("BADARG_FAIL")
+except M.BadArgument:
+    print("BADARG_OK")
+
+# A re-run with everything gone is idempotent 0 (no live disposables carry it).
+assert store.dispose_by_workflow(wf) == 0
+print("IDEMPOTENT_OK")
+PY
+)
+    echo "$py_out" >&2
+    echo "$py_out" | grep -q RESOLVE_OK    || fail workflow-dispose "disp_containers_by_workflow did not resolve exactly the group via the dual-label filter"
+    echo "$py_out" | grep -q DISPOSE_OK    || fail workflow-dispose "dispose_by_workflow did not tear down both group members"
+    echo "$py_out" | grep -q BADARG_OK     || fail workflow-dispose "a malformed workflow id was not rejected fail-closed (BadArgument)"
+    echo "$py_out" | grep -q IDEMPOTENT_OK || fail workflow-dispose "dispose_by_workflow re-run was not idempotent 0"
+    pass "workflow dispose: dual-label resolve, group torn down, malformed id rejected, idempotent re-run"
+
+    # Ground truth: both group members gone; the other-workflow container survived.
+    local n
+    for n in "$a" "$b"; do
+        as_admin podman container exists "$n" 2>/dev/null \
+            && fail workflow-dispose "group member $n survived DisposeByWorkflow"
+    done
+    as_admin podman container exists "$c" 2>/dev/null \
+        || fail workflow-dispose "the other-workflow container $c was wrongly torn down"
+    pass "both group members torn down; the other-workflow disposable survived"
+
+    as_admin podman rm -f "$c" >/dev/null 2>&1 || true
+    rm -f /tmp/wf-dispose-silos.yaml 2>/dev/null || true
+    pass workflow-dispose
+}
+
 cmd_teardown() {
     clean_disp
     rm -f "$RULE_FILE" 2>/dev/null || true
     systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
     as_admin podman rmi "$DENY_IMAGE" >/dev/null 2>&1 || true
     rm -rf "$TIER2_BUILD_DIR" /tmp/disp-build.log 2>/dev/null || true
-    rm -f /tmp/lease-sweep-silos.yaml 2>/dev/null || true
+    rm -f /tmp/lease-sweep-silos.yaml /tmp/proctree-sweep-silos.yaml \
+          /tmp/wf-dispose-silos.yaml 2>/dev/null || true
     pass teardown
 }
 
@@ -608,6 +893,9 @@ case "${1:-}" in
     deny-fail-closed) cmd_deny_fail_closed ;;
     lease-spawn-labels) cmd_lease_spawn_labels ;;
     lease-sweep) cmd_lease_sweep ;;
+    proctree-spawn-labels) cmd_proctree_spawn_labels ;;
+    proctree-sweep) cmd_proctree_sweep ;;
+    workflow-dispose) cmd_workflow_dispose ;;
     teardown) cmd_teardown ;;
-    *) echo "usage: $0 {setup|spawn-window-close|reaper-sweep|deny-fail-closed|lease-spawn-labels|lease-sweep|teardown}" >&2; exit 2 ;;
+    *) echo "usage: $0 {setup|spawn-window-close|reaper-sweep|deny-fail-closed|lease-spawn-labels|lease-sweep|proctree-spawn-labels|proctree-sweep|workflow-dispose|teardown}" >&2; exit 2 ;;
 esac

@@ -188,11 +188,60 @@ if [ "$DISPOSABLE" = 1 ]; then
         if [[ "$QDISTRO_DISPOSABLE_TTL" =~ ^[0-9]+$ ]] \
            && [ "$QDISTRO_DISPOSABLE_TTL" -gt 0 ]; then
             DISP_LEASE_TTL="$QDISTRO_DISPOSABLE_TTL"
-            DISP_LEASE_CREATED="$(date +%s)"
         elif [ "$QDISTRO_DISPOSABLE_TTL" != "0" ]; then
             echo "spawn-tier2: ignoring invalid" \
                  "QDISTRO_DISPOSABLE_TTL=$QDISTRO_DISPOSABLE_TTL (want a" \
                  "positive integer of seconds; 0/empty = no lease)" >&2
+        fi
+    fi
+
+    # Optional process-tree-empty lease (07-disposables-plan §Lifecycle "last
+    # toplevel closed AND process tree empty"). OFF by default. Opt in with
+    # QDISTRO_DISPOSABLE_LEASE_PROCTREE=1 for windowless/agent/workflow pods that
+    # contract "no new client/workload will be launched once the inner tree has
+    # collapsed to the compositor PID1 alone". The session-manager sweep then
+    # reaps the disposable once it observes ONLY weston (PID1) running, past a
+    # grace window. The grace seconds default to 30 (covers the normal "weston is
+    # up before the inner client appears" startup race) and can be overridden
+    # with QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE=<seconds>.
+    DISP_LEASE_PROCTREE=""
+    DISP_LEASE_PROCTREE_GRACE=""
+    if [ "${QDISTRO_DISPOSABLE_LEASE_PROCTREE:-}" = "1" ]; then
+        DISP_LEASE_PROCTREE="1"
+        if [ -n "${QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE:-}" ]; then
+            if [[ "$QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE" =~ ^[0-9]+$ ]]; then
+                DISP_LEASE_PROCTREE_GRACE="$QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE"
+            else
+                echo "spawn-tier2: ignoring invalid" \
+                     "QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE=$QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE" \
+                     "(want a non-negative integer of seconds)" >&2
+            fi
+        fi
+    fi
+
+    # The creation instant is the chain anchor for BOTH the TTL expiry and the
+    # process-tree grace window, so stamp it whenever EITHER lease is opted in
+    # (self-authored unix epoch, never podman's version-volatile created-time).
+    if [ -n "$DISP_LEASE_TTL" ] || [ -n "$DISP_LEASE_PROCTREE" ]; then
+        DISP_LEASE_CREATED="$(date +%s)"
+    fi
+
+    # Optional workflow-step lease (07-disposables-plan §Lifecycle "workflow step
+    # completed"). A grouping id so a workflow runner can tear down EVERY
+    # disposable a step spawned with one DisposeByWorkflow(id) call on step
+    # completion. Opt in with QDISTRO_DISPOSABLE_WORKFLOW=<id>; the id rides in a
+    # podman label and a --filter value, so constrain it to the same conservative
+    # lowercase token shape as a workload (no arbitrary label bytes reach a
+    # filter). This is an EXTERNAL teardown surface, not a periodic predicate — no
+    # created/sweep machinery attaches to it.
+    DISP_LEASE_WORKFLOW=""
+    if [ -n "${QDISTRO_DISPOSABLE_WORKFLOW:-}" ]; then
+        if [[ "$QDISTRO_DISPOSABLE_WORKFLOW" =~ ^[a-z0-9][a-z0-9-]{0,127}$ ]]; then
+            DISP_LEASE_WORKFLOW="$QDISTRO_DISPOSABLE_WORKFLOW"
+        else
+            echo "spawn-tier2: ignoring invalid" \
+                 "QDISTRO_DISPOSABLE_WORKFLOW=$QDISTRO_DISPOSABLE_WORKFLOW" \
+                 "(want ^[a-z0-9][a-z0-9-]{0,127}\$)" >&2
         fi
     fi
 fi
@@ -236,6 +285,9 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'STATE=%s\n' "${TIER2_SILO:-none}"
     printf 'LEASE_TTL=%s\n' "${DISP_LEASE_TTL:-none}"
     printf 'LEASE_CREATED=%s\n' "${DISP_LEASE_CREATED:-none}"
+    printf 'LEASE_PROCTREE=%s\n' "${DISP_LEASE_PROCTREE:-none}"
+    printf 'LEASE_PROCTREE_GRACE=%s\n' "${DISP_LEASE_PROCTREE_GRACE:-none}"
+    printf 'LEASE_WORKFLOW=%s\n' "${DISP_LEASE_WORKFLOW:-none}"
     exit 0
 fi
 
@@ -472,12 +524,17 @@ export TIER2_ADMIN_UID_RESOLVED="$ADMIN_UID"
 export TIER2_IMAGE="$IMAGE"
 export TIER2_CONTAINER="$CONTAINER"
 export TIER2_DISPOSABLE_RESOLVED="$DISPOSABLE"
-# Lease (optional TTL backstop): empty unless QDISTRO_DISPOSABLE_TTL opted in
-# (set in the disposable identity block). Exported so the WRAPPER_BODY shell —
-# which only sees exported TIER2_*_RESOLVED vars, not this script's locals —
-# can stamp the lease labels on the podman run.
+# Lease labels (all optional, all opt-in in the disposable identity block):
+# empty unless the corresponding QDISTRO_DISPOSABLE_* knob was set. Exported so
+# the WRAPPER_BODY shell — which only sees exported TIER2_*_RESOLVED vars, not
+# this script's locals — can stamp them on the podman run. TTL + proctree are
+# in-session sweep leases; created anchors BOTH their windows; workflow is the
+# external DisposeByWorkflow grouping id.
 export TIER2_LEASE_TTL_RESOLVED="${DISP_LEASE_TTL:-}"
 export TIER2_LEASE_CREATED_RESOLVED="${DISP_LEASE_CREATED:-}"
+export TIER2_LEASE_PROCTREE_RESOLVED="${DISP_LEASE_PROCTREE:-}"
+export TIER2_LEASE_PROCTREE_GRACE_RESOLVED="${DISP_LEASE_PROCTREE_GRACE:-}"
+export TIER2_LEASE_WORKFLOW_RESOLVED="${DISP_LEASE_WORKFLOW:-}"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
 export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
@@ -581,16 +638,31 @@ elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
         # regex stays as defence-in-depth on the remove path.
         --label qdistro_disposable=1
     )
-    # Optional TTL lease labels (only when QDISTRO_DISPOSABLE_TTL opted in). The
-    # session-manager periodic sweep reaps this disposable once
-    # now - created > ttl; absent labels mean no lease (the default). Read from
-    # the exported TIER2_LEASE_*_RESOLVED env (this is the WRAPPER_BODY shell,
-    # which does not see the parent script non-exported DISP_LEASE_* locals).
+    # Optional lease labels (each only when the matching knob was opted in). The
+    # session-manager periodic sweep reaps a TTL disposable once now-created>ttl,
+    # and a proctree disposable once its inner tree is PID1-only past grace;
+    # absent labels mean no lease (the default). The workflow id is the grouping
+    # key DisposeByWorkflow filters on. Read from the exported TIER2_LEASE_*
+    # _RESOLVED env (this is the WRAPPER_BODY shell, which does not see the parent
+    # script non-exported DISP_LEASE_* locals). The created label is shared by the
+    # TTL and proctree windows, so emit it whenever EITHER is present.
     if [ -n "${TIER2_LEASE_TTL_RESOLVED:-}" ]; then
-        PODMAN_HARDENING+=(
-            --label "qdistro_lease_ttl=${TIER2_LEASE_TTL_RESOLVED}"
-            --label "qdistro_lease_created=${TIER2_LEASE_CREATED_RESOLVED}"
-        )
+        PODMAN_HARDENING+=( --label "qdistro_lease_ttl=${TIER2_LEASE_TTL_RESOLVED}" )
+    fi
+    if [ "${TIER2_LEASE_PROCTREE_RESOLVED:-}" = "1" ]; then
+        PODMAN_HARDENING+=( --label "qdistro_lease_proctree=1" )
+        if [ -n "${TIER2_LEASE_PROCTREE_GRACE_RESOLVED:-}" ]; then
+            PODMAN_HARDENING+=(
+                --label "qdistro_lease_proctree_grace=${TIER2_LEASE_PROCTREE_GRACE_RESOLVED}"
+            )
+        fi
+    fi
+    if [ -n "${TIER2_LEASE_TTL_RESOLVED:-}" ] \
+       || [ "${TIER2_LEASE_PROCTREE_RESOLVED:-}" = "1" ]; then
+        PODMAN_HARDENING+=( --label "qdistro_lease_created=${TIER2_LEASE_CREATED_RESOLVED}" )
+    fi
+    if [ -n "${TIER2_LEASE_WORKFLOW_RESOLVED:-}" ]; then
+        PODMAN_HARDENING+=( --label "qdistro_lease_workflow=${TIER2_LEASE_WORKFLOW_RESOLVED}" )
     fi
 fi
 PODMAN_HARDENING+=(

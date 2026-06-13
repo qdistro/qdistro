@@ -272,3 +272,75 @@ def test_disposable_podman_argv(tmp_path: Path) -> None:
     assert "--label qdistro_disposable=1" in argv
     # no persistent-state bind into /home/admin
     assert ":/home/admin:rw" not in argv
+
+
+# --- lease labels (07-disposables-plan §Lifecycle) -------------------------
+
+def test_disposable_no_lease_labels_by_default(tmp_path: Path) -> None:
+    """An interactive disposable (no lease knob) acquires NO lease labels — it
+    relies on window-close + --rm and must never get a surprise reap."""
+    result = _run_disposable(tmp_path, print_plan=True)
+    plan = _plan(result)
+    assert plan["LEASE_TTL"] == "none"
+    assert plan["LEASE_CREATED"] == "none"
+    assert plan["LEASE_PROCTREE"] == "none"
+    assert plan["LEASE_WORKFLOW"] == "none"
+
+
+def test_disposable_proctree_lease_plan(tmp_path: Path) -> None:
+    result = _run_disposable(
+        tmp_path, print_plan=True,
+        extra_env={"QDISTRO_DISPOSABLE_LEASE_PROCTREE": "1",
+                   "QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE": "45"})
+    plan = _plan(result)
+    assert plan["LEASE_PROCTREE"] == "1"
+    assert plan["LEASE_PROCTREE_GRACE"] == "45"
+    # created is the shared anchor — stamped because proctree was opted in even
+    # though no TTL was set.
+    assert re.match(r"^\d+$", plan["LEASE_CREATED"]), plan
+    assert plan["LEASE_TTL"] == "none"
+
+
+def test_disposable_proctree_labels_in_argv(tmp_path: Path) -> None:
+    result = _run_disposable(
+        tmp_path, dbus_mode="allow", record_podman=True,
+        extra_env={"QDISTRO_DISPOSABLE_LEASE_PROCTREE": "1",
+                   "QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE": "45"})
+    assert result.returncode == 0, result.stderr
+    argv = (tmp_path / "podman-argv").read_text()
+    assert "--label qdistro_lease_proctree=1" in argv
+    assert "--label qdistro_lease_proctree_grace=45" in argv
+    assert re.search(r"--label qdistro_lease_created=\d+", argv), argv
+
+
+def test_disposable_proctree_bad_grace_ignored(tmp_path: Path) -> None:
+    # A non-integer grace is ignored (the sweep falls back to the default), but
+    # proctree itself stays opted in.
+    result = _run_disposable(
+        tmp_path, print_plan=True,
+        extra_env={"QDISTRO_DISPOSABLE_LEASE_PROCTREE": "1",
+                   "QDISTRO_DISPOSABLE_LEASE_PROCTREE_GRACE": "soon"})
+    plan = _plan(result)
+    assert plan["LEASE_PROCTREE"] == "1"
+    assert plan["LEASE_PROCTREE_GRACE"] == "none"
+    assert "ignoring invalid" in result.stderr
+
+
+def test_disposable_workflow_lease_plan_and_argv(tmp_path: Path) -> None:
+    result = _run_disposable(
+        tmp_path, dbus_mode="allow", record_podman=True,
+        extra_env={"QDISTRO_DISPOSABLE_WORKFLOW": "step-1"})
+    assert result.returncode == 0, result.stderr
+    argv = (tmp_path / "podman-argv").read_text()
+    assert "--label qdistro_lease_workflow=step-1" in argv
+
+
+def test_disposable_workflow_bad_id_ignored(tmp_path: Path) -> None:
+    # A malformed workflow id is rejected at spawn (never stamped) so a bad value
+    # can never reach a label / downstream filter.
+    result = _run_disposable(
+        tmp_path, print_plan=True,
+        extra_env={"QDISTRO_DISPOSABLE_WORKFLOW": "Bad Id!"})
+    plan = _plan(result)
+    assert plan["LEASE_WORKFLOW"] == "none"
+    assert "ignoring invalid" in result.stderr

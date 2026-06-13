@@ -89,6 +89,23 @@ class _FakeOps:
         # disp_lease_candidates raises it.
         self.disp_lease_meta: dict[str, dict[str, str]] = {}
         self.disp_lease_raises: BaseException | None = None
+        # name -> {"token","proctree","created","grace"} for the process-tree
+        # sweep candidate read (mirrors the qdistro_lease_proctree=1 filter: only
+        # names also flagged here as opted-in are enumerated). When set to an
+        # exception, disp_proctree_candidates raises it.
+        self.disp_proctree_meta: dict[str, dict[str, str]] = {}
+        self.disp_proctree_raises: BaseException | None = None
+        # name -> raw `podman top` output string the proctree predicate parses.
+        # A missing name returns None (the real ops' fail-closed behaviour). When
+        # set to an exception, disp_container_top_pids raises it.
+        self.disp_top_output: dict[str, str | None] = {}
+        self.disp_top_raises: BaseException | None = None
+        self.disp_top_calls: list[str] = []
+        # id -> list of container names carrying qdistro_lease_workflow=<id>
+        # (for DisposeByWorkflow resolution). When set to an exception,
+        # disp_containers_by_workflow raises it (lookup failure -> fail closed).
+        self.disp_workflow_map: dict[str, list[str]] = {}
+        self.disp_workflow_lookup_raises: BaseException | None = None
         self._egress_init()
 
     # ---- queries ----------------------------------------------------------
@@ -149,6 +166,37 @@ class _FakeOps:
                         "ttl": meta.get("ttl", ""),
                         "created": meta.get("created", "")})
         return out
+
+    def disp_proctree_candidates(self) -> list[dict]:
+        if self.disp_proctree_raises is not None:
+            raise self.disp_proctree_raises
+        out = []
+        for name in self.disp_containers:
+            meta = self.disp_proctree_meta.get(name)
+            if meta is None:
+                # Mirror the real --filter label=qdistro_lease_proctree=1:
+                # only opted-in disposables are enumerated.
+                continue
+            out.append({"name": name,
+                        "token": meta.get("token", ""),
+                        "proctree": meta.get("proctree", "1"),
+                        "created": meta.get("created", ""),
+                        "grace": meta.get("grace", "")})
+        return out
+
+    def disp_container_top_pids(self, name: str):
+        self.disp_top_calls.append(name)
+        if self.disp_top_raises is not None:
+            raise self.disp_top_raises
+        return self.disp_top_output.get(name)
+
+    def disp_containers_by_workflow(self, workflow_id: str) -> list[str]:
+        if self.disp_workflow_lookup_raises is not None:
+            raise self.disp_workflow_lookup_raises
+        # Mirror the dual label filter: only containers also in disp_containers
+        # (carrying qdistro_disposable=1) resolve.
+        return [n for n in self.disp_workflow_map.get(workflow_id, [])
+                if n in self.disp_containers]
 
     def make_state_dir(self, name: str, uid: int):
         self.state_dirs[name] = (int(uid), int(uid), 0o700)
@@ -1963,6 +2011,257 @@ class TestSweepExpiredLeases:
         assert "uid" in store.LEASE_CALLER and store.LEASE_CALLER["uid"] == 0
 
 
+# ---------------------------------------------------------------------------
+# Process-tree-empty sweep (P2b — reap a disposable collapsed to weston PID1)
+# ---------------------------------------------------------------------------
+
+_PT_TOP_EMPTY = "PID COMMAND\n1 weston\n"
+_PT_TOP_BUSY = "PID COMMAND\n1 weston\n42 weston-terminal\n"
+
+
+class TestSweepEmptyProctrees:
+    """sweep_empty_proctrees() reaps OPT-IN disposables whose inner tree has
+    collapsed to the compositor PID1 (weston) alone, past grace. Two-phase:
+    metadata eligibility, then a `podman top` emptiness check ONLY for eligible
+    candidates. Fail-safe (never reap a non-opted-in/mid-startup/non-empty/
+    non-disposable) and crash-proof (never raises; one failure never aborts the
+    rest)."""
+    def _store(self, ops, tmp_path, audit=None):
+        return _SiloStore(ops, config_path=tmp_path / "silos.yaml", audit=audit)
+
+    def _meta(self, token=_LEASE_TOK, proctree="1", created="1000", grace="30"):
+        return {"token": token, "proctree": proctree,
+                "created": created, "grace": grace}
+
+    def test_reaps_empty_tree_via_dispose_and_audits(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta()}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        reaped = store.sweep_empty_proctrees(now=5000.0)  # past grace
+        assert reaped == [_GOOD_DISP]
+        assert ops.disp_removed == [_GOOD_DISP]
+        # podman top was consulted for the eligible candidate.
+        assert ops.disp_top_calls == [_GOOD_DISP]
+        # Audited under 'dispose' with the distinct proctree caller exe.
+        row = [r for r in audit.rows if r["action"] == "dispose"][-1]
+        assert row["decision"] == "allow"
+        assert row["caller"]["exe"] == "session-manager:lease-proctree"
+
+    def test_busy_tree_is_never_reaped(self, ops, tmp_path):
+        # An inner client (weston-terminal) is still running -> not empty -> keep.
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta()}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_BUSY}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees(now=5000.0) == []
+        assert ops.disp_removed == []
+        # top WAS consulted (it was eligible) but emptiness was False.
+        assert ops.disp_top_calls == [_GOOD_DISP]
+
+    def test_not_opted_in_is_never_inspected_or_reaped(self, ops, tmp_path):
+        # A disposable without the proctree label is not even enumerated by the
+        # candidate read (the real --filter), so it is never inspected.
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {}            # no proctree metadata
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees(now=9_000_000_000.0) == []
+        assert ops.disp_top_calls == []        # never inspected
+        assert ops.disp_removed == []
+
+    def test_within_grace_is_not_inspected(self, ops, tmp_path):
+        # Mid-startup (within grace) -> ineligible -> top never consulted, so a
+        # transiently-PID1-only just-spawned pod is never reaped.
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta(created="1000",
+                                                         grace="30")}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees(now=1010.0) == []   # age 10 < grace 30
+        assert ops.disp_top_calls == []
+        assert ops.disp_removed == []
+
+    @pytest.mark.parametrize("meta", [
+        {"token": "NOTHEX"},                       # bad token
+        {"token": "<no value>"},                   # missing token
+        {"created": "<no value>"},                 # no created -> cannot judge age
+        {"created": "garbage"},                    # malformed created
+        {"proctree": "0"},                         # opt-out value (enumerated but
+                                                   # eligibility rejects)
+    ])
+    def test_guard_skipped_candidates_survive(self, ops, tmp_path, meta):
+        m = self._meta()
+        m.update(meta)
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: m}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees(now=9_000_000_000.0) == []
+        assert ops.disp_top_calls == []           # ineligible -> never inspected
+        assert ops.disp_removed == []
+
+    def test_top_failure_is_skip_not_reap(self, ops, tmp_path):
+        # podman top returning None (error/timeout) must SKIP, never reap.
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta()}
+        ops.disp_top_output = {_GOOD_DISP: None}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees(now=5000.0) == []
+        assert ops.disp_top_calls == [_GOOD_DISP]
+        assert ops.disp_removed == []
+
+    def test_top_raises_is_skip_not_crash(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta()}
+        ops.disp_top_raises = OSError("podman top exploded")
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        # Per-candidate top error is caught -> skip, not crash the sweep.
+        assert store.sweep_empty_proctrees(now=5000.0) == []
+        assert ops.disp_removed == []
+
+    def test_enumeration_failure_is_swept_to_empty(self, ops, tmp_path):
+        ops.disp_proctree_raises = OSError("podman storage locked")
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_empty_proctrees() == []
+
+    def test_one_failure_does_not_abort_the_rest(self, ops, tmp_path):
+        other = "disp-agent-20260612-152000"
+        ops.disp_containers = [_GOOD_DISP, other]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta(),
+                                  other: self._meta()}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY,
+                               other: _PT_TOP_EMPTY}
+        # First dispose raises BadState (failed rm); the sweep must still reach
+        # and reap the second.
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        orig = store.dispose
+        calls = []
+
+        def flaky(name, caller=None):
+            calls.append(name)
+            if name == _GOOD_DISP:
+                from qdistro_session_manager import BadState as BS
+                raise BS("simulated rm failure")
+            return orig(name, caller=caller)
+        store.dispose = flaky
+        reaped = store.sweep_empty_proctrees(now=5000.0)
+        assert reaped == [other]
+        assert _GOOD_DISP in calls and other in calls
+
+    def test_default_caller_marks_proctree(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_proctree_meta = {_GOOD_DISP: self._meta()}
+        ops.disp_top_output = {_GOOD_DISP: _PT_TOP_EMPTY}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        store.sweep_empty_proctrees(now=5000.0)
+        assert store.PROCTREE_CALLER["exe"] == "session-manager:lease-proctree"
+        # Distinct from the TTL caller so an audit reader can tell them apart.
+        assert store.PROCTREE_CALLER["exe"] != store.LEASE_CALLER["exe"]
+
+
+# ---------------------------------------------------------------------------
+# DisposeByWorkflow (P2b — tear down every disposable a workflow step spawned)
+# ---------------------------------------------------------------------------
+
+_WF_ID = "step-1"
+
+
+class TestDisposeByWorkflow:
+    """dispose_by_workflow resolves every disposable carrying the shared
+    qdistro_lease_workflow=<id> label and tears them all down. Fail-closed like
+    dispose_by_token, and — crucially — must NOT report clean success if any
+    matched container failed to dispose (cond 8)."""
+    def _store(self, ops, tmp_path, audit=None):
+        return _SiloStore(ops, config_path=tmp_path / "silos.yaml", audit=audit)
+
+    def test_reaps_all_in_the_group(self, ops, tmp_path):
+        a = "disp-agent-20260612-151828"
+        b = "disp-agent-20260612-151900"
+        ops.disp_containers = [a, b]
+        ops.disp_workflow_map = {_WF_ID: [a, b]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        caller = {"uid": 1000, "pid": 9, "exe": "/usr/bin/qs"}
+        assert store.dispose_by_workflow(_WF_ID, caller=caller) == 2
+        assert sorted(ops.disp_removed) == sorted([a, b])
+        join = [r for r in audit.rows if r["action"] == "dispose-by-workflow"]
+        assert join[-1]["decision"] == "allow"
+        teardowns = [r for r in audit.rows if r["action"] == "dispose"]
+        assert {r["silo"] for r in teardowns} == {a, b}
+
+    @pytest.mark.parametrize("bad", [
+        "UPPER", "has space", "x;rm -rf /", "-lead", "", "x" * 129,
+    ])
+    def test_malformed_id_is_badargument_fail_closed(self, ops, tmp_path, bad):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_workflow_map = {bad: [_GOOD_DISP]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadArgument):
+            store.dispose_by_workflow(bad)
+        assert ops.disp_removed == []            # never reached a filter/remove
+        assert audit.rows[-1]["action"] == "dispose-by-workflow"
+        assert audit.rows[-1]["decision"] == "deny"
+
+    def test_no_match_is_idempotent_zero(self, ops, tmp_path):
+        ops.disp_containers = []
+        ops.disp_workflow_map = {}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        assert store.dispose_by_workflow(_WF_ID) == 0
+        assert ops.disp_removed == []
+        assert audit.rows[-1]["decision"] == "allow"
+
+    def test_lookup_failure_fails_closed_not_already_gone(self, ops, tmp_path):
+        ops.disp_workflow_lookup_raises = OSError("podman storage locked")
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        with pytest.raises(BadState):
+            store.dispose_by_workflow(_WF_ID)
+        assert ops.disp_removed == []
+        assert audit.rows[-1]["decision"] == "error"
+
+    def test_partial_failure_raises_not_clean_success(self, ops, tmp_path):
+        # One of two containers fails to dispose -> the method MUST NOT report
+        # clean success (cond 8). The other is still attempted (best-effort).
+        a = "disp-agent-20260612-151828"
+        b = "disp-agent-20260612-151900"
+        ops.disp_containers = [a, b]
+        ops.disp_workflow_map = {_WF_ID: [a, b]}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        orig = store.dispose
+        seen = []
+
+        def flaky(name, caller=None):
+            seen.append(name)
+            if name == a:
+                return orig(name, caller=caller)   # succeeds
+            return False                            # podman rm "failed"
+        store.dispose = flaky
+        with pytest.raises(BadState):
+            store.dispose_by_workflow(_WF_ID)
+        # Both were attempted (best-effort across the group)...
+        assert a in seen and b in seen
+        # ...and the failure was audited as an error, not a clean allow.
+        err = [r for r in audit.rows
+               if r["action"] == "dispose-by-workflow" and r["decision"] == "error"]
+        assert err
+
+    def test_nondisposable_workflow_match_resolves_to_nothing(self, ops, tmp_path):
+        # Defence in depth: a workflow id whose only match is an UNLABELLED
+        # (non-disposable) container resolves to [] via the dual label filter ->
+        # idempotent 0, never removes the admin container.
+        ops.disp_containers = []
+        ops.disp_workflow_map = {_WF_ID: ["qdistro-silo-browser"]}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.dispose_by_workflow(_WF_ID) == 0
+        assert ops.disp_removed == []
+
+
 class TestDispLeaseCandidates:
     """The real _SystemOps.disp_lease_candidates() podman parsing, with podman
     stubbed via a fake subprocess.run."""
@@ -2007,6 +2306,78 @@ class TestDispLeaseCandidates:
             raise sm.subprocess.TimeoutExpired(argv, 30)
         monkeypatch.setattr(sm.subprocess, "run", boom)
         assert ops.disp_lease_candidates() == []
+
+
+class TestDispProctreeCandidates:
+    """The real _SystemOps.disp_proctree_candidates() podman parsing (5 US fields)
+    and disp_container_top_pids(), with podman stubbed."""
+    def _ops_with_podman(self, monkeypatch, stdout, returncode=0):
+        ops = sm._SystemOps()
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        return ops
+
+    def test_parses_us_separated_rows(self, monkeypatch):
+        sep = "\x1f"
+        rows = sep.join(["disp-agent-20260612-151828", _LEASE_TOK, "1",
+                         "1000", "30"]) + "\n" + \
+            sep.join(["disp-x-20260612-152000", "", "1", "1000", ""]) + "\n"
+        ops = self._ops_with_podman(monkeypatch, rows)
+        cands = ops.disp_proctree_candidates()
+        assert cands[0] == {"name": "disp-agent-20260612-151828",
+                            "token": _LEASE_TOK, "proctree": "1",
+                            "created": "1000", "grace": "30"}
+        assert cands[1] == {"name": "disp-x-20260612-152000",
+                            "token": "", "proctree": "1",
+                            "created": "1000", "grace": ""}
+
+    def test_returns_empty_on_podman_failure(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "", returncode=125)
+        assert ops.disp_proctree_candidates() == []
+
+    def test_skips_malformed_rows(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "only-one-field\n\n")
+        assert ops.disp_proctree_candidates() == []
+
+    def test_enumeration_timeout_returns_empty(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def boom(argv, **kw):
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        monkeypatch.setattr(sm.subprocess, "run", boom)
+        assert ops.disp_proctree_candidates() == []
+
+    def test_top_returns_stdout_for_disposable(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "PID COMMAND\n1 weston\n")
+        assert ops.disp_container_top_pids("disp-agent-20260612-151828") \
+            == "PID COMMAND\n1 weston\n"
+
+    def test_top_refuses_nondisposable_name(self, monkeypatch):
+        # Defence in depth: a non-disposable name never reaches `podman top`.
+        called = []
+
+        def fake_run(argv, **kw):
+            called.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="x", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        ops = sm._SystemOps()
+        assert ops.disp_container_top_pids("qdistro-silo-browser") is None
+        assert called == []
+
+    def test_top_failure_returns_none(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "", returncode=125)
+        assert ops.disp_container_top_pids("disp-agent-20260612-151828") is None
+
+    def test_top_timeout_returns_none(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def boom(argv, **kw):
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        monkeypatch.setattr(sm.subprocess, "run", boom)
+        assert ops.disp_container_top_pids("disp-agent-20260612-151828") is None
 
 
 class TestDispContainerRemoveTimeout:

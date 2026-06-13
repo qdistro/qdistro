@@ -96,3 +96,29 @@ teardown_file() {
     assert_output_contains "PASS: fresh / no-lease / no-token / forged-name fixtures all survived"
     assert_output_contains "PASS: lease-sweep"
 }
+
+@test "disposables: shipped spawn stamps proctree + workflow lease labels (and the shared created anchor without a TTL) when opted in" {
+    vm_run "bash $PROBE proctree-spawn-labels"
+    assert_success
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_proctree=1"
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_proctree_grace=45"
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_created (shared anchor) without a TTL"
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_workflow=wfstep-1"
+    assert_output_contains "PASS: proctree-spawn-labels"
+}
+
+@test "disposables: process-tree-empty sweep reaps only the PID1-only disposable past grace (busy/within-grace/not-opted-in/no-token survive)" {
+    vm_run "bash $PROBE proctree-sweep"
+    assert_success
+    assert_output_contains "PASS: proctree sweep: real label read + real podman top discriminated PID1-only, reaped only the empty-tree disposable"
+    assert_output_contains "PASS: busy / within-grace / not-opted-in / no-token fixtures all survived"
+    assert_output_contains "PASS: proctree-sweep"
+}
+
+@test "disposables: DisposeByWorkflow tears down every disposable in a workflow group (other workflow survives; malformed id rejected; idempotent)" {
+    vm_run "bash $PROBE workflow-dispose"
+    assert_success
+    assert_output_contains "PASS: workflow dispose: dual-label resolve, group torn down, malformed id rejected, idempotent re-run"
+    assert_output_contains "PASS: both group members torn down; the other-workflow disposable survived"
+    assert_output_contains "PASS: workflow-dispose"
+}
