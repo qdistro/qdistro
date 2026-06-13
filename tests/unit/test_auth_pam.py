@@ -15,6 +15,7 @@ generation that was current when the attempt ran.
 from __future__ import annotations
 
 import os
+import pwd
 import sys
 import types
 
@@ -319,8 +320,47 @@ def test_probe_pam_defaults_to_login_when_none_found(monkeypatch):
     assert ready == [True]
 
 
-def test_missing_username_raises(monkeypatch):
-    monkeypatch.delenv("USER", raising=False)
-    monkeypatch.delenv("LOGNAME", raising=False)
+def test_unresolvable_uid_raises(monkeypatch):
+    # Identity is derived from the process uid via pwd.getpwuid(). If NSS /
+    # the passwd database cannot resolve the running uid, construction must
+    # fail CLOSED rather than fall back to anything weaker.
+    def boom(_uid):
+        raise KeyError("no such uid")
+
+    monkeypatch.setattr(pwd, "getpwuid", boom)
     with pytest.raises(RuntimeError):
         AuthBackend(fprintd_enabled=False)
+
+
+@pytest.mark.cheat_aware(
+    protects="the authenticated account is derived from the process uid, "
+    "never from the mutable USER/LOGNAME env — pwd.getpwuid(os.getuid()) "
+    "is the only source of _pam_user",
+    severity="critical",
+    cheats=[
+        "read USER/LOGNAME (again) to populate _pam_user",
+        "assert _pam_user == os.environ['USER'] instead of the uid name",
+        "fall back to getpass.getuser()/os.getlogin() (env/utmp-backed)",
+    ],
+    consequence="an attacker who can set USER/LOGNAME in the locker's "
+    "environment redirects PAM/fprintd auth to a different account",
+)
+def test_username_from_uid_not_env(monkeypatch):
+    monkeypatch.setenv("USER", "root")
+    monkeypatch.setenv("LOGNAME", "root")
+    backend = AuthBackend(fprintd_enabled=False)
+    expected = pwd.getpwuid(os.getuid()).pw_name
+    assert backend._pam_user == expected
+    # Tampered env must not have redirected identity (unless we genuinely
+    # run as root, in which case the uid name legitimately is "root").
+    if os.getuid() != 0:
+        assert backend._pam_user != "root"
+
+
+def test_username_resolves_with_env_unset(monkeypatch):
+    # Identity is env-independent: with USER and LOGNAME both unset,
+    # construction still succeeds and yields the uid-derived name.
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    backend = AuthBackend(fprintd_enabled=False)
+    assert backend._pam_user == pwd.getpwuid(os.getuid()).pw_name

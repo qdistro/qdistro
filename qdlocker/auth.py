@@ -14,6 +14,7 @@ import asyncio
 import enum
 import logging
 import os
+import pwd
 import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -44,12 +45,18 @@ class AuthBackend(QObject):
     ) -> None:
         super().__init__(parent)
         self._pam_service = os.environ.get("QDLOCKER_PAM_SERVICE")
-        self._pam_user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-        if not self._pam_user:
+        # Identity comes from the kernel — the real uid of the locker process
+        # — not from $USER/$LOGNAME. As a TCB process the locker must
+        # authenticate whoever actually owns it, never an attacker-mutable env
+        # var (the "identity-from-kernel" envelope of the threat model): a
+        # tampered $USER/$LOGNAME must not redirect PAM/fprintd auth to a
+        # different account. Fail closed if NSS/passwd can't resolve the uid.
+        try:
+            self._pam_user = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError as exc:
             raise RuntimeError(
-                "qdlocker: cannot determine admin username "
-                "(neither $USER nor $LOGNAME set)"
-            )
+                "qdlocker: cannot resolve the unlock account from the running uid"
+            ) from exc
         self._state_lock = threading.Lock()
         # Monotonically increasing session generation. Bumped on every
         # reset_session() (i.e. each fresh lock). Every emitted outcome
