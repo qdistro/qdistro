@@ -118,6 +118,27 @@ if [ -f "$IMG/${VM}.qcow2" ] || virsh -c qemu:///session dominfo "$VM" >/dev/nul
     exit 1
 fi
 
+# Self-cleanup trap for a half-provisioned clone. Everything below this point
+# creates resources ($VM's overlay, then the defined+started domain) that the
+# CALLER can't reclaim on failure — $VM is only echoed on success, so an INT/TERM
+# or mid-build error would otherwise leak a defined domain + overlay until the
+# next `qci cleanup`. The trap is installed AFTER the "already exists" guard so
+# it can only ever touch the VM THIS invocation creates, and is gated by
+# CLONE_OK (set to 1 right before the final name echo, and before the deliberate
+# --from-enforcing-baked post-mortem exit so that path keeps the VM for triage).
+CLONE_OK=0
+_clone_cleanup() {
+    trap - EXIT INT TERM          # disarm so INT->exit doesn't re-run via EXIT
+    [ "$CLONE_OK" = 1 ] && return
+    virsh -c qemu:///session destroy "$VM" >/dev/null 2>&1 || true
+    virsh -c qemu:///session undefine "$VM" --nvram >/dev/null 2>&1 \
+        || virsh -c qemu:///session undefine "$VM" >/dev/null 2>&1 || true
+    rm -f "$IMG/${VM}.qcow2" 2>/dev/null || true
+}
+trap '_rc=$?; _clone_cleanup; exit $_rc' EXIT
+trap '_clone_cleanup; exit 130' INT
+trap '_clone_cleanup; exit 143' TERM
+
 # 1. qcow2 overlay backed by $BACKING_NAME (baseweed or baseweed-baked or baseweed-enforcing-baked)
 qemu-img create -F qcow2 -b "$BACKING" -f qcow2 "$IMG/${VM}.qcow2" \
     >/dev/null
@@ -348,13 +369,19 @@ if [ "$FROM_ENFORCING" = 1 ]; then
         echo "ERROR: --from-enforcing-baked: SSH never came up on 127.0.0.1:$SSH_PORT" >&2
         echo "       hint: virsh -c qemu:///session screenshot $VM /tmp/$VM.png  (often shows a grub> rescue)" >&2
         echo "       hint: if the baked image is rotten, rebuild via scripts/vm/build-enforcing-baseweed.sh --force" >&2
+        CLONE_OK=1   # deliberately keep this VM defined for post-mortem (see hints above)
         exit 7
     fi
 else
     "$VM_TOOLS/vm-start-and-wait" "$VM" >/dev/null
 fi
 
+# Built successfully. Emit the name (and ssh_port) the caller consumes, THEN mark
+# success so the EXIT trap keeps the VM. Marking BEFORE the echo would, on a
+# broken-pipe echo (caller already gone) under set -e, disarm the cleanup yet
+# leave the caller without the name — leaking exactly the VM this trap reclaims.
 echo "$VM"
 if [ "$FROM_ENFORCING" = 1 ]; then
     echo "ssh_port=$SSH_PORT"
 fi
+CLONE_OK=1
