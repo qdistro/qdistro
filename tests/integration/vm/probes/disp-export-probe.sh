@@ -517,8 +517,183 @@ PY
     pass edit-import
 }
 
+# --- templated-silo END-TO-END import (the positive resolve->land glue) -------
+# The lanes above prove the FAIL-CLOSED import paths (untemplated/gate-deny) and
+# the edit landing by calling promote_edit DIRECTLY on a throwaway tempdir. They
+# never drove import_from_disposable into a REAL provisioned templated silo whose
+# state_path is resolved by the REAL qdistro-resolve-binding — the one un-glued
+# backend edge. These two lanes close it: provision a minimal-but-schema-VALID
+# templated silo (binding + promoted-generation record authored via the SAME real
+# qt schema the SHIPPED unit test tests/unit/test_resolve_binding.py uses and the
+# real resolver+validator accept — NOT a full template-build/promote, which would
+# build a real image and the importer's resolve path never launches it), then
+# drive the REAL store.import_from_disposable and assert the file LANDS.
+TEMPLATES_LIBEXEC=/usr/libexec/qdistro
+
+ensure_export_allow() {  # ensure_export_allow <label>
+    [ "$(broker_check "qdistro.dispose.export:${OPEN_CLASS}")" = "allow" ] && return 0
+    author_rule "$EXPORT_RULE" disp-export-class-allow "qdistro.dispose.export:${OPEN_CLASS}"
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    local _
+    for _ in $(seq 1 20); do
+        [ "$(broker_check "qdistro.dispose.export:${OPEN_CLASS}")" = "allow" ] && return 0
+        sleep 0.25
+    done
+    fail "${1:-ensure-export}" "export gate did not return to 'allow'"
+}
+
+# Author a minimal templated silo the REAL resolver accepts: binding (digest, not
+# tag) + a promoted-generation manifest whose generation_ref matches, + a real
+# admin-owned state tree (mirrors a tier2 silo whose User=admin -> state is
+# admin-owned). template name == silo for clean per-silo teardown. Optional
+# srcspec "rel/path=content" seeds a source file (admin-owned) for the edit lane.
+_provision_silo() {  # _provision_silo <silo> [srcspec]
+    python3 - "$1" "$ADMIN_UID" "${2:-}" <<PY
+import hashlib, os, sys
+sys.path.insert(0, "$TEMPLATES_LIBEXEC")
+import qdistro_templates as qt
+silo, admin_uid, srcspec = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+layout = qt.Layout()
+template = silo
+digest = "sha256:" + hashlib.sha256(silo.encode()).hexdigest()
+state_path = layout.default_state_path(silo)
+os.makedirs(layout.bindings_dir, mode=0o700, exist_ok=True)
+binding = {"silo": silo, "template": template, "backend": "podman-image",
+           "active_generation": digest, "previous_generations": [],
+           "state_path": state_path, "activation_policy": "manual",
+           "identity_revision": 1}
+qt.write_toml_atomic(layout.binding_file(silo), binding, 0o600)
+gen_dir = layout.generation_dir(template, digest)
+os.makedirs(gen_dir, exist_ok=True)
+manifest = {"template": template, "run_id": "r1", "image_digest": digest,
+            "image_id": digest, "containerfile_digest": digest,
+            "build_command": "podman build ...", "network_mode": "unrestricted",
+            "artifact_manifest": [], "generation_ref": digest}
+qt.write_toml_atomic(os.path.join(gen_dir, "manifest.toml"), manifest, 0o644)
+os.makedirs(state_path, mode=0o700, exist_ok=True)
+os.chown(state_path, admin_uid, admin_uid); os.chmod(state_path, 0o700)
+if srcspec:
+    rel, _, content = srcspec.partition("=")
+    p = os.path.join(state_path, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write(content)
+    # own the seeded subtree as the silo owner
+    d = os.path.dirname(p)
+    while os.path.realpath(d).startswith(os.path.realpath(state_path)) and d != state_path:
+        os.chown(d, admin_uid, admin_uid); d = os.path.dirname(d)
+    os.chown(p, admin_uid, admin_uid)
+print("PROVISIONED " + state_path)
+PY
+}
+
+_deprovision_silo() {  # _deprovision_silo <silo>
+    local silo=${1:?}
+    rm -f "/var/lib/qdistro/bindings/$silo.toml" "/var/lib/qdistro/bindings/$silo.activated" 2>/dev/null || true
+    rm -rf "/var/lib/qdistro/templates/$silo" "/var/lib/qdistro/silos/$silo" 2>/dev/null || true
+    rm -f "/run/qdistro/template-run/$silo.toml" 2>/dev/null || true
+}
+
+cmd_import_land_templated() {
+    clean_disp; clean_staging
+    ensure_export_allow import-land-templated
+    local silo=exportwork-t state tok py_out prov
+    prov=$(mktemp)
+    _deprovision_silo "$silo"
+    _provision_silo "$silo" >"$prov" 2>&1 || { cat "$prov" >&2; rm -f "$prov"; fail import-land-templated "silo provisioning failed"; }
+    grep -q '^PROVISIONED ' "$prov" || { cat "$prov" >&2; rm -f "$prov"; fail import-land-templated "provisioning emitted no state_path"; }
+    rm -f "$prov"
+    state="/var/lib/qdistro/silos/$silo/state"
+    # Sanity: the REAL resolver resolves the provisioned silo to that state_path.
+    local resolved
+    resolved=$("$TEMPLATES_LIBEXEC/qdistro-resolve-binding" "$silo" --launch-env 2>/dev/null \
+               | awk -F= '/^STATE_PATH=/{print $2; exit}')
+    [ "$resolved" = "$state" ] \
+        || fail import-land-templated "REAL resolve-binding did not return the provisioned state_path (got '$resolved')"
+    pass "REAL qdistro-resolve-binding resolves the provisioned silo to its state_path"
+
+    tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    _make_staging "$tok" "$silo" "$OPEN_CLASS" "result.txt=hello-from-disposable"
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$state" "$ADMIN_UID" <<PY 2>&1
+import os, re, sys
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+tok, state, admin_uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+store = M._SiloStore(M._SystemOps(), config_path=M.Path("/tmp/land-silos.yaml"))
+r = store.import_from_disposable(tok)
+dest = r.get("dest")
+print("DEST=" + str(dest))
+real_state = os.path.realpath(state)
+inc = os.path.join(real_state, "Incoming", "agent-scratch")
+print("UNDER_OK" if dest and os.path.realpath(dest).startswith(inc + os.sep) else "UNDER_FAIL " + str(dest))
+# the landing leaf is the documented <token8>-<ts> per-import dir
+# (ts is a YYYYMMDD-HHMMSS stamp, so token8 + date + time)
+print("LEAF_OK" if dest and re.match(r"^[0-9a-f]{8}-[0-9]{8}-[0-9]{6}$", os.path.basename(dest)) else "LEAF_FAIL " + (os.path.basename(dest) if dest else "none"))
+landed = os.path.join(dest, "result.txt") if dest else ""
+print("CONTENT_OK" if landed and os.path.isfile(landed) and open(landed).read() == "hello-from-disposable" else "CONTENT_FAIL")
+st = os.lstat(landed) if landed and os.path.exists(landed) else None
+print("OWNER_OK" if st and st.st_uid == admin_uid else "OWNER_FAIL " + (str(st.st_uid) if st else "no-file"))
+print("RECEIPT_OK" if dest and os.path.isfile(os.path.join(dest, "_receipt.json")) else "RECEIPT_FAIL")
+print("STAGING_GONE_OK" if not os.path.exists("$STAGING_BASE/" + tok) else "STAGING_GONE_FAIL")
+PY
+)
+    local k
+    for k in UNDER_OK LEAF_OK CONTENT_OK OWNER_OK RECEIPT_OK STAGING_GONE_OK; do
+        echo "$py_out" | grep -q "^$k\$" || fail import-land-templated "$k missing: $py_out"
+    done
+    pass "import: landed into <state>/Incoming/agent-scratch via the REAL resolver, silo-owned, receipt written, staging one-shot removed"
+    _deprovision_silo "$silo"; clean_staging
+    pass import-land-templated
+}
+
+cmd_edit_land_templated() {
+    clean_disp; clean_staging
+    ensure_export_allow edit-land-templated
+    local silo=editwork-t state src src_real tok py_out prov
+    prov=$(mktemp)
+    _deprovision_silo "$silo"
+    _provision_silo "$silo" "docs/report.txt=ORIGINAL" >"$prov" 2>&1 \
+        || { cat "$prov" >&2; rm -f "$prov"; fail edit-land-templated "silo provisioning failed"; }
+    rm -f "$prov"
+    state="/var/lib/qdistro/silos/$silo/state"
+    src="$state/docs/report.txt"
+    src_real=$(readlink -f "$src")
+    [ -f "$src" ] || fail edit-land-templated "seeded source file missing"
+
+    tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    _make_edit_staging "$tok" "$silo" "$OPEN_CLASS" "$src_real" "out=EDITED-BY-DISPOSABLE"
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$src" "$ADMIN_UID" <<PY 2>&1
+import os, sys
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+tok, src, admin_uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+store = M._SiloStore(M._SystemOps(), config_path=M.Path("/tmp/editland-silos.yaml"))
+r = store.import_from_disposable(tok)
+dest = r.get("dest")
+print("DEST=" + str(dest))
+print("LANDED_OK" if dest and dest.endswith("/docs/report.txt.disp-edited") else "LANDED_FAIL " + str(dest))
+print("BESIDE_OK" if dest and os.path.dirname(dest) == os.path.dirname(os.path.realpath(src)) else "BESIDE_FAIL")
+print("CONTENT_OK" if dest and os.path.isfile(dest) and open(dest).read() == "EDITED-BY-DISPOSABLE" else "CONTENT_FAIL")
+print("SRC_OK" if open(src).read() == "ORIGINAL" else "SRC_FAIL")
+st = os.lstat(dest) if dest and os.path.exists(dest) else None
+print("OWNER_OK" if st and st.st_uid == admin_uid else "OWNER_FAIL " + (str(st.st_uid) if st else "no-file"))
+print("STAGING_GONE_OK" if not os.path.exists("$STAGING_BASE/" + tok) else "STAGING_GONE_FAIL")
+PY
+)
+    local k
+    for k in LANDED_OK BESIDE_OK CONTENT_OK SRC_OK OWNER_OK STAGING_GONE_OK; do
+        echo "$py_out" | grep -q "^$k\$" || fail edit-land-templated "$k missing: $py_out"
+    done
+    pass "edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, staging one-shot removed"
+    _deprovision_silo "$silo"; clean_staging
+    pass edit-land-templated
+}
+
 cmd_teardown() {
     clean_disp; clean_staging
+    _deprovision_silo exportwork-t; _deprovision_silo editwork-t
     rm -f "$SPAWN_RULE" "$OPEN_RULE" "$EXPORT_RULE" "$EDIT_SRC" 2>/dev/null || true
     systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
     rm -rf "$TIER2_BUILD_DIR" /tmp/dispexport-build.log 2>/dev/null || true
@@ -530,8 +705,10 @@ case "${1:-}" in
     export-rw-mount) cmd_export_rw_mount ;;
     export-gate-fail-closed) cmd_export_gate_fail_closed ;;
     import-flow) cmd_import_flow ;;
+    import-land-templated) cmd_import_land_templated ;;
     edit-rw-mount) cmd_edit_rw_mount ;;
     edit-import) cmd_edit_import ;;
+    edit-land-templated) cmd_edit_land_templated ;;
     teardown) cmd_teardown ;;
-    *) echo "usage: $0 {setup|export-rw-mount|export-gate-fail-closed|import-flow|edit-rw-mount|edit-import|teardown}" >&2; exit 2 ;;
+    *) echo "usage: $0 {setup|export-rw-mount|export-gate-fail-closed|import-flow|import-land-templated|edit-rw-mount|edit-import|edit-land-templated|teardown}" >&2; exit 2 ;;
 esac

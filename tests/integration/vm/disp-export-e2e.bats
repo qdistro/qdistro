@@ -89,3 +89,23 @@ teardown_file() {
     assert_output_contains "PASS: edit landing on real fs as root: <name>.disp-edited beside source, silo-owned, source intact, no litter"
     assert_output_contains "PASS: edit-import"
 }
+
+# The positive resolve->land glue: a REAL provisioned templated silo whose
+# state_path the REAL qdistro-resolve-binding resolves, then a REAL
+# import_from_disposable LANDS into it. The fail-closed half (untemplated/gate-
+# deny) is proven above; this is the one un-glued backend edge — every other
+# real-podman/broker/resolver edge was already VM-proven.
+@test "templated-silo import: lands into <state>/Incoming via the REAL resolver (provisioned binding+generation, silo-owned)" {
+    vm_run "bash $PROBE import-land-templated"
+    assert_success
+    assert_output_contains "PASS: REAL qdistro-resolve-binding resolves the provisioned silo to its state_path"
+    assert_output_contains "PASS: import: landed into <state>/Incoming/agent-scratch via the REAL resolver, silo-owned, receipt written, staging one-shot removed"
+    assert_output_contains "PASS: import-land-templated"
+}
+
+@test "templated-silo edit: lands <name>.disp-edited beside a source IN A REAL SILO STATE via the REAL resolver" {
+    vm_run "bash $PROBE edit-land-templated"
+    assert_success
+    assert_output_contains "PASS: edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, staging one-shot removed"
+    assert_output_contains "PASS: edit-land-templated"
+}
