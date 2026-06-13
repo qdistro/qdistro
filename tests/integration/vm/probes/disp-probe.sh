@@ -26,17 +26,20 @@
 # as tier2.spawn — proven by an allow path (rule authored in setup) and a deny
 # path (no rule -> broker "unknown" -> spawn refused, no container minted).
 #
-# SCOPE NOTE on secctx wire-tagging: spawn-tier2 only stamps the
-# wp_security_context_v1 app_id (qdistro.disp.<token>) when launched by a
-# root-trusted launcher (id==0 or the QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED dev
-# override); an admin-driven spawn like this lane runs UN-TAGGED on the wire
-# (spawn-tier2.sh:651-675). So this lane proves the disposable IDENTITY the
-# shipped binary COMPUTES (the disp-* name + the qdistro.disp.<token> app_id it
-# emits and would hand to secctx-exec) and that a real disposable WINDOW reaches
-# the outer compositor from admin's container — but it does NOT assert the
-# compositor received the disp app_id on the wire (that needs the root-launcher
-# path, covered separately by phase7-secctx). The lane surfaces the un-tagged
-# state as a NOTE so the scope stays visible rather than silently hidden.
+# SCOPE NOTE on secctx wire-tagging: this ADMIN-driven lane runs UN-TAGGED on
+# the wire. spawn-tier2 stamps the wp_security_context_v1 app_id
+# (qdistro.disp.<token>) only via the ROOT-launcher path (TIER2_ROOT_LAUNCHER=1,
+# which runs qdistro-secctx-exec under a root `runuser` parent so qdwin's
+# hardened secctx authorization accepts the manager bind); an admin-driven spawn
+# has no such root parent and correctly runs un-tagged (spawn-tier2.sh, the
+# admin-direct branch). So THIS lane proves the disposable IDENTITY the shipped
+# binary COMPUTES (the disp-* name + the qdistro.disp.<token> app_id it emits and
+# would hand to secctx-exec) and that a real disposable WINDOW reaches the outer
+# compositor from admin's container — but it does NOT assert the compositor
+# received the disp app_id ON THE WIRE. That wire tag is proven by the dedicated
+# root-launcher lane disposable-secctx-wiretag.bats
+# (probes/disp-secctx-wiretag-probe.sh). This lane surfaces the un-tagged state
+# as a NOTE so the scope stays visible rather than silently hidden.
 set -u
 
 SRC=/root/qdistro-src/qdistro

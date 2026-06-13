@@ -148,6 +148,64 @@ fi
 APP_ARGV=("$@")
 APP_NAME="${APP_ARGV[0]##*/}"
 
+# --- root-launcher mode (secctx wire-tag provenance) ---------------------
+# By default spawn-tier2 runs AS ADMIN (the qdistro-tier2-silo@.service unit
+# uses User=admin, and qshell/PodApps launch it as admin too). In that
+# topology qdistro-secctx-exec has no direct ROOT launcher parent, so qdwin's
+# hardened secctx authorization refuses to bind the manager and the outer
+# connection is UN-TAGGED on the wire (the wp_security_context_v1 app_id never
+# reaches the compositor). See qdistro-tier2-silo@.service's "SECCTX
+# PROVENANCE (known follow-up)" note.
+#
+# TIER2_ROOT_LAUNCHER=1 selects the proven tier-3 topology (see
+# tier3/spawn-tier3.sh:442-463): a ROOT caller invokes spawn-tier2 as root,
+# spawn-tier2 stays the root supervisor ONLY for the trusted-launcher
+# parentage + the per-container dir bookkeeping, and EVERY rootless-podman
+# touch (collision check, image-exists, orphan reaper, the final podman run)
+# runs as admin via `runuser`. The secctx-exec helper is then a direct child
+# of `runuser` (root) yet itself runs at the admin uid, satisfying BOTH
+# qdistro-secctx-exec's trusted-launcher check AND qdwin's root-parent
+# attestation — so the disposable's qdistro.disp.<token> app_id is stamped on
+# the wire. Rootless podman keeps the admin --userns=keep-id state model
+# intact (running podman as root would break it — that anti-pattern is
+# explicitly forbidden).
+ROOT_LAUNCHER=0
+ADMIN_USER=""
+if [ "${TIER2_ROOT_LAUNCHER:-0}" = "1" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "spawn-tier2: TIER2_ROOT_LAUNCHER=1 requires running as root" \
+             "(it is the trusted launcher parent for qdistro-secctx-exec)" >&2
+        exit 1
+    fi
+    # Resolve the admin uid we will drop podman to. Default 1000; never 0
+    # (rootless podman + admin-owned state demand a non-root target).
+    _root_admin_uid="${TIER2_ADMIN_UID:-1000}"
+    if ! [[ "$_root_admin_uid" =~ ^[0-9]+$ ]] || [ "$_root_admin_uid" -eq 0 ]; then
+        echo "spawn-tier2: TIER2_ROOT_LAUNCHER target uid '$_root_admin_uid'" \
+             "is invalid (must be a non-root uid)" >&2
+        exit 1
+    fi
+    ADMIN_USER="$(id -nu "$_root_admin_uid" 2>/dev/null || true)"
+    [ -n "$ADMIN_USER" ] \
+        || { echo "spawn-tier2: cannot resolve a user name for uid" \
+                  "$_root_admin_uid (root-launcher mode)" >&2; exit 1; }
+    ROOT_LAUNCHER=1
+fi
+
+# pm: route every podman invocation through the correct identity. In
+# root-launcher mode podman MUST run rootless as admin (never as root — that
+# would use root's empty image store and break --userns=keep-id state); in the
+# default admin-direct mode it is bare `podman`. A single shim means a podman
+# call can never accidentally run under the wrong uid.
+if [ "$ROOT_LAUNCHER" = 1 ]; then
+    pm() {
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="/run/user/${_root_admin_uid}" podman "$@"
+    }
+else
+    pm() { podman "$@"; }
+fi
+
 # --- disposable identity (07-disposables-plan P1, D15) -------------------
 if [ "$DISPOSABLE" = 1 ]; then
     # A disposable never mounts persistent state — refuse a silo binding.
@@ -168,7 +226,7 @@ if [ "$DISPOSABLE" = 1 ]; then
     CONTAINER="disp-${WORKLOAD}-${DISP_TS}"
     # Same-second collision: append a short random hex suffix (D15).
     if command -v podman >/dev/null 2>&1 \
-       && podman container exists "$CONTAINER" 2>/dev/null; then
+       && pm container exists "$CONTAINER" 2>/dev/null; then
         CONTAINER="${CONTAINER}-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
     fi
     # Per-launch secctx token -> app_id qdistro.disp.<token>.
@@ -246,13 +304,40 @@ if [ "$DISPOSABLE" = 1 ]; then
     fi
 fi
 
-ADMIN_UID="${TIER2_ADMIN_UID:-$(id -u)}"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
-# Export so qdistro-secctx-exec (which checks the actual env, not just
-# our computed defaults) and podman both see it. Useful when this
-# script is invoked via `runuser -u admin -- bash …` which can strip
-# the parent shell's runtime-dir env.
-export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+if [ "$ROOT_LAUNCHER" = 1 ]; then
+    # Root supervisor: target the ADMIN uid + runtime dir, never root's own
+    # (id -u would be 0 here and /run/user/0 is wrong for the rootless podman
+    # we drop into). The wrapper/secctx chain runs under `runuser -u admin`,
+    # which sets the admin XDG_RUNTIME_DIR itself.
+    ADMIN_UID="$_root_admin_uid"
+    RUNTIME_DIR="/run/user/$ADMIN_UID"
+    # The admin runtime dir must already exist + be admin-owned (a logged-in
+    # admin session creates it). Fail closed rather than spawn against a
+    # bogus/absent runtime dir.
+    if [ ! -d "$RUNTIME_DIR" ]; then
+        echo "spawn-tier2: admin runtime dir $RUNTIME_DIR absent" \
+             "(is the admin session up?) — refusing root-launcher spawn" >&2
+        exit 1
+    fi
+    _rt_owner="$(stat -c '%u' "$RUNTIME_DIR" 2>/dev/null || echo -1)"
+    if [ "$_rt_owner" != "$ADMIN_UID" ]; then
+        echo "spawn-tier2: $RUNTIME_DIR is owned by uid $_rt_owner, not the" \
+             "admin uid $ADMIN_UID — refusing (fail closed)" >&2
+        exit 1
+    fi
+    # Do NOT export root's XDG_RUNTIME_DIR down the chain; the admin runuser
+    # legs set their own. Keep it pointed at the admin dir for the host-side
+    # checks below (outer wayland socket existence, etc).
+    export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+else
+    ADMIN_UID="${TIER2_ADMIN_UID:-$(id -u)}"
+    RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
+    # Export so qdistro-secctx-exec (which checks the actual env, not just
+    # our computed defaults) and podman both see it. Useful when this
+    # script is invoked via `runuser -u admin -- bash …` which can strip
+    # the parent shell's runtime-dir env.
+    export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+fi
 OUTER_DISPLAY="${TIER2_OUTER_DISPLAY:-${WAYLAND_DISPLAY:-wayland-1}}"
 QDWIN_SHELL_SO="${TIER2_QDWIN_SHELL_SO:-/usr/lib64/weston/qdwin-shell.so}"
 IMAGE="qdistro/tier2-${WORKLOAD}:latest"
@@ -289,6 +374,29 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'LEASE_PROCTREE_GRACE=%s\n' "${DISP_LEASE_PROCTREE_GRACE:-none}"
     printf 'LEASE_WORKFLOW=%s\n' "${DISP_LEASE_WORKFLOW:-none}"
     exit 0
+fi
+
+# Root-launcher mode exists ONLY to stamp the secctx wire tag. If it CANNOT
+# (secctx disabled, or the helper absent), it MUST fail closed — never silently
+# fall through to the un-tagged wrapper, which would mint a disposable that
+# looks tagged (correct name/app_id on stdout) yet carries NO
+# wp_security_context on the wire. That false assurance is exactly what this
+# mode removes, so it is a hard error. Checked HERE — before any podman /
+# broker / per-container-dir work — so it fails fast and cannot be masked by an
+# earlier "podman not in PATH" when a caller strips PATH to test this very gate.
+if [ "$ROOT_LAUNCHER" = 1 ]; then
+    if [ "$USE_SECCTX" != "1" ]; then
+        echo "spawn-tier2: TIER2_ROOT_LAUNCHER=1 requires TIER2_USE_SECCTX=1" \
+             "(the mode's sole purpose is the secctx wire tag) — refusing to" \
+             "launch un-tagged" >&2
+        exit 2
+    fi
+    if ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
+        echo "spawn-tier2: TIER2_ROOT_LAUNCHER=1 but qdistro-secctx-exec is not" \
+             "in PATH — cannot stamp the wire tag; refusing to launch un-tagged" \
+             "(PACKAGING GAP)" >&2
+        exit 2
+    fi
 fi
 
 # Hardening defaults — secure, override via env for special workloads.
@@ -411,7 +519,7 @@ if [ -n "$TIER2_SILO" ]; then
     esac
 fi
 
-if ! podman image exists "$IMAGE" 2>/dev/null; then
+if ! pm image exists "$IMAGE" 2>/dev/null; then
     if [ -n "$TIER2_SILO" ]; then
         fail "resolved generation $IMAGE for silo $TIER2_SILO is not present in the image store"
     fi
@@ -481,7 +589,7 @@ PERCONT_DIR="$PARENT_DIR/$LAUNCH_TOKEN"
 # set to 32-hex-char tokens to ignore podman's "<no value>" sentinel
 # for unlabeled containers.
 if [ -d "$PARENT_DIR" ]; then
-    live_tokens=$(podman ps -a --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
+    live_tokens=$(pm ps -a --format '{{.Labels.qdistro_tier2_token}}' 2>/dev/null \
                     | grep -E '^[0-9a-f]{32}$' \
                     | sort -u || true)
     for d in "$PARENT_DIR"/*/; do
@@ -494,8 +602,18 @@ if [ -d "$PARENT_DIR" ]; then
     done
 fi
 
-mkdir -p "$PERCONT_DIR"
-chmod 0700 "$PERCONT_DIR"
+# In root-launcher mode the per-container dir lives under the ADMIN runtime
+# dir and is written by the admin podman wrapper (socket stubs), so it MUST be
+# admin-owned, not root-owned. Create it as admin via runuser; the root
+# supervisor still owns the EXIT-trap cleanup (root can rm an admin-owned
+# subtree). In the default admin-direct mode this is a plain mkdir as admin.
+if [ "$ROOT_LAUNCHER" = 1 ]; then
+    runuser -u "$ADMIN_USER" -- mkdir -p -m 0700 "$PERCONT_DIR" \
+        || fail "could not create admin-owned per-container dir $PERCONT_DIR"
+else
+    mkdir -p "$PERCONT_DIR"
+    chmod 0700 "$PERCONT_DIR"
+fi
 
 # Cleanup runs from both the EXIT trap (covers pre-flight `fail`s and
 # the explicit call after the wrapper returns below) and the orphan-
@@ -546,6 +664,46 @@ export TIER2_ALLOW_PRIVESC_RESOLVED="$TIER2_ALLOW_PRIVESC_VAL"
 export TIER2_SECCOMP_PROFILE_RESOLVED="$TIER2_SECCOMP_PROFILE"
 APP_ARGV_JOINED="$(printf '%q ' "${APP_ARGV[@]}")"
 export TIER2_APP_ARGV_JOINED="$APP_ARGV_JOINED"
+
+# The admin-direct secctx path forks qdistro-secctx-exec in-process, so the
+# WRAPPER_BODY shell inherits all the exported TIER2_*_RESOLVED / QDWIN_* /
+# WAYLAND_DISPLAY / XDG_RUNTIME_DIR vars above by plain process inheritance.
+# The ROOT-launcher path goes through `runuser -u admin`, which runs PAM and
+# RESETS the environment to admin's login env — silently stripping every one of
+# those exports, so the wrapper would run mis-configured (empty image, no
+# per-container dir, no socket name). Re-pass them EXPLICITLY through `env` in
+# the runuser leg. Built here (right after the exports) as NAME=VALUE pairs so
+# the list cannot drift from the exports. NB secctx-exec REWRITES
+# WAYLAND_DISPLAY for its child, so we pass the pre-secctx value and let the
+# rewrite happen as usual; XDG_RUNTIME_DIR/HOME are also set by the runuser leg.
+SECCTX_ENV_PASS=(
+    "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    "QDWIN_OUTER_DISPLAY=$QDWIN_OUTER_DISPLAY"
+    "QDWIN_NESTED_MODE=$QDWIN_NESTED_MODE"
+    "QDWIN_LAUNCH_TOKEN=$QDWIN_LAUNCH_TOKEN"
+    "TIER2_INNER_SOCKET=$TIER2_INNER_SOCKET"
+    "TIER2_PERCONT_DIR=$TIER2_PERCONT_DIR"
+    "TIER2_ADMIN_UID_RESOLVED=$TIER2_ADMIN_UID_RESOLVED"
+    "TIER2_IMAGE=$TIER2_IMAGE"
+    "TIER2_CONTAINER=$TIER2_CONTAINER"
+    "TIER2_DISPOSABLE_RESOLVED=$TIER2_DISPOSABLE_RESOLVED"
+    "TIER2_LEASE_TTL_RESOLVED=$TIER2_LEASE_TTL_RESOLVED"
+    "TIER2_LEASE_CREATED_RESOLVED=$TIER2_LEASE_CREATED_RESOLVED"
+    "TIER2_LEASE_PROCTREE_RESOLVED=$TIER2_LEASE_PROCTREE_RESOLVED"
+    "TIER2_LEASE_PROCTREE_GRACE_RESOLVED=$TIER2_LEASE_PROCTREE_GRACE_RESOLVED"
+    "TIER2_LEASE_WORKFLOW_RESOLVED=$TIER2_LEASE_WORKFLOW_RESOLVED"
+    "TIER2_QDWIN_SHELL_SO_RESOLVED=$TIER2_QDWIN_SHELL_SO_RESOLVED"
+    "TIER2_STATE_PATH_RESOLVED=$TIER2_STATE_PATH_RESOLVED"
+    "TIER2_NETWORK_RESOLVED=$TIER2_NETWORK_RESOLVED"
+    "TIER2_PIDS_LIMIT_RESOLVED=$TIER2_PIDS_LIMIT_RESOLVED"
+    "TIER2_MEMORY_RESOLVED=$TIER2_MEMORY_RESOLVED"
+    "TIER2_CPUS_RESOLVED=$TIER2_CPUS_RESOLVED"
+    "TIER2_KEEP_CAPS_RESOLVED=$TIER2_KEEP_CAPS_RESOLVED"
+    "TIER2_ALLOW_PRIVESC_RESOLVED=$TIER2_ALLOW_PRIVESC_RESOLVED"
+    "TIER2_SECCOMP_PROFILE_RESOLVED=$TIER2_SECCOMP_PROFILE_RESOLVED"
+    "TIER2_APP_ARGV_JOINED=$TIER2_APP_ARGV_JOINED"
+    "TIER2_DEBUG=${TIER2_DEBUG:-0}"
+)
 
 # --- emit correlation metadata to stdout BEFORE exec --------------------
 echo "LAUNCH_TOKEN=$LAUNCH_TOKEN"
@@ -761,10 +919,45 @@ trap 'forward_signal TERM' TERM
 trap 'forward_signal INT'  INT
 
 if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
-    if [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
+    if [ "$ROOT_LAUNCHER" = 1 ]; then
+        # Root-launcher topology (mirrors tier3/spawn-tier3.sh:442-463): we are
+        # root, and we run qdistro-secctx-exec via `runuser -u admin` so the
+        # helper runs at the ADMIN uid (introspectable by the unprivileged
+        # admin compositor) while its DIRECT launcher parent is `runuser`
+        # (root). That satisfies BOTH qdistro-secctx-exec's trusted-launcher
+        # check AND qdwin's root-parent attestation, so the disposable's
+        # qdistro.disp.<token> app_id is stamped on the wire. The WRAPPER_BODY
+        # (which execs the rootless `podman run`) runs as admin too, keeping
+        # the --userns=keep-id state model intact.
+        LAUNCHREC_TOKEN="$(gen_launch_token "spawn-tier2")"
+        LAUNCHREC_FILE_ID="$(gen_launch_token "spawn-tier2")"
+        # The launch record is written by secctx-exec AS ADMIN under the admin
+        # runtime dir, so it must live there (root reads it back below to
+        # register the launch with the broker).
+        LAUNCHREC_PATH="$RUNTIME_DIR/qdistro-tier2-launchrec-$LAUNCHREC_FILE_ID.pid"
+        runuser -u "$ADMIN_USER" -- rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
+        # `runuser` resets the env (PAM), so re-pass EVERYTHING the chain needs
+        # explicitly via `env`: the secctx-exec controls + the WRAPPER_BODY's
+        # full TIER2_*_RESOLVED set (SECCTX_ENV_PASS). Without the latter the
+        # wrapper would see empty vars and mis-launch.
+        # runuser runs PAM and sets HOME/USER/LOGNAME for admin itself; we only
+        # need to re-assert XDG_RUNTIME_DIR (the admin runtime dir) + the secctx
+        # controls + the wrapper's TIER2_*_RESOLVED env on top.
+        runuser -u "$ADMIN_USER" -- env \
+            XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+            QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \
+            QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH" \
+            QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN" \
+            "${SECCTX_ENV_PASS[@]}" \
+            qdistro-secctx-exec \
+                --sandbox-engine "$ENGINE" \
+                --app-id "$SECCTX_APPID" \
+                --instance-id "$LAUNCH_TOKEN" \
+                -- bash -c "$WRAPPER_BODY" &
+    elif [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
         echo "spawn-tier2: WARN: secctx stamping requires a direct root launcher parent;" >&2
-        echo "             running un-tagged. Use the root launcher/broker path, or set" >&2
-        echo "             QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
+        echo "             running un-tagged. Use the root launcher path (TIER2_ROOT_LAUNCHER=1)," >&2
+        echo "             or set QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
         bash -c "$WRAPPER_BODY" &
     else
         LAUNCHREC_TOKEN="$(gen_launch_token "spawn-tier2")"

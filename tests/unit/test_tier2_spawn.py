@@ -30,6 +30,7 @@ def _tool_path(tmp_path: Path, *, dbus_mode: str | None) -> str:
         "env",
         "grep",
         "head",
+        "id",
         "mkdir",
         "od",
         "readlink",
@@ -344,3 +345,46 @@ def test_disposable_workflow_bad_id_ignored(tmp_path: Path) -> None:
     plan = _plan(result)
     assert plan["LEASE_WORKFLOW"] == "none"
     assert "ignoring invalid" in result.stderr
+
+
+# --- root-launcher (secctx wire-tag) mode guards --------------------------
+# These exercise the fail-closed guards the unit harness CAN reach without
+# real root: TIER2_ROOT_LAUNCHER=1 is a privileged mode and must refuse every
+# precondition it cannot satisfy. The full tagged path (helper under a root
+# runuser parent → qdwin commit on the wire) is proven by the dedicated VM
+# lane disposable-secctx-wiretag.bats; here we only lock in that the guards
+# fail closed rather than silently downgrading to an un-tagged or rootful run.
+
+def test_root_launcher_requires_root(tmp_path: Path) -> None:
+    """TIER2_ROOT_LAUNCHER=1 from a non-root caller (the test runner) must
+    refuse BEFORE any podman/broker work — it cannot be the trusted root
+    launcher parent secctx-exec/qdwin require, so it must not pretend to."""
+    result = _run_disposable(
+        tmp_path, dbus_mode="allow",
+        extra_env={"TIER2_ROOT_LAUNCHER": "1"})
+    assert result.returncode != 0, result.stdout
+    assert "requires running as root" in result.stderr
+    # Fail closed: nothing launched, no correlation metadata emitted.
+    assert "LAUNCH_TOKEN=" not in result.stdout
+    assert "CONTAINER=" not in result.stdout
+
+
+def test_root_launcher_rejects_root_target_uid(tmp_path: Path) -> None:
+    """Even if it were root, a target uid of 0 is forbidden (rootless podman +
+    admin-owned state demand a non-root target). The non-root guard fires
+    first for the test runner, so we assert it refuses; the uid-0 branch is a
+    second defence proven by inspection. Either way it must NOT run."""
+    result = _run_disposable(
+        tmp_path, dbus_mode="allow",
+        extra_env={"TIER2_ROOT_LAUNCHER": "1", "TIER2_ADMIN_UID": "0"})
+    assert result.returncode != 0, result.stdout
+    assert "LAUNCH_TOKEN=" not in result.stdout
+
+
+def test_root_launcher_off_by_default_runs_untagged(tmp_path: Path) -> None:
+    """Without TIER2_ROOT_LAUNCHER the disposable still launches as admin
+    (the un-tagged fallback) — the new mode is opt-in and must not change the
+    default admin-direct behaviour. Here secctx is off, so it just runs."""
+    result = _run_disposable(tmp_path, dbus_mode="allow", record_podman=True)
+    assert result.returncode == 0, result.stderr
+    assert "LAUNCH_TOKEN=" in result.stdout
