@@ -4,9 +4,10 @@
 # the new ingredient is the `qdistro/tier2-<workload>:latest` container
 # images (image-per-workload model) built by tier2/make-tier2-image.sh.
 # First workload: qdistro/tier2-weston-terminal:latest.
-# Drivers stage themselves over the bats http server (port 8768) the
-# same way broker-e2e.bats stages s90; s32 builds the image on-demand
-# inside the VM if missing. Skips on VMs without podman.
+# Drivers stage themselves over the shared free-port bats http server
+# (stage_vm_driver, helpers.bash) the same way broker-e2e.bats stages s90;
+# s32 builds the image on-demand inside the VM if missing. Skips on VMs
+# without podman.
 
 load helpers
 
@@ -16,33 +17,16 @@ setup() {
     vm_run "systemctl stop qdistro-admin-broker.service 2>/dev/null || true"
 }
 
-# Stage the in-VM driver script onto the host's bats http server
-# (port 8768 by convention) so the VM can fetch it. Mirrors the
-# self-staging pattern in broker-e2e.bats.
-stage_vm_driver() {
-    local script_name="$1"
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/$script_name"
-    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
-
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-
-    if ! ss -tln 2>/dev/null | grep -q ":8768 "; then
-        local stage_dir
-        stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
-        (
-            cd "$stage_dir" || exit 1
-            nohup python3 -m http.server 8768 \
-                >/tmp/qdistro-bats-http.log 2>&1 </dev/null 3>&- 4>&- 5>&- &
-            disown "$!" 2>/dev/null || true
-        )
-        sleep 1
-    fi
+# Drivers are staged via the shared stage_vm_driver (helpers.bash), which serves
+# them on a private free port exported as QDISTRO_BATS_HTTP_PORT; reap the server
+# once the whole file is done.
+teardown_file() {
+    reap_vm_drivers
 }
 
 @test "phase7-tier2-podman: in-container weston-terminal becomes a peer toplevel on outer" {
     stage_vm_driver "s32-tier2-podman.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s32.sh http://10.0.2.2:8768/s32-tier2-podman.sh && chmod +x /tmp/s32.sh && bash /tmp/s32.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s32.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s32-tier2-podman.sh && chmod +x /tmp/s32.sh && bash /tmp/s32.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -58,7 +42,7 @@ stage_vm_driver() {
 
 @test "phase7-tier2-input: QDNI input forwards into the in-container nested compositor" {
     stage_vm_driver "s33-tier2-input.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s33.sh http://10.0.2.2:8768/s33-tier2-input.sh && chmod +x /tmp/s33.sh && bash /tmp/s33.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s33.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s33-tier2-input.sh && chmod +x /tmp/s33.sh && bash /tmp/s33.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -84,7 +68,7 @@ stage_vm_driver() {
     # running admin ydotoold; the driver SKIPs when that surface is absent
     # and SKIP is escalated to fail_loud below so missing infra is noticed.
     stage_vm_driver "s60-launcher-podapp-click.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s60.sh http://10.0.2.2:8768/s60-launcher-podapp-click.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s60.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s60-launcher-podapp-click.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman / tier-2 image / outer compositor / ydotool+uinput absent on this VM"
@@ -102,7 +86,7 @@ stage_vm_driver() {
 
 @test "phase7-tier2-lifecycle: two containers + stop-cleanup" {
     stage_vm_driver "s34-tier2-lifecycle.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s34.sh http://10.0.2.2:8768/s34-tier2-lifecycle.sh && chmod +x /tmp/s34.sh && bash /tmp/s34.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s34.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s34-tier2-lifecycle.sh && chmod +x /tmp/s34.sh && bash /tmp/s34.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -115,7 +99,7 @@ stage_vm_driver() {
 
 @test "phase7-tier2-hardening: container-runtime isolation flags effective" {
     stage_vm_driver "s40-tier2-hardening.sh"
-    vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-tier2-hardening.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s40.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s40-tier2-hardening.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman / tier-2 image / outer compositor absent on this VM"
@@ -140,7 +124,7 @@ stage_vm_driver() {
 
 @test "phase7-tier3-waypipe: cross-uid bridge smoke (wayland-info as user1)" {
     stage_vm_driver "s35-tier3-waypipe.sh"
-    vm_run "curl -s -o /tmp/s35.sh http://10.0.2.2:8768/s35-tier3-waypipe.sh && chmod +x /tmp/s35.sh && bash /tmp/s35.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s35.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s35-tier3-waypipe.sh && chmod +x /tmp/s35.sh && bash /tmp/s35.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / wayland-info / qdistro-tier3 group / user1 silo) not available on this VM"
@@ -157,7 +141,7 @@ stage_vm_driver() {
 
 @test "phase7-tier3-app: cross-uid weston-terminal as user1 reaches outer" {
     stage_vm_driver "s36-tier3-app.sh"
-    vm_run "curl -s -o /tmp/s36.sh http://10.0.2.2:8768/s36-tier3-app.sh && chmod +x /tmp/s36.sh && bash /tmp/s36.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s36.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s36-tier3-app.sh && chmod +x /tmp/s36.sh && bash /tmp/s36.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / weston-terminal / user1 silo / qdshell Tier3Apps) not available on this VM"
@@ -173,7 +157,7 @@ stage_vm_driver() {
 
 @test "phase7-tier3-lifecycle: two silos (user1+user2), kill A leaves B running" {
     stage_vm_driver "s37-tier3-lifecycle.sh"
-    vm_run "curl -s -o /tmp/s37.sh http://10.0.2.2:8768/s37-tier3-lifecycle.sh && chmod +x /tmp/s37.sh && bash /tmp/s37.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s37.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s37-tier3-lifecycle.sh && chmod +x /tmp/s37.sh && bash /tmp/s37.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / weston-terminal / user1+user2 silos / qdshell Tier3Apps) not available on this VM"
@@ -188,7 +172,7 @@ stage_vm_driver() {
 
 @test "phase7-tier3-chrome: qdshell parses silo identifier + applies per-silo color override" {
     stage_vm_driver "s38-tier3-chrome.sh"
-    vm_run "curl -s -o /tmp/s38.sh http://10.0.2.2:8768/s38-tier3-chrome.sh && chmod +x /tmp/s38.sh && bash /tmp/s38.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s38.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s38-tier3-chrome.sh && chmod +x /tmp/s38.sh && bash /tmp/s38.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / silo users / qdshell) not available on this VM"
@@ -208,7 +192,7 @@ stage_vm_driver() {
 
 @test "phase7-secctx: wp_security_context_v1 advertised + waypipe-tagged silo client (§6.10)" {
     stage_vm_driver "s40-secctx.sh"
-    vm_run "curl -s -o /tmp/s40.sh http://10.0.2.2:8768/s40-secctx.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s40.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s40-secctx.sh && chmod +x /tmp/s40.sh && bash /tmp/s40.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / wayland-info / user1 silo) not available on this VM"
@@ -243,7 +227,7 @@ stage_vm_driver() {
     #   3. waypipe wl_client mismatch is moot once focus is set —
     #      qdwin emits source_handle = silo_toplevel.handle.
     stage_vm_driver "s39-clipboard-gate.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s39.sh http://10.0.2.2:8768/s39-clipboard-gate.sh && chmod +x /tmp/s39.sh && bash /tmp/s39.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s39.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s39-clipboard-gate.sh && chmod +x /tmp/s39.sh && bash /tmp/s39.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / qdistro-test-clipboard-source / dbus / user1 silo / qdshell / broker) not available on this VM"
@@ -261,7 +245,7 @@ stage_vm_driver() {
 
 @test "phase7-secctx-toplevel-event: qdwin_shell_v1@v13 toplevel_security_context end-to-end" {
     stage_vm_driver "s41-secctx-toplevel-event.sh"
-    vm_run "curl -s -o /tmp/s41.sh http://10.0.2.2:8768/s41-secctx-toplevel-event.sh && chmod +x /tmp/s41.sh && bash /tmp/s41.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s41.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s41-secctx-toplevel-event.sh && chmod +x /tmp/s41.sh && bash /tmp/s41.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / weston-terminal / user1 silo / qdshell / qdwin source tree) not available on this VM"
@@ -299,7 +283,7 @@ stage_vm_driver() {
         skip "tier-4 stack (libvirt/qemu/kvm + tier4-vm-guest template) not installed on this VM (opt-in bake)"
     fi
     stage_vm_driver "s42-tier4-spawn.sh"
-    vm_run "curl -s -o /tmp/s42.sh http://10.0.2.2:8768/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s42.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s42-tier4-spawn.sh && chmod +x /tmp/s42.sh && bash /tmp/s42.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-4 stack (libvirt/qemu/waypipe) not installed on this VM (opt-in bake)"
@@ -317,7 +301,7 @@ stage_vm_driver() {
     # per spec/00. Tests the data path with vsock CID=1 (loopback).
     # Real-VM mode (--vm <name>) is covered by phase7-tier5-vm.
     stage_vm_driver "s43-tier5-loopback.sh"
-    vm_run "curl -s -o /tmp/s43.sh http://10.0.2.2:8768/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s43.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s43-tier5-loopback.sh && chmod +x /tmp/s43.sh && bash /tmp/s43.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info) not available on this VM"
@@ -334,7 +318,7 @@ stage_vm_driver() {
     # wrapper end-to-end with qdistro-test-window as a stand-in for
     # waypipe to avoid dragging libvirt+qemu into the test.
     stage_vm_driver "s44-tier4-secctx-exec.sh"
-    vm_run "curl -s -o /tmp/s44.sh http://10.0.2.2:8768/s44-tier4-secctx-exec.sh && chmod +x /tmp/s44.sh && bash /tmp/s44.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s44.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s44-tier4-secctx-exec.sh && chmod +x /tmp/s44.sh && bash /tmp/s44.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-secctx-exec / qdistro-test-window absent on this VM"
@@ -363,7 +347,7 @@ stage_vm_driver() {
         skip "tier-5 base disk / virsh / qemu-img / kvm absent (opt-in bake; set QDISTRO_BUILD_TIER5_BASE=1)"
     fi
     stage_vm_driver "s45-tier5-vm.sh"
-    vm_run "curl -s -o /tmp/s45.sh http://10.0.2.2:8768/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s45.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s45-tier5-vm.sh && chmod +x /tmp/s45.sh && bash /tmp/s45.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk absent (rerun fresh-vm-bootstrap.sh with QDISTRO_BUILD_TIER5_BASE=1)"
@@ -388,7 +372,7 @@ stage_vm_driver() {
         skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
     fi
     stage_vm_driver "s48-tier5-close-cleanup.sh"
-    vm_run "curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-tier5-close-cleanup.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
@@ -410,7 +394,7 @@ stage_vm_driver() {
         skip "tier-5 base disk / pw-cli / qemu-audio-pipewire absent (opt-in bake)"
     fi
     stage_vm_driver "s47-tier5-audio.sh"
-    vm_run "curl -s -o /tmp/s47.sh http://10.0.2.2:8768/s47-tier5-audio.sh && chmod +x /tmp/s47.sh && bash /tmp/s47.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s47.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s47-tier5-audio.sh && chmod +x /tmp/s47.sh && bash /tmp/s47.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-5 base disk / pw-cli / qemu-audio-pipewire absent"
@@ -434,7 +418,7 @@ stage_vm_driver() {
     # the focus state that the real waypipe path would deliver naturally is
     # injected via qdshell's ctrl-socket.
     stage_vm_driver "s46-tier4-clipboard-gate.sh"
-    vm_run "curl -s -o /tmp/s46.sh http://10.0.2.2:8768/s46-tier4-clipboard-gate.sh && chmod +x /tmp/s46.sh && bash /tmp/s46.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s46.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s46-tier4-clipboard-gate.sh && chmod +x /tmp/s46.sh && bash /tmp/s46.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-secctx-exec / qdistro-test-window / qdistro-test-clipboard-source absent"
@@ -461,7 +445,7 @@ stage_vm_driver() {
     # Needs the tier-4 secctx stack + broker + qdshell. Skips cleanly on a
     # minimal bake; fails LOUDLY on the bad path otherwise.
     stage_vm_driver "s110-tier4-waypipe-display.sh"
-    vm_run "curl -s -o /tmp/s110.sh http://10.0.2.2:8768/s110-tier4-waypipe-display.sh && chmod +x /tmp/s110.sh && bash /tmp/s110.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s110.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s110-tier4-waypipe-display.sh && chmod +x /tmp/s110.sh && bash /tmp/s110.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-4 secctx stack / wayland-info / dbus-send absent on this VM (opt-in bake)"
@@ -497,7 +481,7 @@ stage_vm_driver() {
         skip "tier-4/5 stack (virsh/kvm) absent on this VM (opt-in bake)"
     fi
     stage_vm_driver "s111-tier4-tier5-lifecycle-stress.sh"
-    vm_run "curl -s -o /tmp/s111.sh http://10.0.2.2:8768/s111-tier4-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s111.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s111-tier4-tier5-lifecycle-stress.sh && chmod +x /tmp/s111.sh && bash /tmp/s111.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-4/5 stack / kvm absent on this VM (opt-in bake)"
@@ -519,7 +503,7 @@ stage_vm_driver() {
     # surface) over D-Bus; tier base disks not required. Real cross-
     # compositor selection set+receive is PENDING-LIVE-FOCUS.
     stage_vm_driver "s112-cross-tier-clipboard.sh"
-    vm_run "curl -s -o /tmp/s112.sh http://10.0.2.2:8768/s112-cross-tier-clipboard.sh && chmod +x /tmp/s112.sh && bash /tmp/s112.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s112.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s112-cross-tier-clipboard.sh && chmod +x /tmp/s112.sh && bash /tmp/s112.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "broker / dbus-send absent — cross-tier clipboard gate untestable"
@@ -543,7 +527,7 @@ stage_vm_driver() {
     # The implementation pass picks up from this baseline once the four
     # blocking spikes in tier1/spike-checklist.md resolve.
     stage_vm_driver "s50-tier1-skeleton.sh"
-    vm_run "curl -s -o /tmp/s50.sh http://10.0.2.2:8768/s50-tier1-skeleton.sh && chmod +x /tmp/s50.sh && bash /tmp/s50.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s50.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s50-tier1-skeleton.sh && chmod +x /tmp/s50.sh && bash /tmp/s50.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier1 source not staged in this VM"
@@ -565,7 +549,7 @@ stage_vm_driver() {
     # path is what this script exercises; real chrome click-to-focus
     # uses the same set_keyboard_focus request.
     stage_vm_driver "s48-focus-aware-clear.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s48.sh http://10.0.2.2:8768/s48-focus-aware-clear.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s48.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s48-focus-aware-clear.sh && chmod +x /tmp/s48.sh && bash /tmp/s48.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / qs / qdistro-test-clipboard-source / user1 silo / qdshell) not available on this VM"
@@ -595,7 +579,7 @@ stage_vm_driver() {
     # user1 → user1 (same silo) must NOT log a clear — proving strict mode
     # still allows same-silo paste.
     stage_vm_driver "s49-clipboard-focus-gate-journal.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s49.sh http://10.0.2.2:8768/s49-clipboard-focus-gate-journal.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-clipboard-focus-gate-journal.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "tier-3 stack (waypipe / qs / qdistro-test-clipboard-source / user1 silo / qdshell) not available on this VM"
@@ -618,7 +602,7 @@ stage_vm_driver() {
     # places the inner command in qdistro_tier1_t, broker spawn-action
     # gate denies an authored rule.
     stage_vm_driver "s51-tier1-e2e.sh"
-    vm_run "curl -s -o /tmp/s51.sh http://10.0.2.2:8768/s51-tier1-e2e.sh && chmod +x /tmp/s51.sh && bash /tmp/s51.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s51.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s51-tier1-e2e.sh && chmod +x /tmp/s51.sh && bash /tmp/s51.sh 2>/dev/null"
     # SELinux Tier-1 stack is an opt-in bake (policy module + spawn
     # wrapper + tier1-exec daemon + enforcing mode). The bake we run
     # against pins SELINUX=permissive in /etc/selinux/config so the
@@ -651,7 +635,7 @@ stage_vm_driver() {
     # wl_data_device receives the offer. The byte-for-byte payload
     # assertion is now load-bearing whenever the sink helper is built.
     stage_vm_driver "s53-data-offer-receive-v15.sh"
-    vm_run "curl -s -o /tmp/s53.sh http://10.0.2.2:8768/s53-data-offer-receive-v15.sh && chmod +x /tmp/s53.sh && bash /tmp/s53.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s53.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s53-data-offer-receive-v15.sh && chmod +x /tmp/s53.sh && bash /tmp/s53.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "qdistro-test-clipboard-sink absent or v15 binding missing"
@@ -683,7 +667,7 @@ stage_vm_driver() {
     # Restoration: trap re-issues setenforce 0 on natural exit OR
     # signal so a failed run still leaves the VM in permissive mode.
     stage_vm_driver "s55-tier1-enforcing.sh"
-    vm_run "curl -s -o /tmp/s55.sh http://10.0.2.2:8768/s55-tier1-enforcing.sh && chmod +x /tmp/s55.sh && bash /tmp/s55.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s55.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s55-tier1-enforcing.sh && chmod +x /tmp/s55.sh && bash /tmp/s55.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "Tier-1 SELinux enforcing not enabled in this bake (config-pinned permissive; opt-in QDISTRO_BUILD_TIER1=1)"
     fi
@@ -703,7 +687,7 @@ stage_vm_driver() {
     # Same SKIP semantics as phase7-tier1-enforcing: when /etc/selinux/
     # config pins SELINUX=permissive, the runtime flip is refused.
     stage_vm_driver "s56-broker-enforcing.sh"
-    vm_run "curl -s -o /tmp/s56.sh http://10.0.2.2:8768/s56-broker-enforcing.sh && chmod +x /tmp/s56.sh && bash /tmp/s56.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s56.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s56-broker-enforcing.sh && chmod +x /tmp/s56.sh && bash /tmp/s56.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "broker enforcing not enabled in this bake (config-pinned permissive; opt-in QDISTRO_BUILD_TIER1=1)"
     fi
@@ -719,7 +703,7 @@ stage_vm_driver() {
     # under qdistro_sessmgr_t, run the representative s101 lifecycle
     # workload, and fail on any new qdistro_sessmgr_t AVCs.
     stage_vm_driver "s63-session-manager-enforcing.sh"
-    vm_run "curl -s -o /tmp/s63.sh http://10.0.2.2:8768/s63-session-manager-enforcing.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s63.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s63-session-manager-enforcing.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "session-manager enforcing not enabled in this bake (policy/config/transport prereq missing)"
     fi
@@ -745,7 +729,7 @@ stage_vm_driver() {
     #
     # Re-run-safe: probe revokes its own rows on entry + exit.
     stage_vm_driver "s57-qsu-argv-scopes.sh"
-    vm_run "curl -s -o /tmp/s57.sh http://10.0.2.2:8768/s57-qsu-argv-scopes.sh && chmod +x /tmp/s57.sh && bash /tmp/s57.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s57.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s57-qsu-argv-scopes.sh && chmod +x /tmp/s57.sh && bash /tmp/s57.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL:"*"qdistro-admin-broker.service not active"* ]]; then
         fail_loud "broker service inactive on this VM"
@@ -779,7 +763,7 @@ stage_vm_driver() {
     # out step B (re-prompt instead of cache) or fail step A's
     # DecideRequest with "forbidden scope on delegated request".
     stage_vm_driver "s58-qsu-real-flow.sh"
-    vm_run "curl -s -o /tmp/s58.sh http://10.0.2.2:8768/s58-qsu-real-flow.sh && chmod +x /tmp/s58.sh && bash /tmp/s58.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s58.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s58-qsu-real-flow.sh && chmod +x /tmp/s58.sh && bash /tmp/s58.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"FAIL: /usr/local/bin/qsu absent"* ]]; then
         fail_loud "qsu not installed on this VM (older bootstrap)"
@@ -800,7 +784,7 @@ stage_vm_driver() {
     # AVC denial in qdistro_tier1_t → audispd plugin → broker
     # RecordSelinuxAvc → audit DB row with selinux_subj_type set.
     stage_vm_driver "s52-tier1-audisp.sh"
-    vm_run "curl -s -o /tmp/s52.sh http://10.0.2.2:8768/s52-tier1-audisp.sh && chmod +x /tmp/s52.sh && bash /tmp/s52.sh 2>/dev/null"
+    vm_run "curl -fsS -o /tmp/s52.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s52-tier1-audisp.sh && chmod +x /tmp/s52.sh && bash /tmp/s52.sh 2>/dev/null"
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "Tier-1 audispd pipeline not enabled in this bake (opt-in QDISTRO_BUILD_TIER1=1)"
     fi
@@ -834,7 +818,7 @@ stage_vm_driver() {
 
 @test "phase7-tier2-podapps-discovery: podman exec scan writes apps.json" {
     stage_vm_driver "s59-tier2-podapps-discovery.sh"
-    vm_run "systemctl start qdistro-admin-broker.service && curl -s -o /tmp/s59.sh http://10.0.2.2:8768/s59-tier2-podapps-discovery.sh && chmod +x /tmp/s59.sh && bash /tmp/s59.sh 2>/dev/null"
+    vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s59.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s59-tier2-podapps-discovery.sh && chmod +x /tmp/s59.sh && bash /tmp/s59.sh 2>/dev/null"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         fail_loud "podman or qdistro/tier2 image absent on this VM"
@@ -875,7 +859,7 @@ stage_vm_driver() {
     # CreateSilo inside s101 then failed with "silo 'work' already
     # exists"). `userdel` and `rm -rf` of /var/lib stay as root.
     vm_run "runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 StopSilo si work 2 >/dev/null 2>&1 || true; runuser -u admin -- busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 org.qdistro.SessionManager1 DeleteSilo s work >/dev/null 2>&1 || true; userdel -r work 2>/dev/null || true; rm -rf /var/lib/qdistro/silos/work 2>/dev/null || true"
-    vm_run "curl -s -o /tmp/s101.sh http://10.0.2.2:8768/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
+    vm_run "curl -fsS -o /tmp/s101.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s101-session-lifecycle.sh && chmod +x /tmp/s101.sh && systemctl restart qdistro-session-manager.service && sleep 1 && runuser -u admin -- bash /tmp/s101.sh 2>&1"
     assert_success
     if [[ "$output" == *"FAIL: qdistro-session-manager.service failed to start"* ]]; then
         fail_loud "qdistro-session-manager not installed on this VM (older bootstrap)"

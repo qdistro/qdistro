@@ -26,19 +26,14 @@ setup() {
             || systemctl start qdistro-admin-broker.service"
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "phase9-broker-e2e: HooksGate + Notifications round-trip" {
-    # Push the driver into the VM via the http-staging dance other
-    # phaseN bats already use.
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s90-phase5-broker-e2e.sh"
-    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
-
-    # Stage on host http server (port 8765 by convention). See
-    # stage_http_8765 in helpers.bash for the kill-and-respawn rationale.
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    vm_run 'curl -s -o /tmp/s90.sh http://10.0.2.2:8765/s90-phase5-broker-e2e.sh && chmod +x /tmp/s90.sh && bash /tmp/s90.sh'
+    # Push the driver into the VM via the shared free-port http stager.
+    stage_vm_driver "s90-phase5-broker-e2e.sh"
+    vm_run "curl -fsS -o /tmp/s90.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s90-phase5-broker-e2e.sh && chmod +x /tmp/s90.sh && bash /tmp/s90.sh"
     assert_success
     assert_output_contains "PASS: hooks: CheckPermission unknown when no rule"
     assert_output_contains "PASS: hooks: CheckPermission allow with rule"

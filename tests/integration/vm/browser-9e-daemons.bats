@@ -58,6 +58,10 @@ setup() {
     wait_for_bus_name org.qdistro.Compositor    --user
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "9e-daemons: four bus names owned on the user session bus" {
     # vm_run/vm_run_admin already wrap the command in bats `run`, setting
     # $status/$output in this scope; call it bare (a second `run` would
@@ -72,14 +76,12 @@ setup() {
 }
 
 @test "9e-daemons: full desktop-integration round-trip" {
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s-browser-9e-daemons.sh"
-    [ -f "$script_path" ] || skip "driver script not provisioned: $script_path"
+    # This driver is optional/provisioned-only: skip (not fail) when absent.
+    [ -f "$(dirname "$BATS_TEST_FILENAME")/s-browser-9e-daemons.sh" ] \
+        || skip "driver script not provisioned: s-browser-9e-daemons.sh"
 
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    run vm_run "curl -s http://$(vm_host_ip):8765/s-browser-9e-daemons.sh \
+    stage_vm_driver "s-browser-9e-daemons.sh"
+    run vm_run "curl -fsS http://$(vm_host_ip):${QDISTRO_BATS_HTTP_PORT}/s-browser-9e-daemons.sh \
                 -o /tmp/s-9e.sh && bash /tmp/s-9e.sh"
     echo "$output"
     [ "$status" -eq 0 ]

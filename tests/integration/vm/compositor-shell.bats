@@ -33,6 +33,10 @@ setup() {
     vm_run "systemctl stop qdistro-admin-broker.service 2>/dev/null || true"
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "s3c-e2e: subscribe + qdistro-forward spawns, RDP port accepts, frames flow" {
     skip "$SKIP_LEGACY_CTRL_SOCK"
     vm_run "bash /root/s3c-e2e.sh"
@@ -197,14 +201,8 @@ setup() {
     vm_run "command -v ydotool >/dev/null && command -v foot >/dev/null"
     [ "$status" -eq 0 ] || skip "$SKIP_S103_NO_INPUT"
 
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s103-launcher-foot-roundtrip.sh"
-    [ -f "$script_path" ] || fail_loud "driver script missing: $script_path"
-
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    vm_run 'curl -s -o /tmp/s103.sh http://10.0.2.2:8765/s103-launcher-foot-roundtrip.sh && chmod +x /tmp/s103.sh && bash /tmp/s103.sh'
+    stage_vm_driver "s103-launcher-foot-roundtrip.sh"
+    vm_run "curl -fsS -o /tmp/s103.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-launcher-foot-roundtrip.sh && chmod +x /tmp/s103.sh && bash /tmp/s103.sh"
     assert_success
 
     # Load-bearing PASS contract — one per step of the scenario.

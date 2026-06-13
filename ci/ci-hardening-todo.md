@@ -25,20 +25,22 @@ check can't fire while blocked in a command substitution (codex's main finding).
 VM-verified (normal path + exec'd / backgrounded / grandchild kills) and
 codex-reviewed.
 
-## 2. Fixed-port driver-stager collision  (`:8768` / `:8765`)
-`tiered-isolation.bats` (local `stage_vm_driver`, ~22–41), `tier2-hardening-lockin.bats`
-(~28–47), and `helpers.bash:stage_http_8765` (~165) serve a driver over a
-**fixed, host-global, cross-user** HTTP port and copy it into a **shared** dir.
-A worker silently reuses whatever (foreign/stale) server squats the port; stale
-listeners from other users/runs were observed live. `stage_http_8765` even
-`pkill`s sibling workers' servers. Fix: consolidate to ONE shared helper using
-**free-port + content-validation** (the `silo-egress.bats` pattern: bind port 0,
-`curl … | cmp` to prove it serves OUR file) — or base64 delivery (the
-`qdlocker-faillock.bats` pattern). Remove the `pkill`; replace the per-file
-local copies; add `curl -fsS`; stage into `BATS_TEST_TMPDIR` not the shared dir;
-add a `teardown_file` to reap leaked servers. Other `:8765` consumers to migrate:
-`admin-app-polish`, `app-launcher`, `broker-e2e`, `browser-9e-daemons`,
-`compositor-shell`.
+## 2. Fixed-port driver-stager collision  (`:8768` / `:8765`)  — DONE 2026-06-13
+`tiered-isolation.bats` (local `stage_vm_driver`), `tier2-hardening-lockin.bats`,
+and `helpers.bash:stage_http_8765` served drivers over a **fixed, host-global,
+cross-user** HTTP port and copied them into a **shared** dir; a worker silently
+reused whatever squatted the port and `stage_http_8765` even `pkill`ed sibling
+workers' servers. Consolidated to ONE shared `stage_vm_driver` + `reap_vm_drivers`
+in `helpers.bash`: **free port** (`python3 bind(0)`) **+ content-validation**
+(`curl -fsS | cmp` proves the port serves OUR file, else retries a new port — 5
+attempts, closing the bind(0)→http.server TOCTOU codex flagged), private per-file
+serving dir under `BATS_FILE_TMPDIR` (not the shared dir), `QDISTRO_BATS_HTTP_PORT`
+exported for the VM fetch, PIDs reaped via `teardown_file`. Migrated all 9
+consumers (tiered-isolation ×35 sites, tier2-hardening-lockin, broker-e2e,
+removable-media, app-launcher, admin-app-polish, compositor-shell,
+browser-9e-daemons, and silo-egress — whose local free-port helper was folded in).
+Removed the `pkill`; switched fetches to `curl -fsS`. VM-verified (broker-e2e
+gate green) and codex-reviewed.
 NOTE (codex): this collision was only ~10% of the two named failures — the
 bigger cause is item 3.
 

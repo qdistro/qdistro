@@ -22,15 +22,13 @@ setup() {
             || systemctl start qdistro-admin-broker.service"
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "removable-media: brokered mount/unmount + injection refusal" {
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s60-removable-media.sh"
-    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
-
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    vm_run 'curl -s -o /tmp/s60.sh http://10.0.2.2:8765/s60-removable-media.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh'
+    stage_vm_driver "s60-removable-media.sh"
+    vm_run "curl -fsS -o /tmp/s60.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s60-removable-media.sh && chmod +x /tmp/s60.sh && bash /tmp/s60.sh"
     assert_success
     assert_output_contains "PASS: media: injection device string refused"
     assert_output_contains "PASS: media: non-/dev device refused"

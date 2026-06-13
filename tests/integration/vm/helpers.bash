@@ -149,44 +149,109 @@ require() {
     fi
 }
 
-# stage_http_8765 <stage_dir> — idempotently (re)start the host-side
-# python3 http.server on port 8765 rooted at <stage_dir>, so VM tests
-# can fetch driver scripts via http://10.0.2.2:8765/<name>.
+# ---------------------------------------------------------------------------
+# Driver staging over a PRIVATE, free-port HTTP server (parallel-safe).
 #
-# Round-6 root cause: spin-test-vm leaves an http.server bound to 8765
-# whose cwd is a tempdir that gets deleted on spin exit. The kernel
-# then reports the process cwd as "(deleted)" and python serves an
-# HTML 404 page for every request, which makes the VM-side
-# `curl … | bash` choke on `<!DOCTYPE HTML>`. Detecting a stale server
-# (port-bound but serving wrong root) by content-sniff is fragile, so
-# we always kill anything on 8765 and spawn fresh — costs ~200ms but
-# is deterministic. Logs and PID files are per-run/per-user so parallel
-# developers cannot trip over root-owned leftovers in /tmp.
-stage_http_8765() {
-    local stage_dir="$1"
-    [[ -d "$stage_dir" ]] || { echo "stage_http_8765: not a dir: $stage_dir" >&2; return 1; }
-    pkill -f "python3 -m http.server 8765" 2>/dev/null || true
-    local state_dir="${BATS_TEST_TMPDIR:-${TMPDIR:-/tmp}}"
-    local log_path="$state_dir/qdistro-bats-http-$(id -u)-8765.log"
-    local pid_path="$state_dir/qdistro-bats-http-$(id -u)-8765.pid"
-    local i
-    for ((i=0; i<20; i++)); do
-        ss -tln 2>/dev/null | grep -q ":8765 " || break
-        sleep 0.1
+# stage_vm_driver <script_name> stages tests/integration/vm/<script_name> and
+# serves it to the VM over a python http.server bound to a FREE port. This
+# replaces the old fixed host-global ports (:8765 / :8768) that collided between
+# concurrent CI workers — a worker could silently reuse a foreign/stale server
+# squatting the port (one even pkill'd sibling workers' servers).
+#
+# It sets QDISTRO_BATS_HTTP_PORT for the VM-side fetch and CONTENT-VALIDATES
+# (curl … | cmp) that the chosen port actually serves OUR file before returning,
+# so a squatter can't masquerade as the stager (it picks a new free port). The
+# server roots at a private per-FILE dir under BATS_FILE_TMPDIR and is reaped by
+# reap_vm_drivers, which each test wires into teardown_file.
+#
+# VM-side fetch — use DOUBLE quotes so the port expands in the test shell:
+#   vm_run "curl -fsS -o /tmp/x.sh \
+#       http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/<script_name> && bash /tmp/x.sh"
+# ---------------------------------------------------------------------------
+
+# Private per-file serving dir. BATS_FILE_TMPDIR persists across a file's @tests
+# and is removed by bats after teardown_file; the per-pid fallback keeps the
+# helper usable outside a bats run.
+_qd_driver_stage_dir() {
+    printf '%s/qd-driver-stage' "${BATS_FILE_TMPDIR:-${TMPDIR:-/tmp}/qd-drivers-$(id -u)-$$}"
+}
+
+_qd_pick_free_port() {
+    python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+}
+
+stage_vm_driver() {
+    local script_name="$1"
+    local src stage_dir staged portfile pidfile base i
+    src="$(dirname "$BATS_TEST_FILENAME")/$script_name"
+    [ -f "$src" ] || fail_loud "driver script not found at $src"
+
+    stage_dir="$(_qd_driver_stage_dir)"
+    mkdir -p "$stage_dir"
+    base="$(basename "$script_name")"
+    staged="$stage_dir/$base"
+    cp "$src" "$staged"
+    portfile="$stage_dir/.port"
+    pidfile="$stage_dir/.pids"
+
+    # Reuse a server already started for this file if it still serves our dir.
+    if [ -f "$portfile" ]; then
+        QDISTRO_BATS_HTTP_PORT="$(cat "$portfile")"
+        if curl -fsS "http://127.0.0.1:${QDISTRO_BATS_HTTP_PORT}/$base" 2>/dev/null | cmp -s - "$staged"; then
+            export QDISTRO_BATS_HTTP_PORT
+            return 0
+        fi
+    fi
+
+    # Start a fresh server on a free port (root it at our private dir). The
+    # free-port pick is a TOCTOU: another worker can grab the port between our
+    # bind(0) probe and http.server's bind, in which case our python exits and
+    # validation fails. Retry a NEW port a few times rather than failing the
+    # whole test on a transient race.
+    local attempt pid
+    for attempt in 1 2 3 4 5; do
+        QDISTRO_BATS_HTTP_PORT="$(_qd_pick_free_port)" || fail_loud "could not choose a free HTTP port"
+        pid=""
+        (
+            cd "$stage_dir" || exit 1
+            nohup python3 -m http.server "$QDISTRO_BATS_HTTP_PORT" \
+                >"$stage_dir/.http-${QDISTRO_BATS_HTTP_PORT}.log" 2>&1 </dev/null 3>&- 4>&- 5>&- &
+            echo $! >>"$pidfile"
+            disown "$!" 2>/dev/null || true
+        )
+        pid="$(tail -n1 "$pidfile" 2>/dev/null)"
+        echo "$QDISTRO_BATS_HTTP_PORT" >"$portfile"
+        export QDISTRO_BATS_HTTP_PORT
+
+        # Wait until the server serves OUR staged file (content-validated, not
+        # just port-bound) — proves it's our process and not a squatter.
+        for ((i=0; i<50; i++)); do
+            curl -fsS "http://127.0.0.1:${QDISTRO_BATS_HTTP_PORT}/$base" 2>/dev/null \
+                | cmp -s - "$staged" && return 0
+            sleep 0.1
+        done
+        # This port lost the race (or the server died). Reap it and try another.
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
-    (
-        cd "$stage_dir" || exit 1
-        nohup python3 -m http.server 8765 \
-            >"$log_path" 2>&1 </dev/null 3>&- 4>&- 5>&- &
-        echo $! >"$pid_path"
-        disown "$!" 2>/dev/null || true
-    )
-    for ((i=0; i<30; i++)); do
-        curl -sf -o /dev/null "http://127.0.0.1:8765/" && return 0
-        sleep 0.1
-    done
-    echo "stage_http_8765: server on 8765 did not become reachable" >&2
-    return 1
+    fail_loud "driver stager could not serve $base after 5 free-port attempts"
+}
+
+# reap_vm_drivers — kill any http.server stage_vm_driver started for this file.
+# Wire into teardown_file. A no-op when nothing was staged.
+reap_vm_drivers() {
+    local stage_dir pidfile pid
+    stage_dir="$(_qd_driver_stage_dir)"
+    pidfile="$stage_dir/.pids"
+    [ -f "$pidfile" ] || return 0
+    while read -r pid; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done < "$pidfile"
+    rm -f "$pidfile"
 }
 
 # fail_loud <description> — alias for `require` when the test wants

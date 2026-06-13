@@ -13,78 +13,10 @@
 # otherwise). dnsmasq backs the `direct`-egress per-silo resolver (Opt 3-A).
 load helpers
 
-# Stager HTTP port. If the conventional default is already occupied by a
-# foreign listener, auto-select a free high port. An explicit
-# QDISTRO_BATS_HTTP_PORT=NNNN remains pinned and fails loudly on mismatch.
-_QDISTRO_BATS_HTTP_PORT_EXPLICIT=
-_QDISTRO_BATS_HTTP_PORT_INITIALIZED=
-
-_init_http_port() {
-    [ -n "${_QDISTRO_BATS_HTTP_PORT_INITIALIZED:-}" ] && return 0
-    if [ -n "${QDISTRO_BATS_HTTP_PORT:-}" ]; then
-        _QDISTRO_BATS_HTTP_PORT_EXPLICIT=1
-    else
-        QDISTRO_BATS_HTTP_PORT=8768
-        _QDISTRO_BATS_HTTP_PORT_EXPLICIT=
-    fi
-    _QDISTRO_BATS_HTTP_PORT_INITIALIZED=1
-    export QDISTRO_BATS_HTTP_PORT \
-        _QDISTRO_BATS_HTTP_PORT_EXPLICIT \
-        _QDISTRO_BATS_HTTP_PORT_INITIALIZED
-}
-
-_pick_free_http_port() {
-    python3 - <<'PY'
-import socket
-with socket.socket() as s:
-    s.bind(("127.0.0.1", 0))
-    print(s.getsockname()[1])
-PY
-}
-
-stage_vm_driver() {
-    local script_name="$1"
-    local script_path staged stage_dir
-    _init_http_port
-    script_path="$(dirname "$BATS_TEST_FILENAME")/$script_name"
-    [ -f "$script_path" ] || fail_loud "driver script not found at $script_path"
-    stage_dir="$(dirname "$BATS_TEST_FILENAME")/.."
-    staged="$stage_dir/$(basename "$script_name")"
-    cp "$script_path" "$staged"
-    if ! ss -tln 2>/dev/null | grep -q ":${QDISTRO_BATS_HTTP_PORT} "; then
-        (
-            cd "$stage_dir" || exit 1
-            nohup python3 -m http.server "$QDISTRO_BATS_HTTP_PORT" \
-                >"${TMPDIR:-/tmp}/qdistro-bats-http-$(id -u).log" 2>&1 \
-                </dev/null 3>&- 4>&- 5>&- &
-            disown "$!" 2>/dev/null || true
-        )
-        sleep 1
-    fi
-    # Validate from the host that the port actually serves OUR staged script and
-    # not a foreign process squatting it (the reuse check above trusts any
-    # listener). A mismatch here is the squatted-port case — fail loudly with the
-    # remedy instead of shipping a 404 to the VM as the "probe".
-    local url="http://127.0.0.1:${QDISTRO_BATS_HTTP_PORT}/$(basename "$script_name")"
-    if ! curl -fsS "$url" 2>/dev/null | cmp -s - "$staged"; then
-        if [ -n "$_QDISTRO_BATS_HTTP_PORT_EXPLICIT" ]; then
-            fail_loud "port ${QDISTRO_BATS_HTTP_PORT} is not serving the staged driver (foreign listener?)"
-            return 1
-        fi
-        QDISTRO_BATS_HTTP_PORT="$(_pick_free_http_port)" \
-            || fail_loud "could not choose a fallback HTTP port"
-        (
-            cd "$stage_dir" || exit 1
-            nohup python3 -m http.server "$QDISTRO_BATS_HTTP_PORT" \
-                >"${TMPDIR:-/tmp}/qdistro-bats-http-$(id -u)-${QDISTRO_BATS_HTTP_PORT}.log" 2>&1 \
-                </dev/null 3>&- 4>&- 5>&- &
-            disown "$!" 2>/dev/null || true
-        )
-        sleep 1
-        url="http://127.0.0.1:${QDISTRO_BATS_HTTP_PORT}/$(basename "$script_name")"
-        curl -fsS "$url" 2>/dev/null | cmp -s - "$staged" \
-            || fail_loud "fallback port ${QDISTRO_BATS_HTTP_PORT} is not serving the staged driver"
-    fi
+# Drivers stage themselves via the shared free-port stage_vm_driver (helpers.bash),
+# which content-validates the port and exports QDISTRO_BATS_HTTP_PORT.
+teardown_file() {
+    reap_vm_drivers
 }
 
 @test "task3: per-silo netns + WireGuard egress kill-switch end-to-end" {

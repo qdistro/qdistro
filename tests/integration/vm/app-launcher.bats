@@ -22,18 +22,13 @@ setup() {
             || systemctl start qdistro-session-manager.service"
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "P03-send-to-roundtrip: qterminator+qnotebook+qfileman App1 round-trip" {
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s102-send-to-roundtrip.sh"
-    [ -f "$script_path" ] || fail_loud "driver script missing: $script_path"
-
-    # Stage on host http server (port 8765 by convention — matches
-    # broker-e2e.bats so we don't fight for a port). See
-    # stage_http_8765 in helpers.bash for the kill-and-respawn rationale.
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    vm_run 'curl -s -o /tmp/s102.sh http://10.0.2.2:8765/s102-send-to-roundtrip.sh && chmod +x /tmp/s102.sh && bash /tmp/s102.sh'
+    stage_vm_driver "s102-send-to-roundtrip.sh"
+    vm_run "curl -fsS -o /tmp/s102.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s102-send-to-roundtrip.sh && chmod +x /tmp/s102.sh && bash /tmp/s102.sh"
     assert_success
 
     # Every load-bearing PASS string declared in the task file.

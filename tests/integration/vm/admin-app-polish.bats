@@ -18,18 +18,13 @@ setup() {
             || systemctl start qdistro-admin-broker.service"
 }
 
+teardown_file() {
+    reap_vm_drivers
+}
+
 @test "P07-admin-app-polish: Rules + History + tray + shortcuts + modal" {
-    local script_path
-    script_path="$(dirname "$BATS_TEST_FILENAME")/s104-admin-app-polish.sh"
-    [ -f "$script_path" ] || fail_loud "driver script missing: $script_path"
-
-    # Stage on host http server (port 8765 by convention — matches
-    # broker-e2e.bats / app-launcher.bats so we don't fight for a port).
-    # See stage_http_8765 in helpers.bash for the kill-and-respawn rationale.
-    cp "$script_path" "$(dirname "$BATS_TEST_FILENAME")/../"
-    stage_http_8765 "$(dirname "$BATS_TEST_FILENAME")/.."
-
-    vm_run 'curl -s -o /tmp/s104.sh http://10.0.2.2:8765/s104-admin-app-polish.sh && chmod +x /tmp/s104.sh && bash /tmp/s104.sh'
+    stage_vm_driver "s104-admin-app-polish.sh"
+    vm_run "curl -fsS -o /tmp/s104.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s104-admin-app-polish.sh && chmod +x /tmp/s104.sh && bash /tmp/s104.sh"
     assert_success
 
     # Every load-bearing PASS string declared in the task file.
