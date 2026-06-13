@@ -6,13 +6,24 @@ LIVE state, never bootstrap-time defaults: the `locked` field reads
 from the compositor.
 
 Commands (one per connection, newline-terminated):
+  lock                forces lock; equivalent to a `lock_requested`
+                       arriving from the compositor. ALWAYS available —
+                       it can only raise the lock state and leaks nothing,
+                       so production (qdshell's lock button / session menu /
+                       IPC) relies on it.
   status              `locked=<bool> prompt-len=<n> pam-ready=<bool>
                        unlock-in-progress=<bool>`
-  lock                forces lock; equivalent to a `lock_requested`
-                       arriving from the compositor.
   unlock-result       `last=<success|failed|none>`
   prompt-text         masked prompt buffer (`*` per char + length);
                        never returns plaintext.
+
+Finding 02: `status`, `unlock-result` and `prompt-text` are introspection
+commands — they expose live lock state and, via prompt-text/prompt-len, a
+password-LENGTH side channel. They exist only for the GUI test harness and are
+served ONLY when introspection is enabled (constructor `introspection=True`).
+app.py authorizes that solely via a root-owned marker
+(`/etc/qdistro/locker-ctrl-introspection`) so a same-uid process cannot forge
+it. In production they return `error: command unavailable`.
 """
 
 from __future__ import annotations
@@ -121,10 +132,17 @@ class CtrlSocket(QObject):
         bridge,
         path: Path | None = None,
         parent: QObject | None = None,
+        introspection: bool = False,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._bridge = bridge
+        # Finding 02: introspection commands (status, unlock-result,
+        # prompt-text) expose live lock state and a password-LENGTH side
+        # channel (prompt-text). They exist only for the GUI test harness and
+        # are gated OFF by default; production keeps only the `lock` command,
+        # which can merely raise the lock state and leaks nothing.
+        self._introspection = introspection
         self._path = path or default_socket_path()
         self._state = CtrlState(controller, bridge.locked)
         self._stop = threading.Event()
@@ -296,18 +314,26 @@ class CtrlSocket(QObject):
         if not line:
             return "error: empty command"
         cmd, _, _rest = line.partition(" ")
-        if cmd == "status":
-            return self._state.status()
         if cmd == "lock":
             # 3 = manual per qdwin-locker-v1.xml. Routed through the
             # bridge so it goes through the same QueuedConnection
-            # path as a real compositor event.
+            # path as a real compositor event. Always available — it can
+            # only raise the lock state and discloses nothing (finding 02).
             self._bridge.inject_lock_requested(3)
             return "ok"
-        if cmd == "unlock-result":
-            return self._state.unlock_result()
-        if cmd == "prompt-text":
-            # Never return plaintext — only a length-revealing mask.
-            # Scenario 05 asserts on this exact form.
+        # Finding 02: the remaining commands are introspection/diagnostics and
+        # are only served when explicitly enabled (introspection=True, which
+        # app.py authorizes via a root-owned marker for the GUI test harness).
+        # In production they are unavailable, so the prompt-length side channel
+        # and live-state readout do not exist.
+        if cmd in ("status", "unlock-result", "prompt-text"):
+            if not self._introspection:
+                return "error: command unavailable"
+            if cmd == "status":
+                return self._state.status()
+            if cmd == "unlock-result":
+                return self._state.unlock_result()
+            # prompt-text: never return plaintext — only a length-revealing
+            # mask. Scenario 05 asserts on this exact form.
             return self._state.prompt_text()
         return f"error: unknown command '{cmd}'"

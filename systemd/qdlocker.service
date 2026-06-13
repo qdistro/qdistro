@@ -84,6 +84,11 @@ PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 IPAddressDeny=any
 
+# Finding 07: the unlock password is held in a Python str and cannot be
+# reliably zeroed (CPython limitation). Disable core dumps so a crash cannot
+# spill the plaintext (or the prompt buffer) to disk via systemd-coredump.
+LimitCORE=0
+
 Restart=always
 RestartSec=2
 

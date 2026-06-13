@@ -74,7 +74,11 @@ class StubBridge(QObject):
 def ctrl_socket(qapp, auth, tmp_path):
     controller = LockController(auth)
     bridge = StubBridge()
-    sock = CtrlSocket(controller, bridge, path=tmp_path / "qdlocker.sock")
+    # introspection=True so the peercred tests can probe with `status`; this
+    # fixture exercises the SO_PEERCRED gate, not the finding-02 command gating
+    # (which test_ctrl_introspection.py covers).
+    sock = CtrlSocket(controller, bridge, path=tmp_path / "qdlocker.sock",
+                      introspection=True)
     yield sock, bridge
     sock.close()
 

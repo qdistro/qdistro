@@ -57,6 +57,17 @@ _CONFIG_SCHEMA = {
     "fprintd_timeout_s": (int, lambda v: 1 <= v <= 600),
 }
 
+# Finding 06: auth-affecting knobs that select the fingerprint backend and its
+# failure policy. These must come ONLY from the trusted, root-owned system
+# config — never from a user-writable ~/.config file. The ergonomic knobs
+# (idle_timeout_s, lid_action) remain user-overridable. This holds structurally
+# even if the root-owned /etc/qdistro/locker.conf is ever missing.
+_SYSTEM_ONLY_KEYS = frozenset({
+    "fprintd_enabled",
+    "fprintd_max_failures",
+    "fprintd_timeout_s",
+})
+
 _DEFAULT_CONFIG: dict = {
     "idle_timeout_s": 300,
     "lid_action": "lock",
@@ -96,14 +107,25 @@ def _notify_ready() -> None:
         log.exception("sd_notify failed")
 
 
-def _validate_config(file_config: dict, source: str) -> dict:
+def _validate_config(file_config: dict, source: str,
+                     allow_auth_keys: bool = True) -> dict:
     """Filter file_config through the schema. Unknown keys are
     logged at WARNING and discarded. Type/range errors are logged
-    and the offending key is dropped (defaults stay in place)."""
+    and the offending key is dropped (defaults stay in place).
+
+    When allow_auth_keys is False (the config came from the untrusted user
+    path), auth-affecting keys (_SYSTEM_ONLY_KEYS) are dropped with a warning
+    so a user-writable file cannot weaken authentication (finding 06)."""
     cleaned: dict = {}
     for key, value in file_config.items():
         if key not in _CONFIG_SCHEMA:
             log.warning("%s: ignoring unknown config key '%s'", source, key)
+            continue
+        if not allow_auth_keys and key in _SYSTEM_ONLY_KEYS:
+            log.warning(
+                "%s: ignoring auth-affecting key '%s' from non-system config; "
+                "it is honored only from the root-owned system config", source,
+                key)
             continue
         expected_type, validator = _CONFIG_SCHEMA[key]
         if not isinstance(value, expected_type) or isinstance(value, bool) != (expected_type is bool):
@@ -138,6 +160,24 @@ def _system_config_is_trusted(path: str) -> bool:
         log.warning("config path %s is group/world-writable; refusing", path)
         return False
     return True
+
+
+# Finding 02: introspection is authorized only by this root-owned marker, so a
+# same-uid process cannot re-enable the ctrl-socket diagnostics (and the
+# password-length side channel) by forging it. The GUI test harness installs it
+# as root; production never ships it.
+_INTROSPECTION_MARKER = "/etc/qdistro/locker-ctrl-introspection"
+
+
+def _introspection_authorized() -> bool:
+    """True only when the root-owned introspection marker is present and
+    trustworthy (regular file, owned by root, not group/world-writable)."""
+    authorized = _system_config_is_trusted(_INTROSPECTION_MARKER)
+    if authorized:
+        log.warning("ctrl-socket introspection ENABLED via %s "
+                    "(diagnostics + prompt-length readable to same-uid peers)",
+                    _INTROSPECTION_MARKER)
+    return authorized
 
 
 def _read_toml_no_follow(path: str) -> dict:
@@ -188,7 +228,7 @@ def load_config() -> dict:
         log.info("using built-in defaults (no trusted config file found)")
         return config
 
-    path, _is_system = chosen
+    path, is_system = chosen
     try:
         file_config = _read_toml_no_follow(path)
     except FileNotFoundError:
@@ -202,7 +242,7 @@ def load_config() -> dict:
         log.error("config %s: open failed (%s)", path, e.__class__.__name__)
         return config
 
-    cleaned = _validate_config(file_config, path)
+    cleaned = _validate_config(file_config, path, allow_auth_keys=is_system)
     config.update(cleaned)
     log.info("loaded config from %s (%d keys)", path, len(cleaned))
     return config
@@ -511,7 +551,17 @@ def main(argv: list[str] | None = None) -> int:
     # app.exec() runs. Parented on `app` for cleanup on quit.
     ctrl: CtrlSocket | None = None
     if os.environ.get("QDLOCKER_CTRL_SOCKET", "1") != "0":
-        ctrl = CtrlSocket(controller, bridge, parent=app)
+        # Finding 02: the socket stays on by default for the production `lock`
+        # command (qdshell's lock button / session menu / IPC depend on it).
+        # The sensitive introspection commands (status, unlock-result,
+        # prompt-text — the password-length side channel) are served only when
+        # explicitly authorized by a ROOT-OWNED marker. A user-controlled env
+        # var would be insufficient: a compromised same-uid process (the very
+        # actor finding 02 reduces surface against) could set it and restart the
+        # user unit. A root-owned marker cannot be forged without root.
+        introspection = _introspection_authorized()
+        ctrl = CtrlSocket(controller, bridge, parent=app,
+                          introspection=introspection)
 
     app.aboutToQuit.connect(client.disconnect)
     if ctrl is not None:

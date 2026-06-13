@@ -38,6 +38,15 @@ wall-clock parallelism, clone the base VM per
     scenario 02.
 - VM name: `$VMNAME` if set, else
   `virsh -c qemu:///session list --name --state-running | head -1`.
+- **Ctrl-socket introspection (finding 02):** production gates the
+  `status` / `unlock-result` / `prompt-text` commands OFF — only `lock`
+  is served. These scenarios assert on `status`/`prompt-text`, so
+  `qdlocker_session_healthy` installs a root-owned marker
+  (`/etc/qdistro/locker-ctrl-introspection`, via
+  `qdlocker_enable_introspection`) and restarts the unit before any
+  scenario runs. Nothing to do by hand;
+  just be aware production locker sockets answer `error: command
+  unavailable` to those three commands.
 - The qdshell ctrl-socket at `/run/user/1000/qdshell.sock` is still
   available for navigating the desktop *outside* the locker.
 - The **qdlocker** ctrl-socket at `/run/user/1000/qdlocker.sock` is

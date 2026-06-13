@@ -104,3 +104,24 @@ def test_pam_file_enforces_faillock_lockout():
         "auth phase must NOT include/substack common-auth — on openSUSE that "
         "falls through to authfail on a correct password and bricks the locker"
     )
+
+
+@pytest.mark.cheat_aware(
+    protects="qdlocker.service disables core dumps (LimitCORE=0) so a crash "
+    "cannot spill the unlock password (held in a non-zeroable Python str) to "
+    "disk via systemd-coredump",
+    severity="low",
+    cheats=[
+        "drop LimitCORE=0 so coredumps re-enable",
+        "set LimitCORE to a non-zero value",
+    ],
+    consequence="a locker crash can write the plaintext password / prompt "
+    "buffer into a core dump readable post-incident",
+)
+def test_unit_disables_core_dumps():
+    """Finding 07: no core dumps for the locker unit."""
+    text = UNIT_FILE.read_text()
+    assert re.search(r"^\s*LimitCORE\s*=\s*0\s*$", text, re.MULTILINE), (
+        "qdlocker.service must set LimitCORE=0 to keep the unlock password "
+        "out of core dumps"
+    )

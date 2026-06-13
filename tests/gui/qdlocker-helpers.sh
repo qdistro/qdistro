@@ -194,8 +194,45 @@ qdlocker_assert_color_present_in_crop() {
 # Composite check: qdwin session healthy AND qdlocker user-unit active.
 # Both must pass before any scenario steps run.
 
+# Finding 02: in production the ctrl socket serves only `lock`; the
+# introspection commands (status, unlock-result, prompt-text) that the GUI
+# scenarios assert on are authorized only by the ROOT-OWNED marker
+# /etc/qdistro/locker-ctrl-introspection (a user-controlled env var would let a
+# same-uid process re-enable the side channel). Install the marker as root and
+# restart the unit. Idempotent — only restarts when the marker was just created.
+# Fails loudly (non-zero) if it cannot install/restart, so the health check
+# below does not silently run scenarios without introspection.
+qdlocker_enable_introspection() {
+    qdwin_require_vm || return $?
+    "$QDWIN_VM_EXEC" "$VMNAME" '
+        set -e
+        f=/etc/qdistro/locker-ctrl-introspection
+        if [ ! -f "$f" ]; then
+            install -d -m 0755 -o 0 -g 0 /etc/qdistro
+            : > "$f"
+            chown 0:0 "$f"
+            chmod 0644 "$f"
+            runuser -l admin -c "systemctl --user restart qdlocker.service"
+            sleep 2
+        fi
+        # Verify it took effect: the locker must now answer `status`.
+        reply=$(printf "status\n" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock)
+        case "$reply" in
+            *locked=*) exit 0 ;;
+            *) echo "introspection not active (status: $reply)" >&2; exit 1 ;;
+        esac
+    '
+}
+
 qdlocker_session_healthy() {
     qdwin_require_vm || return $?
+    # The GUI lane drives introspection commands; production gates them off.
+    # Fail loudly if introspection could not be enabled — otherwise later
+    # scenarios that parse `locked=`/`prompt-len=` would silently false-green.
+    if ! qdlocker_enable_introspection; then
+        echo "qdlocker_session_healthy: could not enable ctrl introspection" >&2
+        return 1
+    fi
     local compositor_state
     compositor_state=$("$QDWIN_VM_EXEC" "$VMNAME" \
         'runuser -l admin -c "systemctl --user is-active qdwin-compositor.service"' 2>/dev/null \
@@ -222,11 +259,16 @@ qdlocker_session_healthy() {
             return 1
             ;;
     esac
-    # Ctrl-socket must respond — proves the QML root window mounted
-    # AND the listener fd is up. This is the most authoritative
-    # smoke check; everything else is necessary-but-not-sufficient.
-    if ! qdlocker_ctrl status >/dev/null 2>&1; then
-        echo "qdlocker_session_healthy: ctrl-socket not responding" >&2
-        return 1
-    fi
+    # Ctrl-socket must respond with a real status line — proves the QML root
+    # window mounted, the listener fd is up, AND introspection is active (a
+    # production-gated socket would answer `error: command unavailable` and
+    # exit 0, false-greening the check).
+    case "$(qdlocker_ctrl status 2>/dev/null)" in
+        *locked=*) ;;
+        *)
+            echo "qdlocker_session_healthy: ctrl-socket status not available "\
+                 "(introspection off or socket down)" >&2
+            return 1
+            ;;
+    esac
 }
