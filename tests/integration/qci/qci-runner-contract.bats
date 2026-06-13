@@ -4,7 +4,7 @@
 #
 # These lock down the runner invariants the local-CI proposal (todo/ci/gates.md)
 # depends on so local triage agents can act on a run without guessing:
-#   - the stable exit-class table (0/10/20/30/35/40/50/60/70/80/90);
+#   - the stable exit-class table (0/10/15/20/30/35/40/50/60/70/80/90);
 #   - usage / unknown-command dispatch return EXIT_USAGE (2);
 #   - a headless gate (preflight/lint/selftest) writes a well-formed run dir
 #     (manifest.txt + results.tsv + exit-code.txt) with the documented
@@ -103,7 +103,7 @@ latest_run_dir() {
     # Skip header; every data row's exit_class (col 5) must be in the table.
     run awk -F'\t' 'NR>1 && NF>=5 {
         c=$5
-        if (c !~ /^(pass|preflight|build|host|bats|vm_provision|vm_boot|service|gui|visual|runner)$/) {
+        if (c !~ /^(pass|preflight|release|build|host|bats|vm_provision|vm_boot|service|gui|visual|runner)$/) {
             print "BAD_CLASS:" c; bad=1
         }
     } END { exit bad }' "$dir/results.tsv"
