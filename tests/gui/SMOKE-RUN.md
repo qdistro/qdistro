@@ -21,7 +21,7 @@ work — see "Known gaps" below).
 | 4 | `set_locked(1)` → `locked_changed(1)` | PASS | probe + journal `locked_changed=1 cause=locker_set_locked` |
 | 5 | `set_locked(0)` → `locked_changed(0)` | PASS | probe + journal `locked_changed=0` |
 | 6 | Ctrl+Alt+L hotkey → `lock_requested(reason=3=manual)` reaches locker | PASS | probe `[('lock_requested', 3)]` + journal `qdwin: lock_requested` |
-| 7 | **Security boundary**: typed-while-locked keystrokes route to locker via `overlay_key`, NOT to qdshell | **PASS** | probe reassembled `"kruger"` from 6 events + journal `qdwin: overlay_key role=2 sym=… utf8="x" state=PRESSED` for each char |
+| 7 | **Security boundary**: typed-while-locked keystrokes route to locker via `overlay_key`, NOT to qdshell | **PASS** | probe reassembled the test password from overlay events + journal `qdwin: overlay_key role=2 sym=… utf8="x" state=PRESSED` for each char |
 
 Scenarios 03 (idle), 04 (lid/suspend), 06 (shell crash) — not
 exercised in this run. Note that 03 (idle, via `ext-idle-notify-v1`)
@@ -96,7 +96,7 @@ All edits in `qdwin/qdwin/qdwin.c` for the new protocol:
 
 ```bash
 # From qdistro-org/qdistro:
-QDISTRO_VM_PASSWORD=<pw> bash scripts/vm/spin-test-vm.sh qdlocker-smoke
+bash scripts/vm/spin-test-vm.sh qdlocker-smoke
 
 # After spin-test-vm finishes, inside the VM:
 runuser -l admin -c 'WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 \

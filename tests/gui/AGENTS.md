@@ -43,8 +43,8 @@ wall-clock parallelism, clone the base VM per
 - The **qdlocker** ctrl-socket at `/run/user/1000/qdlocker.sock` is
   the load-bearing introspection surface for this harness — every
   lock-state assertion goes through it.
-- Standard test password `$QDISTRO_VM_PASSWORD` (matches the
-  guest's PAM admin account).
+- Standard test password `Pa_ssw0rd45` (matches the guest's PAM admin
+  account).
 
 ## What works (and what doesn't) on qdlocker
 
@@ -100,7 +100,7 @@ prefer the qdlocker helpers and direct VM commands when possible.
   unlock-result` until `last=success`.
 - `qdlocker_assert_prompt_len <N>` — fails non-zero if `prompt-len`
   isn't exactly N.
-- `qdlocker_unlock_with_password [password=$QDISTRO_VM_PASSWORD|kruger]`
+- `qdlocker_unlock_with_password [password=Pa_ssw0rd45]`
   and `qdlocker_drain_lock_state` — unlock through the real keyboard
   overlay path. Prefer this for cleanup; restarting qdlocker while
   qdwin is locked is fail-safe and may leave the compositor locked.

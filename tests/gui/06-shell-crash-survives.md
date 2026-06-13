@@ -64,15 +64,12 @@ dead, no decorations) but the lock UI is intact.
 ### Step 3 — type the password into the still-locked screen
 
 ```bash
-for c in k r u g e r; do
-    qdwin_qmp_key "$c" down; sleep 0.05
-    qdwin_qmp_key "$c" up;   sleep 0.05
-done
+qdlocker_type_password_chars
 sleep 0.3
-qdlocker_assert_prompt_len 6
+qdlocker_assert_prompt_len 11
 ```
 
-**Assert (3.1):** `prompt-len=6`. The keyboard grab and overlay_key
+**Assert (3.1):** `prompt-len=11`. The keyboard grab and overlay_key
 forwarding survive the shell death.
 
 ### Step 4 — unlock
@@ -120,7 +117,7 @@ neither process owns the other.
   unmapped the lock surface when the shell disconnected. The lock
   surface must be owned by the locker resource, not the shell. The
   C-side reorganization in `qdwin/doc/locker.md §1` is the fix.
-- Step 3 PASS at `prompt-len=6` but Step 4 FAIL — PAM authentication
+- Step 3 PASS at `prompt-len=11` but Step 4 FAIL — PAM authentication
   needs the seat/session, which logind might tear down when the
   shell exits. Check `loginctl list-sessions` inside the VM; if the
   admin session is gone, the shell's

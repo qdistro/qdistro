@@ -77,13 +77,7 @@ qdlocker's overlay_key channel using the same pattern as scenario
 01 step 3+4.
 
 ```bash
-# Send password kruger + Enter to unlock.
-for c in k r u g e r; do
-    qdwin_qmp_key "$c" down; sleep 0.05
-    qdwin_qmp_key "$c" up;   sleep 0.05
-done
-qdwin_send_key KEY_ENTER
-qdlocker_wait_for_unlock 5
+qdlocker_unlock_with_password
 
 # Now generate activity, then check at t=2s (under the 3s threshold).
 qdwin_qmp_key spc down; sleep 0.05; qdwin_qmp_key spc up

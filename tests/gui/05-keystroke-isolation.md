@@ -69,13 +69,10 @@ this fails, the lock-transition routing in qdwin.c
 (`qdwin_overlay_grab_start(role=2)`) is racing with the
 `set_locked(1)` state flip.
 
-### Step 2 — type 6 password characters
+### Step 2 — type the test password
 
 ```bash
-for c in k r u g e r; do
-    qdwin_qmp_key "$c" down; sleep 0.05
-    qdwin_qmp_key "$c" up;   sleep 0.05
-done
+qdlocker_type_password_chars
 sleep 0.3
 qdlocker_ctrl status
 SHELL_AFTER_TYPING=$(qdwin_ctrl "last-overlay-keys" | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
@@ -89,8 +86,8 @@ fi
 echo "shell overlay_key after-typing=$SHELL_AFTER_TYPING"
 ```
 
-**Assert (2.1):** `qdlocker_ctrl status` reports `prompt-len=6`. The
-locker received all six keystrokes.
+**Assert (2.1):** `qdlocker_ctrl status` reports `prompt-len=11`. The
+locker received the full test password.
 
 **Assert (2.2):** `$SHELL_AFTER_TYPING` == `$SHELL_AFTER_LOCK`. The
 qdshell overlay_key counter has NOT advanced. **This is the
@@ -104,7 +101,7 @@ overlay-key router is delivering to the wrong resource.
 qdlocker_ctrl prompt-text
 ```
 
-**Assert (3.1):** the response is `masked=****** len=6` — six
+**Assert (3.1):** the response is `masked=*********** len=11` — eleven
 asterisks, no plaintext. The locker's ctrl socket must NOT leak the
 buffer even to a privileged test caller. (Tests would otherwise
 become a documented exfiltration path.)

@@ -77,13 +77,27 @@ qdlocker_assert_prompt_len() {
     fi
 }
 
-qdlocker_unlock_with_password() {
-    local password="${1:-${QDISTRO_VM_PASSWORD:-kruger}}"
+qdlocker_type_password_chars() {
+    local password="${1:-Pa_ssw0rd45}"
     local i ch
     for ((i = 0; i < ${#password}; i++)); do
         ch="${password:i:1}"
         case "$ch" in
             [a-z0-9]) ;;
+            [A-Z])
+                qdwin_qmp_key shift down; sleep 0.03
+                qdwin_qmp_key "${ch,,}" down; sleep 0.05
+                qdwin_qmp_key "${ch,,}" up;   sleep 0.05
+                qdwin_qmp_key shift up; sleep 0.03
+                continue
+                ;;
+            _)
+                qdwin_qmp_key shift down; sleep 0.03
+                qdwin_qmp_key minus down; sleep 0.05
+                qdwin_qmp_key minus up;   sleep 0.05
+                qdwin_qmp_key shift up; sleep 0.03
+                continue
+                ;;
             *)
                 echo "qdlocker_unlock_with_password: unsupported char '$ch'" >&2
                 return 2
@@ -92,6 +106,10 @@ qdlocker_unlock_with_password() {
         qdwin_qmp_key "$ch" down; sleep 0.05
         qdwin_qmp_key "$ch" up;   sleep 0.05
     done
+}
+
+qdlocker_unlock_with_password() {
+    qdlocker_type_password_chars "${1:-Pa_ssw0rd45}" || return $?
     qdwin_send_key KEY_ENTER
     qdlocker_wait_for_unlock 5
 }
@@ -99,7 +117,7 @@ qdlocker_unlock_with_password() {
 qdlocker_drain_lock_state() {
     case "$(qdlocker_ctrl status 2>/dev/null)" in
         *locked=True*)
-            if qdlocker_unlock_with_password "${1:-${QDISTRO_VM_PASSWORD:-kruger}}"; then
+            if qdlocker_unlock_with_password "${1:-Pa_ssw0rd45}"; then
                 return 0
             fi
             echo "qdlocker_drain_lock_state: password unlock failed; restarting qdwin session" >&2

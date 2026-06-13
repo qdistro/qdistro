@@ -79,20 +79,17 @@ old qdshell-embedded locker).
 ### Step 3 — type the password (overlay_key forwarded to qdlocker)
 
 ```bash
-for c in k r u g e r; do
-    qdwin_qmp_key "$c" down; sleep 0.05
-    qdwin_qmp_key "$c" up;   sleep 0.05
-done
+qdlocker_type_password_chars
 sleep 0.3
 qdwin_screenshot /tmp/qdlocker-01-step3-typed.png
-qdlocker_assert_prompt_len 6
+qdlocker_assert_prompt_len 11
 ```
 
-**Assert (3.1):** qdlocker ctrl reports `prompt-len=6`. This is the
+**Assert (3.1):** qdlocker ctrl reports `prompt-len=11`. This is the
 critical security assert — it confirms `qdwin_locker_v1.overlay_key`
 is reaching qdlocker. If keystrokes leaked to qdshell instead,
 qdshell's prompt-len would advance and qdlocker's would stay 0.
-**Assert (3.2):** screenshot shows 6 password dots (`••••••`).
+**Assert (3.2):** screenshot shows 11 password dots.
 
 ### Step 4 — Enter triggers PAM and unlocks
 
@@ -157,7 +154,7 @@ All asserts 1.1 → 5.2 pass. Confirms:
 - Step 2 PASS at screenshot but FAIL at `qdlocker_ctrl status` —
   qdlocker isn't running. Check `systemctl --user status qdlocker`
   inside the guest.
-- Step 3 PASS at screenshot (6 dots) but qdlocker reports
+- Step 3 PASS at screenshot (password dots shown) but qdlocker reports
   `prompt-len=0` — keys are reaching qdshell instead of qdlocker.
   The overlay_key routing in qdwin.c needs to check
   `qdwin->locker_resource != NULL` before falling back to the
