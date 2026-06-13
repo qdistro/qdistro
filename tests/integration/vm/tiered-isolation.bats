@@ -11,6 +11,73 @@
 
 load helpers
 
+# The tier-2 lane is broker-gated and the broker namespace is rules-only /
+# fail-closed: without an explicit admin allow rule every tier-2 spawn AND
+# every nested-publisher advertise is refused at the gate, so phase7-tier2-*
+# can never reach the compositor. Bake the two required allow rules into the
+# VM's /etc/qdistro/rules.d in setup_file (write YAML -> reload broker ->
+# settle until CheckPermission=allow), and remove them in teardown_file so no
+# test-authored rule leaks across runs. Mirrors disposables-e2e.bats. The two
+# action strings match s32-tier2-podman.sh's spawn (workload/app =
+# weston-terminal/weston-terminal) and the in-container publisher's nested
+# advertise (org.freedesktop.weston.wayland-terminal).
+setup_file() {
+    vm_run "$(cat <<'SETUP'
+RULE_DIR=/etc/qdistro/rules.d
+RULE_FILE="$RULE_DIR/zz-tier2-isolation-allow.yaml"
+install -d -m 0755 "$RULE_DIR" || { echo "FAIL: cannot create $RULE_DIR"; exit 1; }
+cat >"$RULE_FILE" <<'YAML' || { echo "FAIL: cannot write $RULE_FILE"; exit 1; }
+# Test-authored (tiered-isolation.bats/setup_file): allow the tier-2
+# weston-terminal spawn gate + the nested-publisher advertise gate so the
+# phase7-tier2 lane can drive the real launch path. Removed in teardown_file.
+- name: tier2-isolation-spawn-allow
+  decision: allow
+  match:
+    action: qdistro.tier2.spawn:weston-terminal/weston-terminal
+- name: tier2-isolation-nested-advertise-allow
+  decision: allow
+  match:
+    action: qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal
+YAML
+systemctl start qdistro-admin-broker.service 2>/dev/null || true
+systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+# Settle: poll as the REAL caller (admin uid) until both freshly-authored
+# rules resolve to allow (broker reloads rules on SIGHUP/restart).
+bc() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        dbus-send --system --print-reply=literal \
+        --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
+        "string:$1" "dict:string:string:" 2>/dev/null | tr -d ' \t\n'
+}
+r1=""; r2=""
+for _ in $(seq 1 20); do
+    r1=$(bc "qdistro.tier2.spawn:weston-terminal/weston-terminal")
+    r2=$(bc "qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal")
+    [ "$r1" = allow ] && [ "$r2" = allow ] && break
+    sleep 0.25
+done
+if [ "$r1" = allow ] && [ "$r2" = allow ]; then
+    echo "PASS: tier-2 broker allow-rules loaded"
+else
+    echo "FAIL: broker did not load tier-2 allow-rules (spawn=$r1 advertise=$r2)"
+    exit 1
+fi
+SETUP
+)"
+    assert_success || fail_loud "could not author the tier-2 broker allow-rules in the VM"
+    assert_output_contains "PASS: tier-2 broker allow-rules loaded"
+}
+
+teardown_file() {
+    # Remove the test-authored rules so they never leak across runs. A failed
+    # cleanup — which would leave a standing allow rule in the VM — is LOUD,
+    # not swallowed (helpers.bash policy: never silently skip).
+    vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml; systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true; echo 'PASS: tier-2 broker allow-rules removed'"
+    assert_success || fail_loud "could not remove the tier-2 broker allow-rules (a test-authored rule may persist in the VM)"
+    assert_output_contains "PASS: tier-2 broker allow-rules removed"
+}
+
 setup() {
     vm_run "pgrep -x pipewire >/dev/null"
     assert_success
