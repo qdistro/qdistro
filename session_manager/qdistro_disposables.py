@@ -24,6 +24,18 @@ import re
 DISP_PREFIX = "disp-"
 SECCTX_APPID_PREFIX = "qdistro.disp."
 
+# Lease (07-disposables-plan §Lifecycle): a disposable may carry a max-lifetime
+# TTL so a windowless/background leak (a helper that outlived its driver, an
+# agent pod whose workflow crashed before calling dispose) is reaped in-session
+# rather than only at the next boot/logout boundary. Both values are authored
+# at spawn time as immutable integer podman labels (NOT read from podman's
+# version-volatile created-time field): the TTL in seconds, and the creation
+# instant as a unix-epoch second. A disposable with no TTL label (or TTL 0) has
+# NO lease and is never reaped by the sweep — interactive disposables opt out by
+# default and rely on window-close + --rm, exactly as before.
+LEASE_TTL_LABEL = "qdistro_lease_ttl"
+LEASE_CREATED_LABEL = "qdistro_lease_created"
+
 # A workload label becomes part of a container name and a broker action, so
 # constrain it to a safe, lowercase, DNS-ish token.
 _WORKLOAD_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -113,3 +125,82 @@ def disp_sweep_targets(container_names: list[str]) -> list[str]:
     nothing else is touched (non-disposable names are ignored, so an
     admin-named container is never collateral)."""
     return [n for n in container_names if is_disposable_container(n)]
+
+
+# ---------------------------------------------------------------------------
+# Lease (TTL max-lifetime) helpers — pure, no clock, no podman
+# ---------------------------------------------------------------------------
+
+
+def parse_lease_seconds(raw: object) -> int | None:
+    """Parse a lease label value (``qdistro_lease_ttl`` / ``qdistro_lease_created``
+    as podman emits it) to a non-negative ``int`` of seconds, or ``None`` if it
+    is absent or malformed.
+
+    Fail-closed: anything that is not a clean non-negative base-10 integer
+    returns ``None`` so the candidate is SKIPPED (never reaped on a guess).
+    This rejects a missing label (podman renders an absent label as the literal
+    ``<no value>``), the empty string, a sign, a float, embedded whitespace,
+    and non-digit garbage. Python ``int`` has no overflow, so a huge but
+    well-formed value parses fine (and simply never expires in practice)."""
+    if isinstance(raw, bool):  # bool is an int subclass — reject explicitly
+        return None
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    # str.isdigit() is True only for a non-empty run of decimal digits: it
+    # rejects '', '<no value>', '-5', '5.0', '5 6', '0x5', and unicode oddities
+    # (isdigit allows some superscripts, so guard with the ASCII int parse).
+    if not s.isdigit():
+        return None
+    try:
+        v = int(s)
+    except ValueError:
+        return None
+    return v if v >= 0 else None
+
+
+def lease_expired(now_epoch: float, created_epoch: int | None,
+                  ttl_seconds: int | None) -> bool:
+    """True iff a disposable's TTL lease has expired at ``now_epoch``.
+
+    No lease / opt-out: ``ttl_seconds`` ``None`` or ``<= 0`` -> never expired.
+    Fail-safe: an unparseable/absent created instant (``None``) -> never
+    expired (we cannot judge age, so we never reap on a guess). A negative age
+    (the wall clock jumped backwards since spawn) clamps to not-expired rather
+    than reaping early."""
+    if ttl_seconds is None or ttl_seconds <= 0:
+        return False
+    if created_epoch is None:
+        return False
+    age = now_epoch - created_epoch
+    if age < 0:
+        return False
+    return age > ttl_seconds
+
+
+def lease_sweep_targets(candidates: list[dict], now_epoch: float) -> list[str]:
+    """Names of disposables whose TTL lease has expired at ``now_epoch``.
+
+    Each candidate is a raw dict ``{name, token, ttl, created}`` with the
+    strings podman emitted (or ``None``). A candidate is eligible for reaping
+    ONLY when every guard passes: a well-formed ``disp-*`` name, a well-formed
+    per-spawn token label (so an accidental/baked ``qdistro_disposable=1`` on a
+    container that is not one of our spawned disposables is excluded), a
+    parseable TTL and created instant, and an elapsed lease. Anything that
+    fails a guard is SKIPPED — the sweep never reaps on a guess, and final
+    removal is still re-validated by ``dispose()``. Pure: no I/O, no clock."""
+    targets: list[str] = []
+    for c in candidates:
+        name = c.get("name")
+        if not is_disposable_container(name):
+            continue
+        if not is_disposable_token(c.get("token") or ""):
+            continue
+        ttl = parse_lease_seconds(c.get("ttl"))
+        created = parse_lease_seconds(c.get("created"))
+        if lease_expired(now_epoch, created, ttl):
+            targets.append(name)
+    return targets

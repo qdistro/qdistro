@@ -167,3 +167,91 @@ def test_reaper_removes_only_disposables():
         "disp-pdf-20260612-151828", "disp-office-20260612-152000"}
     assert ops.removed == reaped
     assert "qdistro-silo-browser" in ops._containers  # untouched
+
+
+# ---- lease (TTL max-lifetime) pure helpers ---------------------------
+
+@pytest.mark.parametrize("raw,want", [
+    ("0", 0),
+    ("1", 1),
+    ("300", 300),
+    ("  300  ", 300),                 # surrounding whitespace tolerated
+    ("99999999999999999999", 99999999999999999999),  # python int, no overflow
+    (300, 300),                       # already an int
+    (0, 0),
+    # Fail-closed -> None (candidate is skipped, never reaped on a guess):
+    (None, None),
+    ("", None),
+    ("<no value>", None),             # podman's absent-label sentinel
+    ("-5", None),
+    (-5, None),
+    ("5.0", None),
+    ("5 6", None),
+    ("0x10", None),
+    ("inf", None),
+    ("nan", None),
+    ("5m", None),
+    ("  ", None),
+    ("\t300\n", 300),                 # str.strip() handles tabs/newlines
+    (True, None),                     # bool is an int subclass — rejected
+    (False, None),
+    (3.5, None),                      # raw float object rejected
+    (["300"], None),                  # wrong type
+])
+def test_parse_lease_seconds(raw, want):
+    assert disp.parse_lease_seconds(raw) == want
+
+
+@pytest.mark.parametrize("now,created,ttl,want", [
+    # No lease / opt-out: ttl None or <= 0 -> never expired.
+    (1000.0, 0, None, False),
+    (1000.0, 0, 0, False),
+    (10_000.0, 0, -1, False),
+    # created unknown -> fail-safe, never expired.
+    (10_000.0, None, 300, False),
+    # Within the lease window -> not expired (age == ttl is NOT expired).
+    (1300.0, 1000, 300, False),
+    (1299.0, 1000, 300, False),
+    # Past the lease -> expired.
+    (1301.0, 1000, 300, True),
+    (10_000.0, 1000, 300, True),
+    # Clock jumped backwards (negative age) -> clamp to not-expired.
+    (500.0, 1000, 300, False),
+])
+def test_lease_expired(now, created, ttl, want):
+    assert disp.lease_expired(now, created, ttl) is want
+
+
+_TOK = "0123456789abcdef0123456789abcdef"
+
+
+def _cand(name, token=_TOK, ttl="300", created="1000"):
+    return {"name": name, "token": token, "ttl": ttl, "created": created}
+
+
+def test_lease_sweep_targets_reaps_only_expired_well_formed():
+    now = 2000.0  # created=1000 + ttl=300 -> expired by now
+    cands = [
+        _cand("disp-pdf-20260612-151828"),                       # expired -> reap
+        _cand("disp-office-20260612-152000", ttl="5000"),        # under ttl -> keep
+        _cand("disp-agent-20260612-152100", ttl="0"),            # no lease -> keep
+        _cand("disp-agent-20260612-152200", ttl="<no value>"),   # no ttl label -> keep
+        _cand("disp-agent-20260612-152300", created="<no value>"),  # no created -> keep
+        _cand("disp-agent-20260612-152400", ttl="5m"),           # malformed ttl -> keep
+        _cand("qdistro-silo-browser"),                           # not disp-shaped -> keep
+        _cand("disp-evil-20260612-152500", token="NOTHEX"),      # bad token label -> keep
+        _cand("disp-evil-20260612-152600", token="<no value>"),  # missing token -> keep
+        _cand("disp-pdf-20260612-151828\nevil"),                 # newline name -> keep
+    ]
+    assert disp.lease_sweep_targets(cands, now) == ["disp-pdf-20260612-151828"]
+
+
+def test_lease_sweep_targets_empty():
+    assert disp.lease_sweep_targets([], 5000.0) == []
+
+
+def test_lease_sweep_targets_missing_keys_are_skipped():
+    # A candidate dict missing fields (a malformed podman row) is skipped, not
+    # crashed on.
+    assert disp.lease_sweep_targets([{"name": "disp-x-20260612-151828"}],
+                                    9_000_000_000.0) == []

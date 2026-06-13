@@ -80,3 +80,19 @@ teardown_file() {
     assert_output_contains "PASS: no container minted on the deny path (fail-closed)"
     assert_output_contains "PASS: deny-fail-closed"
 }
+
+@test "disposables: shipped spawn stamps qdistro_lease_ttl/created labels when QDISTRO_DISPOSABLE_TTL is opted in" {
+    vm_run "bash $PROBE lease-spawn-labels"
+    assert_success
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_ttl"
+    assert_output_contains "PASS: shipped spawn stamped qdistro_lease_created"
+    assert_output_contains "PASS: lease-spawn-labels"
+}
+
+@test "disposables: TTL-lease sweep reaps only the expired well-formed disposable (fresh/no-lease/no-token/forged-name survive)" {
+    vm_run "bash $PROBE lease-sweep"
+    assert_success
+    assert_output_contains "PASS: lease sweep enumerated by label, reaped only the expired well-formed disposable"
+    assert_output_contains "PASS: fresh / no-lease / no-token / forged-name fixtures all survived"
+    assert_output_contains "PASS: lease-sweep"
+}

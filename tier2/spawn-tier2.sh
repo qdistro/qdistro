@@ -174,6 +174,27 @@ if [ "$DISPOSABLE" = 1 ]; then
     # Per-launch secctx token -> app_id qdistro.disp.<token>.
     DISP_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
     TIER2_SECCTX_APPID="qdistro.disp.${DISP_TOKEN}"
+    # Optional TTL lease (07-disposables-plan Lifecycle): a max-lifetime leak
+    # backstop reaped by the session-manager periodic sweep. OFF by default --
+    # interactive disposables rely on window-close + --rm and must NOT acquire a
+    # surprise wall-clock kill. Opt in with QDISTRO_DISPOSABLE_TTL=<seconds> for
+    # short-lived agent/workflow pods. When set to a positive integer we stamp
+    # two immutable labels the sweep reads: the TTL (seconds) and the spawn
+    # instant (unix epoch seconds, authored here rather than trusting the
+    # podman version-volatile created-time field).
+    DISP_LEASE_TTL=""
+    DISP_LEASE_CREATED=""
+    if [ -n "${QDISTRO_DISPOSABLE_TTL:-}" ]; then
+        if [[ "$QDISTRO_DISPOSABLE_TTL" =~ ^[0-9]+$ ]] \
+           && [ "$QDISTRO_DISPOSABLE_TTL" -gt 0 ]; then
+            DISP_LEASE_TTL="$QDISTRO_DISPOSABLE_TTL"
+            DISP_LEASE_CREATED="$(date +%s)"
+        elif [ "$QDISTRO_DISPOSABLE_TTL" != "0" ]; then
+            echo "spawn-tier2: ignoring invalid" \
+                 "QDISTRO_DISPOSABLE_TTL=$QDISTRO_DISPOSABLE_TTL (want a" \
+                 "positive integer of seconds; 0/empty = no lease)" >&2
+        fi
+    fi
 fi
 
 ADMIN_UID="${TIER2_ADMIN_UID:-$(id -u)}"
@@ -213,6 +234,8 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'ENGINE=%s\n' "$ENGINE"
     printf 'SPAWN_ACTION=%s\n' "$SPAWN_ACTION"
     printf 'STATE=%s\n' "${TIER2_SILO:-none}"
+    printf 'LEASE_TTL=%s\n' "${DISP_LEASE_TTL:-none}"
+    printf 'LEASE_CREATED=%s\n' "${DISP_LEASE_CREATED:-none}"
     exit 0
 fi
 
@@ -449,6 +472,12 @@ export TIER2_ADMIN_UID_RESOLVED="$ADMIN_UID"
 export TIER2_IMAGE="$IMAGE"
 export TIER2_CONTAINER="$CONTAINER"
 export TIER2_DISPOSABLE_RESOLVED="$DISPOSABLE"
+# Lease (optional TTL backstop): empty unless QDISTRO_DISPOSABLE_TTL opted in
+# (set in the disposable identity block). Exported so the WRAPPER_BODY shell —
+# which only sees exported TIER2_*_RESOLVED vars, not this script's locals —
+# can stamp the lease labels on the podman run.
+export TIER2_LEASE_TTL_RESOLVED="${DISP_LEASE_TTL:-}"
+export TIER2_LEASE_CREATED_RESOLVED="${DISP_LEASE_CREATED:-}"
 export TIER2_QDWIN_SHELL_SO_RESOLVED="$QDWIN_SHELL_SO"
 export TIER2_STATE_PATH_RESOLVED="$STATE_PATH"
 export TIER2_NETWORK_RESOLVED="$TIER2_NETWORK_VAL"
@@ -552,6 +581,17 @@ elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
         # regex stays as defence-in-depth on the remove path.
         --label qdistro_disposable=1
     )
+    # Optional TTL lease labels (only when QDISTRO_DISPOSABLE_TTL opted in). The
+    # session-manager periodic sweep reaps this disposable once
+    # now - created > ttl; absent labels mean no lease (the default). Read from
+    # the exported TIER2_LEASE_*_RESOLVED env (this is the WRAPPER_BODY shell,
+    # which does not see the parent script non-exported DISP_LEASE_* locals).
+    if [ -n "${TIER2_LEASE_TTL_RESOLVED:-}" ]; then
+        PODMAN_HARDENING+=(
+            --label "qdistro_lease_ttl=${TIER2_LEASE_TTL_RESOLVED}"
+            --label "qdistro_lease_created=${TIER2_LEASE_CREATED_RESOLVED}"
+        )
+    fi
 fi
 PODMAN_HARDENING+=(
     --mount type=tmpfs,destination=/home/admin/.cache,tmpfs-size=32m,tmpfs-mode=0700,U

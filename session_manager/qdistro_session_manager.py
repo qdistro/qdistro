@@ -90,6 +90,30 @@ SILOS_CONFIG_PATH = Path("/etc/qdistro/silos.yaml")
 # which silo and when" has one obvious place to look. SQLite, append-
 # only, 0600.
 SILOS_AUDIT_PATH = Path("/var/lib/qdistro/audit/session_manager_audit.sqlite")
+# Disposable TTL-lease sweep cadence (seconds). The periodic in-daemon sweep
+# reaps disposables whose spawn-authored lease has elapsed (07 §Lifecycle). A
+# value <= 0 disables the timer entirely. The sweep itself only acts on
+# disposables that opted into a TTL at spawn (QDISTRO_DISPOSABLE_TTL), so the
+# default cadence is harmless for the no-lease default.
+DISPOSABLE_LEASE_INTERVAL_DEFAULT = 60
+
+
+def _lease_sweep_interval() -> int:
+    """Resolve the disposable lease-sweep interval (seconds) from
+    QDISTRO_DISPOSABLE_LEASE_INTERVAL, falling back to the default. A
+    non-integer or negative value falls back too; 0 disables the timer."""
+    raw = os.environ.get("QDISTRO_DISPOSABLE_LEASE_INTERVAL")
+    if raw is None or not raw.strip():
+        return DISPOSABLE_LEASE_INTERVAL_DEFAULT
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        log.warning("ignoring non-integer QDISTRO_DISPOSABLE_LEASE_INTERVAL=%r",
+                    raw)
+        return DISPOSABLE_LEASE_INTERVAL_DEFAULT
+    return v if v >= 0 else DISPOSABLE_LEASE_INTERVAL_DEFAULT
+
+
 # cgroup-v2 hierarchy root for silo scopes. One subdir per silo;
 # cgroup.freeze controls Freeze/Resume.
 CGROUP_ROOT = Path("/sys/fs/cgroup/qdistro-silos")
@@ -1068,16 +1092,85 @@ class _SystemOps:
                 f"{proc.stderr.strip()}")
         return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
 
+    def disp_lease_candidates(self) -> list[dict]:
+        """Live disposables plus the metadata a TTL-lease sweep needs: the
+        container name, its per-spawn token label, and the two spawn-authored
+        lease labels (ttl seconds + created epoch). Enumerated by the
+        ``qdistro_disposable=1`` label, exactly like the boot reaper, so an
+        admin container merely *named* disp-* is never listed.
+
+        Returns RAW strings as podman emits them (an absent label renders as the
+        literal ``<no value>``); ALL parsing/validation lives in the pure
+        ``qdistro_disposables`` helpers so it is unit-testable without podman.
+        Fields are split on US (0x1f), which cannot occur in a container name,
+        a hex token, or an integer label. Returns [] on ANY failure or timeout
+        (best-effort: a wedged podman must slow a leak sweep, never crash the
+        daemon — the boundary reaper is the backstop)."""
+        sep = "\x1f"
+        fmt = sep.join((
+            "{{.Names}}",
+            '{{.Label "qdistro_tier2_token"}}',
+            '{{.Label "qdistro_lease_ttl"}}',
+            '{{.Label "qdistro_lease_created"}}',
+        ))
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u",
+                 os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--format", fmt],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("lease sweep: candidate enumeration failed: %s", e)
+            return []
+        if proc.returncode != 0:
+            log.warning("lease sweep: podman ps rc=%d: %s",
+                        proc.returncode, proc.stderr.strip())
+            return []
+        out: list[dict] = []
+        for ln in proc.stdout.splitlines():
+            if not ln.strip():
+                continue
+            parts = ln.split(sep)
+            if len(parts) != 4:
+                # A name/token cannot contain US; a malformed row is podman
+                # noise — skip it (the pure helper would reject it anyway).
+                continue
+            name, token, ttl, created = parts
+            out.append({"name": name, "token": token,
+                        "ttl": ttl, "created": created})
+        return out
+
     def disp_container_remove(self, name: str) -> bool:
         """Force-remove a disposable container in admin's rootless podman.
-        Returns True on success (or already-gone)."""
+        Returns True on success (or already-gone), False on a failed/timed-out
+        removal (retryable — the periodic lease sweep / next-boot reaper try
+        again).
+
+        The ``timeout=`` is load-bearing for the lease sweep: ``podman rm -f``
+        can wedge on a storage lock or a D-state container, and the sweep runs
+        single-flight on a worker thread. Without a bound a wedged remove would
+        block that worker forever, leaving the single-flight flag stuck so EVERY
+        future sweep is skipped — the leak backstop would die on the first hung
+        rm. A TimeoutExpired kills the child and is caught here as a failed
+        (retryable) removal so the worker always returns and re-arms the timer;
+        it is NOT raised, keeping the bool contract every caller already relies
+        on (dispose() audits a False as 'podman rm failed', the reaper retries
+        next boot). OSError (podman/runuser missing) still propagates as
+        before."""
         if not _disp.is_disposable_container(name):
             # Defence in depth: never let a non-disposable name reach rm -f.
             raise ValueError(f"refusing to reap non-disposable name {name!r}")
-        proc = subprocess.run(
-            ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
-             "--", "podman", "rm", "-f", name],
-            capture_output=True)
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", os.environ.get("QDISTRO_ADMIN_USER", "admin"),
+                 "--", "podman", "rm", "-f", name],
+                capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            log.warning("podman rm -f %r timed out; treating as a failed "
+                        "(retryable) removal", name)
+            return False
         return proc.returncode == 0
 
     def kill_pids(self, pids: Iterable[int], sig: int) -> None:
@@ -2440,6 +2533,63 @@ class _SiloStore:
                            reason=f"resolved to {names[0]}", caller=caller)
         return self.dispose(names[0], caller=caller)
 
+    # Caller stamped on a lease-triggered teardown so an audit reader can tell a
+    # session-manager-initiated reap (the wall clock crossed the lease) from an
+    # admin's explicit Dispose. The discriminator lives in ``exe`` because that
+    # is the only caller field _AuditLog persists (uid/pid/exe) — a separate
+    # key would be silently dropped by the sqlite schema. The concrete removal
+    # still produces the normal 'dispose' audit row (via dispose()), carrying
+    # this caller, so caller_exe='session-manager:lease-ttl' is the durable join.
+    LEASE_CALLER = {"uid": 0, "pid": None, "exe": "session-manager:lease-ttl"}
+
+    def sweep_expired_leases(self, now: float | None = None,
+                             candidates: list[dict] | None = None,
+                             caller: dict[str, Any] | None = None) -> list[str]:
+        """In-session TTL leak backstop (07-disposables-plan §Lifecycle). Reap
+        every live disposable whose spawn-authored ``qdistro_lease_ttl`` has
+        elapsed since its ``qdistro_lease_created``, by delegating to
+        ``dispose()`` — which re-validates the name shape and audits each
+        removal. A disposable with no TTL label (interactive, the default) has
+        no lease and is never touched here; it is still torn down on
+        window-close (--rm) and at the boot/stop boundary (the reaper).
+
+        Best-effort and crash-proof: it NEVER raises (a periodic GLib timer
+        drives it and must survive a wedged podman / a single failed remove),
+        and a failure on one disposable does not abort the sweep of the rest.
+        Returns the names actually reaped.
+
+        Deliberately does NOT hold ``self._lock``: disposables are external
+        podman objects, not ``_silos`` registry state, and ``dispose()`` holds
+        no lock — serializing the whole sweep under the registry lock would
+        block unrelated D-Bus lifecycle methods behind a slow ``podman ps`` /
+        ``podman rm``. The caller (the daemon's timer) runs it single-flight on
+        a worker thread; the audit log it writes to is its own thread-safe."""
+        if now is None:
+            now = time.time()
+        if candidates is None:
+            try:
+                candidates = self._ops.disp_lease_candidates()
+            except Exception as e:  # noqa: BLE001
+                log.warning("lease sweep: candidate enumeration errored: %s", e)
+                return []
+        caller = caller if caller is not None else dict(self.LEASE_CALLER)
+        reaped: list[str] = []
+        for name in _disp.lease_sweep_targets(candidates, now):
+            try:
+                if self.dispose(name, caller=caller):
+                    reaped.append(name)
+            except SessionError as e:
+                # BadState from a failed podman rm (storage lock, wedged
+                # container): logged + already audited by dispose(); the next
+                # tick retries. Must not abort the remaining expired leases.
+                log.warning("lease sweep: dispose(%r) failed: %s", name, e)
+            except Exception as e:  # noqa: BLE001
+                log.warning("lease sweep: dispose(%r) errored: %s", name, e)
+        if reaped:
+            log.info("lease sweep reaped %d expired disposable(s): %s",
+                     len(reaped), reaped)
+        return reaped
+
     def autostart_pass(self) -> list[str]:
         """Called once at daemon startup. For each silo whose
         persisted state is Active OR whose autostart flag is true,
@@ -2996,6 +3146,76 @@ if dbus is not None:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+class _LeaseSweepScheduler:
+    """Single-flight scheduler for the periodic disposable lease sweep.
+
+    The GLib timer fires ``tick`` on the main (D-Bus dispatch) thread, so it
+    must return immediately: it offloads the slow ``podman ps`` / ``podman rm``
+    to a worker thread and never overlaps two sweeps (two concurrent sweeps
+    could race to remove the same container and double-audit). The worker
+    ALWAYS clears the in-flight flag in its ``finally`` — even if the sweep
+    raises or a ``podman rm`` times out — so a single slow pass can never wedge
+    the flag and silently disable every future sweep. Extracted from the timer
+    install so the single-flight + re-arm behaviour is unit-testable without a
+    GLib loop or real wall-clock waits (``spawn`` is injectable)."""
+
+    def __init__(self, run_sweep, spawn=None):
+        # run_sweep: () -> None — the actual sweep (may block on podman).
+        # spawn: (callable) -> None — start the worker; defaults to a daemon
+        # thread. Tests inject a synchronous/capturing spawn.
+        self._run_sweep = run_sweep
+        self._spawn = spawn or self._spawn_thread
+        self._guard = threading.Lock()
+        self._running = False
+
+    @staticmethod
+    def _spawn_thread(target) -> None:
+        threading.Thread(target=target, name="lease-sweep",
+                         daemon=True).start()
+
+    def tick(self) -> bool:
+        """GLib timeout callback. Returns True to keep the timer alive. Starts a
+        worker only when no sweep is in flight (single-flight)."""
+        with self._guard:
+            if self._running:
+                log.debug("lease sweep still in flight; skipping this tick")
+                return True
+            self._running = True
+        self._spawn(self._work)
+        return True
+
+    def _work(self) -> None:
+        try:
+            self._run_sweep()
+        except Exception:  # noqa: BLE001
+            log.exception("lease sweep worker crashed")
+        finally:
+            with self._guard:
+                self._running = False
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def _install_lease_sweep(mgr):  # pragma: no cover - VM/daemon only
+    """Register the periodic disposable TTL-lease sweep on the GLib main loop
+    via a single-flight _LeaseSweepScheduler. No-op (returns None) when the
+    interval is <= 0 or GLib is unavailable. Returns the scheduler otherwise."""
+    interval = _lease_sweep_interval()
+    if interval <= 0:
+        log.info("disposable lease sweep disabled "
+                 "(QDISTRO_DISPOSABLE_LEASE_INTERVAL<=0)")
+        return None
+    if GLib is None:
+        log.warning("GLib unavailable; disposable lease sweep not installed")
+        return None
+    sched = _LeaseSweepScheduler(lambda: mgr.store.sweep_expired_leases())
+    GLib.timeout_add_seconds(interval, sched.tick)
+    log.info("disposable TTL-lease sweep every %ds", interval)
+    return sched
+
+
 def main():  # pragma: no cover - exercised in the VM
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -3006,7 +3226,8 @@ def main():  # pragma: no cover - exercised in the VM
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
-    SessionManager(name)
+    mgr = SessionManager(name)
+    _install_lease_sweep(mgr)
     loop = GLib.MainLoop()
     try:
         loop.run()

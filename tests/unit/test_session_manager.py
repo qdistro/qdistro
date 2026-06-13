@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,13 @@ class _FakeOps:
         # (simulates a podman/runuser lookup failure — must fail closed, never
         # be read as "already gone").
         self.disp_token_lookup_raises: BaseException | None = None
+        # name -> {"token","ttl","created"} lease metadata as podman labels
+        # would carry it (strings), for the TTL-lease sweep tests. Only names
+        # also present in disp_containers are enumerated (mirrors the
+        # qdistro_disposable=1 label filter). When set to an exception,
+        # disp_lease_candidates raises it.
+        self.disp_lease_meta: dict[str, dict[str, str]] = {}
+        self.disp_lease_raises: BaseException | None = None
         self._egress_init()
 
     # ---- queries ----------------------------------------------------------
@@ -128,6 +136,19 @@ class _FakeOps:
         if name in self.disp_containers:
             self.disp_containers.remove(name)
         return True
+
+    def disp_lease_candidates(self) -> list[dict]:
+        if self.disp_lease_raises is not None:
+            raise self.disp_lease_raises
+        out = []
+        for name in self.disp_containers:
+            meta = self.disp_lease_meta.get(name, {})
+            # Absent labels come back as an empty field from real podman.
+            out.append({"name": name,
+                        "token": meta.get("token", ""),
+                        "ttl": meta.get("ttl", ""),
+                        "created": meta.get("created", "")})
+        return out
 
     def make_state_dir(self, name: str, uid: int):
         self.state_dirs[name] = (int(uid), int(uid), 0o700)
@@ -1806,3 +1827,274 @@ class TestDisposeByToken:
         row = audit.rows[-1]
         assert row["action"] == "dispose-by-token"
         assert row["decision"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Disposable TTL-lease sweep (P2b — the periodic in-session leak backstop)
+# ---------------------------------------------------------------------------
+
+_LEASE_TOK = "0123456789abcdef0123456789abcdef"
+
+
+class TestSweepExpiredLeases:
+    """sweep_expired_leases() reaps disposables whose spawn-authored TTL lease
+    has elapsed, delegating to dispose() (name re-validation + audit). It must
+    be fail-safe (never reap a non-leased / malformed / non-disposable
+    candidate) and crash-proof (a single failure never aborts the rest, and it
+    never raises — a GLib timer drives it)."""
+    def _store(self, ops, tmp_path, audit=None):
+        return _SiloStore(ops, config_path=tmp_path / "silos.yaml", audit=audit)
+
+    def _lease(self, ttl="300", created="1000", token=_LEASE_TOK):
+        return {"token": token, "ttl": ttl, "created": created}
+
+    def test_reaps_expired_lease_via_dispose_and_audits(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease()}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        reaped = store.sweep_expired_leases(now=5000.0)   # 1000+300 < 5000
+        assert reaped == [_GOOD_DISP]
+        assert ops.disp_removed == [_GOOD_DISP]
+        assert _GOOD_DISP not in ops.disp_containers
+        # The teardown is audited under 'dispose' and marked as a lease reap via
+        # the caller exe (the only caller field _AuditLog persists is
+        # uid/pid/exe — so the discriminator MUST live in exe, not a dropped
+        # extra key).
+        row = [r for r in audit.rows if r["action"] == "dispose"][-1]
+        assert row["decision"] == "allow"
+        assert row["caller"]["exe"] == "session-manager:lease-ttl"
+
+    def test_no_lease_label_is_never_reaped(self, ops, tmp_path):
+        # The default (no QDISTRO_DISPOSABLE_TTL at spawn) -> no ttl label ->
+        # the interactive disposable is never wall-clock-killed by the sweep.
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {}            # no lease metadata at all
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_expired_leases(now=9_000_000_000.0) == []
+        assert ops.disp_removed == []
+        assert _GOOD_DISP in ops.disp_containers
+
+    def test_within_ttl_survives(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease(ttl="5000")}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_expired_leases(now=2000.0) == []  # age 1000 < 5000
+        assert ops.disp_removed == []
+
+    @pytest.mark.parametrize("meta", [
+        {"ttl": "0", "created": "1000"},          # opt-out ttl
+        {"ttl": "5m", "created": "1000"},         # malformed ttl
+        {"ttl": "300", "created": "<no value>"},  # missing created
+        {"ttl": "300", "created": "bogus"},       # malformed created
+        {"ttl": "<no value>", "created": "1000"},  # missing ttl
+    ])
+    def test_unleased_or_malformed_candidates_survive(self, ops, tmp_path, meta):
+        m = {"token": _LEASE_TOK, **meta}
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {_GOOD_DISP: m}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_expired_leases(now=9_000_000_000.0) == []
+        assert ops.disp_removed == []
+
+    def test_bad_or_missing_token_label_survives(self, ops, tmp_path):
+        # A container labelled qdistro_disposable=1 but with no/garbled token
+        # label is not one of our well-formed spawns — skip it (defence in depth
+        # on top of the disposable-name guard).
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease(token="NOTHEX")}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        assert store.sweep_expired_leases(now=9_000_000_000.0) == []
+        assert ops.disp_removed == []
+
+    def test_one_failure_does_not_abort_the_rest(self, ops, tmp_path):
+        # The first expired disposable fails to remove (podman rm rc!=0); the
+        # second must still be reaped. Order is the enumeration order.
+        other = "disp-office-20260612-152000"
+        ops.disp_containers = [_GOOD_DISP, other]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease(),
+                               other: self._lease()}
+        ops.disp_remove_fails = True   # both report rc!=0 -> dispose() False
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        reaped = store.sweep_expired_leases(now=5000.0)
+        # Neither was reaped (both rm-fail), but BOTH were attempted — the loop
+        # did not abort after the first.
+        assert reaped == []
+        assert ops.disp_removed == [_GOOD_DISP, other]
+
+    def test_badstate_on_one_does_not_abort(self, ops, tmp_path):
+        # dispose() raising BadState (podman OSError) on one candidate is caught
+        # and the sweep continues. Use a remove that raises only for the first.
+        other = "disp-office-20260612-152000"
+        ops.disp_containers = [_GOOD_DISP, other]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease(),
+                               other: self._lease()}
+
+        real_remove = ops.disp_container_remove
+
+        def flaky(name):
+            if name == _GOOD_DISP:
+                raise FileNotFoundError("podman")
+            return real_remove(name)
+        ops.disp_container_remove = flaky
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        reaped = store.sweep_expired_leases(now=5000.0)
+        assert reaped == [other]            # second one still reaped
+        assert other not in ops.disp_containers
+
+    def test_enumeration_failure_returns_empty_not_raise(self, ops, tmp_path):
+        ops.disp_lease_raises = OSError("podman storage locked")
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        # candidates=None -> store enumerates -> ops raises -> swept to [].
+        assert store.sweep_expired_leases() == []
+
+    def test_default_caller_marks_session_manager(self, ops, tmp_path):
+        ops.disp_containers = [_GOOD_DISP]
+        ops.disp_lease_meta = {_GOOD_DISP: self._lease()}
+        audit = _RecordingAudit()
+        store = self._store(ops, tmp_path, audit)
+        # No explicit caller -> the store stamps its lease caller, whose exe is
+        # the durable (uid/pid/exe-only) discriminator persisted by _AuditLog.
+        store.sweep_expired_leases(now=5000.0)
+        assert store.LEASE_CALLER["exe"] == "session-manager:lease-ttl"
+        row = [r for r in audit.rows if r["action"] == "dispose"][-1]
+        assert row["caller"]["exe"] == "session-manager:lease-ttl"
+        # Defence against shared-dict mutation: the class constant is unchanged.
+        assert "uid" in store.LEASE_CALLER and store.LEASE_CALLER["uid"] == 0
+
+
+class TestDispLeaseCandidates:
+    """The real _SystemOps.disp_lease_candidates() podman parsing, with podman
+    stubbed via a fake subprocess.run."""
+    def _ops_with_podman(self, monkeypatch, stdout, returncode=0):
+        ops = sm._SystemOps()
+
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(
+                returncode=returncode, stdout=stdout, stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        return ops
+
+    def test_parses_us_separated_rows(self, monkeypatch):
+        # Real podman renders an absent {{.Label "x"}} as an EMPTY field, which
+        # the parser passes through verbatim (parse_lease_seconds maps it to
+        # None downstream); a populated row carries the raw label strings.
+        sep = "\x1f"
+        rows = sep.join(["disp-pdf-20260612-151828", _LEASE_TOK, "300",
+                         "1000"]) + "\n" + \
+            sep.join(["disp-x-20260612-152000", "", "", ""]) + "\n"
+        ops = self._ops_with_podman(monkeypatch, rows)
+        cands = ops.disp_lease_candidates()
+        assert cands[0] == {"name": "disp-pdf-20260612-151828",
+                            "token": _LEASE_TOK, "ttl": "300",
+                            "created": "1000"}
+        assert cands[1] == {"name": "disp-x-20260612-152000",
+                            "token": "", "ttl": "", "created": ""}
+
+    def test_returns_empty_on_podman_failure(self, monkeypatch):
+        ops = self._ops_with_podman(monkeypatch, "", returncode=125)
+        assert ops.disp_lease_candidates() == []
+
+    def test_skips_malformed_rows(self, monkeypatch):
+        # A row without exactly 4 US-separated fields is skipped (podman noise).
+        ops = self._ops_with_podman(monkeypatch, "only-one-field\n\n")
+        assert ops.disp_lease_candidates() == []
+
+    def test_enumeration_timeout_returns_empty(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def boom(argv, **kw):
+            raise sm.subprocess.TimeoutExpired(argv, 30)
+        monkeypatch.setattr(sm.subprocess, "run", boom)
+        assert ops.disp_lease_candidates() == []
+
+
+class TestDispContainerRemoveTimeout:
+    """disp_container_remove must bound `podman rm -f` so a wedged remove never
+    blocks the single-flight lease worker forever (M1)."""
+    def test_timeout_is_failed_removal_not_raise(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def hang(argv, **kw):
+            assert kw.get("timeout"), "podman rm -f must pass a timeout"
+            raise sm.subprocess.TimeoutExpired(argv, kw["timeout"])
+        monkeypatch.setattr(sm.subprocess, "run", hang)
+        # A timed-out rm is a failed (retryable) removal -> False, NOT an
+        # exception (keeps the bool contract; unblocks the worker thread).
+        assert ops.disp_container_remove("disp-pdf-20260612-151828") is False
+
+    def test_nondisposable_name_still_refused(self):
+        ops = sm._SystemOps()
+        with pytest.raises(ValueError):
+            ops.disp_container_remove("qdistro-silo-browser")
+
+
+class TestLeaseSweepScheduler:
+    """The single-flight scheduler that the GLib timer drives: a slow/hung
+    sweep must never start a second concurrent sweep, and the in-flight flag
+    must ALWAYS re-arm so future ticks keep running (the M1 wedge guard)."""
+
+    def test_single_flight_skips_while_running_then_rearms(self):
+        # Inject a capturing spawn: it records the worker target WITHOUT running
+        # it, so we control exactly when the 'worker' finishes.
+        captured = []
+        sched = sm._LeaseSweepScheduler(run_sweep=lambda: None,
+                                        spawn=lambda target: captured.append(target))
+        # First tick: starts a worker (one capture), stays True.
+        assert sched.tick() is True
+        assert len(captured) == 1
+        # Second tick while the first worker has NOT finished: single-flight ->
+        # no new worker spawned.
+        assert sched.tick() is True
+        assert len(captured) == 1
+        # The worker completes -> in-flight flag clears.
+        captured[0]()
+        # Next tick re-arms and spawns again.
+        assert sched.tick() is True
+        assert len(captured) == 2
+
+    def test_flag_clears_even_when_sweep_raises(self):
+        captured = []
+
+        def boom():
+            raise RuntimeError("podman wedged")
+        sched = sm._LeaseSweepScheduler(run_sweep=boom,
+                                        spawn=lambda target: captured.append(target))
+        sched.tick()
+        captured[0]()                 # worker runs the raising sweep
+        # Despite the raise, the flag re-armed -> a later tick spawns again.
+        sched.tick()
+        assert len(captured) == 2
+
+    def test_real_thread_single_flight(self):
+        # A real worker thread blocked on an Event: the second tick must skip,
+        # and after the worker is released the scheduler re-arms.
+        import threading as _t
+        gate = _t.Event()
+        ran = []
+
+        def slow():
+            ran.append(1)
+            gate.wait(5)
+        sched = sm._LeaseSweepScheduler(run_sweep=slow)
+        assert sched.tick() is True   # spawns a real daemon thread, blocks on gate
+        for _ in range(100):          # wait until the worker has entered slow()
+            if ran:
+                break
+            time.sleep(0.01)
+        assert ran, "worker thread never started"
+        assert sched.tick() is True   # in-flight -> must NOT start a 2nd worker
+        assert len(ran) == 1
+        gate.set()                    # release the worker
+        for _ in range(200):          # let it finish and clear the flag
+            if not sched._running:
+                break
+            time.sleep(0.01)
+        assert not sched._running
+        sched.tick()                  # re-armed -> spawns again
+        gate.set()
+        for _ in range(200):
+            if len(ran) == 2:
+                break
+            time.sleep(0.01)
+        assert len(ran) == 2

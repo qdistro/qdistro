@@ -443,12 +443,161 @@ cmd_deny_fail_closed() {
     pass deny-fail-closed
 }
 
+# A 32-char lowercase-hex per-spawn token (the shape spawn-common gen_launch_token
+# emits and is_disposable_token accepts), for the synthetic lease fixtures.
+gen_token() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+
+cmd_lease_spawn_labels() {
+    # Prove the SHIPPED /usr/bin/qdistro-tier2-spawn stamps the TTL-lease labels
+    # on the REAL container when QDISTRO_DISPOSABLE_TTL is opted in — the
+    # spawn-side half of the lease (the daemon-side reap is cmd_lease_sweep).
+    # We only need the container to be CREATED with its labels; no window wait.
+    clean_disp
+    local out err container ttl created label_ttl label_created
+    out=$(mktemp); err=$(mktemp); container=""; SPAWN_PID=""
+    # shellcheck disable=SC2317
+    _lsl_cleanup() {
+        [ -n "${container:-}" ] && as_admin podman rm -f "$container" >/dev/null 2>&1
+        [ -n "${SPAWN_PID:-}" ] && kill "$SPAWN_PID" 2>/dev/null
+        rm -f "$out" "$err" 2>/dev/null
+        return 0
+    }
+    trap _lsl_cleanup EXIT
+
+    ttl=3600   # long: this disposable must NOT be reaped by an incidental sweep
+    as_admin env QDISTRO_DISPOSABLE_TTL="$ttl" \
+        "$SPAWN" --disposable "$WORKLOAD" -- weston-terminal \
+        >"$out" 2>"$err" &
+    SPAWN_PID=$!
+    for _ in $(seq 1 60); do
+        container=$(awk -F= '/^CONTAINER=/{print $2; exit}' "$out" 2>/dev/null)
+        [ -n "$container" ] && as_admin podman container exists "$container" 2>/dev/null && break
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$container" ] && as_admin podman container exists "$container" 2>/dev/null \
+        || { echo "--- spawn stderr ---" >&2; cat "$err" >&2; \
+             fail lease-spawn-labels "disposable container never appeared"; }
+
+    label_ttl=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_ttl"}}' "$container" 2>/dev/null)
+    [ "$label_ttl" = "$ttl" ] \
+        || fail lease-spawn-labels "qdistro_lease_ttl label '$label_ttl' != $ttl"
+    pass "shipped spawn stamped qdistro_lease_ttl=$ttl"
+    label_created=$(as_admin podman inspect --format \
+        '{{index .Config.Labels "qdistro_lease_created"}}' "$container" 2>/dev/null)
+    [[ "$label_created" =~ ^[0-9]+$ ]] \
+        || fail lease-spawn-labels "qdistro_lease_created label '$label_created' is not an epoch integer"
+    pass "shipped spawn stamped qdistro_lease_created=$label_created (epoch)"
+
+    as_admin podman rm -f "$container" >/dev/null 2>&1 || true
+    container=""
+    pass lease-spawn-labels
+}
+
+cmd_lease_sweep() {
+    # Drive the REAL daemon-side TTL-lease machinery against real podman:
+    # _SystemOps.disp_lease_candidates (real `podman ps` label read, incl. the
+    # `<no value>` absent-label sentinel) + qdistro_disposables.lease_sweep_targets
+    # + _SiloStore.sweep_expired_leases -> dispose() -> real `podman rm -f`. The
+    # host fake-ops cannot prove the podman label parsing or the real rm.
+    clean_disp
+    local ts now past tok_exp tok_fresh tok_nolease tok_forged
+    ts=$(date +%Y%m%d-%H%M%S)
+    now=$(date +%s); past=$(( now - 100 ))
+    tok_exp=$(gen_token); tok_fresh=$(gen_token)
+    tok_nolease=$(gen_token); tok_forged=$(gen_token)
+
+    local exp fresh nolease notoken forged
+    exp="disp-lexp-$ts"        # expired lease (ttl 1, created 100s ago) -> REAP
+    fresh="disp-lfresh-$ts"    # long ttl, created now                   -> keep
+    nolease="disp-lnone-$ts"   # disposable, valid token, NO lease labels -> keep
+    notoken="disp-lntok-$ts"   # expired lease but NO token label         -> keep (token guard)
+    forged="forged-lease-$ts"  # expired lease + valid token, non-disp NAME -> keep (name guard)
+
+    as_admin podman run -d --name "$exp" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_exp" \
+        --label "qdistro_lease_ttl=1" --label "qdistro_lease_created=$past" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail lease-sweep "could not create expired fixture $exp"
+    as_admin podman run -d --name "$fresh" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_fresh" \
+        --label "qdistro_lease_ttl=100000" --label "qdistro_lease_created=$now" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail lease-sweep "could not create fresh fixture $fresh"
+    as_admin podman run -d --name "$nolease" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_nolease" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail lease-sweep "could not create no-lease fixture $nolease"
+    as_admin podman run -d --name "$notoken" \
+        --label qdistro_disposable=1 \
+        --label "qdistro_lease_ttl=1" --label "qdistro_lease_created=$past" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail lease-sweep "could not create no-token fixture $notoken"
+    as_admin podman run -d --name "$forged" \
+        --label qdistro_disposable=1 --label "qdistro_tier2_token=$tok_forged" \
+        --label "qdistro_lease_ttl=1" --label "qdistro_lease_created=$past" \
+        --entrypoint sleep "$IMAGE" 600 >/dev/null 2>&1 \
+        || fail lease-sweep "could not create forged-name fixture $forged"
+
+    local py_out
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        python3 - "$exp" "$fresh" "$nolease" "$notoken" "$forged" <<PY 2>&1
+import sys, time
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+exp, fresh, nolease, notoken, forged = sys.argv[1:6]
+ops = M._SystemOps()
+
+# Real podman label read: every labelled fixture is enumerated; the candidate
+# dict carries the raw label strings (absent labels come back as '<no value>').
+cands = {c["name"]: c for c in ops.disp_lease_candidates()}
+for n in (exp, fresh, nolease, notoken, forged):
+    assert n in cands, f"{n!r} not enumerated by disp_lease_candidates: {list(cands)}"
+# podman renders an absent {{.Label "x"}} as an EMPTY string (some versions emit
+# the literal '<no value>'); parse_lease_seconds maps both to None -> survive.
+assert cands[nolease]["ttl"] in ("", "<no value>"), cands[nolease]
+assert cands[notoken]["token"] in ("", "<no value>"), cands[notoken]
+print("ENUM_OK")
+
+# Drive the real store sweep (real dispose -> real podman rm). now() is live, so
+# the ttl=1 created=now-100 fixtures are genuinely expired.
+store = M._SiloStore(ops, config_path=M.Path("/tmp/lease-sweep-silos.yaml"))
+reaped = store.sweep_expired_leases()
+assert reaped == [exp], f"sweep reaped {reaped!r}, expected exactly [{exp!r}]"
+print("SWEEP_OK")
+PY
+)
+    echo "$py_out" >&2
+    echo "$py_out" | grep -q ENUM_OK  || fail lease-sweep "disp_lease_candidates did not enumerate the fixtures / parse the <no value> labels"
+    echo "$py_out" | grep -q SWEEP_OK || fail lease-sweep "sweep_expired_leases did not reap EXACTLY the expired well-formed disposable"
+    pass "lease sweep enumerated by label, reaped only the expired well-formed disposable"
+
+    # Ground truth from podman: only the expired one is gone; every guard-skipped
+    # fixture survived (fresh / no-lease / no-token / forged-name).
+    as_admin podman container exists "$exp" 2>/dev/null \
+        && fail lease-sweep "expired disposable $exp survived the sweep"
+    local n
+    for n in "$fresh" "$nolease" "$notoken" "$forged"; do
+        as_admin podman container exists "$n" 2>/dev/null \
+            || fail lease-sweep "guard-skipped fixture $n was wrongly reaped (MUST survive)"
+    done
+    pass "fresh / no-lease / no-token / forged-name fixtures all survived"
+
+    for n in "$fresh" "$nolease" "$notoken" "$forged"; do
+        as_admin podman rm -f "$n" >/dev/null 2>&1 || true
+    done
+    rm -f /tmp/lease-sweep-silos.yaml 2>/dev/null || true
+    pass lease-sweep
+}
+
 cmd_teardown() {
     clean_disp
     rm -f "$RULE_FILE" 2>/dev/null || true
     systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
     as_admin podman rmi "$DENY_IMAGE" >/dev/null 2>&1 || true
     rm -rf "$TIER2_BUILD_DIR" /tmp/disp-build.log 2>/dev/null || true
+    rm -f /tmp/lease-sweep-silos.yaml 2>/dev/null || true
     pass teardown
 }
 
@@ -457,6 +606,8 @@ case "${1:-}" in
     spawn-window-close) cmd_spawn_window_close ;;
     reaper-sweep) cmd_reaper_sweep ;;
     deny-fail-closed) cmd_deny_fail_closed ;;
+    lease-spawn-labels) cmd_lease_spawn_labels ;;
+    lease-sweep) cmd_lease_sweep ;;
     teardown) cmd_teardown ;;
-    *) echo "usage: $0 {setup|spawn-window-close|reaper-sweep|deny-fail-closed|teardown}" >&2; exit 2 ;;
+    *) echo "usage: $0 {setup|spawn-window-close|reaper-sweep|deny-fail-closed|lease-spawn-labels|lease-sweep|teardown}" >&2; exit 2 ;;
 esac
