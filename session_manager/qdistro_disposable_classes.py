@@ -80,7 +80,8 @@ _VALID_NETWORK = frozenset(("none", "egress"))
 
 # Keys a class table may carry. An unknown key is a typo (``min_teir``) that
 # could silently default-enable a hostile class — reject it (fail-closed).
-_ALLOWED_KEYS = frozenset(("workload", "tier", "min_tier", "network", "export"))
+_ALLOWED_KEYS = frozenset(
+    ("workload", "tier", "min_tier", "network", "export", "edit"))
 # A min_tier we substitute when a class omits it: higher than any real tier, so
 # the class is DISABLED. We never default a missing min_tier to an enabled
 # value. (Belt and suspenders: the loader rejects a missing min_tier outright;
@@ -133,6 +134,15 @@ class DisposableClass:
     # — this flag is the package/admin policy axis; the broker rule is the
     # per-deployment authorization, exactly like open=registry + dispose.open=rule.
     export: bool = False
+    # Whether this class supports the EDIT-ROUND-TRIP landing mode (07-disposables
+    # -plan P2 follow-on): a file opened for editing is promoted back BESIDE its
+    # source as ``<name>.disp-edited`` (never overwriting in place) rather than
+    # into the generic ``Incoming/`` drop. ``edit`` is a strict refinement of
+    # ``export`` — an edit IS an export crossing (it reuses the same staging,
+    # /mnt/output RW bind, and qdistro.dispose.export:<class> broker gate), so a
+    # class may declare ``edit = true`` ONLY when ``export = true`` (validated in
+    # :func:`_parse_class`). Default FALSE: edit-round-trip is opt-in per class.
+    edit: bool = False
 
     def is_enabled(self, max_tier: int = MAX_AVAILABLE_TIER) -> bool:
         return self.min_tier <= max_tier
@@ -224,9 +234,26 @@ def _parse_class(name: str, table: object) -> DisposableClass:
             f"class {name!r}: export must be a boolean (true/false), "
             f"got {export!r}")
 
+    # edit: optional, defaults to the secure False (no edit-round-trip landing).
+    # Same strict-boolean rule as export (a quoted "true"/int is rejected, never
+    # coerced). edit is a refinement of export — it reuses the export staging +
+    # broker gate but lands beside the source instead of in Incoming/ — so it is
+    # incoherent (and refused, fail-closed) for a class to be edit=true while
+    # export=false: there would be no authorized output surface to carry the
+    # edited file out.
+    edit = table.get("edit", False)
+    if not isinstance(edit, bool):
+        raise RegistryError(
+            f"class {name!r}: edit must be a boolean (true/false), "
+            f"got {edit!r}")
+    if edit and not export:
+        raise RegistryError(
+            f"class {name!r}: edit = true requires export = true "
+            f"(edit-round-trip is an export crossing)")
+
     return DisposableClass(
         name=name, workload=workload, tier=tier, min_tier=min_tier,
-        network=network, export=export)
+        network=network, export=export, edit=edit)
 
 
 def load_classes(path: str | Path) -> dict[str, DisposableClass]:
@@ -340,7 +367,8 @@ def _main(argv: list[str]) -> int:
     """Tiny CLI for the trusted bash launch path (spawn-tier2.sh).
 
     ``--resolve <class>`` prints ``WORKLOAD=<w>``/``NETWORK=<n>``/``TIER=<t>``/
-    ``OPEN_ACTION=<a>``/``EXPORT=<true|false>``/``EXPORT_ACTION=<a>`` KEY=VALUE
+    ``OPEN_ACTION=<a>``/``EXPORT=<true|false>``/``EXPORT_ACTION=<a>``/
+    ``EDIT=<true|false>`` KEY=VALUE
     lines and exits 0 IFF the class is in the registry AND enabled at the current
     max tier. Exit codes:
       0  enabled       -> KEY=VALUE plan on stdout
@@ -386,6 +414,7 @@ def _main(argv: list[str]) -> int:
     print(f"OPEN_ACTION={open_action(cls.name)}")
     print(f"EXPORT={'true' if cls.export else 'false'}")
     print(f"EXPORT_ACTION={export_action(cls.name)}")
+    print(f"EDIT={'true' if cls.edit else 'false'}")
     return 0
 
 

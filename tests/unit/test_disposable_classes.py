@@ -406,3 +406,84 @@ export = true
         capture_output=True, text=True, check=True).stdout
     assert "EXPORT=true" in out
     assert "EXPORT_ACTION=qdistro.dispose.export:agent-scratch" in out
+
+
+# --- edit-round-trip field (export-back follow-on) --------------------------
+
+def test_edit_defaults_false(tmp_path):
+    reg = _write(tmp_path, """
+[classes.plain]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+""")
+    assert C.load_classes(reg)["plain"].edit is False
+
+
+def test_edit_true_requires_export(tmp_path):
+    """edit = true WITHOUT export = true is incoherent (no output surface) and is
+    rejected fail-closed — an edit is an export crossing."""
+    reg = _write(tmp_path, """
+[classes.bad]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+edit = true
+""")
+    with pytest.raises(C.RegistryError, match="edit = true requires export"):
+        C.load_classes(reg)
+
+
+def test_edit_true_with_export_parsed(tmp_path):
+    reg = _write(tmp_path, """
+[classes.editable]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+edit = true
+""")
+    cls = C.load_classes(reg)["editable"]
+    assert cls.edit is True and cls.export is True
+
+
+def test_edit_non_bool_rejected(tmp_path):
+    """A quoted/int edit is rejected (fail-closed) — same strict-boolean rule as
+    export, so a typo can never silently grant the beside-source landing."""
+    reg = _write(tmp_path, """
+[classes.bad]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+edit = "true"
+""")
+    with pytest.raises(C.RegistryError, match="edit must be a boolean"):
+        C.load_classes(reg)
+
+
+def test_shipped_agent_scratch_is_edit_capable():
+    classes = C.load_classes(SHIPPED_REGISTRY)
+    assert classes["agent-scratch"].edit is True
+    # The non-export classes are not edit-capable either.
+    assert classes["text/plain"].edit is False
+    assert classes["url-preview-known-origin"].edit is False
+
+
+def test_resolver_cli_emits_edit_line(tmp_path):
+    import subprocess
+    import sys
+    reg = _write(tmp_path, """
+[classes."agent-scratch"]
+workload = "weston-terminal"
+tier = 2
+min_tier = 2
+export = true
+edit = true
+""")
+    out = subprocess.run(
+        [sys.executable, str(C.__file__), "--resolve", "agent-scratch",
+         "--registry", str(reg)],
+        capture_output=True, text=True, check=True).stdout
+    assert "EDIT=true" in out

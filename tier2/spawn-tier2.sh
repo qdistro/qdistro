@@ -396,6 +396,16 @@ RO_INPUT_KIND=""
 # import (the actual data crossing, in the session manager). The launcher writes
 # meta.json OUTSIDE the bind (the container can never see/forge the request silo
 # or class). The staging base is created root-controlled at install.
+# Edit-round-trip (export-back follow-on): when the caller sets TIER2_REQUEST_EDIT=1
+# (and the class is edit-capable, and a regular-FILE RO input is supplied), the
+# single artifact dropped in /mnt/output is promoted back BESIDE its source as
+# <name>.disp-edited at IMPORT (never overwriting in place). This is purely a
+# launcher-stamped meta flag (edit_mode + input_realpath in meta.json, outside the
+# bind) + a forensic label; it reuses the export staging, the /mnt/output RW bind,
+# and the qdistro.dispose.export:<class> broker gate unchanged — the landing mode
+# is chosen at import by the session manager from the meta.
+REQUEST_EDIT="${TIER2_REQUEST_EDIT:-}"
+EDIT_ENABLED=0
 REQUEST_SILO="${TIER2_REQUEST_SILO:-}"
 EXPORT_ENABLED=0
 EXPORT_GATE_ACTION=""
@@ -465,7 +475,7 @@ if [ -n "$OPEN_CLASS" ]; then
     esac
     # Parse the KEY=VALUE plan the resolver printed.
     CLASS_WORKLOAD=""; CLASS_NETWORK=""; OPEN_ACTION=""
-    CLASS_EXPORT=""; EXPORT_ACTION=""
+    CLASS_EXPORT=""; EXPORT_ACTION=""; CLASS_EDIT=""
     while IFS='=' read -r _k _v; do
         case "$_k" in
             WORKLOAD)      CLASS_WORKLOAD="$_v" ;;
@@ -473,6 +483,7 @@ if [ -n "$OPEN_CLASS" ]; then
             OPEN_ACTION)   OPEN_ACTION="$_v" ;;
             EXPORT)        CLASS_EXPORT="$_v" ;;
             EXPORT_ACTION) EXPORT_ACTION="$_v" ;;
+            EDIT)          CLASS_EDIT="$_v" ;;
         esac
     done <<< "$OPEN_PLAN"
     # The class pins the workload: the caller-supplied WORKLOAD must equal the
@@ -562,6 +573,40 @@ if [ -n "$OPEN_CLASS" ]; then
             echo "spawn-tier2: refusing input basename with control characters" >&2; exit 2
         fi
     fi
+
+    # --- edit-round-trip enablement (export-back follow-on) --------------
+    # Opt-in PER LAUNCH via TIER2_REQUEST_EDIT=1. It is a strict refinement of an
+    # export launch: it needs the SAME preconditions (a request silo + an
+    # export-capable, gated class -> EXPORT_ENABLED already set above) PLUS the
+    # class must be edit-capable AND the RO input must be a single regular FILE
+    # (an edit-round-trip returns ONE edited file beside ONE source; a directory
+    # input has no single source to land beside). The chosen landing mode is
+    # carried to import only as the meta `edit_mode` flag + `input_realpath`
+    # (written outside the container bind); nothing about /mnt/output or the gate
+    # changes. Refuse loudly rather than silently downgrade an edit request to a
+    # plain export — the caller asked for the beside-source semantics.
+    if [ -n "$REQUEST_EDIT" ]; then
+        if [ "$REQUEST_EDIT" != "1" ]; then
+            echo "spawn-tier2: TIER2_REQUEST_EDIT must be '1' if set (got '$REQUEST_EDIT')" >&2
+            exit 2
+        fi
+        if [ "$EXPORT_ENABLED" != "1" ]; then
+            echo "spawn-tier2: TIER2_REQUEST_EDIT=1 requires TIER2_REQUEST_SILO and an" \
+                 "export-capable open class (no export surface to return the edit) — refusing" >&2
+            exit 2
+        fi
+        if [ "$CLASS_EDIT" != "true" ]; then
+            echo "spawn-tier2: TIER2_REQUEST_EDIT=1 but open class '$OPEN_CLASS' is not" \
+                 "edit-capable (edit=false) — refusing" >&2
+            exit 2
+        fi
+        if [ "$RO_INPUT_KIND" != "file" ]; then
+            echo "spawn-tier2: TIER2_REQUEST_EDIT=1 requires a single regular-file" \
+                 "TIER2_RO_INPUT to edit (got kind '${RO_INPUT_KIND:-none}') — refusing" >&2
+            exit 2
+        fi
+        EDIT_ENABLED=1
+    fi
 fi
 
 # Test/inspection hook: dump the resolved launch plan and exit 0 BEFORE the
@@ -585,6 +630,7 @@ if [ "${TIER2_PRINT_PLAN:-0}" = "1" ]; then
     printf 'OPEN_ACTION=%s\n' "${OPEN_ACTION:-none}"
     printf 'EXPORT=%s\n' "$([ "$EXPORT_ENABLED" = 1 ] && printf 'true' || printf 'false')"
     printf 'EXPORT_ACTION=%s\n' "${EXPORT_GATE_ACTION:-none}"
+    printf 'EDIT=%s\n' "$([ "$EDIT_ENABLED" = 1 ] && printf 'true' || printf 'false')"
     printf 'REQUEST_SILO=%s\n' "${REQUEST_SILO:-none}"
     printf 'OUTPUT_TARGET=%s\n' "$([ "$EXPORT_ENABLED" = 1 ] && printf '/mnt/output' || printf 'none')"
     printf 'NETWORK=%s\n' "${TIER2_NETWORK:-none}"
@@ -897,11 +943,20 @@ if [ "$EXPORT_ENABLED" = 1 ]; then
     # break JSON. python opens+writes the file itself (the redirect would be done
     # by the root parent shell and mis-own it), so it lands owned by the staging
     # identity. input_basename is null when there was no RO input.
+    # edit_mode + input_realpath ride the meta ONLY for an edit-round-trip launch;
+    # they select the beside-source landing at import. input_realpath is the
+    # launcher's own canonical source path (the importer re-canonicalizes it and
+    # requires it strictly under the request silo's state — a spawn-time string is
+    # not authority). For a plain export they are absent/null and the importer
+    # takes the Incoming/ landing as before.
     stg_run python3 - "$EXPORT_STAGING_DIR/meta.json" "$LAUNCH_TOKEN" \
         "$REQUEST_SILO" "$OPEN_CLASS" "$WORKLOAD" "$CONTAINER" \
-        "$(date +%s)" "${RO_INPUT_BASENAME:-}" <<'PYMETA'
+        "$(date +%s)" "${RO_INPUT_BASENAME:-}" "$EDIT_ENABLED" \
+        "${RO_INPUT_REAL:-}" <<'PYMETA'
 import json, os, sys
-path, token, silo, oc, workload, container, created, inp = sys.argv[1:9]
+(path, token, silo, oc, workload, container, created, inp,
+ edit_enabled, inp_real) = sys.argv[1:11]
+edit_mode = (edit_enabled == "1")
 meta = {
     "version": 1,
     "launch_token": token,
@@ -911,6 +966,9 @@ meta = {
     "container": container,
     "created": int(created),
     "input_basename": inp if inp else None,
+    "edit_mode": edit_mode,
+    # Only meaningful (and only trusted) when edit_mode; null otherwise.
+    "input_realpath": (inp_real if (edit_mode and inp_real) else None),
 }
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w") as f:
@@ -968,6 +1026,7 @@ export TIER2_RO_INPUT_BASENAME_RESOLVED="${RO_INPUT_BASENAME:-}"
 # immutable container labels (forensics; meta.json remains the authoritative
 # source the importer reads). Empty unless an export-capable open class opted in.
 export TIER2_EXPORT_ENABLED_RESOLVED="$EXPORT_ENABLED"
+export TIER2_EDIT_ENABLED_RESOLVED="$EDIT_ENABLED"
 export TIER2_EXPORT_PAYLOAD_DIR_RESOLVED="${EXPORT_PAYLOAD_DIR:-}"
 export TIER2_REQUEST_SILO_RESOLVED="${REQUEST_SILO:-}"
 export TIER2_OPEN_CLASS_RESOLVED="${OPEN_CLASS:-}"
@@ -1011,6 +1070,7 @@ SECCTX_ENV_PASS=(
     "TIER2_ALLOW_PRIVESC_RESOLVED=$TIER2_ALLOW_PRIVESC_RESOLVED"
     "TIER2_SECCOMP_PROFILE_RESOLVED=$TIER2_SECCOMP_PROFILE_RESOLVED"
     "TIER2_EXPORT_ENABLED_RESOLVED=$TIER2_EXPORT_ENABLED_RESOLVED"
+    "TIER2_EDIT_ENABLED_RESOLVED=$TIER2_EDIT_ENABLED_RESOLVED"
     "TIER2_EXPORT_PAYLOAD_DIR_RESOLVED=$TIER2_EXPORT_PAYLOAD_DIR_RESOLVED"
     "TIER2_REQUEST_SILO_RESOLVED=$TIER2_REQUEST_SILO_RESOLVED"
     "TIER2_OPEN_CLASS_RESOLVED=$TIER2_OPEN_CLASS_RESOLVED"
@@ -1146,6 +1206,11 @@ elif [ "${TIER2_DISPOSABLE_RESOLVED:-0}" = 1 ]; then
             --label "qdistro_request_silo=${TIER2_REQUEST_SILO_RESOLVED}"
             --label "qdistro_open_class=${TIER2_OPEN_CLASS_RESOLVED}"
         )
+        # Edit-round-trip: a forensic marker only (the landing mode is decided at
+        # import from meta.json, never from this label).
+        if [ "${TIER2_EDIT_ENABLED_RESOLVED:-0}" = "1" ]; then
+            PODMAN_HARDENING+=( --label "qdistro_edit=1" )
+        fi
     fi
 fi
 PODMAN_HARDENING+=(

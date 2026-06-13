@@ -2923,6 +2923,20 @@ class _SiloStore:
                                reason=f"class {open_class!r} export=false",
                                caller=caller)
             raise BadState(f"open class {open_class!r} is not export-capable")
+        # Edit-round-trip is a refinement of export. If the launcher marked this
+        # staging edit_mode, the class must STILL be edit-capable in the current
+        # registry (re-checked here at the crossing, never trusted from the
+        # spawn-time stamp alone) — a registry that dropped `edit` since spawn
+        # refuses the beside-source landing fail-closed.
+        edit_mode = bool(meta.get("edit_mode"))
+        if edit_mode and not cls.edit:
+            self._audit_record(
+                "dispose-export", request_silo, decision="deny",
+                reason=f"class {open_class!r} edit=false but edit_mode requested",
+                caller=caller)
+            raise BadState(
+                f"open class {open_class!r} is not edit-capable "
+                f"(edit-round-trip refused)")
         try:
             gate = _dispclasses.export_action(open_class)
         except _dispclasses.RegistryError as e:
@@ -2965,26 +2979,86 @@ class _SiloStore:
             raise BadState(f"export target state_path {state_path!r} not a dir")
 
         # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
+        # Two landing modes: edit-round-trip lands the SINGLE edited file beside
+        # its source as <name>.disp-edited; plain export-back lands into Incoming/.
         payload = str(staging / "payload")
         try:
-            receipt = _dispexport.promote_export(
-                payload, state_path, meta=meta, now_epoch=now,
-                owner_uid=dst.st_uid, owner_gid=dst.st_gid)
+            if edit_mode:
+                source_rel = self._edit_source_rel(
+                    meta, state_path, request_silo, caller)
+                receipt = _dispexport.promote_edit(
+                    payload, state_path, source_rel=source_rel, meta=meta,
+                    now_epoch=now, owner_uid=dst.st_uid, owner_gid=dst.st_gid)
+            else:
+                receipt = _dispexport.promote_export(
+                    payload, state_path, meta=meta, now_epoch=now,
+                    owner_uid=dst.st_uid, owner_gid=dst.st_gid)
         except _dispexport.ExportError as e:
             self._audit_record("dispose-export", request_silo, decision="error",
                                reason=f"promotion failed: {e}", caller=caller)
-            raise BadState(f"export-back promotion failed: {e}") from e
+            raise BadState(
+                f"{'edit-round-trip' if edit_mode else 'export-back'} "
+                f"promotion failed: {e}") from e
 
         # One-shot: remove the staging now the import is durable.
         self._remove_export_staging(token)
         self._audit_record(
             "dispose-export", request_silo, decision="allow",
-            reason=f"imported {len(receipt.get('files', []))} file(s) from "
-                   f"{open_class} -> {receipt.get('dest')}",
+            reason=(f"{'edited' if edit_mode else 'imported'} "
+                    f"{len(receipt.get('files', []))} file(s) from "
+                    f"{open_class} -> {receipt.get('dest')}"),
             caller=caller)
-        log.info("import_from_disposable %r -> %d file(s) into %s",
-                 token, len(receipt.get("files", [])), receipt.get("dest"))
+        log.info("import_from_disposable %r -> %s %d file(s) into %s",
+                 token, "edit" if edit_mode else "export",
+                 len(receipt.get("files", [])), receipt.get("dest"))
         return receipt
+
+    def _edit_source_rel(self, meta: dict, state_path: str, request_silo: str,
+                         caller: dict[str, Any] | None) -> str:
+        """Resolve an edit-round-trip's source path to a path RELATIVE to the
+        requesting silo's ``state_path`` — and enforce the policy boundary that it
+        lies STRICTLY UNDER that state (so the edited copy can only land inside the
+        silo the import targets; there is no cross-silo write surface).
+
+        ``meta['input_realpath']`` is the launcher's own canonical path of the file
+        that was opened for editing (``readlink -f`` of ``TIER2_RO_INPUT`` at
+        spawn). We canonicalize BOTH it and ``state_path`` again here and require
+        ``commonpath`` to be exactly the state (a sibling like ``…/work2`` sharing
+        a prefix is rejected). The returned relative path is then re-validated and
+        walked ``O_NOFOLLOW`` by :func:`promote_edit`, so this prefix check is the
+        policy gate and the walk is the race-safe enforcement. Raises
+        :class:`BadState` fail-closed on a missing/absolute-escaping/outside
+        source."""
+        raw = meta.get("input_realpath")
+        if not isinstance(raw, str) or not raw:
+            self._audit_record(
+                "dispose-export", request_silo, decision="error",
+                reason="edit_mode meta missing input_realpath", caller=caller)
+            raise BadState(
+                "edit-round-trip staging has no source path (input_realpath)")
+        real_state = os.path.realpath(state_path)
+        real_src = os.path.realpath(raw)
+        try:
+            common = os.path.commonpath([real_state, real_src])
+        except ValueError as e:
+            # Different roots / mixed absolute-relative — never on a sane Linux
+            # path pair, but fail-closed rather than guess.
+            self._audit_record(
+                "dispose-export", request_silo, decision="deny",
+                reason=f"edit source path incomparable to state: {e}",
+                caller=caller)
+            raise BadState(
+                f"edit source {raw!r} is not under the silo state") from e
+        if common != real_state or real_src == real_state:
+            self._audit_record(
+                "dispose-export", request_silo, decision="deny",
+                reason=f"edit source {raw!r} is not strictly under the "
+                       f"request silo state",
+                caller=caller)
+            raise BadState(
+                f"edit source {raw!r} is not under the request silo "
+                f"{request_silo!r} state — refusing (no cross-silo edit write)")
+        return os.path.relpath(real_src, real_state)
 
     def _read_export_meta(self, staging: Path, token: str,
                           caller: dict[str, Any] | None) -> dict:

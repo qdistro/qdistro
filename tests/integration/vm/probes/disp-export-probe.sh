@@ -360,9 +360,166 @@ PY
     pass import-flow
 }
 
+# --- edit-round-trip (export-back follow-on): real podman spawn + real-fs land --
+EDIT_SRC=/tmp/qd-edit-src.txt
+
+cmd_edit_rw_mount() {
+    clean_disp; clean_staging
+    printf 'ORIGINAL CONTENT\n' > "$EDIT_SRC"; chmod a+r "$EDIT_SRC"
+    local src_real; src_real=$(readlink -f "$EDIT_SRC")
+    local out err container="" SPAWN_PID=""
+    out=$(mktemp); err=$(mktemp)
+    # shellcheck disable=SC2317
+    _cleanup() {
+        [ -n "${container:-}" ] && as_admin podman rm -f "$container" >/dev/null 2>&1
+        [ -n "${SPAWN_PID:-}" ] && kill "$SPAWN_PID" 2>/dev/null
+        rm -f "$out" "$err" "$EDIT_SRC" 2>/dev/null; return 0
+    }
+    trap _cleanup EXIT
+
+    # Edit launch: export-capable + edit-capable class, a regular-FILE input, and
+    # the per-launch TIER2_REQUEST_EDIT=1 opt-in.
+    as_admin env TIER2_OPEN_CLASS="$OPEN_CLASS" TIER2_REQUEST_SILO="$REQUEST_SILO" \
+        TIER2_RO_INPUT="$EDIT_SRC" TIER2_REQUEST_EDIT=1 \
+        "$SPAWN" --disposable "$WORKLOAD" -- sleep 600 >"$out" 2>"$err" &
+    SPAWN_PID=$!
+    local token=""
+    for _ in $(seq 1 60); do
+        container=$(awk -F= '/^CONTAINER=/{print $2; exit}' "$out" 2>/dev/null)
+        token=$(awk -F= '/^LAUNCH_TOKEN=/{print $2; exit}' "$out" 2>/dev/null)
+        [ -n "$container" ] && [ -n "$token" ] && break
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$container" ] && [ -n "$token" ] \
+        || { cat "$err" >&2; fail edit-rw-mount "spawn emitted no CONTAINER/LAUNCH_TOKEN (edit refused?)"; }
+    pass "edit disposable spawned ($container)"
+
+    local up=""
+    for _ in $(seq 1 40); do
+        as_admin podman container exists "$container" 2>/dev/null && { up=1; break; }
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    [ -n "$up" ] || { cat "$err" >&2; fail edit-rw-mount "container never appeared"; }
+
+    # /mnt/input bound RO, /mnt/output bound RW.
+    local roin rw
+    roin=$(as_admin podman inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/mnt/input/qd-edit-src.txt"}}{{.RW}}{{end}}{{end}}' "$container" 2>/dev/null)
+    [ "$roin" = "false" ] || fail edit-rw-mount "/mnt/input not bound READ-ONLY (RW=$roin)"
+    rw=$(as_admin podman inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/mnt/output"}}{{.RW}}{{end}}{{end}}' "$container" 2>/dev/null)
+    [ "$rw" = "true" ] || fail edit-rw-mount "/mnt/output is RW=$rw (must be writable)"
+    pass "edit disposable: /mnt/input RO + /mnt/output RW"
+
+    # The qdistro_edit forensic label landed (alongside the export labels).
+    local lbl
+    lbl=$(as_admin podman inspect --format '{{.Config.Labels.qdistro_edit}}' "$container" 2>/dev/null)
+    [ "$lbl" = "1" ] || fail edit-rw-mount "qdistro_edit label missing (got '$lbl')"
+    pass "qdistro_edit label stamped"
+
+    # meta.json carries edit_mode=true + the canonical input_realpath (outside bind).
+    [ -f "$STAGING_BASE/$token/meta.json" ] || fail edit-rw-mount "meta.json not written"
+    grep -q '"edit_mode": true' "$STAGING_BASE/$token/meta.json" \
+        || fail edit-rw-mount "meta.json missing edit_mode=true"
+    grep -q "\"input_realpath\": \"$src_real\"" "$STAGING_BASE/$token/meta.json" \
+        || { cat "$STAGING_BASE/$token/meta.json" >&2; fail edit-rw-mount "meta.json missing/wrong input_realpath"; }
+    pass "meta.json: edit_mode=true + input_realpath stamped outside the bind"
+
+    as_admin podman stop -t 5 "$container" >/dev/null 2>&1 || true
+    wait "$SPAWN_PID" 2>/dev/null || true
+    SPAWN_PID=""; container=""
+    pass edit-rw-mount
+}
+
+# Build edit-mode staging (admin-owned, as spawn-tier2 would) for the import test.
+_make_edit_staging() {  # _make_edit_staging <token> <silo> <class> <src_realpath> [payloadfile=content]
+    local token="$1" silo="$2" oc="$3" srp="$4" pf="${5:-out.txt=EDITED}"
+    local d="$STAGING_BASE/$token"
+    as_admin mkdir -p -m 0700 "$d/payload"
+    as_admin python3 - "$d/meta.json" "$token" "$silo" "$oc" "$srp" <<'PY'
+import json, os, sys
+path, token, silo, oc, srp = sys.argv[1:6]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"version": 1, "launch_token": token, "request_silo": silo,
+               "open_class": oc, "container": "disp-x", "created": 1,
+               "input_basename": os.path.basename(srp),
+               "edit_mode": True, "input_realpath": srp}, f, sort_keys=True)
+PY
+    as_admin sh -c "printf '%s' '${pf#*=}' > '$d/payload/${pf%%=*}'"
+}
+
+cmd_edit_import() {
+    clean_disp; clean_staging
+    # (a) edit_mode import targeting an UNTEMPLATED silo: real broker export gate
+    # passes, real resolver returns no binding -> BadState (same fail-closed anchor
+    # as plain export; the edit branch must not bypass it).
+    local etok; etok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    _make_edit_staging "$etok" "$REQUEST_SILO" "$OPEN_CLASS" "/tmp/whatever.txt"
+    local py_out
+    py_out=$(QDISTRO_ADMIN_USER="$ADMIN" QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$etok" <<PY 2>&1
+import os, sys
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_session_manager as M
+tok = sys.argv[1]
+store = M._SiloStore(M._SystemOps(), config_path=M.Path("/tmp/edit-silos.yaml"))
+try:
+    store.import_from_disposable(tok)
+    print("UNTEMPLATED_FAIL")
+except M.BadState as e:
+    print("UNTEMPLATED_OK" if "untemplated" in str(e).lower() else f"UNTEMPLATED_WRONG {e}")
+print("KEEP_OK" if os.path.isdir("$STAGING_BASE/"+tok) else "KEEP_FAIL")
+PY
+)
+    echo "$py_out" | grep -q '^UNTEMPLATED_OK$' || fail edit-import "edit import to untemplated silo not refused via the REAL resolver: $py_out"
+    echo "$py_out" | grep -q '^KEEP_OK$'        || fail edit-import "staging destroyed on a refusal: $py_out"
+    pass "edit import: untemplated target refused via the REAL broker+resolver, staging kept"
+
+    # (b) the beside-source landing on a REAL filesystem AS ROOT: this proves the
+    # O_TMPFILE/linkat lander + the silo-owner fchown (the host unit runs unpriv,
+    # so fchown is a no-op there). A throwaway state tree stands in for a silo home.
+    py_out=$(python3 - <<PY 2>&1
+import os, sys, tempfile, pwd
+sys.path.insert(0, "$LIBEXEC")
+import qdistro_disposable_export as E
+uid = pwd.getpwnam("$ADMIN").pw_uid
+gid = pwd.getpwnam("$ADMIN").pw_gid
+state = tempfile.mkdtemp(prefix="qd-editstate-")
+os.makedirs(os.path.join(state, "docs"))
+src = os.path.join(state, "docs", "report.txt")
+open(src, "w").write("ORIGINAL")
+payload = tempfile.mkdtemp(prefix="qd-editpayload-")
+open(os.path.join(payload, "x"), "w").write("EDITED-BY-DISPOSABLE")
+meta = {"launch_token": "a"*32, "open_class": "agent-scratch",
+        "request_silo": "$REQUEST_SILO", "container": "disp-x"}
+r = E.promote_edit(payload, state, source_rel="docs/report.txt", meta=meta,
+                   now_epoch=1700000000, owner_uid=uid, owner_gid=gid)
+dest = r["dest"]
+print("LANDED_OK" if dest.endswith("/docs/report.txt.disp-edited") else f"LANDED_FAIL {dest}")
+print("CONTENT_OK" if open(dest).read() == "EDITED-BY-DISPOSABLE" else "CONTENT_FAIL")
+print("SRC_OK" if open(src).read() == "ORIGINAL" else "SRC_FAIL")
+st = os.lstat(dest)
+print("OWNER_OK" if st.st_uid == uid else f"OWNER_FAIL {st.st_uid}!={uid}")
+# no temp litter beside the source
+entries = sorted(os.listdir(os.path.join(state, "docs")))
+print("CLEAN_OK" if entries == ["report.txt", "report.txt.disp-edited"] else f"CLEAN_FAIL {entries}")
+PY
+)
+    for k in LANDED_OK CONTENT_OK SRC_OK OWNER_OK CLEAN_OK; do
+        echo "$py_out" | grep -q "^$k\$" || fail edit-import "real-fs beside-source landing: $k missing ($py_out)"
+    done
+    pass "edit landing on real fs as root: <name>.disp-edited beside source, silo-owned, source intact, no litter"
+
+    clean_staging
+    pass edit-import
+}
+
 cmd_teardown() {
     clean_disp; clean_staging
-    rm -f "$SPAWN_RULE" "$OPEN_RULE" "$EXPORT_RULE" 2>/dev/null || true
+    rm -f "$SPAWN_RULE" "$OPEN_RULE" "$EXPORT_RULE" "$EDIT_SRC" 2>/dev/null || true
     systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
     rm -rf "$TIER2_BUILD_DIR" /tmp/dispexport-build.log 2>/dev/null || true
     pass teardown
@@ -373,6 +530,8 @@ case "${1:-}" in
     export-rw-mount) cmd_export_rw_mount ;;
     export-gate-fail-closed) cmd_export_gate_fail_closed ;;
     import-flow) cmd_import_flow ;;
+    edit-rw-mount) cmd_edit_rw_mount ;;
+    edit-import) cmd_edit_import ;;
     teardown) cmd_teardown ;;
-    *) echo "usage: $0 {setup|export-rw-mount|export-gate-fail-closed|import-flow|teardown}" >&2; exit 2 ;;
+    *) echo "usage: $0 {setup|export-rw-mount|export-gate-fail-closed|import-flow|edit-rw-mount|edit-import|teardown}" >&2; exit 2 ;;
 esac

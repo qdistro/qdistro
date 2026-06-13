@@ -25,6 +25,7 @@ Apps wire themselves via the higher-level ``register_app`` helper in
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -156,6 +157,77 @@ def open_in_disposable(path: str, *, class_name: str,
             if k in ("LAUNCH_TOKEN", "CONTAINER", "IMAGE", "APP_ID"):
                 contract[k] = v
     return contract
+
+
+def open_for_edit(path: str, *, class_name: str, request_silo: str,
+                  spawn_bin: str | None = None,
+                  extra_env: dict[str, str] | None = None) -> dict:
+    """Open ``path`` FOR EDITING in a fresh tier-2 disposable (the export-back
+    edit-round-trip). Same trusted-binary boundary as :func:`open_in_disposable`,
+    plus the per-launch export+edit opt-in: the binary requires ``class_name`` to
+    be edit-capable, binds the source RO at ``/mnt/input/<name>`` AND a RW staging
+    dir at ``/mnt/output``, and stamps the meta so that when the disposable is
+    later imported (admin ``ImportFromDisposable``), the SINGLE file the editor
+    saved to ``/mnt/output`` is promoted back BESIDE the source as
+    ``<name>.disp-edited`` — never overwriting ``path`` in place.
+
+    ``request_silo`` is the silo the edited copy lands in; the importer requires
+    the source to live strictly under that silo's state (no cross-silo write), so
+    pass the silo that owns ``path``. ``path`` must be an existing absolute
+    regular FILE (a directory has no single source to edit). Returns the launch
+    contract dict (as :func:`open_in_disposable`). Raises
+    :class:`OpenInDisposableError` on any failure — the binary re-validates every
+    gate, so this helper is convenience, never the security boundary."""
+    if not isinstance(request_silo, str) or not request_silo:
+        raise OpenInDisposableError("request_silo must be a non-empty string")
+    real = os.path.realpath(path) if isinstance(path, str) and path else ""
+    if not real or not os.path.isfile(real):
+        # Mirror open_in_disposable's early sanity check but tightened to a
+        # regular file (edit-round-trip is single-file); the binary re-checks.
+        raise OpenInDisposableError(
+            f"open_for_edit requires an existing regular file: {path!r}")
+    env_extra = {
+        "TIER2_REQUEST_SILO": request_silo,
+        "TIER2_REQUEST_EDIT": "1",
+    }
+    if extra_env:
+        env_extra.update({str(k): str(v) for k, v in extra_env.items()})
+    return open_in_disposable(
+        path, class_name=class_name, spawn_bin=spawn_bin, extra_env=env_extra)
+
+
+# Kind tag for the edit-round-trip "your edited copy is ready" App1 message. The
+# payload is a small JSON object naming the source + the landed copy so the
+# source app can offer "open / replace" without re-reading the importer's stdout.
+EDIT_READY_KIND = "application/x-qdistro-edit-ready"
+
+
+def notify_edit_ready(target_uid: int, target_service: str, receipt: dict, *,
+                      timeout: float = DEFAULT_TIMEOUT_S) -> bool:
+    """Notify the source app that an edit-round-trip landed: relay an App1
+    message (kind :data:`EDIT_READY_KIND`) to ``target_service`` carrying the
+    edit receipt's ``source``/``dest``/``sha256`` so the app can surface "an
+    edited copy of <source> is ready" and offer to open or replace it.
+
+    This is the SDK half of "source app notified via SDK"; the full qdshell /
+    qfileman UI wiring is a separate backlog item. ``receipt`` is the dict
+    returned by ``ImportFromDisposable`` for an ``edit`` import (``mode ==
+    "edit"``). Returns True iff the relay delivered (admin approved + the target's
+    Receive was invoked); a non-edit / dest-less receipt raises ValueError (there
+    is nothing to announce)."""
+    if not isinstance(receipt, dict) or receipt.get("mode") != "edit":
+        raise ValueError("notify_edit_ready needs an edit-mode import receipt")
+    dest = receipt.get("dest")
+    if not dest:
+        raise ValueError("edit receipt has no landed dest to announce")
+    files = receipt.get("files") or []
+    payload = json.dumps({
+        "source": receipt.get("source"),
+        "dest": dest,
+        "sha256": files[0].get("sha256") if files else None,
+    }, sort_keys=True)
+    return send_to(target_uid, target_service, EDIT_READY_KIND, payload,
+                   timeout=timeout)
 
 
 def _resolve_open_workload(class_name: str,

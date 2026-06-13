@@ -71,3 +71,21 @@ teardown_file() {
     assert_output_contains "PASS: import: export-gate DENY refused at the REAL broker, staging kept (fail-closed)"
     assert_output_contains "PASS: import-flow"
 }
+
+@test "edit-round-trip: edit launch binds /mnt/input RO + /mnt/output RW, stamps qdistro_edit + edit_mode/input_realpath meta" {
+    vm_run "bash $PROBE edit-rw-mount"
+    assert_success
+    assert_output_contains "PASS: edit disposable spawned"
+    assert_output_contains "PASS: edit disposable: /mnt/input RO + /mnt/output RW"
+    assert_output_contains "PASS: qdistro_edit label stamped"
+    assert_output_contains "PASS: meta.json: edit_mode=true + input_realpath stamped outside the bind"
+    assert_output_contains "PASS: edit-rw-mount"
+}
+
+@test "edit-round-trip: import lands <name>.disp-edited beside source (real-fs, root, silo-owned) + untemplated fail-closed" {
+    vm_run "bash $PROBE edit-import"
+    assert_success
+    assert_output_contains "PASS: edit import: untemplated target refused via the REAL broker+resolver, staging kept"
+    assert_output_contains "PASS: edit landing on real fs as root: <name>.disp-edited beside source, silo-owned, source intact, no litter"
+    assert_output_contains "PASS: edit-import"
+}

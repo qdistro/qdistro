@@ -147,3 +147,67 @@ def test_open_dir_input_allowed(tmp_path):
     env_lines = (tmp_path / "spawn-env").read_text().splitlines()
     env = dict(ln.split("=", 1) for ln in env_lines if "=" in ln)
     assert env["TIER2_RO_INPUT"] == os.path.realpath(str(d))
+
+
+# --- open_for_edit / notify_edit_ready (edit-round-trip) --------------------
+
+def test_open_for_edit_sets_request_silo_and_edit(tmp_path):
+    """open_for_edit execs the binary with TIER2_REQUEST_SILO + TIER2_REQUEST_EDIT
+    on top of the open-class/RO-input env open_in_disposable already sets."""
+    f = tmp_path / "doc.txt"
+    f.write_text("hi")
+    spawn = _fake_spawn_bin(tmp_path, rc=0, stdout="CONTAINER=disp-x\n")
+    qdistro_app.open_for_edit(
+        str(f), class_name="agent-scratch", request_silo="work",
+        spawn_bin=str(spawn), extra_env=_base_env())
+    env_lines = (tmp_path / "spawn-env").read_text().splitlines()
+    env = dict(ln.split("=", 1) for ln in env_lines if "=" in ln)
+    assert env["TIER2_OPEN_CLASS"] == "agent-scratch"
+    assert env["TIER2_RO_INPUT"] == os.path.realpath(str(f))
+    assert env["TIER2_REQUEST_SILO"] == "work"
+    assert env["TIER2_REQUEST_EDIT"] == "1"
+
+
+def test_open_for_edit_rejects_directory(tmp_path):
+    d = tmp_path / "adir"
+    d.mkdir()
+    with pytest.raises(qdistro_app.OpenInDisposableError, match="regular file"):
+        qdistro_app.open_for_edit(str(d), class_name="agent-scratch",
+                                  request_silo="work")
+
+
+def test_open_for_edit_requires_request_silo(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    with pytest.raises(qdistro_app.OpenInDisposableError, match="request_silo"):
+        qdistro_app.open_for_edit(str(f), class_name="agent-scratch",
+                                  request_silo="")
+
+
+def test_notify_edit_ready_relays_payload(tmp_path, monkeypatch):
+    sent = {}
+
+    def fake_send_to(uid, service, kind, payload, *, timeout=600):
+        sent.update(uid=uid, service=service, kind=kind, payload=payload)
+        return True
+
+    monkeypatch.setattr(qdistro_app, "send_to", fake_send_to)
+    receipt = {"mode": "edit", "source": "docs/report.txt",
+               "dest": "/home/work/docs/report.txt.disp-edited",
+               "files": [{"name": "report.txt.disp-edited", "sha256": "deadbeef"}]}
+    assert qdistro_app.notify_edit_ready(1000, "org.qdistro.Notepad", receipt)
+    assert sent["kind"] == qdistro_app.EDIT_READY_KIND
+    import json as _json
+    body = _json.loads(sent["payload"])
+    assert body["dest"] == "/home/work/docs/report.txt.disp-edited"
+    assert body["source"] == "docs/report.txt"
+    assert body["sha256"] == "deadbeef"
+
+
+def test_notify_edit_ready_rejects_non_edit_receipt(monkeypatch):
+    monkeypatch.setattr(qdistro_app, "send_to",
+                        lambda *a, **k: pytest.fail("should not relay"))
+    with pytest.raises(ValueError):
+        qdistro_app.notify_edit_ready(1000, "svc", {"files": [], "dest": None})
+    with pytest.raises(ValueError):
+        qdistro_app.notify_edit_ready(1000, "svc", {"mode": "edit", "dest": None})

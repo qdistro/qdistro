@@ -798,3 +798,131 @@ def test_export_rw_bind_and_labels_in_podman_argv(tmp_path: Path) -> None:
     assert "qdistro_export=1" in argv
     assert "qdistro_request_silo=work" in argv
     assert "qdistro_open_class=agent-scratch" in argv
+
+
+# ---------------------------------------------------------------------------
+# Edit-round-trip launch (export-back follow-on) — the spawn-side opt-in.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_plan(tmp_path: Path) -> None:
+    """TIER2_REQUEST_EDIT=1 on an edit-capable class + a regular-file input + a
+    request silo enables edit-round-trip: the plan carries EDIT=true alongside the
+    unchanged export surface."""
+    inp = tmp_path / "note.txt"
+    inp.write_text("hello\n")
+    result = _run_open(tmp_path, request_silo="work", ro_input=str(inp),
+                       print_plan=True, extra_env={"TIER2_REQUEST_EDIT": "1"})
+    assert result.returncode == 0, result.stderr
+    plan = _plan(result)
+    assert plan["EDIT"] == "true"
+    assert plan["EXPORT"] == "true"
+    assert plan["OUTPUT_TARGET"] == "/mnt/output"
+    assert plan["RO_INPUT_KIND"] == "file"
+
+
+def test_edit_meta_and_label(tmp_path: Path) -> None:
+    """An edit launch stamps edit_mode=true + input_realpath (the canonical source
+    path) into meta.json OUTSIDE the bind, and the container carries qdistro_edit=1.
+    A plain export launch leaves edit_mode false / input_realpath null."""
+    base = tmp_path / "staging"
+    base.mkdir()
+    inp = tmp_path / "doc.txt"
+    inp.write_text("source\n")
+    result = _run_open(tmp_path, dbus_mode="allow", open_verdict="allow",
+                       export_verdict="allow", request_silo="work",
+                       ro_input=str(inp), staging_base=str(base),
+                       record_podman=True,
+                       extra_env={"TIER2_REQUEST_EDIT": "1"})
+    assert result.returncode == 0, result.stderr
+    token = ""
+    for ln in result.stdout.splitlines():
+        if ln.startswith("LAUNCH_TOKEN="):
+            token = ln.partition("=")[2]
+    assert token, result.stdout
+    meta_obj = json.loads((base / token / "meta.json").read_text())
+    assert meta_obj["edit_mode"] is True
+    # input_realpath is the launcher's canonical source path (readlink -f of input).
+    assert meta_obj["input_realpath"] == os.path.realpath(str(inp))
+    assert meta_obj["input_basename"] == "doc.txt"
+    argv = (tmp_path / "podman-argv").read_text()
+    assert "qdistro_edit=1" in argv
+
+
+def test_export_without_edit_has_no_edit_marks(tmp_path: Path) -> None:
+    """A plain export launch (no TIER2_REQUEST_EDIT) carries edit_mode=false,
+    input_realpath=null, and NO qdistro_edit label."""
+    base = tmp_path / "staging"
+    base.mkdir()
+    inp = tmp_path / "doc.txt"
+    inp.write_text("source\n")
+    result = _run_open(tmp_path, dbus_mode="allow", open_verdict="allow",
+                       export_verdict="allow", request_silo="work",
+                       ro_input=str(inp), staging_base=str(base),
+                       record_podman=True)
+    assert result.returncode == 0, result.stderr
+    token = next(ln.partition("=")[2] for ln in result.stdout.splitlines()
+                 if ln.startswith("LAUNCH_TOKEN="))
+    meta_obj = json.loads((base / token / "meta.json").read_text())
+    assert meta_obj["edit_mode"] is False
+    assert meta_obj["input_realpath"] is None
+    assert "qdistro_edit=1" not in (tmp_path / "podman-argv").read_text()
+
+
+def test_edit_requires_request_silo(tmp_path: Path) -> None:
+    """TIER2_REQUEST_EDIT=1 without a request silo (no export surface) is refused."""
+    inp = tmp_path / "note.txt"
+    inp.write_text("x\n")
+    result = _run_open(tmp_path, ro_input=str(inp), print_plan=True,
+                       extra_env={"TIER2_REQUEST_EDIT": "1"})
+    assert result.returncode == 2
+    assert "requires TIER2_REQUEST_SILO" in result.stderr
+
+
+def test_edit_requires_regular_file_input(tmp_path: Path) -> None:
+    """A directory input cannot be edited single-file — refuse."""
+    d = tmp_path / "adir"
+    d.mkdir()
+    result = _run_open(tmp_path, request_silo="work", ro_input=str(d),
+                       print_plan=True, extra_env={"TIER2_REQUEST_EDIT": "1"})
+    assert result.returncode == 2
+    assert "regular-file" in result.stderr
+
+
+def test_edit_no_input_refused(tmp_path: Path) -> None:
+    """TIER2_REQUEST_EDIT=1 with NO input at all is refused (nothing to edit)."""
+    result = _run_open(tmp_path, request_silo="work", print_plan=True,
+                       extra_env={"TIER2_REQUEST_EDIT": "1"})
+    assert result.returncode == 2
+    assert "regular-file" in result.stderr
+
+
+def test_edit_invalid_flag_value_refused(tmp_path: Path) -> None:
+    """TIER2_REQUEST_EDIT must be exactly '1' if set."""
+    inp = tmp_path / "note.txt"
+    inp.write_text("x\n")
+    result = _run_open(tmp_path, request_silo="work", ro_input=str(inp),
+                       print_plan=True, extra_env={"TIER2_REQUEST_EDIT": "yes"})
+    assert result.returncode == 2
+    assert "TIER2_REQUEST_EDIT must be" in result.stderr
+
+
+def test_edit_non_edit_capable_class_refused(tmp_path: Path) -> None:
+    """A class that is export-capable but NOT edit-capable (edit=false) refuses an
+    edit launch — proven with a custom registry (the shipped registry has no such
+    class)."""
+    reg = tmp_path / "noedit-classes.toml"
+    reg.write_text(
+        '[classes."scratch-noedit"]\n'
+        'workload = "weston-terminal"\n'
+        'tier = 2\nmin_tier = 2\nnetwork = "none"\n'
+        'export = true\nedit = false\n')
+    inp = tmp_path / "note.txt"
+    inp.write_text("x\n")
+    result = _run_open(
+        tmp_path, open_class="scratch-noedit", request_silo="work",
+        ro_input=str(inp), print_plan=True,
+        extra_env={"TIER2_REQUEST_EDIT": "1",
+                   "TIER2_DISPOSABLE_CLASSES_TEST": str(reg)})
+    assert result.returncode == 2
+    assert "not" in result.stderr and "edit-capable" in result.stderr

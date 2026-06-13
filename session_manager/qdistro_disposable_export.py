@@ -60,6 +60,14 @@ _CHUNK = 1024 * 1024
 # a single constant, trivially renamable if Jan prefers another name.
 INCOMING_DIRNAME = "Incoming"
 
+# Edit-round-trip landing suffix. A file opened FOR EDITING in a disposable is
+# promoted back BESIDE its source as ``<source-name><EDITED_SUFFIX>`` — never
+# overwriting the source in place (the source is the user's authoritative copy;
+# the disposable's output is an *offer*, not a replacement). On the (rare) name
+# collision a ``-<n>`` is appended; the landing NEVER clobbers an existing file
+# (the link is no-overwrite, see :func:`_link_into_place`).
+EDITED_SUFFIX = ".disp-edited"
+
 
 class ExportError(Exception):
     """Base for export-back promotion failures."""
@@ -209,32 +217,43 @@ def _copy_one(src_dir_fd: int, name: str, dst_dir_fd: int, dst_name: str,
         if not stat.S_ISREG(st.st_mode):
             raise ExportPolicyError(
                 f"payload entry {name!r} is not a regular file at open — refusing")
-        h = hashlib.sha256()
-        written = 0
         dflags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                   | getattr(os, "O_CLOEXEC", 0))
         dfd = os.open(dst_name, dflags, 0o600, dir_fd=dst_dir_fd)
         try:
             _maybe_fchown(dfd, owner_uid, owner_gid)
-            while True:
-                chunk = os.read(sfd, _CHUNK)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > max_bytes:
-                    raise ExportPolicyError(
-                        f"payload entry {name!r} grew past its scanned size "
-                        f"({max_bytes}-byte cap) during copy — refusing")
-                h.update(chunk)
-                off = 0
-                while off < len(chunk):
-                    off += os.write(dfd, chunk[off:])
-            os.fsync(dfd)
+            return _stream_to_fd(sfd, dfd, name, max_bytes)
         finally:
             os.close(dfd)
-        return written, h.hexdigest()
     finally:
         os.close(sfd)
+
+
+def _stream_to_fd(sfd: int, dfd: int, name: str, max_bytes: int) -> tuple[int, str]:
+    """Copy bytes from the open source fd ``sfd`` to the open destination fd
+    ``dfd``, hashing as we go, and fsync ``dfd``. Returns
+    ``(bytes_written, sha256_hex)``. The copy is bounded at ``max_bytes`` (the
+    already-cap-checked scanned size): a file that grew after the scan trips
+    :class:`ExportPolicyError` (nothing partial is kept by the caller). Both fds
+    are caller-owned + already validated — this is the inner loop shared by the
+    Incoming promoter (:func:`_copy_one`) and the edit-round-trip lander."""
+    h = hashlib.sha256()
+    written = 0
+    while True:
+        chunk = os.read(sfd, _CHUNK)
+        if not chunk:
+            break
+        written += len(chunk)
+        if written > max_bytes:
+            raise ExportPolicyError(
+                f"payload entry {name!r} grew past its scanned size "
+                f"({max_bytes}-byte cap) during copy — refusing")
+        h.update(chunk)
+        off = 0
+        while off < len(chunk):
+            off += os.write(dfd, chunk[off:])
+    os.fsync(dfd)
+    return written, h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -503,3 +522,324 @@ def _write_receipt_at(dir_fd: int, receipt: dict,
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Edit-round-trip lander (promote a single edited file BESIDE its source)
+# ---------------------------------------------------------------------------
+
+
+def split_source_rel(source_rel: str) -> tuple[list[str], str]:
+    """Split a source path RELATIVE to the silo state_path into
+    ``(dir_components, leaf)`` after a strict hygiene pass, or raise
+    :class:`ExportPolicyError`. ``source_rel`` is the source-of-edit's location
+    inside the requesting silo (e.g. ``docs/report.txt``). It MUST be a real
+    relative path with no escape: not absolute, no empty component, no ``.``/``..``
+    component, no NUL/control byte; the leaf must additionally pass
+    :func:`sanitize_filename` (so it can never be the reserved receipt name or a
+    separator-bearing string). This is the pure half of the "stay inside the
+    silo" guarantee; the walk in :func:`promote_edit` then enforces it again at
+    the filesystem level with an ``O_NOFOLLOW`` fd-chain."""
+    if not isinstance(source_rel, str) or not source_rel:
+        raise ExportPolicyError("edit source path is empty")
+    if source_rel.startswith("/"):
+        raise ExportPolicyError(
+            f"edit source path {source_rel!r} is absolute — refusing "
+            f"(it must be relative to the silo state)")
+    if "\x00" in source_rel:
+        raise ExportPolicyError("edit source path contains a NUL byte")
+    parts = source_rel.split("/")
+    comps: list[str] = []
+    for p in parts:
+        if p == "" or p == "." or p == "..":
+            raise ExportPolicyError(
+                f"edit source path {source_rel!r} has an empty/'.'/'..' "
+                f"component — refusing")
+        comps.append(p)
+    leaf = comps[-1]
+    dir_components = comps[:-1]
+    if sanitize_filename(leaf) is None:
+        raise ExportPolicyError(
+            f"edit source leaf {leaf!r} is unsafe/reserved — refusing")
+    return dir_components, leaf
+
+
+def _open_existing_dir_at(parent_fd: int, name: str) -> int:
+    """Open an EXISTING child directory ``name`` under ``parent_fd``
+    ``O_RDONLY|O_DIRECTORY|O_NOFOLLOW`` and return its fd. Unlike
+    :func:`_child_dir_at` this NEVER creates: the source's parent chain must
+    already exist (the source itself lives there), and creating a component would
+    be a sign the tree changed under us. A symlink/non-dir in the slot
+    (owner-planted) raises :class:`ExportPolicyError` (ELOOP/ENOTDIR); a missing
+    component raises :class:`ExportStateError` (the recorded source path no longer
+    resolves)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                     | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     dir_fd=parent_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ExportPolicyError(
+                f"edit source component {name!r} is a symlink/non-dir — refusing "
+                f"(a silo-planted symlink must not redirect the root lander)") from e
+        if e.errno == errno.ENOENT:
+            raise ExportStateError(
+                f"edit source parent component {name!r} no longer exists")
+        raise ExportStateError(
+            f"cannot open edit source component {name!r}: {e}") from e
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise ExportStateError(
+                f"edit source component {name!r} is not a directory")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_writable_temp(parent_fd: int) -> tuple[int, str | None]:
+    """Create a fresh writable temp file in the directory referred to by
+    ``parent_fd`` and return ``(fd, tmpname_or_None)``.
+
+    PREFERRED: ``O_TMPFILE`` — an UNNAMED inode that has no directory entry until
+    it is atomically linked into place (:func:`_link_into_place`). Because it
+    never has a name, the owner of the (less-trusted) silo directory can never
+    see, open, swap, or race the temp before it is finalized. ``tmpname`` is
+    ``None`` in this path.
+
+    FALLBACK (filesystems without ``O_TMPFILE`` support — EOPNOTSUPP/EISDIR/
+    ENOTSUP/EINVAL): a named ``O_CREAT|O_EXCL|O_NOFOLLOW`` temp whose name starts
+    with a dot. We still finalize by linking the temp's *fd* (via ``/proc/self/fd``
+    — see :func:`_link_into_place`), never by ``rename`` (which would clobber an
+    existing target), and unlink the temp name afterwards; an owner who swaps the
+    temp NAME cannot affect the inode we already hold open. ``tmpname`` is the
+    name to unlink on cleanup/finalize."""
+    o_tmpfile = getattr(os, "O_TMPFILE", 0)
+    if o_tmpfile:
+        try:
+            fd = os.open(".", os.O_WRONLY | o_tmpfile
+                         | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=parent_fd)
+            return fd, None
+        except OSError as e:
+            if e.errno not in (errno.EOPNOTSUPP, errno.EISDIR,
+                               getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+                               errno.EINVAL):
+                raise ExportStateError(
+                    f"cannot create O_TMPFILE for edit landing: {e}") from e
+            # fall through to the named-temp fallback
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+             | getattr(os, "O_CLOEXEC", 0))
+    for _ in range(100):
+        nm = f".disp-edited.tmp.{os.urandom(8).hex()}"
+        try:
+            fd = os.open(nm, flags, 0o600, dir_fd=parent_fd)
+            return fd, nm
+        except FileExistsError:
+            continue
+        except OSError as e:
+            raise ExportStateError(
+                f"cannot create temp file for edit landing: {e}") from e
+    raise ExportStateError("could not create a unique edit temp file")
+
+
+def _link_into_place(parent_fd: int, tmp_fd: int, base: str) -> str:
+    """Link the open temp inode ``tmp_fd`` into ``parent_fd`` under ``base``
+    (``<source-leaf>.disp-edited``), appending ``-<n>`` on a collision, and return
+    the placed name.
+
+    NO-OVERWRITE is enforced by ``linkat`` itself: linking onto an existing name
+    fails ``EEXIST`` (there is NO atomic-replace, unlike ``rename``), so the
+    source — or a prior edited copy — is never clobbered, with no TOCTOU window
+    between a check and a create. The inode is reached by its ``/proc/self/fd``
+    symlink with ``follow_symlinks=True`` (the AT_EMPTY_PATH analog usable from
+    Python): this works both for an ``O_TMPFILE`` (nameless) inode and a named
+    fallback temp, so finalization is a single fd-based path."""
+    proc_src = f"/proc/self/fd/{tmp_fd}"
+    target = base
+    n = 1
+    while True:
+        try:
+            os.link(proc_src, target, dst_dir_fd=parent_fd, follow_symlinks=True)
+            return target
+        except FileExistsError:
+            target = f"{base}-{n}"
+            n += 1
+            if n > 1000:
+                raise ExportStateError(
+                    f"too many {base!r} edit-landing collisions")
+        except OSError as e:
+            raise ExportStateError(
+                f"cannot link edited file into place: {e}") from e
+
+
+def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
+                 meta: dict, now_epoch: float,
+                 owner_uid: int | None = None,
+                 owner_gid: int | None = None,
+                 caps: ExportCaps | None = None) -> dict:
+    """Promote the SINGLE edited artifact at ``payload_dir`` BESIDE its source —
+    the edit-round-trip landing (the export-back follow-on). Returns the lineage
+    receipt dict (``mode == "edit"``).
+
+    ``source_rel`` is the source-of-edit's path RELATIVE to ``state_path`` (the
+    requesting silo's home); the caller (the session manager) has already required
+    it to resolve strictly under ``state_path``. The edited file lands at
+    ``<state_path>/<dirname(source_rel)>/<leaf><EDITED_SUFFIX>`` (``-<n>`` suffix
+    on collision), NEVER overwriting the source or any existing file.
+
+    Defensive, mirroring :func:`promote_export`:
+    - ``source_rel`` is hygiene-checked (:func:`split_source_rel`) and the source
+      parent is reached by an ``O_NOFOLLOW`` fd-walk rooted at ``state_path`` — a
+      symlink anywhere in the chain (the dirs are owner-writable) refuses, so the
+      root lander can never be redirected outside the silo.
+    - the source leaf must still exist as a REGULAR FILE beside which we land (we
+      are returning an *edit of it*); a missing/symlinked/non-regular source
+      refuses.
+    - the payload is treated as HOSTILE: it is fully scanned (:func:`_scan_payload`,
+      regular-files-only / caps / O_NOFOLLOW). EXACTLY ONE file is expected —
+      ZERO is a clean no-op ("nothing was edited"), MORE THAN ONE is an
+      :class:`ExportPolicyError` (edit-round-trip is single-file).
+    - finalization is fully fd-based: the edited bytes are written into a temp
+      inode (``O_TMPFILE`` preferred — never named) and ``linkat``'d into place
+      no-overwrite. No ``rename`` (which would clobber), no named temp the owner
+      can race (in the preferred path).
+
+    The receipt is RETURNED, not scattered beside the source (an edit lands in the
+    user's own working directory; a ``_receipt.json`` sibling would be litter).
+    Raises :class:`ExportPolicyError` (hostile/over-cap/symlinked path — nothing
+    landed) or :class:`ExportStateError` (an I/O error / vanished source)."""
+    caps = caps or ExportCaps()
+    token = str(meta.get("launch_token", ""))
+    open_class = str(meta.get("open_class", ""))
+    dir_components, leaf = split_source_rel(source_rel)
+
+    try:
+        pdir_fd = os.open(
+            payload_dir,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as e:
+        raise ExportStateError(
+            f"cannot open payload dir {payload_dir!r}: {e}") from e
+
+    sp_fd = -1
+    walked: list[int] = []
+    parent_fd = -1
+    tmp_fd = -1
+    tmpname: str | None = None
+    linked = False
+    landed: str | None = None
+    try:
+        pst = os.fstat(pdir_fd)
+        if not stat.S_ISDIR(pst.st_mode):
+            raise ExportStateError(
+                f"payload path {payload_dir!r} is not a directory")
+        # Full scan FIRST (all-or-nothing). Edit is single-file.
+        validated = _scan_payload(pdir_fd, caps)
+        if len(validated) == 0:
+            # Nothing was edited/saved — a clean no-op (not an error).
+            return {"version": RECEIPT_VERSION, "mode": "edit",
+                    "launch_token": token, "open_class": open_class,
+                    "request_silo": meta.get("request_silo"),
+                    "source": source_rel, "files": [], "dest": None}
+        if len(validated) > 1:
+            raise ExportPolicyError(
+                f"edit-round-trip expects a single edited file but the payload "
+                f"has {len(validated)} — refusing (ambiguous)")
+        payload_name, scanned_size = validated[0]
+
+        # Walk to the source's parent dir, O_NOFOLLOW each component, rooted at
+        # the trusted state_path. state_path is binding-resolved (trusted prefix).
+        try:
+            sp_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                            | getattr(os, "O_CLOEXEC", 0))
+        except OSError as e:
+            raise ExportStateError(
+                f"cannot open state_path {state_path!r}: {e}") from e
+        cur = sp_fd
+        for comp in dir_components:
+            nxt = _open_existing_dir_at(cur, comp)
+            walked.append(nxt)
+            cur = nxt
+        parent_fd = cur
+
+        # The source must still exist as a regular file beside which we land.
+        try:
+            sst = os.lstat(leaf, dir_fd=parent_fd)
+        except FileNotFoundError as e:
+            raise ExportStateError(
+                f"edit source {source_rel!r} no longer exists — refusing") from e
+        except OSError as e:
+            raise ExportStateError(
+                f"cannot stat edit source {source_rel!r}: {e}") from e
+        if stat.S_ISLNK(sst.st_mode):
+            raise ExportPolicyError(
+                f"edit source {source_rel!r} is a symlink — refusing")
+        if not stat.S_ISREG(sst.st_mode):
+            raise ExportPolicyError(
+                f"edit source {source_rel!r} is not a regular file — refusing")
+
+        # Write the edited bytes into a temp inode, then link no-overwrite.
+        tmp_fd, tmpname = _open_writable_temp(parent_fd)
+        _maybe_fchown(tmp_fd, owner_uid, owner_gid)
+        sfd = os.open(payload_name, os.O_RDONLY | os.O_NOFOLLOW
+                      | getattr(os, "O_CLOEXEC", 0), dir_fd=pdir_fd)
+        try:
+            sfd_st = os.fstat(sfd)
+            if not stat.S_ISREG(sfd_st.st_mode):
+                raise ExportPolicyError(
+                    f"payload entry {payload_name!r} is not a regular file at "
+                    f"open — refusing")
+            written, digest = _stream_to_fd(
+                sfd, tmp_fd, payload_name, scanned_size)
+        finally:
+            os.close(sfd)
+
+        landed = _link_into_place(parent_fd, tmp_fd, f"{leaf}{EDITED_SUFFIX}")
+        linked = True
+        os.fsync(parent_fd)
+    finally:
+        # If we created a NAMED fallback temp, remove its directory entry. When we
+        # linked successfully the inode survives via the new (landed) link; when
+        # we failed before/at link the temp must not be left behind. O_TMPFILE
+        # (tmpname is None) needs no unlink. Done fd-relative to the source parent.
+        if tmpname is not None and parent_fd >= 0:
+            try:
+                os.unlink(tmpname, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if tmp_fd >= 0:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        # Close the walked child dir fds (parent_fd is the last of them, or is
+        # sp_fd when there were no dir components) + the payload dir fd. sp_fd is
+        # never in `walked` (only child fds are appended), so it is closed exactly
+        # once in its own branch below — no double close.
+        for fd in (*reversed(walked), pdir_fd):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if sp_fd >= 0:
+            try:
+                os.close(sp_fd)
+            except OSError:
+                pass
+
+    dest = os.path.join(state_path, *dir_components, landed) if linked else None
+    return {
+        "version": RECEIPT_VERSION,
+        "mode": "edit",
+        "launch_token": token,
+        "container": meta.get("container"),
+        "open_class": open_class,
+        "request_silo": meta.get("request_silo"),
+        "source": source_rel,
+        "exported_at": int(now_epoch),
+        "files": [{"name": landed, "size": written, "sha256": digest}],
+        "dest": dest,
+    }
