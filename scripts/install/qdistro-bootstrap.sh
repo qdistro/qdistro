@@ -1898,8 +1898,30 @@ configure_greetd() {
 
     systemctl daemon-reload
     systemctl enable greetd.service
-    systemctl enable greetd-fallback.service \
-        || warn "greetd-fallback.service enable failed"
+    # tty4 fallback escape hatch: greetd-fallback.service auto-logins `admin`
+    # into a PASSWORDLESS LXQt+labwc graphical VT. That is a developer/test-bake
+    # recovery convenience, NOT a hardened-profile feature — on daily-driver/
+    # release a passwordless graphical admin VT would bypass the locked tty3
+    # greeter, and the LXQt+labwc stack it needs is not part of a hardened
+    # install. The unit + config are installed (above) so an operator can enable
+    # it deliberately after laying down the stack, but we ENABLE it only under
+    # the dev profile AND only when the full session stack is actually present,
+    # so we never leave an enabled-but-missing unit thrashing 203/EXEC on tty4
+    # (greetd-fallback.service is Restart=always). The dev greeter bring-up
+    # (scripts/vm/enable-qdgreeter.sh) lays down the stack and owns the enable
+    # for dev bakes. Production recovery is via GRUB (doc/recovery.md), not tty4.
+    if is_dev \
+        && [ -x /usr/local/bin/qdistro-startlxqtwayland ] \
+        && [ -x /usr/local/bin/qdistro-lxqt-session-wrap ] \
+        && command -v labwc >/dev/null 2>&1 \
+        && command -v lxqt-session >/dev/null 2>&1; then
+        systemctl enable greetd-fallback.service \
+            || warn "greetd-fallback.service enable failed"
+    else
+        # Idempotent: undo any enable left by a prior run or a profile change.
+        systemctl disable greetd-fallback.service 2>/dev/null || true
+        log "  greetd-fallback.service installed but NOT enabled (hardened profile or LXQt fallback stack absent); tty4 escape hatch is dev-only — production recovery is via GRUB (doc/recovery.md)"
+    fi
     systemctl set-default graphical.target
 }
 

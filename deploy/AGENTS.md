@@ -10,14 +10,17 @@ that references it.
 | TTY  | Service                  | Config                                | Purpose |
 |------|--------------------------|---------------------------------------|---------|
 | tty3 | `greetd.service`         | `/etc/greetd/config.toml` (← greetd-config.toml) | **Production** — greetd → qdgreeter → qdwin-session.target → qdshell-on-qdwin |
-| tty4 | `greetd-fallback.service`| `/etc/greetd/config-fallback.toml` (← greetd-config-fallback.toml) | **Escape hatch** — greetd → legacy LXQt+labwc (`qdistro-startlxqtwayland`). Reachable via Ctrl+Alt+F4 when qdwin commits brick the test VM. |
-| tty2 | `getty@tty2.service`     | (kernel default)                      | Textual root shell of last resort. |
+| tty4 | `greetd-fallback.service`| `/etc/greetd/config-fallback.toml` (← greetd-config-fallback.toml) | **Escape hatch (dev/test bakes only)** — greetd → *passwordless* `admin` LXQt+labwc autologin (`qdistro-startlxqtwayland`). Reachable via Ctrl+Alt+F4 when qdwin commits brick the test VM. Enabled only under the `dev` profile where the LXQt stack is installed; daily-driver/release ship it installed-but-disabled (production recovery is GRUB — see `doc/recovery.md`). |
+| tty2 | (none)                   | —                                     | No qdistro VT login is wired here. Text-mode recovery is via GRUB rescue/emergency or a read-only snapshot boot (`doc/recovery.md`). |
 
-The tty4 hatch is **load-bearing** for development: deleting it
-without deleting tty4 from the bake will leave a wedged qdwin commit
-un-recoverable without serial console. If you want to remove it,
-remove the bake step that installs `greetd-fallback.service` in the
-same commit.
+The tty4 hatch is **load-bearing for development** (it is enabled on
+dev/test bakes only): deleting it without deleting tty4 from the bake
+will leave a wedged qdwin commit un-recoverable without serial console.
+If you want to remove it, remove the bake step that installs
+`greetd-fallback.service` in the same commit. On daily-driver/release
+the hatch is intentionally installed-but-disabled — a passwordless
+graphical admin VT would bypass the locked tty3 greeter — so production
+recovery is via GRUB, not tty4.
 
 ## qdistro session target
 

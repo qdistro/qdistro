@@ -116,7 +116,8 @@ ML transforms; modern laptop CPU handles 720p/30fps background blur at
 ## Fingerprint reader
 
 - **fprintd** is admin-scope. Only admin enrols prints.
-- The PyQt locker and tty2's `pam_fprintd` both read from admin's DB.
+- The PyQt locker and any other `pam_fprintd` consumer (e.g. `sudo`) both
+ read from admin's DB. (There is no tty2 text login — see `doc/sessions.md`.)
 
 ## Approval scopes
 

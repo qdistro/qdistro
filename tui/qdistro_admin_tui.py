@@ -2,8 +2,8 @@
 """qdistro admin TUI — terminal companion to the PyQt admin app.
 
 Same broker, same scope picker, same approve/deny semantics. Designed
-to be runnable on any TTY (incl. greetd's tuigreet drop-shell, ssh,
-or a serial console) — no compositor required.
+to be runnable on any TTY (incl. an ssh session, a GRUB rescue/emergency
+shell, or a serial console) — no compositor required.
 
 See  for the playbook + acceptance.
 """

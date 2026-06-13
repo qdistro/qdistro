@@ -15,7 +15,7 @@ not wired, say so here rather than implying it works.
 | TTY | What runs | Wired by |
 |-----|-----------|----------|
 | tty3 | **Production session.** `greetd` → `qdgreeter` (graphical PAM via greetd JSON-IPC) → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell). Boots here by default (`systemd.default_vt=3`). | `deploy/greetd-config.toml`, `greetd.service` |
-| tty4 | **Escape hatch.** `greetd-fallback.service` → `greetd --config /etc/greetd/config-fallback.toml` → auto-login `admin` into a legacy **LXQt + labwc** Wayland session (`qdistro-startlxqtwayland`). Reachable with **Ctrl+Alt+F4**. | `deploy/greetd-config-fallback.toml`, `deploy/greetd-fallback.service` (enabled at `qdistro-bootstrap.sh:1888`) |
+| tty4 | **Escape hatch (dev/test bakes only).** `greetd-fallback.service` → `greetd --config /etc/greetd/config-fallback.toml` → auto-login `admin` into a legacy **LXQt + labwc** Wayland session (`qdistro-startlxqtwayland`). Reachable with **Ctrl+Alt+F4**. *Enabled only under the `dev` profile where the LXQt stack is installed; on daily-driver/release the unit is installed-but-disabled (see below).* | `deploy/greetd-config-fallback.toml`, `deploy/greetd-fallback.service` |
 | tty5+ | Dynamic / pinned work sessions written by `qdistro-session-manager`. | session manager |
 
 The tty4 fallback is **graphical** — it is the same LXQt+labwc stack qdwin
@@ -25,28 +25,25 @@ because the underlying Wayland/KMS stack is still healthy. It does **not**
 recover a fully broken graphics stack (KMS/driver fault, missing libweston) —
 in that case tty4 fails the same way tty3 does; use the text-mode paths below.
 
-> **v1 limitation — the tty4 escape hatch is not wired on a production
-> bootstrap.** `qdistro-bootstrap.sh` *enables* `greetd-fallback.service`
-> (`:1888`) but does **not** install the command it execs
-> (`/usr/local/bin/qdistro-startlxqtwayland`), its `labwc -S` wrapper
-> (`qdistro-lxqt-session-wrap`), or the LXQt+labwc package stack — only the
-> VM bake (`scripts/vm/spin-test-vm-gui.sh`) installs the full set;
-> `image/config.sh` has the same gap. On a plain bootstrap install tty4
-> therefore fails to exec (`203/EXEC`, restarted forever). **Until this is
-> reconciled, treat the GRUB paths below — not tty4 — as the dependable
-> recovery on a real install.** Tracked in
-> `todo/fable-release/04-feature-completion.md` (escape-hatch install gap).
+> **By design — the tty4 escape hatch is a dev/test-bake feature, not a
+> production recovery path.** `greetd-fallback.service` auto-logins `admin`
+> into LXQt+labwc with **no password prompt**; a passwordless graphical admin
+> VT on a real install would bypass the locked tty3 greeter, so on
+> daily-driver/release the unit is installed-but-**disabled** and the LXQt+labwc
+> stack is not installed (`qdistro-bootstrap.sh` enables it only under the `dev`
+> profile when the full stack is present; `image/config.sh` ships it disabled).
+> The dev greeter bring-up (`scripts/vm/enable-qdgreeter.sh`) installs the
+> launcher + `labwc -S` wrapper and enables the unit when the LXQt+labwc stack
+> is present. (`spin-test-vm-gui.sh` is a separate LXQt-on-tty1 agetty harness,
+> not the greetd-fallback path.) **On a real install, use the GRUB paths below —
+> not tty4 — for recovery.**
 
-> **v1 limitation — no qdistro text-mode VT login.** `doc/architecture.md`
-> and `doc/sessions.md` describe a tty2 `tuigreet` textual admin login "for
-> repairs when Wayland won't start." That is **not wired in v1**: no greetd
-> config, service, or getty targets tty2 (grep `deploy/`, the units, and the
-> install scripts — the only `tuigreet` mention is a stale comment). Until it
-> is wired or the docs are reconciled, text-mode recovery when *all* of
-> Wayland is broken goes through GRUB (rescue/emergency target or a snapshot
-> boot), not a qdistro VT login. (No deploy config, service, or `getty@tty2`
-> unit invokes `tuigreet` — only stale docs/comments do.) Tracked as a
-> release doc-debt / feature gap.
+> **By design — there is no qdistro text-mode VT login.** tty3 is the only
+> interactive qdistro login (the locked graphical greeter); no greetd config,
+> service, or `getty@tty2` wires a textual admin login on tty2 (an earlier
+> `tuigreet` design was never implemented and the docs have been reconciled).
+> Text-mode recovery when *all* of Wayland is broken goes through GRUB
+> (rescue/emergency target or a read-only snapshot boot), not a qdistro VT login.
 
 ## Scenario A — the graphical session won't come up (qdwin/qdshell wedged)
 
@@ -54,8 +51,8 @@ Symptom: tty3 shows the greeter but login never reaches a desktop, or the
 compositor crashes back to the greeter, while the rest of the machine is
 responsive.
 
-If the tty4 escape hatch is installed (VM bakes today — see the limitation
-above; on a plain bootstrap install skip to Scenario B/C):
+If the tty4 escape hatch is enabled (dev/test bakes only — see the note
+above; on a daily-driver/release install skip to Scenario B/C):
 
 1. Press **Ctrl+Alt+F4** to switch to the tty4 escape hatch. You are
    auto-logged-in as `admin` into LXQt+labwc.
@@ -117,10 +114,9 @@ corruption is bounded to that user and rolled back separately through the
 admin Snapshots panel ("Roll back this user (full)", which drives the
 `qdistro-snap-swap` atomic subvolume swap) or file-granularity
 `snapper undochange` — never by `snapper rollback` of `/`. See
-`doc/filesystem.md` for the per-user rollback semantics. (Note: the
-`qdistro-snap-swap` CLI is installed by the templates installer step, not by
-the minimal snapshots step — see the known gap below if "Roll back this user
-(full)" is unavailable.)
+`doc/filesystem.md` for the per-user rollback semantics. (The
+`qdistro-snap-swap` CLI ships from the `snapshots` installer chain step, so it
+is present wherever the snapshot feature and the admin Snapshots panel are.)
 
 ## Scenario D — broken or partial qdistro install (re-run bootstrap)
 
@@ -152,7 +148,7 @@ the `http://`-staging VM helpers are not for a recovery on a real machine.
 
 | Situation | First move |
 |-----------|-----------|
-| Desktop won't start, machine responsive | **Ctrl+Alt+F4** → tty4 LXQt *(VM bakes only today)*, else GRUB → `rescue.target`; diagnose, then Scenario C or D |
+| Desktop won't start, machine responsive | **Ctrl+Alt+F4** → tty4 LXQt *(dev/test bakes only)*, else GRUB → `rescue.target`; diagnose, then Scenario C or D |
 | No graphics at all (tty3 *and* tty4 dead) | Reboot → GRUB → `systemd.unit=rescue.target` |
 | Last update broke boot/login | Reboot → GRUB → read-only snapshot → `snapper rollback` |
 | One user's home corrupted | admin Snapshots panel → "Roll back this user (full)" |
@@ -161,27 +157,24 @@ the `http://`-staging VM helpers are not for a recovery on a real machine.
 
 ## Known gaps (v1)
 
-These are real release blockers/doc-debt for the recovery story, not just
-documentation polish. Each needs a decision before v1 sign-off:
+The first three install/doc gaps below were closed 2026-06-13 (F9a/b/c); the
+remaining item is human-gated:
 
-- **tty4 escape hatch is enabled but not installed on a production
-  bootstrap.** `greetd-fallback.service` is enabled by `qdistro-bootstrap.sh`
-  (and `image/config.sh`) but the `qdistro-startlxqtwayland` command, its
-  `qdistro-lxqt-session-wrap` (`labwc -S …`) target, and the LXQt+labwc
-  package stack are installed only by the VM bake. An enabled-but-missing
-  unit fails `203/EXEC` and restarts forever. Fix: either install the full
-  fallback stack from the bootstrap/image, or stop enabling the service on
-  paths that don't install it. Until then tty4 is not a real install's
-  escape hatch — GRUB is.
-- **No qdistro text-mode VT login.** The documented tty2 `tuigreet` path is
-  not wired anywhere (no deploy config, service, or getty — only stale
-  claims in `architecture.md`/`sessions.md`); fully-broken-Wayland text
-  recovery is via GRUB rescue/emergency target. Either wire tty2 or reconcile
-  those docs before v1 sign-off.
-- **`qdistro-snap-swap` not in the minimal install.** The per-user
-  "Roll back this user (full)" action depends on a CLI installed only by the
-  templates installer step, not the snapshots step. Confirm the install
-  chain provides it wherever the admin Snapshots panel is shipped.
+- **tty4 escape hatch — resolved (F9a).** The fallback was a *passwordless*
+  admin LXQt+labwc autologin enabled even on hardened installs where its stack
+  was never installed (`203/EXEC` restart loop + a greeter bypass). It is now
+  enabled only under the `dev` profile when the full LXQt stack is present;
+  daily-driver/release ship the unit installed-but-disabled and steer recovery
+  to GRUB (`qdistro-bootstrap.sh` configure_greetd, `image/config.sh`).
+- **No qdistro text-mode VT login — resolved (F9b).** tty3 is by design the
+  only interactive qdistro login; the never-implemented tty2 `tuigreet` claims
+  in `architecture.md`/`sessions.md`/`devices.md` were reconciled.
+  Fully-broken-Wayland text recovery is via GRUB rescue/emergency target.
+- **`qdistro-snap-swap` install — resolved (F9c).** The per-user "Roll back
+  this user (full)" CLI now ships from the `snapshots` installer chain step
+  (`install-snapshots-for-vm.sh`), so it lands wherever the snapshot feature
+  (and the admin Snapshots panel) does — not only via the VM-only templates
+  installer.
 - **Recovery drills are human-gated.** The boot-to-snapshot and
   rescue-target paths above are validated by hand in
   `06-human-test-plan.md`; there is no agent harness for a real

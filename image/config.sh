@@ -296,7 +296,14 @@ chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
 echo "[qdistro-image] qdwin-session.target installed; qdshell + qdlocker wired into it; noctalia auto-start disabled"
 
 systemctl enable greetd.service
-systemctl enable greetd-fallback.service || true
+# tty4 fallback (greetd-fallback.service) auto-logins `admin` into a PASSWORDLESS
+# LXQt+labwc VT and needs an LXQt stack this image does not install. Enabling it
+# on a release image would both bypass the locked tty3 greeter and 203/EXEC-loop
+# on tty4 (the unit is Restart=always with a missing ExecStart target). Ship the
+# unit + config installed (above) but DISABLED; production recovery is via GRUB
+# (doc/recovery.md), not tty4. Dev/test bakes that want the hatch enable it via
+# the GUI bring-up scripts after laying down the LXQt+labwc stack.
+systemctl disable greetd-fallback.service 2>/dev/null || true
 systemctl set-default graphical.target
 
 # Keep /root/qdistro-src on the image — the LLM-modifiability principle

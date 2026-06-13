@@ -34,9 +34,9 @@ be visible in different sessions while commit authority remains separate.
 | TTY | Role | Owner | Notes |
 |-------|-------------------------------|------------------------------------|--------------------------------------------------------------------------------------------------------------------|
 | tty1 | Emergency text console | `agetty` | Raw getty; no greetd; recovery path if everything else breaks. |
-| tty2 | Textual admin login | `greetd` + `tuigreet` | Admin login for repairs when Wayland won't start. |
+| tty2 | (no qdistro login) | systemd `getty@` (inactive by default) | No textual admin login is wired here. Text-mode recovery when Wayland is down is via GRUB (rescue/emergency target or a read-only snapshot boot) — see `doc/recovery.md`. |
 | tty3 | Admin graphical session | `greetd` → `qdgreeter` → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell) | Pinned; boots here by default; the PyQt locker is active from start. P01 wired this path in 2026-05; before that, greetd ran LXQt+labwc here. |
-| tty4 | Escape hatch — legacy LXQt+labwc | `greetd-fallback.service` → `qdistro-startlxqtwayland` | Recovery path when qdwin is broken. Same code that used to run on tty3 pre-P01. |
+| tty4 | Escape hatch — legacy LXQt+labwc | `greetd-fallback.service` → `qdistro-startlxqtwayland` | **Dev/test bakes only.** A *passwordless* `admin` LXQt+labwc autologin (same code that ran on tty3 pre-P01). Enabled only under the `dev` profile and only where the LXQt stack is installed; on daily-driver/release it is installed-but-disabled (a passwordless graphical admin VT would bypass the locked tty3 greeter). Production recovery is via GRUB — see `doc/recovery.md`. |
 | tty5+ | Pinned and dynamic sessions | `qdistro-session-manager` | TTY work sessions, fullscreen sessions, VM viewers, and special-role sessions; some slots may be pinned, remaining slots allocated dynamically. |
 
 Kernel cmdline: `systemd.default_vt=3`. Boot lands on admin.

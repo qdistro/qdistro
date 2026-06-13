@@ -55,6 +55,9 @@ install -m 0644 "$QD/deploy/greetd-hardening.conf" \
 
 install -m 0755 "$QD/deploy/qdwin-session-launcher.sh" /usr/local/bin/qdwin-session-launcher
 install -m 0755 "$QD/deploy/qdistro-startlxqtwayland.sh" /usr/local/bin/qdistro-startlxqtwayland
+# The tty4 fallback launcher execs `labwc -S /usr/local/bin/qdistro-lxqt-session-wrap`,
+# so its wrapper must be installed too or the hatch 203/EXECs at the labwc step.
+install -m 0755 "$QD/deploy/qdistro-lxqt-session-wrap.sh" /usr/local/bin/qdistro-lxqt-session-wrap
 install -d -m 0755 /etc/systemd/user
 install -m 0644 "$QD/deploy/qdwin-session.target" /etc/systemd/user/qdwin-session.target
 install -m 0644 "$QD/deploy/qdwin-compositor.service" /etc/systemd/user/qdwin-compositor.service
@@ -84,7 +87,21 @@ runuser -l admin -c \
     'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null || true' \
     || true
 systemctl enable greetd.service
-systemctl enable greetd-fallback.service || true
+# tty4 fallback escape hatch (greetd-fallback.service → passwordless admin
+# LXQt+labwc). Enable it only when the full session stack is actually present
+# (launcher + `labwc -S` wrapper + labwc + lxqt-session), so a greeter bake
+# without the LXQt stack doesn't get an enabled-but-missing unit thrashing
+# 203/EXEC on tty4 (the unit is Restart=always). GUI bakes that install
+# labwc/lxqt get a working hatch; headless greeter bakes ship it disabled.
+if [ -x /usr/local/bin/qdistro-startlxqtwayland ] \
+    && [ -x /usr/local/bin/qdistro-lxqt-session-wrap ] \
+    && command -v labwc >/dev/null 2>&1 \
+    && command -v lxqt-session >/dev/null 2>&1; then
+    systemctl enable greetd-fallback.service || true
+else
+    systemctl disable greetd-fallback.service 2>/dev/null || true
+    log "greetd-fallback.service installed but NOT enabled (LXQt fallback stack absent on this bake)"
+fi
 install -d -m 0755 /etc/systemd/system/multi-user.target.wants
 ln -sfn /usr/lib/systemd/system/greetd.service \
     /etc/systemd/system/multi-user.target.wants/greetd.service

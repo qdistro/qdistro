@@ -52,6 +52,17 @@ install -m 0644 "$SRC/qdistro_backup_manifest.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_cli.py"       "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_service.py"   "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_recovery.py"  "$DEST_LIB_QDISTRO/"
+# qdistro-snap-swap — the per-user "Roll back this user (full)" crash-consistent
+# state-restore CLI that the admin Snapshots panel drives (doc/recovery.md). Its
+# source lives in snapshots/ (this $SRC) but it was previously installed ONLY by
+# install-templates-for-vm.sh, a VM-only script NOT in the bootstrap installer
+# chain — so on a production install the panel's rollback action would hit a
+# missing binary. It ships here, in the `snapshots` chain step, so it lands
+# wherever the snapshot feature does. Stdlib-only (no sibling imports), installed
+# into the same /usr/libexec/qdistro/ + /usr/local/bin/ paths the templates
+# script uses, so VM bakes that run both installers just write it twice
+# (idempotent, identical content).
+install -m 0644 "$SRC/qdistro_snap_swap.py"        "$DEST_LIB_QDISTRO/"
 
 cat >"$DEST_BIN/qdistro-snap-export" <<'CLI'
 #!/bin/bash
@@ -71,6 +82,12 @@ cat >"$DEST_BIN/qdistro-backup-run" <<'CLI'
 exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_backup_service.py "$@"
 CLI
 chmod 0755 "$DEST_BIN/qdistro-backup-run"
+
+cat >"$DEST_BIN/qdistro-snap-swap" <<'CLI'
+#!/bin/bash
+exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_snap_swap.py "$@"
+CLI
+chmod 0755 "$DEST_BIN/qdistro-snap-swap"
 
 install -m 0644 "$SRC/qdistro-backup.service" "$DEST_SYSD/qdistro-backup.service"
 install -m 0644 "$SRC/qdistro-backup.timer"   "$DEST_SYSD/qdistro-backup.timer"

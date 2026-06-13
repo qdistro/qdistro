@@ -26,9 +26,9 @@ Each TTY starts a greetd instance with a role-specific config:
 | TTY | greetd config | Runs |
 |-------|------------------------------------------|---------------------------------------------------------------------|
 | tty1 | (none — agetty only) | Raw text login, emergency only. |
-| tty2 | `initial_session = tuigreet` | Textual admin login via PAM (fingerprint or password) → shell. |
+| tty2 | (none — no greetd config) | No qdistro VT login is wired here. Text-mode recovery when Wayland is down is via GRUB rescue/emergency or a read-only snapshot boot (`doc/recovery.md`). |
 | tty3 | `default_session.command = /usr/bin/qdgreeter` (deploy/greetd-config.toml) | Graphical qdgreeter → admin auth via greetd JSON-IPC → `qdwin-session-launcher` → `qdwin-session.target` → qdwin compositor + qdshell. |
-| tty4 | `default_session.command = qdistro-startlxqtwayland` (deploy/greetd-config-fallback.toml, run by greetd-fallback.service) | **Escape hatch.** Legacy LXQt+labwc session for recovering from a broken qdwin commit. Reachable via Ctrl+Alt+F4. Documented in `deploy/AGENTS.md`. |
+| tty4 | `default_session.command = qdistro-startlxqtwayland` (deploy/greetd-config-fallback.toml, run by greetd-fallback.service) | **Escape hatch — dev/test bakes only.** A *passwordless* `admin` LXQt+labwc autologin for recovering from a broken qdwin commit, reachable via Ctrl+Alt+F4. Enabled only under the `dev` profile where the LXQt stack is installed; on daily-driver/release the unit is installed-but-disabled (the passwordless graphical admin VT would bypass the locked tty3 greeter). Production recovery is via GRUB (`doc/recovery.md`). Documented in `deploy/AGENTS.md`. |
 | tty5+ | Dynamic; session manager writes ephemeral configs | TTY work sessions, fullscreen user sessions, special-role sessions, or VM viewers. |
 
 `systemd.default_vt=3` boots to admin.
@@ -142,7 +142,9 @@ there, and switching to non-admin TTYs is blocked until admin authenticates.
  fprintd DBs stay empty.
 - Locker flow: the locker calls `net.reactivated.Fprint.Device.VerifyStart`
  against admin's enrolled prints; any match unlocks.
-- tty2 fallback: `pam_fprintd` configured for admin; the same prints work.
+- The same `pam_fprintd` admin enrolment is also used by any other PAM
+ consumer configured for it (e.g. `sudo`/`su`); there is no separate tty2
+ text-login fingerprint path (tty2 has no qdistro login — see the TTY table).
 
 `fprintd` stores enrolled templates per Linux user — there is no native
 "shared fingerprint DB accessible to multiple users." For qdistro's
