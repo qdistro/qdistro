@@ -214,12 +214,17 @@ stage_vm_driver() {
         fail_loud "tier-3 stack (waypipe / wayland-info / user1 silo) not available on this VM"
     fi
     assert_output_contains "PASS: outer admin compositor up"
-    # Post-hardening: qdwin gates wp_security_context_manager_v1 behind a
-    # wl_global_filter, hiding it from ordinary same-uid clients (only the
-    # bound shell or the authorized secctx helper may see/bind it). The
-    # driver asserts the hidden-from-ordinary-client property; the positive
-    # bind path is the "waypipe bound ..." line below.
-    assert_output_contains "PASS: wp_security_context_manager_v1 hidden from ordinary admin client"
+    # §4b global-filter negative (02/S1): qdwin gates the shell-only globals
+    # (wp_security_context_manager_v1, weston_capture_v1) behind a
+    # wl_global_filter, hiding them from ordinary same-uid clients (only the
+    # bound shell / authorized secctx helper may see them). The driver pins
+    # this with a positive control (enum works), a selectivity check (the
+    # secctx-only-hidden IME/VK/idle globals stay visible to ordinary), and
+    # the shell-only-globals-hidden assertion; the positive bind path is the
+    # "waypipe bound ..." line below.
+    assert_output_contains "PASS: ordinary client enumerates globals (wl_compositor visible)"
+    assert_output_contains "PASS: ordinary client sees all secctx-only-hidden globals (IME/VK/idle) — filter is selective"
+    assert_output_contains "PASS: §4b: shell-only globals (secctx-manager, weston-capture) hidden from ordinary client"
     assert_output_contains "PASS: waypipe bound wp_security_context_manager_v1"
     assert_output_contains "PASS: silo client tagged with secctx"
     assert_output_contains "PASS: secctx app_id propagated via wrapper default"

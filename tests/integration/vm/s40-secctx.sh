@@ -8,10 +8,13 @@
 # logs all three fields.
 #
 # Load-bearing assertions per design doc / dead-bats-entries.md §s40:
-#   1. wp_security_context_manager_v1 enumerable on the outer
-#      compositor (wayland-info global listing). Confirms qdwin's
-#      wl_global_create succeeded + the wl_display_set_global_filter
-#      doesn't hide it from unsandboxed observers.
+#   1. §4b global-filter negative (02/S1): the shell-only globals
+#      (wp_security_context_manager_v1, weston_capture_v1) are HIDDEN
+#      from an ordinary (non-shell, non-secctx) wayland-info client by
+#      qdwin's wl_display_set_global_filter, while ordinary-visible
+#      globals (wl_compositor; the secctx-only-hidden IME/VK/idle
+#      managers) remain advertised. The manager's existence is proven
+#      by (2)/(3), where the trusted launcher actually binds it.
 #   2. waypipe must have bound it — proven *indirectly* by (3): if
 #      a secctx commit reaches qdwin's handler, waypipe necessarily
 #      bound the manager global to plant it. (Direct observation
@@ -93,11 +96,46 @@ pass "outer admin compositor up"
 # spawn-tier3 → waypipe → secctx flow. Mirrors s44's updated assertion.
 WL_INFO=$(runuser -u admin -- env WAYLAND_DISPLAY=wayland-1 \
     XDG_RUNTIME_DIR="$RUNTIME_DIR" wayland-info 2>&1 || true)
-if echo "$WL_INFO" | grep -q "wp_security_context_manager_v1"; then
-    echo "$WL_INFO" | head -40 >&2
-    fail "wp_security_context_manager_v1 visible to ordinary admin client"
+
+# Positive control — the enumeration actually ran. Without this an empty
+# wayland-info (compositor down / connect failure) would make every
+# "global absent" check below pass vacuously.
+if echo "$WL_INFO" | grep -Fq "interface: 'wl_compositor',"; then
+    pass "ordinary client enumerates globals (wl_compositor visible)"
 else
-    pass "wp_security_context_manager_v1 hidden from ordinary admin client"
+    echo "$WL_INFO" | head -40 >&2
+    fail "ordinary wayland-info produced no wl_compositor — enum broken, §4b checks would be vacuous"
+fi
+
+# Selectivity discriminator — the filter is selective, not hide-everything.
+# IME/VK/idle are hidden only from secctx clients, so an ordinary client
+# must still see ALL THREE; if any is missing the filter is over-hiding and
+# the shell-only "absent" checks below would be meaningless.
+SEL_MISS=""
+for g in zwp_input_method_manager_v2 zwp_virtual_keyboard_manager_v1 ext_idle_notifier_v1; do
+    echo "$WL_INFO" | grep -Fq "interface: '$g'," || SEL_MISS="$SEL_MISS $g"
+done
+if [ -z "$SEL_MISS" ]; then
+    pass "ordinary client sees all secctx-only-hidden globals (IME/VK/idle) — filter is selective"
+else
+    echo "$WL_INFO" | head -40 >&2
+    fail "ordinary client missing secctx-only-hidden global(s):$SEL_MISS — filter over-hiding (vacuous §4b)"
+fi
+
+# §4b — shell-only privileged globals must be HIDDEN from the ordinary
+# client. weston_capture_v1 is the original §4b "pixel theft" target;
+# wp_security_context_manager_v1 (whose existence (2)/(3) prove) is the
+# secctx-mint authority. Same-uid visibility of either lets an ordinary
+# session process capture pixels / self-assert secctx and impersonate a silo.
+S1_LEAK=""
+for g in wp_security_context_manager_v1 weston_capture_v1; do
+    echo "$WL_INFO" | grep -Fq "interface: '$g'," && S1_LEAK="$S1_LEAK $g"
+done
+if [ -z "$S1_LEAK" ]; then
+    pass "§4b: shell-only globals (secctx-manager, weston-capture) hidden from ordinary client"
+else
+    echo "$WL_INFO" | head -40 >&2
+    fail "§4b global-filter leak — shell-only global(s) visible to ordinary client:$S1_LEAK"
 fi
 
 # --- 5. capture journal cursor --------------------------------------
