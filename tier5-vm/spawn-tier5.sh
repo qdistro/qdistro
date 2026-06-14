@@ -205,14 +205,9 @@ run_as_admin() {
         "$@"
 }
 
-domain_xml_tmpfile() {
-    local prefix="$1"
-    local runtime="$3"
-    local dir="$runtime/qdistro-tier5-domainxml"
-
-    run_as_admin install -d -m 0700 "$dir" || return 1
-    run_as_admin mktemp "$dir/${prefix}.XXXXXX.xml"
-}
+# domain_xml_tmpfile is provided by lib/spawn-common.sh (sourced below); it
+# renders into a private 0700 dir under the admin runtime. (A local definition
+# here would be shadowed by that source anyway.)
 
 NO_GPU="${TIER5_NO_GPU:-1}"
 DEBUG="${TIER5_DEBUG:-0}"

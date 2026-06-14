@@ -44,11 +44,11 @@ gen_launch_token() {
 # (tmpfs) or /run — both per-user and not world-traversable, so neither the
 # file nor its parent can be raced by another uid.
 #
-# Falls back to a 0700 mktemp dir under $TMPDIR/tmp only if neither
-# $XDG_RUNTIME_DIR nor /run is writable; even then the unguessable 0700
-# parent closes the race. The directory is registered for cleanup via an
-# EXIT trap the FIRST time this is called; the file itself is also removed
-# by the caller's existing `rm -f "$TMP_XML"` lines (harmless double-remove).
+# In the common case the per-user 0700 runtime dir IS the private base and the
+# file is mktemp'd directly in it; the world-writable /run and /tmp fallbacks
+# get an extra unguessable 0700 mktemp -d subdir so the race is closed there
+# too. Cleanup is the caller's existing `rm -f "$TMP_XML"` — this function sets
+# NO EXIT trap (it is invoked via command substitution; see the body NOTE).
 #
 # The spawn scripts run privileged (root, via pkexec) but hand the rendered
 # XML to `virsh` running as the unprivileged admin user (run_as_admin).
@@ -62,41 +62,73 @@ gen_launch_token() {
 #
 # Exits the calling script with status 5 if a private dir/file cannot be
 # created — a privileged render must never fall back to a predictable path.
-_QD_DOMAIN_XML_DIR=""
+# _qd_dir_is_private <dir> <expected-reader-user|empty> — 0 iff <dir> is owned
+# by the expected reader (default: the current user) AND carries NO group/other
+# permission bits (mode ?00), i.e. a genuine per-user private directory we may
+# drop a 0600 file into directly. Gates the no-subdir fast path below so a
+# stale/misconfigured/non-private base never skips the 0700 race-isolation dir.
+_qd_dir_is_private() {
+    local d="$1" want="${2:-}" meta own perms
+    [ -d "$d" ] || return 1
+    meta="$(stat -c '%U %a' "$d" 2>/dev/null)" || return 1
+    own="${meta%% *}"; perms="${meta##* }"
+    [ -n "$want" ] || want="$(id -un)"
+    [ "$own" = "$want" ] || return 1
+    case "$perms" in *00) return 0 ;; *) return 1 ;; esac
+}
+
 domain_xml_tmpfile() {
-    local prefix="${1:-qdistro}" owner="${2:-}" owner_rt="${3:-}" base f
-    if [ -z "$_QD_DOMAIN_XML_DIR" ] || [ ! -d "$_QD_DOMAIN_XML_DIR" ]; then
-        if [ -n "$owner_rt" ] && [ -d "$owner_rt" ]; then
-            base="$owner_rt"
-        elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ] && [ -w "${XDG_RUNTIME_DIR}" ]; then
-            base="$XDG_RUNTIME_DIR"
-        elif [ -d /run ] && [ -w /run ]; then
-            base="/run"
-        else
-            base="${TMPDIR:-/tmp}"
-        fi
-        _QD_DOMAIN_XML_DIR="$(mktemp -d "$base/qdistro-domxml.XXXXXX")" || {
+    local prefix="${1:-qdistro}" owner="${2:-}" owner_rt="${3:-}" base dir f
+    # NOTE: this function is invoked via command substitution
+    # (TMP_XML="$(domain_xml_tmpfile ...)"), i.e. in a SUBSHELL. It must NOT set
+    # an EXIT trap to clean the private dir: a trap set here fires when the
+    # substitution subshell returns — deleting the dir before the caller writes
+    # the XML, which was the tier-5/tier-4 "virsh define: No such file or
+    # directory" bug. Cleanup is the caller's existing `rm -f "$TMP_XML"`.
+    #
+    # Pick the most private writable base, preferring the owner's per-user
+    # runtime. The file is dropped DIRECTLY in base only when base is verified
+    # private (owner-owned, no group/other bits) — then mktemp's O_EXCL + the
+    # 0700 parent close the pre-create/symlink race and the caller's rm -f leaves
+    # nothing. Any non-private base (world-writable /run|/tmp, or an
+    # unexpectedly-permissive owner_rt) instead gets an unguessable 0700
+    # mktemp -d subdir for the same protection.
+    if [ -n "$owner_rt" ] && [ -d "$owner_rt" ]; then
+        base="$owner_rt"
+    elif [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "${XDG_RUNTIME_DIR}" ] && [ -w "${XDG_RUNTIME_DIR}" ]; then
+        base="$XDG_RUNTIME_DIR"
+    elif [ -d /run ] && [ -w /run ]; then
+        base="/run"
+    else
+        base="${TMPDIR:-/tmp}"
+    fi
+    local need_subdir=1
+    _qd_dir_is_private "$base" "$owner" && need_subdir=0
+    if [ "$need_subdir" = 1 ]; then
+        dir="$(mktemp -d "$base/qdistro-domxml.XXXXXX")" || {
             echo "${prefix}: failed to create private domain-XML dir under $base" >&2
             exit 5
         }
-        chmod 0700 "$_QD_DOMAIN_XML_DIR"
-        # Owned by the reader (admin) so it can traverse its own 0700 dir;
-        # still unreadable / un-pre-creatable by any other uid.
-        if [ -n "$owner" ]; then
-            chown "$owner" "$_QD_DOMAIN_XML_DIR" 2>/dev/null || true
+        chmod 0700 "$dir"
+        # Owned by the reader (admin) so it can traverse its own 0700 dir.
+        if [ -n "$owner" ] && ! chown "$owner" "$dir" 2>/dev/null; then
+            echo "${prefix}: failed to chown private domain-XML dir to $owner" >&2
+            rm -rf "$dir"; exit 5
         fi
-        # Clean the private dir on exit without clobbering an existing trap.
-        local _existing
-        _existing="$(trap -p EXIT | sed "s/^trap -- '//;s/' EXIT$//")"
-        # shellcheck disable=SC2064
-        trap "rm -rf '$_QD_DOMAIN_XML_DIR' 2>/dev/null; ${_existing}" EXIT
+        base="$dir"
     fi
-    f="$(mktemp "$_QD_DOMAIN_XML_DIR/${prefix}.XXXXXX.xml")" || {
-        echo "${prefix}: failed to create private domain-XML file" >&2
+    f="$(mktemp "$base/${prefix}.XXXXXX.xml")" || {
+        echo "${prefix}: failed to create private domain-XML file under $base" >&2
         exit 5
     }
     chmod 0600 "$f"
-    [ -n "$owner" ] && chown "$owner" "$f" 2>/dev/null || true
+    # The render runs as root but virsh reads the file as the admin owner — fail
+    # closed if we cannot hand ownership over, rather than defer to a confusing
+    # "virsh define: permission denied".
+    if [ -n "$owner" ] && ! chown "$owner" "$f" 2>/dev/null; then
+        echo "${prefix}: failed to chown domain-XML file to $owner" >&2
+        rm -f "$f"; exit 5
+    fi
     printf '%s' "$f"
 }
 
