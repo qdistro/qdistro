@@ -987,7 +987,8 @@ host_ruff_targets() {
     local d
     for d in broker browser_bridge cli tui qsu polkit user_relay pwd print \
              phone recall browser_daemons daemons snapshots sdk admin_app \
-             session_manager workflow templates plugins scripts; do
+             session_manager workflow templates plugins scripts ci deploy \
+             tier4-vm tier5b-vm; do
         [ -d "$QDISTRO_REPO/$d" ] && printf '%s\n' "$QDISTRO_REPO/$d"
     done
     local repo

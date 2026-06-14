@@ -7,6 +7,7 @@ wlroots virtual-keyboard input injection isn't reliable on labwc yet.
 Usage: admin-decide.py <id> <allow|deny> [once|session]
 """
 import sys
+
 import dbus
 
 BUS = "org.qdistro.AdminBroker1"

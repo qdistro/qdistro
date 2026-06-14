@@ -37,9 +37,8 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
-
 
 # Domain-name shape shared with spawn-tier4.sh:90 — single source of truth
 # so both spawn and close enforce the same allow-list. Reject leading

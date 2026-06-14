@@ -116,7 +116,7 @@ def build_handshake(vm_name: str, instance_id: str, port: int) -> str:
     try:
         port_i = int(port)
     except (TypeError, ValueError):
-        raise HandshakeError("bad-port", repr(port))
+        raise HandshakeError("bad-port", repr(port)) from None
     if not (1 <= port_i <= 65535):
         raise HandshakeError("bad-port", str(port_i))
     return (f"{BANNER_MAGIC} {BANNER_VERSION} "
@@ -204,7 +204,7 @@ def verify_handshake(banner: str, expected: LaunchRecord) -> None:
     try:
         banner_port = int(fields["port"])
     except ValueError:  # pragma: no cover — parse already charset-gated
-        raise HandshakeError("bad-port", fields["port"])
+        raise HandshakeError("bad-port", fields["port"]) from None
     if banner_port != int(expected.port):
         raise HandshakeError(
             "port-mismatch",

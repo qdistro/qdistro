@@ -39,7 +39,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 try:  # pragma: no cover — App1 SDK only available in qdistro deployments
     from qdistro_app import app_receiver as _app_receiver

@@ -9,7 +9,6 @@ import re
 import sys
 from pathlib import Path
 
-
 KEY_RE = re.compile(
     r"(FAIL|FAIL_LOUD|ERROR|FAILED|Traceback|AssertionError|not found|missing|"
     r"denied|refused|timed out|timeout|No module named|protocol error|inactive|failed)",

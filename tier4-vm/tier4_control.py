@@ -47,7 +47,6 @@ import sys
 import threading
 from typing import Any
 
-
 # Allow the script to run from spawn-tier4.sh without the qdistro_app
 # SDK / dbus-python installed; we degrade to a passthrough exec rather
 # than blocking VM startup.
@@ -361,7 +360,7 @@ def _exec_or_fork_client(viewer_argv: list[str]) -> int:
     password = None
     if password_file:
         try:
-            with open(password_file, "r", encoding="utf-8") as f:
+            with open(password_file, encoding="utf-8") as f:
                 password = f.readline()
         except OSError as e:
             _log(f"viewer password file read failed: {e!r}")
