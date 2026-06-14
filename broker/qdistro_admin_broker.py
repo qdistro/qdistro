@@ -41,14 +41,30 @@ from qdistro_resolver import resolve_subject  # type: ignore[import-not-found]
 
 BUS_NAME = "org.qdistro.AdminBroker1"
 OBJ_PATH = "/org/qdistro/AdminBroker1"
-# qdistro is single-tenant: the admin role is the fixed admin account.
-try:
-    ADMIN_UID = _pwd_mod.getpwnam("admin").pw_uid
-except KeyError as e:
-    raise RuntimeError("fixed admin user 'admin' does not exist") from e
-if ADMIN_UID != 1000:
-    raise RuntimeError(
-        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
+# qdistro is single-tenant: the admin role is the fixed 'admin' account, which
+# must be uid 1000. Resolve leniently at import (default 1000 when the account
+# is absent) so this module stays importable for unit tests on hosts without
+# the admin user; the invariant is enforced fail-closed at daemon startup via
+# _require_admin_account() (see main()).
+def _resolve_admin_uid() -> int:
+    try:
+        return _pwd_mod.getpwnam("admin").pw_uid
+    except KeyError:
+        return 1000
+
+
+def _require_admin_account() -> None:
+    """Fail closed if the host lacks the fixed admin/uid-1000 account."""
+    try:
+        uid = _pwd_mod.getpwnam("admin").pw_uid
+    except KeyError as e:
+        raise RuntimeError("fixed admin user 'admin' does not exist") from e
+    if uid != 1000:
+        raise RuntimeError(
+            f"fixed admin user 'admin' must resolve to uid 1000, got {uid}")
+
+
+ADMIN_UID = _resolve_admin_uid()
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
 
@@ -4525,6 +4541,9 @@ def main():
     if "--version" in sys.argv[1:]:
         print("qdistro-admin-broker (qdistro)")
         return
+    # Fail closed before serving if the host is misconfigured (no admin/uid-1000
+    # account). Deferred here (not import) so unit tests can import this module.
+    _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     _name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)

@@ -65,13 +65,30 @@ AGENT_BUS = "org.qdistro.PolkitAgent"
 QDISTRO_BROKER_BUS = "org.qdistro.AdminBroker1"
 QDISTRO_BROKER_OBJ = "/org/qdistro/AdminBroker1"
 
-try:
-    ADMIN_UID = _pwd_mod.getpwnam("admin").pw_uid
-except KeyError as e:
-    raise RuntimeError("fixed admin user 'admin' does not exist") from e
-if ADMIN_UID != 1000:
-    raise RuntimeError(
-        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
+# qdistro is single-tenant: the admin role is the fixed 'admin' account, which
+# must be uid 1000. Resolve leniently at import (default 1000 when the account
+# is absent) so this module stays importable for unit tests on hosts without
+# the admin user; the invariant is enforced fail-closed at agent startup via
+# _require_admin_account() (see main()).
+def _resolve_admin_uid() -> int:
+    try:
+        return _pwd_mod.getpwnam("admin").pw_uid
+    except KeyError:
+        return 1000
+
+
+def _require_admin_account() -> None:
+    """Fail closed if the host lacks the fixed admin/uid-1000 account."""
+    try:
+        uid = _pwd_mod.getpwnam("admin").pw_uid
+    except KeyError as e:
+        raise RuntimeError("fixed admin user 'admin' does not exist") from e
+    if uid != 1000:
+        raise RuntimeError(
+            f"fixed admin user 'admin' must resolve to uid 1000, got {uid}")
+
+
+ADMIN_UID = _resolve_admin_uid()
 
 DEFAULT_METHOD = "broker"
 DEFAULT_PAM_SERVICE = "login"
@@ -565,6 +582,8 @@ def _session_id() -> str:
 
 def main() -> int:
     syslog.openlog("qdistro-polkit-agent", syslog.LOG_PID, syslog.LOG_DAEMON)
+    # Fail closed before serving if the host lacks the admin/uid-1000 account.
+    _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SessionBus()
     try:

@@ -60,13 +60,30 @@ from qdistro_silo_egress import (
 BUS_NAME = "org.qdistro.SessionManager1"
 OBJ_PATH = "/org/qdistro/SessionManager1"
 ADMIN_USER_NAME = "admin"
-try:
-    ADMIN_UID = int(pwd.getpwnam(ADMIN_USER_NAME).pw_uid)
-except KeyError as e:
-    raise RuntimeError("fixed admin user 'admin' does not exist") from e
-if ADMIN_UID != 1000:
-    raise RuntimeError(
-        f"fixed admin user 'admin' must resolve to uid 1000, got {ADMIN_UID}")
+# qdistro is single-tenant: the admin role is the fixed 'admin' account, which
+# must be uid 1000. Resolve leniently at import (default 1000 when the account
+# is absent) so this module stays importable for unit tests on hosts without
+# the admin user; the invariant is enforced fail-closed at daemon startup via
+# _require_admin_account() (see main()).
+def _resolve_admin_uid() -> int:
+    try:
+        return int(pwd.getpwnam(ADMIN_USER_NAME).pw_uid)
+    except KeyError:
+        return 1000
+
+
+def _require_admin_account() -> None:
+    """Fail closed if the host lacks the fixed admin/uid-1000 account."""
+    try:
+        uid = int(pwd.getpwnam(ADMIN_USER_NAME).pw_uid)
+    except KeyError as e:
+        raise RuntimeError("fixed admin user 'admin' does not exist") from e
+    if uid != 1000:
+        raise RuntimeError(
+            f"fixed admin user 'admin' must resolve to uid 1000, got {uid}")
+
+
+ADMIN_UID = _resolve_admin_uid()
 
 # Where per-silo broker state lives. The dir for each silo is owned
 # by the silo's uid and is mode 0700 so other uids cannot peek.
@@ -4313,6 +4330,8 @@ def main():  # pragma: no cover - exercised in the VM
     )
     if dbus is None:
         raise SystemExit("dbus-python not available")
+    # Fail closed before serving if the host lacks the admin/uid-1000 account.
+    _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
