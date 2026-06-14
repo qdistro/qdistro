@@ -25,7 +25,12 @@ fi
 PASS "Recall timer/service not installed in v1 profile"
 
 /usr/bin/python3 - <<'PY'
-import importlib.util
+import importlib.util, sys
+# Load the bridge the way it is actually run in production: as a script whose
+# own directory is on sys.path[0]. importlib.exec_module does NOT add the file's
+# directory automatically, so its sibling import (qdistro_browser_allowlist,
+# split out in the P0-4 allowlist follow-up) would otherwise ModuleNotFoundError.
+sys.path.insert(0, "/usr/libexec/qdistro")
 spec = importlib.util.spec_from_file_location(
     "qdistro_browser_bridge",
     "/usr/libexec/qdistro/qdistro_browser_bridge.py")

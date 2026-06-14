@@ -67,6 +67,39 @@ ADMIN_UID=1000
 runuser -u admin -- test -S "/run/user/$ADMIN_UID/wayland-1" \
     || die "outer compositor not running"
 
+# Broker: allow the tier-2 spawn gate for our workload. Since
+# `security: require broker allow for tier2 spawns`, spawn-tier2 fails closed
+# (decision=unknown) unless a rule allows qdistro.tier2.spawn:<workload>/<app>.
+# This is the hardening regression guard, not a broker-policy test, so it
+# authors its own allow rule exactly like the silo-secctx-wiretag probe.
+RULE_DIR=/etc/qdistro/rules.d
+RULE_FILE="$RULE_DIR/zz-tier2-hardening-allow.yaml"
+SPAWN_ACTION="qdistro.tier2.spawn:${WORKLOAD}/${WORKLOAD}"
+systemctl start qdistro-admin-broker.service 2>/dev/null || true
+install -d -m 0755 "$RULE_DIR"
+cat >"$RULE_FILE" <<EOF
+# Test-authored: allow the tier-2 spawn of $WORKLOAD so the hardening lock-in
+# lane can mint the container. s40-tier2-hardening.sh.
+- name: tier2-hardening-${WORKLOAD}-allow
+  decision: allow
+  match:
+    action: $SPAWN_ACTION
+EOF
+trap 'rm -f "$RULE_FILE" 2>/dev/null || true; systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true' EXIT
+systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+broker_reply=""
+for _ in $(seq 1 20); do
+    broker_reply=$(runuser -u admin -- env XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
+        dbus-send --system --print-reply=literal \
+        --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
+        "string:$SPAWN_ACTION" "dict:string:string:" 2>/dev/null | tr -d ' \t\n')
+    [ "$broker_reply" = "allow" ] && break
+    sleep 0.25
+done
+[ "$broker_reply" = "allow" ] \
+    || die "broker did not load the tier-2 hardening allow rule (CheckPermission='$broker_reply')"
+
 # Cleanup any leftover container with the same name.
 runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
