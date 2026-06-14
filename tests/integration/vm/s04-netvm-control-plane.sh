@@ -20,21 +20,29 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 URL="${QDISTRO_NETVM_UBUS_URL:?set QDISTRO_NETVM_UBUS_URL}"
 PW="${QDISTRO_NETVM_PASSWORD:?set QDISTRO_NETVM_PASSWORD}"
+# The baked image (etc/uci-defaults/99-qdistro-netvm) scopes the rpcd login to
+# the 'qdistro-admin' account, NOT root; the client default is 'root'. Pass the
+# image's username so this runs against the committed image, not just a rig.
+USER_NAME="${QDISTRO_NETVM_USER:-qdistro-admin}"
 
 pass=0; fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
 bad()  { echo "FAIL: $1"; fail=$((fail+1)); }
 
-PYTHONPATH="$REPO/session_manager" python3 - "$URL" "$PW" <<'PY'
+PYTHONPATH="$REPO/session_manager" python3 - "$URL" "$PW" "$USER_NAME" <<'PY'
 import sys
 from qdistro_silo_egress import EgressPolicy
 from qdistro_netvm_uci import SiloNet, compile_all
 from qdistro_netvm_client import (NetVMClient, NetVMCallError,
                                   NetVMPermissionError)
-url, pw = sys.argv[1], sys.argv[2]
-c = NetVMClient(base_url=url, password=pw, timeout=15)
+url, pw, user = sys.argv[1], sys.argv[2], sys.argv[3]
+c = NetVMClient(base_url=url, password=pw, username=user, timeout=15)
 
+_fails = 0
 def check(name, cond):
+    global _fails
+    if not cond:
+        _fails += 1
     print(("PASS: " if cond else "FAIL: ") + name)
 
 # read path
@@ -70,6 +78,7 @@ check("egress_reload is idempotent", c.egress_reload(frags).get("applied") is Tr
 r = c.call("qdistro.netvm", "wifi_join",
            {"device": "radio0", "ssid": "x"*40, "encryption": "none"})
 check("wifi_join rejects overlong ssid", r.get("applied") is False)
+sys.exit(1 if _fails else 0)
 PY
 rc=$?
 
