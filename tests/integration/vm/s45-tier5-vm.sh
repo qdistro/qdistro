@@ -61,7 +61,14 @@ CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
 SPAWN_LOG=/tmp/s45-spawn.log
 : >"$SPAWN_LOG"
 
-bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
+# Request a 512 MiB guest (TIER5_MEM_KIB) instead of spawn-tier5's 1.5 GiB
+# default. The bats VM is ~4 GiB and already runs the admin compositor, so only
+# ~1.3 GiB is free — over-committing a 1.5 GiB guest there made the guest
+# unstable (it sometimes died mid-run: "domain stopped"). 512 MiB fits with
+# headroom and is the value the sibling s47-tier5-audio.sh boots the same base
+# disk with. Nested-CI memory accommodation only; production keeps 1.5 GiB.
+TIER5_MEM_KIB=524288 \
+    bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
@@ -69,18 +76,19 @@ cleanup_vm() {
     kill -TERM "$SPAWN_PID" 2>/dev/null || true
     wait "$SPAWN_PID" 2>/dev/null || true
     # Belt-and-braces — spawn-tier5.sh's trap normally handles these.
-    runuser -u admin -- virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    runuser -u admin -- virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
     rm -f "$OVERLAY" 2>/dev/null || true
 }
 trap cleanup_vm EXIT
 
-# Wait for the domain to define+start. Guest boot can take ~30s on
-# Tumbleweed-Minimal-VM Cloud; budget 90s before declaring failure.
+# Wait for the domain to define+start. The nested-on-nested guest reaches
+# "running" slower than 90s under CI; budget 120s to match s47-tier5-audio.sh
+# (same base disk + boot class).
 DOMAIN_OK=0
-for _ in $(seq 1 180); do
-    if runuser -u admin -- virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-        if runuser -u admin -- virsh domstate "$VM_NAME" 2>/dev/null \
+for _ in $(seq 1 240); do
+    if runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+        if runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh domstate "$VM_NAME" 2>/dev/null \
             | grep -qw running; then
             DOMAIN_OK=1; break
         fi
@@ -91,7 +99,7 @@ if [ "$DOMAIN_OK" = "1" ]; then
     pass "libvirt domain $VM_NAME defined + running"
 else
     cat "$SPAWN_LOG" >&2 || true
-    fail "libvirt domain never reached running state within 90s"
+    fail "libvirt domain never reached running state within 120s"
 fi
 
 # Wait for the host-side waypipe listener-ready line.
@@ -136,8 +144,10 @@ done
 # Per-VM overlay disk created in admin's session libvirt dir.
 if [ -f "$OVERLAY" ]; then
     pass "per-VM overlay disk created at $OVERLAY"
-    # Confirm linked-clone backing file.
-    if runuser -u admin -- qemu-img info "$OVERLAY" 2>/dev/null \
+    # Confirm linked-clone backing file. -U: the VM is running, so qemu holds
+    # the qcow2 lock; without -U qemu-img info fails to acquire it and prints
+    # nothing. The backing-file metadata is static, so reading it no-lock is safe.
+    if runuser -u admin -- qemu-img info -U "$OVERLAY" 2>/dev/null \
         | grep -q "backing file:.*qdistro-tier5-base.qcow2"; then
         pass "overlay is linked-clone of the base image (not a full copy)"
     else

@@ -34,6 +34,7 @@ command -v virsh >/dev/null 2>&1 || skip "virsh not installed"
 [ -e /dev/kvm ] || skip "/dev/kvm not present"
 
 ADMIN_UID=1000
+RUNTIME_DIR="/run/user/$ADMIN_UID"
 if ! runuser -u admin -- test -S "/run/user/$ADMIN_UID/wayland-1"; then
     skip "outer admin compositor not up"
 fi
@@ -43,16 +44,20 @@ OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
 SPAWN_LOG=/tmp/s48-spawn.log
 : >"$SPAWN_LOG"
 
-bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
+# 512 MiB guest (TIER5_MEM_KIB): the ~4 GiB bats VM has only ~1.3 GiB free, so a
+# 1.5 GiB nested guest is unstable here; 512 MiB fits (same value as
+# s45-tier5-vm.sh / s47-tier5-audio.sh). Nested-CI accommodation; prod keeps 1.5G.
+TIER5_MEM_KIB=524288 \
+    bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
-# Wait until the domain is running and overlay exists, then we can
-# trigger teardown.
-deadline=$(( $(date +%s) + 90 ))
+# Wait until the domain is running and overlay exists, then we can trigger
+# teardown. Budget 120s (nested-on-nested boot under CI; match s45/s47).
+deadline=$(( $(date +%s) + 120 ))
 READY=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if runuser -u admin -- virsh domstate "$VM_NAME" 2>/dev/null \
+    if runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh domstate "$VM_NAME" 2>/dev/null \
         | grep -qw running && [ -f "$OVERLAY" ]; then
         READY=1; break
     fi
@@ -63,9 +68,9 @@ if [ "$READY" = "1" ]; then
 else
     cat "$SPAWN_LOG" >&2 || true
     kill -KILL "$SPAWN_PID" 2>/dev/null || true
-    fail "domain never reached running state within 90s — cannot test teardown"
-    runuser -u admin -- virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-    runuser -u admin -- virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+    fail "domain never reached running state within 120s — cannot test teardown"
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+    runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
     rm -f "$OVERLAY"
     echo "[s48] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
@@ -82,7 +87,7 @@ deadline=$(( $(date +%s) + 10 ))
 DOMAIN_GONE=0
 OVERLAY_GONE=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if ! runuser -u admin -- virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+    if ! runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         DOMAIN_GONE=1
     fi
     [ -f "$OVERLAY" ] || OVERLAY_GONE=1
@@ -99,8 +104,8 @@ done
     || fail "overlay $OVERLAY still present 10s after SIGTERM (orphan disk leak)"
 
 # Final belt-and-braces cleanup in case of partial leak.
-runuser -u admin -- virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-runuser -u admin -- virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
 rm -f "$OVERLAY" "$SPAWN_LOG"
 
 if [ "$FAILCOUNT" -eq 0 ]; then

@@ -92,7 +92,7 @@
 #   TIER5_CID            (--vm only) override allocated CID.
 #   TIER5_BASE_DISK      (--vm only) override base disk path.
 #   TIER5_DISK_DIR       (--vm only) override per-VM disk dir.
-#   TIER5_MEM_KIB        (--vm only) guest RAM in KiB (default 524288).
+#   TIER5_MEM_KIB        (--vm only) guest RAM in KiB (default 1572864 = 1.5 GiB).
 #   TIER5_DOMAIN_TEMPLATE
 #                        (--vm only) override domain XML template path.
 #   TIER5_KEEP_DOMAIN=1  (--vm only) skip destroy+undefine on exit
