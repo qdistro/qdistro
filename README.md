@@ -69,7 +69,9 @@ The admin app (tray icon) shows active silos, pending approvals, and audit histo
 
 **6. Report back:**
 File issues at [codeberg.org/qdistro/qdistro/issues](https://codeberg.org/qdistro/qdistro/issues).
-Most useful: "I ran step X and Y was unclear / broken."
+Most useful: "I ran step X and Y was unclear / broken." See
+[doc/support.md](doc/support.md) for what to include, how security issues are
+handled privately, and the [known-regressions](doc/known-regressions.md) ledger.
 
 ## Repository layout (sibling checkout required)
 
