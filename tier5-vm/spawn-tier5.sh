@@ -421,10 +421,24 @@ if [ -n "$SECCTX" ] && [ "$USE_SECCTX" != "1" ]; then
     CLIENT_OPTS+=(--secctx "$SECCTX")
 fi
 
-# Build the secctx-exec wrap if enabled.
+# Build the secctx-exec wrap if enabled. When wrapping, also hand secctx-exec a
+# launch-record path + token so it publishes the inner waypipe-client pid for the
+# permission-lineage register below (mirrors tier-1/2/3). The record is what lets
+# enforce mode resolve this tier-5 silo's source pid to its silo instead of
+# failing closed; without it tier-5 was the only tier whose spawn never published
+# a launch record. The file is written by secctx-exec AS ADMIN (runuser below),
+# so it must live in admin's runtime dir; root reads it back to register.
 SECCTX_WRAP=()
+LAUNCHREC_PATH=""
+LAUNCHREC_TOKEN=""
 if [ "$USE_SECCTX" = "1" ]; then
+    LAUNCHREC_TOKEN="$(gen_launch_token "[tier5] FAIL")"
+    LAUNCHREC_FILE_ID="$(gen_launch_token "[tier5] FAIL")"
+    LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier5-launchrec-$LAUNCHREC_FILE_ID.pid"
+    rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
     SECCTX_WRAP=(env QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1
+        QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH"
+        QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN"
         qdistro-secctx-exec
         --sandbox-engine "$SECCTX_ENGINE"
         --app-id         "$SECCTX_APPID"
@@ -438,6 +452,15 @@ runuser -u "$ADMIN_USER" -- env \
     HOME="$ADMIN_HOME" \
     "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
+
+# Permission-lineage: register the inner waypipe-client pid (published by
+# secctx-exec into LAUNCHREC_PATH) with the broker, binding (pid,starttime) ->
+# silo so a later cross-silo gate resolves this tier-5 source pid to its record
+# instead of failing closed. No-op when secctx-exec wasn't wrapped
+# (LAUNCHREC_PATH empty, i.e. TIER5_USE_SECCTX=0) or dbus-send is absent.
+qd_register_secctx_launch_record \
+    "$SILO_TAG" "$SECCTX_ENGINE" "$SECCTX_APPID" "$SECCTX_INSTANCE" "tier5" \
+    "$LAUNCHREC_PATH" "$LAUNCHREC_TOKEN" "tier5"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if grep -q 'Starting client main process' "$CLIENT_LOG" 2>/dev/null; then

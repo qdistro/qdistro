@@ -452,6 +452,27 @@ setup() {
     assert_output_contains "PASS: §Phase-7 tier-5-Linux waypipe-vsock loopback end-to-end"
 }
 
+@test "phase7-tier5-loopback-lineage-register: spawn-tier5 --loopback auto-registers a launch record (02/S3e)" {
+    # 02/S3e evidence: the tier-5 half of permission lineage. spawn-tier5.sh
+    # wraps waypipe-client with qdistro-secctx-exec, which now publishes the
+    # inner pid; spawn-tier5 calls qd_register_secctx_launch_record so the broker
+    # persists qdistro.lineage.register:<silo>. Loopback (vsock CID=1) needs no
+    # guest VM / nested KVM. Companion to s60 (tier-3), s61/s62 (tier-2); tier-5
+    # has no broker spawn gate so no allow rule is authored.
+    stage_vm_driver "s63-tier5-loopback-lineage-register.sh"
+    vm_run "curl -fsS -o /tmp/s63.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s63-tier5-loopback-lineage-register.sh && chmod +x /tmp/s63.sh && bash /tmp/s63.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-5 stack (waypipe / vsock_loopback / wayland-info / qdistro-secctx-exec / outer compositor / broker audit db) not available on this VM"
+    fi
+    # Load-bearing: the registration line only appears if secctx-exec published
+    # the inner waypipe-client pid and the broker RegisterLaunch re-verified it.
+    assert_output_contains "PASS: spawn-tier5 (loopback) logged the launch-record registration for silo="
+    assert_output_contains "PASS: tier-5 loopback silo identity is this spawn's pid (loopback-"
+    assert_output_contains "PASS: broker recorded qdistro.lineage.register:"
+    assert_output_contains "PASS: §02/S3e tier-5 (loopback/vsock) permission-lineage register end-to-end"
+}
+
 @test "phase7-tier4-secctx-exec: qdistro-secctx-exec wraps a Wayland client with wp_security_context_v1" {
     # §Phase-7 tier-4 secctx — the wrapper is reusable for any non-secctx-
     # aware client. Tests the

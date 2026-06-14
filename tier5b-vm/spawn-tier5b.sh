@@ -536,6 +536,23 @@ CLIENT_OPTS=(-s "$HOST_LISTEN_CID:$PORT" --vsock -o)
 
 build_secctx_wrap "$USE_SECCTX" "$SECCTX_ENGINE" "$SECCTX_APPID" "$SECCTX_INSTANCE"
 
+# Permission-lineage: when secctx-exec is in the chain, hand it a launch-record
+# path + token so it publishes the inner waypipe-client pid for the broker
+# register below (mirrors tier-1/2/3/5; tier-5b previously published none). The
+# file is written by secctx-exec AS ADMIN, so it lives in admin's runtime dir;
+# root reads it back. Injected at the OUTER env (not build_secctx_wrap, which is
+# source-only-tested for its exact composition) — secctx-exec inherits them via
+# getenv and unsets them before exec. Empty when TIER5B_USE_SECCTX=0 (then no
+# secctx-exec runs and the helper no-ops on an empty path).
+LAUNCHREC_PATH=""
+LAUNCHREC_TOKEN=""
+if [ "$USE_SECCTX" = "1" ]; then
+    LAUNCHREC_TOKEN="$(gen_launch_token "[tier5b] FAIL")"
+    LAUNCHREC_FILE_ID="$(gen_launch_token "[tier5b] FAIL")"
+    LAUNCHREC_PATH="$ADMIN_RUNTIME/qdistro-tier5b-launchrec-$LAUNCHREC_FILE_ID.pid"
+    rm -f "$LAUNCHREC_PATH" 2>/dev/null || true
+fi
+
 # setsid so a qdshell crash (the parent of this script in production)
 # doesn't propagate SIGHUP to waypipe-client. The client must outlive
 # the shell — s108 stage 8 exercises this.
@@ -543,8 +560,16 @@ setsid runuser -u "$ADMIN_USER" -- env \
     WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
     XDG_RUNTIME_DIR="$ADMIN_RUNTIME" \
     HOME="$ADMIN_HOME" \
+    QDISTRO_LAUNCH_RECORD_PATH="$LAUNCHREC_PATH" \
+    QDISTRO_LAUNCH_RECORD_TOKEN="$LAUNCHREC_TOKEN" \
     "${SECCTX_WRAP[@]}" waypipe "${CLIENT_OPTS[@]}" client >"$CLIENT_LOG" 2>&1 &
 CLIENT_PID=$!
+
+# Register the inner waypipe-client pid with the broker (no-op when not wrapped
+# or dbus-send absent), binding (pid,starttime) -> silo for cross-silo lineage.
+qd_register_secctx_launch_record \
+    "$SILO_TAG" "$SECCTX_ENGINE" "$SECCTX_APPID" "$SECCTX_INSTANCE" "tier5b" \
+    "$LAUNCHREC_PATH" "$LAUNCHREC_TOKEN" "tier5b"
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if grep -q 'Starting client main process' "$CLIENT_LOG" 2>/dev/null; then
