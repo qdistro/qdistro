@@ -11,23 +11,42 @@
 #   - The admin user's qdwin/qdshell session started so DISPLAY=:0
 #     XWayland is reachable for `vm-gui screenshot` / `xdotool`.
 #
-# fresh-vm-bootstrap.sh masks greetd (greetd would grab the DRM seat
-# and prevent admin's user manager from starting). This script keeps
-# greetd masked and starts the noctalia-shell user unit directly via
-# admin's systemd user manager, which is the documented manual
-# follow-up to fresh-vm-bootstrap.sh.
+# fresh-vm-bootstrap.sh masks greetd (greetd would grab the DRM seat and
+# prevent admin's lingering user manager from starting) and stages BOTH the
+# qdwin+qdshell session units (noctalia-session/noctalia-shell) and the labwc
+# stack. greetd stays masked here; this script then selects which session
+# admin's user manager leaves running, via QDISTRO_VM_GUI_SESSION:
+#
+#   labwc (default) — disables the qdwin units and runs labwc+lxqt on wayland-0
+#                     for the permissions-gui admin-app scenarios.
+#   qdwin           — keeps the production qdwin compositor + qdshell session on
+#                     wayland-1 (the one fresh-vm-bootstrap.sh already started),
+#                     for the qdwin/qdshell GUI lanes (taskbar isolation menu,
+#                     popup-clamp, …). Needs the vendored libweston (staged by
+#                     fresh-vm-bootstrap.sh) for the popup clamp/grab paths.
 #
 # Usage:
-#   scripts/vm/spin-test-vm-gui.sh [<prefix>]
+#   [QDISTRO_VM_GUI_SESSION=labwc|qdwin] scripts/vm/spin-test-vm-gui.sh [<prefix>]
 #
 # Output (last line): the VM name, suitable for piping into
-# `tests/integration/permissions-gui/` runner agents as VMNAME.
+# `tests/integration/permissions-gui/` (labwc) or `qdwin-noctalia/` (qdwin)
+# runner agents as VMNAME.
 
 set -euo pipefail
 
 VM_PASSWORD='Pa_ssw0rd45'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${1:-qd-gui}"
+
+# Which graphical session to leave running (see the POSTBOOT block for the full
+# contract): `labwc` (default — labwc+lxqt on wayland-0 for permissions-gui) or
+# `qdwin` (the production qdwin compositor + qdshell on wayland-1, for the
+# qdwin/qdshell GUI lanes). Select with QDISTRO_VM_GUI_SESSION=qdwin.
+GUI_SESSION="${QDISTRO_VM_GUI_SESSION:-labwc}"
+case "$GUI_SESSION" in
+    labwc|qdwin) ;;
+    *) echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$GUI_SESSION' (want labwc|qdwin)" >&2; exit 2 ;;
+esac
 
 echo "[gui-spin] step 1/3: spin-test-vm.sh $PREFIX (broker layer)" >&2
 # spin-test-vm prints the VM name on the last stdout line. Capture
@@ -50,6 +69,23 @@ B64=$(base64 -w0 <<'POSTBOOT'
 set -eu
 
 SRC=/root/qdistro-src/qdistro
+
+# Which graphical session this VM should expose to scenarios:
+#   labwc  (default) — labwc + lxqt on wayland-0, for the permissions-gui
+#                      admin-app scenarios (the historical behaviour).
+#   qdwin            — the production qdwin compositor + qdshell (Quickshell)
+#                      session on wayland-1, for the qdwin/qdshell GUI lanes
+#                      (taskbar isolation menu, popup-clamp, etc.). The session
+#                      units (noctalia-session/noctalia-shell — the qdwin+qdshell
+#                      units install-qdwin-session-for-vm.sh wires up), the
+#                      vendored libweston, and the QML plugin are already staged
+#                      by fresh-vm-bootstrap.sh; this profile simply KEEPS that
+#                      session up instead of tearing it down for labwc.
+SESSION="${QDISTRO_VM_GUI_SESSION:-labwc}"
+case "$SESSION" in labwc|qdwin) ;; *)
+    echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$SESSION' (want labwc|qdwin)"; exit 2 ;;
+esac
+echo "[gui-spin] gui session profile: $SESSION"
 
 # 1. work + work2 users (uids 2000 / 3000), linger so their session
 #    buses come up.
@@ -144,6 +180,12 @@ size=@Size(1200 700)
 INI
 chown admin:users /home/admin/.config/qterminal.org/qterminal.ini
 
+# Steps 6-8 below stand up the labwc+lxqt session and are skipped for the
+# `qdwin` profile (which keeps the qdwin+qdshell session staged by
+# fresh-vm-bootstrap.sh instead — see step 8c). §8b (virtio-gpu DRM) runs for
+# BOTH profiles. The body is intentionally left un-indented to keep the diff
+# reviewable; it is bracketed by this `if`/`fi`.
+if [ "$SESSION" = labwc ]; then
 # 6. Install labwc + lxqt + XWayland + qterminal + xdotool + fonts.
 #    The permissions-gui scenarios assume `labwc + lxqt on tty3 as
 #    user admin, autologged via greetd` (AGENTS.md), not the
@@ -206,9 +248,12 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
 fi
 EOF2
 chown admin:users /home/admin/.bash_profile
+fi  # end labwc-only steps 6-8
 
 # 8b. Display-resolution fix — make virtio_gpu the DRM driver instead
 #     of the generic vesa/simple framebuffer.
+#     Generic — runs for BOTH the labwc and qdwin profiles (qdwin's weston
+#     drm-backend also wants virtio_gpu to win over simpledrm).
 #
 #     The template (create-template-domain.sh, default path) now
 #     exposes a bare virtio-gpu-pci device (no VGA-compat shim), so
@@ -283,44 +328,90 @@ elif command -v update-bootloader >/dev/null 2>&1; then
         || echo "[gui-spin] WARN: update-bootloader failed"
 fi
 
-# Make sure greetd stays out of the way and getty@tty1 wins.
+# greetd stays masked in BOTH profiles (it would grab the DRM seat and block
+# admin's lingering user manager — see fresh-vm-bootstrap.sh). The two profiles
+# differ only in which session admin's user manager runs.
 systemctl mask greetd.service 2>/dev/null || true
-systemctl set-default multi-user.target >/dev/null
-systemctl daemon-reload
-systemctl restart getty@tty1.service
 
-# Disable the qdwin session units — they'd race labwc on tty1.
-runuser -l admin -c 'systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null' || true
+if [ "$SESSION" = labwc ]; then
+    # labwc: getty@tty1 autologin execs labwc on wayland-0; the qdwin session
+    # units would race it for the DRM seat, so disable them.
+    systemctl set-default multi-user.target >/dev/null
+    systemctl daemon-reload
+    systemctl restart getty@tty1.service
+    runuser -l admin -c 'systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null' || true
 
-# Wait up to 30s for admin's wayland-0 socket to appear (labwc up).
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    if [ -e /run/user/1000/wayland-0 ]; then
-        echo "[gui-spin] wayland-0 socket up after ${i}s"
-        break
+    # Wait up to 30s for admin's wayland-0 socket to appear (labwc up).
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if [ -e /run/user/1000/wayland-0 ]; then
+            echo "[gui-spin] wayland-0 socket up after ${i}s"
+            break
+        fi
+        sleep 2
+    done
+else
+    # 8c. qdwin profile: keep the qdwin compositor + qdshell session that
+    #     fresh-vm-bootstrap.sh staged and started under admin's lingering user
+    #     manager (units named noctalia-session/noctalia-shell — these are the
+    #     qdwin+qdshell units, see install-qdwin-session-for-vm.sh). Ensure they
+    #     are enabled + (re)started (idempotent — bootstrap normally already
+    #     has wayland-1 up) and wait for the wayland-1 socket.
+    systemctl daemon-reload
+    runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+
+    # Wait up to 60s for admin's wayland-1 socket (qdwin compositor up). The
+    # compositor restarts on-failure, so give it longer than the labwc path.
+    for i in $(seq 1 30); do
+        if [ -S /run/user/1000/wayland-1 ]; then
+            echo "[gui-spin] wayland-1 socket up after $((i*2))s (qdwin compositor)"
+            break
+        fi
+        sleep 2
+    done
+    if [ ! -S /run/user/1000/wayland-1 ]; then
+        # Fail CLOSED: the whole point of this profile is to hand back a VM
+        # running qdwin+qdshell. If the compositor never came up, returning a
+        # VM name would let downstream qdwin/qdshell lanes run against a VM that
+        # does not satisfy the requested profile. Dump diagnostics, then abort
+        # (this exit propagates through vm-exec to the host spinner's set -e).
+        echo "[gui-spin] ERROR: wayland-1 socket did not appear within 60s — qdwin compositor failed to start"
+        runuser -l admin -c 'systemctl --user --no-pager status noctalia-session.service noctalia-shell.service 2>&1 | head -40' || true
+        runuser -l admin -c 'journalctl --user -u noctalia-session.service -u noctalia-shell.service --no-pager -n 40 2>&1' || true
+        exit 1
     fi
-    sleep 2
-done
+fi
 
 # Confirm the surface the scenarios need:
-echo "--- post-install state ---"
+echo "--- post-install state ($SESSION) ---"
 id work
 id work2
 ls -l /usr/local/bin/qdistro-{test-permission,start-admin-app,start-admin-tui}
 ls -l /usr/local/bin/qdistro-admin-tui
-ls -l /usr/local/bin/startlxqtwayland /usr/local/bin/qdistro-lxqt-session-wrap
 ls -l /home/admin/qdistro/admin_app/qdistro_admin_app.py
 ls -l /home/admin/qdistro/tui/qdistro_admin_tui.py
-ls -l /home/admin/.config/qterminal.org/qterminal.ini
 ls -l /etc/dracut.conf.d/90-qdistro-virtio-gpu.conf 2>&1 \
     || echo "WARN: virtio-gpu dracut conf not installed"
 grep -H "simpledrm_platform_driver_init" /etc/default/grub 2>&1 \
     || echo "WARN: simpledrm blacklist not in GRUB cmdline"
-ls -l /run/user/1000/wayland-0 2>&1 || echo "WARN: wayland-0 not up"
-ps -ef | grep -E "labwc|lxqt|Xwayland" | grep -v grep | head -5
+if [ "$SESSION" = labwc ]; then
+    ls -l /usr/local/bin/startlxqtwayland /usr/local/bin/qdistro-lxqt-session-wrap
+    ls -l /home/admin/.config/qterminal.org/qterminal.ini
+    ls -l /run/user/1000/wayland-0 2>&1 || echo "WARN: wayland-0 not up"
+    ps -ef | grep -E "labwc|lxqt|Xwayland" | grep -v grep | head -5
+else
+    # qdwin profile: the compositor socket, the vendored libweston the clamp/
+    # popup-grab paths need, and the live qs (qdshell) + weston processes.
+    ls -l /run/user/1000/wayland-1 2>&1 || echo "WARN: wayland-1 not up"
+    ls -ld /usr/libexec/qdistro/qdwin-libweston/lib64 2>&1 \
+        || echo "WARN: vendored libweston not installed (popup clamp/grab will be absent)"
+    runuser -l admin -c 'systemctl --user is-active noctalia-session.service noctalia-shell.service' 2>&1 || true
+    ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
+fi
 echo "--- done ---"
 POSTBOOT
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' bash" >&2
+$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' QDISTRO_VM_GUI_SESSION='$GUI_SESSION' bash" >&2
 
 # Note on display resolution (FIXED — verify on a live boot):
 #   Earlier templates used QXL / virtio-vga (VGA-compat shim), which
@@ -350,6 +441,6 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' bash" >&2
 #   its original initramfs, so reboot it (`virsh reboot $VM`) before
 #   running geometry-sensitive scenarios (e.g. 35).
 
-echo "[gui-spin] step 3/3: ready. Scenarios can target VMNAME=$VM" >&2
+echo "[gui-spin] step 3/3: ready ($GUI_SESSION session). Scenarios can target VMNAME=$VM" >&2
 # Final stdout line: the VM name, matching spin-test-vm.sh's contract.
 echo "$VM"
