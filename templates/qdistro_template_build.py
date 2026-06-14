@@ -28,8 +28,8 @@ import subprocess
 import sys
 import time
 
-import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_templates as qt
 
 # Where shipped recipe Containerfiles live on the target. A policy's
 # ``containerfile`` may be a bare name (resolved here) or an absolute path.

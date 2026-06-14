@@ -30,8 +30,9 @@ import shutil
 import subprocess
 import time
 
-import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_templates as qt
+
 # NB: qdistro_snap_swap lives under snapshots/, not templates/, so it is
 # imported LAZILY inside restore_snapshot() — the launch anchor and promote
 # import this module with only templates/ on the path (the probe's host mode),

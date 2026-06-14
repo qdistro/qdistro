@@ -36,9 +36,9 @@ import os
 import sys
 import time
 
-import qdistro_templates as qt
-import qdistro_template_audit as audit
 import qdistro_state_snapshot as state_snapshot
+import qdistro_template_audit as audit
+import qdistro_templates as qt
 
 # Distinct exit code for a strict-policy pre-activation snapshot refusal — the
 # binding resolved fine, but the new generation must not activate without a
@@ -243,12 +243,12 @@ def _activation_policy(layout: qt.Layout, template: str) -> str:
         return qt.DEFAULT_ACTIVATION_SNAPSHOT
     except OSError as exc:
         raise state_snapshot.StateSnapshotError(
-            f"cannot read activation_snapshot policy {path}: {exc}")
+            f"cannot read activation_snapshot policy {path}: {exc}") from exc
     try:
         policy = qt.validate_template_policy(raw)
     except (qt.TemplateError, ValueError) as exc:
         raise state_snapshot.StateSnapshotError(
-            f"invalid template policy {path}: {exc}")
+            f"invalid template policy {path}: {exc}") from exc
     return qt.activation_snapshot_policy(policy)
 
 

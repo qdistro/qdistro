@@ -584,7 +584,7 @@ def _open_existing_dir_at(parent_fd: int, name: str) -> int:
                 f"(a silo-planted symlink must not redirect the root lander)") from e
         if e.errno == errno.ENOENT:
             raise ExportStateError(
-                f"edit source parent component {name!r} no longer exists")
+                f"edit source parent component {name!r} no longer exists") from e
         raise ExportStateError(
             f"cannot open edit source component {name!r}: {e}") from e
     try:
@@ -667,7 +667,7 @@ def _link_into_place(parent_fd: int, tmp_fd: int, base: str) -> str:
             n += 1
             if n > 1000:
                 raise ExportStateError(
-                    f"too many {base!r} edit-landing collisions")
+                    f"too many {base!r} edit-landing collisions") from None
         except OSError as e:
             raise ExportStateError(
                 f"cannot link edited file into place: {e}") from e

@@ -28,9 +28,9 @@ import subprocess
 import sys
 import time
 
-import qdistro_templates as qt
-import qdistro_template_audit as audit
 import qdistro_state_snapshot as state_snapshot
+import qdistro_template_audit as audit
+import qdistro_templates as qt
 
 # A snapshot dir that has a payload but no meta.toml is a partial left by a
 # crash between materializing the payload and writing its metadata. Reap it

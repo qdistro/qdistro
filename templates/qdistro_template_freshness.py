@@ -25,9 +25,9 @@ import subprocess
 import sys
 import time
 
-import qdistro_templates as qt
 import qdistro_template_build as build
 import qdistro_template_validate as validate
+import qdistro_templates as qt
 
 DESIRED_MAX_AGE_DEFAULT = 7 * 86400
 WARN_AGE = 7 * 86400
@@ -270,7 +270,7 @@ def run_freshness(layout: qt.Layout | None = None, *,
         status = read_status(layout, template)
         if not is_stale(status, now, desired_max_age):
             age = last_success_age(status, now)
-            log(f"{template}: fresh ({int((age or 0))//86400}d old) — skip")
+            log(f"{template}: fresh ({int(age or 0)//86400}d old) — skip")
             summary["templates"].append({"template": template, "action": "skipped-fresh"})
             continue
         log(f"{template}: stale — rebuilding from scratch")

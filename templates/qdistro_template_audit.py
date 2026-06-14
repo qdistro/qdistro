@@ -37,6 +37,7 @@ import sqlite3
 import sys
 import time
 
+
 # Lives in the shared audit store. Overridable for tests via the same
 # QDISTRO_VAR_DIR the Layout uses.
 def _default_db_path() -> str:
@@ -154,7 +155,7 @@ class TemplateAuditLog:
             f"ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
         )
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
     def close(self) -> None:
         self._conn.close()

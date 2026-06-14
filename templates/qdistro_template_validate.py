@@ -27,8 +27,8 @@ import tempfile
 import time
 import zlib
 
-import qdistro_templates as qt
 import qdistro_template_audit as audit
+import qdistro_templates as qt
 
 # The pinned headless-Chromium arg set the whole slice reuses (codex r5 of
 # the plan: define ONCE, do not let implementers rediscover flags by

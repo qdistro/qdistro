@@ -25,9 +25,9 @@ import subprocess
 import sys
 import time
 
-import qdistro_templates as qt
-import qdistro_template_audit as audit
 import qdistro_state_snapshot as state_snapshot
+import qdistro_template_audit as audit
+import qdistro_templates as qt
 
 # How long the outgoing generation stays pinned as a rollback target.
 ROLLBACK_WINDOW_DAYS = int(os.environ.get("QDISTRO_ROLLBACK_WINDOW_DAYS", "14"))
