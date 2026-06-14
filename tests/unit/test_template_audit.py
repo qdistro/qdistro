@@ -105,6 +105,100 @@ def test_emit_best_effort_does_not_raise(tmp_path, monkeypatch):
     assert rows[0]["evidence_path"].endswith("/evidence")
 
 
+def test_store_unwritable_classification():
+    # The pwd-owned shared store surfaces as PermissionError or a sqlite
+    # "unable to open"/readonly OperationalError — those are the journal-first
+    # downgrade. A genuine fault (corruption, disk full) must stay loud.
+    import sqlite3
+    assert audit._is_store_unwritable(PermissionError(13, "Permission denied"))
+    assert audit._is_store_unwritable(
+        sqlite3.OperationalError("unable to open database file"))
+    assert audit._is_store_unwritable(
+        sqlite3.OperationalError("attempt to write a readonly database"))
+    assert not audit._is_store_unwritable(
+        sqlite3.OperationalError("database disk image is malformed"))
+    # sqlite commonly raises a disk I/O fault as OperationalError, not just
+    # DatabaseError — neither must be silenced as journal-first.
+    assert not audit._is_store_unwritable(sqlite3.OperationalError("disk I/O error"))
+    assert not audit._is_store_unwritable(sqlite3.DatabaseError("disk I/O error"))
+
+
+def test_emit_journal_first_when_store_unwritable(tmp_path, monkeypatch, capsys):
+    # On a real install the admin-context emitter cannot open the pwd-owned
+    # shared mirror. emit() must NOT raise, must NOT print a scary "DB write
+    # failed" WARN, must still reach the journal, and should notice the
+    # downgrade exactly once per db path.
+    import sqlite3
+    journaled = []
+    monkeypatch.setattr(audit, "_to_journald",
+                        lambda event, fields: journaled.append((event, dict(fields))))
+
+    def _deny(_db_path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(audit, "TemplateAuditLog", _deny)
+    monkeypatch.setattr(audit, "_JOURNAL_FIRST_NOTED", set())
+
+    db = _db(tmp_path)
+    audit.emit("template.binding.activated", db_path=db, broker=False,
+               silo="dev-silo", template="tier2-dev",
+               generation="sha256:" + "e" * 64, result="activated")
+    audit.emit("template.state_snapshot.created", db_path=db, broker=False,
+               silo="dev-silo", template="tier2-dev",
+               generation="sha256:" + "f" * 64, result="created")
+
+    # Both events reached the journal (the authoritative sink).
+    assert [e for e, _ in journaled] == ["template.binding.activated",
+                                         "template.state_snapshot.created"]
+    assert journaled[0][1]["silo"] == "dev-silo"
+    err = capsys.readouterr().err
+    # No alarming WARN; a single journal-first notice for the path.
+    assert "WARN: DB write failed" not in err
+    assert err.count("journal-first") == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason="root ignores directory write bits")
+def test_emit_real_unwritable_dir_is_journal_first(tmp_path, monkeypatch, capsys):
+    # Prove the REAL errno path (not a monkeypatched message): a write-denied
+    # audit dir — the way the qdistro-pwd:0700 shared store presents to an
+    # admin-context emitter — must classify as journal-first, not a WARN.
+    journaled = []
+    monkeypatch.setattr(audit, "_to_journald",
+                        lambda event, fields: journaled.append(event))
+    monkeypatch.setattr(audit, "_JOURNAL_FIRST_NOTED", set())
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    os.chmod(audit_dir, 0o500)  # r-x: cannot create/open the DB file inside
+    try:
+        audit.emit("template.binding.activated",
+                   db_path=str(audit_dir / "template_audit.sqlite"),
+                   broker=False, silo="dev-silo", template="tier2-dev",
+                   generation="sha256:" + "a" * 64, result="activated")
+    finally:
+        os.chmod(audit_dir, 0o700)  # let tmp_path cleanup remove it
+    assert journaled == ["template.binding.activated"]
+    err = capsys.readouterr().err
+    assert "WARN: DB write failed" not in err
+    assert err.count("journal-first") == 1
+
+
+def test_emit_genuine_db_fault_stays_loud(tmp_path, monkeypatch, capsys):
+    # A real DB fault on a writable store must NOT be silenced as journal-first.
+    import sqlite3
+    monkeypatch.setattr(audit, "_to_journald", lambda event, fields: None)
+
+    def _corrupt(_db_path):
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(audit, "TemplateAuditLog", _corrupt)
+    audit.emit("template.gc.deleted", db_path=_db(tmp_path), broker=False,
+               template="t", generation="sha256:" + "a" * 64, result="deleted")
+    err = capsys.readouterr().err
+    assert "WARN: DB write failed" in err
+    assert "journal-first" not in err
+
+
 def test_emit_deletion_records_surviving_evidence(tmp_path):
     # Evidence outlives payload: a deletion event must reference the
     # evidence that remains.

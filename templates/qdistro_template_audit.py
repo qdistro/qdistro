@@ -1,11 +1,25 @@
 """Audit trail for the template lifecycle (todo/fableplan task 06).
 
-Template lifecycle decisions are appended to the same audit store as the
-rest of qdistro (a dedicated SQLite DB under /var/lib/qdistro/audit/,
-alongside the broker permission audit and the workflow/print audit DBs)
-*and* emitted as structured journald fields, so `journalctl` and the admin
-UI both see them. Security-relevant decisions (promote applied/refused, GC
-deletions) are also forwarded best-effort into the broker's audit table.
+**Journal-first.** The authoritative, always-present audit sink is the
+system journal: every lifecycle event is emitted as structured journald
+fields (`doc/templates.md` — "decisions append to the existing audit
+journal"), and the on-disk evidence/ tree plus the binding activation
+marker are the durable record of what happened. A queryable SQLite mirror
+(`/var/lib/qdistro/audit/template_audit.sqlite`, alongside the broker
+permission audit and the workflow/print audit DBs) is written *best-effort*
+on top of that, so `journalctl` and the admin UI both see the events.
+
+The SQLite mirror is only writable from a privileged/root-bypass context (or
+a test/admin-owned `QDISTRO_VAR_DIR`). On a real install the shared audit
+store is `qdistro-pwd:0700` — it is deliberately closed to admin so an
+unprivileged user cannot tamper with the root/pwd audit trails (see
+`scripts/install/install-templates-for-vm.sh`). The admin-context lifecycle
+emitters (the launch anchor `qdistro-resolve-binding`, promote, state
+snapshot, and GC, all run under rootless podman / as admin) therefore cannot
+open the mirror; that is an expected **journal-first downgrade**, not data
+loss — the event is already in the journal. Security-relevant decisions
+(promote applied/refused, GC deletions) are additionally forwarded
+best-effort into the broker's audit table when that store is reachable.
 
 The cardinal rule: **evidence outlives payload.** A deletion event records
 the evidence path that remains; there is no event deletion path here at
@@ -153,6 +167,42 @@ def _best_effort_stderr(msg: str) -> None:
         pass
 
 
+# Paths already reported as journal-first this process, so a long-lived
+# emitter does not print the downgrade notice on every single event.
+_JOURNAL_FIRST_NOTED: set[str] = set()
+
+
+def _is_store_unwritable(exc: Exception) -> bool:
+    """True when the SQLite mirror could not be opened because the shared
+    audit store is not writable from this context (admin into the pwd-owned
+    0700 dir) — as opposed to a genuine DB fault (corruption, disk full) that
+    should stay loud. PermissionError is unambiguous; sqlite surfaces the same
+    condition as an OperationalError whose message names an open/readonly
+    failure."""
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, sqlite3.OperationalError):
+        msg = str(exc).lower()
+        return ("unable to open database file" in msg
+                or "readonly database" in msg
+                or "attempt to write a readonly database" in msg
+                or "permission denied" in msg)
+    return False
+
+
+def _note_journal_first(db_path: str, exc: Exception) -> None:
+    """Record the journal-first downgrade once per DB path per process. The
+    event itself already reached the journal (emitted before the mirror write),
+    so this is an informational notice, not a data-loss warning."""
+    if db_path in _JOURNAL_FIRST_NOTED:
+        return
+    _JOURNAL_FIRST_NOTED.add(db_path)
+    _best_effort_stderr(
+        f"[qdistro-template-audit] journal-first: {db_path} not writable from "
+        f"this context ({exc}); template lifecycle events are recorded to the "
+        f"journal + on-disk evidence, the authoritative audit sink.")
+
+
 def _to_journald(event: str, fields: dict) -> None:
     """Emit one structured journal entry. Falls back to a structured stderr
     line when python-systemd is unavailable (systemd still captures it).
@@ -217,9 +267,11 @@ _BROKER_FORWARD = {
 
 def emit(event: str, *, db_path: str | None = None, broker: bool = True,
          **fields) -> None:
-    """Record a template lifecycle event: journald + the template audit DB
-    (+ the broker audit table for security decisions). Best-effort — a
-    logging failure must never break the lifecycle operation it records."""
+    """Record a template lifecycle event: journald (the authoritative sink) +
+    a best-effort SQLite mirror (+ the broker audit table for security
+    decisions). Best-effort — a logging failure must never break the lifecycle
+    operation it records, and an unwritable shared mirror is a journal-first
+    downgrade, not an error (see module docstring)."""
     try:
         _to_journald(event, fields)
     except Exception:  # noqa: BLE001
@@ -231,7 +283,10 @@ def emit(event: str, *, db_path: str | None = None, broker: bool = True,
         finally:
             log.close()
     except Exception as exc:  # noqa: BLE001
-        _best_effort_stderr(f"[qdistro-template-audit] WARN: DB write failed: {exc}")
+        if _is_store_unwritable(exc):
+            _note_journal_first(db_path or _default_db_path(), exc)
+        else:
+            _best_effort_stderr(f"[qdistro-template-audit] WARN: DB write failed: {exc}")
     if broker and event in _BROKER_FORWARD:
         try:
             _forward_to_broker(event, fields)

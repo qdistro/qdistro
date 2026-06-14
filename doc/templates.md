@@ -205,6 +205,16 @@ systemd services; decisions append to the existing audit journal.
   the recipe ref, lock hash, build command, builder identity, network mode,
   fetched-artifact manifest, candidate digest, validation report, and
   promotion/denial decision remain in `evidence/` and the audit journal.
+- **Audit is journal-first.** The system journal is the authoritative
+  lifecycle audit sink; together with the `evidence/` tree and the per-silo
+  binding activation marker it is the durable record. A queryable SQLite
+  mirror (`/var/lib/qdistro/audit/template_audit.sqlite`) is written
+  best-effort on top. That shared store is `qdistro-pwd:0700` so an
+  unprivileged user cannot tamper with the root/pwd audit trails, which means
+  the admin-context emitters (the launch anchor, promote, snapshot, GC — run
+  under rootless podman / as admin) cannot write the mirror; those events are
+  journal-only on a real install by design, not a gap. Security decisions are
+  also forwarded best-effort to the broker audit table where reachable.
 - **Retention defaults:** keep 3 promoted generations (2 for VM artifacts),
   failed candidate payloads 7 days, build logs 180 days, audit evidence 3
   years, security-decision evidence indefinitely. License-bound artifacts
