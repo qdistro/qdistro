@@ -17,6 +17,15 @@
 : "${QDWIN_REPO:=${QDLOCKER_REPO}/../qdwin}"
 : "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../qdistro/scripts/vm/vm-exec}"
 
+# qdwin session unit names. Default to the production/deploy names
+# (qdistro/deploy/). VMs spun via install-qdwin-session-for-vm.sh ship the
+# same compositor under legacy noctalia-* names for the qdwin-noctalia harness,
+# so override these to run the driver there, e.g.:
+#   QDWIN_COMPOSITOR_UNIT=noctalia-session.service \
+#   QDWIN_SHELL_UNIT=noctalia-shell.service ./f9-vm-verify.sh
+: "${QDWIN_COMPOSITOR_UNIT:=qdwin-compositor.service}"
+: "${QDWIN_SHELL_UNIT:=qdshell.service}"
+
 if [ -f "${QDWIN_REPO}/tests/gui/qdwin-helpers.sh" ]; then
     # shellcheck disable=SC1091
     source "${QDWIN_REPO}/tests/gui/qdwin-helpers.sh"
@@ -34,8 +43,15 @@ fi
 qdlocker_ctrl() {
     qdwin_require_vm || return $?
     local cmd="$1"
-    "$QDWIN_VM_EXEC" "$VMNAME" \
-        "printf '%s\n' '${cmd}' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock"
+    # The ctrl socket is uid-gated to the session owner (admin/1000) via
+    # SO_PEERCRED and fails closed for any other peer. vm-exec runs as root, so
+    # the socat MUST run as admin or the connection is refused ("reset by
+    # peer"). base64 the inner script to dodge vm-exec's embedded-quote
+    # handling (mirrors qdwin-helpers.sh qdwin_ctrl, which runs as admin too).
+    local inner b64
+    inner="printf '%s\n' '${cmd}' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock"
+    b64=$(printf '%s' "$inner" | base64 -w0)
+    "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | runuser -u admin -- bash"
 }
 
 # ---------------------------------------------------------------- poll
@@ -122,7 +138,7 @@ qdlocker_drain_lock_state() {
             fi
             echo "qdlocker_drain_lock_state: password unlock failed; restarting qdwin session" >&2
             "$QDWIN_VM_EXEC" "$VMNAME" \
-                'runuser -l admin -c "systemctl --user restart qdwin-compositor.service"; sleep 3; runuser -l admin -c "systemctl --user restart qdshell.service qdlocker.service"; sleep 3' \
+                "runuser -l admin -c \"systemctl --user restart $QDWIN_COMPOSITOR_UNIT\"; sleep 3; runuser -l admin -c \"systemctl --user restart $QDWIN_SHELL_UNIT qdlocker.service\"; sleep 3" \
                 >/dev/null
             case "$(qdlocker_ctrl status 2>/dev/null)" in
                 *locked=False*) return 0 ;;
@@ -204,24 +220,29 @@ qdlocker_assert_color_present_in_crop() {
 # below does not silently run scenarios without introspection.
 qdlocker_enable_introspection() {
     qdwin_require_vm || return $?
-    "$QDWIN_VM_EXEC" "$VMNAME" '
-        set -e
-        f=/etc/qdistro/locker-ctrl-introspection
-        if [ ! -f "$f" ]; then
-            install -d -m 0755 -o 0 -g 0 /etc/qdistro
-            : > "$f"
-            chown 0:0 "$f"
-            chmod 0644 "$f"
-            runuser -l admin -c "systemctl --user restart qdlocker.service"
-            sleep 2
-        fi
-        # Verify it took effect: the locker must now answer `status`.
-        reply=$(printf "status\n" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock)
-        case "$reply" in
-            *locked=*) exit 0 ;;
-            *) echo "introspection not active (status: $reply)" >&2; exit 1 ;;
-        esac
-    '
+    # Send the block as a base64 envelope: vm-exec's qga/JSON encoding mishandles
+    # multi-line args with nested quotes + backslashes (the status probe below).
+    local script b64
+    script=$(cat <<'SCRIPT'
+set -e
+f=/etc/qdistro/locker-ctrl-introspection
+if [ ! -f "$f" ]; then
+    install -d -m 0755 -o 0 -g 0 /etc/qdistro
+    : > "$f"; chown 0:0 "$f"; chmod 0644 "$f"
+    runuser -l admin -c "systemctl --user restart qdlocker.service"
+    sleep 4
+fi
+# Verify it took effect: the locker must now answer `status`. Connect as admin —
+# the ctrl socket is uid-gated to the session owner and refuses the root context.
+reply=$(runuser -u admin -- bash -c "printf 'status\n' | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock")
+case "$reply" in
+    *locked=*) exit 0 ;;
+    *) echo "introspection not active (status: $reply)" >&2; exit 1 ;;
+esac
+SCRIPT
+)
+    b64=$(printf '%s' "$script" | base64 -w0)
+    "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | bash"
 }
 
 qdlocker_session_healthy() {
@@ -235,12 +256,12 @@ qdlocker_session_healthy() {
     fi
     local compositor_state
     compositor_state=$("$QDWIN_VM_EXEC" "$VMNAME" \
-        'runuser -l admin -c "systemctl --user is-active qdwin-compositor.service"' 2>/dev/null \
+        "runuser -l admin -c \"systemctl --user is-active $QDWIN_COMPOSITOR_UNIT\"" 2>/dev/null \
         | tr -d '\r\n')
     case "$compositor_state" in
         active) ;;
         *)
-            echo "qdlocker_session_healthy: qdwin-compositor.service is '$compositor_state' (want active)" >&2
+            echo "qdlocker_session_healthy: $QDWIN_COMPOSITOR_UNIT is '$compositor_state' (want active)" >&2
             return 1
             ;;
     esac
