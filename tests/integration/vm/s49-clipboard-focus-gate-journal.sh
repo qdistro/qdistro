@@ -35,6 +35,18 @@
 # Real chrome click-to-focus uses the same qdwin_shell_v1 set_keyboard_focus
 # request, so this exercises the production focus→clear path.
 #
+# CROSS-SILO DESTINATION = a SECOND tier-3 silo (user2), not the admin toplevel.
+# Tier3FocusIPC.injectFocus deliberately scopes injection to tier-3/4 handles
+# (_isTier3Handle) — the admin destination toplevel is NOT injectable, so the
+# test cannot drive a user1→admin focus move through this IPC (it returns
+# "handle=N is not a tier-3 toplevel"). That is a test-IPC limitation, NOT a
+# production gap: a real click focuses admin fine, and ClipboardGate's
+# cross-silo decision (_onSeatFocusChanged → _logFocusClear) fires for ANY
+# focus move that leaves the selection's source silo. We therefore drive the
+# cross-silo case as user1→user2 (both injectable tier-3 silos): it exercises
+# the same planFocusClear cross-silo branch and emits the same
+# CLIPBOARD_FOCUS_GATE line (src_silo=user1 dst_silo=user2).
+#
 # PASS strings MUST match the assert_output_contains lines in the bats
 # phase7-clipboard-focus-gate-journal @test block.
 
@@ -50,7 +62,7 @@ skip() { echo "SKIP: $*"; exit 0; }
 # EXIT trap — kill background source/silo processes on interrupt or bats
 # timeout so a half-finished run can't poison qdwin's secctx state for the
 # next test (same class as the s46-leaked-clipboard-source incident).
-ADMIN_TOPLEVEL_PID=""
+CROSS_PID=""
 SILO_A_PID=""
 SILO_B_PID=""
 SRC_PID=""
@@ -58,19 +70,19 @@ TRAP_FIRED=0
 cleanup() {
     [ "$TRAP_FIRED" -eq 1 ] && return 0
     TRAP_FIRED=1
-    for pid in "$ADMIN_TOPLEVEL_PID" "$SILO_A_PID" "$SILO_B_PID" "$SRC_PID"; do
+    for pid in "$CROSS_PID" "$SILO_A_PID" "$SILO_B_PID" "$SRC_PID"; do
         [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
     done
     sleep 0.5
-    for pid in "$ADMIN_TOPLEVEL_PID" "$SILO_A_PID" "$SILO_B_PID" "$SRC_PID"; do
+    for pid in "$CROSS_PID" "$SILO_A_PID" "$SILO_B_PID" "$SRC_PID"; do
         [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
         [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
     # Usernames, not UIDs — uid assignment can drift across VMs.
     pkill -u user1 -x weston-terminal 2>/dev/null || true
     pkill -u user1 -f qdistro-test-clipboard-source 2>/dev/null || true
-    pkill -u admin -x weston-terminal 2>/dev/null || true
-    rm -f /tmp/s49-admin.log /tmp/s49-silo-a.log /tmp/s49-silo-b.log \
+    pkill -u user2 -x weston-terminal 2>/dev/null || true
+    rm -f /tmp/s49-cross.log /tmp/s49-silo-a.log /tmp/s49-silo-b.log \
           /tmp/s49-src.log 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -104,6 +116,7 @@ qs_ipc() {
 # --- 2. tier3 install ran --------------------------------------------
 getent group qdistro-tier3 >/dev/null || skip "qdistro-tier3 group missing"
 id -u user1 >/dev/null 2>&1 || skip "silo user 'user1' missing"
+id -u user2 >/dev/null 2>&1 || skip "silo user 'user2' missing (cross-silo destination)"
 
 # --- 3. outer compositor + qdshell -----------------------------------
 ADMIN_UID=1000
@@ -138,7 +151,7 @@ else
     fail "no qdwin_shell_v1 bound-v log line in journal"
 fi
 
-# --- 5. spawn admin destination toplevel (the cross-silo focus target) ---
+# --- 5. journal cursor + tier-3 spawn helpers ------------------------
 journal_cursor() {
     journalctl --since=now -n0 --show-cursor 2>/dev/null \
         | awk -F': ' '/-- cursor:/ {print $2}'
@@ -153,31 +166,14 @@ journal_after() {
     fi
 }
 
-runuser -u admin -- env \
-    XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-    WAYLAND_DISPLAY=wayland-1 \
-    weston-terminal >/tmp/s49-admin.log 2>&1 &
-ADMIN_TOPLEVEL_PID=$!
-sleep 3
-
-ADMIN_TL_LINE=$(journal_after | grep -m1 -E 'qdwin: toplevel_added handle=[0-9]+ uid=1000' || true)
-ADMIN_HANDLE=$(echo "$ADMIN_TL_LINE" | grep -oE 'handle=[0-9]+' | grep -oE '[0-9]+' | head -1)
-if [ -n "$ADMIN_HANDLE" ]; then
-    pass "admin destination toplevel registered handle=$ADMIN_HANDLE"
-else
-    cat /tmp/s49-admin.log >&2 || true
-    fail "no admin toplevel_added log within 3s"
-fi
-
-# --- 6. spawn TWO tier-3 (user1) toplevels ---------------------------
-# Two same-silo windows so the negative control can change focus WITHIN
-# silo user1 (handle A → handle B) and prove no clear fires. spawn-tier3.sh
-# bridges a real weston-terminal toplevel through waypipe under uid user1,
-# tagged with wp_security_context_v1 so qdshell resolves silo=user1.
+# spawn-tier3.sh bridges a real weston-terminal toplevel through waypipe under
+# the given silo uid, tagged with wp_security_context_v1 so qdshell resolves
+# silo=<silo>. Generic over the silo so the same helper brings up the user1
+# source windows AND the user2 cross-silo destination.
 spawn_silo_terminal() {
-    local logf="$1"
+    local silo="$1" logf="$2"
     TIER3_NO_REAP=1 \
-    bash "$TIER3_DIR/spawn-tier3.sh" user1 -- weston-terminal >"$logf" 2>&1 &
+    bash "$TIER3_DIR/spawn-tier3.sh" "$silo" -- weston-terminal >"$logf" 2>&1 &
     echo $!
 }
 wait_bridge_ready() {
@@ -189,17 +185,40 @@ wait_bridge_ready() {
     done
     return 1
 }
+# Distinct toplevel handles qdshell observed for a given silo (deduped).
+silo_handles() {
+    local silo="$1"
+    journal_after \
+        | grep -oE "\[tier3\] toplevel observed silo=$silo secctx=qdistro\.tier3\.$silo handle=[0-9]+" \
+        | grep -oE 'handle=[0-9]+' | grep -oE '[0-9]+' | awk '!seen[$0]++'
+}
 
-SILO_A_PID=$(spawn_silo_terminal /tmp/s49-silo-a.log)
+# --- 5b. spawn the user2 cross-silo destination toplevel -------------
+# The Phase-A focus target: a SECOND tier-3 silo (user2). It must be a tier-3
+# toplevel (not the admin toplevel) so Tier3FocusIPC.injectFocus accepts it;
+# qdshell resolves it to silo=user2, making a user1→user2 focus move cross-silo.
+CROSS_PID=$(spawn_silo_terminal user2 /tmp/s49-cross.log)
+wait_bridge_ready /tmp/s49-cross.log "$CROSS_PID" || true
+sleep 5
+CROSS_HANDLE=$(silo_handles user2 | head -1)
+if [ -n "$CROSS_HANDLE" ]; then
+    pass "cross-silo (user2) destination toplevel registered handle=$CROSS_HANDLE"
+else
+    cat /tmp/s49-cross.log >&2 || true
+    fail "no [tier3] toplevel observed silo=user2 within 5s"
+fi
+
+# --- 6. spawn TWO tier-3 (user1) toplevels ---------------------------
+# Two same-silo windows so the negative control can change focus WITHIN
+# silo user1 (handle A → handle B) and prove no clear fires.
+SILO_A_PID=$(spawn_silo_terminal user1 /tmp/s49-silo-a.log)
 wait_bridge_ready /tmp/s49-silo-a.log "$SILO_A_PID" || true
-SILO_B_PID=$(spawn_silo_terminal /tmp/s49-silo-b.log)
+SILO_B_PID=$(spawn_silo_terminal user1 /tmp/s49-silo-b.log)
 wait_bridge_ready /tmp/s49-silo-b.log "$SILO_B_PID" || true
 sleep 5
 
 # Collect the two distinct user1 toplevel handles qdshell observed.
-mapfile -t SILO_HANDLES < <(journal_after \
-    | grep -oE '\[tier3\] toplevel observed silo=user1 secctx=qdistro\.tier3\.user1 handle=[0-9]+' \
-    | grep -oE 'handle=[0-9]+' | grep -oE '[0-9]+' | awk '!seen[$0]++')
+mapfile -t SILO_HANDLES < <(silo_handles user1)
 SILO_HANDLE_A="${SILO_HANDLES[0]:-}"
 SILO_HANDLE_B="${SILO_HANDLES[1]:-}"
 if [ -n "$SILO_HANDLE_A" ]; then
@@ -252,18 +271,21 @@ fi
 # PHASE A — cross-silo focus change MUST clear (CLIPBOARD_FOCUS_GATE)
 # ====================================================================
 A_CURSOR=$(journal_cursor)
-if [ -n "$ADMIN_HANDLE" ]; then
-    INJECT_A=$(qs_ipc call tier3focus injectFocus "$ADMIN_HANDLE" default)
-    echo "  (injectFocus → admin reply: $INJECT_A)" >&2
+if [ -n "$CROSS_HANDLE" ]; then
+    INJECT_A=$(qs_ipc call tier3focus injectFocus "$CROSS_HANDLE" default)
+    echo "  (injectFocus → user2 reply: $INJECT_A)" >&2
     sleep 2
 fi
 
-# The qdshell decision: focus crossed user1 → admin (cross-silo), so
+# The qdshell decision: focus crossed user1 → user2 (cross-silo), so
 # _onSeatFocusChanged → _logFocusClear emits CLIPBOARD_FOCUS_GATE with
-# verdict=deny reason=focus-cross-silo. Field order is the stable contract
-# the harness keys on.
+# verdict=deny reason=focus-cross-silo. Pin the EXACT silos (src_silo=user1,
+# dst_silo=user2) — not just "some cross-silo line" — so the assertion proves the
+# user1→user2 transition fired, not a stray gate event. The trailing space after
+# each silo name is the field separator in the Logger.i line, so it also keeps
+# user1/user2 from prefix-matching a hypothetical user10/user20.
 FOCUS_GATE_LINE=$(journal_after "$A_CURSOR" \
-    | grep -m1 -E 'CLIPBOARD_FOCUS_GATE .*src_silo=.*dst_silo=.*verdict=deny.*reason=focus-cross-silo' \
+    | grep -m1 -E 'CLIPBOARD_FOCUS_GATE .*src_silo=user1 .*dst_silo=user2 .*verdict=deny.*reason=focus-cross-silo' \
     || true)
 if [ -n "$FOCUS_GATE_LINE" ]; then
     pass "qdshell logged CLIPBOARD_FOCUS_GATE on cross-silo focus"
@@ -273,8 +295,9 @@ else
     fail "no CLIPBOARD_FOCUS_GATE deny line after cross-silo focus injection"
 fi
 
-# End-state the decision demands: the destination paste reads empty. Prefer a
-# real wl-paste from the admin (destination) seat; fall back to the IPC
+# End-state the decision demands: the seat selection is gone, so a paste reads
+# empty. The seat selection is shared, so reading it via the admin connection
+# is a faithful probe of the post-clear seat state; fall back to the IPC
 # selection-state probe when wl-paste isn't installed.
 if runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         WAYLAND_DISPLAY=wayland-1 sh -c 'command -v wl-paste' >/dev/null 2>&1; then
@@ -322,11 +345,15 @@ fi
 # logged. This proves same-silo paste keeps working (strict ≠ clear-on-any-
 # focus-change).
 if [ -z "$SILO_HANDLE_B" ]; then
-    # Only one user1 toplevel came up — can't drive a same-silo focus change.
-    # Don't fail the suite on the negative control; the primary gap (Phase A)
-    # is the load-bearing assertion. Log it loudly instead.
-    pass "same-silo focus change did NOT clear (skipped: second user1 toplevel unavailable)"
-    echo "  (note: SILO_HANDLE_B not observed; same-silo control not exercised)" >&2
+    # The second user1 toplevel is REQUIRED setup for the same-silo negative
+    # control — without it the control would not run. Fail loudly rather than
+    # emit a PASS-shaped line: a skipped negative control that still satisfies
+    # the bats `assert_output_contains "PASS: same-silo focus change did NOT
+    # clear"` would let the lane go green without ever proving same-silo paste
+    # survives (strict ≠ clear-on-any-focus-change). The two user1 windows come
+    # up reliably (proven on VM), so a missing one is a real failure to surface.
+    cat /tmp/s49-silo-b.log >&2 || true
+    fail "same-silo negative control could not run: second user1 toplevel (SILO_HANDLE_B) never observed"
 else
     kill -KILL "$SRC_PID" 2>/dev/null || true; wait "$SRC_PID" 2>/dev/null || true
     qs_ipc call tier3focus injectFocus "$SILO_HANDLE_A" default >/dev/null 2>&1 || true

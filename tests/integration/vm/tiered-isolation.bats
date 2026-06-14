@@ -761,10 +761,14 @@ setup() {
     # ClipboardGate._onSeatFocusChanged emits when focus crosses OUT of a
     # selection's source silo. A tier-3 (user1) silo owns the selection so
     # the source silo is KNOWN (an "unknown" source is never tracked and
-    # would never log the line). Phase A: user1 → admin focus change must log
-    # CLIPBOARD_FOCUS_GATE and leave the destination paste empty. Phase B:
-    # user1 → user1 (same silo) must NOT log a clear — proving strict mode
-    # still allows same-silo paste.
+    # would never log the line). Phase A: user1 → user2 focus change (a SECOND
+    # tier-3 silo) must log CLIPBOARD_FOCUS_GATE and leave the destination paste
+    # empty. (The cross-silo destination is a second silo rather than the admin
+    # toplevel because Tier3FocusIPC.injectFocus deliberately refuses non-tier3/4
+    # handles — the admin toplevel is not injectable; the production clear path
+    # is identical for any cross-silo focus move.) Phase B: user1 → user1 (same
+    # silo) must NOT log a clear — proving strict mode still allows same-silo
+    # paste.
     stage_vm_driver "s49-clipboard-focus-gate-journal.sh"
     vm_run "systemctl start qdistro-admin-broker.service && curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-clipboard-focus-gate-journal.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
     assert_success
@@ -774,7 +778,7 @@ setup() {
     assert_output_contains "PASS: outer admin compositor up"
     assert_output_contains "PASS: qdshell up"
     assert_output_contains "PASS: qdshell bound qdwin_shell_v1 at version >= 14"
-    assert_output_contains "PASS: admin destination toplevel registered handle="
+    assert_output_contains "PASS: cross-silo (user2) destination toplevel registered handle="
     assert_output_contains "PASS: silo toplevel registered silo=user1 handle="
     assert_output_contains "PASS: qdshell recorded selection with known source silo"
     assert_output_contains "PASS: qdshell logged CLIPBOARD_FOCUS_GATE on cross-silo focus"
