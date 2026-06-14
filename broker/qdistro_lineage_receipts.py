@@ -22,17 +22,25 @@ Trust split (matches the broker authority model and doc/lineage.md §Authority):
   central chain. The sidecar/manifest are the durable path; the xattr is an
   opportunistic local pointer that may not survive copies/moves/archives.
 
-Task 1 ships sidecar + export-manifest + xattr. git-trailer and upload-receipt
-are later milestones (the envelope/canonical-bytes contract here is shared).
+Sidecar + export-manifest + xattr + git-trailer surfaces are implemented (all
+share the envelope/canonical-bytes contract). The git-trailer helpers
+(:func:`append_git_trailer`/:func:`parse_git_trailer`) are PURE message
+transforms — there is no production commit chokepoint to wire them into yet (that
+needs a broker-owned git-commit action handler that records the commit activity +
+entity + edges + sealed receipt row and assembles the message before signing), so
+they ship as the reusable layer a future chokepoint will call. upload-receipt is
+the remaining later milestone.
 
 Style mirrors the other broker modules: plain functions, stdlib only, fail
 closed on anything malformed.
 """
 from __future__ import annotations
 
+import base64
 import errno
 import json
 import os
+import re
 from typing import Any
 
 from qdistro_lineage_store import RECEIPT_KINDS, RECEIPT_NAMES
@@ -58,6 +66,7 @@ MANIFEST_BASE_BYTES = 1 << 20        # 1 MiB base ...
 MANIFEST_PER_RECEIPT_BYTES = 1 << 16  # ... + 64 KiB per declared child
 MANIFEST_HARD_MAX_BYTES = 64 << 20   # absolute ceiling on a manifest read (bounds alloc)
 XATTR_MAX_BYTES = 60 << 10           # stay under the ~64 KiB Linux xattr cap
+GIT_TRAILER_MAX_VALUE_BYTES = 64 << 10  # cap a single trailer value before decode
 
 #: Required envelope keys (others are optional/reserved). ``artifact_digest`` may
 #: legitimately be ``None`` (a recorded-but-content-free entity), so it is
@@ -472,6 +481,132 @@ def _validate_manifest(manifest: Any, *, declared_cap_bytes: int | None = None
                 "child receipt chain_head differs from manifest chain_head"
             )
     return manifest
+
+
+# --- git trailer (commit-message receipt) ---------------------------------
+#
+# A ``Qdistro-Lineage`` git trailer carries the base64 of an envelope's canonical
+# bytes on ONE line, so it survives commit-message round-trips (rebases, tooling)
+# without whitespace/colon ambiguity. There is NO production commit chokepoint to
+# emit this yet (see module docstring) — these are the pure transforms a future
+# broker-owned commit handler will call. Like every surface, a parsed trailer is
+# NOT authority: it only means something after :func:`verify_against_store`.
+
+#: The stable trailer token (RECEIPT_NAMES['git-trailer']).
+GIT_TRAILER_TOKEN = RECEIPT_NAMES["git-trailer"]
+
+#: A strict ``token: value`` git-trailer line (no folded continuations, no exotic
+#: separators — we only need to recognise the simple block we and tools emit).
+_TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9-]+: .+$")
+
+
+def _normalize_newlines(message: str) -> str:
+    return message.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _final_paragraph(body: str) -> list[str]:
+    """The lines of the LAST blank-line-separated paragraph of ``body`` (which has
+    no trailing blank lines). ``body`` empty → ``[]``."""
+    if not body:
+        return []
+    lines = body.split("\n")
+    last_blank = -1
+    for i, ln in enumerate(lines):
+        if ln == "":
+            last_blank = i
+    return lines[last_blank + 1:]
+
+
+def _all_trailer_lines(lines: list[str]) -> bool:
+    """True iff ``lines`` is non-empty and every line is a strict trailer line."""
+    return bool(lines) and all(_TRAILER_LINE_RE.match(ln) for ln in lines)
+
+
+def append_git_trailer(message: str, envelope: dict[str, Any]) -> str:
+    """Append a ``Qdistro-Lineage`` trailer carrying ``envelope`` (validated with
+    ``expected_kind='git-trailer'``) to commit ``message``; return the new message.
+
+    The value is ``base64(canonical_bytes(envelope))`` — one line, no whitespace
+    or ``:`` ambiguity. CRLF/CR are normalised to LF; the result ends in exactly
+    one newline. Multiple ``Qdistro-Lineage`` trailers are allowed (a re-append on
+    a rebase/retry is fine — :func:`parse_git_trailer` + the store decide which is
+    authoritative). The trailer joins an existing final trailer block when one is
+    clearly present; otherwise it starts a fresh block after one blank line.
+
+    The trailer is NEVER authority on its own (it verifies only via
+    :func:`verify_against_store`); this helper just produces the portable surface."""
+    validate_envelope(envelope, expected_kind="git-trailer")
+    value = base64.b64encode(canonical_bytes(envelope)).decode("ascii")
+    trailer = f"{GIT_TRAILER_TOKEN}: {value}"
+    body = _normalize_newlines(message).rstrip("\n")
+    if not body.strip():
+        return trailer + "\n"
+    last = _final_paragraph(body)
+    # The final paragraph is the ONLY paragraph when no blank line precedes it.
+    is_only = "" not in body.split("\n")
+    # Join an EXISTING final trailer block (a body paragraph followed by a blank
+    # line then an all-trailer paragraph) directly. Otherwise — a lone subject, a
+    # prose final paragraph, or any message with no blank-line body/trailer
+    # boundary (is_only) — start a FRESH block after one blank line, so git's own
+    # parser also recognises the trailer (it needs the blank-line separation).
+    if _all_trailer_lines(last) and not is_only:
+        return body + "\n" + trailer + "\n"
+    return body + "\n\n" + trailer + "\n"
+
+
+def _decode_trailer_value(value: str) -> dict[str, Any] | None:
+    """Decode + validate one trailer value (base64 of a canonical git-trailer
+    envelope). Returns the envelope, or ``None`` if it is malformed in any way
+    (bad base64, non-JSON, duplicate keys, wrong schema/kind, oversized,
+    embedded whitespace) — a malformed trailer is never authority regardless."""
+    if not value or any(c.isspace() for c in value):
+        return None
+    if len(value) > GIT_TRAILER_MAX_VALUE_BYTES:
+        return None
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except ValueError:
+        return None
+    try:
+        env = _loads_strict(raw)
+        return validate_envelope(env, expected_kind="git-trailer")
+    except ReceiptError:
+        return None
+
+
+def parse_git_trailer(message: str) -> list[dict[str, Any]]:
+    """Return every structurally valid ``Qdistro-Lineage`` envelope in
+    ``message``'s final trailer block (tolerating multiple). Only the final
+    trailer block is scanned (a body line that happens to look like a trailer is
+    ignored). Empty list if NO ``Qdistro-Lineage`` trailer is present; but if one
+    or more ARE present and NONE decode validly, raises :class:`MalformedReceipt`
+    — so a caller that requires lineage never mistakes a tampered commit message
+    for "no lineage here" (the fail-closed direction). A returned envelope is
+    still not authority until :func:`verify_against_store` matches it to a sealed
+    row, so a mix of valid + malformed trailers returns just the valid ones.
+
+    A ``Qdistro-Lineage`` line is recognised even when the final paragraph also
+    carries a sibling NON-trailer line (e.g. ``git cherry-pick -x`` appends
+    ``(cherry picked from commit <sha>)`` into the trailer block) — git itself
+    still treats the trailer as present, so reporting it absent would be a
+    fail-OPEN. "Absent" therefore means strictly "no ``Qdistro-Lineage`` line in
+    the final paragraph"."""
+    body = _normalize_newlines(message).rstrip("\n")
+    last = _final_paragraph(body)
+    prefix = GIT_TRAILER_TOKEN + ": "
+    candidates = [ln[len(prefix):] for ln in last if ln.startswith(prefix)]
+    if not candidates:
+        return []
+    out: list[dict[str, Any]] = []
+    for val in candidates:
+        env = _decode_trailer_value(val)
+        if env is not None:
+            out.append(env)
+    if not out:
+        raise MalformedReceipt(
+            "Qdistro-Lineage trailer(s) present but none decoded to a valid receipt"
+        )
+    return out
 
 
 # --- verification against the central store --------------------------------

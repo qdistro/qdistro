@@ -7,6 +7,7 @@ export manifest with per-child chain_head equality, and verify-against-store.
 """
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
 import json
@@ -600,3 +601,162 @@ def test_read_xattr_eperm_surfaces(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getxattr", eperm)
     with pytest.raises(OSError):
         r.read_xattr(str(art))  # EPERM is a real signal, not "absent"
+
+
+# --- git trailer -----------------------------------------------------------
+
+
+def _gt(**kw):
+    return _env(kind="git-trailer", **kw)
+
+
+def test_git_trailer_round_trips_through_a_body():
+    env = _gt()
+    msg = "Fix the thing\n\nA longer body paragraph explaining why."
+    out = r.append_git_trailer(msg, env)
+    assert out.startswith(msg)
+    assert out.endswith("\n")
+    assert "\nQdistro-Lineage: " in out
+    parsed = r.parse_git_trailer(out)
+    assert parsed == [env]
+
+
+def test_git_trailer_subject_only_gets_blank_line_separator():
+    env = _gt()
+    out = r.append_git_trailer("Just a subject", env)
+    assert out == "Just a subject\n\n" + \
+        f"Qdistro-Lineage: {base64.b64encode(r.canonical_bytes(env)).decode()}\n"
+    assert r.parse_git_trailer(out) == [env]
+
+
+def test_git_trailer_empty_message_is_trailer_only():
+    env = _gt()
+    out = r.append_git_trailer("", env)
+    assert out == \
+        f"Qdistro-Lineage: {base64.b64encode(r.canonical_bytes(env)).decode()}\n"
+    assert r.parse_git_trailer(out) == [env]
+
+
+def test_git_trailer_joins_existing_trailer_block():
+    env = _gt()
+    msg = "Subject\n\nBody.\n\nCo-Authored-By: Someone <s@x>\nSigned-off-by: Me <m@x>"
+    out = r.append_git_trailer(msg, env)
+    # appended INTO the existing trailer block (no extra blank line before it)
+    assert "Signed-off-by: Me <m@x>\nQdistro-Lineage: " in out
+    assert r.parse_git_trailer(out) == [env]
+
+
+def test_git_trailer_multiple_are_all_parsed():
+    e1 = _gt(entity="file:one")
+    e2 = _gt(entity="file:two")
+    out = r.append_git_trailer(r.append_git_trailer("Subj", e1), e2)
+    parsed = r.parse_git_trailer(out)
+    assert parsed == [e1, e2]
+
+
+def test_git_trailer_absent_returns_empty():
+    assert r.parse_git_trailer("Subject\n\nbody, no trailers here") == []
+    assert r.parse_git_trailer("Co-Authored-By: x <x@y>") == []  # other token only
+
+
+def test_git_trailer_present_but_all_malformed_raises():
+    msg = "Subject\n\nQdistro-Lineage: not%%%valid%%%base64"
+    with pytest.raises(r.MalformedReceipt):
+        r.parse_git_trailer(msg)
+
+
+def test_git_trailer_mixed_valid_and_malformed_returns_valid():
+    env = _gt()
+    good = base64.b64encode(r.canonical_bytes(env)).decode()
+    msg = f"Subject\n\nQdistro-Lineage: !!!bad!!!\nQdistro-Lineage: {good}"
+    assert r.parse_git_trailer(msg) == [env]
+
+
+def test_git_trailer_valid_base64_non_json_is_malformed():
+    bad = base64.b64encode(b"not json at all").decode()
+    with pytest.raises(r.MalformedReceipt):
+        r.parse_git_trailer(f"S\n\nQdistro-Lineage: {bad}")
+
+
+def test_git_trailer_wrong_kind_is_malformed():
+    # a sidecar envelope (valid JSON, valid receipt) is NOT a git-trailer kind
+    sidecar = _env(kind="sidecar")
+    enc = base64.b64encode(r.canonical_bytes(sidecar)).decode()
+    with pytest.raises(r.MalformedReceipt):
+        r.parse_git_trailer(f"S\n\nQdistro-Lineage: {enc}")
+
+
+def test_git_trailer_oversize_value_is_malformed():
+    huge = "A" * (r.GIT_TRAILER_MAX_VALUE_BYTES + 1)
+    with pytest.raises(r.MalformedReceipt):
+        r.parse_git_trailer(f"S\n\nQdistro-Lineage: {huge}")
+
+
+def test_git_trailer_crlf_input_parses():
+    env = _gt()
+    out = r.append_git_trailer("Subject", env).replace("\n", "\r\n")
+    assert r.parse_git_trailer(out) == [env]
+
+
+def test_append_git_trailer_validates_envelope_kind():
+    with pytest.raises(r.MalformedReceipt):
+        r.append_git_trailer("S", _env(kind="sidecar"))  # wrong kind for trailer
+
+
+def test_git_trailer_body_line_lookalike_not_parsed_as_trailer():
+    # a body line that looks like our trailer but is NOT in the final block is
+    # ignored (only the final trailer block is scanned).
+    env = _gt()
+    enc = base64.b64encode(r.canonical_bytes(env)).decode()
+    msg = f"Subject\n\nQdistro-Lineage: {enc}\n\nThis is the real final paragraph."
+    assert r.parse_git_trailer(msg) == []
+
+
+def test_git_trailer_seal_and_verify_round_trip(store):
+    env = _gt()
+    store.record_receipt(entity=env["entity"], kind="git-trailer",
+                         locator=env.get("locator"),
+                         digest=env["artifact_digest"], payload=env)
+    store.record_entity(Entity(eid=env["entity"], kind="commit",
+                               digest=env["artifact_digest"]))
+    out = r.append_git_trailer("Commit subject", env)
+    [parsed] = r.parse_git_trailer(out)
+    assert r.verify_against_store(store, parsed) is True
+    # a tampered trailer parses but does not verify (no sealed row matches)
+    tampered = dict(parsed, locator="evil")
+    assert r.verify_against_store(store, tampered) is False
+
+
+def test_git_trailer_unsealed_does_not_verify(store):
+    env = _gt()
+    out = r.append_git_trailer("S", env)
+    [parsed] = r.parse_git_trailer(out)
+    assert r.verify_against_store(store, parsed) is False  # never sealed
+
+
+def test_git_trailer_parsed_despite_sibling_non_trailer_line():
+    # `git cherry-pick -x` appends "(cherry picked from commit <sha>)" — a
+    # non-trailer line — INTO the trailer block. git still recognises the
+    # Qdistro-Lineage trailer, so parse must NOT silently report it absent ([]).
+    env = _gt()
+    out = r.append_git_trailer("Subject", env).rstrip("\n")
+    out += "\n(cherry picked from commit abc1234def5678)\n"
+    assert r.parse_git_trailer(out) == [env]
+
+
+def test_git_trailer_sibling_line_with_only_malformed_raises():
+    # same shape but the lineage value is corrupt: present-but-malformed must
+    # raise (fail-closed), never be read as absent.
+    msg = "Subject\n\nQdistro-Lineage: !!!bad!!!\n(cherry picked from commit ab12)"
+    with pytest.raises(r.MalformedReceipt):
+        r.parse_git_trailer(msg)
+
+
+def test_git_trailer_append_starts_fresh_block_when_no_body_boundary():
+    # a multi-line body whose every line looks like a trailer but has NO blank-line
+    # boundary must still get a blank line before the appended trailer, else git's
+    # own parser would not see it as a trailer block.
+    env = _gt()
+    out = r.append_git_trailer("foo: bar\nbaz: qux", env)
+    assert "\n\nQdistro-Lineage: " in out
+    assert r.parse_git_trailer(out) == [env]
