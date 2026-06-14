@@ -37,6 +37,13 @@ include = ["qdlocker*"]
 qdlocker = [
     "qml/*.qml",
     "qml/qmldir",
+    # The `shim` QML module (Main.qml does `import shim`). Without these the
+    # installed wheel ships Main.qml but not its shim/ dependency, so QML load
+    # fails at runtime ("module shim is not installed") and qdlocker crash-loops.
+    # Explicit subdir globs — not `qml/**`, which setuptools handles
+    # inconsistently (see note above).
+    "qml/shim/*.qml",
+    "qml/shim/qmldir",
     "protocol/qdwin_locker_v1/*.py",
 ]
 
