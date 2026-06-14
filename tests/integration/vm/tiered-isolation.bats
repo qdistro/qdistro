@@ -207,6 +207,31 @@ setup() {
     assert_output_contains "PASS: §02/S3b tier-2 (root-launcher) permission-lineage register end-to-end"
 }
 
+@test "phase7-tier2-template-lineage-register: binding-resolved silo unit registers on the resolved identity (02/S3c)" {
+    # 02/S3c evidence: the tier-2-TEMPLATE half of permission lineage. A
+    # binding-resolved templated silo, launched through the PRODUCTION systemd
+    # unit (qdistro-tier2-silo@<silo> -> qdistro-tier2-silo-launch -> spawn-tier2
+    # root-launcher with TIER2_SILO set), registers its launch record keyed on
+    # the RESOLVED silo identity (not the container name). Reuses the wiretag
+    # probe's near-instant FROM-only recipe + promote. Companion to S3b (s61) and
+    # S3d (s60); the driver authors its own broker rule (idempotent w/ setup_file).
+    stage_vm_driver "s62-tier2-template-lineage-register.sh"
+    vm_run "curl -fsS -o /tmp/s62.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s62-tier2-template-lineage-register.sh && chmod +x /tmp/s62.sh && bash /tmp/s62.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-2 template stack (qdistro-template-build / silo unit + launch helper / podman / secctx-exec / outer compositor / broker audit db) not available on this VM"
+    fi
+    assert_output_contains "PASS: silo 's62silo' binding-resolved + promoted into the production tree"
+    # Load-bearing: the registration line only appears if the silo unit ran the
+    # root-launcher path and the broker RegisterLaunch re-verified the inner pid.
+    assert_output_contains "PASS: silo unit (root-launcher) logged the launch-record registration for silo="
+    # The S3c distinction: the record is keyed on the binding-resolved silo
+    # identity, NOT the container name.
+    assert_output_contains "PASS: lineage record keyed on the binding-resolved silo identity"
+    assert_output_contains "PASS: broker recorded qdistro.lineage.register:"
+    assert_output_contains "PASS: §02/S3c tier-2 (binding-resolved template) permission-lineage register end-to-end"
+}
+
 # --- §Phase-7 tier-3: cross-uid silos via waypipe ---------------------
 # spec/02 row 3. waypipe-client runs as admin (uid 1000), waypipe-server
 # runs as the silo uid; the two halves cross-uid bridge a wl_display
