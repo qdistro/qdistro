@@ -11,9 +11,12 @@
 # (qdistro.tier2, <container>/<app>, <launch-token>).
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
-# Runtime deps. weston pulls libpipewire-0_3 + wayland-backend +
-# pipewire-backend transitively on Tumbleweed; we list them
-# explicitly so a future weston rebuild on a slimmer base still works.
+# Runtime deps. weston pulls libpipewire-0_3 + pipewire-backend
+# transitively on Tumbleweed; we list them explicitly so a future weston
+# rebuild on a slimmer base still works. (The weston package may also ship
+# wayland-backend.so, but the inner nested weston intentionally does NOT
+# load it — see weston.ini; it would create a phantom host-output window
+# on the outer.)
 #
 # Debug packages (procps, wayland-utils) removed for attack surface
 # reduction. To debug, use: podman exec -it <ctr> zypper install procps
@@ -56,8 +59,10 @@ Categories=System;TerminalEmulator;
 Terminal=false
 DESK
 
-# Inner weston needs a config that loads qdwin-shell.so + the wayland
-# backend + the pipewire backend. We ship a minimal weston.ini.
+# Inner weston needs a config that loads qdwin-shell.so + the pipewire
+# backend (per-toplevel pixel feed; the publisher reaches the outer on
+# its own connection, so no wayland-backend — see weston.ini). We ship
+# a minimal weston.ini.
 COPY weston.ini /etc/xdg/weston/weston.ini
 
 # In-container entrypoint: starts inner weston, exec's the inner app

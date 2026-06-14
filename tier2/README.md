@@ -19,7 +19,7 @@ admin compositor (qdwin) ← outer
  │
  ▼ inside the container
  │
-[weston --shell=qdwin-shell.so --backend=wayland-backend.so,pipewire-backend.so]
+[weston --shell=qdwin-shell.so --backend=pipewire-backend.so]
  │       (env QDWIN_NESTED_MODE=1, QDWIN_OUTER_DISPLAY=wayland-secctx-NN)
  │
  │  inner weston binds qdwin_nested_manager_v1 on the outer; for each
@@ -47,7 +47,7 @@ broker clipboard/handoff gates like every other toplevel.
   podman images, one per workload. First workload:
   `qdistro/tier2-weston-terminal:latest` (the bats minimum).
 - `Containerfile.weston-terminal` — minimal openSUSE Tumbleweed base +
-  weston (with backend-pipewire + wayland-backend) + qdwin-shell.so +
+  weston (with backend-pipewire) + qdwin-shell.so +
   weston-terminal + the in-container entrypoint.
 - `entrypoint.sh` — runs inside the container. Starts inner weston in
   the foreground with the qdwin-shell.so plugin, exec's the guest app

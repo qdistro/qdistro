@@ -196,6 +196,37 @@ setup() {
     assert_output_contains "PASS: §6.8 S3b input-sink decoder + per-toplevel inner-seat replay end-to-end"
 }
 
+@test "s6.8-s3d-nested-input-route: pipewire-only nested has no phantom + pointer routes to proxy (F6#2)" {
+    # The F6#2 fix: nested weston is pipewire-only (no wayland-backend host-
+    # output window), and the OUTER pointer routing chain
+    # pick_view->track_focus->active_input_proxy->QDNI-button actually fires
+    # (S3d drives the real path, unlike the S3b synthetic burst).
+    vm_run "bash /root/s3d-nested-input-route.sh 2>/dev/null"
+    assert_success
+    assert_output_contains "PASS: pipewire-only nested weston publisher mode ready"
+    assert_output_contains "PASS: publisher bound qdwin_nested_manager_v1 on outer"
+    assert_output_contains "PASS: outer received advertise + created nested proxy"
+    assert_output_contains "PASS: no phantom host-output toplevel from the nested publisher"
+    assert_output_contains "PASS: S3d route-test — pick_view resolved to the proxy + active_input_proxy armed"
+    assert_output_contains "PASS: inner weston decoded the ROUTED QDNI button (press + release)"
+    assert_output_contains "PASS: §6.8 S3d nested-proxy input routing + no-phantom end-to-end"
+}
+
+@test "s6.8-s3e-nested-pending-unpickable: pending proxy stays input-transparent through bind_proxy_pixels (F6#2)" {
+    # The broker boundary: a PENDING (unapproved) nested proxy must NOT be
+    # pickable even after the pixelfeed binds a (default-full-input) surface.
+    # Mechanism A defers the curtain->pixel swap until allow; the empty-input
+    # curtain stays the active view, so pick_view never returns the proxy.
+    vm_run "bash /root/s3e-nested-pending-unpickable.sh 2>/dev/null"
+    assert_success
+    assert_output_contains "PASS: pipewire-only nested weston publisher mode ready"
+    assert_output_contains "PASS: outer created a PENDING nested proxy (broker-required)"
+    assert_output_contains "PASS: no phantom host-output toplevel"
+    assert_output_contains "PASS: bind_proxy_pixels while pending was DEFERRED (pixel feed stashed)"
+    assert_output_contains "PASS: pending nested proxy is NOT input-pickable (pick_view skips it)"
+    assert_output_contains "PASS: §6.8 S3e pending nested proxy stays input-transparent through bind"
+}
+
 @test "s6.8-s4-nested-broker-gate: allow + deny verdicts gate the proxy lifecycle" {
     skip "$SKIP_LEGACY_NESTED_QDSHELL"
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s24-nested-broker-gate.sh 2>/dev/null"

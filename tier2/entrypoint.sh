@@ -28,9 +28,10 @@ fi
 # The XDG runtime dir from the host has the outer wayland socket
 # (e.g. wayland-1 or wayland-secctx-NN). The inner weston wants its
 # own server socket name; we use $INNER_SOCKET inside the same
-# runtime dir. Inner weston's WAYLAND_DISPLAY points at the OUTER
-# (so qdwin-shell.so's nested-mode publisher connects there), the
-# inner app's WAYLAND_DISPLAY points at the INNER.
+# runtime dir. qdwin-shell.so's nested-mode publisher reaches the OUTER
+# over its OWN wl_display connection to $QDWIN_OUTER_DISPLAY (not via a
+# wayland-backend — the inner weston runs a pipewire-only backend, see
+# weston.ini). The inner app's WAYLAND_DISPLAY points at the INNER.
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
     log "FATAL: XDG_RUNTIME_DIR not set"
     exit 2
