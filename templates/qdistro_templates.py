@@ -593,6 +593,29 @@ def _stat_fstype(path: str) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+#: btrfs lives in /usr/sbin, which is NOT on the default PATH of non-root users.
+#: The silo promote (create_state_tree) and the launch-anchor resolver
+#: (qdistro_state_snapshot._materialize) both run AS ADMIN, so a plain
+#: ``shutil.which("btrfs")`` returns None there and the btrfs subvolume mechanism
+#: would silently degrade to a plain-directory ``copy`` snapshot on a real btrfs
+#: install. Resolve robustly: PATH first, then the standard sbin locations.
+_BTRFS_SBIN_FALLBACKS = ("/usr/sbin/btrfs", "/sbin/btrfs", "/usr/local/sbin/btrfs")
+
+
+def resolve_btrfs() -> str | None:
+    """Absolute path to the ``btrfs`` CLI, or None if genuinely absent. Unlike
+    ``shutil.which`` this also checks the standard sbin locations, so the
+    as-admin promote / resolve paths find it even though /usr/sbin is off their
+    PATH (else the per-silo btrfs subvolume snapshot never engages)."""
+    found = shutil.which("btrfs")
+    if found:
+        return found
+    for cand in _BTRFS_SBIN_FALLBACKS:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def create_state_tree(state_path: str, mode: int = 0o700) -> str:
     """Create ``state_path`` as a btrfs subvolume when the filesystem
     supports it (btrfs CLI present and the parent is btrfs), else a plain
@@ -618,7 +641,7 @@ def create_state_tree(state_path: str, mode: int = 0o700) -> str:
         return mechanism
 
     mechanism = "directory"
-    btrfs = shutil.which("btrfs")
+    btrfs = resolve_btrfs()
     if btrfs and _stat_fstype(parent) == "btrfs":
         rc = subprocess.run([btrfs, "subvolume", "create", state_path],
                             capture_output=True, text=True)

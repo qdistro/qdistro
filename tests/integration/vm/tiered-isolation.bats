@@ -232,6 +232,32 @@ setup() {
     assert_output_contains "PASS: §02/S3c tier-2 (binding-resolved template) permission-lineage register end-to-end"
 }
 
+@test "phase7-tier2-template-snapshot-e2e: launch flips a generation and takes a real btrfs pre-activation snapshot (05/B#5)" {
+    # 05/B#5 (D9): the spawn -> pre-activation SNAPSHOT -> podman-run launch path
+    # on REAL btrfs. Promotes gen1 (first activation, no snapshot), then a
+    # DISTINCT gen2; the flip must take a real btrfs read-only subvolume snapshot
+    # of the outgoing state via the production launch anchor
+    # (qdistro_resolve_binding) before the container runs. Backs the silos dir
+    # with a btrfs loopback when the VM root isn't btrfs. This is the suite that
+    # surfaced + validates the resolve_btrfs() fix (btrfs is off the as-admin
+    # PATH, so the subvolume mechanism had silently degraded to copy).
+    stage_vm_driver "s64-tier2-template-snapshot-e2e.sh"
+    vm_run "curl -fsS -o /tmp/s64.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s64-tier2-template-snapshot-e2e.sh && chmod +x /tmp/s64.sh && bash /tmp/s64.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "tier-2 template stack / mkfs.btrfs / btrfs subvolume support not available on this VM"
+    fi
+    assert_output_contains "PASS: silo state created as a btrfs subvolume (mechanism=subvolume)"
+    assert_output_contains "PASS: gen2 activation flipped the marker"
+    # Load-bearing: the marker only flips AFTER the pre-activation snapshot
+    # succeeds, so these prove the launch path took a real btrfs snapshot.
+    assert_output_contains "PASS: launch path logged a pre-activation snapshot with mechanism=subvolume"
+    assert_output_contains "PASS: launch path emitted template.state_snapshot.created (result=created, mechanism=subvolume)"
+    assert_output_contains "PASS: pre-activation snapshot is a read-only btrfs subvolume"
+    assert_output_contains "PASS: gen2 podman container ran"
+    assert_output_contains "PASS: §05/B#5 tier-2-template spawn -> pre-activation snapshot -> podman-run end-to-end (real btrfs)"
+}
+
 # --- §Phase-7 tier-3: cross-uid silos via waypipe ---------------------
 # spec/02 row 3. waypipe-client runs as admin (uid 1000), waypipe-server
 # runs as the silo uid; the two halves cross-uid bridge a wl_display

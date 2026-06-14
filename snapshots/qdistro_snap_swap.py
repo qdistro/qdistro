@@ -200,7 +200,17 @@ def _materialize_clone(snapshot_path: str, temp_path: str,
 
 def _which(name: str) -> str | None:
     import shutil
-    return shutil.which(name)
+    found = shutil.which(name)
+    if found:
+        return found
+    # btrfs lives in /usr/sbin, which is off the default non-root PATH; the
+    # per-user rollback runs as the silo user / admin, so also check the sbin
+    # locations (else a btrfs subvolume rollback silently can't find the tool).
+    if name == "btrfs":
+        for cand in ("/usr/sbin/btrfs", "/sbin/btrfs", "/usr/local/sbin/btrfs"):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    return None
 
 
 def _verify_clone(temp_path: str) -> None:

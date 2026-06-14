@@ -266,3 +266,16 @@ def test_exchange_method_used_when_supported(tmp_path):
     # already excludes a host whose libc lacks renameat2.
     assert result["method"] == "exchange"
     assert _read_sentinel(state) == "A"
+
+
+def test_which_btrfs_sbin_fallback(monkeypatch):
+    """snap_swap._which must find btrfs in /usr/sbin even when it is off PATH
+    (the per-user rollback runs as the silo user / admin, whose PATH lacks
+    /usr/sbin)."""
+    import qdistro_snap_swap as qsw
+    monkeypatch.setattr("shutil.which", lambda n: None)
+    monkeypatch.setattr(qsw.os.path, "isfile", lambda p: p == "/usr/sbin/btrfs")
+    monkeypatch.setattr(qsw.os, "access", lambda p, m: p == "/usr/sbin/btrfs")
+    assert qsw._which("btrfs") == "/usr/sbin/btrfs"
+    # a non-btrfs tool gets no sbin fallback (which() None -> None).
+    assert qsw._which("definitely-not-a-real-tool-xyz") is None

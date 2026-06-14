@@ -452,3 +452,31 @@ def test_validate_binding_rejects_control_char_state_path():
     }
     with pytest.raises(qt.TemplateError, match="single line|control"):
         qt.validate_binding(binding)
+
+
+# --------------------------------------------------------------------------
+# resolve_btrfs() — btrfs lives in /usr/sbin, OFF the default non-root PATH, but
+# the as-admin promote (create_state_tree) + launch-anchor resolver
+# (qdistro_state_snapshot._materialize) must still find it, else the per-silo
+# btrfs subvolume snapshot silently degrades to a plain-directory `copy`.
+# --------------------------------------------------------------------------
+
+def test_resolve_btrfs_prefers_path(monkeypatch):
+    monkeypatch.setattr(qt.shutil, "which",
+                        lambda n: "/opt/bin/btrfs" if n == "btrfs" else None)
+    assert qt.resolve_btrfs() == "/opt/bin/btrfs"
+
+
+def test_resolve_btrfs_falls_back_to_sbin_when_off_path(monkeypatch):
+    # The exact bug: admin's PATH lacks /usr/sbin, so which() is None, but the
+    # binary is at /usr/sbin/btrfs and must still be resolved.
+    monkeypatch.setattr(qt.shutil, "which", lambda n: None)
+    monkeypatch.setattr(qt.os.path, "isfile", lambda p: p == "/usr/sbin/btrfs")
+    monkeypatch.setattr(qt.os, "access", lambda p, m: p == "/usr/sbin/btrfs")
+    assert qt.resolve_btrfs() == "/usr/sbin/btrfs"
+
+
+def test_resolve_btrfs_none_when_genuinely_absent(monkeypatch):
+    monkeypatch.setattr(qt.shutil, "which", lambda n: None)
+    monkeypatch.setattr(qt.os.path, "isfile", lambda p: False)
+    assert qt.resolve_btrfs() is None

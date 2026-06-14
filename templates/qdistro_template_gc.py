@@ -410,8 +410,7 @@ def _collect_state_snapshots(layout: qt.Layout, now: float,
 
 
 def _rm_snapshot_payload(path: str) -> None:
-    btrfs = subprocess.run(["sh", "-c", "command -v btrfs"],
-                           capture_output=True, text=True).stdout.strip()
+    btrfs = qt.resolve_btrfs()
     if btrfs:
         rc = subprocess.run([btrfs, "subvolume", "delete", path],
                             capture_output=True, text=True)

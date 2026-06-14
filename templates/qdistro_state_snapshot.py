@@ -92,7 +92,7 @@ def _materialize(state_path: str, dest: str, mechanism: str) -> None:
     ``dest``. subvolume → RO btrfs snapshot; directory → cp -a reflink copy
     (the honest ``mechanism = "copy"`` marker is recorded by the caller)."""
     if mechanism == "subvolume":
-        btrfs = shutil.which("btrfs")
+        btrfs = qt.resolve_btrfs()
         if not btrfs:
             raise StateSnapshotError(
                 "state mechanism is subvolume but the btrfs CLI is absent")
@@ -301,7 +301,7 @@ def _write_snapshot_pin(layout, template, outgoing, silo, snap_id, now) -> None:
 
 def _rm_snapshot_payload(path: str) -> None:
     """Remove a snapshot payload (RO subvolume or copied dir)."""
-    btrfs = shutil.which("btrfs")
+    btrfs = qt.resolve_btrfs()
     if btrfs:
         rc = subprocess.run([btrfs, "subvolume", "delete", path],
                             capture_output=True, text=True)
