@@ -135,9 +135,11 @@ fi
 # canonical injector is `freerdp` /v: with `--keys: ...` but that's
 # brittle. Operator can override with TIER2_S33_INJECT="<cmd>" env.
 INJECT_CMD="${TIER2_S33_INJECT:-}"
+INJECT_IS_DEFAULT_CLICK=0
 if [ -z "$INJECT_CMD" ]; then
     if command -v ydotool >/dev/null 2>&1; then
         INJECT_CMD="ydotool click 0xC0"   # left button down+up
+        INJECT_IS_DEFAULT_CLICK=1
     elif command -v wtype >/dev/null 2>&1; then
         # wtype is keyboard-only; use it as a fallback that still
         # demonstrates the input path (the bats comment block
@@ -146,23 +148,88 @@ if [ -z "$INJECT_CMD" ]; then
     fi
 fi
 
-BUTTON_LINE=""
-if [ -n "$INJECT_CMD" ]; then
-    # ydotoold listens on the non-default $RUNTIME_DIR/ydotool.sock (see
-    # its --socket-path in install-deps.sh); without YDOTOOL_SOCKET the
-    # ydotool client probes the default ~/.ydotool_socket and fails to
-    # connect (rc=2), so no button is ever injected and the test below
-    # misreports it as a forwarding regression. Sibling injector drivers
-    # (s60, s103) set this too.
+# ydotoold listens on the non-default $RUNTIME_DIR/ydotool.sock (see its
+# --socket-path in install-deps.sh); without YDOTOOL_SOCKET the ydotool
+# client probes the default ~/.ydotool_socket and fails to connect (rc=2),
+# so no button is ever injected and the test below misreports it as a
+# forwarding regression. Sibling injector drivers (s60, s103) set this too.
+inject_as_admin() {
     runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
         WAYLAND_DISPLAY=wayland-1 \
-        YDOTOOL_SOCKET="$RUNTIME_DIR/ydotool.sock" $INJECT_CMD >/dev/null 2>&1 &
+        YDOTOOL_SOCKET="$RUNTIME_DIR/ydotool.sock" "$@" >/dev/null 2>&1
+}
+
+button_observed() {
+    journalctl --after-cursor="$CURSOR" 2>/dev/null \
+        | grep -m1 -E "qdwin/nested: (button|key) handle=$HANDLE" || true
+}
+
+# Strict oracle for the default pointer-click sweep: a synthetic pointer click
+# must prove a forwarded *button*. The broad button_observed() above also
+# accepts a "key handle=" line, but the wrapper explicitly allows optional
+# S3B/S3C keyboard activity in this scenario, so a stray key event could
+# satisfy the sweep and report a pointer-button PASS without a button ever
+# landing on the proxy. The click path therefore requires "button handle=".
+pointer_button_observed() {
+    journalctl --after-cursor="$CURSOR" 2>/dev/null \
+        | grep -m1 -E "qdwin/nested: button handle=$HANDLE" || true
+}
+
+BUTTON_LINE=""
+if [ "$INJECT_IS_DEFAULT_CLICK" -eq 1 ]; then
+    # POINTER WARP BEFORE CLICK (the actual phase7-tier2-input fix):
+    # a bare `ydotool click` injects a button at wherever the synthetic
+    # pointer happens to sit — by default (0,0), which is over the qdshell
+    # top bar / empty desktop, NOT the proxied tier-2 toplevel. qdwin only
+    # encodes a QDNI_EVENT_BUTTON for the nested input-sink when the button
+    # lands on the proxy surface, so without first positioning the pointer
+    # over the proxy no "qdwin/nested: button handle=N" line is ever
+    # emitted and the run is misread as a forwarding regression.
+    #
+    # The qdwin-bystander request_focus path the header comment alludes to
+    # is NOT usable here: with qdshell already running, qdwin-bystander
+    # fails to bind qdwin_shell_v1 ("shell role already claimed" — see the
+    # note in s48-focus-aware-clear.sh), so it cannot stand in to focus the
+    # proxy. The journal "qdwin/nested-proxy: created handle=" line carries
+    # no geometry, so the proxy's exact rect cannot be queried either.
+    #
+    # We therefore follow the established s103-launcher-foot-roundtrip
+    # idiom: `ydotool mousemove --absolute` the pointer onto the proxy,
+    # then `ydotool click`, using the journal "button handle=$HANDLE" line
+    # as the success oracle. The freshly-mapped chromed proxy occupies a
+    # large central region of the default 1280x800 test output (see
+    # scripts/vm/spin-test-vm-gui.sh), so we sweep a few center-biased
+    # hit-points (window chrome/edges and scale/theme shift the exact rect)
+    # and stop at the first that lands a button on the proxy.
+    CANDIDATES=("640 400" "640 300" "500 350" "780 450" "400 250")
+    for xy in "${CANDIDATES[@]}"; do
+        read -r CX CY <<<"$xy"
+        inject_as_admin ydotool mousemove --absolute -x "$CX" -y "$CY" || true
+        sleep 0.3
+        # $INJECT_CMD is a multi-word command (e.g. "ydotool click 0xC0");
+        # intentional word-splitting, as in the original driver.
+        # shellcheck disable=SC2086
+        inject_as_admin $INJECT_CMD || true
+
+        deadline=$(( $(date +%s) + 4 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            BUTTON_LINE=$(pointer_button_observed)
+            [ -n "$BUTTON_LINE" ] && break
+            sleep 0.5
+        done
+        [ -n "$BUTTON_LINE" ] && break
+    done
+elif [ -n "$INJECT_CMD" ]; then
+    # Operator override ($TIER2_S33_INJECT) or the wtype keyboard fallback:
+    # run as-is (no pointer warp — wtype is keyboard-only and an override
+    # owns its own positioning) and wait for the button/key oracle.
+    # shellcheck disable=SC2086  # intentional word-splitting of $INJECT_CMD
+    inject_as_admin $INJECT_CMD &
     INJECT_PID=$!
 
     deadline=$(( $(date +%s) + 8 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        BUTTON_LINE=$(journalctl --after-cursor="$CURSOR" 2>/dev/null \
-            | grep -m1 -E "qdwin/nested: (button|key) handle=$HANDLE" || true)
+        BUTTON_LINE=$(button_observed)
         [ -n "$BUTTON_LINE" ] && break
         sleep 0.5
     done
