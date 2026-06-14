@@ -236,9 +236,17 @@ fi  # end stages 4-5 (skipped in run-golden mode)
 
 # Stage 6: verify the session came up.
 # wayland-1 is the core "compositor came up" signal — fatal on miss.
-# qdshell ctrl-socket + qdlocker.sock are warn-only (the qdlocker bug
-# is still in flight in the qdlocker repo and qdshell may not have
-# bound the ctrl-socket yet at this exact moment).
+# qdshell ctrl-socket + qdlocker.sock are warn-only. qdshell may not have
+# bound the ctrl-socket yet at this exact moment. qdlocker.sock is created by
+# a successfully running qdlocker by default (QDLOCKER_CTRL_SOCKET=1); it is
+# expected to be ABSENT on this lxqt/labwc admin-test harness because qdlocker
+# only runs inside the qdwin compositor session — without qdwin's
+# qdwin_locker_v1 global it retry-crashes (by design) before creating its ctrl
+# socket. The /etc/qdistro/locker-ctrl-introspection marker gates only the
+# diagnostic commands (status/unlock-result/prompt-text) on that socket, not
+# the socket itself or the production `lock` command. So distinguish: socket
+# absent + qdlocker not active = expected here; qdlocker active + socket
+# missing = a real ctrl-socket regression.
 sleep 3
 WAYLAND_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/wayland-1 ] && echo yes || echo no" 2>/dev/null | tail -1)
 if [ "${WAYLAND_OK:-no}" != "yes" ]; then
@@ -258,7 +266,17 @@ LOCKER_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/qdlocker.sock ] && 
 if [ "${LOCKER_OK:-no}" = "yes" ]; then
     log "PASS: qdlocker.sock present"
 else
-    log "WARN: qdlocker.sock missing (known qdlocker env bug; fix in flight)"
+    # Don't flat-normalize the absence: an absent socket is expected only when
+    # qdlocker isn't running (no qdwin session on this harness). If qdlocker is
+    # active but the socket is missing, that's a real ctrl-socket regression.
+    # is-active returns nonzero for an inactive/failed unit; neutralize so the
+    # substitution doesn't trip set -e/pipefail before we classify the state.
+    LOCKER_STATE=$("$SCRIPT_DIR/vm-exec" "$VM" 'runuser -l admin -c "systemctl --user is-active qdlocker.service"' 2>/dev/null | tr -d '\r' | tail -1 || true)
+    if [ "${LOCKER_STATE:-}" = "active" ]; then
+        log "WARN: qdlocker.sock missing though qdlocker.service is active — possible ctrl-socket regression (QDLOCKER_CTRL_SOCKET leak / bad XDG_RUNTIME_DIR / bind failure)"
+    else
+        log "WARN: qdlocker.sock absent (expected on this lxqt harness: qdlocker.service is '${LOCKER_STATE:-unknown}', no qdwin compositor session to bind qdwin_locker_v1; introspection marker gates only status/unlock-result/prompt-text)"
+    fi
 fi
 
 # Success: emit the VM name FIRST, then mark SPUN_OK so the EXIT trap won't tear
