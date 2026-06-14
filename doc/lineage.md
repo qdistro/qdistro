@@ -215,7 +215,13 @@ Signed commits and the central store provide the integrity story.
 
 ## Open Decisions
 
-- Verification-key custody for tamper-evident logs.
+- Verification-key custody for tamper-evident logs. **v1 decision: hash-chain
+  only.** The seal is `H(prev||table||row)`, not a signature; `verify_chain`
+  accepts an off-host `expected_head` pinned out of band by the operator, which is
+  the honest guarantee without a key-custody scheme. Receipt envelopes reserve
+  `signature_algo`/`key_id`/`signature` (null) so a real signing key can be added
+  later without a format break. Revisit real signing keys once a custody design
+  (where the head/key lives so it survives host compromise) is chosen.
 - Exact SQLite schema and migration strategy for the logical store above.
 - Whether qdistro uses in-toto envelopes directly for portable attestations or
   only for exported artifacts.
