@@ -39,9 +39,12 @@ qdlocker_ctrl status
 ### Step 2 — kill qdlocker while locked
 
 ```bash
+# `runuser -l admin -c` (login shell) is required: a bare `runuser -u admin --
+# systemctl --user` lacks XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS, so the
+# user-manager lookup fails (rc=1) and the kill is a SILENT no-op.
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -u admin -- systemctl --user kill --signal=KILL qdlocker.service'
-sleep 2
+  'runuser -l admin -c "systemctl --user kill --signal=KILL qdlocker.service"'
+sleep 3
 qdwin_screenshot /tmp/qdlocker-08-step2-locker-dead.png
 ```
 
