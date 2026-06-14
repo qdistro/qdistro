@@ -500,8 +500,8 @@ cmd_lease_spawn_labels() {
 
 cmd_lease_sweep() {
     # Drive the REAL daemon-side TTL-lease machinery against real podman:
-    # _SystemOps.disp_lease_candidates (real `podman ps` label read, incl. the
-    # `<no value>` absent-label sentinel) + qdistro_disposables.lease_sweep_targets
+    # _SystemOps.disp_lease_candidates (real `podman ps --format json` label read,
+    # where an absent label is None) + qdistro_disposables.lease_sweep_targets
     # + _SiloStore.sweep_expired_leases -> dispose() -> real `podman rm -f`. The
     # host fake-ops cannot prove the podman label parsing or the real rm.
     clean_disp
@@ -553,14 +553,17 @@ exp, fresh, nolease, notoken, forged = sys.argv[1:6]
 ops = M._SystemOps()
 
 # Real podman label read: every labelled fixture is enumerated; the candidate
-# dict carries the raw label strings (absent labels come back as '<no value>').
+# dict carries the raw label values (an absent label comes back as None, since
+# disp_lease_candidates now parses `podman ps --format json` where an absent
+# label is null -> None, not the old Go-template '<no value>'/'' sentinel).
 cands = {c["name"]: c for c in ops.disp_lease_candidates()}
 for n in (exp, fresh, nolease, notoken, forged):
     assert n in cands, f"{n!r} not enumerated by disp_lease_candidates: {list(cands)}"
-# podman renders an absent {{.Label "x"}} as an EMPTY string (some versions emit
-# the literal '<no value>'); parse_lease_seconds maps both to None -> survive.
-assert cands[nolease]["ttl"] in ("", "<no value>"), cands[nolease]
-assert cands[notoken]["token"] in ("", "<no value>"), cands[notoken]
+# An absent label is None off the json read (older Go-template reads emitted ''
+# or the literal '<no value>'); parse_lease_seconds maps all three to None ->
+# survive. Accept every shape so the probe is robust across podman versions.
+assert cands[nolease]["ttl"] in (None, "", "<no value>"), cands[nolease]
+assert cands[notoken]["token"] in (None, "", "<no value>"), cands[notoken]
 print("ENUM_OK")
 
 # Drive the real store sweep (real dispose -> real podman rm). now() is live, so
@@ -572,7 +575,7 @@ print("SWEEP_OK")
 PY
 )
     echo "$py_out" >&2
-    echo "$py_out" | grep -q ENUM_OK  || fail lease-sweep "disp_lease_candidates did not enumerate the fixtures / parse the <no value> labels"
+    echo "$py_out" | grep -q ENUM_OK  || fail lease-sweep "disp_lease_candidates did not enumerate the fixtures / parse the absent (None) labels"
     echo "$py_out" | grep -q SWEEP_OK || fail lease-sweep "sweep_expired_leases did not reap EXACTLY the expired well-formed disposable"
     pass "lease sweep enumerated by label, reaped only the expired well-formed disposable"
 
