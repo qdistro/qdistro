@@ -40,6 +40,18 @@ SILOS_YAML="/etc/qdistro/silos.yaml"
 STATE_PATH_DEFAULT="/var/lib/qdistro/silos/$SILO/state"
 PROFILE="/home/admin/profile"      # the chromium profile, inside the state bind
 
+# Broker spawn gate. Since edb7f32 ("require broker allow for tier2 spawns") the
+# silo spawn is default-deny: spawn-tier2 computes the action
+# qdistro.tier2.spawn:<workload>/<app> and refuses unless a rule allows it. The
+# silo's launch argv is ["sleep","infinity"] (see _silos_yaml_edit), so APP_NAME
+# is "sleep" and the action is qdistro.tier2.spawn:browser/sleep. Author a
+# test-owned allow rule (root, in provision-silo; removed in deprovision-silo),
+# mirroring tier2-silo-secctx-wiretag-probe.sh. The gate runs AS ADMIN under the
+# root-launcher, so a uid-unscoped action rule matches.
+RULE_DIR=/etc/qdistro/rules.d
+RULE_FILE="$RULE_DIR/zz-silo-browserdemo-allow.yaml"
+SPAWN_ACTION="qdistro.tier2.spawn:$WORKLOAD/sleep"
+
 # The template CLIs read their POLICY tree from QDISTRO_ETC_DIR but write the
 # binding/generations/pins to the real (admin-owned) /var/lib/qdistro. The real
 # /etc/qdistro/templates is root-owned 0755 (admin cannot write the per-build
@@ -71,6 +83,16 @@ UA_BASE="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1 ${2:-}"; exit 1; }
+
+# CheckPermission as the admin uid (1000) — the identity the root-launcher drops
+# the spawn-tier2 broker gate to. Used to confirm the test-owned allow rule loaded.
+broker_check_admin() {
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        dbus-send --system --print-reply=literal \
+        --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.CheckPermission \
+        "string:$1" "dict:string:string:" 2>/dev/null | tr -d ' \t\n'
+}
 
 # Resolve the template CLIs: installed wrappers (VM) else in-tree (dev).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -448,13 +470,39 @@ sys.exit(0 if s.connect_ex(('127.0.0.1',$LOGIN_PORT))==0 else 1)" \
     done
     systemctl is-active --quiet qdistro-session-manager.service \
         || fail provision-silo "session manager not active after restart"
+
+    # Broker: allow the silo spawn gate so the launch path can create the
+    # qdistro-silo-browserdemo container (default-deny since edb7f32). Mirrors
+    # tier2-silo-secctx-wiretag-probe.sh: write a test-owned allow rule, reload
+    # the broker, and confirm CheckPermission flips to allow (as admin, the uid
+    # the root-launcher runs the gate as) before any scenario launches the silo.
+    install -d -m 0755 "$RULE_DIR"
+    cat >"$RULE_FILE" <<EOF
+# Test-authored (templates-browser): allow the tier-2 browser silo spawn so the
+# browser-rollback demo can drive the real launch path. Removed in deprovision.
+- name: silo-browserdemo-allow
+  decision: allow
+  match:
+    action: $SPAWN_ACTION
+EOF
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    local reply=""
+    for i in $(seq 1 20); do
+        reply=$(broker_check_admin "$SPAWN_ACTION")
+        [ "$reply" = "allow" ] && break
+        sleep 0.25
+    done
+    [ "$reply" = "allow" ] \
+        || fail provision-silo "broker did not load the silo allow rule (CheckPermission='$reply' for $SPAWN_ACTION)"
+
     pass "provision-silo"
 }
 
 scenario_deprovision_silo() {
     [ "$(id -u)" = 0 ] || fail deprovision-silo "must run as root"
     systemctl stop fp2-login.service 2>/dev/null || true
-    rm -f /etc/systemd/system/fp2-login.service /usr/local/bin/podman
+    rm -f /etc/systemd/system/fp2-login.service /usr/local/bin/podman "$RULE_FILE"
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     systemctl stop qdistro-tier2-silo@"$SILO".service 2>/dev/null || true
     systemctl stop qdistro-session-manager.service 2>/dev/null || true
