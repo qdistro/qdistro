@@ -27,9 +27,12 @@
 #    drops the resolver to admin via `as_admin_run`, preserving the admin-owned
 #    binding tree even though the unit is now User=root.
 #
-#  (fail-closed) The launch helper EXITS NONZERO (no un-tagged silo) when it
-#    cannot resolve a non-root admin uid; the stop helper refuses uid 0; and
-#    spawn-tier2's root-launcher gate refuses when it cannot stamp the tag.
+#  (fail-closed) The launch + stop helpers REFUSE to `.`-source a non-root-owned
+#    (admin-writable) launch env as root, and spawn-tier2's root-launcher gate
+#    refuses when it cannot stamp the tag (TIER2_USE_SECCTX=0). The missing-admin
+#    / uid-0 admin-resolution refusals are no longer driven here: b168138 fixed
+#    the admin identity in the helpers (no env-file injection), so those are
+#    covered at the host level in tests/unit/test_silo_launch.py.
 #
 # Runs as root INSIDE the test VM (staged to /root). Every PASS line is
 # asserted by tier2-silo-secctx-wiretag.bats.
@@ -340,36 +343,19 @@ cmd_fail_closed() {
     clean_silo
     local out err rc
 
-    # (a) launch helper with a non-existent admin user (driven THROUGH the env
-    #     file — the source of truth — exactly as a real non-default-admin
-    #     deployment would) must EXIT NONZERO + mint nothing.
-    write_launch_env nosuchadmin
-    out=$(mktemp); err=$(mktemp)
-    "$LAUNCH_HELPER" "$SILO" >"$out" 2>"$err"
-    rc=$?
-    [ "$rc" -ne 0 ] \
-        || { echo "--- stdout ---" >&2; cat "$out" >&2; \
-             fail fail-closed "helper SUCCEEDED with a missing admin user (rc=0) — fail-open"; }
-    grep -q 'does not exist' "$err" \
-        || { cat "$err" >&2; fail fail-closed "helper did not fail with the expected missing-admin refusal"; }
-    grep -q 'LAUNCH_TOKEN=' "$out" \
-        && fail fail-closed "helper emitted a LAUNCH_TOKEN despite the refusal — it spawned"
-    rm -f "$out" "$err"
-    pass "launch helper refuses a missing admin user FROM THE ENV FILE (no un-tagged spawn)"
-
-    # (b) the stop helper must refuse uid 0 (would orphan the admin container).
-    #     Again driven through the env file so the env-file resolution path is
-    #     what refuses (root resolves to uid 0).
-    write_launch_env root
-    out=$(mktemp); err=$(mktemp)
-    "$STOP_HELPER" "$SILO" >"$out" 2>"$err"
-    rc=$?
-    [ "$rc" -ne 0 ] \
-        || fail fail-closed "stop helper SUCCEEDED for uid-0 admin (would 'stop' root's empty store, orphaning the admin container)"
-    grep -q 'uid 0' "$err" \
-        || { cat "$err" >&2; fail fail-closed "stop helper did not refuse uid 0 with the expected message"; }
-    rm -f "$out" "$err"
-    pass "stop helper refuses an admin user (from env file) that resolves to uid 0"
+    # NOTE (b168138 "ci: standardize test VM credentials"): the admin identity is
+    # now FIXED in the helpers (`ADMIN_USER="admin"`, asserted uid 1000) and is no
+    # longer carried by the launch env file (write_launch_env writes only silo
+    # metadata). The old (a) missing-admin and (b) uid-0 cases injected a bad admin
+    # THROUGH the env file — a vector that commit removed. Driving them here no
+    # longer refuses; the helper resolves the real admin (uid 1000) and execs
+    # spawn-tier2 in the FOREGROUND, launching a real container that never returns
+    # (the lane hung at exit 124 before any pass). The missing-admin / uid-0 /
+    # unsafe-env refusals are exercised at the host level by
+    # tests/unit/test_silo_launch.py (a fake `id` farm + a fake spawn that stops
+    # before the real launch). This VM lane keeps only the fail-closed checks that
+    # genuinely need real root + a real spawn: the non-root-owned env refusal (b2)
+    # and the spawn-tier2 USE_SECCTX=0 refusal (c).
 
     # (b2) SECURITY: a launch env file NOT owned by root (admin-writable) must be
     #      REFUSED, never `.`-sourced as root. Plant an admin-owned env file and

@@ -62,8 +62,8 @@ teardown_file() {
 @test "tier2-silo-secctx-wiretag: fails closed (no un-tagged silo) when it cannot stamp / drop" {
     vm_run "bash $PROBE fail-closed"
     assert_success
-    assert_output_contains "PASS: launch helper refuses a missing admin user FROM THE ENV FILE"
-    assert_output_contains "PASS: stop helper refuses an admin user (from env file) that resolves to uid 0"
+    # (Missing-admin / uid-0 refusals moved to tests/unit/test_silo_launch.py once
+    # b168138 fixed the admin identity in the helpers — no longer env-injectable.)
     assert_output_contains "PASS: launch + stop helpers REFUSE a non-root-owned (admin-writable) launch env"
     assert_output_contains "PASS: spawn-tier2 root-launcher refuses TIER2_USE_SECCTX=0"
     assert_output_contains "PASS: fail-closed"

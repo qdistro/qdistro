@@ -227,6 +227,21 @@ def test_launch_fails_closed_on_missing_admin(tmp_path: Path) -> None:
         "spawn must NOT have run for a missing admin user"
 
 
+def test_launch_fails_closed_on_uid_0_admin(tmp_path: Path) -> None:
+    """A fixed admin that resolves to uid 0 must EXIT NONZERO (rootless podman
+    needs a non-root uid; a root spawn would not be the admin-rootless store).
+    Dynamically pins the launch-side uid-0 guard that the VM fail-closed lane can
+    no longer drive (b168138 fixed the admin identity — no env-file injection)."""
+    _write_env_file(tmp_path, "work")
+    farm, env = _farm(tmp_path, users={"admin": "0"})
+    rec = _recording_spawn(farm)
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 6, (res.returncode, res.stderr)
+    assert "uid 0" in res.stderr
+    assert not rec.exists() or rec.read_text() == "", \
+        "spawn must NOT have run for a uid-0 admin"
+
+
 def test_launch_refuses_group_or_other_writable_env_file(tmp_path: Path) -> None:
     """Root TCB: the helper `.`-sources the file as root, so a group/other-
     writable file (a non-owner could rewrite it) must be REFUSED, never sourced."""
