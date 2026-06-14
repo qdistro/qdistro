@@ -21,11 +21,15 @@ QDISTRO_PKGS=(
   # Devel headers for building the production profile of qdistro's
   # vendored libweston-14 (libweston-vendored/build-libweston.sh
   # QDWIN_LIBWESTON_PROFILE=production): GL renderer (Mesa EGL/GLES),
-  # colour management (lcms2), DRM-backend display-info, and the X11
-  # backend client libs. Runtime Mesa-libEGL1/GL1 above are not enough
-  # to compile the renderer.
+  # colour management (lcms2), DRM-backend display-info, the X11
+  # backend client libs, and cairo (shared/cairo-util.c — weston's
+  # toy-toolkit util the build hard-requires; without cairo-devel the
+  # meson configure dies "Dependency cairo not found" and the vendored
+  # tree never builds, so the qdwin layer-popup clamp/grab paths fall
+  # back to stock libweston-14). Runtime Mesa-libEGL1/GL1 above are not
+  # enough to compile the renderer.
   Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel liblcms2-devel
-  libdisplay-info-devel libX11-devel libxcb-devel
+  libdisplay-info-devel libX11-devel libxcb-devel cairo-devel
   python313-pywayland python313-cffi python313-PyQt6
   qt6-wayland python313-setuptools
   socat Mesa Mesa-libEGL1 Mesa-libGL1 Mesa-dri

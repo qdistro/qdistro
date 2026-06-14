@@ -51,6 +51,13 @@ find_srclib() {
             "$PREFIX"/lib/*/libweston-14.so.0* \
             "$PREFIX"/lib/libweston-14.so.0* 2>/dev/null | head -n1 || true)
     [ -n "$so" ] && dirname "$so"
+    # "not found" is a valid result (empty output), NOT an error: callers use
+    # `SRCLIB=$(find_srclib)` and branch on emptiness to build-on-demand. Without
+    # this, the trailing `[ -n "$so" ]` test returns 1 when the prefix is absent,
+    # and under the script's `set -e` that bare command-substitution assignment
+    # aborts the installer BEFORE the build branch — so the vendored tree never
+    # builds. Return 0 so emptiness reaches the caller.
+    return 0
 }
 
 # 1. Ensure a built production prefix exists. Build it on demand if the
