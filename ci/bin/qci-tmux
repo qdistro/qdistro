@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# qci-tmux - launch `qci` inside a detached, timestamped tmux session.
+#
+# Why: a bare `qci full` is bound to its controlling terminal. If that terminal
+# (or SSH session) closes, the whole run is killed by SIGHUP mid-step, leaving a
+# half-finished run with no report and possibly orphaned VMs. Running inside a
+# detached tmux session decouples the run from the terminal, so disconnects are
+# harmless and you can re-attach later.
+#
+# Usage:
+#   qdistro/ci/bin/qci-tmux [qci-args...]      # default args: "full"
+#   QCI_OFFLINE=1 qdistro/ci/bin/qci-tmux host # env vars are forwarded
+#
+# The session is named `qci-<gate>-<UTCstamp>`. qci runs as the pane's sole
+# foreground process (no pipeline), so `tmux send-keys -t <s> C-c` delivers a
+# real SIGINT to qci and its INT trap finalizes the run. A full transcript is
+# logged via tmux `pipe-pane` so the run is observable even if you never attach.
+
+set -euo pipefail
+
+SELF=$(readlink -f "$0")
+BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
+QCI="$BIN_DIR/qci"
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "qci-tmux: tmux not found. Install it (e.g. 'sudo zypper install tmux')," >&2
+    echo "          or run qci directly under nohup:" >&2
+    echo "          nohup $QCI ${*:-full} > /tmp/qci.log 2>&1 &" >&2
+    exit 1
+fi
+[ -x "$QCI" ] || { echo "qci-tmux: cannot find executable qci at $QCI" >&2; exit 1; }
+
+# Args default to a full run; the first arg is the gate, used in the session name.
+if [ "$#" -eq 0 ]; then
+    set -- full
+fi
+gate=$1
+# Sanitise the gate for use in a tmux session name (no whitespace/dots/colons).
+gate_tag=$(printf '%s' "$gate" | tr -c 'A-Za-z0-9_-' '-')
+ts=$(date -u +%Y%m%dT%H%M%SZ)
+session="qci-${gate_tag}-${ts}"
+
+log_dir=${QCI_TMUX_LOG_DIR:-${TMPDIR:-/tmp}}
+mkdir -p "$log_dir"
+log="$log_dir/$session.log"
+
+# Forward CI-relevant environment by NAME (read values straight from this shell)
+# so the run behaves identically whether or not a tmux server is already running
+# with its own environment. Name-based forwarding is immune to multi-line values
+# that line-parsing `env` would split.
+env_args=()
+while IFS= read -r name; do
+    [ -n "$name" ] && env_args+=(-e "$name=${!name}")
+done < <(compgen -v | grep -E '^(QCI_|QDWIN_|QDISTRO_)' || true)
+[ -n "${LIBVIRT_DEFAULT_URI:-}" ] && env_args+=(-e "LIBVIRT_DEFAULT_URI=$LIBVIRT_DEFAULT_URI")
+
+# Run qci as a simple foreground command (NOT the left side of a pipe, so C-c
+# reaches qci), preserving its exit status as the pane's exit status. Logging is
+# done out-of-band by pipe-pane below, not by a pipeline in the pane.
+qci_q=$(printf '%q' "$QCI")
+args_q=$(printf '%q ' "$@")
+session_q=$(printf '%q' "$session")
+log_q=$(printf '%q' "$log")
+body="$qci_q $args_q; rc=\$?; printf '\n[qci-tmux] %s exited rc=%s\n' $session_q \"\$rc\"; exit \$rc"
+
+tmux new-session -d "${env_args[@]}" -s "$session" "bash -c $(printf '%q' "$body")"
+# Keep the pane after qci exits so the final report/exit line stays visible.
+tmux set-option -t "$session" remain-on-exit on >/dev/null 2>&1 || true
+# Mirror the pane to a persistent log file (out-of-band; does not touch qci stdio).
+tmux pipe-pane -t "$session" -o "cat >> $log_q"
+
+cat <<EOF
+qci-tmux: started detached run
+  session : $session
+  command : qci $*
+  log     : $log
+
+  attach  : tmux attach -t $session
+  tail    : tail -f $log
+  list    : tmux ls
+  stop    : tmux send-keys -t $session C-c   (delivers SIGINT; qci finalizes the run)
+EOF

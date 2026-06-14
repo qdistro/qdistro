@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# qci-host-deps - check (or install) the host-test dependencies the `host` gate
+# needs but that are NOT part of the base qdistro install.
+#
+# These deps are documented in qdistro/ci/README.md ("Host test dependencies").
+# When they are missing, individual host-gate steps fail deep into a long run
+# (e.g. qfileman pytest fails on a missing tomli_w, qdwin's vendored libweston
+# symbols test fails on missing pango/libevdev/cairo/... devel). This tool
+# surfaces and fixes those gaps up front.
+#
+# Usage:
+#   qdistro/ci/bin/qci-host-deps            # --check (default): report only, no sudo
+#   qdistro/ci/bin/qci-host-deps --install  # install missing deps (uses sudo/pip)
+#
+# Package managers: zypper (openSUSE), apt (Debian/Ubuntu). The qdwin libweston
+# package names are read directly from qdwin's own dependency table so they never
+# drift. tomli_w is installed via pip (it is not packaged by most distros).
+
+set -uo pipefail
+
+# Print the contiguous leading comment block (after the shebang) as help text,
+# stopping at the first non-comment line so it never drifts into real code.
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+
+MODE=check
+case "${1:-}" in
+    ""|--check|-c) MODE=check ;;
+    --install|-i)  MODE=install ;;
+    -h|--help)     usage; exit 0 ;;
+    *) echo "qci-host-deps: unknown argument '$1' (use --check or --install)" >&2; exit 2 ;;
+esac
+
+SELF=$(readlink -f "$0")
+BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
+WORKSPACE=$(cd "$BIN_DIR/../../.." && pwd)
+QDWIN_SYMS_TEST="$WORKSPACE/qdwin/libweston-vendored/run-production-symbols-test.sh"
+
+# Detect the system package manager (apt/zypper; matches what qdwin's own test
+# emits — dnf has no name column in that table, so qdwin deps degrade to a hint).
+PM=""
+for cand in zypper apt; do
+    if command -v "$cand" >/dev/null 2>&1; then PM=$cand; break; fi
+done
+# Note: qci's host gate runs project tests with the ambient `python3` (no per-repo
+# venv as of writing), so these import probes reflect what the tests actually see.
+have_py() { python3 -c "import $1" >/dev/null 2>&1; }
+
+ok=()            # satisfied (human-readable)
+missing=()       # human-readable "what + how"
+distro_pkgs=()   # distro packages to install
+pip_pkgs=()      # pip packages to install
+manual=()        # deps we can detect but not auto-install on this host
+
+# --- qfileman: tomli_w (declared in qfileman/pyproject.toml; pip-only) ---
+if have_py tomli_w; then ok+=("tomli_w (qfileman)")
+else missing+=("tomli_w (qfileman) -> pip install tomli_w"); pip_pkgs+=("tomli_w>=1.0"); fi
+
+# --- qdbrowser: jeepney (pure-Python; distro pkg or pip) ---
+if have_py jeepney; then ok+=("jeepney (qdbrowser)")
+else
+    case "$PM" in
+        zypper|apt) missing+=("jeepney (qdbrowser) -> $PM python3-jeepney"); distro_pkgs+=("python3-jeepney") ;;
+        *)          missing+=("jeepney (qdbrowser) -> pip install jeepney"); pip_pkgs+=("jeepney") ;;
+    esac
+fi
+
+# --- qdwin vendored-libweston symbols test: reuse qdwin's authoritative table ---
+# Parse rows of the form:  "<pkg-config module> <apt pkg> <zypper pkg> <gate>"
+# and check the genuinely-unconditional ones. gl/x11 rows are intentionally
+# skipped: the symbols test auto-disables those backends when their devel deps
+# are absent, so they never hard-fail the host step. lcms honours QDWIN_LW_LCMS.
+qdwin_checked=0; qdwin_missing=0
+if [ -r "$QDWIN_SYMS_TEST" ] && command -v pkg-config >/dev/null 2>&1; then
+    lcms_on=1; [ "${QDWIN_LW_LCMS:-true}" = false ] && lcms_on=0
+    while read -r mod apt zyp gate; do
+        case "$gate" in
+            always) : ;;
+            lcms)   [ "$lcms_on" = 1 ] || continue ;;
+            *)      continue ;;   # gl/x11/other: auto-managed by the test
+        esac
+        qdwin_checked=$((qdwin_checked + 1))
+        pkg-config --exists "$mod" 2>/dev/null && continue
+        qdwin_missing=$((qdwin_missing + 1))
+        case "$PM" in
+            zypper) missing+=("$mod devel (qdwin) -> zypper $zyp"); distro_pkgs+=("$zyp") ;;
+            apt)    missing+=("$mod devel (qdwin) -> apt $apt");    distro_pkgs+=("$apt") ;;
+            *)      missing+=("$mod devel (qdwin) -> install manually"); manual+=("$mod") ;;
+        esac
+    done < <(grep -oE '"[a-z0-9._+-]+ +[A-Za-z0-9._+-]+ +[A-Za-z0-9._+-]+ +(always|lcms|gl|x11)"' \
+                 "$QDWIN_SYMS_TEST" | tr -d '"')
+    [ "$qdwin_checked" -gt 0 ] && ok+=("qdwin libweston build deps: $((qdwin_checked - qdwin_missing))/$qdwin_checked present")
+elif [ ! -r "$QDWIN_SYMS_TEST" ]; then
+    manual+=("qdwin deps (could not read $QDWIN_SYMS_TEST)")
+elif ! command -v pkg-config >/dev/null 2>&1; then
+    missing+=("pkg-config (needed to check qdwin deps) -> install pkgconf/pkg-config")
+fi
+
+# De-duplicate the install lists (pango/pangocairo map to the same package, etc.).
+mapfile -t distro_pkgs < <(printf '%s\n' "${distro_pkgs[@]}" | awk 'NF && !seen[$0]++')
+mapfile -t pip_pkgs    < <(printf '%s\n' "${pip_pkgs[@]}"    | awk 'NF && !seen[$0]++')
+
+echo "host-test dependency status (pm=${PM:-none}):"
+for o in "${ok[@]}";      do echo "  OK   $o"; done
+for m in "${missing[@]}"; do echo "  MISS $m"; done
+for x in "${manual[@]}";  do echo "  MANUAL $x"; done
+echo
+echo "note: qdshell QML tests also need the QtQml.WorkerScript module and"
+echo "      qterminator needs the QTermWidget Python binding (built from source);"
+echo "      these are not auto-installed here. See qdistro/ci/README.md."
+
+if [ "${#missing[@]}" -eq 0 ]; then
+    echo; echo "All auto-checkable host-test deps are present."
+    exit 0
+fi
+
+if [ "$MODE" = check ]; then
+    echo; echo "Run 'qdistro/ci/bin/qci-host-deps --install' to install the missing deps."
+    exit 1
+fi
+
+# --- install mode (best effort; one failing installer does not block the rest) ---
+rc=0
+if [ "${#distro_pkgs[@]}" -gt 0 ]; then
+    if [ -z "$PM" ]; then
+        echo "qci-host-deps: no supported package manager (zypper/apt) found; install manually: ${distro_pkgs[*]}" >&2
+        rc=1
+    else
+        echo "+ installing distro packages via $PM: ${distro_pkgs[*]}"
+        case "$PM" in
+            zypper) sudo zypper install -y "${distro_pkgs[@]}" || rc=1 ;;
+            apt)    sudo apt-get update && sudo apt-get install -y "${distro_pkgs[@]}" || rc=1 ;;
+        esac
+    fi
+fi
+if [ "${#pip_pkgs[@]}" -gt 0 ]; then
+    echo "+ installing pip packages: ${pip_pkgs[*]}"
+    if ! python3 -m pip install "${pip_pkgs[@]}"; then
+        # PEP 668 externally-managed hosts (e.g. openSUSE) reject plain `pip
+        # install` AND `--user` alone; `--user --break-system-packages` installs
+        # into ~/.local, which the ambient python3 (what the host gate uses) can
+        # import. This keeps the change user-local, not system-wide.
+        echo "  pip install failed (PEP 668 externally-managed env?); retrying with --user --break-system-packages..." >&2
+        if ! python3 -m pip install --user --break-system-packages "${pip_pkgs[@]}"; then
+            echo "  still failed; install via a distro python package or manually." >&2
+            rc=1
+        fi
+    fi
+fi
+if [ "${#manual[@]}" -gt 0 ]; then
+    echo "manual steps still required: ${manual[*]}" >&2
+    rc=1
+fi
+[ "$rc" -eq 0 ] && echo "done. Re-run 'qci-host-deps' to verify."
+exit "$rc"

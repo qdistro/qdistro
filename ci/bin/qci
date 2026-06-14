@@ -422,6 +422,9 @@ abort_run() {
 
 trap 'abort_run INT' INT
 trap 'abort_run TERM' TERM
+# SIGHUP: a closed terminal/SSH session must not kill the run mid-step and leak
+# VMs. Finalize cleanly instead (also see qci-tmux, which decouples from the tty).
+trap 'abort_run HUP' HUP
 
 # Map a result's gate + kind to the shared confidence-taxonomy category
 # documented in ci/TAXONOMY.md. This is an HONEST, coarse classification of
@@ -857,6 +860,20 @@ gate_preflight() {
             record_result preflight "$label" skip 0 pass tool "$report" "optional tool missing; related gate will fail or skip"
         fi
     }
+    # Host-test deps are not part of the base install. Surface them up front (as
+    # skip/WARN, never failing preflight) so a missing package is visible at the
+    # start of a run instead of failing deep in the host gate. Install hint
+    # points at qci-host-deps. See README "Host test dependencies".
+    check_host_dep() {
+        local label=$1 cmd=$2
+        if bash -lc "$cmd" >/dev/null 2>&1; then
+            printf 'OK\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" pass 0 pass tool "$report" ""
+        else
+            printf 'WARN\t%s\n' "$label" >> "$report"
+            record_result preflight "$label" skip 0 pass tool "$report" "missing host-test dep; run qdistro/ci/bin/qci-host-deps --install"
+        fi
+    }
 
     local p
     for p in "${PROJECTS[@]}"; do
@@ -880,6 +897,10 @@ gate_preflight() {
     check_optional "npm" "command -v npm"
     check_optional "zola" "command -v zola"
     check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
+    check_host_dep "host-dep tomli_w (qfileman)" "python3 -c 'import tomli_w'"
+    check_host_dep "host-dep libevdev (qdwin)" "pkg-config --exists libevdev"
+    check_host_dep "host-dep pango/pangocairo (qdwin)" "pkg-config --exists pango pangocairo"
+    check_host_dep "host-dep jeepney (qdbrowser)" "python3 -c 'import jeepney'"
     {
         echo
         echo "## libvirt domains"
@@ -3445,11 +3466,21 @@ EOF
 resolve_replay_scenario() {
     # Prints "<kind>\t<resolved-path>" or nothing. kind = bats|gui.
     local s=$1 cand
-    # Explicit, existing path.
+    # Explicit, existing path: absolute, relative to CWD, or relative to the
+    # repo root. The repo-root fallback keeps resolution CWD-independent (the
+    # basename branches below already resolve against $QDISTRO_REPO), so e.g.
+    # `qci replay tests/integration/vm/app-launcher.bats <vm>` works from any
+    # working directory, not only the repo root.
+    local explicit=""
     if [ -f "$s" ]; then
-        case "$s" in
-            *.bats) printf 'bats\t%s\n' "$s" ;;
-            *.md)   printf 'gui\t%s\n' "$s" ;;
+        explicit=$s
+    elif [ -f "$QDISTRO_REPO/$s" ]; then
+        explicit="$QDISTRO_REPO/$s"
+    fi
+    if [ -n "$explicit" ]; then
+        case "$explicit" in
+            *.bats) printf 'bats\t%s\n' "$explicit" ;;
+            *.md)   printf 'gui\t%s\n' "$explicit" ;;
             *)      : ;;
         esac
         return 0

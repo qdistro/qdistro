@@ -60,6 +60,19 @@ vitest tags), and the per-suite relabel action items.
 qdistro/ci/bin/qci full
 ```
 
+A full run takes a long time. A bare `qci` is bound to its terminal, so a closed
+terminal or dropped SSH session kills the run mid-step (SIGHUP). Two safeguards:
+
+```bash
+# Preferred: run detached in a timestamped tmux session that survives disconnects.
+qdistro/ci/bin/qci-tmux full
+#   session: qci-full-<UTCstamp>   log: /tmp/qci-full-<UTCstamp>.log
+#   attach:  tmux attach -t qci-full-<UTCstamp>
+```
+
+`qci` itself also traps `SIGHUP` now, so even a direct run finalizes the report
+and releases VMs on a terminal hangup instead of leaving a half-finished run.
+
 Successful disposable `qci-*` VMs are destroyed. Failed disposable VMs are
 preserved by default for debugging and recorded in the report. To delete failed
 VMs as well:
@@ -172,8 +185,17 @@ cannot be located. It does not guess paths outside libvirt metadata.
 
 ## Host test dependencies
 
-The `host` gate runs tests across all sibling projects. Three projects need
-dependencies that are not part of the base qdistro install:
+The `host` gate runs tests across all sibling projects. Several projects need
+dependencies that are not part of the base qdistro install. Check or install
+them in one shot (preflight also flags missing ones as WARN at the start of a
+run):
+
+```bash
+qdistro/ci/bin/qci-host-deps            # report what is missing (no sudo)
+qdistro/ci/bin/qci-host-deps --install  # install via zypper/apt/dnf + pip
+```
+
+The individual deps are:
 
 **qdbrowser tests** require `jeepney` (D-Bus bridge client, already a
 runtime dependency in `qdbrowser/pyproject.toml`):
@@ -207,6 +229,24 @@ cd qterminator/qtermwidget-pyqt && pip install .
 
 See `qterminator/README.md` for full build prerequisites (qtermwidget-devel,
 sip, pyqt-builder).
+
+**qfileman tests** require `tomli_w` (declared in `qfileman/pyproject.toml`; not
+packaged by most distros):
+
+```bash
+pip install tomli_w
+```
+
+**qdwin vendored-libweston symbols test** requires the `libevdev` and `pango`
+(incl. `pangocairo`) development packages:
+
+```bash
+# openSUSE Tumbleweed
+sudo zypper install libevdev-devel pango-devel
+
+# Ubuntu
+sudo apt install libevdev-dev libpango1.0-dev
+```
 
 ## Host Link Checks
 
