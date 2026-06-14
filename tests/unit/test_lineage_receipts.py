@@ -256,6 +256,39 @@ def test_xattr_present_but_malformed_raises(tmp_path):
         r.read_xattr(str(art))
 
 
+def test_xattr_dir_fd_mode_round_trips(tmp_path):
+    art = tmp_path / "a"
+    art.write_bytes(b"hi")
+    if not _supports_xattr(str(art)):
+        pytest.skip("filesystem does not support user xattrs")
+    dfd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        name = r.set_xattr("a", _env(), dir_fd=dfd)  # basename resolved at dir_fd
+    finally:
+        os.close(dfd)
+    assert name == RECEIPT_NAMES["xattr"]
+    ptr = r.read_xattr(str(art))
+    assert ptr is not None and ptr["entity"] == _env()["entity"]
+
+
+def test_xattr_dir_fd_mode_rejects_non_basename(tmp_path):
+    dfd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(ValueError):
+            r.set_xattr("sub/a", _env(), dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def test_xattr_dir_fd_mode_soft_fails_on_missing(tmp_path):
+    # a missing target under the dir fd is opportunistic -> None, never raises
+    dfd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert r.set_xattr("gone", _env(), dir_fd=dfd) is None
+    finally:
+        os.close(dfd)
+
+
 # --- export manifest -------------------------------------------------------
 
 

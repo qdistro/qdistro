@@ -294,18 +294,42 @@ def _xattr_pointer(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def set_xattr(artifact_path: str, envelope: dict[str, Any], *,
-              follow_symlinks: bool = False) -> str | None:
+              follow_symlinks: bool = False,
+              dir_fd: int | None = None) -> str | None:
     """Best-effort: tag the artifact with a COMPACT lineage pointer in the
     ``user.qdistro.lineage`` xattr. Returns the xattr name on success, or
     ``None`` if the surface is unavailable (unsupported fs, permission, too
     large). A *malformed envelope* still raises (that is a programming error,
     not a storage limitation). The xattr is never the canonical record — pair it
-    with a sidecar/manifest."""
+    with a sidecar/manifest.
+
+    With ``dir_fd`` (the export-back rooted-tree mode, mirroring
+    :func:`write_sidecar`), ``artifact_path`` is a single basename resolved
+    ``O_NOFOLLOW`` RELATIVE to that already-verified directory fd and the xattr is
+    set on the OPEN fd — never on a path a swapped-in symlink could redirect.
+    ``os.setxattr`` on an fd ignores the open mode, so ``O_RDONLY`` is enough to
+    tag our own freshly-written file (a ``user.*`` xattr only needs inode write
+    permission, which the importer — root, or the owner in unit tests — holds)."""
     validate_envelope(envelope)  # any kind; the pointer is kind-agnostic
     name = RECEIPT_NAMES["xattr"]
     data = canonical_bytes(_xattr_pointer(envelope))
     if len(data) > XATTR_MAX_BYTES:
         return None
+    if dir_fd is not None:
+        _require_basename(artifact_path)
+        try:
+            fd = os.open(artifact_path, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC,
+                         dir_fd=dir_fd)
+        except OSError:
+            return None  # vanished/symlinked/unopenable — opportunistic
+        try:
+            os.setxattr(fd, name, data)
+        except OSError:
+            # ENOTSUP/EOPNOTSUPP/EPERM/E2BIG/ENOSPC/EDQUOT ... — opportunistic.
+            return None
+        finally:
+            os.close(fd)
+        return name
     try:
         os.setxattr(artifact_path, name, data, follow_symlinks=follow_symlinks)
     except OSError:

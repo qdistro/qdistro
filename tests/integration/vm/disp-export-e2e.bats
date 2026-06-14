@@ -99,13 +99,13 @@ teardown_file() {
     vm_run "bash $PROBE import-land-templated"
     assert_success
     assert_output_contains "PASS: REAL qdistro-resolve-binding resolves the provisioned silo to its state_path"
-    assert_output_contains "PASS: import: landed silo-owned + _receipt.json + chain-anchored lineage receipt surfaces (sidecar+manifest) that VERIFY against the sealed store (forged copy refused), staging one-shot removed"
+    assert_output_contains "PASS: import: landed silo-owned + _receipt.json + chain-anchored lineage receipt surfaces (sidecar+manifest+xattr) that VERIFY against the sealed store (forged copy refused), staging one-shot removed"
     assert_output_contains "PASS: import-land-templated"
 }
 
-@test "templated-silo edit: lands <name>.disp-edited beside a source IN A REAL SILO STATE via the REAL resolver" {
+@test "templated-silo edit: lands <name>.disp-edited beside a source IN A REAL SILO STATE via the REAL resolver + a chain-anchored sidecar that verifies" {
     vm_run "bash $PROBE edit-land-templated"
     assert_success
-    assert_output_contains "PASS: edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, staging one-shot removed"
+    assert_output_contains "PASS: edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, one chain-anchored sidecar (no manifest) that VERIFIES + xattr, staging one-shot removed"
     assert_output_contains "PASS: edit-land-templated"
 }

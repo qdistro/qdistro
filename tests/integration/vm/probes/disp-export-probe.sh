@@ -657,6 +657,23 @@ print("TAMPER_OK" if not lr.verify_against_store(ls, dict(env, locator="evil.txt
 man_env = lr.read_export_manifest(dest)
 print("MANIFEST_VERIFY_OK" if all(lr.verify_against_store(ls, c) for c in man_env["receipts"]) else "MANIFEST_VERIFY_FAIL")
 ls.close()
+# --- xattr pointer (item 1): must SURVIVE the temp-dir -> final-dir rename on
+# the real (btrfs) Incoming tree. The xattr is set on the file inode in the temp
+# dir; a parent-dir rename preserves inode xattrs, so on an xattr-capable fs the
+# compact pointer must read back consistent with the verifiable sidecar.
+def _xattr_supported(p):
+    try:
+        os.setxattr(p, "user.qdistro.probe", b"1"); os.removexattr(p, "user.qdistro.probe")
+        return True
+    except OSError:
+        return False
+xp = lr.read_xattr(landed) if landed and os.path.exists(landed) else None
+if xp is not None:
+    print("XATTR_OK" if xp == {k: env[k] for k in lr._XATTR_KEYS} else "XATTR_FAIL " + repr(xp))
+elif landed and os.path.exists(landed) and not _xattr_supported(landed):
+    print("XATTR_SKIP")
+else:
+    print("XATTR_LOST")
 print("STAGING_GONE_OK" if not os.path.exists("$STAGING_BASE/" + tok) else "STAGING_GONE_FAIL")
 PY
 )
@@ -667,7 +684,12 @@ PY
              VERIFY_OK TAMPER_OK MANIFEST_VERIFY_OK STAGING_GONE_OK; do
         echo "$py_out" | grep -q "^$k\$" || fail import-land-templated "$k missing: $py_out"
     done
-    pass "import: landed silo-owned + _receipt.json + chain-anchored lineage receipt surfaces (sidecar+manifest) that VERIFY against the sealed store (forged copy refused), staging one-shot removed"
+    # xattr is opportunistic: OK (set + survived the move, consistent w/ sidecar)
+    # or SKIP (fs without user-xattr support) pass; LOST (supported but the pointer
+    # did not survive the brokered move) or FAIL (inconsistent) is a real bug.
+    echo "$py_out" | grep -Eq '^XATTR_(OK|SKIP)$' \
+        || fail import-land-templated "xattr pointer did not survive the brokered move: $py_out"
+    pass "import: landed silo-owned + _receipt.json + chain-anchored lineage receipt surfaces (sidecar+manifest+xattr) that VERIFY against the sealed store (forged copy refused), staging one-shot removed"
     _deprovision_silo "$silo"; clean_staging
     pass import-land-templated
 }
@@ -688,11 +710,17 @@ cmd_edit_land_templated() {
 
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     _make_edit_staging "$tok" "$silo" "$OPEN_CLASS" "$src_real" "out=EDITED-BY-DISPOSABLE"
+    local lineage_dir lineage_db
+    lineage_dir=$(mktemp -d /tmp/editland-lineage.XXXXXX)
+    lineage_db="$lineage_dir/export.sqlite"
     py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+        QDISTRO_EXPORT_LINEAGE_DB="$lineage_db" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$src" "$ADMIN_UID" <<PY 2>&1
 import os, sys
 sys.path.insert(0, "$LIBEXEC")
 import qdistro_session_manager as M
+import qdistro_lineage_receipts as lr
+from qdistro_lineage_store import LineageStore
 tok, src, admin_uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
 store = M._SiloStore(M._SystemOps(), config_path=M.Path("/tmp/editland-silos.yaml"))
 r = store.import_from_disposable(tok)
@@ -704,14 +732,45 @@ print("CONTENT_OK" if dest and os.path.isfile(dest) and open(dest).read() == "ED
 print("SRC_OK" if open(src).read() == "ORIGINAL" else "SRC_FAIL")
 st = os.lstat(dest) if dest and os.path.exists(dest) else None
 print("OWNER_OK" if st and st.st_uid == admin_uid else "OWNER_FAIL " + (str(st.st_uid) if st else "no-file"))
+# --- edit lineage receipt (item 2): ONE sidecar beside the edited file, no
+# batch manifest (single-file), sealed + verifying against the store ---
+side = (dest + ".qdistro-lineage.json") if dest else ""
+print("SIDECAR_OK" if side and os.path.isfile(side) else "SIDECAR_FAIL")
+print("NOMANIFEST_OK" if dest and not os.path.exists(os.path.join(os.path.dirname(dest), "qdistro-export-manifest.json")) else "NOMANIFEST_FAIL")
+print("SEALED_OK" if r.get("lineage_sealed") else "SEALED_FAIL " + repr(r.get("lineage_sealed")))
+sst = os.lstat(side) if side and os.path.exists(side) else None
+print("SIDECAR_OWNER_OK" if sst and sst.st_uid == admin_uid else "SIDECAR_OWNER_FAIL")
+ls = LineageStore(os.environ["QDISTRO_EXPORT_LINEAGE_DB"])
+env = lr.read_sidecar(dest)
+print("VERIFY_OK" if lr.verify_against_store(ls, env) else "VERIFY_FAIL")
+print("TAMPER_OK" if not lr.verify_against_store(ls, dict(env, locator="evil")) else "TAMPER_FAIL")
+ls.close()
+def _xattr_supported(p):
+    try:
+        os.setxattr(p, "user.qdistro.probe", b"1"); os.removexattr(p, "user.qdistro.probe")
+        return True
+    except OSError:
+        return False
+xp = lr.read_xattr(dest) if dest and os.path.exists(dest) else None
+if xp is not None:
+    print("XATTR_OK" if xp == {k: env[k] for k in lr._XATTR_KEYS} else "XATTR_FAIL " + repr(xp))
+elif dest and os.path.exists(dest) and not _xattr_supported(dest):
+    print("XATTR_SKIP")
+else:
+    print("XATTR_LOST")
 print("STAGING_GONE_OK" if not os.path.exists("$STAGING_BASE/" + tok) else "STAGING_GONE_FAIL")
 PY
 )
+    rm -rf "$lineage_dir"
     local k
-    for k in LANDED_OK BESIDE_OK CONTENT_OK SRC_OK OWNER_OK STAGING_GONE_OK; do
+    for k in LANDED_OK BESIDE_OK CONTENT_OK SRC_OK OWNER_OK \
+             SIDECAR_OK NOMANIFEST_OK SEALED_OK SIDECAR_OWNER_OK \
+             VERIFY_OK TAMPER_OK STAGING_GONE_OK; do
         echo "$py_out" | grep -q "^$k\$" || fail edit-land-templated "$k missing: $py_out"
     done
-    pass "edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, staging one-shot removed"
+    echo "$py_out" | grep -Eq '^XATTR_(OK|SKIP)$' \
+        || fail edit-land-templated "edit xattr pointer not preserved: $py_out"
+    pass "edit import: landed <name>.disp-edited beside source IN A REAL SILO STATE via the REAL resolver, silo-owned, source intact, one chain-anchored sidecar (no manifest) that VERIFIES + xattr, staging one-shot removed"
     _deprovision_silo "$silo"; clean_staging
     pass edit-land-templated
 }

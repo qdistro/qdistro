@@ -3299,28 +3299,29 @@ class _SiloStore:
         # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
         # Two landing modes: edit-round-trip lands the SINGLE edited file beside
         # its source as <name>.disp-edited; plain export-back lands into Incoming/.
-        # For plain export-back, also emit chain-anchored lineage receipt surfaces
-        # (sidecar + manifest) INTO the same atomic landing; they are SEALED into
-        # the session-manager lineage store only after the durable rename below.
-        # Lineage is best-effort: its unavailability never blocks the import.
+        # BOTH modes also emit chain-anchored lineage receipt surfaces INTO the
+        # same atomic landing (export: per-file sidecar + batch manifest; edit: one
+        # sidecar, no manifest), plus a best-effort xattr pointer; they are SEALED
+        # into the session-manager lineage store only after the durable landing
+        # below. Lineage is best-effort: its unavailability never blocks the import.
         payload = str(staging / "payload")
         lineage = None
         receipt_ctx = None
-        if not edit_mode:
-            try:
-                lineage = self._get_lineage_store()
-                receipt_ctx = {"chain_head": lineage.chain_head(),
-                               "issuer": LINEAGE_ISSUER}
-            except Exception as e:  # noqa: BLE001 - degrade, never block export
-                log.warning("import_from_disposable: lineage store unavailable, "
-                            "no receipts emitted: %s", e)
+        try:
+            lineage = self._get_lineage_store()
+            receipt_ctx = {"chain_head": lineage.chain_head(),
+                           "issuer": LINEAGE_ISSUER}
+        except Exception as e:  # noqa: BLE001 - degrade, never block export
+            log.warning("import_from_disposable: lineage store unavailable, "
+                        "no receipts emitted: %s", e)
         try:
             if edit_mode:
                 source_rel = self._edit_source_rel(
                     meta, state_path, request_silo, caller)
                 receipt = _dispexport.promote_edit(
                     payload, state_path, source_rel=source_rel, meta=meta,
-                    now_epoch=now, owner_uid=dst.st_uid, owner_gid=dst.st_gid)
+                    now_epoch=now, owner_uid=dst.st_uid, owner_gid=dst.st_gid,
+                    receipt_ctx=receipt_ctx)
             else:
                 receipt = _dispexport.promote_export(
                     payload, state_path, meta=meta, now_epoch=now,

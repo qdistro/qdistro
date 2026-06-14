@@ -460,6 +460,14 @@ def _emit_lineage_surfaces(tmp_fd: int, receipt_files: list,
             issuer=issuer)
         lr.write_sidecar(name, sidecar, dir_fd=tmp_fd,
                          owner_uid=owner_uid, owner_gid=owner_gid)
+        # Best-effort: also tag the landed artifact with the compact xattr
+        # pointer (kind-agnostic; reuses the sidecar envelope). Opportunistic —
+        # set_xattr soft-fails to None on an unsupported fs, and the xattr is set
+        # on the file inode IN the temp dir, so the later parent-dir rename
+        # (_place_at, same filesystem) preserves it. The sidecar/manifest remain
+        # the durable, verifiable surfaces; the xattr is a local convenience
+        # pointer. dir_fd-relative to keep the symlink-safe rooted-tree posture.
+        lr.set_xattr(name, sidecar, dir_fd=tmp_fd)
         sidecars.append(sidecar)
         manifest_children.append(lr.build_envelope(
             entity=eid, kind="export-manifest", chain_head=chain_head,
@@ -471,6 +479,46 @@ def _emit_lineage_surfaces(tmp_fd: int, receipt_files: list,
     lr.write_export_manifest("", manifest, dir_fd=tmp_fd,
                              owner_uid=owner_uid, owner_gid=owner_gid)
     return sidecars, manifest
+
+
+def _lineage_edit_eid(token: str, landed: str) -> str:
+    """Stable entity id for an edit-round-trip artifact: the FULL launch token
+    (unique per launch) + the landed leaf name (``<source>.disp-edited`` plus any
+    ``-<n>`` collision suffix). A namespace distinct from the Incoming export eid
+    (:func:`_lineage_eid`) so an edit receipt and an export receipt never collide
+    in the store."""
+    return f"disp-edit:{token}:{landed}"
+
+
+def _emit_edit_lineage_surface(parent_fd: int, landed: str, digest: str,
+                               token: str, now_epoch: float, receipt_ctx: dict,
+                               owner_uid: int | None, owner_gid: int | None):
+    """Build + write the chain-anchored sidecar (and best-effort xattr) for the
+    SINGLE edited file ``landed`` (already linked into place under ``parent_fd``).
+    Returns the sidecar envelope for the caller to seal. Single-file: NO batch
+    manifest — the per-file sidecar alone covers the one artifact. Lazily imports
+    the receipt library so a runtime missing it still lands the edit (no receipt).
+
+    Unlike the Incoming export (where surfaces are written into an unpublished
+    temp dir and rename in atomically), the edited file landed first (a single
+    no-overwrite ``linkat``); the sidecar is written immediately after into the
+    same parent dir, before the caller's ``fsync(parent_fd)``, so both reach disk
+    together. A best-effort sidecar that follows its artifact by a beat is fine:
+    the sealed store row — not the on-disk surface — is the authority."""
+    import qdistro_lineage_receipts as lr
+
+    chain_head = str(receipt_ctx["chain_head"])
+    issuer = str(receipt_ctx.get("issuer", "qdistro-session-manager"))
+    created_at = int(now_epoch)
+    eid = _lineage_edit_eid(token, landed)
+    sidecar = lr.build_envelope(
+        entity=eid, kind="sidecar", chain_head=chain_head,
+        created_at=created_at, artifact_digest=digest, locator=landed,
+        issuer=issuer)
+    lr.write_sidecar(landed, sidecar, dir_fd=parent_fd,
+                     owner_uid=owner_uid, owner_gid=owner_gid)
+    lr.set_xattr(landed, sidecar, dir_fd=parent_fd)
+    return sidecar
 
 
 def _cleanup_temp_at(class_fd: int, tmp_fd: int, tmpname: str) -> None:
@@ -767,7 +815,8 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
                  meta: dict, now_epoch: float,
                  owner_uid: int | None = None,
                  owner_gid: int | None = None,
-                 caps: ExportCaps | None = None) -> dict:
+                 caps: ExportCaps | None = None,
+                 receipt_ctx: dict | None = None) -> dict:
     """Promote the SINGLE edited artifact at ``payload_dir`` BESIDE its source —
     the edit-round-trip landing (the export-back follow-on). Returns the lineage
     receipt dict (``mode == "edit"``).
@@ -795,8 +844,20 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
       no-overwrite. No ``rename`` (which would clobber), no named temp the owner
       can race (in the preferred path).
 
-    The receipt is RETURNED, not scattered beside the source (an edit lands in the
-    user's own working directory; a ``_receipt.json`` sibling would be litter).
+    The importer-internal ``_receipt.json`` is RETURNED, not scattered beside the
+    source (an edit lands in the user's own working directory; a ``_receipt.json``
+    sibling would be litter). When ``receipt_ctx`` (``{"chain_head", "issuer"}``)
+    is supplied, ONE chain-anchored lineage sidecar
+    (``<name>.disp-edited.qdistro-lineage.json``) — plus a best-effort
+    ``user.qdistro.lineage`` xattr — IS written beside the landed edit (the
+    artifact-adjacent receipt the lineage feature exists for; a single, portable,
+    verifiable surface, not litter). It is single-file, so there is NO batch
+    manifest. The built envelope is returned as ``lineage_sidecars`` (a one-item
+    list, ``lineage_manifest`` empty) so the caller can SEAL it into the lineage
+    store AFTER the durable landing; the surface alone is not authority (it
+    verifies only against a sealed store row). Lineage is best-effort: its failure
+    NEVER fails the edit (the edited file already landed).
+
     Raises :class:`ExportPolicyError` (hostile/over-cap/symlinked path — nothing
     landed) or :class:`ExportStateError` (an I/O error / vanished source)."""
     caps = caps or ExportCaps()
@@ -820,6 +881,7 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
     tmpname: str | None = None
     linked = False
     landed: str | None = None
+    edit_sidecar: dict | None = None
     try:
         pst = os.fstat(pdir_fd)
         if not stat.S_ISDIR(pst.st_mode):
@@ -888,6 +950,23 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
 
         landed = _link_into_place(parent_fd, tmp_fd, f"{leaf}{EDITED_SUFFIX}")
         linked = True
+        if receipt_ctx is not None:
+            # Additive provenance: emission (lazy receipt-lib import, envelope
+            # build, sidecar+xattr write) must NEVER fail an otherwise-complete
+            # edit landing — the edited file is already linked into place. Any
+            # failure degrades to "no receipt" (the caller seals nothing; any
+            # partial surface published is simply unverifiable — the fail-closed
+            # direction). Written before fsync so artifact + sidecar reach disk
+            # together.
+            try:
+                edit_sidecar = _emit_edit_lineage_surface(
+                    parent_fd, landed, digest, token, now_epoch, receipt_ctx,
+                    owner_uid, owner_gid)
+            except Exception as e:  # noqa: BLE001 - never fail edit on lineage
+                logging.getLogger(__name__).warning(
+                    "edit-round-trip: lineage receipt emission failed "
+                    "(file lands; no receipt): %s", e)
+                edit_sidecar = None
         os.fsync(parent_fd)
     finally:
         # If we created a NAMED fallback temp, remove its directory entry. When we
@@ -921,7 +1000,7 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
                 pass
 
     dest = os.path.join(state_path, *dir_components, landed) if linked else None
-    return {
+    receipt = {
         "version": RECEIPT_VERSION,
         "mode": "edit",
         "launch_token": token,
@@ -933,3 +1012,9 @@ def promote_edit(payload_dir: str, state_path: str, *, source_rel: str,
         "files": [{"name": landed, "size": written, "sha256": digest}],
         "dest": dest,
     }
+    if edit_sidecar is not None:
+        # Single-file: one sidecar, no batch manifest. The session manager's
+        # _seal_export_receipts seals the sidecar list (empty manifest is a no-op).
+        receipt["lineage_sidecars"] = [edit_sidecar]
+        receipt["lineage_manifest"] = {}
+    return receipt

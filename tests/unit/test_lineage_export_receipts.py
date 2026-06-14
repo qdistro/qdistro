@@ -189,3 +189,132 @@ def test_empty_export_emits_empty_manifest(tmp_path):
     assert receipt["lineage_sidecars"] == []
     man = lr.read_export_manifest(str(dest))
     assert man["receipts"] == []
+
+
+# --- xattr pointer in export-back -----------------------------------------
+
+
+def _supports_xattr(path) -> bool:
+    import os
+    try:
+        os.setxattr(path, "user.qdistro.probe", b"1", follow_symlinks=False)
+        os.removexattr(path, "user.qdistro.probe", follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+
+
+def test_export_emits_xattr_pointer_consistent_with_sidecar(tmp_path):
+    receipt, dest = _export(tmp_path, {"result.txt": b"hello world"})
+    art = str(dest / "result.txt")
+    if not _supports_xattr(art):
+        pytest.skip("filesystem does not support user xattrs")
+    # The xattr survives the temp-dir -> final-dir rename (_place_at): it is set on
+    # the file inode in the temp dir, and a parent-dir rename preserves inode xattrs.
+    xp = lr.read_xattr(art)
+    assert xp is not None
+    env = lr.read_sidecar(art)
+    # The xattr pointer is exactly the compact projection of the verifiable sidecar
+    # (same entity/digest/chain_head), so it locates the sealed entity.
+    assert xp == {k: env[k] for k in lr._XATTR_KEYS}
+    # and the sidecar it points at verifies against the sealed store
+    store = LineageStore(str(tmp_path / "lineage.db"))
+    try:
+        _seal(store, receipt)
+        assert lr.verify_against_store(store, env) is True
+        assert xp["entity"] == env["entity"]
+    finally:
+        store.close()
+
+
+# --- edit-round-trip receipts ----------------------------------------------
+
+
+def _edit(tmp_path, *, edited=b"EDITED-BY-DISPOSABLE", with_ctx=True,
+          chain_head="edit-head"):
+    state = tmp_path / "state"
+    (state / "docs").mkdir(parents=True)
+    src = state / "docs" / "report.txt"
+    src.write_text("ORIGINAL")
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "x").write_bytes(edited)
+    ctx = {"chain_head": chain_head, "issuer": "qdistro-session-manager"} \
+        if with_ctx else None
+    receipt = ex.promote_edit(str(payload), str(state),
+                              source_rel="docs/report.txt", meta=_meta(),
+                              now_epoch=1_700_000_000, receipt_ctx=ctx)
+    return receipt, Path(receipt["dest"]), src
+
+
+def test_edit_emits_one_sidecar_no_manifest(tmp_path):
+    receipt, dest, src = _edit(tmp_path)
+    # one sidecar beside the landed edited file; single-file -> no batch manifest
+    side = dest.parent / (dest.name + ".qdistro-lineage.json")
+    assert side.is_file()
+    assert not (dest.parent / "qdistro-export-manifest.json").exists()
+    assert len(receipt["lineage_sidecars"]) == 1
+    assert receipt["lineage_manifest"] == {}
+    assert src.read_text() == "ORIGINAL"  # source untouched
+
+
+def test_edit_sidecar_binds_full_token_landed_name_and_digest(tmp_path):
+    receipt, dest, _ = _edit(tmp_path, edited=b"E")
+    env = lr.read_sidecar(str(dest))
+    assert env["entity"] == f"disp-edit:{TOKEN}:report.txt.disp-edited"
+    assert env["artifact_digest"] == hashlib.sha256(b"E").hexdigest()
+    assert env["locator"] == "report.txt.disp-edited"
+    assert env["chain_head"] == "edit-head"
+
+
+def test_edit_sidecar_seals_and_verifies(tmp_path):
+    receipt, dest, _ = _edit(tmp_path)
+    store = LineageStore(str(tmp_path / "lineage.db"))
+    try:
+        _seal(store, receipt)
+        env = lr.read_sidecar(str(dest))
+        assert lr.verify_against_store(store, env) is True
+        # a forged copy (different locator) does not verify
+        assert lr.verify_against_store(store, dict(env, locator="evil")) is False
+    finally:
+        store.close()
+
+
+def test_edit_no_ctx_emits_no_sidecar(tmp_path):
+    receipt, dest, _ = _edit(tmp_path, with_ctx=False)
+    assert "lineage_sidecars" not in receipt
+    assert not (dest.parent / (dest.name + ".qdistro-lineage.json")).exists()
+
+
+def test_edit_emission_failure_never_blocks_landing(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise ModuleNotFoundError("qdistro_lineage_receipts unavailable")
+
+    monkeypatch.setattr(ex, "_emit_edit_lineage_surface", boom)
+    receipt, dest, src = _edit(tmp_path)
+    assert dest.read_bytes() == b"EDITED-BY-DISPOSABLE"  # edit landed
+    assert src.read_text() == "ORIGINAL"
+    assert "lineage_sidecars" not in receipt  # degraded to no receipt
+
+
+def test_edit_emits_xattr_pointer_consistent_with_sidecar(tmp_path):
+    receipt, dest, _ = _edit(tmp_path)
+    if not _supports_xattr(str(dest)):
+        pytest.skip("filesystem does not support user xattrs")
+    xp = lr.read_xattr(str(dest))
+    assert xp is not None
+    env = lr.read_sidecar(str(dest))
+    assert xp == {k: env[k] for k in lr._XATTR_KEYS}
+
+
+def test_edit_zero_file_noop_has_no_lineage(tmp_path):
+    state = tmp_path / "state"
+    (state / "d").mkdir(parents=True)
+    (state / "d" / "f.txt").write_text("ORIG")
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    r = ex.promote_edit(str(payload), str(state), source_rel="d/f.txt",
+                        meta=_meta(), now_epoch=1,
+                        receipt_ctx={"chain_head": "h", "issuer": "i"})
+    assert r["files"] == [] and r["dest"] is None
+    assert "lineage_sidecars" not in r
