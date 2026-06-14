@@ -448,14 +448,24 @@ class SshTarget:
 
     def listdir(self) -> list[str]:
         """READ-ONLY: list regular files at the remote base via ssh. `find`
-        keeps it to plain basenames; failure (absent dir) yields []."""
+        keeps it to plain basenames; failure (absent dir) yields [].
+
+        ssh concatenates the remote argv into ONE string that the remote LOGIN
+        SHELL re-parses, so the `find` words and — critically — the `-printf`
+        format's `\\n` must be shell-quoted into a single token, or the remote
+        shell's quote-removal eats the backslash-n and `find` emits every
+        basename run together (no separators). We therefore shlex.quote the
+        whole remote command and split on a NUL delimiter (`%f\\0`), which is
+        the one byte that cannot appear in a filename — robust even if a name
+        contained a literal newline."""
+        remote_cmd = " ".join(shlex.quote(a) for a in [
+            "find", self.base, "-maxdepth", "1", "-type", "f", "-printf", "%f\\0"])
         proc = subprocess.run(
-            self.ssh_base + [self.host, "find", self.base, "-maxdepth", "1",
-                             "-type", "f", "-printf", "%f\\n"],
+            self.ssh_base + [self.host, remote_cmd],
             stdout=subprocess.PIPE, check=False)
         if proc.returncode != 0:
             return []
-        return [ln for ln in proc.stdout.decode("utf-8", "replace").split("\n")
+        return [ln for ln in proc.stdout.decode("utf-8", "replace").split("\0")
                 if ln]
 
     def get(self, name: str, local_path: str) -> None:

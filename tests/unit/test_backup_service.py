@@ -223,6 +223,72 @@ class TestSshTargetExecution:
         assert ops.index("sync") > ops.index("mv"), \
             "the remote sync must run AFTER the publish mv (flushes the rename)"
 
+    def _read_shim(self, tmp_path):
+        """A fake ssh tailored to the rehearsal's READ path (listdir/get), which
+        now passes the remote command as ONE shell-quoted token. Real ssh hands
+        that single token to the remote LOGIN SHELL, so this shim re-parses it as
+        a shell does — `bash -c "$1"` — not `exec "$@"` (which would treat the
+        `find ... -printf %f\\0` token as a program name). NOTE: this models the
+        single-token form only; it is not a general OpenSSH model (an op passing
+        multiple separate tokens would need `bash -c "$*"`). That single-token
+        re-parse is exactly where the VM lane caught the bug: the old argv form
+        lost the `-printf` separator through the remote shell, so the old code
+        run under THIS shim returns mangled/empty names (a true regression
+        guard, not a tautology)."""
+        bindir = tmp_path / "rbin"
+        bindir.mkdir()
+        ssh = bindir / "ssh"
+        ssh.write_text(
+            "#!/bin/bash\n"
+            "while [[ \"$1\" == -* ]]; do\n"
+            "  case \"$1\" in -i|-p|-o|-F) shift 2 ;; *) shift ;; esac\n"
+            "done\n"
+            "shift   # drop the host token\n"
+            "exec bash -c \"$1\"   # remote login shell re-parses the joined command\n")
+        ssh.chmod(0o755)
+        rsync = bindir / "rsync"
+        rsync.write_text(
+            "#!/bin/bash\n"
+            "args=(\"$@\")\n"
+            "src=\"${args[-2]}\"\n"
+            "dst=\"${args[-1]}\"\n"
+            "src=\"${src#*:}\"   # strip optional 'host:' on the PULL source\n"
+            "dst=\"${dst#*:}\"   # strip optional 'host:' on the PUSH dest\n"
+            "cp -- \"$src\" \"$dst\"\n")
+        rsync.chmod(0o755)
+        return str(ssh), str(rsync)
+
+    def test_ssh_listdir_get_read_only_paths(self, tmp_path):
+        # The rehearsal's read-only remote access: SshTarget.listdir (manifest
+        # discovery) + SshTarget.get (manifest/blob pull). listdir must survive
+        # the remote-shell re-parse and return CLEAN separated basenames — the
+        # regression the VM lane caught (the old `-printf %f\\n` argv form
+        # collapsed every name together once it crossed ssh).
+        ssh, rsync = self._read_shim(tmp_path)
+        remote_root = tmp_path / "remote2"
+        (remote_root / "dest").mkdir(parents=True)
+        for n in ("manifest-0.json", "manifest-0.json.sig", "data-0.btrfs.age"):
+            (remote_root / "dest" / n).write_text(n)
+        # a subdir at the base must NOT appear (find -type f only)
+        (remote_root / "dest" / "subdir").mkdir()
+        spec = f"fakehost:{remote_root}/dest"
+        t = svc.make_target(spec, f"{rsync} -aHAX", ssh)
+        assert isinstance(t, svc.SshTarget)
+
+        names = set(t.listdir())
+        assert names == {"manifest-0.json", "manifest-0.json.sig", "data-0.btrfs.age"}, \
+            f"listdir over (faked) ssh returned mangled/wrong names: {names!r}"
+
+        # get() pulls a remote artifact down to a local path (read-only).
+        local = tmp_path / "pulled.json"
+        t.get("manifest-0.json", str(local))
+        assert local.read_text() == "manifest-0.json"
+
+        # An ABSENT remote base yields [] (find exits nonzero) — never raises.
+        t_missing = svc.make_target(
+            f"fakehost:{remote_root}/nope", f"{rsync} -aHAX", ssh)
+        assert t_missing.listdir() == []
+
 
 class TestState:
     def _state(self, tmp_path):
