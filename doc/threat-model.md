@@ -184,10 +184,29 @@ Do not treat the broker pilot as evidence for those other domains.
   filter-classified in `qdwin_classify_global` or on a reviewed
   intentionally-visible inventory — so a **qdwin-created** global that is added
   without a visibility decision is now a mechanical CI failure rather than a
-  silent fail-open. **Residual:** the ~25 globals INHERITED from libweston core
-  (`wl_compositor`, `wl_seat`, xdg-shell, etc.) are not created in `qdwin.c` and
-  cannot be enumerated from that source, so a new *upstream* libweston global
-  still classifies ORDINARY until a row is added; the full per-class
-  advertised-global enumeration (one classify row per advertised global, with
-  the live silo-registry negative) remains VM/B1-gated work tracked in
-  `todo/fable-release` 02-security-gate.md S1.
+  silent fail-open. **Inherited globals closed (S1 libweston-bump guard):**
+  `test_global_filter.py` now ALSO enumerates every `wl_global_create()` site in
+  the vendored `libweston-vendored/` tree and requires each advertised interface
+  to be categorized in `LIBWESTON_INHERITED_GLOBALS` (GATED — pulled into
+  `qdwin_classify_global` by pointer identity, today `weston_capture_v1` +
+  `weston_touch_calibration`; or VISIBLE — by-design session protocol or a
+  tracked residual). So a libweston bump that adds a new core global — or a new
+  create site reusing a known interface — is a mechanical CI failure too, not a
+  silent ORDINARY fail-open. `weston_touch_calibration` (global touch-input
+  calibration / touch grab) is now gated under `QDWIN_GLOBAL_TOUCH_CALIBRATION`
+  and hidden from secctx/silo clients via its public `compositor->touch_calibration`
+  pointer. **Residual (gating, not detection):** four privileged inherited globals
+  still classify ORDINARY and remain visible to silo clients —
+  `weston_direct_display_v1` and `weston_content_protection` (advertised on the
+  DRM backend, `backend-drm/drm.c`), `weston_debug_v1`, and `xx_color_manager_v4`
+  (only when the compositor enables them). Unlike capture/touch-calibration these
+  have **no qdwin-reachable `wl_global *`** to gate by pointer identity: libweston
+  discards the `wl_global_create` result for direct-display/content-protection/
+  color-manager (bare `if (!wl_global_create(...))`, not stored in any compositor
+  field) and stashes the debug global behind the opaque `weston_log_context`. So
+  a silo client's `wl_registry` can still bind them — a metadata/scanout
+  side-channel of the same class as the `zwlr_output_manager_v1` enumeration
+  above. Gating them needs an upstream API to recover the global pointer plus the
+  live silo-registry negative, so that work + the full per-class advertised-global
+  enumeration remain VM/B1-gated, tracked in `todo/fable-release`
+  02-security-gate.md S1.
