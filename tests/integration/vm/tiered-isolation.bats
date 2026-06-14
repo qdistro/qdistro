@@ -70,6 +70,11 @@ SETUP
 }
 
 teardown_file() {
+    # Reap the shared free-port driver-staging http server first (host-side
+    # cleanup, always runs). NB: bats runs only the LAST teardown_file() defined
+    # in a file, so the broker-rule removal below MUST live in this same function
+    # — a second teardown_file() would silently shadow it and leak the rule.
+    reap_vm_drivers
     # Remove the test-authored rules so they never leak across runs. A failed
     # cleanup — which would leave a standing allow rule in the VM — is LOUD,
     # not swallowed (helpers.bash policy: never silently skip).
@@ -84,12 +89,8 @@ setup() {
     vm_run "systemctl stop qdistro-admin-broker.service 2>/dev/null || true"
 }
 
-# Drivers are staged via the shared stage_vm_driver (helpers.bash), which serves
-# them on a private free port exported as QDISTRO_BATS_HTTP_PORT; reap the server
-# once the whole file is done.
-teardown_file() {
-    reap_vm_drivers
-}
+# (Driver-staging http server reaping via reap_vm_drivers is folded into the
+# single teardown_file() above — bats only runs the last one defined.)
 
 @test "phase7-tier2-podman: in-container weston-terminal becomes a peer toplevel on outer" {
     stage_vm_driver "s32-tier2-podman.sh"
@@ -180,6 +181,30 @@ teardown_file() {
     assert_output_contains "PASS: no host bus/pulse/gnupg/ssh-agent in /run/user/1000/"
     assert_output_contains "PASS: qdistro_tier2_token label set"
     assert_output_contains "PASS: §Phase-7 tier-2 hardening invariants enforced"
+}
+
+@test "phase7-tier2-lineage-register: spawn-tier2 root-launcher auto-registers a launch record (02/S3b)" {
+    # 02/S3b evidence: the tier-2-podman half of permission lineage. The
+    # root-launcher path (TIER2_ROOT_LAUNCHER=1 — spawn-tier2's "proven tier-3
+    # topology") reads the qdistro-secctx-exec inner pid and calls broker
+    # RegisterLaunch via the shared qd_register_secctx_launch_record helper, so
+    # enforce mode can resolve a cross-silo source pid to its record. Companion
+    # to phase7-tier3-lineage-register (s60). The spawn gate rule is authored by
+    # setup_file (and idempotently by the driver), so this needs no extra setup.
+    stage_vm_driver "s61-tier2-lineage-register.sh"
+    vm_run "curl -fsS -o /tmp/s61.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s61-tier2-lineage-register.sh && chmod +x /tmp/s61.sh && bash /tmp/s61.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        fail_loud "podman / tier-2 image / qdistro-secctx-exec / outer compositor / broker audit db not available on this VM"
+    fi
+    assert_output_contains "PASS: broker spawn gate allows qdistro.tier2.spawn:weston-terminal/weston-terminal"
+    # Load-bearing: the registration line can only appear if spawn-tier2's
+    # root-launcher path read the secctx-exec inner pid and the broker
+    # RegisterLaunch re-verified it.
+    assert_output_contains "PASS: spawn-tier2 (root-launcher) logged the launch-record registration for silo="
+    # The broker persisted the record as an auditable qdistro.lineage.register row.
+    assert_output_contains "PASS: broker recorded qdistro.lineage.register:"
+    assert_output_contains "PASS: §02/S3b tier-2 (root-launcher) permission-lineage register end-to-end"
 }
 
 # --- §Phase-7 tier-3: cross-uid silos via waypipe ---------------------
