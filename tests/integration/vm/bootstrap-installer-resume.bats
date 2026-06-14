@@ -33,6 +33,7 @@ setup() {
     # It records the script's basename (so the trace is by-script) plus the
     # src-dir argument it was handed.
     local installers=(
+        install-sdk-for-vm.sh
         install-broker-for-qdwin.sh
         install-session-manager.sh
         install-polkit-agent-for-vm.sh
@@ -88,7 +89,8 @@ _trace_scripts() { awk '{print $1}' "$TRACE"; }
     # Exact ordered set of scripts that ran.
     run _trace_scripts
     [ "$status" -eq 0 ]
-    expected="install-broker-for-qdwin.sh
+    expected="install-sdk-for-vm.sh
+install-broker-for-qdwin.sh
 install-session-manager.sh
 install-polkit-agent-for-vm.sh
 install-pwd-for-vm.sh
@@ -106,7 +108,8 @@ install-tier5b-for-vm.sh"
     # State file records every step NAME (not script basename), in order.
     run cat "$STATE_DIR/installer-chain.state"
     [ "$status" -eq 0 ]
-    state_expected="broker
+    state_expected="sdk
+broker
 session-manager
 polkit
 pwd
@@ -136,6 +139,7 @@ tier5b"
     _run_chain ''
     [ "$status" -eq 0 ]
     grep -qx "install-broker-for-qdwin.sh $FAKE_QD/broker" "$TRACE"
+    grep -qx "install-sdk-for-vm.sh $FAKE_QD/sdk/qdistro_app" "$TRACE"
     grep -qx "install-session-manager.sh $FAKE_QD/session_manager" "$TRACE"
     # portal-backend / tier3 / tier4-host / tier5 / tier5b -> bare QD
     grep -qx "install-portal-backend-for-vm.sh $FAKE_QD" "$TRACE"
@@ -144,14 +148,15 @@ tier5b"
 
 # --- --resume: skips the recorded-complete prefix, runs only the remainder --
 
-@test "resume: with broker..qsu recorded, runs ONLY browser-bridge..tier5b" {
+@test "resume: with broker..qsu recorded, runs ONLY sdk plus browser-bridge..tier5b" {
     mkdir -p "$STATE_DIR"
     printf 'broker\nsession-manager\npolkit\npwd\nqsu\n' \
         > "$STATE_DIR/installer-chain.state"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run _trace_scripts
-    expected="install-browser-bridge-for-vm.sh
+    expected="install-sdk-for-vm.sh
+install-browser-bridge-for-vm.sh
 install-portal-backend-for-vm.sh
 install-print-proxy-for-vm.sh
 install-snapshots-for-vm.sh
@@ -175,7 +180,8 @@ install-tier5b-for-vm.sh"
     ! grep -q "install-qsu-for-vm.sh" "$TRACE"
     # ... but every other release-profile step ran, in order.
     run _trace_scripts
-    expected="install-broker-for-qdwin.sh
+    expected="install-sdk-for-vm.sh
+install-broker-for-qdwin.sh
 install-session-manager.sh
 install-polkit-agent-for-vm.sh
 install-pwd-for-vm.sh
@@ -195,7 +201,8 @@ install-tier5b-for-vm.sh"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run bash -c 'wc -l < "'"$TRACE"'"'
-    [ "$(echo "$output" | tr -d ' ')" = "13" ]
+    [ "$(echo "$output" | tr -d ' ')" = "14" ]
+    grep -q "install-sdk-for-vm.sh" "$TRACE"
     grep -q "install-broker-for-qdwin.sh" "$TRACE"
     grep -q "install-tier5b-for-vm.sh" "$TRACE"
 }
@@ -237,10 +244,10 @@ install-tier5b-for-vm.sh"
 }
 
 @test "rerun-step: first step in the chain works too" {
-    _run_chain 'RERUN_STEP=broker'
+    _run_chain 'RERUN_STEP=sdk'
     [ "$status" -eq 0 ]
     run _trace_scripts
-    [ "$output" = "install-broker-for-qdwin.sh" ]
+    [ "$output" = "install-sdk-for-vm.sh" ]
 }
 
 @test "rerun-step: unknown step name is rejected (fail-closed) and runs nothing" {

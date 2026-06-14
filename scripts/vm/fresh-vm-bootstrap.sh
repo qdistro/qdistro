@@ -126,6 +126,7 @@ log "installing Python modules..."
 cd "$SRC/qdistro"
 QD="$SRC/qdistro"
 INSTALLERS=(
+    "scripts/install/install-sdk-for-vm.sh             $QD/sdk/qdistro_app"
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
     "scripts/install/install-session-manager.sh        $QD/session_manager"
     "scripts/install/install-user-relay-for-vm.sh      $QD/user_relay"

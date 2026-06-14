@@ -1538,6 +1538,7 @@ pip_install_apps() {
 # whether the file is executed or sourced by the test harness.
 installer_chain_entries() {
     cat <<'EOF'
+sdk|scripts/install/install-sdk-for-vm.sh|/sdk/qdistro_app
 broker|scripts/install/install-broker-for-qdwin.sh|/broker
 session-manager|scripts/install/install-session-manager.sh|/session_manager
 polkit|scripts/install/install-polkit-agent-for-vm.sh|/polkit
