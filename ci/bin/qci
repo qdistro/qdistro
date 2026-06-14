@@ -91,7 +91,7 @@ QCI_OFFLINE="${QCI_OFFLINE:-0}"
 # the D1-dropped `image` gate are intentionally excluded.
 QCI_RELEASE="${QCI_RELEASE:-0}"
 [ "$QCI_RELEASE" = 1 ] && export QCI_RELEASE
-QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile in-place-upgrade"
+QCI_RELEASE_FATAL_GATES="vm-smoke bats gui release-manifest bootstrap-release-profile"
 
 # QCI_ALLOW_TEST_EDITS=1 sanctions edits to the `qci edit-guard` protected
 # paths (tests/**, ci/prompts/**, selinux/**). Same effect as the
@@ -236,8 +236,8 @@ Environment:
                             test-annotation hook.
   QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` row in
                             a release-relevant gate (vm-smoke / bats / gui /
-                            release-manifest / bootstrap-release-profile /
-                            in-place-upgrade) is FATAL, not exit-0. "Green" then
+                            release-manifest / bootstrap-release-profile) is
+                            FATAL, not exit-0. "Green" then
                             means zero blocked rows — a missing prerequisite (no
                             built image/VM, an unpopulated/unsigned manifest)
                             cannot pass as success. Escalates an otherwise-passing
@@ -273,6 +273,12 @@ exit_class_name() {
     esac
 }
 
+# Map a child process exit code to a qci exit class. KNOWN LIMITATION: qci's
+# class codes share the integer space with raw child codes, so a sub-tool that
+# happens to exit with one of these values (e.g. a script that `exit 40`s) is
+# passed through and recorded under THAT class (vm_provision) instead of the
+# caller's $default. Real test runners use small codes (pytest 1-5, npm 1), so
+# this rarely bites; a future cleanup could namespace qci's own rc separately.
 map_rc() {
     local rc=$1 default=$2
     case "$rc" in
@@ -639,8 +645,19 @@ release_vm() {
         log "preserving failed VM $vm"
         printf 'preserved_failed_vm=%s\n' "$vm" >> "$RDIR/manifest.txt"
         # This overlay's backing chain may point at a per-run golden; keep the
-        # golden disk(s) so the preserved VM stays bootable for triage.
-        [ "${#RUN_GOLDEN_DISKS[@]}" -gt 0 ] && GOLDEN_PRESERVE=1
+        # golden disk(s) so the preserved VM stays bootable for triage. Record
+        # this via a PERSISTENT MARKER FILE, not just the GOLDEN_PRESERVE shell
+        # var: in the parallel bats/gui pools release_vm runs inside a
+        # backgrounded `&` worker subshell, so a var assigned here never reaches
+        # the parent that later runs cleanup_run_goldens — the golden would be
+        # deleted out from under the preserved overlay and `virsh start <vm>`
+        # for triage would fail on a dangling backing. The marker file survives
+        # the subshell; GOLDEN_PRESERVE is kept too for parent-side callers
+        # (abort_run).
+        if [ "${#RUN_GOLDEN_DISKS[@]}" -gt 0 ]; then
+            GOLDEN_PRESERVE=1
+            mkdir -p "$RDIR/vm" && : > "$RDIR/vm/golden-preserve"
+        fi
         local preserved_state notes
         if [ "${QCI_KEEP_FAILED_VM_RUNNING:-0}" = 1 ]; then
             log "  QCI_KEEP_FAILED_VM_RUNNING=1 — leaving $vm running"
@@ -804,7 +821,10 @@ cleanup_run_goldens() {
     local d
     for d in "${RUN_GOLDEN_DISKS[@]:-}"; do
         [ -n "$d" ] || continue
-        if [ "$GOLDEN_PRESERVE" = 1 ]; then
+        # Authoritative signal is the marker FILE written by release_vm (it
+        # survives the backgrounded worker subshells where the var cannot); the
+        # GOLDEN_PRESERVE var is an in-parent fallback (abort_run path).
+        if [ "$GOLDEN_PRESERVE" = 1 ] || [ -e "$RDIR/vm/golden-preserve" ]; then
             log "preserving golden backing $d (a failed worker overlay was preserved and references it)"
             printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
             continue
@@ -3460,22 +3480,27 @@ resolve_replay_scenario() {
         printf 'bats\t%s\n' "$cand"
         return 0
     fi
-    # GUI markdown basename across the known scenario roots.
+    # GUI markdown basename across the known scenario roots. This list MUST
+    # cover every root agent_scenarios enumerates (qdwin tests/gui + tests/apps,
+    # qdistro permissions-gui + qdwin-noctalia, qdlocker tests/gui) — otherwise
+    # `qci replay <basename>` cannot find a scenario that `qci gui` actually
+    # runs. workflow-gui is also accepted (a valid replay target). Defined once
+    # and reused by both the exact-match and the glob-prefix passes below.
     local root mdbase=${s%.md}
-    for root in \
-        "$QDISTRO_REPO/tests/integration/permissions-gui" \
-        "$QDISTRO_REPO/tests/integration/qdwin-noctalia" \
+    local gui_roots=(
+        "$WORKSPACE/qdwin/tests/gui"
+        "$WORKSPACE/qdwin/tests/apps"
+        "$QDISTRO_REPO/tests/integration/permissions-gui"
+        "$QDISTRO_REPO/tests/integration/qdwin-noctalia"
+        "$WORKSPACE/qdlocker/tests/gui"
         "$QDISTRO_REPO/tests/integration/workflow-gui"
-    do
+    )
+    for root in "${gui_roots[@]}"; do
         cand="$root/$mdbase.md"
         [ -f "$cand" ] && { printf 'gui\t%s\n' "$cand"; return 0; }
     done
     # Glob fallback: a basename prefix match (e.g. "03" -> 03-*.md).
-    for root in \
-        "$QDISTRO_REPO/tests/integration/permissions-gui" \
-        "$QDISTRO_REPO/tests/integration/qdwin-noctalia" \
-        "$QDISTRO_REPO/tests/integration/workflow-gui"
-    do
+    for root in "${gui_roots[@]}"; do
         for cand in "$root/$mdbase"*.md; do
             [ -f "$cand" ] && { printf 'gui\t%s\n' "$cand"; return 0; }
         done

@@ -50,7 +50,7 @@ vitest tags), and the per-suite relabel action items.
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
 | `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. The agent scenarios run **in parallel** (one disposable VM each). |
-| `full` | Run `preflight`, `host`, `vm-smoke`, `bats`, and `gui`. |
+| `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 
