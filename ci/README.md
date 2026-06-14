@@ -125,11 +125,20 @@ marked `blocked` so the report cannot be mistaken for a green run.
 QCI_AGENT_CMD='my-visual-agent-runner' qdistro/ci/bin/qci gui
 ```
 
-If your runner needs a template, include `{prompt}`:
+If your runner needs a template, include `{prompt}` — it is substituted with the
+prompt-file path and the result is run via `bash -lc` (so `$(cat {prompt})`
+inlines the prompt text, which `claude -p` takes as a positional argument rather
+than a path):
 
 ```bash
-QCI_AGENT_CMD='claude -p "$(cat {prompt})"' qdistro/ci/bin/qci gui
+QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+  qdistro/ci/bin/qci gui
 ```
+
+`--dangerously-skip-permissions` is required because the agent must run
+`vm-exec`/`virsh` and write its `status.txt` without interactive approval;
+`--model haiku` keeps the per-scenario cost down (the scenarios are mechanical
+drive-and-screenshot tasks, run one disposable VM each).
 
 The executable qdwin smokes run before the markdown assignments:
 
