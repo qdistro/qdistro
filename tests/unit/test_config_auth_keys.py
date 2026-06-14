@@ -42,15 +42,53 @@ def test_introspection_off_without_root_marker(monkeypatch):
     assert _introspection_authorized() is False
 
 
-def test_introspection_rejects_non_root_marker(tmp_path, monkeypatch):
-    # A marker the user could create (owned by the test uid, not root) must be
-    # refused — _system_config_is_trusted requires uid 0.
-    marker = tmp_path / "locker-ctrl-introspection"
-    marker.write_text("")
+def test_introspection_rejects_self_owned_marker(monkeypatch):
+    # A marker owned by the service's own uid must be refused even under SAFE
+    # (root-owned) parent dirs — proving the self-owned-file check itself, not
+    # just a writable parent. This is the same-uid forgery case.
+    import stat
+    from types import SimpleNamespace
+
     import qdlocker.app as app_mod
-    monkeypatch.setattr(app_mod, "_INTROSPECTION_MARKER", str(marker))
-    # Running as non-root, the file is owned by us (uid != 0) -> refused.
+    marker = "/etc/qdistro/locker-ctrl-introspection"
+    monkeypatch.setattr(app_mod, "_INTROSPECTION_MARKER", marker)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(os, "getegid", lambda: 1000)
+    monkeypatch.setattr(os, "getgroups", lambda: [1000])
+
+    def fake_lstat(path):
+        if str(path) == marker:
+            # owned by us (the same-uid attacker)
+            return SimpleNamespace(st_uid=1000, st_gid=0,
+                                   st_mode=stat.S_IFREG | 0o644)
+        return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
     assert _introspection_authorized() is False
+
+
+def test_introspection_trusts_overflow_uid_marker_under_userns(monkeypatch):
+    # PrivateNetwork regression: under the service userns a root-installed marker
+    # reads as the overflow uid 65534 (!= our uid). It must enable introspection;
+    # before the fix the st_uid==0 check refused it and the GUI harness broke.
+    import stat
+    from types import SimpleNamespace
+
+    import qdlocker.app as app_mod
+    marker = "/etc/qdistro/locker-ctrl-introspection"
+    monkeypatch.setattr(app_mod, "_INTROSPECTION_MARKER", marker)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(os, "getegid", lambda: 1000)
+    monkeypatch.setattr(os, "getgroups", lambda: [1000])
+
+    def fake_lstat(path):
+        if str(path) == marker:
+            return SimpleNamespace(st_uid=65534, st_gid=0,
+                                   st_mode=stat.S_IFREG | 0o644)
+        return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    assert _introspection_authorized() is True
 
 
 @pytest.mark.cheat_aware(

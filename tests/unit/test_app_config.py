@@ -5,8 +5,10 @@ timeout, lid action, and fprintd behaviour. A config an unprivileged
 user can control is a privilege/auth surface (e.g. disabling fprintd or
 stretching the idle timeout). These tests exercise the three defenses:
 
-  * _system_config_is_trusted — regular-file + root-owned + not
-    group/world-writable.
+  * _system_config_is_trusted — regular-file + not forgeable by the
+    service's own uid (root-owned in practice, but verified by the
+    namespace-stable property since PrivateNetwork's userns hides true
+    root ownership) + not group/world-writable + safe parent chain.
   * _read_toml_no_follow      — O_NOFOLLOW so a symlink swap fails closed.
   * _validate_config          — schema/type/range filtering.
 
@@ -32,64 +34,133 @@ from qdlocker.app import (
 )
 
 # ---- _system_config_is_trusted --------------------------------------------
+#
+# The trust predicate is "not forgeable by qdlocker's own (service) uid", NOT
+# "owned by root specifically": under PrivateNetwork=yes the service runs in a
+# user namespace where host root (and every other unmapped host uid) collapses
+# to the overflow uid 65534, so st_uid==0 is unrecoverable from inside. We pin a
+# fixed service identity and a path-aware os.lstat (file inode + safe root-owned
+# parent dirs) so the suite doesn't need real root-owned files.
+
+_SERVICE_UID = 1000  # qdlocker runs as admin; this is the same-uid attacker.
 
 
-def _fake_stat(*, uid, mode):
-    return SimpleNamespace(st_uid=uid, st_mode=mode)
+def _fake_stat(*, uid, mode, gid=0):
+    return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=mode)
 
 
-def test_system_config_root_owned_is_trusted(monkeypatch, tmp_path):
-    p = tmp_path / "locker.conf"
-    p.write_text("idle_timeout_s = 60\n")
-    monkeypatch.setattr(
-        os, "lstat",
-        lambda path: _fake_stat(uid=0, mode=stat.S_IFREG | 0o644),
-    )
-    assert _system_config_is_trusted(str(p)) is True
+def _safe_dir_stat():
+    # /etc/qdistro deployment shape: root-owned 0755 directory.
+    return _fake_stat(uid=0, mode=stat.S_IFDIR | 0o755)
+
+
+@pytest.fixture
+def fixed_identity(monkeypatch):
+    """Pin the service identity so trust is deterministic regardless of the
+    uid the test runner happens to have."""
+    monkeypatch.setattr(os, "geteuid", lambda: _SERVICE_UID)
+    monkeypatch.setattr(os, "getegid", lambda: _SERVICE_UID)
+    monkeypatch.setattr(os, "getgroups", lambda: [_SERVICE_UID])
+
+
+def _install_lstat(monkeypatch, target, file_stat, *, parent_overrides=None):
+    """Path-aware os.lstat: file_stat at `target`, safe root-owned dir stat for
+    every parent unless overridden via parent_overrides={abspath: stat}."""
+    overrides = {str(k): v for k, v in (parent_overrides or {}).items()}
+
+    def fake_lstat(path):
+        sp = str(path)
+        if sp == str(target):
+            return file_stat
+        if sp in overrides:
+            return overrides[sp]
+        return _safe_dir_stat()
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+
+def test_system_config_root_owned_is_trusted(monkeypatch, fixed_identity):
+    p = "/etc/qdistro/locker.conf"
+    _install_lstat(monkeypatch, p, _fake_stat(uid=0, mode=stat.S_IFREG | 0o644))
+    assert _system_config_is_trusted(p) is True
+
+
+def test_system_config_overflow_uid_trusted_under_userns(monkeypatch, fixed_identity):
+    # PrivateNetwork regression: host-root reads as overflow uid 65534 inside
+    # the service userns. It is != our uid, so it must still be trusted.
+    p = "/etc/qdistro/locker.conf"
+    _install_lstat(monkeypatch, p, _fake_stat(uid=65534, mode=stat.S_IFREG | 0o644))
+    assert _system_config_is_trusted(p) is True
 
 
 @pytest.mark.cheat_aware(
-    protects="a system config NOT owned by root is rejected — an "
-    "unprivileged user cannot plant /etc/qdistro/locker.conf to weaken "
-    "the locker (disable fprintd, stretch the idle timeout)",
+    protects="a system config owned by qdlocker's own (service) uid is "
+    "rejected — a same-uid attacker cannot plant /etc/qdistro/locker.conf to "
+    "weaken the locker (disable fprintd, stretch the idle timeout)",
     severity="high",
     cheats=[
-        "drop the st_uid==0 check",
+        "only reject when st_uid == some hardcoded attacker uid",
         "accept any uid that can read the file",
-        "stat the realpath after following a symlink to a root-owned file",
+        "stat the realpath after following a symlink to a trusted file",
     ],
-    consequence="a non-root user controls the locker's security policy via "
-    "a config file they own — an auth/privilege bypass surface",
+    consequence="a same-uid process controls the locker's security policy via "
+    "a config file it owns — an auth/privilege bypass surface",
 )
-def test_system_config_user_owned_not_trusted(monkeypatch, tmp_path):
-    p = tmp_path / "locker.conf"
-    p.write_text("idle_timeout_s = 60\n")
-    monkeypatch.setattr(
-        os, "lstat",
-        lambda path: _fake_stat(uid=1000, mode=stat.S_IFREG | 0o644),
-    )
-    assert _system_config_is_trusted(str(p)) is False
+def test_system_config_self_owned_not_trusted(monkeypatch, fixed_identity):
+    p = "/etc/qdistro/locker.conf"
+    _install_lstat(monkeypatch, p,
+                   _fake_stat(uid=_SERVICE_UID, mode=stat.S_IFREG | 0o644))
+    assert _system_config_is_trusted(p) is False
 
 
 @pytest.mark.cheat_aware(
-    protects="a root-owned but group/world-writable system config is "
-    "rejected — a non-root user in the right group cannot weaken the locker "
-    "by writing to it",
+    protects="a non-self-owned but group/world-writable system config is "
+    "rejected — a same-uid attacker in the right group cannot weaken the "
+    "locker by writing to it",
     severity="high",
     cheats=[
-        "check only st_uid==0 and ignore the writable mode bits",
+        "check only ownership and ignore the writable mode bits",
     ],
     consequence="any user who can write the file controls locker policy "
-    "despite root ownership",
+    "despite non-self ownership",
 )
-def test_system_config_group_world_writable_not_trusted(monkeypatch, tmp_path):
-    p = tmp_path / "locker.conf"
-    p.write_text("idle_timeout_s = 60\n")
-    monkeypatch.setattr(
-        os, "lstat",
-        lambda path: _fake_stat(uid=0, mode=stat.S_IFREG | 0o666),
+def test_system_config_group_world_writable_not_trusted(monkeypatch, fixed_identity):
+    p = "/etc/qdistro/locker.conf"
+    _install_lstat(monkeypatch, p, _fake_stat(uid=0, mode=stat.S_IFREG | 0o666))
+    assert _system_config_is_trusted(p) is False
+
+
+@pytest.mark.cheat_aware(
+    protects="a config under a parent directory the service uid controls is "
+    "rejected — the same-uid attacker could rename/replace the path",
+    severity="high",
+    cheats=[
+        "stat only the file and skip the parent-directory chain",
+    ],
+    consequence="a same-uid attacker who owns a parent dir swaps the file for "
+    "their own and controls locker policy",
+)
+def test_system_config_self_writable_parent_not_trusted(monkeypatch, fixed_identity):
+    p = "/etc/qdistro/locker.conf"
+    # File itself is fine, but /etc/qdistro is owned by the service uid.
+    _install_lstat(
+        monkeypatch, p, _fake_stat(uid=0, mode=stat.S_IFREG | 0o644),
+        parent_overrides={
+            "/etc/qdistro": _fake_stat(uid=_SERVICE_UID, mode=stat.S_IFDIR | 0o755),
+        },
     )
-    assert _system_config_is_trusted(str(p)) is False
+    assert _system_config_is_trusted(p) is False
+
+
+def test_system_config_world_writable_parent_not_trusted(monkeypatch, fixed_identity):
+    p = "/etc/qdistro/locker.conf"
+    _install_lstat(
+        monkeypatch, p, _fake_stat(uid=0, mode=stat.S_IFREG | 0o644),
+        parent_overrides={
+            "/etc/qdistro": _fake_stat(uid=0, mode=stat.S_IFDIR | 0o777),
+        },
+    )
+    assert _system_config_is_trusted(p) is False
 
 
 @pytest.mark.cheat_aware(
@@ -97,22 +168,20 @@ def test_system_config_group_world_writable_not_trusted(monkeypatch, tmp_path):
     "rejected before its contents are trusted",
     severity="high",
     cheats=[
-        "trust any path that stats with uid==0, including a symlink",
-        "follow the symlink and stat the (root-owned) target",
+        "trust any non-self-owned path, including a symlink",
+        "follow the symlink and stat the target",
     ],
     consequence="a symlink swap redirects the trusted-config read to "
     "attacker-controlled content",
 )
-def test_system_config_non_regular_file_not_trusted(monkeypatch):
+def test_system_config_non_regular_file_not_trusted(monkeypatch, fixed_identity):
     # e.g. a symlink (S_IFLNK) or fifo at the config path.
-    monkeypatch.setattr(
-        os, "lstat",
-        lambda path: _fake_stat(uid=0, mode=stat.S_IFLNK | 0o777),
-    )
+    _install_lstat(monkeypatch, "/etc/qdistro/locker.conf",
+                   _fake_stat(uid=0, mode=stat.S_IFLNK | 0o777))
     assert _system_config_is_trusted("/etc/qdistro/locker.conf") is False
 
 
-def test_system_config_missing_not_trusted(monkeypatch):
+def test_system_config_missing_not_trusted(monkeypatch, fixed_identity):
     def raise_oserror(path):
         raise FileNotFoundError(path)
 

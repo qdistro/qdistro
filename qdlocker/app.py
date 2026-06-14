@@ -142,9 +142,68 @@ def _validate_config(file_config: dict, source: str,
     return cleaned
 
 
+def _mode_writable_by_us(st: os.stat_result, uid: int, gids: set[int]) -> bool:
+    """True if the running service identity can write (or chmod) this inode."""
+    if st.st_uid == uid:
+        # If we own it we can chmod it even when the write bit is currently
+        # absent, so ownership itself is control for this trust boundary.
+        return True
+    if (st.st_mode & stat.S_IWGRP) and st.st_gid in gids:
+        return True
+    if st.st_mode & stat.S_IWOTH:
+        return True
+    return False
+
+
+def _parent_chain_is_not_self_writable(path: str) -> bool:
+    """Every parent directory up to / must be outside the running service
+    identity's control, so the same-uid attacker cannot rename/replace the path
+    out from under us."""
+    uid = os.geteuid()
+    gids = set(os.getgroups())
+    gids.add(os.getegid())
+
+    try:
+        p = Path(path).resolve(strict=False).parent
+    except (OSError, RuntimeError):
+        # e.g. a symlink loop in the parent chain — fail closed.
+        log.warning("config path %s could not be resolved; refusing", path)
+        return False
+    while True:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            log.warning("config parent %s cannot be statted; refusing", p)
+            return False
+        if not stat.S_ISDIR(st.st_mode):
+            log.warning("config parent %s is not a directory; refusing", p)
+            return False
+        if _mode_writable_by_us(st, uid, gids):
+            log.warning("config parent %s is controlled/writable by this uid; refusing", p)
+            return False
+        if p.parent == p:
+            return True
+        p = p.parent
+
+
 def _system_config_is_trusted(path: str) -> bool:
-    """Reject the system config path unless it is a regular file owned
-    by root with no group/world write bits."""
+    """Reject a system-controlled marker/config unless the running service
+    identity cannot forge or replace it.
+
+    The load-bearing property is "not forgeable by qdlocker's own uid", NOT
+    "owned by root specifically" — the latter is unrecoverable under
+    PrivateNetwork=yes, whose user namespace maps host root (and every other
+    unmapped host uid) to the overflow uid 65534 inside the service. A
+    root-owned file then reads as uid 65534 (!= our uid → trusted); an
+    admin-forged file reads as our own uid (rejected). This holds identically
+    inside and outside the namespace. Residual: a file owned by a third
+    non-root uid is also accepted if root placed it under a parent chain we
+    cannot modify — acceptable because /etc/qdistro is 0755 root:root, enforced
+    by the parent-chain check below."""
+    uid = os.geteuid()
+    gids = set(os.getgroups())
+    gids.add(os.getegid())
+
     try:
         st = os.lstat(path)
     except OSError:
@@ -152,26 +211,40 @@ def _system_config_is_trusted(path: str) -> bool:
     if not stat.S_ISREG(st.st_mode):
         log.warning("config path %s is not a regular file; refusing", path)
         return False
-    if st.st_uid != 0:
-        log.warning("config path %s not owned by root (uid=%d); refusing",
+    if st.st_uid == uid:
+        log.warning("config path %s is owned by this service uid (%d); refusing",
                     path, st.st_uid)
         return False
+    if _mode_writable_by_us(st, uid, gids):
+        log.warning("config path %s is writable/controlled by this service; refusing",
+                    path)
+        return False
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        # Defense in depth: reject broad writability even if our current groups
+        # would not match this gid.
         log.warning("config path %s is group/world-writable; refusing", path)
+        return False
+    if not _parent_chain_is_not_self_writable(path):
         return False
     return True
 
 
-# Finding 02: introspection is authorized only by this root-owned marker, so a
-# same-uid process cannot re-enable the ctrl-socket diagnostics (and the
+# Finding 02: introspection is authorized only by this marker, which must pass
+# _system_config_is_trusted (a regular file the service's own uid cannot forge or
+# replace — root-installed in practice, but verified by the namespace-stable
+# property since PrivateNetwork's userns hides true root ownership). A same-uid
+# process therefore cannot re-enable the ctrl-socket diagnostics (and the
 # password-length side channel) by forging it. The GUI test harness installs it
 # as root; production never ships it.
 _INTROSPECTION_MARKER = "/etc/qdistro/locker-ctrl-introspection"
 
 
 def _introspection_authorized() -> bool:
-    """True only when the root-owned introspection marker is present and
-    trustworthy (regular file, owned by root, not group/world-writable)."""
+    """True only when the introspection marker is present and trustworthy: a
+    regular file the running service identity cannot forge or replace (see
+    _system_config_is_trusted — root-owned in practice, but verified by the
+    namespace-stable not-forgeable-by-us property, since PrivateNetwork's userns
+    hides true root ownership)."""
     authorized = _system_config_is_trusted(_INTROSPECTION_MARKER)
     if authorized:
         log.warning("ctrl-socket introspection ENABLED via %s "
