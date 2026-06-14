@@ -354,6 +354,120 @@ def test_export_manifest_empty_is_valid(tmp_path):
     assert got["receipts"] == []
 
 
+# --- upload receipt --------------------------------------------------------
+
+
+def _uchild(eid, digest, *, dest=None, locator=None, chain_head="uhead"):
+    # the AUDIT-significant remote destination lives in the child's `extra` (only
+    # children are sealed); locator is the remote per-file locator (secondary).
+    extra = {"destination": dest} if dest is not None else None
+    return r.build_envelope(entity=eid, kind="upload-receipt",
+                            chain_head=chain_head, created_at=1000,
+                            artifact_digest=digest, locator=locator or eid,
+                            extra=extra)
+
+
+def test_upload_receipt_round_trip(tmp_path):
+    envs = [_uchild("upload:a", _digest(b"a"), dest="https://x/a"),
+            _uchild("upload:b", _digest(b"b"), dest="https://x/b")]
+    rec = r.build_upload_receipt(envs, chain_head="uhead", created_at=1000,
+                                 destination="https://x/")
+    name = r.write_upload_receipt(str(tmp_path), rec)
+    assert name.endswith(RECEIPT_NAMES["upload-receipt"])
+    assert name.endswith("qdistro-upload-receipt.json")
+    got = r.read_upload_receipt(str(tmp_path))
+    assert got == rec
+    assert got["destination"] == "https://x/"  # convenience summary preserved
+    # the audit destination is in each child's extra (the sealed part)
+    assert got["receipts"][0]["extra"]["destination"] == "https://x/a"
+
+
+def test_upload_receipt_round_trip_via_dir_fd(tmp_path):
+    envs = [_uchild("upload:a", _digest(b"a"))]
+    rec = r.build_upload_receipt(envs, chain_head="uhead", created_at=1000)
+    dfd = os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        r.write_upload_receipt("", rec, dir_fd=dfd)
+        got = r.read_upload_receipt("", dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    assert got == rec
+    assert got["destination"] is None  # optional
+
+
+def test_upload_receipt_child_chain_head_must_match():
+    bad = {**_uchild("upload:a", _digest()), "chain_head": "different"}
+    with pytest.raises(r.MalformedReceipt):
+        r.build_upload_receipt([bad], chain_head="uhead", created_at=1000)
+
+
+def test_upload_receipt_rejects_non_upload_child_kind():
+    sidecar = r.build_envelope(entity="x", kind="sidecar", chain_head="uhead",
+                               created_at=1000, artifact_digest=_digest())
+    with pytest.raises(r.MalformedReceipt):
+        r.build_upload_receipt([sidecar], chain_head="uhead", created_at=1000)
+
+
+def test_upload_receipt_destination_must_be_str_or_none():
+    with pytest.raises(r.MalformedReceipt):
+        r.build_upload_receipt([], chain_head="uhead", created_at=1000,
+                               destination=123)
+
+
+def test_batch_builders_reject_non_int_created_at():
+    # defense-in-depth at the trusted mint point (parity across both builders)
+    with pytest.raises(r.MalformedReceipt):
+        r.build_upload_receipt([], chain_head="uhead", created_at="1000")
+    with pytest.raises(r.MalformedReceipt):
+        r.build_upload_receipt([], chain_head="uhead", created_at=True)
+    with pytest.raises(r.MalformedReceipt):
+        r.build_export_manifest([], chain_head="head1", created_at="1000")
+    with pytest.raises(r.MalformedReceipt):
+        r.build_export_manifest([], chain_head="head1", created_at=True)
+
+
+def test_upload_receipt_read_rejects_drifted_child(tmp_path):
+    rec = r.build_upload_receipt([_uchild("upload:a", _digest())],
+                                 chain_head="uhead", created_at=1000)
+    rec["receipts"][0] = {**rec["receipts"][0], "chain_head": "evil"}
+    (tmp_path / RECEIPT_NAMES["upload-receipt"]).write_bytes(
+        json.dumps(rec).encode("utf-8"))
+    with pytest.raises(r.MalformedReceipt):
+        r.read_upload_receipt(str(tmp_path))
+
+
+def test_upload_receipt_rejects_wrong_schema(tmp_path):
+    (tmp_path / RECEIPT_NAMES["upload-receipt"]).write_bytes(
+        json.dumps({"schema": "evil", "receipts": []}).encode())
+    with pytest.raises(r.MalformedReceipt):
+        r.read_upload_receipt(str(tmp_path))
+
+
+def test_upload_receipt_empty_is_valid(tmp_path):
+    rec = r.build_upload_receipt([], chain_head="uhead", created_at=1000)
+    r.write_upload_receipt(str(tmp_path), rec)
+    assert r.read_upload_receipt(str(tmp_path))["receipts"] == []
+
+
+def test_upload_receipt_child_seals_and_verifies(store):
+    child = _uchild("upload:a", _digest(b"a"), dest="https://x/a",
+                    chain_head=store.chain_head())
+    rec = r.build_upload_receipt([child], chain_head=child["chain_head"],
+                                 created_at=1000, destination="https://x/")
+    # only the CHILD envelope is sealed (the container is the on-disk surface).
+    store.record_entity(Entity(eid=child["entity"], kind="artifact",
+                               digest=child["artifact_digest"]))
+    store.record_receipt(entity=child["entity"], kind="upload-receipt",
+                         locator=child.get("locator"),
+                         digest=child["artifact_digest"], payload=child)
+    parsed = r.build_upload_receipt(rec["receipts"], chain_head=child["chain_head"],
+                                    created_at=1000, destination="https://x/")
+    assert r.verify_against_store(store, parsed["receipts"][0]) is True
+    # a forged child (different sealed destination in extra) does not verify
+    forged = dict(child, extra={"destination": "https://evil/"})
+    assert r.verify_against_store(store, forged) is False
+
+
 # --- verify_against_store --------------------------------------------------
 #
 # A receipt surface is attacker-writable in the Task-2 export model, so verify

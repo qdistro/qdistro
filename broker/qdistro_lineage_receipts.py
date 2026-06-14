@@ -22,14 +22,17 @@ Trust split (matches the broker authority model and doc/lineage.md §Authority):
   central chain. The sidecar/manifest are the durable path; the xattr is an
   opportunistic local pointer that may not survive copies/moves/archives.
 
-Sidecar + export-manifest + xattr + git-trailer surfaces are implemented (all
-share the envelope/canonical-bytes contract). The git-trailer helpers
-(:func:`append_git_trailer`/:func:`parse_git_trailer`) are PURE message
-transforms — there is no production commit chokepoint to wire them into yet (that
-needs a broker-owned git-commit action handler that records the commit activity +
-entity + edges + sealed receipt row and assembles the message before signing), so
-they ship as the reusable layer a future chokepoint will call. upload-receipt is
-the remaining later milestone.
+All surfaces are implemented (sidecar, export-manifest, xattr, git-trailer,
+upload-receipt — all share the envelope/canonical-bytes contract). Two of them
+ship AHEAD of a production chokepoint, as pure transforms a future broker-owned
+handler will call: the git-trailer helpers
+(:func:`append_git_trailer`/:func:`parse_git_trailer`) — no commit chokepoint
+exists yet (that needs a handler that records the commit activity + entity +
+edges + sealed receipt row and assembles the message before signing) — and the
+upload-receipt helpers (:func:`build_upload_receipt`/:func:`write_upload_receipt`/
+:func:`read_upload_receipt`) — no upload chokepoint exists yet (upload mediation
+lives in the browser-extension siblings; the broker portal backend only
+policy-gates the FileChooser).
 
 Style mirrors the other broker modules: plain functions, stdlib only, fail
 closed on anything malformed.
@@ -52,6 +55,9 @@ from qdistro_lineage_store import RECEIPT_KINDS, RECEIPT_NAMES
 RECEIPT_SCHEMA = "qdistro-lineage-receipt/v1"
 #: Container schema for the batch export manifest (holds N child envelopes).
 EXPORT_MANIFEST_SCHEMA = "qdistro-lineage-export-manifest/v1"
+#: Container schema for an upload receipt (an upload event covering N files to a
+#: remote destination). Same batch shape as the export manifest.
+UPLOAD_RECEIPT_SCHEMA = "qdistro-lineage-upload-receipt/v1"
 
 #: The chain-seal algorithm the store uses today (H(prev||table||row); NOT a
 #: signature — key custody is an open decision, doc/lineage.md §Open Decisions).
@@ -400,6 +406,8 @@ def build_export_manifest(envelopes: list[dict[str, Any]], *, chain_head: str,
     container's (so an extracted child is self-describing and drift is caught)."""
     if not isinstance(chain_head, str) or not chain_head:
         raise MalformedReceipt("chain_head must be a non-empty string")
+    if not isinstance(created_at, int) or isinstance(created_at, bool):
+        raise MalformedReceipt("created_at must be an int")
     children: list[dict[str, Any]] = []
     for env in envelopes:
         validate_envelope(env, expected_kind="export-manifest")
@@ -481,6 +489,127 @@ def _validate_manifest(manifest: Any, *, declared_cap_bytes: int | None = None
                 "child receipt chain_head differs from manifest chain_head"
             )
     return manifest
+
+
+# --- upload receipt (batch container) -------------------------------------
+#
+# An upload receipt records an upload EVENT: N files sent to a remote destination.
+# It mirrors the export manifest's batch shape (child envelopes, per-child
+# chain_head equality, the same size budget), with two upload-specific points:
+#
+# * The uploaded bytes may never land a LOCAL file (they go to a remote service),
+#   so each child's ``artifact_digest`` is the digest of the bytes that were SENT
+#   and its ``locator``/``extra`` carry the remote per-file locator. The receipt
+#   is DESCRIPTIVE of what was sent — it does NOT attest the remote actually
+#   stored it (no remote round-trip proof here); a future chokepoint that wants
+#   an outcome records it in the child ``extra``.
+# * The remote DESTINATION that AUDIT cares about belongs in each child
+#   envelope's ``extra`` (the child is what a future chokepoint SEALS via
+#   ``record_receipt(payload=envelope)``, so only child fields are authenticated
+#   by :func:`verify_against_store`). The container's top-level ``destination`` is
+#   a NON-AUTHORITATIVE convenience summary only — never trust it as the sealed
+#   destination; it is not covered by any chain row.
+
+#: There is no production upload chokepoint yet (upload mediation lives in the
+#: browser-extension siblings; the broker portal backend only policy-gates the
+#: FileChooser). These are the pure surface helpers a future broker-owned upload
+#: chokepoint will call — like the git-trailer helpers, they ship ahead of wiring.
+
+
+def build_upload_receipt(envelopes: list[dict[str, Any]], *, chain_head: str,
+                         created_at: int, destination: str | None = None,
+                         issuer: str = DEFAULT_ISSUER) -> dict[str, Any]:
+    """Build the upload-receipt container. Every child is a full receipt envelope
+    with ``kind == 'upload-receipt'`` and a ``chain_head`` equal to the
+    container's. ``destination`` is an OPTIONAL non-authoritative convenience
+    summary of the remote target — the audit-significant destination must live in
+    each child envelope's ``extra`` (only children are sealed)."""
+    if not isinstance(chain_head, str) or not chain_head:
+        raise MalformedReceipt("chain_head must be a non-empty string")
+    if not isinstance(created_at, int) or isinstance(created_at, bool):
+        raise MalformedReceipt("created_at must be an int")
+    if destination is not None and not isinstance(destination, str):
+        raise MalformedReceipt("destination must be a string or None")
+    children: list[dict[str, Any]] = []
+    for env in envelopes:
+        validate_envelope(env, expected_kind="upload-receipt")
+        if env["chain_head"] != chain_head:
+            raise MalformedReceipt(
+                "child receipt chain_head differs from upload-receipt chain_head"
+            )
+        children.append(env)
+    return {
+        "schema": UPLOAD_RECEIPT_SCHEMA,
+        "issuer": issuer,
+        "chain_algo": CHAIN_ALGO,
+        "chain_head": chain_head,
+        "created_at": created_at,
+        "destination": destination,
+        "receipts": children,
+    }
+
+
+def write_upload_receipt(dest_dir: str, receipt: dict[str, Any], *,
+                         dir_fd: int | None = None,
+                         owner_uid: int | None = None,
+                         owner_gid: int | None = None) -> str:
+    """Atomically write the upload receipt into ``dest_dir`` as
+    ``qdistro-upload-receipt.json`` (same O_NOFOLLOW/atomic/fchown posture as
+    :func:`write_export_manifest`). With ``dir_fd``, the name resolves relative to
+    that already-verified directory fd."""
+    _validate_upload_receipt(receipt)
+    name = RECEIPT_NAMES["upload-receipt"]
+    target = name if dir_fd is not None else os.path.join(dest_dir, name)
+    _write_file_atomic(target, canonical_bytes(receipt), dir_fd=dir_fd,
+                       owner_uid=owner_uid, owner_gid=owner_gid)
+    return target
+
+
+def read_upload_receipt(dest_dir: str, *,
+                        dir_fd: int | None = None) -> dict[str, Any]:
+    """Read + validate the upload receipt. Caps the read proportional to the
+    declared child count after a cheap hard-ceiling read. Returns the validated
+    container (``["receipts"]`` is the list of child envelopes)."""
+    name = RECEIPT_NAMES["upload-receipt"]
+    target = name if dir_fd is not None else os.path.join(dest_dir, name)
+    data = _read_file_capped(target, MANIFEST_HARD_MAX_BYTES, dir_fd=dir_fd)
+    obj = _loads_strict(data)
+    return _validate_upload_receipt(obj, declared_cap_bytes=len(data))
+
+
+def _validate_upload_receipt(receipt: Any, *, declared_cap_bytes: int | None = None
+                             ) -> dict[str, Any]:
+    if not isinstance(receipt, dict):
+        raise MalformedReceipt("upload receipt must be a JSON object")
+    if receipt.get("schema") != UPLOAD_RECEIPT_SCHEMA:
+        raise MalformedReceipt(
+            f"unexpected upload-receipt schema {receipt.get('schema')!r}"
+        )
+    if receipt.get("chain_algo") != CHAIN_ALGO:
+        raise MalformedReceipt("unexpected upload-receipt chain_algo")
+    head = receipt.get("chain_head")
+    if not isinstance(head, str) or not head:
+        raise MalformedReceipt("upload-receipt chain_head must be a non-empty string")
+    if not isinstance(receipt.get("created_at"), int) or isinstance(
+            receipt.get("created_at"), bool):
+        raise MalformedReceipt("upload-receipt created_at must be an int")
+    dest = receipt.get("destination")
+    if dest is not None and not isinstance(dest, str):
+        raise MalformedReceipt("upload-receipt destination must be a string or null")
+    receipts = receipt.get("receipts")
+    if not isinstance(receipts, list):
+        raise MalformedReceipt("upload-receipt receipts must be a list")
+    if declared_cap_bytes is not None:
+        cap = MANIFEST_BASE_BYTES + MANIFEST_PER_RECEIPT_BYTES * max(1, len(receipts))
+        if declared_cap_bytes > cap:
+            raise MalformedReceipt("upload receipt exceeds size budget")
+    for env in receipts:
+        validate_envelope(env, expected_kind="upload-receipt")
+        if env["chain_head"] != head:
+            raise MalformedReceipt(
+                "child receipt chain_head differs from upload-receipt chain_head"
+            )
+    return receipt
 
 
 # --- git trailer (commit-message receipt) ---------------------------------
