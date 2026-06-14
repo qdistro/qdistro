@@ -208,7 +208,21 @@ cmd_wiretag() {
     # The inner container must exist in ADMIN's rootless store, NOT root's. A
     # container in root's store would mean spawn-tier2 ran podman as root —
     # breaking the --userns=keep-id / admin-state model the design forbids.
-    as_admin podman container exists "$container" 2>/dev/null \
+    # Poll for registration: qdwin logs the secctx commit (asserted above) the
+    # moment the secctx-exec helper binds, but admin's rootless podman registers
+    # the container a beat later. Under the 16-wide full gate that lag exceeded a
+    # single one-shot check and flaked the lane (idle always passed). A bounded
+    # poll tolerates the lag WITHOUT weakening the assertion — a container that
+    # never lands in admin's store still fails after the deadline. Mirrors the
+    # commit poll above and the seq-based waits elsewhere in this probe.
+    local admin_has=""
+    for _ in $(seq 1 40); do
+        if as_admin podman container exists "$container" 2>/dev/null; then
+            admin_has=1; break
+        fi
+        sleep 0.5
+    done
+    [ -n "$admin_has" ] \
         || fail wiretag "container '$container' not in admin's rootless podman (did the run drop to admin?)"
     pass "inner container lives in admin's rootless podman (no rootful run)"
     if podman container exists "$container" 2>/dev/null; then
