@@ -28,6 +28,9 @@ from typing import Any
 import dbus
 import dbus.mainloop.glib
 import dbus.service
+import qdistro_disposable_classes as _dispclasses  # type: ignore[import-not-found]
+import qdistro_disposables as _disp  # type: ignore[import-not-found]
+import qdistro_export_lineage as _export_lineage  # type: ignore[import-not-found]
 import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
 from gi.repository import Gio, GLib
 from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
@@ -67,6 +70,11 @@ def _require_admin_account() -> None:
 ADMIN_UID = _resolve_admin_uid()
 DB_PATH = "/var/lib/qdistro/approvals/approvals.sqlite"
 AUDIT_PATH = "/var/lib/qdistro/audit/audit.sqlite"
+LINEAGE_DB_PATH = os.environ.get(
+    "QDISTRO_EXPORT_LINEAGE_DB",
+    "/var/lib/qdistro/lineage/export-lineage.sqlite",
+)
+LINEAGE_ISSUER = "qdistro-broker"
 
 
 def _username_for_uid(uid: int) -> str:
@@ -850,6 +858,7 @@ class Broker(dbus.service.Object):
         # against it (Phase 2/3). Reaped once a minute alongside the
         # cache GC.
         self.launch_records = LaunchRecordStore()
+        self._lineage_store: Any | None = None
         print(f"[broker] lineage_enforce={LINEAGE_ENFORCE} "
               f"(False=shadow/audit-only)", flush=True)
         # Retention knob: env override wins for tests; 0 disables GC.
@@ -1198,6 +1207,70 @@ class Broker(dbus.service.Object):
         pid = int(dbus_iface.GetConnectionUnixProcessID(sender))
         exe, start_time = _read_proc_identity(pid)
         return uid, pid, exe, start_time
+
+    def _get_lineage_store(self):
+        """Lazily open the broker-owned export lineage store."""
+        if self._lineage_store is None:
+            from qdistro_lineage_store import LineageStore
+
+            parent = os.path.dirname(LINEAGE_DB_PATH)
+            if parent:
+                created = not os.path.exists(parent)
+                os.makedirs(parent, exist_ok=True)
+                if created:
+                    try:
+                        os.chmod(parent, 0o700)
+                    except OSError as e:
+                        print(f"[broker] lineage dir chmod failed: {e}", flush=True)
+            self._lineage_store = LineageStore(LINEAGE_DB_PATH)
+        return self._lineage_store
+
+    def _require_root_lineage_peer(self, sender, conn, method: str) -> tuple[int, int, str, int]:
+        uid, pid, exe, st = self._peer_info(sender, conn)
+        if uid != 0:
+            raise dbus.DBusException(
+                f"{method} restricted to root callers; got uid {uid}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        return uid, pid, exe, st
+
+    def _check_export_lineage_policy(
+        self,
+        desc: _export_lineage.ExportLineageDescriptor,
+        *,
+        caller_exe: str,
+    ) -> None:
+        try:
+            cls = _dispclasses.resolve_from_registry(desc.open_class)
+        except _dispclasses.RegistryError as e:
+            raise dbus.DBusException(
+                f"disposable-class registry unreadable: {e}",
+                name=BUS_NAME + ".LineagePolicyDenied",
+            ) from e
+        except (_dispclasses.UnknownClass, _dispclasses.ClassDisabled) as e:
+            raise dbus.DBusException(
+                f"open class {desc.open_class!r} is not importable: {e}",
+                name=BUS_NAME + ".LineagePolicyDenied",
+            ) from e
+        if not cls.export or (desc.mode == "edit" and not cls.edit):
+            raise dbus.DBusException(
+                f"open class {desc.open_class!r} does not permit {desc.mode}",
+                name=BUS_NAME + ".LineagePolicyDenied",
+            )
+        try:
+            gate = _dispclasses.export_action(desc.open_class)
+        except _dispclasses.RegistryError as e:
+            raise dbus.DBusException(
+                f"invalid open class {desc.open_class!r}: {e}",
+                name=BUS_NAME + ".LineagePolicyDenied",
+            ) from e
+        rule = self.rules.match(uid=0, action=gate, exe=caller_exe)
+        if rule is None or rule.decision != "allow":
+            verdict = "unknown" if rule is None else rule.decision
+            raise dbus.DBusException(
+                f"broker did not allow {gate} (verdict={verdict})",
+                name=BUS_NAME + ".LineagePolicyDenied",
+            )
 
     # ---- permission lineage (findings.md Phases 2/3) -------------------
     def _resolve_subject(self, pid: int):
@@ -1553,6 +1626,76 @@ class Broker(dbus.service.Object):
             print(f"[broker] qdistro.audit.failure: register_launch, "
                   f"reason={e!r}", flush=True)
         return rec.record_id
+
+    @dbus.service.method(
+        BUS_NAME,
+        in_signature="",
+        out_signature="s",
+        sender_keyword="sender",
+        connection_keyword="conn",
+    )
+    def GetLineageReceiptContext(self, sender=None, conn=None) -> str:
+        """Return the broker-owned receipt surface context as JSON."""
+        self._require_root_lineage_peer(sender, conn, "GetLineageReceiptContext")
+        try:
+            store = self._get_lineage_store()
+        except Exception as e:  # noqa: BLE001
+            raise dbus.DBusException(
+                f"lineage store unavailable: {e}",
+                name=BUS_NAME + ".LineageUnavailable",
+            ) from e
+        return json.dumps(
+            {
+                "version": 1,
+                "chain_head": store.chain_head(),
+                "issuer": LINEAGE_ISSUER,
+            },
+            sort_keys=True,
+        )
+
+    @dbus.service.method(
+        BUS_NAME,
+        in_signature="s",
+        out_signature="s",
+        sender_keyword="sender",
+        connection_keyword="conn",
+    )
+    def RecordExportLineage(self, descriptor_json: str, sender=None, conn=None) -> str:
+        """Validate landed export artifacts and record broker-owned lineage."""
+        _uid, _pid, caller_exe, _st = self._require_root_lineage_peer(
+            sender, conn, "RecordExportLineage")
+        try:
+            desc = _export_lineage.load_descriptor_json(descriptor_json)
+            if not _disp.is_disposable_token(desc.launch_token):
+                raise _export_lineage.BadDescriptor("malformed launch_token")
+            self._check_export_lineage_policy(desc, caller_exe=caller_exe)
+            _export_lineage.validate_landed_files(desc)
+            store = self._get_lineage_store()
+            result = _export_lineage.record_export_activity(store, desc)
+        except _export_lineage.BadDescriptor as e:
+            raise dbus.DBusException(str(e), name=BUS_NAME + ".BadArgument") from e
+        except _export_lineage.ValidationFailed as e:
+            raise dbus.DBusException(
+                str(e), name=BUS_NAME + ".LineageValidationFailed"
+            ) from e
+        except dbus.DBusException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise dbus.DBusException(
+                f"lineage store unavailable: {e}",
+                name=BUS_NAME + ".LineageUnavailable",
+            ) from e
+        return json.dumps(
+            {
+                "version": 1,
+                "lineage_sealed": True,
+                "activity": result.activity,
+                "source": result.source,
+                "outputs": list(result.outputs),
+                "chain_head": result.chain_head,
+            },
+            sort_keys=True,
+        )
 
     @dbus.service.method(BUS_NAME, in_signature="sa{sv}", out_signature="i", sender_keyword="sender", connection_keyword="conn")
     def RequestPermission(self, action: str, details: dict, sender=None, conn=None) -> int:

@@ -46,9 +46,21 @@ for f in qdistro_admin_cache.py qdistro_admin_audit.py \
          qdistro_admin_ratelimit.py qdistro_admin_rules.py \
          qdistro_audisp_parser.py qdistro_hook_client.py \
          qdistro_proc_identity.py qdistro_launch_record.py \
-         qdistro_resolver.py; do
+         qdistro_resolver.py qdistro_lineage_store.py \
+         qdistro_lineage_receipts.py qdistro_export_lineage.py; do
     install -o root -g root -m 0644 "$BROKER_SRC/$f" "$DEST/$f"
 done
+
+# Broker-central export lineage re-validates disposable class policy itself.
+# These pure modules live under session_manager/ in the source tree but the
+# broker is installed before the session-manager in the canonical bootstrap, so
+# copy them here too.
+SESSION_MANAGER_SRC="$(dirname "$BROKER_SRC")/session_manager"
+for f in qdistro_disposables.py qdistro_disposable_classes.py; do
+    install -o root -g root -m 0644 "$SESSION_MANAGER_SRC/$f" "$DEST/$f"
+done
+
+install -d -o root -g root -m 0700 /var/lib/qdistro/lineage
 
 # 2b. Workflow orchestration package. The broker loads it in-process
 # and resolves a "workflow/" subdir beside itself (see
