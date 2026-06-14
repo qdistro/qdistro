@@ -614,11 +614,17 @@ cmd_import_land_templated() {
 
     tok=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     _make_staging "$tok" "$silo" "$OPEN_CLASS" "result.txt=hello-from-disposable"
+    local lineage_dir lineage_db
+    lineage_dir=$(mktemp -d /tmp/land-lineage.XXXXXX)
+    lineage_db="$lineage_dir/export.sqlite"
     py_out=$(QDISTRO_EXPORT_STAGING_BASE="$STAGING_BASE" \
+        QDISTRO_EXPORT_LINEAGE_DB="$lineage_db" \
         XDG_RUNTIME_DIR="$RUNTIME_DIR" python3 - "$tok" "$state" "$ADMIN_UID" <<PY 2>&1
 import os, re, sys
 sys.path.insert(0, "$LIBEXEC")
 import qdistro_session_manager as M
+import qdistro_lineage_receipts as lr
+from qdistro_lineage_store import LineageStore
 tok, state, admin_uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
 store = M._SiloStore(M._SystemOps(), config_path=M.Path("/tmp/land-silos.yaml"))
 r = store.import_from_disposable(tok)
@@ -635,14 +641,33 @@ print("CONTENT_OK" if landed and os.path.isfile(landed) and open(landed).read() 
 st = os.lstat(landed) if landed and os.path.exists(landed) else None
 print("OWNER_OK" if st and st.st_uid == admin_uid else "OWNER_FAIL " + (str(st.st_uid) if st else "no-file"))
 print("RECEIPT_OK" if dest and os.path.isfile(os.path.join(dest, "_receipt.json")) else "RECEIPT_FAIL")
+# --- lineage receipt surfaces (Task 2) ---
+side = os.path.join(dest, "result.txt.qdistro-lineage.json") if dest else ""
+man = os.path.join(dest, "qdistro-export-manifest.json") if dest else ""
+print("SIDECAR_OK" if side and os.path.isfile(side) else "SIDECAR_FAIL")
+print("MANIFEST_OK" if man and os.path.isfile(man) else "MANIFEST_FAIL")
+print("SEALED_OK" if r.get("lineage_sealed") else "SEALED_FAIL " + repr(r.get("lineage_sealed")))
+sst = os.lstat(side) if side and os.path.exists(side) else None
+print("SIDECAR_OWNER_OK" if sst and sst.st_uid == admin_uid else "SIDECAR_OWNER_FAIL")
+# the on-disk sidecar verifies against the SEALED store row, a forged copy does not
+ls = LineageStore(os.environ["QDISTRO_EXPORT_LINEAGE_DB"])
+env = lr.read_sidecar(os.path.join(dest, "result.txt"))
+print("VERIFY_OK" if lr.verify_against_store(ls, env) else "VERIFY_FAIL")
+print("TAMPER_OK" if not lr.verify_against_store(ls, dict(env, locator="evil.txt")) else "TAMPER_FAIL")
+man_env = lr.read_export_manifest(dest)
+print("MANIFEST_VERIFY_OK" if all(lr.verify_against_store(ls, c) for c in man_env["receipts"]) else "MANIFEST_VERIFY_FAIL")
+ls.close()
 print("STAGING_GONE_OK" if not os.path.exists("$STAGING_BASE/" + tok) else "STAGING_GONE_FAIL")
 PY
 )
+    rm -rf "$lineage_dir"
     local k
-    for k in UNDER_OK LEAF_OK CONTENT_OK OWNER_OK RECEIPT_OK STAGING_GONE_OK; do
+    for k in UNDER_OK LEAF_OK CONTENT_OK OWNER_OK RECEIPT_OK \
+             SIDECAR_OK MANIFEST_OK SEALED_OK SIDECAR_OWNER_OK \
+             VERIFY_OK TAMPER_OK MANIFEST_VERIFY_OK STAGING_GONE_OK; do
         echo "$py_out" | grep -q "^$k\$" || fail import-land-templated "$k missing: $py_out"
     done
-    pass "import: landed into <state>/Incoming/agent-scratch via the REAL resolver, silo-owned, receipt written, staging one-shot removed"
+    pass "import: landed silo-owned + _receipt.json + chain-anchored lineage receipt surfaces (sidecar+manifest) that VERIFY against the sealed store (forged copy refused), staging one-shot removed"
     _deprovision_silo "$silo"; clean_staging
     pass import-land-templated
 }

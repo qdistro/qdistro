@@ -88,3 +88,13 @@ def test_installer_ships_every_imported_sibling() -> None:
 def test_disposables_is_installed() -> None:
     # Explicit anchor for the M3 regression this test was written for.
     assert "qdistro_disposables" in _installed_modules()
+
+
+def test_lineage_modules_and_dir_installed() -> None:
+    # The daemon seals export-back receipts into a lineage store; the two lineage
+    # modules live under broker/ and MUST be copied into $DEST, and the root-owned
+    # store dir MUST be created, or receipt sealing silently degrades.
+    text = _INSTALLER.read_text()
+    assert "qdistro_lineage_store.py" in text
+    assert "qdistro_lineage_receipts.py" in text
+    assert "/var/lib/qdistro/lineage" in text

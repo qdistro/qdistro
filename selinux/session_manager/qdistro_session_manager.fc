@@ -10,9 +10,13 @@
 # broker/pwd .fc files).
 #
 # Only the exec is labelled in Phase 1. The session manager's persistent
-# state (silos.yaml, session_audit.sqlite) and runtime dirs stay under
-# their existing types until the Phase-2 audit2allow harvest decides
-# which need dedicated types — keeping the permissive-rollout surface
-# minimal and the relabel list short.
+# state (silos.yaml, session_audit.sqlite, the export-back lineage store
+# under /var/lib/qdistro/lineage/) and runtime dirs stay under their
+# existing types until the Phase-2 audit2allow harvest decides which need
+# dedicated types — keeping the permissive-rollout surface minimal and the
+# relabel list short. (The lineage store joins this deferred list: the
+# enforcing-mode allow rules for qdistro_sessmgr_t writing the sqlite +
+# WAL/SHM there come from that harvest, which needs a console-driven
+# enforcing VM — the headless lane runs permissive.)
 
 /usr/libexec/qdistro/qdistro_session_manager\.py    --  gen_context(system_u:object_r:qdistro_sessmgr_exec_t,s0)

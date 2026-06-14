@@ -90,6 +90,14 @@ SILOS_AUDIT_PATH = Path("/var/lib/qdistro/audit/session_manager_audit.sqlite")
 # ownership/mode at install (install-session-manager.sh). Overridable for tests.
 EXPORT_STAGING_BASE = Path(
     os.environ.get("QDISTRO_EXPORT_STAGING_BASE", "/var/lib/qdistro/disposable-export"))
+# Root-owned data-lineage store for export-back receipts. The session-manager is
+# the privileged authority that seals a receipt for each artifact it lands, so it
+# owns this store (a broker-central store is a future consolidation). Created
+# root:root 0700 at install; overridable for tests so /var/lib is never touched.
+EXPORT_LINEAGE_DB = Path(
+    os.environ.get("QDISTRO_EXPORT_LINEAGE_DB",
+                   "/var/lib/qdistro/lineage/export-lineage.sqlite"))
+LINEAGE_ISSUER = "qdistro-session-manager"
 # Disposable TTL-lease sweep cadence (seconds). The periodic in-daemon sweep
 # reaps disposables whose spawn-authored lease has elapsed (07 §Lifecycle). A
 # value <= 0 disables the timer entirely. The sweep itself only acts on
@@ -1842,13 +1850,20 @@ class _SiloStore:
                  egress_backend: EgressBackend | None = None,
                  tunnel_resolver: callable | None = None,
                  key_provider: callable | None = None,
-                 export_staging_base: Path = EXPORT_STAGING_BASE):
+                 export_staging_base: Path = EXPORT_STAGING_BASE,
+                 lineage_db_path: Path | None = None):
         self._ops = ops
         self._config_path = Path(config_path)
         self._on_change = on_change
         # Root-controlled base for disposable export-back staging (injectable for
         # tests so a real /var/lib path is never touched).
         self._export_staging_base = Path(export_staging_base)
+        # Session-manager-owned data-lineage store for export-back receipts,
+        # lazily opened (one daemon-owned single-writer sqlite instance).
+        # Injectable for tests; defaults to the root-owned /var/lib path.
+        self._lineage_db_path = Path(lineage_db_path) if lineage_db_path is not None \
+            else EXPORT_LINEAGE_DB
+        self._lineage_store: Any = None
         # Per-silo netns egress (task 3). The backend is pure; tunnel_resolver
         # maps a tunnel name -> TunnelConfig (non-secret, from /etc/qdistro/wg),
         # and key_provider maps a tunnel name -> private key (from qdistro-pwd),
@@ -3046,6 +3061,68 @@ class _SiloStore:
     def _export_staging_dir(self, token: str) -> Path:
         return self._export_staging_base / token
 
+    def _get_lineage_store(self) -> Any:
+        """Lazily open the session-manager-owned export-lineage store. The parent
+        dir is created root:root 0700 EXPLICITLY (not via LineageStore's makedirs,
+        which runs before any restrictive umask). One instance is reused for the
+        daemon's life (single-writer sqlite, WAL)."""
+        if self._lineage_store is None:
+            from qdistro_lineage_store import LineageStore
+            p = self._lineage_db_path
+            # Create the dir 0700 ONLY when we create it — never chmod a
+            # pre-existing dir (the installer already makes /var/lib/qdistro/lineage
+            # 0700; a misconfigured path must never silently tighten a shared dir
+            # like /var/lib or a test tmpdir).
+            created = not p.parent.exists()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if created:
+                try:
+                    os.chmod(p.parent, 0o700)
+                except OSError as e:
+                    log.warning("lineage dir chmod 0700 failed for %s: %s",
+                                p.parent, e)
+            self._lineage_store = LineageStore(str(p))
+        return self._lineage_store
+
+    def _seal_export_receipts(self, lineage: Any, receipt: dict) -> None:
+        """Seal the receipt surfaces that ``promote_export`` already wrote into the
+        (now durable) landing dir: record one entity + sealed receipt row per
+        artifact, plus one export-manifest receipt row per child, in ONE
+        transaction. Runs AFTER the atomic rename — the artifacts are already safe,
+        so a lineage failure must NEVER fail the import; it is logged and the
+        receipt is marked degraded (the on-disk surfaces then verify as
+        unverified, the fail-closed direction). Sets ``receipt['lineage_sealed']``.
+        """
+        from qdistro_lineage_store import Entity
+        sidecars = receipt.get("lineage_sidecars") or []
+        manifest = receipt.get("lineage_manifest") or {}
+        try:
+            with lineage.transaction():
+                for env in sidecars:
+                    eid = env["entity"]
+                    lineage.record_entity(Entity(
+                        eid=eid, kind="artifact", digest=env["artifact_digest"],
+                        locator=env.get("locator"), created_at=env["created_at"]))
+                    lineage.record_receipt(
+                        entity=eid, kind="sidecar", locator=env.get("locator"),
+                        digest=env["artifact_digest"], payload=env)
+                for child in manifest.get("receipts", []):
+                    lineage.record_receipt(
+                        entity=child["entity"], kind="export-manifest",
+                        locator=child.get("locator"),
+                        digest=child["artifact_digest"], payload=child)
+            receipt["lineage_sealed"] = True
+        except Exception as e:  # noqa: BLE001 - data is durable; never fail import
+            receipt["lineage_sealed"] = False
+            log.warning(
+                "import_from_disposable: sealing export receipts failed "
+                "(artifacts landed; lineage degraded/unverified): %s", e)
+        # The bulky envelopes have served their purpose (written to disk + sealed);
+        # drop them from the D-Bus return, keeping a small status summary.
+        receipt["lineage_receipts"] = len(sidecars)
+        receipt.pop("lineage_sidecars", None)
+        receipt.pop("lineage_manifest", None)
+
     def import_from_disposable(self, token: str,
                                caller: dict[str, Any] | None = None,
                                now: float | None = None) -> dict:
@@ -3205,7 +3282,21 @@ class _SiloStore:
         # (7) Promote (all-or-nothing, atomic). Land files owned by the silo owner.
         # Two landing modes: edit-round-trip lands the SINGLE edited file beside
         # its source as <name>.disp-edited; plain export-back lands into Incoming/.
+        # For plain export-back, also emit chain-anchored lineage receipt surfaces
+        # (sidecar + manifest) INTO the same atomic landing; they are SEALED into
+        # the session-manager lineage store only after the durable rename below.
+        # Lineage is best-effort: its unavailability never blocks the import.
         payload = str(staging / "payload")
+        lineage = None
+        receipt_ctx = None
+        if not edit_mode:
+            try:
+                lineage = self._get_lineage_store()
+                receipt_ctx = {"chain_head": lineage.chain_head(),
+                               "issuer": LINEAGE_ISSUER}
+            except Exception as e:  # noqa: BLE001 - degrade, never block export
+                log.warning("import_from_disposable: lineage store unavailable, "
+                            "no receipts emitted: %s", e)
         try:
             if edit_mode:
                 source_rel = self._edit_source_rel(
@@ -3216,13 +3307,19 @@ class _SiloStore:
             else:
                 receipt = _dispexport.promote_export(
                     payload, state_path, meta=meta, now_epoch=now,
-                    owner_uid=dst.st_uid, owner_gid=dst.st_gid)
+                    owner_uid=dst.st_uid, owner_gid=dst.st_gid,
+                    receipt_ctx=receipt_ctx)
         except _dispexport.ExportError as e:
             self._audit_record("dispose-export", request_silo, decision="error",
                                reason=f"promotion failed: {e}", caller=caller)
             raise BadState(
                 f"{'edit-round-trip' if edit_mode else 'export-back'} "
                 f"promotion failed: {e}") from e
+
+        # Seal the now-durable receipt surfaces into the lineage store (after the
+        # atomic rename: a row is never recorded for a non-durable artifact).
+        if receipt_ctx is not None and lineage is not None:
+            self._seal_export_receipts(lineage, receipt)
 
         # One-shot: remove the staging now the import is durable.
         self._remove_export_staging(token)

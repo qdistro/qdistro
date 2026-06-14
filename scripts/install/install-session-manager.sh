@@ -62,6 +62,23 @@ fi
 # Without it the daemon ModuleNotFoundErrors and crash-loops on boot.
 install -o root -g root -m 0755 "$SRC/qdistro_disposable_export.py" \
     "$DEST/qdistro_disposable_export.py"
+# Data-lineage receipt library + store (live under broker/, a sibling of the
+# session-manager source). The daemon imports them to seal a chain-anchored
+# receipt for each artifact it lands via export-back; the flat libexec layout
+# makes them importable. Idempotent if the broker install already dropped them.
+_qd_broker_src="$(dirname "$SRC")/broker"
+for _qd_lin in qdistro_lineage_store.py qdistro_lineage_receipts.py; do
+    if [ -f "$_qd_broker_src/$_qd_lin" ]; then
+        install -o root -g root -m 0644 "$_qd_broker_src/$_qd_lin" "$DEST/$_qd_lin"
+    else
+        echo "install-session-manager: WARN: lineage module $_qd_lin not found at" \
+             "$_qd_broker_src; export-back receipts will be skipped at runtime" >&2
+    fi
+done
+# Root-owned data-lineage store dir for export-back receipts. root:root 0700 so
+# only the privileged daemon reads/writes it (created explicitly here, not via the
+# store's makedirs which would run before any restrictive umask).
+install -d -o root -g root -m 0700 /var/lib/qdistro/lineage
 # Root-controlled base for export-back staging. The PARENT (/var/lib/qdistro) is
 # root:root 0755, so admin cannot replace this entry with a symlink (no write on
 # the parent); the dir itself is admin-owned 0700 so the admin tier-2 launcher can

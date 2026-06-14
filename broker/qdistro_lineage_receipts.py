@@ -255,17 +255,23 @@ def sidecar_name(artifact_basename: str) -> str:
 
 
 def write_sidecar(artifact_path: str, envelope: dict[str, Any], *,
-                  dir_fd: int | None = None) -> str:
+                  dir_fd: int | None = None,
+                  owner_uid: int | None = None,
+                  owner_gid: int | None = None) -> str:
     """Atomically write the sidecar beside ``artifact_path``. When ``dir_fd`` is
     given, ``artifact_path`` is a basename resolved RELATIVE to that already-
     verified directory fd (Task 2 reuses the export's O_NOFOLLOW-rooted chain);
-    otherwise it is a full path. Returns the sidecar's name/path. Validates the
-    envelope first (a malformed envelope never reaches disk)."""
+    otherwise it is a full path. ``owner_uid``/``owner_gid`` (when running as root)
+    fchown the file to a less-trusted owner BEFORE publish, so a receipt landing in
+    a silo-owned tree is readable by that silo — done on the open fd, never a path,
+    so it is race-free. Returns the sidecar's name/path. Validates the envelope
+    first (a malformed envelope never reaches disk)."""
     validate_envelope(envelope, expected_kind="sidecar")
     if dir_fd is not None:
         _require_basename(artifact_path)
     name = sidecar_name(artifact_path)
-    _write_file_atomic(name, canonical_bytes(envelope), dir_fd=dir_fd)
+    _write_file_atomic(name, canonical_bytes(envelope), dir_fd=dir_fd,
+                       owner_uid=owner_uid, owner_gid=owner_gid)
     return name
 
 
@@ -380,14 +386,19 @@ def build_export_manifest(envelopes: list[dict[str, Any]], *, chain_head: str,
 
 
 def write_export_manifest(dest_dir: str, manifest: dict[str, Any], *,
-                          dir_fd: int | None = None) -> str:
+                          dir_fd: int | None = None,
+                          owner_uid: int | None = None,
+                          owner_gid: int | None = None) -> str:
     """Atomically write the manifest into ``dest_dir`` as
     ``qdistro-export-manifest.json``. With ``dir_fd``, ``dest_dir`` is ignored
-    for opening (the manifest name resolves relative to ``dir_fd``)."""
+    for opening (the manifest name resolves relative to ``dir_fd``).
+    ``owner_uid``/``owner_gid`` fchown it to a less-trusted owner before publish
+    (see :func:`write_sidecar`)."""
     _validate_manifest(manifest)
     name = RECEIPT_NAMES["export-manifest"]
     target = name if dir_fd is not None else os.path.join(dest_dir, name)
-    _write_file_atomic(target, canonical_bytes(manifest), dir_fd=dir_fd)
+    _write_file_atomic(target, canonical_bytes(manifest), dir_fd=dir_fd,
+                       owner_uid=owner_uid, owner_gid=owner_gid)
     return target
 
 
@@ -471,6 +482,12 @@ def verify_against_store(store: Any, envelope: dict[str, Any], *,
     instead authenticated by the full-payload sealed-row match above (an attacker
     cannot alter it without breaking that match).
 
+    NOTE: a verified receipt attests that the broker SEALED this exact envelope
+    (whose ``artifact_digest`` was the artifact's content at export time) — it does
+    NOT re-hash the artifact, so it does not by itself prove the *current* file
+    bytes still match. A caller that needs "does the file on disk still match"
+    must re-hash the artifact and compare it to ``artifact_digest`` separately.
+
     Returns ``True``/``False``; only a structurally malformed envelope raises."""
     validate_envelope(envelope)
     ent = store.get_entity(envelope["entity"])
@@ -537,11 +554,15 @@ def _require_basename(name: str) -> None:
         )
 
 
-def _write_file_atomic(name: str, data: bytes, *, dir_fd: int | None = None) -> None:
+def _write_file_atomic(name: str, data: bytes, *, dir_fd: int | None = None,
+                       owner_uid: int | None = None,
+                       owner_gid: int | None = None) -> None:
     """Write ``data`` to ``name`` via temp-file + fsync + atomic rename, never
     following a symlink at the final name. With ``dir_fd``, ``name`` is a
     basename resolved relative to that directory fd; otherwise it is a path whose
-    parent dir is opened O_DIRECTORY for the rename + dir fsync."""
+    parent dir is opened O_DIRECTORY for the rename + dir fsync. When ``owner_uid``
+    is given and we run as root, the file is fchowned on the open fd (before the
+    publish rename) so it lands owned by a less-trusted owner — race-free."""
     if dir_fd is not None:
         _require_basename(name)
         parent_fd = dir_fd
@@ -563,6 +584,15 @@ def _write_file_atomic(name: str, data: bytes, *, dir_fd: int | None = None) -> 
             os.unlink(tmp, dir_fd=parent_fd)
             fd = os.open(tmp, flags, 0o600, dir_fd=parent_fd)
         try:
+            if owner_uid is not None and os.geteuid() == 0:
+                # fchown the fd we just created (never a path) before publish, so
+                # the receipt lands owned by the silo, not root. Best-effort: a
+                # chown failure must not abandon an otherwise-complete write.
+                try:
+                    os.fchown(fd, owner_uid,
+                              owner_gid if owner_gid is not None else -1)
+                except OSError:
+                    pass
             os.write(fd, data)
             os.fsync(fd)
         finally:

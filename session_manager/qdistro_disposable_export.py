@@ -35,6 +35,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import stat
 from dataclasses import dataclass
@@ -44,6 +45,14 @@ from dataclasses import dataclass
 # disposable can never overwrite / forge the provenance record.
 RECEIPT_NAME = "_receipt.json"
 RECEIPT_VERSION = 1
+
+# Reserved lineage-receipt surface names (mirror qdistro_lineage_receipts
+# RECEIPT_NAMES — hardcoded here so the hot scan path never depends on the
+# receipt library being importable). A payload artifact whose leaf would collide
+# with an emitted sidecar/manifest is refused, so a hostile disposable can never
+# clobber a surface or smuggle a forged one in the artifact set.
+LINEAGE_SIDECAR_SUFFIX = ".qdistro-lineage.json"
+LINEAGE_MANIFEST_NAME = "qdistro-export-manifest.json"
 
 # Defensive caps (fail-closed when exceeded — a breach aborts the whole import,
 # never a partial promotion). Tunable by the caller; these are the defaults.
@@ -135,6 +144,9 @@ def sanitize_filename(name: str) -> str | None:
         return None
     if name == RECEIPT_NAME:
         # Reserved for the importer-written provenance record.
+        return None
+    if name == LINEAGE_MANIFEST_NAME or name.endswith(LINEAGE_SIDECAR_SUFFIX):
+        # Reserved for the importer-written lineage receipt surfaces.
         return None
     return name
 
@@ -265,12 +277,22 @@ def promote_export(payload_dir: str, state_path: str, *,
                    meta: dict, now_epoch: float,
                    owner_uid: int | None = None,
                    owner_gid: int | None = None,
-                   caps: ExportCaps | None = None) -> dict:
+                   caps: ExportCaps | None = None,
+                   receipt_ctx: dict | None = None) -> dict:
     """Promote the staged payload at ``payload_dir`` into the requesting silo's
     home at ``state_path``, returning the lineage receipt dict.
 
     The destination is ``<state_path>/Incoming/<class-leaf>/<token8>-<ts>/`` with
     one file per validated artifact plus ``_receipt.json``.
+
+    When ``receipt_ctx`` (``{"chain_head": str, "issuer": str}``) is supplied, a
+    chain-anchored lineage RECEIPT surface is also emitted INTO the same temp dir
+    (so it publishes atomically with the artifacts): a per-file sidecar
+    ``<name>.qdistro-lineage.json`` and a batch ``qdistro-export-manifest.json``.
+    The built envelopes are returned in the receipt dict as ``lineage_sidecars`` /
+    ``lineage_manifest`` so the caller (session-manager) can SEAL them into its
+    lineage store AFTER the durable rename. The surfaces alone are not authority —
+    they verify only against a sealed store row.
 
     SECURITY: the importer runs as root, and the silo OWNER (a less-trusted user)
     can write under ``state_path``, so a pre-created symlink at ``Incoming`` or
@@ -359,6 +381,27 @@ def promote_export(payload_dir: str, state_path: str, *,
             "files": receipt_files,
         }
         _write_receipt_at(tmp_fd, receipt, owner_uid, owner_gid)
+        if receipt_ctx is not None:
+            # Lineage receipts are ADDITIVE provenance: their emission (incl. the
+            # lazy receipt-library import, envelope build, and surface writes) must
+            # NEVER abort an otherwise-complete export — the artifacts already sit
+            # in the temp dir. Any failure degrades to "no receipts" (the caller
+            # then seals nothing; any partial surface published is simply
+            # unverifiable, the fail-closed direction). This is what guarantees the
+            # invariant "lineage unavailability never blocks import" even though the
+            # receipt library is imported here, not in the caller's probe.
+            try:
+                sidecars, manifest = _emit_lineage_surfaces(
+                    tmp_fd, receipt_files, token, now_epoch, receipt_ctx,
+                    owner_uid, owner_gid)
+                receipt["lineage_sidecars"] = sidecars
+                receipt["lineage_manifest"] = manifest
+            except Exception as e:  # noqa: BLE001 - never fail export on lineage
+                logging.getLogger(__name__).warning(
+                    "export-back: lineage receipt emission failed "
+                    "(artifacts land; no receipts): %s", e)
+                receipt.pop("lineage_sidecars", None)
+                receipt.pop("lineage_manifest", None)
         os.fsync(tmp_fd)
 
         final_name = _place_at(class_fd, tmpname, final_name)
@@ -381,6 +424,53 @@ def promote_export(payload_dir: str, state_path: str, *,
 
     receipt["dest"] = os.path.join(real_class_dir, final_name)
     return receipt
+
+
+def _lineage_eid(token: str, name: str) -> str:
+    """Stable entity id for an exported artifact: the FULL launch token (unique
+    per disposable launch — token8 could collide) + the relative artifact name.
+    Path-independent, so the post-copy ``_place_at`` rename (which may change the
+    landing dir) never invalidates it."""
+    return f"disp-export:{token}:{name}"
+
+
+def _emit_lineage_surfaces(tmp_fd: int, receipt_files: list,
+                           token: str, now_epoch: float, receipt_ctx: dict,
+                           owner_uid: int | None, owner_gid: int | None):
+    """Build + write the chain-anchored receipt surfaces into the (unpublished)
+    temp import dir, so they land atomically with the artifacts. Returns
+    ``(sidecar_envelopes, manifest)`` for the caller to seal post-rename. The
+    locator is the RELATIVE artifact name (the sidecar lives beside it); the
+    entity id uses the full token. Lazily imports the receipt library so a runtime
+    missing it still does core export (without receipts)."""
+    import qdistro_lineage_receipts as lr
+
+    chain_head = str(receipt_ctx["chain_head"])
+    issuer = str(receipt_ctx.get("issuer", "qdistro-session-manager"))
+    created_at = int(now_epoch)
+    sidecars = []
+    manifest_children = []
+    for fr in receipt_files:
+        name = fr["name"]
+        eid = _lineage_eid(token, name)
+        digest = fr["sha256"]
+        sidecar = lr.build_envelope(
+            entity=eid, kind="sidecar", chain_head=chain_head,
+            created_at=created_at, artifact_digest=digest, locator=name,
+            issuer=issuer)
+        lr.write_sidecar(name, sidecar, dir_fd=tmp_fd,
+                         owner_uid=owner_uid, owner_gid=owner_gid)
+        sidecars.append(sidecar)
+        manifest_children.append(lr.build_envelope(
+            entity=eid, kind="export-manifest", chain_head=chain_head,
+            created_at=created_at, artifact_digest=digest, locator=name,
+            issuer=issuer))
+    manifest = lr.build_export_manifest(
+        manifest_children, chain_head=chain_head, created_at=created_at,
+        issuer=issuer)
+    lr.write_export_manifest("", manifest, dir_fd=tmp_fd,
+                             owner_uid=owner_uid, owner_gid=owner_gid)
+    return sidecars, manifest
 
 
 def _cleanup_temp_at(class_fd: int, tmp_fd: int, tmpname: str) -> None:
