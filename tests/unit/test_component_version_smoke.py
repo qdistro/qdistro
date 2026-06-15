@@ -43,6 +43,12 @@ _REPO = Path(__file__).resolve().parents[2]
 # flat per-dir layout is not yet collapsed into one install prefix.
 _PYTHONPATH = [
     "broker",
+    # The broker imports two pure modules (qdistro_disposables,
+    # qdistro_disposable_classes) that live under session_manager/ in the
+    # source tree. Production flattens them beside the broker at install
+    # time (scripts/install/install-broker-for-qdwin.sh), so the spawned
+    # subprocess needs session_manager/ on PYTHONPATH to mirror that.
+    "session_manager",
     "workflow",
     "cli",
     "recall",
