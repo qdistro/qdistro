@@ -4,11 +4,24 @@
 umbrella checkout. It is meant to be usable by a developer or by an agent with
 shell access to the same workspace.
 
-The entrypoint is:
+The preferred entrypoint is `just` (run from `qdistro/ci/`):
+
+```bash
+just full            # or: just bats --file <f.bats>, just triage --latest
+just --list          # all recipes
+```
+
+Every recipe delegates to the stable CLI, which is also usable directly (and is
+what scripts/agents/run-artifacts invoke):
 
 ```bash
 qdistro/ci/bin/qci <gate>
 ```
+
+`just` is only the task surface; the CI engine (run lifecycle, VM/golden
+management, parallel pools, report finalization, exit-class accumulation) lives
+in bash modules under `qdistro/ci/lib/` that `bin/qci` sources into one process.
+See [`AGENTS.md`](AGENTS.md) for the module map.
 
 Every invocation writes artifacts under:
 

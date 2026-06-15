@@ -1,0 +1,137 @@
+# qdistro local CI — task surface.
+#
+# `just` is the preferred human entry point; every recipe delegates to the
+# stable CLI `bin/qci`, which is the machine contract (run dirs, results.tsv,
+# exit-class table) that report.py, triage agents, and hundreds of callers
+# depend on. The CI ENGINE — run lifecycle, VM/golden management, parallel
+# pools, report finalization, the worst-case exit class — lives in bash under
+# `lib/` (sourced by `bin/qci`), NOT here: `just`'s dependency model runs deps
+# as separate processes and STOPS at the first failure, which would break the
+# "run every gate, emit one complete report" contract. So `full` is one recipe
+# that calls `qci full`, never a `full: preflight host ...` dependency chain.
+#
+# Env knobs pass straight through (just inherits the caller's environment):
+#   QCI_RELEASE=1 just full        # release-profile: blocked rows are fatal
+#   QCI_OFFLINE=1 just bats        # no-egress posture
+#   QCI_JOBS=4   just bats         # cap the disposable-VM pool
+# See README.md for the full knob list.
+
+qci := justfile_directory() / "bin" / "qci"
+
+set shell := ["bash", "-cu"]
+# Pass recipe arguments through as real positional args ("$@") so a path/ref/
+# scenario containing spaces survives intact — plain interpolation of a just
+# variadic would word-split it before bash sees it.
+set positional-arguments := true
+
+# List available recipes.
+default:
+    @just --list
+
+# --- host-only gates (no VM) -------------------------------------------------
+
+# Verify sibling repos, libvirt session, VM tools, prebaked image, host tools.
+preflight:
+    {{qci}} preflight
+
+# Static pre-VM lint: shellcheck + bats syntax + GUI-scenario structure.
+lint:
+    {{qci}} lint
+
+# Self-test the qci runner itself (host-only bats; no VM).
+selftest:
+    {{qci}} selftest
+
+# Run all sibling-repo host tests/builds (pytest/npm/meson/zola + lint).
+host:
+    {{qci}} host
+
+# Validate tests/registry.tsv (advisory).
+registry-check:
+    {{qci}} registry-check
+
+# Assert the source manifest is release-grade (R1, read-only).
+release-manifest:
+    {{qci}} release-manifest
+
+# Enforce the hardened/release bootstrap contract (R2, host-only).
+bootstrap-release-profile:
+    {{qci}} bootstrap-release-profile
+
+# --- VM gates ----------------------------------------------------------------
+
+# Create/reuse a VM and verify the qdwin/qdshell session. Pass flags through,
+# e.g. `just vm-smoke --vm qci-foo`.
+vm-smoke *args:
+    {{qci}} vm-smoke "$@"
+
+# Run VM bats integration tests (one disposable VM per file, parallel pool).
+# `just bats`                       all files
+# `just bats --file tests/integration/vm/broker-e2e.bats`
+# `just bats --vm <name> --file <f.bats>`
+bats *args:
+    {{qci}} bats "$@"
+
+# Run GUI smokes + agent markdown scenarios.
+# `just gui`  /  `just gui --vm <name> --scenario <path.md>`
+gui *args:
+    {{qci}} gui "$@"
+
+# Image gate: static content checklist, then boot/install when an image exists.
+image *args:
+    {{qci}} image "$@"
+
+# Build a qdistro-daily-YYYY-MM-DD VM from current source.
+# `just snapshot-daily`  /  `just snapshot-daily --name <vm>`
+snapshot-daily *args:
+    {{qci}} snapshot-daily "$@"
+
+# Remove stale qci-* disposable VMs/overlays (never touches qdistro-daily*).
+# `just cleanup --dry-run --age-hours 24`
+cleanup *args:
+    {{qci}} cleanup "$@"
+
+# --- full battery ------------------------------------------------------------
+
+# preflight + host + release gates + vm-smoke + bats + gui, one report.
+# `just full`  /  `just full --keep-on-fail`  /  `just full --delete-failed-vm`
+full *args:
+    {{qci}} full "$@"
+
+# Release-profile full run: a blocked release-relevant row is fatal (exit 15).
+release-full *args:
+    QCI_RELEASE=1 {{qci}} full "$@"
+
+# Offline full run: host-only / no-egress posture for VM tests.
+offline-full *args:
+    QCI_OFFLINE=1 {{qci}} full "$@"
+
+# --- selection / integrity ---------------------------------------------------
+
+# Map changed paths to the gates that should run (optionally --run them).
+# `just affected --changed-from origin/main`  /  `just affected --run -- <path>...`
+affected *args:
+    {{qci}} affected "$@"
+
+# CI-integrity guard: flag agent edits to protected paths (tests/, ci/prompts/, selinux/).
+edit-guard *args:
+    {{qci}} edit-guard "$@"
+
+# Rerun ONE scenario against an existing (preserved) VM, no provisioning.
+# `just replay <scenario> <vm>`
+replay *args:
+    {{qci}} replay "$@"
+
+# --- triage ------------------------------------------------------------------
+
+# Render the report for a run. `just report --latest`  /  `just report --run <dir>`
+report *args:
+    {{qci}} report "$@"
+
+# Print a triage summary. `just triage --latest`
+triage *args:
+    {{qci}} triage "$@"
+
+# List all recorded runs, oldest first.
+list-runs:
+    {{qci}} list-runs

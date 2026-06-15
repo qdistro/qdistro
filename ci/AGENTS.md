@@ -2,6 +2,42 @@
 
 You are running or triaging local CI for the qdistro umbrella checkout.
 
+## Runner layout
+
+`just` is the preferred entry (`just full`, `just bats --file <f>`, `just triage
+--latest`); every recipe in `ci/justfile` delegates to `ci/bin/qci`, which is the
+stable machine contract (run dirs, `results.tsv`, the exit-class table). Both run
+the SAME code.
+
+`ci/bin/qci` is a thin (~60-line) dispatcher: it resolves paths and SOURCES the
+engine modules under `ci/lib/`, so the whole run is one process that shares
+`RDIR`, the per-run golden disks, `CREATED_VMS`, the INT/TERM trap, and the
+accumulated exit class. Do NOT reintroduce orchestration into `just` — its deps
+run as separate processes and stop at the first failure, which would break the
+"run every gate, emit one report" contract.
+
+Module map (all sourced into the one process; functions resolve at call time):
+
+- `lib/bootstrap.sh` — exit-class table, `PROJECTS`, run-state vars, env knobs.
+- `lib/core.sh` — primitives (`log`/`stamp`/`safe_name`/`exit_class_name`/`map_rc`/`rel_path`/`kv`).
+- `lib/usage.sh` — `usage()`.
+- `lib/assert.sh` — `qci_assert_*` precondition helpers; each gate calls them at
+  the top to verify its assumptions (run dir initialized, VM exists, ...) and
+  records a fail row + returns a class instead of crashing later.
+- `lib/run.sh` — `init_run`/`finish_run`/`abort_run`, `record_result`/`_skip`/
+  `_blocked`/`_timing`, `run_logged`, and the INT/TERM traps.
+- `lib/vm.sh` — `acquire_vm`/`release_vm`, per-run golden build/cleanup, artifacts.
+- `lib/affected.sh` — registry lookups + changed-path → gate selection.
+- `lib/edit_guard.sh` — protected-path edit guard.
+- `lib/gates/<gate>.sh` — one file per gate (`gate_<name>`): preflight, lint,
+  selftest, host, vm_smoke, bats, gui, release, image, snapshot, cleanup,
+  registry, replay.
+- `lib/dispatch.sh` — `gate_full`, triage helpers, and `main()`.
+
+When editing a gate, change only its `lib/gates/*.sh` file; shared behavior lives
+in `run.sh`/`vm.sh`. After any change, re-run `ci/bin/qci selftest` (the
+host-only `tests/integration/qci/*.bats` contract suite) before trusting a run.
+
 ## Ground rules
 
 - Do not mutate `qdistro-daily` or any `qdistro-daily-*` VM unless the user
