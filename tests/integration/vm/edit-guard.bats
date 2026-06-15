@@ -15,6 +15,22 @@
 REPO_ROOT="$(git -C "$(dirname "${BATS_TEST_FILENAME}")" rev-parse --show-toplevel 2>/dev/null)"
 QCI="$REPO_ROOT/ci/bin/qci"
 
+# Copy the real ci/ tree into a throwaway repo at $1. Since commit 8e4e0b1
+# split the runner into a justfile + sourced modules, ci/bin/qci SOURCES
+# ci/lib/*.sh at startup; a throwaway repo with only ci/bin/qci makes that
+# sourcing fail and leaves main() undefined (exit 127, "main: command not
+# found"). Copying the whole ci/ tree makes ci/lib/ present so the dispatcher
+# behaves identically to the real repo. We exclude the gitignored ci/runs/
+# artifacts dir (potentially large local run logs that qci never reads — tests
+# override QCI_RUNS_DIR anyway) so the copy stays cheap.
+_copy_ci_tree() {
+    local dest="$1/ci"
+    mkdir -p "$dest"
+    # Copy everything under ci/ except the runs/ artifacts directory, via a
+    # tar pipe (portable, preserves perms incl. the +x dispatcher).
+    tar -C "$REPO_ROOT/ci" --exclude=./runs -cf - . | tar -C "$dest" -xf -
+}
+
 setup() {
     [ -x "$QCI" ] || skip "qci not found/executable at $QCI"
     BATS_TMP="$(mktemp -d)"
@@ -119,8 +135,11 @@ teardown() {
 @test "git-derived: an UNTRACKED protected file (newly created) is caught" {
     # A newly *created* protected test is exactly the kind of agent edit the
     # guard must catch — and a plain `git diff` never lists untracked files.
-    mkdir -p "$BATS_TMP/repo/ci/bin" "$BATS_TMP/repo/tests" "$BATS_TMP/repo/src"
-    cp "$QCI" "$BATS_TMP/repo/ci/bin/qci"
+    mkdir -p "$BATS_TMP/repo/tests" "$BATS_TMP/repo/src"
+    # The dispatcher SOURCES ci/lib/*.sh, so the throwaway repo needs the
+    # whole ci/ tree (not just ci/bin/qci) or sourcing fails and main is
+    # undefined (exit 127).
+    _copy_ci_tree "$BATS_TMP/repo"
     git -C "$BATS_TMP/repo" init -q
     git -C "$BATS_TMP/repo" config user.email t@t
     git -C "$BATS_TMP/repo" config user.name t
@@ -142,9 +161,10 @@ teardown() {
     # default (HEAD) diff. It must detect the protected edit and FAIL.
     git -C "$BATS_TMP" init -q
     git -C "$BATS_TMP" config user.email t@t && git -C "$BATS_TMP" config user.name t
-    mkdir -p "$BATS_TMP/repo/ci/bin" "$BATS_TMP/repo/tests/unit" "$BATS_TMP/repo/src"
-    # Use the real qci so behavior is identical.
-    cp "$QCI" "$BATS_TMP/repo/ci/bin/qci"
+    mkdir -p "$BATS_TMP/repo/tests/unit" "$BATS_TMP/repo/src"
+    # Use the real ci/ tree so behavior is identical; the dispatcher sources
+    # ci/lib/*.sh, so copying only ci/bin/qci would break (exit 127).
+    _copy_ci_tree "$BATS_TMP/repo"
     rm -rf "$BATS_TMP/.git"
     git -C "$BATS_TMP/repo" init -q
     git -C "$BATS_TMP/repo" config user.email t@t
@@ -164,8 +184,9 @@ teardown() {
 
 @test "git-derived: a clean tree (no diff vs HEAD) passes" {
     git -C "$BATS_TMP" init -q
-    mkdir -p "$BATS_TMP/repo/ci/bin" "$BATS_TMP/repo/src"
-    cp "$QCI" "$BATS_TMP/repo/ci/bin/qci"
+    mkdir -p "$BATS_TMP/repo/src"
+    # Whole ci/ tree: the dispatcher sources ci/lib/*.sh (exit 127 otherwise).
+    _copy_ci_tree "$BATS_TMP/repo"
     rm -rf "$BATS_TMP/.git"
     git -C "$BATS_TMP/repo" init -q
     git -C "$BATS_TMP/repo" config user.email t@t
@@ -186,8 +207,9 @@ teardown() {
 # nothing — only a merge-base-vs-integration diff catches it.
 _make_committed_branch_repo() {
     local r="$BATS_TMP/repo"
-    mkdir -p "$r/ci/bin" "$r/tests/unit" "$r/src"
-    cp "$QCI" "$r/ci/bin/qci"
+    mkdir -p "$r/tests/unit" "$r/src"
+    # Whole ci/ tree: the dispatcher sources ci/lib/*.sh (exit 127 otherwise).
+    _copy_ci_tree "$r"
     git -C "$r" init -q -b main
     git -C "$r" config user.email t@t
     git -C "$r" config user.name t
@@ -230,8 +252,9 @@ _make_committed_branch_repo() {
 
 @test "git-derived: a non-protected committed edit on a branch passes vs merge-base" {
     local r="$BATS_TMP/repo"
-    mkdir -p "$r/ci/bin" "$r/src"
-    cp "$QCI" "$r/ci/bin/qci"
+    mkdir -p "$r/src"
+    # Whole ci/ tree: the dispatcher sources ci/lib/*.sh (exit 127 otherwise).
+    _copy_ci_tree "$r"
     git -C "$r" init -q -b main
     git -C "$r" config user.email t@t && git -C "$r" config user.name t
     echo "code" > "$r/src/app.py"
@@ -249,8 +272,9 @@ _make_committed_branch_repo() {
     # computed. Diffing against HEAD here would hide a committed protected edit,
     # so the guard must FAIL-SAFE (block), never pass clean.
     local r="$BATS_TMP/repo"
-    mkdir -p "$r/ci/bin" "$r/tests"
-    cp "$QCI" "$r/ci/bin/qci"
+    mkdir -p "$r/tests"
+    # Whole ci/ tree: the dispatcher sources ci/lib/*.sh (exit 127 otherwise).
+    _copy_ci_tree "$r"
     git -C "$r" init -q -b feature-only
     git -C "$r" config user.email t@t && git -C "$r" config user.name t
     echo "x" > "$r/tests/sneaky.bats"
@@ -269,7 +293,13 @@ _make_committed_branch_repo() {
     # the host gate (which runs in `qci host` and `qci full`) actually calls
     # gate_edit_guard, and that it is the CI form (empty ref so it diffs against
     # the integration merge-base, not a working-tree-only HEAD diff).
-    run bash -c "awk '/^gate_host\\(\\)/{f=1} f{print} /^}/{if(f)exit}' '$QCI'"
+    #
+    # Since commit 8e4e0b1 split the runner into ci/lib modules, gate_host()
+    # lives in ci/lib/gates/host.sh (no longer inline in the dispatcher), so
+    # grep the file that actually defines it.
+    local host_gate="$REPO_ROOT/ci/lib/gates/host.sh"
+    [ -f "$host_gate" ] || skip "gate_host source not found at $host_gate"
+    run bash -c "awk '/^gate_host\\(\\)/{f=1} f{print} /^}/{if(f)exit}' '$host_gate'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate_edit_guard"* ]]
     # CI form: called with an empty changed-from ref (\"\"), so the default
