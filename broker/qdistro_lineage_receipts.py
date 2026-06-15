@@ -200,13 +200,19 @@ def build_envelope(*, entity: str, kind: str, chain_head: str, created_at: int,
     return env
 
 
-def _is_hex_digest(s: Any) -> bool:
+def is_hex_digest(s: Any) -> bool:
     """v1 digest grammar: a bare 64-char lowercase sha256 hex string — exactly
     what the store records (``hashlib.sha256(...).hexdigest()``). One spelling
-    only, so a receipt digest is never structurally valid yet unmatchable."""
+    only, so a receipt digest is never structurally valid yet unmatchable. Public
+    so chokepoint surfaces (commit/upload lineage) validate digests against the
+    same grammar the envelope builder enforces."""
     if not isinstance(s, str) or len(s) != 64:
         return False
     return all(c in "0123456789abcdef" for c in s)
+
+
+#: Back-compat private alias (pre-existing internal callers).
+_is_hex_digest = is_hex_digest
 
 
 def validate_envelope(envelope: Any, *, expected_kind: str | None = None) -> dict[str, Any]:
