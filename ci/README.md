@@ -4,11 +4,24 @@
 umbrella checkout. It is meant to be usable by a developer or by an agent with
 shell access to the same workspace.
 
-The entrypoint is:
+The preferred entrypoint is `just` (run from `qdistro/ci/`):
+
+```bash
+just full            # or: just bats --file <f.bats>, just triage --latest
+just --list          # all recipes
+```
+
+Every recipe delegates to the stable CLI, which is also usable directly (and is
+what scripts/agents/run-artifacts invoke):
 
 ```bash
 qdistro/ci/bin/qci <gate>
 ```
+
+`just` is only the task surface; the CI engine (run lifecycle, VM/golden
+management, parallel pools, report finalization, exit-class accumulation) lives
+in bash modules under `qdistro/ci/lib/` that `bin/qci` sources into one process.
+See [`AGENTS.md`](AGENTS.md) for the module map.
 
 Every invocation writes artifacts under:
 
@@ -50,7 +63,7 @@ vitest tags), and the per-suite relabel action items.
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
 | `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. The agent scenarios run **in parallel** (one disposable VM each). |
-| `full` | Run `preflight`, `host`, `vm-smoke`, `bats`, and `gui`. |
+| `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
 

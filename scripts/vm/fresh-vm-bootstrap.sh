@@ -470,16 +470,29 @@ if [ ! -S /run/user/1000/wayland-1 ]; then
     runuser -l admin -c 'journalctl --user -u noctalia-session.service --no-pager -n 30' || true
 fi
 
-# qdlocker has a known WAYLAND_DISPLAY env-propagation bug being fixed
-# in the qdlocker repo by another agent; the socket may not appear yet.
-# Warn-and-continue — do NOT fail the bootstrap on this.
+# qdlocker.sock is created by a successfully running qdlocker by default
+# (QDLOCKER_CTRL_SOCKET=1). This admin-test harness starts the lxqt/labwc
+# path, not the qdwin compositor session, so qdlocker may retry-crash before
+# binding qdwin_locker_v1 and before creating the ctrl socket. The
+# /etc/qdistro/locker-ctrl-introspection marker gates only the diagnostic
+# commands (status/unlock-result/prompt-text); it does not gate socket
+# creation or the production `lock` command. Warn-and-continue — do NOT fail
+# the bootstrap on this harness; only flag the case that signals a real
+# regression (qdlocker active but no socket).
 log "  waiting for /run/user/1000/qdlocker.sock (best-effort)..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     [ -S /run/user/1000/qdlocker.sock ] && break
     sleep 1
 done
 if [ ! -S /run/user/1000/qdlocker.sock ]; then
-    log "  WARN: /run/user/1000/qdlocker.sock did not appear within 30s (known qdlocker env bug)"
+    # is-active returns nonzero for an inactive/failed unit; neutralize so the
+    # substitution doesn't trip set -e/pipefail before we classify the state.
+    locker_state=$(runuser -l admin -c 'systemctl --user is-active qdlocker.service' 2>/dev/null | tr -d '\r' || true)
+    if [ "${locker_state:-}" = "active" ]; then
+        log "  WARN: /run/user/1000/qdlocker.sock missing though qdlocker.service is active — possible ctrl-socket regression (not expected absence)"
+    else
+        log "  WARN: /run/user/1000/qdlocker.sock absent (expected on this harness: qdlocker.service is '${locker_state:-unknown}', no qdwin compositor session; marker gates introspection commands only)"
+    fi
 fi
 
 # ---- 8. Opt-in: build tier-4 / tier-5 guest base images ----------------

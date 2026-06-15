@@ -195,7 +195,7 @@ def recommendation(row: dict[str, str], run_dir: Path) -> str:
             "Run this gate with a real visual-agent command or have an agent "
             "complete the generated prompt files under agent-notes/."
         )
-    if "qdistRO_vm_password".lower() in lower:
+    if "qdistro_vm_password" in lower:
         return "The qdistro test VM password is fixed at Pa_ssw0rd45; rebuild or patch the baseweed images if authentication fails."
     if "baseweed-baked" in lower:
         return "Build or repair the prebaked VM image with qdistro/scripts/vm/build-baked-baseweed.sh."
