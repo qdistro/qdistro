@@ -48,10 +48,21 @@ case "$GUI_SESSION" in
     *) echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$GUI_SESSION' (want labwc|qdwin)" >&2; exit 2 ;;
 esac
 
+# Per-run GOLDEN clone? acquire_vm exports QCI_RUN_GOLDEN_BACKING when cloning a
+# worker from the gui golden. On a clone the whole gui layer (work users, SDK,
+# launchers, labwc/qdwin install, §8b virtio-gpu, autologin/session config) is
+# already BAKED into the golden and the staged source ($SRC) is absent, so the
+# POSTBOOT install path is skipped (see the GOLDEN_CLONE fast-path inside it) and
+# we only verify the baked session came up.
+GOLDEN_CLONE=0
+[ -n "${QCI_RUN_GOLDEN_BACKING:-}" ] && GOLDEN_CLONE=1
+
 echo "[gui-spin] step 1/3: spin-test-vm.sh $PREFIX (broker layer)" >&2
-# spin-test-vm prints the VM name on the last stdout line. Capture
-# stderr to console, stdout to a variable.
-VM=$(bash "$SCRIPT_DIR/spin-test-vm.sh" "$PREFIX" 2>&1 | tee /dev/stderr | tail -1)
+# spin-test-vm prints the VM name on the last stdout line. Capture stderr to
+# console, stdout to a variable. QCI_SPIN_VERIFY_SESSION=none: the child's
+# stage-6 wayland-1 check is qdwin-specific (and a labwc golden clone has no
+# wayland-1) — the gui POSTBOOT below does profile-aware verification instead.
+VM=$(QCI_SPIN_VERIFY_SESSION=none bash "$SCRIPT_DIR/spin-test-vm.sh" "$PREFIX" 2>&1 | tee /dev/stderr | tail -1)
 
 if ! echo "$VM" | grep -qE "^${PREFIX}-[0-9]+-[0-9]+(-[0-9]+)*$"; then
     echo "[gui-spin] could not parse VM name from spin-test-vm.sh output: '$VM'" >&2
@@ -86,6 +97,52 @@ case "$SESSION" in labwc|qdwin) ;; *)
     echo "[gui-spin] ERROR: QDISTRO_VM_GUI_SESSION='$SESSION' (want labwc|qdwin)"; exit 2 ;;
 esac
 echo "[gui-spin] gui session profile: $SESSION"
+
+# GOLDEN-CLONE FAST-PATH. Everything below (work/work2 users, SDK, launchers,
+# labwc/qdwin install, §8b virtio-gpu dracut/grub, autologin + session config)
+# is already BAKED into the gui golden disk, and the staged source ($SRC) does
+# NOT exist on a clone — so re-running it would fail and/or duplicate work. A
+# clone boots straight into the baked session (getty autologin → labwc, or the
+# enabled noctalia user units → qdwin). We only VERIFY, fail-closed and
+# profile-aware, that the baked session + the surface scenarios depend on came
+# up, then exit. The full-build path (golden build / QCI_NO_GOLDEN) is below.
+if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
+    echo "[gui-spin] golden clone: skipping install, verifying baked session ($SESSION)"
+    if [ "$SESSION" = labwc ]; then
+        for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-0 ] && break; sleep 2; done
+        if [ ! -S /run/user/1000/wayland-0 ]; then
+            echo "[gui-spin] ERROR: wayland-0 missing on labwc golden clone"
+            runuser -l admin -c 'systemctl --user --no-pager status 2>&1 | head -30' || true
+            journalctl -b --no-pager 2>&1 | tail -40 || true
+            exit 1
+        fi
+        pgrep -x labwc >/dev/null || { echo "[gui-spin] ERROR: labwc not running on clone"; exit 1; }
+        echo "[gui-spin] labwc clone session up (wayland-0)"
+    else
+        for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-1 ] && break; sleep 2; done
+        if [ ! -S /run/user/1000/wayland-1 ]; then
+            echo "[gui-spin] ERROR: wayland-1 missing on qdwin golden clone"
+            runuser -l admin -c 'systemctl --user --no-pager status noctalia-session.service noctalia-shell.service 2>&1 | head -40' || true
+            exit 1
+        fi
+        runuser -l admin -c 'systemctl --user is-active noctalia-session.service noctalia-shell.service' >/dev/null 2>&1 \
+            || { echo "[gui-spin] ERROR: noctalia units not active on qdwin clone"; exit 1; }
+        echo "[gui-spin] qdwin clone session up (wayland-1)"
+    fi
+    # The baked install surface the scenarios require — fail-closed on core bits
+    # (codex review: verify, don't ls-and-warn, the things a clone depends on).
+    id work >/dev/null 2>&1 && id work2 >/dev/null 2>&1 \
+        || { echo "[gui-spin] ERROR: work/work2 users missing in golden"; exit 1; }
+    for _f in /usr/local/bin/qdistro-test-permission \
+              /usr/local/bin/qdistro-start-admin-app \
+              /usr/local/bin/qdistro-start-admin-tui; do
+        [ -x "$_f" ] || { echo "[gui-spin] ERROR: baked launcher $_f missing in golden"; exit 1; }
+    done
+    /usr/bin/python3 -c 'import qdistro_app' 2>/dev/null \
+        || { echo "[gui-spin] ERROR: qdistro_app SDK not importable in golden clone"; exit 1; }
+    echo "[gui-spin] golden clone verification OK ($SESSION)"
+    exit 0
+fi
 
 # 1. work + work2 users (uids 2000 / 3000), linger so their session
 #    buses come up.
@@ -411,7 +468,7 @@ fi
 echo "--- done ---"
 POSTBOOT
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' QDISTRO_VM_GUI_SESSION='$GUI_SESSION' bash" >&2
+$VMEXEC "$VM" "echo $B64 | base64 -d | VM_PASSWORD='$VM_PASSWORD' QDISTRO_VM_GUI_SESSION='$GUI_SESSION' GOLDEN_CLONE='$GOLDEN_CLONE' bash" >&2
 
 # Note on display resolution (FIXED — verify on a live boot):
 #   Earlier templates used QXL / virtio-vga (VGA-compat shim), which

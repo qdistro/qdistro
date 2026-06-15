@@ -253,6 +253,17 @@ gate_gui() {
     qci_assert_vm_tools gui || return $?
     local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 noctalia_shell=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
+    # Build the per-run GUI golden ONCE (compositor + labwc/qdwin layer built
+    # from current source), so the probe VM AND every per-scenario worker CLONE
+    # it and skip the ~150-310s in-VM build + source staging. Without this, N
+    # disposable GUI workers each ran a from-scratch compositor build IN PARALLEL
+    # (the gui pool defaults to 8), saturating the host (load spiked to ~35) and
+    # causing VM-creation timeouts + a source-tarball race on the live run dir +
+    # agent API drops. Skipped when an explicit --vm is given (that IS the VM to
+    # use). Opt out with QCI_NO_GOLDEN=1 (each worker then runs the full build).
+    if [ -z "$explicit" ] && [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
+        ensure_run_golden gui || return "$EXIT_VM_PROVISION"
+    fi
     # A single "session" VM is used for the capability probe + the per-session
     # sub-gates (executable smokes, qdshell-ui vision). The agent SCENARIOS then
     # each run on their own disposable VM in a parallel pool below.

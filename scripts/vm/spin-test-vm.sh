@@ -140,8 +140,14 @@ log "stage 4a: tarballing qdistro, qdwin, qdshell..."
 # (spec/20 priority #5 source-of-truth probed by s64). Restrict the
 # exclude to the known meson-host build dirs in sibling repos so
 # regular scripts named `build-*` survive into the staged tarballs.
+# Exclude ci/runs (the live CI run dirs): the guest never needs host CI
+# artifacts, and tarring the run dir that concurrent qci workers are actively
+# writing raced as `tar: ./ci/runs/...: file changed as we read it`, failing the
+# spin (observed on a parallel gui worker). Excluding it removes the race and
+# shrinks the tarball.
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     --exclude='.git' --exclude='build' --exclude='build-host*' \
+    --exclude='./ci/runs' \
     -czf "$STAGE/qdistro.tar.gz" -C "$PARENT/qdistro" .
 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
     --exclude='.git' --exclude='build' --exclude='build-host*' \
@@ -234,7 +240,14 @@ case "${QDISTRO_BUILD_TIER2_IMAGES:-0}" in 1|true|yes|on) _T2_IMAGES=1 ;; *) _T2
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 
-# Stage 6: verify the session came up.
+# Stage 6: verify the qdwin session came up. SKIPPED when
+# QCI_SPIN_VERIFY_SESSION=none — the gui spinner (spin-test-vm-gui.sh) sets that
+# and does its OWN profile-aware verification in its POSTBOOT. A labwc GUI
+# golden clone boots straight into labwc (wayland-0, no wayland-1), so an
+# unconditional wayland-1 check here would fail every labwc clone before the gui
+# POSTBOOT ever runs. Default (qdwin) preserves the historic check for bats +
+# standalone spin-test-vm.sh.
+if [ "${QCI_SPIN_VERIFY_SESSION:-qdwin}" != none ]; then
 # wayland-1 is the core "compositor came up" signal — fatal on miss.
 # qdshell ctrl-socket + qdlocker.sock are warn-only. qdshell may not have
 # bound the ctrl-socket yet at this exact moment. qdlocker.sock is created by
@@ -278,6 +291,7 @@ else
         log "WARN: qdlocker.sock absent (expected on this lxqt harness: qdlocker.service is '${LOCKER_STATE:-unknown}', no qdwin compositor session to bind qdwin_locker_v1; introspection marker gates only status/unlock-result/prompt-text)"
     fi
 fi
+fi  # end stage 6 (skipped when QCI_SPIN_VERIFY_SESSION=none)
 
 # Success: emit the VM name FIRST, then mark SPUN_OK so the EXIT trap won't tear
 # it down. Ordering matters — qci only trusts a clean (rc=0) exit, so if we are
