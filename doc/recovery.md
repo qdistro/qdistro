@@ -15,35 +15,17 @@ not wired, say so here rather than implying it works.
 | TTY | What runs | Wired by |
 |-----|-----------|----------|
 | tty3 | **Production session.** `greetd` → `qdgreeter` (graphical PAM via greetd JSON-IPC) → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell). Boots here by default (`systemd.default_vt=3`). | `deploy/greetd-config.toml`, `greetd.service` |
-| tty4 | **Escape hatch (dev/test bakes only).** `greetd-fallback.service` → `greetd --config /etc/greetd/config-fallback.toml` → auto-login `admin` into a legacy **LXQt + labwc** Wayland session (`qdistro-startlxqtwayland`). Reachable with **Ctrl+Alt+F4**. *Enabled only under the `dev` profile where the LXQt stack is installed; on daily-driver/release the unit is installed-but-disabled (see below).* | `deploy/greetd-config-fallback.toml`, `deploy/greetd-fallback.service` |
 | tty5+ | Dynamic / pinned work sessions written by `qdistro-session-manager`. | session manager |
 
-The tty4 fallback is **graphical** — it is the same LXQt+labwc stack qdwin
-replaced (P01, 2026-05). When present it recovers a **broken qdwin/qdshell**
-(compositor segfault, qdshell QML failure, `qdwin_shell_v1` binding error)
-because the underlying Wayland/KMS stack is still healthy. It does **not**
-recover a fully broken graphics stack (KMS/driver fault, missing libweston) —
-in that case tty4 fails the same way tty3 does; use the text-mode paths below.
-
-> **By design — the tty4 escape hatch is a dev/test-bake feature, not a
-> production recovery path.** `greetd-fallback.service` auto-logins `admin`
-> into LXQt+labwc with **no password prompt**; a passwordless graphical admin
-> VT on a real install would bypass the locked tty3 greeter, so on
-> daily-driver/release the unit is installed-but-**disabled** and the LXQt+labwc
-> stack is not installed (`qdistro-bootstrap.sh` enables it only under the `dev`
-> profile when the full stack is present; `image/config.sh` ships it disabled).
-> The dev greeter bring-up (`scripts/vm/enable-qdgreeter.sh`) installs the
-> launcher + `labwc -S` wrapper and enables the unit when the LXQt+labwc stack
-> is present. (`spin-test-vm-gui.sh` is a separate LXQt-on-tty1 agetty harness,
-> not the greetd-fallback path.) **On a real install, use the GRUB paths below —
-> not tty4 — for recovery.**
-
-> **By design — there is no qdistro text-mode VT login.** tty3 is the only
-> interactive qdistro login (the locked graphical greeter); no greetd config,
-> service, or `getty@tty2` wires a textual admin login on tty2 (an earlier
-> `tuigreet` design was never implemented and the docs have been reconciled).
-> Text-mode recovery when *all* of Wayland is broken goes through GRUB
-> (rescue/emergency target or a read-only snapshot boot), not a qdistro VT login.
+> **By design — there is no graphical escape hatch and no qdistro text-mode VT
+> login.** There is no tty4 fallback desktop (the legacy passwordless LXQt+labwc
+> hatch was removed — a passwordless graphical admin VT would bypass the locked
+> tty3 greeter). tty3 is the only interactive qdistro login (the locked graphical
+> greeter); no greetd config, service, or `getty@tty2` wires a textual admin
+> login on tty2 (an earlier `tuigreet` design was never implemented and the docs
+> have been reconciled). When the compositor or graphics stack is broken — or
+> *all* of Wayland is — recover through GRUB (rescue/emergency target or a
+> read-only snapshot boot), not a VT login.
 
 ## Scenario A — the graphical session won't come up (qdwin/qdshell wedged)
 
@@ -51,25 +33,19 @@ Symptom: tty3 shows the greeter but login never reaches a desktop, or the
 compositor crashes back to the greeter, while the rest of the machine is
 responsive.
 
-If the tty4 escape hatch is enabled (dev/test bakes only — see the note
-above; on a daily-driver/release install skip to Scenario B/C):
+There is no graphical escape hatch — recover from the bootloader in text mode
+(Scenario B), then inspect what failed and fix forward or roll back:
 
-1. Press **Ctrl+Alt+F4** to switch to the tty4 escape hatch. You are
-   auto-logged-in as `admin` into LXQt+labwc.
-2. Open a terminal. Inspect what failed:
+1. Reboot into the **GRUB** rescue/emergency target (Scenario B).
+2. From the text shell, inspect what failed:
    - `systemctl status qdwin-session.target 'qdwin*' 'qdshell*'`
    - `journalctl -b -u 'qdwin*' -u 'qdshell*' --no-pager | tail -100`
 3. Fix forward (rebuild/repair the offending component, see Scenario D) **or**
    roll back the root filesystem to the last-good state (Scenario C).
-4. Return to the production session: `systemctl restart greetd` then
-   **Ctrl+Alt+F3**.
 
-If tty4 itself does not come up, the graphics stack — not just qdwin — is
-broken; go to Scenario B.
+## Scenario B — graphics fully broken
 
-## Scenario B — graphics fully broken (tty4 also fails)
-
-Symptom: neither tty3 nor tty4 produces a usable session; black screen,
+Symptom: tty3 does not produce a usable session; black screen,
 KMS errors, or the compositor cannot open the GPU.
 
 Recover from the bootloader, in text mode:
@@ -148,24 +124,22 @@ the `http://`-staging VM helpers are not for a recovery on a real machine.
 
 | Situation | First move |
 |-----------|-----------|
-| Desktop won't start, machine responsive | **Ctrl+Alt+F4** → tty4 LXQt *(dev/test bakes only)*, else GRUB → `rescue.target`; diagnose, then Scenario C or D |
-| No graphics at all (tty3 *and* tty4 dead) | Reboot → GRUB → `systemd.unit=rescue.target` |
+| Desktop won't start, machine responsive | Reboot → GRUB → `systemd.unit=rescue.target`; diagnose, then Scenario C or D |
+| No graphics at all (tty3 dead) | Reboot → GRUB → `systemd.unit=rescue.target` |
 | Last update broke boot/login | Reboot → GRUB → read-only snapshot → `snapper rollback` |
 | One user's home corrupted | admin Snapshots panel → "Roll back this user (full)" |
 | qdistro components broken/half-installed | `qdistro-bootstrap.sh --resume` (or `--rerun-step NAME`) |
-| Return to production session | `systemctl restart greetd` → **Ctrl+Alt+F3** |
+| Return to production session | `systemctl restart greetd` (boots tty3) |
 
 ## Known gaps (v1)
 
 The first three install/doc gaps below were closed 2026-06-13 (F9a/b/c); the
 remaining item is human-gated:
 
-- **tty4 escape hatch — resolved (F9a).** The fallback was a *passwordless*
-  admin LXQt+labwc autologin enabled even on hardened installs where its stack
-  was never installed (`203/EXEC` restart loop + a greeter bypass). It is now
-  enabled only under the `dev` profile when the full LXQt stack is present;
-  daily-driver/release ship the unit installed-but-disabled and steer recovery
-  to GRUB (`qdistro-bootstrap.sh` configure_greetd, `image/config.sh`).
+- **tty4 escape hatch — removed.** The fallback was a *passwordless* admin
+  LXQt+labwc autologin that (when mis-enabled) caused a `203/EXEC` restart loop
+  and a greeter bypass. It has been removed entirely; recovery is via GRUB
+  (`qdistro-bootstrap.sh` configure_greetd, `image/config.sh`).
 - **No qdistro text-mode VT login — resolved (F9b).** tty3 is by design the
   only interactive qdistro login; the never-implemented tty2 `tuigreet` claims
   in `architecture.md`/`sessions.md`/`devices.md` were reconciled.

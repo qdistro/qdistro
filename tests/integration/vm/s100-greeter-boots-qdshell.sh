@@ -8,7 +8,6 @@
 # Asserts the P01 boot path:
 #   greetd (tty3) → qdgreeter → qdwin-session.target → qdshell-on-qdwin
 #   ⊥ LXQt + labwc are NOT running in the session.
-#   tty4 fallback escape hatch is reachable.
 #
 # Every PASS string below is load-bearing — compositor-shell.bats
 # asserts on each one. Renaming a PASS line WILL silently green-wash
@@ -17,8 +16,6 @@
 # The script ASSUMES:
 #   - greetd is configured with /etc/greetd/config.toml pointing at
 #     qdgreeter (P01 deploy/greetd-config.toml installed).
-#   - /etc/greetd/config-fallback.toml + greetd-fallback.service are
-#     installed for the tty4 hatch.
 #   - The admin user is set up; qdwin-session.target is installed
 #     under /etc/systemd/user/.
 #   - A test password is exposed via $QDGREETER_TEST_PASSWORD (the
@@ -183,28 +180,5 @@ if pgrep -fx 'labwc' >/dev/null || pgrep -fx 'lxqt-panel' >/dev/null \
     err "legacy LXQt+labwc processes still present in the qdwin session"
 fi
 echo "PASS: LXQt is NOT running (no labwc / lxqt-panel processes)"
-
-# ---------------------------------------------------------------------------
-# Step 8 — fallback escape hatch on tty4 is reachable.
-#
-# We don't switch to tty4 here (that would disrupt the running shell
-# the test is running against) — instead we assert:
-#   - /etc/greetd/config-fallback.toml exists and pins vt=4
-#   - greetd-fallback.service unit is installed (and either enabled
-#     or already running)
-#   - The fallback target command (qdistro-startlxqtwayland) exists
-#     and is executable on $PATH.
-# ---------------------------------------------------------------------------
-[[ -f /etc/greetd/config-fallback.toml ]] \
-    || err "tty4 fallback config /etc/greetd/config-fallback.toml missing"
-grep -qE '^vt[[:space:]]*=[[:space:]]*4' /etc/greetd/config-fallback.toml \
-    || err "fallback config does not pin vt=4"
-grep -q 'qdistro-startlxqtwayland' /etc/greetd/config-fallback.toml \
-    || err "fallback config does not reference qdistro-startlxqtwayland"
-[[ -x /usr/local/bin/qdistro-startlxqtwayland ]] \
-    || err "/usr/local/bin/qdistro-startlxqtwayland not installed"
-systemctl list-unit-files greetd-fallback.service >/dev/null 2>&1 \
-    || err "greetd-fallback.service unit not installed"
-echo "PASS: fallback escape-hatch documented and reachable via tty4"
 
 exit 0

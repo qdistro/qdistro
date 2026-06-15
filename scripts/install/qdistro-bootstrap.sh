@@ -1821,7 +1821,7 @@ install_qdwin_session() {
 }
 
 # ---------------------------------------------------------------------------
-# 13. greetd: qdgreeter (tty3) + fallback (tty4)
+# 13. greetd: qdgreeter (tty3, production session)
 # ---------------------------------------------------------------------------
 configure_greetd() {
     if [ -n "$SKIP_GREETD" ]; then
@@ -1832,7 +1832,7 @@ configure_greetd() {
         warn "greetd not installed; skipping greetd config"
         return 0
     fi
-    log "configuring greetd: qdgreeter on tty3, LXQt+labwc fallback on tty4..."
+    log "configuring greetd: qdgreeter on tty3 (production session)..."
 
     # _greeter system user. greetd's [default_session].user convention;
     # runs the qdgreeter UI without admin privileges. PAM does the
@@ -1862,14 +1862,6 @@ configure_greetd() {
         "$REPO_ROOT/qdistro/deploy/greetd-config.toml" \
         /etc/greetd/config.toml
 
-    # fallback config + unit (tty4 — escape hatch).
-    install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/greetd-config-fallback.toml" \
-        /etc/greetd/config-fallback.toml
-    install -m 0644 \
-        "$REPO_ROOT/qdistro/deploy/greetd-fallback.service" \
-        /etc/systemd/system/greetd-fallback.service
-
     # systemd hardening drop-in for the distro-packaged greetd.service.
     if [ -f "$REPO_ROOT/qdistro/deploy/greetd-hardening.conf" ]; then
         install -d -m 0755 /etc/systemd/system/greetd.service.d
@@ -1897,32 +1889,16 @@ configure_greetd() {
         "$REPO_ROOT/qdistro/deploy/qdshell.service" \
         /etc/systemd/user/qdshell.service 2>/dev/null || true
 
+    # Tear down any pre-existing tty4 LXQt+labwc fallback from an OLDER install
+    # (the passwordless escape hatch has been removed). Idempotent — no-op on a
+    # clean tree; ensures an upgrade actively removes the old passwordless
+    # greetd-fallback.service rather than leaving it enabled.
+    systemctl disable --now greetd-fallback.service 2>/dev/null || true
+    rm -f /etc/systemd/system/greetd-fallback.service /etc/greetd/config-fallback.toml
     systemctl daemon-reload
     systemctl enable greetd.service
-    # tty4 fallback escape hatch: greetd-fallback.service auto-logins `admin`
-    # into a PASSWORDLESS LXQt+labwc graphical VT. That is a developer/test-bake
-    # recovery convenience, NOT a hardened-profile feature — on daily-driver/
-    # release a passwordless graphical admin VT would bypass the locked tty3
-    # greeter, and the LXQt+labwc stack it needs is not part of a hardened
-    # install. The unit + config are installed (above) so an operator can enable
-    # it deliberately after laying down the stack, but we ENABLE it only under
-    # the dev profile AND only when the full session stack is actually present,
-    # so we never leave an enabled-but-missing unit thrashing 203/EXEC on tty4
-    # (greetd-fallback.service is Restart=always). The dev greeter bring-up
-    # (scripts/vm/enable-qdgreeter.sh) lays down the stack and owns the enable
-    # for dev bakes. Production recovery is via GRUB (doc/recovery.md), not tty4.
-    if is_dev \
-        && [ -x /usr/local/bin/qdistro-startlxqtwayland ] \
-        && [ -x /usr/local/bin/qdistro-lxqt-session-wrap ] \
-        && command -v labwc >/dev/null 2>&1 \
-        && command -v lxqt-session >/dev/null 2>&1; then
-        systemctl enable greetd-fallback.service \
-            || warn "greetd-fallback.service enable failed"
-    else
-        # Idempotent: undo any enable left by a prior run or a profile change.
-        systemctl disable greetd-fallback.service 2>/dev/null || true
-        log "  greetd-fallback.service installed but NOT enabled (hardened profile or LXQt fallback stack absent); tty4 escape hatch is dev-only — production recovery is via GRUB (doc/recovery.md)"
-    fi
+    # Production recovery is via GRUB (doc/recovery.md); the legacy tty4
+    # passwordless LXQt+labwc escape hatch has been removed.
     systemctl set-default graphical.target
 }
 

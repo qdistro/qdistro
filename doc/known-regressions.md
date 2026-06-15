@@ -40,6 +40,6 @@ trackers.
 
 | Area | Regression | Resolution |
 |---|---|---|
-| Recovery (tty4) | Passwordless admin LXQt+labwc autologin was enabled on hardened installs where its stack was never installed → `203/EXEC` restart loop + greeter-bypass exposure. | tty4 fallback enabled only under the `dev` profile when the LXQt stack is present; daily-driver/release ship it installed-but-disabled and steer recovery to GRUB. |
+| Recovery (tty4) | Passwordless admin LXQt+labwc autologin was enabled on hardened installs where its stack was never installed → `203/EXEC` restart loop + greeter-bypass exposure. | The tty4 LXQt+labwc fallback has been removed entirely; recovery is via GRUB (rescue/emergency target or a read-only snapshot boot). |
 | Recovery (text login) | `architecture.md`/`sessions.md`/`devices.md` documented a tty2 `tuigreet` text login that was never implemented. | Docs reconciled to reality: tty3 is the only interactive qdistro login; fully-broken-Wayland recovery is via the GRUB rescue/emergency target. |
 | Snapshots (rollback CLI) | The per-user "roll back this user (full)" CLI (`qdistro-snap-swap`) shipped only via the VM-only templates installer, so it was missing wherever the snapshot feature itself landed. | Now installed from the `snapshots` bootstrap chain step, so it lands with the snapshot feature and the admin Snapshots panel. |

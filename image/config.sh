@@ -155,9 +155,9 @@ rm -rf "$SHIMS"
 
 install -d -m 0755 /etc/greetd
 
-# P01 boot path: qdgreeter on tty3, LXQt+labwc fallback on tty4.
-# _greeter system user owns the unprivileged greeter process; PAM
-# does the privilege handoff at start_session time.
+# P01 boot path: qdgreeter on tty3 (the production session). _greeter
+# system user owns the unprivileged greeter process; PAM does the
+# privilege handoff at start_session time.
 if ! getent passwd _greeter >/dev/null; then
     useradd --system --no-create-home --home-dir /nonexistent \
         --shell /usr/sbin/nologin _greeter || true
@@ -169,8 +169,6 @@ for g in video render input tty; do
 done
 
 install -m 0644 "$QD/deploy/greetd-config.toml"          /etc/greetd/config.toml
-install -m 0644 "$QD/deploy/greetd-config-fallback.toml" /etc/greetd/config-fallback.toml
-install -m 0644 "$QD/deploy/greetd-fallback.service"     /etc/systemd/system/greetd-fallback.service
 
 # systemd hardening drop-in for the distro-packaged greetd.service.
 if [ -f "$QD/deploy/greetd-hardening.conf" ]; then
@@ -296,14 +294,13 @@ chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
 echo "[qdistro-image] qdwin-session.target installed; qdshell + qdlocker wired into it; noctalia auto-start disabled"
 
 systemctl enable greetd.service
-# tty4 fallback (greetd-fallback.service) auto-logins `admin` into a PASSWORDLESS
-# LXQt+labwc VT and needs an LXQt stack this image does not install. Enabling it
-# on a release image would both bypass the locked tty3 greeter and 203/EXEC-loop
-# on tty4 (the unit is Restart=always with a missing ExecStart target). Ship the
-# unit + config installed (above) but DISABLED; production recovery is via GRUB
-# (doc/recovery.md), not tty4. Dev/test bakes that want the hatch enable it via
-# the GUI bring-up scripts after laying down the LXQt+labwc stack.
-systemctl disable greetd-fallback.service 2>/dev/null || true
+# Tear down any pre-existing tty4 LXQt+labwc fallback (the passwordless escape
+# hatch has been removed). Idempotent — keeps the removal correct even if an
+# image build ever runs over a reused/rooted tree.
+systemctl disable --now greetd-fallback.service 2>/dev/null || true
+rm -f /etc/systemd/system/greetd-fallback.service /etc/greetd/config-fallback.toml
+# Production recovery is via GRUB (doc/recovery.md). (The legacy tty4
+# passwordless LXQt+labwc escape hatch has been removed.)
 systemctl set-default graphical.target
 
 # Keep /root/qdistro-src on the image — the LLM-modifiability principle

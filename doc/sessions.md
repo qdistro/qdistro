@@ -28,7 +28,6 @@ Each TTY starts a greetd instance with a role-specific config:
 | tty1 | (none — agetty only) | Raw text login, emergency only. |
 | tty2 | (none — no greetd config) | No qdistro VT login is wired here. Text-mode recovery when Wayland is down is via GRUB rescue/emergency or a read-only snapshot boot (`doc/recovery.md`). |
 | tty3 | `default_session.command = /usr/bin/qdgreeter` (deploy/greetd-config.toml) | Graphical qdgreeter → admin auth via greetd JSON-IPC → `qdwin-session-launcher` → `qdwin-session.target` → qdwin compositor + qdshell. |
-| tty4 | `default_session.command = qdistro-startlxqtwayland` (deploy/greetd-config-fallback.toml, run by greetd-fallback.service) | **Escape hatch — dev/test bakes only.** A *passwordless* `admin` LXQt+labwc autologin for recovering from a broken qdwin commit, reachable via Ctrl+Alt+F4. Enabled only under the `dev` profile where the LXQt stack is installed; on daily-driver/release the unit is installed-but-disabled (the passwordless graphical admin VT would bypass the locked tty3 greeter). Production recovery is via GRUB (`doc/recovery.md`). Documented in `deploy/AGENTS.md`. |
 | tty5+ | Dynamic; session manager writes ephemeral configs | TTY work sessions, fullscreen user sessions, special-role sessions, or VM viewers. |
 
 `systemd.default_vt=3` boots to admin.
@@ -41,7 +40,9 @@ admin authenticates and the machine lock is cleared.
 > **History:** before P01 (closed 2026-05), tty3 ran
 > `qdistro-startlxqtwayland` (LXQt+labwc) with qdshell as a
 > parity-test overlay. P01 made qdgreeter functional and made qdwin
-> the actual compositor greetd boots; LXQt+labwc demoted to tty4.
+> the actual compositor greetd boots. (The legacy LXQt+labwc session
+> was later kept only as a tty4 dev fallback, since removed; it now
+> survives solely as the GUI test harness — see `deploy/AGENTS.md`.)
 
 ### Greeter keyboard grab and `_greeter` input access
 

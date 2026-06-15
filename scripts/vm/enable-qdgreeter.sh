@@ -1,6 +1,6 @@
 #!/bin/bash
 # enable-qdgreeter.sh — convert a freshly bootstrapped VM into the daily
-# driver login path: greetd on tty3 running qdgreeter, with tty4 fallback.
+# driver login path: greetd on tty3 running qdgreeter (production session).
 #
 # Intended to run inside the guest after fresh-vm-bootstrap.sh has unpacked
 # source tarballs under /root/qdistro-src.
@@ -43,21 +43,15 @@ if [ ! -s /usr/bin/qdgreeter ]; then
     exit 3
 fi
 
-log "installing greetd config and fallback..."
+log "installing greetd config..."
 install -d -m 0755 /etc/greetd
 install -m 0644 "$QD/deploy/greetd-config.toml" /etc/greetd/config.toml
-install -m 0644 "$QD/deploy/greetd-config-fallback.toml" /etc/greetd/config-fallback.toml
-install -m 0644 "$QD/deploy/greetd-fallback.service" /etc/systemd/system/greetd-fallback.service
 
 install -d -m 0755 /etc/systemd/system/greetd.service.d
 install -m 0644 "$QD/deploy/greetd-hardening.conf" \
     /etc/systemd/system/greetd.service.d/10-qdistro-hardening.conf
 
 install -m 0755 "$QD/deploy/qdwin-session-launcher.sh" /usr/local/bin/qdwin-session-launcher
-install -m 0755 "$QD/deploy/qdistro-startlxqtwayland.sh" /usr/local/bin/qdistro-startlxqtwayland
-# The tty4 fallback launcher execs `labwc -S /usr/local/bin/qdistro-lxqt-session-wrap`,
-# so its wrapper must be installed too or the hatch 203/EXECs at the labwc step.
-install -m 0755 "$QD/deploy/qdistro-lxqt-session-wrap.sh" /usr/local/bin/qdistro-lxqt-session-wrap
 install -d -m 0755 /etc/systemd/user
 install -m 0644 "$QD/deploy/qdwin-session.target" /etc/systemd/user/qdwin-session.target
 install -m 0644 "$QD/deploy/qdwin-compositor.service" /etc/systemd/user/qdwin-compositor.service
@@ -86,22 +80,14 @@ systemctl stop user@1000.service 2>/dev/null || true
 runuser -l admin -c \
     'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null || true' \
     || true
+# Tear down any pre-existing tty4 LXQt+labwc fallback from an older bake/golden
+# (the passwordless escape hatch has been removed). Idempotent — no-op on a clean
+# tree. Critical when run against a REUSED VM golden (snapshot-daily) that could
+# still carry the old passwordless greetd-fallback.service.
+systemctl disable --now greetd-fallback.service 2>/dev/null || true
+rm -f /etc/systemd/system/greetd-fallback.service /etc/greetd/config-fallback.toml
+systemctl daemon-reload
 systemctl enable greetd.service
-# tty4 fallback escape hatch (greetd-fallback.service → passwordless admin
-# LXQt+labwc). Enable it only when the full session stack is actually present
-# (launcher + `labwc -S` wrapper + labwc + lxqt-session), so a greeter bake
-# without the LXQt stack doesn't get an enabled-but-missing unit thrashing
-# 203/EXEC on tty4 (the unit is Restart=always). GUI bakes that install
-# labwc/lxqt get a working hatch; headless greeter bakes ship it disabled.
-if [ -x /usr/local/bin/qdistro-startlxqtwayland ] \
-    && [ -x /usr/local/bin/qdistro-lxqt-session-wrap ] \
-    && command -v labwc >/dev/null 2>&1 \
-    && command -v lxqt-session >/dev/null 2>&1; then
-    systemctl enable greetd-fallback.service || true
-else
-    systemctl disable greetd-fallback.service 2>/dev/null || true
-    log "greetd-fallback.service installed but NOT enabled (LXQt fallback stack absent on this bake)"
-fi
 install -d -m 0755 /etc/systemd/system/multi-user.target.wants
 ln -sfn /usr/lib/systemd/system/greetd.service \
     /etc/systemd/system/multi-user.target.wants/greetd.service

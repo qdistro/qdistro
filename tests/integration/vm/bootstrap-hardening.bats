@@ -239,8 +239,6 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q "PrivateTmp=yes" "$REPO_ROOT/deploy/greetd-hardening.conf"
     grep -q "10-qdistro-hardening.conf" "$BOOT"
     grep -q "10-qdistro-hardening.conf" "$IMAGE_CFG"
-    # fallback unit also carries hardening
-    grep -q "ProtectSystem=strict" "$REPO_ROOT/deploy/greetd-fallback.service"
 }
 
 @test "hardening: _greeter is a non-login, non-home system user" {

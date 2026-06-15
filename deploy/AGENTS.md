@@ -10,17 +10,12 @@ that references it.
 | TTY  | Service                  | Config                                | Purpose |
 |------|--------------------------|---------------------------------------|---------|
 | tty3 | `greetd.service`         | `/etc/greetd/config.toml` (← greetd-config.toml) | **Production** — greetd → qdgreeter → qdwin-session.target → qdshell-on-qdwin |
-| tty4 | `greetd-fallback.service`| `/etc/greetd/config-fallback.toml` (← greetd-config-fallback.toml) | **Escape hatch (dev/test bakes only)** — greetd → *passwordless* `admin` LXQt+labwc autologin (`qdistro-startlxqtwayland`). Reachable via Ctrl+Alt+F4 when qdwin commits brick the test VM. Enabled only under the `dev` profile where the LXQt stack is installed; daily-driver/release ship it installed-but-disabled (production recovery is GRUB — see `doc/recovery.md`). |
 | tty2 | (none)                   | —                                     | No qdistro VT login is wired here. Text-mode recovery is via GRUB rescue/emergency or a read-only snapshot boot (`doc/recovery.md`). |
 
-The tty4 hatch is **load-bearing for development** (it is enabled on
-dev/test bakes only): deleting it without deleting tty4 from the bake
-will leave a wedged qdwin commit un-recoverable without serial console.
-If you want to remove it, remove the bake step that installs
-`greetd-fallback.service` in the same commit. On daily-driver/release
-the hatch is intentionally installed-but-disabled — a passwordless
-graphical admin VT would bypass the locked tty3 greeter — so production
-recovery is via GRUB, not tty4.
+The legacy tty4 LXQt+labwc escape hatch has been **removed** (a passwordless
+graphical admin VT would bypass the locked tty3 greeter). Production recovery is
+via GRUB — see `doc/recovery.md`. The LXQt+labwc stack now survives ONLY as the
+GUI **test harness** (`scripts/vm/spin-test-vm-gui.sh`), not on any production VT.
 
 ## qdistro session target
 
@@ -41,15 +36,13 @@ crash loop.
 | File                              | Installs as                              | Owner |
 |-----------------------------------|------------------------------------------|-------|
 | `greetd-config.toml`              | `/etc/greetd/config.toml`                | greetd |
-| `greetd-config-fallback.toml`     | `/etc/greetd/config-fallback.toml`       | greetd-fallback.service |
-| `greetd-fallback.service`         | `/etc/systemd/system/greetd-fallback.service` | systemd |
 | `qdwin-session.target`            | `/etc/systemd/user/qdwin-session.target` | systemd --user (admin) |
 | `qdwin-compositor.service`        | `/etc/systemd/user/qdwin-compositor.service` | systemd --user (admin) |
 | `qdshell.service`                 | `/etc/systemd/user/qdshell.service`      | systemd --user (admin) |
 | `qdwin-session-launcher.sh`       | `/usr/local/bin/qdwin-session-launcher`  | run by greetd as admin |
-| `qdistro-startlxqtwayland.sh`     | `/usr/local/bin/qdistro-startlxqtwayland`| run by greetd-fallback as admin |
-| `qdistro-lxqt-session-wrap.sh`    | `/usr/local/bin/qdistro-lxqt-session-wrap` | child of qdistro-startlxqtwayland (labwc -S) |
-| `lxqt-session.conf`               | `/etc/xdg/lxqt/session.conf`             | lxqt-session (fallback only) |
+| `qdistro-startlxqtwayland.sh`     | `/usr/local/bin/startlxqtwayland` (by the harness) | GUI test harness only (`spin-test-vm-gui.sh`) |
+| `qdistro-lxqt-session-wrap.sh`    | `/usr/local/bin/qdistro-lxqt-session-wrap` | GUI test harness only (labwc -S wrapper) |
+| `lxqt-session.conf`               | `/etc/xdg/lxqt/session.conf`             | GUI test harness only (labwc) |
 
 ## Modifying this directory
 
@@ -61,4 +54,4 @@ crash loop.
   `scripts/`, `tests/integration/vm/`, and the qdshell sibling repo
   — the `s100-greeter-boots-qdshell.sh` smoke driver asserts on
   the name.
-- Touching greetd configs? Run `bats tests/integration/vm/compositor-shell.bats -f greeter-to-qdshell` to confirm boot path + fallback hatch still pass.
+- Touching greetd configs? Run the greeter boot-path VM smoke (`s100-greeter-boots-qdshell.sh`) to confirm the tty3 boot path still passes.

@@ -4,8 +4,7 @@
 #   greetd → qdgreeter (graphical PAM via greetd JSON-IPC) → qdwin-session.target
 #
 # Closes the P01 finding: greetd no longer launches LXQt+labwc as the
-# default. LXQt+labwc is preserved as the tty4 escape hatch
-# (see deploy/greetd-config-fallback.toml).
+# default — the production session is qdwin via qdgreeter.
 
 [terminal]
 vt = 3

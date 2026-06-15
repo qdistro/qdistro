@@ -2,9 +2,8 @@
 # qdwin-session-launcher — what greetd's [default_session].command
 # actually invokes after qdgreeter has authenticated admin.
 #
-# Replaces the legacy /usr/local/bin/qdistro-startlxqtwayland on
-# tty3. The legacy script still exists on tty4 as the escape hatch
-# (see deploy/greetd-config.toml).
+# Replaces the legacy /usr/local/bin/qdistro-startlxqtwayland on tty3
+# (the production session is qdwin via qdgreeter).
 #
 # Flow:
 #   1. Boot the per-user systemd manager (lingering admin user) so
