@@ -151,7 +151,59 @@ class TestBridgeRecallPush:
             {"op": "recall.push", "text": "x"}, identity)
         assert resp.get("ok") is False, resp
         assert resp.get("error") == "unknown_op", resp
+        assert "recall.push" not in bb.DEFAULT_HANDLERS
         assert list(tmp_path.rglob("*.db")) == []
+
+    def test_production_style_load_resolves_sibling_and_cuts_recall(
+            self, monkeypatch):
+        """Load the bridge the way the VM s67-recall-probe.sh does — as a
+        script with only its OWN directory on ``sys.path[0]`` — and assert
+        ``recall.push`` is cut.
+
+        The rest of this module imports the bridge through pytest's
+        ``pythonpath`` injection (``pyproject.toml`` puts ``browser_bridge``
+        on ``sys.path``), which silently satisfies the bridge's sibling
+        ``import qdistro_browser_allowlist``. The VM probe runs OUTSIDE
+        pytest, so that injection is absent: there the import resolves only
+        because the probe puts the bridge's install dir on ``sys.path[0]``,
+        mirroring production where the bridge runs as
+        ``/usr/libexec/qdistro/qdistro_browser_bridge.py``. This test
+        removes ``browser_bridge`` from ``sys.path`` and from the module
+        cache so it exercises that same own-dir resolution path, guarding
+        against a regression of the ``ModuleNotFoundError:
+        qdistro_browser_allowlist`` that the suppressed traceback hid in
+        the pwd-print-recall lane.
+        """
+        # Drop the pytest-injected path + cached modules so the load can
+        # only succeed via the bridge's own directory (production contract).
+        bb_dir = str(BB_DIR)
+        monkeypatch.setattr(
+            sys, "path",
+            [p for p in sys.path if os.path.abspath(p) != bb_dir])
+        for name in ("qdistro_browser_bridge", "qdistro_browser_allowlist"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+        sys.path.insert(0, bb_dir)
+        spec = importlib.util.spec_from_file_location(
+            "qdistro_browser_bridge_prodload",
+            BB_DIR / "qdistro_browser_bridge.py")
+        fresh = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(fresh)
+        except ModuleNotFoundError as e:
+            import pytest
+            pytest.fail(
+                "bridge failed to resolve its sibling import from its own "
+                f"directory (the s67-recall-probe / production load path): {e}")
+
+        identity = {
+            "ppid": 1, "parent_exe": "/usr/lib64/firefox/firefox",
+            "parent_selinux": "", "allowed": True,
+        }
+        resp = fresh.dispatch({"op": "recall.push", "text": "x"}, identity)
+        assert resp.get("ok") is False, resp
+        assert resp.get("error") == "unknown_op", resp
+        assert "recall.push" not in fresh.DEFAULT_HANDLERS
 
 
 # ---- Daemon (TTL reaper) ------------------------------------------
