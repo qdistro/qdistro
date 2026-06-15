@@ -59,7 +59,7 @@ vitest tags), and the per-suite relabel action items.
 | --- | --- |
 | `preflight` | Verify sibling repos, libvirt session, VM tools, prebaked image, and common host tools. |
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
-| `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, qdwin/qdshell meson/QML checks, and the Zola site. |
+| `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
 | `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. The agent scenarios run **in parallel** (one disposable VM each). |
@@ -259,15 +259,6 @@ sudo zypper install libevdev-devel pango-devel
 
 # Ubuntu
 sudo apt install libevdev-dev libpango1.0-dev
-```
-
-## Host Link Checks
-
-The host gate runs `zola check` for `qdistro-site`, including external links.
-If the network is flaky and you want only local site validation:
-
-```bash
-QCI_ZOLA_SKIP_EXTERNAL=1 qdistro/ci/bin/qci host
 ```
 
 ## Fast triage

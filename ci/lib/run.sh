@@ -196,22 +196,43 @@ collect_repo_state() {
 
 run_logged() {
     local gate=$1 subject=$2 default_class=$3 kind=$4 workdir=$5 cmd=$6 notes=${7:-}
-    local safe log_path rc mapped status
+    local safe log_path rc mapped status step_to
     safe=$(safe_name "$subject")
     log_path="$RDIR/$gate/$safe.log"
     mkdir -p "$(dirname "$log_path")"
+    # Hard wall-clock cap for this step. RUN_STEP_TIMEOUT (seconds) is set by the
+    # caller gate (e.g. gate_host) so a single wedged step can never stall the
+    # whole gate again; 0 (the default) keeps the historic unbounded behaviour.
+    step_to="${RUN_STEP_TIMEOUT:-0}"
+    [ "$step_to" -gt 0 ] 2>/dev/null || step_to=0
     {
         printf 'cwd=%s\n' "$workdir"
         printf 'cmd=%s\n' "$cmd"
         printf 'started_utc=%s\n' "$(now_utc)"
+        [ "$step_to" -gt 0 ] && printf 'step_timeout_s=%s\n' "$step_to"
         echo
     } > "$log_path"
     log "$gate/$subject"
     (
         cd "$workdir" || exit 2
-        QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" bash -lc "$cmd"
+        # Run host steps headless: offscreen Qt platform (as before) so Qt
+        # widget/print tests need no real display. NOTE: host-printer coupling
+        # (a QPrinter(HighResolution) that probes the host's default printer and
+        # blocks — the qterminator test_print_terminal hang) is NOT solved here:
+        # Qt ignores CUPS_SERVER for that path. Those tests are excluded from the
+        # host gate and belong in a VM lane (no printer => no hang). The
+        # per-step timeout below is the universal backstop for any other wedge.
+        export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+        if [ "$step_to" -gt 0 ]; then
+            timeout -k 15 "$step_to" bash -lc "$cmd"
+        else
+            bash -lc "$cmd"
+        fi
     ) >> "$log_path" 2>&1
     rc=$?
+    if [ "$rc" -eq 124 ]; then
+        notes="${notes:+$notes; }step exceeded step_timeout_s=${step_to} and was killed"
+    fi
     if [ "$rc" -eq 0 ] && awk '
         body && /^(FAIL|FAIL_LOUD):/ { found=1 }
         /^$/ { body=1 }

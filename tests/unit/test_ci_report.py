@@ -34,7 +34,7 @@ DEP_MISSING = [
     "no module named 'pytest_qt'",
     "No module named foo",
     "registry.tsv not found at /run/x",        # qci:1958
-    "command not found: zola",
+    "command not found: meson",
     "dbus-send absent",                        # s56-broker-enforcing (tool)
     "systemctl absent",                        # tool
     "busctl absent",                           # systemd dbus probe tool

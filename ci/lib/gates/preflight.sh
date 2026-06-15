@@ -65,7 +65,6 @@ gate_preflight() {
     check_optional "ninja" "command -v ninja"
     check_optional "pkg-config" "command -v pkg-config"
     check_optional "npm" "command -v npm"
-    check_optional "zola" "command -v zola"
     check_optional "QCI_AGENT_CMD" "test -n \"\${QCI_AGENT_CMD:-}\""
     check_host_dep "host-dep tomli_w (qfileman)" "python3 -c 'import tomli_w'"
     check_host_dep "host-dep libevdev (qdwin)" "pkg-config --exists libevdev"

@@ -13,7 +13,6 @@ PROJECTS=(
     qdchrome-extension
     qdfirefox-extension
     qdgreeter
-    qdistro-site
     qdlocker
     qfileman
     qnotebook

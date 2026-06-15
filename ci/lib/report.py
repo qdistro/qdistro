@@ -203,11 +203,6 @@ def recommendation(row: dict[str, str], run_dir: Path) -> str:
         return "Install the missing Python dependency or add it to the project test extras."
     if "npm" in lower and ("not found" in lower or "missing" in lower):
         return "Install node dependencies for that extension repo, then rerun the host gate."
-    if row.get("kind") == "zola" or "broken external link" in lower:
-        return (
-            "Fix or remove the broken links in the listed content files, then "
-            "rerun `zola check` in qdistro-site."
-        )
     if "protocol error" in lower or "qdwin_shell" in lower or "wayland" in lower:
         return "Inspect qdwin/qdshell protocol logs first; avoid qdshell workarounds for compositor protocol bugs."
     if "inactive" in lower or "systemctl" in lower:
@@ -238,19 +233,6 @@ def source_links(row: dict[str, str], run_dir: Path, manifest: dict[str, str]) -
         except OSError:
             return False
 
-    # Zola's useful shape: "Broken link in /abs/file.md to URL".
-    zola_pat = re.compile(r"Broken link in\s+(\S+)\s+to\s+(\S+)")
-    for match in zola_pat.finditer(text):
-        path = Path(match.group(1).rstrip(":,.)"))
-        url = match.group(2).rstrip(":,.)")
-        if not path_exists(path) or path in seen:
-            continue
-        seen.add(path)
-        line_no = first_line_containing(path, url)
-        label = display_path(path, workspace, line_no)
-        target = f"{path.as_posix()}:{line_no}" if line_no else path.as_posix()
-        links.append(f"[{label}]({target})")
-
     # Generic fallback for absolute source paths.
     for raw in re.findall(r"(/[A-Za-z0-9_./+@-]+\.[A-Za-z0-9_+-]+)", text):
         path = Path(raw.rstrip(":,.)"))
@@ -263,23 +245,6 @@ def source_links(row: dict[str, str], run_dir: Path, manifest: dict[str, str]) -
         seen.add(path)
         links.append(f"[{display_path(path, workspace, None)}]({path.as_posix()})")
     return links
-
-
-def first_line_containing(path: Path, needle: str) -> int | None:
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return None
-    for idx, line in enumerate(lines, 1):
-        if needle in line:
-            return idx
-    # Try without anchor/fragment if a checker reports the expanded URL.
-    base = needle.split("#", 1)[0]
-    if base != needle:
-        for idx, line in enumerate(lines, 1):
-            if base in line:
-                return idx
-    return None
 
 
 def display_path(path: Path, workspace: Path, line_no: int | None) -> str:
@@ -324,7 +289,7 @@ _DEP_NOUN = (r"dep|dependenc|tool|binar|program|command|executable|module|"
 # "<tool> not installed" skips. Bare tool names are needed only for the
 # "missing <tool>" form (e.g. "missing shellcheck/bats"); the name-agnostic
 # markers below ("not installed", "absent", "not importable") cover the rest.
-_DEP_TOOL = (r"shellcheck|bats|node|npm|ruff|mypy|zola|python3?|pip|"
+_DEP_TOOL = (r"shellcheck|bats|node|npm|ruff|mypy|python3?|pip|"
              r"dbus-send|dbus-python|systemctl|systemd-run|busctl|jq|cmake|"
              r"meson|ninja|virsh|podman|qemu-img|nft|"
              # SELinux probe tooling (used with "<tool> absent")

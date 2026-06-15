@@ -56,9 +56,11 @@ WORKSPACE/                      <- e.g. the runner's $GITHUB_WORKSPACE
 ├── qnotebook/                  <- pytest
 ├── qterminator/                <- pytest
 ├── qdchrome-extension/         <- npm test && npm run build
-├── qdfirefox-extension/        <- npm test && npm run build
-└── qdistro-site/               <- zola check && zola build
+└── qdfirefox-extension/        <- npm test && npm run build
 ```
+
+(`qdistro-site`, the marketing website, is intentionally not part of the host
+gate — it ships through a separate website pipeline.)
 
 Missing siblings do not crash the gate (each step fails/reds individually), but
 a runner that only checks out `qdistro` will red almost every step. The template
@@ -82,7 +84,6 @@ fresh full clone of 11 repos on every push.
 | C/C++ toolchain + Wayland/weston build deps | qdwin meson build + vendored libweston production-symbols test | yes |
 | Qt6 declarative tools (`qmltestrunner`/`qmllint`/`qmlformat`) | qdshell `ci-local.sh --no-int` | for qdshell |
 | `node` + `npm` | qdshell jstest; qdchrome/qdfirefox extension `npm test && npm run build` | yes |
-| `zola` | qdistro-site `zola check && zola build` | for qdistro-site |
 | QtWebEngine runtime deps | qdbrowser pytest | for qdbrowser |
 | `git`, `bash` | everywhere | yes |
 
@@ -112,7 +113,7 @@ A single Forgejo Actions self-hosted runner labelled **`qdistro-host`**
 
    ```sh
    zypper in -y python313 python313-pip meson ninja pkgconf gcc-c++ \
-       nodejs npm git ruff python313-mypy zola \
+       nodejs npm git ruff python313-mypy \
        qt6-declarative-imports qt6-declarative-tools
    pip3.13 install --user PyQt6 PySide6 pytest pytest-qt pytest-cov
    ```

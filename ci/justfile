@@ -42,7 +42,7 @@ lint:
 selftest:
     {{qci}} selftest
 
-# Run all sibling-repo host tests/builds (pytest/npm/meson/zola + lint).
+# Run all sibling-repo host tests/builds (pytest/npm/meson + lint).
 host:
     {{qci}} host
 

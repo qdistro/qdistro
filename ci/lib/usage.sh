@@ -122,7 +122,6 @@ Environment:
                             (default for qci gui/full).
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
-  QCI_ZOLA_SKIP_EXTERNAL=1  Run zola check with --skip-external-links.
   QCI_OFFLINE=1             Host-only / no-egress posture for VM tests. Records
                             a source tarball + sha256 in manifest.txt, exports
                             the gate down to scenarios so external-network tests
