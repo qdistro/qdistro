@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from collections.abc import Callable, Iterable
 
 from . import (
@@ -92,6 +93,8 @@ def register_app(
     silo: str | None = None,
     supported_kinds: Iterable[str] | None = None,
     install_glib_mainloop: bool = True,
+    bus_connect_timeout_s: float = 2.0,
+    bus_connect_interval_s: float = 0.1,
     log: Callable[[str], None] | None = None,
 ) -> AppReceiver | None:
     """Claim ``org.qdistro.<name>.uid<NNNN>`` on the session bus and
@@ -107,13 +110,22 @@ def register_app(
     False when the host process already installed it (re-installation
     is idempotent but the log line is noisy).
 
+    ``bus_connect_timeout_s`` bounds startup delay while the user
+    session bus socket is appearing. Only D-Bus connection/setup
+    failures are retried; an already-owned bus name is a permanent
+    collision and returns immediately.
+
     Returns ``None`` and logs a single structured line when the bus
     isn't reachable or the name can't be claimed. Calling code must
     handle ``None`` (i.e. "the app still runs, just isn't on the
     bus") rather than treating registration as required.
     """
     _log = log or _stderr_log
-    if not is_session_bus_available():
+    has_bus_hint = (
+        bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").strip())
+        or bool(os.environ.get("XDG_RUNTIME_DIR", "").strip())
+    )
+    if not has_bus_hint:
         _log(f"qdistro_app: no session bus for {name!r} "
              f"(DBUS_SESSION_BUS_ADDRESS unset, no $XDG_RUNTIME_DIR/bus); "
              f"skipping App1 registration")
@@ -139,17 +151,42 @@ def register_app(
                  f"App1 receiver will register without GLib dispatch")
     service_name = _canonical_service_name(name)
     callback = on_receive or (lambda kind, payload: None)
-    try:
-        return AppReceiver(
-            service_name=service_name,
-            on_receive=callback,
-            friendly_name=friendly_name,
-            silo=silo,
-            supported_kinds=supported_kinds,
-        )
-    except Exception as e:  # noqa: BLE001
-        _log(f"qdistro_app: failed to claim {service_name!r}: {e}")
-        return None
+    deadline = time.monotonic() + max(0.0, float(bus_connect_timeout_s))
+    # Floor the poll interval so a caller passing 0 can't turn the
+    # bounded wait into a busy-spin that pegs a core for the whole
+    # timeout window (the GUI app blocks here at startup).
+    interval = max(0.01, float(bus_connect_interval_s))
+    last_error: Exception | None = None
+    while True:
+        if is_session_bus_available():
+            try:
+                return AppReceiver(
+                    service_name=service_name,
+                    on_receive=callback,
+                    friendly_name=friendly_name,
+                    silo=silo,
+                    supported_kinds=supported_kinds,
+                )
+            except dbus.exceptions.NameExistsException as e:
+                _log(f"qdistro_app: failed to claim {service_name!r}: {e}")
+                return None
+            except dbus.exceptions.DBusException as e:
+                last_error = e
+            except Exception as e:  # noqa: BLE001
+                _log(f"qdistro_app: failed to claim {service_name!r}: {e}")
+                return None
+
+        now = time.monotonic()
+        if now >= deadline:
+            if last_error is not None:
+                _log(f"qdistro_app: failed to claim {service_name!r}: "
+                     f"{last_error}")
+            else:
+                _log(f"qdistro_app: no session bus for {name!r} "
+                     f"(DBUS_SESSION_BUS_ADDRESS unset, no "
+                     f"$XDG_RUNTIME_DIR/bus); skipping App1 registration")
+            return None
+        time.sleep(min(interval, deadline - now))
 
 
 def send_to_menu_targets(*, self_service: str | None = None,

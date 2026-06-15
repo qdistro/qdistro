@@ -21,7 +21,7 @@ from typing import Iterable
 
 import pytest
 
-pytest.importorskip("dbus")
+dbus = pytest.importorskip("dbus")
 
 # Make the SDK importable.
 _SDK = Path(__file__).resolve().parents[2] / "sdk"
@@ -259,6 +259,104 @@ class TestRegisterAppSkipsWhenBusMissing:
                                                 log=logs.append)
         assert result is None
         assert any("no session bus" in m for m in logs), logs
+
+
+class TestRegisterAppBusRetry:
+    def test_retries_transient_dbus_failure(self, monkeypatch):
+        monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS",
+                            "unix:path=/run/user/2000/bus")
+        sentinel = object()
+        calls: list[str] = []
+
+        def fake_receiver(service_name, **kwargs):  # noqa: ANN001, ARG001
+            calls.append(str(service_name))
+            if len(calls) == 1:
+                raise dbus.exceptions.DBusException("bus not ready")
+            return sentinel
+
+        monkeypatch.setattr(app_receiver_mod, "AppReceiver", fake_receiver)
+        # Drive the clock deterministically: the second attempt must land
+        # before the deadline regardless of host load, so the test can't
+        # flake into a spurious None on a slow runner.
+        clock = {"t": 0.0}
+        monkeypatch.setattr(app_receiver_mod.time, "monotonic",
+                            lambda: clock["t"])
+        monkeypatch.setattr(app_receiver_mod.time, "sleep",
+                            lambda s: clock.__setitem__("t", clock["t"] + s))
+
+        result = app_receiver_mod.register_app(
+            "QTerminator",
+            install_glib_mainloop=False,
+            bus_connect_timeout_s=1.0,
+            bus_connect_interval_s=0.1,
+        )
+
+        assert result is sentinel
+        assert calls == [
+            f"org.qdistro.QTerminator.uid{os.geteuid()}",
+            f"org.qdistro.QTerminator.uid{os.geteuid()}",
+        ]
+
+    def test_name_collision_is_not_retried(self, monkeypatch):
+        monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS",
+                            "unix:path=/run/user/2000/bus")
+        calls: list[str] = []
+        logs: list[str] = []
+
+        def fake_receiver(service_name, **kwargs):  # noqa: ANN001, ARG001
+            calls.append(str(service_name))
+            raise dbus.exceptions.NameExistsException("already claimed")
+
+        monkeypatch.setattr(app_receiver_mod, "AppReceiver", fake_receiver)
+        monkeypatch.setattr(app_receiver_mod.time, "sleep",
+                            lambda _s: pytest.fail("collision retried"))
+
+        result = app_receiver_mod.register_app(
+            "QTerminator",
+            install_glib_mainloop=False,
+            bus_connect_timeout_s=1.0,
+            bus_connect_interval_s=0.0,
+            log=logs.append,
+        )
+
+        assert result is None
+        assert calls == [f"org.qdistro.QTerminator.uid{os.geteuid()}"]
+        assert any("failed to claim" in m for m in logs), logs
+
+    def test_transient_failure_past_deadline_returns_none(self, monkeypatch):
+        # A bus that never comes up (the s102 symptom) must time out and
+        # return None + surface the last D-Bus error — not loop forever.
+        monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS",
+                            "unix:path=/run/user/2000/bus")
+        calls: list[str] = []
+        logs: list[str] = []
+        # Drive the loop deterministically off a fake clock so the test
+        # exercises the real deadline arithmetic without wall-clock waits.
+        clock = {"t": 0.0}
+        monkeypatch.setattr(app_receiver_mod.time, "monotonic",
+                            lambda: clock["t"])
+        monkeypatch.setattr(app_receiver_mod.time, "sleep",
+                            lambda s: clock.__setitem__("t", clock["t"] + s))
+
+        def fake_receiver(service_name, **kwargs):  # noqa: ANN001, ARG001
+            calls.append(str(service_name))
+            raise dbus.exceptions.DBusException("bus still not ready")
+
+        monkeypatch.setattr(app_receiver_mod, "AppReceiver", fake_receiver)
+
+        result = app_receiver_mod.register_app(
+            "QTerminator",
+            install_glib_mainloop=False,
+            bus_connect_timeout_s=0.5,
+            bus_connect_interval_s=0.1,
+            log=logs.append,
+        )
+
+        assert result is None
+        # Retried more than once before giving up (the fix's whole point).
+        assert len(calls) > 1, calls
+        assert any("failed to claim" in m and "bus still not ready" in m
+                   for m in logs), logs
 
 
 # --- send_to_menu_targets -------------------------------------------------

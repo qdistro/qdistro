@@ -99,9 +99,14 @@ cat >/tmp/s102/receiver.py <<'PYEOF'
 
 Argv: <friendly_name>
 Claims org.qdistro.<friendly_name>.uid<euid> and runs GLib main loop.
+
+Registers through the SDK's ``register_app`` helper — the SAME entry
+point qterminator/qnotebook/qfileman use in production — so the test
+exercises the real registration path (including its bounded retry
+while the user session bus socket is still appearing) rather than a
+bespoke raw-AppReceiver shim.
 """
 import os, sys
-import dbus, dbus.service, dbus.mainloop.glib
 from gi.repository import GLib
 
 # Make the SDK importable from the in-tree layout.
@@ -111,13 +116,10 @@ if not os.path.isdir(SDK):
 sys.path.insert(0, SDK)
 sys.path.insert(0, "/usr/local/lib/qdistro/sdk")
 
-dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
-from qdistro_app import AppReceiver  # noqa: E402
+from qdistro_app.app_receiver import register_app  # noqa: E402
 
 friendly = sys.argv[1]
 silo = os.environ.get("QDISTRO_SILO", "work")
-service = f"org.qdistro.{friendly}.uid{os.geteuid()}"
 
 received = []
 def on_recv(kind, payload):
@@ -127,12 +129,19 @@ def on_recv(kind, payload):
     with open(p, "w") as f:
         f.write(f"{kind}\n{payload}\n")
 
-r = AppReceiver(service, on_recv, friendly_name=friendly,
-                silo=silo, supported_kinds=("text/*",))
+# register_app installs the GLib mainloop, builds the canonical
+# org.qdistro.<friendly>.uid<euid> name, and retries the bus connect
+# while /run/user/<uid>/bus is still coming up.
+r = register_app(friendly, on_receive=on_recv, friendly_name=friendly,
+                 silo=silo, supported_kinds=("text/*",))
+if r is None:
+    print(f"[s102/{friendly}] register_app returned None — "
+          f"App1 registration failed", file=sys.stderr, flush=True)
+    sys.exit(1)
 # Drop a "ready" file so the driver knows we've claimed the name.
 with open(f"/tmp/s102/ready-{friendly}.txt", "w") as f:
-    f.write(f"{service}\n{silo}\n")
-print(f"[s102/{friendly}] claimed {service} silo={silo}", flush=True)
+    f.write(f"{r.service_name}\n{silo}\n")
+print(f"[s102/{friendly}] claimed {r.service_name} silo={silo}", flush=True)
 GLib.MainLoop().run()
 PYEOF
 
@@ -154,12 +163,20 @@ start_receiver() {
     err "$friendly receiver did not register within 20s (log: /tmp/s102/$friendly.log)"
 }
 
-# Make sure uid 2000 has a session bus available — start the user
-# manager unit if needed (loginctl enable-linger keeps it after the
-# bake; the test pokes it just in case).
+# Make sure uid 2000 has a session bus available. Starting the user
+# manager is what activates dbus.socket; `systemctl --user ... status`
+# only probes state and can leave /run/user/2000/bus absent long
+# enough for raw AppReceiver construction to fail before it writes the
+# ready marker.
 loginctl enable-linger work >/dev/null 2>&1 || true
-systemctl --user --machine=work@.host status >/dev/null 2>&1 || true
-sleep 1
+systemctl start user@2000.service >/dev/null 2>&1 \
+    || err "failed to start user@2000.service for work session bus"
+for _ in $(seq 1 100); do
+    [ -S /run/user/2000/bus ] && break
+    sleep 0.1
+done
+[ -S /run/user/2000/bus ] \
+    || err "work session bus /run/user/2000/bus did not appear"
 
 # Start the three apps' receivers under the work uid.
 start_receiver QTerminator
