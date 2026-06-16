@@ -29,6 +29,7 @@ markers = [
 # Promote module directories onto sys.path so tests can import
 # qdistro_admin_*, qdistro_polkit_*, qdistro_pwd_*, etc. directly.
 pythonpath = [
+  ".",
   "broker",
   "cli",
   "tui",
