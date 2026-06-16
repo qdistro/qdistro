@@ -253,6 +253,83 @@ class QciVMBackend:
             raise RuntimeError(f"virsh screenshot produced no image at {dest}")
         return dest
 
+    # ---- managed-viewer ops (scenario-2, codex impl-9) ------------------
+    def _push_mm_package(self, vm: str, guest_dir: str = "/tmp/mm") -> None:
+        """Push the minimal ``multimachine`` package the guest viewer imports
+        (``__init__``/``sidechannel``/``bridge``/``viewer`` — no ``generation``)
+        so ``python3 -m multimachine.viewer`` runs in VM-B."""
+        pkg = self.repo_dir / "multimachine"
+        self._vmexec(vm, f"mkdir -p {shlex.quote(guest_dir)}/multimachine")
+        for mod in ("__init__.py", "sidechannel.py", "bridge.py", "viewer.py"):
+            self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
+
+    def launch_viewer(self, vm: str, *, control_host: str, control_port: int,
+                      rdp_host: str, rdp_port: int, generation: int, otp: str,
+                      size: str, status_file: str) -> None:
+        """Bring up the VM-B managed-viewer stack: kiosk weston + the real
+        ``mm-viewer-launch`` connecting to the host control side-channel (impl-9
+        Q2). It decodes (fullscreen) only once the host sends Announce."""
+        real = self._real(vm)
+        self._push_mm_package(real)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/viewer-stack.sh",
+                   "/tmp/mm-viewer-stack.sh")
+        env = (f"CONTROL_HOST={shlex.quote(control_host)} CONTROL_PORT={control_port} "
+               f"RDP_HOST={shlex.quote(rdp_host)} RDP_PORT={rdp_port} "
+               f"GEN={generation} OTP={shlex.quote(otp)} "
+               f"W={self.out_w} H={self.out_h} RDP_USER=mm MMDIR=/tmp/mm "
+               f"STATUS_FILE={shlex.quote(status_file)}")
+        out = self._vmexec(real, f"{env} bash /tmp/mm-viewer-stack.sh", timeout=120)
+        if "VMB_VIEWER_OK" not in out:
+            raise RuntimeError(f"viewer-stack did not report VMB_VIEWER_OK:\n{out}")
+        self._viewer_status_file = status_file
+
+    def viewer_status(self, vm: str) -> dict:
+        """Read + parse the viewer's machine-readable status file from the guest
+        (empty dict if absent — e.g. before it is written)."""
+        import json
+        sf = getattr(self, "_viewer_status_file", "/run/mm-b/viewer-status.json")
+        out = self._vmexec(self._real(vm), f"cat {shlex.quote(sf)} 2>/dev/null",
+                          check=False)
+        out = out.strip()
+        if not out:
+            return {}
+        try:
+            return json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            return {}
+
+    def stop_viewer(self, vm: str) -> None:
+        """Viewer-side close: stop the mm-viewer unit (kills the python + its
+        sdl-freerdp child in the unit cgroup), tearing down the RDP client."""
+        self._vmexec(self._real(vm),
+                     "systemctl stop mm-viewer 2>/dev/null || true", check=False)
+
+    def resubscribe(self, vm: str) -> ViewStreamApproved | None:
+        """Run the source-stack ``MODE=resubscribe`` path on VM-A: a fresh
+        bystander export (new dynamic port + fresh single-use OTP) repointed onto
+        the fixed relay. Returns the fresh approval, or None if not approved."""
+        real = self._real(vm)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
+                   "/tmp/mm-source-stack.sh")
+        env = (f"MODE=resubscribe W={self.out_w} H={self.out_h} "
+               f"RELAY_PORT={self.relay_port}")
+        out = self._vmexec(real, self._as_admin(
+            f"{env} bash /tmp/mm-source-stack.sh"), timeout=120, check=False)
+        if "SETUP_OK" not in out:
+            return None
+        try:
+            fresh = self._parse_setup(out, 0)
+        except RuntimeError:
+            return None
+        self._approved = fresh
+        return fresh
+
+    def source_alive(self, vm: str) -> bool:
+        """True if the VM-A marker (the source toplevel app) is still running."""
+        out = self._vmexec(self._real(vm), "pgrep -f qdwin-marker-client",
+                          check=False)
+        return bool(out.strip())
+
     def apply_netem(self, vm: str, dev: str, profile_name: str) -> None:
         # NB (codex impl-4/impl-6 M6): the loopback relay leg BYPASSES this — it
         # models link impairment on the SLIRP-facing dev, NOT a bridged inter-VM

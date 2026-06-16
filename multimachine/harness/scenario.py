@@ -33,7 +33,7 @@ from .topology import Topology
 from ..bridge import (
     SourceWindowInfo, ViewStreamApproved, bridge_approved, bridge_torn_down,
 )
-from ..sidechannel import Closed, Disconnect, Focus, RemoteViewerState
+from ..sidechannel import Disconnect, Focus, RemoteViewerState
 
 
 class VMBackend(Protocol):

@@ -212,6 +212,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ap.add_argument("--rdp-user", default="",
                     help="sdl-freerdp /u:<name> (proven decoder used 'mm'); the "
                          "OTP on stdin authenticates, so this is optional")
+    ap.add_argument("--decoder-log", default="",
+                    help="redirect the launched sdl-freerdp stdout/stderr here "
+                         "(default: discard) — for live bring-up diagnosis")
     args = ap.parse_args(argv)
 
     w = h = 0
@@ -226,9 +229,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
                                 width=w or ann.meta.req_w, height=h or ann.meta.req_h,
                                 fullscreen=args.fullscreen,
                                 username=args.rdp_user or None)
+        logf = open(args.decoder_log, "wb") if args.decoder_log \
+            else subprocess.DEVNULL
         proc = subprocess.Popen(argvv, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+                                stdout=logf, stderr=subprocess.STDOUT)
         if proc.stdin:
             proc.stdin.write((rdp_password(approved) + "\n").encode())
             proc.stdin.flush()

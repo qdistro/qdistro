@@ -10,7 +10,43 @@ set -uo pipefail   # pipefail surfaces in-pipe failures; cleanup lines are
 export XDG_RUNTIME_DIR=/run/user/1000
 SOCK=wayland-mm
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
+MODE=${MODE:-full}
 RUN() { systemd-run --user --collect "$@"; }
+
+# discover_rdp_port FILE: wait for an approved RDP_PORT in a bystander.out file.
+discover_rdp_port() {
+  local f=$1 p=""
+  for _ in $(seq 1 50); do
+    p=$(grep -m1 '^RDP_PORT=' "$f" 2>/dev/null | cut -d= -f2 | tr -dc '0-9')
+    [ -n "$p" ] && break; sleep 0.3
+  done
+  echo "$p"
+}
+
+# MODE=resubscribe: the qdwin + marker are ALREADY live (a prior full run). Prove
+# the source can serve a FRESH export after the VM-B viewer left (codex impl-9 Q3
+# stream-slot proof): re-run the bystander (a new subscription → a new dynamic RDP
+# port + a fresh single-use OTP — the old OTP is single-use, B4), and repoint the
+# fixed relay at it. The marker (source app) is untouched, so its survival is also
+# asserted by the caller. Honesty: this proves re-exportability + source survival;
+# with num-outputs>1 it is not a strict single-slot reclaim.
+if [ "$MODE" = resubscribe ]; then
+  if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: no live qdwin socket to re-export"; exit 9; fi
+  if ! systemctl --user is-active mm-marker >/dev/null 2>&1; then echo "FAIL: marker not alive for re-export"; exit 9; fi
+  systemctl --user stop mm-bystander mm-relay 2>/dev/null || true   # free the old slot
+  sleep 0.5
+  rm -f "$XDG_RUNTIME_DIR/bystander.out"
+  RUN --unit=mm-bystander --setenv=WAYLAND_DISPLAY=$SOCK \
+    bash -c "qdwin-bystander --subscribe last > $XDG_RUNTIME_DIR/bystander.out 2>&1"
+  sleep 1.5
+  RDP_PORT=$(discover_rdp_port "$XDG_RUNTIME_DIR/bystander.out")
+  if [ -z "$RDP_PORT" ]; then echo "FAIL: re-subscribe not approved (slot not free?)"; echo "--- bystander.out ---"; cat "$XDG_RUNTIME_DIR/bystander.out"; exit 10; fi
+  RUN --unit=mm-relay socat TCP-LISTEN:$RELAY_PORT,reuseaddr,fork TCP:127.0.0.1:$RDP_PORT
+  sleep 0.5
+  echo "--- bystander.out ---"; cat "$XDG_RUNTIME_DIR/bystander.out"
+  echo "SETUP_OK RDP_PORT=$RDP_PORT RELAY_PORT=$RELAY_PORT"
+  exit 0
+fi
 
 # Clean prior run.
 systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay 2>/dev/null || true
