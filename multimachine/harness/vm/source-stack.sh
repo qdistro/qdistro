@@ -8,11 +8,11 @@ set -uo pipefail   # pipefail surfaces in-pipe failures; cleanup lines are
                    # explicitly tolerated (|| true). The caller treats the final
                    # SETUP_OK token (not exit code alone) as the success signal.
 export XDG_RUNTIME_DIR=/run/user/1000
-# qdwin's wayland socket. Default wayland-mm (private). The input-confinement gate
-# overrides this to wayland-0 because qdwin spawns qdistro-forward with a HARDCODED
-# `--wayland-display wayland-0` (qdwin.c) — so for the forward to connect back and
-# CLAIM the input-injection channel, our qdwin must listen on wayland-0 (codex
-# impl-10 / session-4 live finding). Pixels (pipewire) don't need this; input does.
+# qdwin's wayland socket. Default wayland-mm (private). qdwin spawns qdistro-forward
+# with `--wayland-display <its own socket>` (read from WAYLAND_DISPLAY, qdwin.c
+# session-5 fix), so the forward claims the input-injection channel on whatever
+# socket this qdwin listens on — the input-confinement gate no longer needs to force
+# wayland-0 (was a HARDCODED `--wayland-display wayland-0` foot-gun, session-4).
 SOCK=${SOCK:-wayland-mm}
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
 MODE=${MODE:-full}

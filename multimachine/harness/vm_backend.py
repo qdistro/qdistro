@@ -110,6 +110,12 @@ class QciVMBackend:
     repo_dir: Path                              # qdistro/ (for scripts/vm/vm-exec)
     libvirt_uri: str = "qemu:///session"
     relay_port: int = 5555
+    # VM-A-served mm-control (impl-12) binds its OWN dedicated port, distinct from
+    # the host-served ControlServer's 5556 (used by the host-served managed +
+    # input-confinement slices). They never run together, but the VM-A control port
+    # is exposed by a persistent QEMU hostfwd on host loopback — a shared 5556 would
+    # collide with any host-served ControlServer (incl. unit tests) on the same host.
+    control_port: int = 5557
     netdev: str = "hostnet0"
     out_w: int = 1280
     out_h: int = 800
@@ -182,19 +188,22 @@ class QciVMBackend:
             self._ensure_hostfwd(real)
         return real
 
-    def _ensure_hostfwd(self, vm: str) -> None:
-        """Add the SLIRP hostfwd only if an exact-matching rule isn't already
-        present; any OTHER QMP failure is fatal (codex impl-6 M5 — don't treat
-        every error as the benign 'already in use')."""
+    def _ensure_hostfwd(self, vm: str, port: int | None = None) -> None:
+        """Add the SLIRP hostfwd for ``port`` (default the RDP relay) only if an
+        exact-matching rule isn't already present; any OTHER QMP failure is fatal
+        (codex impl-6 M5 — don't treat every error as the benign 'already in
+        use'). Used for both the RDP relay (5555) and the VM-A-served mm-control
+        port (5556, impl-12) — symmetric host-loopback bridging."""
+        port = self.relay_port if port is None else port
         net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
-        if hostfwd_present(net, self.relay_port):
+        if hostfwd_present(net, port):
             return                                  # a forward on the port exists
         out = self._virsh("qemu-monitor-command", vm, "--hmp",
-                          hostfwd_add_hmp(self.netdev, self.relay_port), check=False)
+                          hostfwd_add_hmp(self.netdev, port), check=False)
         # re-query: success means the rule now exists.
         net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
-        if not hostfwd_present(net, self.relay_port):
-            raise RuntimeError(f"hostfwd_add did not install :{self.relay_port}: {out}")
+        if not hostfwd_present(net, port):
+            raise RuntimeError(f"hostfwd_add did not install :{port}: {out}")
 
     def exec(self, vm: str, argv: list[str]) -> str:
         real = self._real(vm)
@@ -267,12 +276,14 @@ class QciVMBackend:
 
     # ---- managed-viewer ops (scenario-2, codex impl-9) ------------------
     def _push_mm_package(self, vm: str, guest_dir: str = "/tmp/mm") -> None:
-        """Push the minimal ``multimachine`` package the guest viewer imports
-        (``__init__``/``sidechannel``/``bridge``/``viewer`` — no ``generation``)
-        so ``python3 -m multimachine.viewer`` runs in VM-B."""
+        """Push the minimal ``multimachine`` package the guest viewer (VM-B) and
+        ``mm-control`` (VM-A) import (``__init__``/``sidechannel``/``bridge``/
+        ``viewer``/``control_source`` — no ``generation``) so ``python3 -m
+        multimachine.viewer`` and ``... .control_source`` run in-guest."""
         pkg = self.repo_dir / "multimachine"
         self._vmexec(vm, f"mkdir -p {shlex.quote(guest_dir)}/multimachine")
-        for mod in ("__init__.py", "sidechannel.py", "bridge.py", "viewer.py"):
+        for mod in ("__init__.py", "sidechannel.py", "bridge.py", "viewer.py",
+                    "control_source.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
 
     def launch_viewer(self, vm: str, *, control_host: str, control_port: int,
@@ -364,23 +375,132 @@ class QciVMBackend:
                           check=False)
         return bool(out.strip())
 
+    # ---- VM-A-served control ops (scenario-2 product shape, codex impl-12) --
+    _MM_CONTROL_LOG = "/run/user/1000/mm-control.jsonl"
+    _MM_CONTROL_STATUS = "/run/user/1000/mm-control-status.json"
+
+    def launch_control(self, vm: str, *, generation: int, window_id: int,
+                       source_machine: str, title: str, app_id: str,
+                       req_w: int, req_h: int, marker_unit: str = "mm-marker",
+                       ) -> str:
+        """Start the VM-A ``mm-control`` unit (impl-12): the control side-channel
+        now ORIGINATES in VM-A, not on the host. Pushes the ``multimachine`` pkg +
+        adds the SLIRP hostfwd for the control port (mirroring the RDP relay), then
+        runs ``python3 -m multimachine.control_source`` as a ``systemd --user``
+        unit (so its ``systemctl --user show mm-marker`` source-death probe sees the
+        marker's unit). Returns the in-guest-minted ``stream_id``.
+
+        The viewer reaches it at ``10.0.2.2:control_port`` over VM-B's own NAT →
+        host loopback → this VM-A hostfwd → mm-control. No host ``ControlServer``.
+
+        The stream_id + terminal reason are read from a FILE the unit writes
+        (``--status-file``), not the unit's journal — robust against the
+        ``--collect`` transient unit being reaped (codex impl-13)."""
+        import time
+        real = self._real(vm)
+        self._push_mm_package(real)
+        self._ensure_hostfwd(real, self.control_port)        # control port bridge
+        # fresh log + status + reusable unit name across relaunches (so a stale
+        # status file can never be mistaken for THIS launch).
+        self._vmexec(real, self._as_admin(
+            "systemctl --user stop mm-control 2>/dev/null; "
+            "systemctl --user reset-failed mm-control 2>/dev/null; "
+            f"rm -f {self._MM_CONTROL_LOG} {self._MM_CONTROL_STATUS}; true"),
+            check=False)
+        argv = (
+            "python3 -m multimachine.control_source "
+            f"--port {self.control_port} --generation {generation} "
+            f"--window-id {window_id} "
+            f"--source-machine {shlex.quote(source_machine)} "
+            f"--title {shlex.quote(title)} --app-id {shlex.quote(app_id)} "
+            f"--req-w {req_w} --req-h {req_h} --marker-unit {shlex.quote(marker_unit)} "
+            f"--emit-log {self._MM_CONTROL_LOG} "
+            f"--status-file {self._MM_CONTROL_STATUS}")
+        out = self._vmexec(real, self._as_admin(
+            "systemd-run --user --collect --unit=mm-control "
+            "--setenv=PYTHONPATH=/tmp/mm "
+            f"{argv}"), check=False)
+        if "Running as unit" not in out and "mm-control.service" not in out:
+            raise RuntimeError(f"systemd-run did not start mm-control:\n{out}")
+        # wait for the unit to publish its listening status file (the bind succeeded
+        # + the in-guest-minted stream_id is available).
+        for _ in range(40):
+            st = self._read_control_status(real)
+            if st.get("state") == "listening" and st.get("stream_id"):
+                return st["stream_id"]
+            time.sleep(0.25)
+        raise RuntimeError("mm-control never published a listening status file")
+
+    def _read_control_status(self, real: str) -> dict:
+        import json
+        raw = self._vmexec(real, self._as_admin(
+            f"cat {self._MM_CONTROL_STATUS} 2>/dev/null"), check=False).strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw.splitlines()[-1])
+        except (ValueError, IndexError):
+            return {}
+
+    def control_log(self, vm: str) -> dict:
+        """What VM-A's mm-control PRODUCED: the JSON-lines it sent (the
+        source-derived Announce, and a source-driven Closed if the marker died) +
+        the watcher's terminal reason. The honesty evidence that the control bytes
+        + lifecycle originate in VM-A. Entirely FILE-based (impl-13)."""
+        import json
+        real = self._real(vm)
+        raw = self._vmexec(real, self._as_admin(
+            f"cat {self._MM_CONTROL_LOG} 2>/dev/null"), check=False)
+        sent = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                sent.append(json.loads(line))
+            except ValueError:
+                continue
+        st = self._read_control_status(real)
+        reason = st.get("reason", "") if st.get("state") == "done" else ""
+        return {"sent": sent, "reason": reason}
+
+    def stop_control(self, vm: str) -> None:
+        self._vmexec(self._real(vm), self._as_admin(
+            "systemctl --user stop mm-control 2>/dev/null || true"), check=False)
+
+    def kill_marker(self, vm: str) -> None:
+        """Source toplevel death: stop the marker's OWN systemd --user unit so
+        mm-control's liveness probe sees it go inactive and emits Closed (impl-12
+        source-driven teardown)."""
+        self._vmexec(self._real(vm), self._as_admin(
+            "systemctl --user stop mm-marker 2>/dev/null || true"), check=False)
+
     # ---- input-confinement ops (scenario-3, codex impl-10) --------------
     def setup_confinement_source(
         self, vm: str, *, generation: int, width: int, height: int,
         exported_telemetry: str, sentinel_telemetry: str,
-        exported_label: str, sentinel_label: str) -> ViewStreamApproved:
+        exported_label: str, sentinel_label: str,
+        allow_input: int = 1) -> ViewStreamApproved:
         """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
-        subscribed, writing per-seat input telemetry) + an ``--allow-input``
-        subscribe. The SENTINEL is launched separately (:meth:`launch_sentinel`)
-        AFTER the oracle, since a visible sentinel overlaps the per-view capture."""
+        subscribed, writing per-seat input telemetry) + a subscribe. The SENTINEL is
+        launched separately (:meth:`launch_sentinel`) AFTER the oracle, since a
+        visible sentinel overlaps the per-view capture.
+
+        ``allow_input=1`` (default) requests an ``--allow-input`` subscription so the
+        forward gets the inject channel (the positive confinement gate). ``0`` is the
+        read-only **negative control** (codex impl-11/13): the SAME injection is
+        attempted but the server-side permission bit must gate it, so NOTHING
+        receives the presses."""
         real = self._real(vm)
         self._sentinel_label = sentinel_label
         self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                    "/tmp/mm-source-stack.sh")
-        # SOCK=wayland-0 so the forward's hardcoded `--wayland-display wayland-0`
-        # connects back and claims the input-injection channel (session-4 finding).
+        # qdwin now spawns qdistro-forward with `--wayland-display <its own socket>`
+        # (read from WAYLAND_DISPLAY, qdwin.c), so the forward claims the input
+        # channel on whatever socket our mm-qdwin listens on. No longer forced onto
+        # wayland-0 — the default private SOCK=wayland-mm works (session-5 qdwin fix).
         env = (f"W={width} H={height} GEN={generation} FS=1 ANIMATE_MS=200 "
-               f"SOCK=wayland-0 RELAY_PORT={self.relay_port} ALLOW_INPUT=1 "
+               f"RELAY_PORT={self.relay_port} ALLOW_INPUT={int(allow_input)} "
                f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
                f"EXPORTED_LABEL={shlex.quote(exported_label)}")
         out = self._vmexec(real, self._as_admin(
@@ -396,7 +516,9 @@ class QciVMBackend:
         sentinel), AFTER the oracle. It must be up + binding seats during injection;
         injected input must never reach it (the confinement detector)."""
         real = self._real(vm)
-        env = (f"MODE=sentinel SOCK=wayland-0 GEN={generation} ANIMATE_MS=200 "
+        # default SOCK=wayland-mm (matches setup_confinement_source; the qdwin
+        # WAYLAND_DISPLAY fix removed the wayland-0 coupling).
+        env = (f"MODE=sentinel GEN={generation} ANIMATE_MS=200 "
                f"SENTINEL_TELEMETRY={shlex.quote(sentinel_telemetry)} "
                f"SENTINEL_LABEL={shlex.quote(sentinel_label)}")
         out = self._vmexec(real, self._as_admin(
@@ -468,7 +590,7 @@ class QciVMBackend:
         if real == self.vm_a:
             self._vmexec(real, self._as_admin(
                 "systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander "
-                "mm-relay 2>/dev/null || true"), check=False)
+                "mm-relay mm-control 2>/dev/null || true"), check=False)
         else:
             self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true",
                          check=False)

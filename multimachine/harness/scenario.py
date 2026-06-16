@@ -383,6 +383,246 @@ def run_managed_toplevel_slice(
 
 
 # ==========================================================================
+# Scenario-2b: VM-A-SERVED managed-toplevel gate (product shape, codex impl-12)
+# ==========================================================================
+class VmaControlBackend(ManagedVMBackend, Protocol):
+    """:class:`ManagedVMBackend` plus the VM-A-served control ops (codex impl-12):
+    the JSON-lines control side-channel originates in VM-A (an ``mm-control``
+    ``systemd --user`` unit), not on the host. ``control_port`` is the port
+    mm-control binds in VM-A (and the VM-A QEMU hostfwd exposes on host loopback)
+    — the viewer reaches it at ``10.0.2.2:control_port`` over its own NAT."""
+
+    control_port: int
+
+    def launch_control(self, vm: str, *, generation: int, window_id: int,
+                       source_machine: str, title: str, app_id: str,
+                       req_w: int, req_h: int,
+                       marker_unit: str = "mm-marker") -> str: ...
+
+    def control_log(self, vm: str) -> dict: ...
+
+    def stop_control(self, vm: str) -> None: ...
+
+    def kill_marker(self, vm: str) -> None: ...
+
+
+@dataclass
+class VmaManagedSliceResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult
+    managed_status: dict
+    announced_stream_id: str       # the stream_id VM-A minted + announced in-guest
+    viewer_stream_id: str          # the stream_id the VM-B viewer actually received
+    host_served_control: bool      # MUST be False (no host ControlServer; impl-12)
+    detach_reason: str             # mm-control watcher reason after the viewer kill
+    detach_emitted_closed: bool    # mm-control wrongly emitted Closed on detach? (False)
+    source_alive_after_detach: bool
+    fresh_approval: bool
+    source_closed_emitted: bool    # mm-control emitted source-driven Closed (True)
+    viewer_proxy_removed: bool     # the viewer dropped the proxy after that Closed
+    source_dead_after_close: bool  # the marker is now gone
+    passed: bool
+
+
+def _control_metadata(topology: Topology, source_handle: int) -> dict:
+    return dict(window_id=source_handle, source_machine=topology.vm_a,
+                title="marker", app_id="qdwin-marker-client")
+
+
+def run_managed_toplevel_vma_slice(
+    backend: VmaControlBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, viewer_control_host: str = "10.0.2.2",
+    viewer_rdp_host: str = "10.0.2.2", rdp_user: str = "mm",
+) -> VmaManagedSliceResult:
+    """Drive the **VM-A-served** managed-toplevel gate (codex impl-12) — the
+    product-shaped successor to :func:`run_managed_toplevel_slice`.
+
+    The control side-channel now ORIGINATES in VM-A: an ``mm-control``
+    ``systemd --user`` unit builds the source-derived ``Announce`` IN-GUEST
+    (``stream_id`` minted in-guest) and a watcher emits ``Closed`` when the SOURCE
+    toplevel (the marker's own unit) dies — driven by the source, NOT by the host
+    orchestrator. The host is only a NAT/loopback bridge (a VM-A hostfwd, symmetric
+    with the RDP relay); there is NO host :class:`ControlServer`.
+
+    Three honest checks:
+
+    1. **Managed oracle** — the VM-B viewer connects to VM-A's control port, gets
+       the in-guest Announce, decodes fullscreen; the decoded oracle passes on the
+       viewer-managed toplevel, and the stream_id the viewer shows is the one VM-A
+       minted (control bytes are source-originated).
+    2. **Viewer detach (step 9)** — killing the VM-B viewer is a detach, not source
+       death: mm-control emits NO ``Closed``, the source marker survives, and a
+       fresh resubscribe reclaims the stream slot.
+    3. **Source-driven Closed (step 10)** — killing the marker on VM-A makes
+       mm-control's watcher emit ``Closed`` (source-exit), which removes the viewer
+       proxy. This proves VM-A owns the source lifecycle.
+
+    Honesty (impl-12): proves "VM-A-served control using source-derived metadata" +
+    "VM-A owns the source lifecycle" — geometry/protocol/process/lifecycle only.
+    Stale-generation rejection stays covered by :class:`RemoteViewerState` unit
+    tests + the prior session-4 live evidence (we deliberately do NOT reintroduce a
+    host-side control inject hook here — it would blur the ownership story).
+    """
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="09-mm-viewer-managed-toplevel-vma", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 VM-A-served managed-toplevel gate"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    meta = _control_metadata(topology, source_handle)
+    status_file = "/run/mm-b/viewer-status.json"
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # VM-A source: marker toplevel + subscribe (the RDP creds for the viewer).
+        backend.exec(a, [
+            "qdwin-marker-client", "--width", str(width), "--height", str(height),
+            "--output-id", str(marker_output_id), "--generation", str(generation),
+            "--frame", "0", "--fullscreen"])
+        approved = backend.subscribe_view_stream(a, source_handle)
+
+        # VM-A-SERVED control: mm-control produces the Announce in-guest. No host
+        # ControlServer is constructed anywhere in this slice (impl-12 Q1 caveat:
+        # the host listener for the control port is the VM-A hostfwd, not Python).
+        announced_stream_id = backend.launch_control(
+            a, generation=generation, req_w=width, req_h=height, **meta)
+
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=backend.control_port,
+            rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+            generation=generation, otp=approved.rdp_password,
+            size=f"{width}x{height}", status_file=status_file)
+        managed_status = _poll(
+            lambda: backend.viewer_status(b),
+            lambda s: s.get("status") == "connected" and s.get("windows"))
+        windows = managed_status.get("windows") or [{}]
+        viewer_stream_id = windows[0].get("stream_id", "")
+
+        # decoded oracle on the viewer-managed toplevel (capture-retry for tearing).
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-managed-vma.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _attempt in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (VM-A-served managed toplevel)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # --- step 9: viewer-side close is a DETACH (no Closed); slot frees -----
+        backend.stop_viewer(b)
+        # let mm-control observe the EOF + run its re-check, then read what it sent.
+        detach_ctl = _poll(lambda: backend.control_log(a),
+                           lambda c: c.get("reason"), tries=40, delay=0.25)
+        detach_reason = detach_ctl.get("reason", "")
+        detach_emitted_closed = any(m.get("type") == "closed"
+                                    for m in detach_ctl.get("sent", []))
+        source_alive_after_detach = backend.source_alive(a)
+        fresh = backend.resubscribe(a)
+        fresh_approval = bool(fresh and fresh.rdp_password
+                              and fresh.rdp_password != approved.rdp_password)
+
+        # --- step 10: SOURCE death drives Closed (VM-A owns the lifecycle) -----
+        source_closed_emitted = False
+        viewer_proxy_removed = False
+        source_dead_after_close = False
+        if fresh_approval:
+            backend.launch_control(a, generation=generation, req_w=width,
+                                   req_h=height, **meta)
+            backend.launch_viewer(
+                b, control_host=viewer_control_host,
+                control_port=backend.control_port, rdp_host=viewer_rdp_host,
+                rdp_port=fresh.rdp_port, generation=generation,
+                otp=fresh.rdp_password, size=f"{width}x{height}",
+                status_file=status_file)
+            _poll(lambda: backend.viewer_status(b),
+                  lambda s: s.get("status") == "connected" and s.get("windows"))
+            backend.kill_marker(a)                 # source toplevel dies on VM-A
+            close_ctl = _poll(
+                lambda: backend.control_log(a),
+                lambda c: any(m.get("type") == "closed" for m in c.get("sent", [])),
+                tries=40, delay=0.25)
+            source_closed_emitted = any(
+                m.get("type") == "closed" and m.get("reason") == "source-exit"
+                for m in close_ctl.get("sent", []))
+            # require a PARSED viewer status (a real status with empty windows),
+            # not an absent/unparseable {} — a crashed viewer or missing status
+            # file must NOT count as a clean proxy removal (codex impl-13). After a
+            # source-driven Closed the viewer is "idle" (proxy gone, link up) or
+            # "disconnected" (its decoder also saw the source vanish); both end with
+            # windows == [].
+            _terminal = ("idle", "disconnected")
+            closed_status = _poll(
+                lambda: backend.viewer_status(b),
+                lambda s: s.get("status") in _terminal and not s.get("windows"))
+            viewer_proxy_removed = (closed_status.get("status") in _terminal
+                                    and not closed_status.get("windows"))
+            source_dead_after_close = not backend.source_alive(a)
+
+        # --- verdict ----------------------------------------------------------
+        managed_ok = bool(res.ok and managed_status.get("windows")
+                          and viewer_stream_id
+                          and viewer_stream_id == announced_stream_id)
+        detach_ok = (detach_reason == "viewer-eof" and not detach_emitted_closed
+                     and source_alive_after_detach and fresh_approval)
+        closed_ok = (source_closed_emitted and viewer_proxy_removed
+                     and source_dead_after_close)
+        passed = managed_ok and detach_ok and closed_ok
+        if passed:
+            bundle.assert_remote_proof()       # honesty gate
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            "VM-A-SERVED control (impl-12): the Announce/Closed bytes originate in "
+            f"VM-A's mm-control unit (stream_id {announced_stream_id} minted "
+            "in-guest); NO host ControlServer. Source-driven Closed on marker "
+            "death proves VM-A owns the lifecycle. Stale-generation rejection: "
+            "covered by RemoteViewerState unit tests + prior session-4 live gate.")
+        bundle.write()
+        return VmaManagedSliceResult(
+            bundle, res, managed_status, announced_stream_id, viewer_stream_id,
+            host_served_control=False, detach_reason=detach_reason,
+            detach_emitted_closed=detach_emitted_closed,
+            source_alive_after_detach=source_alive_after_detach,
+            fresh_approval=fresh_approval,
+            source_closed_emitted=source_closed_emitted,
+            viewer_proxy_removed=viewer_proxy_removed,
+            source_dead_after_close=source_dead_after_close, passed=passed)
+    finally:
+        backend.stop_viewer(b)
+        backend.stop_control(a)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
 # Scenario-3: step-8 input-confinement gate (codex impl-10)
 # ==========================================================================
 class InputConfinementBackend(ManagedVMBackend, Protocol):
@@ -395,7 +635,8 @@ class InputConfinementBackend(ManagedVMBackend, Protocol):
     def setup_confinement_source(
         self, vm: str, *, generation: int, width: int, height: int,
         exported_telemetry: str, sentinel_telemetry: str,
-        exported_label: str, sentinel_label: str) -> ViewStreamApproved: ...
+        exported_label: str, sentinel_label: str,
+        allow_input: int = 1) -> ViewStreamApproved: ...
 
     def launch_sentinel(self, vm: str, *, generation: int,
                         sentinel_telemetry: str, sentinel_label: str) -> None: ...
@@ -560,6 +801,170 @@ def run_input_confinement_slice(
         return InputConfinementResult(
             bundle, res, exported_delta, sentinel_delta, exported_before,
             exported_after, sentinel_before, sentinel_after, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
+# Scenario-3b: read-only (allow_input=0) NEGATIVE CONTROL (codex impl-11/13)
+# ==========================================================================
+@dataclass
+class NegativeControlResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult
+    exported_press_delta: int      # MUST be 0 (permission bit gated injection)
+    sentinel_press_delta: int      # MUST be 0
+    inject_attempted: bool         # the SAME end-to-end injection was driven
+    exported_alive: bool           # the exported marker survived (0 isn't vacuous)
+    exported_valid: bool           # its telemetry is well-formed (it really ran)
+    exported_after: dict
+    sentinel_after: dict
+    passed: bool
+
+
+def run_input_negative_control_slice(
+    backend: InputConfinementBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, control_port: int = 5556,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_telemetry: str = "/run/mm-a/exported.json",
+    sentinel_telemetry: str = "/run/mm-a/sentinel.json",
+    settle: float = 6.0,
+) -> NegativeControlResult:
+    """Drive the **read-only negative control** for the input-confinement gate
+    (codex impl-11/13): export the source with ``allow_input=0`` (NO
+    ``--allow-input`` subscription), then attempt the IDENTICAL end-to-end
+    injection (ydotool on VM-B → sdl-freerdp → RDP → ``qdistro-forward``) and assert
+    that BOTH the exported marker AND the sentinel see **zero** injected presses —
+    proving the source-side permission bit actually gates injection.
+
+    Honesty: this is the negative half of the confinement claim and is interpreted
+    ALONGSIDE the positive gate (same apparatus, ``allow_input=1`` → exported delta
+    > 0). The fence here is fail-closed: a 0 delta is only meaningful if (a) the
+    SAME injection was actually driven (``inject_attempted``), (b) the exported
+    marker is ALIVE and (c) wrote well-formed telemetry — otherwise an absent/dead
+    marker would satisfy "delta 0" for free. Protocol/permission correctness only.
+    """
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-input-negative-control", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 read-only negative-control gate"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # read-only export: allow_input=0 → the forward gets NO inject channel.
+        approved = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry=sentinel_telemetry,
+            exported_label="exported", sentinel_label="sentinel", allow_input=0)
+        src = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                               title="marker", app_id="qdwin-marker-client",
+                               req_w=width, req_h=height)
+        announce = bridge_approved(approved, src, generation)
+
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+            generation=generation, otp=approved.rdp_password,
+            size=f"{width}x{height}", status_file="/run/mm-b/viewer-status.json")
+        control.accept()
+        control.send(announce)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        # the decoded oracle must pass (the viewer really shows the marker stream).
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-negative.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (read-only negative control)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # launch the sentinel (after the oracle), baseline, attempt injection.
+        backend.launch_sentinel(a, generation=generation,
+                                sentinel_telemetry=sentinel_telemetry,
+                                sentinel_label="sentinel")
+        exported_before = backend.read_telemetry(a, exported_telemetry)
+        sentinel_before = backend.read_telemetry(a, sentinel_telemetry)
+        base_exp = _press_total(exported_before)
+        base_sen = _press_total(sentinel_before)
+        inject_attempted = False
+        try:
+            backend.inject_input(b)            # the SAME path as the positive gate
+            inject_attempted = True
+        except Exception:                      # noqa: BLE001 — recorded as a failure
+            inject_attempted = False
+        # give any (wrongly) delivered press time to land, then read once. Unlike
+        # the positive gate we cannot poll-for-a-delta (we EXPECT none), so we
+        # settle a fixed window — long enough that a real leak would have landed.
+        _t.sleep(settle)
+        exported_after = backend.read_telemetry(a, exported_telemetry)
+        sentinel_after = backend.read_telemetry(a, sentinel_telemetry)
+
+        exported_delta = _press_total(exported_after) - base_exp
+        sentinel_delta = _press_total(sentinel_after) - base_sen
+        exported_alive = backend.source_alive(a)
+        # the exported marker really ran (fail-closed: a dead/absent marker that
+        # never wrote telemetry must NOT pass a "delta 0" for free).
+        exported_valid = isinstance(exported_after.get("totals"), dict)
+
+        passed = bool(res.ok and inject_attempted and exported_alive
+                      and exported_valid and exported_delta == 0
+                      and sentinel_delta == 0)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"read-only negative control (allow_input=0): exported press delta="
+            f"{exported_delta} (==0), sentinel press delta={sentinel_delta} (==0), "
+            f"inject_attempted={inject_attempted}, exported_alive={exported_alive}. "
+            "The SAME ydotool→sdl-freerdp→RDP→qdistro-forward injection as the "
+            "positive confinement gate was driven; with no --allow-input "
+            "subscription the forward gets no inject channel, so NOTHING receives "
+            "the presses. Proves the source-side permission bit gates injection.")
+        bundle.write()
+        return NegativeControlResult(
+            bundle, res, exported_delta, sentinel_delta, inject_attempted,
+            exported_alive, exported_valid, exported_after, sentinel_after, passed)
     finally:
         if control is not None:
             control.close()
