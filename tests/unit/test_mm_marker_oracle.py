@@ -180,3 +180,82 @@ class TestOracle:
             if (b.name in {z.name for z in zero}):
                 assert b.classified == "n/a" and b.ok
         assert res.ok, res.summary()
+
+
+# ---- A1-min: two-output straddle verifier (codex impl-5) -----------------
+def _straddle_captures(out_w=640, marker_w=512, h=400, gen=20, out_id=1,
+                       frame=3):
+    """Render a marker and split it across two adjacent OUT_W-wide output
+    captures so its seam_x lands exactly on the shared output boundary.
+
+    Returns (out0, out1, layout, marker_x_in_out0)."""
+    lay = M.compute_layout(marker_w, h)            # seam_x = marker_w // 2
+    pay = M.MarkerPayload(out_id, gen, frame, 0, 0, marker_w, h, 100)
+    full = M.render_rgb(lay, pay, scale=1.0)
+    seam = lay.seam_x
+    mx = out_w - seam                              # place so seam hits the boundary
+    out0 = np.zeros((h, out_w, 3), dtype=np.uint8)
+    out0[:, mx:mx + seam] = full[:, 0:seam]        # left half at capture x = mx
+    out1 = np.zeros((h, out_w, 3), dtype=np.uint8)
+    out1[:, 0:marker_w - seam] = full[:, seam:marker_w]  # right half at x = 0
+    return out0, out1, lay, mx
+
+
+class TestStraddleOracle:
+    def test_clean_straddle_passes(self):
+        out0, out1, lay, mx = _straddle_captures(gen=20, out_id=1)
+        res = O.evaluate_straddle(out0, out1, lay, marker_x_in_out0=mx,
+                                  tol=O.TOL_RDP, active_generation=20,
+                                  expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.seam_continuous and not res.hidden_scaling
+        assert res.payload.generation == 20 and res.payload.output_id == 1
+        # out0 holds the left band sequence, out1 the right.
+        assert [b.name for b in res.out0_bands] == \
+            ["left-anchor", "pre-seam", "seam-left"]
+        assert [b.name for b in res.out1_bands] == \
+            ["seam-right", "post-seam", "right-anchor"]
+
+    def test_full_marker_mirrored_on_both_rejected(self):
+        # each output shows the WHOLE marker (a fake straddle) -> out1's right
+        # bands misclassify (it actually shows the left half at x=0).
+        out0, out1, lay, mx = _straddle_captures()
+        full = M.render_rgb(lay, M.MarkerPayload(1, 20, 3, 0, 0, lay.width,
+                            lay.height, 100), scale=1.0)
+        both = np.zeros_like(out0)
+        both[:, :lay.width] = full
+        res = O.evaluate_straddle(both.copy(), both.copy(), lay,
+                                  marker_x_in_out0=0, active_generation=20)
+        assert not res.ok
+
+    def test_both_show_left_half_rejected(self):
+        out0, out1, lay, mx = _straddle_captures()
+        res = O.evaluate_straddle(out0.copy(), out0.copy(), lay,
+                                  marker_x_in_out0=mx, active_generation=20)
+        assert not res.ok            # out1 (=left half) lacks the right bands
+
+    def test_per_output_scaling_rejected(self):
+        # out0 scales the whole marker to fill the output -> barcode pitch wrong.
+        out0, out1, lay, mx = _straddle_captures()
+        full = M.render_rgb(lay, M.MarkerPayload(1, 20, 3, 0, 0, lay.width,
+                            lay.height, 100), scale=1.0)
+        from PIL import Image
+        scaled = np.asarray(Image.fromarray(full).resize(
+            (out0.shape[1], out0.shape[0])), dtype=np.uint8)
+        res = O.evaluate_straddle(scaled, out1, lay, marker_x_in_out0=0,
+                                  active_generation=20)
+        assert not res.ok
+        assert res.hidden_scaling or res.payload is None
+
+    def test_seam_gap_rejected(self):
+        # out1 shows background where the right half should start (a gap).
+        out0, out1, lay, mx = _straddle_captures()
+        res = O.evaluate_straddle(out0, np.zeros_like(out1), lay,
+                                  marker_x_in_out0=mx, active_generation=20)
+        assert not res.ok and not res.seam_continuous
+
+    def test_stale_generation_rejected(self):
+        out0, out1, lay, mx = _straddle_captures(gen=6)   # capture stamped gen 6
+        res = O.evaluate_straddle(out0, out1, lay, marker_x_in_out0=mx,
+                                  active_generation=20)   # active is 20
+        assert not res.ok and res.stale_generation

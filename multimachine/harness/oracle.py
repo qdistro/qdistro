@@ -319,3 +319,157 @@ def evaluate(
         and (expect_output_id is None or res.payload.output_id == expect_output_id)
     )
     return res
+
+
+# ---------------------------------------------------------------------------
+# A1-min: two-output straddle verification (codex impl-5).
+#
+# A normal qdwin toplevel positioned so its global rect overlaps two adjacent
+# outputs is composited onto BOTH (libweston output_mask). The harness captures
+# each output separately; a single full-marker oracle is wrong here because each
+# capture holds only a COMPLEMENTARY HALF of one logical marker. This verifier
+# checks each output against the marker's SOURCE sub-range that should appear
+# there, plus seam continuity + anti-duplication, so it cannot be fooled by the
+# whole marker mirrored onto both outputs, each output scaling its half, or a
+# gap/overlap at the seam.
+#
+# Scope (honesty): this proves the static render + capture/oracle truth only —
+# NOT WM placement/move/tiling/maximize policy, NOT runtime output lifecycle,
+# NOT RDP-as-monitor, NOT input across the seam. Placement uses a test-only hook.
+# ---------------------------------------------------------------------------
+@dataclass
+class StraddleResult:
+    ok: bool
+    out0_bands: list[BandResult] = field(default_factory=list)  # left of seam
+    out1_bands: list[BandResult] = field(default_factory=list)  # right of seam
+    payload: M.MarkerPayload | None = None       # decoded from out0 (barcode is top-left)
+    payload_error: str | None = None
+    measured_scale: float | None = None
+    hidden_scaling: bool = False
+    stale_generation: bool = False
+    seam_continuous: bool = False
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        bad0 = [b.name for b in self.out0_bands if not b.ok]
+        bad1 = [b.name for b in self.out1_bands if not b.ok]
+        parts = [f"ok={self.ok}", f"seam={self.seam_continuous}"]
+        if self.payload is not None:
+            parts.append(f"out={self.payload.output_id} gen={self.payload.generation}")
+        if self.payload_error:
+            parts.append(f"payload_err={self.payload_error}")
+        if bad0:
+            parts.append(f"bad_out0={bad0}")
+        if bad1:
+            parts.append(f"bad_out1={bad1}")
+        if self.hidden_scaling:
+            parts.append(f"hidden_scaling measured={self.measured_scale}")
+        if self.stale_generation:
+            parts.append("STALE_GENERATION")
+        return " ".join(parts)
+
+
+def _band_strip_y(layout: M.MarkerLayout, scale: float, oy: int,
+                  img_h: int) -> tuple[int, int]:
+    """The horizontal sampling strip below the corner block (mirrors classify_bands)."""
+    y_top = oy + int(round((layout.corner_px[3]
+                            + M.FIDUCIAL_CELLS * M.FIDUCIAL_CELL_PX + 8) * scale))
+    y_bot = oy + int(round((layout.height - GUARD_LOGICAL) * scale))
+    y_top = min(max(0, y_top), img_h - 2)
+    y_bot = min(max(y_top + 1, y_bot), img_h)
+    return y_top, y_bot
+
+
+def verify_marker_half(
+    img: np.ndarray, layout: M.MarkerLayout, scale: float,
+    src_x0: int, src_x1: int, dest_x0: int, *, tol: int = TOL_RDP,
+    oy: int = 0,
+) -> list[BandResult]:
+    """Verify the marker's SOURCE x-range ``[src_x0, src_x1)`` appears in ``img``
+    starting at capture x ``dest_x0`` (1:1 at ``scale``).
+
+    Only bands that fall (sufficiently) inside the source range are checked; each
+    is sampled at the capture x of its *visible-portion centre*. A band wholly
+    outside the range is skipped (it belongs to the other output)."""
+    guard = int(round(GUARD_LOGICAL * scale))
+    y_top, y_bot = _band_strip_y(layout, scale, oy, img.shape[0])
+    out: list[BandResult] = []
+    for b in layout.bands:
+        lo = max(b.x0, src_x0)
+        hi = min(b.x1, src_x1)
+        if hi - lo <= 2 * guard:          # not (sufficiently) in this half
+            continue
+        src_c = (lo + hi) // 2            # centre of the visible portion (source)
+        cap_xc = dest_x0 + int(round((src_c - src_x0) * scale))
+        x0 = max(0, cap_xc - 1)
+        x1 = min(img.shape[1], cap_xc + 2)
+        patch = img[y_top:y_bot, x0:x1]
+        name, frac = classify_color(patch, tol) if patch.size else ("unknown", 0.0)
+        out.append(BandResult(b.name, b.color, name, frac,
+                              name == b.color and frac >= MAJORITY))
+    return out
+
+
+def evaluate_straddle(
+    out0: np.ndarray, out1: np.ndarray, layout: M.MarkerLayout, *,
+    marker_x_in_out0: int, scale: float = 1.0, tol: int = TOL_RDP,
+    oy: int = 0, active_generation: int | None = None,
+    expect_output_id: int | None = None,
+) -> StraddleResult:
+    """A1-min verdict: a marker straddling two adjacent outputs at its ``seam_x``.
+
+    ``out0`` shows source ``[0, seam_x)`` starting at capture x
+    ``marker_x_in_out0``; ``out1`` shows source ``[seam_x, width)`` starting at
+    capture x 0 (out1's left edge is the global seam). The corner barcode is
+    wholly inside the left half (out0)."""
+    res = StraddleResult(ok=False)
+    seam = layout.seam_x
+    res.out0_bands = verify_marker_half(out0, layout, scale, 0, seam,
+                                        marker_x_in_out0, tol=tol, oy=oy)
+    res.out1_bands = verify_marker_half(out1, layout, scale, seam, layout.width,
+                                        0, tol=tol, oy=oy)
+
+    # identity + scale from the barcode (top-left, in the left half / out0).
+    try:
+        res.payload = decode_corner(out0, layout, scale,
+                                    origin=(marker_x_in_out0, oy))
+    except Exception as e:  # noqa: BLE001
+        res.payload_error = str(e)
+    try:
+        res.measured_scale = measure_scale_from_corner(
+            out0, layout, scale, origin=(marker_x_in_out0, oy))
+    except Exception as e:  # noqa: BLE001
+        res.notes.append(f"scale-measure failed: {e}")
+    if res.measured_scale is not None and \
+            abs(res.measured_scale - scale) > 0.15 * max(scale, 0.1):
+        res.hidden_scaling = True
+        res.notes.append(
+            f"hidden scaling: expected={scale:.2f} measured={res.measured_scale:.2f}")
+    if active_generation is not None and res.payload is not None \
+            and res.payload.generation != active_generation:
+        res.stale_generation = True
+        res.notes.append(
+            f"stale generation {res.payload.generation} != {active_generation}")
+
+    # seam continuity + anti-duplication: the band immediately LEFT of the seam
+    # (seam-left/blue) must verify on out0 and the band immediately RIGHT
+    # (seam-right/yellow) on out1. If a whole marker were mirrored onto both, or
+    # both showed the same half, one of these would misclassify (the band
+    # sequences differ: left=red,green,blue ; right=yellow,green,red).
+    sl = next((b for b in res.out0_bands if b.name == "seam-left"), None)
+    sr = next((b for b in res.out1_bands if b.name == "seam-right"), None)
+    res.seam_continuous = bool(sl and sl.ok and sr and sr.ok)
+    if not (sl and sr):
+        res.notes.append("seam bands not both sampled (placement/seam mismatch)")
+
+    bands_ok = (bool(res.out0_bands) and bool(res.out1_bands)
+                and all(b.ok for b in res.out0_bands)
+                and all(b.ok for b in res.out1_bands))
+    res.ok = (
+        bands_ok and res.seam_continuous
+        and res.payload is not None
+        and not res.hidden_scaling and not res.stale_generation
+        and (expect_output_id is None
+             or res.payload.output_id == expect_output_id)
+    )
+    return res
