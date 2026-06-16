@@ -364,6 +364,72 @@ class QciVMBackend:
                           check=False)
         return bool(out.strip())
 
+    # ---- input-confinement ops (scenario-3, codex impl-10) --------------
+    def setup_confinement_source(
+        self, vm: str, *, generation: int, width: int, height: int,
+        exported_telemetry: str, sentinel_telemetry: str,
+        exported_label: str, sentinel_label: str) -> ViewStreamApproved:
+        """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
+        subscribed, writing per-seat input telemetry) + an ``--allow-input``
+        subscribe + a LOCAL SENTINEL marker. Returns the relay-pointed approval."""
+        real = self._real(vm)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
+                   "/tmp/mm-source-stack.sh")
+        env = (f"W={width} H={height} GEN={generation} FS=1 ANIMATE_MS=200 "
+               f"RELAY_PORT={self.relay_port} ALLOW_INPUT=1 "
+               f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
+               f"EXPORTED_LABEL={shlex.quote(exported_label)} "
+               f"SENTINEL_TELEMETRY={shlex.quote(sentinel_telemetry)} "
+               f"SENTINEL_LABEL={shlex.quote(sentinel_label)}")
+        out = self._vmexec(real, self._as_admin(
+            f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)
+        if "SETUP_OK" not in out:
+            raise RuntimeError(f"confinement source-stack did not report SETUP_OK:\n{out}")
+        self._approved = self._parse_setup(out, generation)
+        return self._approved
+
+    def read_telemetry(self, vm: str, path: str) -> dict:
+        """Read + parse a marker's per-seat input telemetry JSON from the guest
+        (empty dict if absent/unwritten)."""
+        import json
+        out = self._vmexec(self._real(vm), f"cat {shlex.quote(path)} 2>/dev/null",
+                          check=False).strip()
+        if not out:
+            return {}
+        try:
+            return json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            return {}
+
+    def inject_input(self, vm: str) -> None:
+        """Inject input at the VM-B viewer via ydotool — the HONEST end-to-end path
+        (ydotool → kiosk weston seat → sdl-freerdp → RDP → qdistro-forward →
+        per-stream seat → exported marker). Ensures ydotoold, lets weston hotplug
+        its uinput device, then moves the pointer into the fullscreen surface,
+        clicks, and sends a key (codex impl-10 Q2: motion→click→key)."""
+        real = self._real(vm)
+        sock = "/run/.ydotool_socket"
+        script = (
+            f"export YDOTOOL_SOCKET={sock}; "
+            f"if ! pgrep -x ydotoold >/dev/null; then "
+            f"  systemctl reset-failed mm-ydotoold 2>/dev/null || true; "
+            f"  systemd-run --collect --unit=mm-ydotoold "
+            f"    ydotoold --socket-path={sock} --socket-perm=0666; "
+            f"  for i in $(seq 1 30); do [ -S {sock} ] && break; sleep 0.2; done; "
+            f"  sleep 2; fi; "                       # let weston hotplug the device
+            # center the pointer (relative: large move to a corner, then to ~center),
+            # click, and send a key. Repeat the click so a missed-focus first click
+            # still leaves a delivered press.
+            f"ydotool mousemove -- -5000 -5000; sleep 0.3; "
+            f"ydotool mousemove -- 640 400; sleep 0.3; "
+            f"ydotool click 0xC0; sleep 0.3; "       # left press+release
+            f"ydotool click 0xC0; sleep 0.3; "
+            f"ydotool key 30:1 30:0; sleep 0.3; "    # 'a' press+release
+            f"echo YDOTOOL_DONE")
+        out = self._vmexec(real, script, check=False)
+        if "YDOTOOL_DONE" not in out:
+            raise RuntimeError(f"ydotool injection failed on {vm}:\n{out}")
+
     def apply_netem(self, vm: str, dev: str, profile_name: str) -> None:
         # NB (codex impl-4/impl-6 M6): the loopback relay leg BYPASSES this — it
         # models link impairment on the SLIRP-facing dev, NOT a bridged inter-VM
@@ -388,8 +454,8 @@ class QciVMBackend:
         real = self._real(vm)
         if real == self.vm_a:
             self._vmexec(real, self._as_admin(
-                "systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay "
-                "2>/dev/null || true"), check=False)
+                "systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander "
+                "mm-relay 2>/dev/null || true"), check=False)
         else:
             self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true",
                          check=False)

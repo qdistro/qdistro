@@ -15,6 +15,15 @@ MODE=${MODE:-full}
 # catch a torn RDP frame mid-repaint (barcode CRC mismatch); ANIMATE_MS=0 = a
 # single STATIC frame, which the single-frame oracle reads deterministically.
 ANIMATE_MS=${ANIMATE_MS:-200}
+# Step-8 input-confinement extras (codex impl-10), all optional/empty by default:
+#   EXPORTED_TELEMETRY / EXPORTED_LABEL — the exported (subscribed) marker writes
+#     per-seat input telemetry here; ALLOW_INPUT=1 → the bystander requests an
+#     input-capable subscription so the forward gets the inject channel;
+#   SENTINEL_TELEMETRY / SENTINEL_LABEL — launch a SECOND local (unexported)
+#     marker as the confinement sentinel (must receive zero injected input).
+EXPORTED_TELEMETRY=${EXPORTED_TELEMETRY:-}; EXPORTED_LABEL=${EXPORTED_LABEL:-exported}
+SENTINEL_TELEMETRY=${SENTINEL_TELEMETRY:-}; SENTINEL_LABEL=${SENTINEL_LABEL:-sentinel}
+ALLOW_INPUT=${ALLOW_INPUT:-0}
 RUN() { systemd-run --user --collect "$@"; }
 
 # discover_rdp_port FILE: wait for an approved RDP_PORT in a bystander.out file.
@@ -53,7 +62,7 @@ if [ "$MODE" = resubscribe ]; then
 fi
 
 # Clean prior run.
-systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay 2>/dev/null || true
+systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay 2>/dev/null || true
 sleep 1
 rm -f "$XDG_RUNTIME_DIR/$SOCK" "$XDG_RUNTIME_DIR/$SOCK.lock" 2>/dev/null
 
@@ -82,16 +91,20 @@ for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/$SOCK" ] && break; sleep 0.2; do
 if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: qdwin socket never appeared"; journalctl --user -u mm-qdwin --no-pager|tail -20; exit 7; fi
 echo "qdwin up on $XDG_RUNTIME_DIR/$SOCK"
 
-# 2) Bystander first (so --subscribe last catches the marker's toplevel_added).
+# 2) Bystander first (so --subscribe last catches the EXPORTED marker's
+#    toplevel_added). ALLOW_INPUT=1 requests an input-capable subscription.
 rm -f "$XDG_RUNTIME_DIR/bystander.out"
+AI_ARG=""; [ "$ALLOW_INPUT" = 1 ] && AI_ARG="--allow-input"
 RUN --unit=mm-bystander --setenv=WAYLAND_DISPLAY=$SOCK \
-  bash -c "qdwin-bystander --subscribe last > $XDG_RUNTIME_DIR/bystander.out 2>&1"
+  bash -c "qdwin-bystander --subscribe last $AI_ARG > $XDG_RUNTIME_DIR/bystander.out 2>&1"
 sleep 1.5
 
-# 3) Marker (source toplevel) WxH, animating.
+# 3) EXPORTED marker (the subscribed source toplevel) WxH, animating. With
+#    EXPORTED_TELEMETRY it counts per-seat injected input (step-8 gate).
 FS_ARG=""; [ "${FS:-0}" = 1 ] && FS_ARG="--fullscreen"
+TEL_ARG=""; [ -n "$EXPORTED_TELEMETRY" ] && TEL_ARG="--telemetry $EXPORTED_TELEMETRY --label $EXPORTED_LABEL"
 RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
-  qdwin-marker-client --width $W --height $H --output-id 1 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG
+  qdwin-marker-client --width $W --height $H --output-id 1 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
 
 # 4) Discover the approved RDP port.
 RDP_PORT=""
@@ -104,5 +117,15 @@ if [ -z "$RDP_PORT" ]; then echo "FAIL: no RDP_PORT approved"; echo "--- bystand
 # 5) Fixed-port relay so the SLIRP hostfwd targets a stable port.
 RUN --unit=mm-relay socat TCP-LISTEN:$RELAY_PORT,reuseaddr,fork TCP:127.0.0.1:$RDP_PORT
 sleep 0.5
+
+# 6) SENTINEL marker — a SECOND, LOCAL, UNEXPORTED toplevel (launched AFTER the
+#    export is subscribed, so --subscribe last never catches it). It is the
+#    confinement detector: injected input must NOT reach it (codex impl-10 Q3a).
+if [ -n "$SENTINEL_TELEMETRY" ]; then
+  RUN --unit=mm-sentinel --setenv=WAYLAND_DISPLAY=$SOCK \
+    qdwin-marker-client --width 400 --height 300 --output-id 2 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS --telemetry $SENTINEL_TELEMETRY --label $SENTINEL_LABEL
+  sleep 1
+  echo "sentinel up (telemetry=$SENTINEL_TELEMETRY)"
+fi
 echo "--- bystander.out ---"; cat "$XDG_RUNTIME_DIR/bystander.out"
 echo "SETUP_OK RDP_PORT=$RDP_PORT RELAY_PORT=$RELAY_PORT"
