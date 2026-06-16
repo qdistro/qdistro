@@ -643,7 +643,9 @@ class InputConfinementBackend(ManagedVMBackend, Protocol):
 
     def read_telemetry(self, vm: str, path: str) -> dict: ...
 
-    def inject_input(self, vm: str) -> None: ...
+    def inject_input(self, vm: str, *, x: int | None = None,
+                     y: int | None = None,
+                     absolute: bool = False) -> tuple[int, int]: ...
 
 
 @dataclass
@@ -965,6 +967,479 @@ def run_input_negative_control_slice(
         return NegativeControlResult(
             bundle, res, exported_delta, sentinel_delta, inject_attempted,
             exported_alive, exported_valid, exported_after, sentinel_after, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
+# Scenario-3c: coordinate-fidelity gate (codex impl-11 deferred; session 6)
+# ==========================================================================
+@dataclass
+class CoordinateFidelityResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult
+    # three AXIS-ALIGNED probe pixels (P2 shares P1's y, P3 shares P1's x) and where
+    # each landed in the marker's surface space — so we measure per-axis scale AND
+    # cross-axis shear, not just a single diagonal (codex impl-16).
+    p1: tuple[int, int]
+    m1: tuple[int, int]
+    p2: tuple[int, int]
+    m2: tuple[int, int]
+    p3: tuple[int, int]
+    m3: tuple[int, int]
+    x_scale: float           # m = scale·p + offset, fitted per axis
+    y_scale: float
+    offset_x: float
+    offset_y: float
+    cross_x_shear: float     # Δx from a pure-Δy move (should be ~0: no y→x leak)
+    cross_y_shear: float     # Δy from a pure-Δx move (should be ~0: no x→y leak)
+    offset_tol: float
+    scale_tol: float
+    shear_tol: float
+    seats_found: bool        # all three injections produced a per-stream seat reading
+    passed: bool
+
+
+def _injected_seat(telemetry: dict) -> dict | None:
+    """The per-stream seat in a marker's telemetry that received injected pointer
+    MOTION (the forward's seat) — its ``last_x``/``last_y`` is where the injected
+    pointer landed in the exported marker's surface-local space. Picks the seat with
+    the most motion (the local seat, if any, never moves)."""
+    best = None
+    for seat in (telemetry.get("seats") or []):
+        if not isinstance(seat, dict):
+            continue
+        if int(seat.get("pointer_motion", 0) or 0) > 0:
+            if best is None or seat["pointer_motion"] > best["pointer_motion"]:
+                best = seat
+    return best
+
+
+def run_input_coordinate_fidelity_slice(
+    backend: InputConfinementBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, control_port: int = 5556,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_telemetry: str = "/run/mm-a/exported.json",
+    sentinel_telemetry: str = "/run/mm-a/sentinel.json",
+    p1: tuple[int, int] | None = None, p2: tuple[int, int] | None = None,
+    p3: tuple[int, int] | None = None,
+    offset_tol: float = 24.0, scale_tol: float = 0.2, shear_tol: float = 24.0,
+) -> CoordinateFidelityResult:
+    """Drive the **coordinate-fidelity** gate (codex impl-11 deferred): inject the
+    pointer at TWO known viewer pixels and assert the source window receives them as
+    a FAITHFUL LINEAR map — zero offset, isotropic scale — validating the whole
+    coordinate path (ydotool → fullscreen 1:1 sdl-freerdp → RDP framebuffer →
+    ``qdistro-forward`` → ``qdwin_stream_input_v1.inject_pointer_motion`` →
+    ``weston_coord_surface_to_global`` → the marker's ``wl_pointer.motion``).
+
+    THREE AXIS-ALIGNED points (not one, not a single diagonal) because the
+    END-TO-END map is ``m = scale·p + offset`` and we must SEPARATE the product
+    transform's fidelity from the test apparatus's fixed scale: ydotool's
+    ``--absolute`` uinput injection lands at a constant multiple of the requested
+    pixel (measured ~2.0× on the live rig — a uinput axis-range artifact, NOT a
+    product bug). P2 shares P1's y (varies x only) and P3 shares P1's x (varies y
+    only), so we measure ``x_scale``/``y_scale`` independently AND the cross-axis
+    shear (a pure-x move must not change y, and vice-versa). We then assert the
+    PRODUCT properties: ``offset ≈ 0`` (no translation), ``x_scale ≈ y_scale``
+    (isotropic), both scales non-degenerate, and ``cross shear ≈ 0`` (no skew / axis
+    swap / cross-axis leak). A diagonal-only pair could be fooled by a shear that is
+    correct on that line; the axis-aligned triple cannot. The uniform apparatus
+    scale is allowed (Phase-1 scope: this is faithful-linear coordinate fidelity up
+    to a uniform scale, not an absolute-scale calibration).
+
+    Honesty: protocol/transform correctness only. Fail-closed — if any injection
+    yields no per-stream seat reading, FAIL; the decoded oracle is still a gate.
+    """
+    profile(netem_profile)
+    # three axis-aligned points, all in-bounds AFTER the ~2× apparatus scale:
+    # P1=(160,100), P2=(480,100) [same y, varies x], P3=(160,300) [same x, varies y].
+    p1 = (width // 8, height // 8) if p1 is None else p1
+    p2 = (3 * width // 8, height // 8) if p2 is None else p2
+    p3 = (width // 8, 3 * height // 8) if p3 is None else p3
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-input-coordinate-fidelity", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 input coordinate-fidelity gate"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # input-capable export (allow_input=1) — we need injection to actually reach
+        # the per-stream seat so its last_x/last_y is meaningful.
+        approved = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry=sentinel_telemetry,
+            exported_label="exported", sentinel_label="sentinel", allow_input=1)
+        src = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                               title="marker", app_id="qdwin-marker-client",
+                               req_w=width, req_h=height)
+        announce = bridge_approved(approved, src, generation)
+
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+            generation=generation, otp=approved.rdp_password,
+            size=f"{width}x{height}", status_file="/run/mm-b/viewer-status.json")
+        control.accept()
+        control.send(announce)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        # decoded oracle (the viewer really shows the marker, geometry 1:1).
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-coordfidelity.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (coordinate-fidelity viewer)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # inject at the THREE axis-aligned pixels (ABSOLUTE — bypass libinput pointer
+        # acceleration), reading the per-stream seat coordinate after each. The
+        # seat's motion count strictly increases per injection; we BASELINE it before
+        # EACH inject and poll for the increment before reading last_x/last_y, so a
+        # stale/pre-existing motion can't be mistaken for an injection (impl-16).
+        def _seat_motion(tel: dict) -> int:
+            s = _injected_seat(tel)
+            return int(s.get("pointer_motion", 0) or 0) if s else 0
+
+        def _inject_read(px: int, py: int):
+            base = _seat_motion(backend.read_telemetry(a, exported_telemetry))
+            backend.inject_input(b, x=px, y=py, absolute=True)
+            tel = _poll(lambda: backend.read_telemetry(a, exported_telemetry),
+                        lambda t: _seat_motion(t) > base, tries=40, delay=0.25)
+            seat = _injected_seat(tel)
+            if seat is None:
+                return None
+            return (int(seat.get("last_x", 0)), int(seat.get("last_y", 0)))
+
+        m1 = _inject_read(p1[0], p1[1])
+        m2 = _inject_read(p2[0], p2[1])
+        m3 = _inject_read(p3[0], p3[1])
+        seats_found = None not in (m1, m2, m3)
+        mm1, mm2, mm3 = (m1 or (0, 0)), (m2 or (0, 0)), (m3 or (0, 0))
+        # P2 varies x only (same y as P1): fit x_scale + the x→y cross shear.
+        # P3 varies y only (same x as P1): fit y_scale + the y→x cross shear.
+        fittable = seats_found and p2[0] != p1[0] and p3[1] != p1[1]
+        if fittable:
+            x_scale = (mm2[0] - mm1[0]) / (p2[0] - p1[0])
+            y_scale = (mm3[1] - mm1[1]) / (p3[1] - p1[1])
+            offset_x = mm1[0] - x_scale * p1[0]
+            offset_y = mm1[1] - y_scale * p1[1]
+            cross_y_shear = mm2[1] - mm1[1]    # pure-x move changed y? (should be 0)
+            cross_x_shear = mm3[0] - mm1[0]    # pure-y move changed x? (should be 0)
+        else:
+            x_scale = y_scale = offset_x = offset_y = 0.0
+            cross_x_shear = cross_y_shear = 10 ** 9
+
+        passed = bool(
+            res.ok and fittable
+            and abs(offset_x) <= offset_tol and abs(offset_y) <= offset_tol
+            and abs(x_scale - y_scale) <= scale_tol
+            and x_scale > 0.1 and y_scale > 0.1          # both axes non-degenerate
+            and abs(cross_x_shear) <= shear_tol
+            and abs(cross_y_shear) <= shear_tol)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"coordinate fidelity: p1={p1}→{mm1}, p2={p2}→{mm2}, p3={p3}→{mm3}; "
+            f"x_scale={x_scale:.3f} y_scale={y_scale:.3f} "
+            f"offset=({offset_x:.1f},{offset_y:.1f}) "
+            f"cross_shear=(x:{cross_x_shear:.1f},y:{cross_y_shear:.1f}); "
+            f"tol offset={offset_tol} scale={scale_tol} shear={shear_tol}. Proves "
+            "the product coordinate transform is a faithful linear map (zero offset, "
+            "isotropic, no cross-axis shear) up to the apparatus's uinput scale.")
+        bundle.write()
+        return CoordinateFidelityResult(
+            bundle, res, tuple(p1), mm1, tuple(p2), mm2, tuple(p3), mm3,
+            x_scale, y_scale, offset_x, offset_y, cross_x_shear, cross_y_shear,
+            offset_tol, scale_tol, shear_tol, seats_found, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
+# Scenario-3d: 2nd-EXPORTED-view (A→B) input isolation gate (codex impl-15)
+# ==========================================================================
+class SecondViewBackend(InputConfinementBackend, Protocol):
+    """:class:`InputConfinementBackend` plus a SECOND concurrent input-capable
+    export on the same qdwin (codex impl-15): ``setup_second_export`` brings up
+    marker-B on a distinct output with its own bystander/forward/relay."""
+
+    def setup_second_export(self, vm: str, *, generation: int, width: int,
+                            height: int, output_id: int, telemetry: str,
+                            label: str, relay_port: int,
+                            allow_input: int = 1) -> ViewStreamApproved: ...
+
+    def marker2_alive(self, vm: str) -> bool: ...
+
+
+@dataclass
+class SecondViewIsolationResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult            # stream-A decoded oracle (a real stream)
+    marker_a_delta: int               # >0: viewer-A injection reached marker-A
+    marker_b_positive_delta: int      # >0: marker-B's seat CAN deliver (phase B1)
+    marker_b_isolation_delta: int     # ==0: viewer-A injection did NOT leak to B
+    marker_b_reproof_delta: int       # >0: B's seat STILL delivers after isolation (B2)
+    marker_b_alive: bool              # mm-marker2/mm-relay2 live through phase A
+    marker_b_valid: bool              # B telemetry well-formed (label/output_id/seats)
+    distinct_views: bool              # marker-A output_id != marker-B output_id
+    passed: bool
+
+
+def run_second_view_isolation_slice(
+    backend: SecondViewBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    second_output_id: int = 2, source_handle: int = 1, second_handle: int = 2,
+    control_port: int = 5556, relay_b_port: int = 5560,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_a_telemetry: str = "/run/mm-a/exported-a.json",
+    exported_b_telemetry: str = "/run/mm-a/exported-b.json",
+) -> SecondViewIsolationResult:
+    """Drive the **2nd-exported-view (stream-A → stream-B) input isolation** gate
+    (codex impl-15) — the deepest Phase-1 isolation claim: input injected at the
+    viewer of one exported window must reach ONLY that window's per-stream seat,
+    never a SECOND, concurrently-exported, input-capable window's seat.
+
+    Two simultaneous input-capable exports from ONE qdwin (marker-A on output 1,
+    marker-B on output 2, both ``allow_input=1``; each forward claims its inject
+    channel on spawn, so BOTH per-stream seats are live throughout). One viewer at
+    a time on VM-B (so ydotool always targets the intended stream — no two-fullscreen
+    focus ambiguity); marker-B's seat persists across viewer-B teardown because
+    forward-B keeps its claim:
+
+    - **Phase B (positive control):** viewer-B decodes stream-B; inject → assert
+      marker-B press delta > 0. This PROVES marker-B's per-stream seat can actually
+      deliver presses (so a later 0 is meaningful, not vacuous). Tear viewer-B down.
+    - **Phase A (isolation):** viewer-A decodes stream-A; the decoded oracle passes
+      (a real stream); inject at viewer-A → assert marker-A press delta > 0 AND
+      marker-B press delta == 0 (NO new presses since phase B). marker-B's seat is
+      still live, so a cross-stream leak COULD have landed — it didn't.
+    - **Phase B2 (re-proof):** bring viewer-B back and inject → assert marker-B
+      delta > 0 AGAIN. This proves marker-B's per-stream seat SURVIVED the whole
+      isolation phase, so the phase-A zero was true confinement and not a dead seat
+      / stale telemetry (codex impl-16 HIGH fail-closed).
+
+    Pass = oracle ok AND marker_a_delta>0 AND marker_b_positive_delta>0 AND
+    marker_b_isolation_delta==0 AND marker_b_reproof_delta>0 AND marker_b_alive
+    (mm-marker2/mm-relay2 live) AND marker_b_valid (well-formed B telemetry) AND
+    distinct_views. Honesty: per-stream-seat isolation across two LIVE input-capable
+    exports — protocol/seat correctness, PRESS deltas only.
+    """
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-second-view-isolation", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 2nd-exported-view input isolation"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    status_file = "/run/mm-b/viewer-status.json"
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # two concurrent input-capable exports from ONE qdwin.
+        approved_a = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_a_telemetry,
+            sentinel_telemetry="/run/mm-a/unused-sentinel.json",
+            exported_label="exported-a", sentinel_label="sentinel", allow_input=1)
+        approved_b = backend.setup_second_export(
+            a, generation=generation, width=width, height=height,
+            output_id=second_output_id, telemetry=exported_b_telemetry,
+            label="exported-b", relay_port=relay_b_port, allow_input=1)
+        src_a = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                                 title="marker-a", app_id="qdwin-marker-client",
+                                 req_w=width, req_h=height)
+        src_b = SourceWindowInfo(window_id=second_handle, source_machine=topology.vm_a,
+                                 title="marker-b", app_id="qdwin-marker-client",
+                                 req_w=width, req_h=height)
+        announce_a = bridge_approved(approved_a, src_a, generation)
+        announce_b = bridge_approved(approved_b, src_b, generation)
+
+        # ---- Phase B: positive control — marker-B's seat CAN deliver presses ---
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved_b.rdp_port,
+            generation=generation, otp=approved_b.rdp_password,
+            size=f"{width}x{height}", status_file=status_file)
+        control.accept()
+        control.send(announce_b)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+        backend.await_decode(b)
+        b_before_pos = backend.read_telemetry(a, exported_b_telemetry)
+        base_b_pos = _press_total(b_before_pos)
+        backend.inject_input(b)
+        b_after_pos = _poll(
+            lambda: backend.read_telemetry(a, exported_b_telemetry),
+            lambda t: _press_total(t) > base_b_pos, tries=40, delay=0.25)
+        marker_b_positive_delta = _press_total(b_after_pos) - base_b_pos
+        backend.stop_viewer(b)          # forward-B + marker-B's seat persist
+
+        # ---- Phase A: isolation — inject viewer-A, marker-B must NOT move -------
+        control.close()
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved_a.rdp_port,
+            generation=generation, otp=approved_a.rdp_password,
+            size=f"{width}x{height}", status_file=status_file)
+        control.accept()
+        control.send(announce_a)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-2ndview.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (2nd-exported-view isolation, stream-A)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        a_before = backend.read_telemetry(a, exported_a_telemetry)
+        b_before_iso = backend.read_telemetry(a, exported_b_telemetry)
+        base_a = _press_total(a_before)
+        base_b_iso = _press_total(b_before_iso)
+        backend.inject_input(b)
+        a_after = _poll(lambda: backend.read_telemetry(a, exported_a_telemetry),
+                        lambda t: _press_total(t) > base_a, tries=40, delay=0.25)
+        _t.sleep(4)                     # give any (wrong) leak to marker-B time to land
+        b_after_iso = backend.read_telemetry(a, exported_b_telemetry)
+        backend.stop_viewer(b)
+
+        marker_a_delta = _press_total(a_after) - base_a
+        marker_b_isolation_delta = _press_total(b_after_iso) - base_b_iso
+        # marker-B liveness through phase A (codex impl-16 HIGH): a 0 isolation delta
+        # is only meaningful if marker-B + its seat were LIVE the whole time — else
+        # b_after_iso is just a stale file. Unit liveness + well-formed B telemetry.
+        marker_b_alive = backend.marker2_alive(a)
+        marker_b_valid = (b_after_iso.get("label") == "exported-b"
+                          and int(b_after_iso.get("output_id", -2)) == second_output_id
+                          and int(b_after_iso.get("seats_seen", 0) or 0) >= 1
+                          and isinstance(b_after_iso.get("totals"), dict))
+
+        # ---- Phase B2: RE-PROVE marker-B's seat still delivers AFTER isolation ---
+        # the decisive liveness proof — bring viewer-B back and inject: if marker-B's
+        # per-stream seat survived the whole isolation phase it presses again, so the
+        # phase-A zero was true confinement, not a dead seat (codex impl-16 HIGH).
+        control.close()
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved_b.rdp_port,
+            generation=generation, otp=approved_b.rdp_password,
+            size=f"{width}x{height}", status_file=status_file)
+        control.accept()
+        control.send(announce_b)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+        backend.await_decode(b)
+        base_b_re = _press_total(backend.read_telemetry(a, exported_b_telemetry))
+        backend.inject_input(b)
+        b_after_re = _poll(
+            lambda: backend.read_telemetry(a, exported_b_telemetry),
+            lambda t: _press_total(t) > base_b_re, tries=40, delay=0.25)
+        marker_b_reproof_delta = _press_total(b_after_re) - base_b_re
+
+        distinct_views = (
+            int(a_after.get("output_id", -1)) == marker_output_id
+            and int(b_after_iso.get("output_id", -2)) == second_output_id
+            and a_after.get("output_id") != b_after_iso.get("output_id"))
+
+        passed = bool(res.ok and marker_a_delta > 0 and marker_b_positive_delta > 0
+                      and marker_b_isolation_delta == 0 and marker_b_reproof_delta > 0
+                      and marker_b_alive and marker_b_valid and distinct_views)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"2nd-exported-view isolation: marker-A delta={marker_a_delta} (>0); "
+            f"marker-B positive-control delta={marker_b_positive_delta} (>0, seat "
+            f"deliverable); marker-B isolation delta={marker_b_isolation_delta} "
+            f"(==0, viewer-A injection did NOT leak); marker-B re-proof delta="
+            f"{marker_b_reproof_delta} (>0, its seat SURVIVED isolation — the 0 was "
+            f"true confinement, not a dead seat); marker_b_alive={marker_b_alive}; "
+            f"distinct_views={distinct_views}. Per-stream seat isolation proven "
+            "across two concurrent live input-capable exports.")
+        bundle.write()
+        return SecondViewIsolationResult(
+            bundle, res, marker_a_delta, marker_b_positive_delta,
+            marker_b_isolation_delta, marker_b_reproof_delta, marker_b_alive,
+            marker_b_valid, distinct_views, passed)
     finally:
         if control is not None:
             control.close()

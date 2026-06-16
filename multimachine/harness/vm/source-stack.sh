@@ -85,8 +85,65 @@ if [ "$MODE" = resubscribe ]; then
   exit 0
 fi
 
-# Clean prior run.
-systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay 2>/dev/null || true
+# MODE=export2: a SECOND, concurrent EXPORTED marker on the ALREADY-LIVE qdwin
+# (2nd-exported-view isolation gate, codex impl-15). qdwin_shell_v1 is a SINGLETON
+# role (only ONE bystander may bind it — a 2nd bystander gets "shell role already
+# claimed"), so we DON'T start a second bystander. Instead we drive the EXISTING
+# mm-bystander's command FIFO: launch marker-B (the new "last" toplevel), then send
+# `subscribelast` so the one shell client subscribes marker-B too (with the same
+# --allow-input it was started with → forward-B claims the inject channel on spawn,
+# so marker-B's per-stream seat goes live). Then relay2 on a SECOND fixed port.
+if [ "$MODE" = export2 ]; then
+  if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: no live qdwin socket for export2"; exit 9; fi
+  if ! systemctl --user is-active mm-marker >/dev/null 2>&1; then echo "FAIL: marker-A not live for export2"; exit 9; fi
+  if ! systemctl --user is-active mm-bystander >/dev/null 2>&1; then echo "FAIL: no live shell client (mm-bystander) for export2"; exit 9; fi
+  OUTPUT_ID=${OUTPUT_ID:-2}
+  BOUT="$XDG_RUNTIME_DIR/bystander.out"
+  FIFO=${QDWIN_BYSTANDER_FIFO:-/tmp/qdwin-cmd.fifo}
+  # RDP_PASSWORD is the LAST line of each approval block (HANDLE/NODE/PORT/CERT/
+  # PASSWORD), so waiting for a NEW one guarantees port+node are already flushed —
+  # no partial-block race (codex impl-16).
+  before=$(grep -c '^RDP_PASSWORD=' "$BOUT" 2>/dev/null); before=${before:-0}
+  systemctl --user stop mm-marker2 2>/dev/null || true
+  systemctl --user reset-failed mm-marker2 2>/dev/null || true
+  sleep 0.3
+  FS_ARG=""; [ "${FS:-0}" = 1 ] && FS_ARG="--fullscreen"
+  TEL_ARG=""; [ -n "$EXPORTED_TELEMETRY" ] && TEL_ARG="--telemetry $EXPORTED_TELEMETRY --label $EXPORTED_LABEL"
+  RUN --unit=mm-marker2 --setenv=WAYLAND_DISPLAY=$SOCK \
+    qdwin-marker-client --width $W --height $H --output-id $OUTPUT_ID --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
+  sleep 1.5   # let the shell client see marker-B's toplevel_added (got_last)
+  [ -p "$FIFO" ] || { echo "FAIL: bystander FIFO $FIFO missing"; exit 9; }
+  echo subscribelast > "$FIFO"
+  # wait for marker-B's COMPLETE approval block = a NEW RDP_PASSWORD line.
+  RDP_PORT=""
+  for _ in $(seq 1 50); do
+    cnt=$(grep -c '^RDP_PASSWORD=' "$BOUT" 2>/dev/null); cnt=${cnt:-0}
+    if [ "$cnt" -gt "$before" ]; then
+      RDP_PORT=$(grep '^RDP_PORT=' "$BOUT" | tail -1 | cut -d= -f2 | tr -dc '0-9')
+      break
+    fi
+    sleep 0.3
+  done
+  if [ -z "$RDP_PORT" ]; then echo "FAIL: export2 not approved (subscribelast)"; echo "--- bystander.out tail ---"; tail -12 "$BOUT"; exit 10; fi
+  # marker-B's creds are the LAST (now-complete) approval block in the stdout.
+  PW_NODE=$(grep '^PIPEWIRE_NODE_NAME=' "$BOUT" | tail -1 | cut -d= -f2)
+  RDP_PASSWORD=$(grep '^RDP_PASSWORD=' "$BOUT" | tail -1 | cut -d= -f2)
+  RUN --unit=mm-relay2 socat TCP-LISTEN:$RELAY_PORT,reuseaddr,fork TCP:127.0.0.1:$RDP_PORT
+  sleep 0.5
+  # echo ONLY marker-B's approval fields, each on its OWN line so parse_approved
+  # (which anchors on `^RDP_PORT=`/`^RDP_PASSWORD=`) binds B, not A.
+  echo "PIPEWIRE_NODE_NAME=$PW_NODE"
+  echo "RDP_PORT=$RDP_PORT"
+  echo "RDP_PASSWORD=$RDP_PASSWORD"
+  echo "SETUP_OK RDP_PORT=$RDP_PORT RELAY_PORT=$RELAY_PORT"
+  exit 0
+fi
+
+# Clean prior run (incl. the 2nd-export units so a crashed prior run can't poison
+# this one — codex impl-16; esp. mm-relay2 holding port 5560).
+systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay \
+  mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
+systemctl --user reset-failed mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
 sleep 1
 rm -f "$XDG_RUNTIME_DIR/$SOCK" "$XDG_RUNTIME_DIR/$SOCK.lock" 2>/dev/null
 

@@ -468,6 +468,18 @@ class QciVMBackend:
         self._vmexec(self._real(vm), self._as_admin(
             "systemctl --user stop mm-control 2>/dev/null || true"), check=False)
 
+    def marker2_alive(self, vm: str) -> bool:
+        """True if the SECOND exported marker (mm-marker2) + its relay (mm-relay2)
+        are both still live — the liveness witness the 2nd-view isolation gate needs
+        so a stale telemetry file can't make marker-B's zero-delta vacuous (codex
+        impl-16). forward-B is a qdwin child (not a unit); mm-relay2 carrying its RDP
+        port + mm-marker2 running is the reachable witness, backed by a Phase-B2
+        re-injection proof in the slice."""
+        out = self._vmexec(self._real(vm), self._as_admin(
+            "systemctl --user is-active mm-marker2 mm-relay2 2>/dev/null"
+            " | tr '\\n' ' '"), check=False)
+        return out.split().count("active") >= 2
+
     def kill_marker(self, vm: str) -> None:
         """Source toplevel death: stop the marker's OWN systemd --user unit so
         mm-control's liveness probe sees it go inactive and emits Closed (impl-12
@@ -510,6 +522,35 @@ class QciVMBackend:
         self._approved = self._parse_setup(out, generation)
         return self._approved
 
+    def setup_second_export(
+        self, vm: str, *, generation: int, width: int, height: int,
+        output_id: int, telemetry: str, label: str, relay_port: int,
+        allow_input: int = 1) -> ViewStreamApproved:
+        """Bring up a SECOND, concurrent EXPORTED marker on the ALREADY-LIVE qdwin
+        (2nd-exported-view isolation gate, codex impl-15; MODE=export2). marker-B on
+        a DISTINCT output + its own bystander (--allow-input → forward-B claims the
+        inject channel ON SPAWN, so marker-B's per-stream seat goes live even before
+        any RDP client) + its own relay on ``relay_port`` (a second host-loopback
+        bridge). Returns marker-B's approval (the viewer reaches it at the relay
+        port). Does NOT clobber the first export's ``self._approved``."""
+        real = self._real(vm)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
+                   "/tmp/mm-source-stack.sh")
+        self._ensure_hostfwd(real, relay_port)               # 2nd RDP relay bridge
+        env = (f"MODE=export2 W={width} H={height} GEN={generation} FS=1 "
+               f"ANIMATE_MS=200 OUTPUT_ID={output_id} RELAY_PORT={relay_port} "
+               f"ALLOW_INPUT={int(allow_input)} "
+               f"EXPORTED_TELEMETRY={shlex.quote(telemetry)} "
+               f"EXPORTED_LABEL={shlex.quote(label)}")
+        out = self._vmexec(real, self._as_admin(
+            f"{env} bash /tmp/mm-source-stack.sh"), timeout=120)
+        if "SETUP_OK" not in out:
+            raise RuntimeError(f"export2 source-stack did not report SETUP_OK:\n{out}")
+        info = parse_approved(out)
+        if not info["password"]:
+            raise RuntimeError("export2 approval has empty RDP_PASSWORD")
+        return ViewStreamApproved(info["pw_node"], relay_port, "", info["password"])
+
     def launch_sentinel(self, vm: str, *, generation: int,
                         sentinel_telemetry: str, sentinel_label: str) -> None:
         """Launch the LOCAL unexported sentinel marker on the live qdwin (MODE=
@@ -539,24 +580,41 @@ class QciVMBackend:
         except (ValueError, IndexError):
             return {}
 
-    def inject_input(self, vm: str) -> None:
+    def inject_input(self, vm: str, *, x: int | None = None,
+                     y: int | None = None, absolute: bool = False
+                     ) -> tuple[int, int]:
         """Inject input at the VM-B viewer via ydotool — the HONEST end-to-end path
         (ydotool → kiosk weston seat → sdl-freerdp → RDP → qdistro-forward →
         per-stream seat → exported marker). Ensures ydotoold, lets weston hotplug
-        its uinput device, then moves the pointer into the fullscreen surface,
-        clicks, and sends a key (codex impl-10 Q2: motion→click→key)."""
+        its uinput device, then moves the pointer to a KNOWN viewer pixel, clicks,
+        and sends a key (codex impl-10 Q2: motion→click→key). Returns ``(px, py)``.
+
+        ``absolute=False`` (default, the confinement/isolation gates): anchor at the
+        corner (a large RELATIVE move clamping to 0,0) then a relative move of
+        ``(px,py)``. Fine when only PRESS deltas matter — but libinput applies
+        POINTER ACCELERATION to relative motion, so the landing pixel is NOT exactly
+        (px,py) (measured ~1.98× live). ``absolute=True`` (the coordinate-fidelity
+        gate): ``ydotool mousemove --absolute`` maps straight onto the output and
+        bypasses acceleration, so the pointer lands at the EXACT viewer pixel — the
+        only honest way to assert a coordinate."""
         real = self._real(vm)
+        px = self.out_w // 2 if x is None else int(x)
+        py = self.out_h // 2 if y is None else int(y)
         # viewer-stack.sh already started OUR ydotoold at this socket BEFORE weston
         # (so weston enumerated the uinput device at startup). Just drive ydotool.
         sock = "/run/.ydotool_socket"
+        if absolute:
+            move = f"ydotool mousemove --absolute -x {px} -y {py}; sleep 0.3; "
+        else:
+            # anchor at the corner (relative move clamps to 0,0), then a relative
+            # move of (px,py) → lands NEAR the viewer pixel (accel-skewed; ok for
+            # press-delta gates that don't assert the coordinate).
+            move = (f"ydotool mousemove -- -5000 -5000; sleep 0.3; "
+                    f"ydotool mousemove -- {px} {py}; sleep 0.3; ")
         script = (
             f"export YDOTOOL_SOCKET={sock}; "
             f"[ -S {sock} ] || {{ echo 'NO_YDOTOOL_SOCKET'; exit 1; }}; "
-            # center the pointer (relative: large move to a corner, then toward
-            # center), click TWICE (a missed-focus first click still leaves a
-            # delivered press), and send a key.
-            f"ydotool mousemove -- -5000 -5000; sleep 0.3; "
-            f"ydotool mousemove -- {self.out_w // 2} {self.out_h // 2}; sleep 0.3; "
+            f"{move}"
             f"ydotool click 0xC0; sleep 0.3; "       # left press+release
             f"ydotool click 0xC0; sleep 0.3; "
             f"ydotool key 30:1 30:0; sleep 0.3; "    # 'a' press+release
@@ -564,6 +622,7 @@ class QciVMBackend:
         out = self._vmexec(real, script, check=False)
         if "YDOTOOL_DONE" not in out:
             raise RuntimeError(f"ydotool injection failed on {vm}:\n{out}")
+        return (px, py)
 
     def apply_netem(self, vm: str, dev: str, profile_name: str) -> None:
         # NB (codex impl-4/impl-6 M6): the loopback relay leg BYPASSES this — it
@@ -590,7 +649,8 @@ class QciVMBackend:
         if real == self.vm_a:
             self._vmexec(real, self._as_admin(
                 "systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander "
-                "mm-relay mm-control 2>/dev/null || true"), check=False)
+                "mm-relay mm-control mm-marker2 mm-bystander2 mm-relay2 "
+                "2>/dev/null || true"), check=False)
         else:
             self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true",
                          check=False)

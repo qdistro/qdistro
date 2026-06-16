@@ -20,7 +20,8 @@ from multimachine.bridge import ViewStreamApproved
 from multimachine.harness import marker as M
 from multimachine.harness.evidence import CaptureClass
 from multimachine.harness.scenario import (
-    run_input_confinement_slice, run_input_negative_control_slice,
+    run_input_confinement_slice, run_input_coordinate_fidelity_slice,
+    run_input_negative_control_slice,
 )
 from multimachine.harness.topology import Topology
 from multimachine.sidechannel import decode
@@ -39,16 +40,25 @@ class _FakeProc:
     def terminate(self): pass
 
 
-def _tel(label="exported", seats_seen=1, button_press=0, key_press=0):
-    return {"label": label, "seats_seen": seats_seen,
+def _tel(label="exported", seats_seen=1, button_press=0, key_press=0,
+         pointer_motion=0, last_x=0, last_y=0):
+    seats = [{"name": 1, "has_pointer": 1, "has_keyboard": 1,
+              "pointer_enter": 1 if pointer_motion else 0,
+              "pointer_motion": pointer_motion, "button_press": button_press,
+              "keyboard_enter": 1, "key_press": key_press,
+              "last_x": last_x, "last_y": last_y}]
+    return {"label": label, "seats_seen": seats_seen, "seats": seats,
             "totals": {"button_press": button_press, "key_press": key_press,
-                       "pointer_enter": 0, "keyboard_enter": 0}}
+                       "pointer_enter": 1 if pointer_motion else 0,
+                       "pointer_motion": pointer_motion, "keyboard_enter": 0}}
 
 
 class MockInputBackend:
     def __init__(self, *, capture_gen=7, capture_out=1, leaky=False,
                  no_deliver=False, dead_sentinel=False, permission_bypassed=False,
-                 dead_exported=False, inject_raises=False, width=1280, height=800):
+                 dead_exported=False, inject_raises=False, coord_offset=0,
+                 swap_axes=False, mock_scale_x=1.0, mock_scale_y=1.0,
+                 width=1280, height=800):
         self.width, self.height = width, height
         self.capture_gen, self.capture_out = capture_gen, capture_out
         self.leaky, self.no_deliver = leaky, no_deliver
@@ -56,6 +66,11 @@ class MockInputBackend:
         self.permission_bypassed = permission_bypassed   # neg-ctrl: bit failed to gate
         self.dead_exported = dead_exported               # neg-ctrl: exported never ran
         self.inject_raises = inject_raises               # neg-ctrl: injection not driven
+        self.coord_offset = coord_offset                 # coord-fidelity: translation bug
+        self.swap_axes = swap_axes                       # coord-fidelity: cross-axis swap
+        self.mock_scale_x = mock_scale_x                 # coord-fidelity: per-axis scale
+        self.mock_scale_y = mock_scale_y
+        self._motion = 0
         self.calls: list[tuple] = []
         self._tel = {"exported": _tel("exported"), "sentinel": _tel("sentinel")}
         self._paths: dict[str, str] = {}
@@ -142,18 +157,28 @@ class MockInputBackend:
             return {}                        # exported marker never wrote telemetry
         return dict(self._tel.get(which, {})) if which else {}
 
-    def inject_input(self, vm):
+    def inject_input(self, vm, *, x=None, y=None, absolute=False):
         self.calls.append(("inject_input", vm))
         if self.inject_raises:
             raise RuntimeError("ydotool injection failed")
+        px = 0 if x is None else int(x)
+        py = 0 if y is None else int(y)
         # allow_input=0 (negative control): the forward got NO inject channel, so
         # the SAME injection delivers nothing — UNLESS the permission bit failed to
-        # gate it (permission_bypassed). allow_input=1 delivers as normal.
+        # gate it (permission_bypassed). allow_input=1 delivers as normal. The
+        # injected pointer lands at the modelled end-to-end map (mock_scale·p +
+        # coord_offset); pointer_motion increments per injection (coord-fidelity).
         deliver = (getattr(self, "_allow_input", 1) or self.permission_bypassed)
         if deliver and not self.no_deliver:
-            self._tel["exported"] = _tel("exported", button_press=1, key_press=1)
+            self._motion += 1
+            ix, iy = (py, px) if self.swap_axes else (px, py)   # swap = cross-axis bug
+            self._tel["exported"] = _tel(
+                "exported", button_press=1, key_press=1, pointer_motion=self._motion,
+                last_x=round(self.mock_scale_x * ix) + self.coord_offset,
+                last_y=round(self.mock_scale_y * iy) + self.coord_offset)
         if self.leaky:                       # a confinement bug: leaks to sentinel
             self._tel["sentinel"] = _tel("sentinel", button_press=1, key_press=1)
+        return (px, py)
 
 
 class TestInputConfinement:
@@ -253,5 +278,66 @@ class TestNegativeControl:
 
     def test_stale_capture_fails(self, tmp_path):
         be = MockInputBackend(capture_gen=6)             # wrong generation
+        res = self._run(be, tmp_path)
+        assert not res.passed and res.oracle.stale_generation
+
+
+class TestCoordinateFidelity:
+    """inject at TWO known viewer pixels, assert the source receives them as a
+    faithful linear map — zero offset, isotropic scale (codex impl-11; session 6).
+    The uniform apparatus scale is allowed; offset/skew/swap must fail."""
+
+    def _run(self, be, tmp_path, **kw):
+        return run_input_coordinate_fidelity_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1", **kw)
+
+    def test_faithful_identity_passes(self, tmp_path):
+        be = MockInputBackend(capture_gen=7)             # identity map
+        res = self._run(be, tmp_path)
+        assert res.passed, (res.x_scale, res.y_scale, res.offset_x, res.offset_y,
+                            res.cross_x_shear, res.cross_y_shear)
+        assert abs(res.offset_x) <= res.offset_tol and abs(res.offset_y) <= res.offset_tol
+        assert abs(res.x_scale - res.y_scale) <= res.scale_tol
+        assert abs(res.cross_x_shear) <= res.shear_tol
+        assert abs(res.cross_y_shear) <= res.shear_tol and res.seats_found
+        res.bundle.assert_remote_proof()
+
+    def test_uniform_apparatus_scale_passes(self, tmp_path):
+        # a UNIFORM scale (the ydotool uinput-absolute artifact) is faithful → pass.
+        be = MockInputBackend(capture_gen=7, mock_scale_x=2.0, mock_scale_y=2.0)
+        res = self._run(be, tmp_path)
+        assert res.passed
+        assert abs(res.x_scale - 2.0) < 0.05 and abs(res.offset_x) <= res.offset_tol
+
+    def test_offset_translation_fails(self, tmp_path):
+        # a coordinate OFFSET (the origin doesn't map faithfully) must FAIL.
+        be = MockInputBackend(capture_gen=7, coord_offset=80)
+        res = self._run(be, tmp_path)
+        assert not res.passed and abs(res.offset_x) > res.offset_tol
+
+    def test_anisotropic_scale_fails(self, tmp_path):
+        # per-axis distortion (x_scale != y_scale) must FAIL.
+        be = MockInputBackend(capture_gen=7, mock_scale_x=1.0, mock_scale_y=2.0)
+        res = self._run(be, tmp_path)
+        assert not res.passed and abs(res.x_scale - res.y_scale) > res.scale_tol
+
+    def test_axis_swap_fails(self, tmp_path):
+        # an axis SWAP (x↔y) is invisible on a single diagonal but the axis-aligned
+        # triple catches it: cross shear blows up (and x/y scale degenerate).
+        be = MockInputBackend(capture_gen=7, swap_axes=True)
+        res = self._run(be, tmp_path)
+        assert not res.passed
+        assert (abs(res.cross_x_shear) > res.shear_tol
+                or abs(res.cross_y_shear) > res.shear_tol
+                or res.x_scale <= 0.1 or res.y_scale <= 0.1)
+
+    def test_no_injected_seat_fails_closed(self, tmp_path):
+        be = MockInputBackend(capture_gen=7, no_deliver=True)
+        res = self._run(be, tmp_path)
+        assert not res.passed and not res.seats_found
+
+    def test_stale_capture_fails(self, tmp_path):
+        be = MockInputBackend(capture_gen=6)
         res = self._run(be, tmp_path)
         assert not res.passed and res.oracle.stale_generation
