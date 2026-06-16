@@ -152,6 +152,21 @@ class TestOracle:
         assert not res.ok
         assert any("output_id" in n for n in res.notes)
 
+    def test_auto_origin_decodes_offset_capture(self):
+        # a compositor places the marker view at an offset on a black output
+        # (qdwin insets a toplevel); auto_origin must find it and decode.
+        lay, pay, marker = _render(width=608, height=448, gen=7, out=1, frame=11)
+        canvas = np.zeros((480, 640, 3), dtype=np.uint8)  # black output
+        canvas[32:32 + 448, 32:32 + 608] = marker          # placed at (32,32)
+        res = O.evaluate(canvas, lay, 1.0, auto_origin=True,
+                         active_generation=7, expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.payload.frame == 11
+        assert any("auto-origin=(32, 32)" in n for n in res.notes)
+
+    def test_detect_origin_all_black_returns_zero(self):
+        assert O.detect_origin(np.zeros((10, 10, 3), dtype=np.uint8)) == (0, 0)
+
     def test_zero_width_band_marked_not_applicable(self):
         # codex impl-3 finding 9: a seam_x that collapses the outer bands to zero
         # width must mark them n/a (ok), not sample an adjacent band and fail.

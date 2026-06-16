@@ -104,6 +104,23 @@ def classify_color(patch: np.ndarray, tol: int) -> tuple[str, float]:
     return best_name, best_frac
 
 
+def detect_origin(img: np.ndarray, threshold: int = 30) -> tuple[int, int]:
+    """Find the (x, y) of the marker's content top-left within a capture.
+
+    A real compositor composites the marker view onto an output at a placement
+    offset (e.g. qdwin insets a normal toplevel; the rest is background). The
+    marker's high-contrast bands/barcode are non-black, so the content bounding
+    box's top-left is the origin to feed the geometry-based decode. Returns
+    (0, 0) if the whole frame is below threshold.
+    """
+    lum = img.max(axis=-1)
+    cols = np.where(lum.max(axis=0) > threshold)[0]
+    rows = np.where(lum.max(axis=1) > threshold)[0]
+    if cols.size == 0 or rows.size == 0:
+        return (0, 0)
+    return (int(cols[0]), int(rows[0]))
+
+
 def _sample_cell(img: np.ndarray, cx: float, cy: float, cell_px: float) -> int:
     """Sample one barcode cell centre; return 1 (white) or 0 (black)."""
     half = max(1, int(cell_px * 0.3))
@@ -232,11 +249,21 @@ def classify_bands(
 def evaluate(
     img: np.ndarray, layout: M.MarkerLayout, scale: float,
     *, tol: int = TOL_LOSSLESS, origin: tuple[int, int] = (0, 0),
+    auto_origin: bool = False,
     active_generation: int | None = None,
     expect_output_id: int | None = None,
 ) -> OracleResult:
-    """Full oracle pass over one capture against the expected marker contract."""
+    """Full oracle pass over one capture against the expected marker contract.
+
+    ``auto_origin=True`` detects the marker's placement offset within the capture
+    (a real compositor insets/places the view) via :func:`detect_origin`,
+    overriding ``origin``. Use it for live captures; leave it off for synthetic
+    captures already at (0, 0).
+    """
     res = OracleResult(ok=False, payload=None, payload_error=None)
+    if auto_origin:
+        origin = detect_origin(img)
+        res.notes.append(f"auto-origin={origin}")
 
     try:
         res.payload = decode_corner(img, layout, scale, origin=origin)
