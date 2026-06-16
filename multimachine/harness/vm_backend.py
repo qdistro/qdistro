@@ -371,22 +371,38 @@ class QciVMBackend:
         exported_label: str, sentinel_label: str) -> ViewStreamApproved:
         """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
         subscribed, writing per-seat input telemetry) + an ``--allow-input``
-        subscribe + a LOCAL SENTINEL marker. Returns the relay-pointed approval."""
+        subscribe. The SENTINEL is launched separately (:meth:`launch_sentinel`)
+        AFTER the oracle, since a visible sentinel overlaps the per-view capture."""
         real = self._real(vm)
+        self._sentinel_label = sentinel_label
         self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                    "/tmp/mm-source-stack.sh")
+        # SOCK=wayland-0 so the forward's hardcoded `--wayland-display wayland-0`
+        # connects back and claims the input-injection channel (session-4 finding).
         env = (f"W={width} H={height} GEN={generation} FS=1 ANIMATE_MS=200 "
-               f"RELAY_PORT={self.relay_port} ALLOW_INPUT=1 "
+               f"SOCK=wayland-0 RELAY_PORT={self.relay_port} ALLOW_INPUT=1 "
                f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
-               f"EXPORTED_LABEL={shlex.quote(exported_label)} "
-               f"SENTINEL_TELEMETRY={shlex.quote(sentinel_telemetry)} "
-               f"SENTINEL_LABEL={shlex.quote(sentinel_label)}")
+               f"EXPORTED_LABEL={shlex.quote(exported_label)}")
         out = self._vmexec(real, self._as_admin(
             f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)
         if "SETUP_OK" not in out:
             raise RuntimeError(f"confinement source-stack did not report SETUP_OK:\n{out}")
         self._approved = self._parse_setup(out, generation)
         return self._approved
+
+    def launch_sentinel(self, vm: str, *, generation: int,
+                        sentinel_telemetry: str, sentinel_label: str) -> None:
+        """Launch the LOCAL unexported sentinel marker on the live qdwin (MODE=
+        sentinel), AFTER the oracle. It must be up + binding seats during injection;
+        injected input must never reach it (the confinement detector)."""
+        real = self._real(vm)
+        env = (f"MODE=sentinel SOCK=wayland-0 GEN={generation} ANIMATE_MS=200 "
+               f"SENTINEL_TELEMETRY={shlex.quote(sentinel_telemetry)} "
+               f"SENTINEL_LABEL={shlex.quote(sentinel_label)}")
+        out = self._vmexec(real, self._as_admin(
+            f"{env} bash /tmp/mm-source-stack.sh"), timeout=60)
+        if "SENTINEL_OK" not in out:
+            raise RuntimeError(f"sentinel did not start:\n{out}")
 
     def read_telemetry(self, vm: str, path: str) -> dict:
         """Read + parse a marker's per-seat input telemetry JSON from the guest
@@ -408,18 +424,15 @@ class QciVMBackend:
         its uinput device, then moves the pointer into the fullscreen surface,
         clicks, and sends a key (codex impl-10 Q2: motion→click→key)."""
         real = self._real(vm)
+        # viewer-stack.sh already started OUR ydotoold at this socket BEFORE weston
+        # (so weston enumerated the uinput device at startup). Just drive ydotool.
         sock = "/run/.ydotool_socket"
         script = (
             f"export YDOTOOL_SOCKET={sock}; "
-            f"if ! pgrep -x ydotoold >/dev/null; then "
-            f"  systemctl reset-failed mm-ydotoold 2>/dev/null || true; "
-            f"  systemd-run --collect --unit=mm-ydotoold "
-            f"    ydotoold --socket-path={sock} --socket-perm=0666; "
-            f"  for i in $(seq 1 30); do [ -S {sock} ] && break; sleep 0.2; done; "
-            f"  sleep 2; fi; "                       # let weston hotplug the device
-            # center the pointer (relative: large move to a corner, then to ~center),
-            # click, and send a key. Repeat the click so a missed-focus first click
-            # still leaves a delivered press.
+            f"[ -S {sock} ] || {{ echo 'NO_YDOTOOL_SOCKET'; exit 1; }}; "
+            # center the pointer (relative: large move to a corner, then toward
+            # center), click TWICE (a missed-focus first click still leaves a
+            # delivered press), and send a key.
             f"ydotool mousemove -- -5000 -5000; sleep 0.3; "
             f"ydotool mousemove -- 640 400; sleep 0.3; "
             f"ydotool click 0xC0; sleep 0.3; "       # left press+release

@@ -122,6 +122,9 @@ class MockInputBackend:
         self.calls.append(("setup_confinement", vm))
         return ViewStreamApproved("pw-0", 43210, "/c.pem", "otp")
 
+    def launch_sentinel(self, vm, *, generation, sentinel_telemetry, sentinel_label):
+        self.calls.append(("launch_sentinel", vm))
+
     def read_telemetry(self, vm, path):
         which = self._paths.get(path)
         return dict(self._tel.get(which, {})) if which else {}

@@ -51,6 +51,20 @@ sleep 1
 systemd-run --collect --unit=mm-seatd seatd
 for _ in $(seq 1 30); do [ -S /run/seatd.sock ] && break; sleep 0.2; done
 [ -S /run/seatd.sock ] && echo "seatd up" || { echo "FAIL: seatd socket missing"; journalctl -u mm-seatd --no-pager|tail -10; exit 6; }
+
+# ydotoold (input-confinement gate, codex impl-10): start OUR OWN at a fixed
+# socket BEFORE weston so weston enumerates its uinput device at startup (more
+# reliable than a later hotplug). The harness's inject_input drives ydotool
+# against this socket. Idempotent across relaunches. Harmless when input isn't
+# exercised (it just adds an idle virtual input device).
+YDSOCK=/run/.ydotool_socket
+systemctl stop mm-ydotoold 2>/dev/null || true
+systemctl reset-failed mm-ydotoold 2>/dev/null || true
+systemd-run --collect --unit=mm-ydotoold ydotoold --socket-path=$YDSOCK --socket-perm=0666
+for _ in $(seq 1 30); do [ -S "$YDSOCK" ] && break; sleep 0.2; done
+[ -S "$YDSOCK" ] && echo "ydotoold up ($YDSOCK)" || echo "WARN: ydotoold socket missing (input gate will fail)"
+sleep 1   # let the uinput device settle before weston enumerates it
+
 rm -rf "$RT"; mkdir -p "$RT"; chmod 0700 "$RT"
 
 cat > "$RT/weston.ini" <<EOF

@@ -223,6 +223,59 @@ class TestLiveManagedToplevelCapture:
         b.assert_remote_proof()  # passing oracle tied to a VM_B decoded capture
 
 
+# ---- Phase-1: LIVE input-confinement gate (scenario-3, step 8) -----------
+_CONFINE_IMG = _DATA / "live-input-confinement-vmb-1280x800-o1-g25.png"
+_CONFINE_EXP = _DATA / "live-input-confinement-exported-g25.json"
+_CONFINE_SEN = _DATA / "live-input-confinement-sentinel-g25.json"
+
+
+def _press_total(path: Path) -> int:
+    import json
+    t = json.loads(path.read_text()).get("totals", {})
+    return int(t.get("button_press", 0)) + int(t.get("key_press", 0))
+
+
+class TestLiveInputConfinementCapture:
+    """Regression on the step-8 INPUT-CONFINEMENT gate (scenario-3, codex impl-10):
+    a REAL two-VM live run (2026-06-16 session 4). Input was injected at the VM-B
+    viewer with ``ydotool`` and rode the ENTIRE shipped path — kiosk weston seat →
+    ``sdl-freerdp`` → RDP → ``qdistro-forward`` (``qfwd_mouse``/``qfwd_keyboard`` →
+    ``inject_*``) → the source view's per-stream ``weston_seat`` (focus-locked to the
+    exported marker) → the marker's ``wl_pointer``/``wl_keyboard``. Two markers ran
+    on VM-A: the EXPORTED (subscribed) one and a LOCAL UNEXPORTED SENTINEL.
+
+    Honesty: protocol/seat/process correctness only — the per-stream-seat isolation
+    is the shipped invariant under test. The proof is PRESS deltas (codex impl-10
+    Q1): the exported marker received the injected presses; the sentinel received
+    ZERO. The decoded oracle (committed still) confirms the captured surface was the
+    managed exported toplevel at 1:1, no hidden scaling.
+    """
+
+    def test_decoded_exported_toplevel_clean(self):
+        img = C.load_image(_CONFINE_IMG)
+        assert img.shape == (800, 1280, 3)
+        res = O.evaluate(img, M.compute_layout(1280, 800), 1.0, tol=O.TOL_RDP,
+                         auto_origin=True, active_generation=25, expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.measured_scale == 1.0 and not res.hidden_scaling
+        assert all(b.ok for b in res.bands)
+
+    def test_injected_input_reached_only_the_exported_window(self):
+        # the confinement proof: the EXPORTED marker received injected presses,
+        # the LOCAL SENTINEL received ZERO (per-stream seat isolation).
+        assert _press_total(_CONFINE_EXP) > 0
+        assert _press_total(_CONFINE_SEN) == 0
+
+    def test_telemetry_is_self_consistent(self):
+        import json
+        exp = json.loads(_CONFINE_EXP.read_text())
+        sen = json.loads(_CONFINE_SEN.read_text())
+        assert exp["label"] == "exported" and sen["label"] == "sentinel"
+        # both bound the per-stream seat (so the sentinel COULD have received a
+        # leak — its zero is meaningful, not a never-attached artifact).
+        assert exp["seats_seen"] >= 1 and sen["seats_seen"] >= 1
+
+
 # ---- A1-min: LIVE two-output straddle (render gate) ----------------------
 _A1_OUT0 = _DATA / "live-straddle-a1-out0-800x600-o1-g20.png"
 _A1_OUT1 = _DATA / "live-straddle-a1-out1-800x600-o1-g20.png"

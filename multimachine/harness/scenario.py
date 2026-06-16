@@ -397,6 +397,9 @@ class InputConfinementBackend(ManagedVMBackend, Protocol):
         exported_telemetry: str, sentinel_telemetry: str,
         exported_label: str, sentinel_label: str) -> ViewStreamApproved: ...
 
+    def launch_sentinel(self, vm: str, *, generation: int,
+                        sentinel_telemetry: str, sentinel_label: str) -> None: ...
+
     def read_telemetry(self, vm: str, path: str) -> dict: ...
 
     def inject_input(self, vm: str) -> None: ...
@@ -512,6 +515,12 @@ def run_input_confinement_slice(
             measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
             stale_generation=res.stale_generation,
             bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # NOW launch the sentinel (a visible local toplevel that would overlap the
+        # per-view capture — so only after the oracle has its clean exported frame).
+        backend.launch_sentinel(a, generation=generation,
+                                sentinel_telemetry=sentinel_telemetry,
+                                sentinel_label="sentinel")
 
         # baseline both telemetry files, inject at VM-B, then poll for a delta.
         exported_before = backend.read_telemetry(a, exported_telemetry)

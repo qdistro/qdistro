@@ -8,7 +8,12 @@ set -uo pipefail   # pipefail surfaces in-pipe failures; cleanup lines are
                    # explicitly tolerated (|| true). The caller treats the final
                    # SETUP_OK token (not exit code alone) as the success signal.
 export XDG_RUNTIME_DIR=/run/user/1000
-SOCK=wayland-mm
+# qdwin's wayland socket. Default wayland-mm (private). The input-confinement gate
+# overrides this to wayland-0 because qdwin spawns qdistro-forward with a HARDCODED
+# `--wayland-display wayland-0` (qdwin.c) — so for the forward to connect back and
+# CLAIM the input-injection channel, our qdwin must listen on wayland-0 (codex
+# impl-10 / session-4 live finding). Pixels (pipewire) don't need this; input does.
+SOCK=${SOCK:-wayland-mm}
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
 MODE=${MODE:-full}
 # Marker frame cadence. A capture (`virsh screenshot`) of an ANIMATING marker can
@@ -43,6 +48,25 @@ discover_rdp_port() {
 # fixed relay at it. The marker (source app) is untouched, so its survival is also
 # asserted by the caller. Honesty: this proves re-exportability + source survival;
 # with num-outputs>1 it is not a strict single-slot reclaim.
+# MODE=sentinel: launch a SECOND, LOCAL, UNEXPORTED marker on the ALREADY-LIVE
+# qdwin as the confinement detector (codex impl-10 Q3a). Launched SEPARATELY, AFTER
+# the decoded oracle has captured the clean exported view — a visible sentinel
+# toplevel overlaps the per-view output capture and corrupts the exported marker's
+# bands, so it must not be up during the oracle (session-4 finding). It only needs
+# to be live + binding seats during input injection.
+if [ "$MODE" = sentinel ]; then
+  if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: no live qdwin socket for sentinel"; exit 9; fi
+  RUN --unit=mm-sentinel --setenv=WAYLAND_DISPLAY=$SOCK \
+    qdwin-marker-client --width 400 --height 300 --output-id 2 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS --telemetry $SENTINEL_TELEMETRY --label $SENTINEL_LABEL
+  sleep 1.5
+  if systemctl --user is-active mm-sentinel >/dev/null 2>&1; then
+    echo "SENTINEL_OK telemetry=$SENTINEL_TELEMETRY"
+  else
+    echo "FAIL: sentinel did not start"; journalctl --user -u mm-sentinel --no-pager|tail -10; exit 9
+  fi
+  exit 0
+fi
+
 if [ "$MODE" = resubscribe ]; then
   if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: no live qdwin socket to re-export"; exit 9; fi
   if ! systemctl --user is-active mm-marker >/dev/null 2>&1; then echo "FAIL: marker not alive for re-export"; exit 9; fi
@@ -118,14 +142,8 @@ if [ -z "$RDP_PORT" ]; then echo "FAIL: no RDP_PORT approved"; echo "--- bystand
 RUN --unit=mm-relay socat TCP-LISTEN:$RELAY_PORT,reuseaddr,fork TCP:127.0.0.1:$RDP_PORT
 sleep 0.5
 
-# 6) SENTINEL marker — a SECOND, LOCAL, UNEXPORTED toplevel (launched AFTER the
-#    export is subscribed, so --subscribe last never catches it). It is the
-#    confinement detector: injected input must NOT reach it (codex impl-10 Q3a).
-if [ -n "$SENTINEL_TELEMETRY" ]; then
-  RUN --unit=mm-sentinel --setenv=WAYLAND_DISPLAY=$SOCK \
-    qdwin-marker-client --width 400 --height 300 --output-id 2 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS --telemetry $SENTINEL_TELEMETRY --label $SENTINEL_LABEL
-  sleep 1
-  echo "sentinel up (telemetry=$SENTINEL_TELEMETRY)"
-fi
+# NB the confinement SENTINEL is NOT launched here — it would overlap the per-view
+# output capture and corrupt the exported marker's bands. The harness launches it
+# separately (MODE=sentinel) AFTER the decoded oracle, before input injection.
 echo "--- bystander.out ---"; cat "$XDG_RUNTIME_DIR/bystander.out"
 echo "SETUP_OK RDP_PORT=$RDP_PORT RELAY_PORT=$RELAY_PORT"
