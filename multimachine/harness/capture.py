@@ -61,9 +61,16 @@ def _read_ppm(path: Path) -> np.ndarray:
 
 
 def load_image(path: Path | str) -> np.ndarray:
-    """Load any capture as an (H, W, 3) uint8 RGB array."""
+    """Load any capture as an (H, W, 3) uint8 RGB array.
+
+    Dispatch is by CONTENT (magic bytes), not extension: ``virsh screenshot``
+    emits PNG even when the caller named the file ``.ppm`` (host-dependent), so
+    trusting the suffix would mis-route. P6 PPM is parsed natively; anything else
+    goes through PIL."""
     path = Path(path)
-    if path.suffix.lower() in (".ppm", ".pnm"):
+    with open(path, "rb") as f:
+        magic = f.read(2)
+    if magic == b"P6":
         return _read_ppm(path)
     from PIL import Image  # lazy: only the non-PPM path needs PIL
 

@@ -29,10 +29,20 @@ class TestLoadImage:
             f.write(arr.tobytes())
         assert C.load_image(p).shape == (4, 5, 3)
 
-    def test_non_p6_rejected(self, tmp_path):
+    def test_png_named_ppm_loads_by_content(self, tmp_path):
+        # virsh screenshot emits PNG even for a .ppm destination; load_image
+        # dispatches by magic bytes, not suffix, so this must load (not be fed to
+        # the P6 parser). Regression for the live QciVMBackend capture path.
+        from PIL import Image
+        arr = np.random.default_rng(3).integers(0, 256, (6, 7, 3), dtype=np.uint8)
+        p = tmp_path / "vm-b-decoded.ppm"   # PNG content, .ppm name
+        Image.fromarray(arr).save(p, format="PNG")
+        assert np.array_equal(C.load_image(p), arr)
+
+    def test_garbage_rejected(self, tmp_path):
         p = tmp_path / "bad.ppm"
-        p.write_bytes(b"P3\n1 1\n255\n0 0 0\n")
-        with pytest.raises(ValueError, match="P6"):
+        p.write_bytes(b"not an image at all")
+        with pytest.raises(Exception):
             C.load_image(p)
 
     def test_png_via_pil(self, tmp_path):
