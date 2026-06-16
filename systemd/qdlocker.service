@@ -73,7 +73,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=QDLOCKER_PAM_SERVICE=qdlocker
 # Pin WAYLAND_DISPLAY + XDG_RUNTIME_DIR explicitly: the test-VM linger
 # session doesn't import them into the user manager environment, so we
-# set them here, mirroring noctalia-shell.service.
+# set them here, mirroring qdshell.service.
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 

@@ -113,7 +113,7 @@ locked_changed=0 cause=locker_set_locked`:
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u noctalia-session.service --since \"1 minute ago\" --no-pager"' \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"1 minute ago\" --no-pager"' \
   | grep "locked_changed=0 cause=locker_set_locked"
 ```
 **Assert (4.3):** screenshot shows the foot terminal (no lock UI).
