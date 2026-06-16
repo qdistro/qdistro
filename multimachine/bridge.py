@@ -94,7 +94,8 @@ def bridge_torn_down(reason: str, generation: int, window_id: int,
 
 def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
                     width: int = 0, height: int = 0,
-                    verify_cert: bool = False) -> list[str]:
+                    verify_cert: bool = False, fullscreen: bool = False,
+                    username: str | None = None) -> list[str]:
     """Build an ``sdl-freerdp`` command for the viewer to decode the stream.
 
     Forces **no client-side scaling** and full-window decode so the captured
@@ -111,10 +112,18 @@ def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
     authenticates the connection. ``verify_cert=True`` pins the
     ``approved.rdp_cert_path`` the compositor served (``/cert:name`` + the cert
     file) for the product path.
+
+    ``fullscreen=True`` adds ``/f`` so the decoded surface fills the (kiosk-shell)
+    output at the origin — the proven decoded-remote capture geometry (codex
+    impl-9 Q2: the captured surface must be the viewer-managed toplevel, fullscreen
+    at 0,0 so the oracle can read the marker barcode 1:1). ``username`` adds
+    ``/u:<name>`` (the proven decoder used ``/u:mm``); the OTP on stdin still
+    authenticates, so it is optional/configurable, not mandatory.
     """
-    argv = [
-        "sdl-freerdp",
-        f"/v:{host}:{approved.rdp_port}",
+    argv = ["sdl-freerdp", f"/v:{host}:{approved.rdp_port}"]
+    if username:
+        argv.append(f"/u:{username}")
+    argv += [
         "/from-stdin",         # read the OTP from stdin, not argv
         "/scale:100",          # no client-side scaling
         "-grab-keyboard",      # do not steal the host's keyboard
@@ -125,6 +134,8 @@ def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
         argv.append("/cert:ignore")   # TOFU; cert validation out of scope (v1)
     if width and height:
         argv.append(f"/size:{width}x{height}")
+    if fullscreen:
+        argv.append("/f")      # fill the kiosk output at origin (1:1 capture)
     return argv
 
 

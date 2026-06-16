@@ -206,6 +206,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ap.add_argument("--otp", required=True, help="single-use stream password")
     ap.add_argument("--size", default="", help="WxH; empty = source size")
     ap.add_argument("--status-file", default="")
+    ap.add_argument("--fullscreen", action="store_true",
+                    help="decode fullscreen at the kiosk output origin (the "
+                         "live decoded-remote capture geometry, impl-9 Q2)")
+    ap.add_argument("--rdp-user", default="",
+                    help="sdl-freerdp /u:<name> (proven decoder used 'mm'); the "
+                         "OTP on stdin authenticates, so this is optional")
     args = ap.parse_args(argv)
 
     w = h = 0
@@ -217,7 +223,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             pipewire_node_name="", rdp_port=args.rdp_port,
             rdp_cert_path=args.rdp_cert, rdp_password=args.otp)
         argvv = rdp_client_argv(approved, host=args.rdp_host,
-                                width=w or ann.meta.req_w, height=h or ann.meta.req_h)
+                                width=w or ann.meta.req_w, height=h or ann.meta.req_h,
+                                fullscreen=args.fullscreen,
+                                username=args.rdp_user or None)
         proc = subprocess.Popen(argvv, stdin=subprocess.PIPE,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)

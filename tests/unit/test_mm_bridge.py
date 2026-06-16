@@ -83,3 +83,19 @@ class TestRdpClientArgv:
     def test_size_optional(self):
         argv = rdp_client_argv(_approved(), width=1280, height=720)
         assert "/size:1280x720" in argv
+
+    def test_fullscreen_knob_adds_f(self):
+        # impl-9 Q2: the live managed gate decodes fullscreen at the kiosk origin.
+        assert "/f" not in rdp_client_argv(_approved())
+        argv = rdp_client_argv(_approved(), fullscreen=True)
+        assert "/f" in argv
+        assert "/from-stdin" in argv          # still OTP-on-stdin, no argv leak
+        assert not any("otp123" in a for a in argv)
+
+    def test_username_knob_optional(self):
+        # default: no /u (the OTP on stdin authenticates).
+        assert not any(a.startswith("/u:") for a in rdp_client_argv(_approved()))
+        argv = rdp_client_argv(_approved(), username="mm")
+        assert "/u:mm" in argv
+        # /u precedes /from-stdin (the proven decoder argv order).
+        assert argv.index("/u:mm") < argv.index("/from-stdin")
