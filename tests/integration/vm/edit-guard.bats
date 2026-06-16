@@ -22,13 +22,17 @@ QCI="$REPO_ROOT/ci/bin/qci"
 # found"). Copying the whole ci/ tree makes ci/lib/ present so the dispatcher
 # behaves identically to the real repo. We exclude the gitignored ci/runs/
 # artifacts dir (potentially large local run logs that qci never reads — tests
-# override QCI_RUNS_DIR anyway) so the copy stays cheap.
+# override QCI_RUNS_DIR anyway) so the copy stays cheap, plus locally-generated
+# Python bytecode (__pycache__/*.pyc, also gitignored) so the fixture depends
+# only on committed source, not on whatever a prior local run happened to leave.
 _copy_ci_tree() {
     local dest="$1/ci"
     mkdir -p "$dest"
-    # Copy everything under ci/ except the runs/ artifacts directory, via a
-    # tar pipe (portable, preserves perms incl. the +x dispatcher).
-    tar -C "$REPO_ROOT/ci" --exclude=./runs -cf - . | tar -C "$dest" -xf -
+    # Copy everything under ci/ except the runs/ artifacts dir and generated
+    # bytecode, via a tar pipe (portable, preserves perms incl. the +x dispatcher).
+    tar -C "$REPO_ROOT/ci" \
+        --exclude=./runs --exclude='*/__pycache__' --exclude='*.pyc' \
+        -cf - . | tar -C "$dest" -xf -
 }
 
 setup() {
