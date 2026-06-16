@@ -40,7 +40,9 @@ class NetemProfile:
             # reorder needs a delay to be meaningful; tc requires it.
             if not self.delay_ms:
                 cmd += ["delay", "1ms"]
-            cmd += ["reorder", f"{100 - self.reorder_pct}%"]
+            # `tc netem reorder PCT` takes the reorder PROBABILITY directly
+            # (codex impl-3 finding 11 — do not invert it).
+            cmd += ["reorder", f"{self.reorder_pct}%"]
         if self.rate_kbit:
             cmd += ["rate", f"{self.rate_kbit}kbit"]
         return cmd

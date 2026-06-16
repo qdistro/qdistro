@@ -59,17 +59,17 @@ class TestViewerState:
         v = RemoteViewerState(generation=4)
         assert v.apply(Announce("announce", 4, _meta(1)))
         assert 1 in v.windows
-        assert v.apply(Configure("configure", 4, 1, 1024, 768))
+        assert v.apply(Configure("configure", 4, 1, 1024, 768, "s1"))
         assert (v.windows[1].w, v.windows[1].h) == (1024, 768)
-        assert v.apply(Focus("focus", 4, 1, True))
+        assert v.apply(Focus("focus", 4, 1, True, "s1"))
         assert v.windows[1].focused
 
     def test_single_focused_proxy(self):
         v = RemoteViewerState(generation=1)
         v.apply(Announce("announce", 1, _meta(1)))
         v.apply(Announce("announce", 1, _meta(2)))
-        v.apply(Focus("focus", 1, 1, True))
-        v.apply(Focus("focus", 1, 2, True))
+        v.apply(Focus("focus", 1, 1, True, "s1"))
+        v.apply(Focus("focus", 1, 2, True, "s2"))
         assert v.windows[2].focused and not v.windows[1].focused
 
     def test_stale_generation_control_rejected(self):
@@ -100,12 +100,12 @@ class TestViewerState:
     def test_closed_removes_window(self):
         v = RemoteViewerState(generation=1)
         v.apply(Announce("announce", 1, _meta(1)))
-        assert v.apply(Closed("closed", 1, 1, "exited"))
+        assert v.apply(Closed("closed", 1, 1, "exited", "s1"))
         assert v.windows == {}
 
     def test_configure_unknown_window_is_noop(self):
         v = RemoteViewerState(generation=1)
-        assert not v.apply(Configure("configure", 1, 99, 10, 10))
+        assert not v.apply(Configure("configure", 1, 99, 10, 10, "sX"))
 
 
 class TestStreamJoinKey:
@@ -125,6 +125,38 @@ class TestStreamJoinKey:
         v.apply(Announce("announce", 1, _meta(1, stream_id="s1")))
         v.apply(Announce("announce", 1, _meta(2, stream_id="s2")))
         assert {w.stream_id for w in v.windows.values()} == {"s1", "s2"}
+
+
+class TestStreamIdentitySafety:
+    def test_announce_requires_non_empty_stream_id(self):
+        v = RemoteViewerState(generation=1)
+        assert not v.apply(Announce("announce", 1, _meta(1, stream_id="")))
+        assert any(r[2] == "empty-stream-id" for r in v.rejected)
+
+    def test_duplicate_live_stream_id_rejected(self):
+        v = RemoteViewerState(generation=1)
+        assert v.apply(Announce("announce", 1, _meta(1, stream_id="dup")))
+        # a second announce reusing the same live stream_id is a replay/collision
+        assert not v.apply(Announce("announce", 1, _meta(2, stream_id="dup")))
+        assert any(r[2] == "duplicate-stream-id" for r in v.rejected)
+
+    def test_control_for_wrong_stream_rejected(self):
+        # window_id reused across exports in the SAME generation: a delayed
+        # Configure/Closed from the prior export (different stream_id) must not
+        # mutate/remove the new proxy (codex impl-3 finding 2).
+        v = RemoteViewerState(generation=1)
+        v.apply(Announce("announce", 1, _meta(1, stream_id="new")))
+        # stale Closed from the prior export of window 1 (stream_id "old")
+        assert not v.apply(Closed("closed", 1, 1, "exited", "old"))
+        assert 1 in v.windows                      # new proxy survives
+        assert not v.apply(Configure("configure", 1, 1, 9, 9, "old"))
+        assert any(r[2] == "stream-id-mismatch" for r in v.rejected)
+
+    def test_matching_stream_control_applies(self):
+        v = RemoteViewerState(generation=1)
+        v.apply(Announce("announce", 1, _meta(1, stream_id="abc")))
+        assert v.apply(Configure("configure", 1, 1, 9, 9, "abc"))
+        assert (v.windows[1].w, v.windows[1].h) == (9, 9)
 
 
 class TestSecurityLabelSemantics:

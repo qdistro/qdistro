@@ -110,3 +110,24 @@ class TestLiveCClient:
                              expect_output_id=out)
             assert res.ok, f"({out},{gen}): {res.summary()}"
             assert res.payload.frame == frame
+
+    def test_live_c_client_non_centered_seam_matches_python(self, tmp_path):
+        # codex impl-3 finding 8: cover the --seam-x layout path (the C band
+        # distribution must match Python's compute_layout for a non-centered seam).
+        binary = _find_marker_binary()
+        if not binary:
+            pytest.skip("qdwin-marker-client not built")
+        w, h, seam = 1280, 480, 400
+        ppm = tmp_path / "seam.ppm"
+        subprocess.run(
+            [binary, "--dump-ppm", str(ppm), "--width", str(w), "--height",
+             str(h), "--seam-x", str(seam), "--output-id", "1",
+             "--generation", "5", "--frame", "1"],
+            check=True, capture_output=True)
+        live = C.load_image(ppm)
+        lay = M.compute_layout(w, h, seam_x=seam)
+        pay = M.MarkerPayload(1, 5, 1, 0, 0, w, h, 100)
+        py = M.render_rgb(lay, pay, scale=1.0)
+        assert np.array_equal(live, py), "C/Python seam layout drift"
+        res = O.evaluate(live, lay, 1.0, active_generation=5, expect_output_id=1)
+        assert res.ok, res.summary()

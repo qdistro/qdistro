@@ -74,8 +74,20 @@ class TestHonestyRule:
         with pytest.raises(ValueError, match="decoded-remote"):
             b.assert_remote_proof()
 
-    def test_decoded_remote_bundle_accepted(self, tmp_path):
+    def test_decoded_remote_bundle_accepted_when_oracle_used_it(self, tmp_path):
         b = EvidenceBundle.create(tmp_path / "bundle", scenario="span")
         b.add_capture(_img(tmp_path, "a.ppm"), CaptureClass.VM_A_GUEST)
-        b.add_capture(_img(tmp_path, "b.ppm"), CaptureClass.VM_B_HOST)
+        cap = b.add_capture(_img(tmp_path, "b.ppm"), CaptureClass.VM_B_HOST)
+        # a PASSING oracle record tied to the decoded-remote capture.
+        b.add_oracle(OracleRecord(capture=cap.path, ok=True, generation=1))
         b.assert_remote_proof()  # must not raise
+
+    def test_unused_decoded_capture_is_refused(self, tmp_path):
+        # finding 4: a VM-B file exists but the passing oracle ran on a
+        # source-intent capture -> the remote claim is not actually proven.
+        b = EvidenceBundle.create(tmp_path / "bundle", scenario="span")
+        src = b.add_capture(_img(tmp_path, "src.ppm"), CaptureClass.VM_A_RDP_SOURCE)
+        b.add_capture(_img(tmp_path, "b.ppm"), CaptureClass.VM_B_HOST)  # unused
+        b.add_oracle(OracleRecord(capture=src.path, ok=True))           # on source!
+        with pytest.raises(ValueError, match="passing oracle record"):
+            b.assert_remote_proof()

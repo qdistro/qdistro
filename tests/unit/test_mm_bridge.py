@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from multimachine.bridge import (
     SourceWindowInfo, ViewStreamApproved, bridge_approved, bridge_torn_down,
-    mint_stream_id, rdp_client_argv,
+    mint_stream_id, rdp_client_argv, rdp_password,
 )
 from multimachine.sidechannel import (
     Announce, Closed, Disconnect, RemoteViewerState,
@@ -35,10 +35,16 @@ class TestBridgeApproved:
         assert "otp123" not in blob          # password never crosses the control channel
         assert "/tmp/c.pem" not in blob
 
-    def test_distinct_exports_get_distinct_stream_ids(self):
-        a = mint_stream_id(_approved(43210), 1)
-        b = mint_stream_id(_approved(43211), 2)
-        assert a != b
+    def test_fresh_nonce_per_export_even_for_identical_endpoint(self):
+        # codex impl-3 finding 1: same window + same endpoint must still mint a
+        # DIFFERENT stream_id each export (replay / rapid close-reopen safety).
+        a = bridge_approved(_approved(43210), _source(7), generation=1)
+        b = bridge_approved(_approved(43210), _source(7), generation=1)
+        assert a.meta.stream_id != b.meta.stream_id
+
+    def test_injected_nonce_is_used(self):
+        sid = mint_stream_id(7, nonce=lambda: "deadbeef")
+        assert sid == "vs-7-deadbeef"
 
     def test_announce_applies_to_viewer_and_correlates_by_stream(self):
         ann = bridge_approved(_approved(), _source(7), generation=3)
@@ -56,13 +62,23 @@ class TestBridgeTornDown:
 
 
 class TestRdpClientArgv:
-    def test_forces_no_scaling_and_otp(self):
+    def test_forces_no_scaling_and_no_password_on_argv(self):
         argv = rdp_client_argv(_approved(43210), host="10.0.2.2")
         assert argv[0] == "sdl-freerdp"
         assert "/v:10.0.2.2:43210" in argv
         assert "/scale:100" in argv          # no hidden client-side scaling
-        assert "/p:otp123" in argv
-        assert "/cert:ignore" in argv
+        assert "/from-stdin" in argv         # OTP read from stdin, not argv
+        # the OTP must NOT appear anywhere in argv (finding 5: argv leak).
+        assert not any("otp123" in a for a in argv)
+        assert "/cert:ignore" in argv        # TOFU, default
+
+    def test_password_supplied_via_stdin_helper(self):
+        assert rdp_password(_approved(43210)) == "otp123"
+
+    def test_verify_cert_pins_cert_path(self):
+        argv = rdp_client_argv(_approved(), verify_cert=True)
+        assert any(a.startswith("/cert:name:/tmp/c.pem") for a in argv)
+        assert "/cert:ignore" not in argv
 
     def test_size_optional(self):
         argv = rdp_client_argv(_approved(), width=1280, height=720)

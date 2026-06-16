@@ -118,6 +118,28 @@ class TestOracle:
         assert res.hidden_scaling, res.summary()
         assert not res.ok
 
+    def test_hidden_scaling_detected_when_caller_expects_1x(self):
+        # codex impl-3 finding 3: the image is actually scaled 1.5x but the
+        # caller passes expected scale 1.0 (it believes no client scaling) and
+        # the stamp says 1.0. The oracle must MEASURE the real pitch from pixels
+        # and flag the mismatch — not tautologically recover the caller's scale.
+        lay = M.compute_layout(800, 400)
+        pay = M.MarkerPayload(1, 5, 10, 0, 0, 800, 400, scale_x100=100)
+        img = M.render_rgb(lay, pay, scale=1.5)     # captured pixels are 1.5x
+        res = O.evaluate(img, lay, 1.0, active_generation=5)  # caller expects 1x
+        assert res.measured_scale is not None
+        assert res.measured_scale > 1.3, res.summary()  # measured ~1.5 from pixels
+        assert res.hidden_scaling and not res.ok
+
+    def test_measured_scale_matches_real_scale_independent_of_caller(self):
+        lay = M.compute_layout(800, 400)
+        pay = M.MarkerPayload(1, 5, 10, 0, 0, 800, 400, scale_x100=200)
+        img = M.render_rgb(lay, pay, scale=2.0)
+        # even if the caller under-states expected scale, the pitch is measured
+        # from pixels and should land near the true 2.0.
+        m = O.measure_scale_from_corner(img, lay, expected_scale=2.0)
+        assert 1.7 < m < 2.3
+
     def test_stale_generation_rejected(self):
         lay, pay, img = _render(gen=4)
         res = O.evaluate(img, lay, 1.0, active_generation=5)
@@ -129,3 +151,17 @@ class TestOracle:
         res = O.evaluate(img, lay, 1.0, active_generation=5, expect_output_id=1)
         assert not res.ok
         assert any("output_id" in n for n in res.notes)
+
+    def test_zero_width_band_marked_not_applicable(self):
+        # codex impl-3 finding 9: a seam_x that collapses the outer bands to zero
+        # width must mark them n/a (ok), not sample an adjacent band and fail.
+        lay = M.compute_layout(800, 400, seam_x=50)
+        zero = [b for b in lay.bands if b.x1 - b.x0 <= 0]
+        assert zero, "expected at least one zero-width band for this layout"
+        pay = M.MarkerPayload(1, 5, 10, 0, 0, 800, 400, scale_x100=100)
+        img = M.render_rgb(lay, pay, scale=1.0)
+        res = O.evaluate(img, lay, 1.0, active_generation=5)
+        for b in res.bands:
+            if (b.name in {z.name for z in zero}):
+                assert b.classified == "n/a" and b.ok
+        assert res.ok, res.summary()

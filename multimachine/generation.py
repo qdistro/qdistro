@@ -111,8 +111,13 @@ class DisplayLease:
         return (not self.revoked) and (now - self.last_heartbeat) <= self.ttl
 
     def renew(self, now: float, generation: int) -> bool:
-        """Heartbeat. A heartbeat from a stale generation must not renew."""
+        """Heartbeat. A heartbeat from a stale generation must not renew, and an
+        **already-expired lease cannot be resurrected** (codex impl-3 finding 6):
+        the precondition is enforced here, not only by the DockSession caller, so
+        a daemon mirroring this contract is safe too."""
         if self.revoked or generation != self.generation:
+            return False
+        if (now - self.last_heartbeat) > self.ttl:   # expired — do not resurrect
             return False
         self.last_heartbeat = now
         return True
@@ -209,11 +214,15 @@ class DockSession:
         if gen != self.generation:
             self.rejected.append((gen, kind, "stale-generation"))
             return False
-        # input additionally requires a currently-valid lease (no input onto a
-        # panel we no longer own) — stale input is never allowed.
-        if kind in INPUT_KINDS:
-            if self.lease is None or not self.lease.is_valid(self.clock()):
-                self.rejected.append((gen, kind, "no-valid-lease"))
-                return False
+        # A lapsed lease fails safe immediately and rejects the message —
+        # *no kind* of current-generation traffic (frame/control/input) is
+        # accepted once we no longer hold the panel (codex impl-3 finding 7).
+        # This does not depend on an external tick(): recv() enforces the bound.
+        # (Stale *pixels already on screen* may persist for the bounded blanking
+        # interval — but no NEW frame from a lapsed lease is applied.)
+        if self.lease is None or not self.lease.is_valid(self.clock()):
+            self._fail_safe("lease invalid at recv")
+            self.rejected.append((gen, kind, "no-valid-lease"))
+            return False
         self.applied.append((gen, kind))
         return True

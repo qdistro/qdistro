@@ -100,18 +100,21 @@ class Configure(ControlMessage):
     window_id: int = 0
     w: int = 0
     h: int = 0
+    stream_id: str = ""
 
 
 @dataclass(frozen=True)
 class Focus(ControlMessage):
     window_id: int = 0
     focused: bool = False
+    stream_id: str = ""
 
 
 @dataclass(frozen=True)
 class TitleChanged(ControlMessage):
     window_id: int = 0
     title: str = ""
+    stream_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ class CloseRequest(ControlMessage):
     """viewer → source: the user asked to close the remote window."""
 
     window_id: int = 0
+    stream_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,7 @@ class Closed(ControlMessage):
 
     window_id: int = 0
     reason: str = ""
+    stream_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -174,28 +179,35 @@ def decode(raw: str) -> ControlMessage:
             pointer_policy=PointerPolicy(m.get("pointer_policy", "forward")))
         return Announce("announce", gen, meta)
     if cls is Configure:
-        return Configure("configure", gen, d["window_id"], d["w"], d["h"])
+        return Configure("configure", gen, d["window_id"], d["w"], d["h"],
+                         d.get("stream_id", ""))
     if cls is Focus:
-        return Focus("focus", gen, d["window_id"], d["focused"])
+        return Focus("focus", gen, d["window_id"], d["focused"],
+                     d.get("stream_id", ""))
     if cls is TitleChanged:
-        return TitleChanged("title", gen, d["window_id"], d["title"])
+        return TitleChanged("title", gen, d["window_id"], d["title"],
+                            d.get("stream_id", ""))
     if cls is CloseRequest:
-        return CloseRequest("close_request", gen, d["window_id"])
+        return CloseRequest("close_request", gen, d["window_id"],
+                            d.get("stream_id", ""))
     if cls is Closed:
-        return Closed("closed", gen, d["window_id"], d.get("reason", ""))
+        return Closed("closed", gen, d["window_id"], d.get("reason", ""),
+                      d.get("stream_id", ""))
     if cls is Disconnect:
         return Disconnect("disconnect", gen, d.get("reason", ""))
     raise AssertionError("unreachable")
 
 
-def map_torn_down(reason: str, generation: int, window_id: int) -> ControlMessage:
+def map_torn_down(reason: str, generation: int, window_id: int,
+                  stream_id: str = "") -> ControlMessage:
     """Map a shipped ``qdwin_view_stream_v1.torn_down`` reason to a side-channel
     teardown message (codex impl-2). Source-close → ``Closed`` (that proxy);
     link/admin/transport → ``Disconnect`` (blank all). Ambiguous → ``Disconnect``
-    (a later authoritative ``Closed`` may follow)."""
+    (a later authoritative ``Closed`` may follow). ``stream_id`` must be the live
+    export's key so the ``Closed`` only removes the matching proxy."""
     r = (reason or "").lower()
     if any(k in r for k in ("closed", "source", "toplevel", "exit", "destroyed")):
-        return Closed("closed", generation, window_id, reason)
+        return Closed("closed", generation, window_id, reason, stream_id)
     # link / admin-revoke / lock / subscriber-disconnect / unknown -> detach
     return Disconnect("disconnect", generation, reason or "stream torn down")
 
@@ -259,20 +271,34 @@ class RemoteViewerState:
             self.rejected.append((msg.generation, msg.type, "stale-generation"))
             return False
         if isinstance(msg, Announce):
+            sid = msg.meta.stream_id
+            # stream_id is the per-export join key: it must be present and not
+            # collide with a live proxy (replay / cross-stream attachment).
+            if not sid:
+                self.rejected.append((msg.generation, msg.type, "empty-stream-id"))
+                return False
+            if any(w.stream_id == sid for w in self.windows.values()):
+                self.rejected.append((msg.generation, msg.type, "duplicate-stream-id"))
+                return False
             self.windows[msg.meta.window_id] = ProxyWindow(
                 meta=msg.meta, w=msg.meta.req_w, h=msg.meta.req_h,
                 title=msg.meta.title)
             return True
-        if isinstance(msg, Configure):
+        # All per-window control messages carry stream_id and must match the
+        # live proxy's stream_id — otherwise a delayed message from a prior
+        # export that reused the same window_id (same generation) could mutate
+        # or remove the new proxy.
+        if isinstance(msg, (Configure, Focus, TitleChanged, Closed, CloseRequest)):
             w = self.windows.get(msg.window_id)
             if not w:
                 return False
+            if msg.stream_id != w.stream_id:
+                self.rejected.append((msg.generation, msg.type, "stream-id-mismatch"))
+                return False
+        if isinstance(msg, Configure):
             w.w, w.h = msg.w, msg.h
             return True
         if isinstance(msg, Focus):
-            w = self.windows.get(msg.window_id)
-            if not w:
-                return False
             # one focused proxy at a time (single seat, 04/05).
             if msg.focused:
                 for other in self.windows.values():
@@ -280,13 +306,11 @@ class RemoteViewerState:
             w.focused = msg.focused
             return True
         if isinstance(msg, TitleChanged):
-            w = self.windows.get(msg.window_id)
-            if not w:
-                return False
             w.title = msg.title
             return True
         if isinstance(msg, Closed):
-            return self.windows.pop(msg.window_id, None) is not None
+            self.windows.pop(msg.window_id, None)
+            return True
         if isinstance(msg, Disconnect):
             # blank + remove every proxy; the source app keeps running (detach).
             self.windows.clear()

@@ -153,13 +153,27 @@ class EvidenceBundle:
     # ---- the honesty rule (09) ------------------------------------------
     def assert_remote_proof(self) -> None:
         """Refuse a bundle that claims to prove the remote monitor's content
-        using only a source-intent capture (the comparison 09 forbids)."""
-        classes = {c.capture_class for c in self.manifest.captures}
-        if not (classes & {c.value for c in DECODED_REMOTE_CLASSES}):
+        unless a **passing oracle result is tied to a decoded-remote capture**
+        (codex impl-3 finding 4). It is not enough for a decoded-remote file to
+        merely exist in the bundle — the ``ok`` verdict must have been computed
+        on it, else a source-intent capture could carry the proof while an
+        unrelated VM-B file sits unused."""
+        decoded = {c.value for c in DECODED_REMOTE_CLASSES}
+        # map capture path -> class
+        cls_by_path = {c.path: c.capture_class for c in self.manifest.captures}
+        if not (set(cls_by_path.values()) & decoded):
             raise ValueError(
                 "bundle has no decoded-remote capture (VM-B host/guest or "
                 "FreeRDP-decoded); a VM-A RDP-source framebuffer only proves "
                 "source intent, not what the peer monitor shows (09).")
+        ok_decoded = [
+            o for o in self.manifest.oracle
+            if o.ok and cls_by_path.get(o.capture) in decoded]
+        if not ok_decoded:
+            raise ValueError(
+                "no passing oracle record is tied to a decoded-remote capture; "
+                "the remote-monitor claim must be proven on the decoded-remote "
+                "framebuffer, not a source-intent one (09).")
 
     # ---- persistence -----------------------------------------------------
     def write(self) -> Path:

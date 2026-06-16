@@ -41,3 +41,32 @@ class TestLoadImage:
         p = tmp_path / "y.png"
         Image.fromarray(arr).save(p)
         assert np.array_equal(C.load_image(p), arr)
+
+
+class TestWestonScreenshooterAdapter:
+    def test_capture_copies_out_and_verifies(self, tmp_path):
+        # codex impl-3 finding 12: capture(dest) must actually produce dest.
+        calls = {}
+
+        def fake_exec(argv):
+            calls["exec"] = argv
+
+        def fake_copy_out(guest_path, dest):
+            calls["copy"] = (guest_path, dest)
+            from pathlib import Path
+            Path(dest).write_bytes(b"img")   # simulate fetching the guest file
+
+        adapter = C.WestonScreenshooter(
+            capture_class=C.CaptureClass.VM_A_GUEST,
+            vm_exec=fake_exec, vm_copy_out=fake_copy_out)
+        out = adapter.capture(tmp_path / "shot.png")
+        assert out.exists()
+        assert calls["copy"][0] == "/tmp/shot.png"
+
+    def test_capture_raises_if_not_copied_out(self, tmp_path):
+        adapter = C.WestonScreenshooter(
+            capture_class=C.CaptureClass.VM_A_GUEST,
+            vm_exec=lambda a: None, vm_copy_out=lambda g, d: None)  # no-op copy
+        import pytest
+        with pytest.raises(RuntimeError, match="not copied out"):
+            adapter.capture(tmp_path / "shot.png")

@@ -110,19 +110,27 @@ class VirshScreenshot(CaptureAdapter):
 class WestonScreenshooter(CaptureAdapter):
     """Guest-side ``weston-screenshooter`` (compositor logical pixels, pre-encode).
 
-    Runs inside the guest via the provided ``vm_exec`` callable (e.g. the qci
-    ``vm-exec``). The output is fetched to ``dest`` by ``vm_exec`` semantics; the
-    caller wires the copy-out.
+    Runs inside the guest via ``vm_exec`` then copies the guest file out to
+    ``dest`` via ``vm_copy_out`` and verifies it exists, so ``capture(dest)``
+    only returns a path it actually produced (codex impl-3 finding 12 — never
+    report success without the file).
     """
 
     vm_exec: object = None       # Callable[[list[str]], subprocess.CompletedProcess]
+    vm_copy_out: object = None   # Callable[[str guest_path, Path dest], None]
     guest_wayland: str = "wayland-1"
 
     def capture(self, dest: Path | str) -> Path:
-        if self.vm_exec is None:
-            raise RuntimeError("WestonScreenshooter needs a vm_exec callable")
-        guest_path = f"/tmp/{Path(dest).name}"
+        if self.vm_exec is None or self.vm_copy_out is None:
+            raise RuntimeError(
+                "WestonScreenshooter needs vm_exec AND vm_copy_out callables")
+        dest = Path(dest)
+        guest_path = f"/tmp/{dest.name}"
         self.vm_exec([  # type: ignore[operator]
             "env", f"WAYLAND_DISPLAY={self.guest_wayland}",
             "weston-screenshooter", guest_path])
-        return Path(dest)
+        self.vm_copy_out(guest_path, dest)  # type: ignore[operator]
+        if not dest.exists():
+            raise RuntimeError(
+                f"weston-screenshooter capture not copied out to {dest}")
+        return dest

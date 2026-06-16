@@ -86,6 +86,25 @@ class TestDisplayLease:
         lease = s.lease
         assert not lease.renew(clk(), generation=s.generation + 99)
 
+    def test_expired_lease_cannot_be_resurrected_by_renew(self):
+        # codex impl-3 finding 6: renew() itself must refuse an expired lease,
+        # not rely on the DockSession caller's pre-check.
+        s, clk = docked_session(ttl=1.0)
+        lease = s.lease
+        clk.advance(2.0)  # past ttl, no heartbeat in between
+        assert lease.renew(clk(), generation=s.generation) is False
+        assert not lease.is_valid(clk())
+
+    def test_current_gen_frame_rejected_after_lease_lapse_without_tick(self):
+        # codex impl-3 finding 7: a current-generation frame/control must be
+        # rejected once the lease lapses, even if no tick()/heartbeat() ran.
+        s, clk = docked_session(ttl=1.0)
+        clk.advance(2.0)            # lease lapsed; no tick() called
+        assert s.recv(s.generation, "frame") is False
+        assert s.recv(s.generation, "clipboard_offer") is False
+        assert any(r[2] == "no-valid-lease" for r in s.rejected)
+        assert s.state is DockState.FAILED_SAFE
+
     def test_input_rejected_when_lease_invalid(self):
         s, clk = docked_session(ttl=1.0)
         clk.advance(2.0)               # lease lapsed but no tick yet

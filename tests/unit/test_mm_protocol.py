@@ -127,6 +127,14 @@ class TestNetemProfiles:
     def test_disconnect_is_hard_drop(self):
         assert profile("disconnect").hard_drop is True
 
+    def test_reorder_pct_not_inverted(self):
+        # codex impl-3 finding 11: tc reorder takes the probability directly.
+        from multimachine.harness.netem import NetemProfile
+        p = NetemProfile("r", delay_ms=5.0, reorder_pct=2.0)
+        cmd = p.tc_add("eth0")
+        i = cmd.index("reorder")
+        assert cmd[i + 1] == "2.0%"     # not 98%
+
     def test_unknown_profile_raises(self):
         import pytest
         with pytest.raises(KeyError):
