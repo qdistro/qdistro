@@ -215,6 +215,16 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ap.add_argument("--decoder-log", default="",
                     help="redirect the launched sdl-freerdp stdout/stderr here "
                          "(default: discard) — for live bring-up diagnosis")
+    ap.add_argument("--gfx-avc", action="store_true",
+                    help="allow H.264/AVC gfx codecs (default OFF → RemoteFX "
+                         "full-range RGB; AVC's limited-range decode darkens the "
+                         "surface and breaks faithful whole-window display)")
+    ap.add_argument("--otp-argv", action="store_true",
+                    help="pass the OTP as /p:<otp> on argv instead of stdin. The "
+                         "current FreeRDP build mis-negotiates the gfx codec to "
+                         "limited-range AVC on the /from-stdin path (dim); /p keeps "
+                         "full range. Single-use OTP → empty leak window (the live "
+                         "gate sets this; product keeps the stdin default).")
     args = ap.parse_args(argv)
 
     w = h = 0
@@ -228,12 +238,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
         argvv = rdp_client_argv(approved, host=args.rdp_host,
                                 width=w or ann.meta.req_w, height=h or ann.meta.req_h,
                                 fullscreen=args.fullscreen,
-                                username=args.rdp_user or None)
+                                username=args.rdp_user or None,
+                                gfx_avc=args.gfx_avc,
+                                from_stdin=not args.otp_argv)
         logf = open(args.decoder_log, "wb") if args.decoder_log \
             else subprocess.DEVNULL
         proc = subprocess.Popen(argvv, stdin=subprocess.PIPE,
                                 stdout=logf, stderr=subprocess.STDOUT)
-        if proc.stdin:
+        if proc.stdin and not args.otp_argv:
             proc.stdin.write((rdp_password(approved) + "\n").encode())
             proc.stdin.flush()
         return proc

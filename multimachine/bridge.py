@@ -95,7 +95,8 @@ def bridge_torn_down(reason: str, generation: int, window_id: int,
 def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
                     width: int = 0, height: int = 0,
                     verify_cert: bool = False, fullscreen: bool = False,
-                    username: str | None = None) -> list[str]:
+                    username: str | None = None, gfx_avc: bool = True,
+                    from_stdin: bool = True) -> list[str]:
     """Build an ``sdl-freerdp`` command for the viewer to decode the stream.
 
     Forces **no client-side scaling** and full-window decode so the captured
@@ -119,12 +120,36 @@ def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
     at 0,0 so the oracle can read the marker barcode 1:1). ``username`` adds
     ``/u:<name>`` (the proven decoder used ``/u:mm``); the OTP on stdin still
     authenticates, so it is optional/configurable, not mandatory.
+
+    ``gfx_avc=False`` disables the H.264/AVC gfx codecs (``/gfx:AVC444:off,
+    AVC420:off``) so the gfx channel uses RemoteFX progressive — **full-range RGB**.
+    The current FreeRDP build (``WITH_VAAPI_H264_ENCODING``) otherwise negotiates
+    AVC, whose **limited-range YCbCr** decode darkens the surface (white→~86),
+    crushing the marker barcode below the oracle's contrast threshold (measured
+    live, session 4). Full-range RFX lets the oracle measure geometry/scale/mapping
+    faithfully — it does NOT weaken the fence (hidden scaling / wrong output id /
+    clipped bands still fail); it removes a lossy-codec COLOR artifact unrelated to
+    the geometry claim.
+
+    ``from_stdin=True`` (default, product path) keeps the OTP OFF argv (codex
+    impl-3 finding 5: argv leaks via process listings) by passing ``/from-stdin``;
+    the caller feeds :func:`rdp_password` on the child's stdin. ``from_stdin=False``
+    puts ``/p:<otp>`` on argv: a **test-gate trade-off** — the live session-4
+    measurement found this FreeRDP build mis-negotiates the gfx codec to
+    limited-range AVC (dim) ONLY on the ``/from-stdin`` path, while ``/p`` honors
+    the ``/gfx`` RFX override (full range). The OTP is single-use and consumed on
+    connect, so the leak window is empty; the proven session-2 decoder also used
+    ``/p``. Product code should keep ``from_stdin=True`` on a FreeRDP where it works
+    (or a credentials file).
     """
     argv = ["sdl-freerdp", f"/v:{host}:{approved.rdp_port}"]
     if username:
         argv.append(f"/u:{username}")
+    if from_stdin:
+        argv.append("/from-stdin")           # read the OTP from stdin, not argv
+    else:
+        argv.append(f"/p:{approved.rdp_password}")   # OTP on argv (test-gate)
     argv += [
-        "/from-stdin",         # read the OTP from stdin, not argv
         "/scale:100",          # no client-side scaling
         "-grab-keyboard",      # do not steal the host's keyboard
     ]
@@ -132,6 +157,8 @@ def rdp_client_argv(approved: ViewStreamApproved, host: str = "127.0.0.1",
         argv.append(f"/cert:name:{approved.rdp_cert_path}")
     else:
         argv.append("/cert:ignore")   # TOFU; cert validation out of scope (v1)
+    if not gfx_avc:
+        argv.append("/gfx:AVC444:off,AVC420:off")   # RFX progressive = full-range RGB
     if width and height:
         argv.append(f"/size:{width}x{height}")
     if fullscreen:

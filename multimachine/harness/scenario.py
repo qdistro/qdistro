@@ -167,6 +167,10 @@ class ManagedVMBackend(VMBackend, Protocol):
 
     def viewer_status(self, vm: str) -> dict: ...
 
+    def await_decode(self, vm: str, timeout: int = 25) -> bool: ...
+
+    def capture(self, vm: str, screen: int, dest: Path) -> Path: ...
+
     def stop_viewer(self, vm: str) -> None: ...
 
     def resubscribe(self, vm: str) -> ViewStreamApproved | None: ...
@@ -268,13 +272,25 @@ def run_managed_toplevel_slice(
                            if s.vm == topology.vm_b)
         decoded = bundle.root / "captures" / "vm-b-managed.ppm"
         decoded.parent.mkdir(parents=True, exist_ok=True)
-        backend.screenshot(b, vm_b_screen, decoded)
-
-        img = load_image(decoded)
+        # the viewer reports "connected" on Announce, BEFORE sdl-freerdp renders;
+        # wait for the decoded frame so the capture is not a blank pre-frame head.
+        backend.await_decode(b)
         layout = M.compute_layout(width, height)
-        res = O.evaluate(img, layout, 1.0, tol=O.TOL_RDP, auto_origin=True,
-                         active_generation=generation,
-                         expect_output_id=marker_output_id)
+        # capture-retry: the marker animates (so the output stays bright), so a
+        # single `virsh screenshot` may catch a torn RDP frame mid-repaint
+        # (barcode CRC mismatch). Re-capture until the oracle decodes a clean frame
+        # (or attempts exhausted — then the last result is the honest failure).
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _attempt in range(8):
+            backend.capture(b, vm_b_screen, decoded)   # capture-only (viewer is live)
+            img = load_image(decoded)
+            res = O.evaluate(img, layout, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                             active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
         cap = Capture(path=str(decoded.relative_to(bundle.root)),
                       capture_class=CaptureClass.VM_B_HOST.value,
                       output_id=marker_output_id,

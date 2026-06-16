@@ -204,6 +204,10 @@ class QciVMBackend:
             self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                        "/tmp/mm-source-stack.sh")
             gen = int(arg_value(argv, "--generation", "1"))
+            # keep the marker ANIMATING: a static surface lets the output dim
+            # (no repaints → the barcode darkens, ~½ brightness, CRC fails); an
+            # animating marker stays bright. Capture tearing is handled by the
+            # scenario's capture-retry (it re-captures until the oracle decodes).
             env = (f"W={self.out_w} H={self.out_h} GEN={gen} FS=1 "
                    f"RELAY_PORT={self.relay_port}")
             out = self._vmexec(real, self._as_admin(
@@ -244,6 +248,14 @@ class QciVMBackend:
                            f"bash /tmp/mm-decoder-stack.sh", timeout=120)
         if "VMB_SETUP_OK" not in out:               # decoder really came up (H1)
             raise RuntimeError(f"decoder-stack did not report VMB_SETUP_OK:\n{out}")
+        return self.capture(vm, screen, dest)
+
+    def capture(self, vm: str, screen: int, dest: Path) -> Path:
+        """Host-side ``virsh screenshot`` ONLY (no decoder/viewer bring-up). The
+        managed-toplevel gate launches the viewer separately via
+        :meth:`launch_viewer`, so it must capture the already-live VM-B head
+        without re-running decoder-stack (which would fight that viewer)."""
+        real = self._real(vm)
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
@@ -282,6 +294,28 @@ class QciVMBackend:
         if "VMB_VIEWER_OK" not in out:
             raise RuntimeError(f"viewer-stack did not report VMB_VIEWER_OK:\n{out}")
         self._viewer_status_file = status_file
+        self._freerdp_log = "/run/mm-b/freerdp.log"
+
+    def await_decode(self, vm: str, timeout: int = 25) -> bool:
+        """Wait until the launched ``sdl-freerdp`` has actually negotiated the
+        decoded channel and rendered, so the capture is a real frame, not a black
+        pre-first-frame head. The viewer status flips to ``connected`` on Announce
+        (before pixels flow), so a capture right after that races the first frame
+        (observed: a blank ``\\x00\\x00`` capture). Mirrors the proven decoder-stack
+        readiness: grep the freerdp log for the rdpgfx channel, then settle."""
+        import time
+        log = getattr(self, "_freerdp_log", "/run/mm-b/freerdp.log")
+        real = self._real(vm)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            out = self._vmexec(
+                real, f"grep -c 'Loading Dynamic Virtual Channel rdpgfx' "
+                f"{shlex.quote(log)} 2>/dev/null || true", check=False)
+            if out.strip() and out.strip().splitlines()[-1].strip() not in ("0", ""):
+                time.sleep(2)                        # settle one repaint, as proven
+                return True
+            time.sleep(0.5)
+        return False
 
     def viewer_status(self, vm: str) -> dict:
         """Read + parse the viewer's machine-readable status file from the guest

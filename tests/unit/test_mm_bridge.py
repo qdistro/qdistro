@@ -92,6 +92,26 @@ class TestRdpClientArgv:
         assert "/from-stdin" in argv          # still OTP-on-stdin, no argv leak
         assert not any("otp123" in a for a in argv)
 
+    def test_from_stdin_default_keeps_otp_off_argv(self):
+        # default product path: /from-stdin, no /p:<otp> leak.
+        argv = rdp_client_argv(_approved())
+        assert "/from-stdin" in argv
+        assert not any(a.startswith("/p:") for a in argv)
+
+    def test_otp_argv_path_puts_password_on_argv(self):
+        # the test-gate trade-off: /p:<otp> on argv (FreeRDP /from-stdin path
+        # mis-negotiates the gfx codec to limited-range AVC).
+        argv = rdp_client_argv(_approved(), from_stdin=False)
+        assert "/from-stdin" not in argv
+        assert "/p:otp123" in argv
+
+    def test_gfx_avc_disable_forces_full_range_rfx(self):
+        # default keeps AVC (no override flag); disabling adds the RFX-progressive
+        # full-range knob (session-4: AVC limited-range darkens the marker).
+        assert not any("AVC" in a for a in rdp_client_argv(_approved()))
+        argv = rdp_client_argv(_approved(), gfx_avc=False)
+        assert "/gfx:AVC444:off,AVC420:off" in argv
+
     def test_username_knob_optional(self):
         # default: no /u (the OTP on stdin authenticates).
         assert not any(a.startswith("/u:") for a in rdp_client_argv(_approved()))

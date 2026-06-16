@@ -23,17 +23,34 @@ MM=/usr/lib64/libweston-14
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 systemctl stop mm-weston mm-viewer 2>/dev/null || true
+systemctl reset-failed mm-weston mm-viewer 2>/dev/null || true   # allow unit reuse on relaunch
 pkill -f sdl-freerdp 2>/dev/null || true
 pkill -f multimachine.viewer 2>/dev/null || true
-sleep 1
 
-# seatd (same as decoder-stack): the seat weston's drm backend needs with no
-# logind graphical session.
-if [ ! -S /run/seatd.sock ]; then
-  systemd-run --collect --unit=mm-seatd seatd
-  for _ in $(seq 1 30); do [ -S /run/seatd.sock ] && break; sleep 0.2; done
-fi
-[ -S /run/seatd.sock ] && echo "seatd up" || { echo "FAIL: seatd socket missing"; exit 6; }
+# Free DRM + the seat from the production qdwin session (session-3 foot-gun): a
+# STANDARD spun VM runs greetd-qdwin + the admin noctalia session holding DRM
+# master, plus a system `seatd -g seat` that REJECTS root (so our own weston's
+# libseat would fail "Broken pipe"). Stop them all (tolerant) and drop the
+# restricted seatd socket so we start our own unrestricted one below.
+systemctl stop greetd-qdwin greetd qdistro-session-manager 2>/dev/null || true
+runuser -u admin -- systemctl --user stop noctalia-session noctalia-shell qdlocker 2>/dev/null || true
+
+# seatd: ALWAYS (re)start our own unrestricted instance, idempotently. The
+# production `seatd.service` runs `seatd -g seat` (rejects root → libseat "Broken
+# pipe") with **Restart=always RestartSec=1**, so a bare `pkill` just respawns it
+# and it re-owns /run/seatd.sock, racing our mm-seatd on the step-10 RELAUNCH
+# (session-4 foot-gun, flaky). So STOP THE UNIT (a `systemctl stop` overrides
+# Restart=always) — not just the process — then drop the socket and start fresh.
+# Also clean-stop our own prior mm-seatd + reset-failed so the unit name is reusable.
+systemctl stop seatd.service seatd.socket 2>/dev/null || true   # production seatd -g seat (Restart=always)
+systemctl stop mm-seatd 2>/dev/null || true
+pkill -x seatd 2>/dev/null || true
+rm -f /run/seatd.sock 2>/dev/null || true
+systemctl reset-failed mm-seatd 2>/dev/null || true
+sleep 1
+systemd-run --collect --unit=mm-seatd seatd
+for _ in $(seq 1 30); do [ -S /run/seatd.sock ] && break; sleep 0.2; done
+[ -S /run/seatd.sock ] && echo "seatd up" || { echo "FAIL: seatd socket missing"; journalctl -u mm-seatd --no-pager|tail -10; exit 6; }
 rm -rf "$RT"; mkdir -p "$RT"; chmod 0700 "$RT"
 
 cat > "$RT/weston.ini" <<EOF
@@ -68,7 +85,7 @@ systemd-run --collect --unit=mm-viewer \
     --control-host "$CONTROL_HOST" --control-port "$CONTROL_PORT" \
     --rdp-host "$RDP_HOST" --rdp-port "$RDP_PORT" \
     --generation "$GEN" --otp "$OTP" --size "${W}x${H}" \
-    --fullscreen --rdp-user "$RDP_USER" \
+    --fullscreen --rdp-user "$RDP_USER" --otp-argv \
     --status-file "$STATUS_FILE" --decoder-log "$RT/freerdp.log"
 
 # 3) Confirm the viewer process is up + connected to the control channel. It does

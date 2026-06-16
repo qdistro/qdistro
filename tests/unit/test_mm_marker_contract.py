@@ -146,6 +146,83 @@ class TestLiveDecodedRemoteCapture:
         b.assert_remote_proof()  # must not raise: passing oracle on a VM_B capture
 
 
+# ---- Phase-1: LIVE managed-toplevel viewer gate (scenario-2) -------------
+_LIVE_MANAGED = _DATA / "live-managed-toplevel-vmb-1280x800-o1-g22.png"
+
+
+class TestLiveManagedToplevelCapture:
+    """Regression on the Phase-1 MANAGED-TOPLEVEL capture (scenario-2, codex
+    impl-8/impl-9): a REAL two-VM live run (2026-06-16 session 4). VM-A runs the
+    dedicated headless qdwin + fullscreen marker + the shipped per-view RDP path;
+    VM-B runs the REAL ``mm-viewer-launch`` (``python3 -m multimachine.viewer``)
+    INSIDE a kiosk-shell weston — it consumes a host-served JSON-lines control
+    side-channel (a real forwarded TCP byte stream over VM-B's SLIRP NAT) and, on
+    the ``Announce``, launches ``sdl-freerdp`` fullscreen ITSELF. So the captured
+    surface IS the viewer-managed toplevel, not a bare decoder. Captured host-side
+    via ``virsh screenshot`` (QMP). VM_B_HOST (decoded-remote) at 1:1, NO hidden
+    scaling.
+
+    Honesty (impl-8): geometry/protocol/process/lifecycle only — NOT A5. The full
+    live gate also proved (not re-checkable from this still): step-9 viewer-close
+    releases the stream slot while the source survives, and step-10 host-injected
+    Disconnect blanks the viewer + a stale-generation control msg is rejected live
+    + the source survives. Input confinement (step 8) is DEFERRED — the marker has
+    no input hook (impl-9 Q4). The decoded gfx channel is forced to RemoteFX
+    progressive (full-range RGB); the FreeRDP build's H.264/AVC path decodes
+    limited-range (dim), which would crush the barcode — a color artifact unrelated
+    to the geometry claim the fence makes.
+    """
+
+    def test_managed_toplevel_decodes_clean_no_hidden_scaling(self):
+        img = C.load_image(_LIVE_MANAGED)
+        assert img.shape == (800, 1280, 3)
+        lay = M.compute_layout(1280, 800)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=22, expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.payload.output_id == 1 and res.payload.generation == 22
+        assert res.payload.w == 1280 and res.payload.h == 800
+        assert res.measured_scale == 1.0 and not res.hidden_scaling
+        assert not res.stale_generation
+        assert all(b.ok for b in res.bands)
+
+    def test_managed_toplevel_kiosk_capture_is_flush(self):
+        # the viewer-managed sdl-freerdp toplevel lands fullscreen at the kiosk
+        # output origin: the decoded marker fills the head 1:1 (auto_origin (0,0)).
+        assert O.detect_origin(C.load_image(_LIVE_MANAGED)) == (0, 0)
+
+    def test_managed_toplevel_rejects_stale_generation(self):
+        # the fence: the SAME capture must FAIL the oracle under a different active
+        # generation (proves the generation stamp is read, not assumed).
+        img = C.load_image(_LIVE_MANAGED)
+        lay = M.compute_layout(1280, 800)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=23, expect_output_id=1)
+        assert not res.ok and res.stale_generation
+
+    def test_managed_toplevel_satisfies_honesty_rule(self, tmp_path):
+        from multimachine.harness.evidence import (
+            CaptureClass, EvidenceBundle, OracleRecord, Topology as EvTopology)
+        img = C.load_image(_LIVE_MANAGED)
+        lay = M.compute_layout(1280, 800)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=22, expect_output_id=1)
+        b = EvidenceBundle.create(
+            tmp_path / "b", scenario="09-mm-viewer-managed-toplevel",
+            step="live-managed", generation=22,
+            topology=EvTopology(vms=["vm-a", "vm-b"], netem_profile="lan-clean",
+                                description="managed-toplevel live"))
+        cap = b.add_capture(_LIVE_MANAGED, CaptureClass.VM_B_HOST, output_id=1,
+                            role="VM-B monitor (viewer-managed decoded toplevel)",
+                            fmt="PNG", scale=1.0)
+        b.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok, output_id=res.payload.output_id,
+            generation=res.payload.generation, frame=res.payload.frame,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling))
+        b.manifest.passed = res.ok
+        b.assert_remote_proof()  # passing oracle tied to a VM_B decoded capture
+
+
 # ---- A1-min: LIVE two-output straddle (render gate) ----------------------
 _A1_OUT0 = _DATA / "live-straddle-a1-out0-800x600-o1-g20.png"
 _A1_OUT1 = _DATA / "live-straddle-a1-out1-800x600-o1-g20.png"

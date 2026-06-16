@@ -72,11 +72,14 @@ class MockManagedBackend:
         return self._mint_approval()
 
     def screenshot(self, vm, screen, dest):
+        return self.capture(vm, screen, dest)
+
+    def capture(self, vm, screen, dest):
         lay = M.compute_layout(self.width, self.height)
         pay = M.MarkerPayload(self.capture_out, self.capture_gen, 5, 0, 0,
                               self.width, self.height, 100)
         _write_ppm(Path(dest), M.render_rgb(lay, pay, scale=1.0))
-        self.calls.append(("screenshot", vm, screen))
+        self.calls.append(("capture", vm, screen))
         return Path(dest)
 
     def apply_netem(self, vm, dev, prof): self.calls.append(("netem+", vm, dev, prof))
@@ -110,6 +113,10 @@ class MockManagedBackend:
 
     def viewer_status(self, vm):
         return dict(self._status.get(vm, {}))
+
+    def await_decode(self, vm, timeout=25):
+        self.calls.append(("await_decode", vm))
+        return True
 
     def stop_viewer(self, vm):
         self.calls.append(("stop_viewer", vm))
