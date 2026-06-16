@@ -67,6 +67,8 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+from qdistro_pwd_atomic import atomic_write_json
+
 VAULT_FORMAT_VERSION_SCRYPT = 1
 VAULT_FORMAT_VERSION_TPM = 2
 SUPPORTED_VAULT_VERSIONS = (VAULT_FORMAT_VERSION_SCRYPT, VAULT_FORMAT_VERSION_TPM)
@@ -164,17 +166,7 @@ def create_vault(vault_dir: str, name: str, password: bytes) -> None:
         },
         "items": [],
     }
-    _atomic_write(path, body)
-
-
-def _atomic_write(path: str, body: dict[str, Any]) -> None:
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(body, f, indent=2, sort_keys=True)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    atomic_write_json(path, body)
 
 
 def _load(path: str) -> dict[str, Any]:
@@ -257,7 +249,7 @@ def create_vault_tpm(vault_dir: str, name: str, pin: bytes,
         },
         "items": [],
     }
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
 
 
 def unlock_vault_tpm(vault_dir: str, name: str, pin: bytes,
@@ -349,7 +341,7 @@ def reseal_vault_with_master_key(vault_dir: str, name: str,
                 "bundle/passphrase?); refusing to reseal") from exc
     blob = tpm_backend.seal(master_key, pin, pcrs=pcrs)
     body["tpm_seal"] = {"backend": tpm_backend.name, "blob": blob}
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
 
 
 def rotate_vault(vault_dir: str, name: str,
@@ -403,7 +395,7 @@ def rotate_vault(vault_dir: str, name: str,
         "ciphertext": _b64e(new_sealed),
     }
     body["rotated"] = int(time.time())
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
 
 
 def rotate_vault_tpm(vault_dir: str, name: str,
@@ -463,7 +455,7 @@ def rotate_vault_tpm(vault_dir: str, name: str,
         "blob":    new_blob,
     }
     body["rotated"] = int(time.time())
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
 
 
 def get_tpm_seal_meta(vault_dir: str, name: str) -> dict[str, Any]:
@@ -529,7 +521,7 @@ def add_item(vault_dir: str, name: str, master_key: bytes,
         items[existing_idx] = entry
     else:
         items.append(entry)
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
 
 
 def get_item_payload(vault_dir: str, name: str, master_key: bytes,
@@ -572,7 +564,7 @@ def delete_item(vault_dir: str, name: str, tag: str) -> bool:
     body["items"] = [it for it in items if it["tag"] != tag]
     if len(body["items"]) == before:
         return False
-    _atomic_write(path, body)
+    atomic_write_json(path, body)
     return True
 
 

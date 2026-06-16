@@ -38,6 +38,8 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+from qdistro_pwd_atomic import atomic_write_json
+
 RECOVERY_FORMAT_VERSION = 1
 
 # Elevated vs the v1 vault (N=2^15): the bundle is opened rarely and guards
@@ -170,26 +172,10 @@ def decrypt_recovery_bundle(bundle: dict[str, Any], passphrase: bytes,
     return master_key
 
 
-def _atomic_write(path: str, body: dict[str, Any]) -> None:
-    # Create 0600 from the start (O_EXCL) — never expose the bundle at the
-    # umask default even briefly.
-    tmp = f"{path}.tmp"
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(body, f, indent=2, sort_keys=True)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
 def write_recovery_bundle(path: str, master_key: bytes, passphrase: bytes,
                           *, label: str = DEFAULT_LABEL) -> None:
     """Encrypt + atomically write a recovery bundle to ``path`` (0600)."""
-    _atomic_write(path, export_recovery_bundle(
+    atomic_write_json(path, export_recovery_bundle(
         master_key, passphrase, label=label))
 
 

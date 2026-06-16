@@ -96,6 +96,9 @@ fi
 # Daemon + sibling modules (kept together so Python's
 # script-dir-on-sys.path rule resolves the imports).
 install -m 0755 "$SRC/qdistro_pwd_daemon.py"   "$DEST_LIB/"
+# Shared hardened atomic JSON writer — imported by qdistro_pwd_vault and
+# qdistro_vault_recovery from this same dir (script-dir-on-sys.path rule).
+install -m 0644 "$SRC/qdistro_pwd_atomic.py"   "$DEST_LIB/"
 install -m 0644 "$SRC/qdistro_pwd_vault.py"    "$DEST_LIB/"
 install -m 0644 "$SRC/qdistro_pwd_identity.py" "$DEST_LIB/"
 install -m 0644 "$SRC/qdistro_pwd_audit.py"    "$DEST_LIB/"

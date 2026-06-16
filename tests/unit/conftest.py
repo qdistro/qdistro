@@ -81,6 +81,9 @@ def pytest_configure(config) -> None:
     )
 
 
+# CANONICAL: `_format_cheat_aware_block` + `pytest_runtest_makereport` below are
+# hand-mirrored into qdshell/tests/ui/conftest.py and must stay byte-identical;
+# test_cheat_aware_sync.py fails on drift.
 def _format_cheat_aware_block(kwargs: dict) -> str:
     """Render the marker kwargs into a human-readable failure block.
 

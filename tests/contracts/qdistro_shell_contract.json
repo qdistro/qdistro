@@ -1,0 +1,61 @@
+{
+  "_README": [
+    "Machine-readable contract between qdistro (producer) and qdshell (consumer).",
+    "This file is the SINGLE SOURCE OF TRUTH for the small set of identifiers that",
+    "qdshell hand-mirrors in QML/JS and that qdistro produces in Python/C. It exists",
+    "to make cross-repo drift FAIL A TEST instead of silently misrendering.",
+    "",
+    "Two guards consume this file:",
+    "  - qdistro/tests/unit/test_shell_contract.py  asserts these values match the",
+    "    authoritative qdistro Python constants (TIER4_SECCTX_PREFIX, SECCTX_APPID_PREFIX,",
+    "    the broker/session-manager BUS_NAME/OBJ_PATH).",
+    "  - qdshell tests/contract-drift.test.js (sibling ../qdistro) asserts the qdshell",
+    "    literals in Services/Qdistro/*.{qml,js} and Modules/Bar/Widgets/*.js match.",
+    "",
+    "Scope is deliberately narrow: only the contract surface qdshell intentionally",
+    "consumes. Do NOT grow this into a full schema/codegen — see doc/ and the codex",
+    "review that gated this. tier3/tier5 prefixes have no Python runtime constant",
+    "today (qdwin produces those secctx app_ids in C); this fixture is their anchor."
+  ],
+
+  "secctx_prefixes": {
+    "tier3": "qdistro.tier3.",
+    "tier4": "qdistro.tier4.",
+    "tier5": "qdistro.tier5.",
+    "disp": "qdistro.disp."
+  },
+
+  "dbus": {
+    "admin_broker": {
+      "bus_name": "org.qdistro.AdminBroker1",
+      "object_path": "/org/qdistro/AdminBroker1",
+      "interface": "org.qdistro.AdminBroker1"
+    },
+    "session_manager": {
+      "bus_name": "org.qdistro.SessionManager1",
+      "object_path": "/org/qdistro/SessionManager1",
+      "interface": "org.qdistro.SessionManager1"
+    }
+  },
+
+  "broker_reply_fields": {
+    "_doc": "Fields qdshell PARSES from each broker reply. The guard asserts qdshell still references each name (silent drop of a depended-on field is the failure mode). A UI may legitimately ignore additional producer fields.",
+    "ListRules": [
+      "name", "decision", "source_path", "uid", "action", "exe",
+      "app_id", "sandbox_engine", "mime_type", "scope", "rationale"
+    ],
+    "ListReceivers": {
+      "_doc": "D-Bus signature a(iss): array of (uid, service, friendly_name) tuples; positional, order matters.",
+      "signature": "(iss)",
+      "tuple": ["uid", "service", "friendly_name"]
+    },
+    "ListSilos": {
+      "_doc": "Returns a single JSON string; qdshell reads only uid+name per silo object.",
+      "fields": ["uid", "name"]
+    }
+  },
+
+  "env": {
+    "silo": "QDISTRO_SILO"
+  }
+}
