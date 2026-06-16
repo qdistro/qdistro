@@ -9,7 +9,20 @@ from __future__ import annotations
 import pytest
 
 from multimachine.harness.vm_backend import (
-    arg_value, hostfwd_add_hmp, is_marker_argv, parse_approved)
+    arg_value, hostfwd_add_hmp, hostfwd_present, is_marker_argv, parse_approved)
+
+
+# Real `info usernet` output (qemu:///session, virtio-net user hub) — the format
+# the host-forward detection must parse. The port is a BARE column field.
+_USERNET = (
+    "Hub -1 (hostnet0):\n"
+    "  Protocol[State]    FD  Source Address  Port   Dest. Address  Port RecvQ SendQ\n"
+    "  TCP[HOST_FORWARD] 138       127.0.0.1  5555       10.0.2.15  5555     0     0\n"
+    "  UDP[211 sec]      137       10.0.2.15 43673   188.68.34.173   123     0     0\n")
+_USERNET_NOFWD = (
+    "Hub -1 (hostnet0):\n"
+    "  Protocol[State]    FD  Source Address  Port   Dest. Address  Port RecvQ SendQ\n"
+    "  UDP[211 sec]      137       10.0.2.15 43673   188.68.34.173   123     0     0\n")
 
 
 class TestParseApproved:
@@ -41,6 +54,23 @@ class TestHostfwd:
 
     def test_custom_host_addr(self):
         assert "tcp:0.0.0.0:7000-:7000" in hostfwd_add_hmp("hostnet0", 7000, "0.0.0.0")
+
+    def test_present_detects_existing_forward(self):
+        # the bare-column `info usernet` format — NOT ":5555" (the old buggy
+        # token check the session-3 live re-validation caught).
+        assert hostfwd_present(_USERNET, 5555)
+        assert hostfwd_present(_USERNET, 5555, "127.0.0.1")
+
+    def test_present_false_when_no_forward(self):
+        assert not hostfwd_present(_USERNET_NOFWD, 5555)
+
+    def test_present_false_for_other_port(self):
+        assert not hostfwd_present(_USERNET, 6000)
+
+    def test_present_ignores_non_hostforward_lines(self):
+        # a UDP session to a host on port 5555 must NOT be read as a forward.
+        udp = ("  UDP[200 sec] 9  10.0.2.15 40000  1.2.3.4  5555  0  0\n")
+        assert not hostfwd_present(udp, 5555)
 
 
 class TestArgv:

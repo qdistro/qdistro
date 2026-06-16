@@ -60,6 +60,27 @@ def hostfwd_add_hmp(netdev: str, port: int, host_addr: str = "127.0.0.1") -> str
     return f"hostfwd_add {netdev} tcp:{host_addr}:{port}-:{port}"
 
 
+def hostfwd_present(usernet: str, port: int, host_addr: str = "127.0.0.1") -> bool:
+    """True if ``info usernet`` already lists a TCP host-forward on ``port``.
+
+    ``info usernet`` formats each rule as a columnar row, e.g.::
+
+        TCP[HOST_FORWARD] 138       127.0.0.1  5555       10.0.2.15  5555 0 0
+
+    so the port is a bare whitespace-delimited field — NOT ``:5555``. The earlier
+    ``":%d" in net`` check never matched this format, so a pre-existing rule was
+    neither detected nor re-addable (it raised on the duplicate); found by the
+    session-3 live ``run_viewer_slice`` re-validation."""
+    p = str(port)
+    for line in usernet.splitlines():
+        if "HOST_FORWARD" not in line:
+            continue
+        fields = line.split()
+        if p in fields and (host_addr in fields or host_addr == ""):
+            return True
+    return False
+
+
 def is_marker_argv(argv: list[str]) -> bool:
     return bool(argv) and argv[0] == "qdwin-marker-client"
 
@@ -166,14 +187,13 @@ class QciVMBackend:
         present; any OTHER QMP failure is fatal (codex impl-6 M5 — don't treat
         every error as the benign 'already in use')."""
         net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
-        token = f":{self.relay_port}"
-        if token in net and "TCP" in net:
+        if hostfwd_present(net, self.relay_port):
             return                                  # a forward on the port exists
         out = self._virsh("qemu-monitor-command", vm, "--hmp",
                           hostfwd_add_hmp(self.netdev, self.relay_port), check=False)
         # re-query: success means the rule now exists.
         net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
-        if token not in net:
+        if not hostfwd_present(net, self.relay_port):
             raise RuntimeError(f"hostfwd_add did not install :{self.relay_port}: {out}")
 
     def exec(self, vm: str, argv: list[str]) -> str:
