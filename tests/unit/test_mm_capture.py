@@ -21,6 +21,19 @@ class TestLoadImage:
         _write_ppm(p, arr)
         assert np.array_equal(C.load_image(p), arr)
 
+    def test_ppm_crlf_header_no_byte_shift(self, tmp_path):
+        # a "\r\n" after maxval must be consumed as ONE separator, not leak a
+        # byte into the pixels (codex impl-6 Low). First pixel is 0x20 to also
+        # confirm a whitespace-valued pixel byte is NOT eaten.
+        w, h = 3, 2
+        px = bytes([0x20, 0x00, 0xff] * (w * h))
+        p = tmp_path / "crlf.ppm"
+        with open(p, "wb") as f:
+            f.write(f"P6\r\n{w} {h}\r\n255\r\n".encode() + px)
+        img = C.load_image(p)
+        assert img.shape == (h, w, 3)
+        assert img[0, 0, 0] == 0x20 and img[0, 0, 2] == 0xff
+
     def test_ppm_with_comment_header(self, tmp_path):
         arr = np.zeros((4, 5, 3), dtype=np.uint8)
         p = tmp_path / "c.ppm"

@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import base64
 import re
+import shlex
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,23 +105,44 @@ class QciVMBackend:
     def _real(self, name: str) -> str:
         return self._logical.get(name, name)
 
-    def _vmexec(self, vm: str, command: str, timeout: int = 300) -> str:
+    def _vmexec(self, vm: str, command: str, timeout: int = 300,
+                check: bool = True) -> str:
         # vm-exec relays the guest command's output across stdout+stderr; merge
         # them (as a manual `2>&1` would) so parsing sees the guest's stdout.
+        # check=True (default): a non-zero guest exit raises — a failed setup step
+        # must never quietly let a later step "pass" (codex impl-6 H1). Use
+        # check=False only for inherently-tolerant probes (pgrep, stop-units).
         out = subprocess.run(
             [str(self.repo_dir / "scripts/vm/vm-exec"), vm, command],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             timeout=timeout)
+        if check and out.returncode != 0:
+            raise RuntimeError(
+                f"vm-exec {vm} failed (rc={out.returncode}): {command}\n{out.stdout}")
         return out.stdout
 
-    def _virsh(self, *args: str, timeout: int = 60) -> str:
-        return subprocess.run(
+    def _virsh(self, *args: str, timeout: int = 60, check: bool = True) -> str:
+        out = subprocess.run(
             ["virsh", "-c", self.libvirt_uri, *args],
-            capture_output=True, text=True, timeout=timeout).stdout
+            capture_output=True, text=True, timeout=timeout)
+        if check and out.returncode != 0:
+            raise RuntimeError(
+                f"virsh {' '.join(args)} failed (rc={out.returncode}): "
+                f"{out.stderr.strip() or out.stdout.strip()}")
+        return out.stdout
 
     def _push(self, vm: str, local: Path, guest: str) -> None:
         b64 = base64.b64encode(local.read_bytes()).decode()
-        self._vmexec(vm, f"printf '%s' '{b64}' | base64 -d > {guest}; chmod 0644 {guest}")
+        g = shlex.quote(guest)
+        self._vmexec(vm, f"printf '%s' '{b64}' | base64 -d > {g} && chmod 0644 {g}")
+
+    def _guest_link_dev(self, vm: str) -> str:
+        """The guest's default-route NIC (e.g. ens2) — the configured
+        ``link_dev`` ('eth0') is often wrong for this image (codex impl-6 M6)."""
+        out = self._vmexec(vm, "ip -o route get 10.0.2.2 2>/dev/null "
+                           "| sed -n 's/.* dev \\([^ ]*\\).*/\\1/p' | head -1")
+        dev = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        return dev or "eth0"
 
     def _as_admin(self, body: str) -> str:
         # run BODY as the admin uid with the session bus + runtime dir wired.
@@ -131,14 +152,29 @@ class QciVMBackend:
     # ---- VMBackend protocol ---------------------------------------------
     def spin(self, name: str) -> str:
         real = self._real(name)
-        # ensure running (idempotent).
-        self._virsh("start", real)
+        self._virsh("start", real, check=False)   # tolerate "already active"
+        # confirm it is actually running (start may have failed for real).
+        st = self._virsh("domstate", real)
+        if "running" not in st:
+            raise RuntimeError(f"{real}: not running after spin ({st.strip()})")
         if real == self.vm_a:
-            # one-time SLIRP hostfwd so vm-b reaches the relay via host loopback.
-            # idempotent: a second add fails ("already in use") — that is fine.
-            self._virsh("qemu-monitor-command", real, "--hmp",
-                        hostfwd_add_hmp(self.netdev, self.relay_port))
+            self._ensure_hostfwd(real)
         return real
+
+    def _ensure_hostfwd(self, vm: str) -> None:
+        """Add the SLIRP hostfwd only if an exact-matching rule isn't already
+        present; any OTHER QMP failure is fatal (codex impl-6 M5 — don't treat
+        every error as the benign 'already in use')."""
+        net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
+        token = f":{self.relay_port}"
+        if token in net and "TCP" in net:
+            return                                  # a forward on the port exists
+        out = self._virsh("qemu-monitor-command", vm, "--hmp",
+                          hostfwd_add_hmp(self.netdev, self.relay_port), check=False)
+        # re-query: success means the rule now exists.
+        net = self._virsh("qemu-monitor-command", vm, "--hmp", "info usernet")
+        if token not in net:
+            raise RuntimeError(f"hostfwd_add did not install :{self.relay_port}: {out}")
 
     def exec(self, vm: str, argv: list[str]) -> str:
         real = self._real(vm)
@@ -147,32 +183,34 @@ class QciVMBackend:
             # relay). subscribe_view_stream reads its result.
             self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                        "/tmp/mm-source-stack.sh")
-            gen = arg_value(argv, "--generation", "1")
-            env = f"W={self.out_w} H={self.out_h} GEN={gen} FS=1 RELAY_PORT={self.relay_port}"
-            return self._vmexec(real, self._as_admin(
+            gen = int(arg_value(argv, "--generation", "1"))
+            env = (f"W={self.out_w} H={self.out_h} GEN={gen} FS=1 "
+                   f"RELAY_PORT={self.relay_port}")
+            out = self._vmexec(real, self._as_admin(
                 f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)
-        # generic exec (e.g. the source-survival pgrep on teardown).
-        return self._vmexec(real, " ".join(argv))
+            if "SETUP_OK" not in out:               # explicit success token (H1)
+                raise RuntimeError(f"source-stack did not report SETUP_OK:\n{out}")
+            # bind the approval to THIS run from the same SETUP_OK output, not a
+            # possibly-stale bystander.out (codex impl-6 H2).
+            self._approved = self._parse_setup(out, gen)
+            return out
+        # generic exec (e.g. the source-survival pgrep on teardown) — tolerant.
+        return self._vmexec(real, " ".join(shlex.quote(a) for a in argv),
+                            check=False)
+
+    def _parse_setup(self, source_stack_out: str, gen: int) -> ViewStreamApproved:
+        info = parse_approved(source_stack_out)
+        if not info["password"]:
+            raise RuntimeError("source-stack approval has empty RDP_PASSWORD")
+        # viewer reaches the relay (not the dynamic port) via host loopback.
+        return ViewStreamApproved(info["pw_node"], self.relay_port, "",
+                                  info["password"])
 
     def subscribe_view_stream(self, vm: str, handle: int) -> ViewStreamApproved:
-        real = self._real(vm)
-        # the source stack restarts the bystander; tolerate a brief race where
-        # bystander.out is mid-rewrite by retrying until RDP_PORT appears.
-        info = None
-        for _ in range(20):
-            out = self._vmexec(real, self._as_admin(
-                "cat /run/user/1000/bystander.out 2>/dev/null"))
-            try:
-                info = parse_approved(out)
-                break
-            except ValueError:
-                time.sleep(0.5)
-        if info is None:
-            raise RuntimeError("subscribe: no approved stream in bystander.out")
-        # the viewer reaches the relay (not the dynamic port) via host loopback;
-        # expose relay_port as the rdp_port the bridge builds the client argv from.
-        self._approved = ViewStreamApproved(
-            info["pw_node"], self.relay_port, "", info["password"])
+        # exec() already brought up the source stack and bound the approval from
+        # this run's SETUP_OK output. Just return it (no stale-file re-read).
+        if self._approved is None:
+            raise RuntimeError("subscribe before exec(marker) / source-stack")
         return self._approved
 
     def screenshot(self, vm: str, screen: int, dest: Path) -> Path:
@@ -181,29 +219,46 @@ class QciVMBackend:
             raise RuntimeError("screenshot before subscribe_view_stream")
         self._push(real, self.repo_dir / "multimachine/harness/vm/decoder-stack.sh",
                    "/tmp/mm-decoder-stack.sh")
-        otp = self._approved.rdp_password
-        self._vmexec(real, f"OTP={otp} W={self.out_w} H={self.out_h} "
-                     f"bash /tmp/mm-decoder-stack.sh", timeout=120)
+        otp = shlex.quote(self._approved.rdp_password)
+        out = self._vmexec(real, f"OTP={otp} W={self.out_w} H={self.out_h} "
+                           f"bash /tmp/mm-decoder-stack.sh", timeout=120)
+        if "VMB_SETUP_OK" not in out:               # decoder really came up (H1)
+            raise RuntimeError(f"decoder-stack did not report VMB_SETUP_OK:\n{out}")
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            dest.unlink()                            # never evaluate a stale capture
         self._virsh("screenshot", real, "--screen", str(screen), str(dest))
+        if not dest.exists() or dest.stat().st_size == 0:
+            raise RuntimeError(f"virsh screenshot produced no image at {dest}")
         return dest
 
     def apply_netem(self, vm: str, dev: str, profile_name: str) -> None:
-        # NB (codex impl-4): the loopback relay leg bypasses this; netem here
-        # models link impairment on the SLIRP-facing dev, it is not a bridged link.
+        # NB (codex impl-4/impl-6 M6): the loopback relay leg BYPASSES this — it
+        # models link impairment on the SLIRP-facing dev, NOT a bridged inter-VM
+        # link. The configured ``dev`` ('eth0') is wrong for this image, so resolve
+        # the guest's real default-route NIC and apply (checked) there.
         from .netem import profile
+        real = self._real(vm)
+        gdev = self._guest_link_dev(real)
         prof = profile(profile_name)
-        self._vmexec(self._real(vm), " ".join(prof.tc_add(dev)))
+        self._vmexec(real, "tc qdisc del dev %s root 2>/dev/null; %s"
+                     % (shlex.quote(gdev), " ".join(prof.tc_add(gdev))))
+        self._netem_dev = gdev
 
     def clear_netem(self, vm: str, dev: str) -> None:
-        self._vmexec(self._real(vm), f"tc qdisc del dev {dev} root 2>/dev/null || true")
+        gdev = getattr(self, "_netem_dev", None) or self._guest_link_dev(self._real(vm))
+        self._vmexec(self._real(vm),
+                     f"tc qdisc del dev {shlex.quote(gdev)} root 2>/dev/null || true",
+                     check=False)
 
     def destroy(self, vm: str) -> None:
         # stop the per-run units; leave the domain defined+running for reuse.
         real = self._real(vm)
         if real == self.vm_a:
             self._vmexec(real, self._as_admin(
-                "systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay 2>/dev/null || true"))
+                "systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay "
+                "2>/dev/null || true"), check=False)
         else:
-            self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true")
+            self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true",
+                         check=False)

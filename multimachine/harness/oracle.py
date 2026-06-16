@@ -389,8 +389,9 @@ def verify_marker_half(
     starting at capture x ``dest_x0`` (1:1 at ``scale``).
 
     Only bands that fall (sufficiently) inside the source range are checked; each
-    is sampled at the capture x of its *visible-portion centre*. A band wholly
-    outside the range is skipped (it belongs to the other output)."""
+    is classified by region-majority over its WHOLE visible interval (guarded),
+    not a centre strip — so a sparse forge that only paints correct colours at the
+    sampled band centres cannot pass (codex impl-6 H3)."""
     guard = int(round(GUARD_LOGICAL * scale))
     y_top, y_bot = _band_strip_y(layout, scale, oy, img.shape[0])
     out: list[BandResult] = []
@@ -399,15 +400,39 @@ def verify_marker_half(
         hi = min(b.x1, src_x1)
         if hi - lo <= 2 * guard:          # not (sufficiently) in this half
             continue
-        src_c = (lo + hi) // 2            # centre of the visible portion (source)
-        cap_xc = dest_x0 + int(round((src_c - src_x0) * scale))
-        x0 = max(0, cap_xc - 1)
-        x1 = min(img.shape[1], cap_xc + 2)
-        patch = img[y_top:y_bot, x0:x1]
+        # classify the band's full visible interval (source [lo,hi) -> capture x),
+        # guarded at both edges, as a region.
+        cap_x0 = dest_x0 + int(round((lo - src_x0) * scale)) + guard
+        cap_x1 = dest_x0 + int(round((hi - src_x0) * scale)) - guard
+        cap_x0 = max(0, cap_x0)
+        cap_x1 = min(img.shape[1], max(cap_x0 + 1, cap_x1))
+        patch = img[y_top:y_bot, cap_x0:cap_x1]
         name, frac = classify_color(patch, tol) if patch.size else ("unknown", 0.0)
         out.append(BandResult(b.name, b.color, name, frac,
                               name == b.color and frac >= MAJORITY))
     return out
+
+
+def _strip_is_color(img: np.ndarray, x0: int, x1: int, y0: int, y1: int,
+                    color_name: str, tol: int) -> bool:
+    x0, x1 = max(0, x0), min(img.shape[1], x1)
+    y0, y1 = max(0, y0), min(img.shape[0], y1)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return False
+    name, frac = classify_color(img[y0:y1, x0:x1], tol)
+    return name == color_name and frac >= MAJORITY
+
+
+def _strip_is_background(img: np.ndarray, x0: int, x1: int, y0: int, y1: int,
+                         tol: int) -> bool:
+    """True if the strip is NOT strongly any marker band colour (i.e. the
+    compositor curtain/background, not a stray marker copy)."""
+    x0, x1 = max(0, x0), min(img.shape[1], x1)
+    y0, y1 = max(0, y0), min(img.shape[0], y1)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return True
+    name, frac = classify_color(img[y0:y1, x0:x1], tol)
+    return not (name in ("red", "green", "blue", "yellow") and frac >= MAJORITY)
 
 
 def evaluate_straddle(
@@ -458,15 +483,54 @@ def evaluate_straddle(
     # sequences differ: left=red,green,blue ; right=yellow,green,red).
     sl = next((b for b in res.out0_bands if b.name == "seam-left"), None)
     sr = next((b for b in res.out1_bands if b.name == "seam-right"), None)
-    res.seam_continuous = bool(sl and sl.ok and sr and sr.ok)
+    seam_bands_ok = bool(sl and sl.ok and sr and sr.ok)
     if not (sl and sr):
         res.notes.append("seam bands not both sampled (placement/seam mismatch)")
 
+    # seam-EDGE check (codex impl-6 H3): the last N marker px before the output
+    # boundary on out0 must be seam-left/blue, and the first N px after it on out1
+    # must be seam-right/yellow. Centre-band samples are far from the seam and
+    # would miss a gap/overlap of a few px AT the boundary; this nails it.
+    guard = int(round(GUARD_LOGICAL * scale))
+    edge = max(2 * guard, int(round(8 * scale)))
+    y_top, y_bot = _band_strip_y(layout, scale, oy, out0.shape[0])
+    seam_cap_x0 = marker_x_in_out0 + int(round(seam * scale))   # boundary in out0
+    out0_edge_ok = _strip_is_color(out0, seam_cap_x0 - edge, seam_cap_x0,
+                                   y_top, y_bot, "blue", tol)
+    yt1, yb1 = _band_strip_y(layout, scale, oy, out1.shape[0])
+    out1_edge_ok = _strip_is_color(out1, 0, edge, yt1, yb1, "yellow", tol)
+    res.seam_continuous = seam_bands_ok and out0_edge_ok and out1_edge_ok
+    if not out0_edge_ok:
+        res.notes.append("seam edge on out0 is not blue (gap/overlap/clip)")
+    if not out1_edge_ok:
+        res.notes.append("seam edge on out1 is not yellow (gap/overlap/clip)")
+
+    # background/extent (codex impl-6 H3): just OUTSIDE the marker's expected
+    # extent the capture must be background (curtain), not a stray marker copy or
+    # a half-marker scaled to fill the output. Check the far edges.
+    right_w = layout.width - seam
+    bg_out0_ok = (marker_x_in_out0 < 2 * guard) or _strip_is_background(
+        out0, 0, marker_x_in_out0 - guard, y_top, y_bot, tol)
+    far1 = int(round(right_w * scale)) + guard
+    bg_out1_ok = (far1 >= out1.shape[1] - 1) or _strip_is_background(
+        out1, far1, out1.shape[1], yt1, yb1, tol)
+    if not bg_out0_ok:
+        res.notes.append("out0 has marker content left of its expected extent")
+    if not bg_out1_ok:
+        res.notes.append("out1 has marker content right of its expected extent")
+
+    # NOTE (codex impl-6 M4 — residual scope): generation/output-id/scale are
+    # proven from the barcode in out0 only; out1 carries no barcode. out1's
+    # identity is therefore established GEOMETRICALLY (it is seam-continuous with
+    # out0's barcoded half + occupies the expected extent), not by an independent
+    # decodable id. A stale out1 from the SAME marker would still be geometrically
+    # valid; full out1 identity needs a side-local barcode in each half (a marker
+    # contract change — deferred). Acceptable for the static A1-min render gate.
     bands_ok = (bool(res.out0_bands) and bool(res.out1_bands)
                 and all(b.ok for b in res.out0_bands)
                 and all(b.ok for b in res.out1_bands))
     res.ok = (
-        bands_ok and res.seam_continuous
+        bands_ok and res.seam_continuous and bg_out0_ok and bg_out1_ok
         and res.payload is not None
         and not res.hidden_scaling and not res.stale_generation
         and (expect_output_id is None

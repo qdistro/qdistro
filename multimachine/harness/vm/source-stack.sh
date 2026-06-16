@@ -4,14 +4,16 @@
 # a separate compositor, unaffected by the production session's lock/shell.
 # Run as: runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000
 #         DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash mm-vma-setup.sh
-set -u
+set -uo pipefail   # pipefail surfaces in-pipe failures; cleanup lines are
+                   # explicitly tolerated (|| true). The caller treats the final
+                   # SETUP_OK token (not exit code alone) as the success signal.
 export XDG_RUNTIME_DIR=/run/user/1000
 SOCK=wayland-mm
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
 RUN() { systemd-run --user --collect "$@"; }
 
 # Clean prior run.
-systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay 2>/dev/null
+systemctl --user stop mm-qdwin mm-marker mm-bystander mm-relay 2>/dev/null || true
 sleep 1
 rm -f "$XDG_RUNTIME_DIR/$SOCK" "$XDG_RUNTIME_DIR/$SOCK.lock" 2>/dev/null
 

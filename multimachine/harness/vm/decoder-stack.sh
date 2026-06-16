@@ -3,7 +3,8 @@
 # a FULLSCREEN wayland client = the decoded-remote output on VM-B's head.
 # Captured host-side via `virsh screenshot` (QMP) — independent of the guest
 # agent, so a DRM/VT-induced agent hiccup never blocks the capture.
-set -u
+set -uo pipefail   # pipefail surfaces in-pipe failures; cleanup is tolerated
+                   # (|| true). Caller treats the final VMB_SETUP_OK token as success.
 RT=/run/mm-b
 SOCK=wayland-b
 HOST=${HOST:-10.0.2.2}; PORT=${PORT:-5555}; OTP=${OTP:?need OTP}
@@ -11,8 +12,8 @@ W=${W:-1280}; H=${H:-800}; TTY=${TTY:-2}
 MM=/usr/lib64/libweston-14
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
-systemctl stop mm-weston mm-viewer 2>/dev/null
-pkill -f sdl-freerdp 2>/dev/null
+systemctl stop mm-weston mm-viewer 2>/dev/null || true
+pkill -f sdl-freerdp 2>/dev/null || true
 sleep 1
 
 # seatd provides the seat libseat (and thus weston's drm backend) needs when
@@ -50,7 +51,7 @@ echo "weston up on $RT/$SOCK"
 systemd-run --collect --unit=mm-viewer \
   --setenv=XDG_RUNTIME_DIR=$RT --setenv=HOME=/root \
   --setenv=WAYLAND_DISPLAY=$SOCK --setenv=SDL_VIDEODRIVER=wayland \
-  bash -c "sdl-freerdp /v:$HOST:$PORT /u:mm /p:$OTP /scale:100 /cert:ignore /size:${W}x${H} /f > $RT/viewer.log 2>&1"
+  bash -c "sdl-freerdp /v:$HOST:$PORT /u:mm /p:\"$OTP\" /scale:100 /cert:ignore /size:${W}x${H} /f > $RT/viewer.log 2>&1"
 
 # 3) Wait for the decoded channels to come up.
 for _ in $(seq 1 40); do

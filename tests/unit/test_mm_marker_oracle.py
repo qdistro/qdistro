@@ -259,3 +259,30 @@ class TestStraddleOracle:
         res = O.evaluate_straddle(out0, out1, lay, marker_x_in_out0=mx,
                                   active_generation=20)   # active is 20
         assert not res.ok and res.stale_generation
+
+    def test_seam_gap_at_boundary_rejected(self):
+        # a few-px gap between out0's marker right edge and the output boundary:
+        # centre-band samples still pass, but the seam-EDGE check catches it.
+        out0, out1, lay, mx = _straddle_captures()
+        ow = out0.shape[1]
+        out0[:, ow - 12:ow] = 0          # blank the last 12px before the boundary
+        res = O.evaluate_straddle(out0, out1, lay, marker_x_in_out0=mx,
+                                  active_generation=20)
+        assert not res.ok and not res.seam_continuous
+
+    def test_sparse_forge_rejected(self):
+        # out0 = barcode + thin correct-colour strips only at band CENTRES, rest
+        # background. Interval (region-majority) band checks must reject it.
+        out0, out1, lay, mx = _straddle_captures()
+        full = M.render_rgb(lay, M.MarkerPayload(1, 20, 3, 0, 0, lay.width,
+                            lay.height, 100), scale=1.0)
+        forged = np.zeros_like(out0)
+        cp = lay.corner_px
+        forged[cp[1]:cp[3], mx:mx + cp[2]] = full[cp[1]:cp[3], 0:cp[2]]  # barcode
+        for b in lay.bands:                       # 3px centre strip per left band
+            if b.x1 <= lay.seam_x and b.x1 > b.x0:
+                c = (b.x0 + b.x1) // 2
+                forged[200:260, mx + c - 1:mx + c + 2] = full[200:260, c - 1:c + 2]
+        res = O.evaluate_straddle(forged, out1, lay, marker_x_in_out0=mx,
+                                  active_generation=20)
+        assert not res.ok

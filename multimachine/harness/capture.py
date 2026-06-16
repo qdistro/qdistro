@@ -52,7 +52,17 @@ def _read_ppm(path: Path) -> np.ndarray:
     width, height, maxval = (int(t) for t in tokens)
     if maxval != 255:
         raise ValueError(f"{path}: unsupported maxval {maxval}")
-    pos += 1  # single whitespace after maxval
+    # The PPM grammar separates maxval from the binary pixels with exactly ONE
+    # whitespace char. Consume one — but treat a "\r\n" terminator as that single
+    # separator (some writers emit CRLF), else the stray "\n" would leak into the
+    # pixels and shift every colour by a byte (codex impl-6 Low). Do NOT greedily
+    # eat all whitespace: a real pixel byte may legitimately be 0x20/0x0a/etc.
+    if pos >= len(data) or data[pos] not in b" \t\r\n":
+        raise ValueError(f"{path}: missing whitespace after maxval")
+    if data[pos:pos + 2] == b"\r\n":
+        pos += 2
+    else:
+        pos += 1
     expected = width * height * 3
     pixels = np.frombuffer(data[pos:pos + expected], dtype=np.uint8)
     if pixels.size != expected:
