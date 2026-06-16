@@ -92,7 +92,10 @@ fi
 # ---- 2. Build qdwin ------------------------------------------------------
 log "building qdwin (libweston shell plugin)..."
 cd "$SRC/qdwin"
-meson setup build --wipe --prefix=/usr
+# QDWIN_EXTRA_MESON_OPTS: optional space-separated extra `meson setup` flags
+# (e.g. -Denable_test_place=true for the A1-min straddle test build). Empty in
+# production spins — the test-only hook is compiled out by default (impl-6 M7).
+meson setup build --wipe --prefix=/usr ${QDWIN_EXTRA_MESON_OPTS:-}
 meson compile -C build
 meson install -C build
 

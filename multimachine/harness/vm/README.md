@@ -84,3 +84,61 @@ correct at 1:1 with no hidden scaling (within RDP tolerance), on a *separate
 machine's head*. The RDP byte path is host loopback (not a bridged inter-VM L2);
 netem on VM-A models link impairment but the loopback relay leg bypasses it — state
 that, don't imply a real network.
+
+---
+
+# A1-min two-output straddle apparatus (`a1-straddle-stack.sh`)
+
+The **proven** (2026-06-16 session 3) live render-gate apparatus for A1-min: one
+qdwin instance, two adjacent real outputs, one marker toplevel composited across
+the seam, captured per-output. Single-VM (no RDP, no second machine) — this is a
+LOCAL render proof (`VM_A_HOST`), not decoded-remote.
+
+The hard part was getting **two capturable heads** (codex impl-7 called it "its
+own discovery project"). The recipe that worked, after QXL-multihead and
+two-separate-cards both failed (QXL/2nd-card heads boot `disconnected` /
+weston drives only the primary card):
+
+- **ONE `virtio-gpu-pci,id=gpu0,max_outputs=2`** so both outputs live on one DRM
+  card weston actually drives (the 2-output enable is in the weston log:
+  `Output 'Virtual-1' enabled` + `Output 'Virtual-2' enabled`).
+- **`-display egl-headless,rendernode=/dev/dri/renderD128`** so QEMU registers a
+  *console per scanout* — without it `screendump head=1` is "no such screen ID"
+  and `virsh screenshot --screen 1` fails (only head 0 exists under `-display
+  none`). Needs a host render node + EGL.
+- **kernel `video=Virtual-2:800x600e`** (force-enable, the `e` suffix) — a
+  headless QEMU boots the 2nd virtio connector `disconnected`, so weston won't
+  enable it; forcing it connected at the DRM layer fixes that.
+- capture each output host-side with **raw QMP** `screendump device=gpu0 head=N`
+  (NOT `virsh screenshot --screen N`, whose enumeration sees only head 0).
+
+`a1-straddle-stack.sh` (run as root in the guest) reuses the production
+compositor unit `noctalia-session.service` (it already acquires seat0 via the
+admin user-session + seatd `-g seat`; a bare `systemd-run` weston is rejected
+"Broken pipe" — not in the active session / root not in group `seat`). It
+overrides `~/weston.ini` to two 800×600 outputs (pixman, scale 1), injects the
+`QDWIN_TEST_PLACE_*` env via a unit drop-in, stops the QML shell (chrome), and
+launches the marker. `MODE=straddle` places it at global (544,100) so its
+seam_x=256 lands on the output boundary x=800; `MODE=calib` places it wholly in
+out0 at (100,100) to prove zero decoration offset + the head→output mapping.
+
+## verdict
+
+`oracle.evaluate_straddle(out0, out1, compute_layout(512,400,seam_x=256),
+marker_x_in_out0=544, oy=100, scale=1.0, active_generation=20, expect_output_id=1)`
+must be `ok` with `seam_continuous`, `measured_scale==1.0`, `hidden_scaling==False`.
+Committed reference + regression: `tests/unit/data/mm/live-straddle-a1-*.png`,
+`TestLiveStraddleA1`. The swapped head assignment MUST fail (proves the
+screen-index→output mapping is established, not assumed).
+
+## honesty scope (A1-min)
+
+Proves only: one qdwin holds two adjacent outputs; libweston composites one normal
+toplevel across the seam into both (correct complementary halves, no duplicate
+full-surface render, no seam gap/overlap, no hidden per-output scaling, no stale
+generation); the harness captures + verifies two-output evidence. Placement uses a
+**test-only** hook, NOT WM policy. Does NOT prove runtime output add/remove,
+hotplug, move/tiling/maximize policy, RDP-as-monitor, or input across the seam.
+`egl-headless` + `video=...e` are a capturable-head test transport; they prove
+qdwin/libweston multi-output composition, not a specific production GPU's
+connector behaviour.

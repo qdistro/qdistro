@@ -146,6 +146,115 @@ class TestLiveDecodedRemoteCapture:
         b.assert_remote_proof()  # must not raise: passing oracle on a VM_B capture
 
 
+# ---- A1-min: LIVE two-output straddle (render gate) ----------------------
+_A1_OUT0 = _DATA / "live-straddle-a1-out0-800x600-o1-g20.png"
+_A1_OUT1 = _DATA / "live-straddle-a1-out1-800x600-o1-g20.png"
+_A1_CALIB = _DATA / "live-straddle-a1-calib-out0-800x600-o1-g20.png"
+
+# Geometry of the real run (codex impl-7): two adjacent 800x600 qdwin outputs
+# (Virtual-1 [0,0,800,600] = out0/head0, Virtual-2 [800,0,800,600] = out1/head1),
+# a 512x400 marker (seam_x=256) placed by the QDWIN_TEST_PLACE_* hook at global
+# (544,100) so its internal seam lands exactly on the output boundary x=800.
+_A1_MW, _A1_MH, _A1_SEAM = 512, 400, 256
+_A1_MARKER_X_IN_OUT0, _A1_OY, _A1_GEN = 544, 100, 20
+
+
+class TestLiveStraddleA1:
+    """Regression on the A1-min LIVE two-output straddle render gate (the
+    render-gate proof, 2026-06-16 session 3). A SINGLE dedicated qdwin
+    (libweston + qdwin-shell.so) drives TWO adjacent DRM outputs on one
+    virtio-gpu (max_outputs=2, the 2nd connector force-enabled with the kernel
+    ``video=Virtual-2:800x600e``; both QEMU scanouts registered as consoles via
+    ``-display egl-headless``). One normal marker toplevel, placed across the
+    seam by the test-only ``QDWIN_TEST_PLACE_*`` hook, is composited by libweston
+    onto BOTH outputs (``output_mask``); each output's QEMU virtual head is
+    captured host-side via QMP ``screendump device=gpu0 head=N``. This is
+    VM_A_HOST (local two-output straddle) — it proves the libweston render +
+    per-output capture + oracle truth, NOT WM policy / runtime output lifecycle /
+    RDP-as-monitor / input (codex impl-5 scope).
+    """
+
+    def _layout(self):
+        return M.compute_layout(_A1_MW, _A1_MH, seam_x=_A1_SEAM)
+
+    def test_straddle_passes_clean_no_hidden_scaling(self):
+        out0 = C.load_image(_A1_OUT0)
+        out1 = C.load_image(_A1_OUT1)
+        assert out0.shape == (600, 800, 3) and out1.shape == (600, 800, 3)
+        res = O.evaluate_straddle(
+            out0, out1, self._layout(), marker_x_in_out0=_A1_MARKER_X_IN_OUT0,
+            scale=1.0, tol=O.TOL_RDP, oy=_A1_OY, active_generation=_A1_GEN,
+            expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.seam_continuous and not res.hidden_scaling
+        assert res.measured_scale == 1.0 and not res.stale_generation
+        assert res.payload.output_id == 1 and res.payload.generation == _A1_GEN
+        assert all(b.ok for b in res.out0_bands) and res.out0_bands
+        assert all(b.ok for b in res.out1_bands) and res.out1_bands
+
+    def test_straddle_head_mapping_is_non_ambiguous(self):
+        # Swapping the per-output captures (head1->out0, head0->out1) MUST fail:
+        # the oracle's source-rect-aware halves only pass under the correct
+        # head->output assignment, so the screen-index mapping is proven, not
+        # assumed (codex impl-7 mapping requirement).
+        out0 = C.load_image(_A1_OUT0)
+        out1 = C.load_image(_A1_OUT1)
+        swapped = O.evaluate_straddle(
+            out1, out0, self._layout(), marker_x_in_out0=_A1_MARKER_X_IN_OUT0,
+            scale=1.0, tol=O.TOL_RDP, oy=_A1_OY, active_generation=_A1_GEN)
+        assert not swapped.ok
+
+    def test_straddle_rejects_stale_generation(self):
+        out0 = C.load_image(_A1_OUT0)
+        out1 = C.load_image(_A1_OUT1)
+        res = O.evaluate_straddle(
+            out0, out1, self._layout(), marker_x_in_out0=_A1_MARKER_X_IN_OUT0,
+            scale=1.0, tol=O.TOL_RDP, oy=_A1_OY, active_generation=_A1_GEN + 5)
+        assert not res.ok and res.stale_generation
+
+    def test_calibration_zero_decoration_offset_and_mapping(self):
+        # The calibration pass placed the marker WHOLLY inside out0 at global
+        # (100,100). Its content top-left must land EXACTLY at (100,100) (no
+        # server-side decoration offset) and NOTHING must appear on out1 — which
+        # also proves head0 is the output holding global x in [0,800) = out0.
+        cal0 = C.load_image(_A1_CALIB)
+        mask = cal0.sum(2) > 40
+        ys, xs = np.where(mask)
+        assert (xs.min(), ys.min()) == (100, 100)          # zero offset
+        assert (xs.max(), ys.max()) == (100 + _A1_MW - 1, 100 + _A1_MH - 1)
+
+    def test_straddle_satisfies_render_gate_evidence(self, tmp_path):
+        from multimachine.harness.evidence import (
+            CaptureClass, EvidenceBundle, OracleRecord, Topology as EvTopology)
+        out0 = C.load_image(_A1_OUT0)
+        out1 = C.load_image(_A1_OUT1)
+        res = O.evaluate_straddle(
+            out0, out1, self._layout(), marker_x_in_out0=_A1_MARKER_X_IN_OUT0,
+            scale=1.0, tol=O.TOL_RDP, oy=_A1_OY, active_generation=_A1_GEN,
+            expect_output_id=1)
+        b = EvidenceBundle.create(
+            tmp_path / "b", scenario="a1-min-straddle", step="live-straddle",
+            generation=_A1_GEN,
+            topology=EvTopology(vms=["vm-a"], netem_profile="lan-clean",
+                                description="A1-min two-output straddle (local)"))
+        # Two VM_A_HOST captures = the two QEMU virtual heads (the two qdwin
+        # outputs) the marker straddles.
+        b.add_capture(_A1_OUT0, CaptureClass.VM_A_HOST, output_id=1,
+                      role="qdwin Virtual-1 (out0, left of seam)", fmt="PNG",
+                      scale=1.0)
+        b.add_capture(_A1_OUT1, CaptureClass.VM_A_HOST, output_id=1,
+                      role="qdwin Virtual-2 (out1, right of seam)", fmt="PNG",
+                      scale=1.0)
+        b.add_oracle(OracleRecord(
+            capture=str(_A1_OUT0), ok=res.ok, output_id=res.payload.output_id,
+            generation=res.payload.generation, frame=res.payload.frame,
+            measured_scale=res.measured_scale,
+            hidden_scaling=res.hidden_scaling))
+        b.manifest.passed = res.ok
+        assert b.manifest.passed       # render gate: a passing straddle oracle
+        assert res.ok and not res.hidden_scaling
+
+
 def _find_marker_binary() -> str | None:
     env = os.environ.get("QDWIN_MARKER_CLIENT")
     if env and Path(env).exists():

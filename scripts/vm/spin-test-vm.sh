@@ -236,7 +236,9 @@ log "stage 5: running fresh-vm-bootstrap.sh in VM..."
 # Normalize the tier-2 image-prebuild flag to a bare 0/1 before embedding it in
 # the guest command string (defensive for manual invocations passing true/yes).
 case "${QDISTRO_BUILD_TIER2_IMAGES:-0}" in 1|true|yes|on) _T2_IMAGES=1 ;; *) _T2_IMAGES=0 ;; esac
-"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' bash /root/fresh-vm-bootstrap.sh" >&2
+# QDWIN_EXTRA_MESON_OPTS (optional) is forwarded verbatim to the in-guest qdwin
+# meson setup — used by the A1-min straddle test build (-Denable_test_place=true).
+"$SCRIPT_DIR/vm-exec" "$VM" "QDISTRO_HTTP_HOST='$STAGE_URL' QDISTRO_BUILD_TIER2_IMAGES='$_T2_IMAGES' QDWIN_EXTRA_MESON_OPTS='${QDWIN_EXTRA_MESON_OPTS:-}' bash /root/fresh-vm-bootstrap.sh" >&2
 
 fi  # end stages 4-5 (skipped in run-golden mode)
 
