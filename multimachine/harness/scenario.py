@@ -535,14 +535,27 @@ def run_input_confinement_slice(
         exported_delta = _press_total(exported_after) - base_exp
         sentinel_delta = _press_total(sentinel_after) - _press_total(sentinel_before)
 
-        passed = bool(res.ok and exported_delta > 0 and sentinel_delta == 0)
+        # FAIL CLOSED on the sentinel (codex impl-11): a `sentinel_delta == 0` is
+        # only a confinement proof if the sentinel was actually ALIVE, identified,
+        # and binding seats — otherwise an absent/malformed/never-started sentinel
+        # (read_telemetry → {} → press 0) would satisfy the negative-control half
+        # for free. Require its telemetry to be well-formed, correctly labelled, and
+        # to have seen at least one seat (so it COULD have received a leak).
+        sentinel_valid = (
+            sentinel_after.get("label") == "sentinel"
+            and int(sentinel_after.get("seats_seen", 0) or 0) >= 1
+            and isinstance(sentinel_after.get("totals"), dict))
+
+        passed = bool(res.ok and exported_delta > 0 and sentinel_delta == 0
+                      and sentinel_valid)
         if passed:
             bundle.assert_remote_proof()
         bundle.manifest.passed = passed
         bundle.manifest.notes.append(
             f"input confinement: exported press delta={exported_delta} (>0), "
-            f"sentinel press delta={sentinel_delta} (==0). Injected end-to-end "
-            "via ydotool→sdl-freerdp→RDP→qdistro-forward→per-stream seat.")
+            f"sentinel press delta={sentinel_delta} (==0), sentinel_valid="
+            f"{sentinel_valid}. Injected end-to-end via ydotool→sdl-freerdp→RDP→"
+            "qdistro-forward→per-stream seat.")
         bundle.write()
         return InputConfinementResult(
             bundle, res, exported_delta, sentinel_delta, exported_before,

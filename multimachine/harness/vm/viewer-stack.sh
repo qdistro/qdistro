@@ -91,6 +91,10 @@ echo "weston up on $RT/$SOCK"
 #    toplevel at origin 0,0.
 command -v python3 >/dev/null || { echo "FAIL: python3 missing on VM-B"; exit 5; }
 [ -f "$MMDIR/multimachine/viewer.py" ] || { echo "FAIL: multimachine pkg not at $MMDIR"; exit 5; }
+# Keep the OTP off the long-lived mm-viewer-launch argv (codex impl-11): write it
+# to a 0600 file and pass --otp-file. (sdl-freerdp still gets /p:<otp> via --otp-argv
+# — the documented FreeRDP /from-stdin-gfx-codec trade-off.)
+OTPFILE="$RT/otp"; printf '%s' "$OTP" > "$OTPFILE"; chmod 0600 "$OTPFILE"
 systemd-run --collect --unit=mm-viewer \
   --setenv=XDG_RUNTIME_DIR=$RT --setenv=HOME=/root \
   --setenv=WAYLAND_DISPLAY=$SOCK --setenv=SDL_VIDEODRIVER=wayland \
@@ -98,7 +102,7 @@ systemd-run --collect --unit=mm-viewer \
   python3 -m multimachine.viewer \
     --control-host "$CONTROL_HOST" --control-port "$CONTROL_PORT" \
     --rdp-host "$RDP_HOST" --rdp-port "$RDP_PORT" \
-    --generation "$GEN" --otp "$OTP" --size "${W}x${H}" \
+    --generation "$GEN" --otp-file "$OTPFILE" --size "${W}x${H}" \
     --fullscreen --rdp-user "$RDP_USER" --otp-argv \
     --status-file "$STATUS_FILE" --decoder-log "$RT/freerdp.log"
 

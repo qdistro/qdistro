@@ -61,6 +61,11 @@ class TestStatusModel:
         assert model_from_status({"status": "bogus"}).status == "idle"
         assert model_from_status({}).rows == []
 
+    def test_non_int_generation_does_not_crash(self):
+        # codex impl-11: a malformed generation must degrade to 0, never raise.
+        assert model_from_status({"generation": "abc"}).generation == 0
+        assert model_from_status({"generation": None}).generation == 0
+
     def test_untitled_window_shows_placeholder(self):
         v = _viewer()
         v.on_message(_announce(title=""))

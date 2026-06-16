@@ -79,7 +79,10 @@ def model_from_status(viewer_status: dict) -> StatusSurfaceModel:
     status = viewer_status.get("status", "idle")
     if status not in _VALID_STATUS:
         status = "idle"
-    gen = int(viewer_status.get("generation", 0) or 0)
+    try:
+        gen = int(viewer_status.get("generation", 0) or 0)
+    except (TypeError, ValueError):          # malformed generation → 0, never crash
+        gen = 0
     source_machine = viewer_status.get("source_machine", "")
     rows: list[RemoteStatusRow] = []
     for w in viewer_status.get("windows", []) or []:

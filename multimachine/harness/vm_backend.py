@@ -434,7 +434,7 @@ class QciVMBackend:
             # center), click TWICE (a missed-focus first click still leaves a
             # delivered press), and send a key.
             f"ydotool mousemove -- -5000 -5000; sleep 0.3; "
-            f"ydotool mousemove -- 640 400; sleep 0.3; "
+            f"ydotool mousemove -- {self.out_w // 2} {self.out_h // 2}; sleep 0.3; "
             f"ydotool click 0xC0; sleep 0.3; "       # left press+release
             f"ydotool click 0xC0; sleep 0.3; "
             f"ydotool key 30:1 30:0; sleep 0.3; "    # 'a' press+release

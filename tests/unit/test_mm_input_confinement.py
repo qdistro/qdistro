@@ -37,19 +37,21 @@ class _FakeProc:
     def terminate(self): pass
 
 
-def _tel(button_press=0, key_press=0):
-    return {"totals": {"button_press": button_press, "key_press": key_press,
+def _tel(label="exported", seats_seen=1, button_press=0, key_press=0):
+    return {"label": label, "seats_seen": seats_seen,
+            "totals": {"button_press": button_press, "key_press": key_press,
                        "pointer_enter": 0, "keyboard_enter": 0}}
 
 
 class MockInputBackend:
     def __init__(self, *, capture_gen=7, capture_out=1, leaky=False,
-                 no_deliver=False, width=1280, height=800):
+                 no_deliver=False, dead_sentinel=False, width=1280, height=800):
         self.width, self.height = width, height
         self.capture_gen, self.capture_out = capture_gen, capture_out
         self.leaky, self.no_deliver = leaky, no_deliver
+        self.dead_sentinel = dead_sentinel
         self.calls: list[tuple] = []
-        self._tel = {"exported": _tel(), "sentinel": _tel()}
+        self._tel = {"exported": _tel("exported"), "sentinel": _tel("sentinel")}
         self._paths: dict[str, str] = {}
         self._threads: dict[str, tuple] = {}
         self._status: dict[str, dict] = {}
@@ -127,14 +129,16 @@ class MockInputBackend:
 
     def read_telemetry(self, vm, path):
         which = self._paths.get(path)
+        if which == "sentinel" and self.dead_sentinel:
+            return {}                        # sentinel never wrote telemetry
         return dict(self._tel.get(which, {})) if which else {}
 
     def inject_input(self, vm):
         self.calls.append(("inject_input", vm))
         if not self.no_deliver:
-            self._tel["exported"] = _tel(button_press=1, key_press=1)
+            self._tel["exported"] = _tel("exported", button_press=1, key_press=1)
         if self.leaky:                       # a confinement bug: leaks to sentinel
-            self._tel["sentinel"] = _tel(button_press=1, key_press=1)
+            self._tel["sentinel"] = _tel("sentinel", button_press=1, key_press=1)
 
 
 class TestInputConfinement:
@@ -172,6 +176,15 @@ class TestInputConfinement:
             be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
             viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
         assert not res.passed and res.oracle.stale_generation
+
+    def test_dead_sentinel_fails_closed(self, tmp_path):
+        # codex impl-11: a sentinel that never wrote telemetry must NOT satisfy the
+        # negative-control half for free — sentinel_delta==0 but unproven → FAIL.
+        be = MockInputBackend(capture_gen=7, dead_sentinel=True)
+        res = run_input_confinement_slice(
+            be, Topology.default(), generation=7, bundle_dir=tmp_path / "b",
+            viewer_control_host="127.0.0.1", viewer_rdp_host="127.0.0.1")
+        assert not res.passed and res.sentinel_press_delta == 0
 
     def test_cleanup_runs(self, tmp_path):
         be = MockInputBackend(capture_gen=7)

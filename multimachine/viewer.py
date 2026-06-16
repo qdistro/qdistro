@@ -203,7 +203,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ap.add_argument("--rdp-host", default="127.0.0.1")
     ap.add_argument("--rdp-port", type=int, required=True)
     ap.add_argument("--rdp-cert", default="")
-    ap.add_argument("--otp", required=True, help="single-use stream password")
+    ap.add_argument("--otp", default="",
+                    help="single-use stream password (test/compat: VISIBLE in this "
+                         "process's argv — prefer --otp-file)")
+    ap.add_argument("--otp-file", default="",
+                    help="read the OTP from this file, keeping it off mm-viewer-"
+                         "launch's own argv (codex impl-11; the product path)")
     ap.add_argument("--size", default="", help="WxH; empty = source size")
     ap.add_argument("--status-file", default="")
     ap.add_argument("--fullscreen", action="store_true",
@@ -227,6 +232,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
                          "gate sets this; product keeps the stdin default).")
     args = ap.parse_args(argv)
 
+    otp = args.otp
+    if args.otp_file:
+        with open(args.otp_file) as f:
+            otp = f.read().strip()
+    if not otp:
+        ap.error("need --otp or --otp-file")
+
     w = h = 0
     if args.size and "x" in args.size:
         w, h = (int(v) for v in args.size.split("x", 1))
@@ -234,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     def launcher(ann: Announce) -> ViewerProcess:
         approved = ViewStreamApproved(
             pipewire_node_name="", rdp_port=args.rdp_port,
-            rdp_cert_path=args.rdp_cert, rdp_password=args.otp)
+            rdp_cert_path=args.rdp_cert, rdp_password=otp)
         argvv = rdp_client_argv(approved, host=args.rdp_host,
                                 width=w or ann.meta.req_w, height=h or ann.meta.req_h,
                                 fullscreen=args.fullscreen,
