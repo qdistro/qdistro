@@ -88,6 +88,64 @@ class TestLivePerViewCapture:
         assert O.detect_origin(img) == (32, 32)
 
 
+_LIVE_DECODED = _DATA / "live-decoded-remote-vmb-1280x800-o1-g20.png"
+
+
+class TestLiveDecodedRemoteCapture:
+    """Regression on the DECODED-REMOTE capture (the honesty-rule capture):
+    a REAL two-VM live run (2026-06-16 session 2). VM-A runs a dedicated headless
+    qdwin (libweston + qdwin-shell.so, [pipewire] num-outputs raised) with the
+    fullscreen marker as the source toplevel; the shipped per-view path spawns
+    qdistro-forward (RDP server); VM-B runs ``sdl-freerdp`` as a fullscreen
+    Wayland client under a kiosk-shell weston on its own DRM head; the decoded
+    output is captured host-side via ``virsh screenshot`` (QMP). RDP bytes are
+    chained VM-B -> host loopback -> VM-A over two SLIRP NATs (PLAN A, codex
+    impl-4). This is VM_B_HOST (decoded-remote) — it proves what the peer monitor
+    actually shows, within RDP tolerance, at 1:1 with NO hidden scaling.
+    """
+
+    def test_decoded_remote_decodes_clean_no_hidden_scaling(self):
+        img = C.load_image(_LIVE_DECODED)
+        assert img.shape == (800, 1280, 3)
+        lay = M.compute_layout(1280, 800)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=20, expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.payload.output_id == 1 and res.payload.generation == 20
+        assert res.payload.w == 1280 and res.payload.h == 800
+        assert res.measured_scale == 1.0 and not res.hidden_scaling
+        assert not res.stale_generation
+        assert all(b.ok for b in res.bands)
+
+    def test_decoded_remote_kiosk_capture_is_flush(self):
+        # kiosk-shell places the fullscreen surface at the output origin: the
+        # decoded marker fills the head 1:1 (auto_origin (0,0)), unlike a
+        # desktop-shell capture that centred + clipped the quiet zone.
+        img = C.load_image(_LIVE_DECODED)
+        assert O.detect_origin(img) == (0, 0)
+
+    def test_decoded_remote_satisfies_honesty_rule(self, tmp_path):
+        from multimachine.harness.evidence import (
+            CaptureClass, EvidenceBundle, OracleRecord, Topology as EvTopology)
+        img = C.load_image(_LIVE_DECODED)
+        lay = M.compute_layout(1280, 800)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=20, expect_output_id=1)
+        b = EvidenceBundle.create(
+            tmp_path / "b", scenario="mm-01-decoded-remote", step="live-decoded",
+            generation=20,
+            topology=EvTopology(vms=["vm-a", "vm-b"], netem_profile="lan-clean",
+                                description="decoded-remote live"))
+        cap = b.add_capture(_LIVE_DECODED, CaptureClass.VM_B_HOST, output_id=1,
+                            role="VM-B monitor (decoded RDP)", fmt="PNG", scale=1.0)
+        b.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok, output_id=res.payload.output_id,
+            generation=res.payload.generation, frame=res.payload.frame,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling))
+        b.manifest.passed = res.ok
+        b.assert_remote_proof()  # must not raise: passing oracle on a VM_B capture
+
+
 def _find_marker_binary() -> str | None:
     env = os.environ.get("QDWIN_MARKER_CLIENT")
     if env and Path(env).exists():
