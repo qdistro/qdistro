@@ -95,9 +95,23 @@ False; a stale same-generation `Announce` is then rejected.
 **Assert 4.2:** the **marker source app is still alive** (detach, not death) —
 unless the test intentionally sent `CloseRequest`.
 
+## Executable form
+
+This scenario's flow is implemented as
+`multimachine.harness.scenario.run_viewer_slice(backend, topology, ...)`. Wire a
+real `VMBackend` (a thin adapter over qci `vm-exec` / `virsh screenshot --screen
+N` / `tc`, + `qdwin-bystander --subscribe` for `subscribe_view_stream`) and call
+it; it spins the VMs, applies netem, runs the marker + subscribe + bridge,
+captures the decoded-remote framebuffer on VM-B, runs the oracle, maps teardown
+to detach, asserts the source survives, and writes the evidence bundle. The
+orchestration logic is already validated by `tests/unit/test_mm_scenario.py`
+against a `MockBackend`; the only new code for a live run is the backend adapter.
+
 ## Pass criteria
 
-All asserts hold; the evidence bundle records the **decoded-remote** capture
-class and the netem profile. Record as *"host-local Phase-1 RDP viewer
-transport/control slice passed"* — never as two-VM remote-output or native-feel
+All asserts hold; `run_viewer_slice(...).passed` is True; the evidence bundle
+records the **decoded-remote** capture class and the netem profile, and
+`assert_remote_proof()` holds (a passing oracle record on the decoded-remote
+capture). Record as *"host-local Phase-1 RDP viewer transport/control slice
+passed under netem profile X"* — never as two-VM remote-output or native-feel
 proof.
