@@ -136,6 +136,39 @@ dest_app_id, source_sandbox_engine)`. Rules can specify `mime_type:` (with
 fnmatch glob support — `text/*`, `image/*`, `application/*`) to allow or
 deny specific MIME shapes per source/dest pair.
 
+### Deny-storm robustness
+
+The set-side gate calls `clear_selection` on **every** deny, and `clear_selection`
+is a synchronous request into qdshell's fixed 4 KB libwayland output buffer to
+the compositor. A producer that re-asserts a denied selection in a tight loop —
+a buggy client, a clipboard manager that re-offers, or a malicious tier guest
+deliberately flooding `selection_set` — would otherwise drive a deny→clear→
+re-offer storm. At a high enough rate the compositor drains slower than qdshell
+fills, libwayland's marshal hits `Data too big for buffer`, and the **whole
+privileged shell↔compositor connection is fatally errored** — taking out the
+clipboard isolation channel and silently dropping any in-flight load-bearing
+request (e.g. a cross-silo focus injection) during the rebind window.
+
+Two coordinated mitigations keep the channel alive under load:
+
+- **qdshell coalesces redundant clears.** The first deny for a given
+ denied-offer identity (`seat` + selection kind + source silo + dest silo +
+ mime set) always clears; identical repeats inside a short window (~500 ms)
+ suppress only the redundant *wire* call. This bounds the `clear_selection`
+ rate to at most one per identity per window. It does **not** weaken
+ fail-closed: every verdict is still audited, the independent set-time and
+ receive-time gates still run per event, and re-clearing an already-cleared
+ selection is a no-op — a denied offer that briefly persists for up to one
+ window while being re-cleared is strictly safer than the channel dying and
+ clearing nothing. (`ClipboardDenyCoalesce.js`.)
+- **qdshell never assumes a request was sent.** After every imperative request
+ it checks the `wl_display_flush` result; a fatal (non-`EAGAIN`) error tears
+ the binding down and triggers reconnect rather than continuing in a false
+ "bound" state. (`qdwin-binding.cpp`.)
+- **The compositor makes `clear_selection` idempotent** (defense-in-depth):
+ clearing an already-empty seat/kind selection is a no-op, so redundant clears
+ cost nothing on the compositor side.
+
 ## Audit
 
 Every cross-compositor transfer flows through `qbus-admin`. Admin can log:
