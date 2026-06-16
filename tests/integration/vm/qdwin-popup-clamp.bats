@@ -10,7 +10,7 @@
 # straight through. The kernel's in-bounds invariant is pinned host-side by
 # qdwin/tests/unit/test-qdwin-logic.c; THIS lane proves the clamp is actually
 # wired and active in a live qdwin session — i.e. the compositor loaded the
-# vendored tree (via noctalia-session.service's LD_LIBRARY_PATH/
+# vendored tree (via qdwin-compositor.service's LD_LIBRARY_PATH/
 # WESTON_MODULE_MAP, written by install-qdwin-session-for-vm.sh) and the real
 # protocol path constrains a hostile popup.
 #

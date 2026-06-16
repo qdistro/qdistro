@@ -29,7 +29,7 @@ loginctl enable-linger admin 2>/dev/null || true
 # s28 cleanup (R9) — needed when s21 runs as the first §6.8 probe in a
 # full-file bats run and the qdwin user-session has just been spun up.
 systemctl --machine=admin@.host --user stop \
-    noctalia-shell.service noctalia-session.service qdlocker.service \
+    qdshell.service qdwin-compositor.service qdlocker.service \
     2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 pkill -9 -f 's21-nested-probe' 2>/dev/null || true

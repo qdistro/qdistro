@@ -357,7 +357,8 @@ no admin-app launchers, no labwc/qdwin session up). Use
 `scripts/vm/spin-test-vm-gui.sh` instead — it layers the
 permissions-gui prereqs (work/work2 users, `qdistro-test-permission`,
 `qdistro-start-admin-{app,tui}`, qterminal.ini, and starts admin's
-noctalia-session/shell) on top. The last stdout line is the VM name,
+qdwin-session.target — qdwin-compositor + qdshell) on top. The last
+stdout line is the VM name,
 ready to feed runners as `VMNAME`.
 
 ### Spawn pattern (validated)

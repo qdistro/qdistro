@@ -22,7 +22,7 @@ pgrep -f "http.server 8765" >/dev/null || (
 )
 sleep 1
 
-noct_session_healthy || { echo "FAIL: noctalia-shell.service not active"; exit 1; }
+noct_session_healthy || { echo "FAIL: qdshell.service not active"; exit 1; }
 ```
 
 ## Steps
@@ -44,7 +44,7 @@ the Noctalia owl/moon wallpaper or a uniform configured background.
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
- "runuser -l admin -c \"journalctl --user -u noctalia-session.service --since '2 minutes ago' --no-pager\"" \
+ "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '2 minutes ago' --no-pager\"" \
  > /tmp/01-weston.log
 ```
 
@@ -65,7 +65,7 @@ noct_screenshot_awake /tmp/01-step3-after-10s.png
 **Assert (3.1):** the bar is still in the top 31 px (compare
 distinct-color count of the top strip in the new screenshot — must
 be approximately the same as step 1).
-**Assert (3.2):** noctalia-shell.service still active —
+**Assert (3.2):** qdshell.service still active —
 `noct_session_healthy`.
 
 ## Cleanup
@@ -90,8 +90,8 @@ All asserts in steps 1-3 pass.
 
 3. **`weston: fatal: unhandled option`** — older `weston.ini`
  versions with `--tty=N` flag don't work with libweston 14.
- Symptom: `noctalia-session.service` won't start. Fix:
- `sed -i 's/ --tty=2//' /home/admin/.config/systemd/user/noctalia-session.service`.
+ Symptom: `qdwin-compositor.service` won't start. Fix:
+ `sed -i 's/ --tty=2//' /home/admin/.config/systemd/user/qdwin-compositor.service`.
 
 4. **MESA-LOADER GLES segfault** — if `weston.ini` doesn't include
  `renderer=pixman`, libgallium tries virtio-gpu accel3d (which

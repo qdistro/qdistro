@@ -37,8 +37,8 @@ respective VMs.
 - **Single-tenant.** The image bakes one admin uid (1000, name `admin`)
   and one user uid (1001, name `user`). No multi-user login screen.
 - **Wayland-only.** greetd autologins admin to a bash shell on tty1;
-  admin's user systemd then auto-starts `noctalia-session.service`
-  (weston with `qdwin-shell.so`) + `noctalia-shell.service`
+  admin's user systemd then auto-starts `qdwin-compositor.service`
+  (weston with `qdwin-shell.so`) + `qdshell.service`
   (quickshell loading `/usr/share/quickshell/qdshell/`).
 - **Source-on-disk.** `/root/qdistro-src/{qdistro,qdwin,qdshell}/` stays
   on the installed system — the LLM-modifiability principle in

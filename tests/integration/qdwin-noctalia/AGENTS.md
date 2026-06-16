@@ -15,7 +15,7 @@ Same orchestrator/runner split as the sibling harness.
 ## Environment
 
 - Target VM: a qdwin VM with `noctalia-shell` + `noctalia-qs` packages
- installed and `noctalia-shell.service` (user unit) enabled.
+ installed and `qdshell.service` (user unit) enabled.
 - Default VM name pattern: `noctalia-vis-YYMMDD-HHMM`. The reference
  setup VM as of 2026-05-03 is `noctalia-vis-260503-1021` (clone of
  `weston-desktop-260422-1604`-derived `layershell-260502-2322`).
@@ -35,7 +35,7 @@ Noctalia has no equivalent ctrl-socket. Instead use:
 - `qdwin_send_key`, `qdwin_qmp_key`, `qdwin_chord` — keyboard
 - `qdwin_mouse_move`, `qdwin_click`, `qdwin_mouse_button` — pointer
 - `noct_session_healthy` — defined in `noctalia-helpers.sh` (this
- dir) — checks the `noctalia-shell.service` user unit is active +
+ dir) — checks the `qdshell.service` user unit is active +
  qs process is alive
 
 ## What works (and what doesn't) on Noctalia

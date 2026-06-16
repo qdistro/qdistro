@@ -31,12 +31,6 @@ if systemctl --user list-unit-files qdwin-compositor.service >/dev/null 2>&1; th
     check_unit qdshell.service || ok=1
     check_unit qdistro-cursor-sprites.service || ok=1
     exit "$ok"
-elif systemctl --user list-unit-files noctalia-session.service >/dev/null 2>&1; then
-    ok=0
-    check_unit noctalia-session.service || ok=1
-    check_unit noctalia-shell.service || ok=1
-    check_unit qdistro-cursor-sprites.service || ok=1
-    exit "$ok"
 else
     echo NO_QDWIN_UNITS
     exit 1

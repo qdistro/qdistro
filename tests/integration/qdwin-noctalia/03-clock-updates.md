@@ -70,7 +70,7 @@ step 1's `HHMM`).
 sleep 2
 ```
 
-**Assert (3.1):** noctalia-shell.service still active —
+**Assert (3.1):** qdshell.service still active —
 `noct_session_healthy`.
 
 ## Pass criteria

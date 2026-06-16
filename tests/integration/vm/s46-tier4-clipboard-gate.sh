@@ -72,15 +72,15 @@ if ! runuser -u admin -- test -S "$OUTER_SOCK"; then
 fi
 pass "outer admin compositor up"
 
-# qdshell process — noctalia-shell is the canonical name on the test
+# qdshell process — qdshell (qs) is the canonical name on the test
 # VM (per qdshell deploy). Both check patterns accepted.
-if pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
+if pgrep -u admin -af "qs -p" >/dev/null 2>&1; then
     pass "qdshell up"
 else
-    if systemctl --user --machine=admin@.host status noctalia-shell.service >/dev/null 2>&1; then
+    if systemctl --user --machine=admin@.host status qdshell.service >/dev/null 2>&1; then
         pass "qdshell up"
     else
-        fail "qdshell (noctalia-shell) not running under admin uid"
+        fail "qdshell (qdshell) not running under admin uid"
     fi
 fi
 

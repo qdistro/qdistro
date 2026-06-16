@@ -78,11 +78,11 @@ if ! runuser -u admin -- test -S "$OUTER_SOCK"; then
     skip "outer admin compositor not up (wayland-1 socket missing)"
 fi
 
-# qdshell process — noctalia-shell is the canonical name on the test VM.
-if ! pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
-    if ! systemctl --user --machine=admin@.host status noctalia-shell.service \
+# qdshell process — qdshell (qs) is the canonical name on the test VM.
+if ! pgrep -u admin -af "qs -p" >/dev/null 2>&1; then
+    if ! systemctl --user --machine=admin@.host status qdshell.service \
             >/dev/null 2>&1; then
-        skip "qdshell (noctalia-shell) not running under admin uid"
+        skip "qdshell (qdshell) not running under admin uid"
     fi
 fi
 
@@ -108,7 +108,7 @@ info "qdwin advertises qdwin_shell_v1 version=$QDWIN_SHELL_VER"
 # journal. We also fall back to the compositor-side "qdwin: shell bound"
 # log (no version printed) + the wayland-info-advertised version as
 # proxy evidence the binding succeeded at >= the advertised version.
-SHELL_BIND_LINE=$(journalctl --user-unit=noctalia-shell.service \
+SHELL_BIND_LINE=$(journalctl --user-unit=qdshell.service \
         --since="-10min" 2>/dev/null \
         | grep -m1 -E "qdwin_shell_v1 bound v[0-9]+" \
     || journalctl --since="-10min" 2>/dev/null \

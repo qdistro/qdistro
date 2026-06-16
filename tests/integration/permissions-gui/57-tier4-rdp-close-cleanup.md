@@ -19,7 +19,7 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
-$VMEXEC "$VM" 'runuser -u admin -- pgrep -a noctalia-shell >/dev/null'
+$VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier4-guest.qcow2'
 $VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier4-vm'

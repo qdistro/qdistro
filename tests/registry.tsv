@@ -30,5 +30,5 @@ tests/integration/vm/broker-e2e.bats	bats	vm	qdistro-admin-broker.service	loopba
 tests/integration/vm/tiered-isolation.bats	bats	vm-nested	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow,flaky
 tests/integration/vm/compositor-shell.bats	bats	vm	qdwin-compositor.service,qdshell.service	loopback	none	qdwin	slow
 tests/integration/permissions-gui/03-qt-admin-app-visual.md	gui	vm	qdistro-admin-broker.service	loopback	agent	qdistro	slow
-tests/integration/qdwin-noctalia/03-clock-updates.md	gui	vm	noctalia-shell.service	none	ocr	qdshell	slow,flaky
+tests/integration/qdwin-noctalia/03-clock-updates.md	gui	vm	qdshell.service	none	ocr	qdshell	slow,flaky
 tests/unit/test_component_version_smoke.py	host	none	none	none	none	qdistro	no

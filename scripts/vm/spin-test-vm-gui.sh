@@ -13,7 +13,8 @@
 #
 # fresh-vm-bootstrap.sh masks greetd (greetd would grab the DRM seat and
 # prevent admin's lingering user manager from starting) and stages BOTH the
-# qdwin+qdshell session units (noctalia-session/noctalia-shell) and the labwc
+# qdwin+qdshell session units (qdwin-compositor.service/qdshell.service via
+# qdwin-session.target) and the labwc
 # stack. greetd stays masked here; this script then selects which session
 # admin's user manager leaves running, via QDISTRO_VM_GUI_SESSION:
 #
@@ -87,7 +88,8 @@ SRC=/root/qdistro-src/qdistro
 #   qdwin            — the production qdwin compositor + qdshell (Quickshell)
 #                      session on wayland-1, for the qdwin/qdshell GUI lanes
 #                      (taskbar isolation menu, popup-clamp, etc.). The session
-#                      units (noctalia-session/noctalia-shell — the qdwin+qdshell
+#                      units (qdwin-compositor.service/qdshell.service via
+#                      qdwin-session.target — the qdwin+qdshell
 #                      units install-qdwin-session-for-vm.sh wires up), the
 #                      vendored libweston, and the QML plugin are already staged
 #                      by fresh-vm-bootstrap.sh; this profile simply KEEPS that
@@ -122,11 +124,11 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
         for _i in $(seq 1 30); do [ -S /run/user/1000/wayland-1 ] && break; sleep 2; done
         if [ ! -S /run/user/1000/wayland-1 ]; then
             echo "[gui-spin] ERROR: wayland-1 missing on qdwin golden clone"
-            runuser -l admin -c 'systemctl --user --no-pager status noctalia-session.service noctalia-shell.service 2>&1 | head -40' || true
+            runuser -l admin -c 'systemctl --user --no-pager status qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
             exit 1
         fi
-        runuser -l admin -c 'systemctl --user is-active noctalia-session.service noctalia-shell.service' >/dev/null 2>&1 \
-            || { echo "[gui-spin] ERROR: noctalia units not active on qdwin clone"; exit 1; }
+        runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' >/dev/null 2>&1 \
+            || { echo "[gui-spin] ERROR: qdwin session units not active on qdwin clone"; exit 1; }
         echo "[gui-spin] qdwin clone session up (wayland-1)"
     fi
     # The baked install surface the scenarios require — fail-closed on core bits
@@ -396,7 +398,7 @@ if [ "$SESSION" = labwc ]; then
     systemctl set-default multi-user.target >/dev/null
     systemctl daemon-reload
     systemctl restart getty@tty1.service
-    runuser -l admin -c 'systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service 2>/dev/null' || true
 
     # Wait up to 30s for admin's wayland-0 socket to appear (labwc up).
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
@@ -409,13 +411,13 @@ if [ "$SESSION" = labwc ]; then
 else
     # 8c. qdwin profile: keep the qdwin compositor + qdshell session that
     #     fresh-vm-bootstrap.sh staged and started under admin's lingering user
-    #     manager (units named noctalia-session/noctalia-shell — these are the
-    #     qdwin+qdshell units, see install-qdwin-session-for-vm.sh). Ensure they
-    #     are enabled + (re)started (idempotent — bootstrap normally already
-    #     has wayland-1 up) and wait for the wayland-1 socket.
+    #     manager (deploy-named units qdwin-compositor.service / qdshell.service,
+    #     pulled in by qdwin-session.target — see install-qdwin-session-for-vm.sh).
+    #     Ensure the target is enabled + (re)started (idempotent — bootstrap
+    #     normally already has wayland-1 up) and wait for the wayland-1 socket.
     systemctl daemon-reload
-    runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service 2>/dev/null' || true
-    runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+    runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
+    runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
 
     # Wait up to 60s for admin's wayland-1 socket (qdwin compositor up). The
     # compositor restarts on-failure, so give it longer than the labwc path.
@@ -433,8 +435,8 @@ else
         # does not satisfy the requested profile. Dump diagnostics, then abort
         # (this exit propagates through vm-exec to the host spinner's set -e).
         echo "[gui-spin] ERROR: wayland-1 socket did not appear within 60s — qdwin compositor failed to start"
-        runuser -l admin -c 'systemctl --user --no-pager status noctalia-session.service noctalia-shell.service 2>&1 | head -40' || true
-        runuser -l admin -c 'journalctl --user -u noctalia-session.service -u noctalia-shell.service --no-pager -n 40 2>&1' || true
+        runuser -l admin -c 'systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service 2>&1 | head -40' || true
+        runuser -l admin -c 'journalctl --user -u qdwin-compositor.service -u qdshell.service --no-pager -n 40 2>&1' || true
         exit 1
     fi
 fi
@@ -462,7 +464,7 @@ else
     ls -l /run/user/1000/wayland-1 2>&1 || echo "WARN: wayland-1 not up"
     ls -ld /usr/libexec/qdistro/qdwin-libweston/lib64 2>&1 \
         || echo "WARN: vendored libweston not installed (popup clamp/grab will be absent)"
-    runuser -l admin -c 'systemctl --user is-active noctalia-session.service noctalia-shell.service' 2>&1 || true
+    runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' 2>&1 || true
     ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
 fi
 echo "--- done ---"

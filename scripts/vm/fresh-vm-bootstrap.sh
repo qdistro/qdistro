@@ -40,7 +40,7 @@ log() { echo "[bootstrap] $*"; }
 # ---- 0. Defensive masking ------------------------------------------------
 # jeos-firstboot fights us for tty1 and blocks multi-user.target;
 # greetd would grab the DRM seat and prevent admin's user manager from
-# starting noctalia-session.service ("Device or resource busy" from
+# starting qdwin-compositor.service ("Device or resource busy" from
 # libseat). build-baked-baseweed.sh masks both at bake time; this is
 # belt-and-braces for images baked before that fix.
 log "masking jeos-firstboot + greetd (idempotent)..."
@@ -236,7 +236,7 @@ meson install -C build \
 # ---- 5c. Install + enable seatd (system service) ------------------------
 # admin's lingering user@1000.service is a "manager" session that does
 # NOT own a logind seat, so libseat's logind backend fails inside
-# noctalia-session.service (weston) with:
+# qdwin-compositor.service (weston) with:
 #   libseat/backend/logind.c: Could not get primary session for user
 #   libseat/backend/seatd.c:  Could not connect to socket /run/seatd.sock
 #   libseat: could not open seat
@@ -332,7 +332,7 @@ EOF
 modprobe uinput >/dev/null 2>&1 || log "  WARN: uinput module unavailable; ydotoold will stay inactive"
 
 # ---- 6. Install qdwin session (weston + qdshell user units) -------------
-log "installing qdwin session (noctalia-session + noctalia-shell user units)..."
+log "installing qdwin session (qdwin-compositor + qdshell user units via qdwin-session.target)..."
 bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
     "$SRC/qdshell" \
     || { echo "[bootstrap] qdwin-session install failed"; exit 3; }
@@ -431,9 +431,9 @@ fi
 # new group membership only takes effect on a fresh session, so we
 # terminate any existing user manager and re-enable linger to get a
 # clean user@1000.service with the right supplementary groups, then
-# start noctalia-shell.service (which pulls noctalia-session.service
-# in via Requires=). qdlocker.service was enabled in §7 and starts via
-# default.target once the user manager comes up.
+# start qdwin-session.target (which pulls qdwin-compositor.service +
+# qdshell.service in via Requires=/Wants=). qdlocker.service was enabled
+# in §7 and starts via default.target once the user manager comes up.
 log "starting admin user session..."
 loginctl terminate-user admin 2>/dev/null || true
 # Wait for the user manager to actually go away before re-lingering.
@@ -451,7 +451,7 @@ if ! systemctl is-active --quiet user@1000.service; then
 fi
 
 runuser -l admin -c 'systemctl --user daemon-reload' || true
-runuser -l admin -c 'systemctl --user start noctalia-shell.service' || true
+runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
 runuser -l admin -c 'systemctl --user start ydotoold.service' \
     || log "  WARN: ydotoold.service did not start (expected if /dev/uinput is absent)"
 
@@ -467,7 +467,7 @@ done
 if [ ! -S /run/user/1000/wayland-1 ]; then
     log "  WARN: /run/user/1000/wayland-1 did not appear within 30s"
     log "  weston logs:"
-    runuser -l admin -c 'journalctl --user -u noctalia-session.service --no-pager -n 30' || true
+    runuser -l admin -c 'journalctl --user -u qdwin-compositor.service --no-pager -n 30' || true
 fi
 
 # qdlocker.sock is created by a successfully running qdlocker by default
@@ -555,5 +555,5 @@ fi
 
 log "bootstrap complete."
 log "session was started by §7d; if it failed, restart with:"
-log "  runuser -l admin -c 'systemctl --user restart noctalia-shell.service'"
+log "  runuser -l admin -c 'systemctl --user restart qdwin-session.target'"
 log "  runuser -l admin -c 'systemctl --user restart qdlocker.service'"

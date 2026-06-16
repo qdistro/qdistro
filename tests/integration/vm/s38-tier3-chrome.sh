@@ -97,12 +97,12 @@ fi
 pass "outer admin compositor up"
 
 # --- 4. qdshell --------------------------------------------------------
-if pgrep -u admin -af "noctalia-shell" >/dev/null 2>&1; then
+if pgrep -u admin -af "qs -p" >/dev/null 2>&1; then
     pass "qdshell up"
-elif systemctl --user --machine=admin@.host status noctalia-shell.service >/dev/null 2>&1; then
+elif systemctl --user --machine=admin@.host status qdshell.service >/dev/null 2>&1; then
     pass "qdshell up"
 else
-    fail "qdshell (noctalia-shell) not running under admin uid"
+    fail "qdshell (qdshell) not running under admin uid"
 fi
 
 # --- 5. capture journal cursor before spawns -------------------------

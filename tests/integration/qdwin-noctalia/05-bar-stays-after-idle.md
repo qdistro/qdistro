@@ -91,7 +91,7 @@ DPMS-off period).
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
- "runuser -l admin -c \"journalctl --user -u noctalia-session.service --since '1 minute ago' --no-pager\"" \
+ "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '1 minute ago' --no-pager\"" \
  > /tmp/05-weston.log
 ```
 

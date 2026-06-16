@@ -1041,11 +1041,11 @@ t_bystander_subscribe_sends_request() {
     # qdshell now holds the bind_as_shell role at v14+ (see the
     # qdshell_binds_qdwin_shell_v1 test). qdwin allows only one bound
     # shell at a time, and subscribe_view_stream is gated on
-    # qdwin_shell_require_bound. Stop noctalia-shell.service for the
+    # qdwin_shell_require_bound. Stop qdshell.service for the
     # duration of this test so the bystander can stand in as the bound
     # shell, then bounce it back at the end.
     "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
-runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop noctalia-shell.service'
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop qdshell.service'
 EOF
     sleep 1
 
@@ -1056,7 +1056,7 @@ EOF
     if [ -z "$handle" ]; then
         kill_all_foots
         "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
-runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start noctalia-shell.service'
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdshell.service'
 EOF
         fail "$name: no toplevel_added in journal after spawn_foot"
         return
@@ -1076,7 +1076,7 @@ EOF
     # Restore qdshell so subsequent tests in the suite see the bound-
     # shell state they expect.
     "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
-runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start noctalia-shell.service'
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start qdshell.service'
 EOF
     sleep 4
 
@@ -1116,7 +1116,7 @@ EOF
 # As of 2026-05-14 qdshell binds qdwin_shell_v1 at v14 via the native
 # QML plugin built from qdshell/qml-plugin/ (libqdistro-qdwin.so
 # installed at /usr/share/qdistro/qml/Qdistro/Qdwin/, picked up via
-# QML_IMPORT_PATH on the noctalia-shell.service unit). Until the
+# QML_IMPORT_PATH on the qdshell.service unit). Until the
 # binding landed, qdshell observed zero qdwin_shell_v1 events; the
 # focus + keybinding code paths in qdwin emit a different journal line
 # depending on whether a v14+ shell is bound, so these tests are the
@@ -1136,13 +1136,13 @@ t_qdshell_binds_qdwin_shell_v1() {
         return
     }
 
-    # noctalia-shell.service must carry QML_IMPORT_PATH=/usr/share/qdistro/qml
+    # qdshell.service must carry QML_IMPORT_PATH=/usr/share/qdistro/qml
     # — otherwise qs can't resolve `import Qdistro.Qdwin 1.0`.
     "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
-runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Environment noctalia-shell.service' | grep -q 'QML_IMPORT_PATH=/usr/share/qdistro/qml'
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p Environment qdshell.service' | grep -q 'QML_IMPORT_PATH=/usr/share/qdistro/qml'
 EOF
     if [ $? -ne 0 ]; then
-        fail "$name: noctalia-shell.service lacks QML_IMPORT_PATH=/usr/share/qdistro/qml — re-run install-qdwin-session-for-vm.sh"
+        fail "$name: qdshell.service lacks QML_IMPORT_PATH=/usr/share/qdistro/qml — re-run install-qdwin-session-for-vm.sh"
         return
     fi
 
@@ -1150,7 +1150,7 @@ EOF
     # cursor — otherwise we'd be reading a stale bind from minutes ago.
     local cursor; cursor=$(vm_journal_cursor)
     "$VM_SCRIPT" "$VM" <<'EOF' >/dev/null 2>&1
-runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart noctalia-shell.service'
+runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdshell.service'
 EOF
     # Give the shell time to start + bind. qdshell loads a lot of QML
     # before the binding runs; 8s covers it on a busy VM.

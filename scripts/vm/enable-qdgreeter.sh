@@ -78,7 +78,7 @@ loginctl disable-linger admin 2>/dev/null || true
 loginctl terminate-user admin 2>/dev/null || true
 systemctl stop user@1000.service 2>/dev/null || true
 runuser -l admin -c \
-    'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now noctalia-session.service noctalia-shell.service 2>/dev/null || true' \
+    'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now qdwin-session.target qdwin-compositor.service qdshell.service 2>/dev/null || true' \
     || true
 # Tear down any pre-existing tty4 LXQt+labwc fallback from an older bake/golden
 # (the passwordless escape hatch has been removed). Idempotent — no-op on a clean

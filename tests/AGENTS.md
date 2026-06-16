@@ -116,7 +116,7 @@ def test_...():
   - `vm_run_admin <cmd>` — run as the `admin` user (uid 1000) with a real
     PAM session and admin's `--user` systemd; use it for anything that
     needs `systemctl --user`, `qdlocker.sock`, `qdshell.sock`,
-    `noctalia-shell.service`, etc.
+    `qdshell.service`, etc.
   - `assert_success` / `assert_output_contains` — tiny shims that print
     the failing command's output to stderr.
 - **Waiters — prefer them over hand-rolled `sleep` loops.** A sibling task

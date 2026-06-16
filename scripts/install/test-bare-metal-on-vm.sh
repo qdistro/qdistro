@@ -230,7 +230,7 @@ verify_vm() {
         "test -x /usr/lib64/weston/qdwin-shell.so || test -x /usr/lib/weston/qdwin-shell.so"
         "test -f /etc/systemd/system/qdistro-admin-broker.service"
         "systemctl is-enabled qdistro-admin-broker.service"
-        "test -f /home/admin/.config/systemd/user/noctalia-shell.service"
+        "test -f /home/admin/.config/systemd/user/qdshell.service"
     )
     local failed=0
     for c in "${checks[@]}"; do
