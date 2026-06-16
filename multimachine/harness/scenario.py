@@ -380,3 +380,168 @@ def run_managed_toplevel_slice(
         backend.clear_netem(a, topology.link_dev)
         backend.destroy(a)
         backend.destroy(b)
+
+
+# ==========================================================================
+# Scenario-3: step-8 input-confinement gate (codex impl-10)
+# ==========================================================================
+class InputConfinementBackend(ManagedVMBackend, Protocol):
+    """:class:`ManagedVMBackend` plus the input-confinement operations (codex
+    impl-10): bring up an EXPORTED marker (with per-seat input telemetry) + a
+    LOCAL unexported SENTINEL marker and an ``--allow-input`` subscribe; inject
+    input at the VM-B viewer (ydotool → sdl-freerdp → RDP → forward → per-stream
+    seat); read each marker's telemetry."""
+
+    def setup_confinement_source(
+        self, vm: str, *, generation: int, width: int, height: int,
+        exported_telemetry: str, sentinel_telemetry: str,
+        exported_label: str, sentinel_label: str) -> ViewStreamApproved: ...
+
+    def read_telemetry(self, vm: str, path: str) -> dict: ...
+
+    def inject_input(self, vm: str) -> None: ...
+
+
+@dataclass
+class InputConfinementResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult
+    exported_press_delta: int      # injected presses the EXPORTED marker received
+    sentinel_press_delta: int      # injected presses the SENTINEL marker received (must be 0)
+    exported_before: dict
+    exported_after: dict
+    sentinel_before: dict
+    sentinel_after: dict
+    passed: bool
+
+
+def _press_total(telemetry: dict) -> int:
+    """button_press + key_press across all seats (the confinement proof signal —
+    codex impl-10: PRESS deltas, not enter)."""
+    t = telemetry.get("totals", {}) if telemetry else {}
+    return int(t.get("button_press", 0)) + int(t.get("key_press", 0))
+
+
+def run_input_confinement_slice(
+    backend: InputConfinementBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, control_port: int = 5556,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_telemetry: str = "/run/mm-a/exported.json",
+    sentinel_telemetry: str = "/run/mm-a/sentinel.json",
+) -> InputConfinementResult:
+    """Drive the step-8 **input-confinement** gate (codex impl-10): prove input
+    sent through the VM-B viewer reaches ONLY the exported source window, not a
+    second local toplevel. The injection rides the ENTIRE shipped path — ydotool
+    on VM-B → kiosk weston seat → ``sdl-freerdp`` → RDP → ``qdistro-forward`` →
+    ``qdwin_stream_input_v1.inject_*`` → the source view's per-stream
+    ``weston_seat`` (focus-locked to the exported marker) → the marker's
+    ``wl_pointer``/``wl_keyboard``.
+
+    Pass = the managed decoded oracle is ok AND the EXPORTED marker's press count
+    increases AND the local SENTINEL marker's press count stays 0 (delta-based, so
+    setup input never counts). Honesty: protocol/seat/process correctness only —
+    the per-stream seat isolation is the shipped invariant under test.
+    """
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-input-confinement", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 input-confinement gate"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # VM-A: exported marker (telemetry) + local sentinel (telemetry) +
+        # an --allow-input subscribe so the forward gets the inject channel.
+        approved = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry=sentinel_telemetry,
+            exported_label="exported", sentinel_label="sentinel")
+        src = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                               title="marker", app_id="qdwin-marker-client",
+                               req_w=width, req_h=height)
+        announce = bridge_approved(approved, src, generation)
+
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+            generation=generation, otp=approved.rdp_password,
+            size=f"{width}x{height}", status_file="/run/mm-b/viewer-status.json")
+        control.accept()
+        control.send(announce)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        # the decoded oracle must pass first (the viewer really shows the marker).
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-confinement.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (input-confinement viewer)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # baseline both telemetry files, inject at VM-B, then poll for a delta.
+        exported_before = backend.read_telemetry(a, exported_telemetry)
+        sentinel_before = backend.read_telemetry(a, sentinel_telemetry)
+        base_exp = _press_total(exported_before)
+        backend.inject_input(b)
+        exported_after = _poll(
+            lambda: backend.read_telemetry(a, exported_telemetry),
+            lambda tel: _press_total(tel) > base_exp, tries=40, delay=0.25)
+        sentinel_after = backend.read_telemetry(a, sentinel_telemetry)
+
+        exported_delta = _press_total(exported_after) - base_exp
+        sentinel_delta = _press_total(sentinel_after) - _press_total(sentinel_before)
+
+        passed = bool(res.ok and exported_delta > 0 and sentinel_delta == 0)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"input confinement: exported press delta={exported_delta} (>0), "
+            f"sentinel press delta={sentinel_delta} (==0). Injected end-to-end "
+            "via ydotool→sdl-freerdp→RDP→qdistro-forward→per-stream seat.")
+        bundle.write()
+        return InputConfinementResult(
+            bundle, res, exported_delta, sentinel_delta, exported_before,
+            exported_after, sentinel_before, sentinel_after, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
