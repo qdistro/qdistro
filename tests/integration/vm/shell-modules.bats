@@ -227,6 +227,25 @@ setup() {
     assert_output_contains "PASS: §6.8 S3e pending nested proxy stays input-transparent through bind"
 }
 
+@test "s6.8-s3f-nested-postallow-route: SAME proxy pending->bind->allow->pickable+routes (F6#2)" {
+    # The post-`allow` TRANSITION lane: drive the SAME nested proxy through
+    # pending (broker-required) -> bind_proxy_pixels (stashed, mechanism A) ->
+    # allow -> pickable + routes input. Closes the open-followups gap. This is
+    # COMPOSITOR-side post-allow transition coverage (it drives the REAL allow
+    # mechanism qdwin_nested_proxy_apply_allow via an env-gated test hook, NOT a
+    # qdshell/broker on the wire). The broker/qdshell wire-path authorization
+    # lane (s24, SKIP_LEGACY_NESTED_QDSHELL) is STILL required and unchanged.
+    vm_run "bash /root/s3f-nested-postallow-route.sh 2>/dev/null"
+    assert_success
+    assert_output_contains "PASS: outer created a PENDING nested proxy (broker-required)"
+    assert_output_contains "PASS: bind_proxy_pixels while pending was DEFERRED (pixel feed stashed)"
+    assert_output_contains "PASS: pending nested proxy is NOT input-pickable (pick_view skips it)"
+    assert_output_contains "PASS: allow transition ran the REAL allow core (proxy released from held)"
+    assert_output_contains "PASS: post-allow S3d route-test — SAME proxy now pickable + active_input_proxy armed"
+    assert_output_contains "PASS: inner weston decoded the ROUTED QDNI button (press + release)"
+    assert_output_contains "PASS: §6.8 S3f nested-proxy pending->bind->allow->pickable+routes end-to-end"
+}
+
 @test "s6.8-s4-nested-broker-gate: allow + deny verdicts gate the proxy lifecycle" {
     skip "$SKIP_LEGACY_NESTED_QDSHELL"
     vm_run "systemctl start qdistro-admin-broker.service && bash /root/s24-nested-broker-gate.sh 2>/dev/null"
