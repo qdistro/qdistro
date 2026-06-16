@@ -32,6 +32,8 @@ import qdistro_disposable_classes as _dispclasses  # type: ignore[import-not-fou
 import qdistro_disposables as _disp  # type: ignore[import-not-found]
 import qdistro_export_lineage as _export_lineage  # type: ignore[import-not-found]
 import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+import qdistro_upload_lineage as _upload_lineage  # type: ignore[import-not-found]
+import qdistro_upload_lineage_entry as _upload_entry  # type: ignore[import-not-found]
 from gi.repository import Gio, GLib
 from qdistro_admin_audit import AuditLog  # type: ignore[import-not-found]
 from qdistro_admin_cache import ApprovalCache  # type: ignore[import-not-found]
@@ -1692,6 +1694,97 @@ class Broker(dbus.service.Object):
                 "activity": result.activity,
                 "source": result.source,
                 "outputs": list(result.outputs),
+                "chain_head": result.chain_head,
+            },
+            sort_keys=True,
+        )
+
+    @dbus.service.method(
+        BUS_NAME,
+        in_signature="s",
+        out_signature="s",
+        sender_keyword="sender",
+        connection_keyword="conn",
+    )
+    def RecordUploadLineage(self, descriptor_json: str, sender=None, conn=None) -> str:
+        """Browser-upload chokepoint entry point (doc/lineage.md §Chokepoints
+        "browser upload/download").
+
+        ROOT-GATED, like ``RecordExportLineage`` and for the same reason: the
+        upload chokepoint authorizes a source SOLELY by a global ``source_eid``
+        lookup, and the lineage store has no per-silo source-ownership model yet
+        (the production silo→source resolver that would bind a source to the
+        authenticated silo is the documented blocker — see issues/qdistro/
+        workflows-lineage-resources.md "Still open — entry-point invocation
+        only"). Until that resolver exists, exposing this to a non-root silo
+        would let any local caller mint a broker-sealed upload receipt + derived
+        edge for ANY tracked, non-denied source it can name (cross-silo source
+        forgery), attributed to its own silo. So the method is root-only at both
+        the bus layer (deny in ``context="default"``) and here, and the bridge
+        ``upload.record`` op is deliberately NOT wired. The legitimate live
+        caller — a root upload helper that resolves the source to the
+        authenticated silo and calls this — lands WITH that resolver.
+
+        Authority model (already fail-closed via ``record_upload``):
+          * The source security snapshot is read store-authoritatively from
+            ``store.get_entity()``; the descriptor cannot supply it (the parser
+            is a strict whitelist).
+          * ``agent_gid`` is DERIVED from the authenticated D-Bus peer uid,
+            never the body.
+          * ``destination`` is legitimately caller-named; per file the caller may
+            name only a ``source_eid`` reference, the ``digest`` of the bytes
+            being sent, and an optional ``locator``.
+          * A source the store has never recorded FAILS CLOSED (laundering
+            guard); a guard-denied file refuses the whole batch and seals
+            nothing.
+        """
+        uid, _pid, _exe, _st = self._require_root_lineage_peer(
+            sender, conn, "RecordUploadLineage")
+        # Agent identity is the AUTHENTICATED peer silo, never a body field.
+        agent_gid = f"silo:{_username_for_uid(int(uid))}"
+        try:
+            desc = _upload_entry.load_descriptor_json(descriptor_json)
+            store = self._get_lineage_store()
+            files = [
+                _upload_lineage.UploadFile(
+                    source_eid=f.source_eid, digest=f.digest, locator=f.locator
+                )
+                for f in desc.files
+            ]
+            result = _upload_lineage.record_upload(
+                store,
+                files=files,
+                destination=desc.destination,
+                agent_gid=agent_gid,
+            )
+        except _upload_entry.UploadDescriptorError as e:
+            raise dbus.DBusException(str(e), name=BUS_NAME + ".BadArgument") from e
+        except _upload_lineage.UploadDenied as e:
+            # The denial audit is already recorded in the store transaction
+            # (record_upload commits phase-1 activities before raising); surface
+            # a typed refusal so the caller aborts the upload.
+            raise dbus.DBusException(
+                str(e), name=BUS_NAME + ".LineagePolicyDenied"
+            ) from e
+        except _upload_lineage.BadUploadInput as e:
+            # Includes the laundering guard: a source the store has never
+            # recorded fails closed here.
+            raise dbus.DBusException(
+                str(e), name=BUS_NAME + ".LineageValidationFailed"
+            ) from e
+        except dbus.DBusException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise dbus.DBusException(
+                f"lineage store unavailable: {e}",
+                name=BUS_NAME + ".LineageUnavailable",
+            ) from e
+        return json.dumps(
+            {
+                "version": 1,
+                "lineage_sealed": True,
+                "manifest": result.manifest,
+                "outputs": list(result.output_eids),
                 "chain_head": result.chain_head,
             },
             sort_keys=True,

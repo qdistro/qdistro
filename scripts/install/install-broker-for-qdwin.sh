@@ -47,7 +47,10 @@ for f in qdistro_admin_cache.py qdistro_admin_audit.py \
          qdistro_audisp_parser.py qdistro_hook_client.py \
          qdistro_proc_identity.py qdistro_launch_record.py \
          qdistro_resolver.py qdistro_lineage_store.py \
-         qdistro_lineage_receipts.py qdistro_export_lineage.py; do
+         qdistro_lineage_receipts.py qdistro_export_lineage.py \
+         qdistro_metadata_schema.py qdistro_guard_registry.py \
+         qdistro_lineage.py qdistro_upload_lineage.py \
+         qdistro_upload_lineage_entry.py; do
     install -o root -g root -m 0644 "$BROKER_SRC/$f" "$DEST/$f"
 done
 

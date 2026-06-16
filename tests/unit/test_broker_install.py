@@ -18,3 +18,18 @@ def test_broker_installer_ships_export_lineage_dependencies() -> None:
     ):
         assert name in text
     assert "/var/lib/qdistro/lineage" in text
+
+
+def test_broker_installer_ships_upload_lineage_dependencies() -> None:
+    """The RecordUploadLineage entry point imports the upload chokepoint and
+    its transitive deps (guard registry + chokepoint + metadata schema); the
+    broker must ship them or the daemon fails to import."""
+    text = _INSTALLER.read_text()
+    for name in (
+        "qdistro_upload_lineage.py",
+        "qdistro_upload_lineage_entry.py",
+        "qdistro_lineage.py",
+        "qdistro_guard_registry.py",
+        "qdistro_metadata_schema.py",
+    ):
+        assert name in text
