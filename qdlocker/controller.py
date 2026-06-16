@@ -37,6 +37,14 @@ class LockController(QObject):
         self._auth = auth
         self._current_text = ""
         self._waiting_for_password = False
+        # Submit-intent latch. Set ONLY when the user presses Return to
+        # submit (tryUnlock → start_pam). A PAM "Password" prompt auto-
+        # submits the typed buffer only while this is set; a prompt that
+        # arrives WITHOUT it — e.g. the fprintd fallback starting PAM on its
+        # own — instead parks in waitingForPassword and waits for an explicit
+        # Return. This stops the locker from firing a half-typed password the
+        # instant the fallback prompt lands mid-typing.
+        self._submit_requested = False
         self._unlock_in_progress = False
         self._show_failure = False
         self._show_info = False
@@ -72,8 +80,17 @@ class LockController(QObject):
         if value:
             self._set_show_info(False)
             self._set_show_failure(False)
-            if not self._waiting_for_password:
-                self._auth.abort_pam()
+            # Deliberately do NOT abort a running PAM conversation on each
+            # keystroke. When fprintd is unavailable, PAM is started by the
+            # backend (lock-begin or fallback) and sits waiting on the typed
+            # password; aborting it per-keystroke killed that worker, and
+            # occupy_fingerprint_sensor(True) below would immediately respawn
+            # it — re-emitting the "Password" prompt every keystroke, which
+            # (with the old auto-submit) fired the half-typed buffer on a loop
+            # (the observed 1,2,3,4,0,… reset). A stale worker from a prior
+            # lock is already neutralised by the per-session generation guard,
+            # and start_pam() suppresses duplicate workers, so there is nothing
+            # left for a per-keystroke abort to usefully cancel.
             self._auth.occupy_fingerprint_sensor(True)
         else:
             self._auth.occupy_fingerprint_sensor(False)
@@ -116,6 +133,9 @@ class LockController(QObject):
         from the currentText setter once the user typed, so an idle lock
         left fprintd dormant and a finger-only unlock never fired."""
         self._unlocked = False
+        # Drop any stale submit-intent so a Return pressed against a previous
+        # lock can't auto-submit into the fresh lock's first PAM prompt.
+        self._submit_requested = False
         # reset_session() bumps the generation and clears the per-session
         # fprintd-unavailable latch; arm AFTER it so the worker captures
         # the fresh generation and a transient wedge from a prior lock is
@@ -136,6 +156,10 @@ class LockController(QObject):
             self._set_waiting_for_password(False)
             self._set_show_info(False)
             return
+        # No prompt is showing yet: the user pressed Return to submit before
+        # PAM asked. Latch the intent so the buffer is auto-submitted when the
+        # prompt arrives, then kick off the conversation.
+        self._submit_requested = True
         log.info("starting PAM authentication")
         self._auth.start_pam()
 
@@ -148,7 +172,15 @@ class LockController(QObject):
     def _on_auth_message(self, text: str, is_error: bool, response_required: bool) -> None:
         log.info("PAM message: %r err=%s resp=%s", text, is_error, response_required)
         if response_required:
-            if self._current_text:
+            # Auto-submit the typed buffer ONLY if the user explicitly asked
+            # to submit (pressed Return → _submit_requested). A prompt that
+            # fires on its own — the fprintd fallback started PAM, or PAM
+            # re-prompted — must NOT fire a half-typed buffer; it parks in
+            # waitingForPassword and waits for an explicit Return. Consume the
+            # intent either way so a later spontaneous re-prompt can't reuse it.
+            submit = self._submit_requested
+            self._submit_requested = False
+            if submit and self._current_text:
                 self._auth.respond_pam(self._current_text)
                 self._set_unlock_in_progress(True)
             else:
@@ -214,6 +246,9 @@ class LockController(QObject):
             return
 
         self._set_unlock_in_progress(False)
+        # This attempt is resolved; clear any submit-intent so it can't bleed
+        # into the next prompt (e.g. a worker that FAILED before prompting).
+        self._submit_requested = False
         if outcome is AuthOutcome.SUCCESS:
             log.info("authentication successful")
             self._unlocked = True
@@ -221,10 +256,11 @@ class LockController(QObject):
             self.unlocked.emit()
             return
         log.info("authentication failed: %s", outcome.name)
-        # Route through the setter so the side effects fire:
-        # aborting any still-running PAM attempt and releasing the
-        # fingerprint sensor occupier. Setting `_current_text`
-        # directly skips that cleanup and leaks worker threads.
+        # Route through the setter (not a direct `_current_text` write) so the
+        # empty-value side effect fires: releasing the fingerprint-sensor
+        # occupier via occupy_fingerprint_sensor(False). The worker that
+        # produced this FAILED has already exited, so there is no PAM attempt
+        # left to cancel here.
         self.currentText = ""
         self._error_message = "Authentication failed"
         self._errorMessageChanged.emit()

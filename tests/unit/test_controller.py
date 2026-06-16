@@ -128,6 +128,111 @@ def test_overlay_key_return_triggers_unlock(qapp, auth):
     auth.start_pam.assert_called_once()
 
 
+# ---- no-auto-submit of a partial buffer on a spontaneous PAM prompt --------
+
+
+@pytest.mark.cheat_aware(
+    protects="a PAM 'Password' prompt that fires WITHOUT the user pressing "
+    "Return (e.g. the fprintd fallback starting PAM, or a re-prompt) must NOT "
+    "auto-submit the typed buffer — it parks in waitingForPassword and waits "
+    "for an explicit Return",
+    severity="high",
+    cheats=[
+        "call respond_pam whenever _current_text is non-empty regardless of "
+        "submit-intent",
+        "set _submit_requested in _on_auth_message so the prompt submits itself",
+        "assert only waitingForPassword and drop the respond_pam-not-called "
+        "and buffer-preserved checks",
+    ],
+    consequence="the locker fires a half-typed password the instant the "
+    "fprintd-fallback prompt lands mid-typing, then clears the field on the "
+    "resulting auth failure — the password entry resets on a loop and a "
+    "slowly-typed password can never be submitted",
+)
+def test_fallback_prompt_does_not_autosubmit_partial_buffer(qapp, auth):
+    ctrl = LockController(auth)
+    QCoreApplication.processEvents()  # let queued ready signal land
+    # User is mid-typing (buffer non-empty) and has NOT pressed Return.
+    ctrl.currentText = "Passw0"
+    auth.respond_pam.reset_mock()
+    # The fprintd fallback (or a re-prompt) starts PAM, which asks for a
+    # password on its own.
+    auth.message.emit("Password", False, True)
+    QCoreApplication.processEvents()
+    auth.respond_pam.assert_not_called()
+    assert ctrl.waitingForPassword is True
+    assert ctrl.currentText == "Passw0", "the typed buffer must be preserved"
+    assert ctrl.unlockInProgress is False
+
+
+def test_return_then_prompt_autosubmits_full_buffer(qapp, auth):
+    """Happy path: type the whole password, press Return, and the prompt that
+    arrives afterwards auto-submits the full buffer exactly once."""
+    from qdlocker.keysyms import XKB_Return
+
+    ctrl = LockController(auth)
+    QCoreApplication.processEvents()
+    ctrl.currentText = "Passw0rd45"
+    ctrl.handle_overlay_key(XKB_Return, "")  # user submits before PAM prompts
+    auth.start_pam.assert_called_once()
+    auth.respond_pam.reset_mock()
+    # PAM now asks for the password; the latched intent submits the full buffer.
+    auth.message.emit("Password", False, True)
+    QCoreApplication.processEvents()
+    auth.respond_pam.assert_called_once_with("Passw0rd45")
+    assert ctrl.unlockInProgress is True
+
+
+def test_waiting_then_typed_password_submits_on_return(qapp, auth):
+    """Fallback flow: the prompt parks (no auto-submit), the user keeps typing,
+    and an explicit Return submits the complete buffer."""
+    from qdlocker.keysyms import XKB_Return
+
+    ctrl = LockController(auth)
+    QCoreApplication.processEvents()
+    # Spontaneous prompt with an empty field → park, waiting for input.
+    auth.message.emit("Password", False, True)
+    QCoreApplication.processEvents()
+    assert ctrl.waitingForPassword is True
+    auth.respond_pam.assert_not_called()
+    # User types the password and presses Return.
+    ctrl.currentText = "Passw0rd45"
+    ctrl.handle_overlay_key(XKB_Return, "")
+    auth.respond_pam.assert_called_once_with("Passw0rd45")
+    assert ctrl.waitingForPassword is False
+
+
+def test_typing_does_not_abort_pam(qapp, auth):
+    """A keystroke must not abort an in-flight PAM conversation: when fprintd is
+    unavailable the backend keeps a worker parked on the typed password, and a
+    per-keystroke abort would kill it (then respawn it via the sensor occupy),
+    re-emitting the prompt on a loop."""
+    ctrl = LockController(auth)
+    QCoreApplication.processEvents()
+    ctrl.currentText = "a"
+    ctrl.currentText = "ab"
+    ctrl.currentText = "abc"
+    auth.abort_pam.assert_not_called()
+
+
+def test_second_prompt_does_not_reuse_consumed_intent(qapp, auth):
+    """Submit-intent is single-use: after Return submits the buffer to the
+    first prompt, a second spontaneous prompt must not auto-submit again."""
+    from qdlocker.keysyms import XKB_Return
+
+    ctrl = LockController(auth)
+    QCoreApplication.processEvents()
+    ctrl.currentText = "Passw0rd45"
+    ctrl.handle_overlay_key(XKB_Return, "")
+    auth.message.emit("Password", False, True)  # first prompt → submits
+    QCoreApplication.processEvents()
+    auth.respond_pam.reset_mock()
+    auth.message.emit("Password", False, True)  # second prompt → must park
+    QCoreApplication.processEvents()
+    auth.respond_pam.assert_not_called()
+    assert ctrl.waitingForPassword is True
+
+
 # ---- item 2: stale-outcome race guard --------------------------------------
 
 
@@ -255,6 +360,25 @@ def test_notify_lock_begin_resets_unlocked_and_session(qapp, auth):
     assert ctrl._unlocked is False
     # reset_session was invoked on the backend (generation advanced).
     assert auth._current_generation() == 1
+
+
+def test_notify_lock_begin_clears_submit_intent(qapp, auth):
+    """A Return pressed against a prior lock must not auto-submit into the
+    fresh lock's first PAM prompt — the new lock starts with no submit-intent."""
+    ctrl = LockController(auth)
+    ctrl._submit_requested = True
+    ctrl.notify_lock_begin()
+    assert ctrl._submit_requested is False
+
+
+def test_outcome_clears_submit_intent(qapp, auth):
+    """A resolved attempt must clear submit-intent so a worker that FAILED
+    before ever prompting can't leave the latch armed for the next prompt."""
+    ctrl = LockController(auth)
+    ctrl._submit_requested = True
+    auth.outcome.emit((AuthOutcome.FAILED, auth._current_generation()))
+    QCoreApplication.processEvents()
+    assert ctrl._submit_requested is False
 
 
 @pytest.mark.cheat_aware(
