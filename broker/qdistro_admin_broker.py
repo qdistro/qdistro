@@ -28,6 +28,7 @@ from typing import Any
 import dbus
 import dbus.mainloop.glib
 import dbus.service
+import qdistro_commit_lineage as _commit_lineage  # type: ignore[import-not-found]
 import qdistro_disposable_classes as _dispclasses  # type: ignore[import-not-found]
 import qdistro_disposables as _disp  # type: ignore[import-not-found]
 import qdistro_export_lineage as _export_lineage  # type: ignore[import-not-found]
@@ -1272,6 +1273,92 @@ class Broker(dbus.service.Object):
                 name=BUS_NAME + ".LineagePolicyDenied",
             )
 
+    @staticmethod
+    def _normalize_commit_lineage_descriptor(payload: str) -> dict:
+        """Strictly re-validate a commit-lineage descriptor broker-side.
+
+        Defense-in-depth on top of ``record_commit``'s own checks: the broker
+        never trusts the caller's shape. Returns a kwargs dict for
+        ``_commit_lineage.record_commit``. The descriptor may carry ONLY a
+        source ``{eid}`` (never caller-supplied guards/compartments/conflict
+        classes — the authoritative security snapshot is read from the store by
+        the handler). Raises :class:`dbus.DBusException` ``.BadArgument`` on any
+        malformed shape.
+        """
+        def bad(msg: str) -> dbus.DBusException:
+            return dbus.DBusException(msg, name=BUS_NAME + ".BadArgument")
+
+        if not isinstance(payload, str) or not payload:
+            raise bad("descriptor must be a non-empty JSON string")
+        try:
+            raw = json.loads(payload)
+        except (TypeError, ValueError) as e:
+            raise bad(f"descriptor is not valid JSON: {e}") from e
+        if not isinstance(raw, dict):
+            raise bad("descriptor must be a JSON object")
+        allowed = {
+            "version", "message", "commit_eid", "sources", "tree_digest",
+            "branch", "dest_compartments", "dest_conflict_classes", "agent_gid",
+        }
+        unknown = set(raw) - allowed
+        if unknown:
+            raise bad(f"descriptor has unknown keys: {sorted(unknown)}")
+        if raw.get("version") != 1:
+            raise bad(f"unsupported descriptor version {raw.get('version')!r}")
+        message = raw.get("message")
+        if not isinstance(message, str):
+            raise bad("message must be a string")
+
+        commit_eid = raw.get("commit_eid")
+        if commit_eid is None:
+            commit_eid = _commit_lineage.new_commit_eid()
+        elif not isinstance(commit_eid, str) or not commit_eid:
+            raise bad("commit_eid must be a non-empty string or null")
+
+        sources_raw = raw.get("sources")
+        if not isinstance(sources_raw, list) or not sources_raw:
+            raise bad("sources must be a non-empty list")
+        sources = []
+        for s in sources_raw:
+            if not isinstance(s, dict) or set(s) != {"eid"}:
+                raise bad("each source must be an object {'eid': str} only")
+            eid = s.get("eid")
+            if not isinstance(eid, str) or not eid:
+                raise bad("source eid must be a non-empty string")
+            sources.append(_commit_lineage.CommitSource(eid=eid))
+
+        tree_digest = raw.get("tree_digest")
+        if tree_digest is not None and not (
+            isinstance(tree_digest, str) and _commit_lineage.lr.is_hex_digest(tree_digest)
+        ):
+            raise bad("tree_digest must be a sha256 hex string or null")
+
+        branch = raw.get("branch")
+        if branch is not None and (not isinstance(branch, str) or not branch):
+            raise bad("branch must be a non-empty string or null")
+        agent_gid = raw.get("agent_gid")
+        if agent_gid is not None and (not isinstance(agent_gid, str) or not agent_gid):
+            raise bad("agent_gid must be a non-empty string or null")
+
+        def _str_list(key: str) -> list[str]:
+            val = raw.get(key, [])
+            if not isinstance(val, list) or not all(
+                isinstance(x, str) and x for x in val
+            ):
+                raise bad(f"{key} must be a list of non-empty strings")
+            return list(val)
+
+        return {
+            "message": message,
+            "commit_eid": commit_eid,
+            "sources": sources,
+            "tree_digest": tree_digest,
+            "branch": branch,
+            "dest_compartments": _str_list("dest_compartments"),
+            "dest_conflict_classes": _str_list("dest_conflict_classes"),
+            "agent_gid": agent_gid,
+        }
+
     # ---- permission lineage (findings.md Phases 2/3) -------------------
     def _resolve_subject(self, pid: int):
         """Resolve a live pid to an authoritative Subject against the
@@ -1692,6 +1779,68 @@ class Broker(dbus.service.Object):
                 "activity": result.activity,
                 "source": result.source,
                 "outputs": list(result.outputs),
+                "chain_head": result.chain_head,
+            },
+            sort_keys=True,
+        )
+
+    @dbus.service.method(
+        BUS_NAME,
+        in_signature="s",
+        out_signature="s",
+        sender_keyword="sender",
+        connection_keyword="conn",
+    )
+    def RecordCommitLineage(self, descriptor_json: str, sender=None, conn=None) -> str:
+        """Record a git-commit chokepoint and return the commit message with the
+        ``Qdistro-Lineage`` trailer appended (BEFORE the caller signs).
+
+        Mirrors :meth:`RecordExportLineage`: root-only, the broker strictly
+        re-validates the descriptor shape and reads the authoritative source
+        security snapshot from the store (never from the caller), then invokes
+        :func:`qdistro_commit_lineage.record_commit`. A guard-denied commit
+        returns NO trailer (``.LineagePolicyDenied`` — the caller MUST abort the
+        commit rather than sign an unguarded message); an unrecorded source is a
+        ``.BadArgument`` (fail-closed laundering guard). The returned ``message``
+        is the bytes the caller signs — the trailer is part of those bytes."""
+        # Root-gate BEFORE any parsing or work, so a non-root caller can never
+        # obtain a trailer-appended (and thus signable) commit message here.
+        self._require_root_lineage_peer(sender, conn, "RecordCommitLineage")
+        kwargs = self._normalize_commit_lineage_descriptor(descriptor_json)
+        try:
+            store = self._get_lineage_store()
+        except Exception as e:  # noqa: BLE001
+            raise dbus.DBusException(
+                f"lineage store unavailable: {e}",
+                name=BUS_NAME + ".LineageUnavailable",
+            ) from e
+        try:
+            result = _commit_lineage.record_commit(store, **kwargs)
+        except _commit_lineage.CommitDenied as e:
+            # A successful fail-closed policy decision, NOT an infra failure:
+            # distinct error so the caller aborts the commit (no retry, no
+            # trailer leaked) rather than treating it as a transient outage.
+            raise dbus.DBusException(
+                str(e), name=BUS_NAME + ".LineagePolicyDenied"
+            ) from e
+        except _commit_lineage.BadCommitInput as e:
+            raise dbus.DBusException(
+                str(e), name=BUS_NAME + ".BadArgument"
+            ) from e
+        except dbus.DBusException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise dbus.DBusException(
+                f"lineage store unavailable: {e}",
+                name=BUS_NAME + ".LineageUnavailable",
+            ) from e
+        return json.dumps(
+            {
+                "version": 1,
+                "lineage_sealed": True,
+                "message": result.message,
+                "commit_eid": result.commit_eid,
+                "activity": result.activity_aid,
                 "chain_head": result.chain_head,
             },
             sort_keys=True,
