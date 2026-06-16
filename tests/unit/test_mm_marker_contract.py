@@ -61,6 +61,33 @@ class TestGolden:
             "golden — marker.py and qdwin-marker-client.c are out of sync.")
 
 
+_LIVE_PERVIEW = _DATA / "live-perview-qfwd-source-640x480-o1-g7-f11.png"
+
+
+class TestLivePerViewCapture:
+    """Regression on a REAL VM capture: the qfwd PipeWire source frame of the
+    marker, captured through qdwin composition + the shipped per-view path
+    (2026-06-16 live run). Decodes only with auto_origin (qdwin inset the
+    toplevel by 32px). This is VM_A_RDP_SOURCE (source-side) evidence — proves
+    the marker survives qdwin composition + per-view capture, not decoded-remote.
+    """
+
+    def test_live_qfwd_source_decodes_with_auto_origin(self):
+        img = C.load_image(_LIVE_PERVIEW)
+        assert img.shape == (480, 640, 3)
+        lay = M.compute_layout(640, 480)
+        res = O.evaluate(img, lay, 1.0, tol=O.TOL_RDP, auto_origin=True,
+                         active_generation=7, expect_output_id=1)
+        assert res.ok, res.summary()
+        assert res.payload.frame == 11 and res.payload.output_id == 1
+        assert all(b.ok for b in res.bands)
+
+    def test_live_capture_needs_origin_correction(self):
+        # documents the compositor placement: at origin (0,0) it does NOT decode.
+        img = C.load_image(_LIVE_PERVIEW)
+        assert O.detect_origin(img) == (32, 32)
+
+
 def _find_marker_binary() -> str | None:
     env = os.environ.get("QDWIN_MARKER_CLIENT")
     if env and Path(env).exists():
