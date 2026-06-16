@@ -15,6 +15,23 @@ model." It is the sidecar JSON control channel (codex B4), woven with the dock
 **generation** (``generation.py``) so stale control from an old dock session is
 rejected exactly like stale frames/input. Pure-Python + unit-tested; the eventual
 qdwin/Python viewer mirrors it. No compositor C here.
+
+Three transport channels, one window (codex impl-2): JSON **control** (this
+module), RDP **pixels** (``qdistro-forward``), and **input**
+(``qdwin_stream_input_v1``). They are correlated by an opaque ``stream_id``
+minted per export — the join key that stops the viewer attaching metadata for
+window A to pixels/input for stream B after reconnect/replay/rapid close-reopen.
+``stream_id`` is *not* an RDP credential; it is a correlation token only.
+
+Three teardown signals are distinct (codex impl-2):
+
+- ``Closed`` — the *source toplevel* is gone; remove that one proxy.
+- ``Disconnect`` — the dock/link/viewer transport ended; blank *all* proxies for
+  that generation; the source toplevels may still exist (detach, not death).
+- the shipped ``qdwin_view_stream_v1.torn_down`` — the *pixel stream* ended; the
+  bridge maps it to ``Closed`` (when caused by source close) or ``Disconnect``
+  (link/admin/transport). When ambiguous, prefer ``Disconnect`` + a later
+  authoritative ``Closed`` (see :func:`map_torn_down`).
 """
 from __future__ import annotations
 
@@ -40,16 +57,26 @@ class RemoteWindowMeta:
     """Identity + presentation hints for one exported toplevel.
 
     Carried alongside the RDP pixel stream so the viewer builds a managed
-    toplevel. ``secctx`` is the opaque qdistro security-context string (with the
-    machine axis, 04/07); the viewer treats it as vouched data, never kernel
-    facts.
+    toplevel.
+
+    ``stream_id`` is the opaque join key (codex impl-2) correlating this control
+    metadata with one ``qdwin_view_stream_v1.approved`` pixel stream and its
+    input channel — minted per export, NOT an RDP credential.
+
+    ``security_label`` is an **opaque display/audit label only** (codex impl-2):
+    it is the qdistro security-context string (with the machine axis, 04/07) the
+    *source-side* policy vouches for. The viewer treats it as vouched data, never
+    kernel facts, and **must not** make authorization decisions from it in
+    Phase 1 — empty is valid; it is unparsed and not an ACL input. Real
+    enforcement is the broker's job, deferred per impl-1.
     """
 
     window_id: int
     source_machine: str
+    stream_id: str = ""
     title: str = ""
     app_id: str = ""
-    secctx: str = ""
+    security_label: str = ""   # opaque display/audit label; NOT an ACL input
     req_w: int = 0
     req_h: int = 0
     sensitivity: Sensitivity = Sensitivity.NORMAL
@@ -139,8 +166,9 @@ def decode(raw: str) -> ControlMessage:
         m = d["meta"]
         meta = RemoteWindowMeta(
             window_id=m["window_id"], source_machine=m["source_machine"],
+            stream_id=m.get("stream_id", ""),
             title=m.get("title", ""), app_id=m.get("app_id", ""),
-            secctx=m.get("secctx", ""), req_w=m.get("req_w", 0),
+            security_label=m.get("security_label", ""), req_w=m.get("req_w", 0),
             req_h=m.get("req_h", 0),
             sensitivity=Sensitivity(m.get("sensitivity", "normal")),
             pointer_policy=PointerPolicy(m.get("pointer_policy", "forward")))
@@ -160,6 +188,18 @@ def decode(raw: str) -> ControlMessage:
     raise AssertionError("unreachable")
 
 
+def map_torn_down(reason: str, generation: int, window_id: int) -> ControlMessage:
+    """Map a shipped ``qdwin_view_stream_v1.torn_down`` reason to a side-channel
+    teardown message (codex impl-2). Source-close → ``Closed`` (that proxy);
+    link/admin/transport → ``Disconnect`` (blank all). Ambiguous → ``Disconnect``
+    (a later authoritative ``Closed`` may follow)."""
+    r = (reason or "").lower()
+    if any(k in r for k in ("closed", "source", "toplevel", "exit", "destroyed")):
+        return Closed("closed", generation, window_id, reason)
+    # link / admin-revoke / lock / subscriber-disconnect / unknown -> detach
+    return Disconnect("disconnect", generation, reason or "stream torn down")
+
+
 # ---- viewer-side state (VM-B) --------------------------------------------
 @dataclass
 class ProxyWindow:
@@ -168,6 +208,10 @@ class ProxyWindow:
     h: int
     focused: bool = False
     title: str = ""
+
+    @property
+    def stream_id(self) -> str:
+        return self.meta.stream_id
 
 
 class RemoteViewerState:
@@ -186,10 +230,26 @@ class RemoteViewerState:
         self.connected = True
 
     def set_generation(self, generation: int) -> None:
-        """Redock / new dock session: bump generation, drop old proxies."""
+        """Redock / new dock session: bump to a STRICTLY NEWER generation and
+        drop old proxies. ``RemoteViewerState`` is *not* the generator — the
+        authoritative source is ``DockSession`` (generation.py); this only
+        enforces monotonicity so a reused/old generation after disconnect stays
+        invalid (codex impl-2 stale/teardown hole)."""
+        if generation <= self.generation:
+            raise ValueError(
+                f"redock generation must be strictly newer than "
+                f"{self.generation}, got {generation}")
         self.generation = generation
         self.windows.clear()
         self.connected = True
+
+    def proxy_for_stream(self, stream_id: str) -> ProxyWindow | None:
+        """Look up a proxy by its opaque stream_id join key (codex impl-2) so
+        pixels/input for a stream attach to the right window's metadata."""
+        for w in self.windows.values():
+            if w.stream_id and w.stream_id == stream_id:
+                return w
+        return None
 
     def apply(self, msg: ControlMessage) -> bool:
         if not self.connected and not isinstance(msg, Disconnect):

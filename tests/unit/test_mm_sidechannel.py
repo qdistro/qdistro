@@ -11,11 +11,12 @@ import pytest
 from multimachine.sidechannel import (
     Announce, Closed, CloseRequest, Configure, Disconnect, Focus,
     PointerPolicy, RemoteViewerState, RemoteWindowMeta, Sensitivity,
-    TitleChanged, decode, encode,
+    TitleChanged, decode, encode, map_torn_down,
 )
 
 
 def _meta(wid=1, **kw):
+    kw.setdefault("stream_id", f"s{wid}")
     return RemoteWindowMeta(window_id=wid, source_machine="server",
                             title="Build", app_id="org.x.term",
                             req_w=800, req_h=600, **kw)
@@ -105,3 +106,65 @@ class TestViewerState:
     def test_configure_unknown_window_is_noop(self):
         v = RemoteViewerState(generation=1)
         assert not v.apply(Configure("configure", 1, 99, 10, 10))
+
+
+class TestStreamJoinKey:
+    def test_stream_id_roundtrips_and_looks_up(self):
+        m = Announce("announce", 1, _meta(1, stream_id="abc123"))
+        got = decode(encode(m))
+        assert got.meta.stream_id == "abc123"
+        v = RemoteViewerState(generation=1)
+        v.apply(m)
+        v.apply(Announce("announce", 1, _meta(2, stream_id="def456")))
+        assert v.proxy_for_stream("abc123").meta.window_id == 1
+        assert v.proxy_for_stream("def456").meta.window_id == 2
+        assert v.proxy_for_stream("nope") is None
+
+    def test_distinct_windows_have_distinct_streams(self):
+        v = RemoteViewerState(generation=1)
+        v.apply(Announce("announce", 1, _meta(1, stream_id="s1")))
+        v.apply(Announce("announce", 1, _meta(2, stream_id="s2")))
+        assert {w.stream_id for w in v.windows.values()} == {"s1", "s2"}
+
+
+class TestSecurityLabelSemantics:
+    def test_label_is_opaque_and_optional(self):
+        # empty is valid; arbitrary opaque string survives round-trip unparsed.
+        m = Announce("announce", 1, _meta(1, security_label=""))
+        assert decode(encode(m)).meta.security_label == ""
+        m2 = Announce("announce", 1, _meta(1, security_label="u:silo:build:m=server"))
+        assert decode(encode(m2)).meta.security_label == "u:silo:build:m=server"
+
+    def test_label_not_used_for_authorization(self):
+        # the viewer applies control regardless of the label value — Phase 1
+        # makes NO authorization decision from it (codex impl-2).
+        v = RemoteViewerState(generation=1)
+        assert v.apply(Announce("announce", 1, _meta(1, security_label="anything")))
+        assert 1 in v.windows
+
+
+class TestGenerationMonotonicity:
+    def test_redock_requires_strictly_newer_generation(self):
+        v = RemoteViewerState(generation=5)
+        with pytest.raises(ValueError, match="strictly newer"):
+            v.set_generation(5)
+        with pytest.raises(ValueError, match="strictly newer"):
+            v.set_generation(4)
+        v.set_generation(6)  # ok
+        assert v.generation == 6
+
+
+class TestTornDownMapping:
+    def test_source_close_maps_to_closed(self):
+        msg = map_torn_down("source toplevel closed", 3, 7)
+        assert isinstance(msg, Closed) and msg.window_id == 7
+
+    def test_link_teardown_maps_to_disconnect(self):
+        for reason in ("subscriber disconnected", "admin revoked", "compositor locked", ""):
+            assert isinstance(map_torn_down(reason, 3, 7), Disconnect)
+
+    def test_torn_down_disconnect_blanks_via_viewer(self):
+        v = RemoteViewerState(generation=3)
+        v.apply(Announce("announce", 3, _meta(1)))
+        v.apply(map_torn_down("admin revoked", 3, 1))
+        assert v.windows == {} and not v.connected
