@@ -30,6 +30,7 @@ from .evidence import (
 from .control_server import ControlServer
 from .netem import profile
 from .topology import Topology
+from .viewer_broker import ViewerBroker
 from ..bridge import (
     SourceWindowInfo, ViewStreamApproved, bridge_approved, bridge_torn_down,
 )
@@ -2344,6 +2345,239 @@ def run_forward_reconnect_slice(
         if control is not None:
             control.close()
         backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
+# Phase-2 RUNG-1 FOLD: durable managed-peers CONTRACT (codex impl-34 Q6)
+# ==========================================================================
+class Rung1PeersBackend(VMBackend, Protocol):
+    """The SOURCE + viewer-observation ops the rung-1 managed-peers CONTRACT slice
+    needs. The viewer-side AUTHORITY under test is the real :class:`ViewerBroker`
+    (the slice constructs it — it is the durable ``remote_managed_toplevel``
+    registry + source-mediated close path being folded). The backend provides only:
+    the per-stream SOURCE control plane (``mm-control``), the qdwin secctx
+    observation (handle↔stream attribution, impl-30 Q6), and the pixel-backend
+    process truth.
+
+    This is the CONTRACT half of the rung-1 gate (codex impl-34 Q6): records,
+    close ORDERING (CloseRequest → source Closed → teardown-only-that-peer),
+    process truth, secctx attribution, and ``pixel_backend_lost`` — all assertable
+    headless against a mock that wires the REAL ``ViewerBroker`` + REAL
+    ``control_source.watch`` loops. The pixel / geometry / pointer assertions stay
+    LIVE in ``drive-r1gate.py`` (same named invariants + event ordering)."""
+
+    control_host: str
+
+    def control_port(self, label: str) -> int: ...
+
+    def setup_export(self, vm: str, *, label: str, generation: int,
+                     allow_input: int) -> ViewStreamApproved: ...
+
+    def launch_control(self, vm: str, *, label: str, generation: int,
+                       window_id: int, source_machine: str, title: str,
+                       app_id: str, req_w: int, req_h: int) -> str: ...
+
+    def control_log(self, vm: str, label: str) -> dict: ...
+
+    def viewer_qdwin_toplevels(self, vm: str) -> dict[int, dict]: ...
+
+    def rdp_client_alive(self, vm: str, label: str) -> bool: ...
+
+    def stop_rdp_client(self, vm: str, label: str) -> None: ...
+
+    def crash_rdp_client(self, vm: str, label: str) -> None: ...
+
+    def source_marker_pid(self, vm: str, label: str) -> str: ...
+
+
+@dataclass
+class Rung1PeersResult:
+    bundle: EvidenceBundle
+    announced_stream_ids: dict          # label -> in-guest-minted stream_id
+    # contract assertions (codex impl-34 Q6):
+    two_distinct_records: bool          # 1: two records, two distinct stream_ids
+    distinct_handles: bool              # 1: two distinct qdwin handles
+    stream_ids_match_announced: bool    # 2: viewer learned the source-minted ids
+    attribution_by_secctx: bool         # 3: bound by secctx app_id, NOT title/pixels
+    allow_input_source_authoritative: bool  # 9: recorded as source metadata only
+    close_request_sent_upstream: bool   # 5: CloseRequest reached + drove the source
+    teardown_after_closed_only: bool    # 6: backend alive until source Closed
+    only_peer_a_closed: bool            # 7: after Closed, only peer A torn down
+    b_unperturbed: bool                 # 7: B record/stream/backend untouched
+    b_process_truth: bool               # 8: B source marker pid unchanged
+    pixel_backend_lost_kept: bool       # 8b: backend-exit-before-Closed keeps record
+    passed: bool
+
+
+def _single_mm_handle(mm: dict, suffix: str):
+    """The single live qdwin handle whose secctx ``app_id`` ends with ``suffix``
+    (e.g. ``.streamA``). FAIL CLOSED (return None) on zero or >1 — the rung-1
+    attribution must be exactly one toplevel per stream (SDL3 churns toplevels)."""
+    hits = [h for h, d in mm.items() if str(d.get("app_id", "")).endswith(suffix)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def run_rung1_managed_peers_slice(
+    backend: Rung1PeersBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, origin: str = "vm-a", width: int = 640,
+    height: int = 400, allow_a: int = 1, allow_b: int = 1,
+    netem_profile: str = "lan-clean",
+) -> Rung1PeersResult:
+    """Drive the durable rung-1 managed-peers CONTRACT (codex impl-34 Q6) headless.
+
+    Two source toplevels (``streamA``/``streamB``) are exported with per-stream
+    ``mm-control`` units; the real :class:`ViewerBroker` connects to each (fail-
+    closed Announce match on app_id/window_id/generation), learns the in-guest-
+    minted ``stream_id``, and binds each viewer qdwin handle to its stream by
+    secctx ``app_id`` (NOT title). Then it proves the source-mediated close
+    ORDERING (``request_source_close`` → upstream ``CloseRequest`` → source stops
+    the marker → source ``Closed`` → ONLY THEN tear down that one peer's pixel
+    backend), that closing A leaves B's record/stream/backend/marker-pid intact,
+    and that a pixel backend that exits BEFORE a source ``Closed`` is marked
+    ``pixel_backend_lost`` WITHOUT synthesizing a source close (codex impl-34 Q3).
+
+    Honesty fence: this proves the lifecycle/attribution/close-ordering CONTRACT
+    of the durable abstraction — geometry/decode/pointer fidelity stay LIVE in
+    ``drive-r1gate.py`` (same named invariants)."""
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="12-mm-rung1-managed-peers", step="contract",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-2 rung-1 durable managed-peers "
+                                        "contract (headless)"))
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    broker = ViewerBroker(control_host=backend.control_host)
+    specs = [("a", "streamA", 1, "mm-marker", allow_a),
+             ("b", "streamB", 2, "mm-marker2", allow_b)]
+    announced: dict[str, str] = {}
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+        appr: dict[str, ViewStreamApproved] = {}
+        for label, _stream, _wid, _marker, ai in specs:
+            appr[label] = backend.setup_export(
+                a, label=label, generation=generation, allow_input=ai)
+        for label, stream, wid, marker, ai in specs:
+            app_id = f"qdistro.mm.{origin}.{stream}"
+            sid = backend.launch_control(
+                a, label=label, generation=generation, window_id=wid,
+                source_machine=origin, title=stream, app_id=app_id,
+                req_w=width, req_h=height)
+            announced[label] = sid
+            broker.add_stream(
+                label, origin=origin, app_id=app_id, rdp_unit=f"mm-rdp-{label}",
+                relay_port=appr[label].rdp_port,
+                control_port=backend.control_port(label), marker_unit=marker,
+                window_id=wid, allow_input=ai, expect_generation=generation)
+            broker.connect(label, timeout=10)     # fail-closed Announce match
+
+        # --- attribution: handle<->stream by secctx app_id (impl-30 Q6) --------
+        tops = backend.viewer_qdwin_toplevels(b)
+        mm = {h: d for h, d in tops.items() if d.get("engine") == "qdistro.mm"}
+        ha = _single_mm_handle(mm, ".streamA")
+        hb = _single_mm_handle(mm, ".streamB")
+        if ha is not None:
+            broker.bind_handle("a", ha)
+        if hb is not None:
+            broker.bind_handle("b", hb)
+
+        pa, pb = broker.peers["a"], broker.peers["b"]
+        two_distinct_records = bool(
+            len(broker.peers) == 2 and pa.stream_id and pb.stream_id
+            and pa.stream_id != pb.stream_id)
+        distinct_handles = ha is not None and hb is not None and ha != hb
+        stream_ids_match_announced = bool(
+            pa.stream_id == announced["a"] and pb.stream_id == announced["b"])
+        attribution_by_secctx = bool(
+            ha in mm and hb in mm
+            and str(mm[ha]["app_id"]).endswith(".streamA")
+            and str(mm[hb]["app_id"]).endswith(".streamB"))
+        # allow_input is recorded as SOURCE-declared metadata; the broker is NOT
+        # the enforcement point (source-side per-stream enforcement is proven LIVE
+        # in the allowinput gate phase). The honest contract here: the record
+        # carries the source value faithfully and the broker has no input path.
+        allow_input_source_authoritative = bool(
+            pa.allow_input == allow_a and pb.allow_input == allow_b
+            and not hasattr(broker, "inject_input"))
+
+        # --- source-mediated close of A (ordering is the load-bearing test) ----
+        a_alive_pre = backend.rdp_client_alive(b, "a")
+        b_pid_before = backend.source_marker_pid(a, "b")
+        b_sid_before = pb.stream_id
+        broker.request_source_close("a")          # CloseRequest upstream ONLY
+        a_alive_mid = backend.rdp_client_alive(b, "a")   # broker must NOT kill it
+        closed = broker.wait_closed("a", timeout=10)
+        teardown_after_closed_only = bool(
+            a_alive_pre and a_alive_mid and closed is not None
+            and closed.stream_id == pa.stream_id)
+        ctl_a = backend.control_log(a, "a")
+        close_request_sent_upstream = bool(
+            ctl_a.get("reason") == "viewer-close"
+            and any(m.get("type") == "closed" for m in ctl_a.get("sent", [])))
+        # ONLY after source Closed do we tear down peer A's pixel backend.
+        if closed is not None:
+            backend.stop_rdp_client(b, "a")
+        a_alive_post = backend.rdp_client_alive(b, "a")
+
+        tops2 = backend.viewer_qdwin_toplevels(b)
+        mm2 = {h: d for h, d in tops2.items() if d.get("engine") == "qdistro.mm"}
+        a_gone = _single_mm_handle(mm2, ".streamA") is None
+        b_still = _single_mm_handle(mm2, ".streamB") is not None
+        only_peer_a_closed = bool(
+            a_gone and b_still and not a_alive_post and pa.close_state == "closed")
+        b_unperturbed = bool(
+            pb.stream_id == b_sid_before and pb.close_state == "open"
+            and pb.backend_alive and backend.rdp_client_alive(b, "b"))
+        b_pid_after = backend.source_marker_pid(a, "b")
+        b_process_truth = bool(
+            b_pid_before and b_pid_after and b_pid_before == b_pid_after)
+
+        # --- pixel_backend_lost: B's FreeRDP exits BEFORE any source Closed -----
+        backend.crash_rdp_client(b, "b")
+        broker.note_backend_exit("b")
+        pixel_backend_lost_kept = bool(
+            "b" in broker.peers and pb.close_state == "pixel_backend_lost"
+            and pb.closed is None)
+
+        checks = {
+            "two_distinct_records": two_distinct_records,
+            "distinct_handles": distinct_handles,
+            "stream_ids_match_announced": stream_ids_match_announced,
+            "attribution_by_secctx": attribution_by_secctx,
+            "allow_input_source_authoritative": allow_input_source_authoritative,
+            "close_request_sent_upstream": close_request_sent_upstream,
+            "teardown_after_closed_only": teardown_after_closed_only,
+            "only_peer_a_closed": only_peer_a_closed,
+            "b_unperturbed": b_unperturbed,
+            "b_process_truth": b_process_truth,
+            "pixel_backend_lost_kept": pixel_backend_lost_kept,
+        }
+        passed = all(checks.values())
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            "RUNG-1 durable managed-peers CONTRACT (codex impl-34 Q6): the real "
+            "ViewerBroker owns two remote_managed_toplevel records, learns the "
+            "in-guest-minted stream_ids, binds handles by secctx app_id (not "
+            "title), and routes a viewer close through the SOURCE (CloseRequest -> "
+            "source stops marker -> source Closed -> teardown ONLY that peer). "
+            "Closing A leaves B's record/stream/backend/marker-pid intact; a pixel "
+            "backend that exits before a source Closed is marked pixel_backend_lost "
+            "without synthesizing a source close. Pixel/geometry/pointer fidelity "
+            f"stay LIVE in drive-r1gate.py. checks={checks}")
+        bundle.write()
+        return Rung1PeersResult(
+            bundle, announced, two_distinct_records, distinct_handles,
+            stream_ids_match_announced, attribution_by_secctx,
+            allow_input_source_authoritative, close_request_sent_upstream,
+            teardown_after_closed_only, only_peer_a_closed, b_unperturbed,
+            b_process_truth, pixel_backend_lost_kept, passed)
+    finally:
+        broker.close()
         backend.clear_netem(a, topology.link_dev)
         backend.destroy(a)
         backend.destroy(b)

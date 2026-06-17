@@ -57,7 +57,9 @@ class RemotePeer:
     # learned at runtime:
     stream_id: str = ""
     handle: int | None = None
-    close_state: str = "open"            # open | close_requested | closed
+    # open | close_requested | closed | pixel_backend_lost (codex impl-34 Q3/Q6)
+    close_state: str = "open"
+    backend_alive: bool = True           # the FreeRDP pixel backend's process truth
     announce: Announce | None = None
     closed: Closed | None = None
     generation: int = 0
@@ -202,6 +204,21 @@ class ViewerBroker:
             if peer.close_state == "open":
                 peer.close_state = "close_requested"
 
+    def note_backend_exit(self, label: str) -> None:
+        """The peer's pixel backend (windowed FreeRDP) exited. This is NOT source
+        death (codex impl-34 Q3): mark ``pixel_backend_lost`` and KEEP the record —
+        do NOT synthesize a source ``Closed`` (inferring source death from viewer-
+        side process death is the forbidden path). The authoritative source
+        ``Closed``, if/when it arrives over the still-watched control socket, still
+        wins and moves the record to ``closed``. If the peer is ALREADY ``closed``
+        (the normal post-``Closed`` teardown), this is just the expected backend
+        exit and the close_state is left as-is."""
+        peer = self.peers[label]
+        with self._lock:
+            peer.backend_alive = False
+            if peer.close_state in ("open", "close_requested"):
+                peer.close_state = "pixel_backend_lost"
+
     def request_source_close_by_handle(self, handle: int) -> str:
         """Decoration-close arriving on a viewer qdwin handle: resolve it to the
         stream and route upstream. Returns the label closed."""
@@ -236,6 +253,7 @@ class ViewerBroker:
                 "relay_port": peer.relay_port, "control_port": peer.control_port,
                 "marker_unit": peer.marker_unit, "window_id": peer.window_id,
                 "allow_input": peer.allow_input, "close_state": peer.close_state,
+                "backend_alive": peer.backend_alive,
                 "closed_reason": peer.closed.reason if peer.closed else "",
             }
 
