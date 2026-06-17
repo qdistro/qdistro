@@ -203,6 +203,47 @@ class TestMultiMachineSession:
         finally:
             s.close()
 
+    def test_bind_handle_validates_redundant_identity(self):
+        # the D-Bus BindHandle(origin, stream, generation, secctx, handle) passes
+        # the full tuple; redundant fields are validated against the resolved peer
+        # (codex impl-36 HIGH) — a disagreement is rejected.
+        s, _events, _ = _session()
+        _setup_two(s)
+        try:
+            app = "qdistro.mm.vm-a.streamA"
+            # mismatched origin / stream / generation → reject (no bind).
+            assert s.bind_handle(app, 101, origin="vm-Z") is False
+            assert s.bind_handle(app, 101, stream_id="wrong") is False
+            assert s.bind_handle(app, 101, generation="999") is False
+            assert s.bind_handle(app, 101, generation="not-an-int") is False
+            assert s.broker.peers["a"].handle is None    # nothing bound yet
+            # matching full tuple → accept.
+            assert s.bind_handle(app, 101, origin="vm-a", stream_id="sid-A",
+                                 generation="51") is True
+            assert s.broker.peers["a"].handle == 101
+        finally:
+            s.close()
+
+    def test_finalize_is_idempotent_and_retires_handle(self):
+        s, events, _ = _session()
+        _setup_two(s)
+        try:
+            s.bind_handle("qdistro.mm.vm-a.streamA", 101)
+            s.request_close(101)
+            assert s.finalize_close("a", timeout=10) is True
+            wa = s.regs["a"].wrapper
+            # handle retired so a reused qdwin handle can't resolve to the dead peer.
+            assert s.broker.peers["a"].handle is None
+            assert s.broker.peer_for_handle(101) is None
+            n_closed = len([e for e in events if e.kind == "closed"])
+            n_teardown = len(wa.teardown_calls)
+            # second finalize is a no-op: no second teardown, no second event.
+            assert s.finalize_close("a", timeout=1) is True
+            assert len(wa.teardown_calls) == n_teardown
+            assert len([e for e in events if e.kind == "closed"]) == n_closed
+        finally:
+            s.close()
+
     def test_source_mediated_close_ordering(self):
         s, events, wrappers = _session()
         _setup_two(s)

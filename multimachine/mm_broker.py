@@ -31,7 +31,7 @@ thin, not-unit-tested shell).
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
 from .harness.viewer_broker import RemotePeer, ViewerBroker
@@ -55,6 +55,7 @@ class _StreamReg:
     teardown_token: str
     wrapper: WrapperHandle | None = None
     backend_lost_emitted: bool = False
+    finalized: bool = False
 
 
 # D-Bus-shaped events the session emits; the live D-Bus server maps these to
@@ -108,11 +109,17 @@ class MultiMachineSession:
         Announce) and learn the in-guest-minted stream_id. Emits ``announced``."""
         sid = self.broker.connect(label, timeout=timeout)
         # the source-minted stream_id is authoritative — adopt it for the wrapper
-        # spec + teardown identity (the spec's stream_id was the expected one).
+        # spec + teardown identity (the spec's stream_id was the EXPECTED one).
+        # NOTE the secctx app_id (qdistro.mm.<origin>.<stream_label>) encodes the
+        # stream LABEL, a SEPARATE namespace from the minted stream_id; adopting
+        # sid therefore does NOT make app_id inconsistent (handle attribution
+        # matches by app_id, teardown by stream_id). `ViewerBroker.connect` already
+        # fail-closed on the app_id/window_id/generation match; we re-validate the
+        # adopted spec so a bad sid can't yield an unlaunchable spec (impl-36 MED).
         reg = self.regs[label]
         if sid and sid != reg.spec.stream_id:
-            from dataclasses import replace
             reg.spec = replace(reg.spec, stream_id=sid)
+            reg.spec.validate()
         peer = self.broker.peers[label]
         self._emit("announced", label, stream_id=sid, app_id=peer.app_id,
                    allow_input=peer.allow_input, generation=peer.generation)
@@ -129,17 +136,36 @@ class MultiMachineSession:
         return reg.wrapper
 
     # ---- handle attribution (BindHandle, impl-30 Q6) ------------------
-    def bind_handle(self, secctx_app_id: str, handle: int) -> bool:
+    def bind_handle(self, secctx_app_id: str, handle: int, *,
+                    origin: str = "", stream_id: str = "",
+                    generation: str | int = "") -> bool:
         """Resolve a viewer qdwin handle to its stream by secctx ``app_id`` (NEVER
         title/pixels) and bind it. FAIL CLOSED: reject if no registered stream
-        matches the app_id, or if it (or this handle) is already bound. Emits
-        ``bound`` on success."""
+        matches the app_id, or if it (or this handle) is already bound.
+
+        The D-Bus method ``BindHandle(origin, stream_id, generation,
+        secctx_app_id, handle)`` (impl-34 Q2) passes the full identity tuple; the
+        redundant ``origin``/``stream_id``/``generation`` are VALIDATED against the
+        peer resolved from ``secctx_app_id`` so qdshell and the broker can't
+        disagree about what was bound (codex impl-36 HIGH) — empty fields skip that
+        check (a 2-arg core caller). Emits ``bound`` on success."""
         match = [lbl for lbl, p in self.broker.peers.items()
                  if p.app_id == secctx_app_id]
         if len(match) != 1:
             return False
         label = match[0]
         peer = self.broker.peers[label]
+        # validate the redundant identity fields when the caller supplied them.
+        if origin and origin != peer.origin:
+            return False
+        if stream_id and stream_id != peer.stream_id:
+            return False
+        if generation != "" and generation is not None:
+            try:
+                if int(generation) != peer.generation:
+                    return False
+            except (TypeError, ValueError):
+                return False
         if peer.handle is not None:
             return peer.handle == handle      # idempotent rebind to the same handle
         if self.broker.peer_for_handle(handle) is not None:
@@ -165,16 +191,26 @@ class MultiMachineSession:
         """Block until the authoritative source ``Closed`` arrives, THEN tear down
         ONLY this peer's pixel backend with the broker token. Returns True once the
         backend is torn down. The teardown is token-gated AND only after Closed —
-        the close ORDERING the gate proves. Emits ``closed``."""
+        the close ORDERING the gate proves. Idempotent (codex impl-36 LOW): a
+        second call after a successful finalize is a no-op. Emits ``closed`` once."""
+        reg = self.regs[label]
+        if reg.finalized:
+            return True
         closed = self.broker.wait_closed(label, timeout=timeout)
         if closed is None:
             return False                      # no source Closed yet — do NOT tear down
-        reg = self.regs[label]
         if reg.wrapper is not None:
             ok = reg.wrapper.teardown(reg.spec.stream_id, reg.spec.generation,
                                       reg.teardown_token)
             if not ok:
                 return False
+        # Retire the handle association so a REUSED qdwin handle can't later
+        # resolve to this now-dead peer (codex impl-36 MED). The record stays
+        # (close_state 'closed') for status, but it owns no handle.
+        peer = self.broker.peers.get(label)
+        if peer is not None:
+            peer.handle = None
+        reg.finalized = True
         self._emit("closed", label, stream_id=reg.spec.stream_id,
                    reason=closed.reason)
         return True
