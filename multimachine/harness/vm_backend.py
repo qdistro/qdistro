@@ -394,8 +394,12 @@ class QciVMBackend:
         (shell=qdwin-shell.so) + qdwin-bystander as the bound shell client + TWO
         *windowed* secctx-tagged FreeRDP clients, each decoding one source stream
         into its own managed qdwin toplevel (viewer-qdwin-stack.sh; impl-30 Q6).
-        Asserts the VMB_QDWIN_OK token (both decoded + two mm secctx toplevels).
-        Returns the script's stdout (carries the observed toplevel lines)."""
+        Asserts the VMB_QDWIN_OK token, which proves a WEAK readiness condition:
+        the gfx channel loaded on both RDP connections AND both per-stream secctx
+        app_ids were observed at least once. It does NOT prove the current LIVE set
+        has exactly one toplevel per stream (SDL3 churns toplevels) — that stronger
+        check is the caller's job via :meth:`viewer_qdwin_toplevels` (live add−removed
+        set). Returns the script's stdout (carries the observed toplevel lines)."""
         real = self._real(vm)
         self._push(real,
                    self.repo_dir / "multimachine/harness/vm/viewer-qdwin-stack.sh",

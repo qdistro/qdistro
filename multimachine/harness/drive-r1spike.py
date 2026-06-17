@@ -84,17 +84,21 @@ def live_handles(settle=2.0, tries=10):
         b = [h for h, d in mm.items() if d["app_id"].endswith(".streamB")]
         if len(a) == 1 and len(b) == 1:
             return a[0], b[0], mm
-        ha, hb = (a[-1] if a else None), (b[-1] if b else None)
         time.sleep(settle)
-    return ha, hb, {}
+    # FAIL CLOSED on ambiguity (zero or >1 live handle for a stream) — never feed
+    # an arbitrary/churned handle into the decode/focus checks.
+    return None, None, mm
 
 
-# --- Assertion 1: two distinct managed objects, two mm secctx identities ---
+# --- Assertion 1: EXACTLY two distinct managed objects, one per stream ---
 ha, hb, mm = live_handles()
 print(f"  live managed mm toplevels: {mm}")
+a_ids = [h for h, d in mm.items() if d["app_id"].endswith(".streamA")]
+b_ids = [h for h, d in mm.items() if d["app_id"].endswith(".streamB")]
 check("A1-two-distinct-managed-objects",
-      ha is not None and hb is not None and ha != hb,
-      f"handle_A={ha} handle_B={hb}")
+      len(mm) == 2 and len(a_ids) == 1 and len(b_ids) == 1
+      and ha is not None and hb is not None and ha != hb,
+      f"live={sorted(mm)} handle_A={ha} handle_B={hb}")
 
 # --- Per-stream 1:1 decode: RAISE each in turn (full-size windows fully overlap;
 #     raise is a compositor z-order op, does not churn the client), capture, oracle
