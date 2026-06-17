@@ -588,7 +588,7 @@ class QciVMBackend:
         self, vm: str, *, generation: int, width: int, height: int,
         exported_telemetry: str, sentinel_telemetry: str,
         exported_label: str, sentinel_label: str,
-        allow_input: int = 1) -> ViewStreamApproved:
+        allow_input: int = 1, fault: str = "") -> ViewStreamApproved:
         """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
         subscribed, writing per-seat input telemetry) + a subscribe. The SENTINEL is
         launched separately (:meth:`launch_sentinel`) AFTER the oracle, since a
@@ -598,7 +598,11 @@ class QciVMBackend:
         forward gets the inject channel (the positive confinement gate). ``0`` is the
         read-only **negative control** (codex impl-11/13): the SAME injection is
         attempted but the server-side permission bit must gate it, so NOTHING
-        receives the presses."""
+        receives the presses.
+
+        ``fault`` (item 6, codex impl-28): if non-empty (``transient``/``persistent``),
+        qdwin is started with ``QDISTRO_FORWARD_FAULT`` so each spawned forward
+        deterministically exercises its bounded-reconnect / give-up path."""
         real = self._real(vm)
         self._sentinel_label = sentinel_label
         self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
@@ -610,7 +614,8 @@ class QciVMBackend:
         env = (f"W={width} H={height} GEN={generation} FS=1 ANIMATE_MS=200 "
                f"RELAY_PORT={self.relay_port} ALLOW_INPUT={int(allow_input)} "
                f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
-               f"EXPORTED_LABEL={shlex.quote(exported_label)}")
+               f"EXPORTED_LABEL={shlex.quote(exported_label)}"
+               + (f" FAULT={shlex.quote(fault)}" if fault else ""))
         out = self._vmexec(real, self._as_admin(
             f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)
         if "SETUP_OK" not in out:

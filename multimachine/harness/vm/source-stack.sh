@@ -263,8 +263,12 @@ EOF
 #    pipewire-backend.so internally (the per-view capture pool) — same as prod.
 MM="/usr/lib64/libweston-14"
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
+# item 6 (codex impl-28): optional VM-TEST-ONLY fault injection into the forward —
+# qdwin inherits QDISTRO_FORWARD_FAULT and passes it to each qdistro-forward it
+# spawns, so we can deterministically exercise the bounded-reconnect/give-up paths.
+FAULT_ARG=""; [ -n "${FAULT:-}" ] && FAULT_ARG="--setenv=QDISTRO_FORWARD_FAULT=$FAULT"
 RUN --unit=mm-qdwin --setenv=QDWIN_ALLOWED_UID=1000 --setenv=QDWIN_ALLOWED_LOCKER_ANY=1 \
-  --setenv="WESTON_MODULE_MAP=$WMAP" \
+  --setenv="WESTON_MODULE_MAP=$WMAP" $FAULT_ARG \
   weston --backend=headless-backend.so --backend=pipewire-backend.so --renderer=pixman \
     --config="$XDG_RUNTIME_DIR/mm-weston.ini" \
     --width=$W --height=$H --socket=$SOCK >/dev/null 2>&1

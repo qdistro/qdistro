@@ -1683,6 +1683,23 @@ class ForwardDeathBackend(SecondViewBackend, Protocol):
 
 
 @dataclass
+class ForwardReconnectResult:
+    bundle: EvidenceBundle
+    mode: str                         # "transient" | "persistent"
+    oracle: O.OracleResult            # decoded oracle AFTER the event
+    fault_injected: bool              # journal: forward synthesized the stream error
+    reconnect_started: bool           # journal: "starting bounded reconnect"
+    recovered: bool                   # transient: journal "stream recovered after N"
+    gave_up: bool                     # persistent: journal "reconnect budget exhausted"
+    forward_alive: bool               # transient: forward did NOT exit
+    forward_exited: bool              # persistent: forward gone, no zombie
+    torn_down: bool                   # persistent: subscriber torn_down("forward exited")
+    no_torn_down: bool                # transient: NO torn_down (stream stayed up)
+    marker_alive: bool                # source app survived throughout
+    passed: bool
+
+
+@dataclass
 class ForwardDeathResult:
     bundle: EvidenceBundle
     oracle: O.OracleResult            # stream-A decoded oracle (a real LIVE stream pre-kill)
@@ -2158,6 +2175,171 @@ def run_forward_death_slice(
             bundle, res, handle_a, handle_b, torn_down_a, torn_down_b_absent,
             forward_a_reaped, forward_b_alive, marker_a_alive, marker_b_alive,
             qdwin_detected, slot_freed, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+def run_forward_reconnect_slice(
+    backend: ForwardDeathBackend, topology: Topology, *, mode: str,
+    generation: int, bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, control_port: int = 5556,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_telemetry: str = "/run/mm-a/exported-a.json",
+) -> ForwardReconnectResult:
+    """Drive the **bounded PipeWire reconnect** gate (item 6, codex impl-28) — the
+    forward's response to a PipeWire stream error, exercised deterministically via
+    the VM-test-only ``QDISTRO_FORWARD_FAULT`` injection.
+
+    ``mode="transient"`` — the forward synthesizes ONE stream error, runs the
+    bounded reconnect, RECREATES the capture stream against the same node, and
+    RECOVERS without exiting. Assert: the qdwin journal shows fault-inject +
+    "starting bounded reconnect" + "stream recovered"; the forward did NOT exit
+    (pid still live); the subscriber got NO ``torn_down`` (the stream stayed up);
+    the source marker is alive; and the decoded oracle passes AFTER recovery (the
+    RDP peer sees fresh pixels again).
+
+    ``mode="persistent"`` — every recreate attempt fails, so the forward exhausts
+    the retry budget and EXITS NON-ZERO. Assert: journal shows "reconnect budget
+    exhausted"; the forward is gone with no zombie; qdwin's pidfd watch fires and
+    the subscriber gets ``torn_down("forward exited")`` (item 5 chaining onto
+    item 6's self-exit); the source marker survives (transport death ≠ app death).
+
+    Honesty: the proof signals are forward/qdwin journal lines + OS process truth
+    (pid alive/gone, no zombie) + a real protocol event (torn_down) + a decoded
+    pixel oracle — never "looks recovered"."""
+    if mode not in ("transient", "persistent"):
+        raise ValueError(f"mode must be transient|persistent, got {mode!r}")
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario=f"12-mm-forward-reconnect-{mode}", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description=f"Phase-1 forward bounded reconnect ({mode})"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    status_file = "/run/mm-b/viewer-status.json"
+    import time as _t
+    res = O.OracleResult(ok=False, payload=None, payload_error="not evaluated")
+    fault_injected = reconnect_started = recovered = gave_up = False
+    forward_alive = forward_exited = torn_down = no_torn_down = marker_alive = False
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # one exported marker; qdwin (and so the forward) gets QDISTRO_FORWARD_FAULT.
+        approved = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry="/run/mm-a/unused-sentinel.json",
+            exported_label="exported-a", sentinel_label="sentinel",
+            allow_input=1, fault=mode)
+
+        if mode == "transient":
+            # bring up the viewer so there is a live RDP peer across the reconnect.
+            src = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                                   title="marker-a", app_id="qdwin-marker-client",
+                                   req_w=width, req_h=height)
+            announce = bridge_approved(approved, src, generation)
+            control = ControlServer(port=control_port)
+            backend.launch_viewer(
+                b, control_host=viewer_control_host, control_port=control.port,
+                rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+                generation=generation, otp=approved.rdp_password,
+                size=f"{width}x{height}", status_file=status_file)
+            control.accept()
+            control.send(announce)
+            _poll(lambda: backend.viewer_status(b),
+                  lambda s: s.get("status") == "connected" and s.get("windows"))
+
+            # the forward injects ONE error once streaming; wait for the recovery line.
+            jr = _poll(lambda: backend.qdwin_journal(a, tail=200),
+                       lambda j: "stream recovered after" in j, tries=60, delay=0.5)
+            fault_injected = "FAULT-INJECT" in jr
+            reconnect_started = "starting bounded reconnect" in jr
+            recovered = "stream recovered after" in jr
+            forward_alive = bool(backend.forward_pids(a))     # forward did NOT exit
+            no_torn_down = not _torn_down_handles(backend.bystander_log(a))
+            marker_alive = backend.marker_unit_alive(a, "mm-marker")
+
+            # decoded oracle AFTER recovery — the RDP peer sees fresh pixels again.
+            vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                               if s.vm == topology.vm_b)
+            decoded = bundle.root / "captures" / "vm-b-reconnect.ppm"
+            decoded.parent.mkdir(parents=True, exist_ok=True)
+            backend.await_decode(b)
+            layout = M.compute_layout(width, height)
+            for _ in range(8):
+                backend.capture(b, vm_b_screen, decoded)
+                res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                                 auto_origin=True, active_generation=generation,
+                                 expect_output_id=marker_output_id)
+                if res.ok:
+                    break
+                _t.sleep(0.4)
+            cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                          capture_class=CaptureClass.VM_B_HOST.value,
+                          output_id=marker_output_id,
+                          role="VM-B monitor (forward reconnect, post-recovery)",
+                          fmt="PPM", scale=1.0)
+            bundle.manifest.captures.append(cap)
+            bundle.add_oracle(OracleRecord(
+                capture=cap.path, ok=res.ok,
+                output_id=res.payload.output_id if res.payload else None,
+                generation=res.payload.generation if res.payload else None,
+                frame=res.payload.frame if res.payload else None,
+                measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+                stale_generation=res.stale_generation,
+                bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+            passed = bool(fault_injected and reconnect_started and recovered
+                          and forward_alive and no_torn_down and marker_alive
+                          and res.ok)
+        else:   # persistent
+            # the forward injects one error then force-fails every recreate → exits
+            # non-zero within the bound; qdwin's pidfd watch posts torn_down.
+            jr = _poll(lambda: backend.qdwin_journal(a, tail=200),
+                       lambda j: "reconnect budget exhausted" in j,
+                       tries=80, delay=0.5)
+            fault_injected = "FAULT-INJECT" in jr
+            reconnect_started = "starting bounded reconnect" in jr
+            gave_up = "reconnect budget exhausted" in jr
+            # forward self-exits; qdwin tears the stream down + posts torn_down.
+            post = _poll(lambda: backend.bystander_log(a),
+                         lambda lg: _torn_down_handles(lg), tries=40, delay=0.25)
+            torn_down = bool(_torn_down_handles(post))
+            forward_exited = not backend.forward_pids(a)     # gone (qdwin/weston reaped)
+            marker_alive = backend.marker_unit_alive(a, "mm-marker")
+            passed = bool(fault_injected and reconnect_started and gave_up
+                          and forward_exited and torn_down and marker_alive)
+
+        # The decoded-remote honesty gate only applies to the transient path (it
+        # captures a VM-B pixel oracle). The persistent path proves a self-exit +
+        # torn_down + process truth — there are no remote pixels to assert.
+        if passed and mode == "transient":
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"forward bounded reconnect ({mode}): fault_injected={fault_injected} "
+            f"reconnect_started={reconnect_started} recovered={recovered} "
+            f"gave_up={gave_up} forward_alive={forward_alive} "
+            f"forward_exited={forward_exited} torn_down={torn_down} "
+            f"no_torn_down={no_torn_down} marker_alive={marker_alive} "
+            f"oracle_ok={res.ok}. codex impl-28: bounded reconnect driven on the "
+            "main loop under pw_thread_loop_lock; transient recovers, persistent "
+            "gives up after the budget and exits non-zero so qdwin's pidfd "
+            "death-watch (item 5) posts torn_down.")
+        bundle.write()
+        return ForwardReconnectResult(
+            bundle, mode, res, fault_injected, reconnect_started, recovered,
+            gave_up, forward_alive, forward_exited, torn_down, no_torn_down,
+            marker_alive, passed)
     finally:
         if control is not None:
             control.close()

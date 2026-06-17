@@ -369,11 +369,28 @@ typedef struct qfwd_subsystem {
 	_Atomic int format_known;     /* published (release) AFTER format_known_ms */
 	int format_warned;            /* main-loop only: logged no-format error once */
 	int frame_warned;             /* main-loop only: logged no-first-frame once */
+
+	/* item 6 (codex impl-28): bounded PipeWire reconnect. The pw thread writes
+	 * pw_state on every state change and bumps pw_error_generation on each
+	 * PW_STREAM_STATE_ERROR; the main wait loop reads them (acquire) and owns the
+	 * reconnect/backoff/give-up state machine (so stream lifetime is only ever
+	 * mutated from the main thread under pw_thread_loop_lock, never re-entrantly
+	 * inside a pw callback). */
+	_Atomic unsigned pw_error_generation;   /* ++ on each stream ERROR */
+	_Atomic int pw_state;                   /* last enum pw_stream_state (-1 init) */
 } qfwd_subsystem;
 
 static rdpShadowServer *g_server;
 static qfwd_subsystem *g_subsystem;
 static volatile sig_atomic_t g_stop_flag;
+/* item 6: set by the main loop when the bounded PipeWire reconnect gives up (or a
+ * non-recoverable internal failure occurs). Distinct from g_stop_flag (a clean
+ * signal/operator shutdown → exit 0): g_fatal → exit NON-ZERO so qdwin's pidfd
+ * death-watch tears the stream down and posts torn_down("forward exited"). */
+static int g_fatal;
+/* item 6 VM-test-only fault injection (env QDISTRO_FORWARD_FAULT). NONE in prod. */
+static enum { QFWD_FAULT_NONE, QFWD_FAULT_TRANSIENT, QFWD_FAULT_PERSISTENT }
+	g_fault_mode = QFWD_FAULT_NONE;
 
 /* ---------- PipeWire ---------- */
 
@@ -385,14 +402,19 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
 {
 	qfwd_subsystem *s = data;
 	(void)old;
+	/* item 6: publish the state for the main-loop reconnect/recovery detector
+	 * (single writer = this pw thread). */
+	if (s)
+		atomic_store(&s->pw_state, (int)state);
 	if (state == PW_STREAM_STATE_ERROR) {
 		/* impl-24: was silent at INFO — a stream error meant a black RDP
 		 * view with no signal. Surface it loudly with the context an
 		 * operator needs (the #1 cause is a --width/--height vs weston
-		 * [pipewire] output-mode mismatch). NOTE: not fatal here — qdwin
-		 * does not yet watch forward death, so a self-exit would leave a
-		 * half-dead stream (impl-24 Q2); bounded recovery/exit is a
-		 * follow-on once qdwin's forward-death watch lands. */
+		 * [pipewire] output-mode mismatch). item 6: ALSO bump the error
+		 * generation so the main loop runs the bounded reconnect/give-up
+		 * state machine — we do NOT mutate stream lifetime from inside this
+		 * pw-thread callback (re-entrant); the main loop owns that. The
+		 * `error` string is callback-scoped, so log it here. */
 		LOGE("pw stream ERROR: %s (target node=%s requested=BGRx %dx%d @0/1; "
 		     "format_known=%d valid_frames=%lu) — check weston [pipewire] "
 		     "output mode vs --width/--height",
@@ -400,6 +422,8 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
 		     g_args.width, g_args.height,
 		     s ? atomic_load(&s->format_known) : -1,
 		     s ? atomic_load(&s->valid_frames) : 0);
+		if (s)
+			atomic_fetch_add(&s->pw_error_generation, 1);
 		return;
 	}
 	LOGI("pw stream state: %s%s%s", pw_stream_state_as_string(state),
@@ -674,35 +698,13 @@ static int qfwd_subsystem_uninit(rdpShadowSubsystem *base)
 	return 1;
 }
 
-static int qfwd_subsystem_start(rdpShadowSubsystem *base)
+/* Create + connect the capture stream on s->core. CALLER MUST HOLD
+ * pw_thread_loop_lock(s->loop). Returns 1 on success; on failure destroys any
+ * partial stream, leaves s->stream == NULL, and returns <= 0. Shared by
+ * subsystem_start and the item-6 reconnect path (codex impl-28) so both build the
+ * EXACT same stream (BGRx, requested WxH, 0/1 framerate). */
+static int qfwd_pw_create_stream_locked(qfwd_subsystem *s)
 {
-	qfwd_subsystem *s = (qfwd_subsystem *)base;
-
-	s->loop = pw_thread_loop_new("qfwd-pw", NULL);
-	if (!s->loop) {
-		LOGE("pw_thread_loop_new failed");
-		return -1;
-	}
-	s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), NULL, 0);
-	if (!s->context) {
-		LOGE("pw_context_new failed");
-		return -1;
-	}
-
-	if (pw_thread_loop_start(s->loop) < 0) {
-		LOGE("pw_thread_loop_start failed");
-		return -1;
-	}
-
-	pw_thread_loop_lock(s->loop);
-
-	s->core = pw_context_connect(s->context, NULL, 0);
-	if (!s->core) {
-		LOGE("pw_context_connect failed: %m");
-		pw_thread_loop_unlock(s->loop);
-		return -1;
-	}
-
 	struct pw_properties *props = pw_properties_new(
 		PW_KEY_MEDIA_TYPE,     "Video",
 		PW_KEY_MEDIA_CATEGORY, "Capture",
@@ -714,7 +716,6 @@ static int qfwd_subsystem_start(rdpShadowSubsystem *base)
 	s->stream = pw_stream_new(s->core, "qdistro-forward", props);
 	if (!s->stream) {
 		LOGE("pw_stream_new failed");
-		pw_thread_loop_unlock(s->loop);
 		return -1;
 	}
 
@@ -751,12 +752,101 @@ static int qfwd_subsystem_start(rdpShadowSubsystem *base)
 		params, 1);
 	if (rc < 0) {
 		LOGE("pw_stream_connect failed: %s", spa_strerror(rc));
-		pw_thread_loop_unlock(s->loop);
-		return -1;
+		/* codex impl-29 LOW: the listener is already added; remove the embedded
+		 * spa_hook before destroying this partial stream so the reused hook is
+		 * cleanly unlinked (mirrors the reconnect destroy path). */
+		spa_hook_remove(&s->stream_listener);
+		pw_stream_destroy(s->stream);
+		s->stream = NULL;
+		return rc;
 	}
 
 	pw_stream_set_active(s->stream, true);
 	atomic_store(&s->stream_active_ms, now_ms()); /* impl-24: watchdog t0 */
+	return 1;
+}
+
+/* item 6 (codex impl-28): tear down ONLY the capture stream and recreate it
+ * against the same target node, keeping loop/context/core. Takes the thread-loop
+ * lock itself (pausing the pw thread at a safe boundary so on_process / state
+ * callbacks cannot run while we mutate stream lifetime), resets all stream-derived
+ * capture state, then rebuilds the stream. Returns 1 on a live recreated stream,
+ * <= 0 on failure (caller counts a failed attempt and backs off). In PERSISTENT
+ * fault-injection mode it force-fails (destroy, no recreate) so the give-up path
+ * is exercised deterministically without needing a real persistent PW error. */
+static int qfwd_pw_reconnect(qfwd_subsystem *s)
+{
+	if (!s || !s->loop || !s->core)
+		return -1;
+
+	pw_thread_loop_lock(s->loop);
+
+	if (s->stream) {
+		spa_hook_remove(&s->stream_listener);   /* unlink while old list alive */
+		pw_stream_destroy(s->stream);
+		s->stream = NULL;
+	}
+
+	/* Reset all stream-derived state BEFORE the new stream can fire callbacks,
+	 * so the watchdog re-baselines and stale frame/format timing can't leak into
+	 * the new episode (codex impl-28 step 2/3). */
+	atomic_store(&s->format_known, 0);
+	atomic_store(&s->format_known_ms, 0);
+	atomic_store(&s->first_frame_ms, 0);
+	atomic_store(&s->last_frame_ms, 0);
+	atomic_store(&s->valid_frames, 0);
+	atomic_store(&s->invalid_frames, 0);
+	atomic_store(&s->stream_active_ms, 0);
+	atomic_store(&s->pw_state, -1);
+	s->format_warned = 0;
+	s->frame_warned = 0;
+
+	if (g_fault_mode == QFWD_FAULT_PERSISTENT) {
+		/* simulate "every recreated stream fails immediately" — exercise the
+		 * bounded give-up + non-zero exit path deterministically. */
+		pw_thread_loop_unlock(s->loop);
+		return 0;
+	}
+
+	int rc = qfwd_pw_create_stream_locked(s);
+	pw_thread_loop_unlock(s->loop);
+	return rc;
+}
+
+static int qfwd_subsystem_start(rdpShadowSubsystem *base)
+{
+	qfwd_subsystem *s = (qfwd_subsystem *)base;
+
+	s->loop = pw_thread_loop_new("qfwd-pw", NULL);
+	if (!s->loop) {
+		LOGE("pw_thread_loop_new failed");
+		return -1;
+	}
+	s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), NULL, 0);
+	if (!s->context) {
+		LOGE("pw_context_new failed");
+		return -1;
+	}
+
+	if (pw_thread_loop_start(s->loop) < 0) {
+		LOGE("pw_thread_loop_start failed");
+		return -1;
+	}
+
+	pw_thread_loop_lock(s->loop);
+
+	s->core = pw_context_connect(s->context, NULL, 0);
+	if (!s->core) {
+		LOGE("pw_context_connect failed: %m");
+		pw_thread_loop_unlock(s->loop);
+		return -1;
+	}
+
+	atomic_store(&s->pw_state, -1);         /* item 6: until first state cb */
+	if (qfwd_pw_create_stream_locked(s) < 0) {
+		pw_thread_loop_unlock(s->loop);
+		return -1;
+	}
 	pw_thread_loop_unlock(s->loop);
 
 	LOGI("subsystem started, pw target=%s rdp_port=%d %dx%d",
@@ -1322,6 +1412,20 @@ int main(int argc, char **argv)
 		g_debug = d && *d && strcmp(d, "0") != 0;   /* =0 / empty = off */
 	}
 
+	{
+		/* item 6 (codex impl-28): VM-TEST-ONLY fault injection — deterministic
+		 * exercise of the bounded-reconnect state machine (a real transient
+		 * weston PipeWire stream ERROR is flaky to induce). Unset/empty in prod. */
+		const char *f = getenv("QDISTRO_FORWARD_FAULT");
+		if (f && !strcmp(f, "transient"))
+			g_fault_mode = QFWD_FAULT_TRANSIENT;
+		else if (f && !strcmp(f, "persistent"))
+			g_fault_mode = QFWD_FAULT_PERSISTENT;
+		if (g_fault_mode != QFWD_FAULT_NONE)
+			LOGE("QDISTRO_FORWARD_FAULT=%s — fault injection ACTIVE "
+			     "(test build behavior, not production)", f);
+	}
+
 	if (parse_args(argc, argv) < 0) {
 		clear_owned_password();
 		clear_owned_access_token();
@@ -1406,6 +1510,25 @@ int main(int argc, char **argv)
 	LOGI("shadow_server running, port=%d, target=%s",
 	     g_args.rdp_port, g_args.pipewire_node);
 
+	/* item 6 (codex impl-28): bounded PipeWire reconnect state machine, driven
+	 * here on the main wait loop (NOT in the pw-thread callback). rc_active=0 is
+	 * HEALTHY; on a new error generation we enter an episode, retry the stream
+	 * recreate with exponential backoff (250ms·2ⁿ, cap 5s, ±20% jitter), and on
+	 * exhausting the budget (5 attempts or 30s) set g_fatal + exit non-zero so
+	 * qdwin's pidfd death-watch tears the stream down. */
+	int rc_active = 0;
+	unsigned rc_attempts = 0;
+	uint32_t rc_first_error_ms = 0;
+	uint32_t rc_next_attempt_ms = 0;
+	uint32_t rc_backoff_ms = 0;
+	unsigned rc_handled_gen = 0;
+	int rc_fault_injected = 0;
+	/* codex impl-29 MED: after a recreate that left a LIVE stream, wait for it to
+	 * settle (PAUSED/STREAMING) or to emit a NEWER error before counting another
+	 * attempt or declaring give-up — else attempt 5 false-fatals a stream still in
+	 * async negotiation. Cleared when a newer error supersedes that attempt. */
+	int rc_waiting_for_recovery = 0;
+
 	for (;;) {
 		DWORD wr = WaitForSingleObject(g_server->thread, 250);
 		if (wr != WAIT_TIMEOUT)
@@ -1415,12 +1538,11 @@ int main(int argc, char **argv)
 			break;
 		}
 		/* impl-24 watchdog: loud, actionable diagnostics on a stalled
-		 * pipeline. NOT fatal (qdwin doesn't watch forward death yet —
-		 * a self-exit would orphan the stream; fatal-exit + bounded
-		 * reconnect is the follow-on once qdwin's child-death watch lands).
-		 * Note weston's pipewire output is damage-driven (framerate 0/1),
-		 * so a STATIC source legitimately produces few frames — we only
-		 * warn on NO format / NO first frame, never on "frames went quiet."*/
+		 * pipeline. Note weston's pipewire output is damage-driven
+		 * (framerate 0/1), so a STATIC source legitimately produces few
+		 * frames — we only warn on NO format / NO first frame, never on
+		 * "frames went quiet." Reconnect (below) triggers ONLY on an actual
+		 * stream ERROR, never on these quiet-frame watchdog timeouts. */
 		qfwd_subsystem *s = g_subsystem;
 		uint32_t active_at = s ? atomic_load(&s->stream_active_ms) : 0;
 		if (active_at) {
@@ -1450,6 +1572,96 @@ int main(int argc, char **argv)
 				     atomic_load(&s->invalid_frames));
 			}
 		}
+
+		/* ---- item 6: bounded PipeWire reconnect / fatal exit ---------- */
+		if (s) {
+			uint32_t now = now_ms();
+			/* fault injection (VM test only): once the stream is genuinely
+			 * STREAMING with frames, synthesize ONE error to drive the
+			 * reconnect state machine — TRANSIENT recovers (real recreate),
+			 * PERSISTENT force-fails every attempt → give up → exit non-zero. */
+			if (g_fault_mode != QFWD_FAULT_NONE && !rc_fault_injected
+			    && !rc_active
+			    && atomic_load(&s->pw_state) == PW_STREAM_STATE_STREAMING
+			    && atomic_load(&s->valid_frames) > 0) {
+				rc_fault_injected = 1;
+				LOGE("FAULT-INJECT: synthesizing one PipeWire stream error "
+				     "(mode=%s) to exercise reconnect",
+				     g_fault_mode == QFWD_FAULT_PERSISTENT
+				     ? "persistent" : "transient");
+				atomic_fetch_add(&s->pw_error_generation, 1);
+			}
+			unsigned gen = atomic_load(&s->pw_error_generation);
+			if (!rc_active && gen != rc_handled_gen) {
+				rc_active = 1;
+				rc_handled_gen = gen;
+				rc_attempts = 0;
+				rc_backoff_ms = 0;
+				rc_first_error_ms = now;
+				rc_next_attempt_ms = now;   /* first attempt ~immediately */
+				LOGE("PipeWire stream error (gen=%u) — starting bounded "
+				     "reconnect (cap 5 attempts / 30s)", gen);
+			}
+			if (rc_active) {
+				int st = atomic_load(&s->pw_state);
+				unsigned cur = atomic_load(&s->pw_error_generation);
+				/* codex impl-29 MED: an error NEWER than the one our last
+				 * attempt re-baselined to means that recreated stream itself
+				 * failed — stop waiting on it so the next backoff attempt (and
+				 * the give-up budget) can proceed. */
+				if (rc_waiting_for_recovery && cur != rc_handled_gen)
+					rc_waiting_for_recovery = 0;
+				/* recovery: only AFTER ≥1 recreate attempt (the old stream
+				 * may still read STREAMING at injection time), with no error
+				 * NEWER than that attempt, the stream healthy again (codex
+				 * impl-28: reset on PAUSED, not first frame — damage-driven). */
+				if (rc_attempts > 0
+				    && g_fault_mode != QFWD_FAULT_PERSISTENT
+				    && cur == rc_handled_gen
+				    && (st == PW_STREAM_STATE_PAUSED ||
+					st == PW_STREAM_STATE_STREAMING)) {
+					LOGI("PipeWire stream recovered after %u attempt(s)",
+					     rc_attempts);
+					rc_active = 0;
+					rc_waiting_for_recovery = 0;
+				} else if ((rc_attempts >= 5 && !rc_waiting_for_recovery) ||
+					   (now - rc_first_error_ms) > 30000) {
+					/* give up on 5 FAILED attempts, or the 30s wall-clock
+					 * backstop (the ultimate bound even while still waiting on
+					 * a live-but-stuck recreate). codex impl-29 MED: NOT fatal
+					 * merely because attempt 5 just left a live stream that has
+					 * not yet published PAUSED/STREAMING. */
+					LOGE("FATAL: PipeWire reconnect budget exhausted "
+					     "(%u attempts, %ums) — exiting non-zero so "
+					     "qdwin tears the stream down", rc_attempts,
+					     now - rc_first_error_ms);
+					g_fatal = 1;
+					shadow_server_stop(g_server);
+					break;
+				} else if ((int32_t)(now - rc_next_attempt_ms) >= 0
+					   && !rc_waiting_for_recovery) {
+					rc_attempts++;
+					int ok = qfwd_pw_reconnect(s);
+					/* codex impl-29 MED: re-baseline so "recovered" means no
+					 * error NEWER than THIS replacement stream; a live recreate
+					 * then waits to settle before another attempt or give-up. */
+					rc_handled_gen = atomic_load(&s->pw_error_generation);
+					rc_waiting_for_recovery = (ok > 0);
+					rc_backoff_ms = rc_backoff_ms
+						? (rc_backoff_ms * 2) : 250;
+					if (rc_backoff_ms > 5000)
+						rc_backoff_ms = 5000;
+					/* ±20% jitter without Math.random: derive from the
+					 * monotonic clock (80–120% of backoff). */
+					uint32_t jit = rc_backoff_ms *
+						(80 + (now_ms() % 41)) / 100;
+					rc_next_attempt_ms = now_ms() + jit;
+					LOGI("PipeWire reconnect attempt %u: %s "
+					     "(next in ~%ums)", rc_attempts,
+					     ok > 0 ? "stream recreated" : "failed", jit);
+				}
+			}
+		}
 	}
 	WaitForSingleObject(g_server->thread, INFINITE);
 
@@ -1459,5 +1671,8 @@ int main(int argc, char **argv)
 	clear_owned_password();
 	clear_owned_access_token();
 	pw_deinit();
-	return 0;
+	/* item 6: non-zero on an unrecoverable transport failure (g_fatal) so qdwin's
+	 * pidfd death-watch emits torn_down("forward exited"); 0 on a clean
+	 * signal/operator stop (g_stop_flag) or the shadow thread exiting normally. */
+	return g_fatal ? EXIT_FAILURE : 0;
 }
