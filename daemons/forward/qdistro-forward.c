@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -62,6 +63,13 @@
 #define LOGE(fmt, ...) fprintf(stderr, "[qfwd %d ERR] " fmt "\n", (int)getpid(), ##__VA_ARGS__)
 #define QFWD_MAX_TOKEN_LEN 4096
 #define QFWD_MAX_PASSWORD_LEN 4096
+
+/* QDISTRO_FORWARD_DEBUG=1 enables the dev-only frame dumps + per-frame log spam
+ * (impl-24): they do disk I/O / hold the surface lock and have no place in the
+ * steady-state frame producer. Read once in main(). */
+static int g_debug;
+
+static uint32_t now_ms(void);   /* CLOCK_MONOTONIC ms; defined below */
 
 /* ---------- argv ---------- */
 
@@ -345,7 +353,22 @@ typedef struct qfwd_subsystem {
 
 	/* Negotiated stream format. */
 	struct spa_video_info_raw format;
-	int format_known;
+
+	/* impl-24 solidity: negotiation/frame watchdog + diagnostics. Timestamps
+	 * are CLOCK_MONOTONIC ms (0 = not-yet). Written on the pw thread (single
+	 * writer per field), read by the main wait loop's watchdog — C11 atomics
+	 * (not volatile) so the cross-thread access is well-defined, not a data
+	 * race (codex impl-25). `format_known_ms` is published BEFORE `format_known`
+	 * so a reader that sees format_known==1 always sees a non-zero ms. */
+	_Atomic uint32_t stream_active_ms;    /* pw_stream_set_active(true) */
+	_Atomic uint32_t format_known_ms;     /* first SPA_PARAM_Format */
+	_Atomic uint32_t first_frame_ms;      /* first valid copied frame */
+	_Atomic uint32_t last_frame_ms;       /* most recent valid copied frame */
+	_Atomic unsigned long valid_frames;
+	_Atomic unsigned long invalid_frames;
+	_Atomic int format_known;     /* published (release) AFTER format_known_ms */
+	int format_warned;            /* main-loop only: logged no-format error once */
+	int frame_warned;             /* main-loop only: logged no-first-frame once */
 } qfwd_subsystem;
 
 static rdpShadowServer *g_server;
@@ -360,7 +383,25 @@ static volatile sig_atomic_t g_dump_request;
 static void on_stream_state_changed(void *data, enum pw_stream_state old,
 				    enum pw_stream_state state, const char *error)
 {
-	(void)data; (void)old;
+	qfwd_subsystem *s = data;
+	(void)old;
+	if (state == PW_STREAM_STATE_ERROR) {
+		/* impl-24: was silent at INFO — a stream error meant a black RDP
+		 * view with no signal. Surface it loudly with the context an
+		 * operator needs (the #1 cause is a --width/--height vs weston
+		 * [pipewire] output-mode mismatch). NOTE: not fatal here — qdwin
+		 * does not yet watch forward death, so a self-exit would leave a
+		 * half-dead stream (impl-24 Q2); bounded recovery/exit is a
+		 * follow-on once qdwin's forward-death watch lands. */
+		LOGE("pw stream ERROR: %s (target node=%s requested=BGRx %dx%d @0/1; "
+		     "format_known=%d valid_frames=%lu) — check weston [pipewire] "
+		     "output mode vs --width/--height",
+		     error ? error : "(no detail)", g_args.pipewire_node,
+		     g_args.width, g_args.height,
+		     s ? atomic_load(&s->format_known) : -1,
+		     s ? atomic_load(&s->valid_frames) : 0);
+		return;
+	}
 	LOGI("pw stream state: %s%s%s", pw_stream_state_as_string(state),
 	     error ? " err=" : "", error ? error : "");
 }
@@ -382,7 +423,12 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 		return;
 
 	s->format = info.info.raw;
-	s->format_known = 1;
+	/* publish the timestamp BEFORE format_known so the watchdog can never see
+	 * format_known==1 with format_known_ms==0 (which would false-fire the
+	 * no-first-frame check via `now - 0`) — codex impl-25. */
+	if (!atomic_load(&s->format_known_ms))
+		atomic_store(&s->format_known_ms, now_ms());
+	atomic_store(&s->format_known, 1);
 	LOGI("pw format: %dx%d fmt=%d (BGRA=%d RGBA=%d BGRx=%d)",
 	     s->format.size.width, s->format.size.height, s->format.format,
 	     SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx);
@@ -479,13 +525,16 @@ static void on_stream_process(void *data)
 {
 	qfwd_subsystem *s = data;
 	static unsigned long frame_count = 0;
-	if ((frame_count++ % 60) == 0)
-		LOGI("on_stream_process tick frame=%lu", frame_count);
+	frame_count++;
+	if (g_debug && (frame_count % 60) == 1)
+		LOGI("on_stream_process tick frame=%lu valid=%lu invalid=%lu",
+		     frame_count, atomic_load(&s->valid_frames),
+		     atomic_load(&s->invalid_frames));
 	struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
 	if (!b)
 		return;
 
-	if (!s->format_known) {
+	if (!atomic_load_explicit(&s->format_known, memory_order_relaxed)) {
 		pw_stream_queue_buffer(s->stream, b);
 		return;
 	}
@@ -514,13 +563,16 @@ static void on_stream_process(void *data)
 		? s->format.size.height : surface->height;
 	struct qfwd_frame_view frame;
 	if (qfwd_validate_frame(buf, &s->format, fw, fh, &frame) < 0) {
-		LOGE("dropping invalid PipeWire frame");
+		unsigned long n = atomic_fetch_add(&s->invalid_frames, 1) + 1;
+		/* rate-limit the drop log so a persistently-bad source can't spam */
+		if (g_debug || (n & (n - 1)) == 0)
+			LOGE("dropping invalid PipeWire frame (#%lu)", n);
 		pw_stream_queue_buffer(s->stream, b);
 		return;
 	}
 	const uint8_t *src = frame.src;
 	uint32_t src_stride = frame.stride;
-	if (frame_count <= 3 && frame.size >= 8) {
+	if (g_debug && frame_count <= 3 && frame.size >= 8) {
 		uint32_t flags = buf->datas[0].chunk ? buf->datas[0].chunk->flags : 0;
 		LOGI("buf: type=%u flags=0x%x size=%u stride=%u offset=%u "
 		     "first8=%02x%02x%02x%02x%02x%02x%02x%02x",
@@ -556,6 +608,14 @@ static void on_stream_process(void *data)
 
 	LeaveCriticalSection(&surface->lock);
 
+	/* impl-24: frame liveness bookkeeping (read by the watchdog). Single
+	 * writer (this pw thread), atomic for the cross-thread read. */
+	uint32_t fnow = now_ms();
+	atomic_fetch_add(&s->valid_frames, 1);
+	atomic_store(&s->last_frame_ms, fnow);
+	if (!atomic_load(&s->first_frame_ms))
+		atomic_store(&s->first_frame_ms, fnow);
+
 	pw_stream_queue_buffer(s->stream, b);
 
 	/* Auto-dump frames 1, 5, 30, 60 — these give a snapshot of:
@@ -568,8 +628,9 @@ static void on_stream_process(void *data)
 	 * wins — the smoke test reads the file after a few seconds and
 	 * gets the freshest frame the producer happened to deliver.
 	 * SIGUSR1 forces an unscheduled dump on the next frame. */
-	if (frame_count == 1 || frame_count == 5 ||
-	    frame_count == 30 || frame_count == 60 || g_dump_request) {
+	if (g_dump_request ||
+	    (g_debug && (frame_count == 1 || frame_count == 5 ||
+			 frame_count == 30 || frame_count == 60))) {
 		g_dump_request = 0;
 		qfwd_dump_surface_ppm(surface);
 	}
@@ -695,6 +756,7 @@ static int qfwd_subsystem_start(rdpShadowSubsystem *base)
 	}
 
 	pw_stream_set_active(s->stream, true);
+	atomic_store(&s->stream_active_ms, now_ms()); /* impl-24: watchdog t0 */
 	pw_thread_loop_unlock(s->loop);
 
 	LOGI("subsystem started, pw target=%s rdp_port=%d %dx%d",
@@ -1192,23 +1254,40 @@ static void qfwd_dump_surface_ppm(rdpShadowSurface *surface)
 	if (!path || !*path)
 		path = "/tmp/qfwd-dump.ppm";
 
-	FILE *f = fopen(path, "wb");
-	if (!f) {
-		LOGE("dump: fopen %s: %m", path);
-		return;
-	}
-
+	/* impl-24: snapshot the surface UNDER the lock, then convert + write the
+	 * PPM AFTER unlocking — never hold the encoder surface lock across disk I/O
+	 * (the old code fprintf'd + fwrote every row while holding it). */
 	EnterCriticalSection(&surface->lock);
 	uint32_t w = surface->width;
 	uint32_t h = surface->height;
 	uint32_t s = surface->scanline;
-	const uint8_t *src = surface->data;
+	/* The conversion loop reads w*4 bytes per row from the snapshot and writes
+	 * w*3 per row; guard the dimensions (incl. scanline >= w*4 and overflow)
+	 * so neither can run past the snapshot, independent of word size (codex
+	 * impl-25). */
+	int dims_ok = w && h && s >= (uint64_t)w * 4 &&
+		      h <= SIZE_MAX / s && w <= SIZE_MAX / 3;
+	size_t snap_size = dims_ok ? (size_t)s * h : 0;
+	uint8_t *snap = dims_ok ? malloc(snap_size) : NULL;
+	if (snap)
+		memcpy(snap, surface->data, snap_size);
+	LeaveCriticalSection(&surface->lock);
+	if (!snap) {
+		LOGE("dump: bad dims or alloc failed (%ux%u scanline=%u)", w, h, s);
+		return;
+	}
 
+	FILE *f = fopen(path, "wb");
+	if (!f) {
+		LOGE("dump: fopen %s: %m", path);
+		free(snap);
+		return;
+	}
 	fprintf(f, "P6\n%u %u\n255\n", w, h);
-	uint8_t *row = malloc(w * 3);
+	uint8_t *row = malloc((size_t)w * 3);
 	if (row) {
 		for (uint32_t y = 0; y < h; y++) {
-			const uint8_t *p = src + y * s;
+			const uint8_t *p = snap + (size_t)y * s;
 			for (uint32_t x = 0; x < w; x++) {
 				/* shadow surface stored as BGRX (PIXEL_FORMAT_BGRX32);
 				 * PPM wants RGB. */
@@ -1216,14 +1295,15 @@ static void qfwd_dump_surface_ppm(rdpShadowSurface *surface)
 				row[x*3 + 1] = p[x*4 + 1];
 				row[x*3 + 2] = p[x*4 + 0];
 			}
-			fwrite(row, 1, w * 3, f);
+			fwrite(row, 1, (size_t)w * 3, f);
 		}
 		free(row);
+		LOGI("dump: wrote %ux%u to %s", w, h, path);
+	} else {
+		LOGE("dump: row alloc failed; wrote header only to %s", path);
 	}
-	LeaveCriticalSection(&surface->lock);
-
+	free(snap);
 	fclose(f);
-	LOGI("dump: wrote %ux%u to %s", w, h, path);
 }
 
 /* ---------- main ---------- */
@@ -1236,6 +1316,11 @@ int main(int argc, char **argv)
 	sigset_t empty;
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);
+
+	{
+		const char *d = getenv("QDISTRO_FORWARD_DEBUG");
+		g_debug = d && *d && strcmp(d, "0") != 0;   /* =0 / empty = off */
+	}
 
 	if (parse_args(argc, argv) < 0) {
 		clear_owned_password();
@@ -1328,6 +1413,42 @@ int main(int argc, char **argv)
 		if (g_stop_flag) {
 			shadow_server_stop(g_server);
 			break;
+		}
+		/* impl-24 watchdog: loud, actionable diagnostics on a stalled
+		 * pipeline. NOT fatal (qdwin doesn't watch forward death yet —
+		 * a self-exit would orphan the stream; fatal-exit + bounded
+		 * reconnect is the follow-on once qdwin's child-death watch lands).
+		 * Note weston's pipewire output is damage-driven (framerate 0/1),
+		 * so a STATIC source legitimately produces few frames — we only
+		 * warn on NO format / NO first frame, never on "frames went quiet."*/
+		qfwd_subsystem *s = g_subsystem;
+		uint32_t active_at = s ? atomic_load(&s->stream_active_ms) : 0;
+		if (active_at) {
+			uint32_t now = now_ms();
+			int known = atomic_load(&s->format_known);
+			uint32_t known_at = atomic_load(&s->format_known_ms);
+			uint32_t first_at = atomic_load(&s->first_frame_ms);
+			if (!known && !s->format_warned &&
+			    (now - active_at) > 3000) {
+				s->format_warned = 1;
+				LOGE("no PipeWire format negotiated for node %s after 3s "
+				     "(requested BGRx %dx%d @0/1) — check the weston "
+				     "[pipewire] output mode matches --width/--height; "
+				     "serving a black RDP view until a format is agreed",
+				     g_args.pipewire_node, g_args.width, g_args.height);
+			}
+			int peers = (g_server && g_server->clients)
+				? (int)ArrayList_Count(g_server->clients) : 0;
+			if (known && !first_at && !s->frame_warned &&
+			    peers > 0 && (now - known_at) > 5000) {
+				s->frame_warned = 1;
+				LOGE("PipeWire format negotiated but NO frame after 5s "
+				     "with %d RDP peer(s) connected (node=%s, "
+				     "invalid_frames=%lu) — source may be stuck or all "
+				     "frames are failing validation",
+				     peers, g_args.pipewire_node,
+				     atomic_load(&s->invalid_frames));
+			}
 		}
 	}
 	WaitForSingleObject(g_server->thread, INFINITE);
