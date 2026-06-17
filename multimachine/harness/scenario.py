@@ -1372,6 +1372,287 @@ def run_input_coordinate_fidelity_slice(
 
 
 # ==========================================================================
+# Scenario-3e: ABSOLUTE-pixel coordinate calibration gate (A2, codex impl-21)
+# ==========================================================================
+class AbsoluteCoordinateBackend(InputConfinementBackend, Protocol):
+    """:class:`InputConfinementBackend` plus the VM-B calibration probe (A2): a
+    fullscreen kiosk-side marker that measures the ydotool→kiosk-pointer apparatus
+    map INDEPENDENTLY of the RDP/source path."""
+
+    def setup_calibration_probe(self, vm: str, *, generation: int,
+                                telemetry: str = "/run/mm-b/calib-probe.json",
+                                label: str = "calib") -> str: ...
+
+    def stop_calibration_probe(self, vm: str) -> None: ...
+
+
+@dataclass
+class AbsoluteCoordinateResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult
+    points: list                  # injected viewer pixels p_i
+    k: list                       # measured apparatus coords T_apparatus(p_i) (calib)
+    m: list                       # source-received coords (product phase)
+    calib_scale_x: float          # fitted apparatus affine (SANITY check only)
+    calib_scale_y: float
+    calib_offset_x: float
+    calib_offset_y: float
+    calib_cross_xy: float         # |b|/|a| (px-y leaking into kx) — should be ~0
+    calib_cross_yx: float         # |d|/|e| (px-x leaking into ky) — should be ~0
+    calib_residual_max: float
+    calib_repeat_dev: float       # repeated-center reproduced k_center within?
+    calib_ok: bool
+    product_max_err: float        # max per-point |m_i - k_i| (the absolute assertion)
+    product_rms_err: float
+    product_ok: bool
+    passed: bool
+
+
+def run_absolute_coordinate_slice(
+    backend: AbsoluteCoordinateBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    source_handle: int = 1, control_port: int = 5556,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_telemetry: str = "/run/mm-a/exported.json",
+    sentinel_telemetry: str = "/run/mm-a/sentinel.json",
+    calib_telemetry: str = "/run/mm-b/calib-probe.json",
+    scale_lo: float = 1.5, scale_hi: float = 2.5, calib_resid_tol: float = 3.0,
+    calib_cross_tol: float = 0.02, calib_offset_tol: float = 8.0,
+    calib_repeat_tol: float = 3.0, product_tol: float = 4.0,
+    product_rms_tol: float = 2.5,
+) -> AbsoluteCoordinateResult:
+    """Drive the **absolute-pixel coordinate calibration** gate (A2, codex impl-21).
+    Turns the coordinate proof from "faithful-linear UP TO a uniform ~2× apparatus
+    scale" (which could LAUNDER a product-side uniform-scale bug as apparatus scale)
+    into an ABSOLUTE-pixel assertion, by measuring the apparatus map INDEPENDENTLY.
+
+    Two phases on the SAME kiosk-weston geometry:
+
+    - **Calibration:** a fullscreen kiosk-side marker probe on VM-B (NO sdl-freerdp /
+      RDP / source in the path). Inject ``ydotool --absolute`` at N in-bounds points
+      and read the probe's received coords ``k_i = T_apparatus(p_i)`` — the
+      ydotool→uinput→kiosk-pointer apparatus, measured directly. A full affine is
+      fitted as a SANITY check (near-zero cross terms, scale in range, ~0 offset,
+      small residual); a repeated centre re-reproduces ``k_centre`` (drift/stale
+      control). The probe is torn down before the product phase (phase isolation).
+    - **Product:** the real viewer (sdl-freerdp) + exported source marker. Inject the
+      SAME points and read the source's per-stream-seat coords ``m_i``.
+
+    **Assertion:** ``max_i |m_i - k_i| <= product_tol`` (compared against the
+    MEASURED ``k_i`` per point, NOT a refit affine — a refit would re-introduce the
+    laundering). Because the decoded oracle proves RDP renders 1:1 (kiosk px == viewer
+    px == source-view px), ``m_i == k_i`` is the absolute-identity target; a
+    product-side scale/offset/shear deviates from the independently-measured ``k_i``
+    and FAILS.
+
+    Contract scope (codex impl-21): the calibration removes ONLY the ydotool/kiosk
+    apparatus. The product phase's ``m_i`` rides ``sdl-freerdp``'s RDP-input mapping
+    too, so this gate validates the deployed **RDP-client→source input path as a
+    whole** (the blame domain includes sdl-freerdp's input coordinate handling, not
+    just qdistro-forward). The decoded oracle proves RENDER 1:1, not input 1:1."""
+    import numpy as _np
+    profile(netem_profile)
+    W, H = width, height
+    # Points in INJECTABLE p-space: k≈2p must stay in-bounds, so p in ~[W/16,7W/16]
+    # (k spans ~[W/8,7W/8] — most of the surface, with margin). center + 4 near-corners
+    # + 4 edge-mids (codex impl-21/22), spread wide so a LOCALIZED product bug outside
+    # a narrow patch can't slip through.
+    pts = [
+        (W // 4, H // 4),                                   # centre (k≈W/2,H/2)
+        (W // 16, H // 16), (7 * W // 16, H // 16),         # top corners (k≈W/8..7W/8)
+        (W // 16, 7 * H // 16), (7 * W // 16, 7 * H // 16), # bottom corners
+        (W // 4, H // 16), (W // 4, 7 * H // 16),           # top/bottom edge-mid
+        (W // 16, H // 4), (7 * W // 16, H // 4),           # left/right edge-mid
+    ]
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-absolute-coordinate", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 absolute-pixel coordinate calibration"))
+
+    def _inject_read(vm: str, telemetry: str, px: int, py: int):
+        """Inject ABSOLUTE at (px,py) on VM-B and read the injected seat's landing
+        coord from `telemetry`, with motion-freshness so a stale read can't pass."""
+        def _motion(tel):
+            s = _injected_seat(tel)
+            return int(s.get("pointer_motion", 0) or 0) if s else 0
+        base = _motion(backend.read_telemetry(vm, telemetry))
+        backend.inject_input(topology.vm_b, x=px, y=py, absolute=True)
+        tel = _poll(lambda: backend.read_telemetry(vm, telemetry),
+                    lambda t: _motion(t) > base, tries=40, delay=0.25)
+        seat = _injected_seat(tel)
+        if seat is None:
+            return None
+        return (int(seat.get("last_x", 0)), int(seat.get("last_y", 0)))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    calib_up = False
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # ---- Phase 1: CALIBRATION (kiosk probe, no RDP/source) ----
+        backend.setup_calibration_probe(b, generation=generation,
+                                        telemetry=calib_telemetry, label="calib")
+        calib_up = True
+        k: list = []
+        for (px, py) in pts:                  # bail on the first dead seat (fail-closed)
+            ki = _inject_read(b, calib_telemetry, px, py)
+            k.append(ki)
+            if ki is None:
+                break
+        all_calib = len(k) == len(pts) and None not in k
+        k_repeat = (_inject_read(b, calib_telemetry, pts[0][0], pts[0][1])
+                    if all_calib else None)            # centre again (drift control)
+        backend.stop_calibration_probe(b)                # MUST precede the product
+        calib_up = False                                 # phase (phase isolation)
+
+        # geometry/bounds fence (codex impl-22): every measured apparatus coord must
+        # land inside the kiosk output — a probe that mapped at the wrong size/output
+        # would push k_i out of [0,W]x[0,H] and must not be trusted.
+        in_bounds = all_calib and all(
+            0 <= ki[0] <= W and 0 <= ki[1] <= H for ki in k)
+        calib_seats_ok = all_calib and k_repeat is not None and in_bounds
+        if calib_seats_ok:
+            P = _np.array([[px, py, 1.0] for (px, py) in pts])
+            Kx = _np.array([ki[0] for ki in k], dtype=float)
+            Ky = _np.array([ki[1] for ki in k], dtype=float)
+            cx, *_ = _np.linalg.lstsq(P, Kx, rcond=None)   # [a, b, c]
+            cy, *_ = _np.linalg.lstsq(P, Ky, rcond=None)   # [d, e, f]
+            a_, b_, c_ = cx
+            d_, e_, f_ = cy
+            resid = max(float(_np.max(_np.abs(P @ cx - Kx))),
+                        float(_np.max(_np.abs(P @ cy - Ky))))
+            cross_xy = abs(b_) / abs(a_) if a_ else 1e9     # py leaking into kx
+            cross_yx = abs(d_) / abs(e_) if e_ else 1e9     # px leaking into ky
+            repeat_dev = max(abs(k_repeat[0] - k[0][0]), abs(k_repeat[1] - k[0][1]))
+        else:
+            a_ = e_ = c_ = f_ = 0.0
+            b_ = d_ = 0.0
+            resid = 1e9
+            cross_xy = cross_yx = 1e9
+            repeat_dev = 1e9
+
+        calib_ok = bool(
+            calib_seats_ok
+            and scale_lo <= a_ <= scale_hi and scale_lo <= e_ <= scale_hi
+            and cross_xy <= calib_cross_tol and cross_yx <= calib_cross_tol
+            and abs(c_) <= calib_offset_tol and abs(f_) <= calib_offset_tol
+            and resid <= calib_resid_tol and repeat_dev <= calib_repeat_tol)
+
+        # ---- Phase 2: PRODUCT (real viewer + source) ----
+        approved = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry=sentinel_telemetry,
+            exported_label="exported", sentinel_label="sentinel", allow_input=1)
+        src = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                               title="marker", app_id="qdwin-marker-client",
+                               req_w=width, req_h=height)
+        announce = bridge_approved(approved, src, generation)
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved.rdp_port,
+            generation=generation, otp=approved.rdp_password,
+            size=f"{width}x{height}", status_file="/run/mm-b/viewer-status.json")
+        control.accept()
+        control.send(announce)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-abscoord.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (absolute-coordinate product phase)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        m: list = []
+        for (px, py) in pts:                  # bail on the first dead seat (fail-closed)
+            mi = _inject_read(a, exported_telemetry, px, py)
+            m.append(mi)
+            if mi is None:
+                break
+        product_seats_ok = len(m) == len(pts) and None not in m
+
+        # ---- the ABSOLUTE assertion: m_i ≈ measured k_i (per-point) ----
+        if product_seats_ok and calib_seats_ok:
+            errs = [max(abs(mi[0] - ki[0]), abs(mi[1] - ki[1]))
+                    for mi, ki in zip(m, k)]
+            product_max_err = max(errs)
+            product_rms_err = float(_np.sqrt(_np.mean(
+                [((mi[0] - ki[0]) ** 2 + (mi[1] - ki[1]) ** 2) / 2.0
+                 for mi, ki in zip(m, k)])))
+        else:
+            product_max_err = product_rms_err = 1e9
+        product_in_bounds = product_seats_ok and all(
+            0 <= mi[0] <= W and 0 <= mi[1] <= H for mi in m)
+        product_ok = bool(product_seats_ok and product_in_bounds
+                          and product_max_err <= product_tol
+                          and product_rms_err <= product_rms_tol)
+
+        passed = bool(res.ok and calib_ok and product_ok)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"absolute coordinate calibration (A2): apparatus scale=("
+            f"{a_:.3f},{e_:.3f}) offset=({c_:.1f},{f_:.1f}) cross=("
+            f"{cross_xy:.4f},{cross_yx:.4f}) resid_max={resid:.2f} "
+            f"repeat_dev={repeat_dev:.1f} calib_ok={calib_ok}; PRODUCT vs MEASURED "
+            f"apparatus: max_err={product_max_err:.2f}px rms={product_rms_err:.2f}px "
+            f"(tol max={product_tol} rms={product_rms_tol}) product_ok={product_ok}. "
+            "Proves the deployed RDP-client→source input path lands at the ABSOLUTE "
+            "intended pixel after removing the independently-measured apparatus scale "
+            "— a product-side uniform-scale bug can no longer be laundered as "
+            "apparatus scale.")
+        bundle.write()
+        return AbsoluteCoordinateResult(
+            bundle, res, [tuple(p) for p in pts], k, m,
+            float(a_), float(e_), float(c_), float(f_),
+            float(cross_xy), float(cross_yx), float(resid), float(repeat_dev),
+            calib_ok, float(product_max_err), float(product_rms_err), product_ok,
+            passed)
+    finally:
+        if calib_up:                          # guarantee phase-1 teardown on any
+            backend.stop_calibration_probe(b)  # exceptional exit (codex impl-22)
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+# ==========================================================================
 # Scenario-3d: 2nd-EXPORTED-view (A→B) input isolation gate (codex impl-15)
 # ==========================================================================
 class SecondViewBackend(InputConfinementBackend, Protocol):

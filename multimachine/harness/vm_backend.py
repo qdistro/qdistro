@@ -307,6 +307,42 @@ class QciVMBackend:
         self._viewer_status_file = status_file
         self._freerdp_log = "/run/mm-b/freerdp.log"
 
+    def setup_calibration_probe(self, vm: str, *, generation: int,
+                                telemetry: str = "/run/mm-b/calib-probe.json",
+                                label: str = "calib") -> str:
+        """Bring up the VM-B coordinate-CALIBRATION probe (A2, codex impl-21): the
+        SAME kiosk weston + ydotoold recipe as the managed viewer, but a FULLSCREEN
+        ``qdwin-marker-client`` with telemetry INSTEAD of sdl-freerdp. The harness
+        injects ``ydotool --absolute`` and reads this probe's received coords =
+        ``T_apparatus(p)`` — the ydotool→uinput→kiosk-pointer map, measured WITHOUT
+        qdistro-forward/RDP/the source in the path. Returns the probe telemetry path.
+        Tear it down with :meth:`stop_calibration_probe` BEFORE the product phase."""
+        real = self._real(vm)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/calib-probe.sh",
+                   "/tmp/mm-calib-probe.sh")
+        env = (f"W={self.out_w} H={self.out_h} GEN={generation} ANIMATE_MS=200 "
+               f"TELEMETRY={shlex.quote(telemetry)} LABEL={shlex.quote(label)}")
+        out = self._vmexec(real, f"{env} bash /tmp/mm-calib-probe.sh", timeout=120)
+        if "CALIB_OK" not in out:
+            raise RuntimeError(f"calib-probe did not report CALIB_OK:\n{out}")
+        return telemetry
+
+    def stop_calibration_probe(self, vm: str) -> None:
+        """Tear down the calibration probe + its kiosk weston so the product phase
+        brings up a FRESH viewer on the SAME geometry (phase isolation: the probe
+        must not retain fullscreen/focus while sdl-freerdp maps). WAITS for the units
+        to actually go inactive + the wayland socket to disappear before returning so
+        the product viewer can't race a lingering compositor (codex impl-22)."""
+        real = self._real(vm)
+        self._vmexec(
+            real,
+            "systemctl stop mm-calib mm-weston 2>/dev/null || true; "
+            "systemctl reset-failed mm-calib mm-weston 2>/dev/null || true; "
+            "for _ in $(seq 1 30); do "
+            "  systemctl is-active mm-weston >/dev/null 2>&1 || break; "
+            "  sleep 0.2; "
+            "done; rm -f /run/mm-b/wayland-b 2>/dev/null; true", check=False)
+
     def await_decode(self, vm: str, timeout: int = 25) -> bool:
         """Wait until the launched ``sdl-freerdp`` has actually negotiated the
         decoded channel and rendered, so the capture is a real frame, not a black
