@@ -18,11 +18,12 @@
 : "${QDWIN_VM_EXEC:=${QDLOCKER_REPO}/../qdistro/scripts/vm/vm-exec}"
 
 # qdwin session unit names. Default to the production/deploy names
-# (qdistro/deploy/). VMs spun via install-qdwin-session-for-vm.sh ship the
-# same compositor under legacy noctalia-* names for the qdwin-noctalia harness,
-# so override these to run the driver there, e.g.:
-#   QDWIN_COMPOSITOR_UNIT=noctalia-session.service \
-#   QDWIN_SHELL_UNIT=noctalia-shell.service ./f9-vm-verify.sh
+# (qdistro/deploy/). VMs spun via install-qdwin-session-for-vm.sh now ship
+# the session under these SAME deploy names (the legacy noctalia-* aliases
+# were retired 2026-06-16), so the defaults validate the real contract on
+# every lane. The env-var indirection is kept only as an escape hatch for
+# explicitly nonstandard experiments / future unit renames — the normal
+# VM path needs no override.
 : "${QDWIN_COMPOSITOR_UNIT:=qdwin-compositor.service}"
 : "${QDWIN_SHELL_UNIT:=qdshell.service}"
 
