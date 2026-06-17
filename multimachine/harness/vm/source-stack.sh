@@ -113,7 +113,10 @@ if [ "$MODE" = export2 ]; then
     qdwin-marker-client --width $W --height $H --output-id $OUTPUT_ID --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
   sleep 1.5   # let the shell client see marker-B's toplevel_added (got_last)
   [ -p "$FIFO" ] || { echo "FAIL: bystander FIFO $FIFO missing"; exit 9; }
-  echo subscribelast > "$FIFO"
+  # Per-handle allow_input override (rung-1 per-window allow_input gate): the ONE
+  # shared bystander subscribes marker-B with B's OWN allow_input, independent of
+  # marker-A's (which set the bystander's --allow-input flag at start).
+  echo "subscribelast $ALLOW_INPUT" > "$FIFO"
   # wait for marker-B's COMPLETE approval block = a NEW RDP_PASSWORD line.
   RDP_PORT=""
   for _ in $(seq 1 50); do
