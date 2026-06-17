@@ -85,6 +85,34 @@ class TestBrokerConnectAndAnnounce:
         assert b.peer_for_handle(99) is None
         b.close()
 
+    def test_mismatched_announce_app_id_fails_closed(self):
+        # a stale control source announcing the WRONG app_id must be rejected at
+        # connect (codex impl-33 MEDIUM) — never learn a stale stream_id.
+        fake = _FakeControl()             # announces qdistro.mm.vm-a.streamA
+        b = ViewerBroker(control_host="127.0.0.1")
+        b.add_stream("a", origin="vm-a", app_id="qdistro.mm.vm-a.streamWRONG",
+                     rdp_unit="mm-rdp-a", relay_port=5555, control_port=fake.port,
+                     marker_unit="mm-marker", window_id=1)
+        try:
+            b.connect("a", timeout=5.0)
+            assert False, "expected a mismatch RuntimeError"
+        except RuntimeError as e:
+            assert "app_id" in str(e)
+        b.close()
+
+    def test_mismatched_generation_fails_closed(self):
+        fake = _FakeControl(generation=7)
+        b = ViewerBroker(control_host="127.0.0.1")
+        b.add_stream("a", origin="vm-a", app_id="qdistro.mm.vm-a.streamA",
+                     rdp_unit="mm-rdp-a", relay_port=5555, control_port=fake.port,
+                     marker_unit="mm-marker", window_id=1, expect_generation=99)
+        try:
+            b.connect("a", timeout=5.0)
+            assert False, "expected a generation-mismatch RuntimeError"
+        except RuntimeError as e:
+            assert "generation" in str(e)
+        b.close()
+
 
 class TestSourceMediatedClose:
     def test_request_close_then_source_closed(self):
@@ -118,7 +146,8 @@ class TestSourceMediatedClose:
             def _serve(self):
                 src = ControlSource.from_source(
                     SourceWindowInfo(window_id=1, source_machine="vm-a",
-                                     title="m", app_id="a", req_w=640, req_h=400),
+                                     title="m", app_id="qdistro.mm.vm-a.streamA",
+                                     req_w=640, req_h=400),
                     7, stream_id=self.stream_id)
                 conn, _ = self.srv.accept()
                 conn.sendall((encode(src.announce()) + "\n").encode())

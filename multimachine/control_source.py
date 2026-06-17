@@ -266,7 +266,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             logf.flush()
         print(f"MM_CONTROL_SENT {msg.type}", flush=True)
 
-    last_chunk = {"data": ""}
+    # Persistent receive buffer: a stream socket may split a JSON-lines message
+    # across recv()s OR deliver several at once. We only ever parse COMPLETE
+    # newline-terminated lines and keep the trailing partial in the buffer, so a
+    # CloseRequest split across two reads is never lost (codex impl-33 HIGH).
+    rx = {"buf": "", "ready": ""}
 
     def poll_viewer() -> str:
         r, _, _ = select.select([conn], [], [], args.poll_interval)
@@ -278,14 +282,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             return VIEWER_EOF
         if not chunk:
             return VIEWER_EOF              # clean EOF — viewer detached
-        last_chunk["data"] = chunk.decode("utf-8", "replace")
-        return VIEWER_DATA                 # upstream bytes (e.g. CloseRequest)
+        rx["buf"] += chunk.decode("utf-8", "replace")
+        if "\n" not in rx["buf"]:
+            rx["ready"] = ""               # no complete line yet — keep buffering
+            return VIEWER_ALIVE            # treat as idle until a full line lands
+        *lines, rest = rx["buf"].split("\n")
+        rx["buf"] = rest                   # leave the trailing partial line buffered
+        rx["ready"] = "\n".join(lines)
+        return VIEWER_DATA                 # ≥1 complete upstream message
 
     def on_viewer_data() -> str | None:
         # Source-mediated close (codex impl-32 Q4): a CloseRequest for OUR stream
         # closes OUR source toplevel by stopping its marker unit. The existing
         # liveness watcher then emits the authoritative Closed("viewer-close").
-        if viewer_close_requested(last_chunk["data"], source.meta.stream_id):
+        if viewer_close_requested(rx["ready"], source.meta.stream_id):
             print(f"MM_CONTROL_CLOSEREQ stream_id={source.meta.stream_id} "
                   f"-> stop {args.marker_unit}", flush=True)
             subprocess.run(["systemctl", "--user", "stop", args.marker_unit],

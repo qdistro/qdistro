@@ -53,6 +53,7 @@ class RemotePeer:
     marker_unit: str
     window_id: int = 0
     allow_input: int = 1
+    expect_generation: int | None = None    # verified against the Announce
     # learned at runtime:
     stream_id: str = ""
     handle: int | None = None
@@ -76,11 +77,13 @@ class ViewerBroker:
     # ---- registration -------------------------------------------------
     def add_stream(self, label: str, *, origin: str, app_id: str, rdp_unit: str,
                    relay_port: int, control_port: int, marker_unit: str,
-                   window_id: int = 0, allow_input: int = 1) -> RemotePeer:
+                   window_id: int = 0, allow_input: int = 1,
+                   expect_generation: int | None = None) -> RemotePeer:
         peer = RemotePeer(
             label=label, origin=origin, app_id=app_id, rdp_unit=rdp_unit,
             relay_port=relay_port, control_port=control_port,
-            marker_unit=marker_unit, window_id=window_id, allow_input=allow_input)
+            marker_unit=marker_unit, window_id=window_id, allow_input=allow_input,
+            expect_generation=expect_generation)
         self.peers[label] = peer
         return peer
 
@@ -110,6 +113,20 @@ class ViewerBroker:
         if not isinstance(ann, Announce):
             raise RuntimeError(
                 f"{label}: first control message was {ann!r}, expected Announce")
+        # FAIL CLOSED on a mismatched Announce (codex impl-33 MEDIUM): a stale
+        # hostfwd / leftover control unit could route this port to the wrong
+        # (still syntactically valid) source. The app_id, the window_id, and the
+        # generation must match what we asked the source to export, else the
+        # stream_id we'd learn is for the wrong stream.
+        if ann.meta.app_id != peer.app_id:
+            raise RuntimeError(f"{label}: Announce app_id={ann.meta.app_id!r} "
+                               f"!= expected {peer.app_id!r} (stale control?)")
+        if peer.window_id and ann.meta.window_id != peer.window_id:
+            raise RuntimeError(f"{label}: Announce window_id={ann.meta.window_id} "
+                               f"!= expected {peer.window_id}")
+        if peer.expect_generation is not None and ann.generation != peer.expect_generation:
+            raise RuntimeError(f"{label}: Announce generation={ann.generation} "
+                               f"!= expected {peer.expect_generation} (stale control?)")
         with self._lock:
             peer.announce = ann
             peer.stream_id = ann.meta.stream_id
@@ -123,7 +140,11 @@ class ViewerBroker:
 
     def _read_message(self, peer: RemotePeer, timeout: float | None = None):
         """Read ONE decoded control message off this peer's socket (line-framed).
-        Used synchronously for the initial Announce before the reader thread runs."""
+        Single-reader invariant: ONLY called for the initial synchronous Announce,
+        BEFORE the reader thread starts — so `_buf`/`_conn` have exactly one
+        consumer at all times (codex impl-33 LOW). The reader thread owns them
+        afterwards."""
+        assert peer._reader is None, "_read_message after reader thread started"
         s = peer._conn
         assert s is not None
         s.settimeout(timeout)

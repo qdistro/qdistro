@@ -144,10 +144,12 @@ def make_broker(allow_a, allow_b):
     broker = ViewerBroker(control_host="127.0.0.1")
     broker.add_stream("a", origin="vm-a", app_id=APP_A, rdp_unit="mm-rdp-a",
                       relay_port=RELAY_A, control_port=CTRL_A,
-                      marker_unit="mm-marker", window_id=1, allow_input=allow_a)
+                      marker_unit="mm-marker", window_id=1, allow_input=allow_a,
+                      expect_generation=GEN)
     broker.add_stream("b", origin="vm-a", app_id=APP_B, rdp_unit="mm-rdp-b",
                       relay_port=RELAY_B, control_port=CTRL_B,
-                      marker_unit="mm-marker2", window_id=2, allow_input=allow_b)
+                      marker_unit="mm-marker2", window_id=2, allow_input=allow_b,
+                      expect_generation=GEN)
     sid_a = broker.connect("a", timeout=30)
     sid_b = broker.connect("b", timeout=30)
     print(f"  broker connected: A.stream_id={sid_a} B.stream_id={sid_b}",
@@ -357,7 +359,9 @@ def close_lifecycle(broker, ha, hb):
     CloseRequest(A) → VM-A stops mm-marker → source emits Closed(A) → we tear
     down ONLY peer A. B stays live + input-capable; B's source pid unchanged."""
     b_pid_before = source_pid("mm-marker2")
-    print(f"  B source pid before close A: {b_pid_before}", flush=True)
+    b_sid_before = broker.peers["b"].stream_id
+    print(f"  B source pid before close A: {b_pid_before} stream_id={b_sid_before}",
+          flush=True)
     # peer A must be visible + its FreeRDP unit alive BEFORE close.
     a_alive_pre = be.rdp_client_alive("vm-b", "a")
     broker.request_source_close("a")
@@ -382,10 +386,18 @@ def close_lifecycle(broker, ha, hb):
         be.inject_key("vm-b"); time.sleep(1.5)
         k1 = key_total(be.read_telemetry("vm-a", TEL_B))
         check("A6-B-still-input-capable", (k1 - k0) > 0, f"B dkey={k1 - k0}")
+    # Process truth (codex impl-33 MEDIUM — not pid-only): closing A must leave
+    # B's source marker pid, B's viewer FreeRDP backend, and B's control-plane
+    # stream_id ALL unchanged (not "B's marker survived but the peer/stream was
+    # silently recreated").
     b_pid_after = source_pid("mm-marker2")
+    b_rdp_alive = be.rdp_client_alive("vm-b", "b")
+    b_sid_after = broker.peers["b"].stream_id
     check("A8-process-truth-B-source-pid-unchanged",
-          b_pid_before and b_pid_after and b_pid_before == b_pid_after,
-          f"B pid {b_pid_before} -> {b_pid_after}")
+          b_pid_before and b_pid_after and b_pid_before == b_pid_after
+          and b_rdp_alive and b_sid_before and b_sid_after == b_sid_before,
+          f"B pid {b_pid_before}->{b_pid_after} rdp_alive={b_rdp_alive} "
+          f"sid {b_sid_before}=={b_sid_after}")
 
 
 def live_handles_b_only(settle=2.0, tries=8):
