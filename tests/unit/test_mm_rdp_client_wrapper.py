@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from multimachine.rdp_client_wrapper import (
-    RdpClientWrapper, SpecError, StreamSpec,
+    RdpClientWrapper, SpecError, StreamSpec, dispatch_request,
 )
 
 
@@ -146,3 +146,43 @@ class TestTokenGatedTeardown:
         assert w.teardown("sid-OTHER", 51, "tok-secret") is False
         assert w.teardown("sid-abc", 99, "tok-secret") is False
         assert not proc.terminated
+
+
+class TestDispatchRequestFailClosed:
+    """The socket adapter's pure core (codex impl-35 HIGH): malformed broker IPC
+    must FAIL CLOSED — never crash, never tear down FreeRDP without a valid token."""
+
+    def test_status_request(self):
+        w, proc, _ = _wrapper()
+        w.start("otp123")
+        resp, accepted = dispatch_request(w, {"cmd": "status"})
+        assert accepted is False and resp["pid"] == proc.pid and resp["alive"]
+
+    def test_malformed_generation_rejected_not_torn_down(self):
+        w, proc, _ = _wrapper(token="tok-secret")
+        w.start("otp123")
+        # non-integer generation must NOT raise and must NOT tear down.
+        resp, accepted = dispatch_request(
+            w, {"cmd": "teardown", "stream_id": "sid-abc",
+                "generation": "x", "token": "tok-secret"})
+        assert accepted is False and resp == {"accepted": False}
+        assert not proc.terminated
+
+    def test_missing_fields_rejected(self):
+        w, proc, _ = _wrapper(token="tok-secret")
+        w.start("otp123")
+        for req in ({"cmd": "teardown"},
+                    {"cmd": "teardown", "token": "tok-secret"},
+                    {}, {"cmd": "bogus"}, None):
+            _resp, accepted = dispatch_request(w, req)
+            assert accepted is False
+        assert not proc.terminated
+
+    def test_valid_teardown_accepted(self):
+        w, proc, _ = _wrapper(token="tok-secret")
+        w.start("otp123")
+        resp, accepted = dispatch_request(
+            w, {"cmd": "teardown", "stream_id": "sid-abc",
+                "generation": 51, "token": "tok-secret"})
+        assert accepted is True and resp == {"accepted": True}
+        assert proc.terminated

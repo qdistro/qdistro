@@ -196,6 +196,25 @@ class RdpClientWrapper:
         return True
 
 
+def dispatch_request(w: RdpClientWrapper, req: dict) -> tuple[dict, bool]:
+    """Handle ONE decoded broker request against the wrapper. Returns
+    ``(response, accepted_teardown)``. FAILS CLOSED on malformed input — a bad
+    request is rejected, never raised (codex impl-35 HIGH: a parse crash in the
+    socket loop must NOT fall through to a tokenless teardown of FreeRDP). Pure +
+    unit-tested; :func:`main`'s socket loop is just the transport around it."""
+    cmd = (req or {}).get("cmd")
+    if cmd == "status":
+        return w.process_truth(), False
+    if cmd == "teardown":
+        try:
+            gen = int(req.get("generation", -1))
+        except (TypeError, ValueError):
+            gen = -1                      # unparseable generation → reject
+        ok = w.teardown(req.get("stream_id", ""), gen, req.get("token", ""))
+        return {"accepted": ok}, ok
+    return {"error": f"unknown cmd {cmd!r}"}, False
+
+
 # ---- live wiring (the thin, not-unit-tested CLI shell) -------------------
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     """``qdistro-mm-rdp-client-wrapper``: spawn the windowed FreeRDP for ONE
@@ -259,37 +278,36 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     os.chmod(args.control_socket, 0o600)
     srv.listen(4)
     srv.settimeout(0.5)
+    reported_exit = False
     try:
         while True:
             try:
                 conn, _ = srv.accept()
             except socket.timeout:
-                if not w.alive():
-                    # pixel backend exited: report once and keep serving status so
+                if not w.alive() and not reported_exit:
+                    # pixel backend exited: report ONCE and keep serving status so
                     # the broker can read the exit (NEVER infer source close here).
+                    reported_exit = True
                     print(f"MM_WRAPPER_BACKEND_EXIT stream_id={spec.stream_id} "
                           f"status={w.exit_status()}", flush=True)
                 continue
-            with conn:
-                data = conn.recv(4096).decode("utf-8", "replace").strip()
-                try:
-                    req = json.loads(data) if data else {}
-                except ValueError:
-                    req = {}
-                cmd = req.get("cmd")
-                if cmd == "status":
-                    resp = w.process_truth()
-                elif cmd == "teardown":
-                    ok = w.teardown(req.get("stream_id", ""),
-                                    int(req.get("generation", -1)),
-                                    req.get("token", ""))
-                    resp = {"accepted": ok}
-                    if ok:
-                        conn.sendall((json.dumps(resp) + "\n").encode())
-                        break
-                else:
-                    resp = {"error": f"unknown cmd {cmd!r}"}
-                conn.sendall((json.dumps(resp) + "\n").encode())
+            # One bad/flaky request must NEVER crash the loop into the finally
+            # teardown path (codex impl-35 HIGH) — handle each connection fail-
+            # closed and keep serving. dispatch_request does the token gating.
+            accepted = False
+            try:
+                with conn:
+                    data = conn.recv(4096).decode("utf-8", "replace").strip()
+                    try:
+                        req = json.loads(data) if data else {}
+                    except ValueError:
+                        req = {}
+                    resp, accepted = dispatch_request(w, req)
+                    conn.sendall((json.dumps(resp) + "\n").encode())
+            except OSError:
+                continue
+            if accepted:
+                break               # authorized teardown actioned — done
     finally:
         try:
             if w.alive():

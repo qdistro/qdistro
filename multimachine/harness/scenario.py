@@ -2524,8 +2524,17 @@ def run_rung1_managed_peers_slice(
             backend.stop_rdp_client(b, "a")
         a_alive_post = backend.rdp_client_alive(b, "a")
 
-        tops2 = backend.viewer_qdwin_toplevels(b)
-        mm2 = {h: d for h, d in tops2.items() if d.get("engine") == "qdistro.mm"}
+        # A's toplevel disappears ASYNCHRONOUSLY after its backend stops + the
+        # FreeRDP client disconnects (a real qdwin destroys the toplevel a short
+        # interval later) — so POLL for "A gone AND B still present" rather than
+        # assume synchronous teardown (codex impl-35 MED). B must hold throughout.
+        def _mm_tops():
+            return {h: d for h, d in backend.viewer_qdwin_toplevels(b).items()
+                    if d.get("engine") == "qdistro.mm"}
+        mm2 = _poll(_mm_tops,
+                    lambda m: _single_mm_handle(m, ".streamA") is None
+                    and _single_mm_handle(m, ".streamB") is not None,
+                    tries=25, delay=0.2)   # ~5s: ample for async toplevel destroy
         a_gone = _single_mm_handle(mm2, ".streamA") is None
         b_still = _single_mm_handle(mm2, ".streamB") is not None
         only_peer_a_closed = bool(
@@ -2542,7 +2551,7 @@ def run_rung1_managed_peers_slice(
         broker.note_backend_exit("b")
         pixel_backend_lost_kept = bool(
             "b" in broker.peers and pb.close_state == "pixel_backend_lost"
-            and pb.closed is None)
+            and pb.closed is None and not pb.backend_alive)
 
         checks = {
             "two_distinct_records": two_distinct_records,
