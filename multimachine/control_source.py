@@ -38,7 +38,7 @@ from typing import Callable
 
 from .bridge import SourceWindowInfo, mint_stream_id
 from .sidechannel import (
-    Announce, Closed, ControlMessage, RemoteWindowMeta,
+    Announce, CloseRequest, Closed, ControlMessage, RemoteWindowMeta, decode,
 )
 
 # What a single viewer-poll observed (one watch iteration):
@@ -85,6 +85,26 @@ class ControlSource:
                       self.meta.stream_id)
 
 
+def viewer_close_requested(chunk: str, stream_id: str) -> bool:
+    """Pure: does the viewer's upstream byte ``chunk`` (JSON-lines control
+    messages) contain a ``CloseRequest`` for ``stream_id``? (codex impl-32 Q4 —
+    source-mediated close: the viewer asks, the SOURCE decides). Unparseable /
+    non-CloseRequest / mismatched-stream lines are ignored — only an exact
+    stream_id match is a close. Robust to partial reads delivering several
+    newline-delimited messages at once."""
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = decode(line)
+        except (ValueError, KeyError):
+            continue
+        if isinstance(msg, CloseRequest) and msg.stream_id == stream_id:
+            return True
+    return False
+
+
 def active_state_alive(show_output: str) -> bool:
     """Classify a ``systemctl --user show -p ActiveState -p SubState`` dump for the
     marker unit: the source is DEAD only on a terminal ``inactive``/``failed``
@@ -104,6 +124,7 @@ def active_state_alive(show_output: str) -> bool:
 
 def watch(source: ControlSource, *, is_source_alive: Callable[[], bool],
           poll_viewer: Callable[[], str], send: Callable[[ControlMessage], None],
+          on_viewer_data: Callable[[], str | None] | None = None,
           max_polls: int = 10_000_000) -> str:
     """Drive one exported stream's control lifecycle, source-owned.
 
@@ -122,6 +143,15 @@ def watch(source: ControlSource, *, is_source_alive: Callable[[], bool],
     detected within ~one interval. ``is_source_alive`` is the marker-unit liveness
     proxy. Both injected so the loop is pure + unit-tested headless.
 
+    ``on_viewer_data`` (codex impl-32 Q4): called when the viewer sends upstream
+    bytes; it parses them and, on a matching ``CloseRequest(stream_id)``, closes
+    the SOURCE toplevel (stops the marker unit) and returns the teardown reason
+    (e.g. ``"viewer-close"``) — else None. This is the source-mediated close:
+    the viewer ASKS, the source closes its own toplevel, and the existing
+    liveness path then emits the authoritative ``Closed`` with that reason (NOT
+    the forbidden viewer-side peer kill). If None, upstream bytes are drained as
+    before.
+
     Race note: killing the source toplevel also tears down its RDP pixel stream, so
     the viewer can disconnect (control-socket EOF) at nearly the same instant the
     liveness poll would fire. EOF alone is therefore ambiguous — so on EOF we
@@ -131,17 +161,27 @@ def watch(source: ControlSource, *, is_source_alive: Callable[[], bool],
     source-death teardown deterministic regardless of which signal lands first.
     """
     send(source.announce())
+    # The reason carried by the eventual Closed. A viewer CloseRequest upgrades
+    # it to "viewer-close" so the artefact distinguishes a source-mediated close
+    # from a spontaneous source death — both still flow through the SAME
+    # liveness→Closed path (the close is real source death, never a viewer kill).
+    exit_reason = "source-exit"
     for _ in range(max_polls):
         if not is_source_alive():
-            send(source.closed("source-exit"))
-            return "source-exit"
+            send(source.closed(exit_reason))
+            return exit_reason
         ev = poll_viewer()
         if ev == VIEWER_EOF:
             if not is_source_alive():      # disconnect caused BY source death
-                send(source.closed("source-exit"))
-                return "source-exit"
+                send(source.closed(exit_reason))
+                return exit_reason
             return "viewer-eof"            # genuine detach — source alive, NO Closed
-        # VIEWER_ALIVE (idle) or VIEWER_DATA (upstream drained) → keep watching.
+        if ev == VIEWER_DATA and on_viewer_data is not None:
+            r = on_viewer_data()           # may close the source + return a reason
+            if r:
+                exit_reason = r
+        # VIEWER_ALIVE (idle) or VIEWER_DATA (drained) → keep watching until the
+        # liveness poll observes the (now-closing) source die.
     return "limit"
 
 
@@ -226,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             logf.flush()
         print(f"MM_CONTROL_SENT {msg.type}", flush=True)
 
+    last_chunk = {"data": ""}
+
     def poll_viewer() -> str:
         r, _, _ = select.select([conn], [], [], args.poll_interval)
         if not r:
@@ -236,7 +278,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             return VIEWER_EOF
         if not chunk:
             return VIEWER_EOF              # clean EOF — viewer detached
+        last_chunk["data"] = chunk.decode("utf-8", "replace")
         return VIEWER_DATA                 # upstream bytes (e.g. CloseRequest)
+
+    def on_viewer_data() -> str | None:
+        # Source-mediated close (codex impl-32 Q4): a CloseRequest for OUR stream
+        # closes OUR source toplevel by stopping its marker unit. The existing
+        # liveness watcher then emits the authoritative Closed("viewer-close").
+        if viewer_close_requested(last_chunk["data"], source.meta.stream_id):
+            print(f"MM_CONTROL_CLOSEREQ stream_id={source.meta.stream_id} "
+                  f"-> stop {args.marker_unit}", flush=True)
+            subprocess.run(["systemctl", "--user", "stop", args.marker_unit],
+                           capture_output=True, text=True)
+            return "viewer-close"
+        return None
 
     def is_source_alive() -> bool:
         # the marker's OWN systemd --user unit going terminally inactive/failed is
@@ -250,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
         return active_state_alive(out.stdout)
 
     reason = watch(source, is_source_alive=is_source_alive,
-                   poll_viewer=poll_viewer, send=send)
+                   poll_viewer=poll_viewer, send=send,
+                   on_viewer_data=on_viewer_data)
     write_status("done", reason)        # file-based terminal reason for the harness
     print(f"MM_CONTROL_DONE reason={reason}", flush=True)
     if logf:

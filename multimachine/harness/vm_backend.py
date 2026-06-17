@@ -469,6 +469,26 @@ class QciVMBackend:
                             "cat /run/mm-vb/bystander.out 2>/dev/null || true",
                             check=False)
 
+    def viewer_qdwin_geometry(self, vm: str) -> dict[int, tuple[int, int, int, int]]:
+        """The LATEST ``toplevel_geometry`` (x, y, w, h) the bound shell observed per
+        handle — the AUTHORITATIVE viewer-WM rectangles (qdwin reports them; the
+        shell does not invent them). Used by the rung-1 gate to prove independent
+        overlapping geometry + that moving A does not perturb B's rect (impl-32
+        Q1). Replays the log so the last event per handle wins."""
+        raw = self._vmexec(self._real(vm),
+                           "cat /run/mm-vb/bystander.out 2>/dev/null || true",
+                           check=False)
+        rx = re.compile(
+            r'toplevel_geometry handle=(\d+) x=(-?\d+) y=(-?\d+) '
+            r'w=(\d+) h=(\d+)')
+        geo: dict[int, tuple[int, int, int, int]] = {}
+        for line in raw.splitlines():
+            m = rx.search(line)
+            if m:
+                geo[int(m.group(1))] = (int(m.group(2)), int(m.group(3)),
+                                        int(m.group(4)), int(m.group(5)))
+        return geo
+
     def rdp_client_alive(self, vm: str, which: str) -> bool:
         """True if a specific windowed FreeRDP client unit (``a``/``b``) is live —
         process/peer truth for the per-toplevel lifecycle assertions."""
@@ -517,59 +537,80 @@ class QciVMBackend:
     def launch_control(self, vm: str, *, generation: int, window_id: int,
                        source_machine: str, title: str, app_id: str,
                        req_w: int, req_h: int, marker_unit: str = "mm-marker",
+                       unit: str = "mm-control", control_port: int | None = None,
                        ) -> str:
-        """Start the VM-A ``mm-control`` unit (impl-12): the control side-channel
-        now ORIGINATES in VM-A, not on the host. Pushes the ``multimachine`` pkg +
-        adds the SLIRP hostfwd for the control port (mirroring the RDP relay), then
-        runs ``python3 -m multimachine.control_source`` as a ``systemd --user``
-        unit (so its ``systemctl --user show mm-marker`` source-death probe sees the
+        """Start a VM-A control unit (impl-12): the control side-channel ORIGINATES
+        in VM-A, not on the host. Pushes the ``multimachine`` pkg + adds the SLIRP
+        hostfwd for the control port (mirroring the RDP relay), then runs
+        ``python3 -m multimachine.control_source`` as a ``systemd --user`` unit (so
+        its ``systemctl --user show <marker_unit>`` source-death probe sees the
         marker's unit). Returns the in-guest-minted ``stream_id``.
 
+        ``unit`` + ``control_port`` are parameterised so the Phase-2 rung-1 gate can
+        run ONE control unit PER stream (``mm-control-a``/``mm-control-b`` on
+        5571/5572, watching ``mm-marker``/``mm-marker2``) — codex impl-32 Q4. The
+        per-stream status/log files are derived from the unit name so two controls
+        never clobber each other's handshake. Defaults reproduce the single-stream
+        impl-12 behaviour (``mm-control`` on ``self.control_port``).
+
         The viewer reaches it at ``10.0.2.2:control_port`` over VM-B's own NAT →
-        host loopback → this VM-A hostfwd → mm-control. No host ``ControlServer``.
+        host loopback → this VM-A hostfwd → the control unit (the host-side viewer
+        broker reaches the SAME port over loopback). No host ``ControlServer``.
 
         The stream_id + terminal reason are read from a FILE the unit writes
         (``--status-file``), not the unit's journal — robust against the
         ``--collect`` transient unit being reaped (codex impl-13)."""
         import time
         real = self._real(vm)
+        port = self.control_port if control_port is None else int(control_port)
+        status_file, log_file = self._control_paths(unit)
         self._push_mm_package(real)
-        self._ensure_hostfwd(real, self.control_port)        # control port bridge
+        self._ensure_hostfwd(real, port)                     # control port bridge
         # fresh log + status + reusable unit name across relaunches (so a stale
         # status file can never be mistaken for THIS launch).
         self._vmexec(real, self._as_admin(
-            "systemctl --user stop mm-control 2>/dev/null; "
-            "systemctl --user reset-failed mm-control 2>/dev/null; "
-            f"rm -f {self._MM_CONTROL_LOG} {self._MM_CONTROL_STATUS}; true"),
+            f"systemctl --user stop {unit} 2>/dev/null; "
+            f"systemctl --user reset-failed {unit} 2>/dev/null; "
+            f"rm -f {log_file} {status_file}; true"),
             check=False)
         argv = (
             "python3 -m multimachine.control_source "
-            f"--port {self.control_port} --generation {generation} "
+            f"--port {port} --generation {generation} "
             f"--window-id {window_id} "
             f"--source-machine {shlex.quote(source_machine)} "
             f"--title {shlex.quote(title)} --app-id {shlex.quote(app_id)} "
             f"--req-w {req_w} --req-h {req_h} --marker-unit {shlex.quote(marker_unit)} "
-            f"--emit-log {self._MM_CONTROL_LOG} "
-            f"--status-file {self._MM_CONTROL_STATUS}")
+            f"--emit-log {log_file} "
+            f"--status-file {status_file}")
         out = self._vmexec(real, self._as_admin(
-            "systemd-run --user --collect --unit=mm-control "
+            f"systemd-run --user --collect --unit={unit} "
             "--setenv=PYTHONPATH=/tmp/mm "
             f"{argv}"), check=False)
-        if "Running as unit" not in out and "mm-control.service" not in out:
-            raise RuntimeError(f"systemd-run did not start mm-control:\n{out}")
+        if "Running as unit" not in out and f"{unit}.service" not in out:
+            raise RuntimeError(f"systemd-run did not start {unit}:\n{out}")
         # wait for the unit to publish its listening status file (the bind succeeded
         # + the in-guest-minted stream_id is available).
         for _ in range(40):
-            st = self._read_control_status(real)
+            st = self._read_control_status(real, status_file)
             if st.get("state") == "listening" and st.get("stream_id"):
                 return st["stream_id"]
             time.sleep(0.25)
-        raise RuntimeError("mm-control never published a listening status file")
+        raise RuntimeError(f"{unit} never published a listening status file")
 
-    def _read_control_status(self, real: str) -> dict:
+    def _control_paths(self, unit: str) -> tuple[str, str]:
+        """The per-unit status + emit-log paths. The default ``mm-control`` keeps
+        the historic impl-12/13 paths; any other unit gets unit-qualified files so
+        per-stream controls don't clobber each other."""
+        if unit == "mm-control":
+            return self._MM_CONTROL_STATUS, self._MM_CONTROL_LOG
+        base = f"/run/user/1000/{unit}"
+        return f"{base}-status.json", f"{base}.jsonl"
+
+    def _read_control_status(self, real: str, status_file: str | None = None) -> dict:
         import json
+        path = status_file or self._MM_CONTROL_STATUS
         raw = self._vmexec(real, self._as_admin(
-            f"cat {self._MM_CONTROL_STATUS} 2>/dev/null"), check=False).strip()
+            f"cat {path} 2>/dev/null"), check=False).strip()
         if not raw:
             return {}
         try:
@@ -577,15 +618,16 @@ class QciVMBackend:
         except (ValueError, IndexError):
             return {}
 
-    def control_log(self, vm: str) -> dict:
-        """What VM-A's mm-control PRODUCED: the JSON-lines it sent (the
+    def control_log(self, vm: str, unit: str = "mm-control") -> dict:
+        """What a VM-A control unit PRODUCED: the JSON-lines it sent (the
         source-derived Announce, and a source-driven Closed if the marker died) +
         the watcher's terminal reason. The honesty evidence that the control bytes
         + lifecycle originate in VM-A. Entirely FILE-based (impl-13)."""
         import json
         real = self._real(vm)
+        status_file, log_file = self._control_paths(unit)
         raw = self._vmexec(real, self._as_admin(
-            f"cat {self._MM_CONTROL_LOG} 2>/dev/null"), check=False)
+            f"cat {log_file} 2>/dev/null"), check=False)
         sent = []
         for line in raw.splitlines():
             line = line.strip()
@@ -595,13 +637,13 @@ class QciVMBackend:
                 sent.append(json.loads(line))
             except ValueError:
                 continue
-        st = self._read_control_status(real)
+        st = self._read_control_status(real, status_file)
         reason = st.get("reason", "") if st.get("state") == "done" else ""
         return {"sent": sent, "reason": reason}
 
-    def stop_control(self, vm: str) -> None:
+    def stop_control(self, vm: str, unit: str = "mm-control") -> None:
         self._vmexec(self._real(vm), self._as_admin(
-            "systemctl --user stop mm-control 2>/dev/null || true"), check=False)
+            f"systemctl --user stop {unit} 2>/dev/null || true"), check=False)
 
     def marker2_alive(self, vm: str) -> bool:
         """True if the SECOND exported marker (mm-marker2) + its relay (mm-relay2)

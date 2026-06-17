@@ -10,10 +10,10 @@ from __future__ import annotations
 from multimachine.bridge import SourceWindowInfo
 from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, active_state_alive,
-    watch,
+    viewer_close_requested, watch,
 )
 from multimachine.sidechannel import (
-    Announce, Closed, RemoteViewerState, decode, encode,
+    Announce, CloseRequest, Closed, RemoteViewerState, decode, encode,
 )
 
 
@@ -128,5 +128,70 @@ class TestWatchLoop:
         alive = iter([True, False])
         reason = watch(cs, is_source_alive=lambda: next(alive),
                        poll_viewer=lambda: VIEWER_EOF, send=sent.append)
+        assert reason == "source-exit"
+        assert isinstance(sent[-1], Closed) and sent[-1].reason == "source-exit"
+
+
+class TestViewerCloseRequested:
+    """The pure CloseRequest detector (codex impl-32 Q4, source-mediated close)."""
+
+    def _wire(self, stream_id, window_id=1, gen=7):
+        return encode(CloseRequest("close_request", gen, window_id, stream_id))
+
+    def test_matching_stream_id_is_a_close(self):
+        assert viewer_close_requested(self._wire("sid"), "sid") is True
+
+    def test_mismatched_stream_id_is_not_a_close(self):
+        assert viewer_close_requested(self._wire("other"), "sid") is False
+
+    def test_non_close_message_ignored(self):
+        cs = ControlSource.from_source(_src(), generation=7, stream_id="sid")
+        assert viewer_close_requested(encode(cs.announce()), "sid") is False
+
+    def test_garbage_and_empty_ignored(self):
+        assert viewer_close_requested("", "sid") is False
+        assert viewer_close_requested("not json\n{partial", "sid") is False
+
+    def test_matching_among_multiple_buffered_lines(self):
+        # a single recv() can deliver several newline-delimited messages.
+        chunk = "garbage\n" + self._wire("other") + "\n" + self._wire("sid") + "\n"
+        assert viewer_close_requested(chunk, "sid") is True
+
+
+class TestWatchViewerClose:
+    def test_viewer_close_request_closes_source_and_sets_reason(self):
+        """A CloseRequest fires on_viewer_data, which (in the live shell) stops the
+        marker unit; the NEXT liveness poll sees it dead and the Closed carries the
+        upgraded 'viewer-close' reason — the source-mediated close path."""
+        cs = ControlSource.from_source(_src(), generation=7, stream_id="sid")
+        sent = []
+        # alive (top) → DATA poll fires on_viewer_data (which "stops" the marker)
+        # → next top sees it dead → Closed.
+        alive = iter([True, False])
+        ev = iter([VIEWER_DATA])
+        closed_marker = {"stopped": False}
+
+        def on_data():
+            closed_marker["stopped"] = True
+            return "viewer-close"
+
+        reason = watch(cs, is_source_alive=lambda: next(alive),
+                       poll_viewer=lambda: next(ev), send=sent.append,
+                       on_viewer_data=on_data)
+        assert closed_marker["stopped"] is True
+        assert reason == "viewer-close"
+        assert isinstance(sent[-1], Closed) and sent[-1].reason == "viewer-close"
+        assert sent[-1].stream_id == "sid"
+
+    def test_non_close_data_keeps_source_exit_reason(self):
+        """Upstream data that is NOT a close (on_viewer_data returns None) leaves the
+        reason as a spontaneous source-exit."""
+        cs = ControlSource.from_source(_src(), generation=7, stream_id="sid")
+        sent = []
+        alive = iter([True, False])
+        ev = iter([VIEWER_DATA])
+        reason = watch(cs, is_source_alive=lambda: next(alive),
+                       poll_viewer=lambda: next(ev), send=sent.append,
+                       on_viewer_data=lambda: None)
         assert reason == "source-exit"
         assert isinstance(sent[-1], Closed) and sent[-1].reason == "source-exit"
