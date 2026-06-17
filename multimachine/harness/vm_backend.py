@@ -385,6 +385,101 @@ class QciVMBackend:
         self._vmexec(self._real(vm),
                      "systemctl stop mm-viewer 2>/dev/null || true", check=False)
 
+    # ---- Phase-2 rung-1 viewer-qdwin spike ops (codex impl-30 Option B) -----
+    def launch_viewer_qdwin(self, vm: str, *, rdp_host: str,
+                            port_a: int, otp_a: str, port_b: int, otp_b: str,
+                            stream_a: str = "streamA", stream_b: str = "streamB",
+                            origin: str = "vm-a") -> str:
+        """Bring up the VM-B Phase-2 rung-1 viewer stack: a REAL qdwin
+        (shell=qdwin-shell.so) + qdwin-bystander as the bound shell client + TWO
+        *windowed* secctx-tagged FreeRDP clients, each decoding one source stream
+        into its own managed qdwin toplevel (viewer-qdwin-stack.sh; impl-30 Q6).
+        Asserts the VMB_QDWIN_OK token (both decoded + two mm secctx toplevels).
+        Returns the script's stdout (carries the observed toplevel lines)."""
+        real = self._real(vm)
+        self._push(real,
+                   self.repo_dir / "multimachine/harness/vm/viewer-qdwin-stack.sh",
+                   "/tmp/mm-viewer-qdwin-stack.sh")
+        env = (f"RDP_HOST={shlex.quote(rdp_host)} "
+               f"RDP_PORT_A={int(port_a)} OTP_A={shlex.quote(otp_a)} "
+               f"RDP_PORT_B={int(port_b)} OTP_B={shlex.quote(otp_b)} "
+               f"STREAM_A={shlex.quote(stream_a)} STREAM_B={shlex.quote(stream_b)} "
+               f"ORIGIN={shlex.quote(origin)} W={self.out_w} H={self.out_h} "
+               f"RDP_USER=mm")
+        out = self._vmexec(real, f"{env} bash /tmp/mm-viewer-qdwin-stack.sh",
+                           timeout=240)
+        if "VMB_QDWIN_OK" not in out:
+            raise RuntimeError(f"viewer-qdwin-stack did not report VMB_QDWIN_OK:\n{out}")
+        return out
+
+    def viewer_qdwin_toplevels(self, vm: str) -> dict[int, dict]:
+        """Parse the VM-B bound shell client's (qdwin-bystander) observations into
+        the LIVE ``handle -> {engine, app_id, instance_id}`` set, from its
+        ``toplevel_added`` / ``toplevel_security_context`` / ``toplevel_removed``
+        lines. This is the load-bearing handle<->stream attribution (impl-30 Q6:
+        secctx, NOT window title / client pixels).
+
+        The SDL3 FreeRDP frontend churns several short-lived toplevels (create →
+        destroy) before settling on its final window, so we MUST honour
+        ``toplevel_removed`` and return only handles that are currently live —
+        otherwise dead transient handles would be mis-attributed as peers."""
+        raw = self._vmexec(self._real(vm),
+                           "cat /run/mm-vb/bystander.out 2>/dev/null || true",
+                           check=False)
+        rx_secctx = re.compile(
+            r'toplevel_security_context handle=(\d+) engine="([^"]*)" '
+            r'app_id="([^"]*)" instance_id="([^"]*)"')
+        rx_added = re.compile(r'toplevel_added handle=(\d+) ')
+        rx_removed = re.compile(r'toplevel_removed handle=(\d+)')
+        live: set[int] = set()
+        secctx: dict[int, dict] = {}
+        # replay the log in order so adds/removes net out to the live set.
+        for line in raw.splitlines():
+            m = rx_added.search(line)
+            if m:
+                live.add(int(m.group(1)))
+                continue
+            m = rx_removed.search(line)
+            if m:
+                live.discard(int(m.group(1)))
+                continue
+            m = rx_secctx.search(line)
+            if m:
+                secctx[int(m.group(1))] = {
+                    "engine": m.group(2), "app_id": m.group(3),
+                    "instance_id": m.group(4)}
+        return {h: secctx[h] for h in live if h in secctx}
+
+    def viewer_fifo(self, vm: str, cmd: str) -> None:
+        """Send one command (e.g. ``raise <handle>``, ``max <handle>``,
+        ``focus <handle>``, ``close <handle>``) to the bound shell client's FIFO so
+        the harness drives placement/stacking/focus — the viewer shell authority."""
+        self._vmexec(self._real(vm),
+                     f"printf '%s\\n' {shlex.quote(cmd)} > /tmp/qdwin-cmd.fifo",
+                     check=False)
+
+    def viewer_qdwin_log(self, vm: str) -> str:
+        """The full bound-shell observation log (toplevel_added +
+        toplevel_security_context + FIFO command echoes) — anti-fake evidence."""
+        return self._vmexec(self._real(vm),
+                            "cat /run/mm-vb/bystander.out 2>/dev/null || true",
+                            check=False)
+
+    def rdp_client_alive(self, vm: str, which: str) -> bool:
+        """True if a specific windowed FreeRDP client unit (``a``/``b``) is live —
+        process/peer truth for the per-toplevel lifecycle assertions."""
+        unit = "mm-rdp-a" if which == "a" else "mm-rdp-b"
+        out = self._vmexec(self._real(vm),
+                           f"systemctl is-active {unit} 2>/dev/null", check=False)
+        return out.strip() == "active"
+
+    def stop_rdp_client(self, vm: str, which: str) -> None:
+        """Stop one windowed FreeRDP client unit (viewer-side teardown of one
+        peer's pixel backend)."""
+        unit = "mm-rdp-a" if which == "a" else "mm-rdp-b"
+        self._vmexec(self._real(vm),
+                     f"systemctl stop {unit} 2>/dev/null || true", check=False)
+
     def resubscribe(self, vm: str) -> ViewStreamApproved | None:
         """Run the source-stack ``MODE=resubscribe`` path on VM-A: a fresh
         bystander export (new dynamic port + fresh single-use OTP) repointed onto
@@ -770,6 +865,23 @@ class QciVMBackend:
             raise RuntimeError(f"ydotool injection failed on {vm}:\n{out}")
         return (px, py)
 
+    def inject_key(self, vm: str, key: str = "30:1 30:0") -> None:
+        """Inject a KEYBOARD-only event at the VM-B viewer via ydotool (no pointer
+        move/click). Keyboard events follow the compositor's keyboard FOCUS
+        (qdwin set_keyboard_focus), so this isolates shell-owned focus routing from
+        pointer hit-testing — the honest test of 'keyboard reaches only the
+        viewer-focused peer's source' (rung-1 assertion 3) without the pointer-pick
+        / ydotool absolute-scale confounds. Default key 30 = 'a'."""
+        real = self._real(vm)
+        sock = "/run/.ydotool_socket"
+        script = (
+            f"export YDOTOOL_SOCKET={sock}; "
+            f"[ -S {sock} ] || {{ echo 'NO_YDOTOOL_SOCKET'; exit 1; }}; "
+            f"ydotool key {key}; sleep 0.3; echo YDOTOOL_DONE")
+        out = self._vmexec(real, script, check=False)
+        if "YDOTOOL_DONE" not in out:
+            raise RuntimeError(f"ydotool key injection failed on {vm}:\n{out}")
+
     def apply_netem(self, vm: str, dev: str, profile_name: str) -> None:
         # NB (codex impl-4/impl-6 M6): the loopback relay leg BYPASSES this — it
         # models link impairment on the SLIRP-facing dev, NOT a bridged inter-VM
@@ -798,5 +910,7 @@ class QciVMBackend:
                 "mm-relay mm-control mm-marker2 mm-bystander2 mm-relay2 "
                 "2>/dev/null || true"), check=False)
         else:
-            self._vmexec(real, "systemctl stop mm-weston mm-viewer 2>/dev/null || true",
+            self._vmexec(real,
+                         "systemctl stop mm-weston mm-viewer mm-qdwin "
+                         "mm-bystander-vb mm-rdp-a mm-rdp-b 2>/dev/null || true",
                          check=False)
