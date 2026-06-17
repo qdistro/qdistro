@@ -1,18 +1,38 @@
 #!/bin/bash
 # Install the admin-user systemd session that runs qdwin + qdshell.
 #
-# Two user units land in /home/admin/.config/systemd/user/:
+# Three user units land in /home/admin/.config/systemd/user/, mirroring
+# the PRODUCTION deploy contract (qdistro/deploy/) so the GUI test lanes
+# validate the units deploy actually ships:
 #
-#   noctalia-session.service  — weston with qdwin-shell.so on the drm
+#   qdwin-compositor.service  — weston with qdwin-shell.so on the drm
 #                               backend (+ pipewire sub-backend for
 #                               §6.5 view_stream outputs), claiming
 #                               wayland-1.
-#   noctalia-shell.service    — quickshell loading the qdshell QML stack
+#   qdshell.service           — quickshell loading the qdshell QML stack
 #                               from /usr/share/quickshell/qdshell/.
+#   qdwin-session.target      — the session target that pulls in the
+#                               compositor (Requires=) + shell (Wants=).
 #
-# The unit names are kept as noctalia-* for compatibility with the
-# qdwin-noctalia GUI test harness (tests/integration/qdwin-noctalia/
-# noctalia-helpers.sh greps these specific names).
+# The unit names match deploy exactly (was the legacy noctalia-session /
+# noctalia-shell pair, retired 2026-06-16 — deploy-contract drift
+# followup). The [Unit] graph mirrors deploy/: the compositor + shell are
+# PartOf= the target, the shell After=/Requires= the compositor, and the
+# target Requires= the compositor + Wants= the shell.
+#
+# VM-vs-deploy divergence: this installer ENABLES qdwin-session.target
+# under default.target so the lingering admin user-manager auto-starts the
+# desktop in the headless/spin-test VM (which has no greeter to start it).
+# The production greeter image starts the target EXPLICITLY via
+# qdwin-session-launcher after PAM auth and must NOT also enable it under
+# default.target (that would race for wayland-1) — image/config.sh removes
+# the default.target.wants symlink for exactly that reason.
+#
+# The [Service] bodies keep the VM-specific tuning the static deploy units
+# do not carry: a dynamically computed WESTON_MODULE_MAP (vendored vs
+# distro libweston), a conditional LD_LIBRARY_PATH, an explicit
+# XDG_RUNTIME_DIR (the lingering user manager path), and the VM weston.ini
+# with the pipewire sub-backend + idle-time=0.
 #
 # Args:
 #   $1 — path to qdshell source tree (default /root/qdistro-src/qdshell)
@@ -274,35 +294,47 @@ else
     QDWIN_LD_LINE="# (distro libweston on default loader path; no LD_LIBRARY_PATH)"
 fi
 
-cat > /home/admin/.config/systemd/user/noctalia-session.service <<EOF
+# Compositor unit. Mirrors deploy/qdwin-compositor.service: PartOf= the
+# session target (stop/restart propagates from the target). NO [Install]
+# section — the unit is pulled in by qdwin-session.target's Requires=, so
+# it must NOT be enabled directly under default.target (that would
+# auto-start a second compositor racing the target for wayland-1).
+# Keeps the VM-tuned XDG_RUNTIME_DIR + dynamic module map / LD path.
+cat > /home/admin/.config/systemd/user/qdwin-compositor.service <<EOF
 [Unit]
-Description=qdwin compositor session (libweston + qdwin-shell.so)
-After=graphical.target
+Description=qdwin compositor (libweston + qdwin-shell.so)
+PartOf=qdwin-session.target
 
 [Service]
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_SESSION_TYPE=wayland
 $QDWIN_LD_LINE
 Environment=WESTON_MODULE_MAP=$QDWIN_MODULE_MAP
 ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
-
-[Install]
-WantedBy=default.target
 EOF
 
-cat > /home/admin/.config/systemd/user/noctalia-shell.service <<'EOF'
+# Shell unit. Mirrors deploy/qdshell.service: After=/Requires= the
+# compositor, PartOf= the target, with deploy's start-limit guard. NO
+# [Install] — wired into the target via a .wants/ symlink (written below)
+# plus the target's Wants=.
+cat > /home/admin/.config/systemd/user/qdshell.service <<'EOF'
 [Unit]
-Description=qdshell QML on top of qdwin
-After=noctalia-session.service
-Requires=noctalia-session.service
+Description=qdshell desktop (Quickshell QML on top of qdwin)
+After=qdwin-compositor.service
+Requires=qdwin-compositor.service
+PartOf=qdwin-session.target
+StartLimitBurst=5
+StartLimitIntervalSec=30s
 
 [Service]
 Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_SESSION_TYPE=wayland
 Environment=QML_DISABLE_DISK_CACHE=1
 # Tell qs to look in /usr/share/qdistro/qml for the
 # Qdistro.Qdwin QML plugin (libqdistro-qdwin.so installed in step 3b).
@@ -310,14 +342,35 @@ Environment=QML_DISABLE_DISK_CACHE=1
 # `import Qdistro.Qdwin 1.0` and the qdwin_shell_v1 binding stays
 # unbound.
 Environment=QML_IMPORT_PATH=/usr/share/qdistro/qml
-ExecStartPre=/bin/sh -c 'while [ ! -e $XDG_RUNTIME_DIR/wayland-1 ]; do sleep 0.5; done'
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -e "$XDG_RUNTIME_DIR/wayland-1" ]; do i=$((i+1)); [ $i -gt 20 ] && exit 1; sleep 0.25; done'
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/qs -p /usr/share/quickshell/qdshell
 Restart=on-failure
-RestartSec=2
+RestartSec=1
+EOF
+
+# Session target. Mirrors deploy/qdwin-session.target: Requires= the
+# compositor (hard backbone — target tears down if the compositor dies),
+# Wants= the shell (recoverable). [Install] WantedBy=default.target so the
+# lingering admin user manager auto-starts the desktop in this headless
+# VM. NOTE: qdlocker.service is wired into the target by fresh-vm-bootstrap
+# / image/config.sh when present, not here (the locker is a separate repo).
+cat > /home/admin/.config/systemd/user/qdwin-session.target <<'EOF'
+[Unit]
+Description=qdistro desktop session (qdwin compositor + qdshell)
+Wants=qdshell.service
+Requires=qdwin-compositor.service
+After=qdwin-compositor.service
 
 [Install]
 WantedBy=default.target
 EOF
+
+# Materialize the target -> shell Wants= as an on-disk .wants/ symlink so
+# the enabled graph matches deploy/image even before a live `enable` runs.
+install -d -o admin -g users -m 0755 \
+    /home/admin/.config/systemd/user/qdwin-session.target.wants
+ln -sf ../qdshell.service \
+    /home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service
 
 chown -R admin:users /home/admin/.config/systemd
 
@@ -345,10 +398,16 @@ polkit.addRule(function(action, subject) {
 });
 EOF
 
-# 5. Enable (but don't start — caller decides).
-runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service ydotoold.service' \
+# 5. Enable (but don't start — caller decides). Enable the SESSION TARGET
+# (not the services directly): the target Requires= the compositor and
+# Wants= the shell, so enabling + starting the target brings up the whole
+# session in the right order. ydotoold is VM-test-only support, enabled
+# independently. The greeter image must remove the resulting
+# default.target.wants/qdwin-session.target symlink (the greeter starts
+# the target explicitly) — image/config.sh handles that.
+runuser -l admin -c 'systemctl --user enable qdwin-session.target ydotoold.service' \
     2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
 
-echo "qdwin session installed."
-echo "  start now:    runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
-echo "  start at boot: systemctl --user --machine=admin@ start noctalia-shell.service  (after reboot/relogin)"
+echo "qdwin session installed (deploy-named units: qdwin-compositor.service + qdshell.service + qdwin-session.target)."
+echo "  start now:    runuser -l admin -c 'systemctl --user start qdwin-session.target'"
+echo "  start at boot: systemctl --user --machine=admin@ start qdwin-session.target  (after reboot/relogin)"

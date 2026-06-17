@@ -54,7 +54,7 @@ NEITHER of: "Privacy", "PRIVACY", "GOT IT", "Welcome to Noctalia",
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
-    "runuser -l admin -c \"journalctl --user -u noctalia-shell.service --since '30 seconds ago' --no-pager\"" \
+    "runuser -l admin -c \"journalctl --user -u qdshell.service --since '30 seconds ago' --no-pager\"" \
     > /tmp/02-shell.log
 ```
 
@@ -79,6 +79,6 @@ All asserts in steps 1 and 2 pass.
    `Commons/Settings.qml` (which gates the welcome flow) and any
    new `Modules/Welcome*/` directory.
 
-2. **Bar not yet rendered** (assert 1.1 fails): `noctalia-shell.service`
-   needs ~2-3 seconds after `noctalia-session.service` to bind its
+2. **Bar not yet rendered** (assert 1.1 fails): `qdshell.service`
+   needs ~2-3 seconds after `qdwin-compositor.service` to bind its
    layer-shell surfaces. Increase the post-`noct_restart` sleep.

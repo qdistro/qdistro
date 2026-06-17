@@ -44,7 +44,7 @@ command -v qdistro-nested-pixelfeed >/dev/null 2>&1 \
 loginctl enable-linger admin 2>/dev/null || true
 
 systemctl --machine=admin@.host --user stop \
-    noctalia-shell.service noctalia-session.service qdlocker.service \
+    qdshell.service qdwin-compositor.service qdlocker.service \
     2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 pkill -9 -f "sdl-freerdp.*:3389" 2>/dev/null || true

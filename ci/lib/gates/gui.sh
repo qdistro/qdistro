@@ -251,7 +251,7 @@ gui_run_scenario() {
 gate_gui() {
     qci_assert_run_dir || return $?
     qci_assert_vm_tools gui || return $?
-    local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 noctalia_shell=0
+    local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
     # Build the per-run GUI golden ONCE (compositor + labwc/qdwin layer built
     # from current source), so the probe VM AND every per-scenario worker CLONE
@@ -275,18 +275,18 @@ gate_gui() {
     if "$VM_TOOLS/vm-exec" "$svm" "test -e /dev/kvm" >/dev/null 2>&1; then
         nested_kvm=1
     fi
-    if "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && pgrep -a noctalia-shell >/dev/null" >/dev/null 2>&1; then
-        noctalia_shell=1
+    if "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service >/dev/null 2>&1" >/dev/null 2>&1; then
+        qdshell_active=1
     fi
 
     run_qdwin_executable_gui_smokes "$svm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
-    # Authoritatively probe noctalia-shell.service (the deployed qs unit) +
-    # the wayland-1 socket rather than relying solely on the pgrep-based
-    # noctalia_shell flag, which matches the broader scenario gating.
+    # Authoritatively probe qdshell.service (the deployed qs unit) + the
+    # wayland-1 socket rather than relying solely on the earlier
+    # qdshell_active flag, which matches the broader scenario gating.
     local qdshell_session=0
-    if [ "$noctalia_shell" = 1 ] || "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active noctalia-shell.service qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
+    if [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
         qdshell_session=1
     fi
     if [ "$qdshell_session" = 1 ]; then
@@ -350,35 +350,35 @@ gate_gui() {
                 ;;
             qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
             qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md)
-                if [ "$noctalia_shell" != 1 ]; then
+                if [ "$qdshell_active" != 1 ]; then
                     {
                         echo "Skipped qdshell/noctalia GUI scenario."
                         echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
+                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
                     continue
                 fi
                 ;;
             qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md)
-                if [ "$noctalia_shell" != 1 ]; then
+                if [ "$qdshell_active" != 1 ]; then
                     {
                         echo "Skipped qdwin/noctalia GUI scenario."
                         echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
+                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
                     continue
                 fi
                 ;;
             qdlocker/tests/gui/[0-9][0-9]-*.md)
-                if [ "$noctalia_shell" != 1 ]; then
+                if [ "$qdshell_active" != 1 ]; then
                     {
                         echo "Skipped qdlocker GUI scenario."
                         echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or noctalia-shell is absent; qdlocker GUI tests require the qdwin/noctalia session, while this VM profile runs labwc for permissions-gui admin app scenarios."
+                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; qdlocker GUI tests require the qdwin/qdshell session, while this VM profile runs labwc for permissions-gui admin app scenarios."
                     } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "noctalia/qdshell session not active in this VM profile"
+                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
                     continue
                 fi
                 ;;

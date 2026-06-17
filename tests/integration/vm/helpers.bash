@@ -86,7 +86,7 @@ vm_run() {
 # Routes through the same transport as vm_run (qga or ssh) but wraps
 # the command in `runuser -l admin -c '...'`. Use this for any test
 # step that needs admin's user manager (systemctl --user, qdlocker.sock,
-# qdshell.sock, noctalia-shell.service, etc).
+# qdshell.sock, qdshell.service, etc).
 vm_run_admin() {
     local cmd="$1"
     # Escape single quotes for runuser's outer 'cmd' string.
@@ -95,7 +95,7 @@ vm_run_admin() {
 }
 
 # start_user_session — idempotent: ensure admin's user manager is
-# running and noctalia-shell + qdlocker are active. Tests that need
+# running and the qdwin compositor + qdshell are active. Tests that need
 # the qdshell GUI alive call this in their setup_file().
 # Returns 0 on success; non-zero if /run/user/1000/wayland-1 didn't
 # appear within 30s (caller should fail_loud).
@@ -103,7 +103,7 @@ _user_session_started=""
 start_user_session() {
     [[ -n "$_user_session_started" ]] && return 0
     vm_run "loginctl enable-linger admin >/dev/null 2>&1 || true"
-    vm_run_admin "systemctl --user start noctalia-shell.service" || true
+    vm_run_admin "systemctl --user start qdwin-session.target" || true
     # Wait up to 30s for the wayland socket (see wait_for_socket below).
     if wait_for_socket /run/user/1000/wayland-1 30; then
         _user_session_started=1
@@ -485,9 +485,9 @@ wait_until_succeeds() {
 #       start_user_session || fail_loud "user session did not start"
 #
 #       subtest "qdshell services and sockets"
-#       step "wait for noctalia-shell --user unit"
-#       wait_for_unit noctalia-shell.service 30 --user \
-#           || fail_loud "noctalia-shell.service never went active"
+#       step "wait for qdshell --user unit"
+#       wait_for_unit qdshell.service 30 --user \
+#           || fail_loud "qdshell.service never went active"
 #
 #       step "wait for the qdshell control socket"
 #       wait_for_socket /run/user/1000/qdshell.sock 15 \

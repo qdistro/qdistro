@@ -38,15 +38,16 @@ setup() {
     grep -q '/home/admin/.config/systemd/user' "$IMAGE_CFG"
 }
 
-@test "#15: image disables noctalia auto-start so only the greeter path brings up the desktop" {
-    # The legacy installer enables noctalia under default.target.wants; the
-    # unified path must remove those symlinks so two compositors do not race.
-    grep -Eq 'rm -f .*default.target.wants/\$u' "$IMAGE_CFG" \
-        || grep -q 'noctalia-session.service noctalia-shell.service' "$IMAGE_CFG"
-    grep -q 'noctalia-shell.service' "$IMAGE_CFG"
+@test "#15: image suppresses qdwin-session.target auto-start so only the greeter path brings up the desktop" {
+    # The VM installer enables qdwin-session.target under default.target for
+    # the headless spin-test path; the IMAGE path must suppress that (the
+    # greeter starts the target explicitly) so two starters do not race for
+    # wayland-1. config.sh removes the default.target.wants/qdwin-session.target
+    # symlink and the runuser shim skips it.
+    grep -Eq 'rm -f .*default.target.wants/qdwin-session.target' "$IMAGE_CFG"
 }
 
-@test "#15: verify.sh asserts the qdwin-session units the greeter starts (not only noctalia)" {
+@test "#15: verify.sh asserts the qdwin-session units the greeter starts" {
     grep -q 'qdwin-session.target' "$VERIFY"
     grep -q 'qdshell wanted by qdwin-session.target' "$VERIFY"
 }
@@ -55,6 +56,47 @@ setup() {
     grep -q 'qdwin-session.target (admin user unit)' "$VERIFY_CONTENTS"
     grep -q 'qdwin-compositor.service (admin user unit)' "$VERIFY_CONTENTS"
     grep -q 'qdshell.service (admin user unit)' "$VERIFY_CONTENTS"
+}
+
+# --- deploy-unit migration: VM installer emits the deploy-named units ----
+# Lock-in for the 2026-06-16 followup "VM session path still installs legacy
+# noctalia-* units". The VM installer must emit the deploy unit names (so GUI
+# lanes validate the production contract) and must NOT regress to noctalia-*.
+
+@test "deploy-units: install-qdwin-session-for-vm.sh emits the deploy-named session units" {
+    SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
+    grep -q '/qdwin-compositor.service <<' "$SESSION_INSTALL"
+    grep -q '/qdshell.service <<' "$SESSION_INSTALL"
+    grep -q '/qdwin-session.target <<' "$SESSION_INSTALL"
+}
+
+@test "deploy-units: install-qdwin-session-for-vm.sh no longer writes legacy noctalia-* units" {
+    SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
+    # No `cat > .../noctalia-*.service` unit-writing redirects (the only
+    # remaining 'noctalia' tokens are the historical note in the header).
+    run grep -E '/noctalia-(session|shell)\.service <<' "$SESSION_INSTALL"
+    [ "$status" -ne 0 ] || { echo "still writes a noctalia-* unit:"$'\n'"$output" >&2; return 1; }
+}
+
+@test "deploy-units: installer enables the session TARGET (not the services directly)" {
+    SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
+    grep -Eq "systemctl --user enable qdwin-session.target" "$SESSION_INSTALL"
+}
+
+@test "deploy-units: the VM target wiring mirrors deploy (PartOf/Requires/After)" {
+    SESSION_INSTALL="$REPO_ROOT/scripts/install/install-qdwin-session-for-vm.sh"
+    grep -q 'PartOf=qdwin-session.target' "$SESSION_INSTALL"
+    grep -q 'Requires=qdwin-compositor.service' "$SESSION_INSTALL"
+    grep -q 'After=qdwin-compositor.service' "$SESSION_INSTALL"
+}
+
+@test "deploy-units: image config.sh does NOT clobber the VM-tuned compositor/shell units" {
+    # The VM installer is the single source for these units (they carry the
+    # dynamic WESTON_MODULE_MAP / LD_LIBRARY_PATH / XDG_RUNTIME_DIR tuning).
+    # config.sh must not re-install deploy/qdwin-compositor.service or
+    # deploy/qdshell.service over them.
+    run grep -E 'install -m 0644 .*deploy/(qdwin-compositor|qdshell)\.service' "$IMAGE_CFG"
+    [ "$status" -ne 0 ] || { echo "config.sh clobbers a VM-tuned unit:"$'\n'"$output" >&2; return 1; }
 }
 
 # --- #16: qdlocker is part of qdwin-session.target ----------------------

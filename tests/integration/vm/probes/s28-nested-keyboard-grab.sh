@@ -37,7 +37,7 @@ loginctl enable-linger admin 2>/dev/null || true
 # Restart=on-failure relaunches weston between our pkill and our own
 # outer's startup, racing the wayland-1 lockfile.
 systemctl --machine=admin@.host --user stop \
-    noctalia-shell.service noctalia-session.service qdlocker.service \
+    qdshell.service qdwin-compositor.service qdlocker.service \
     2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 pkill -9 -f "sdl-freerdp.*:3389" 2>/dev/null || true

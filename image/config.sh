@@ -68,7 +68,7 @@ meson compile -C build
 meson install -C build
 
 # qdshell's qml-plugin binds qdwin_shell_v1 -> QML. Without it the
-# install-qdwin-session installer falls back to stubs and noctalia-shell
+# install-qdwin-session installer falls back to stubs and qdshell.service
 # can't resolve `import Qdistro.Qdwin 1.0`.
 echo "[qdistro-image] building qdshell qml-plugin..."
 cd "$SRC/qdshell"
@@ -136,13 +136,23 @@ esac
 SHIM
 cat > "$SHIMS/runuser" <<'SHIM'
 #!/bin/bash
-# kiwi-chroot shim: the upstream call is
-#   runuser -l admin -c 'systemctl --user enable noctalia-session.service noctalia-shell.service'
-# We emulate it by writing the symlinks directly under admin's
-# default.target.wants.
+# kiwi-chroot shim: the upstream call (install-qdwin-session-for-vm.sh) is
+#   runuser -l admin -c 'systemctl --user enable qdwin-session.target ydotoold.service'
+# We emulate `enable` by writing the WantedBy=default.target symlinks
+# directly under admin's default.target.wants (there is no live user
+# manager in the kiwi chroot).
+#
+# IMPORTANT: in the IMAGE / greeter path we do NOT auto-start
+# qdwin-session.target under default.target — the greeter's
+# qdwin-session-launcher starts the target EXPLICITLY after PAM auth, and
+# a default.target.wants/qdwin-session.target symlink would race it for
+# the wayland-1 socket. So this shim enables ydotoold (VM-test support)
+# but deliberately SKIPS the session target. (The spin/test-VM path keeps
+# the target auto-started via the installer's own enable — see
+# install-qdwin-session-for-vm.sh. This shim is the image-build override.)
 target=/home/admin/.config/systemd/user/default.target.wants
 mkdir -p "$target"
-for u in noctalia-session.service noctalia-shell.service ; do
+for u in ydotoold.service ; do
     src="/home/admin/.config/systemd/user/$u"
     [ -f "$src" ] || continue
     ln -sf "../$u" "$target/$u"
@@ -210,20 +220,26 @@ if [ ! -x /usr/bin/qdgreeter ]; then
 fi
 echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
 
-# Production session units (qdwin-session.target + qdwin-compositor.service
-# + qdshell.service) and the screen locker (qdlocker.service). The greeter
-# launcher does `systemctl --user start qdwin-session.target`, so these
-# MUST be installed and enabled for the admin user — the legacy
-# install-qdwin-session-for-vm.sh above only writes the noctalia-* units,
-# which the greeter never starts (findings #15, #16). Install both unit
-# sets so the boot path the greeter drives actually resolves; the noctalia
-# units stay for the GUI test harness that greps their names.
+# Production session units. As of 2026-06-16 the VM installer above
+# (install-qdwin-session-for-vm.sh) is the SINGLE SOURCE for the deploy-
+# named session units — it emits qdwin-compositor.service, qdshell.service
+# and qdwin-session.target directly (with the VM-specific tuning the static
+# deploy/ units do NOT carry: dynamic WESTON_MODULE_MAP, conditional
+# LD_LIBRARY_PATH, explicit XDG_RUNTIME_DIR=/run/user/1000). We must NOT
+# re-copy deploy/qdwin-compositor.service or deploy/qdshell.service here —
+# that would CLOBBER those VM-tuned units with the static vendored-path
+# versions and the VM session could come up with the wrong module map or a
+# missing XDG_RUNTIME_DIR. So this block only adds what the VM installer
+# does NOT: the screen locker (qdlocker.service, a separate repo) and its
+# wiring into qdwin-session.target.wants/.
+#
+# The greeter launcher does `systemctl --user start qdwin-session.target`,
+# and the runuser shim above deliberately does NOT enable the target under
+# default.target in the image path (the greeter is the authoritative
+# starter; auto-start would race for wayland-1).
 ADMIN_USER_UNITS=/home/admin/.config/systemd/user
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS"
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS/qdwin-session.target.wants"
-for unit in qdwin-session.target qdwin-compositor.service qdshell.service; do
-    install -m 0644 "$QD/deploy/$unit" "$ADMIN_USER_UNITS/$unit"
-done
 # qdlocker.service ships from the qdlocker repo (synced as $SRC/qdlocker).
 # The upstream unit hardcodes ExecStart=/usr/local/bin/qdlocker, but the
 # image pip-installs qdlocker with --prefix=/usr (above), which lands the
@@ -266,32 +282,30 @@ if [ -f "$SRC/qdlocker/pam/qdlocker" ]; then
 else
     echo "[qdistro-image]   WARN: qdlocker/pam/qdlocker not synced — unlock PAM service absent"
 fi
-# Wire qdshell + qdlocker into qdwin-session.target.wants/ so the target
-# pulls them in. (The target unit also declares Wants= for both, but the
-# .wants symlinks are how `systemctl enable` would normally materialize
-# that; we write them directly because there is no live user manager in
-# the kiwi chroot.) qdwin-session.target itself is NOT enabled under
-# default.target — the greeter's qdwin-session-launcher starts it
-# explicitly (`systemctl --user start qdwin-session.target`) after PAM
-# auth, which is the authoritative session-start path.
-for unit in qdshell.service qdlocker.service; do
+# Wire qdlocker into qdwin-session.target.wants/ so the target pulls it in.
+# (qdshell.service is already symlinked into qdwin-session.target.wants/ by
+# the VM installer above; the locker is the piece only the image build adds,
+# since qdlocker is a separate repo.) The .wants symlink is how
+# `systemctl enable` would normally materialize the target's Wants=; we
+# write it directly because there is no live user manager in the kiwi
+# chroot. qdwin-session.target itself is NOT enabled under default.target —
+# the greeter's qdwin-session-launcher starts it explicitly
+# (`systemctl --user start qdwin-session.target`) after PAM auth, which is
+# the authoritative session-start path (the runuser shim above skips the
+# target's default.target.wants symlink for exactly this reason).
+for unit in qdlocker.service; do
     [ -f "$ADMIN_USER_UNITS/$unit" ] || continue
     ln -sf "../$unit" "$ADMIN_USER_UNITS/qdwin-session.target.wants/$unit"
 done
 
-# Unify on ONE production session: the greeter launches
-# qdwin-session.target, NOT the legacy noctalia-* units. The legacy
-# installer enabled noctalia-session/-shell under default.target.wants,
-# which would auto-start a SECOND compositor at login and race
-# qdwin-session.target for the wayland-1 socket. Remove those auto-start
-# symlinks so only the greeter-driven qdwin-session.target brings up the
-# desktop. The noctalia unit FILES stay on disk for the GUI test harness
-# that greps their names; they are simply not auto-enabled (finding #15).
-for u in noctalia-session.service noctalia-shell.service; do
-    rm -f "$ADMIN_USER_UNITS/default.target.wants/$u"
-done
+# Defensive: the VM installer enables qdwin-session.target under
+# default.target for the headless spin-test path, but the image runuser
+# shim above is meant to suppress that. Belt-and-suspenders — remove any
+# default.target.wants/qdwin-session.target symlink so only the greeter-
+# driven start brings up the desktop (no race for wayland-1).
+rm -f "$ADMIN_USER_UNITS/default.target.wants/qdwin-session.target"
 chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
-echo "[qdistro-image] qdwin-session.target installed; qdshell + qdlocker wired into it; noctalia auto-start disabled"
+echo "[qdistro-image] qdwin session: VM-installer units kept; qdlocker wired into qdwin-session.target.wants; target auto-start suppressed (greeter starts it)"
 
 systemctl enable greetd.service
 # Tear down any pre-existing tty4 LXQt+labwc fallback (the passwordless escape

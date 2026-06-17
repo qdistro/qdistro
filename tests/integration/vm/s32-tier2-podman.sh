@@ -47,7 +47,7 @@ command -v podman >/dev/null 2>&1 || skip "podman not installed in this VM"
 [ -d "$TIER2_DIR" ] || skip "tier2 source not unpacked at $TIER2_DIR"
 [ -f "$COMMON_LIB_DIR/spawn-common.sh" ] || skip "spawn-common library not unpacked at $COMMON_LIB_DIR"
 
-# Outer compositor running? noctalia-session.service + qdshell user
+# Outer compositor running? qdwin-compositor.service + qdshell user
 # units are how the test VM brings up qdwin (see install-qdwin-session).
 ADMIN_UID=1000
 RUNTIME_DIR="/run/user/$ADMIN_UID"

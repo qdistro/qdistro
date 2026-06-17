@@ -1,11 +1,10 @@
 [Unit]
 Description=qdistro cursor sprite supplier for qdwin
 Documentation=https://codeberg.org/qdistro/qdistro
-# The qdshell user session is shipped as noctalia-shell.service on the
-# current image (formerly qdshell.service). List both so the dependency
-# resolves on either the old or the new image without a second drop-in.
-After=noctalia-shell.service qdshell.service
-PartOf=noctalia-shell.service qdshell.service
+# The qdshell user session ships as qdshell.service (the deploy-named
+# unit; the legacy noctalia-shell.service alias was retired 2026-06-16).
+After=qdshell.service
+PartOf=qdshell.service
 
 [Service]
 Type=simple
@@ -20,9 +19,7 @@ KillSignal=SIGTERM
 TimeoutStopSec=5
 
 [Install]
-# WantedBy accepts multiple space-separated targets. systemctl enable
-# will create a *.wants/ symlink under whichever of these units actually
-# exists; the non-existent one is logged as a warning but does not fail
-# the enable (and on a future image where the unit is renamed back, the
-# other symlink takes over automatically).
-WantedBy=noctalia-shell.service qdshell.service
+# Enabled alongside the shell: systemctl enable creates a
+# qdshell.service.wants/ symlink so the sprite supplier comes up with the
+# qdshell session.
+WantedBy=qdshell.service

@@ -14,7 +14,7 @@
 # holding lib64/libweston-14.so.0[.x.y] + lib64/libweston-14/*.so
 # (the backends). The system `weston` binary loads the core via
 # LD_LIBRARY_PATH and the backends via WESTON_MODULE_MAP — both set in
-# the noctalia-session.service unit by install-qdwin-session-for-vm.sh.
+# the qdwin-compositor.service unit by install-qdwin-session-for-vm.sh.
 # /usr/libexec/ is chosen over /usr/lib64 so the vendored .so never
 # shadows the distro's libweston-14 for any *other* weston consumer.
 #

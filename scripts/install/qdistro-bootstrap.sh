@@ -1877,8 +1877,9 @@ configure_greetd() {
         /usr/local/bin/qdwin-session-launcher
 
     # qdwin-session.target + sub-units (system-wide copy of the
-    # production target; install-qdwin-session-for-vm.sh also installs
-    # the noctalia-* per-user units used by the legacy path).
+    # production target under /etc/systemd/user/; install-qdwin-session-for-vm.sh
+    # ALSO installs per-user deploy-named copies under admin's
+    # ~/.config/systemd/user/ with the VM-specific module map / LD path).
     install -m 0644 \
         "$REPO_ROOT/qdistro/deploy/qdwin-session.target" \
         /etc/systemd/user/qdwin-session.target 2>/dev/null || true
@@ -2055,10 +2056,10 @@ main() {
         log ""
         # On the skip-greetd path the system-wide qdwin-compositor.service /
         # qdwin-session.target units (installed by configure_greetd) are NOT
-        # present. Only the per-user units from install_qdwin_session exist for
-        # admin, so the valid test command targets noctalia-shell.service.
+        # present. The per-user deploy-named units from install_qdwin_session
+        # exist for admin, so the valid test command starts the session target.
         log "To test the session before rebooting (requires loginctl enable-linger admin):"
-        log "  runuser -l admin -c 'systemctl --user start noctalia-shell.service'"
+        log "  runuser -l admin -c 'systemctl --user start qdwin-session.target'"
     fi
 }
 

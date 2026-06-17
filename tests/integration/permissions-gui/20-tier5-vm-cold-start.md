@@ -30,7 +30,7 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 # Precondition: outer compositor + qdshell up.
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
-$VMEXEC "$VM" 'runuser -u admin -- pgrep -a noctalia-shell >/dev/null'
+$VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
 
 # Precondition: nested KVM + base image + tier-5 source.
 $VMEXEC "$VM" 'test -e /dev/kvm'
