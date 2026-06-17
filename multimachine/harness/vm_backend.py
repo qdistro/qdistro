@@ -523,6 +523,66 @@ class QciVMBackend:
         self._vmexec(self._real(vm), self._as_admin(
             "systemctl --user stop mm-marker 2>/dev/null || true"), check=False)
 
+    # ---- forward-death watch ops (item 5, codex impl-26) ----------------
+    def forward_pids(self, vm: str) -> dict[int, int]:
+        """Map ``rdp_port -> pid`` for every live ``qdistro-forward`` child of
+        qdwin. ``pgrep -af`` prints ``<pid> <cmdline>``; each forward carries
+        ``--rdp-port <N>`` so we can attribute a pid to a specific view_stream
+        (item 5: kill exactly ONE forward and prove only its stream tears down)."""
+        out = self._vmexec(self._real(vm), "pgrep -af qdistro-forward",
+                          check=False)
+        ports: dict[int, int] = {}
+        for line in out.splitlines():
+            toks = line.split()
+            if not toks or not toks[0].isdigit():
+                continue
+            pid = int(toks[0])
+            if "--rdp-port" in toks:
+                i = toks.index("--rdp-port")
+                if i + 1 < len(toks) and toks[i + 1].isdigit():
+                    ports[int(toks[i + 1])] = pid
+        return ports
+
+    def kill_forward(self, vm: str, pid: int) -> None:
+        """SIGKILL one ``qdistro-forward`` child (transport death). qdwin's pidfd
+        death-watch must notice and tear down ONLY that view_stream."""
+        self._vmexec(self._real(vm), f"kill -9 {int(pid)} 2>/dev/null || true",
+                     check=False)
+
+    def pid_reaped(self, vm: str, pid: int) -> bool:
+        """True if ``pid`` is fully gone (no live process, no zombie). weston's
+        signalfd handler ``waitpid(-1)``-reaps the forward, so after death the pid
+        must leave NO ``Z`` zombie behind. ``ps -o stat=`` prints the state code
+        (or nothing if the pid is gone); a 'Z' means an unreaped zombie = FAIL."""
+        out = self._vmexec(self._real(vm),
+                           f"ps -o stat= -p {int(pid)} 2>/dev/null || true",
+                           check=False).strip()
+        return out == "" or "Z" not in out
+
+    def bystander_log(self, vm: str) -> str:
+        """The subscriber (mm-bystander) merged stdout+stderr — where the
+        ``view_stream torn_down handle=N reason="..."`` lines land (item 5's
+        viewer-visible Closed at the subscribing shell client) alongside the
+        per-approval ``HANDLE=``/``RDP_PORT=`` blocks (to map port -> handle)."""
+        return self._vmexec(self._real(vm),
+                           "cat /run/user/1000/bystander.out 2>/dev/null || true",
+                           check=False)
+
+    def qdwin_journal(self, vm: str, tail: int = 80) -> str:
+        """The mm-qdwin unit journal — corroborates the COMPOSITOR-side detection
+        ('qdistro-forward pid=N exited; tearing down view_stream ...')."""
+        return self._vmexec(self._real(vm), self._as_admin(
+            f"journalctl --user -u mm-qdwin --no-pager 2>/dev/null | tail -{int(tail)}"),
+            check=False)
+
+    def marker_unit_alive(self, vm: str, unit: str = "mm-marker") -> bool:
+        """True if a specific exported marker's ``systemd --user`` unit is still
+        active (process truth: transport death must NOT kill the source app)."""
+        out = self._vmexec(self._real(vm), self._as_admin(
+            f"systemctl --user is-active {shlex.quote(unit)} 2>/dev/null"),
+            check=False)
+        return out.strip() == "active"
+
     # ---- input-confinement ops (scenario-3, codex impl-10) --------------
     def setup_confinement_source(
         self, vm: str, *, generation: int, width: int, height: int,

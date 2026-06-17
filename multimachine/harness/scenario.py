@@ -1668,6 +1668,37 @@ class SecondViewBackend(InputConfinementBackend, Protocol):
     def marker2_alive(self, vm: str) -> bool: ...
 
 
+class ForwardDeathBackend(SecondViewBackend, Protocol):
+    """:class:`SecondViewBackend` plus the forward-death-watch probes (item 5,
+    codex impl-26): enumerate/kill ``qdistro-forward`` children, prove a killed
+    one leaves no zombie, and read the subscriber log + qdwin journal + per-marker
+    unit liveness."""
+
+    def forward_pids(self, vm: str) -> dict[int, int]: ...
+    def kill_forward(self, vm: str, pid: int) -> None: ...
+    def pid_reaped(self, vm: str, pid: int) -> bool: ...
+    def bystander_log(self, vm: str) -> str: ...
+    def qdwin_journal(self, vm: str, tail: int = 80) -> str: ...
+    def marker_unit_alive(self, vm: str, unit: str = "mm-marker") -> bool: ...
+
+
+@dataclass
+class ForwardDeathResult:
+    bundle: EvidenceBundle
+    oracle: O.OracleResult            # stream-A decoded oracle (a real LIVE stream pre-kill)
+    handle_a: int                     # subscriber handle for stream A
+    handle_b: int                     # subscriber handle for stream B
+    torn_down_a: bool                 # subscriber got torn_down(handle A, "forward exited")
+    torn_down_b_absent: bool          # NO torn_down for handle B (only A's stream died)
+    forward_a_reaped: bool            # killed forward gone + NO zombie (weston reaped it)
+    forward_b_alive: bool             # the OTHER forward untouched
+    marker_a_alive: bool              # source app A survived transport death (process truth)
+    marker_b_alive: bool              # source app B untouched
+    qdwin_detected: bool              # mm-qdwin journal shows the compositor-side teardown
+    slot_freed: bool                  # qdwin can mint a NEW stream after the failure
+    passed: bool
+
+
 @dataclass
 class SecondViewIsolationResult:
     bundle: EvidenceBundle
@@ -1891,6 +1922,242 @@ def run_second_view_isolation_slice(
             bundle, res, marker_a_delta, marker_b_positive_delta,
             marker_b_isolation_delta, marker_b_reproof_delta, marker_b_alive,
             marker_b_valid, distinct_views, passed)
+    finally:
+        if control is not None:
+            control.close()
+        backend.stop_viewer(b)
+        backend.clear_netem(a, topology.link_dev)
+        backend.destroy(a)
+        backend.destroy(b)
+
+
+def _bystander_blocks(log: str) -> list[tuple[int, int]]:
+    """Ordered ``(handle, dynamic_rdp_port)`` per approval from a qdwin-bystander
+    log. Each approval prints a block ``HANDLE=<h> ... RDP_PORT=<p> ...`` where
+    RDP_PORT is the **dynamic qdwin-allocated** port (= the forward's ``--rdp-port``
+    and the port qdwin logs in its teardown line) — NOT the fixed relay port in the
+    viewer's ``ViewStreamApproved``. Order is deterministic: the first export
+    (stream A) precedes the second (stream B), so we attribute streams by position
+    rather than by the relay port the harness happens to know."""
+    blocks: list[tuple[int, int]] = []
+    cur_handle: int | None = None
+    for line in log.splitlines():
+        line = line.strip()
+        if line.startswith("HANDLE="):
+            v = line[len("HANDLE="):].strip()
+            cur_handle = int(v) if v.isdigit() else cur_handle
+        elif line.startswith("RDP_PORT=") and cur_handle is not None:
+            v = line[len("RDP_PORT="):].strip()
+            if v.isdigit():
+                blocks.append((cur_handle, int(v)))
+                cur_handle = None
+    return blocks
+
+
+def _torn_down_handles(log: str, reason: str = "forward exited") -> set[int]:
+    """Handles for which the subscriber logged ``torn_down ... reason="<reason>"``.
+    Bystander format: ``view_stream torn_down handle=<h> reason="<r>"``."""
+    out: set[int] = set()
+    for line in log.splitlines():
+        if "torn_down" not in line or f'reason="{reason}"' not in line:
+            continue
+        for tok in line.split():
+            if tok.startswith("handle="):
+                v = tok[len("handle="):]
+                if v.isdigit():
+                    out.add(int(v))
+    return out
+
+
+def run_forward_death_slice(
+    backend: ForwardDeathBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, netem_profile: str = "lan-clean",
+    width: int = 1280, height: int = 800, marker_output_id: int = 1,
+    second_output_id: int = 2, source_handle: int = 1, second_handle: int = 2,
+    control_port: int = 5556, relay_b_port: int = 5560,
+    viewer_control_host: str = "10.0.2.2", viewer_rdp_host: str = "10.0.2.2",
+    exported_a_telemetry: str = "/run/mm-a/exported-a.json",
+    exported_b_telemetry: str = "/run/mm-a/exported-b.json",
+) -> ForwardDeathResult:
+    """Drive the **forward-death watch** gate (item 5, codex impl-26) — prove that
+    when a ``qdistro-forward`` transport child dies ON ITS OWN, qdwin's pidfd
+    death-watch notices, tears down ONLY that view_stream, and emits a
+    subscriber-visible ``torn_down("forward exited")`` — while the SOURCE app and
+    every OTHER stream are untouched.
+
+    Two concurrent input-capable exports from ONE qdwin (marker-A on output 1,
+    marker-B on output 2; each forward live). A real VM-B viewer decodes stream-A
+    (anti-fake: the decoded oracle proves stream-A is a genuinely LIVE remote
+    stream BEFORE the kill). Then ``SIGKILL`` forward-A only and assert:
+
+    - **torn_down_a** — the subscriber (mm-bystander) receives exactly one
+      ``torn_down`` for stream-A's handle with reason ``"forward exited"``.
+    - **torn_down_b_absent** — stream-B's handle gets NO torn_down (per-stream).
+    - **forward_a_reaped** — the killed forward is gone with NO zombie (weston's
+      signalfd ``waitpid(-1)`` reaped it; qdwin's pidfd fired without qdwin
+      waiting). **forward_b_alive** — the other forward is untouched.
+    - **marker_a_alive / marker_b_alive** — both source toplevels' units stay
+      active: transport death is NOT app death (process truth).
+    - **qdwin_detected** — mm-qdwin's journal shows the compositor-side teardown.
+    - **slot_freed** — qdwin can mint a NEW stream after the failure (the torn-down
+      stream's slot/port freed; the list/resource teardown didn't poison qdwin).
+
+    Honesty: geometry/protocol/seat/process/lifecycle only — the proof signals are
+    a real protocol event (torn_down) + OS process truth (pid gone, no zombie, app
+    units alive), never "looks closed". Captured BEFORE the resubscribe (which
+    restarts the singleton bystander and would wipe the evidence).
+    """
+    profile(netem_profile)
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="11-mm-forward-death-watch", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a, topology.vm_b],
+                            netem_profile=netem_profile,
+                            description="Phase-1 forward-death watch (item 5)"))
+
+    a = backend.spin(topology.vm_a)
+    b = backend.spin(topology.vm_b)
+    control: ControlServer | None = None
+    status_file = "/run/mm-b/viewer-status.json"
+    try:
+        backend.apply_netem(a, topology.link_dev, netem_profile)
+
+        # two concurrent input-capable exports from ONE qdwin.
+        approved_a = backend.setup_confinement_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_a_telemetry,
+            sentinel_telemetry="/run/mm-a/unused-sentinel.json",
+            exported_label="exported-a", sentinel_label="sentinel", allow_input=1)
+        approved_b = backend.setup_second_export(
+            a, generation=generation, width=width, height=height,
+            output_id=second_output_id, telemetry=exported_b_telemetry,
+            label="exported-b", relay_port=relay_b_port, allow_input=1)
+        src_a = SourceWindowInfo(window_id=source_handle, source_machine=topology.vm_a,
+                                 title="marker-a", app_id="qdwin-marker-client",
+                                 req_w=width, req_h=height)
+        announce_a = bridge_approved(approved_a, src_a, generation)
+
+        # ---- bring up the VM-B viewer on stream-A + decoded oracle (LIVE proof) --
+        control = ControlServer(port=control_port)
+        backend.launch_viewer(
+            b, control_host=viewer_control_host, control_port=control.port,
+            rdp_host=viewer_rdp_host, rdp_port=approved_a.rdp_port,
+            generation=generation, otp=approved_a.rdp_password,
+            size=f"{width}x{height}", status_file=status_file)
+        control.accept()
+        control.send(announce_a)
+        _poll(lambda: backend.viewer_status(b),
+              lambda s: s.get("status") == "connected" and s.get("windows"))
+
+        vm_b_screen = next(s.screen_index for s in topology.screens.screens
+                           if s.vm == topology.vm_b)
+        decoded = bundle.root / "captures" / "vm-b-forward-death.ppm"
+        decoded.parent.mkdir(parents=True, exist_ok=True)
+        backend.await_decode(b)
+        layout = M.compute_layout(width, height)
+        res = O.OracleResult(ok=False, payload=None, payload_error="no capture")
+        import time as _t
+        for _ in range(8):
+            backend.capture(b, vm_b_screen, decoded)
+            res = O.evaluate(load_image(decoded), layout, 1.0, tol=O.TOL_RDP,
+                             auto_origin=True, active_generation=generation,
+                             expect_output_id=marker_output_id)
+            if res.ok:
+                break
+            _t.sleep(0.4)
+        cap = Capture(path=str(decoded.relative_to(bundle.root)),
+                      capture_class=CaptureClass.VM_B_HOST.value,
+                      output_id=marker_output_id,
+                      role="VM-B monitor (forward-death watch, stream-A live pre-kill)",
+                      fmt="PPM", scale=1.0)
+        bundle.manifest.captures.append(cap)
+        bundle.add_oracle(OracleRecord(
+            capture=cap.path, ok=res.ok,
+            output_id=res.payload.output_id if res.payload else None,
+            generation=res.payload.generation if res.payload else None,
+            frame=res.payload.frame if res.payload else None,
+            measured_scale=res.measured_scale, hidden_scaling=res.hidden_scaling,
+            stale_generation=res.stale_generation,
+            bad_bands=[x.name for x in res.bands if not x.ok], notes=res.notes))
+
+        # viewer's job (proving the stream was live) is done; stop it so its own
+        # freerdp teardown doesn't race the forward-death observation.
+        backend.stop_viewer(b)
+
+        # ---- map streams->handles/dynamic-ports->pids; record pre-kill state ----
+        # The viewer's approved.rdp_port is the FIXED relay port; the subscriber log
+        # + the forward's --rdp-port use the DYNAMIC qdwin port. Attribute streams by
+        # approval ORDER (A first, B second) and key pids by the dynamic port.
+        pre_log = backend.bystander_log(a)
+        blocks = _bystander_blocks(pre_log)
+        pids = backend.forward_pids(a)
+        handle_a = handle_b = -1
+        dynport_a = dynport_b = 0
+        pid_a = pid_b = 0
+        if len(blocks) >= 2:
+            (handle_a, dynport_a), (handle_b, dynport_b) = blocks[0], blocks[1]
+            pid_a = pids.get(dynport_a, 0)
+            pid_b = pids.get(dynport_b, 0)
+        pre_torn = _torn_down_handles(pre_log)
+        # sanity: both forwards live, distinct handles, nothing torn down yet.
+        pre_ok = (pid_a > 0 and pid_b > 0 and handle_a >= 0 and handle_b >= 0
+                  and handle_a != handle_b and not pre_torn)
+
+        # ---- KILL forward-A only -----------------------------------------------
+        torn_down_a = forward_a_reaped = False
+        torn_down_b_absent = forward_b_alive = marker_a_alive = marker_b_alive = False
+        qdwin_detected = slot_freed = False
+        if pre_ok:
+            backend.kill_forward(a, pid_a)
+            # poll the subscriber log for stream-A's torn_down("forward exited").
+            post_log = _poll(
+                lambda: backend.bystander_log(a),
+                lambda lg: handle_a in _torn_down_handles(lg),
+                tries=40, delay=0.25)
+            torn = _torn_down_handles(post_log)
+            torn_down_a = handle_a in torn
+            torn_down_b_absent = handle_b not in torn
+            # the killed forward must be GONE with no zombie; the other untouched.
+            post_pids = backend.forward_pids(a)
+            forward_a_reaped = (dynport_a not in post_pids
+                                and backend.pid_reaped(a, pid_a))
+            forward_b_alive = (dynport_b in post_pids
+                               and post_pids.get(dynport_b) == pid_b)
+            # process truth: both source apps survived the transport death.
+            marker_a_alive = backend.marker_unit_alive(a, "mm-marker")
+            marker_b_alive = backend.marker_unit_alive(a, "mm-marker2")
+            # compositor-side corroboration in the qdwin journal (it logs the
+            # DYNAMIC rdp_port in its 'tearing down view_stream rdp_port=N' line).
+            jr = backend.qdwin_journal(a)
+            qdwin_detected = ("forward exited" in jr and str(dynport_a) in jr)
+            # FINALLY (evidence already captured): prove qdwin still mints streams.
+            # NB resubscribe restarts the singleton bystander → wipes bystander.out,
+            # so this MUST come after every bystander-log assertion above.
+            fresh = backend.resubscribe(a)
+            slot_freed = bool(fresh and fresh.rdp_port)
+
+        passed = bool(res.ok and pre_ok and torn_down_a and torn_down_b_absent
+                      and forward_a_reaped and forward_b_alive and marker_a_alive
+                      and marker_b_alive and qdwin_detected and slot_freed)
+        if passed:
+            bundle.assert_remote_proof()
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"forward-death watch (item 5): killed forward-A pid={pid_a} "
+            f"(rdp_port={dynport_a}, handle={handle_a}); subscriber got "
+            f'torn_down("forward exited")={torn_down_a}; stream-B (handle={handle_b}) '
+            f"torn_down_absent={torn_down_b_absent}; forward-A reaped (no zombie)="
+            f"{forward_a_reaped}; forward-B alive={forward_b_alive}; marker-A alive="
+            f"{marker_a_alive}; marker-B alive={marker_b_alive} (transport death is "
+            f"NOT app death); qdwin journal detected teardown={qdwin_detected}; "
+            f"qdwin minted a fresh stream after the failure={slot_freed}. pidfd "
+            "death-watch proven: weston owns SIGCHLD/waitpid(-1), qdwin learns of "
+            "the death via pidfd readiness and tears down exactly one stream.")
+        bundle.write()
+        return ForwardDeathResult(
+            bundle, res, handle_a, handle_b, torn_down_a, torn_down_b_absent,
+            forward_a_reaped, forward_b_alive, marker_a_alive, marker_b_alive,
+            qdwin_detected, slot_freed, passed)
     finally:
         if control is not None:
             control.close()
