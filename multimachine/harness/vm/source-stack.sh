@@ -139,6 +139,106 @@ if [ "$MODE" = export2 ]; then
   exit 0
 fi
 
+# MODE=claimant: the COMPOSITOR-BOUNDARY direct-claimant gate (A1, session 7).
+# qdwin spawns `qdwin-stream-claimant` IN PLACE of qdistro-forward (selected via
+# the trusted QDWIN_FORWARD_BIN seam), so the per-stream access token is claimed
+# and inject_* is driven DIRECTLY against qdwin_stream_input_v1 — NO FreeRDP / RDP
+# shadow server / remote viewer, so a failure is unambiguously compositor-side.
+# The claimant claims on spawn, runs the negative protocol checks (already_claimed,
+# invalid_token), then GATES its inject on a GO file so we can bring the confinement
+# SENTINEL up first (its zero-delta is only non-vacuous if it is live during inject).
+if [ "$MODE" = claimant ]; then
+  CLAIMANT_BIN=${CLAIMANT_BIN:-$(command -v qdwin-stream-claimant || true)}
+  if [ -z "$CLAIMANT_BIN" ]; then echo "FAIL: qdwin-stream-claimant not found in PATH"; exit 9; fi
+  STATUS=${CLAIMANT_STATUS:-$XDG_RUNTIME_DIR/claimant-status.json}
+  GO=${CLAIMANT_GO:-$XDG_RUNTIME_DIR/claimant-go}
+  INJ_X=${INJECT_X:-$((W/2))}; INJ_Y=${INJECT_Y:-$((H/2))}
+  # Clean prior run (qdwin + units + claimant artifacts).
+  systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay \
+    mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
+  systemctl --user reset-failed mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
+  sleep 1
+  rm -f "$XDG_RUNTIME_DIR/$SOCK" "$XDG_RUNTIME_DIR/$SOCK.lock" "$STATUS" "$STATUS.tmp" "$GO" 2>/dev/null
+
+  cat > "$XDG_RUNTIME_DIR/mm-weston.ini" <<EOF
+[core]
+shell=/usr/lib64/weston/qdwin-shell.so
+idle-time=0
+[shell]
+locking=false
+[pipewire]
+num-outputs=4
+EOF
+
+  MM="/usr/lib64/libweston-14"
+  WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
+  # qdwin inherits the QDWIN_CLAIMANT_* env → passes it to the spawned claimant.
+  RUN --unit=mm-qdwin --setenv=QDWIN_ALLOWED_UID=1000 --setenv=QDWIN_ALLOWED_LOCKER_ANY=1 \
+    --setenv="WESTON_MODULE_MAP=$WMAP" \
+    --setenv="QDWIN_FORWARD_BIN=$CLAIMANT_BIN" \
+    --setenv="QDWIN_CLAIMANT_STATUS=$STATUS" --setenv="QDWIN_CLAIMANT_GO=$GO" \
+    --setenv="QDWIN_CLAIMANT_INJECT_X=$INJ_X" --setenv="QDWIN_CLAIMANT_INJECT_Y=$INJ_Y" \
+    ${SI_DEBUG:+--setenv=QDWIN_STREAM_INPUT_DEBUG=1} \
+    weston --backend=headless-backend.so --backend=pipewire-backend.so --renderer=pixman \
+      --config="$XDG_RUNTIME_DIR/mm-weston.ini" \
+      --width=$W --height=$H --socket=$SOCK >/dev/null 2>&1
+  for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/$SOCK" ] && break; sleep 0.2; done
+  if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: qdwin socket never appeared"; journalctl --user -u mm-qdwin --no-pager|tail -20; exit 7; fi
+  echo "claimant-gate: qdwin up; QDWIN_FORWARD_BIN=$CLAIMANT_BIN"
+
+  # Bystander first (--subscribe last catches the exported marker), input-capable.
+  rm -f "$XDG_RUNTIME_DIR/bystander.out"
+  RUN --unit=mm-bystander --setenv=WAYLAND_DISPLAY=$SOCK \
+    bash -c "qdwin-bystander --subscribe last --allow-input > $XDG_RUNTIME_DIR/bystander.out 2>&1"
+  sleep 1.5
+
+  # Exported marker (fullscreen, animating, writing per-seat telemetry).
+  TEL_ARG=""; [ -n "$EXPORTED_TELEMETRY" ] && TEL_ARG="--telemetry $EXPORTED_TELEMETRY --label $EXPORTED_LABEL"
+  RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
+    qdwin-marker-client --width $W --height $H --output-id 1 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS --fullscreen $TEL_ARG
+
+  # Subscribe approval = qdwin spawned the claimant (=our "forward").
+  RDP_PORT=$(discover_rdp_port "$XDG_RUNTIME_DIR/bystander.out")
+  if [ -z "$RDP_PORT" ]; then echo "FAIL: no RDP_PORT approved (claimant not spawned)"; echo "--- bystander.out ---"; cat "$XDG_RUNTIME_DIR/bystander.out"; exit 8; fi
+
+  # Wait for the claimant to report a successful real claim (fail-closed).
+  CLAIMED=0
+  for _ in $(seq 1 50); do
+    if grep -q '"claim_real":1' "$STATUS" 2>/dev/null; then CLAIMED=1; break; fi
+    sleep 0.3
+  done
+  if [ "$CLAIMED" != 1 ]; then echo "FAIL: claimant did not report claim_real"; echo "--- status ---"; cat "$STATUS" 2>/dev/null; echo "--- mm-qdwin tail ---"; journalctl --user -u mm-qdwin --no-pager|tail -20; exit 11; fi
+
+  # Sentinel up BEFORE the GO (must be live + binding seats during inject). It is
+  # FULLSCREEN on output 2 and mapped AFTER the source marker, so on the headless
+  # pipewire backend (outputs overlap at the global origin) it covers the SAME
+  # global region as the source view, stacked ON TOP — i.e. it DELIBERATELY
+  # overlaps the injected point. Before the IMPL-19 focus-lock fix this stole the
+  # injected press (notify_motion_absolute re-picked focus to the topmost view);
+  # with the fix the per-stream grab keeps focus on the source view, so the press
+  # reaches the source marker and the (overlapping) sentinel stays at delta 0.
+  if [ -n "$SENTINEL_TELEMETRY" ]; then
+    RUN --unit=mm-sentinel --setenv=WAYLAND_DISPLAY=$SOCK \
+      qdwin-marker-client --width $W --height $H --output-id 2 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS --fullscreen --telemetry $SENTINEL_TELEMETRY --label $SENTINEL_LABEL
+    sleep 1.5
+    if ! systemctl --user is-active mm-sentinel >/dev/null 2>&1; then echo "FAIL: sentinel did not start"; journalctl --user -u mm-sentinel --no-pager|tail -10; exit 9; fi
+  fi
+
+  # Release the inject.
+  : > "$GO"
+  # Wait for the claimant to report the inject was sent.
+  INJECTED=0
+  for _ in $(seq 1 50); do
+    if grep -q '"inject_sent":1' "$STATUS" 2>/dev/null; then INJECTED=1; break; fi
+    sleep 0.3
+  done
+  if [ "$INJECTED" != 1 ]; then echo "FAIL: claimant did not report inject_sent"; echo "--- status ---"; cat "$STATUS" 2>/dev/null; exit 12; fi
+  sleep 1   # let the marker's atomic telemetry settle
+  echo "--- claimant status ---"; cat "$STATUS" 2>/dev/null
+  echo "SETUP_OK RDP_PORT=$RDP_PORT STATUS=$STATUS"
+  exit 0
+fi
+
 # Clean prior run (incl. the 2nd-export units so a crashed prior run can't poison
 # this one — codex impl-16; esp. mm-relay2 holding port 5560).
 systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay \

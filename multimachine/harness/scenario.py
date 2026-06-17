@@ -977,6 +977,176 @@ def run_input_negative_control_slice(
 
 
 # ==========================================================================
+# Scenario-3d: compositor-boundary DIRECT-CLAIMANT gate (A1, session 7)
+# ==========================================================================
+class DirectClaimantBackend(InputConfinementBackend, Protocol):
+    """:class:`InputConfinementBackend` plus the direct-claimant op (A1): bring up
+    a single-VM source where qdwin spawns ``qdwin-stream-claimant`` in place of
+    ``qdistro-forward`` (the trusted ``QDWIN_FORWARD_BIN`` seam), claims the
+    per-stream token, and drives ``qdwin_stream_input_v1`` inject directly."""
+
+    def setup_claimant_source(
+        self, vm: str, *, generation: int, width: int, height: int,
+        exported_telemetry: str, sentinel_telemetry: str,
+        exported_label: str, sentinel_label: str) -> dict: ...
+
+    def read_claimant_status(self, vm: str, path: str) -> dict: ...
+
+
+@dataclass
+class DirectClaimantResult:
+    bundle: EvidenceBundle
+    # claimant self-report (fail-closed witness that the claim path ran):
+    claim_real: bool          # claim(real token) succeeded
+    already_claimed: bool     # 2nd claim of the same token → already_claimed error
+    invalid_token: bool       # claim(bogus token) → invalid_token error
+    inject_sent: bool         # motion+button injected on the live handle
+    # the real proof (marker telemetry, NOT the claimant's word):
+    exported_press_delta: int # presses the EXPORTED marker received (must be > 0)
+    sentinel_press_delta: int # presses the SENTINEL received (must be 0)
+    pressed_seat_name: str | None   # wl_seat.name that got the press
+    expected_seat_name: str         # "qdwin-stream-<rdp_port>" (the per-stream seat)
+    seat_identity_ok: bool          # the press landed on the per-stream seat
+    exported_alive: bool
+    exported_valid: bool
+    sentinel_alive: bool
+    status: dict
+    exported_after: dict
+    sentinel_after: dict
+    passed: bool
+
+
+def _pressed_seat(telemetry: dict) -> dict | None:
+    """The seat in a marker's telemetry that received an injected BUTTON press
+    (the per-stream seat the claimant drove). Picks the seat with the most
+    presses; ties broken by pointer motion (the injected motion rode the same
+    seat)."""
+    best = None
+    for seat in (telemetry.get("seats") or []):
+        if not isinstance(seat, dict):
+            continue
+        if int(seat.get("button_press", 0) or 0) > 0:
+            if (best is None
+                    or seat["button_press"] > best["button_press"]
+                    or (seat["button_press"] == best["button_press"]
+                        and int(seat.get("pointer_motion", 0) or 0)
+                        > int(best.get("pointer_motion", 0) or 0))):
+                best = seat
+    return best
+
+
+def run_direct_claimant_slice(
+    backend: DirectClaimantBackend, topology: Topology, *, generation: int,
+    bundle_dir: Path | str, width: int = 1280, height: int = 800,
+    exported_telemetry: str = "/run/user/1000/exported.json",
+    sentinel_telemetry: str = "/run/user/1000/sentinel.json",
+) -> DirectClaimantResult:
+    """Drive the **compositor-boundary direct-claimant** gate (A1, codex
+    impl-17/impl-18). A SINGLE-VM gate: qdwin spawns ``qdwin-stream-claimant`` in
+    place of ``qdistro-forward`` (the trusted ``QDWIN_FORWARD_BIN`` seam), so the
+    real one-shot per-stream access token is claimed and ``inject_*`` is driven
+    DIRECTLY against ``qdwin_stream_input_v1`` — with NO FreeRDP / RDP shadow
+    server / remote viewer in the loop. A failure is therefore unambiguously
+    compositor-side; this narrows the Phase-1 isolation claim to the compositor
+    boundary the live two-VM gates prove end to end.
+
+    The honesty here does NOT rest on the claimant's self-report. Because this is
+    single-VM with NO other input path (no ydotool, no RDP, no production
+    forward), the ONLY way the exported marker can register a BUTTON PRESS is the
+    claimant's ``inject_pointer_button`` through the claimed per-stream handle —
+    which qdwin routes exclusively through the source view's per-stream
+    ``weston_seat``. So the gate asserts, all of:
+
+      - the marker's per-seat PRESS delta > 0 AND it landed on the seat named
+        ``qdwin-stream-<rdp_port>`` (the per-stream seat — the strongest fence
+        that the event went through the stream handle, not an ambient seat);
+      - the LOCAL sentinel's press delta == 0 (confinement), with the sentinel
+        proven LIVE + writing well-formed telemetry (a dead/absent sentinel is a
+        HARD FAIL, never a vacuous 0);
+      - the negative protocol contract held: a 2nd claim of the same token →
+        ``already_claimed``; a bogus token → ``invalid_token``;
+      - the claimant reported a successful real claim + a sent inject.
+
+    (The ``not_claimed`` error is unreachable by construction — an inject handle
+    only exists after a successful claim, and a failed claim is a fatal protocol
+    error — so it is documented, not asserted.) NOT a remote-monitor claim: this
+    gate says nothing about what a peer screen shows, so ``assert_remote_proof``
+    deliberately does not apply."""
+    bundle = EvidenceBundle.create(
+        bundle_dir, scenario="10-mm-direct-claimant", step="static",
+        generation=generation,
+        topology=EvTopology(vms=[topology.vm_a],
+                            netem_profile="none",
+                            description="Phase-1 compositor-boundary direct-claimant gate"))
+
+    a = backend.spin(topology.vm_a)
+    try:
+        result = backend.setup_claimant_source(
+            a, generation=generation, width=width, height=height,
+            exported_telemetry=exported_telemetry,
+            sentinel_telemetry=sentinel_telemetry,
+            exported_label="exported", sentinel_label="sentinel")
+        status = result.get("status") or {}
+        rdp_port = int(result.get("rdp_port") or 0)
+
+        exported_after = backend.read_telemetry(a, exported_telemetry)
+        sentinel_after = backend.read_telemetry(a, sentinel_telemetry)
+
+        claim_real = bool(status.get("claim_real"))
+        already_claimed = bool(status.get("already_claimed"))
+        invalid_token = bool(status.get("invalid_token"))
+        inject_sent = bool(status.get("inject_sent"))
+
+        # The marker is fresh and the claimant is the ONLY input source, so its
+        # press total IS the injected-press delta from a 0 baseline.
+        exported_delta = _press_total(exported_after)
+        sentinel_delta = _press_total(sentinel_after)
+
+        pressed = _pressed_seat(exported_after)
+        pressed_seat_name = (pressed.get("seat_name") if pressed else None) or None
+        expected_seat_name = f"qdwin-stream-{rdp_port}" if rdp_port else ""
+        seat_identity_ok = bool(
+            pressed_seat_name and expected_seat_name
+            and pressed_seat_name == expected_seat_name)
+
+        exported_alive = backend.source_alive(a)
+        exported_valid = isinstance(exported_after.get("totals"), dict)
+        # the sentinel must be a REAL, live, telemetry-writing client for its zero
+        # to mean anything (fail-closed; codex impl-18).
+        sentinel_valid = (isinstance(sentinel_after.get("totals"), dict)
+                          and int(sentinel_after.get("seats_seen", 0) or 0) >= 1)
+        sentinel_alive = sentinel_valid
+
+        passed = bool(
+            claim_real and already_claimed and invalid_token and inject_sent
+            and exported_alive and exported_valid and exported_delta > 0
+            and seat_identity_ok
+            and sentinel_alive and sentinel_valid and sentinel_delta == 0)
+
+        bundle.manifest.passed = passed
+        bundle.manifest.notes.append(
+            f"compositor-boundary direct-claimant gate (A1): qdwin spawned "
+            f"qdwin-stream-claimant in place of qdistro-forward; it claimed the "
+            f"real per-stream token and injected motion+button DIRECTLY via "
+            f"qdwin_stream_input_v1 (no FreeRDP/RDP/viewer). exported press delta="
+            f"{exported_delta} (>0) on seat '{pressed_seat_name}' "
+            f"(expected '{expected_seat_name}', match={seat_identity_ok}); sentinel "
+            f"press delta={sentinel_delta} (==0, alive={sentinel_alive}); negatives: "
+            f"already_claimed={already_claimed}, invalid_token={invalid_token}; "
+            f"claim_real={claim_real}, inject_sent={inject_sent}, "
+            f"exported_alive={exported_alive}. Narrows the per-stream input-seat "
+            "isolation claim to the compositor boundary.")
+        bundle.write()
+        return DirectClaimantResult(
+            bundle, claim_real, already_claimed, invalid_token, inject_sent,
+            exported_delta, sentinel_delta, pressed_seat_name, expected_seat_name,
+            seat_identity_ok, exported_alive, exported_valid, sentinel_alive,
+            status, exported_after, sentinel_after, passed)
+    finally:
+        backend.destroy(a)
+
+
+# ==========================================================================
 # Scenario-3c: coordinate-fidelity gate (codex impl-11 deferred; session 6)
 # ==========================================================================
 @dataclass

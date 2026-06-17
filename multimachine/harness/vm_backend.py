@@ -567,6 +567,51 @@ class QciVMBackend:
         if "SENTINEL_OK" not in out:
             raise RuntimeError(f"sentinel did not start:\n{out}")
 
+    def setup_claimant_source(
+        self, vm: str, *, generation: int, width: int, height: int,
+        exported_telemetry: str, sentinel_telemetry: str,
+        exported_label: str, sentinel_label: str) -> dict:
+        """Bring up the COMPOSITOR-BOUNDARY direct-claimant gate on VM-A (A1,
+        session 7; MODE=claimant). qdwin spawns ``qdwin-stream-claimant`` IN PLACE
+        of ``qdistro-forward`` (the trusted ``QDWIN_FORWARD_BIN`` seam), so the
+        per-stream access token is claimed and ``inject_*`` is driven DIRECTLY
+        against ``qdwin_stream_input_v1`` — NO FreeRDP / RDP / remote viewer. The
+        script keeps the sentinel up BEFORE releasing the claimant's GO-gated
+        inject, then returns once the claimant reports the inject was sent.
+
+        Returns ``{"status": <claimant status JSON>, "rdp_port": <int>}`` — the
+        rdp_port lets the caller cross-check the marker's pressed-seat identity is
+        ``qdwin-stream-<rdp_port>`` (the per-stream seat)."""
+        real = self._real(vm)
+        self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
+                   "/tmp/mm-source-stack.sh")
+        status_path = "/run/user/1000/claimant-status.json"
+        env = (f"MODE=claimant W={width} H={height} GEN={generation} "
+               f"ANIMATE_MS=200 CLAIMANT_STATUS={shlex.quote(status_path)} "
+               f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
+               f"EXPORTED_LABEL={shlex.quote(exported_label)} "
+               f"SENTINEL_TELEMETRY={shlex.quote(sentinel_telemetry)} "
+               f"SENTINEL_LABEL={shlex.quote(sentinel_label)}")
+        out = self._vmexec(real, self._as_admin(
+            f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)
+        if "SETUP_OK" not in out:
+            raise RuntimeError(f"claimant source-stack did not report SETUP_OK:\n{out}")
+        rdp_port = 0
+        for line in out.splitlines():
+            if line.startswith("SETUP_OK"):
+                import re
+                m = re.search(r"RDP_PORT=(\d+)", line)
+                if m:
+                    rdp_port = int(m.group(1))
+        return {"status": self.read_claimant_status(vm, status_path),
+                "rdp_port": rdp_port}
+
+    def read_claimant_status(self, vm: str, path: str) -> dict:
+        """Read + parse the direct claimant's status JSON from the guest (the
+        fail-closed witness that the claim path ran + the negative protocol checks
+        held). Empty dict if absent/unwritten."""
+        return self.read_telemetry(vm, path)
+
     def read_telemetry(self, vm: str, path: str) -> dict:
         """Read + parse a marker's per-seat input telemetry JSON from the guest
         (empty dict if absent/unwritten)."""
