@@ -20,7 +20,7 @@ from qdistro_lineage import (
     record_chokepoint,
     report_processing_host,
 )
-from qdistro_lineage_store import LineageStore
+from qdistro_lineage_store import Entity, LineageStore
 
 
 @pytest.fixture
@@ -269,6 +269,9 @@ def test_chokepoint_is_atomic_on_failure(store):
 def test_chokepoint_records_keep_chain_intact(store):
     record_chokepoint(store, chokepoint="clipboard", inputs=[_local_only_input()],
                       output_eid="file:p")
+    # declassify fails closed on an unrecorded source, so seed it first.
+    store.record_entity(Entity(eid="file:secret", kind="file",
+                               guards=frozenset({"local-only"})))
     declassify(store, source_eid="file:secret", output_eid="ex:1",
                residual_guards=[], authority_gid="cred:a")
     assert store.verify_chain() is True

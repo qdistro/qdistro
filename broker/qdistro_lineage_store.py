@@ -117,6 +117,7 @@ ACTIVITY_KINDS = frozenset(
         "commit",
         "sanitize",
         "declassify",
+        "reclassify",
         "recall-query",
         "recall-export",
         "credential-use",

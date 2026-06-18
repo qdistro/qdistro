@@ -316,7 +316,25 @@ def declassify(
     output refs, transform, the approving authority, and the residual security
     fields, and emit an ``actedOnBehalfOf`` edge from the workflow agent to the
     approving authority. Returns the new output eid.
+
+    AUTHORITY CONTRACT (codex review 2026-06-18): this function performs the
+    *mechanics* of a declassification; it does NOT itself enforce the
+    capability/delegation gate. The supported, authority-checked entry point is
+    :meth:`qdistro_security_mutation.SecurityMutator.reclassify` (NARROW path),
+    which runs the per-field/wildcard delegation gate AND requires an approving
+    authority + ``declassify`` verdict before calling here. Do not call
+    ``declassify`` directly from an unauthenticated or ungated surface — a caller
+    that can do so is as trusted as one that can write the lineage store. As a
+    minimal guard against a mistaken caller, a non-empty ``authority_gid`` and an
+    EXISTING source entity are required (fail closed: you cannot declassify a
+    source that was never recorded).
     """
+    if not authority_gid:
+        raise ValueError("declassify requires a non-empty approving authority_gid")
+    if store.get_entity(source_eid) is None:
+        raise ValueError(
+            f"cannot declassify unknown source entity {source_eid!r} "
+            "(no recorded snapshot)")
     ts = now if now is not None else int(time.time())
     out_eid = output_eid or _gen_id("entity")
     aid = _gen_id("activity")

@@ -145,6 +145,35 @@ Immutable after record creation:
 - artifact hashes in receipts;
 - declassification evidence.
 
+### Who may mutate (capability-based delegation)
+
+The admin app holds the right to mutate security fields by default. Because
+mutating security fields is legitimately part of workflows (silo deployment /
+promotion, declassification), there is a capability-based delegation layer rather
+than an "admin-app only" rule:
+
+- a grant maps a principal to a set of mutation scopes, each either a single
+  field (`security.guards`, `security.compartments`, `security.conflictClasses`,
+  `security.sensitivity`, `security.declassification`) or a wildcard
+  (`security.*` for all security fields, `*` unrestricted);
+- the broker checks grants fail-closed: the admin app is allowed by default;
+  every other principal must hold a scope matching every field the change
+  touches, or the whole mutation is denied with no write. Scope matching is
+  exact-or-explicit-wildcard only — no prefix/parent matching, and an unknown
+  field token can never be granted;
+- a principal may only delegate (grant/revoke) a capability it itself holds (the
+  admin app may delegate anything); you cannot mint a wildcard from a narrower
+  grant;
+- grants and revokes are append-only sealed assertions (audit-immutable): a
+  revoke is a new event, never a rewrite, and the effective scope set is replayed
+  from the log. Every mutation records, in its sealed evidence, which scope
+  authorised it (`delegated_via`).
+
+This is independent of the NARROW (declassification) authority+verdict rule: a
+delegated principal that narrows guards still needs both a matching grant AND an
+approving authority + `declassify` verdict — the grant does not substitute for
+declassification authority, nor vice versa.
+
 ## MCS Mapping
 
 SELinux MCS categories may back selected compartment decisions at runtime, but
