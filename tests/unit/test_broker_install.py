@@ -54,6 +54,42 @@ def test_broker_installer_ships_upload_lineage_dependencies() -> None:
         assert name in text
 
 
+def test_broker_installer_ships_silo_security_resolver() -> None:
+    """The silo->security-snapshot resolver module and its authority registry
+    template must ship: the broker imports qdistro_silo_security at runtime, and
+    the registry file is the production authority the resolver reads from."""
+    text = _INSTALLER.read_text()
+    assert "qdistro_silo_security.py" in text
+    assert "silo-security.toml" in text
+
+
+def test_silo_security_imports_from_installed_module_set() -> None:
+    """Smoke: importing ``qdistro_silo_security`` with ONLY the installed broker
+    modules on sys.path must succeed (it depends on qdistro_resolver,
+    qdistro_guard_registry, qdistro_metadata_schema, qdistro_proc_identity)."""
+    import subprocess
+    import tempfile
+
+    shipped = _installed_broker_modules()
+    with tempfile.TemporaryDirectory() as dest:
+        dest_path = Path(dest)
+        for name in shipped:
+            src = _BROKER_SRC / name
+            if src.exists():
+                (dest_path / name).write_bytes(src.read_bytes())
+        proc = subprocess.run(
+            [sys.executable, "-c", "import qdistro_silo_security"],
+            cwd=str(dest_path),
+            env={"PYTHONPATH": str(dest_path), "PATH": ""},
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, (
+            "qdistro_silo_security failed to import from the installed module "
+            f"set (missing transitive dep?):\n{proc.stderr}"
+        )
+
+
 def _installed_broker_modules() -> set[str]:
     """The .py broker modules the installer copies into DEST (parsed from the
     two `install`/`for f in ... .py` blocks). Used to reconstruct the runtime

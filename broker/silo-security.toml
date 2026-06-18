@@ -1,0 +1,54 @@
+# Silo -> security-snapshot store: the v1 BOOTSTRAP backing for the central
+# snapshot authority (qdistro_silo_security.TomlSnapshotAuthority).
+#
+# The broker reaches the central silo-snapshot store through the
+# SnapshotAuthority seam; in v1 that authority is backed by THIS file. It maps a
+# launcher-attested silo name to its authoritative
+# {guards, compartments, conflict_classes} security snapshot, and that snapshot
+# feeds guard enforcement / lineage guard inheritance (record_chokepoint).
+#
+# This file is the v1 BOOTSTRAP store, NOT the design end state: per
+# todo/decisions/silo-snapshot-authority-control-plane.md, a future control-plane
+# daemon (Kubernetes-style: desired+observed snapshot repository, reconcile loop,
+# cross-machine silo migration) will own/populate the central store behind the
+# same seam. Until then this file is admin/packaging-maintained.
+#
+# It is NOT the illustrative taxonomy in doc/resources.md / doc/guards.md — those
+# examples are non-final and are NEVER loaded as authority.
+#
+# Safety contract (enforced by the loader, fail-closed):
+#   * this file MUST be root-owned and NOT group/world-writable (a writable file
+#     would let the writer mint guards/compartments). Install it 0644 root:root.
+#   * each [silo.<name>] table may carry ONLY: guards, compartments,
+#     conflict_classes. An unknown key (e.g. a typo'd "compartment") rejects the
+#     WHOLE file.
+#   * every guard MUST be in RESERVED_GUARDS (currently: local-only,
+#     no-cross-contaminate). An unknown guard string rejects the whole file — a
+#     guard must land in RESERVED_GUARDS + the behavioural registry before a
+#     config may use it.
+#   * compartment / conflict-class / silo names are lowercase DNS-label-ish slugs.
+#
+# A silo NOT listed here resolves to state="unresolved" (unknown, NOT clean) —
+# the fail-closed default. An EMPTY file (no [silo.*] tables) is valid and means
+# "every silo is unresolved". So this shipped template intentionally defines NO
+# silos: a fresh install classifies nothing until an admin/packaging declares the
+# deployment's real silos below. Declaring a wrong-but-clean mapping would be
+# worse than unresolved.
+#
+# Example (uncomment + adapt to your deployment's actual silos):
+#
+# [silo.work]
+# guards = ["no-cross-contaminate"]
+# compartments = ["work"]
+# conflict_classes = ["home-work-separation"]
+#
+# [silo.home]
+# guards = ["no-cross-contaminate"]
+# compartments = ["home"]
+# conflict_classes = ["home-work-separation"]
+#
+# [silo.vault]
+# # a local-only silo whose data must never reach a remote/unknown host:
+# guards = ["local-only", "no-cross-contaminate"]
+# compartments = ["vault"]
+# conflict_classes = ["vault-isolation"]

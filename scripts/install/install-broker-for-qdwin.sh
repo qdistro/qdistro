@@ -50,9 +50,23 @@ for f in qdistro_admin_cache.py qdistro_admin_audit.py \
          qdistro_lineage_receipts.py qdistro_export_lineage.py \
          qdistro_commit_lineage.py qdistro_lineage.py \
          qdistro_guard_registry.py qdistro_metadata_schema.py \
+         qdistro_silo_security.py \
          qdistro_upload_lineage.py qdistro_upload_lineage_entry.py; do
     install -o root -g root -m 0644 "$BROKER_SRC/$f" "$DEST/$f"
 done
+
+# Silo -> security-snapshot store: the v1 bootstrap backing for the central
+# snapshot authority (qdistro_silo_security.TomlSnapshotAuthority). Installed mode
+# 0644 (root-owned, only-owner-writable) because the loader refuses a
+# group/world-writable or non-root-owned store (it mints resolved FlowEndpoints).
+# Conditional install preserves admin edits, mirroring disposable-classes.toml;
+# a future control-plane daemon owns/populates the store behind the same seam.
+install -d -o root -g root -m 0755 /etc/qdistro
+if [ ! -f /etc/qdistro/silo-security.toml ]; then
+    install -o root -g root -m 0644 \
+        "$BROKER_SRC/silo-security.toml" \
+        /etc/qdistro/silo-security.toml
+fi
 
 # Broker-central export lineage re-validates disposable class policy itself.
 # These pure modules live under session_manager/ in the source tree but the

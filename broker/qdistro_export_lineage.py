@@ -1,9 +1,23 @@
 """Broker-owned recording for disposable export lineage.
 
-This module deliberately does not call ``record_chokepoint``. Disposable export
-sources do not yet have an authoritative production security snapshot, so the
-broker records structural provenance and explicit ``security.snapshot.state =
-"unresolved"`` assertions instead of minting a clean-looking guard union.
+This module deliberately does not call ``record_chokepoint``. It records
+structural provenance and explicit ``security.snapshot.state = "unresolved"``
+assertions instead of minting a clean-looking guard union.
+
+The production silo -> security-snapshot resolver now exists
+(``qdistro_silo_security``: a verified live pid -> launcher-attested silo ->
+central snapshot store behind the ``SnapshotAuthority`` seam). It still does NOT
+unblock THIS caller, by design (codex design review, 2026-06-18): the resolver's
+only safe input is a verified live ``(pid, starttime)``, but a disposable
+export-back has no live source process — the descriptor carries a disposable
+``launch_token`` plus a caller-supplied ``request_silo`` STRING (exactly the
+untrusted value the resolver refuses to consume), and the D-Bus caller pid is the
+root helper, not the disposable source (which may have exited). Wiring this to
+``record_chokepoint`` from those would be cross-silo source forgery. Doing so
+needs a separate, trusted ``launch_token -> silo`` authority (issuer-authenticated,
+bound at disposable creation, expiry/replay handling) — a future design item, NOT
+this v1 slice. Until then the unresolved branch stays (empty guards mean unknown,
+never clean).
 """
 from __future__ import annotations
 
