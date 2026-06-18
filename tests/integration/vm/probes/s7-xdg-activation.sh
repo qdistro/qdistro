@@ -70,6 +70,12 @@ chmod 0666 /run/user/1000/wayland-1 2>/dev/null || true
 install -m 0644 /root/s7-xdg-activation-probe.py /home/admin/s7-xdg-activation-probe.py
 chown admin:admin /home/admin/s7-xdg-activation-probe.py
 
+# Cursor so the journal-side compositor-log checks below match ONLY lines emitted
+# from here on (this probe run), never a stale "token issued" from earlier
+# session startup. Empty if journalctl has no cursor (checks fall back to a time
+# window then).
+JCURSOR=$( { journalctl --merge -n0 --show-cursor 2>/dev/null || true; } | awk -F'-- cursor: ' '/-- cursor: /{print $2}')
+
 set +e
 runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 \
     WAYLAND_DISPLAY=wayland-1 \
@@ -78,19 +84,58 @@ runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=/run/user/1000 \
 PROBE_RC=${PIPESTATUS[0]}
 set -e
 
+# Verify the compositor-side traces. The probe connects to
+# WAYLAND_DISPLAY=wayland-1; normally that's the weston this driver just launched
+# (which logs to $WLOG). But in a full run a systemd-managed
+# qdwin-compositor.service may already own wayland-1 and auto-restart after our
+# `pkill`, so the probe can instead be serviced by THAT compositor — whose qdwin
+# log lines go to the systemd journal (`weston[pid]: qdwin: ...`), not our
+# $WLOG. Both run qdwin-shell and emit the identical lines, so verify in EITHER
+# sink. Also retry briefly: weston's file-log subscriber does not fflush, so a
+# just-emitted line can lag the grep on $WLOG.
+# Read whichever compositor serviced the probe: our weston's $WLOG, plus the
+# systemd journal scoped to this run (--after-cursor; --since fallback if no
+# cursor). Same qdwin-shell, identical lines, so a match in EITHER sink counts.
+_journal_since() {
+    # `|| true`: a journalctl failure must yield empty output, not a non-zero
+    # exit that would trip set -e at the `j=$(...)` capture below.
+    if [ -n "$JCURSOR" ]; then
+        journalctl --merge --after-cursor="$JCURSOR" 2>/dev/null || true
+    else
+        journalctl --merge --since "-3 min" 2>/dev/null || true
+    fi
+}
+compositor_has() {
+    local pat="$1" i j
+    for i in 1 2 3 4 5; do
+        grep -q "$pat" "$WLOG" 2>/dev/null && return 0
+        # Capture the journal first, then grep a here-string — NOT
+        # `journalctl | grep -q`. `grep -q` closes the pipe on its first match,
+        # SIGPIPE-ing journalctl (exit 141); under `set -o pipefail` that makes
+        # the pipeline non-zero and would drop a REAL match (false negative).
+        j=$(_journal_since)
+        grep -q "$pat" <<<"$j" && return 0
+        sleep 1
+    done
+    return 1
+}
+
 echo
-echo "=== weston log (xdg-activation traces) ==="
-grep "xdg-activation" "$WLOG" || echo "(none)"
+echo "=== compositor xdg-activation traces ($WLOG + journal) ==="
+# Diagnostic only — each leg `|| true` so a no-match grep can't trip set -e/pipefail.
+traces=$( { grep "xdg-activation" "$WLOG" 2>/dev/null || true; \
+            _journal_since | grep "xdg-activation" || true; } | sort -u )
+[ -n "$traces" ] && echo "$traces" || echo "(none)"
 echo
 
 if [ "$PROBE_RC" -ne 0 ]; then
     echo "FAIL: probe exited $PROBE_RC"; exit "$PROBE_RC"
 fi
 
-grep -q "xdg-activation token issued" "$WLOG" || {
+compositor_has "xdg-activation token issued" || {
     echo "FAIL: compositor log missing 'token issued'"; exit 4
 }
-grep -q "xdg-activation activate with unknown token" "$WLOG" || {
+compositor_has "xdg-activation activate with unknown token" || {
     echo "FAIL: compositor log missing 'activate with unknown token'"; exit 5
 }
 
