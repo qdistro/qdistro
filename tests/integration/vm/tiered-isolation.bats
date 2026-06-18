@@ -67,6 +67,41 @@ SETUP
 )"
     assert_success || fail_loud "could not author the tier-2 broker allow-rules in the VM"
     assert_output_contains "PASS: tier-2 broker allow-rules loaded"
+
+    # Disable qdlocker's idle-auto-lock for the duration of this suite. The
+    # focus-injection tests near the end (phase7-focus-aware-clear /
+    # -clipboard-focus-gate-journal / -data-offer-receive-v15) drive cross-silo
+    # qdwin_shell_v1 set_keyboard_focus, which qdwin CORRECTLY refuses while the
+    # screen is locked (findings F1 lock-bypass guard) by posting a fatal
+    # qdwin_shell_v1 protocol error. This suite runs well past qdlocker's
+    # default 5-minute idle timeout with NO real input (focus is driven over
+    # IPC, which is not user activity), so without this the compositor
+    # idle-locks before those tests run and the injection is (correctly)
+    # refused — a test-harness artifact, not a product gap (a real session has
+    # input that resets the idle timer). Push the idle timeout far out via a
+    # systemd-user drop-in + restart; teardown_file removes it. QDLOCKER_IDLE_MS
+    # (qdlocker app.py) overrides the configured idle_timeout for the process.
+    vm_run "$(cat <<'IDLE'
+set -e
+d=/etc/systemd/user/qdlocker.service.d
+install -d -m0755 "$d"
+printf '[Service]\nEnvironment=QDLOCKER_IDLE_MS=86400000\n' > "$d/99-qci-no-idle-lock.conf"
+# Reach admin's --user manager from this root context. Prefer the machined
+# form (used elsewhere in this suite, e.g. s38/s41/s100); fall back to a login
+# shell as admin (which PAM-populates XDG_RUNTIME_DIR + DBUS) if machined isn't
+# wired. Either reloads the unit (picking up the drop-in) and restarts qdlocker
+# so it re-reads QDLOCKER_IDLE_MS.
+adm_uctl() {
+    systemctl --user --machine=admin@.host "$@" 2>/dev/null \
+        || runuser -l admin -c "systemctl --user $*" 2>/dev/null
+}
+adm_uctl daemon-reload || true
+adm_uctl restart qdlocker.service || true
+echo "PASS: qdlocker idle-auto-lock disabled for suite"
+IDLE
+)"
+    assert_success || fail_loud "could not disable qdlocker idle-auto-lock for the suite"
+    assert_output_contains "PASS: qdlocker idle-auto-lock disabled for suite"
 }
 
 teardown_file() {
@@ -81,6 +116,23 @@ teardown_file() {
     vm_run "rm -f /etc/qdistro/rules.d/zz-tier2-isolation-allow.yaml; systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true; echo 'PASS: tier-2 broker allow-rules removed'"
     assert_success || fail_loud "could not remove the tier-2 broker allow-rules (a test-authored rule may persist in the VM)"
     assert_output_contains "PASS: tier-2 broker allow-rules removed"
+
+    # Restore qdlocker's idle-auto-lock (undo the setup_file drop-in) so the
+    # idle timeout never leaks across runs to a VM that outlives this suite.
+    vm_run "$(cat <<'UNIDLE'
+rm -f /etc/systemd/user/qdlocker.service.d/99-qci-no-idle-lock.conf
+rmdir /etc/systemd/user/qdlocker.service.d 2>/dev/null || true
+adm_uctl() {
+    systemctl --user --machine=admin@.host "$@" 2>/dev/null \
+        || runuser -l admin -c "systemctl --user $*" 2>/dev/null
+}
+adm_uctl daemon-reload || true
+adm_uctl restart qdlocker.service || true
+echo "PASS: qdlocker idle-auto-lock restored"
+UNIDLE
+)"
+    assert_success || fail_loud "could not restore qdlocker idle-auto-lock (the test-authored drop-in may persist in the VM)"
+    assert_output_contains "PASS: qdlocker idle-auto-lock restored"
 }
 
 setup() {
