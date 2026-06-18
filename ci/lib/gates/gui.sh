@@ -248,6 +248,74 @@ gui_run_scenario() {
     return "$frc"
 }
 
+# Decide, purely from the session-VM capability flags, whether a GUI agent
+# scenario must be SKIPPED because the OUTER stack it needs is not provisioned
+# in this VM profile (rather than dispatched to the agent, which would then
+# write ERROR — the bug this fixes). Mirrors the bats `tiered-isolation` skip.
+#
+# Critical SKIP-vs-ERROR boundary (see scenarios 20/56 Setup notes): SKIP only
+# when the tier-4/5 OUTER stack itself is unprovisioned — no qdwin/qdshell
+# compositor on wayland-1, or no nested KVM (/dev/kvm). When that outer stack IS
+# present but only the baked guest image (qdistro-tier{4,5}-*.qcow2) is missing
+# or broken, this is a PRESENT-BUT-BROKEN bake: the scenario MUST run and the
+# agent reports ERROR/INFRA per its own contract ("do not silently skip"). So
+# image presence is deliberately NOT part of the skip decision — the agent
+# evaluates the image and emits ERROR/INFRA when the provisioned bake is broken.
+#
+# Pure function: reads ONLY its arguments (no globals, no VM I/O), so the
+# verdict logic is host-testable without the GUI VM stack — see
+# tests/integration/qci/gui-scenario-skip.bats. Echoes the human-readable skip reason
+# when the scenario must be skipped, or nothing when it should run.
+#
+# Args: rel legacy_ctrl nested_kvm qdshell_active vm_ssh_port
+gui_scenario_skip_reason() {
+    local rel=$1 legacy_ctrl=$2 nested_kvm=$3 qdshell_active=$4 vm_ssh_port=$5
+    case "$rel" in
+        qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
+            [ "$legacy_ctrl" != 1 ] && \
+                printf '%s\n' "legacy qdshell ctrl-socket not available" ;;
+        qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
+        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md)
+            # Tier-5 OUTER stack: the qdwin/qdshell compositor on wayland-1 +
+            # nested KVM. Absent => the opt-in tier-5 bake is not provisioned at
+            # all => SKIP. (A present outer stack with only the base image
+            # missing is broken-not-absent and runs => agent ERROR.)
+            if [ "$qdshell_active" != 1 ]; then
+                printf '%s\n' "tier-5 outer stack not provisioned: qdwin/qdshell session (wayland-1) absent in this VM profile"
+            elif [ "$nested_kvm" != 1 ]; then
+                printf '%s\n' "tier-5 outer stack not provisioned: nested KVM (/dev/kvm) absent in this VM"
+            fi ;;
+        qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+            # Tier-4 OUTER stack: the qdwin/qdshell compositor on wayland-1 +
+            # nested KVM. Absent => the opt-in tier-4 bake is not provisioned at
+            # all => SKIP. (A present outer stack with only the guest image
+            # missing is broken-not-absent and runs => agent ERROR/INFRA.)
+            if [ "$qdshell_active" != 1 ]; then
+                printf '%s\n' "tier-4 outer stack not provisioned: qdwin/qdshell session (wayland-1) absent in this VM profile"
+            elif [ "$nested_kvm" != 1 ]; then
+                printf '%s\n' "tier-4 outer stack not provisioned: nested KVM (/dev/kvm) absent in this VM"
+            fi ;;
+        qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
+        qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md)
+            [ "$qdshell_active" != 1 ] && \
+                printf '%s\n' "qdshell session not active in this VM profile" ;;
+        qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md)
+            [ "$qdshell_active" != 1 ] && \
+                printf '%s\n' "qdshell session not active in this VM profile" ;;
+        qdlocker/tests/gui/[0-9][0-9]-*.md)
+            [ "$qdshell_active" != 1 ] && \
+                printf '%s\n' "qdshell session not active in this VM profile" ;;
+        qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md)
+            [ -z "$vm_ssh_port" ] && \
+                printf '%s\n' "VM_SSH_PORT not set for SSH-only SELinux scenario" ;;
+    esac
+    # Always succeed: a no-skip outcome (empty stdout) must not look like a
+    # failure to callers. Without this the trailing `[ ] && printf` short-circuit
+    # would leak a nonzero status when the scenario should run.
+    return 0
+}
+
 gate_gui() {
     qci_assert_run_dir || return $?
     qci_assert_vm_tools gui || return $?
@@ -322,78 +390,25 @@ gate_gui() {
             record_result gui "$rel" skip 0 pass agent "" "QCI_OFFLINE=1: registry network=external; skipped"
             continue
         fi
-        case "$rel" in
-            qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
-                if [ "$legacy_ctrl" != 1 ]; then
-                    {
-                        echo "Skipped legacy qdwin markdown scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/qdshell.sock is absent; current qdistro GUI session is Quickshell/noctalia based."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "legacy qdshell ctrl-socket not available"
-                    continue
-                fi
-                ;;
-            qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
-            qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
-            qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
-            qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
-                if [ "$nested_kvm" != 1 ]; then
-                    {
-                        echo "Skipped nested-VM GUI scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: /dev/kvm is absent inside the session VM; this scenario requires nested KVM."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "nested KVM not available in VM"
-                    continue
-                fi
-                ;;
-            qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
-            qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md)
-                if [ "$qdshell_active" != 1 ]; then
-                    {
-                        echo "Skipped qdshell/noctalia GUI scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
-                    continue
-                fi
-                ;;
-            qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md)
-                if [ "$qdshell_active" != 1 ]; then
-                    {
-                        echo "Skipped qdwin/noctalia GUI scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; this VM profile runs labwc for permissions-gui admin app scenarios."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
-                    continue
-                fi
-                ;;
-            qdlocker/tests/gui/[0-9][0-9]-*.md)
-                if [ "$qdshell_active" != 1 ]; then
-                    {
-                        echo "Skipped qdlocker GUI scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: /run/user/1000/wayland-1 or qdshell.service is absent; qdlocker GUI tests require the qdwin/qdshell session, while this VM profile runs labwc for permissions-gui admin app scenarios."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "qdshell session not active in this VM profile"
-                    continue
-                fi
-                ;;
-            qdistro/tests/integration/permissions-gui/55-qsu-selinux-enforcing.md)
-                if [ -z "${VM_SSH_PORT:-}" ]; then
-                    {
-                        echo "Skipped SSH-only SELinux GUI scenario."
-                        echo "Scenario: $scenario"
-                        echo "Reason: VM_SSH_PORT is not set; this scenario explicitly requires SSH transport because qemu-guest-agent cannot set SELinux enforcing mode."
-                    } > "$log_path"
-                    record_result gui "$rel" skip 0 pass agent "$log_path" "VM_SSH_PORT not set for SSH-only SELinux scenario"
-                    continue
-                fi
-                ;;
-        esac
+        # Stack-absent SKIP gate (see gui_scenario_skip_reason). When the VM
+        # profile lacks the OUTER stack a scenario needs (legacy ctrl-socket,
+        # qdshell/wayland-1 session, nested KVM, SSH transport), short-circuit to
+        # SKIP up front — no VM spent, no agent dispatched. A present-but-broken
+        # stack (outer stack up, e.g. baked tier-4/5 image missing) is NOT caught
+        # here: it reaches the agent, which reports ERROR per the scenarios' own
+        # "do not silently skip" contract.
+        local skip_reason
+        skip_reason=$(gui_scenario_skip_reason "$rel" "$legacy_ctrl" "$nested_kvm" \
+            "$qdshell_active" "${VM_SSH_PORT:-}")
+        if [ -n "$skip_reason" ]; then
+            {
+                echo "Skipped GUI scenario."
+                echo "Scenario: $scenario"
+                echo "Reason: $skip_reason"
+            } > "$log_path"
+            record_result gui "$rel" skip 0 pass agent "$log_path" "$skip_reason"
+            continue
+        fi
         if [ -z "${QCI_AGENT_CMD:-}" ]; then
             {
                 echo "QCI_AGENT_CMD is not set."

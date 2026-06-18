@@ -42,9 +42,16 @@ echo "VM4=$VM4"
 $VMEXEC "$VM" 'pkill -u root -f "spawn-tier4.sh.*rdp" 2>/dev/null || true; sleep 1'
 ```
 
-If the tier-4 guest image is absent, report **INFRA** and point at
-`tier4-vm-guest/build-guest-image.sh`. Do not silently skip; this is
-a release-gating visual scenario for RDP.
+This scenario requires the tier-4 outer stack: the qdwin/qdshell
+compositor on `wayland-1`, nested KVM, and the baked tier-4 guest image.
+When the OUTER stack itself is unprovisioned in this VM profile (no
+qdwin/qdshell session on `wayland-1`, or no nested KVM), the GUI gate
+short-circuits to **SKIP** before dispatching this scenario — mirroring
+the bats `tiered-isolation` skip. When the outer stack IS present but
+only the tier-4 guest image is missing/broken, report **INFRA** and
+point at `tier4-vm-guest/build-guest-image.sh`. Do not silently skip a
+present-but-broken stack; this is a release-gating visual scenario for
+RDP.
 
 ## Steps
 

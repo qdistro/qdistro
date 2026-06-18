@@ -13,10 +13,16 @@ arrival). Here we corroborate visually that the user-visible UX —
 a window placeholder during the ~30-60s guest boot — works the way
 the cold-start spec in `doc/window-hierarchy.md` describes.
 
-This scenario REQUIRES the tier-5 base image
-(`/var/lib/libvirt/images/qdistro-tier5-base.qcow2`) to be built. If
-absent, runner reports **ERROR** with a one-line note pointing at
-`tier5-vm/build-guest-image.sh`.
+This scenario REQUIRES the tier-5 outer stack: the qdwin/qdshell
+compositor on `wayland-1`, nested KVM, and the tier-5 base image
+(`/var/lib/libvirt/images/qdistro-tier5-base.qcow2`). When the OUTER
+stack itself is unprovisioned in this VM profile (no qdwin/qdshell
+session on `wayland-1`, or no nested KVM), the GUI gate short-circuits to
+**SKIP** before dispatching this scenario — mirroring the bats
+`tiered-isolation` skip. When the outer stack IS present but only the
+base image is missing/broken, the runner reports **ERROR** with a
+one-line note pointing at `tier5-vm/build-guest-image.sh` — do not
+silently skip a present-but-broken bake.
 
 Budget: this scenario can take 2-3 minutes wall-clock (guest boot +
 waypipe handshake + ~5s for placeholder UI verification).
