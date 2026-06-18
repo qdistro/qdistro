@@ -177,6 +177,19 @@ main() {
                 shift
             done
             gate_snapshot_daily "$date_arg" "$name_arg"; rc=$?; finish_run "$rc" ;;
+        mmnet)
+            # Opt-in multi-machine smoke lane. Intentionally NOT in gate_full
+            # and NOT under tests/integration/vm/, so the default single-machine
+            # lanes never touch the isolated udp segment or boot a 2nd VM.
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --force) export QD_MMNET_FORCE=1 ;;
+                    --keep)  export QD_MMNET_KEEP=1 ;;
+                    *) record_blocked mmnet "$1" "$EXIT_USAGE" args "unknown mmnet flag"; finish_run "$EXIT_USAGE" ;;
+                esac
+                shift
+            done
+            gate_mmnet; rc=$?; finish_run "$rc" ;;
         cleanup)
             gate_cleanup "$@"; rc=$?; finish_run "$rc" ;;
         report)

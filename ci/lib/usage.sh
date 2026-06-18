@@ -23,6 +23,7 @@ Usage:
   qci edit-guard [--changed-from <ref>] [--allow-test-edits] [<path> ...]
   qci replay <scenario> <vm>
   qci full [--keep-on-fail|--delete-failed-vm]
+  qci mmnet [--force] [--keep]
   qci snapshot-daily [--date YYYY-MM-DD] [--name <vm-name>]
   qci cleanup [--dry-run] [--age-hours N]
   qci report [--latest|--run <run-dir>]
@@ -89,6 +90,20 @@ Notes:
               base, a git diff that cannot be computed, or an indeterminate
               (explicit-but-empty) path set FAILS rather than passing-as-clean
               — it never silently hides a protected edit.
+  qci mmnet   OPT-IN multi-machine smoke lane (NOT part of `qci full`). Clones
+              TWO disposable VMs from baseweed-baked, each with a SECOND NIC on
+              an ISOLATED, per-run inter-VM segment (QEMU `type='udp'` point-to-
+              point over loopback — a rootless, host-confined Ethernet-in-UDP
+              tunnel; no host bridge, no system libvirtd, no multicast route, no
+              persistent libvirt network). Brings up a static /24 on each guest's
+              mmnet NIC over the qga control plane, then proves DATA-PLANE
+              reachability that does NOT depend on qga: it asserts peer A's route
+              to peer B egresses the mmnet NIC, then ICMP ping + a TCP token
+              round-trip A->B. The single-machine lanes never create this segment
+              or boot a 2nd VM. Load-aware (skips if MemAvailable < ~14 GiB; a
+              sibling lane may be running — override with QD_MMNET_FORCE=1 or the
+              --force flag). ALWAYS reaps both clones on exit; --keep / QD_MMNET_
+              KEEP=1 keeps them and prints the manual cleanup commands.
   qci replay  Rerun ONE named scenario against an already-preserved (named) VM,
               without provisioning. <scenario> is a bats file (path or basename
               under tests/integration/vm) or a GUI markdown scenario (path or

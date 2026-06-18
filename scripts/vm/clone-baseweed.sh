@@ -37,6 +37,7 @@ GPU=0
 FROM_BAKED=0
 FROM_ENFORCING=0
 FROM_GOLDEN=""
+EXTRA_NIC_XML=""
 for arg in "$@"; do
     case "$arg" in
         --gpu)                   GPU=1 ;;
@@ -45,6 +46,15 @@ for arg in "$@"; do
         # Per-run golden backing: an already-built qcow2 (compositor built once
         # per run) used as the backing for this clone, skipping fresh-vm-bootstrap.
         --from-run-golden=*)     FROM_GOLDEN="${arg#*=}" ;;
+        # Multi-machine lane ONLY (clone-mmnet.sh): splice one extra
+        # <interface> block (read from this file) into the cloned domain BEFORE
+        # define, so the clone gets a second NIC on the isolated inter-VM segment
+        # in addition to the template's user-mode NIC. The default
+        # single-machine lane NEVER passes this, so its clones are byte-for-byte
+        # the template's single-NIC definition. The XML is spliced verbatim
+        # right before </devices>; the caller owns its validity (the mmnet lane
+        # generates it from scripts/vm/mmnet-config.sh and validates by define).
+        --extra-nic-xml=*)       EXTRA_NIC_XML="${arg#*=}" ;;
         --*)
             echo "ERROR: unknown flag '$arg'" >&2; exit 2 ;;
         *)
@@ -72,6 +82,14 @@ if [ -n "$FROM_GOLDEN" ]; then
         /*) : ;;
         *) echo "ERROR: --from-run-golden requires an absolute path (got '$FROM_GOLDEN')" >&2; exit 2 ;;
     esac
+fi
+if [ -n "$EXTRA_NIC_XML" ]; then
+    if [ ! -f "$EXTRA_NIC_XML" ]; then
+        echo "ERROR: --extra-nic-xml file not found: $EXTRA_NIC_XML" >&2; exit 2
+    fi
+    if ! grep -q '<interface' "$EXTRA_NIC_XML"; then
+        echo "ERROR: --extra-nic-xml file has no <interface> block: $EXTRA_NIC_XML" >&2; exit 2
+    fi
 fi
 
 # Name must be unique even when many VMs are cloned in the same minute
@@ -254,6 +272,33 @@ if [ "$GPU" = 1 ]; then
     if ! grep -q "<acceleration accel3d='yes'/>" <<<"$XML"; then
         echo "ERROR: --gpu requested but accel3d substitution didn't fire" >&2
         echo "       (template '$TEMPLATE' may have a different XML format)" >&2
+        exit 1
+    fi
+fi
+
+# Multi-machine lane: splice the caller-supplied extra <interface> block
+# (the isolated inter-VM socket NIC) verbatim immediately before </devices>. This is
+# additive — the template's existing user-mode NIC is untouched, so the clone
+# keeps qga/SLIRP reachability AND gains the inter-VM segment. Only fires when
+# --extra-nic-xml was passed; the default single-machine clone path skips this
+# entirely.
+if [ -n "$EXTRA_NIC_XML" ]; then
+    EXTRA_BLOCK=$(cat "$EXTRA_NIC_XML")
+    XML=$(EXTRA_BLOCK="$EXTRA_BLOCK" python3 -c '
+import sys, os
+src = sys.stdin.read()
+extra = os.environ["EXTRA_BLOCK"].rstrip("\n") + "\n"
+idx = src.rfind("</devices>")
+if idx == -1:
+    sys.stderr.write("ERROR: cloned XML has no </devices> to splice before\n")
+    sys.exit(2)
+sys.stdout.write(src[:idx] + extra + src[idx:])
+' <<<"$XML") || { echo "ERROR: extra-nic splice failed" >&2; exit 1; }
+    # Verify the splice actually landed an extra socket NIC (udp for the mmnet
+    # lane; mcast tolerated for any future caller) rather than silently no-op'ing
+    # into a one-NIC clone.
+    if ! grep -qE "type='(udp|mcast)'" <<<"$XML"; then
+        echo "ERROR: --extra-nic-xml splice didn't land a udp/mcast interface" >&2
         exit 1
     fi
 fi
