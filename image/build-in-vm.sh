@@ -33,6 +33,9 @@ export LIBVIRT_DEFAULT_URI="$URI"
 VM="${QDISTRO_BUILDER_VM:-qdistro-builder-$(date +%y%m%d-%H%M)}"
 BUILD_DISK_GB="${QDISTRO_BUILD_DISK_GB:-60}"
 HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+# Forwarded into the in-VM kiwi run so config.sh's profile gate sees it
+# (release = no passwordless sudo; dev = passwordless sudo for test harnesses).
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-release}"
 LOGS="$HERE/logs/in-vm-$(date +%y%m%d-%H%M%S)"
 mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
@@ -170,11 +173,14 @@ log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
 set +e
-vms <<'EOS' | tee "$LOGS/kiwi-driver.log"
+log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE"
+vms <<EOS | tee "$LOGS/kiwi-driver.log"
 cd /root/qdistro-image
 # TMPDIR is intentionally NOT redirected to /build/tmp: dracut runs inside
 # the image-root chroot and won't see anything mounted under /build there.
-QDISTRO_BUILD_DIR=/build/out bash build.sh --no-sync \
+# QDISTRO_PROFILE is forwarded so config.sh's sudoers/profile gate matches the
+# host invocation; kiwi inherits it into config.sh's environment.
+QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_BUILD_DIR=/build/out bash build.sh --no-sync \\
     >/root/kiwi-build.log 2>&1
 EOS
 KIWI_RC=${PIPESTATUS[0]}
@@ -211,15 +217,33 @@ if [ "$(virsh domstate "$VM")" != "shut off" ]; then
     virsh destroy "$VM" || true
 fi
 
-# The build disk is a bare xfs filesystem on /dev/sda (no partition table),
-# so libguestfs auto-inspection finds no OS and refuses; mount /dev/sda
-# explicitly via guestfish (-m /dev/sda /). Trap unmount in case copy fails.
-mkdir -p "$HOST_BUILD_DIR" "$LOGS/guestmnt"
-trap 'guestunmount "$LOGS/guestmnt" 2>/dev/null || true' EXIT
-guestmount -a "$BUILD_DISK" -m /dev/sda --ro "$LOGS/guestmnt" 2>>"$LOGS/copy-out.log"
-cp -av "$LOGS/guestmnt/out/"* "$HOST_BUILD_DIR/" 2>&1 | tail -10
-guestunmount "$LOGS/guestmnt"
-trap - EXIT
+# The build disk is a bare xfs filesystem on /dev/sda (no partition table), so
+# libguestfs auto-inspection finds no OS; mount /dev/sda explicitly.
+# Use guestfish's synchronous copy-out, NOT guestmount: the FUSE mount is
+# unreliable under rootless qemu:///session here (returns success but exposes an
+# empty tree). Force the direct (appliance) backend — the default libvirt
+# backend can't boot the appliance in this nested/rootless setup.
+mkdir -p "$HOST_BUILD_DIR"
+export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
+# qemu can keep flushing the build qcow2 for several seconds after libvirt
+# reports the domain "shut off", so a too-early read sees an empty out/.
+# Retry until the artifacts have settled on the host side.
+# Copy only the artifact files (not /out/build/, the multi-GB extracted
+# image-root tree kiwi leaves behind).
+copied=0
+for attempt in $(seq 1 6); do
+    guestfish --ro -a "$BUILD_DISK" -m /dev/sda <<EOF 2>>"$LOGS/copy-out.log"
+glob copy-out /out/*.raw $HOST_BUILD_DIR/
+glob copy-out /out/*.install.iso $HOST_BUILD_DIR/
+glob copy-out /out/*.packages $HOST_BUILD_DIR/
+glob copy-out /out/*.changes $HOST_BUILD_DIR/
+glob copy-out /out/*.verified $HOST_BUILD_DIR/
+EOF
+    if ls "$HOST_BUILD_DIR"/*.raw >/dev/null 2>&1; then copied=1; break; fi
+    log "copy-out: artifacts not settled yet (attempt $attempt/6); waiting..."
+    sleep 5
+done
+[ "$copied" = 1 ] || die "copy-out: build artifacts never appeared (see $LOGS/copy-out.log)"
 
 log "artifacts on host:"
 ls -lh "$HOST_BUILD_DIR/" | tee -a "$LOGS/artifacts.txt"
