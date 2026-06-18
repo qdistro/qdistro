@@ -260,12 +260,41 @@ if [ "${QCI_SPIN_VERIFY_SESSION:-qdwin}" != none ]; then
 # the socket itself or the production `lock` command. So distinguish: socket
 # absent + qdlocker not active = expected here; qdlocker active + socket
 # missing = a real ctrl-socket regression.
+# Poll for the compositor socket rather than a single fixed sleep. The
+# guest-agent becoming ready does NOT mean the qdwin compositor session has
+# finished starting — under first-wave concurrency (several clones booting
+# while the per-run golden is still warm/contended) the session can take well
+# over 3s to bind wayland-1. A one-shot `sleep 3` then check spuriously failed
+# the first wave of bats lanes with "compositor did not come up" even though
+# the compositor came up moments later. Poll up to QCI_SPIN_WAYLAND_TIMEOUT
+# seconds (default 45) and fail only if it never appears — the gate is
+# unchanged (still fatal on a genuine no-show), just patient under load.
+WAYLAND_TIMEOUT="${QCI_SPIN_WAYLAND_TIMEOUT:-45}"
+# Sanitise: a non-integer override would make `[ -ge ]` below error out
+# (false) every pass and hang the loop unbounded — fall back to the default.
+case "$WAYLAND_TIMEOUT" in
+    ''|*[!0-9]*) WAYLAND_TIMEOUT=45 ;;
+esac
+# Also reject an all-digit but absurdly large value (>5 digits, i.e. >99999s):
+# it would overflow the numeric `[ -ge ]` test below ("integer expression
+# expected" → false every pass → unbounded loop). 99999s is already far beyond
+# any sane compositor-readiness wait.
+[ "${#WAYLAND_TIMEOUT}" -gt 5 ] && WAYLAND_TIMEOUT=45
+WAYLAND_OK=no
+_waited=0
 sleep 3
-WAYLAND_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/wayland-1 ] && echo yes || echo no" 2>/dev/null | tail -1)
+while :; do
+    WAYLAND_OK=$("$SCRIPT_DIR/vm-exec" "$VM" "[ -S /run/user/1000/wayland-1 ] && echo yes || echo no" 2>/dev/null | tail -1)
+    [ "${WAYLAND_OK:-no}" = "yes" ] && break
+    [ "$_waited" -ge "$WAYLAND_TIMEOUT" ] && break
+    sleep 3
+    _waited=$((_waited + 3))
+done
 if [ "${WAYLAND_OK:-no}" != "yes" ]; then
-    log "FAIL: /run/user/1000/wayland-1 missing — compositor did not come up"
+    log "FAIL: /run/user/1000/wayland-1 missing — compositor did not come up (waited ${_waited}s)"
     exit 4
 fi
+[ "$_waited" -gt 0 ] && log "note: compositor up after ${_waited}s of polling"
 log "PASS: /run/user/1000/wayland-1 present (compositor up)"
 
 REPLY=$("$SCRIPT_DIR/vm-exec" "$VM" "echo list | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>&1 | head -1" 2>/dev/null | tail -1)
