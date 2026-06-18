@@ -144,6 +144,37 @@ shoot() {
 
 shoot 00-just-booted
 
+#-- 5b. Start sshd via the guest agent (sshd is NOT enabled by default) -------
+# The shipped image intentionally does not enable sshd at boot (avoids a
+# network-reachable default-credential exposure; see image/config.sh). The
+# qemu-guest-agent provides an out-of-band virtio-serial channel we use to
+# start sshd on demand for these verification assertions — no network path is
+# baked into the image. guest-exec runs as root inside the guest.
+qga() {
+    virsh -c "$URI" qemu-agent-command "$VM" "$1" 2>/dev/null
+}
+log "waiting for qemu-guest-agent (max 180s)..."
+qga_deadline=$(( $(date +%s) + 180 ))
+qga_up=0
+while [ "$(date +%s)" -lt "$qga_deadline" ]; do
+    if qga '{"execute":"guest-ping"}' | grep -q '"return"'; then qga_up=1; break; fi
+    sleep 3
+done
+[ "$qga_up" = 1 ] || { shoot 99-qga-timeout; die "guest agent never responded; cannot start sshd (see $VERIFY_DIR/screenshots/99-qga-timeout.png)"; }
+log "guest agent up; starting sshd over the agent channel"
+exec_out=$(qga '{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["start","sshd.service"],"capture-output":true}}')
+qga_pid=$(printf '%s' "$exec_out" | grep -oE '"pid":[0-9]+' | grep -oE '[0-9]+' | head -1)
+[ -n "$qga_pid" ] || { shoot 99-qga-exec; die "guest-exec to start sshd failed: $exec_out"; }
+# Poll guest-exec-status until the systemctl call exits (bounded).
+st_deadline=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$st_deadline" ]; do
+    st=$(qga "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$qga_pid}}")
+    printf '%s' "$st" | grep -q '"exited":true' && break
+    sleep 2
+done
+ec=$(printf '%s' "$st" | grep -oE '"exitcode":[0-9]+' | grep -oE '[0-9]+' | head -1)
+[ "${ec:-0}" = 0 ] || warn "systemctl start sshd returned exitcode=$ec (continuing; SSH wait loop will confirm)"
+
 #-- 6. SSH wrapper + wait for auth to actually succeed -----------------------
 # First-boot resize + greetd autologin together take ~2-5 min; we poll
 # real SSH auth (not /dev/tcp — passt-forwarded ports accept connections

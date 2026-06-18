@@ -36,7 +36,17 @@ systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/nul
 echo "qdistro" > /etc/hostname
 
 ssh-keygen -A
-systemctl enable sshd.service NetworkManager.service
+# sshd is intentionally NOT enabled by default. A network-reachable sshd
+# combined with the baked default password is a remote default-credential
+# exposure (Opus security review finding #1). Host keys are generated above so
+# the VM test harness can start sshd on demand over the qemu-guest-agent channel
+# (see image/verify.sh); for human dev VMs login is greetd autologin on the
+# console, which never needs sshd.
+systemctl enable NetworkManager.service
+# qemu-guest-agent: out-of-band host->guest control channel (virtio-serial,
+# no network). Lets the VM test harness drive the guest (e.g. start sshd) over
+# `virsh qemu-agent-command` without baking network-reachable SSH on by default.
+systemctl enable qemu-guest-agent.service
 
 # Sudoers policy is profile-gated. This config.sh bakes a RELEASE image by
 # default, which must NOT ship `admin ALL=(ALL) NOPASSWD: ALL` — a baked-in
@@ -160,6 +170,11 @@ done
 chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
 SHIM
 chmod +x "$SHIMS"/loginctl "$SHIMS"/runuser
+# install-qdwin-session-for-vm.sh does `usermod -aG ...,seat admin`, assuming the
+# `seat` group already exists (its comment says fresh-vm-bootstrap.sh creates it).
+# The kiwi image build never runs fresh-vm-bootstrap.sh, so create the libseat
+# `seat` group here first or the usermod aborts config.sh (set -e).
+getent group seat >/dev/null || groupadd -r seat
 PATH="$SHIMS:$PATH" bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
 rm -rf "$SHIMS"
 

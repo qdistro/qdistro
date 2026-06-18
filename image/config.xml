@@ -100,8 +100,9 @@
     <package name="zypper"/>
     <package name="openssh"/>
     <package name="openssh-server"/>
+    <package name="qemu-guest-agent"/>
     <package name="sudo"/>
-    <package name="vim"/>
+    <package name="nano"/>
     <package name="git-core"/>
     <package name="wget"/>
     <package name="curl"/>
