@@ -30,6 +30,20 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
+sleep 1
+
+# Ensure both user-relays are up with linger. Without these the broker
+# cannot discover cross-silo receivers, so ListReceivers (S2) and
+# GetLastReceived (S5) come back empty. Mirrors scenario 15's setup.
+$VMEXEC "$VM" 'loginctl enable-linger work work2'
+$VMEXEC "$VM" 'systemctl start user@2000.service user@3000.service'
+for _ in 1 2 3 4 5; do
+ $VMEXEC "$VM" 'test -S /run/user/2000/bus && test -S /run/user/3000/bus' && break
+ sleep 1
+done
+$VMEXEC "$VM" 'systemctl --machine=work@.host --user restart qdistro-user-relay.service'
+$VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qdistro-user-relay.service'
+
 $VMEXEC "$VM" 'systemctl --machine=work@.host --user stop qstub-notepad.service 2>/dev/null || true'
 $VMEXEC "$VM" 'systemctl --machine=work2@.host --user stop qstub-notepad.service 2>/dev/null || true'
 
