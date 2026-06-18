@@ -60,6 +60,13 @@ QDISTRO_PKGS=(
   libnotify-tools
   greetd
   podman slirp4netns fuse-overlayfs crun
+  # Per-silo egress backend: session-manager shells out to `wg`
+  # (wireguard-tools) and programs `nft` rules; `dnsmasq` serves the
+  # per-netns resolver. Required in the baked base so the silo-egress
+  # VM lane (tests/integration/vm/silo-egress.bats) is not a no-op —
+  # these previously lived only in scripts/install/install-deps.sh, so
+  # baseweed-baked clones lacked them and the lane failed at setup.
+  wireguard-tools nftables dnsmasq
   waypipe
   wl-clipboard
   # Test-VM-only synthetic input. Requires a kernel with uinput; production
