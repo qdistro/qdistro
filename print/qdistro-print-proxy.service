@@ -21,6 +21,11 @@ StandardError=journal
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+# systemd creates and tears down /run/qdistro-print for us. Without this the
+# ReadWritePaths bind below has nothing to bind and the unit dies at step
+# NAMESPACE (status=226) in a tight restart loop.
+RuntimeDirectory=qdistro-print
+RuntimeDirectoryMode=0755
 ReadWritePaths=/run/qdistro-print
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

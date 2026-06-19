@@ -1,7 +1,7 @@
 # 22 — `ApprovalRevoked` signal payload, GUI revoke path
 
 **What**: with one cached approval seeded for `work` (uid 2000),
-attach `dbus-monitor` to the system bus, then revoke the row from
+attach a real D-Bus signal subscriber, then revoke the row from
 the Qt admin app's Cache tab. Verify (a) one `ApprovalRevoked`
 signal is emitted with the correct `(caller_uid, action, exe)`
 payload, (b) the cache row is gone, (c) an audit row with
@@ -51,23 +51,33 @@ PY
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+
+# Deliver the signal subscriber. We use a real dbus-python
+# add_signal_receiver listener (the same receive path qdshell uses),
+# NOT `dbus-monitor`: dbus-monitor's BecomeMonitor eavesdrop has a
+# start-up window where a revoke fired too early is missed, and it does
+# not prove the ordinary `<allow receive_sender>` policy that production
+# subscribers depend on. The helper touches a readiness file only AFTER
+# its match rule is installed, closing the subscribe/emit race.
+SUB_B64=$(base64 -w0 < "${QDISTRO_REPO}/tests/integration/permissions-gui/listen-broker-signal.py")
+$VMEXEC "$VM" "echo $SUB_B64 | base64 -d > /tmp/listen-broker-signal.py"
 ```
 
 ## Steps
 
-### S1 — attach dbus-monitor, launch admin app
+### S1 — start the signal subscriber, launch admin app
 
 ```bash
-# dbus-monitor runs as root because the system bus policy file
-# restricts the eavesdrop privilege to root. Capture only
-# ApprovalRevoked traffic so the log is one signal long when the
-# scenario succeeds.
-$VMEXEC "$VM" 'rm -f /tmp/22-signals.log; \
-  setsid dbus-monitor --system \
-    "type=signal,interface=org.qdistro.AdminBroker1,member=ApprovalRevoked" \
-    >/tmp/22-signals.log 2>&1 </dev/null &
+# Start the subscriber and BLOCK until it is actually listening (the
+# --ready file) before any revoke can fire. Captures the first
+# ApprovalRevoked as JSON to /tmp/22-signals.json.
+$VMEXEC "$VM" 'rm -f /tmp/22-signals.json /tmp/22-ready /tmp/22-sub.log; \
+  setsid python3 /tmp/listen-broker-signal.py ApprovalRevoked \
+    --ready /tmp/22-ready --out /tmp/22-signals.json --timeout 30 \
+    >/tmp/22-sub.log 2>&1 </dev/null &
   echo $! >/tmp/22-monitor.pid'
-sleep 1
+$VMEXEC "$VM" 'for i in $(seq 1 50); do [ -f /tmp/22-ready ] && break; sleep 0.1; done; \
+  [ -f /tmp/22-ready ] && echo "subscriber ready" || { echo "subscriber NOT ready"; cat /tmp/22-sub.log; }'
 
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
@@ -83,9 +93,8 @@ $VMGUI "$VM" screenshot /tmp/22-s1-launched.png
 
 **Assert**:
 - Window `admin approvals` is visible.
-- `/tmp/22-signals.log` exists; its content (post-`signal time=...`
-  header lines from dbus-monitor's startup) does NOT yet contain
-  the substring `member=ApprovalRevoked` — no signal has fired.
+- The subscriber printed `subscriber ready` (its match rule is installed).
+- `/tmp/22-signals.json` does NOT yet exist — no signal has fired.
 
 ### S2 — keyboard: reach Cache tab, select row, press Revoke
 
@@ -143,23 +152,26 @@ $VMGUI "$VM" screenshot /tmp/22-s2c-after-revoke.png
 - No error dialog appeared.
 
 (Screenshots are coarse on this template — AGENTS.md "Ground truth".
-The authoritative checks are the dbus-monitor log in S3 and the audit
+The authoritative checks are the captured signal JSON in S3 and the audit
 row in S4, which prove the revoke actually fired with the right
 payload.)
 
 ### S3 — exactly one signal, correct payload
 
 ```bash
-$VMEXEC "$VM" 'kill $(cat /tmp/22-monitor.pid) 2>/dev/null; sleep 0.3; cat /tmp/22-signals.log'
+# The subscriber quits and writes the JSON on the first signal; give it a
+# moment, then read the captured payload.
+$VMEXEC "$VM" 'sleep 0.5; cat /tmp/22-signals.json 2>/dev/null; echo; cat /tmp/22-sub.log'
 ```
 
-**Assert** (textual analysis of `/tmp/22-signals.log`):
-- Exactly **one** `signal ... interface=org.qdistro.AdminBroker1;
-  member=ApprovalRevoked` block.
-- The signal body contains three arguments in this order:
-  - `int32 2000`  (caller_uid)
-  - `string "test.action"`  (action)
-  - `string "/usr/bin/python3.13"`  (exe / match_value)
+**Assert** (`/tmp/22-signals.json` is a JSON array of captured signals):
+- The file exists and contains exactly **one** entry (one signal fired).
+- That entry's args are exactly, in order:
+  - `2000`  (caller_uid)
+  - `"test.action"`  (action)
+  - `"/usr/bin/python3.13"`  (exe / match_value)
+
+  i.e. the file reads `[[2000, "test.action", "/usr/bin/python3.13"]]`.
 
 ### S4 — audit row matches
 
@@ -179,7 +191,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'kill $(cat /tmp/22-monitor.pid) 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/22-signals.log /tmp/22-monitor.pid'
+$VMEXEC "$VM" 'rm -f /tmp/22-signals.json /tmp/22-ready /tmp/22-sub.log /tmp/22-monitor.pid'
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals;
 SQL_EOF
@@ -201,7 +213,10 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
   Future scenarios should cover both shapes — this one pins the
   `forever_exe` shape since it's the load-bearing case for qdshell's
   per-exe stream teardown.
-- `dbus-monitor --system` needs root. If `kill` of the monitor PID
-  doesn't reap it (orphaned via setsid), the next run's monitor will
-  share the log file and produce two-signal noise; the teardown
-  block above cleans up explicitly.
+- The subscriber (`listen-broker-signal.py`) self-terminates on the first
+  captured signal or after `--timeout` seconds, so an orphaned listener
+  reaps itself; the teardown still kills the recorded PID and clears the
+  JSON/ready/log files explicitly for a clean re-run. Earlier revisions of
+  this scenario used `dbus-monitor`, which both raced the revoke at start-up
+  and tested the eavesdrop path rather than the ordinary receive policy that
+  production subscribers use — the subscriber fixes both.
