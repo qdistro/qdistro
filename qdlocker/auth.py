@@ -155,10 +155,13 @@ class AuthBackend(QObject):
 
     def start_pam(self) -> None:
         if self._pam_thread and self._pam_thread.is_alive():
-            log.warning(
-                "PAM start suppressed: previous worker is still alive. "
-                "If the user has waited >10s on a stuck conversation this "
-                "is the cause."
+            # Expected: a new worker is suppressed while the single in-flight
+            # one is parked waiting for the password. This fires once per
+            # keystroke (each re-arms the fingerprint sensor → start_pam) and
+            # is NOT evidence of a wedged retry loop, so keep it at debug.
+            log.debug(
+                "PAM start suppressed: previous worker is still alive "
+                "(parked waiting for password; normal per-keystroke re-arm)."
             )
             return
         self._pam_abort.clear()
