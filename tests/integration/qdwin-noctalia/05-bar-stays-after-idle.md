@@ -34,18 +34,23 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 # stop-paint behaviour if wlopm is absent — see Known failure modes).
 ADMIN_USER=$("$QDWIN_VM_EXEC" "$VMNAME" 'getent passwd 1000 | cut -d: -f1' 2>/dev/null | tail -1)
 SETTINGS=/home/$ADMIN_USER/.config/noctalia/settings.json
+# Create-or-edit: a fresh VM may have no settings.json yet, in which case the
+# old `if [ -f ]` gate silently skipped the timeout change and DPMS never
+# fired. mkdir -p + load-or-default so the idle timeout is always applied.
 "$QDWIN_VM_EXEC" "$VMNAME" "
- if [ -f $SETTINGS ]; then
+ mkdir -p /home/$ADMIN_USER/.config/noctalia
  python3 - <<PY
-import json
+import json, os
 p='$SETTINGS'
-d=json.load(open(p))
+try:
+    d=json.load(open(p))
+except (FileNotFoundError, ValueError):
+    d={}
 d.setdefault('idle',{})['screenOffTimeout']=10
 d['idle'].setdefault('screenOffCommand','')
 json.dump(d, open(p,'w'), indent=2)
 PY
- chown $ADMIN_USER:$ADMIN_USER $SETTINGS
- fi
+ chown -R $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.config/noctalia
 "
 noct_restart
 ```

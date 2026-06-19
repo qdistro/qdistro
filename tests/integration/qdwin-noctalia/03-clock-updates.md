@@ -33,9 +33,11 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 EXPECT_HHMM=$("$QDWIN_VM_EXEC" "$VMNAME" 'date +%H%M' | tail -1)
 noct_screenshot_awake /tmp/03-step1-now.png
 
-# Crop the top-left corner where Noctalia shows the date+clock
-# (approximate region: 0,0 → 250,30).
-magick /tmp/03-step1-now.png -crop 250x30+0+0 /tmp/03-step1-clock.png
+# Crop the FULL-WIDTH top bar strip, not a top-left corner: Noctalia centres
+# the clock capsule in the bar, so a narrow 250x30 left crop misses it entirely
+# and OCR comes back empty. An over-wide width clamps to the image width, so
+# this is resolution-robust.
+magick /tmp/03-step1-now.png -crop 2560x48+0+0 /tmp/03-step1-clock.png
 OCR=$(tesseract /tmp/03-step1-clock.png stdout 2>/dev/null)
 echo "$EXPECT_HHMM matches OCR: $OCR"
 ```
@@ -55,7 +57,7 @@ sleep 65 # let the next clock-tick fire (Noctalia ticks every minute)
 
 EXPECT_HHMM2=$("$QDWIN_VM_EXEC" "$VMNAME" 'date +%H%M' | tail -1)
 noct_screenshot_awake /tmp/03-step2-advanced.png
-magick /tmp/03-step2-advanced.png -crop 250x30+0+0 /tmp/03-step2-clock.png
+magick /tmp/03-step2-advanced.png -crop 2560x48+0+0 /tmp/03-step2-clock.png
 OCR2=$(tesseract /tmp/03-step2-clock.png stdout 2>/dev/null)
 ```
 

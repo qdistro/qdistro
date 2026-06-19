@@ -11,12 +11,18 @@
 #     when the OUTER stack is unprovisioned (no qdwin/qdshell wayland-1, OR no
 #     nested KVM) — mirroring the bats tiered-isolation skip — instead of being
 #     dispatched to the agent (which then writes ERROR, the bug).
-#   - PRESENT-BUT-BROKEN is NOT pre-skipped: when the outer stack (wayland-1 +
-#     nested KVM) IS present, the scenario RUNS even if the baked guest image is
-#     absent — the agent then reports ERROR/INFRA per the scenarios' own "do not
-#     silently skip" contract. Image presence is deliberately NOT a gate input.
+#   - tier-4/5 base image is OPT-IN: when the outer stack is present but the
+#     opt-in base image is absent AND the run did not opt in
+#     (QDISTRO_BUILD_TIER{4,5}_BASE=1), gui_scenario_tier_base_skip_reason
+#     resolves to SKIP (cheap + honest). When the run DID opt in but the bake is
+#     still missing/broken, the scenario RUNS and the agent reports ERROR/INFRA
+#     per the scenarios' own "do not silently skip a requested bake" contract.
+#     This gate runs BEFORE the qdwin-routing bypass so it fires for these
+#     qdwin-required scenarios in the default lane.
 #
-# Helper signature: gui_scenario_skip_reason rel legacy nested qdshell ssh skip_qdwin
+# Helper signatures:
+#   gui_scenario_skip_reason           rel legacy nested qdshell ssh skip_qdwin
+#   gui_scenario_tier_base_skip_reason rel tier5_base tier4_base tier5_optin tier4_optin
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
@@ -55,13 +61,55 @@ reason_full_stack() {
     [[ "$output" == *"nested KVM"* ]]
 }
 
-@test "gui run: tier-5 cold-start (20) RUNS when outer stack present (image gap is agent ERROR, not skip)" {
-    # qdshell + nested KVM present; the baked image is irrelevant to the gate —
-    # this is present-but-broken, the agent must report ERROR. Function must NOT
-    # pre-skip it.
+@test "gui run: tier-5 cold-start (20) RUNS (stack-presence gate) when outer stack present" {
+    # Stack-presence function only: qdshell + nested KVM present => no stack skip.
+    # (Base-image opt-in is a separate gate, gui_scenario_tier_base_skip_reason.)
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
         0 1 1 ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# gui_scenario_tier_base_skip_reason: opt-in base-image gate (runs before the
+# qdwin-routing bypass in the dispatch loop).
+# args: rel tier5_base tier4_base tier5_optin tier4_optin
+@test "gui tier-base skip: tier-5 (20) SKIPs when base image absent and NOT opted-in" {
+    run gui_scenario_tier_base_skip_reason \
+        "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
+        0 0 0 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tier-5 base image not built"* ]]
+}
+
+@test "gui tier-base run: tier-5 (20) RUNS (ERROR contract) when base absent but opted-in" {
+    run gui_scenario_tier_base_skip_reason \
+        "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
+        0 0 1 0
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui tier-base run: tier-5 (20) RUNS when base image present" {
+    run gui_scenario_tier_base_skip_reason \
+        "qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md" \
+        1 1 0 0
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui tier-base run: tier-4 (57) SKIPs when base absent and NOT opted-in" {
+    run gui_scenario_tier_base_skip_reason \
+        "qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md" \
+        1 0 0 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tier-4 base image not built"* ]]
+}
+
+@test "gui tier-base run: non-tier scenario never tier-base-skipped" {
+    run gui_scenario_tier_base_skip_reason \
+        "qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md" \
+        0 0 0 0
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

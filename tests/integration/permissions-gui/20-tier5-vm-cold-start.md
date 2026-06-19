@@ -19,10 +19,14 @@ compositor on `wayland-1`, nested KVM, and the tier-5 base image
 stack itself is unprovisioned in this VM profile (no qdwin/qdshell
 session on `wayland-1`, or no nested KVM), the GUI gate short-circuits to
 **SKIP** before dispatching this scenario — mirroring the bats
-`tiered-isolation` skip. When the outer stack IS present but only the
-base image is missing/broken, the runner reports **ERROR** with a
-one-line note pointing at `tier5-vm/build-guest-image.sh` — do not
-silently skip a present-but-broken bake.
+`tiered-isolation` skip. The tier-5 base image is OPT-IN
+(`QDISTRO_BUILD_TIER5_BASE=1`): when the outer stack is present but the
+base image is absent and the run did **not** opt in, the gate also
+**SKIPs** (a clean "not built" rather than a noisy ERROR every default
+run). Only when the run DID opt in (env set) but the bake is still
+missing/broken does the runner report **ERROR** with a one-line note
+pointing at `tier5-vm/build-guest-image.sh` — do not silently skip a
+bake the run explicitly requested.
 
 Budget: this scenario can take 2-3 minutes wall-clock (guest boot +
 waypipe handshake + ~5s for placeholder UI verification).

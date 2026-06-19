@@ -329,6 +329,38 @@ gui_run_scenario() {
 # tests/integration/qci/gui-scenario-skip.bats. Echoes the human-readable skip reason
 # when the scenario must be skipped, or nothing when it should run.
 #
+# Tier-4/5 base images are OPT-IN (built only under QDISTRO_BUILD_TIER{4,5}_BASE
+# =1). In the default lane the outer stack is present but the image is
+# intentionally absent — dispatching every run to the agent just to get ERROR is
+# noise. So: present-stack-but-absent-image is a clean SKIP *unless the run opted
+# in*, in which case an absent/broken bake runs and the agent reports ERROR (the
+# build was requested). This is decided HERE, separately from
+# gui_scenario_skip_reason, because it must run BEFORE the qdwin-routing bypass
+# in the dispatch loop (tier-4/5 scenarios are qdwin-required, so the bypass
+# would otherwise skip the stack-presence function entirely). Pure function:
+# host-testable. Echoes the skip reason, or nothing when the scenario should run.
+#
+# Args: rel tier5_base_present tier4_base_present tier5_optin tier4_optin
+gui_scenario_tier_base_skip_reason() {
+    local rel=$1 tier5_base=${2:-1} tier4_base=${3:-1} tier5_optin=${4:-0} tier4_optin=${5:-0}
+    case "$rel" in
+        qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
+        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md)
+            [ "$tier5_base" != 1 ] && [ "$tier5_optin" != 1 ] && \
+                printf '%s\n' "tier-5 base image not built (opt-in: QDISTRO_BUILD_TIER5_BASE=1 on a nested-KVM host)" ;;
+        qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+            [ "$tier4_base" != 1 ] && [ "$tier4_optin" != 1 ] && \
+                printf '%s\n' "tier-4 base image not built (opt-in: QDISTRO_BUILD_TIER4_BASE=1 on a nested-KVM host)" ;;
+    esac
+    return 0
+}
+
+# Tier-4/5 base-image opt-in skip is handled SEPARATELY by
+# gui_scenario_tier_base_skip_reason (above) so it can run BEFORE the
+# qdwin-routing bypass in the dispatch loop; this function stays purely about
+# OUTER-stack presence.
+#
 # Args: rel legacy_ctrl nested_kvm qdshell_active vm_ssh_port skip_qdwin
 gui_scenario_skip_reason() {
     local rel=$1 legacy_ctrl=$2 nested_kvm=$3 qdshell_active=$4 vm_ssh_port=$5 skip_qdwin=${6:-0}
@@ -410,6 +442,14 @@ gate_gui() {
     if "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service >/dev/null 2>&1" >/dev/null 2>&1; then
         qdshell_active=1
     fi
+    # Tier-4/5 opt-in base-image presence: absent + not-opted-in => clean SKIP
+    # (the bake is opt-in, not a broken provision). See gui_scenario_skip_reason.
+    local tier5_base=0 tier4_base=0
+    "$VM_TOOLS/vm-exec" "$svm" "test -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2" >/dev/null 2>&1 && tier5_base=1
+    "$VM_TOOLS/vm-exec" "$svm" "test -f /var/lib/libvirt/images/qdistro-tier4-guest.qcow2" >/dev/null 2>&1 && tier4_base=1
+    local tier5_optin=0 tier4_optin=0
+    [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = 1 ] && tier5_optin=1
+    [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = 1 ] && tier4_optin=1
 
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ] || [ -n "$explicit" ]; then
         qdwin_svm=$svm
@@ -474,18 +514,28 @@ gate_gui() {
         # Stack-absent SKIP gate (see gui_scenario_skip_reason). When the VM
         # profile lacks the OUTER stack a scenario needs (legacy ctrl-socket,
         # qdshell/wayland-1 session, nested KVM, SSH transport), short-circuit to
-        # SKIP up front — no VM spent, no agent dispatched. A present-but-broken
-        # stack (outer stack up, e.g. baked tier-4/5 image missing) is NOT caught
-        # here: it reaches the agent, which reports ERROR per the scenarios' own
-        # "do not silently skip" contract.
+        # SKIP up front — no VM spent, no agent dispatched. For tier-4/5: an
+        # absent OPT-IN base image is SKIPped here when the run did not opt in
+        # (gui_scenario_tier_base_skip_reason); but if the run DID opt in
+        # (QDISTRO_BUILD_TIER{4,5}_BASE=1) yet the bake is still missing/broken,
+        # the scenario reaches the agent, which reports ERROR per the scenarios'
+        # own "do not silently skip a requested bake" contract.
         local skip_reason
         # Legacy ctrl-socket scenarios (removed qdshell.py API) can never pass
         # against the shipping Quickshell session — skip them deterministically by
         # content, in EVERY path (this runs before the qdwin-routing bypass below
         # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
         # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
+        local tier_base_skip
+        tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
+            "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
+        elif [ -n "$tier_base_skip" ]; then
+            # Opt-in tier-4/5 base image absent (and not opted in): clean SKIP.
+            # Runs BEFORE the qdwin-routing bypass below so it actually fires for
+            # these qdwin-required scenarios in the default lane.
+            skip_reason="$tier_base_skip"
         elif [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
             skip_reason=""
         else

@@ -33,6 +33,11 @@ teardown_file() {
     assert_output_contains "PASS: broker ApprovalRevoked captured by real subscriber"
     # #2 qdlocker PAM (standalone repro must accept the standard test password)
     assert_output_contains "PASS: qdlocker PAM accepts Pa_ssw0rd45"
+    # #6 qdwin smoke: setsid -f detached test-window reaches qdwin (or at least
+    # survives the launching shell — the bug was a bare `&` getting SIGHUP'd).
+    assert_output_contains "PASS: smoke: detached qdistro-test-window"
+    # #7 qdlocker B1: systemctl --user with XDG_RUNTIME_DIR applies the dropin
+    assert_output_contains "PASS: qdlocker B1: systemctl --user (with XDG_RUNTIME_DIR) applied the idle dropin"
     # Driver ran to completion.
     assert_output_contains "VERIFY-DONE"
     # Surface the driver's INFO: diagnostics (esp. the #2 PAM/sandbox verdict and

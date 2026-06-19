@@ -308,8 +308,13 @@ container_image_digest() {
 
 # --- silo lifecycle helpers (admin) -------------------------------------
 launch_silo() {
-    qdistro-silo-launch "$SILO" >/dev/null 2>&1 \
-        || fail "${1:-launch}" "qdistro-silo-launch $SILO failed (session manager/compositor up?)"
+    local label="${1:-launch}" out
+    # Capture stderr instead of discarding it — when silo launch fails (e.g. a
+    # polkit auth-agent NoReply, or the session manager being down) the real
+    # reason is here, and suppressing it turned every downstream scenario into a
+    # misleading cascade (state/cookie assertions that never had a browser).
+    out="$(qdistro-silo-launch "$SILO" 2>&1)" \
+        || fail "$label" "qdistro-silo-launch $SILO failed (session manager/compositor up?): ${out:-<no output>}"
     # Wait for the detached container to be running.
     local i
     for i in $(seq 1 60); do
@@ -317,7 +322,7 @@ launch_silo() {
             && return 0
         sleep 1
     done
-    fail "${1:-launch}" "container $CONTAINER never reached Running"
+    fail "$label" "container $CONTAINER never reached Running"
 }
 stop_silo() {
     qdistro-silo-launch --stop "$SILO" >/dev/null 2>&1 || true
@@ -797,6 +802,13 @@ scenario_rollback() {
     local genA genB markerA url
     genA="$(cat "$STATE/genA")"; genB="$(cat "$STATE/genB")"
     markerA="$(cat "$STATE/markerA")"; url="$(base_url)"
+    # Prerequisite: update-flip must have planted the B-ERA-ONLY sentinel in the
+    # LIVE state before we roll back. If it's absent here, update-flip never
+    # completed (e.g. an upstream baseline/launch failure) — fail with THAT
+    # prerequisite rather than the misleading "rollback lost displaced state"
+    # assertion below, which would blame the rollback for a missing setup.
+    [ -f "$STATE_PATH_DEFAULT/profile/b-era-sentinel" ] \
+        || fail rollback "prerequisite: B-era sentinel absent from live state before rollback — update-flip did not complete (check baseline/update-flip scenarios upstream)"
     # Clear breakage but KEEP issued sessions — the restored A-era cookie must
     # still be honoured at /home to prove the rollback.
     site_ctl "/__clearbreak" >/dev/null 2>&1 || true

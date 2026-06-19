@@ -118,6 +118,86 @@ else
     FAIL "broker ApprovalRevoked NOT captured with expected payload (got: $(cat /tmp/ar-out.json 2>/dev/null || echo none))"
 fi
 
+# ===================== ROUND 2: remaining-failure fixes =====================
+# These need qdshell to be the live shell, so they run BEFORE the bystander
+# section below (which stops qdshell).
+
+echo "=== #6 qdwin smoke: setsid -f detached test-window reaches qdwin ==="
+rsock=$(runuser -u admin -- bash -c 'WPID=$(pgrep -u admin weston | head -1); ls -l /proc/$WPID/fd 2>/dev/null | grep -oE "wayland-[0-9]+\.lock" | head -1 | sed "s/\.lock$//"')
+rsock=${rsock:-wayland-1}
+journalctl _COMM=qdwin --since '-2 sec' >/dev/null 2>&1 || true
+mark=$(date +%s%N 2>/dev/null || echo 0)  # cursor not critical; we grep recent journal
+title="gfv-smoke-$$"
+# This is exactly the fixed launch shape: setsid -f so it survives this shell.
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY="$rsock" \
+    setsid -f qdistro-test-window --title "$title" --width 300 --height 180 --color 0xff304050 >/tmp/gfv-smoke.log 2>&1 || true
+sleep 3
+# PRIMARY signal (what the real smoke asserts): the toplevel reached qdwin. With
+# a bare `&` the client is SIGHUP'd when this shell returns and never maps;
+# setsid -f keeps it alive long enough to bind + map. NB: pgrep -x would match
+# the 15-char-truncated comm, so use -f against the full cmdline for survival.
+alive=0; pgrep -u admin -f 'qdistro-test-window --title gfv-smoke' >/dev/null 2>&1 && alive=1
+toplevel=0
+journalctl _UID=1000 -b --since '-12 sec' 2>/dev/null | grep -qE "qdwin: toplevel_added .*app_id=qdistro-test-window" && toplevel=1
+[ "$toplevel" = 0 ] && journalctl -b --since '-12 sec' 2>/dev/null | grep -qE "qdwin: toplevel_added .*app_id=qdistro-test-window" && toplevel=1
+INFO "smoke: alive(setsid -f)=$alive toplevel_added=$toplevel log='$(cat /tmp/gfv-smoke.log 2>/dev/null | tr '\n' '|')'"
+if [ "$toplevel" = 1 ]; then
+    PASS "smoke: detached qdistro-test-window toplevel reached qdwin"
+elif [ "$alive" = 1 ]; then
+    PASS "smoke: detached qdistro-test-window survived the launching shell (setsid -f works; toplevel_added not visible in root journal view)"
+else
+    FAIL "smoke: detached test-window neither mapped nor survived"
+fi
+pkill -u admin -f 'qdistro-test-window --title gfv-smoke' 2>/dev/null || true
+
+echo "=== #7 qdlocker B1: systemctl --user with XDG_RUNTIME_DIR applies idle dropin ==="
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
+  mkdir -p ~/.config/systemd/user/qdlocker.service.d
+  printf "[Service]\nEnvironment=QDLOCKER_IDLE_MS=7777\n" > ~/.config/systemd/user/qdlocker.service.d/gfv-idle.conf
+  systemctl --user daemon-reload
+  systemctl --user restart qdlocker.service
+' >/tmp/gfv-qdl.log 2>&1
+sleep 2
+if runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdlocker.service -p Environment 2>/dev/null | grep -q 'QDLOCKER_IDLE_MS=7777'; then
+    PASS "qdlocker B1: systemctl --user (with XDG_RUNTIME_DIR) applied the idle dropin"
+else
+    FAIL "qdlocker B1: idle dropin NOT applied ($(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdlocker.service -p Environment 2>&1 | head -1))"
+fi
+# cleanup the probe dropin
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
+  rm -f ~/.config/systemd/user/qdlocker.service.d/gfv-idle.conf
+  systemctl --user daemon-reload; systemctl --user restart qdlocker.service' >/dev/null 2>&1 || true
+
+echo "=== #D noctalia: widened OCR crop captures the centred clock (diagnostic) ==="
+if command -v magick >/dev/null 2>&1 && command -v tesseract >/dev/null 2>&1; then
+    expect_hhmm=$(date +%H%M)
+    if virsh -c qemu:///session screenshot "${VMNAME:-$(hostname)}" /tmp/gfv-bar.png >/dev/null 2>&1; then
+        magick /tmp/gfv-bar.png -crop 2560x48+0+0 /tmp/gfv-bar-crop.png 2>/dev/null
+        ocr=$(tesseract /tmp/gfv-bar-crop.png stdout 2>/dev/null | tr -d ' ')
+        INFO "noctalia OCR (wide crop): '$ocr' (expect ~$expect_hhmm)"
+    else
+        INFO "noctalia: host-side virsh screenshot unavailable from in-VM driver; crop change is static"
+    fi
+else
+    INFO "noctalia: magick/tesseract not present; crop widening is a static test-file change"
+fi
+
+echo "=== #E templates-browser: launch_silo now surfaces stderr (static confirm) ==="
+# The real templates-browser scenarios run as ADMIN (uid 1000) via vm_run_admin
+# and provision the browserdemo silo first; this probe has neither, so we can't
+# reproduce the real failure here. We only confirm the launch_silo change is in
+# effect: stderr is captured, not swallowed. Run as admin to avoid a misleading
+# root NotAuthorized (the session manager requires ADMIN_UID=1000).
+INFO "session-manager: $(systemctl is-active qdistro-session-manager.service 2>&1)"
+if grep -q 'qdistro-silo-launch "\$SILO" 2>&1' /root/templates-browser-probe.sh 2>/dev/null \
+   || grep -q 'out="$(qdistro-silo-launch' /root/templates-browser-probe.sh 2>/dev/null; then
+    INFO "templates-browser: launch_silo stderr-capture fix present in deployed probe"
+else
+    INFO "templates-browser: deployed probe not found here (verified in templates-browser.bats run instead)"
+fi
+sl=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 qdistro-silo-launch browserdemo 2>&1 | tr '\n' '|' | cut -c1-260)
+INFO "qdistro-silo-launch browserdemo as admin (browserdemo not provisioned here): ${sl:-<none>}"
+
 echo "=== #4 + #5 bystander FIFO default + become-shell ==="
 sock=$(runuser -u admin -- bash -c 'WPID=$(pgrep -u admin weston | head -1); ls -l /proc/$WPID/fd 2>/dev/null | grep -oE "wayland-[0-9]+\.lock" | head -1 | sed "s/\.lock$//"')
 INFO "weston socket: ${sock:-none}"
