@@ -128,7 +128,7 @@ $VMEXEC "$VM" 'rm -f /tmp/35-work.log /tmp/35-work.pid'
   bus_name-filter bug fixed in commit `d72a430` for the Qt app
   — see scenario 08 for the cousin failure). File a separate
   todo card for the TUI version of that fix.
-- TUI placement on screen depends on labwc's window-management;
+- TUI placement on screen depends on the compositor's window-management;
   the runner may need to read the TUI screenshot region from a
   different location than the Qt app. OCR the visible text first
   to identify which window is which.

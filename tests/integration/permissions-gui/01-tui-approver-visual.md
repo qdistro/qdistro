@@ -1,7 +1,7 @@
 # 01 — TUI approver renders correctly in a real terminal
 
 **What**: launch `qdistro-admin-tui` inside `qterminal` in the VM's
-labwc Wayland session, inject one pending request, and verify the
+admin compositor session, inject one pending request, and verify the
 TUI's empty and populated states both render with correct colors,
 layout, and footer keybindings.
 
@@ -16,9 +16,9 @@ VM=${VMNAME:-qdistro-dev-260421-0052}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
-# Precondition: broker running, no pending requests, admin session up.
+# Precondition: broker running, no pending requests, admin compositor session up.
 $VMEXEC "$VM" 'systemctl is-active qdistro-admin-broker.service'
-$VMEXEC "$VM" 'pgrep -a labwc >/dev/null'
+$VMEXEC "$VM" 'test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1'
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 ```
 
@@ -41,7 +41,7 @@ $VMGUI "$VM" screenshot /tmp/01-tui-approver-visual-s1-empty.png
 ```
 
 **Assert (empty):**
-- A qterminal window is visible on the labwc desktop (chrome with
+- A qterminal window is visible on the admin compositor desktop (chrome with
  "Shell No. 1" titlebar is acceptable).
 - Inside the terminal content area, the TUI header reads
  `qdistro admin approvals (TUI)` followed by a pending-count
@@ -87,8 +87,8 @@ $VMGUI "$VM" screenshot /tmp/01-tui-approver-visual-s2-populated.png
 ### S3 — deny and confirm empty state returns
 
 ```bash
-# `vm-gui key d` silently no-ops against labwc's XWayland: xdotool
-# injects via X but qterminal's focus/input path under labwc
+# `vm-gui key d` may silently no-op through XWayland: xdotool
+# injects via X but qterminal's focus/input path
 # doesn't receive plain-letter keys reliably. Drive via virsh
 # send-key (evdev, below X/Wayland). See AGENTS.md .
 virsh send-key "$VM" --codeset linux KEY_D
@@ -115,7 +115,7 @@ $VMEXEC "$VM" 'rm -f /tmp/test-pid /tmp/test-output.txt /tmp/qterminal-tui.log'
 
 - If qterminal fails to appear, check `/tmp/qterminal-tui.log` inside
  the VM (`vm-exec $VM 'cat /tmp/qterminal-tui.log'`). The launcher
- sets `DISPLAY=:0`, `WAYLAND_DISPLAY=wayland-0`, `XDG_RUNTIME_DIR`,
+ sets `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
  `DBUS_SESSION_BUS_ADDRESS`; missing any of those in the session
  itself (e.g. admin not logged in via greetd) is the usual culprit.
 - The TUI uses Textual's default dark theme; exact RGB values are not

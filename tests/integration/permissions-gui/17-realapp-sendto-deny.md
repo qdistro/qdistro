@@ -1,7 +1,7 @@
 # 17 — cross-user send-to between real qnotebook instances, admin denies
 
 **What**: same flow as 16 (work's qnotebook → work2's qnotebook
-via broker, admin app in admin's labwc session), but admin clicks
+via broker, admin app in admin's compositor session), but admin clicks
 **Deny**. Assert that work2's qnotebook receiver was NOT called
 (its `GetLastReceived` reflects its pre-deny state), the sender
 observes `Denied`, and the audit row records `decision=0`.
@@ -48,7 +48,7 @@ sleep 6
 
 # Start admin app after qnotebooks (matches scenario 16's stable
 # ordering) and wait for the window to become visible under
-# labwc/XWayland before proceeding.
+# XWayland before proceeding.
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 2
 $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 sh -c '"'"'
@@ -156,7 +156,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
  audit decision=0 below. Why both are acceptable: the
  OCR-driven admin click can easily exceed dbus-send's 25s
  default reply timeout when three Qt apps and admin-app are
- all up on labwc; in that case dbus-send bails with NoReply
+ all up; in that case dbus-send bails with NoReply
  even though the broker later delivers a `.Denied` that
  dbus-send is no longer listening for. What must NOT happen
  is a `method return` with no error — that would indicate

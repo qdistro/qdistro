@@ -815,7 +815,7 @@ class TestYamlIsAllowAllGuard:
 # ---------------------------------------------------------------------------
 # Table tab-key navigation (accessibility): Tab must escape the QTableView so
 # the keyboard can reach the row-action buttons. Qt's default
-# tabKeyNavigation=True traps Tab inside the view; on the labwc/XWayland GUI
+# tabKeyNavigation=True traps Tab inside the view; on the XWayland GUI
 # test template mouse is platform-blocked, so this is the only path to e.g.
 # the Cache tab's "Revoke" button after selecting a row.
 # ---------------------------------------------------------------------------

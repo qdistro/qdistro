@@ -98,10 +98,17 @@ in_file() {
     in_file "size=@Size(1200 700)" "$GUI_SPIN"
 }
 
-@test "gui-spin: installs the labwc + XWayland + fonts stack" {
-    in_file "labwc" "$GUI_SPIN"
+@test "gui-spin: installs XWayland + fonts for compositor-enabled admin scenarios" {
     in_file "xwayland" "$GUI_SPIN"
     in_file "dejavu-fonts" "$GUI_SPIN"
+}
+
+@test "gui-spin: supports separate labwc and qdwin session profiles" {
+    in_file "QDISTRO_VM_GUI_SESSION:-labwc" "$GUI_SPIN"
+    in_file "labwc|qdwin" "$GUI_SPIN"
+    in_file "systemctl --user start qdwin-session.target" "$GUI_SPIN"
+    in_file "wayland-1 socket up" "$GUI_SPIN"
+    in_file "qdwin clone session up (wayland-1)" "$GUI_SPIN"
 }
 
 @test "gui-spin: installs perl-Net-DBus" {

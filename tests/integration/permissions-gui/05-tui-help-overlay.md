@@ -50,13 +50,13 @@ xdotool-based plain-key injection reaches it (unlike modifier combos
 into Qt apps — see AGENTS.md ).
 
 ```bash
-# Click into the qterminal content area first — under labwc, keyboard
+# Click into the qterminal content area first — under the GUI test compositor, keyboard
 # focus can lag xdotool's `search` unless the window has been explicitly
 # clicked. A plain click on the terminal body does not send a keystroke
 # to the TUI (it just transfers focus).
 $VMGUI "$VM" click 640 400
 sleep 0.3
-# `?` = Shift+/ at evdev; vm-gui key no-ops on labwc XWayland.
+# `?` = Shift+/ at evdev; vm-gui key no-ops on some XWayland paths.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_SLASH
 sleep 1
 $VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s2-help-open.png

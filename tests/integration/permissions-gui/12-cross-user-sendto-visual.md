@@ -11,7 +11,7 @@ the "Just this once" radio is pre-selected (forbidden scopes are
 broker-rejected), and the Approve click produces a cache-free
 audit trail.
 
-Sender-side GUI (qstub-sender as `work` on labwc XWayland) is
+Sender-side GUI (qstub-sender as `work` on the GUI test compositor) is
 deferred — see .
 
 ## Setup

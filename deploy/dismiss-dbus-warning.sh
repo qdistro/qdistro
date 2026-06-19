@@ -3,9 +3,15 @@
 # warning dialog at session start that blocks subsequent autostart entries
 # until clicked. We can't suppress it at source without patching liblxqt,
 # so this helper polls for it and presses Return once.
-# Runs from the labwc autostart in the background.
-export WAYLAND_DISPLAY=wayland-0
+# Runs from the compositor-session autostart in the background.
 export XDG_RUNTIME_DIR=/run/user/1000
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+        export WAYLAND_DISPLAY=wayland-0
+    elif [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+        export WAYLAND_DISPLAY=wayland-1
+    fi
+fi
 for _ in $(seq 1 30); do
     sleep 1
     # If lxqt-panel is up, the dialog has either been dismissed or never appeared

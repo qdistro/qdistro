@@ -62,7 +62,8 @@ vitest tags), and the per-suite relabel action items.
 | `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
 | `bats` | Run every `qdistro/tests/integration/vm/*.bats` file. Each file gets a fresh disposable VM, and files run **in parallel** (see [Parallelism & per-run golden](#parallelism--per-run-golden-image)). |
-| `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. The agent scenarios run **in parallel** (one disposable VM each). |
+| `gui` | Run executable qdwin GUI smokes, qdshell vision pytest when configured, and markdown scenario assignments for qdwin, qdlocker, qdistro permissions GUI, and qdwin-noctalia. Normal disposable runs provision both GUI profiles: admin/non-qdwin scenarios use the admin compositor harness, while qdwin-dependent rows use `QDISTRO_VM_GUI_SESSION=qdwin`. The agent scenarios run **in parallel** (one disposable VM each). |
+| `gui-admin` | Run the GUI gate in admin/non-qdwin mode: qdwin/qdshell, qdlocker, qdwin-noctalia, and tier-4/5 scenarios are recorded as intentional skips while qdistro admin/broker GUI scenarios still run. |
 | `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
@@ -129,6 +130,7 @@ run end, and preserved only if a failed worker that references it is preserved.
 | --- | --- | --- |
 | `QCI_JOBS` | auto-tier | Override bats pool concurrency (still RAM-clamped). |
 | `QCI_GUI_JOBS` | 8 | Override gui pool concurrency (still RAM-clamped). |
+| `QCI_GUI_SKIP_QDWIN` | 0 | `1` runs only the admin/non-qdwin GUI lane for `qci gui`; `qci gui-admin` sets this automatically. |
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |

@@ -1,6 +1,6 @@
 # 03 — Qt admin approval app renders master/detail correctly
 
-**What**: launch the PyQt admin app in admin's labwc Wayland session,
+**What**: launch the PyQt admin app in admin's compositor session,
 inject one pending request, verify the master (list) / detail (form)
 layout renders with correct empty and populated states, and confirm
 Deny returns the pane to empty.
@@ -19,7 +19,7 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'systemctl is-active qdistro-admin-broker.service'
-$VMEXEC "$VM" 'pgrep -a labwc >/dev/null'
+$VMEXEC "$VM" 'test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1'
 # Clean slate: no stray admin app, no stray qterminal+TUI, no stray test.
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
@@ -49,7 +49,7 @@ $VMGUI "$VM" screenshot /tmp/03-qt-admin-app-visual-s1-empty.png
 
 **Assert (empty):**
 - A window with titlebar text `admin approvals` is visible on the
- labwc desktop.
+ admin compositor desktop.
 - The window content is split horizontally: a left-side list view
  (empty — no items) and a right-side detail pane.
 - The detail pane's user label reads literally `(no selection)`.
@@ -99,7 +99,7 @@ tab — but this test launches straight into the Pending tab with the
 window focused, so a single Ctrl+N decides as expected (no tab
 switch is needed). We inject Ctrl+N at the KVM keyboard level via
 `virsh send-key` because xdotool modifier combos don't reach
-XWayland Qt apps under labwc (see AGENTS.md caveat).
+XWayland Qt apps under the GUI test compositor (see AGENTS.md caveat).
 
 ```bash
 # Focus the admin-approvals window before the KVM-level keystroke,

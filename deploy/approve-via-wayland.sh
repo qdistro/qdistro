@@ -1,10 +1,16 @@
 #!/bin/bash
-# Run this as admin inside the labwc Wayland session to focus the admin
+# Run this as admin inside the active admin Wayland session to focus the admin
 # approvals window and send Ctrl+Y to approve the currently-selected
 # pending request.
 set -u
-export WAYLAND_DISPLAY=wayland-0
 export XDG_RUNTIME_DIR=/run/user/1000
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+        export WAYLAND_DISPLAY=wayland-0
+    elif [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+        export WAYLAND_DISPLAY=wayland-1
+    fi
+fi
 
 echo "[approve] toplevels:"
 wlrctl toplevel list || true

@@ -13,11 +13,17 @@ if [ "$(id -u)" = "0" ]; then
     fi
     exec runuser -u "$ADMIN_USER" -- "$0" "$@"
 fi
-export WAYLAND_DISPLAY=wayland-0
 export XDG_RUNTIME_DIR=/run/user/1000
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+        export WAYLAND_DISPLAY=wayland-0
+    elif [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+        export WAYLAND_DISPLAY=wayland-1
+    fi
+fi
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 export QT_QPA_PLATFORM=xcb
-export DISPLAY=:0
+export DISPLAY=${DISPLAY:-:0}
 ADMIN_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
 APP_PY="$ADMIN_HOME/qdistro/admin_app/qdistro_admin_app.py"
 [ -f "$APP_PY" ] || APP_PY=/home/admin/qdistro/admin_app/qdistro_admin_app.py

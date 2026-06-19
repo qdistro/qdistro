@@ -23,12 +23,18 @@ if [ "$(id -u)" = "0" ]; then
     fi
     exec runuser -u "$ADMIN_USER" -- "$0" "$@"
 fi
-export WAYLAND_DISPLAY=wayland-0
 export XDG_RUNTIME_DIR=/run/user/1000
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+        export WAYLAND_DISPLAY=wayland-0
+    elif [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+        export WAYLAND_DISPLAY=wayland-1
+    fi
+fi
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=LXQt
-export DISPLAY=:0
+export XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-qdistro}
+export DISPLAY=${DISPLAY:-:0}
 setsid qterminal -e /usr/local/bin/qdistro-admin-tui \
     </dev/null >/tmp/qterminal-tui.log 2>&1 &
 disown

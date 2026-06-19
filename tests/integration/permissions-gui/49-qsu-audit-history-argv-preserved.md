@@ -83,7 +83,7 @@ This scenario's load-bearing check is the audit/history wire shape, not
 Qt radio-button navigation. Use the broker API to apply the exact
 `forever_argv` decision after S2 has visually established the pending row;
 mouse and radio-keyboard delivery to the Qt app are platform-flaky on this
-labwc/XWayland template.
+XWayland GUI template.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'

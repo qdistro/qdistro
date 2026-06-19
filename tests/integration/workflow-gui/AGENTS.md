@@ -20,7 +20,7 @@ This file only documents what is *different* for workflow scenarios.
 ## Provisioning
 
 Use `scripts/vm/spin-test-vm-gui.sh` (same as permissions-gui): it brings
-up the broker, admin-app launchers, and the labwc session. The workflow
+up the broker, admin-app launchers, and an admin compositor session. The workflow
 engine loads inside the broker automatically (`_setup_workflow_engine`),
 so no extra service is needed — but it only picks up workflows present at
 broker start or on a reload.

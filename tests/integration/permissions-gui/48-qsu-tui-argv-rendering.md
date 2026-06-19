@@ -158,7 +158,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 - All TUI key inputs (`6`, `a`, `r`) must go via
   `virsh send-key --codeset linux KEY_…`, NOT `vm-gui key`. See
-  AGENTS.md pitfall 3b — qterminal under labwc swallows plain
+  AGENTS.md pitfall 3b — qterminal under XWayland may swallow plain
   keystrokes through xdotool inconsistently.
 - The TUI terminal window must have keyboard focus when `6` is
   injected — that's what `windowactivate --sync` is for. If S3

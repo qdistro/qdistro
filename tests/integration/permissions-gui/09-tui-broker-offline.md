@@ -72,7 +72,7 @@ $VMEXEC "$VM" 'systemctl start qdistro-admin-broker.service'
 sleep 2
 # Ask the TUI to refresh now so we don't wait another poll cycle.
 # `vm-gui key r` sometimes works against a focused qterminal but
-# not reliably under labwc — virsh send-key is the portable path.
+# not reliably through XWayland — virsh send-key is the portable path.
 virsh send-key "$VM" --codeset linux KEY_R
 sleep 1
 $VMGUI "$VM" screenshot /tmp/09-s3-recovered.png

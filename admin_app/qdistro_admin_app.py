@@ -1202,7 +1202,7 @@ class CacheTab(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         # Let Tab advance OUT of the table to the row-action buttons (Revoke);
         # Qt's default tabKeyNavigation traps Tab inside the view, and mouse is
-        # unavailable on the labwc/XWayland GUI test template.
+        # unavailable on the XWayland GUI test template.
         self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -1391,7 +1391,7 @@ class SilosTab(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         # Let Tab advance OUT of the table to the row-action buttons; Qt's
         # default tabKeyNavigation traps Tab inside the view, and mouse is
-        # unavailable on the labwc/XWayland GUI test template.
+        # unavailable on the XWayland GUI test template.
         self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -2768,7 +2768,7 @@ class RulesTab(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         # Let Tab advance OUT of the table to the row-action buttons; Qt's
         # default tabKeyNavigation traps Tab inside the view, and mouse is
-        # unavailable on the labwc/XWayland GUI test template.
+        # unavailable on the XWayland GUI test template.
         self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(
@@ -3315,7 +3315,7 @@ class WorkflowsTab(QWidget):
         # Let Tab advance OUT of the table to the row-action buttons (the
         # runs table feeds "Approve selected run"); Qt's default
         # tabKeyNavigation traps Tab inside the view, and mouse is
-        # unavailable on the labwc/XWayland GUI test template.
+        # unavailable on the XWayland GUI test template.
         table.setTabKeyNavigation(False)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setSectionResizeMode(
@@ -3405,7 +3405,7 @@ class HistoryTab(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         # Let Tab advance OUT of the table to the row-action buttons; Qt's
         # default tabKeyNavigation traps Tab inside the view, and mouse is
-        # unavailable on the labwc/XWayland GUI test template.
+        # unavailable on the XWayland GUI test template.
         self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(

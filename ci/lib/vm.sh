@@ -30,7 +30,7 @@ validate_vm() {
 }
 
 acquire_vm() {
-    local gate=$1 explicit=${2:-} log_path vm spinner
+    local gate=$1 explicit=${2:-} log_path vm spinner gui_session=""
     if [ -n "$explicit" ]; then
         validate_vm "$gate" "$explicit" || return "$EXIT_VM_PROVISION"
         printf '%s\n' "$explicit"
@@ -46,17 +46,20 @@ acquire_vm() {
     # scenarios all ERRORed on "broker-only VM, missing GUI components". Use the
     # same gui|gui-* glob as the golden_backing case just below.
     case "$gate" in
-        gui|gui-*) spinner=spin-test-vm-gui.sh ;;
+        gui-qdwin|gui-qdwin-*) spinner=spin-test-vm-gui.sh; gui_session=qdwin ;;
+        gui|gui-admin|gui-admin-*|gui-*) spinner=spin-test-vm-gui.sh; gui_session=labwc ;;
     esac
     # If a per-run golden has been built for this gate's family, clone from it
     # (the spinner then skips fresh-vm-bootstrap). Empty => normal full build.
     local golden_backing=""
     case "$gate" in
         bats|bats-*) golden_backing="$RUN_GOLDEN_BATS" ;;
-        gui|gui-*)   golden_backing="$RUN_GOLDEN_GUI" ;;
+        gui-qdwin|gui-qdwin-*) golden_backing="$RUN_GOLDEN_GUI_QDWIN" ;;
+        gui|gui-admin|gui-admin-*|gui-*) golden_backing="$RUN_GOLDEN_GUI_ADMIN" ;;
     esac
     QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
     QCI_RUN_GOLDEN_BACKING="$golden_backing" \
+    QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -214,13 +217,14 @@ wait_for_shutoff() {
 # workers skip the build. Idempotent. Returns EXIT_VM_PROVISION on any failure
 # (caller should fail the gate fast — no silent fallback to per-worker build).
 ensure_run_golden() {
-    local profile=$1 spinner gvm gdisk log rc tier2_images=0
+    local profile=$1 spinner gvm gdisk log rc tier2_images=0 gui_session=""
     case "$profile" in
         # Pre-bake the tier-2 podman images into the bats golden so every cloned
         # bats worker inherits them and the tier-2 drivers skip their cold
         # `podman build` hot path (see fresh-vm-bootstrap.sh §8).
         bats) [ -n "$RUN_GOLDEN_BATS" ] && return 0; spinner=spin-test-vm.sh; tier2_images=1 ;;
-        gui)  [ -n "$RUN_GOLDEN_GUI" ]  && return 0; spinner=spin-test-vm-gui.sh ;;
+        gui|gui-admin) [ -n "$RUN_GOLDEN_GUI_ADMIN" ] && return 0; spinner=spin-test-vm-gui.sh; gui_session=labwc; profile=gui-admin ;;
+        gui-qdwin) [ -n "$RUN_GOLDEN_GUI_QDWIN" ] && return 0; spinner=spin-test-vm-gui.sh; gui_session=qdwin ;;
         *) return 1 ;;
     esac
     log="$RDIR/vm/golden-$profile.log"
@@ -230,6 +234,7 @@ ensure_run_golden() {
     QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
     QCI_RUN_GOLDEN_BACKING="" \
     QDISTRO_BUILD_TIER2_IMAGES="$tier2_images" \
+    QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-golden-$profile" > "$log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -273,7 +278,8 @@ ensure_run_golden() {
     "${VIRSH[@]}" undefine "$gvm" --nvram >/dev/null 2>&1 || "${VIRSH[@]}" undefine "$gvm" >/dev/null 2>&1 || true
     case "$profile" in
         bats) RUN_GOLDEN_BATS="$gdisk" ;;
-        gui)  RUN_GOLDEN_GUI="$gdisk" ;;
+        gui-admin) RUN_GOLDEN_GUI_ADMIN="$gdisk" ;;
+        gui-qdwin) RUN_GOLDEN_GUI_QDWIN="$gdisk" ;;
     esac
     RUN_GOLDEN_DISKS+=("$gdisk")
     kv "golden_${profile}_disk" "$gdisk"

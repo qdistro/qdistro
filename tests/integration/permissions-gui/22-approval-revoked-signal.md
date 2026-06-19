@@ -89,7 +89,7 @@ $VMGUI "$VM" screenshot /tmp/22-s1-launched.png
 
 ### S2 — keyboard: reach Cache tab, select row, press Revoke
 
-Mouse clicks are platform-blocked on the labwc/XWayland template
+Mouse clicks are platform-blocked on the XWayland GUI template
 (AGENTS.md §3b), so drive the whole revoke path with the keyboard via
 `virsh send-key` (the blessed input path, §3a). After launch the
 window focuses the Pending list; one **Shift+Tab** moves focus back to

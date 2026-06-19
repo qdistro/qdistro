@@ -188,6 +188,6 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
   real regression worth filing.
 - Approve / Deny keyboard chords go via `virsh send-key` (Ctrl+Y
   / Ctrl+N); `vm-gui key ctrl+y` does NOT work consistently with
-  XWayland under labwc (see AGENTS.md pitfall 3).
+  XWayland under the GUI test compositor (see AGENTS.md pitfall 3).
 - This scenario is the entry point for the qsu series — 44-46
   exercise the same shape but pick different forever-* scopes.

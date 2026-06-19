@@ -55,7 +55,7 @@ $VMGUI "$VM" screenshot /tmp/02-tui-scope-picker-s1-default.png
 ### S2 — press `2` (1h)
 
 ```bash
-virsh send-key "$VM" --codeset linux KEY_2 # see AGENTS.md : vm-gui key no-ops on labwc XWayland
+virsh send-key "$VM" --codeset linux KEY_2 # see AGENTS.md: vm-gui key may no-op through XWayland
 sleep 1
 $VMGUI "$VM" screenshot /tmp/02-tui-scope-picker-s2-1h.png
 ```

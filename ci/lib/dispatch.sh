@@ -142,11 +142,13 @@ main() {
                 shift
             done
             gate_bats "$EXPLICIT_VM" "${files[@]}"; rc=$?; finish_run "$rc" ;;
-        gui)
+        gui|gui-admin)
+            [ "$cmd" = gui-admin ] && export QCI_GUI_SKIP_QDWIN=1
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --vm) shift; EXPLICIT_VM=${1:-} ;;
                     --scenario) shift; scenarios+=("${1:-}") ;;
+                    --skip-qdwin) export QCI_GUI_SKIP_QDWIN=1 ;;
                     --no-require-agent) export QCI_REQUIRE_AGENT_GUI=0 ;;
                     *) record_blocked gui "$1" "$EXIT_USAGE" args "unknown arg"; finish_run "$EXIT_USAGE" ;;
                 esac

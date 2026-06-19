@@ -28,7 +28,9 @@ and return a report.
 - Host: openSUSE Tumbleweed with `libvirt` + `virsh`.
 - Target: a running virt-manager VM (name passed via `$VMNAME`, default
  picked from `virsh list --name --state-running | head -1`).
-- VM runs LXQt + labwc on tty3 as user `admin`, autologged via greetd.
+- VM runs an admin compositor session as user `admin`; current CI may use
+  the labwc harness for admin-only scenarios or the qdwin/qdshell profile for
+  production-compositor scenarios.
 - `qdistro-admin-broker.service` is active under root; TUI at
  `/usr/local/bin/qdistro-admin-tui`; Qt admin app at
  `/home/admin/qdistro/admin_app/qdistro_admin_app.py`.
@@ -38,7 +40,7 @@ and return a report.
  - `${QDISTRO_REPO}/scripts/vm/vm-gui <vm> ...`
  `start`, `screenshot [file]`, `click x y`, `type <text>`,
  `key <keysym>` — implemented via virsh screenshot + xdotool in
- XWayland (labwc Wayland; `DISPLAY=:0` XWayland is available).
+ XWayland (`DISPLAY=:0` XWayland is available on the GUI harness).
 - VM user password is `Pa_ssw0rd45` for `admin` and `work`.
 
 ## Hard-learned pitfalls (read before running commands)
@@ -88,7 +90,7 @@ and return a report.
  wrapping the Textual TUI (`qdistro-admin-tui`).
 
  Source in `deploy/start-admin-{app,tui}.sh`.
-3. **Wayland input injection is unreliable on labwc.** Drive the GUI
+3. **Wayland input injection is unreliable on the GUI harness.** Drive the GUI
  via keyboard (`vm-gui key`) through XWayland where possible; do
  **not** click pixel coordinates for Wayland-native windows unless a
  scenario explicitly instructs to.
@@ -96,7 +98,7 @@ and return a report.
  **Caveat for modifier-key shortcuts on XWayland Qt apps** (e.g.
  the admin approval app's `Ctrl+Y`/`Ctrl+N`): `vm-gui key ctrl+n`
  silently fails to reach the app — xdotool/XTest routes modifier
- combos through XWayland's focus handling, which labwc does not
+ combos through XWayland's focus handling, which the compositor may not
  synchronize with the Qt window's X input focus. Use the KVM
  keyboard instead:
  ```bash
@@ -106,7 +108,7 @@ and return a report.
  keyboard (evdev) layer, below X/Wayland entirely.
 
  **Plain-key caveat too**: even single letters / digits through
- `vm-gui key <X>` silently no-op against qterminal under labwc in
+ `vm-gui key <X>` may silently no-op against qterminal under XWayland in
  practice — xdotool reaches the X server but the focused terminal
  window doesn't see the key consistently. TUI scenarios (01, 02,
  05, 09) drive every plain key (`d`, `1`, `2`, `3`, `r`, `?`,
@@ -117,7 +119,7 @@ and return a report.
 
 3a. **Keyboard navigation via `virsh send-key` is the BLESSED input
  path.** Mouse-click delivery to Qt/XWayland windows is *not*
- reliable on this labwc/XWayland template (see 3b for why and the
+ reliable on this XWayland template (see 3b for why and the
  history). Unless a scenario's whole point is to exercise the mouse
  (06-qt-admin-app-mouse.md), drive every interaction with the
  keyboard:
@@ -138,11 +140,11 @@ and return a report.
 3b. **Mouse-click scenarios describe targets by visible text, not
  pixels.** Mouse clicks are PLATFORM-BLOCKED on this template —
  both `vm-gui click X Y` and direct `xdotool mousemove…click` fail
- to reach Qt XWayland windows on this labwc build (labwc does not
+ to reach Qt XWayland windows on some compositor builds (the compositor may not
  synchronise pointer events into XWayland's focus the way the Qt
  windows expect). 06-qt-admin-app-mouse.md is therefore the *only*
  scenario that legitimately uses the mouse, and it is expected to
- stay platform-blocked until a labwc build with working XWayland
+ stay platform-blocked until this harness has working XWayland
  pointer delivery is available; treat its mouse steps as a known
  ERROR-on-this-template, not a regression. For every other
  scenario use the keyboard path in 3a.
@@ -353,11 +355,11 @@ executed, and you'll spawn runner subagents to do it.
 ### Provisioning a fresh VM for permissions-gui
 
 `spin-test-vm.sh` only builds a broker-only VM (no work/work2 users,
-no admin-app launchers, no labwc/qdwin session up). Use
+no admin-app launchers, no admin compositor session up). Use
 `scripts/vm/spin-test-vm-gui.sh` instead — it layers the
 permissions-gui prereqs (work/work2 users, `qdistro-test-permission`,
 `qdistro-start-admin-{app,tui}`, qterminal.ini, and starts admin's
-qdwin-session.target — qdwin-compositor + qdshell) on top. The last
+compositor session) on top. The last
 stdout line is the VM name,
 ready to feed runners as `VMNAME`.
 

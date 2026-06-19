@@ -77,6 +77,10 @@ bats *args:
 gui *args:
     {{qci}} gui "$@"
 
+# Run admin/non-qdwin GUI scenarios; qdwin-dependent rows are intentional skips.
+gui-admin *args:
+    {{qci}} gui-admin "$@"
+
 # Image gate: static content checklist, then boot/install when an image exists.
 image *args:
     {{qci}} image "$@"

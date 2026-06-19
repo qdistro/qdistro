@@ -81,7 +81,7 @@ class Sender(QMainWindow):
         self._btn.customContextMenuRequested.connect(self._on_right_click)
         # Left-click also opens the menu so the app is discoverable
         # without needing to right-click, which matters when driving
-        # via xdotool where right-click on XWayland under labwc is
+        # via xdotool where right-click on XWayland under the GUI harness is
         # flakier than left-click.
         self._btn.clicked.connect(
             lambda: self._open_menu(self._btn.rect().bottomLeft()))

@@ -16,7 +16,7 @@
 #     absent — the agent then reports ERROR/INFRA per the scenarios' own "do not
 #     silently skip" contract. Image presence is deliberately NOT a gate input.
 #
-# Helper signature: gui_scenario_skip_reason rel legacy nested qdshell ssh
+# Helper signature: gui_scenario_skip_reason rel legacy nested qdshell ssh skip_qdwin
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
@@ -190,8 +190,38 @@ reason_full_stack() {
     [[ "$output" == *"legacy qdshell ctrl-socket not available"* ]]
 }
 
+@test "gui skip: qdwin md SKIPs when qdwin lane is disabled" {
+    run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222" 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"QCI_GUI_SKIP_QDWIN=1"* ]]
+}
+
+@test "gui classify: qdwin rows require the qdwin profile" {
+    run gui_scenario_requires_qdwin "qdwin/tests/gui/01-foo.md"
+    [ "$status" -eq 0 ]
+
+    run gui_scenario_requires_qdwin "qdistro/tests/integration/qdwin-noctalia/01-bar-visible.md"
+    [ "$status" -eq 0 ]
+
+    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "gui classify: admin rows do not require the qdwin profile" {
+    run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md"
+    [ "$status" -ne 0 ]
+}
+
 @test "gui run: legacy qdwin md RUNS when legacy ctrl-socket present" {
     run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui run: admin permissions scenario still RUNS when qdwin lane is disabled" {
+    run gui_scenario_skip_reason \
+        "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md" \
+        0 0 0 "" 1
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

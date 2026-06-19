@@ -1,6 +1,6 @@
 # 16 — cross-user send-to between two real qnotebook instances, visual admin-app approve
 
-**What**: run the scenario-15 flow on the live labwc display with
+**What**: run the scenario-15 flow on the live admin compositor display with
 admin's approvals GUI in the middle. Launch qnotebook as `work`
 and `work2` via the xhost SI allowlist helper, trigger a
 `RelayMessage` as work in the background, OCR-verify the admin
@@ -53,7 +53,7 @@ SQL_EOF
 )
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/approvals/approvals.sqlite 2>/dev/null; true"
 
-# Launch both qnotebook instances on admin's labwc via the helper.
+# Launch both qnotebook instances on admin's compositor via the helper.
 $VMEXEC "$VM" '
  pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
  pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
@@ -223,13 +223,13 @@ $VMEXEC "$VM" '
 
 ## Notes for the runner
 
-- Three windows on one labwc session stack — if the admin app is
+- Three windows on one compositor session stack — if the admin app is
  buried behind a qnotebook, OCR for `admin approvals` and click
  its window first to raise it, then retake the S3 screenshot.
 - Driving qnotebook's own *sender* UI (selecting text + right-
  click → Plugins → qdistro send-to… → pick target) is
  intentionally NOT exercised in this scenario: rich-editor
- context menus across labwc XWayland via OCR is fragile.
+ context menus across XWayland via OCR is fragile.
  Scenario 15 covers the wire path; the plugin's MenuProvider
  code is unit-tested. Manual smoke-test: open qnotebook by hand,
  select a paragraph, Menu bar → Plugins → "Qdistro: Send

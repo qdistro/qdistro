@@ -8,6 +8,18 @@
 run_qdwin_executable_gui_smokes() {
     local vm=$1 rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
+    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
+        for scenario in \
+            agent-mvp-session-smoke.sh \
+            agent-protocol-audit.sh \
+            agent-cursor-clickthrough-smoke.sh \
+            agent-click-smoke.sh
+        do
+            record_result gui "qdwin-$scenario" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
+        done
+        record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
+        return 0
+    fi
     if ! "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && ! pgrep -x labwc >/dev/null && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-compositor.service qdshell.service qdistro-cursor-sprites.service >/dev/null" >/dev/null 2>&1; then
         for scenario in \
             agent-mvp-session-smoke.sh \
@@ -57,6 +69,25 @@ run_qdwin_executable_gui_smokes() {
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     fi
     return "$rc"
+}
+
+gui_scenario_requires_qdwin() {
+    local rel=$1
+    case "$rel" in
+        qdwin/tests/gui/[0-9][0-9]-*.md|\
+        qdwin/tests/apps/[0-9][0-9]-*.md|\
+        qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
+        qdlocker/tests/gui/[0-9][0-9]-*.md|\
+        qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
+        qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md|\
+        qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
+        qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
+        qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
 }
 
 agent_scenarios() {
@@ -207,13 +238,18 @@ gui_job_count() {
 # timing, then release the VM. Self-contained for backgrounded pool execution.
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
-    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2 gate_name
     rel=${scenario#$WORKSPACE/}
     t0=$(date +%s)
     if [ -n "$provided" ]; then
         vm=$provided
     else
-        vm=$(acquire_vm "gui-$(safe_name "$rel")" "") || {
+        if gui_scenario_requires_qdwin "$rel"; then
+            gate_name="gui-qdwin-$(safe_name "$rel")"
+        else
+            gate_name="gui-admin-$(safe_name "$rel")"
+        fi
+        vm=$(acquire_vm "$gate_name" "") || {
             record_result gui "$rel" fail "$EXIT_VM_PROVISION" vm_provision vm "" "GUI VM creation failed"
             record_timing gui "$rel" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
             return "$EXIT_VM_PROVISION"
@@ -267,9 +303,13 @@ gui_run_scenario() {
 # tests/integration/qci/gui-scenario-skip.bats. Echoes the human-readable skip reason
 # when the scenario must be skipped, or nothing when it should run.
 #
-# Args: rel legacy_ctrl nested_kvm qdshell_active vm_ssh_port
+# Args: rel legacy_ctrl nested_kvm qdshell_active vm_ssh_port skip_qdwin
 gui_scenario_skip_reason() {
-    local rel=$1 legacy_ctrl=$2 nested_kvm=$3 qdshell_active=$4 vm_ssh_port=$5
+    local rel=$1 legacy_ctrl=$2 nested_kvm=$3 qdshell_active=$4 vm_ssh_port=$5 skip_qdwin=${6:-0}
+    if [ "$skip_qdwin" = 1 ] && gui_scenario_requires_qdwin "$rel"; then
+        printf '%s\n' "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent scenario skipped"
+        return 0
+    fi
     case "$rel" in
         qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
             [ "$legacy_ctrl" != 1 ] && \
@@ -319,23 +359,21 @@ gui_scenario_skip_reason() {
 gate_gui() {
     qci_assert_run_dir || return $?
     qci_assert_vm_tools gui || return $?
-    local explicit=${1:-} svm rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0
+    local explicit=${1:-} svm qdwin_svm="" rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
-    # Build the per-run GUI golden ONCE (compositor + labwc/qdwin layer built
-    # from current source), so the probe VM AND every per-scenario worker CLONE
-    # it and skip the ~150-310s in-VM build + source staging. Without this, N
-    # disposable GUI workers each ran a from-scratch compositor build IN PARALLEL
-    # (the gui pool defaults to 8), saturating the host (load spiked to ~35) and
-    # causing VM-creation timeouts + a source-tarball race on the live run dir +
-    # agent API drops. Skipped when an explicit --vm is given (that IS the VM to
-    # use). Opt out with QCI_NO_GOLDEN=1 (each worker then runs the full build).
+    # Build per-run GUI goldens once per profile. The admin profile keeps the
+    # compositor-independent approval/broker scenarios available; the qdwin
+    # profile runs qdwin/qdshell/qdshell-vision rows instead of pre-skipping them
+    # just because the admin probe VM is not a qdwin session.
     if [ -z "$explicit" ] && [ "${QCI_NO_GOLDEN:-0}" != 1 ]; then
-        ensure_run_golden gui || return "$EXIT_VM_PROVISION"
+        ensure_run_golden gui-admin || return "$EXIT_VM_PROVISION"
+        if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ]; then
+            ensure_run_golden gui-qdwin || return "$EXIT_VM_PROVISION"
+        fi
     fi
-    # A single "session" VM is used for the capability probe + the per-session
-    # sub-gates (executable smokes, qdshell-ui vision). The agent SCENARIOS then
-    # each run on their own disposable VM in a parallel pool below.
-    svm=$(acquire_vm gui "$explicit") || return "$EXIT_VM_PROVISION"
+    # A single admin session VM is used for compositor-independent capability
+    # probes. qdwin-specific sub-gates get a qdwin-profile session VM below.
+    svm=$(acquire_vm gui-admin "$explicit") || return "$EXIT_VM_PROVISION"
     kv vm "$svm"
     if "$VM_TOOLS/vm-exec" "$svm" "runuser -u admin -- sh -c 'echo list | socat -t 2 - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>/dev/null | head -1 | grep -qx \"ok list\"'" >/dev/null 2>&1; then
         legacy_ctrl=1
@@ -347,18 +385,32 @@ gate_gui() {
         qdshell_active=1
     fi
 
-    run_qdwin_executable_gui_smokes "$svm"; step_rc=$?
+    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ] || [ -n "$explicit" ]; then
+        qdwin_svm=$svm
+    else
+        qdwin_svm=$(acquire_vm gui-qdwin "") || {
+            collect_vm_artifacts "$svm" gui
+            release_vm "$svm" "$EXIT_VM_PROVISION"
+            return "$EXIT_VM_PROVISION"
+        }
+        kv vm_qdwin "$qdwin_svm"
+    fi
+
+    run_qdwin_executable_gui_smokes "$qdwin_svm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
     # Authoritatively probe qdshell.service (the deployed qs unit) + the
     # wayland-1 socket rather than relying solely on the earlier
     # qdshell_active flag, which matches the broader scenario gating.
     local qdshell_session=0
-    if [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; then
+    if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && { [ "$qdshell_active" = 1 ] || "$VM_TOOLS/vm-exec" "$qdwin_svm" "test -S /run/user/1000/wayland-1 && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdshell.service 2>/dev/null | grep -qx active" >/dev/null 2>&1; }; then
         qdshell_session=1
     fi
-    if [ "$qdshell_session" = 1 ]; then
-        gate_qdshell_ui_agent "$svm"; step_rc=$?
+    if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
+        record_result gui qdshell-ui skip 0 pass vision "" \
+            "QCI_GUI_SKIP_QDWIN=1: qdwin/qdshell vision harness skipped"
+    elif [ "$qdshell_session" = 1 ]; then
+        gate_qdshell_ui_agent "$qdwin_svm"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     else
         record_result gui qdshell-ui skip 0 pass vision "" \
@@ -373,12 +425,15 @@ gate_gui() {
     if [ -z "$explicit" ]; then
         collect_vm_artifacts "$svm" gui
         release_vm "$svm" "$rc"
+        if [ -n "$qdwin_svm" ] && [ "$qdwin_svm" != "$svm" ]; then
+            collect_vm_artifacts "$qdwin_svm" gui-qdwin
+            release_vm "$qdwin_svm" "$rc"
+        fi
     fi
 
-    # Partition scenarios: those gated out by this VM profile are recorded as
-    # skips up front (no VM spent). The capability flags are identical across
-    # GUI VMs (same spin profile), so the probe on the session VM applies to
-    # every worker VM. The rest run one-VM-each in a parallel pool.
+    # Partition scenarios: admin-profile scenarios are gated by the admin probe
+    # VM, while qdwin-dependent scenarios are routed to qdwin-profile workers
+    # unless qdwin was explicitly disabled for an admin-only run.
     local to_run=() log_path
     while IFS= read -r scenario; do
         rel=${scenario#$WORKSPACE/}
@@ -398,8 +453,12 @@ gate_gui() {
         # here: it reaches the agent, which reports ERROR per the scenarios' own
         # "do not silently skip" contract.
         local skip_reason
-        skip_reason=$(gui_scenario_skip_reason "$rel" "$legacy_ctrl" "$nested_kvm" \
-            "$qdshell_active" "${VM_SSH_PORT:-}")
+        if [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
+            skip_reason=""
+        else
+            skip_reason=$(gui_scenario_skip_reason "$rel" "$legacy_ctrl" "$nested_kvm" \
+                "$qdshell_active" "${VM_SSH_PORT:-}" "${QCI_GUI_SKIP_QDWIN:-0}")
+        fi
         if [ -n "$skip_reason" ]; then
             {
                 echo "Skipped GUI scenario."

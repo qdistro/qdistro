@@ -1,6 +1,6 @@
 #!/bin/sh
 # qdistro-start-user-app — launch a Qt XWayland app as another uid
-# on admin's labwc display.
+# on admin's compositor display.
 #
 # Usage:
 #   qdistro-start-user-app <user> <command> [args...]

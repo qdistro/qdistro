@@ -14,7 +14,8 @@ Usage:
   qci host
   qci vm-smoke [--vm <name>]
   qci bats [--vm <name>] [--file <file.bats> ...]
-  qci gui [--vm <name>] [--scenario <path.md> ...]
+  qci gui [--vm <name>] [--skip-qdwin] [--scenario <path.md> ...]
+  qci gui-admin [--vm <name>] [--scenario <path.md> ...]
   qci image [--root <extracted-tree>] [--idempotency] [--no-boot]
   qci registry-check
   qci release-manifest
@@ -135,6 +136,12 @@ Environment:
                             "origin/main main origin/master master".
   QCI_REQUIRE_AGENT_GUI=1   Make missing QCI_AGENT_CMD fail the gui gate
                             (default for qci gui/full).
+  QCI_GUI_SKIP_QDWIN=1      Run the admin/non-qdwin GUI lane: qdwin/qdshell,
+                            qdlocker, qdwin-noctalia, and tier-4/5 GUI
+                            scenarios are recorded as intentional skips.
+                            `qci gui-admin` sets this automatically.
+                            Without this, disposable `qci gui` provisions a
+                            separate qdwin-profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default
                             ~/.local/share/libvirt/images.
   QCI_OFFLINE=1             Host-only / no-egress posture for VM tests. Records

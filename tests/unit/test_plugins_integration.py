@@ -33,7 +33,7 @@ What we don't cover here (belongs in gui-tests/):
   is monkey-patched to skip the real BusName claim; we test the
   claiming surface in `test_sdk_sendto.py::TestAppReceiver`).
 - Live admin approval flow (scenario 16/17).
-- xhost + labwc + cross-uid display (scenario 16).
+- xhost + cross-uid GUI display (scenario 16).
 """
 from __future__ import annotations
 
