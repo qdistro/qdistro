@@ -90,6 +90,32 @@ gui_scenario_requires_qdwin() {
     esac
 }
 
+# True (0) when a qdwin GUI scenario drives the REMOVED legacy qdshell.py
+# ctrl-socket — detected by CONTENT: the `qdwin_ctrl` shell helper or a raw
+# `socat … /run/user/1000/qdshell.sock` call. The shipping session is Quickshell,
+# whose ctrl-server (qdshell/qml-plugin/ctrl-server.cpp) only answers
+# status/last-overlay-keys, so every legacy verb returns "error: unknown command"
+# and these scenarios can never pass. They used to be hidden because the whole
+# qdwin profile was skipped; commit "ci(gui): route qdwin scenarios to qdwin
+# profile" began running them live, turning them into agent ERRORs. We skip them
+# deterministically by content (so MODERN qs-ipc scenarios — e.g. gui/17,18 — and
+# app-launch tests still run), unless the explicit legacy lane is requested with
+# QCI_GUI_RUN_LEGACY_QDWIN_MD=1. Detection is content-based rather than the old
+# runtime `legacy_ctrl` probe, which was unsound (it ran on the gui-admin VM while
+# the scenarios run on gui-qdwin, and the modern qs server owns the same socket
+# path, so the probe false-positived across profiles and flipped a green run red).
+# Arg: absolute or workspace-relative scenario path.
+gui_scenario_uses_legacy_ctrl() {
+    local file=$1
+    case "$file" in
+        */qdwin/tests/gui/[0-9][0-9]-*.md|*/qdwin/tests/apps/[0-9][0-9]-*.md|\
+        qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md) ;;
+        *) return 1 ;;
+    esac
+    [ -f "$file" ] || return 1
+    grep -qE 'qdwin_ctrl|socat[^|]*qdshell\.sock' "$file"
+}
+
 agent_scenarios() {
     local f
     for f in \
@@ -453,7 +479,14 @@ gate_gui() {
         # here: it reaches the agent, which reports ERROR per the scenarios' own
         # "do not silently skip" contract.
         local skip_reason
-        if [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
+        # Legacy ctrl-socket scenarios (removed qdshell.py API) can never pass
+        # against the shipping Quickshell session — skip them deterministically by
+        # content, in EVERY path (this runs before the qdwin-routing bypass below
+        # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
+        # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
+        if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
+            skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
+        elif [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
             skip_reason=""
         else
             skip_reason=$(gui_scenario_skip_reason "$rel" "$legacy_ctrl" "$nested_kvm" \

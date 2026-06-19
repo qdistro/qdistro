@@ -218,6 +218,47 @@ reason_full_stack() {
     [ -z "$output" ]
 }
 
+# ---------------------------------------------------------------------------
+# Content-based legacy ctrl-socket detection (gui_scenario_uses_legacy_ctrl).
+# This is what actually gates the qdwin profile in normal CI: legacy qdshell.py
+# scenarios are skipped by content while modern qs-ipc / app scenarios run.
+# ---------------------------------------------------------------------------
+
+@test "legacy detect: qdwin md using qdwin_ctrl IS legacy" {
+    local d="$BATS_TEST_TMPDIR/qdwin/tests/gui"; mkdir -p "$d"
+    printf 'run: qdwin_ctrl "list"\n' > "$d/13-foo.md"
+    run gui_scenario_uses_legacy_ctrl "$d/13-foo.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "legacy detect: qdwin md using raw qdshell.sock socat IS legacy" {
+    local d="$BATS_TEST_TMPDIR/qdwin/tests/apps"; mkdir -p "$d"
+    printf 'echo max | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock\n' > "$d/03-foo.md"
+    run gui_scenario_uses_legacy_ctrl "$d/03-foo.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "legacy detect: modern qs-ipc qdwin md is NOT legacy" {
+    local d="$BATS_TEST_TMPDIR/qdwin/tests/gui"; mkdir -p "$d"
+    printf 'qs -p /usr/share/quickshell/qdshell ipc call ...\n' > "$d/17-foo.md"
+    run gui_scenario_uses_legacy_ctrl "$d/17-foo.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "legacy detect: app-launch qdwin md (no ctrl-socket) is NOT legacy" {
+    local d="$BATS_TEST_TMPDIR/qdwin/tests/apps"; mkdir -p "$d"
+    printf 'launch feh and screenshot the window\n' > "$d/11-foo.md"
+    run gui_scenario_uses_legacy_ctrl "$d/11-foo.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "legacy detect: non-qdwin scenario path is never legacy" {
+    local d="$BATS_TEST_TMPDIR/qdistro/tests/integration/qdwin-noctalia"; mkdir -p "$d"
+    printf 'qdwin_ctrl "list"\n' > "$d/03-foo.md"
+    run gui_scenario_uses_legacy_ctrl "$d/03-foo.md"
+    [ "$status" -ne 0 ]
+}
+
 @test "gui run: admin permissions scenario still RUNS when qdwin lane is disabled" {
     run gui_scenario_skip_reason \
         "qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md" \
