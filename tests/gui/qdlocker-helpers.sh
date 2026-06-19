@@ -55,6 +55,12 @@ qdlocker_ctrl() {
     "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | runuser -u admin -- bash"
 }
 
+# NOTE on `systemctl --user` for admin from a root vm-exec: it needs the user
+# session context (XDG_RUNTIME_DIR), or it fails "DBUS_SESSION_BUS_ADDRESS not
+# defined" and dropins/restarts silently don't apply. Scenarios pin it inline as
+# `runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user ...`
+# (see 03-idle-lock-trigger.md / 04-lid-close-lock.md).
+
 # ---------------------------------------------------------------- poll
 
 qdlocker_wait_for_lock() {
@@ -94,25 +100,29 @@ qdlocker_assert_prompt_len() {
     fi
 }
 
-qdlocker_type_password_chars() {
-    local password="${1:-Pa_ssw0rd45}"
+# Type the password once, char by char, via QMP key events. Per-key sleeps are
+# 0.08s (bumped from 0.05) so the guest's QMP input queue drains between events —
+# the previous timing occasionally dropped a char, producing a short prompt and a
+# spurious PAM reject. Verification/retry lives in the public wrapper below.
+_qdlocker_type_password_chars_once() {
+    local password="$1"
     local i ch
     for ((i = 0; i < ${#password}; i++)); do
         ch="${password:i:1}"
         case "$ch" in
             [a-z0-9]) ;;
             [A-Z])
-                qdwin_qmp_key shift down; sleep 0.03
-                qdwin_qmp_key "${ch,,}" down; sleep 0.05
-                qdwin_qmp_key "${ch,,}" up;   sleep 0.05
-                qdwin_qmp_key shift up; sleep 0.03
+                qdwin_qmp_key shift down; sleep 0.04
+                qdwin_qmp_key "${ch,,}" down; sleep 0.08
+                qdwin_qmp_key "${ch,,}" up;   sleep 0.08
+                qdwin_qmp_key shift up; sleep 0.04
                 continue
                 ;;
             _)
-                qdwin_qmp_key shift down; sleep 0.03
-                qdwin_qmp_key minus down; sleep 0.05
-                qdwin_qmp_key minus up;   sleep 0.05
-                qdwin_qmp_key shift up; sleep 0.03
+                qdwin_qmp_key shift down; sleep 0.04
+                qdwin_qmp_key minus down; sleep 0.08
+                qdwin_qmp_key minus up;   sleep 0.08
+                qdwin_qmp_key shift up; sleep 0.04
                 continue
                 ;;
             *)
@@ -120,9 +130,42 @@ qdlocker_type_password_chars() {
                 return 2
                 ;;
         esac
-        qdwin_qmp_key "$ch" down; sleep 0.05
-        qdwin_qmp_key "$ch" up;   sleep 0.05
+        qdwin_qmp_key "$ch" down; sleep 0.08
+        qdwin_qmp_key "$ch" up;   sleep 0.08
     done
+}
+
+# Type the password and VERIFY all chars landed via the locker's prompt-len
+# introspection, retrying (clear + retype) up to 3 times. This converts the
+# QMP keystroke-injection flake (a dropped char → wrong password → PAM reject)
+# into a deterministic outcome. The final prompt-len is still authoritative:
+# the caller's unlock assertion remains hard, so this hides a transient dropped
+# key but NOT a real routing/PAM regression.
+qdlocker_type_password_chars() {
+    local password="${1:-Pa_ssw0rd45}"
+    local want=${#password}
+    local attempt
+    for attempt in 1 2 3; do
+        _qdlocker_type_password_chars_once "$password" || return $?
+        sleep 0.2
+        if qdlocker_assert_prompt_len "$want" 2>/dev/null; then
+            return 0
+        fi
+        echo "qdlocker_type_password_chars: attempt $attempt prompt-len mismatch (want $want); clearing + retrying" >&2
+        # Clear the field: send a generous number of backspaces, then confirm the
+        # field is actually empty before retyping — otherwise residual chars make
+        # the retype overshoot and the next attempt fails the same way.
+        local b
+        for ((b = 0; b < want + 4; b++)); do
+            qdwin_qmp_key backspace down; sleep 0.03
+            qdwin_qmp_key backspace up;   sleep 0.03
+        done
+        sleep 0.2
+        qdlocker_assert_prompt_len 0 2>/dev/null \
+            || echo "qdlocker_type_password_chars: field not empty after clear (attempt $attempt)" >&2
+    done
+    echo "qdlocker_type_password_chars: failed to reach prompt-len=$want after 3 attempts" >&2
+    return 1
 }
 
 qdlocker_unlock_with_password() {

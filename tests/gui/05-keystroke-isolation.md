@@ -26,7 +26,7 @@ qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 case "$(qdlocker_ctrl status 2>/dev/null)" in
     *locked=True*)
         "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- systemctl --user restart qdlocker.service; sleep 2' \
+          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
           >/dev/null
         ;;
 esac

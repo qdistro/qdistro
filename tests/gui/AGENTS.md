@@ -131,10 +131,14 @@ prefer the qdlocker helpers and direct VM commands when possible.
 
 1. **qdlocker is a `systemd --user` unit, not `systemd` system.**
    `systemctl status qdlocker.service` as root inside the VM returns
-   "not found." The right invocation is
-   `runuser -u admin -- systemctl --user status qdlocker.service`
-   or `loginctl enable-linger admin && machinectl shell admin@.host
-   ...`. `vm-exec` runs as root by default; remember to switch user.
+   "not found." `vm-exec` runs as root, which has no user-session bus, so
+   you MUST switch user AND supply the session runtime dir — bare
+   `runuser -u admin -- systemctl --user ...` fails with
+   "DBUS_SESSION_BUS_ADDRESS not defined" and any restart/dropin silently
+   no-ops. The right invocation is
+   `runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status qdlocker.service`
+   (or `runuser -l admin -c 'systemctl --user ...'`, which sets it via
+   pam_systemd).
 
 2. **Resetting the locker between scenarios.** If a scenario fails
    mid-cycle leaving `locked=True`, the next scenario's setup will

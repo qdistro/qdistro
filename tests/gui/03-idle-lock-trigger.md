@@ -19,7 +19,7 @@ qdlocker_session_healthy || { echo "FAIL: session not up"; exit 2; }
 case "$(qdlocker_ctrl status 2>/dev/null)" in
     *locked=True*)
         "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -u admin -- systemctl --user restart qdlocker.service; sleep 2' \
+          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' \
           >/dev/null
         ;;
 esac
@@ -27,7 +27,7 @@ esac
 # Shorten the idle threshold to 3s so the scenario doesn't wall-clock
 # wait for the default 5min (QDLOCKER_IDLE_MS=300000). Set the env in the user-unit dropin and
 # restart qdlocker so it re-reads.
-"$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- bash -lc '
+"$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
   mkdir -p ~/.config/systemd/user/qdlocker.service.d
   cat > ~/.config/systemd/user/qdlocker.service.d/idle.conf <<EOF
 [Service]
@@ -93,7 +93,7 @@ wall-clock since boot instead of last-activity time.
 ## Cleanup
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- bash -lc '
+"$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
   rm -f ~/.config/systemd/user/qdlocker.service.d/idle.conf
   systemctl --user daemon-reload
   systemctl --user restart qdlocker.service
