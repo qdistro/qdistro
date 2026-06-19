@@ -43,7 +43,9 @@ cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
 cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
+# TIER5_MEM_KIB=524288 (512 MiB): the 1.5 GiB default overcommits the nested CI
+# VM and kills the guest mid-boot; mirror s45-tier5-vm.sh's CI accommodation.
+TIER5_MEM_KIB=524288 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s21-spawn.log 2>&1 &
 disown
 EOF
