@@ -124,7 +124,16 @@ install -d -m 0755 "$TMP/lib64/libweston-14"
 # (lib64 or lib/<arch>); the staged tree is always lib64 — the layout the
 # qdwin runtime's LD path on the (openSUSE) image expects.
 cp -a "$SRCLIB"/libweston-14.so* "$TMP/lib64/"
-# Backends (drm/pipewire/rdp/wayland/x11/headless/...) + xwayland.
+# Backends + the XWayland module. weston's xwayland.so is a libweston module
+# living in the SAME libweston-14/ module dir as the backends (on this
+# openSUSE weston 14 layout: /usr/lib64/libweston-14/xwayland.so), so this glob
+# stages it too IF the production profile built it. NB: the current vendored
+# src/meson.build deliberately skips the weston frontend/xwayland subdir, so a
+# stock vendored prefix has NO xwayland.so here — the qdwin session then maps
+# the DISTRO xwayland.so (ABI-compatible: same pinned 14.0.x) instead. See
+# install-qdwin-session-for-vm.sh's XWayland wiring. Either way XWayland is
+# loaded via `[core] xwayland=true` + WESTON_MODULE_MAP, never the fatal
+# `modules=xwayland.so` old-style load.
 cp -a "$SRCLIB"/libweston-14/*.so "$TMP/lib64/libweston-14/" 2>/dev/null || true
 
 # Bundled libdisplay-info, when the production build vendored it. weston-14

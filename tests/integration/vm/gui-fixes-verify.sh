@@ -245,20 +245,30 @@ else
     INFO "#2 VERDICT: PAM FAILS in the locker sandbox -> real qdlocker.service hardening bug breaking unix_chkpwd"
 fi
 
-echo "=== #X XWayland binary installed (module-load is a deferred follow-up) ==="
-# The xwayland PACKAGE is installed (Xwayland binary present). NOTE: actually
-# LOADING the weston xwayland.so module is a separate follow-up — it's a weston
-# compositor module, not a libweston-14 backend, so install-vendored-libweston.sh
-# doesn't stage it yet. So we only assert the binary here; the load is INFO.
+echo "=== #X XWayland binary installed + weston module loaded ==="
+# The xwayland PACKAGE provides /usr/bin/Xwayland (the X server weston's
+# xwayland.so module execs). install-qdwin-session-for-vm.sh maps the
+# libweston-14 xwayland.so module via WESTON_MODULE_MAP and sets weston.ini
+# `[core] xwayland=true`, so weston loads it at session start.
 if command -v Xwayland >/dev/null 2>&1; then
     PASS "xwayland: /usr/bin/Xwayland installed ($(command -v Xwayland))"
 else
     FAIL "xwayland: Xwayland binary NOT installed"
 fi
-if journalctl _UID=1000 -b 2>/dev/null | grep -qiE "Loading module.*xwayland\.so|Xwayland is now ready"; then
-    INFO "xwayland: weston loaded the xwayland module (unexpected — module staging not wired yet, good if true)"
+# weston.ini must enable XWayland the supported way (xwayland=true), NOT the
+# fatal old `modules=xwayland.so` load.
+if grep -qE '^xwayland=true$' /home/admin/weston.ini 2>/dev/null; then
+    PASS "xwayland: weston.ini sets [core] xwayland=true"
 else
-    INFO "xwayland: weston does not load xwayland.so yet (deferred: module not staged into the vendored tree)"
+    FAIL "xwayland: weston.ini does NOT set xwayland=true (XWayland wiring not applied)"
+fi
+# weston must actually load the module (journal). "Xwayland is now ready" only
+# appears once an X client connects (lazy), so accept the module-load /
+# plugin-API-registration lines too.
+if journalctl _UID=1000 -b 2>/dev/null | grep -qiE "Loading module.*xwayland\.so|Registered plugin API 'weston_xwayland|Xwayland is now ready"; then
+    PASS "xwayland: weston loaded the xwayland module"
+else
+    FAIL "xwayland: weston did NOT load xwayland.so (check WESTON_MODULE_MAP + xwayland=true + module path)"
 fi
 
 echo "VERIFY-DONE"

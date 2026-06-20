@@ -257,6 +257,44 @@ zypper -n install --no-recommends seatd >/dev/null 2>&1 \
 log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
     || { log "  ERROR: zypper install xwayland failed"; exit 3; }
+
+# ---- GUI app-deps lane (qdwin XWayland/Wayland app tests) -----------------
+# The qdwin app tests (qdwin/tests/apps/*.md) drive real desktop apps —
+# firefox, xterm, foot, thunar, vlc, chromium, audacity, feh, tk/fltk/swing.
+# They are heavy and only the app-test lane needs them, so the install is
+# gated by QDWIN_APP_DEPS (default 1: the qdwin gui golden ships them so the
+# app tests can run green; set QDWIN_APP_DEPS=0 for a lean golden).
+#
+# Best-effort PER PACKAGE: an unavailable/renamed package is logged and
+# skipped, NEVER fatal. A wrong name here must never abort the golden build —
+# that fail-closed-on-a-missing-dep regression is exactly what we avoid. A
+# package that fails to install just leaves its one app test infra-blocked.
+if [ "${QDWIN_APP_DEPS:-1}" = 1 ]; then
+    log "installing qdwin app-test deps (best-effort; QDWIN_APP_DEPS=0 to skip)..."
+    # Map: firefox=MozillaFirefox, gtk4=gnome-text-editor, gtk3=thunar,
+    # qt5=vlc, electron=chromium, wxwidgets=audacity, tk=python3-tk,
+    # fltk demo needs fltk-devel+gcc-c++, swing=java(jdk for javac), imlib2=feh.
+    # Fonts: xterm's `-fa Monospace` (Xft) and most toolkits need a real font
+    # backing fontconfig's Monospace/Sans aliases — without dejavu/liberation
+    # the image has no scalable Monospace and xterm refuses to start.
+    _app_pkgs="MozillaFirefox xterm foot gnome-text-editor thunar vlc chromium \
+audacity python3-tk fltk fltk-devel gcc-c++ feh \
+java-21-openjdk java-21-openjdk-devel java-17-openjdk java-17-openjdk-devel \
+dejavu-fonts liberation-fonts"
+    _app_ok=0; _app_fail=""
+    for _pkg in $_app_pkgs; do
+        if zypper -n install --no-recommends "$_pkg" >/dev/null 2>&1; then
+            _app_ok=$((_app_ok + 1))
+        else
+            _app_fail="$_app_fail $_pkg"
+        fi
+    done
+    log "  app-deps: $_app_ok package(s) installed;${_app_fail:+ failed:$_app_fail}"
+    [ -n "$_app_fail" ] && log "  (failed packages leave their app test infra-blocked, not the build)"
+else
+    log "skipping qdwin app-test deps (QDWIN_APP_DEPS=0)"
+fi
+
 groupadd -f seat
 cat > /etc/systemd/system/seatd.service <<'EOF'
 [Unit]
