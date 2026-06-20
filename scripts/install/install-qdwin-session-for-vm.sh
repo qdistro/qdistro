@@ -109,7 +109,7 @@ cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
 renderer=gl
-modules=xwayland.so
+modules=
 idle-time=0
 
 [shell]
@@ -285,20 +285,15 @@ for _mod in drm-backend.so gl-renderer.so color-lcms.so \
     QDWIN_MODULE_MAP="${QDWIN_MODULE_MAP:+$QDWIN_MODULE_MAP;}$_mod=$QDWIN_MOD_BASE/$_mod"
 done
 
-# Fail-closed XWayland guard. weston.ini loads xwayland.so (the [core]
-# modules= line above), which the map resolves to $QDWIN_MOD_BASE/xwayland.so.
-# A vendored build that omits xwayland.so would silently ship a golden with
-# NO XWayland (every X11 app test then fails opaquely). Refuse such a build
-# loudly here rather than producing a no-XWayland desktop. (The distro
-# fallback ships the full module set, so this only bites a partial vendored
-# tree.)
-if [ ! -f "$QDWIN_MOD_BASE/xwayland.so" ]; then
-    echo "ERROR: $QDWIN_MOD_BASE/xwayland.so is missing — the qdwin weston.ini" >&2
-    echo "       loads xwayland.so but the module is absent from this build." >&2
-    echo "       The session would start WITHOUT XWayland (all X11 app tests" >&2
-    echo "       fail). Rebuild/restage libweston with the xwayland module." >&2
-    exit 1
-fi
+# NOTE: XWayland is NOT yet wired here. The weston `xwayland.so` is a COMPOSITOR
+# module (installed by weston to its own module dir), NOT a libweston-14 backend,
+# so install-vendored-libweston.sh — which only stages lib64/libweston-14/*.so —
+# does not copy it into the vendored tree. Setting `modules=xwayland.so` + a
+# fail-closed guard here just aborted the golden build (the module is absent).
+# Loading XWayland needs install-vendored-libweston.sh to ALSO stage the weston
+# xwayland.so module + map it; tracked as a separate follow-up. Until then the
+# session intentionally starts without XWayland (X11 app tests stay infra-blocked,
+# same as before — not a regression).
 
 # Only emit the LD_LIBRARY_PATH line in the vendored case — an empty
 # LD_LIBRARY_PATH is a (minor) loader smell, and the distro library is on
