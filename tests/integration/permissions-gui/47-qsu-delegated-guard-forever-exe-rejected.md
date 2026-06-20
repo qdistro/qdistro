@@ -79,18 +79,21 @@ $VMGUI "$VM" screenshot /tmp/47-s2-pending.png
 ### S3 — admin picks `forever_exe`, presses Approve
 
 ```bash
-# OCR /tmp/47-s2-pending.png to find the "Forever, only this exact
-# program" radio label; click ~15px left of label-x at label-y-mid.
-# (Runner: forever_exe is the 5th radio; forever_argv is the 6th.)
-$VMGUI "$VM" screenshot /tmp/47-s3a-forever-exe-selected.png
-
-# Activate window then virsh-send Ctrl+Y for Approve.
+# Activate the admin window, then select the forever_exe scope via the
+# admin app's deterministic keyboard shortcut Ctrl+Shift+<index> (index
+# 5 = forever_exe; index 6 = forever_argv). Mouse-clicking the radio is
+# unreliable on the Qt/XWayland template, so use the shortcut instead.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
   --name "admin approvals" windowactivate --sync
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_5
+sleep 1
+$VMGUI "$VM" screenshot /tmp/47-s3a-forever-exe-selected.png
+
+# virsh-send Ctrl+Y for Approve.
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 $VMGUI "$VM" screenshot /tmp/47-s3b-after-approve-click.png
@@ -120,14 +123,22 @@ proves the broker isn't broken — only the over-broad scope is
 rejected.
 
 ```bash
-$VMGUI "$VM" screenshot /tmp/47-s4a-forever-argv-selected.png
-# Runner: click "Forever, only this exact argv tuple" radio (6th).
+# Activate the admin window, then select the forever_argv scope via the
+# deterministic keyboard shortcut Ctrl+Shift+6 (index 6 = forever_argv).
+# This replaces the mouse-click on the radio, which is unreliable on the
+# Qt/XWayland template and was leaving the default `once` selected — the
+# broker then correctly recorded `once` and S4 failed even though the
+# broker is not buggy.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
   --name "admin approvals" windowactivate --sync
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_6
+sleep 1
+$VMGUI "$VM" screenshot /tmp/47-s4a-forever-argv-selected.png
+
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 

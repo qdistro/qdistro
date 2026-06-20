@@ -247,6 +247,16 @@ meson install -C build \
 log "installing + enabling seatd (system service)..."
 zypper -n install --no-recommends seatd >/dev/null 2>&1 \
     || { log "  ERROR: zypper install seatd failed"; exit 3; }
+
+# xwayland provides /usr/bin/Xwayland, which weston's xwayland.so module
+# (loaded via the qdwin weston.ini modules= line) execs to serve X11
+# clients. The labwc gui profile installs this in spin-test-vm-gui.sh, but
+# the qdwin profile builds its own session here, so install it on this path
+# too — without it qdwin starts with no working XWayland and every X11 app
+# test fails.
+log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
+zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
+    || { log "  ERROR: zypper install xwayland failed"; exit 3; }
 groupadd -f seat
 cat > /etc/systemd/system/seatd.service <<'EOF'
 [Unit]

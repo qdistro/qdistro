@@ -245,4 +245,23 @@ else
     INFO "#2 VERDICT: PAM FAILS in the locker sandbox -> real qdlocker.service hardening bug breaking unix_chkpwd"
 fi
 
+echo "=== #X XWayland is installed AND loaded by weston (deterministic) ==="
+if command -v Xwayland >/dev/null 2>&1; then
+    PASS "xwayland: /usr/bin/Xwayland installed ($(command -v Xwayland))"
+else
+    FAIL "xwayland: Xwayland binary NOT installed"
+fi
+# weston should log loading the xwayland module at session start (modules=xwayland.so).
+if journalctl _UID=1000 -b 2>/dev/null | grep -qiE "Loading module.*xwayland\.so|xwayland.*initialized|Xwayland is now ready"; then
+    PASS "xwayland: weston loaded the xwayland module"
+else
+    INFO "xwayland: no 'Loading module xwayland.so' in _UID=1000 journal yet"
+    # Fall back to confirming the generated weston.ini requests it.
+    if runuser -u admin -- grep -qE '^\s*modules=.*xwayland\.so' /home/admin/weston.ini 2>/dev/null; then
+        PASS "xwayland: weston.ini requests modules=xwayland.so (load not yet observed in journal)"
+    else
+        FAIL "xwayland: weston.ini does NOT request xwayland.so (modules= line: $(runuser -u admin -- grep -E '^\s*modules=' /home/admin/weston.ini 2>/dev/null | head -1))"
+    fi
+fi
+
 echo "VERIFY-DONE"

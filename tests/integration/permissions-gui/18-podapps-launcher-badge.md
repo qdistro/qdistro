@@ -26,8 +26,26 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
 
 # Precondition: tier-2 image built and weston-terminal container can
 # be spawned. s32 builds the image on first run; reuse if cached.
-$VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest \
-                || bash /root/qdistro-src/qdistro/tier2/make-tier2-image.sh weston-terminal'
+#
+# The first-run image build is the expensive, UNBOUNDED step (270s+ on a
+# cold cache) — prebuild + assert it HERE in Setup, bounded by an explicit
+# timeout, so the expensive build is NOT on S1's critical path and cannot
+# blow the scenario's wall-clock (rc=124) budget. A clean setup-failure
+# message makes a slow/failed build obvious instead of an opaque timeout.
+$VMEXEC "$VM" 'timeout 240 bash -c "
+    podman image exists qdistro/tier2-weston-terminal:latest \
+        || bash /root/qdistro-src/qdistro/tier2/make-tier2-image.sh weston-terminal"' \
+  || { echo "FAIL(setup): tier-2 image build/check exceeded 240s or failed"; exit 1; }
+# Hard-assert the image now exists, so S1 only does the (fast) spawn+scan.
+$VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest' \
+  || { echo "FAIL(setup): qdistro/tier2-weston-terminal:latest missing after build"; exit 1; }
+
+# Defensive (NOT the proven cause): disable the idle-lock for this VM's
+# session so a long agent-driven scenario can't trip qdlocker mid-run.
+# Codex hypothesised an idle-lock fired during S1, but no artifact
+# evidence supports it — this is belt-and-suspenders only.
+$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+    systemctl --user set-environment QDLOCKER_IDLE_MS=0 2>/dev/null || true'
 ```
 
 ## Steps
@@ -37,12 +55,18 @@ $VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest \
 The scan helper requires the container to be running, so spawn it
 first in detached mode and run the scan in foreground.
 
+The image is already built (Setup precondition), so this step is just the
+fast spawn + foreground scan. Bound it with an explicit timeout so a
+hung spawn/scan fails loudly instead of consuming the scenario's
+wall-clock budget.
+
 ```bash
-$VMEXEC "$VM" 'runuser -u admin -- bash -c "
+$VMEXEC "$VM" 'timeout 60 runuser -u admin -- bash -c "
     TIER2_DETACH=1 /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
         tier2-c-ui weston-terminal -- weston-terminal &
     sleep 3
-    /root/qdistro-src/qdistro/tier2/podapps-scan.sh tier2-c-ui"'
+    /root/qdistro-src/qdistro/tier2/podapps-scan.sh tier2-c-ui"' \
+  || { echo "FAIL(S1): spawn+scan exceeded 60s or failed"; exit 1; }
 ```
 
 **Expected** (stderr): `podapps-scan: tier2-c-ui → N entries`

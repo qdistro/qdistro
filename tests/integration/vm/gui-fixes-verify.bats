@@ -38,6 +38,9 @@ teardown_file() {
     assert_output_contains "PASS: smoke: detached qdistro-test-window"
     # #7 qdlocker B1: systemctl --user with XDG_RUNTIME_DIR applies the dropin
     assert_output_contains "PASS: qdlocker B1: systemctl --user (with XDG_RUNTIME_DIR) applied the idle dropin"
+    # #X XWayland: the package is installed for the qdwin golden (the load-bearing
+    # half of the XWayland fix; weston-load is asserted via INFO/fallback).
+    assert_output_contains "PASS: xwayland: /usr/bin/Xwayland installed"
     # Driver ran to completion.
     assert_output_contains "VERIFY-DONE"
     # Surface the driver's INFO: diagnostics (esp. the #2 PAM/sandbox verdict and

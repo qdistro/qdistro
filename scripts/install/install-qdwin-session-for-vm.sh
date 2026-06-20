@@ -109,7 +109,7 @@ cat > /home/admin/weston.ini <<'EOF'
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
 renderer=gl
-modules=
+modules=xwayland.so
 idle-time=0
 
 [shell]
@@ -284,6 +284,21 @@ for _mod in drm-backend.so gl-renderer.so color-lcms.so \
     fi
     QDWIN_MODULE_MAP="${QDWIN_MODULE_MAP:+$QDWIN_MODULE_MAP;}$_mod=$QDWIN_MOD_BASE/$_mod"
 done
+
+# Fail-closed XWayland guard. weston.ini loads xwayland.so (the [core]
+# modules= line above), which the map resolves to $QDWIN_MOD_BASE/xwayland.so.
+# A vendored build that omits xwayland.so would silently ship a golden with
+# NO XWayland (every X11 app test then fails opaquely). Refuse such a build
+# loudly here rather than producing a no-XWayland desktop. (The distro
+# fallback ships the full module set, so this only bites a partial vendored
+# tree.)
+if [ ! -f "$QDWIN_MOD_BASE/xwayland.so" ]; then
+    echo "ERROR: $QDWIN_MOD_BASE/xwayland.so is missing — the qdwin weston.ini" >&2
+    echo "       loads xwayland.so but the module is absent from this build." >&2
+    echo "       The session would start WITHOUT XWayland (all X11 app tests" >&2
+    echo "       fail). Rebuild/restage libweston with the xwayland module." >&2
+    exit 1
+fi
 
 # Only emit the LD_LIBRARY_PATH line in the vendored case — an empty
 # LD_LIBRARY_PATH is a (minor) loader smell, and the distro library is on
