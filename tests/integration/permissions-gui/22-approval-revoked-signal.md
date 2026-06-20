@@ -65,19 +65,18 @@ $VMEXEC "$VM" "echo $SUB_B64 | base64 -d > /tmp/listen-broker-signal.py"
 
 ## Steps
 
-### S1 — start the signal subscriber, launch admin app
+### S1 — launch the admin app
+
+The signal subscriber is deliberately NOT started here. It is armed in S2
+immediately before the revoke keypress, so its `--timeout` budget covers only
+the Space→emit latency rather than the whole GUI launch/nav/screenshot
+choreography below (see the comment in S2 for why this matters).
 
 ```bash
-# Start the subscriber and BLOCK until it is actually listening (the
-# --ready file) before any revoke can fire. Captures the first
-# ApprovalRevoked as JSON to /tmp/22-signals.json.
-$VMEXEC "$VM" 'rm -f /tmp/22-signals.json /tmp/22-ready /tmp/22-sub.log; \
-  setsid python3 /tmp/listen-broker-signal.py ApprovalRevoked \
-    --ready /tmp/22-ready --out /tmp/22-signals.json --timeout 30 \
-    >/tmp/22-sub.log 2>&1 </dev/null &
-  echo $! >/tmp/22-monitor.pid'
-$VMEXEC "$VM" 'for i in $(seq 1 50); do [ -f /tmp/22-ready ] && break; sleep 0.1; done; \
-  [ -f /tmp/22-ready ] && echo "subscriber ready" || { echo "subscriber NOT ready"; cat /tmp/22-sub.log; }'
+# Reap any listener left over from an interrupted prior run, then clear its
+# files so the readiness/premature-signal checks in S2 start from clean state.
+$VMEXEC "$VM" 'pkill -f "[l]isten-broker-signal.py ApprovalRevoked" 2>/dev/null; true'
+$VMEXEC "$VM" 'rm -f /tmp/22-signals.json /tmp/22-ready /tmp/22-sub.log /tmp/22-monitor.pid'
 
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
@@ -93,8 +92,6 @@ $VMGUI "$VM" screenshot /tmp/22-s1-launched.png
 
 **Assert**:
 - Window `admin approvals` is visible.
-- The subscriber printed `subscriber ready` (its match rule is installed).
-- `/tmp/22-signals.json` does NOT yet exist — no signal has fired.
 
 ### S2 — keyboard: reach Cache tab, select row, press Revoke
 
@@ -109,7 +106,9 @@ focus from the table OUT to the `btn_revoke` button, and **Space**
 activates it. The Tab-out-of-table step relies on the Cache table
 having `tabKeyNavigation` disabled — Qt's default traps Tab inside the
 view, which would make `btn_revoke` unreachable by keyboard with a row
-selected.
+selected. Only once the row is selected and `btn_revoke` is focused do we arm
+the D-Bus subscriber and then press **Space** — so the subscriber's timeout
+covers just the revoke, not the GUI choreography that precedes it.
 
 ```bash
 # Re-focus the window so the evdev send-key events land on it.
@@ -138,6 +137,25 @@ $VMGUI "$VM" screenshot /tmp/22-s2b-row-selected.png
 # Tab: focus OUT of the table to btn_revoke (needs tabKeyNavigation off).
 virsh send-key "$VM" --codeset linux KEY_TAB
 sleep 0.3
+
+# Arm the signal subscriber NOW — immediately before the revoke — and BLOCK
+# until it is actually listening (the --ready file). This keeps its --timeout
+# budget scoped to the Space->emit latency only; anchoring it back in S1 (with
+# the admin-app launch, six send-keys, and three screenshots in between) is
+# what made this scenario flake under full-run load — the 30s window expired
+# before Space ever fired the revoke. The subscribe/emit race stays closed
+# because we wait for --ready before sending Space, and none of the nav keys
+# above trigger a revoke; only Space does. Starting a process on the VM does
+# not steal the admin app's GUI focus, so btn_revoke stays focused.
+$VMEXEC "$VM" 'setsid python3 /tmp/listen-broker-signal.py ApprovalRevoked \
+    --ready /tmp/22-ready --out /tmp/22-signals.json --timeout 30 \
+    >/tmp/22-sub.log 2>&1 </dev/null &
+  echo $! >/tmp/22-monitor.pid'
+$VMEXEC "$VM" 'for i in $(seq 1 50); do [ -f /tmp/22-ready ] && break; sleep 0.1; done; \
+  [ -f /tmp/22-ready ] || { echo "subscriber NOT ready"; cat /tmp/22-sub.log; exit 1; }; \
+  [ -s /tmp/22-signals.json ] && { echo "premature signal before revoke:"; cat /tmp/22-signals.json; exit 1; }; \
+  echo "subscriber ready"'
+
 # Space: activate the focused Revoke button.
 virsh send-key "$VM" --codeset linux KEY_SPACE
 sleep 1
@@ -147,6 +165,13 @@ $VMGUI "$VM" screenshot /tmp/22-s2c-after-revoke.png
 **Assert**:
 - `/tmp/22-s2a-cache-tab.png`: the Cache tab is selected and shows the
   `test.action` row (table is non-empty before revoke).
+- The subscriber printed `subscriber ready` (its match rule is installed)
+  before the Space keypress, and `/tmp/22-signals.json` was still empty at that
+  point — no signal had fired prematurely. (The readiness step `exit 1`s if the
+  listener never armed or if a signal was already captured before the revoke,
+  so this assertion is executable, not just observational. The helper opens the
+  out-file at start-up, so it exists-but-empty until a signal lands — the check
+  is `-s`, non-empty, not existence.)
 - `/tmp/22-s2c-after-revoke.png`: Cache tab table is empty (no
   `test.action` row).
 - No error dialog appeared.
@@ -164,14 +189,16 @@ payload.)
 $VMEXEC "$VM" 'sleep 0.5; cat /tmp/22-signals.json 2>/dev/null; echo; cat /tmp/22-sub.log'
 ```
 
-**Assert** (`/tmp/22-signals.json` is a JSON array of captured signals):
-- The file exists and contains exactly **one** entry (one signal fired).
-- That entry's args are exactly, in order:
+**Assert** (`/tmp/22-signals.json` is JSON-lines — one JSON object per
+captured signal, as written by `listen-broker-signal.py`):
+- The file exists and contains exactly **one** line (one signal fired).
+- That line is an object whose `args` array is exactly, in order:
   - `2000`  (caller_uid)
   - `"test.action"`  (action)
   - `"/usr/bin/python3.13"`  (exe / match_value)
 
-  i.e. the file reads `[[2000, "test.action", "/usr/bin/python3.13"]]`.
+  i.e. the file reads:
+  `{"member": "ApprovalRevoked", "args": [2000, "test.action", "/usr/bin/python3.13"]}`
 
 ### S4 — audit row matches
 
@@ -190,7 +217,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
-$VMEXEC "$VM" 'kill $(cat /tmp/22-monitor.pid) 2>/dev/null; true'
+$VMEXEC "$VM" '[ -f /tmp/22-monitor.pid ] && kill "$(cat /tmp/22-monitor.pid)" 2>/dev/null; true'
 $VMEXEC "$VM" 'rm -f /tmp/22-signals.json /tmp/22-ready /tmp/22-sub.log /tmp/22-monitor.pid'
 APPROVALS_SQL_B64=$(base64 -w0 <<'SQL_EOF'
 DELETE FROM approvals;
@@ -220,3 +247,14 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
   this scenario used `dbus-monitor`, which both raced the revoke at start-up
   and tested the eavesdrop path rather than the ordinary receive policy that
   production subscribers use — the subscriber fixes both.
+- Do NOT move the subscriber start back into S1. It is armed in S2 right
+  before the Space keypress on purpose: the `--timeout` must cover only the
+  revoke's emit latency, not the admin-app launch + keyboard nav + screenshots.
+  When it was anchored in S1, slow full-run hosts blew the 30s window before
+  the revoke fired, so the signal was emitted to an already-exited listener and
+  the scenario falsely read as "broker never emitted ApprovalRevoked". The
+  broker's `RevokeApproval` emits unconditionally (the emit is the line right
+  before its `[broker] revoked approval ...` journal print), so a missed signal
+  here is a harness-timing problem, not a product bug.
+- `listen-broker-signal.py` writes JSON-**lines** (one `{"member":..,"args":..}`
+  object per signal), NOT a JSON array. Assert against that shape (S3).
