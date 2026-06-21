@@ -289,6 +289,31 @@ SCRIPT
     "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | bash"
 }
 
+qdlocker_prepare_gui_lane() {
+    qdwin_require_vm || return $?
+    local script b64
+    script=$(cat <<'SCRIPT'
+set -e
+# GUI scenarios exercise password auth repeatedly across preserved/replayed VMs.
+# Reset stale faillock tallies so one failed/flaky run does not poison the next
+# scenario, then keep the production 5-minute idle lock from firing in long
+# focus/input suites. Individual idle tests can still override this explicitly.
+faillock --user admin --reset 2>/dev/null || true
+install -d -m 0755 -o admin -g users /home/admin/.config/systemd/user/qdlocker.service.d
+cat >/home/admin/.config/systemd/user/qdlocker.service.d/90-ci-gui.conf <<'EOF'
+[Service]
+Environment=QDLOCKER_IDLE_MS=86400000
+EOF
+chown admin:users /home/admin/.config/systemd/user/qdlocker.service.d/90-ci-gui.conf
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
+sleep 3
+SCRIPT
+)
+    b64=$(printf '%s' "$script" | base64 -w0)
+    "$QDWIN_VM_EXEC" "$VMNAME" "echo $b64 | base64 -d | bash"
+}
+
 qdlocker_session_healthy() {
     qdwin_require_vm || return $?
     # The GUI lane drives introspection commands; production gates them off.
@@ -296,6 +321,10 @@ qdlocker_session_healthy() {
     # scenarios that parse `locked=`/`prompt-len=` would silently false-green.
     if ! qdlocker_enable_introspection; then
         echo "qdlocker_session_healthy: could not enable ctrl introspection" >&2
+        return 1
+    fi
+    if ! qdlocker_prepare_gui_lane; then
+        echo "qdlocker_session_healthy: could not prepare GUI lane state" >&2
         return 1
     fi
     local compositor_state

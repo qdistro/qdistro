@@ -10,7 +10,7 @@ This is the load-bearing reason the locker is its own peer process
 on its own private protocol. If this assertion fails, the lock UI
 is theatre.
 
-The qdshell ctrl-socket exposes a `last-overlay-keys` accessor that
+qdshell exposes a `qs ipc call qdwin lastOverlayKeys` accessor that
 returns the count of `overlay_key` events qdshell has received since
 boot. We assert that count does NOT advance during a locked typing
 sequence, even as qdlocker's `prompt-len` does.
@@ -37,11 +37,11 @@ esac
 # the read returns a non-empty integer before the test proceeds —
 # without this, a missing/typo'd command would return empty strings
 # and the equality assertion would silently green-pass.
-SHELL_BASELINE=$(qdwin_ctrl "last-overlay-keys" | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
+SHELL_BASELINE=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
 if ! [[ "$SHELL_BASELINE" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: qdwin_ctrl 'last-overlay-keys' did not return 'count=<int>' — got: $SHELL_BASELINE" >&2
-    echo "       This scenario depends on qdshell exposing an overlay_key counter via the ctrl-socket." >&2
-    echo "       Add the command in qdshell (Modules/Locker/...) before re-running." >&2
+    echo "ERROR: qs ipc call qdwin lastOverlayKeys did not return 'count=<int>' — got: $SHELL_BASELINE" >&2
     exit 78  # bats: hard ERROR (not SKIP), this is a security regression risk
 fi
 echo "shell overlay_key baseline=$SHELL_BASELINE"
@@ -55,7 +55,9 @@ echo "shell overlay_key baseline=$SHELL_BASELINE"
 qdwin_chord ctrl alt -- l
 qdlocker_wait_for_lock 5
 qdlocker_ctrl status
-SHELL_AFTER_LOCK=$(qdwin_ctrl "last-overlay-keys" | sed -n 's/.*count=\([0-9]*\).*/\1/p')
+SHELL_AFTER_LOCK=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  | sed -n 's/.*count=\([0-9]*\).*/\1/p')
 echo "shell overlay_key after-lock=$SHELL_AFTER_LOCK"
 ```
 
@@ -75,12 +77,14 @@ this fails, the lock-transition routing in qdwin.c
 qdlocker_type_password_chars
 sleep 0.3
 qdlocker_ctrl status
-SHELL_AFTER_TYPING=$(qdwin_ctrl "last-overlay-keys" | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
+SHELL_AFTER_TYPING=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
 # Same numeric-shape guard as setup — defends against silent green-pass
 # if the command starts returning errors mid-test (qdshell restart,
 # socket disconnect).
 if ! [[ "$SHELL_AFTER_TYPING" =~ ^[0-9]+$ ]]; then
-    echo "FAIL (3.x precondition): qdwin_ctrl 'last-overlay-keys' returned non-numeric: $SHELL_AFTER_TYPING" >&2
+    echo "FAIL (3.x precondition): qdwin lastOverlayKeys returned non-numeric: $SHELL_AFTER_TYPING" >&2
     exit 1
 fi
 echo "shell overlay_key after-typing=$SHELL_AFTER_TYPING"
