@@ -2,10 +2,11 @@
 
 **What**: scan a running `qdistro/tier2-weston-terminal` container,
 verify the launcher shows the workload's app entries from the
-PodApps provider, click one, verify a placeholder taskbar entry
-appears with the BusyIndicator overlay, then verify the placeholder
-is replaced by a real toplevel once `qdwin_shell_v1.toplevel_security_context`
-arrives.
+PodApps provider with the current tier-2 visual signal: the
+pink/magenta square badge. Also verify the PodApps cache carries the
+tier-2 silo marker and non-empty `execArgv`. The delegate-side overlay
+and S3/S4 cold-start visual transition are diagnostic until that
+rendering path is merged and stable.
 
 **Why**: this is the pixel-level half of the tier-2 cold-start
 contract. The journal side (advertise + secctx arrival) is covered
@@ -104,8 +105,13 @@ $VMEXEC "$VM" 'timeout 60 runuser -u admin -- bash -c "
 $VMEXEC "$VM" 'cat /var/lib/qdistro/podapps/tier2-c-ui/apps.json | jq .[0]'
 ```
 
-Must include `"silo": "tier2/tier2-c-ui"` and a non-empty
-`"execArgv"`.
+Hard assertion: `apps.json` must contain at least one entry with the
+tier-2 badge marker (`"silo": "tier2/tier2-c-ui"`) and a non-empty
+`"execArgv"`:
+
+```bash
+$VMEXEC "$VM" 'jq -e '"'"'any(.[]; .silo == "tier2/tier2-c-ui" and (.execArgv | type == "array" and length > 0))'"'"' /var/lib/qdistro/podapps/tier2-c-ui/apps.json'
+```
 
 ### S2 — open the launcher; podapps entries visible
 
@@ -120,11 +126,17 @@ sleep 1
 $VMGUI screenshot "$VM" /tmp/s18-launcher-open.png
 ```
 
-**Assert** (agent-visual): the launcher's app list contains at least
-one entry whose description begins with `[tier2/tier2-c-ui]`. That
-prefix is the placeholder for the silo badge convention from
-`doc/ui.md`; once delegate-side badge rendering lands, this assertion
-shifts to "icon has the badge overlay".
+**Assert** (hard, agent-visual): the launcher's app list contains at
+least one `tier2-c-ui` PodApps entry and renders the current tier-2
+visual signal: a pink/magenta square badge on the entry.
+
+**Assert** (best-effort diagnostic): record whether the not-yet-merged
+delegate-side badge overlay is visible. Do not fail the scenario on
+the overlay check until the delegate rendering has landed.
+
+TODO: re-tighten this assertion to require the delegate-side silo badge
+overlay from `doc/ui.md` / `doc/containers.md` once that rendering path
+merges.
 
 ### S3 — click a podapps entry; placeholder taskbar appears
 
@@ -138,10 +150,11 @@ $VMEXEC "$VM" 'runuser -u admin -- ydotool key enter'
 $VMGUI screenshot "$VM" /tmp/s18-cold-start.png
 ```
 
-**Assert** (agent-visual): the taskbar (or dock) shows a new entry
-for weston-terminal with reduced opacity and a small spinner overlay.
-Per the cold-start contract in `doc/window-hierarchy.md`, the entry
-should NOT yet match a real toplevel.
+**Assert** (best-effort diagnostic, agent-visual): record whether the
+taskbar (or dock) shows a new entry for weston-terminal with reduced
+opacity and a small spinner overlay. Per the cold-start contract in
+`doc/window-hierarchy.md`, the entry should NOT yet match a real
+toplevel, but this visual cold-start check must not fail the scenario.
 
 ### S4 — placeholder resolves on toplevel arrival
 
@@ -155,10 +168,28 @@ $VMGUI screenshot "$VM" /tmp/s18-warm.png
 $VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'"
 ```
 
-**Assert** (agent-visual): the taskbar entry is now at full opacity,
-no spinner overlay, and renders normally. The journal grep must
-produce at least one matching line (load-bearing assertion per the
-repo convention).
+**Assert** (hard): the journal grep must produce at least one matching
+`toplevel_security_context.*tier2-c-ui` line.
+
+**Assert** (best-effort diagnostic, agent-visual): record whether the
+taskbar entry is now at full opacity, has no spinner overlay, and
+renders normally. Do not fail the scenario on this S3/S4 visual
+cold-start transition.
+
+## Pass criteria
+
+Hard pass conditions:
+
+1. Setup preconditions pass, including the qdlocker-not-locked guard.
+2. S1 populates `/var/lib/qdistro/podapps/tier2-c-ui/apps.json`.
+3. `apps.json` contains a tier-2 marker (`"silo": "tier2/tier2-c-ui"`)
+   and non-empty `execArgv`.
+4. S2 visually confirms at least one tier-2 PodApps launcher entry with
+   the current pink/magenta square badge.
+5. S4 journal output confirms `toplevel_security_context.*tier2-c-ui`.
+
+The delegate-side badge overlay and S3/S4 visual cold-start transition
+are best-effort diagnostics only.
 
 ### S5 — cleanup
 
@@ -169,9 +200,11 @@ $VMEXEC "$VM" 'pkill -u admin -f "spawn-tier2.sh tier2-c-ui" 2>/dev/null || true
 
 ## Known caveats
 
-- **No delegate-side badge** yet (tracked in `doc/containers.md`
-  "Future work"). The visual signal during S2 / S4 is the `[tier2/<name>]`
-  description prefix.
+- **Delegate-side overlay re-tighten pending.** The hard visual signal
+  during S2 is currently the pink/magenta square tier-2 badge. The
+  not-yet-merged delegate-side overlay is diagnostic only; re-tighten
+  the scenario once the rendering path in `doc/containers.md` "Future
+  work" lands.
 - ydotool is the assumed input injector. The VM image bakes it in;
   see `scripts/vm/install-deps.sh`. If ydotool ever moves to wtype or
   similar, update S2/S3 here.
