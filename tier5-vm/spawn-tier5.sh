@@ -93,6 +93,15 @@
 #   TIER5_BASE_DISK      (--vm only) override base disk path.
 #   TIER5_DISK_DIR       (--vm only) override per-VM disk dir.
 #   TIER5_MEM_KIB        (--vm only) guest RAM in KiB (default 1572864 = 1.5 GiB).
+#   TIER5_SERIAL_LOG     (--vm only) path for a file-backed guest serial
+#                        console. Default unset = pty serial (interactive
+#                        `virsh console`). When set, the guest's boot
+#                        console is appended to this file so a headless
+#                        failure (kernel panic, mid-boot poweroff,
+#                        firstboot stall) is diagnosable offline without a
+#                        controlling TTY. The file is created/owned by the
+#                        admin user (the qemu:///session domain runs as
+#                        admin and must be able to open it for writing).
 #   TIER5_DOMAIN_TEMPLATE
 #                        (--vm only) override domain XML template path.
 #   TIER5_KEEP_DOMAIN=1  (--vm only) skip destroy+undefine on exit
@@ -528,8 +537,23 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     # the substituted snippet still contains the __MAC__ marker so the
     # later MAC sed pass fills it in.
     NIC_XML_ESCAPED=$(printf '%s' "$NIC_XML" | sed 's|[\\/&]|\\&|g')
+
+    # __SERIAL_XML__: default to a pty serial (interactive `virsh console`).
+    # When TIER5_SERIAL_LOG is set, use a file-backed serial so the guest's
+    # boot console is captured headlessly (virsh console needs a controlling
+    # TTY and can't be redirected to a file). The qemu:///session domain runs
+    # as admin, so the log file must be admin-writable; create it as admin.
+    if [ -n "${TIER5_SERIAL_LOG:-}" ]; then
+        run_as_admin sh -c ': >>"$1" 2>/dev/null || true' _ "$TIER5_SERIAL_LOG"
+        SERIAL_XML="<serial type='file'><source path='$TIER5_SERIAL_LOG'/><target type='isa-serial' port='0'/></serial>"
+    else
+        SERIAL_XML="<serial type='pty'><target type='isa-serial' port='0'/></serial>"
+    fi
+    SERIAL_XML_ESCAPED=$(printf '%s' "$SERIAL_XML" | sed 's|[\\/&]|\\&|g')
+
     sed \
         -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
+        -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
         -e "s|__VM_NAME__|$VM_NAME|g" \
         -e "s|__MAC__|$NEW_MAC|g" \
         -e "s|__MEM_KIB__|$MEM_KIB|g" \

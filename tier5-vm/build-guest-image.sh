@@ -176,10 +176,26 @@ fi
 echo "[tier5-build] customizing..."
 # Tumbleweed Minimal-VM Cloud image is mutable (not transactional), so
 # zypper install works directly via virt-customize.
+#
+# jeos-firstboot / cloud-init must be masked. The stock Tumbleweed
+# Minimal-VM Cloud image ships jeos-firstboot active: on first boot its
+# interactive wizard takes over ttyS0, blocks multi-user.target, and —
+# unanswered, as in headless CI — the guest eventually powers itself off
+# mid-boot. The host then sees the per-app domain go "shut off" right
+# after the publisher starts (the tier-5 cold-start GUI scenario's S2
+# poll caught exactly this). cloud-init is masked too: spawn-tier5.sh
+# injects per-VM config via the domain XML + qga, not a cloud-init seed,
+# so cloud-init only adds boot latency / its own ttyS0 prompts. This
+# mirrors the OUTER baseweed images, which mask jeos-firstboot for the
+# same reason (scripts/vm/build-baseweed-from-scratch.sh,
+# scripts/vm/fresh-vm-bootstrap.sh).
 virt-customize -a "$BASE_QCOW" \
     --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
+    --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
+    --run-command 'rm -f /var/lib/YaST2/reconfig_system 2>/dev/null || true' \
+    --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true' \
     --run-command 'fc-cache -f || true' \
     --run-command 'if [ -f /etc/selinux/config ]; then sed -i "s/^SELINUX=.*/SELINUX=permissive/" /etc/selinux/config; fi' \
     --run-command 'rm -f /.autorelabel' \

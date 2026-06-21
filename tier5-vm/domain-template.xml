@@ -9,6 +9,14 @@
                          base image). spawn-tier5.sh creates this fresh
                          per spawn; the base disk it references is
                          immutable (qcow2 backing-chain semantics).
+       __SERIAL_XML__    guest serial port. Default is a pty (interactive
+                         `virsh console`). When TIER5_SERIAL_LOG is set,
+                         spawn-tier5.sh substitutes a file-backed serial
+                         instead so the guest's boot console (incl. a
+                         kernel panic / poweroff / firstboot stall) is
+                         captured to disk for offline diagnosis — no TTY
+                         needed (virsh console requires a controlling
+                         TTY and can't be captured headlessly).
        NIC_XML marker    network configuration. Default empty (no NIC
                          — TIER5_NETWORK=none, mirrors podman's
                          network=none hardening). TIER5_NETWORK=user
@@ -54,7 +62,7 @@
     <controller type='pci' model='pcie-root'/>
     <controller type='virtio-serial' index='0'/>
     __NIC_XML__
-    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    __SERIAL_XML__
     <console type='pty'><target type='serial' port='0'/></console>
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>

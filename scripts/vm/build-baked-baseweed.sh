@@ -190,6 +190,16 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils' \
                 --run-command 'systemctl enable qemu-guest-agent.service' \
                 --run-command 'systemctl enable serial-getty@ttyS0.service' \
+                `# Mask jeos-firstboot/cloud-init: the stock Tumbleweed Cloud` \
+                `# image runs the firstboot wizard on ttyS0, which blocks` \
+                `# multi-user.target and powers the guest off mid-boot in` \
+                `# headless CI — the host then sees the tier-5 per-app domain` \
+                `# go "shut off" right after the publisher starts (the` \
+                `# 20-tier5-vm-cold-start.md S2 poll caught this). Mirrors the` \
+                `# outer baseweed images and tier5-vm/build-guest-image.sh.` \
+                --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
+                --run-command 'rm -f /var/lib/YaST2/reconfig_system 2>/dev/null || true' \
+                --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true' \
                 --copy-in "$PUBLISHER_TMP:/usr/local/bin/" \
                 --run-command "mv /usr/local/bin/$(basename "$PUBLISHER_TMP") /usr/local/bin/qdistro-tier5-publisher.sh" \
                 --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
