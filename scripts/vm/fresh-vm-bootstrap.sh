@@ -258,18 +258,23 @@ log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
     || { log "  ERROR: zypper install xwayland failed"; exit 3; }
 
-# ---- GUI app-deps lane (qdwin XWayland/Wayland app tests) -----------------
+# ---- GUI app-deps lane (qdwin XWayland/Wayland app tests) — OPT-IN ---------
 # The qdwin app tests (qdwin/tests/apps/*.md) drive real desktop apps —
 # firefox, xterm, foot, thunar, vlc, chromium, audacity, feh, tk/fltk/swing.
-# They are heavy and only the app-test lane needs them, so the install is
-# gated by QDWIN_APP_DEPS (default 1: the qdwin gui golden ships them so the
-# app tests can run green; set QDWIN_APP_DEPS=0 for a lean golden).
+# OPT-IN (QDWIN_APP_DEPS=1), DEFAULT OFF: this bootstrap is shared by EVERY
+# golden (bats, gui-admin, gui-qdwin), so installing these heavy packages —
+# and especially the fonts below — unconditionally bloated all goldens and
+# shifted the qdshell bar layout enough to break compositor-shell.bats'
+# rocket-icon click-coords ("foot never launched"). Only the app-test lane
+# needs them, so it must opt in (e.g. a dedicated `QDWIN_APP_DEPS=1 qci gui`
+# run); the default full run stays lean and stable. With deps absent the app
+# tests are infra-blocked, exactly as before this lane existed.
 #
 # Best-effort PER PACKAGE: an unavailable/renamed package is logged and
 # skipped, NEVER fatal. A wrong name here must never abort the golden build —
 # that fail-closed-on-a-missing-dep regression is exactly what we avoid. A
 # package that fails to install just leaves its one app test infra-blocked.
-if [ "${QDWIN_APP_DEPS:-1}" = 1 ]; then
+if [ "${QDWIN_APP_DEPS:-0}" = 1 ]; then
     log "installing qdwin app-test deps (best-effort; QDWIN_APP_DEPS=0 to skip)..."
     # Map: firefox=MozillaFirefox, gtk4=gnome-text-editor, gtk3=thunar,
     # qt5=vlc, electron=chromium, wxwidgets=audacity, tk=python3-tk,
