@@ -228,21 +228,40 @@ fi
 RUA systemctl --user start qdshell.service 2>/dev/null || true
 
 echo "=== #2b qdlocker PAM inside qdlocker.service-equivalent sandbox (diagnostic) ==="
-# Reproduce the locker's RUNTIME context: PrivateNetwork + restricted address
-# families, as in qdlocker/systemd/qdlocker.service. If THIS fails while the
-# plain repro above passed, unix_chkpwd's 'user unknown' is the sandbox; if it
-# also passes, the GUI unlock failure is the known QMP keystroke-injection flake.
+# Reproduce the locker's RUNTIME context faithfully. CRITICAL: the probe MUST
+# run under the per-USER systemd manager (systemd-run --user as admin), NOT
+# `systemd-run --uid=admin` from the system manager. On a --user unit an
+# unprivileged manager realizes PrivateNetwork=yes via an implicit
+# PrivateUsers= USER NAMESPACE with no host-root mapping, which de-privileges
+# the setuid unix_chkpwd helper and breaks pam_unix ("check pass; user
+# unknown"). The system manager instead gives a real netns (root mapped), so a
+# `--uid=admin` probe would WRONGLY pass and mask the bug. The two probes below
+# bracket the fix:
+#   pn=yes (old, broken): rootless userns -> unix_chkpwd de-privileged -> False
+#   pn=no  (current fix): normal userns/uid map -> setuid unix_chkpwd -> True
 faillock --user admin --reset 2>/dev/null || true
-sb=$(systemd-run --pipe --quiet --uid=admin \
+PAMPROBE='import pam; print("RESULT", pam.pam().authenticate("admin","Pa_ssw0rd45",service="qdlocker",call_end=True))'
+sb_pn=$(RUA systemd-run --user --pipe --quiet \
         -p PrivateNetwork=yes \
         -p 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' \
         -p IPAddressDeny=any \
-        python3 -c "import pam; print('SANDBOX', pam.pam().authenticate('admin','Pa_ssw0rd45',service='qdlocker',call_end=True))" 2>&1 | tr '\n' ' ')
-INFO "pam(qdlocker) in sandbox: $sb"
-if echo "$sb" | grep -q 'SANDBOX True'; then
-    INFO "#2 VERDICT: PAM works even in the locker sandbox -> GUI unlock fail is the keystroke-injection flake, not a product bug"
+        python3 -c "$PAMPROBE" 2>&1 | tr '\n' ' ')
+INFO "pam(qdlocker) with PrivateNetwork=yes (old/broken context): $sb_pn"
+faillock --user admin --reset 2>/dev/null || true
+sb=$(RUA systemd-run --user --pipe --quiet \
+        -p 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' \
+        -p IPAddressDeny=any \
+        python3 -c "$PAMPROBE" 2>&1 | tr '\n' ' ')
+INFO "pam(qdlocker) without PrivateNetwork (current fix context): $sb"
+if echo "$sb" | grep -q 'RESULT True'; then
+    PASS "#2 qdlocker PAM unlock authenticates in the fixed (no-PrivateNetwork) --user sandbox"
 else
-    INFO "#2 VERDICT: PAM FAILS in the locker sandbox -> real qdlocker.service hardening bug breaking unix_chkpwd"
+    FAIL "#2 qdlocker PAM unlock FAILS even without PrivateNetwork -> unix_chkpwd still de-privileged; investigate"
+fi
+if echo "$sb_pn" | grep -q 'RESULT True'; then
+    INFO "#2 NOTE: PrivateNetwork=yes also passed here; userns-deprivilege may not reproduce in this manager/kernel (verify uid_map)"
+else
+    INFO "#2 CONFIRMED: PrivateNetwork=yes reproduces the unix_chkpwd de-privilege failure that the fix removes"
 fi
 
 echo "=== #X XWayland binary installed + weston module loaded ==="
