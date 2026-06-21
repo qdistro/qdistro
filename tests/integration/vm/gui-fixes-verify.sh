@@ -230,38 +230,56 @@ RUA systemctl --user start qdshell.service 2>/dev/null || true
 echo "=== #2b qdlocker PAM inside qdlocker.service-equivalent sandbox (diagnostic) ==="
 # Reproduce the locker's RUNTIME context faithfully. CRITICAL: the probe MUST
 # run under the per-USER systemd manager (systemd-run --user as admin), NOT
-# `systemd-run --uid=admin` from the system manager. On a --user unit an
-# unprivileged manager realizes PrivateNetwork=yes via an implicit
-# PrivateUsers= USER NAMESPACE with no host-root mapping, which de-privileges
-# the setuid unix_chkpwd helper and breaks pam_unix ("check pass; user
-# unknown"). The system manager instead gives a real netns (root mapped), so a
-# `--uid=admin` probe would WRONGLY pass and mask the bug. The two probes below
-# bracket the fix:
-#   pn=yes (old, broken): rootless userns -> unix_chkpwd de-privileged -> False
-#   pn=no  (current fix): normal userns/uid map -> setuid unix_chkpwd -> True
+# `systemd-run --uid=admin` from the system manager — only the --user manager
+# exhibits the failure modes below.
+#
+# qdlocker authenticates via pam_unix.so -> setuid-root /usr/sbin/unix_chkpwd.
+# TWO distinct directives de-privilege that setuid helper on a --user unit and
+# brick unlock ("check pass; user unknown", PAM code 9). Both were proven live:
+#   - PrivateNetwork=yes: an unprivileged manager realizes it via an implicit
+#     PrivateUsers= USER NAMESPACE with no host-root mapping; unix_chkpwd can't
+#     elevate.
+#   - RestrictAddressFamilies=... : a SECCOMP filter, so systemd IMPLICITLY sets
+#     NoNewPrivileges=yes (the unit's NoNewPrivs:1 even though `systemctl show`
+#     says no); under NNP the kernel ignores the setuid bit. This is the one
+#     that re-broke unlock after PrivateNetwork=yes was removed, which is why the
+#     FIXED unit carries NEITHER directive (IPAddressDeny was also dropped: it is
+#     a cgroup-eBPF no-op on a rootless --user manager — it never blocked
+#     egress, so keeping it only advertised a property the unit didn't have).
+# The probes below bracket the fix: each broken directive -> False; the fixed
+# context (no PrivateNetwork, no RestrictAddressFamilies, no IPAddressDeny,
+# matching qdlocker.service) -> True.
 faillock --user admin --reset 2>/dev/null || true
 PAMPROBE='import pam; print("RESULT", pam.pam().authenticate("admin","Pa_ssw0rd45",service="qdlocker",call_end=True))'
 sb_pn=$(RUA systemd-run --user --pipe --quiet \
         -p PrivateNetwork=yes \
-        -p 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' \
-        -p IPAddressDeny=any \
         python3 -c "$PAMPROBE" 2>&1 | tr '\n' ' ')
 INFO "pam(qdlocker) with PrivateNetwork=yes (old/broken context): $sb_pn"
 faillock --user admin --reset 2>/dev/null || true
-sb=$(RUA systemd-run --user --pipe --quiet \
+sb_raf=$(RUA systemd-run --user --pipe --quiet \
         -p 'RestrictAddressFamilies=AF_UNIX AF_NETLINK' \
-        -p IPAddressDeny=any \
         python3 -c "$PAMPROBE" 2>&1 | tr '\n' ' ')
-INFO "pam(qdlocker) without PrivateNetwork (current fix context): $sb"
+INFO "pam(qdlocker) with RestrictAddressFamilies (broken: implies NoNewPrivileges): $sb_raf"
+faillock --user admin --reset 2>/dev/null || true
+# Fixed context: NO network-sandbox directives, mirroring qdlocker.service.
+sb=$(RUA systemd-run --user --pipe --quiet \
+        -p LimitCORE=0 \
+        python3 -c "$PAMPROBE" 2>&1 | tr '\n' ' ')
+INFO "pam(qdlocker) in fixed context (no PrivateNetwork/RAF/IPAddressDeny): $sb"
 if echo "$sb" | grep -q 'RESULT True'; then
-    PASS "#2 qdlocker PAM unlock authenticates in the fixed (no-PrivateNetwork) --user sandbox"
+    PASS "#2 qdlocker PAM unlock authenticates in the fixed --user sandbox"
 else
-    FAIL "#2 qdlocker PAM unlock FAILS even without PrivateNetwork -> unix_chkpwd still de-privileged; investigate"
+    FAIL "#2 qdlocker PAM unlock FAILS in the fixed context -> unix_chkpwd still de-privileged; investigate"
 fi
 if echo "$sb_pn" | grep -q 'RESULT True'; then
     INFO "#2 NOTE: PrivateNetwork=yes also passed here; userns-deprivilege may not reproduce in this manager/kernel (verify uid_map)"
 else
     INFO "#2 CONFIRMED: PrivateNetwork=yes reproduces the unix_chkpwd de-privilege failure that the fix removes"
+fi
+if echo "$sb_raf" | grep -q 'RESULT True'; then
+    INFO "#2 NOTE: RestrictAddressFamilies also passed here; NoNewPrivileges-deprivilege may not reproduce in this kernel"
+else
+    INFO "#2 CONFIRMED: RestrictAddressFamilies (implicit NoNewPrivileges) reproduces the unix_chkpwd de-privilege failure that the fix removes"
 fi
 
 echo "=== #X XWayland binary installed + weston module loaded ==="
