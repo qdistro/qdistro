@@ -40,16 +40,35 @@ $VMEXEC "$VM" 'timeout 240 bash -c "
 $VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest' \
   || { echo "FAIL(setup): qdistro/tier2-weston-terminal:latest missing after build"; exit 1; }
 
-# Defensive (NOT the proven cause): disable the idle-lock for this VM's
-# session so a long agent-driven scenario can't trip qdlocker mid-run.
-# Codex hypothesised an idle-lock fired during S1, but no artifact
-# evidence supports it — this is belt-and-suspenders only.
-$VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
-    systemctl --user set-environment QDLOCKER_IDLE_MS=0 2>/dev/null || true'
-$VMEXEC "$VM" 'faillock --user admin --reset 2>/dev/null || true'
+# Keep qdlocker from stealing launcher keystrokes. The CI artifact from
+# 2026-06-21 showed the round-2 set-environment-only guard was too weak:
+# the already-running locker stayed locked and consumed "weston-terminal"
+# as a password. Install the same test-lane drop-in used by qdlocker GUI
+# helpers, enable ctrl introspection, restart the unit so the new idle
+# timeout actually takes effect, and fail closed if the lock is still up.
+$VMEXEC "$VM" 'set -e
+    faillock --user admin --reset 2>/dev/null || true
+    install -d -m 0755 -o 0 -g 0 /etc/qdistro
+    : > /etc/qdistro/locker-ctrl-introspection
+    chown 0:0 /etc/qdistro/locker-ctrl-introspection
+    chmod 0644 /etc/qdistro/locker-ctrl-introspection
+    install -d -m 0755 -o admin -g users /home/admin/.config/systemd/user/qdlocker.service.d
+    cat >/home/admin/.config/systemd/user/qdlocker.service.d/90-ci-gui.conf <<EOF
+[Service]
+Environment=QDLOCKER_IDLE_MS=86400000
+EOF
+    chown admin:users /home/admin/.config/systemd/user/qdlocker.service.d/90-ci-gui.conf
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+    runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service
+    sleep 3'
 case "$($VMEXEC "$VM" 'runuser -u admin -- bash -c "printf \"status\n\" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null"' 2>/dev/null)" in
+    *locked=False*) ;;
     *locked=True*)
-        echo "FAIL(setup): qdlocker is already engaged; launcher input would be captured by the lock overlay"
+        echo "FAIL(setup): qdlocker is locked; launcher input would be captured by the lock overlay"
+        exit 1
+        ;;
+    *)
+        echo "FAIL(setup): qdlocker status introspection unavailable; cannot prove launcher input is unobstructed"
         exit 1
         ;;
 esac

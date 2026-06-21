@@ -69,6 +69,10 @@ QDISTRO_PKGS=(
   wireguard-tools nftables dnsmasq
   waypipe
   wl-clipboard
+  # OCR engine used by qdwin-noctalia/03-clock-updates.md. The scenario
+  # verifies the qdshell clock bar with tesseract and skips when the binary
+  # is missing, which makes absence from the baked GUI VM a dependency gap.
+  tesseract-ocr
   # Test-VM-only synthetic input. Requires a kernel with uinput; production
   # images must not depend on this package.
   ydotool
