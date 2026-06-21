@@ -125,8 +125,13 @@ CID=$(( 100 + (RANDOM % 100) ))
 # Substitute the template. Mirrors spawn-tier5.sh's logic but inlined.
 NIC_XML="<!-- TIER5_NETWORK=none: no NIC by default -->"
 NIC_XML_ESCAPED=$(printf '%s' "$NIC_XML" | sed 's|[\\/&]|\\&|g')
+# __SERIAL_XML__: s47 doesn't exercise the serial console, so use the
+# default pty serial (matches spawn-tier5.sh's no-TIER5_SERIAL_LOG branch).
+SERIAL_XML="<serial type='pty'><target type='isa-serial' port='0'/></serial>"
+SERIAL_XML_ESCAPED=$(printf '%s' "$SERIAL_XML" | sed 's|[\\/&]|\\&|g')
 sed \
     -e "s|__NIC_XML__|$NIC_XML_ESCAPED|g" \
+    -e "s|__SERIAL_XML__|$SERIAL_XML_ESCAPED|g" \
     -e "s|__VM_NAME__|$VM_NAME|g" \
     -e "s|__MAC__|52:54:00:11:22:33|g" \
     -e "s|__MEM_KIB__|524288|g" \
