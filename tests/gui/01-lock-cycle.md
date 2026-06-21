@@ -20,7 +20,7 @@ pgrep -f "http.server 8765" >/dev/null || (
 )
 sleep 1
 
-qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
+qdlocker_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
 # qdlocker should be running under systemd --user. If a previous test
 # left the locker engaged, unstick it before we start. vm-exec runs
@@ -29,7 +29,7 @@ qdwin_session_healthy || { echo "FAIL: session not up"; exit 1; }
 case "$(qdlocker_ctrl status 2>/dev/null)" in
     *locked=True*)
         "$QDWIN_VM_EXEC" "$VMNAME" \
-          'runuser -l admin -c "systemctl --user restart qdlocker.service"; sleep 2' >/dev/null
+          'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service; sleep 2' >/dev/null
         ;;
 esac
 

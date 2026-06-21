@@ -90,11 +90,13 @@ up — chrome around any pre-existing toplevels is rendered again.
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" 'runuser -l admin -c "systemctl --user is-active qdshell.service"' 2>&1
-ls /run/user/1000/qdshell.sock 2>&1
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 qs ipc -p /usr/share/quickshell/qdshell call qdwin capabilities'
 ```
 
-**Assert (5.1):** systemd reports `active`. The ctrl-socket file
-exists. qdshell came back online via `Restart=always`.
+**Assert (5.1):** systemd reports `active` and Quickshell IPC answers
+the `qdwin capabilities` call. qdshell came back online via
+`Restart=always`.
 
 ## Cleanup
 
