@@ -46,6 +46,13 @@ $VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest' \
 # evidence supports it — this is belt-and-suspenders only.
 $VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
     systemctl --user set-environment QDLOCKER_IDLE_MS=0 2>/dev/null || true'
+$VMEXEC "$VM" 'faillock --user admin --reset 2>/dev/null || true'
+case "$($VMEXEC "$VM" 'runuser -u admin -- bash -c "printf \"status\n\" | socat -t 1 - UNIX-CONNECT:/run/user/1000/qdlocker.sock 2>/dev/null"' 2>/dev/null)" in
+    *locked=True*)
+        echo "FAIL(setup): qdlocker is already engaged; launcher input would be captured by the lock overlay"
+        exit 1
+        ;;
+esac
 ```
 
 ## Steps
