@@ -114,24 +114,34 @@ def test_execstart_dir_stays_unprefixed_and_documents_installer_rewrite():
 
 def test_no_network_runtime_hardening():
     cp = _parse_unit()
-    # PrivateNetwork=yes MUST NOT be set on this --user unit: an unprivileged
-    # per-user manager realizes it via an implicit PrivateUsers= user namespace
-    # with no host-root mapping, which de-privileges the setuid unix_chkpwd
-    # helper pam_unix(qdlocker:auth) execs and rejects the correct unlock
-    # password ("check pass; user unknown"). The no-network discipline is kept
-    # via RestrictAddressFamilies (seccomp) + IPAddressDeny (cgroup eBPF), which
-    # need no namespace and don't break PAM. See the unit's comment block.
+    # qdlocker authenticates via pam_unix.so -> setuid-root unix_chkpwd. Every
+    # systemd unit primitive that could restrict network egress on this uid-1000
+    # --user unit either de-privileges that setuid helper (and bricks unlock) or
+    # is a silent no-op without cgroup-BPF delegation a rootless user manager
+    # lacks. ALL of the following were proven broken/ineffective live and MUST
+    # NOT be set on this unit (see the unit's comment block for the VM evidence):
+    #   - PrivateNetwork=yes  -> implicit rootless userns -> unix_chkpwd can't
+    #     elevate -> "check pass; user unknown".
+    #   - RestrictAddressFamilies= -> seccomp -> systemd implicitly forces
+    #     NoNewPrivileges=yes -> setuid bit ignored -> SAME unlock failure.
+    #   - IPAddressDeny= / SocketBindDeny= -> cgroup-eBPF no-op on a --user unit
+    #     (verified: AF_INET egress NOT blocked) -> advertises a property the
+    #     unit doesn't have.
+    # Egress containment for qdlocker belongs at the system layer, not here.
     assert cp.get("Service", "PrivateNetwork", fallback="") != "yes", (
         "PrivateNetwork=yes on a --user unit forces a rootless user namespace "
-        "that breaks setuid unix_chkpwd / pam_unix unlock; rely on "
-        "RestrictAddressFamilies + IPAddressDeny instead."
+        "that breaks setuid unix_chkpwd / pam_unix unlock."
     )
-    assert cp.get("Service", "IPAddressDeny", fallback="") == "any"
-    families = cp.get("Service", "RestrictAddressFamilies", fallback="")
-    assert "AF_UNIX" in families
-    assert "AF_INET" not in families
-    assert "AF_INET6" not in families
-    assert "AF_VSOCK" not in families
+    assert cp.get("Service", "RestrictAddressFamilies", fallback="") == "", (
+        "RestrictAddressFamilies on this --user unit implicitly forces "
+        "NoNewPrivileges=yes, which de-privileges the setuid unix_chkpwd helper "
+        "and breaks the PAM unlock (proven live). It must not be set."
+    )
+    assert cp.get("Service", "IPAddressDeny", fallback="") == "", (
+        "IPAddressDeny is a cgroup-eBPF no-op on a rootless --user unit (proven "
+        "live: AF_INET egress was not blocked). Keeping it advertises a "
+        "no-egress property the unit does not actually have."
+    )
 
 
 def test_sources_stay_unix_only():

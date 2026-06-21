@@ -77,35 +77,43 @@ Environment=QDLOCKER_PAM_SERVICE=qdlocker
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 
-# TCB no-network discipline. qdlocker talks to qdwin, its ctrl socket,
-# logind/fprintd/PAM, and systemd notify over AF_UNIX/system facilities
-# only; it has no legitimate IP/vsock egress path.
+# TCB no-network discipline — DELIBERATELY NOT enforced from this --user unit.
+# qdlocker talks to qdwin, its ctrl socket, logind/fprintd/PAM, and systemd
+# notify over AF_UNIX/system facilities only; it has no legitimate IP/vsock
+# egress path. But NO systemd unit primitive can enforce that here without
+# breaking unlock, because qdlocker authenticates via pam_unix.so, which execs
+# the setuid-root helper /usr/sbin/unix_chkpwd to read /etc/shadow. ALL of these
+# were tried and PROVEN broken/ineffective live (qdlocker gui 01-lock-cycle /
+# 06-shell-crash-survives, openSUSE Tumbleweed, uid-1000 user@1000 manager):
 #
-# DO NOT set PrivateNetwork=yes here. This is a systemd --user unit, and an
-# unprivileged per-user manager cannot create a private network namespace the
-# privileged way, so systemd realizes PrivateNetwork=yes by implicitly turning
-# on PrivateUsers= and wrapping the service in a USER NAMESPACE that maps ONLY
-# this uid (1000) — host root is left UNMAPPED (reads as overflow uid 65534).
-# That de-privileges the setuid-root helper /usr/sbin/unix_chkpwd that
-# pam_unix(qdlocker:auth) execs to read /etc/shadow: with no host-root mapping
-# the setuid bit can't elevate, so unix_chkpwd runs as uid 1000, fails the
-# shadow read, and logs "check pass; user unknown" — the CORRECT unlock
-# password is rejected and the screen locker bricks (gui 01-lock-cycle /
-# 06-shell-crash-survives, run gui-20260621T071239Z). A login-session PAM auth
-# (runuser -l admin) has no userns, so unix_chkpwd is genuinely setuid-root and
-# the same password authenticates — which is exactly the observed split.
+#   - PrivateNetwork=yes: an unprivileged per-user manager can't make a private
+#     netns the privileged way, so systemd implies PrivateUsers= and wraps the
+#     service in a rootless USER NAMESPACE with host root UNMAPPED (overflow
+#     65534). unix_chkpwd then can't elevate → runs as uid 1000 → shadow read
+#     fails → "check pass; user unknown" → correct password rejected.
+#   - RestrictAddressFamilies=... : a SECCOMP filter, so systemd IMPLICITLY sets
+#     NoNewPrivileges=yes (verified: the service PID shows NoNewPrivs:1 even
+#     though `systemctl show` reports NoNewPrivileges=no). Under NNP the kernel
+#     ignores unix_chkpwd's setuid bit → SAME "user unknown" failure (PAM code
+#     9). This is what re-broke unlock after PrivateNetwork=yes was removed.
+#   - IPAddressDeny=any / SocketBindDeny= : cgroup-eBPF controls that need BPF
+#     delegation a rootless user manager lacks. Verified a NO-OP here: an
+#     AF_INET connect()+send() from inside an IPAddressDeny=any --user unit was
+#     NOT blocked. Keeping it is cargo-cult — it advertises a property the unit
+#     does not actually have, hiding the gap from review.
+#   - RestrictNetworkInterfaces= : needs netns machinery → same userns problem
+#     class as PrivateNetwork.
 #
-# The no-network discipline is preserved WITHOUT a namespace:
-#   - RestrictAddressFamilies (seccomp) denies AF_INET/AF_INET6/AF_VSOCK
-#     socket() creation outright — no IP/vsock egress can even be opened.
-#   - IPAddressDeny=any (cgroup eBPF) backstops any IP traffic.
-# Tradeoff vs PrivateNetwork=yes (accepted to keep PAM unlock working): the
-# host's abstract AF_UNIX namespace and loopback are reachable again. For a
-# uid-1000 screen locker that must reliably authenticate local passwords, an
-# unlockable locker outweighs that residual isolation. AF_NETLINK is retained
-# because logind/udev paths use it.
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
-IPAddressDeny=any
+# Conclusion (codex-reviewed gpt-5.5, VM-proven): for a uid-1000 --user service
+# that must run setuid unix_chkpwd on demand at every unlock, in-process egress
+# containment is fundamentally incompatible with a working PAM unlock. Egress
+# containment for qdlocker must live at a layer that CAN enforce it (a system
+# firewall / nftables in the qdistro image, or user@1000 slice policy with the
+# needed cgroup-BPF delegation), NOT this --user unit. Removing these directives
+# does NOT weaken authentication: the locker still runs uid 1000, pam_unix +
+# setuid unix_chkpwd + /etc/shadow + pam_faillock(deny=5) are all intact, and a
+# WRONG password still fails (verified PAM code 7) — only the never-effective
+# in-process egress claim is dropped. See tests/unit/test_session_target.py.
 
 # Finding 07: the unlock password is held in a Python str and cannot be
 # reliably zeroed (CPython limitation). Disable core dumps so a crash cannot
