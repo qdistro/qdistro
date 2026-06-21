@@ -104,7 +104,8 @@ $VMEXEC "$VM" 'grep -q "^lineage_enforce" /etc/qdistro/broker.conf 2>/dev/null \
   || echo "lineage_enforce = true" >> /etc/qdistro/broker.conf'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
-$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service --since "-10s" | grep -m1 lineage_enforce'
+$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service --since "-30s" \
+  | grep -m1 "lineage_enforce=True"'
 ```
 
 **Assert**: the journal line reads `lineage_enforce=True`.

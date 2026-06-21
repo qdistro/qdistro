@@ -239,14 +239,16 @@ python3 -m pytest tests/ui -v"
 
 # How many GUI scenarios to run concurrently. GUI VMs are heavier than bats
 # (nested KVM + compositor) and each spawns its own agent (QCI_AGENT_CMD)
-# process, so this is capped separately from bats. Default 8; QCI_GUI_JOBS
-# overrides. RAM-clamped like the bats pool.
+# process. The default is deliberately serial: running many full GUI stacks at
+# once has repeatedly produced black screenshots, missed input/focus events, and
+# agent timeouts that do not reproduce in isolation. QCI_GUI_JOBS remains an
+# explicit opt-in for throughput experiments.
 gui_job_count() {
     local jobs ram_gb ram_cap
     if [ -n "${QCI_GUI_JOBS:-}" ] && [ "${QCI_GUI_JOBS}" -ge 1 ] 2>/dev/null; then
         jobs=$QCI_GUI_JOBS
     else
-        jobs=8
+        jobs=1
     fi
     # Clamp by current MemAvailable (reclaimable cache included), not MemTotal.
     ram_gb=$(awk '/^MemAvailable:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)

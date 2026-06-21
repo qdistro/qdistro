@@ -447,6 +447,105 @@ EOF
         log "  installed /etc/pam.d/qdlocker (dedicated unlock PAM + faillock lockout)"
     fi
 
+    # Test-only fake fprintd used by qdlocker/tests/gui/02. The helper is
+    # staged but not enabled because it owns the same system-bus name as real
+    # fprintd; the scenario starts it explicitly after stopping fprintd.
+    install -d -m 0755 /usr/libexec /etc/systemd/system /etc/dbus-1/system.d
+    cat >/usr/libexec/qdistro-fprintd-fake <<'FAKE'
+#!/usr/bin/env python3
+import asyncio
+from dbus_next.aio import MessageBus
+from dbus_next.constants import BusType
+from dbus_next.service import ServiceInterface, method, signal
+
+
+class Manager(ServiceInterface):
+    def __init__(self):
+        super().__init__("net.reactivated.Fprint.Manager")
+
+    @method()
+    def GetDefaultDevice(self) -> "o":
+        return "/net/reactivated/Fprint/Device/0"
+
+
+class Device(ServiceInterface):
+    def __init__(self):
+        super().__init__("net.reactivated.Fprint.Device")
+
+    @method()
+    def Claim(self, username: "s"): pass
+
+    @method()
+    def Release(self): pass
+
+    @method()
+    def VerifyStart(self, finger: "s"): pass
+
+    @method()
+    def VerifyStop(self): pass
+
+    @signal()
+    def VerifyStatus(self, result: "s", done: "b") -> "sb":
+        return [result, done]
+
+
+class Fake(ServiceInterface):
+    def __init__(self, device):
+        super().__init__("qdistro.FprintFake")
+        self._device = device
+
+    @method()
+    def EmitMatch(self):
+        self._device.VerifyStatus("verify-match", True)
+
+
+async def main():
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    device = Device()
+    bus.export("/net/reactivated/Fprint/Manager", Manager())
+    bus.export("/net/reactivated/Fprint/Device/0", device)
+    bus.export("/net/reactivated/Fprint/Device/0", Fake(device))
+    await bus.request_name("net.reactivated.Fprint")
+    await asyncio.Event().wait()
+
+
+asyncio.run(main())
+FAKE
+    chmod 0755 /usr/libexec/qdistro-fprintd-fake
+    cat >/etc/systemd/system/qdistro-fprintd-fake.service <<'UNIT'
+[Unit]
+Description=qdistro fake fprintd for VM tests
+
+[Service]
+Type=dbus
+BusName=net.reactivated.Fprint
+ExecStart=/usr/libexec/qdistro-fprintd-fake
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    cat >/etc/dbus-1/system.d/qdistro-fprintd-fake.conf <<'DBUS'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <policy user="root">
+    <allow own="net.reactivated.Fprint"/>
+    <allow send_destination="net.reactivated.Fprint"/>
+  </policy>
+  <policy user="admin">
+    <allow send_destination="net.reactivated.Fprint"
+           send_interface="qdistro.FprintFake"/>
+    <allow send_destination="net.reactivated.Fprint"
+           send_interface="net.reactivated.Fprint.Manager"/>
+    <allow send_destination="net.reactivated.Fprint"
+           send_interface="net.reactivated.Fprint.Device"/>
+  </policy>
+</busconfig>
+DBUS
+    systemctl daemon-reload || true
+    systemctl reload dbus.service 2>/dev/null || systemctl reload dbus-broker.service 2>/dev/null || true
+    log "  installed qdistro-fprintd-fake test service"
+
     runuser -l admin -c 'systemctl --user daemon-reload' || true
     runuser -l admin -c 'systemctl --user enable qdlocker.service' || true
     log "  qdlocker installed; will start with the user session"
