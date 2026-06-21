@@ -127,12 +127,15 @@ $VMGUI screenshot "$VM" /tmp/s18-launcher-open.png
 ```
 
 **Assert** (hard, agent-visual): the launcher's app list contains at
-least one `tier2-c-ui` PodApps entry and renders the current tier-2
-visual signal: a pink/magenta square badge on the entry.
+least one `tier2-c-ui` PodApps entry, rendered with the tier-2 silo
+signal the PodApps provider currently emits — the textual silo prefix
+`[tier2/tier2-c-ui]` on the entry label (see qdshell
+`Modules/Panels/Launcher/Providers/PodAppsProvider.qml`).
 
 **Assert** (best-effort diagnostic): record whether the not-yet-merged
-delegate-side badge overlay is visible. Do not fail the scenario on
-the overlay check until the delegate rendering has landed.
+delegate-side badge OVERLAY (the pink/magenta square badge driven by
+`modelData.badgeIcon`) is visible. Do NOT fail the scenario on the
+badge-overlay check until the delegate rendering has landed.
 
 TODO: re-tighten this assertion to require the delegate-side silo badge
 overlay from `doc/ui.md` / `doc/containers.md` once that rendering path
