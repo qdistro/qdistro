@@ -114,7 +114,18 @@ def test_execstart_dir_stays_unprefixed_and_documents_installer_rewrite():
 
 def test_no_network_runtime_hardening():
     cp = _parse_unit()
-    assert cp.get("Service", "PrivateNetwork", fallback="") == "yes"
+    # PrivateNetwork=yes MUST NOT be set on this --user unit: an unprivileged
+    # per-user manager realizes it via an implicit PrivateUsers= user namespace
+    # with no host-root mapping, which de-privileges the setuid unix_chkpwd
+    # helper pam_unix(qdlocker:auth) execs and rejects the correct unlock
+    # password ("check pass; user unknown"). The no-network discipline is kept
+    # via RestrictAddressFamilies (seccomp) + IPAddressDeny (cgroup eBPF), which
+    # need no namespace and don't break PAM. See the unit's comment block.
+    assert cp.get("Service", "PrivateNetwork", fallback="") != "yes", (
+        "PrivateNetwork=yes on a --user unit forces a rootless user namespace "
+        "that breaks setuid unix_chkpwd / pam_unix unlock; rely on "
+        "RestrictAddressFamilies + IPAddressDeny instead."
+    )
     assert cp.get("Service", "IPAddressDeny", fallback="") == "any"
     families = cp.get("Service", "RestrictAddressFamilies", fallback="")
     assert "AF_UNIX" in families

@@ -191,15 +191,18 @@ def _system_config_is_trusted(path: str) -> bool:
     identity cannot forge or replace it.
 
     The load-bearing property is "not forgeable by qdlocker's own uid", NOT
-    "owned by root specifically" — the latter is unrecoverable under
-    PrivateNetwork=yes, whose user namespace maps host root (and every other
-    unmapped host uid) to the overflow uid 65534 inside the service. A
-    root-owned file then reads as uid 65534 (!= our uid → trusted); an
-    admin-forged file reads as our own uid (rejected). This holds identically
-    inside and outside the namespace. Residual: a file owned by a third
-    non-root uid is also accepted if root placed it under a parent chain we
-    cannot modify — acceptable because /etc/qdistro is 0755 root:root, enforced
-    by the parent-chain check below."""
+    "owned by root specifically": a root-owned file reads as uid 0 (!= our uid
+    1000 → trusted); an admin-forged file reads as our own uid (rejected). This
+    deliberately holds identically whether or not the service runs in a user
+    namespace — historically qdlocker.service set PrivateNetwork=yes, which on a
+    --user unit forced a rootless userns that remapped host root to the overflow
+    uid 65534 (the file then read as 65534 != our uid, still trusted). That
+    PrivateNetwork=yes was removed because the same userns also de-privileged
+    pam_unix's setuid unix_chkpwd helper and broke unlock; the uid-mismatch
+    property below remains correct in either world. Residual: a file owned by a
+    third non-root uid is also accepted if root placed it under a parent chain
+    we cannot modify — acceptable because /etc/qdistro is 0755 root:root,
+    enforced by the parent-chain check below."""
     uid = os.geteuid()
     gids = set(os.getgroups())
     gids.add(os.getegid())
