@@ -198,6 +198,11 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true' \
     --run-command 'fc-cache -f || true' \
     --run-command 'if [ -f /etc/selinux/config ]; then sed -i "s/^SELINUX=.*/SELINUX=permissive/" /etc/selinux/config; fi' \
+    `# Also force permissive on the kernel cmdline: the qga guest-exec domain` \
+    `# (virt_qemu_ga_t) is denied a runtime "setenforce 0", so a config-only` \
+    `# permissive that fails to apply would leave the waypipe-server socket bind` \
+    `# denied (EACCES) and the tier-5 app unrenderable. enforcing=0 cannot be denied.` \
+    --run-command 'sed -i "s/\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"/\1 enforcing=0\"/" /etc/default/grub 2>/dev/null; grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true' \
     --run-command 'rm -f /.autorelabel' \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \

@@ -187,7 +187,13 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             chmod +x "$PUBLISHER_TMP"
             virt-customize -a "$BAKED_CACHE.partial" \
                 --run-command 'zypper -n --no-gpg-checks refresh' \
-                --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils' \
+                `# weston provides weston-terminal (the tier-5 cold-start app);` \
+                `# dejavu-fonts gives it a monospace face. Without these the` \
+                `# in-guest publisher cannot launch a renderable client` \
+                `# (perm-gui 20/21). build-guest-image.sh installs the full set;` \
+                `# the baked base only needs weston + a font.` \
+                --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils weston dejavu-fonts fontconfig' \
+                --run-command 'fc-cache -f || true' \
                 --run-command 'systemctl enable qemu-guest-agent.service' \
                 --run-command 'systemctl enable serial-getty@ttyS0.service' \
                 `# Mask jeos-firstboot/cloud-init: the stock Tumbleweed Cloud` \
@@ -200,6 +206,16 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
                 --run-command 'rm -f /var/lib/YaST2/reconfig_system 2>/dev/null || true' \
                 --run-command 'systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service 2>/dev/null || true' \
+                `# SELinux: the stock Tumbleweed Cloud image boots targeted/ENFORCING.` \
+                `# The publisher runs via qga guest-exec in the confined` \
+                `# virt_qemu_ga_t domain, which is then DENIED the waypipe-server` \
+                `# AF_UNIX socket bind (EACCES) — so the inner app never renders` \
+                `# (perm-gui 20/21). The publisher's runtime "setenforce 0" is itself` \
+                `# denied from virt_qemu_ga_t, so boot permissive at the source: set` \
+                `# it in the config AND on the kernel cmdline (enforcing=0 cannot be` \
+                `# denied and needs no relabel). Mirrors tier5-vm/build-guest-image.sh.` \
+                --run-command 'sed -i "s/^SELINUX=.*/SELINUX=permissive/" /etc/selinux/config 2>/dev/null || true' \
+                --run-command 'sed -i "s/\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"/\1 enforcing=0\"/" /etc/default/grub 2>/dev/null; grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true' \
                 --copy-in "$PUBLISHER_TMP:/usr/local/bin/" \
                 --run-command "mv /usr/local/bin/$(basename "$PUBLISHER_TMP") /usr/local/bin/qdistro-tier5-publisher.sh" \
                 --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
