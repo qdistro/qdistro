@@ -632,7 +632,21 @@ echo "[tier5] app: $*" >&2
 # In loopback mode, waypipe-client has --oneshot and exits when the
 # server disconnects; wait for it directly.
 if [ "$MODE" = "vm" ]; then
-    while run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | grep -qw running; do
+    # Poll for an EXPLICIT terminal state. A transient runuser/virsh query
+    # failure (e.g. virtqemud "End of file ... I/O error" under audit-backlog
+    # churn from this very poll) must NOT be read as "domain stopped": the old
+    # `grep -qw running` exited the loop on ANY non-"running" output, so a single
+    # blip declared a HEALTHY guest stopped and tore it down (perm-gui 20/21
+    # cold-start failed every run for this reason). Treat empty/error output as
+    # transient and ride it out; only an explicit terminal state ends the wait.
+    misses=0
+    while :; do
+        d_state=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
+        case "$d_state" in
+            running|paused|idle|pmsuspended) misses=0 ;;
+            "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
+            *) break ;;
+        esac
         sleep 2
     done
     echo "[tier5] tier-5 domain $VM_NAME stopped" >&2
