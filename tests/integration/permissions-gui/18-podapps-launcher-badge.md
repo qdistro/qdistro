@@ -73,6 +73,20 @@ case "$($VMEXEC "$VM" 'runuser -u admin -- bash -c "printf \"status\n\" | socat 
         exit 1
         ;;
 esac
+
+# Precondition: the input channel is ready. S2/S3 inject launcher keystrokes
+# via vm-gui, which talks to ydotoold over /run/user/1000/ydotool.sock. If the
+# daemon is down or the socket is missing, every keystroke is silently dropped
+# and the launcher never opens — fail fast here rather than timing out.
+case "$($VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active ydotoold.service' 2>/dev/null)" in
+    active) ;;
+    *)
+        echo "FAIL(setup): ydotoold not active / ydotool socket missing — launcher keystrokes would be dropped"
+        exit 1
+        ;;
+esac
+$VMEXEC "$VM" 'test -S /run/user/1000/ydotool.sock' \
+  || { echo "FAIL(setup): ydotoold not active / ydotool socket missing — launcher keystrokes would be dropped"; exit 1; }
 ```
 
 ## Steps
@@ -116,14 +130,16 @@ $VMEXEC "$VM" 'jq -e '"'"'any(.[]; .silo == "tier2/tier2-c-ui" and (.execArgv | 
 ### S2 — open the launcher; podapps entries visible
 
 ```bash
-$VMGUI screenshot "$VM" /tmp/s18-launcher-empty.png
+$VMGUI "$VM" screenshot /tmp/s18-launcher-empty.png
 
 # Open launcher via configured keybinding (qdwin emits launcher_requested
 # → qdshell opens it). On the VM image this is Ctrl+Space by default.
-$VMEXEC "$VM" 'runuser -u admin -- ydotool key ctrl+space || true'
+# Inject through vm-gui (exports YDOTOOL_SOCKET + gates on ydotoold) like
+# the rest of the GUI suite; bare ydotool drops keystrokes without it.
+$VMGUI "$VM" key ctrl+space
 sleep 1
 
-$VMGUI screenshot "$VM" /tmp/s18-launcher-open.png
+$VMGUI "$VM" screenshot /tmp/s18-launcher-open.png
 ```
 
 **Assert** (hard, agent-visual): the launcher's app list contains at
@@ -145,12 +161,12 @@ merges.
 
 ```bash
 # Type to filter to weston-terminal, then Enter.
-$VMEXEC "$VM" 'runuser -u admin -- ydotool type "weston-terminal"'
+$VMGUI "$VM" type "weston-terminal"
 sleep 0.3
-$VMEXEC "$VM" 'runuser -u admin -- ydotool key enter'
+$VMGUI "$VM" key enter
 
 # Screenshot immediately — before the inner toplevel can map.
-$VMGUI screenshot "$VM" /tmp/s18-cold-start.png
+$VMGUI "$VM" screenshot /tmp/s18-cold-start.png
 ```
 
 **Assert** (best-effort diagnostic, agent-visual): record whether the
@@ -165,7 +181,7 @@ Wait up to 5s, then screenshot again.
 
 ```bash
 sleep 5
-$VMGUI screenshot "$VM" /tmp/s18-warm.png
+$VMGUI "$VM" screenshot /tmp/s18-warm.png
 
 # Cross-check journal for the matching secctx event.
 $VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'"
