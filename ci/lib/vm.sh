@@ -224,7 +224,14 @@ ensure_run_golden() {
         # `podman build` hot path (see fresh-vm-bootstrap.sh §8).
         bats) [ -n "$RUN_GOLDEN_BATS" ] && return 0; spinner=spin-test-vm.sh; tier2_images=1 ;;
         gui|gui-admin) [ -n "$RUN_GOLDEN_GUI_ADMIN" ] && return 0; spinner=spin-test-vm-gui.sh; gui_session=labwc; profile=gui-admin ;;
-        gui-qdwin) [ -n "$RUN_GOLDEN_GUI_QDWIN" ] && return 0; spinner=spin-test-vm-gui.sh; gui_session=qdwin ;;
+        # Pre-bake the tier-2 podman images into the gui-qdwin golden too: the
+        # tier-2 GUI scenarios (permissions-gui/18-podapps, 19-tier5-loopback) run
+        # on THIS profile, and without the prebake each one pays the cold
+        # `podman build` (≈240s) inside the agent's 720s budget — the dominant
+        # cause of their recurring rc=124 agent-timeouts. Built once into the
+        # golden, every cloned qdwin worker inherits it and the scenario's
+        # `podman image exists` Setup check passes instantly.
+        gui-qdwin) [ -n "$RUN_GOLDEN_GUI_QDWIN" ] && return 0; spinner=spin-test-vm-gui.sh; gui_session=qdwin; tier2_images=1 ;;
         *) return 1 ;;
     esac
     log="$RDIR/vm/golden-$profile.log"
