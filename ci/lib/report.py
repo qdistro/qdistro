@@ -459,6 +459,59 @@ def generate_md(run_dir: Path) -> str:
         for block in evidence_blocks:
             lines.extend(block)
 
+    # Agent attempts & host load (Phase 2 observability; additive). Surfaces the
+    # flake-relevant signal: agent attempts that did not cleanly PASS (rc!=0,
+    # UNKNOWN/timeout, slow walls) and the host contention they ran under. Both
+    # source TSVs are optional — read_tsv() returns [] when absent, so legacy runs
+    # render exactly as before (no heading). Reporting only; gates nothing.
+    attempts = read_tsv(run_dir / "scenario-attempts.tsv")
+    flaky_attempts = [
+        a for a in attempts
+        if (a.get("status") or "").upper() != "PASS" or (a.get("agent_rc") or "0") != "0"
+    ]
+    if flaky_attempts:
+        lines.append("## Agent attempts (non-clean)")
+        lines.append("Agent scenario attempts that did not cleanly PASS with rc=0 — "
+                     "the flake-relevant rows (UNKNOWN/timeout/slow). Reporting only.")
+        lines.append("")
+        lines.append("| scenario | attempt | status | agent_rc | classifier | wall_s |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for a in flaky_attempts:
+            lines.append(
+                f"| {a.get('subject', '?')} | {a.get('attempt', '')} | "
+                f"{a.get('status', '')} | {a.get('agent_rc', '')} | "
+                f"{a.get('classifier', '') or '—'} | {a.get('wall_s', '')} |"
+            )
+        lines.append("")
+
+    host_load = read_tsv(run_dir / "host-load.tsv")
+    if host_load:
+        def _nums(key: str) -> list[float]:
+            out = []
+            for r in host_load:
+                try:
+                    out.append(float(r.get(key, "")))
+                except (TypeError, ValueError):
+                    pass
+            return out
+        loads = _nums("loadavg1")
+        avails = _nums("mem_avail_mb")
+        vms = _nums("qemu_vms")
+        if loads or avails or vms:
+            lines.append("## Host load during GUI scenarios")
+            lines.append("Contention proxy sampled at each scenario's start/end. "
+                         "High peak load / low available memory correlate with the "
+                         "GUI flake variance. Reporting only.")
+            if loads:
+                lines.append(f"- **peak loadavg (1m)**: {max(loads):.2f} "
+                             f"(min {min(loads):.2f})")
+            if avails:
+                lines.append(f"- **min MemAvailable**: {min(avails):.0f} MiB "
+                             f"(max {max(avails):.0f} MiB)")
+            if vms:
+                lines.append(f"- **peak concurrent qemu VMs**: {max(vms):.0f}")
+            lines.append("")
+
     lines.append("## All Results")
     lines.append("| status | gate | subject | category | kind | exit | log | notes |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")

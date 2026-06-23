@@ -30,6 +30,15 @@ init_run() {
     printf 'gate\tsubject\tstatus\texit_code\texit_class\tkind\tlog\tnotes\tcategory\n' > "$RDIR/results.tsv"
     printf 'repo\tbranch\thead\tdirty_files\tstatus_log\n' > "$RDIR/repo-state.tsv"
     printf 'gate\tsubject\tprovision_s\twork_s\ttotal_s\trc\tvm\n' > "$RDIR/timings.tsv"
+    # Additive observability siblings (Phase 2 of the test-infra hardening
+    # roadmap). These are OBSERVABILITY ONLY — they gate nothing — so they are
+    # written as separate files rather than extending the fixed-column
+    # results.tsv/timings.tsv contracts that report.py and external readers
+    # depend on. scenario-attempts.tsv carries one row per agent attempt (so a
+    # future retry shows as attempt 2); host-load.tsv samples the host contention
+    # that drives the GUI flake variance.
+    printf 'gate\tsubject\tattempt\tstatus\tagent_rc\tclassifier\twall_s\tvm\tlog\n' > "$RDIR/scenario-attempts.tsv"
+    printf 'gate\tsubject\tphase\tloadavg1\tmem_avail_mb\tqemu_vms\tepoch\n' > "$RDIR/host-load.tsv"
     : > "$RDIR/vm/created-vms.txt"
     collect_repo_state
     record_offline_source
@@ -273,4 +282,36 @@ record_blocked() {
 record_timing() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$RDIR/timings.tsv"
+}
+
+# Append one per-attempt row for an agent scenario. A single `printf >>` is
+# atomic for a line this short, so this is safe from the concurrent GUI worker
+# pool (same contract as record_result/record_timing). `status` is the RAW agent
+# verdict (PASS/FAIL/ERROR/SKIP/UNKNOWN) — distinct from the qci pass/fail row in
+# results.tsv — and `classifier` stays empty until the retry classifier (Phase 6)
+# fills it. OBSERVABILITY ONLY: nothing here gates a run.
+# Columns: gate subject attempt status agent_rc classifier wall_s vm log
+record_attempt() {
+    local gate=$1 subject=$2 attempt=$3 status=$4 agent_rc=$5 classifier=${6:-} wall_s=${7:-} vm=${8:-} log_path=${9:-}
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$gate" "$subject" "$attempt" "$status" "$agent_rc" "$classifier" "$wall_s" "$vm" \
+        "$(rel_path "$log_path")" >> "$RDIR/scenario-attempts.tsv"
+}
+
+# Append one host-load sample — a cheap proxy for the contention that drives the
+# GUI flake variance (8-vs-25 fails on the same code is host-load-driven). Sample
+# at scenario start and end so a slow/failed attempt can be correlated with the
+# load it ran under. loadavg1 = 1-min load; mem_avail_mb = reclaimable memory;
+# qemu_vms = concurrent qemu domains (the single-tenant lane should be ~1/worker).
+# One `printf >>` = atomic. OBSERVABILITY ONLY.
+# Columns: gate subject phase loadavg1 mem_avail_mb qemu_vms epoch
+record_host_load() {
+    local gate=$1 subject=$2 phase=$3 load avail vms
+    load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+    avail=$(awk '/^MemAvailable:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+    vms=$(pgrep -fc 'qemu-system-x86_64' 2>/dev/null || true)
+    [ -n "$vms" ] || vms=0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$gate" "$subject" "$phase" "${load:-?}" "${avail:-?}" "$vms" "$(date +%s)" \
+        >> "$RDIR/host-load.tsv"
 }

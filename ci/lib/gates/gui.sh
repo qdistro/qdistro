@@ -310,7 +310,7 @@ gui_job_count() {
 # timing, then release the VM. Self-contained for backgrounded pool execution.
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
-    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2 gate_name
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2 ta0 ta1 gate_name
     rel=${scenario#$WORKSPACE/}
     t0=$(date +%s)
     if [ -n "$provided" ]; then
@@ -334,9 +334,17 @@ gui_run_scenario() {
     mkdir -p "$(dirname "$log_path")"
     write_agent_prompt "$vm" "$scenario" "$prompt"
     log "agent scenario $rel on $vm"
+    record_host_load gui "$rel" start
+    ta0=$(date +%s)
     run_agent_command "$prompt" "$log_path"
     agent_rc=$?
+    ta1=$(date +%s)
+    record_host_load gui "$rel" end
     status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
+    # Per-attempt observability row: the RAW agent status + rc + wall seconds,
+    # before the fail-closed verdict mapping collapses it to pass/fail/skip. This
+    # is where the flake signal lives (rc=124, UNKNOWN, slow walls under load).
+    record_attempt gui "$rel" 1 "$status" "$agent_rc" "" "$((ta1 - ta0))" "$vm" "$log_path"
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
