@@ -68,16 +68,24 @@ $VMGUI "$VM" screenshot /tmp/44-s1-pending.png
 
 ```bash
 $VMGUI "$VM" screenshot /tmp/44-s2a-radios.png
-# Runner: OCR the radio labels; click "Forever, only this exact
-# argv tuple" (6th radio).
-$VMGUI "$VM" screenshot /tmp/44-s2b-selected.png
 
+# Select the "Forever, only this exact argv tuple" scope via the admin app's
+# dedicated keyboard shortcut (Ctrl+Shift+6 → forever_argv; scope order at
+# admin_app/qdistro_admin_app.py:2040-2046). The previous step asked the runner to
+# MOUSE-CLICK the 6th radio, but click input to the XWayland Qt app is
+# platform-blocked on the CI template (AGENTS.md 3a/3b), so the click intermittently
+# missed and the approval landed scope=once. The keyboard-shortcut path is
+# deterministic; the s2b screenshot below still visually confirms forever_argv is
+# filled, so the assertion stays the tripwire (no masking).
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
   --name "admin approvals" windowactivate --sync
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_6
+sleep 1
+$VMGUI "$VM" screenshot /tmp/44-s2b-selected.png
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2
 
