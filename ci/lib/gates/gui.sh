@@ -467,6 +467,44 @@ gui_scenario_skip_reason() {
     return 0
 }
 
+# Pure preflight capability summary (Phase 3 observability). Given the SAME
+# session-VM capability flags the dispatch loop already probed, report which
+# SHARED preconditions are absent and which whole lanes that takes down — so a
+# profile gap (e.g. no qdshell session => EVERY qdshell/noctalia/qdlocker/podapps
+# scenario skips) is visible ONCE, up front, instead of being inferred from N
+# scattered skip rows. This deliberately does NOT re-derive per-scenario
+# decisions (that stays the single source of truth in gui_scenario_skip_reason /
+# gui_scenario_tier_base_skip_reason); it only summarizes the same inputs. It is
+# reporting only — it changes no dispatch decision and fails nothing. Echoes one
+# observation per line, empty when the profile is fully capable. Pure (reads only
+# its args) => host-testable (tests/integration/qci/gui-preflight.bats).
+# Args: skip_qdwin qdshell_active nested_kvm legacy_ctrl vm_ssh_port \
+#       tier5_base tier4_base tier5_optin tier4_optin
+gui_preflight_capabilities() {
+    local skip_qdwin=$1 qdshell_active=$2 nested_kvm=$3 legacy_ctrl=$4 vm_ssh_port=$5
+    local tier5_base=${6:-0} tier4_base=${7:-0} tier5_optin=${8:-0} tier4_optin=${9:-0}
+    if [ "$skip_qdwin" = 1 ]; then
+        printf '%s\n' "qdwin lane DISABLED (QCI_GUI_SKIP_QDWIN=1): qdwin/qdshell/noctalia/qdlocker/tier scenarios skip"
+    else
+        [ "$qdshell_active" != 1 ] && \
+            printf '%s\n' "qdshell session ABSENT on wayland-1: qdshell/noctalia/qdlocker/podapps scenarios will skip (profile gap, not per-scenario failures)"
+        [ "$nested_kvm" != 1 ] && \
+            printf '%s\n' "nested KVM (/dev/kvm) ABSENT: tier-4/5 cold-start/cleanup scenarios will skip"
+    fi
+    [ -z "$vm_ssh_port" ] && \
+        printf '%s\n' "VM_SSH_PORT unset: the SSH-only SELinux-enforcing scenario (55) will skip"
+    # Tier base images are only noteworthy when the run OPTED IN but the bake is
+    # absent: a REQUESTED-but-missing environment runs and the agent reports
+    # ERROR (a broken requested bake is a real failure, never a silent skip).
+    [ "$tier5_optin" = 1 ] && [ "$tier5_base" != 1 ] && \
+        printf '%s\n' "tier-5 base image REQUESTED (QDISTRO_BUILD_TIER5_BASE=1) but ABSENT: scenarios 20/21 will run and ERROR on the broken bake"
+    [ "$tier4_optin" = 1 ] && [ "$tier4_base" != 1 ] && \
+        printf '%s\n' "tier-4 base image REQUESTED (QDISTRO_BUILD_TIER4_BASE=1) but ABSENT: scenarios 56/57 will run and ERROR on the broken bake"
+    [ "$legacy_ctrl" != 1 ] && \
+        printf '%s\n' "legacy qdshell ctrl-socket absent (expected on the shipping Quickshell session): legacy qdwin/*.md scenarios skip by content"
+    return 0
+}
+
 gate_gui() {
     qci_assert_run_dir || return $?
     qci_assert_vm_tools gui || return $?
@@ -503,6 +541,37 @@ gate_gui() {
     local tier5_optin=0 tier4_optin=0
     [ "${QDISTRO_BUILD_TIER5_BASE:-0}" = 1 ] && tier5_optin=1
     [ "${QDISTRO_BUILD_TIER4_BASE:-0}" = 1 ] && tier4_optin=1
+
+    # Preflight capability summary (reporting only): surface absent SHARED
+    # preconditions ONCE before the scenario pool spends VMs/agents, rather than
+    # leaving the reader to infer a whole-lane-down profile gap from N skip rows.
+    # Reuses the same capability flags; does not change any dispatch decision.
+    local preflight_log="$RDIR/gui/preflight.txt" preflight_obs
+    preflight_obs=$(gui_preflight_capabilities "${QCI_GUI_SKIP_QDWIN:-0}" \
+        "$qdshell_active" "$nested_kvm" "$legacy_ctrl" "${VM_SSH_PORT:-}" \
+        "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
+    {
+        echo "# GUI preflight capability summary"
+        echo "session VM: $svm"
+        echo "flags: skip_qdwin=${QCI_GUI_SKIP_QDWIN:-0} qdshell_active=$qdshell_active nested_kvm=$nested_kvm legacy_ctrl=$legacy_ctrl vm_ssh_port=${VM_SSH_PORT:-} tier5_base=$tier5_base tier4_base=$tier4_base tier5_optin=$tier5_optin tier4_optin=$tier4_optin"
+        echo
+        if [ -n "$preflight_obs" ]; then
+            echo "Observations (lanes that will skip / run-and-error this run):"
+            printf '%s\n' "$preflight_obs" | sed 's/^/- /'
+        else
+            echo "Fully capable profile: no shared precondition is absent."
+        fi
+    } > "$preflight_log"
+    if [ -n "$preflight_obs" ]; then
+        local obs_count
+        obs_count=$(printf '%s\n' "$preflight_obs" | grep -c .)
+        log "gui preflight: $obs_count shared-capability observation(s) — see gui/preflight.txt"
+        record_result gui preflight skip 0 pass agent "$preflight_log" \
+            "$obs_count shared-capability observation(s); some lanes will skip (see log)"
+    else
+        record_result gui preflight pass 0 pass agent "$preflight_log" \
+            "fully capable GUI profile; no shared precondition absent"
+    fi
 
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ] || [ -n "$explicit" ]; then
         qdwin_svm=$svm
