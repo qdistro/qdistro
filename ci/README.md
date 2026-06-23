@@ -112,8 +112,11 @@ binding constraint; CPU is intentionally overprovisioned.
   minimal `≤32 GiB → 4`, medium `≥56 GiB & ≥10 cores → 10`, high
   `≥90 GiB & ≥12 cores → 16`. The value is clamped by **current** `MemAvailable`
   (`(avail−6)/5`, ~5 GiB/VM) so a busy host can't be overcommitted.
-- **gui concurrency** defaults to **8** (heavier VMs + one agent process each),
-  same RAM clamp.
+- **gui concurrency** defaults to **1** (serial). GUI VMs are heavier (nested KVM
+  + compositor) and each spawns its own agent process; running many full GUI stacks
+  at once has repeatedly produced black screenshots, missed input/focus events, and
+  agent timeouts that do not reproduce in isolation. `QCI_GUI_JOBS` is an explicit
+  opt-in for throughput experiments and is still RAM-clamped.
 
 **Per-run golden image:** the expensive part of provisioning is building
 qdwin/qdshell from current source (`fresh-vm-bootstrap.sh`, ~150–310 s per VM).
@@ -122,15 +125,17 @@ per run** into a golden qcow2 (`qci-golden-bats-*.qcow2`), then every worker
 clones that golden and **skips the build** (per-VM provisioning drops to ~10 s).
 The golden is built from *current* source each run (still fresh), cleaned up at
 run end, and preserved only if a failed worker that references it is preserved.
-(GUI golden is planned — see `ci/ci-hardening-todo.md`.)
+The **gui** gate uses the same per-run-golden mechanism (admin + qdwin profiles;
+`spin-test-vm-gui.sh`).
 
 ### Environment knobs
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `QCI_JOBS` | auto-tier | Override bats pool concurrency (still RAM-clamped). |
-| `QCI_GUI_JOBS` | 8 | Override gui pool concurrency (still RAM-clamped). |
+| `QCI_GUI_JOBS` | 1 | Override gui pool concurrency (default serial; still RAM-clamped). |
 | `QCI_GUI_SKIP_QDWIN` | 0 | `1` runs only the admin/non-qdwin GUI lane for `qci gui`; `qci gui-admin` sets this automatically. |
+| `QCI_AGENT_TIMEOUT` | 0 | Host-side backstop deadline (s) on each agent scenario, wrapping `QCI_AGENT_CMD` in `timeout -k 15`. `0` = unbounded (the operator command owns the budget). When both are set the smaller wins; on expiry the agent is killed and the scenario fails closed (rc=124, no verdict). |
 | `QCI_NO_GOLDEN` | 0 | `1` disables the per-run golden; every worker runs the full bootstrap. |
 | `QDWIN_VM_VCPUS` | 4 | vCPUs per disposable VM. |
 | `QCI_DELETE_FAILED_VM` | 0 | `1` deletes failed VMs instead of preserving them. |

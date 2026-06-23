@@ -183,17 +183,61 @@ agent_artifact_status() {
     esac
 }
 
+# Pure status/rc -> verdict mapper for one agent scenario attempt. FAIL CLOSED:
+# a pass is recorded ONLY for an explicit PASS with rc=0. SKIP passes through as
+# skip. Everything else — FAIL/ERROR, UNKNOWN (agent exited without a parseable
+# status.txt/report verdict), PASS-with-nonzero-rc (claimed PASS but the runner
+# returned nonzero), or any malformed combination — is a hard GUI failure, never
+# a silent green. The agent prompt's contract is "return 0 only when every
+# required assertion passes", so a nonzero rc on a PASS is a contradiction and
+# stays red. Echoes a single TAB-separated line "<verdict>\t<note>" where
+# <verdict> is pass|skip|fail. Pure (reads only its args) so it is host-testable
+# without the GUI VM stack — see tests/integration/qci/gui-agent-verdict.bats.
+# Args: status rc
+gui_agent_verdict() {
+    local status=$1 rc=$2
+    case "$status:$rc" in
+        PASS:0)
+            printf 'pass\tagent scenario passed' ;;
+        SKIP:*)
+            printf 'skip\tagent scenario skipped' ;;
+        FAIL:*|ERROR:*)
+            printf 'fail\tagent status=%s rc=%s' "$status" "$rc" ;;
+        *)
+            printf 'fail\tagent command rc=%s status=%s (no usable verdict — fail closed)' "$rc" "$status" ;;
+    esac
+}
+
 run_agent_command() {
     local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded
     if [ -z "$cmd" ]; then
         return 127
     fi
+    # Host-side backstop timeout. QCI_AGENT_TIMEOUT (seconds) bounds the agent even
+    # when the operator's QCI_AGENT_CMD does not self-wrap `timeout`; on expiry the
+    # agent is killed (`timeout -k 15`, SIGTERM then SIGKILL after 15s) and the call
+    # returns 124. gui_run_scenario then records a hard failure (rc=124 with no
+    # status => fail closed). Default 0 = unbounded, preserving the historic behavior
+    # where the operator's own command owns the budget (e.g. `timeout 720 claude`).
+    # When BOTH are set the smaller deadline wins, so an operator's inner 720 still
+    # fires first under a larger harness cap.
+    local to=${QCI_AGENT_TIMEOUT:-0}
+    [ "$to" -gt 0 ] 2>/dev/null || to=0
     if [[ "$cmd" == *"{prompt}"* ]]; then
         expanded=${cmd//\{prompt\}/$prompt}
-        bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+        if [ "$to" -gt 0 ]; then
+            timeout -k 15 "$to" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+        else
+            bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+        fi
     else
-        # shellcheck disable=SC2086
-        $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+        if [ "$to" -gt 0 ]; then
+            # shellcheck disable=SC2086
+            timeout -k 15 "$to" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+        else
+            # shellcheck disable=SC2086
+            $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+        fi
     fi
 }
 
@@ -293,17 +337,16 @@ gui_run_scenario() {
     run_agent_command "$prompt" "$log_path"
     agent_rc=$?
     status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
-    case "$status:$agent_rc" in
-        PASS:0|UNKNOWN:0)
-            record_result gui "$rel" pass 0 pass agent "$log_path" "agent scenario passed" ;;
-        SKIP:*)
-            record_result gui "$rel" skip 0 pass agent "$log_path" "agent scenario skipped" ;;
-        FAIL:*|ERROR:*)
-            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent status=$status rc=$agent_rc"
-            frc=$EXIT_GUI ;;
-        *)
-            record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "agent command rc=$agent_rc status=$status"
-            frc=$EXIT_GUI ;;
+    # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
+    # that exited 0 without rendering a usable verdict — is a hard failure here,
+    # not the silent pass it used to be.
+    local verdict note
+    IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
+    case "$verdict" in
+        pass) record_result gui "$rel" pass 0 pass agent "$log_path" "$note" ;;
+        skip) record_result gui "$rel" skip 0 pass agent "$log_path" "$note" ;;
+        *)    record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "$note"
+              frc=$EXIT_GUI ;;
     esac
     t2=$(date +%s)
     collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
