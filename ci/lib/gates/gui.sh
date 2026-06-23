@@ -130,8 +130,12 @@ agent_scenarios() {
 }
 
 write_agent_prompt() {
-    local vm=$1 scenario=$2 prompt=$3 rel
+    local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} rel
     rel=${scenario#$WORKSPACE/}
+    # Per-attempt artifact dir so a retry's agent writes its status/report to its
+    # OWN directory and never clobbers the first attempt's evidence (the audit
+    # trail that makes classified retry acceptable). Defaults to the canonical dir.
+    [ -n "$artifact_dir" ] || artifact_dir="$RDIR/gui/$(safe_name "$rel")"
     cat > "$prompt" <<EOF
 # qdistro CI GUI scenario runner
 
@@ -147,8 +151,8 @@ Rules:
 - Read the nearest AGENTS.md before executing the scenario.
 - Do not edit source files.
 - Save screenshots, OCR output, command logs, and notes under:
-  \`$RDIR/gui/$(safe_name "$rel")/\`
-- Before returning, write \`$RDIR/gui/$(safe_name "$rel")/status.txt\`
+  \`$artifact_dir/\`
+- Before returning, write \`$artifact_dir/status.txt\`
   containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - Use VMNAME=$vm.
 - Execute setup, steps, assertions, and cleanup serially.
@@ -254,28 +258,33 @@ gui_agent_verdict() {
 #   product-fail      status=FAIL   (agent ran the asserts; one failed)       NEVER retry
 #   product-error     status=ERROR  (agent couldn't set up preconditions)     NEVER retry
 #   no-verdict        UNKNOWN:0      (agent exited clean with no verdict)      NEVER retry
-#   transport-timeout rc=124 + no status.txt + a guest-agent/vm-exec transport
-#                     marker in the log: the qemu-agent/vm-exec transport itself
-#                     wedged — unambiguous INFRA                              retriable
-#   agent-timeout     rc=124 + no status.txt, no transport marker: the agent ran
-#                     out of budget. DELIBERATELY NOT auto-retriable — an agent
-#                     timeout can equally mean the PRODUCT hung, and retrying could
-#                     flake-pass a real hang (codex). Surfaced for human triage /
-#                     a Phase-5 scenario split instead.                     report-only
-#   unknown           anything else                                          NEVER retry
-# Pure (args only) => host-testable (tests/integration/qci/gui-retry-classify.bats).
-# Args: status agent_rc status_present(0/1) transport_marker(0/1)
+#   transport-timeout UNKNOWN + rc=124 + an unambiguous qemu GUEST-AGENT
+#                     CONNECTIVITY-loss marker in the log (the host could not talk
+#                     to the guest agent AT ALL) — pure INFRA                retriable
+#   agent-timeout     UNKNOWN + rc=124, no connectivity marker: the agent ran out
+#                     of budget. DELIBERATELY NOT auto-retriable — a slow agent can
+#                     equally mean the PRODUCT hung, and retrying could flake-pass a
+#                     real hang (codex). Surfaced for human triage / a Phase-5
+#                     scenario split instead.                              report-only
+#   unknown           anything else (incl. PASS:nonzero, a partial PASS/SKIP report
+#                     with rc=124 — inconsistent, NOT an unambiguous infra retry)
+#                                                                            NEVER retry
+# Keying on the PARSED status=UNKNOWN (not merely "no status.txt") is deliberate:
+# a partial report.md verdict + rc=124 is an inconsistent agent result, not an
+# infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
+# Args: status agent_rc transport_marker(0/1)
 gui_classify_failure() {
-    local status=$1 rc=$2 status_present=$3 transport=$4
+    local status=$1 rc=$2 transport=$3
     case "$status" in
         FAIL)  printf 'product-fail';  return ;;
         ERROR) printf 'product-error'; return ;;
+        UNKNOWN)
+            if [ "$rc" = 0 ]; then printf 'no-verdict'; return; fi
+            if [ "$rc" = 124 ]; then
+                if [ "$transport" = 1 ]; then printf 'transport-timeout'; else printf 'agent-timeout'; fi
+                return
+            fi ;;
     esac
-    if [ "$status" = UNKNOWN ] && [ "$rc" = 0 ]; then printf 'no-verdict'; return; fi
-    if [ "$rc" = 124 ] && [ "$status_present" != 1 ]; then
-        if [ "$transport" = 1 ]; then printf 'transport-timeout'; else printf 'agent-timeout'; fi
-        return
-    fi
     printf 'unknown'
 }
 
@@ -290,15 +299,19 @@ gui_classifier_retriable() {
     esac
 }
 
-# Host-side: does the agent log show a qemu-agent / vm-exec TRANSPORT failure
-# (vs the agent merely running slow)? This is the discriminator between
-# transport-timeout (retriable infra) and agent-timeout (not retriable). Reads
-# the log file; returns 0 when a transport marker is present.
+# Host-side: does the agent log show an unambiguous qemu GUEST-AGENT CONNECTIVITY
+# failure — the host transport could not reach the guest agent AT ALL? This is
+# the ONLY discriminator that makes a timeout retriable. It deliberately does NOT
+# match a generic `vm-exec ... timed out` / rc=124: vm-exec's own overall deadline
+# (QDISTRO_VM_EXEC_TIMEOUT) fires on a wedged GUEST command, which is equally a
+# PRODUCT hang — retrying that could flake-pass a real hang (codex). Only true
+# agent-connectivity loss (libvirt/qemu-agent level) qualifies. Reads the log
+# file; returns 0 when a connectivity-loss marker is present.
 gui_detect_transport_marker() {
     local log_path=$1
     [ -f "$log_path" ] || return 1
     grep -qEi \
-        'guest agent is not responding|qemu guest agent is not connected|qemu-agent.*timeout|guest-agent-not-responding|agent unreachable|vm-exec.*(timed out|exit(ed)? *124|rc=124)' \
+        'guest agent is not responding|qemu guest agent is not (connected|running)|guest-agent-not-responding|guest agent channel|agent unreachable|cannot connect to .*qemu.*agent' \
         "$log_path" 2>/dev/null
 }
 
@@ -448,11 +461,10 @@ gui_run_scenario() {
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
-    local classifier="" transport=0 status_present=0
-    [ -f "$adir/status.txt" ] && status_present=1
+    local classifier="" transport=0
     if [ "$verdict" = fail ]; then
         gui_detect_transport_marker "$log_path" && transport=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$status_present" "$transport")
+        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport")
     fi
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
@@ -473,30 +485,39 @@ gui_run_scenario() {
             log "agent scenario $rel: retriable infra signature ($classifier); one retry on a fresh VM"
             collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
             release_vm "$vm" "$EXIT_GUI"
-            local vm2 ta2 ta3 status2 verdict2 note2 classifier2="" transport2=0 sp2=0
+            # Attempt 2 writes to its OWN log + artifact dir so the first attempt's
+            # evidence (the basis for the retriable classification) is preserved
+            # and the second agent starts from a clean status/report dir.
+            local vm2 ta2 ta3 status2 verdict2 note2 classifier2="" transport2=0
+            local log_path2="${log_path%.agent.log}.retry.agent.log"
+            local adir2="${adir}.retry"
+            mkdir -p "$adir2"
             vm2=$(acquire_vm "$gate_name" "")
             if [ -n "$vm2" ]; then
                 vm=$vm2
-                write_agent_prompt "$vm2" "$scenario" "$prompt"
+                write_agent_prompt "$vm2" "$scenario" "$prompt" "$adir2"
                 install_gui_waiters "$vm2" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
                 record_host_load gui "$rel" start
-                ta2=$(date +%s); run_agent_command "$prompt" "$log_path"; agent_rc=$?; ta3=$(date +%s)
+                ta2=$(date +%s); run_agent_command "$prompt" "$log_path2"; agent_rc=$?; ta3=$(date +%s)
                 record_host_load gui "$rel" end
-                status2=$(agent_artifact_status "$adir" "$log_path")
+                status2=$(agent_artifact_status "$adir2" "$log_path2")
                 IFS=$'\t' read -r verdict2 note2 < <(gui_agent_verdict "$status2" "$agent_rc")
-                [ -f "$adir/status.txt" ] && sp2=1
                 if [ "$verdict2" = fail ]; then
-                    gui_detect_transport_marker "$log_path" && transport2=1
-                    classifier2=$(gui_classify_failure "$status2" "$agent_rc" "$sp2" "$transport2")
+                    gui_detect_transport_marker "$log_path2" && transport2=1
+                    classifier2=$(gui_classify_failure "$status2" "$agent_rc" "$transport2")
                 fi
-                record_attempt gui "$rel" 2 "$status2" "$agent_rc" "$classifier2" "$((ta3 - ta2))" "$vm2" "$log_path"
+                record_attempt gui "$rel" 2 "$status2" "$agent_rc" "$classifier2" "$((ta3 - ta2))" "$vm2" "$log_path2"
                 if [ "$verdict2" = fail ]; then
+                    # Final verdict + evidence come from attempt 2 — adopt its note
+                    # (prefixed with the first classifier) so the result row is not
+                    # internally inconsistent.
+                    note="classified retry failed: first_classifier=$classifier first_rc=124; final: $note2"
                     record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-fail "$log_path"
                 else
                     note="classified flake: classifier=$classifier first_rc=124 attempts=2; $note2"
                     record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-pass "$log_path"
                 fi
-                status=$status2; verdict=$verdict2
+                status=$status2; verdict=$verdict2; log_path=$log_path2
             else
                 log "agent scenario $rel: retry VM provision failed; keeping the first verdict"
                 record_flake "$rel" "$classifier" "$status" "$agent_rc" "" 1 retry-vm-provision-failed "$log_path"
