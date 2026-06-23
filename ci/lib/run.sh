@@ -39,6 +39,12 @@ init_run() {
     # that drives the GUI flake variance.
     printf 'gate\tsubject\tattempt\tstatus\tagent_rc\tclassifier\twall_s\tvm\tlog\n' > "$RDIR/scenario-attempts.tsv"
     printf 'gate\tsubject\tphase\tloadavg1\tmem_avail_mb\tqemu_vms\tepoch\n' > "$RDIR/host-load.tsv"
+    # flake.tsv is the retry LEDGER (Phase 6): one row per failure that carried a
+    # retriable infra signature — either `would-retry` (report-only, the default)
+    # or the outcome of an actual classified retry. It exists so a retry can NEVER
+    # silently collapse a flake into a green: a pass that was reached via retry is
+    # always accompanied by a flake.tsv row + a note on the results.tsv row.
+    printf 'subject\tclassifier\tfirst_status\tfirst_rc\tretry_status\tattempts\taction\tlog\n' > "$RDIR/flake.tsv"
     : > "$RDIR/vm/created-vms.txt"
     collect_repo_state
     record_offline_source
@@ -314,4 +320,20 @@ record_host_load() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$phase" "${load:-?}" "${avail:-?}" "$vms" "$(date +%s)" \
         >> "$RDIR/host-load.tsv"
+}
+
+# Append one retry-ledger row. One `printf >>` = atomic. The `action` records
+# what the classified-retry machine did: `would-retry` (report-only default —
+# classified retriable but not actually retried), `retried-pass`, `retried-fail`,
+# or `retry-vm-provision-failed`. A `retried-pass` row is the MANDATORY companion
+# to a green results.tsv row that was only reached via retry — the flake tax is
+# never hidden. OBSERVABILITY/AUDIT: this records the retry decision; the gating
+# itself lives in gui.sh.
+# Columns: subject classifier first_status first_rc retry_status attempts action log
+record_flake() {
+    local subject=$1 classifier=$2 first_status=$3 first_rc=$4 \
+        retry_status=${5:-} attempts=${6:-1} action=${7:-} log_path=${8:-}
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$subject" "$classifier" "$first_status" "$first_rc" "$retry_status" \
+        "$attempts" "$action" "$(rel_path "$log_path")" >> "$RDIR/flake.tsv"
 }

@@ -248,6 +248,60 @@ gui_agent_verdict() {
     esac
 }
 
+# Pure failure classifier (Phase 6). Maps a FAILING agent attempt to a MECHANICAL
+# signature — the ONLY basis on which an automatic retry may ever be considered.
+# It NEVER classifies a product/test failure as retriable:
+#   product-fail      status=FAIL   (agent ran the asserts; one failed)       NEVER retry
+#   product-error     status=ERROR  (agent couldn't set up preconditions)     NEVER retry
+#   no-verdict        UNKNOWN:0      (agent exited clean with no verdict)      NEVER retry
+#   transport-timeout rc=124 + no status.txt + a guest-agent/vm-exec transport
+#                     marker in the log: the qemu-agent/vm-exec transport itself
+#                     wedged — unambiguous INFRA                              retriable
+#   agent-timeout     rc=124 + no status.txt, no transport marker: the agent ran
+#                     out of budget. DELIBERATELY NOT auto-retriable — an agent
+#                     timeout can equally mean the PRODUCT hung, and retrying could
+#                     flake-pass a real hang (codex). Surfaced for human triage /
+#                     a Phase-5 scenario split instead.                     report-only
+#   unknown           anything else                                          NEVER retry
+# Pure (args only) => host-testable (tests/integration/qci/gui-retry-classify.bats).
+# Args: status agent_rc status_present(0/1) transport_marker(0/1)
+gui_classify_failure() {
+    local status=$1 rc=$2 status_present=$3 transport=$4
+    case "$status" in
+        FAIL)  printf 'product-fail';  return ;;
+        ERROR) printf 'product-error'; return ;;
+    esac
+    if [ "$status" = UNKNOWN ] && [ "$rc" = 0 ]; then printf 'no-verdict'; return; fi
+    if [ "$rc" = 124 ] && [ "$status_present" != 1 ]; then
+        if [ "$transport" = 1 ]; then printf 'transport-timeout'; else printf 'agent-timeout'; fi
+        return
+    fi
+    printf 'unknown'
+}
+
+# Pure: is a classifier eligible for an AUTOMATIC retry? ONLY the unambiguous
+# infra signature. agent-timeout is intentionally excluded (product-hang masking
+# risk); product-fail/error/no-verdict/unknown are never retriable by definition.
+# Args: classifier
+gui_classifier_retriable() {
+    case "$1" in
+        transport-timeout) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Host-side: does the agent log show a qemu-agent / vm-exec TRANSPORT failure
+# (vs the agent merely running slow)? This is the discriminator between
+# transport-timeout (retriable infra) and agent-timeout (not retriable). Reads
+# the log file; returns 0 when a transport marker is present.
+gui_detect_transport_marker() {
+    local log_path=$1
+    [ -f "$log_path" ] || return 1
+    grep -qEi \
+        'guest agent is not responding|qemu guest agent is not connected|qemu-agent.*timeout|guest-agent-not-responding|agent unreachable|vm-exec.*(timed out|exit(ed)? *124|rc=124)' \
+        "$log_path" 2>/dev/null
+}
+
 run_agent_command() {
     local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded
     if [ -z "$cmd" ]; then
@@ -350,7 +404,7 @@ gui_job_count() {
 # timing, then release the VM. Self-contained for backgrounded pool execution.
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
-    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 t0 t1 t2 ta0 ta1 gate_name
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name
     rel=${scenario#$WORKSPACE/}
     t0=$(date +%s)
     if [ -n "$provided" ]; then
@@ -384,16 +438,77 @@ gui_run_scenario() {
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
-    status=$(agent_artifact_status "$RDIR/gui/$(safe_name "$rel")" "$log_path")
-    # Per-attempt observability row: the RAW agent status + rc + wall seconds,
-    # before the fail-closed verdict mapping collapses it to pass/fail/skip. This
-    # is where the flake signal lives (rc=124, UNKNOWN, slow walls under load).
-    record_attempt gui "$rel" 1 "$status" "$agent_rc" "" "$((ta1 - ta0))" "$vm" "$log_path"
+    local adir
+    adir="$RDIR/gui/$(safe_name "$rel")"
+    status=$(agent_artifact_status "$adir" "$log_path")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
     # not the silent pass it used to be.
     local verdict note
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
+    # Classify a failing attempt (mechanical signature only) for the attempt
+    # ledger + the retry decision. Empty for pass/skip.
+    local classifier="" transport=0 status_present=0
+    [ -f "$adir/status.txt" ] && status_present=1
+    if [ "$verdict" = fail ]; then
+        gui_detect_transport_marker "$log_path" && transport=1
+        classifier=$(gui_classify_failure "$status" "$agent_rc" "$status_present" "$transport")
+    fi
+    # Per-attempt observability row: the RAW agent status + rc + wall seconds +
+    # classifier, before the verdict collapses it. This is where the flake signal
+    # lives (rc=124, UNKNOWN, slow walls under load).
+    record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path"
+
+    # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
+    # retriable INFRA signature (only transport-timeout — agent-timeout is
+    # excluded as a product-hang masking risk) either records a `would-retry`
+    # flake row (report-only) or, when QCI_GUI_RETRY is enabled AND this is a
+    # disposable (own) VM, runs EXACTLY ONE more attempt on a FRESH VM. A retried
+    # pass always emits a flake.tsv row + a note on the result row, so a retry can
+    # never silently turn a flake green. status=FAIL/ERROR is never retried.
+    local retry_enabled=0
+    case "${QCI_GUI_RETRY:-0}" in 1|on|classified|true) retry_enabled=1 ;; esac
+    if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier"; then
+        if [ "$retry_enabled" = 1 ]; then
+            log "agent scenario $rel: retriable infra signature ($classifier); one retry on a fresh VM"
+            collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
+            release_vm "$vm" "$EXIT_GUI"
+            local vm2 ta2 ta3 status2 verdict2 note2 classifier2="" transport2=0 sp2=0
+            vm2=$(acquire_vm "$gate_name" "")
+            if [ -n "$vm2" ]; then
+                vm=$vm2
+                write_agent_prompt "$vm2" "$scenario" "$prompt"
+                install_gui_waiters "$vm2" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+                record_host_load gui "$rel" start
+                ta2=$(date +%s); run_agent_command "$prompt" "$log_path"; agent_rc=$?; ta3=$(date +%s)
+                record_host_load gui "$rel" end
+                status2=$(agent_artifact_status "$adir" "$log_path")
+                IFS=$'\t' read -r verdict2 note2 < <(gui_agent_verdict "$status2" "$agent_rc")
+                [ -f "$adir/status.txt" ] && sp2=1
+                if [ "$verdict2" = fail ]; then
+                    gui_detect_transport_marker "$log_path" && transport2=1
+                    classifier2=$(gui_classify_failure "$status2" "$agent_rc" "$sp2" "$transport2")
+                fi
+                record_attempt gui "$rel" 2 "$status2" "$agent_rc" "$classifier2" "$((ta3 - ta2))" "$vm2" "$log_path"
+                if [ "$verdict2" = fail ]; then
+                    record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-fail "$log_path"
+                else
+                    note="classified flake: classifier=$classifier first_rc=124 attempts=2; $note2"
+                    record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-pass "$log_path"
+                fi
+                status=$status2; verdict=$verdict2
+            else
+                log "agent scenario $rel: retry VM provision failed; keeping the first verdict"
+                record_flake "$rel" "$classifier" "$status" "$agent_rc" "" 1 retry-vm-provision-failed "$log_path"
+                vm_live=0   # the first VM was already collected+released above
+            fi
+        else
+            # Report-only (default): record what WOULD be retried, do not re-run.
+            record_flake "$rel" "$classifier" "$status" "$agent_rc" "" 1 would-retry "$log_path"
+        fi
+    fi
+
+    # Final result from the (possibly retried) verdict.
     case "$verdict" in
         pass) record_result gui "$rel" pass 0 pass agent "$log_path" "$note" ;;
         skip) record_result gui "$rel" skip 0 pass agent "$log_path" "$note" ;;
@@ -401,8 +516,10 @@ gui_run_scenario() {
               frc=$EXIT_GUI ;;
     esac
     t2=$(date +%s)
-    collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
-    [ "$own" = 1 ] && release_vm "$vm" "$frc"
+    if [ "$vm_live" = 1 ]; then
+        collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
+        [ "$own" = 1 ] && release_vm "$vm" "$frc"
+    fi
     record_timing gui "$rel" "$((t1 - t0))" "$((t2 - t1))" "$((t2 - t0))" "$frc" "$vm"
     return "$frc"
 }

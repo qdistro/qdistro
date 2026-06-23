@@ -512,6 +512,29 @@ def generate_md(run_dir: Path) -> str:
                 lines.append(f"- **peak concurrent qemu VMs**: {max(vms):.0f}")
             lines.append("")
 
+    # Retry ledger (Phase 6; additive). Surfaces every failure that carried a
+    # retriable infra signature — what WOULD retry (report-only default) or the
+    # outcome of an actual classified retry — so a retried pass is never an
+    # invisible flake. Optional file; absent on legacy runs.
+    flakes = read_tsv(run_dir / "flake.tsv")
+    if flakes:
+        retried_pass = [f for f in flakes if f.get("action") == "retried-pass"]
+        lines.append("## Flake ledger (classified retry)")
+        if retried_pass:
+            lines.append(f"**{len(retried_pass)} result(s) reached PASS only via retry** — "
+                         "counted as flakes, not clean greens:")
+        lines.append("")
+        lines.append("| scenario | classifier | first | retry | attempts | action |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for f in flakes:
+            lines.append(
+                f"| {f.get('subject', '?')} | {f.get('classifier', '')} | "
+                f"{f.get('first_status', '')}:{f.get('first_rc', '')} | "
+                f"{f.get('retry_status', '') or '—'} | {f.get('attempts', '')} | "
+                f"{f.get('action', '')} |"
+            )
+        lines.append("")
+
     lines.append("## All Results")
     lines.append("| status | gate | subject | category | kind | exit | log | notes |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
