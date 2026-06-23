@@ -114,5 +114,28 @@ gate_lint() {
         record_result lint md-structure skip 0 pass lint "$log_path" "$md_missing/$nmd scenarios missing headings (heuristic, non-fatal)"
     fi
 
+    # 4. flake-smell lint over GUI scenarios (warn-only). Flags the recurring
+    # flake sources (fixed sleeps before assertions, unscoped journal reads,
+    # one-shot systemctl/virsh, prose-only assertions) so they can be migrated to
+    # the waiter library. Reporting only — never hard-fails; the finding count is
+    # the migration progress metric.
+    local fl_script="$QCI_BIN_DIR/scenario-flake-lint.py" fl_findings
+    if [ -f "$fl_script" ] && command -v python3 >/dev/null 2>&1; then
+        { echo; echo "## scenario flake-smell lint (warn-only)"; } >> "$log_path"
+        python3 "$fl_script" --format gcc >> "$log_path" 2>>"$log_path"
+        fl_findings=$(python3 "$fl_script" --format summary 2>&1 >/dev/null \
+            | awk '/scenario-flake-lint:/{print $2; exit}')
+        [ -n "$fl_findings" ] 2>/dev/null || fl_findings=0
+        log "lint: scenario flake-smells $fl_findings finding(s) (warn-only)"
+        if [ "$fl_findings" -eq 0 ] 2>/dev/null; then
+            record_result lint flake-smells pass 0 pass lint "$log_path" "no flake-smell findings"
+        else
+            record_result lint flake-smells skip 0 pass lint "$log_path" \
+                "$fl_findings flake-smell finding(s) (warn-only; migrate to waiter lib)"
+        fi
+    else
+        record_skip lint flake-smells lint "scenario-flake-lint.py or python3 absent; skipping flake-smell lint"
+    fi
+
     return "$EXIT_OK"
 }

@@ -23,6 +23,32 @@ sequence of setup steps, actions, and visual assertions you verify from
 screenshots. You do not write or modify scenarios — you execute them
 and return a report.
 
+## Readiness waiters (do NOT `sleep N` then grep)
+
+The CI harness copies a guest waiter library into every disposable VM at
+`/tmp/qci-gui-waiters.sh`. When a scenario's bash needs to wait for async state
+to become ready, **source it and use a bounded waiter instead of a fixed
+`sleep`** — a fixed sleep is a bet on host load and is the single largest flake
+source. Inside the VM:
+
+```bash
+source /tmp/qci-gui-waiters.sh
+await_user_unit_active qdshell.service        # not: systemctl is-active (one-shot)
+await_socket /run/user/1000/wayland-1
+await_file /path/that/the/action/creates
+await_domstate "$nested_dom" running          # not: virsh domstate (one-shot)
+# scope a journal wait to AFTER the action with a cursor captured first:
+cur=$(journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p')
+# …drive the action…
+await_journal_line_after_cursor "$cur" 'toplevel_added.*app_id=foo' 30 1 --user
+```
+
+Every waiter is bounded and fails LOUD (expected-vs-last-observed + elapsed) when
+the condition never holds — it rides out nondeterministic *readiness*, it never
+hides a real failure. Wait for the SAME condition your assertion checks; never
+`|| true` a waiter. The `qci lint` gate's `flake-smells` check flags `sleep`
++grep / one-shot `systemctl`/`virsh` patterns to migrate here.
+
 ## Environment
 
 - Host: openSUSE Tumbleweed with `libvirt` + `virsh`.

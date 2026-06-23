@@ -183,6 +183,46 @@ agent_artifact_status() {
     esac
 }
 
+# Copy the guest-side waiter library (ci/lib/guest/gui-waiters.sh) into a
+# disposable VM at /tmp/qci-gui-waiters.sh so markdown scenarios (and the agent)
+# can `source /tmp/qci-gui-waiters.sh`. Delivered base64 over vm-exec — NOT a
+# shared HTTP port (the single-tenant lane rule) — from the VERSIONED repo copy,
+# so a waiter-library change is exercised against current source without rebaking
+# any image. bash -n in the guest verifies the delivered file parses. Best-effort
+# from the caller's view: returns nonzero (and the caller logs) on failure; a
+# scenario that genuinely needs the waiters and lacks them fails its own
+# assertion loudly rather than passing silently.
+install_gui_waiters() {
+    local vm=$1 src="$QDISTRO_REPO/ci/lib/guest/gui-waiters.sh" b64
+    [ -f "$src" ] || { log "install_gui_waiters: source missing: $src"; return 1; }
+    b64=$(base64 -w0 < "$src" 2>/dev/null) || b64=$(base64 < "$src" | tr -d '\n')
+    "$VM_TOOLS/vm-exec" "$vm" \
+        "printf '%s' '$b64' | base64 -d > /tmp/qci-gui-waiters.sh && bash -n /tmp/qci-gui-waiters.sh" \
+        >/dev/null 2>&1
+}
+
+# Host-side waiter: retry a guest command over vm-exec until it exits 0 or the
+# deadline passes — the host equivalent of the guest await_* helpers, for
+# host-driven readiness gates. Bounded by the wall clock; on timeout logs the
+# last guest output. Returns 0 on success, 1 on timeout. VM_TOOLS is overridable
+# so this is host-testable with a fake vm-exec.
+# Args: vm timeout_s interval_s <guest-cmd...>
+await_vmexec_success() {
+    local vm=$1 timeout=$2 interval=$3; shift 3
+    local start=$SECONDS last elapsed
+    while :; do
+        if last=$("$VM_TOOLS/vm-exec" "$vm" "$*" 2>&1); then
+            return 0
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            log "await_vmexec_success: TIMEOUT ${elapsed}s on '$*' (last: ${last:0:200})"
+            return 1
+        fi
+        sleep "$interval"
+    done
+}
+
 # Pure status/rc -> verdict mapper for one agent scenario attempt. FAIL CLOSED:
 # a pass is recorded ONLY for an explicit PASS with rc=0. SKIP passes through as
 # skip. Everything else — FAIL/ERROR, UNKNOWN (agent exited without a parseable
@@ -333,6 +373,10 @@ gui_run_scenario() {
     log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
     mkdir -p "$(dirname "$log_path")"
     write_agent_prompt "$vm" "$scenario" "$prompt"
+    # Deliver the guest waiter library so the scenario can source
+    # /tmp/qci-gui-waiters.sh (best-effort; a scenario that needs it and lacks it
+    # fails its own assertion loudly).
+    install_gui_waiters "$vm" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
     ta0=$(date +%s)

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# qdistro CI GUI scenario waiter library (GUEST-side).
+#
+# Source this INSIDE the disposable VM to replace the two biggest flake sources
+# in GUI scenarios — a fixed `sleep N` before an assertion, and a single-shot
+# read of volatile state (`systemctl is-active`, `virsh domstate`, a journal
+# grep) — with BOUNDED, OBSERVABLE readiness gates.
+#
+# Every helper:
+#   - polls a small interval up to a bounded deadline (never an unbounded hang);
+#   - returns 0 the instant the condition is observed (fast on a quiet host,
+#     tolerant on a loaded one — this is what collapses the 8-vs-25 variance);
+#   - on TIMEOUT prints, to stderr, the thing it was waiting for, the LAST
+#     observed state, and the elapsed seconds, then returns nonzero.
+#
+# CRITICAL — this is hardening, NOT masking: a waiter only rides out
+# nondeterministic READINESS. It must wait for the SAME condition the assertion
+# checks, with a bounded deadline, and fail LOUD when the condition never holds.
+# Never widen a waiter to swallow a real product failure (e.g. do not `|| true`
+# a waiter, and do not wait on a weaker condition than the one you assert).
+#
+# Delivery: the host copies this file into the VM at /tmp/qci-gui-waiters.sh
+# (see install_gui_waiters in ci/lib/gates/gui.sh); markdown scenarios source
+# that path. Host-side driver scripts can source the repo copy directly. The
+# library has NO host-only dependencies.
+# shellcheck shell=bash
+
+# Defaults (override per call). Deadlines are intentionally modest: a waiter is a
+# readiness gate, not a licence to hang. Scenarios that legitimately need longer
+# pass an explicit timeout argument.
+: "${QCI_AWAIT_TIMEOUT_DEFAULT:=30}"
+: "${QCI_AWAIT_INTERVAL_DEFAULT:=1}"
+
+# _await <description> <timeout_s> <interval_s> <probe-cmd...>
+# Core poll loop. Runs <probe-cmd> until it exits 0 or <timeout_s> elapses. The
+# probe's combined stdout+stderr from the final attempt is reported as the "last
+# observed state" on timeout, so a probe that echoes the value it saw produces a
+# self-explaining failure. Bounded by the wall clock via SECONDS. Returns 0 when
+# ready, 1 on timeout.
+_await() {
+    local desc=$1 timeout=$2 interval=$3; shift 3
+    local start=$SECONDS last="" elapsed
+    while :; do
+        if last=$("$@" 2>&1); then
+            return 0
+        fi
+        elapsed=$((SECONDS - start))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            printf '[await] TIMEOUT after %ss waiting for: %s\n' "$elapsed" "$desc" >&2
+            if [ -n "$last" ]; then
+                printf '[await] last observed: %s\n' "$last" >&2
+            else
+                printf '[await] last observed: (condition never true; no probe output)\n' >&2
+            fi
+            return 1
+        fi
+        sleep "$interval"
+    done
+}
+
+# await_file <path> [timeout] [interval] — wait until <path> exists.
+await_file() {
+    local path=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "file to exist: $path" "$timeout" "$interval" test -e "$path"
+}
+
+# await_socket <path> [timeout] [interval] — wait until <path> is a socket.
+await_socket() {
+    local path=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "socket to exist: $path" "$timeout" "$interval" test -S "$path"
+}
+
+# await_user_unit_active <unit> [user] [timeout] [interval]
+# Wait until a per-user systemd unit reports `active`, queried AS the session
+# user with XDG_RUNTIME_DIR set (so a root caller still reaches the user manager).
+await_user_unit_active() {
+    local unit=$1 user=${2:-admin} timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "user unit active: $unit (user $user)" "$timeout" "$interval" \
+        _probe_user_unit_active "$unit" "$user"
+}
+_probe_user_unit_active() {
+    local unit=$1 user=$2 uid state
+    uid=$(id -u "$user" 2>/dev/null) || { printf 'no such user: %s' "$user"; return 1; }
+    state=$(runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+        systemctl --user is-active "$unit" 2>/dev/null)
+    printf 'state=%s' "${state:-unknown}"
+    [ "$state" = active ]
+}
+
+# await_journal_line_after_cursor <cursor> <ere-pattern> [timeout] [interval] [journalctl-args...]
+# Wait for a journal line matching <ere-pattern> that appears AFTER <cursor>.
+# Capture the cursor BEFORE the action you are about to drive, e.g.:
+#   cur=$(journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p')
+# then drive the action, then await the event. Scoping by cursor is what makes
+# this sound: a stale line emitted BEFORE the action can never satisfy the wait,
+# so the gate proves the action's OWN effect, not a leftover. Extra journalctl
+# args (e.g. --user, -u qdwin-compositor.service) are forwarded.
+await_journal_line_after_cursor() {
+    local cursor=$1 pattern=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    shift 4 2>/dev/null || shift "$#"
+    _await "journal line /$pattern/ after cursor" "$timeout" "$interval" \
+        _probe_journal_after_cursor "$cursor" "$pattern" "$@"
+}
+_probe_journal_after_cursor() {
+    local cursor=$1 pattern=$2; shift 2
+    local hit
+    hit=$(journalctl "$@" --after-cursor "$cursor" --no-pager -o cat 2>/dev/null \
+        | grep -E -m1 "$pattern")
+    if [ -n "$hit" ]; then
+        printf 'matched: %s' "$hit"
+        return 0
+    fi
+    printf 'no line matching /%s/ since cursor yet' "$pattern"
+    return 1
+}
+
+# await_window_mapped <app_id> [timeout] [interval] [journalctl-args...]
+# Wait until the compositor journal reports a toplevel mapped for <app_id>
+# (`toplevel_added app_id=<app_id>`). Defaults to the user journal; pass
+# -u qdwin-compositor.service (etc.) as trailing args to scope to a unit.
+await_window_mapped() {
+    local app_id=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    shift 3 2>/dev/null || shift "$#"
+    local args=("$@"); [ "${#args[@]}" -gt 0 ] || args=(--user)
+    _await "window mapped: app_id=$app_id" "$timeout" "$interval" \
+        _probe_window_mapped "$app_id" "${args[@]}"
+}
+_probe_window_mapped() {
+    local app_id=$1; shift
+    local hit
+    hit=$(journalctl "$@" --no-pager -o cat 2>/dev/null \
+        | grep -E -m1 "toplevel_added.*app_id=${app_id}([^a-zA-Z0-9_-]|$)")
+    if [ -n "$hit" ]; then printf 'matched: %s' "$hit"; return 0; fi
+    printf 'no toplevel_added for app_id=%s yet' "$app_id"
+    return 1
+}
+
+# await_domstate <domain> <expected-state> [timeout] [interval]
+# Wait until `virsh domstate <domain>` equals <expected-state> (e.g. running,
+# "shut off"). For NESTED guests this runs inside the disposable VM, which is the
+# libvirt host for its tier-4/5 child. Tolerant of a transient empty/error read
+# (the documented tier5 single-shot domstate flake) — it keeps polling rather
+# than treating one bad read as the verdict.
+await_domstate() {
+    local dom=$1 want=$2 timeout=${3:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${4:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "domstate of $dom == '$want'" "$timeout" "$interval" \
+        _probe_domstate "$dom" "$want"
+}
+_probe_domstate() {
+    local dom=$1 want=$2 state
+    state=$(virsh domstate "$dom" 2>/dev/null | tr -d '\r' | head -n1)
+    printf 'domstate=%s' "${state:-<empty>}"
+    [ "$state" = "$want" ]
+}
