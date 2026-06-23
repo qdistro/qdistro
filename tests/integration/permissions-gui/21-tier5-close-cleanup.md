@@ -50,27 +50,76 @@ TIER5_MEM_KIB=524288 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm
 disown
 EOF
 )
+# Capture a compositor-journal cursor BEFORE the spawn so the mapped-check below
+# cannot be satisfied by a STALE app_id event from a prior attempt.
+CUR=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")
+
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
-# Wait for the toplevel to map (mirrors s20's S3 wait).
+# Readiness gate (replaces the old weak host-log-proxy + blind `sleep 5` + single
+# screenshot — the dominant S1 flake: a guest that had actually committed its
+# secctx was caught mid-paint as an empty desktop and read as a false ERROR). Poll
+# CONTINUOUSLY, classifying liveness vs death, until the inner tier-5 toplevel
+# really maps (the SAME condition the screenshot asserts) or the ~3min budget
+# expires. The domstate poll mirrors scenario 20's proven tolerant idiom (a
+# transient empty/error read is NOT death; only an explicit terminal state on
+# consecutive reads is). The mapped-check is journal-cursor-scoped to THIS attempt.
+# Every non-mapped outcome ERRORs LOUD with a precise reason — a real nested-guest
+# death (512 MiB budget), a never-running guest, or alive-but-never-mapped are all
+# genuine infra/product signals, never masked.
+mapped=0; saw_running=0; term_hits=0; reason=""; handle=""
 deadline=$((SECONDS + 180))
 while [ $SECONDS -lt $deadline ]; do
-    if $VMEXEC "$VM" 'grep -q "guest publisher pid=" /tmp/s21-spawn.log'; then
-        break
+    state=$($VMEXEC "$VM" "runuser -u admin -- virsh domstate $VM5 2>/dev/null || true" | tr -d '[:space:]')
+    case "$state" in
+        running|paused|idle|pmsuspended) saw_running=1; term_hits=0 ;;
+        shutoff|crashed)
+            term_hits=$((term_hits + 1))
+            [ "$term_hits" -ge 2 ] && { reason="guest domain reached terminal state '$state' on consecutive reads (real nested-guest death under TIER5_MEM_KIB=512MiB)"; break; } ;;
+    esac
+    # Stage 1: learn OUR toplevel's qdwin handle from the secctx line that carries
+    # our app_id (cursor-scoped, so a stale prior-attempt handle can't be picked
+    # up). The secctx line is emitted at security-context SETUP — necessary to map
+    # app_id→handle, but NOT proof the window painted, hence stage 2.
+    if [ -z "$handle" ]; then
+        handle=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor '$CUR' --no-pager -o cat 2>/dev/null | grep -F 'app_id=qdistro.tier5.$VM5' | grep -oE 'toplevel_security_context handle=[0-9]+' | grep -oE '[0-9]+' | head -1" | tr -d '[:space:]')
+    fi
+    # Stage 2: that handle actually MAPPED. qdwin emits `qdwin: mapped handle=N`
+    # ONLY after the toplevel's first buffer commit — i.e. it is painted, the same
+    # condition the screenshot asserts. Matching `mapped` (not the earlier
+    # secctx-committed setup line) is what makes this a true readiness gate and
+    # avoids the original race where a screenshot beat the first frame.
+    if [ -n "$handle" ] && $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor '$CUR' --no-pager -o cat 2>/dev/null | grep -qE 'qdwin: mapped handle=$handle '"; then
+        mapped=1; break
     fi
     sleep 2
 done
-sleep 5
+
+if [ "$mapped" != 1 ]; then
+    [ -n "$reason" ] || { [ "$saw_running" = 1 ] \
+        && reason="guest reached 'running' but the tier-5 toplevel never mapped within ~3min" \
+        || reason="guest domain never reached 'running' within ~3min"; }
+    echo "ERROR(S1): $reason"
+    $VMEXEC "$VM" 'tail -40 /tmp/s21-spawn.log' 2>/dev/null
+    exit 2
+fi
+
+# qdwin emitted `mapped handle=$handle` for our toplevel — it has painted its
+# first frame. Now capture the visual frame for the assertion.
+sleep 1
 $VMGUI "$VM" screenshot /tmp/s21-running.png
 ```
 
 **Assert** (agent-visual): `/tmp/s21-running.png` shows a
 weston-terminal window labelled `[tier5:$VM5]` rendered like a
-normal app window.
+normal app window. (The readiness gate above already proved the
+toplevel mapped, so this is now a stable corroboration rather than a
+race against a blind sleep.)
 
-If S1 fails to produce a visible toplevel within ~3min, ERROR (not
-FAIL) — the close path can't be exercised without something to
-close.
+If S1 errors above (no visible toplevel within ~3min — guest never
+ran, died, or never mapped), record ERROR (not FAIL): the close path
+can't be exercised without something to close. The echoed reason
+distinguishes a real nested-guest death from a slow/absent map.
 
 ### S2 — click the close button on the title bar
 
