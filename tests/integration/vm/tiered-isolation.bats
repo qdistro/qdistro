@@ -622,6 +622,28 @@ setup() {
     assert_output_contains "PASS: §Phase-7 tier-5 SIGTERM teardown reclaims all per-VM resources"
 }
 
+@test "phase7-tier5-graceful-shutdown: per-app policy resolves + graceful reap reclaims resources" {
+    # §Phase-7 tier-5 lifecycle — the configurable, PER-APP generalization of the
+    # hard reap above. Verifies --policy-key + the sectioned lifecycle config
+    # resolve a per-app `graceful` over a global `force`, and that the graceful
+    # app-exit teardown (virsh shutdown ACPI -> qga agent -> destroy) still
+    # reclaims the domain + overlay. Same skip surface as phase7-tier5-vm.
+    vm_run "[ -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2 ] && command -v virsh >/dev/null && [ -e /dev/kvm ]"
+    if [[ "$status" -ne 0 ]]; then
+        skip "tier-5 base disk / virsh / kvm absent (opt-in bake)"
+    fi
+    stage_vm_driver "s49-tier5-graceful-shutdown.sh"
+    vm_run "curl -fsS -o /tmp/s49.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s49-tier5-graceful-shutdown.sh && chmod +x /tmp/s49.sh && bash /tmp/s49.sh 2>/dev/null"
+    assert_success
+    if [[ "$output" == *"SKIP:"* ]]; then
+        skip "tier-5 base disk or virsh/kvm absent — same skip surface as phase7-tier5-vm"
+    fi
+    assert_output_contains "PASS: per-app policy resolved"
+    assert_output_contains "PASS: libvirt domain"
+    assert_output_contains "PASS: per-VM overlay unlinked after graceful reap"
+    assert_output_contains "PASS: §Phase-7 tier-5 per-app graceful shutdown resolves"
+}
+
 @test "phase7-tier5-audio: qemu -audiodev pipewire bridges guest audio to host PipeWire" {
     # §Phase-7 tier-5 audio — spec/29 §3 picked path. Skips when the
     # tier-5 base disk is absent OR pipewire-tools / qemu-audio-pipewire

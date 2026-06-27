@@ -106,6 +106,33 @@
 #                        (--vm only) override domain XML template path.
 #   TIER5_KEEP_DOMAIN=1  (--vm only) skip destroy+undefine on exit
 #                        (useful for debug; normally one-VM-per-spawn).
+#                        Bypasses ALL lifecycle policy below (the explicit
+#                        "never auto-shutdown" switch).
+#
+#   Lifecycle policy (--vm only) is PER-APP. Precedence per value:
+#     env var > [app:<policy-key>] section > global section > built-in default.
+#   The config file ($ADMIN_HOME/.config/qdistro/tier5-lifecycle.conf) is written
+#   by qdshell's "Sandboxed VM apps" settings panel and parsed (never sourced)
+#   with literal section matching + numeric clamps; see conf_get/resolve_policy.
+#   --policy-key KEY     stable per-app key for the lookup (qdshell passes its
+#                        catalogue appId, e.g. "tier5/firefox"). Defaults to the
+#                        app basename. Parsed before `--`; never reaches guest
+#                        argv. TIER5_POLICY_KEY is the env equivalent (debug).
+#   TIER5_SHUTDOWN_METHOD  graceful (default) | force. graceful =
+#                        `virsh shutdown --mode acpi` (ACPI power button), qga
+#                        agent shutdown after the grace, then `virsh destroy` as
+#                        a last resort. force = immediate `virsh destroy`. A
+#                        SIGTERM/SIGINT teardown is ALWAYS force (fast) regardless
+#                        of this setting.
+#   TIER5_SHUTDOWN_GRACE_SECS  seconds to wait for a graceful shutdown before
+#                        escalating (0..300, default 15).
+#   TIER5_IDLE_SHUTDOWN_SECS   after the app exits, hold the idle VM this long
+#                        before shutting it down (0..86400, default 0 = reap
+#                        immediately). A shutdown DELAY, not cross-spawn reuse.
+#   TIER5_LOWMEM_MB      during the idle hold, if host MemAvailable drops below
+#                        this many MiB, shut the idle VM down now (0 = disabled,
+#                        default 0).
+#   TIER5_LIFECYCLE_CONF override the GUI config file path.
 #   TIER5_NETWORK        (--vm only) Network configuration. Default
 #                        "none" — no NIC, mirroring podman's
 #                        --network=none hardening for tier-2.
@@ -133,7 +160,7 @@
 set -uo pipefail
 
 usage() {
-    sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,159p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
@@ -146,6 +173,7 @@ fi
 MODE=""
 VM_NAME=""
 EXPLICIT_PORT=""
+EXPLICIT_POLICY_KEY=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -159,6 +187,14 @@ while [ $# -gt 0 ]; do
         -p|--port)
             shift
             EXPLICIT_PORT="${1:?-p requires PORT}"; shift
+            ;;
+        --policy-key)
+            # Stable per-app lifecycle-policy key (e.g. the qdshell catalogue
+            # appId "tier5/firefox"). Parsed BEFORE `--` so it never reaches the
+            # guest argv. qdshell passes row.appId here; absent it, the wrapper
+            # falls back to the app basename. See the lifecycle-policy block.
+            shift
+            EXPLICIT_POLICY_KEY="${1:?--policy-key requires KEY}"; shift
             ;;
         --)
             shift; break
@@ -376,35 +412,198 @@ mkdir -p "$ADMIN_RUNTIME"
 : >"$CLIENT_LOG" >"$SERVER_LOG"
 chown "$ADMIN_USER" "$CLIENT_LOG" "$SERVER_LOG" 2>/dev/null || true
 
+# --- tier-5 VM lifecycle policy (graceful shutdown / idle timeout / low-mem) --
+# How a finished/closed tier-5 VM is torn down. Policy is PER-APP: each value
+# resolves with precedence
+#   explicit env var  >  [app:$POLICY_KEY] section  >  global section  >  default
+# so a per-app override can change just one field and inherit the rest. The
+# config file is written by qdshell's "Sandboxed VM apps" settings panel (admin
+# uid) and read here by ROOT. It only controls teardown TIMING + METHOD of a
+# disposable VM (never a security boundary), so an admin-owned file is an
+# acceptable trust posture — but it is PARSED (never sourced) with literal
+# section matching + numeric clamps + a method allowlist, and only honored when
+# it is a regular, admin/root-owned, non-symlink, non-group/other-writable file.
+#
+# POLICY_KEY is the STABLE per-app identity: qdshell passes its catalogue appId
+# (e.g. "tier5/firefox") via --policy-key (argv survives pkexec; env does not).
+# Absent/invalid, we fall back to the app basename — stable enough for direct
+# CLI/test use but NOT for distinguishing catalogue entries that share an exe.
+LIFECYCLE_CONF="${TIER5_LIFECYCLE_CONF:-$ADMIN_HOME/.config/qdistro/tier5-lifecycle.conf}"
+POLICY_KEY="${EXPLICIT_POLICY_KEY:-${TIER5_POLICY_KEY:-$APP_BASENAME}}"
+# Validate the key (catalogue-shaped): reject control chars / pathological
+# section names; fall back to the app basename on a bad key. Use bash `[[ =~ ]]`,
+# NOT grep — grep matches line-by-line, so a newline-bearing key would slip past
+# an anchored ^…$ regex; `[[ =~ ]]` anchors against the whole string.
+if ! [[ "$POLICY_KEY" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]; then
+    POLICY_KEY="$APP_BASENAME"
+fi
+
+_conf_file_ok() {  # honor only a regular, admin/root-owned, sane-perm file
+    local f="$LIFECYCLE_CONF" owner
+    [ -f "$f" ] || return 1
+    [ -L "$f" ] && return 1
+    # Reject group- or world-writable files (-perm /022 matches either bit).
+    find "$f" -maxdepth 0 -perm /022 2>/dev/null | grep -q . && return 1
+    owner=$(stat -c '%u' "$f" 2>/dev/null) || return 1
+    case "$owner" in 0|"$ADMIN_UID") return 0 ;; *) return 1 ;; esac
+}
+
+conf_get() {  # conf_get SECTION KEY -> value ("" SECTION = global/top), else ""
+    _conf_file_ok || return 0
+    awk -v want="$1" -v key="$2" '
+        /^[[:space:]]*[#;]/ { next }
+        /^[[:space:]]*\[.*\][[:space:]]*$/ {                 # section header
+            s=$0; sub(/^[[:space:]]*\[/,"",s); sub(/\][[:space:]]*$/,"",s)
+            cur=s; next                                      # literal, not regex
+        }
+        {
+            if (cur != want) next                            # string equality
+            line=$0; sub(/^[[:space:]]+/,"",line)
+            eq=index(line,"="); if (eq==0) next              # split at first =
+            k=substr(line,1,eq-1); sub(/[[:space:]]+$/,"",k)
+            if (k != key) next
+            v=substr(line,eq+1); gsub(/[[:space:]]/,"",v); val=v   # last wins
+        }
+        END { if (val != "") print val }
+    ' "$LIFECYCLE_CONF"
+}
+
+resolve_policy() {  # resolve_policy KEY -> per-app override else global else ""
+    local v
+    v=$(conf_get "app:$POLICY_KEY" "$1")
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    conf_get "" "$1"
+}
+
+clamp_int() {  # clamp_int VARNAME DEFAULT MIN MAX — validate/clamp an integer
+    local name="$1" def="$2" lo="$3" hi="$4" cur
+    cur="${!name}"
+    printf '%s' "$cur" | grep -qE '^[0-9]+$' || cur="$def"
+    [ "$cur" -lt "$lo" ] && cur="$lo"
+    [ "$cur" -gt "$hi" ] && cur="$hi"
+    printf -v "$name" '%s' "$cur"
+}
+
+SHUTDOWN_METHOD="${TIER5_SHUTDOWN_METHOD:-$(resolve_policy SHUTDOWN_METHOD)}"
+case "$SHUTDOWN_METHOD" in graceful|force) ;; *) SHUTDOWN_METHOD=graceful ;; esac
+SHUTDOWN_GRACE_SECS="${TIER5_SHUTDOWN_GRACE_SECS:-$(resolve_policy SHUTDOWN_GRACE_SECS)}"
+clamp_int SHUTDOWN_GRACE_SECS 15 0 300
+IDLE_SHUTDOWN_SECS="${TIER5_IDLE_SHUTDOWN_SECS:-$(resolve_policy IDLE_SHUTDOWN_SECS)}"
+clamp_int IDLE_SHUTDOWN_SECS 0 0 86400
+LOWMEM_MB="${TIER5_LOWMEM_MB:-$(resolve_policy LOWMEM_MB)}"
+clamp_int LOWMEM_MB 0 0 1048576
+
+host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
+    local kb
+    kb=$(grep -E '^MemAvailable:' /proc/meminfo 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    [ -n "$kb" ] || return 0
+    printf '%s' $((kb / 1024))
+}
+
+# reap_domain [force] — stop the domain, undefine it, unlink the overlay.
+# Graceful (default): ACPI power-button (`virsh shutdown --mode acpi`, the owner-
+# requested mechanism). If the guest is still up after SHUTDOWN_GRACE_SECS, try
+# ONE bounded qga agent shutdown (qemu-guest-agent is already a hard tier-5
+# dependency, so this is the natural fallback when the guest lacks a power-button
+# handler), and only then force `virsh destroy`. force=1 (a signal teardown, or
+# SHUTDOWN_METHOD=force) skips straight to destroy — keeping the SIGTERM path
+# fast (s48's 10s budget). The undefine retry afterwards is load-bearing: virsh
+# destroy/shutdown can return before libvirt finishes teardown, so a lone
+# undefine races it and leaves a stopped-but-DEFINED domain (a leak, perm-gui/21
+# S4). NOTE: `domstate` output has its whitespace stripped, so "shut off"
+# compares as "shutoff".
+reap_domain() {
+    local force="${1:-0}" method="$SHUTDOWN_METHOD" waited=0 st
+    [ "$force" = "1" ] && method=force
+    if [ "$method" = "graceful" ]; then
+        echo "[tier5] graceful shutdown (ACPI) $VM_NAME (grace=${SHUTDOWN_GRACE_SECS}s)" >&2
+        run_as_admin virsh shutdown --mode acpi "$VM_NAME" >/dev/null 2>&1 || true
+        while [ "$waited" -lt "$SHUTDOWN_GRACE_SECS" ]; do
+            st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
+            case "$st" in shutoff|crashed|"") break ;; esac
+            sleep 1; waited=$((waited + 1))
+        done
+        st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
+        case "$st" in
+            shutoff|crashed|"") : ;;
+            *)
+                echo "[tier5] ACPI grace expired; trying qga agent shutdown $VM_NAME" >&2
+                run_as_admin virsh shutdown --mode agent "$VM_NAME" >/dev/null 2>&1 || true
+                waited=0
+                while [ "$waited" -lt 8 ]; do
+                    st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
+                    case "$st" in shutoff|crashed|"") break ;; esac
+                    sleep 1; waited=$((waited + 1))
+                done
+                ;;
+        esac
+    fi
+    # Force-destroy if still running (or method=force). Harmless if already off.
+    run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+        run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+}
+
+# idle_keep_warm — after the published app exits, optionally keep the (now idle)
+# VM up for IDLE_SHUTDOWN_SECS before teardown. This is a configurable shutdown
+# DELAY, not cross-spawn reuse (this wrapper owns one VM and tears it down on
+# exit; true relaunch-into-a-warm-VM needs a persistent pool manager — a
+# documented follow-up). Ends early under host memory pressure (LOWMEM_MB) or if
+# the guest stops on its own. A SIGTERM during the wait hits the force trap.
+idle_keep_warm() {
+    [ "${TIER5_KEEP_DOMAIN:-0}" = "1" ] && return 0
+    [ "$IDLE_SHUTDOWN_SECS" -gt 0 ] || return 0
+    echo "[tier5] app exited; holding idle $VM_NAME up to ${IDLE_SHUTDOWN_SECS}s before shutdown" >&2
+    local waited=0 step avail st
+    while [ "$waited" -lt "$IDLE_SHUTDOWN_SECS" ]; do
+        st=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
+        case "$st" in shutoff|crashed|"")
+            echo "[tier5] guest stopped on its own during idle hold" >&2; return 0 ;;
+        esac
+        if [ "$LOWMEM_MB" -gt 0 ]; then
+            avail=$(host_mem_avail_mb)
+            if [ -n "$avail" ] && [ "$avail" -lt "$LOWMEM_MB" ]; then
+                echo "[tier5] host low memory (${avail}MB < ${LOWMEM_MB}MB); ending idle hold for $VM_NAME" >&2
+                return 0
+            fi
+        fi
+        step=5; [ $((IDLE_SHUTDOWN_SECS - waited)) -lt 5 ] && step=$((IDLE_SHUTDOWN_SECS - waited))
+        sleep "$step"; waited=$((waited + step))
+    done
+    echo "[tier5] idle timeout (${IDLE_SHUTDOWN_SECS}s) elapsed; shutting down $VM_NAME" >&2
+}
+
 CLIENT_PID=
 SERVER_PID=
 DOMAIN_DEFINED=0
 DISK_CREATED=0
+CLEANUP_STARTED=0
 cleanup() {
+    # force=1 (signal teardown) skips graceful and ALWAYS runs, even if a
+    # graceful EXIT-path cleanup was already mid-flight — so a SIGTERM during a
+    # graceful shutdown escalates to an immediate destroy instead of stalling.
+    local force="${1:-0}"
+    if [ "$CLEANUP_STARTED" = "1" ] && [ "$force" != "1" ]; then return 0; fi
+    CLEANUP_STARTED=1
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
     if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
-        # Stop, then remove the definition. `virsh destroy` can return before
-        # libvirt has finished the teardown, so a single `undefine` occasionally
-        # races it and leaves a stopped-but-still-DEFINED domain — which is a
-        # leak, not a pass (perm-gui/21 S4). Retry undefine until `dominfo` no
-        # longer finds the domain (or a ~5s budget expires).
-        run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-            run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 || break
-            sleep 0.5
-        done
+        reap_domain "$force"
     fi
     if [ "$MODE" = "vm" ] && [ "$DISK_CREATED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
         rm -f "$DISK" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+# Normal exit (incl. the wait loop's app-exit path) -> graceful teardown.
+# INT/TERM -> force (fast) teardown; drop the EXIT trap so it can't double-run.
+trap 'cleanup 0' EXIT
+trap 'trap - EXIT INT TERM; cleanup 1; exit 130' INT
+trap 'trap - EXIT INT TERM; cleanup 1; exit 143' TERM
 
 # --- 1. host-side waypipe client (creates vsock listener) -----------
 # CID=1 in loopback; CID=2 (host) in --vm mode (guest connects to host).
@@ -635,6 +834,7 @@ GUEST_PID=$(echo "$QGA_REPLY" | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' 
 echo "[tier5] guest publisher pid=$GUEST_PID running" >&2
 echo "[tier5] $SILO_TAG (vm) → vsock:$CID(guest) → $HOST_LISTEN_CID:$PORT → wayland-1" >&2
 echo "[tier5] app: $*" >&2
+echo "[tier5] lifecycle[$POLICY_KEY]: method=$SHUTDOWN_METHOD grace=${SHUTDOWN_GRACE_SECS}s idle=${IDLE_SHUTDOWN_SECS}s lowmem=${LOWMEM_MB}MB" >&2
 
 # In VM mode (no --oneshot), waypipe-client stays alive as a listener.
 # Poll the domain state — when it stops, tear down the bridge.
@@ -656,18 +856,18 @@ if [ "$MODE" = "vm" ]; then
             "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
             *) break ;;
         esac
-        # Minimal teardown-on-done: a tier-5 VM hosts a SINGLE published app, so
-        # once that app exits (e.g. its last window was closed -> request_close
-        # -> the app quit) the VM has no further purpose. Watch the published
-        # process via the guest agent; an explicit "exited":true ends the wait so
-        # cleanup() destroys + undefines the domain and unlinks the overlay.
-        # Before this, the loop ended ONLY on a guest self-poweroff, so closing
-        # the app window leaked the whole nested VM + overlay (perm-gui/21
+        # Teardown-on-done: a tier-5 VM hosts a SINGLE published app, so once that
+        # app exits (e.g. its last window was closed -> request_close -> the app
+        # quit) the VM has no further purpose. Watch the published process via the
+        # guest agent; an explicit "exited":true ends the wait. We then optionally
+        # hold the idle VM (idle_keep_warm — IDLE_SHUTDOWN_SECS/low-mem policy)
+        # and break, so the EXIT-trap cleanup() reaps it (graceful ACPI shutdown
+        # by default — see reap_domain/SHUTDOWN_METHOD — then undefine + overlay
+        # unlink). Before this, the loop ended ONLY on a guest self-poweroff, so
+        # closing the app window leaked the whole nested VM + overlay (perm-gui/21
         # S3-S5). Keying on the APP process (GUEST_PID), not a single toplevel,
         # is deliberate: a multi-window app is reaped when it FULLY exits, not on
-        # the first window close. NOTE: this is a hard reap (cleanup's virsh
-        # destroy). A configurable graceful path (ACPI shutdown + timeout, idle
-        # delay, low-memory) is a follow-up; see todo/tier5-vm-lifecycle.md.
+        # the first window close.
         # --timeout is load-bearing: `qemu-agent-command` BLOCKS by default, so a
         # guest whose qga has gone unresponsive (a dying/OOMing guest is exactly
         # the case that matters) would hang this loop forever and the
@@ -677,6 +877,7 @@ if [ "$MODE" = "vm" ]; then
              "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$GUEST_PID}}" 2>&1)
         if printf '%s' "$es" | grep -qE '"exited"[[:space:]]*:[[:space:]]*true'; then
             echo "[tier5] published app (pid=$GUEST_PID) exited; reaping $VM_NAME" >&2
+            idle_keep_warm
             break
         elif printf '%s' "$es" | grep -qiE 'PID [0-9]+ does not exist|does not exist'; then
             # The guest agent REAPS a finished guest-exec entry the first time its
@@ -690,6 +891,7 @@ if [ "$MODE" = "vm" ]; then
             exec_gone=$((exec_gone + 1))
             if [ "$exec_gone" -ge 2 ]; then
                 echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); reaping $VM_NAME" >&2
+                idle_keep_warm
                 break
             fi
         else

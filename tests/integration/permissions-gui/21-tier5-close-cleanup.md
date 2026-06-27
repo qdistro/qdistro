@@ -83,7 +83,12 @@ chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
 # TIER5_MEM_KIB=524288 (512 MiB): the 1.5 GiB default overcommits the nested CI
 # VM and kills the guest mid-boot; mirror s45-tier5-vm.sh's CI accommodation.
-TIER5_MEM_KIB=524288 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
+# TIER5_SHUTDOWN_METHOD=force: this scenario is the orphan-resource-completeness
+# net (everything reclaimed after close), so it pins the deterministic hard reap
+# — independent of whether the test base image carries the guest power-button
+# wiring that graceful (the default) needs. The graceful ACPI path + per-app
+# policy are covered by tests/integration/vm/s49-tier5-graceful-shutdown.sh.
+TIER5_MEM_KIB=524288 TIER5_SHUTDOWN_METHOD=force setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s21-spawn.log 2>&1 &
 disown
 EOF

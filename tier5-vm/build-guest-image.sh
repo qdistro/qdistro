@@ -163,6 +163,24 @@ exec waypipe --vsock -s "2:$PORT" server -- "$@"
 PUBEOF
 chmod 0755 "$PUBLISHER"
 
+# Stage a systemd-logind drop-in so an ACPI power-button press powers the guest
+# off cleanly. The host reaps a finished/closed tier-5 VM with
+# `virsh shutdown --mode acpi` (TIER5_SHUTDOWN_METHOD=graceful, the default in
+# spawn-tier5.sh); without a power-button handler that event is ignored and the
+# wrapper has to fall back to `virsh destroy` (a hard yank) after the grace
+# window. systemd-logind is already running in the image (the enabled
+# serial-getty@ttyS0 brings up a seat0 session), so it observes the ACPI power
+# button and acts on this policy. `poweroff` is also systemd's built-in default
+# for HandlePowerKey; pinning it makes the intent explicit and overrides any
+# image default of `ignore`. (qemu-guest-agent — already installed/enabled below
+# — gives the host an agent-mode shutdown fallback before the destroy.)
+LOGIND_DROPIN="$WORK/10-qdistro-tier5-powerkey.conf"
+cat >"$LOGIND_DROPIN" <<'LOGINDEOF'
+[Login]
+HandlePowerKey=poweroff
+HandlePowerKeyLongPress=poweroff
+LOGINDEOF
+
 # Build the (optional) root-password argument. Default bakes the debug
 # password; the hardened path (flag=0) bakes none.
 PW_ARGS=()
@@ -206,6 +224,8 @@ virt-customize -a "$BASE_QCOW" \
     --run-command 'rm -f /.autorelabel' \
     --copy-in "$PUBLISHER:/usr/local/bin/" \
     --run-command 'chmod +x /usr/local/bin/qdistro-tier5-publisher.sh' \
+    --mkdir /etc/systemd/logind.conf.d \
+    --copy-in "$LOGIND_DROPIN:/etc/systemd/logind.conf.d/" \
     --run-command 'echo "qdistro-tier5-base" >/etc/hostname' \
     "${PW_ARGS[@]}" \
     --run-command 'modprobe vsock; modprobe vhost_vsock || true' \
