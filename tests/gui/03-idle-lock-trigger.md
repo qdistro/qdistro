@@ -24,20 +24,29 @@ case "$(qdlocker_ctrl status 2>/dev/null)" in
         ;;
 esac
 
-# Shorten the idle threshold to 3s so the scenario doesn't wall-clock
-# wait for the default 5min (QDLOCKER_IDLE_MS=300000). Set the env in the user-unit dropin and
-# restart qdlocker so it re-reads.
+# Shorten the idle threshold so the scenario doesn't wall-clock wait for the
+# default 5min (QDLOCKER_IDLE_MS=300000). 8s — NOT 3s — is deliberate: the
+# setup restart + vm-exec round-trips can take >3s, so a 3s threshold let the
+# idle timer fire and lock the screen DURING setup, before the baseline check
+# could read the unlocked state (the test raced itself). 8s is comfortably
+# larger than the setup+round-trip budget yet still short enough to exercise.
+# The `idle.conf` name sorts AFTER the GUI-lane `90-ci-gui.conf` dropin (which
+# disables idle for ordinary scenarios), so this override wins for THIS test.
 "$QDWIN_VM_EXEC" "$VMNAME" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 bash -lc '
   mkdir -p ~/.config/systemd/user/qdlocker.service.d
   cat > ~/.config/systemd/user/qdlocker.service.d/idle.conf <<EOF
 [Service]
-Environment=QDLOCKER_IDLE_MS=3000
+Environment=QDLOCKER_IDLE_MS=8000
 EOF
   systemctl --user daemon-reload
   systemctl --user restart qdlocker.service
 '"
 sleep 2
 
+# Reset the idle counter immediately before reading the baseline: a lone Shift
+# press (no text side-effect on the focused desktop) generates input so the 8s
+# idle window restarts at ~0 and cannot fire during the baseline read below.
+qdwin_qmp_key shift down; sleep 0.05; qdwin_qmp_key shift up
 qdlocker_ctrl status   # baseline — must be locked=False
 ```
 
@@ -54,17 +63,17 @@ qdwin_screenshot /tmp/qdlocker-03-step1-baseline.png
 (`initially_locked=True` from `qdwin_locker_v1.ready`), this scenario
 is meaningless — abort and run after a clean unlock cycle.
 
-### Step 2 — wait 4s without touching the keyboard/pointer
+### Step 2 — wait 9s without touching the keyboard/pointer
 
 ```bash
-sleep 4
+sleep 9
 qdlocker_ctrl status
 qdwin_screenshot /tmp/qdlocker-03-step2-idle.png
 ```
 
 **Assert (2.1):** `qdlocker_ctrl status` reports `locked=True`. The
-idle subscription fired at 3s; the locker entered locked state by
-the 4s mark.
+idle subscription fired at 8s; the locker entered locked state by
+the 9s mark.
 **Assert (2.2):** screenshot shows the qdlocker UI (clock, password
 field) and NOT the desktop / foot terminal.
 
@@ -76,17 +85,23 @@ unlock for the next part of the test, send the password through
 qdlocker's overlay_key channel using the same pattern as scenario
 01 step 3+4.
 
+**Run the whole block below as a SINGLE command** — do NOT split the unlock,
+the activity keypress, and the status read across separate tool calls. The idle
+timer keeps ticking between calls, so a multi-second gap between the unlock and
+the activity keypress lets the 8s window re-fire and re-lock before the check,
+producing a spurious `locked=True` that is a HARNESS artifact, not a product bug.
+
 ```bash
 qdlocker_unlock_with_password
 
-# Now generate activity, then check at t=2s (under the 3s threshold).
+# Now generate activity, then check at t=2s (well under the 8s threshold).
 qdwin_qmp_key spc down; sleep 0.05; qdwin_qmp_key spc up
 sleep 2
 qdlocker_ctrl status
 ```
 
 **Assert (3.1):** `locked=False` — at t=2s after a keypress, the
-idle subscription should NOT have fired (threshold is 3s, last
+idle subscription should NOT have fired (threshold is 8s, last
 activity was 2s ago). If `locked=True`, the locker is using
 wall-clock since boot instead of last-activity time.
 
@@ -106,7 +121,7 @@ wall-clock since boot instead of last-activity time.
   `locked=False` — the idle subscription fired but qdlocker never
   called `set_locked(1)`. Check `idle.py:start` is wired (the
   scaffold has a TODO).
-- Step 2 FAIL at the 4s mark with `locked=False` — `idle.py` isn't
+- Step 2 FAIL at the 9s mark with `locked=False` — `idle.py` isn't
   bound to ext-idle-notify-v1 at all. `idle_watcher.on_idle(...)` is
   set but `idle_watcher.start(display)` was never called.
 - Step 3 FAIL with `locked=True` at t=2s — the idle subscription is
