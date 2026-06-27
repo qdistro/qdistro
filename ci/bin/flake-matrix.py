@@ -116,7 +116,7 @@ def main(argv: list[str]) -> int:
         print()
         print("run".ljust(col_w) + "pass".rjust(6) + "fail".rjust(6)
               + "skip".rjust(6) + "blocked".rjust(9))
-        for lbl, run in zip(labels, per_run):
+        for lbl, run in zip(labels, per_run, strict=True):
             tally: dict[str, int] = {}
             for st in run.values():
                 tally[st] = tally.get(st, 0) + 1

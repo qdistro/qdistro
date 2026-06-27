@@ -110,11 +110,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_log = logging.getLogger("qdistro.silo_security")
-
 from qdistro_guard_registry import FlowEndpoint
 from qdistro_metadata_schema import RESERVED_GUARDS
 from qdistro_resolver import UNKNOWN_SILO, resolve_subject
+
+_log = logging.getLogger("qdistro.silo_security")
 
 # v1 bootstrap store path. The broker reaches the central snapshot store through
 # the SnapshotAuthority seam (default: TomlSnapshotAuthority over this file); a

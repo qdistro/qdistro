@@ -37,7 +37,6 @@ from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-
 from qdistro_pwd_atomic import atomic_write_json
 
 RECOVERY_FORMAT_VERSION = 1

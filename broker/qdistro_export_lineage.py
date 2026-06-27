@@ -105,7 +105,7 @@ def normalize_descriptor(raw: Any) -> ExportLineageDescriptor:
     source = raw.get("source") or {}
     if source is not None and not isinstance(source, dict):
         raise BadDescriptor("source must be an object when present")
-    source_input = source.get("source_input") or raw.get("source_input")
+    source_input = (source or {}).get("source_input") or raw.get("source_input")
     if source_input is not None and not isinstance(source_input, str):
         raise BadDescriptor("source_input must be a string or null")
     files_raw = raw.get("files")
