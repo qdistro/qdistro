@@ -28,13 +28,18 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SRC=/root/qdistro-src/qdistro
 TIER5_DIR=/tmp/qdistro-tier5
+# Stage tier5-vm AND lib as siblings so spawn-tier5.sh's `../lib/spawn-common.sh`
+# source resolves (matches permissions-gui/21's layout).
 if [ -d "$SRC/tier5-vm" ]; then
     rm -rf "$TIER5_DIR" 2>/dev/null || true
-    cp -r "$SRC/tier5-vm" "$TIER5_DIR"
+    mkdir -p "$TIER5_DIR"
+    cp -r "$SRC/tier5-vm" "$TIER5_DIR/tier5-vm"
+    cp -r "$SRC/lib" "$TIER5_DIR/lib"
     chmod -R a+rX "$TIER5_DIR"
     find "$TIER5_DIR" -name '*.sh' -exec chmod a+rx {} +
 fi
-[ -d "$TIER5_DIR" ] || skip "tier5-vm source not unpacked at $TIER5_DIR"
+SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
+[ -f "$SPAWN" ] || skip "tier5-vm source not unpacked at $SPAWN"
 
 BASE=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
 [ -f "$BASE" ] || skip "tier-5 base image $BASE not built"
@@ -75,7 +80,7 @@ SPAWN_LOG=/tmp/s49-spawn.log
 env -u TIER5_SHUTDOWN_METHOD -u TIER5_SHUTDOWN_GRACE_SECS \
     -u TIER5_IDLE_SHUTDOWN_SECS -u TIER5_LOWMEM_MB -u TIER5_POLICY_KEY \
     TIER5_MEM_KIB=524288 TIER5_LIFECYCLE_CONF="$CONF" \
-    bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" --policy-key "$POLICY_KEY" \
+    bash "$SPAWN" --vm "$VM_NAME" --policy-key "$POLICY_KEY" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 

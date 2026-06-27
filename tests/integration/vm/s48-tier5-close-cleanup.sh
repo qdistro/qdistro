@@ -20,13 +20,20 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SRC=/root/qdistro-src/qdistro
 TIER5_DIR=/tmp/qdistro-tier5
+# Stage tier5-vm AND lib as siblings so spawn-tier5.sh's `../lib/spawn-common.sh`
+# source resolves (gen_launch_token / domain_xml_tmpfile live there). A flat copy
+# of just tier5-vm leaves `../lib` pointing at /tmp/lib and the wrapper aborts at
+# virsh define. Mirrors permissions-gui/21 + s49.
 if [ -d "$SRC/tier5-vm" ]; then
     rm -rf "$TIER5_DIR" 2>/dev/null || true
-    cp -r "$SRC/tier5-vm" "$TIER5_DIR"
+    mkdir -p "$TIER5_DIR"
+    cp -r "$SRC/tier5-vm" "$TIER5_DIR/tier5-vm"
+    cp -r "$SRC/lib" "$TIER5_DIR/lib"
     chmod -R a+rX "$TIER5_DIR"
     find "$TIER5_DIR" -name '*.sh' -exec chmod a+rx {} +
 fi
-[ -d "$TIER5_DIR" ] || skip "tier5-vm source not unpacked at $TIER5_DIR"
+SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
+[ -f "$SPAWN" ] || skip "tier5-vm source not unpacked at $SPAWN"
 
 BASE=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
 [ -f "$BASE" ] || skip "tier-5 base image $BASE not built"
@@ -48,7 +55,7 @@ SPAWN_LOG=/tmp/s48-spawn.log
 # 1.5 GiB nested guest is unstable here; 512 MiB fits (same value as
 # s45-tier5-vm.sh / s47-tier5-audio.sh). Nested-CI accommodation; prod keeps 1.5G.
 TIER5_MEM_KIB=524288 \
-    bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
+    bash "$SPAWN" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
