@@ -226,15 +226,47 @@ weston-terminal window, and the taskbar/dock has no `[tier5:$VM5]` entry.
 The bats variant `s48-tier5-close-cleanup.sh` exercises the same trap
 via SIGTERM directly; it's the regression net underneath this scenario.
 
-### S3 — verify the wrapper exited
+### S3 — wait for the reap, then verify the wrapper exited
+
+Closing the app reaps the VM ASYNCHRONOUSLY: in `--vm` mode
+`spawn-tier5.sh`'s wait loop notices the published app exited (polled
+via the guest agent) and then runs its EXIT trap — `virsh destroy` +
+`virsh undefine` + overlay unlink. That is a couple of poll cycles plus
+the virsh teardown, not instant, so poll up to ~20s for it to complete
+before asserting.
+
+Check all three IN A SINGLE guest command per poll and ONLY interpret the
+result when `vm-exec` itself succeeded — a transport/qga failure on the outer
+VM must read as "unknown, keep polling", NEVER as "gone" (that would false-pass
+this assertion on an outer-VM hiccup).
 
 ```bash
-$VMEXEC "$VM" 'pgrep -af "spawn-tier5.sh.*'"$VM5"'" || echo "no spawn-tier5 wrapper running (expected)"'
+for _ in $(seq 1 20); do
+    res=$($VMEXEC "$VM" "w=present; d=present; o=present; \
+        pgrep -f 'spawn-tier5.sh.*$VM5' >/dev/null || w=gone; \
+        runuser -u admin -- virsh dominfo $VM5 >/dev/null 2>&1 || d=gone; \
+        test -e /home/admin/.local/share/libvirt/images/$VM5.qcow2 || o=gone; \
+        echo \"S3RESULT w=\$w d=\$d o=\$o\"") || { sleep 1; continue; }
+    # Require the structured token (proves the guest command actually ran), then
+    # stop once all three are gone.
+    printf '%s\n' "$res" | grep -q 'S3RESULT ' || { sleep 1; continue; }
+    printf '%s\n' "$res" | grep -q 'w=gone d=gone o=gone' && { echo "$res"; break; }
+    sleep 1
+done
+# Final S3 probe — print an unambiguous token; treat vm-exec transport failure
+# as ERROR (re-run), not as a pass.
+$VMEXEC "$VM" "pgrep -f 'spawn-tier5.sh.*$VM5' >/dev/null \
+    && echo S3-WRAPPER-STILL-RUNNING || echo S3-WRAPPER-GONE-EXPECTED" \
+    || echo "S3-TRANSPORT-FAIL (outer vm-exec/qga failed; re-run — NOT a product result)"
 ```
 
-**Assert**: no `spawn-tier5.sh` process remains for `$VM5`. The
-wrapper's `wait $CLIENT_PID` returns when waypipe-client tears down
-its side after the toplevel goes away.
+**Assert**: the final probe prints `S3-WRAPPER-GONE-EXPECTED` — no
+`spawn-tier5.sh` process remains for `$VM5`. In `--vm` mode the wrapper's loop
+ends when the single published app exits (detected via the guest agent), then
+its trap reaps the domain. `S3-WRAPPER-STILL-RUNNING` after the ~20s budget is
+the orphan leak this scenario guards; `S3-TRANSPORT-FAIL` is an
+infrastructure/ERROR result (the outer guest agent was unreachable), not a
+product FAIL — re-run.
 
 ### S4 — verify libvirt domain is gone
 

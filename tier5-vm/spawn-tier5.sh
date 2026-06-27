@@ -385,8 +385,17 @@ cleanup() {
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
     if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
+        # Stop, then remove the definition. `virsh destroy` can return before
+        # libvirt has finished the teardown, so a single `undefine` occasionally
+        # races it and leaves a stopped-but-still-DEFINED domain — which is a
+        # leak, not a pass (perm-gui/21 S4). Retry undefine until `dominfo` no
+        # longer finds the domain (or a ~5s budget expires).
         run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+            run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 || break
+            sleep 0.5
+        done
     fi
     if [ "$MODE" = "vm" ] && [ "$DISK_CREATED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
@@ -639,7 +648,7 @@ if [ "$MODE" = "vm" ]; then
     # blip declared a HEALTHY guest stopped and tore it down (perm-gui 20/21
     # cold-start failed every run for this reason). Treat empty/error output as
     # transient and ride it out; only an explicit terminal state ends the wait.
-    misses=0
+    misses=0; exec_gone=0
     while :; do
         d_state=$(run_as_admin virsh domstate "$VM_NAME" 2>/dev/null | tr -d '[:space:]')
         case "$d_state" in
@@ -647,9 +656,48 @@ if [ "$MODE" = "vm" ]; then
             "") misses=$((misses + 1)); [ "$misses" -ge 5 ] && break ;;
             *) break ;;
         esac
+        # Minimal teardown-on-done: a tier-5 VM hosts a SINGLE published app, so
+        # once that app exits (e.g. its last window was closed -> request_close
+        # -> the app quit) the VM has no further purpose. Watch the published
+        # process via the guest agent; an explicit "exited":true ends the wait so
+        # cleanup() destroys + undefines the domain and unlinks the overlay.
+        # Before this, the loop ended ONLY on a guest self-poweroff, so closing
+        # the app window leaked the whole nested VM + overlay (perm-gui/21
+        # S3-S5). Keying on the APP process (GUEST_PID), not a single toplevel,
+        # is deliberate: a multi-window app is reaped when it FULLY exits, not on
+        # the first window close. NOTE: this is a hard reap (cleanup's virsh
+        # destroy). A configurable graceful path (ACPI shutdown + timeout, idle
+        # delay, low-memory) is a follow-up; see todo/tier5-vm-lifecycle.md.
+        # --timeout is load-bearing: `qemu-agent-command` BLOCKS by default, so a
+        # guest whose qga has gone unresponsive (a dying/OOMing guest is exactly
+        # the case that matters) would hang this loop forever and the
+        # domstate-based reap above could never fire. Bounding it lets the next
+        # iteration's domstate check catch a stopped/gone guest instead.
+        es=$(run_as_admin virsh qemu-agent-command --timeout 5 "$VM_NAME" \
+             "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$GUEST_PID}}" 2>&1)
+        if printf '%s' "$es" | grep -qE '"exited"[[:space:]]*:[[:space:]]*true'; then
+            echo "[tier5] published app (pid=$GUEST_PID) exited; reaping $VM_NAME" >&2
+            break
+        elif printf '%s' "$es" | grep -qiE 'PID [0-9]+ does not exist|does not exist'; then
+            # The guest agent REAPS a finished guest-exec entry the first time its
+            # terminal status is read, after which status calls for that PID return
+            # "PID N does not exist". So a missing-PID for OUR known GUEST_PID also
+            # means the app exited — covering the race where we miss the single
+            # "exited":true (e.g. a --timeout firing exactly as qga reaped it).
+            # Require 2 CONSECUTIVE so a one-off blip can't reap a live app; a
+            # generic qga timeout/outage is NOT this error, resets the counter,
+            # and is left to the domstate path above (guest death) to handle.
+            exec_gone=$((exec_gone + 1))
+            if [ "$exec_gone" -ge 2 ]; then
+                echo "[tier5] published app (pid=$GUEST_PID) reaped by qga (no longer tracked); reaping $VM_NAME" >&2
+                break
+            fi
+        else
+            exec_gone=0
+        fi
         sleep 2
     done
-    echo "[tier5] tier-5 domain $VM_NAME stopped" >&2
+    echo "[tier5] $VM_NAME wait loop ended; cleanup will destroy+undefine+unlink" >&2
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     exit 0
 else
