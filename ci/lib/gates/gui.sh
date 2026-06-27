@@ -157,12 +157,49 @@ Rules:
 - Use VMNAME=$vm.
 - Execute setup, steps, assertions, and cleanup serially.
 - Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
-- If the failure is a missing qdwin/Wayland protocol, point at qdwin or libweston integration, not a qdshell workaround.
+- Diagnose your OWN tooling before blaming the product:
+  - First confirm your setup/driver commands actually executed. A shell
+    parser/usage error from one of your own commands (e.g. \`option requires an
+    argument\`, \`unexpected EOF\`, \`syntax error near\`) is a tooling error on
+    your side — fix and re-issue the command; do NOT record a product FAIL on
+    that basis.
+  - Treat an empty IPC response as inconclusive until you retry it or a nonzero
+    command result explains it — not as proof the compositor is broken.
+  - If you cannot get your own driver commands to run, record ERROR, not FAIL.
+  - Only attribute a failure to qdwin/Wayland/libweston after an IPC call
+    returned a valid response or a failure code proving it reached that layer.
 
 Start by reading:
 - \`$scenario\`
 - \`$(dirname "$scenario")/AGENTS.md\` if present, otherwise the closest parent AGENTS.md.
 EOF
+    # Optional verbose-debug appendix (QCI_GUI_DEBUG=1). Triage aid: have the
+    # agent capture the exact command/stderr at the point of any failure and a
+    # precise root-cause verdict, so we can tell agent-weakness from a real
+    # test/product defect. Off by default — never affects normal grading prompts.
+    if [ "${QCI_GUI_DEBUG:-0}" = 1 ]; then
+        cat >> "$prompt" <<EOF
+
+## DEBUG MODE (verbose triage — this run only)
+
+Produce a CONCISE debug log at \`$artifact_dir/debug.md\` IN ADDITION to
+status.txt. WRITE status.txt FIRST as soon as you have a verdict, THEN expand
+debug.md — never let debugging consume your whole budget and leave no verdict.
+Keep it focused (do NOT paste full output of every command — that is too slow):
+- At the FIRST point anything goes wrong, capture just that: the exact failing
+  command, its rc, the relevant stderr/journal lines, and one screenshot. Label
+  it "FAILURE POINT". One failure point is enough; do not keep probing forever.
+- Classify the failure into ONE of: (a) AGENT-TOOLING — your own command was
+  malformed/quoted wrong; (b) PRECONDITION — a required app/service/image/env is
+  missing on this VM (SKIP/ERROR, not a product bug); (c) STALE-ASSERTION — the
+  scenario asserts an outdated name/value but the product behaves correctly;
+  (d) TEST-RACE — a timing/ordering bug in the scenario, not the product;
+  (e) PRODUCT-DEFECT — a genuine qdwin/qdshell/qdlocker bug. One sentence of
+  evidence for the choice.
+- If a weaker model previously failed this scenario, state in one line whether
+  YOU got past that step and what you did differently.
+EOF
+    fi
 }
 
 agent_artifact_status() {
@@ -258,6 +295,10 @@ gui_agent_verdict() {
 #   product-fail      status=FAIL   (agent ran the asserts; one failed)       NEVER retry
 #   product-error     status=ERROR  (agent couldn't set up preconditions)     NEVER retry
 #   no-verdict        UNKNOWN:0      (agent exited clean with no verdict)      NEVER retry
+#   agent-tooling     status=FAIL + an unambiguous SHELL COMMAND-CONSTRUCTION
+#                     error in the agent's OWN driver commands (malformed bash/sh
+#                     -c wrapper, unterminated quote): the FAIL is NOT a trustworthy
+#                     product result because the assertion target never ran.  retriable
 #   transport-timeout UNKNOWN + rc=124 + an unambiguous qemu GUEST-AGENT
 #                     CONNECTIVITY-loss marker in the log (the host could not talk
 #                     to the guest agent AT ALL) — pure INFRA                retriable
@@ -272,11 +313,16 @@ gui_agent_verdict() {
 # Keying on the PARSED status=UNKNOWN (not merely "no status.txt") is deliberate:
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
 # infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
-# Args: status agent_rc transport_marker(0/1)
+# Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
 gui_classify_failure() {
-    local status=$1 rc=$2 transport=$3
+    local status=$1 rc=$2 transport=$3 tooling=${4:-0}
     case "$status" in
-        FAIL)  printf 'product-fail';  return ;;
+        FAIL)
+            # A FAIL whose evidence shows the agent's OWN command was malformed is
+            # not a trustworthy product result (the assertion target never ran).
+            # Only status=FAIL is flipped — ERROR/PASS/SKIP/UNKNOWN are untouched.
+            if [ "$tooling" = 1 ]; then printf 'agent-tooling'; else printf 'product-fail'; fi
+            return ;;
         ERROR) printf 'product-error'; return ;;
         UNKNOWN)
             if [ "$rc" = 0 ]; then printf 'no-verdict'; return; fi
@@ -294,8 +340,34 @@ gui_classify_failure() {
 # Args: classifier
 gui_classifier_retriable() {
     case "$1" in
-        transport-timeout) return 0 ;;
+        transport-timeout|agent-tooling) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# Pure: map the QCI_GUI_RETRY knob to a MAX retry count (the number of ADDITIONAL
+# fresh-VM attempts allowed after the first). Report-only when 0:
+#   ''|0|off|false|no       -> 0   (report-only; record `would-retry`, do not re-run)
+#   on|classified|true|yes  -> 1   (back-compat with the original boolean knob)
+#   a bare non-negative int -> itself, capped at GUI_RETRY_CAP (runaway backstop)
+#   anything else           -> 0   (fail safe: an unparseable knob never retries)
+# Each retried attempt is still gated on the per-attempt classifier staying
+# retriable, so a retry that surfaces a genuine product-fail stops the loop —
+# the count is only the CEILING, never a guarantee of N reruns. Pure (args only)
+# => host-testable (gui-retry-classify.bats).
+GUI_RETRY_CAP=${GUI_RETRY_CAP:-5}
+gui_retry_max() {
+    case "$1" in
+        ''|0|off|false|no) printf '0' ;;
+        on|classified|true|yes) printf '1' ;;
+        *)
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                local n=$1
+                [ "$n" -gt "$GUI_RETRY_CAP" ] && n=$GUI_RETRY_CAP
+                printf '%s' "$n"
+            else
+                printf '0'
+            fi ;;
     esac
 }
 
@@ -312,6 +384,32 @@ gui_detect_transport_marker() {
     [ -f "$log_path" ] || return 1
     grep -qEi \
         'guest agent is not responding|qemu guest agent is not (connected|running)|guest-agent-not-responding|guest agent channel|agent unreachable|cannot connect to .*qemu.*agent' \
+        "$log_path" 2>/dev/null
+}
+
+# Host-side: does the agent log show an unambiguous SHELL COMMAND-CONSTRUCTION
+# error in the agent's OWN driver commands — i.e. the agent emitted a malformed
+# `bash -c`/`sh -c` wrapper or an unterminated/unbalanced quoted string, so the
+# command never validly ran? This is the discriminator that distinguishes
+# "agent botched its own tooling and then declared FAIL" (NOT a trustworthy
+# product result) from "agent ran the asserts and one genuinely failed".
+#
+# The marker set is deliberately TIGHT and ANCHORED: a matching line must BEGIN
+# with a real shell-stderr prefix (`bash:`/`sh:`/`dash:`/`/bin/sh:` …, optional
+# `[pid]`) AND carry one of a small set of parser/usage diagnostics. The anchor
+# is load-bearing: the de-biased agent prompt now *teaches* phrases like
+# "option requires an argument", so an agent merely quoting/discussing one in its
+# narrative (or a product log echoing it) must NOT flip a genuine status=FAIL to
+# retriable — only an actual shell emitting the diagnostic at the start of a line
+# counts. It deliberately does NOT match broad patterns like `command not found`
+# or a bare `No such file or directory`, which a real guest-side product/script
+# problem can legitimately produce. Reads the log file; returns 0 when a
+# command-construction marker is present.
+gui_detect_agent_tooling_marker() {
+    local log_path=$1
+    [ -f "$log_path" ] || return 1
+    grep -qE \
+        '^[[:space:]]*(bash|sh|dash|/bin/sh|/bin/bash|/usr/bin/sh|/usr/bin/bash)(\[[0-9]+\])?:.*(-c: option requires an argument|unexpected EOF while looking for matching|syntax error near unexpected token|[Ss]yntax error: [Uu]nterminated quoted string)' \
         "$log_path" 2>/dev/null
 }
 
@@ -461,10 +559,15 @@ gui_run_scenario() {
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
-    local classifier="" transport=0
+    local classifier="" transport=0 tooling=0
+    # Preserve the FIRST attempt's rc: the retry note + flake ledger below must
+    # report the real cause, not a hard-coded 124. agent-tooling fails typically
+    # carry rc=1, not the 124 that the transport-timeout path assumed.
+    local agent_rc1=$agent_rc
     if [ "$verdict" = fail ]; then
         gui_detect_transport_marker "$log_path" && transport=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport")
+        gui_detect_agent_tooling_marker "$log_path" && tooling=1
+        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling")
     fi
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
@@ -472,56 +575,76 @@ gui_run_scenario() {
     record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
-    # retriable INFRA signature (only transport-timeout — agent-timeout is
-    # excluded as a product-hang masking risk) either records a `would-retry`
-    # flake row (report-only) or, when QCI_GUI_RETRY is enabled AND this is a
-    # disposable (own) VM, runs EXACTLY ONE more attempt on a FRESH VM. A retried
-    # pass always emits a flake.tsv row + a note on the result row, so a retry can
-    # never silently turn a flake green. status=FAIL/ERROR is never retried.
-    local retry_enabled=0
-    case "${QCI_GUI_RETRY:-0}" in 1|on|classified|true) retry_enabled=1 ;; esac
+    # retriable signature (transport-timeout or agent-tooling — agent-timeout and
+    # any product-fail/error are excluded as masking risks) either records a
+    # `would-retry` flake row (report-only) or, when QCI_GUI_RETRY enables it AND
+    # this is a disposable (own) VM, runs UP TO N more attempts on FRESH VMs
+    # (N = gui_retry_max). The loop re-classifies after EACH attempt and stops the
+    # moment a verdict is no longer fail-and-retriable: a retry that surfaces a
+    # genuine product-fail is adopted immediately and never re-rolled, so extra
+    # retries can never flake-pass a real product bug. Every retry emits an
+    # attempt row, and a retried run always emits a flake.tsv row + a note on the
+    # result, so a retry can never silently turn a flake green.
+    local retry_max
+    retry_max=$(gui_retry_max "${QCI_GUI_RETRY:-0}")
     if [ "$verdict" = fail ] && [ "$own" = 1 ] && gui_classifier_retriable "$classifier"; then
-        if [ "$retry_enabled" = 1 ]; then
-            log "agent scenario $rel: retriable infra signature ($classifier); one retry on a fresh VM"
-            collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
-            release_vm "$vm" "$EXIT_GUI"
-            # Attempt 2 writes to its OWN log + artifact dir so the first attempt's
-            # evidence (the basis for the retriable classification) is preserved
-            # and the second agent starts from a clean status/report dir.
-            local vm2 ta2 ta3 status2 verdict2 note2 classifier2="" transport2=0
-            local log_path2="${log_path%.agent.log}.retry.agent.log"
-            local adir2="${adir}.retry"
-            mkdir -p "$adir2"
-            vm2=$(acquire_vm "$gate_name" "")
-            if [ -n "$vm2" ]; then
-                vm=$vm2
-                write_agent_prompt "$vm2" "$scenario" "$prompt" "$adir2"
-                install_gui_waiters "$vm2" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+        if [ "$retry_max" -ge 1 ]; then
+            # Snapshot the FIRST attempt's evidence — the basis for the retriable
+            # classification and the audit trail that makes retry acceptable.
+            local log_path_base=$log_path first_classifier=$classifier first_status=$status
+            local attempt=0 provision_failed=0
+            while [ "$attempt" -lt "$retry_max" ] \
+                  && [ "$verdict" = fail ] \
+                  && gui_classifier_retriable "$classifier"; do
+                attempt=$((attempt + 1))
+                local ordinal=$((attempt + 1))   # attempt-2 is the first retry
+                log "agent scenario $rel: retriable signature ($classifier); retry $attempt/$retry_max on a fresh VM"
+                collect_vm_artifacts "$vm" "gui-$(safe_name "$rel")"
+                release_vm "$vm" "$EXIT_GUI"
+                vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
+                # Each retry writes to its OWN log + artifact dir so every attempt's
+                # evidence is preserved and each fresh agent starts clean.
+                local vmN logN adirN tsa tsb statusN verdictN noteN classifierN transportN toolingN
+                logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
+                adirN="${adir%.retry*}.retry${attempt}"
+                mkdir -p "$adirN"
+                vmN=$(acquire_vm "$gate_name" "")
+                if [ -z "$vmN" ]; then
+                    log "agent scenario $rel: retry $attempt VM provision failed; keeping the previous verdict"
+                    record_flake "$rel" "$first_classifier" "$first_status" "$agent_rc1" "" "$ordinal" retry-vm-provision-failed "$log_path_base"
+                    provision_failed=1
+                    break
+                fi
+                vm=$vmN; vm_live=1
+                write_agent_prompt "$vmN" "$scenario" "$prompt" "$adirN"
+                install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
                 record_host_load gui "$rel" start
-                ta2=$(date +%s); run_agent_command "$prompt" "$log_path2"; agent_rc=$?; ta3=$(date +%s)
+                tsa=$(date +%s); run_agent_command "$prompt" "$logN"; agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
-                status2=$(agent_artifact_status "$adir2" "$log_path2")
-                IFS=$'\t' read -r verdict2 note2 < <(gui_agent_verdict "$status2" "$agent_rc")
-                if [ "$verdict2" = fail ]; then
-                    gui_detect_transport_marker "$log_path2" && transport2=1
-                    classifier2=$(gui_classify_failure "$status2" "$agent_rc" "$transport2")
+                statusN=$(agent_artifact_status "$adirN" "$logN")
+                transportN=0; toolingN=0; classifierN=""
+                IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
+                if [ "$verdictN" = fail ]; then
+                    gui_detect_transport_marker "$logN" && transportN=1
+                    gui_detect_agent_tooling_marker "$logN" && toolingN=1
+                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN")
                 fi
-                record_attempt gui "$rel" 2 "$status2" "$agent_rc" "$classifier2" "$((ta3 - ta2))" "$vm2" "$log_path2"
-                if [ "$verdict2" = fail ]; then
-                    # Final verdict + evidence come from attempt 2 — adopt its note
-                    # (prefixed with the first classifier) so the result row is not
-                    # internally inconsistent.
-                    note="classified retry failed: first_classifier=$classifier first_rc=124; final: $note2"
-                    record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-fail "$log_path"
+                record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN"
+                # Promote this attempt as the new current state; the loop guard
+                # re-evaluates verdict+classifier to decide whether to keep going.
+                status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
+            done
+            # Summarize the retried run (skip when we bailed on a provision failure,
+            # which already recorded its own flake row).
+            if [ "$attempt" -ge 1 ] && [ "$provision_failed" = 0 ]; then
+                local total=$((attempt + 1))
+                if [ "$verdict" = fail ]; then
+                    note="classified retry exhausted: first_classifier=$first_classifier first_rc=$agent_rc1 attempts=$total; final: $note"
+                    record_flake "$rel" "$first_classifier" "$first_status" "$agent_rc1" "$status" "$total" retried-fail "$log_path_base"
                 else
-                    note="classified flake: classifier=$classifier first_rc=124 attempts=2; $note2"
-                    record_flake "$rel" "$classifier" "$status" "124" "$status2" 2 retried-pass "$log_path"
+                    note="classified flake: classifier=$first_classifier first_rc=$agent_rc1 attempts=$total; $note"
+                    record_flake "$rel" "$first_classifier" "$first_status" "$agent_rc1" "$status" "$total" retried-pass "$log_path_base"
                 fi
-                status=$status2; verdict=$verdict2; log_path=$log_path2
-            else
-                log "agent scenario $rel: retry VM provision failed; keeping the first verdict"
-                record_flake "$rel" "$classifier" "$status" "$agent_rc" "" 1 retry-vm-provision-failed "$log_path"
-                vm_live=0   # the first VM was already collected+released above
             fi
         else
             # Report-only (default): record what WOULD be retried, do not re-run.

@@ -72,13 +72,125 @@ setup() {
     [ "$(gui_classify_failure UNKNOWN 1 1)" = unknown ]
 }
 
-@test "classifier_retriable: only transport-timeout is retriable" {
+@test "classifier_retriable: only transport-timeout and agent-tooling are retriable" {
     for c in product-fail product-error no-verdict agent-timeout unknown ""; do
         run gui_classifier_retriable "$c"
         [ "$status" -ne 0 ]
     done
     run gui_classifier_retriable transport-timeout
     [ "$status" -eq 0 ]
+    run gui_classifier_retriable agent-tooling
+    [ "$status" -eq 0 ]
+}
+
+# --- agent-tooling: a FAIL whose evidence shows the agent's OWN command was
+# malformed is not a trustworthy product result. ONLY status=FAIL is flipped. ---
+
+@test "classify: FAIL + agent-tooling marker -> agent-tooling (retriable)" {
+    [ "$(gui_classify_failure FAIL 1 0 1)" = agent-tooling ]
+    run gui_classifier_retriable agent-tooling
+    [ "$status" -eq 0 ]
+}
+
+@test "classify: FAIL + NO tooling marker -> product-fail (unchanged default)" {
+    [ "$(gui_classify_failure FAIL 1 0 0)" = product-fail ]
+    # The 4th arg defaults to 0, so the historic 3-arg call is unaffected.
+    [ "$(gui_classify_failure FAIL 1 0)" = product-fail ]
+}
+
+@test "classify: ERROR + tooling marker stays product-error (only FAIL is flipped)" {
+    [ "$(gui_classify_failure ERROR 1 0 1)" = product-error ]
+}
+
+@test "classify: UNKNOWN:124 + tooling marker but no transport marker is NOT agent-tooling" {
+    # A timeout with no connectivity loss is agent-timeout regardless of any
+    # tooling string; the tooling flip applies only to an explicit status=FAIL.
+    [ "$(gui_classify_failure UNKNOWN 124 0 1)" = agent-timeout ]
+}
+
+@test "classify: transport marker still wins for UNKNOWN:124 even with tooling marker" {
+    [ "$(gui_classify_failure UNKNOWN 124 1 1)" = transport-timeout ]
+}
+
+# --- gui_detect_agent_tooling_marker: log scan ---
+
+@test "tooling marker: detects 'bash: -c: option requires an argument'" {
+    local log="$BATS_TEST_TMPDIR/t.log"
+    printf '[vm-exec] --- stderr ---\nbash: -c: option requires an argument\n' > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "tooling marker: detects an unterminated quoted string / unexpected EOF" {
+    local log="$BATS_TEST_TMPDIR/t2.log"
+    echo "bash: -c: line 1: unexpected EOF while looking for matching \`\"'" > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "tooling marker: an ordinary assertion FAIL log is NOT a tooling marker" {
+    # A genuine product FAIL that merely reports a missing event must NOT be
+    # mistaken for an agent command-construction error.
+    local log="$BATS_TEST_TMPDIR/t3.log"
+    printf 'Assert 2.1: FAIL: No request_close event found for handle 13\n' > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "tooling marker: a bare 'command not found' is NOT a tooling marker (too broad)" {
+    local log="$BATS_TEST_TMPDIR/t4.log"
+    echo "foo: command not found" > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "tooling marker: a PROSE mention of a diagnostic does NOT match (anchor)" {
+    # The de-biased prompt teaches these exact phrases, so an agent quoting one in
+    # its narrative (not a real shell stderr line) must NOT flip a product FAIL.
+    local log="$BATS_TEST_TMPDIR/t5.log"
+    printf 'I checked for "syntax error near unexpected token" but found none.\n' > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -ne 0 ]
+    # And a FAIL note that merely repeats "option requires an argument" in prose.
+    printf 'Note: the docs warn that -c with no option requires an argument later.\n' > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "tooling marker: a real /bin/sh-prefixed dash syntax error matches" {
+    local log="$BATS_TEST_TMPDIR/t6.log"
+    echo "sh: 1: Syntax error: Unterminated quoted string" > "$log"
+    run gui_detect_agent_tooling_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "tooling marker: missing log file is not a marker" {
+    run gui_detect_agent_tooling_marker "$BATS_TEST_TMPDIR/nope.log"
+    [ "$status" -ne 0 ]
+}
+
+# --- gui_retry_max: QCI_GUI_RETRY knob -> max additional attempts ---
+
+@test "retry_max: disabled values map to 0 (report-only)" {
+    for v in "" 0 off false no bogus; do
+        [ "$(gui_retry_max "$v")" = 0 ]
+    done
+}
+
+@test "retry_max: legacy boolean truthy values map to 1" {
+    for v in on classified true yes 1; do
+        [ "$(gui_retry_max "$v")" = 1 ]
+    done
+}
+
+@test "retry_max: a bare integer passes through" {
+    [ "$(gui_retry_max 2)" = 2 ]
+    [ "$(gui_retry_max 3)" = 3 ]
+}
+
+@test "retry_max: an oversized integer is capped at GUI_RETRY_CAP" {
+    GUI_RETRY_CAP=5
+    [ "$(gui_retry_max 99)" = 5 ]
 }
 
 # --- gui_detect_transport_marker: log scan ---
