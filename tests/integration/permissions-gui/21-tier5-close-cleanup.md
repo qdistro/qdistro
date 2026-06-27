@@ -1,17 +1,25 @@
 # 21 — closing a tier-5 toplevel tears down the guest VM cleanly
 
-**What**: bring up a tier-5 `--vm` weston-terminal, click the close
-button on its title bar (or close via the taskbar context menu),
-verify the inner app exits AND the per-app guest VM domain is
-destroyed + undefined AND the per-VM overlay qcow2 is unlinked. No
-orphans.
+**What**: bring up a tier-5 `--vm` weston-terminal, drive
+`Qdwin.closeWindow(handle)` through qdshell's IPC (the same supported
+test surface scenario 17 uses), verify the inner app exits AND the
+per-app guest VM domain is destroyed + undefined AND the per-VM
+overlay qcow2 is unlinked. No orphans.
 
 **Why**: this is the orphan-resource budget for tier-5. Anything
 left around after the toplevel goes away is a leak (libvirt
 domain, qcow2 disk, dangling waypipe processes). The bats variant
 `tests/integration/vm/s48-tier5-close-cleanup.sh` SIGTERMs the
-wrapper directly — here we exercise the actual user-visible close
-path through qdwin's title-bar chrome.
+wrapper directly; here we exercise the `xdg_toplevel.close` path —
+qdshell's binding issues `qdwin_shell_v1.request_close`, qdwin relays
+the close through waypipe to the tier-5 inner app, and the toplevel
+is torn down. The close is driven by IPC, **not** by agent-clicking
+the title-bar glyph: clicking depends on OCR aim and on the idle
+locker not stealing the frame, so a missed click was historically
+mis-read as "window persists after close". The IPC path removes both
+variables, so a toplevel that survives the close is an unambiguous
+product signal. The title-bar chrome close button itself is covered
+separately by `qdwin/tests/gui/08-titlebar-close-button.md`.
 
 ## Setup
 
@@ -25,6 +33,36 @@ $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
 $VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier5-vm'
+
+# qs_ipc <method> [args...] — call a qdwin IPC method on the running qdshell,
+# mirroring scenario 17's proven `ipc_vm` shape: runuser -u admin -- env …
+# WAYLAND_DISPLAY=wayland-1 qs ipc -p PATH call qdwin …. Falls back to PID
+# targeting when the -p path lookup can't find the -p-launched instance (the
+# fallback scenario 17 found is sometimes needed — without it a healthy binding
+# can read as "no running instance").
+QS_PATH=/usr/share/quickshell/qdshell
+qs_ipc() {
+    local out
+    out=$($VMEXEC "$VM" \
+        "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+         qs ipc -p $QS_PATH call qdwin $*" 2>&1)
+    if printf '%s' "$out" | grep -qiE 'no running instance|No such'; then
+        local pid
+        pid=$($VMEXEC "$VM" \
+            "pgrep -u admin -f 'qs -p $QS_PATH' | while read p; do \
+               grep -q dbus-run-session /proc/\$p/cmdline 2>/dev/null || { echo \$p; break; }; done")
+        [ -n "$pid" ] || { printf '%s\n' "$out"; return 1; }
+        out=$($VMEXEC "$VM" \
+            "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+             qs ipc --pid $pid call qdwin $*" 2>&1)
+    fi
+    printf '%s\n' "$out"
+}
+
+# Binding preflight: if the qdwin IPC binding isn't reachable, the close path
+# can't be driven — that's an ERROR (setup), never a product close-cleanup FAIL.
+qs_ipc capabilities | grep -q 'bound=true' \
+    || { echo "ERROR: qs ipc bridge or qdwin binding not reachable (bound!=true)"; exit 2; }
 
 VM5="qdistro-tier5-s21-$RANDOM"
 echo "VM5=$VM5"
@@ -105,7 +143,10 @@ if [ "$mapped" != 1 ]; then
 fi
 
 # qdwin emitted `mapped handle=$handle` for our toplevel — it has painted its
-# first frame. Now capture the visual frame for the assertion.
+# first frame. Persist the handle so S2 doesn't depend on the shell variable
+# surviving across fenced blocks (the runner does not guarantee one persistent
+# shell). Then capture the visual frame for the assertion.
+printf '%s' "$handle" > /tmp/s21-handle
 sleep 1
 $VMGUI "$VM" screenshot /tmp/s21-running.png
 ```
@@ -121,32 +162,69 @@ ran, died, or never mapped), record ERROR (not FAIL): the close path
 can't be exercised without something to close. The echoed reason
 distinguishes a real nested-guest death from a slow/absent map.
 
-### S2 — click the close button on the title bar
+### S2 — drive request_close via qdshell IPC (deterministic)
 
-qdwin chromes tier-5 toplevels with `zxdg_decoration_manager_v1` in
-server-side mode (per `qdwin/qdwin.c:62b2702`). The close button is
-in the top-right corner of the title bar. OCR-find it (typically a
-`×` glyph or labelled "Close" — depends on theme).
+Close the tier-5 toplevel through `Qdwin.closeWindow(handle)` — the
+supported Quickshell IPC surface, exactly as scenario 17 drives it —
+not by clicking the title-bar glyph. `$handle` is the tier-5
+toplevel handle the S1 readiness gate already learned.
 
 ```bash
-# Runner: read /tmp/s21-running.png, locate the close button on the
-# tier-5 toplevel's title bar, click it.
-$VMGUI "$VM" click <close_x> <close_y>
+handle=$(cat /tmp/s21-handle 2>/dev/null)
+[ -n "$handle" ] || { echo "ERROR: no tier-5 handle persisted from S1 (cannot drive close)"; exit 2; }
+
+# Journal cursor BEFORE the close so the asserts below cannot match a stale
+# request_close/toplevel_removed from S1 or a prior attempt.
+CUR2=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+  journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")
+
+# Drive close via the qdwin IPC binding (qs_ipc handles the -p / --pid fallback).
+qs_ipc closeWindow "$handle" \
+  || echo "WARN: qs ipc closeWindow returned nonzero (see binding preflight)"
+
+# Mechanically check BOTH product markers — do NOT rely on the screenshot:
+#   request_seen — qdshell issued request_close (proves the IPC reached qdwin);
+#                  for a tier-5 proxy this is the `(nested-proxy: …)` variant.
+#   removed      — the tier-5 toplevel actually went away within ~5s.
+# This split is the whole diagnostic: removed without request_seen would be an
+# app that exited on its own, not a close we drove.
+request_seen=0; removed=0
+for _ in $(seq 1 10); do
+    if [ "$request_seen" = 0 ] && $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        journalctl --user --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
+        | grep -qE 'qdwin: request_close handle=$handle( |\$)'"; then
+        request_seen=1
+    fi
+    if $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        journalctl --user --after-cursor '$CUR2' --no-pager -o cat 2>/dev/null \
+        | grep -qE 'qdwin: toplevel_removed handle=$handle( |\$)'"; then
+        removed=1; break
+    fi
+    sleep 0.5
+done
+echo "request_seen=$request_seen removed=$removed"
 sleep 1
 $VMGUI "$VM" screenshot /tmp/s21-after-close.png
 ```
 
-**Assert** (agent-visual): `/tmp/s21-after-close.png` no longer
-shows the weston-terminal window. The taskbar/dock has no entry
-for `[tier5:$VM5]`.
+**Assert (2.1):** `request_seen=1` — a `qdwin: request_close handle=$handle`
+line appeared after `$CUR2` (the `(nested-proxy: fired close_requested)`
+variant for tier-5), so qdshell's binding issued `qdwin_shell_v1.request_close`
+and it reached the compositor. **If `request_seen=0`** (and `qs ipc` warned
+nonzero), this is an IPC/binding ERROR, not a product FAIL — re-check the
+`qs_ipc capabilities`→`bound=true` preflight; do NOT bank a product result.
+**Assert (2.2):** `removed=1` — a `qdwin: toplevel_removed handle=$handle`
+line appeared within ~5s — the tier-5 inner app received `xdg_toplevel.close`
+through waypipe and exited cleanly, and qdwin tore the proxy toplevel down.
+**If `request_seen=1` but `removed=0`**, the close request reached the
+compositor but the tier-5 inner app never closed: that is the genuine tier-5
+close/cleanup defect this scenario guards — record FAIL with the
+`--after-cursor "$CUR2"` journal slice as evidence, NOT a missed-click ERROR.
+**Assert (2.3, soft):** `/tmp/s21-after-close.png` no longer shows the
+weston-terminal window, and the taskbar/dock has no `[tier5:$VM5]` entry.
 
-If the close glyph is not detectable, fallback to a context-menu
-close: right-click the toplevel's title bar → "Close" entry. Apply
-the same screenshot-after assertion.
-
-The bats variant `s48-tier5-close-cleanup.sh` exercises the same
-trap via SIGTERM directly; it's the regression net underneath this
-scenario.
+The bats variant `s48-tier5-close-cleanup.sh` exercises the same trap
+via SIGTERM directly; it's the regression net underneath this scenario.
 
 ### S3 — verify the wrapper exited
 
@@ -196,8 +274,12 @@ $VMEXEC "$VM" "pkill -u root -f \"spawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
 
 ## Known caveats
 
-- **Title-bar close button position** depends on the active qdshell
-  theme. OCR/vision identification, NOT hard-coded pixel offsets.
+- **IPC binding must be reachable**: `qs ipc -p $QS_PATH call qdwin
+  closeWindow` needs the qdwin binding bound (`qs ipc capabilities`
+  reporting `bound=true`, as scenario 16/17 assert). If the call
+  returns nonzero or no `request_close` line appears (2.1 silent),
+  that's an IPC/binding failure, not a close-cleanup defect — re-check
+  the binding before reading the result as a product FAIL.
 - **xdg_toplevel.close semantics**: weston-terminal listens for
   the close request and exits cleanly. Some inner apps ignore the
   request — for those, the scenario falls back to forcing the close
