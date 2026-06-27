@@ -19,6 +19,30 @@ git clone https://codeberg.org/qdistro/qdwin.git
 git clone https://codeberg.org/qdistro/qdshell.git
 ```
 
+(The "no system install required" above is about the repo *layout* — siblings
+are found by relative path, with no env vars. The build *toolchain* below still
+has to be on the host.)
+
+### Host build prerequisites
+
+The build steps assume these tools are on `PATH`:
+
+- **meson** + **ninja** + **pkg-config** — build the qdwin compositor and the C
+  daemons.
+- **Python 3** + **pytest** — headless unit tests.
+- **npm** — WebExtension tests/builds.
+
+`qdistro/ci/bin/qci preflight` checks the build/lint tools it can (meson, ninja,
+pkg-config, npm, ruff, mypy) plus virsh/KVM/VM tooling, and reports any that are
+missing. It records optional tools (meson included) as skip/warn rather than
+failing — the hard failure surfaces later in `qci host`, where the qdwin/qdshell
+`meson setup && compile` rows error out if meson isn't installed. (pytest is not
+a preflight check; it runs as part of the host test step.)
+
+> On hosts where the distro forbids a system `pip install` of meson (PEP 668),
+> either install the packaged meson (e.g. `meson` 1.x from the distro) or build
+> through a throwaway venv (`python -m venv` then `pip install meson`).
+
 Build order (from the parent `qdistro-org/` directory):
 
 ```sh
@@ -258,9 +282,21 @@ format:
 
 ## Lint / format
 
-- **`ruff`** for both linting and formatting.
-- **`mypy`** optional; add if typing needs are complex.
-- Don't add black or flake8 — ruff covers both.
+Per language, the linters used across the tree (all run by `qci lint` /
+`qci host`, and worth running locally before a push):
+
+- **Python** — **`ruff`** for both linting and formatting. **`mypy`** optional;
+  add if typing needs are complex. Don't add black or flake8 — ruff covers both.
+- **Bash** — **`shellcheck`**. The `qci lint` gate runs it warn-by-default (a
+  missing shellcheck is a skip, not a failure); keep new scripts clean.
+- **QML** (qdshell) — **`qmllint`** against `qdshell/.qmllint.ini` (run by
+  `qdshell/scripts/ci-local.sh`, which `qci host` invokes). Host `qmllint`
+  can't resolve the Quickshell `qs.*` modules, so `.qmllint.ini` disables the
+  resulting import/unqualified-access/missing-property cascade; real type
+  coverage over resolving `qs.*` types happens at runtime in the VM via
+  qmltestrunner (and the gui gate).
+- **bats** — `qci lint` also does a bats-syntax parse pass over every
+  `*.bats` file.
 
 ## Editor / agent LSP setup (optional)
 
