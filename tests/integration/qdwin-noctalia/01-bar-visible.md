@@ -35,7 +35,7 @@ noct_screenshot_awake /tmp/01-step1-baseline.png
 
 **Assert (1.1):** the screenshot resolution is 1920×1080.
 **Assert (1.2):** the top 31 px contain visible non-black pixels —
-this is the Noctalia bar (`noctalia-bar-content` layer surface).
+this is the Noctalia bar (`qdshell-bar-content` layer surface).
 A simple check: pick row y=15, count distinct colors > 5.
 **Assert (1.3):** the bottom 80% of the image (y >= 216) contains
 the Noctalia owl/moon wallpaper or a uniform configured background.
@@ -49,9 +49,9 @@ the Noctalia owl/moon wallpaper or a uniform configured background.
 ```
 
 **Assert (2.1):** at least one `qdwin: layer-shell mapped
-ns=noctalia-bar-content-` line is present.
+ns=qdshell-bar-content-` line is present.
 **Assert (2.2):** at least one `qdwin: layer-shell mapped
-ns=noctalia-wallpaper-` line is present.
+ns=qdshell-wallpaper-` line is present.
 **Assert (2.3):** zero lines matching `error <N>:` from any
 `zwlr_layer_*` interface in the captured log.
 
