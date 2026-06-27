@@ -242,6 +242,39 @@ install_gui_waiters() {
         >/dev/null 2>&1
 }
 
+# Best-effort: keep the qdlocker idle lock from firing mid-scenario on long agent
+# GUI runs. A multi-minute agent session otherwise trips the production 5-minute
+# idle lock; the lock screen then appears mid-run and the agent burns its whole
+# budget fighting it instead of testing the scenario (observed in apps/10 and
+# permissions-gui/21, where the "app" screenshots were actually the lock screen).
+#
+# Installs the SAME 24h-idle dropin that qdlocker_prepare_gui_lane uses
+# (90-ci-gui.conf), but for EVERY agent GUI VM — not just the qdlocker scenarios
+# that source qdlocker-helpers.sh. The 90- prefix sorts BEFORE the `idle.conf`
+# that the dedicated idle scenarios (qdlocker/03-idle-lock-trigger,
+# 04-lid-close-lock) write, so those tests' shorter override still wins and the
+# idle path stays under test. Best-effort: no-op when the admin session user is
+# absent, and any reload/restart failure is swallowed so it can't abort a run.
+suppress_idle_lock() {
+    local vm=$1 b64 script
+    script='set -e
+# Only meaningful on a VM that has the admin session user; bail harmlessly
+# otherwise. Create the drop-in dir unconditionally (install -d makes parents),
+# so a VM whose per-user tree is not pre-populated still gets idle suppression.
+id admin >/dev/null 2>&1 || exit 0
+d=/home/admin/.config/systemd/user/qdlocker.service.d
+install -d -m 0755 -o admin -g users "$d"
+cat >"$d/90-ci-gui.conf" <<EOF
+[Service]
+Environment=QDLOCKER_IDLE_MS=86400000
+EOF
+chown admin:users "$d/90-ci-gui.conf"
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || exit 0
+runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart qdlocker.service 2>/dev/null || true'
+    b64=$(printf '%s' "$script" | base64 -w0 2>/dev/null) || b64=$(printf '%s' "$script" | base64 | tr -d '\n')
+    "$VM_TOOLS/vm-exec" "$vm" "printf '%s' '$b64' | base64 -d | bash" >/dev/null 2>&1 || true
+}
+
 # Host-side waiter: retry a guest command over vm-exec until it exits 0 or the
 # deadline passes — the host equivalent of the guest await_* helpers, for
 # host-driven readiness gates. Bounded by the wall clock; on timeout logs the
@@ -542,6 +575,7 @@ gui_run_scenario() {
     # /tmp/qci-gui-waiters.sh (best-effort; a scenario that needs it and lacks it
     # fails its own assertion loudly).
     install_gui_waiters "$vm" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+    suppress_idle_lock "$vm"
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
     ta0=$(date +%s)
@@ -618,6 +652,7 @@ gui_run_scenario() {
                 vm=$vmN; vm_live=1
                 write_agent_prompt "$vmN" "$scenario" "$prompt" "$adirN"
                 install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
+                suppress_idle_lock "$vmN"
                 record_host_load gui "$rel" start
                 tsa=$(date +%s); run_agent_command "$prompt" "$logN"; agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
