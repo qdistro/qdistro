@@ -38,7 +38,7 @@ esac
 # without this, a missing/typo'd command would return empty strings
 # and the equality assertion would silently green-pass.
 SHELL_BASELINE=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 qs ipc -p /usr/share/quickshell/qdshell call qdwin lastOverlayKeys' \
   | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
 if ! [[ "$SHELL_BASELINE" =~ ^[0-9]+$ ]]; then
     echo "ERROR: qs ipc call qdwin lastOverlayKeys did not return 'count=<int>' — got: $SHELL_BASELINE" >&2
@@ -56,7 +56,7 @@ qdwin_chord ctrl alt -- l
 qdlocker_wait_for_lock 5
 qdlocker_ctrl status
 SHELL_AFTER_LOCK=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 qs ipc -p /usr/share/quickshell/qdshell call qdwin lastOverlayKeys' \
   | sed -n 's/.*count=\([0-9]*\).*/\1/p')
 echo "shell overlay_key after-lock=$SHELL_AFTER_LOCK"
 ```
@@ -78,7 +78,7 @@ qdlocker_type_password_chars
 sleep 0.3
 qdlocker_ctrl status
 SHELL_AFTER_TYPING=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  "runuser -l admin -c 'XDG_RUNTIME_DIR=/run/user/1000 qs -p /usr/share/quickshell/qdshell ipc call qdwin lastOverlayKeys'" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 qs ipc -p /usr/share/quickshell/qdshell call qdwin lastOverlayKeys' \
   | sed -n 's/.*count=\([0-9]\+\).*/\1/p')
 # Same numeric-shape guard as setup — defends against silent green-pass
 # if the command starts returning errors mid-test (qdshell restart,
