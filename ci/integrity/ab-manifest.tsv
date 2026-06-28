@@ -1,0 +1,30 @@
+# A/B driver-integrity manifest — consumed by ci/tools/qci-driver-ab.sh
+#
+# Columns (TAB-separated): scenario_path<TAB>expected_verdict
+#   scenario_path    : path relative to the WORKSPACE root (the dir ABOVE the
+#                      qdistro repo) — same form as a qci results.tsv `subject`.
+#   expected_verdict : PASS  — a known-good scenario a faithful driver must pass.
+#                      FAIL  — an integrity TRIPWIRE whose only correct verdict
+#                              is FAIL; a candidate that returns PASS here has
+#                              FALSE-PASSED and is rejected.
+#
+# The PASS rows are the "admin-9" set validated 2026-06-23/06-28 as genuine
+# (non-rubber-stamping) haiku passes. The FAIL rows are the ground-truth
+# negatives that make a driver swap safe (fail-closed grading cannot catch a
+# false-pass on its own). Lines starting with # and blank lines are ignored.
+#
+# Future extension: add a "negated known-good" tripwire (a known-good admin flow
+# with one expected value inverted) to also catch a driver that pattern-matches
+# "admin scenario shape => PASS". Keep any such file under ci/integrity/.
+
+qdistro/tests/integration/permissions-gui/07-cli-roundtrip.md	PASS
+qdistro/tests/integration/permissions-gui/24-rule-allow-no-prompt.md	PASS
+qdistro/tests/integration/permissions-gui/03-qt-admin-app-visual.md	PASS
+qdistro/tests/integration/permissions-gui/06-qt-admin-app-mouse.md	PASS
+qdistro/tests/integration/permissions-gui/10-qt-cache-revoke.md	PASS
+qdistro/tests/integration/permissions-gui/16-realapp-sendto-visual.md	PASS
+qdistro/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md	PASS
+qdistro/tests/integration/permissions-gui/09-tui-broker-offline.md	PASS
+qdistro/tests/integration/permissions-gui/12-cross-user-sendto-visual.md	PASS
+qdistro/ci/integrity/tripwire-deterministic.md	FAIL
+qdistro/ci/integrity/tripwire-visual.md	FAIL
