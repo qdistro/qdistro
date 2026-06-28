@@ -129,9 +129,10 @@ $VMEXEC "$VM" 'test -S /run/user/1000/ydotool.sock' \
 
 > **Budget discipline (this is a heavy tier-2 lane — stay inside the wall clock).**
 > Only **one** screenshot requires visual judgment: `/tmp/s18-launcher-open.png`.
-> Inspect it and decide hard pass criterion 4. Every other hard criterion is a
-> deterministic shell check (S1 `jq`, S4 `journalctl`) — run the command and read
-> its exit status; do not "look" to decide them.
+> Inspect it and decide hard pass criterion 4 (the tier-2 badge). The other hard
+> criteria are deterministic shell checks (S1 `jq`) — run the command and read its
+> exit status; do not "look" to decide them. The S4 `journalctl` grep is a
+> diagnostic NOTE, not a pass criterion.
 >
 > The screenshots `/tmp/s18-launcher-empty.png`, `/tmp/s18-cold-start.png`, and
 > `/tmp/s18-warm.png` are **artifact-only diagnostics**. You MUST still run the
@@ -140,7 +141,8 @@ $VMEXEC "$VM" 'test -S /run/user/1000/ydotool.sock' \
 > those images, and they MUST NOT affect PASS/FAIL.
 >
 > After Setup, S1, the apps.json `jq` assertion, the S2 launcher-open visual
-> assertion, the S3 launch action, and the S4 journal grep have completed, write
+> assertion (the tier-2 badge), the S3 launch action, and the S4 journal grep NOTE
+> have completed, write
 > `status.txt` immediately and STOP — do not continue exploring or collecting
 > extra evidence. (S5 cleanup is best-effort and may be skipped: each scenario
 > runs on a fresh disposable VM.) Spending vision round-trips on the
@@ -200,26 +202,28 @@ $VMGUI "$VM" screenshot /tmp/s18-launcher-open.png
 
 **Assert** (hard, agent-visual): the launcher's app list contains at
 least one `tier2-c-ui` PodApps entry, rendered with the tier-2 silo
-signal the PodApps provider currently emits — the textual silo prefix
-`[tier2/tier2-c-ui]` on the entry label (see qdshell
-`Modules/Panels/Launcher/Providers/PodAppsProvider.qml`).
+signal the PodApps provider currently emits — the pink/magenta square
+tier-2 **badge** on the entry (the delegate-side `modelData.badgeIcon`;
+see qdshell `Modules/Panels/Launcher/Providers/PodAppsProvider.qml` +
+`doc/containers.md`). This is the prominent, agent-readable signal; the
+older `[tier2/tier2-c-ui]` description-line text is only a non-prominent
+stand-in per `doc/containers.md` and is NOT what to look for.
 
-**Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
-the `/tmp/s18-launcher-open.png` you just captured also records the
-not-yet-merged delegate-side badge OVERLAY (the pink/magenta square badge
-driven by `modelData.badgeIcon`). Leave the PNG as an artifact for human
-triage; do not spend a vision round-trip judging the overlay, and never
-fail on it.
+If the badge is genuinely absent on a launcher entry that clearly maps to
+the tier-2 weston-terminal app, fail. A framebuffer too dark to read any
+launcher text is a capture problem, not a missing badge — re-screenshot
+once; do not infer a missing badge from unreadable text.
 
-TODO: re-tighten this into a hard assertion (require the delegate-side silo
-badge overlay from `doc/ui.md` / `doc/containers.md`) once that rendering
-path merges.
+### S3 — launch a podapps entry (diagnostic cold-start exercise)
 
-### S3 — launch a podapps entry (required action for S4's journal event)
-
-The type+Enter here is a **required action**, not a visual check: it launches
-the weston-terminal toplevel whose secctx event S4 asserts on. Run it, then
-capture the cold-start PNG as a diagnostic artifact only.
+The type+Enter here drives the launcher and captures the cold-start PNG as a
+diagnostic artifact. It is NOT a hard assertion: `type "weston-terminal"`+Enter
+selects the top filtered match, and on the tier-5-provisioned image a tier-5
+`weston-terminal` provider entry can outrank the tier-2 PodApps one — so the
+resulting toplevel is not deterministically the tier-2 container. The
+launcher→tier-2-spawn journal contract is covered deterministically by
+`tests/integration/vm/tiered-isolation.bats:phase7-tier2-podman`; here it is
+an artifact-only exercise.
 
 ```bash
 # Type to filter to weston-terminal, then Enter.
@@ -245,13 +249,18 @@ Wait up to 5s, then screenshot again.
 sleep 5
 $VMGUI "$VM" screenshot /tmp/s18-warm.png
 
-# Cross-check journal for the matching secctx event.
-$VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'"
+# Cross-check journal for the matching secctx event (diagnostic NOTE only).
+$VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'" || true
 ```
 
-**Assert** (hard, deterministic): the journal grep must produce at least one
-matching `toplevel_security_context.*tier2-c-ui` line. Read the command's
-exit status — this is a shell check, not a visual one.
+**NOTE** (diagnostic, not a pass criterion): a matching
+`toplevel_security_context.*tier2-c-ui` line corroborates the S3 launch reached
+the tier-2 container, but S3's `type+Enter` is not a deterministic tier-2 launch
+(see S3 — the tier-5/tier-2 `weston-terminal` name collision), so a miss here is
+a NOTE, not a failure. The deterministic launcher→tier-2 journal contract lives
+in `tiered-isolation.bats:phase7-tier2-podman`. This mirrors the journal-side
+twin `tests/integration/vm/s60-launcher-podapp-click.sh`, which likewise treats a
+missing post-Enter advertise as a NOTE.
 
 **Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
 `/tmp/s18-warm.png` records whether the taskbar entry is now at full opacity
@@ -267,13 +276,13 @@ Hard pass conditions:
 3. `apps.json` contains a tier-2 marker (`"silo": "tier2/tier2-c-ui"`)
    and non-empty `execArgv`.
 4. S2 visually confirms at least one tier-2 PodApps launcher entry bearing
-   the textual silo prefix `[tier2/tier2-c-ui]` on its label (the signal the
-   PodApps provider currently emits). **This is the only step that needs
-   visual reasoning.**
-5. S4 journal output confirms `toplevel_security_context.*tier2-c-ui`
-   (deterministic shell check).
+   the pink/magenta square tier-2 **badge** (the signal the PodApps provider
+   currently emits). **This is the only step that needs visual reasoning.**
 
-The delegate-side pink/magenta badge overlay and the S2/S3/S4 cold-start
+S3's launch and the S4 `toplevel_security_context.*tier2-c-ui` journal line are
+diagnostic NOTEs only (the type+Enter launch is non-deterministic across the
+tier-5/tier-2 `weston-terminal` name collision; the journal contract is owned by
+`tiered-isolation.bats:phase7-tier2-podman`). The S2/S3/S4 cold-start
 screenshots are best-effort diagnostic artifacts only — capture them, do not
 analyze them, never fail on them.
 
