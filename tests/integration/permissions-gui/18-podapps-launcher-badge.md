@@ -127,6 +127,26 @@ $VMEXEC "$VM" 'test -S /run/user/1000/ydotool.sock' \
 
 ## Steps
 
+> **Budget discipline (this is a heavy tier-2 lane — stay inside the wall clock).**
+> Only **one** screenshot requires visual judgment: `/tmp/s18-launcher-open.png`.
+> Inspect it and decide hard pass criterion 4. Every other hard criterion is a
+> deterministic shell check (S1 `jq`, S4 `journalctl`) — run the command and read
+> its exit status; do not "look" to decide them.
+>
+> The screenshots `/tmp/s18-launcher-empty.png`, `/tmp/s18-cold-start.png`, and
+> `/tmp/s18-warm.png` are **artifact-only diagnostics**. You MUST still run the
+> listed `vm-gui screenshot` commands so the PNG files exist (they are required
+> triage artifacts), but you MUST NOT inspect, describe, compare, or reason about
+> those images, and they MUST NOT affect PASS/FAIL.
+>
+> After Setup, S1, the apps.json `jq` assertion, the S2 launcher-open visual
+> assertion, the S3 launch action, and the S4 journal grep have completed, write
+> `status.txt` immediately and STOP — do not continue exploring or collecting
+> extra evidence. (S5 cleanup is best-effort and may be skipped: each scenario
+> runs on a fresh disposable VM.) Spending vision round-trips on the
+> artifact-only screenshots is what blows the wall-clock budget (rc=124) on an
+> otherwise-passing scenario.
+
 ### S1 — populate the podapps cache for a not-yet-running container
 
 The scan helper requires the container to be running, so spawn it
@@ -184,16 +204,22 @@ signal the PodApps provider currently emits — the textual silo prefix
 `[tier2/tier2-c-ui]` on the entry label (see qdshell
 `Modules/Panels/Launcher/Providers/PodAppsProvider.qml`).
 
-**Assert** (best-effort diagnostic): record whether the not-yet-merged
-delegate-side badge OVERLAY (the pink/magenta square badge driven by
-`modelData.badgeIcon`) is visible. Do NOT fail the scenario on the
-badge-overlay check until the delegate rendering has landed.
+**Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
+the `/tmp/s18-launcher-open.png` you just captured also records the
+not-yet-merged delegate-side badge OVERLAY (the pink/magenta square badge
+driven by `modelData.badgeIcon`). Leave the PNG as an artifact for human
+triage; do not spend a vision round-trip judging the overlay, and never
+fail on it.
 
-TODO: re-tighten this assertion to require the delegate-side silo badge
-overlay from `doc/ui.md` / `doc/containers.md` once that rendering path
-merges.
+TODO: re-tighten this into a hard assertion (require the delegate-side silo
+badge overlay from `doc/ui.md` / `doc/containers.md`) once that rendering
+path merges.
 
-### S3 — click a podapps entry; placeholder taskbar appears
+### S3 — launch a podapps entry (required action for S4's journal event)
+
+The type+Enter here is a **required action**, not a visual check: it launches
+the weston-terminal toplevel whose secctx event S4 asserts on. Run it, then
+capture the cold-start PNG as a diagnostic artifact only.
 
 ```bash
 # Type to filter to weston-terminal, then Enter.
@@ -205,11 +231,11 @@ $VMGUI "$VM" key enter
 $VMGUI "$VM" screenshot /tmp/s18-cold-start.png
 ```
 
-**Assert** (best-effort diagnostic, agent-visual): record whether the
-taskbar (or dock) shows a new entry for weston-terminal with reduced
-opacity and a small spinner overlay. Per the cold-start contract in
-`doc/window-hierarchy.md`, the entry should NOT yet match a real
-toplevel, but this visual cold-start check must not fail the scenario.
+**Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
+`/tmp/s18-cold-start.png` records whether the taskbar (or dock) shows a new
+weston-terminal entry at reduced opacity with a spinner overlay (the
+cold-start contract in `doc/window-hierarchy.md`). Leave it as an artifact;
+do not spend a vision round-trip on it and never fail on it.
 
 ### S4 — placeholder resolves on toplevel arrival
 
@@ -223,13 +249,14 @@ $VMGUI "$VM" screenshot /tmp/s18-warm.png
 $VMEXEC "$VM" "journalctl --since '30s ago' | grep 'toplevel_security_context.*tier2-c-ui'"
 ```
 
-**Assert** (hard): the journal grep must produce at least one matching
-`toplevel_security_context.*tier2-c-ui` line.
+**Assert** (hard, deterministic): the journal grep must produce at least one
+matching `toplevel_security_context.*tier2-c-ui` line. Read the command's
+exit status — this is a shell check, not a visual one.
 
-**Assert** (best-effort diagnostic, agent-visual): record whether the
-taskbar entry is now at full opacity, has no spinner overlay, and
-renders normally. Do not fail the scenario on this S3/S4 visual
-cold-start transition.
+**Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
+`/tmp/s18-warm.png` records whether the taskbar entry is now at full opacity
+with no spinner overlay. Leave it as an artifact for the S3/S4 cold-start
+transition; do not spend a vision round-trip on it and never fail on it.
 
 ## Pass criteria
 
@@ -239,12 +266,16 @@ Hard pass conditions:
 2. S1 populates `/var/lib/qdistro/podapps/tier2-c-ui/apps.json`.
 3. `apps.json` contains a tier-2 marker (`"silo": "tier2/tier2-c-ui"`)
    and non-empty `execArgv`.
-4. S2 visually confirms at least one tier-2 PodApps launcher entry with
-   the current pink/magenta square badge.
-5. S4 journal output confirms `toplevel_security_context.*tier2-c-ui`.
+4. S2 visually confirms at least one tier-2 PodApps launcher entry bearing
+   the textual silo prefix `[tier2/tier2-c-ui]` on its label (the signal the
+   PodApps provider currently emits). **This is the only step that needs
+   visual reasoning.**
+5. S4 journal output confirms `toplevel_security_context.*tier2-c-ui`
+   (deterministic shell check).
 
-The delegate-side badge overlay and S3/S4 visual cold-start transition
-are best-effort diagnostics only.
+The delegate-side pink/magenta badge overlay and the S2/S3/S4 cold-start
+screenshots are best-effort diagnostic artifacts only — capture them, do not
+analyze them, never fail on them.
 
 ### S5 — cleanup
 
