@@ -41,6 +41,42 @@ $VMEXEC "$VM" 'timeout 240 bash -c "
 $VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest' \
   || { echo "FAIL(setup): qdistro/tier2-weston-terminal:latest missing after build"; exit 1; }
 
+# Precondition: the broker must ALLOW the tier-2 spawn gate for this workload.
+# Since `security: require broker allow for tier2 spawns`, spawn-tier2.sh fails
+# closed (decision=unknown) unless a rule allows
+# qdistro.tier2.spawn:<workload>/<app>. /etc/qdistro/rules.d is empty on a
+# fresh VM, so author the allow rule here exactly like s40-tier2-hardening.sh /
+# the silo-secctx-wiretag probe, reload the broker, and poll CheckPermission
+# until it answers `allow` before S1 spawns. (S1 runs the workload as
+# weston-terminal, so the action is weston-terminal/weston-terminal — the
+# WORKLOAD/APP pair, not the tier2-c-ui container name.)
+$VMEXEC "$VM" 'set -e
+    RULE_DIR=/etc/qdistro/rules.d
+    SPAWN_ACTION="qdistro.tier2.spawn:weston-terminal/weston-terminal"
+    systemctl start qdistro-admin-broker.service 2>/dev/null || true
+    install -d -m 0755 "$RULE_DIR"
+    cat >"$RULE_DIR/zz-s18-podapps-allow.yaml" <<EOF
+# Test-authored (permissions-gui/18): allow the tier-2 spawn of weston-terminal
+# so the podapps-badge lane can mint the container.
+- name: s18-podapps-weston-terminal-allow
+  decision: allow
+  match:
+    action: $SPAWN_ACTION
+EOF
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
+    reply=""
+    for _ in $(seq 1 20); do
+        reply=$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+            dbus-send --system --print-reply=literal \
+            --dest=org.qdistro.AdminBroker1 /org/qdistro/AdminBroker1 \
+            org.qdistro.AdminBroker1.CheckPermission \
+            "string:$SPAWN_ACTION" "dict:string:string:" 2>/dev/null | tr -d " \t\n")
+        [ "$reply" = "allow" ] && break
+        sleep 0.25
+    done
+    [ "$reply" = "allow" ]' \
+  || { echo "FAIL(setup): broker did not load the tier-2 spawn allow rule for weston-terminal/weston-terminal"; exit 1; }
+
 # Keep qdlocker from stealing launcher keystrokes. The CI artifact from
 # 2026-06-21 showed the round-2 set-environment-only guard was too weak:
 # the already-running locker stayed locked and consumed "weston-terminal"
@@ -215,6 +251,10 @@ are best-effort diagnostics only.
 ```bash
 $VMEXEC "$VM" 'podman stop -t 2 tier2-c-ui >/dev/null 2>&1 || true'
 $VMEXEC "$VM" 'pkill -u admin -f "spawn-tier2.sh tier2-c-ui" 2>/dev/null || true'
+# Remove the test-authored broker allow rule and reload, so subsequent
+# scenarios start from the fail-closed default (mirrors the probe teardown).
+$VMEXEC "$VM" 'rm -f /etc/qdistro/rules.d/zz-s18-podapps-allow.yaml 2>/dev/null || true
+    systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true'
 ```
 
 ## Known caveats

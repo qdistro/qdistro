@@ -12,8 +12,8 @@ qdshell.py world but for the new shell.
 ## Setup
 
 ```bash
-source qdwin/tests/gui/qdwin-helpers.sh
-source tests/integration/qdwin-noctalia/noctalia-helpers.sh
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
+source ${QDISTRO_REPO}/tests/integration/qdwin-noctalia/noctalia-helpers.sh
 qdwin_set_vm "${VMNAME:-noctalia-vis-260503-1021}"
 
 pgrep -f "http.server 8765" >/dev/null || (
