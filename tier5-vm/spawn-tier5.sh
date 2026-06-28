@@ -578,6 +578,7 @@ idle_keep_warm() {
 
 CLIENT_PID=
 SERVER_PID=
+LAUNCHREC_PATH=""
 DOMAIN_DEFINED=0
 DISK_CREATED=0
 CLEANUP_STARTED=0
@@ -590,6 +591,23 @@ cleanup() {
     CLEANUP_STARTED=1
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
+    # CLIENT_PID is the backgrounded runuser/secctx-exec PARENT. When we wrap
+    # waypipe with qdistro-secctx-exec, the load-bearing waypipe is secctx-exec's
+    # exec'd fork CHILD, whose pid secctx-exec published to LAUNCHREC_PATH. Killing
+    # only CLIENT_PID can orphan that inner waypipe (perm-gui/s48). secctx-exec now
+    # forwards SIGTERM to it, but reap the published pid directly too so teardown is
+    # robust even against an older/uncrebuilt secctx-exec binary in the image.
+    if [ -n "$LAUNCHREC_PATH" ] && [ -r "$LAUNCHREC_PATH" ]; then
+        _inner_pid="$(awk 'NR==1{print $1}' "$LAUNCHREC_PATH" 2>/dev/null)"
+        if [ -n "$_inner_pid" ] && printf '%s' "$_inner_pid" | grep -qE '^[0-9]+$'; then
+            # Guard against pid reuse: only kill if it is still a waypipe. The
+            # inner client may already be gone (C-side SIGTERM-forward above), in
+            # which case the pid could be recycled by an unrelated process.
+            if grep -qx waypipe "/proc/$_inner_pid/comm" 2>/dev/null; then
+                kill "$_inner_pid" 2>/dev/null || true
+            fi
+        fi
+    fi
     if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
         reap_domain "$force"

@@ -62,6 +62,22 @@ struct ctx {
 	struct wp_security_context_manager_v1 *mgr;
 };
 
+/* Pid of the exec'd inner client (e.g. waypipe). Set in the parent right
+ * after fork() so the signal handler below can forward teardown signals to
+ * it. Without this, a SIGTERM to this wrapper (the lineage parent) kills the
+ * wrapper while it blocks in waitpid(), orphaning the inner client — e.g.
+ * tier-5 leaks the host-side waypipe on VM teardown (perm-gui/s48). */
+static volatile sig_atomic_t g_child_pid = 0;
+
+static void
+forward_signal_to_child(int sig)
+{
+	if (g_child_pid > 0)
+		kill(g_child_pid, sig);
+	/* Do NOT exit here: we return so waitpid() in the parent resumes,
+	 * reaps the child, and runs the normal revoke/unlink cleanup. */
+}
+
 static int
 env_true(const char *name)
 {
@@ -637,6 +653,22 @@ int main(int argc, char **argv)
 	 * never mint a wrong record. Best-effort: a write failure is logged but
 	 * never blocks the launch. */
 	publish_launch_record(getenv("QDISTRO_LAUNCH_RECORD_PATH"), xdg, pid);
+
+	/* Forward teardown signals to the inner client so it is not orphaned
+	 * when this lineage-parent wrapper is killed (e.g. spawn-tier5.sh's
+	 * cleanup `kill $CLIENT_PID`). The handler kills the child and returns;
+	 * waitpid() then resumes via EINTR, reaps it, and runs revoke/unlink. */
+	g_child_pid = pid;
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = forward_signal_to_child;
+		/* No SA_RESTART: we want waitpid() to return EINTR so the
+		 * EINTR loop below re-enters and reaps the now-signalled child. */
+		sigaction(SIGTERM, &sa, NULL);
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGHUP, &sa, NULL);
+	}
 
 	/* Parent: wait for child. */
 	int status = 0;

@@ -51,6 +51,12 @@ OVERLAY="/home/admin/.local/share/libvirt/images/$VM_NAME.qcow2"
 SPAWN_LOG=/tmp/s48-spawn.log
 : >"$SPAWN_LOG"
 
+# Baseline host-side waypipe pids (admin owns the tier-5 waypipe client). We
+# diff against this after spawn so we only assert on OUR waypipe, never another
+# concurrent tier-5 VM's.
+waypipe_pids() { pgrep -u admin -x waypipe 2>/dev/null | sort -un; }
+WAYPIPE_BASELINE="$(waypipe_pids)"
+
 # 512 MiB guest (TIER5_MEM_KIB): the ~4 GiB bats VM has only ~1.3 GiB free, so a
 # 1.5 GiB nested guest is unstable here; 512 MiB fits (same value as
 # s45-tier5-vm.sh / s47-tier5-audio.sh). Nested-CI accommodation; prod keeps 1.5G.
@@ -72,6 +78,23 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 if [ "$READY" = "1" ]; then
     pass "domain $VM_NAME running and overlay $OVERLAY exists"
+    # Our waypipe = current admin waypipe pids minus the pre-spawn baseline.
+    NEW_WAYPIPE="$(comm -13 <(printf '%s\n' "$WAYPIPE_BASELINE") \
+                            <(waypipe_pids))"
+    # Must observe at least one new waypipe, else the orphan assertion below is
+    # vacuous (empty set => trivially "no orphan", a false pass). A tier-5 spawn
+    # ALWAYS starts a host-side waypipe client, so an empty delta is a real defect.
+    if [ -z "$NEW_WAYPIPE" ]; then
+        cat "$SPAWN_LOG" >&2 || true
+        fail "no new host-side waypipe observed after spawn — cannot test orphan reaping"
+        kill -TERM "$SPAWN_PID" 2>/dev/null || true
+        wait "$SPAWN_PID" 2>/dev/null || true
+        runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+        runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+        rm -f "$OVERLAY"
+        echo "[s48] $PASSCOUNT passes, $FAILCOUNT failures"
+        exit 1
+    fi
 else
     cat "$SPAWN_LOG" >&2 || true
     kill -KILL "$SPAWN_PID" 2>/dev/null || true
@@ -90,15 +113,25 @@ kill -TERM "$SPAWN_PID" 2>/dev/null || true
 wait "$SPAWN_PID" 2>/dev/null || true
 
 # Allow up to 10s for the trap's virsh destroy/undefine to complete.
+waypipe_alive() {
+    local p
+    for p in $NEW_WAYPIPE; do
+        kill -0 "$p" 2>/dev/null && return 0
+    done
+    return 1
+}
 deadline=$(( $(date +%s) + 10 ))
 DOMAIN_GONE=0
 OVERLAY_GONE=0
+WAYPIPE_GONE=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if ! runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         DOMAIN_GONE=1
     fi
     [ -f "$OVERLAY" ] || OVERLAY_GONE=1
-    [ "$DOMAIN_GONE" = "1" ] && [ "$OVERLAY_GONE" = "1" ] && break
+    waypipe_alive || WAYPIPE_GONE=1
+    [ "$DOMAIN_GONE" = "1" ] && [ "$OVERLAY_GONE" = "1" ] \
+        && [ "$WAYPIPE_GONE" = "1" ] && break
     sleep 0.5
 done
 
@@ -110,9 +143,21 @@ done
     && pass "per-VM overlay $OVERLAY unlinked by trap" \
     || fail "overlay $OVERLAY still present 10s after SIGTERM (orphan disk leak)"
 
+# The load-bearing tier-5 waypipe is qdistro-secctx-exec's exec'd fork child.
+# A teardown that kills only the wrapper parent ($CLIENT_PID) orphans it
+# (perm-gui/21 + this driver). Assert it is reaped too.
+ORPHAN_PIDS=""
+for p in $NEW_WAYPIPE; do
+    kill -0 "$p" 2>/dev/null && ORPHAN_PIDS="$ORPHAN_PIDS $p"
+done
+[ "$WAYPIPE_GONE" = "1" ] && [ -z "$ORPHAN_PIDS" ] \
+    && pass "host-side waypipe reaped by trap (no orphan)" \
+    || fail "orphaned host-side waypipe pid(s)$ORPHAN_PIDS alive 10s after SIGTERM (waypipe leak)"
+
 # Final belt-and-braces cleanup in case of partial leak.
 runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
 runuser -u admin -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+for p in $NEW_WAYPIPE; do kill -KILL "$p" 2>/dev/null || true; done
 rm -f "$OVERLAY" "$SPAWN_LOG"
 
 if [ "$FAILCOUNT" -eq 0 ]; then
