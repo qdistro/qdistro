@@ -1015,8 +1015,9 @@ EOF
 # qdwin-bystander gained --subscribe HANDLE / --subscribe last on
 # 2026-05-14 so the §6.5 RDP-forward path can be exercised without the
 # /root/s3c-subscribe-extract.sh helper that only exists on the spike
-# bake. install-qdwin-session-for-vm.sh now writes
-# `[pipewire] num-outputs=2` + loads pipewire-backend.so, so on a
+# bake. install-qdwin-session-for-vm.sh now loads pipewire-backend.so via
+# weston.ini `[core] backend=drm-backend.so,pipewire-backend.so` and writes
+# `[pipewire] num-outputs=2`, so on a
 # freshly-baked VM this test hits the `approved` branch (stdout has
 # HANDLE=, PIPEWIRE_NODE_NAME=, RDP_PORT=, RDP_CERT_PATH=,
 # RDP_PASSWORD= sourceable creds). On a VM without the pipewire

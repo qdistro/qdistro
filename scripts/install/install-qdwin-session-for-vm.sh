@@ -92,11 +92,14 @@ loginctl enable-linger admin
 # support, the cursor then lands on the DRM cursor plane (off the
 # scanout) and QEMU forwards it to SPICE → a single cursor.
 #
-# The `[pipewire]` section enables the pipewire sub-backend so qdwin's
-# §6.5 view_stream forwarding (qdwin_shell_v1.subscribe_view_stream)
-# has free pipewire outputs to pin views onto. weston's --backend
-# cmdline takes a single plugin name, so the sub-backend is wired here
-# in weston.ini rather than appended to the unit's ExecStart.
+# qdwin's §6.5 view_stream forwarding (qdwin_shell_v1.subscribe_view_stream)
+# pins views onto free "pipewire*" compositor outputs, so the pipewire
+# backend must actually be LOADED — not merely configured. weston's --backend
+# cmdline takes a single plugin name, so we load BOTH backends via the
+# `[core] backend=` list (drm first = primary virtio-gpu console; pipewire
+# second = off-screen view_stream capture outputs) and drop the --backend
+# override from the unit ExecStart so this list takes effect. The `[pipewire]`
+# section only *configures* the already-loaded backend (it does not load it);
 # num-outputs=2 gives headroom for concurrent forwards.
 # idle-time=0 disables weston's built-in idle timer and flips qdwin
 # into its internal-idle mode so ext-idle-notify-v1 subscribers
@@ -107,6 +110,7 @@ loginctl enable-linger admin
 # qdwin is running in internal-idle mode.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
+backend=drm-backend.so,pipewire-backend.so
 shell=/usr/lib64/weston/qdwin-shell.so
 renderer=gl
 modules=
@@ -360,7 +364,7 @@ Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_SESSION_TYPE=wayland
 $QDWIN_LD_LINE
 Environment=WESTON_MODULE_MAP=$QDWIN_MODULE_MAP
-ExecStart=/usr/bin/weston --backend=drm-backend.so --config=%h/weston.ini --socket=wayland-1
+ExecStart=/usr/bin/weston --config=%h/weston.ini --socket=wayland-1
 Restart=on-failure
 RestartSec=2
 EOF
