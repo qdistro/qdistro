@@ -500,6 +500,24 @@ host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     printf '%s' $((kb / 1024))
 }
 
+# qemu_pids_for_domain — print the pid(s) of the qemu process(es) backing the
+# current domain, or nothing. Robust on a nested-virt host where libvirt's
+# domstate lies (reports "shut off" while qemu is still ALIVE). libvirt launches
+# the qemu:///session qemu with `-name guest=<domain>,debug-threads=on`, so we
+# match on `guest=$VM_NAME,`. pgrep runs through run_as_admin so it can see the
+# admin-owned session qemu. Candidates are then narrowed to REAL qemu processes
+# by /proc/<pid>/comm (truncated to 15 chars, e.g. "qemu-system-x86"); this also
+# discards the run_as_admin wrapper chain (runuser/env/pgrep) that carries the
+# same pattern in its own argv and would otherwise self-match.
+qemu_pids_for_domain() {
+    local p c out=""
+    for p in $(run_as_admin pgrep -f "guest=$VM_NAME," 2>/dev/null); do
+        c=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+        case "$c" in qemu-system-*|qemu-kvm) out="$out $p" ;; esac
+    done
+    printf '%s' "$out"
+}
+
 # reap_domain [force] — stop the domain, undefine it, unlink the overlay.
 # Graceful (default): ACPI power-button (`virsh shutdown --mode acpi`, the owner-
 # requested mechanism). If the guest is still up after SHUTDOWN_GRACE_SECS, try
@@ -540,6 +558,25 @@ reap_domain() {
     fi
     # Force-destroy if still running (or method=force). Harmless if already off.
     run_as_admin virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+    # Nested-KVM safety net: domstate can falsely report "shut off" while qemu is
+    # still ALIVE, so `virsh destroy` no-ops and the undefine below then drops only
+    # the persistent config — leaving a live TRANSIENT domain that dominfo keeps
+    # reporting, so it never undefines (perm-gui/21 S4). If qemu survived destroy,
+    # signal it directly. A pure FALLBACK: when destroy already worked there is no
+    # qemu pid and we fall straight through to undefine.
+    local qpids
+    qpids=$(qemu_pids_for_domain)
+    if [ -n "$qpids" ]; then
+        echo "[tier5] destroy left qemu alive for $VM_NAME (pids:$qpids); killing" >&2
+        run_as_admin kill $qpids 2>/dev/null || true
+        for _ in 1 2 3 4 5 6; do
+            qpids=$(qemu_pids_for_domain)
+            [ -n "$qpids" ] || break
+            sleep 0.5
+        done
+        qpids=$(qemu_pids_for_domain)
+        [ -n "$qpids" ] && run_as_admin kill -9 $qpids 2>/dev/null || true
+    fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
         run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 || break
