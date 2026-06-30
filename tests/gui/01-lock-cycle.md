@@ -22,6 +22,17 @@ sleep 1
 
 qdlocker_session_healthy || { echo "FAIL: session not up"; exit 1; }
 
+# foot is the throwaway toplevel we type into to prove pre/post-unlock
+# keystroke routing (asserts 1.1, 4.3, 5.1). It ships only in the
+# QDWIN_APP_DEPS=1 app-test lane (fresh-vm-bootstrap.sh), not the default
+# golden — SKIP rather than ERROR when it is absent. The foot-free
+# security path (overlay_key routing) is also covered by
+# 05-keystroke-isolation.md. Mirrors 04-lid-close-lock.md's skip-guard.
+if ! "$QDWIN_VM_EXEC" "$VMNAME" 'command -v foot >/dev/null 2>&1'; then
+    echo "SKIP: foot not installed in guest (QDWIN_APP_DEPS=1 lane only)"
+    exit 77   # bats convention for skip
+fi
+
 # qdlocker should be running under systemd --user. If a previous test
 # left the locker engaged, unstick it before we start. vm-exec runs
 # as root by default; bare `systemctl --user` from root has no user
