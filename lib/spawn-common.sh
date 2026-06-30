@@ -207,7 +207,18 @@ qd_register_secctx_launch_record() {
         return 0
     fi
 
-    for _ in $(seq 1 20); do
+    # Poll for the inner pid that qdistro-secctx-exec publishes only AFTER it
+    # has connected to the outer compositor and stood up the wp_security_context
+    # listener. Under a cold/contended compositor session (first-wave parallel
+    # VM boot, qdshell ctrl-socket still settling) that connect can take several
+    # seconds, so the default window is ~6s (60 x 0.1s), overridable for slow
+    # harnesses via QDISTRO_LINEAGE_PID_WAIT_TRIES. The loop breaks the instant
+    # the pid is published, so the normal path pays no extra latency; only a
+    # genuine no-show waits the full window before the (non-blocking) WARN below.
+    local _lr_tries="${QDISTRO_LINEAGE_PID_WAIT_TRIES:-60}"
+    case "$_lr_tries" in ''|*[!0-9]*) _lr_tries=60 ;; esac
+    [ "$_lr_tries" -lt 1 ] && _lr_tries=60
+    for _ in $(seq 1 "$_lr_tries"); do
         if [ -s "$launchrec_path" ]; then
             read -r inner_pid inner_token < "$launchrec_path" || true
             case "$inner_pid" in ''|*[!0-9]*) inner_pid="" ;; esac

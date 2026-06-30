@@ -62,24 +62,40 @@ must not fail the scenario.
 
 ### Step 2 — advance VM clock by 1 minute, verify bar updates
 
+> **Driver note (MUST):** Step 2 includes a synchronous wait of up to ~75 s
+> for the next 60 s clock tick. Run the whole Step-2 block as a **single
+> blocking invocation in this turn**. Do NOT background it, do NOT schedule a
+> wakeup, and do NOT end the session to "check back later" — the wait must
+> complete in-line and you MUST write `status.txt` before finishing.
+
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" 'date -s "+1 minute" >/dev/null'
-sleep 65 # let the next clock-tick fire (Noctalia ticks every minute)
 
 EXPECT_HHMM2=$("$QDWIN_VM_EXEC" "$VMNAME" 'date +%H%M' | tail -1)
 [ "$EXPECT_HHMM" != "$EXPECT_HHMM2" ] || {
   echo "FAIL: VM time did not advance from step 1 to step 2"
   exit 1
 }
-noct_screenshot_awake /tmp/03-step2-advanced.png
-magick /tmp/03-step2-advanced.png -crop 2560x48+0+0 /tmp/03-step2-clock.png
-STEP2_HASH=$(sha256sum /tmp/03-step2-clock.png | awk '{print $1}')
+
+# Poll up to 75s for the next minute-tick repaint. Noctalia ticks on a
+# 60 000 ms Qt timer from launch; advancing the wall clock does not
+# reschedule it, so the repaint lands within one timer period. Break early
+# once the crop hash changes so a fast tick doesn't pay the full wait. This
+# is ONE synchronous loop — it must run to completion in this shell call.
+STEP2_HASH=""
+for _ in $(seq 1 15); do
+  sleep 5
+  noct_screenshot_awake /tmp/03-step2-advanced.png
+  magick /tmp/03-step2-advanced.png -crop 2560x48+0+0 /tmp/03-step2-clock.png
+  STEP2_HASH=$(sha256sum /tmp/03-step2-clock.png | awk '{print $1}')
+  [ "$STEP1_HASH" != "$STEP2_HASH" ] && break
+done
 [ -n "$STEP2_HASH" ] || { echo "FAIL: step-2 bar crop hash is empty"; exit 1; }
 OCR2=$(tesseract /tmp/03-step2-clock.png stdout 2>/dev/null || true)
 echo "step2 bar crop sha256: $STEP2_HASH"
 echo "step2 OCR diagnostic: $OCR2"
 [ "$STEP1_HASH" != "$STEP2_HASH" ] || {
-  echo "FAIL: clock bar crop did not repaint after VM time advanced"
+  echo "FAIL: clock bar crop did not repaint within 75s after VM time advanced"
   exit 1
 }
 ```

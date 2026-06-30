@@ -1,9 +1,10 @@
 # 05 — bar still visible after DPMS wake
 
-**Acceptance criterion:** after weston DPMSes the screen on idle
-(>5min default) and the test wakes it via mouse motion, the
-Noctalia bar reappears at its original position with no protocol
-errors during the wake transition.
+**Acceptance criterion:** after qdwin DPMSes the screen on idle
+(armed here to the 1-minute minimum via the qdshell `power.displayOff*`
+policy) and the test wakes it via mouse motion, the Noctalia bar
+reappears at its original position with no protocol errors during the
+wake transition.
 
 This exercises:
 - Configure/ack handling on output power-cycle
@@ -22,37 +23,104 @@ source tests/integration/qdwin-noctalia/noctalia-helpers.sh
 qdwin_set_vm "${VMNAME:-noctalia-vis-260503-1021}"
 noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 
-# Speed up idle-off for testing. Noctalia drives DPMS via its own
-# `idle.screenOffTimeout` setting (Noctalia subscribes to
-# ext-idle-notify-v1 with that value, runs `idle.screenOffCommand`
-# on fire, and emits a wake signal on activity). Editing
-# `weston.ini [core] idle-time` was the v1 approach but is silently
-# ignored because Noctalia owns the idle path, not weston-desktop.
-# Drop the Noctalia value from its default 600s to 10s so the test
-# completes in ~15s. Also wire `screenOffCommand` to a no-op DRM
-# blackout via `wlopm` (or just rely on the QML scenegraph's
-# stop-paint behaviour if wlopm is absent — see Known failure modes).
+# Arm DPMS display-off for testing. qdwin observes input idle via
+# ext-idle-notify-v1; the SHELL (qdshell — the dir name `qdwin-noctalia` is
+# historical) owns the idle *timing* via `Settings.data.power.displayOff{AC,
+# Battery}` and the compositor enacts display power via the v26 `set_display_
+# power` request. The live settings file is ~/.config/qdshell/settings.json
+# (shellName=qdshell; the deploy sets no NOCTALIA_CONFIG_DIR). These values are
+# in MINUTES — 1 is the smallest non-zero arm (IdlePolicy._toMs), so this test
+# runs in ~80s, not ~15s. weston.ini [core] idle-time and the retired Noctalia
+# `idle.screenOffTimeout` key are NOT read by qdshell. The proven path is
+# qdwin/tests/gui/agent-idle-dpms-recovery-smoke.sh + 20-idle-dpms.md.
 ADMIN_USER=$("$QDWIN_VM_EXEC" "$VMNAME" 'getent passwd 1000 | cut -d: -f1' 2>/dev/null | tail -1)
-SETTINGS=/home/$ADMIN_USER/.config/noctalia/settings.json
-# Create-or-edit: a fresh VM may have no settings.json yet, in which case the
-# old `if [ -f ]` gate silently skipped the timeout change and DPMS never
-# fired. mkdir -p + load-or-default so the idle timeout is always applied.
+[ -n "$ADMIN_USER" ] || { echo "FAIL: no uid-1000 user in guest (getent passwd 1000 empty)"; exit 1; }
+SETTINGS=/home/$ADMIN_USER/.config/qdshell/settings.json
+
+# qs_ipc <method> — proven-working qdwin IPC invocation (same as 16/17/19/20),
+# with a PID fallback when the -p path lookup can't find the instance.
+QS_PATH=/usr/share/quickshell/qdshell
+qs_ipc() {
+    local out
+    out=$("$QDWIN_VM_EXEC" "$VMNAME" \
+        "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+         qs ipc -p $QS_PATH call qdwin $*" 2>&1)
+    if printf '%s' "$out" | grep -qiE 'no running instance|No such'; then
+        local pid
+        pid=$("$QDWIN_VM_EXEC" "$VMNAME" \
+            "pgrep -u admin -f 'qs -p $QS_PATH' | while read p; do \
+               grep -q dbus-run-session /proc/\$p/cmdline 2>/dev/null || { echo \$p; break; }; done")
+        [ -n "$pid" ] || { printf '%s\n' "$out"; return 1; }
+        out=$("$QDWIN_VM_EXEC" "$VMNAME" \
+            "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+             qs ipc --pid $pid call qdwin $*" 2>&1)
+    fi
+    printf '%s\n' "$out"
+}
+
+# Capability gate (tri-state, so a broken IPC can't masquerade as a clean skip):
+# DPMS display-off is live only on a v26+ shell bind (set_display_power) WITH an
+# ext_idle_notifier_v1 + wl_seat, surfaced as CapabilityService.idleDpms.
+#  - IPC never reaches a bound shell      -> FAIL (precondition/ERROR, like 20.A.0)
+#  - bound shell, but idleDpms != true    -> SKIP (genuine capability gap, e.g.
+#                                            an older baked image; not a product FAIL)
+#  - bound shell + idleDpms=true          -> proceed
+CAPS=
+BOUND=0
+for _ in $(seq 1 30); do
+    CAPS=$(qs_ipc capabilities)
+    case "$CAPS" in *bound=true*) BOUND=1; break ;; esac
+    sleep 1
+done
+echo "capabilities: $CAPS"
+[ "$BOUND" = 1 ] || {
+    echo "FAIL: qdshell IPC never reported bound=true (binding unreachable; got: $CAPS)"
+    exit 1
+}
+case "$CAPS" in
+    *idleDpms=true*) ;;
+    *)
+        echo "SKIP: qdwin idle/DPMS capability unavailable on this image (need v26+ idleDpms=true; got: $CAPS)"
+        exit 0
+        ;;
+esac
+
+# Create-or-edit at the real qdshell path. A fresh VM may have no settings.json
+# yet, so load-or-default and write only the power keys (displayOff in MINUTES;
+# leave inactivity at 0 so only DPMS arms, never suspend/lock).
 "$QDWIN_VM_EXEC" "$VMNAME" "
- mkdir -p /home/$ADMIN_USER/.config/noctalia
+ install -d -m 700 /home/$ADMIN_USER/.config/qdshell
  python3 - <<PY
-import json, os
+import json
 p='$SETTINGS'
 try:
     d=json.load(open(p))
 except (FileNotFoundError, ValueError):
     d={}
-d.setdefault('idle',{})['screenOffTimeout']=10
-d['idle'].setdefault('screenOffCommand','')
+pw=d.setdefault('power',{})
+pw['displayOffAC']=1
+pw['displayOffBattery']=1
+pw['presentationMode']=False
 json.dump(d, open(p,'w'), indent=2)
 PY
- chown -R $ADMIN_USER:$ADMIN_USER /home/$ADMIN_USER/.config/noctalia
+ chown -R '$ADMIN_USER:' /home/$ADMIN_USER/.config/qdshell
 "
 noct_restart
+
+# Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm:
+# the proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
+# journal line. Poll briefly after the restart; a missing line means the
+# write-path/schema is wrong, not that DPMS is slow.
+ARMED=
+for _ in $(seq 1 10); do
+    ARMED=$("$QDWIN_VM_EXEC" "$VMNAME" \
+        "journalctl _UID=1000 --since '40 seconds ago' --no-pager 2>/dev/null || true" \
+        2>/dev/null | grep -E 'idle policy armed:.*displayOff=60000ms' | tail -1)
+    [ -n "$ARMED" ] && break
+    sleep 1
+done
+echo "idle-arm journal: ${ARMED:-<not found>}"
+[ -n "$ARMED" ] || { echo "FAIL: qdshell did not arm displayOff=60000ms after settings write (schema/path regression?)"; exit 1; }
 ```
 
 ## Steps
@@ -67,15 +135,22 @@ noct_screenshot_awake /tmp/05-step1-awake.png
 
 ### Step 2 — wait for DPMS-off
 
+> **Driver note (MUST):** this is a synchronous ~75 s idle wait. Run the block
+> as a single blocking invocation in this turn — do NOT background it, schedule
+> a wakeup, or end the session to "check back later". Inject NO input during the
+> wait (any pointer/key activity resets ext-idle-notify and re-arms the timer).
+
 ```bash
-# 8s idle + 2s grace; no input during this period
-sleep 12
+# 60s display-off timeout (1-minute minimum) + grace; no input this period.
+sleep 75
 qdwin_screenshot /tmp/05-step2-asleep.png
 ```
 
 **Assert (2.1):** screenshot is mostly black (avg brightness < 5).
-This confirms DPMS off fired. If still bright, idle-time isn't
-being honored — diagnose `weston.ini` and journal.
+This confirms DPMS off fired. If still bright, the idle/DPMS policy isn't
+armed — diagnose `qs ipc call qdwin capabilities` (idleDpms) and the
+qdshell `power.displayOff*` settings, and the user journal for
+`idle policy armed: ... displayOff=60000ms`.
 
 ### Step 3 — wake screen, capture wake transition
 
@@ -108,15 +183,17 @@ on wake).
 ## Cleanup
 
 ```bash
-# Restore default idle so other scenarios don't suffer
+# Restore default (DPMS disabled) so other scenarios don't suffer.
 "$QDWIN_VM_EXEC" "$VMNAME" "
- SETTINGS=/home/\$(getent passwd 1000 | cut -d: -f1)/.config/noctalia/settings.json
+ SETTINGS=/home/\$(getent passwd 1000 | cut -d: -f1)/.config/qdshell/settings.json
  if [ -f \$SETTINGS ]; then
  python3 - <<PY
 import json
 p='\$SETTINGS'
 d=json.load(open(p))
-d.get('idle',{})['screenOffTimeout']=600
+pw=d.setdefault('power',{})
+pw['displayOffAC']=0
+pw['displayOffBattery']=0
 json.dump(d, open(p,'w'), indent=2)
 PY
  fi
@@ -138,6 +215,11 @@ All asserts in steps 1-4 pass.
  acceptable; Noctalia's QML scenegraph takes a moment to repaint
  after frame-callback resumes. Tolerance window: 5 seconds.
 
-3. **idle-time setting ignored** — older weston versions parse it
- under `[idle]` section, not `[core]`. Check `man weston.ini`
- for the current weston's expected location.
+3. **DPMS never fires (screenshot still bright at step 2)** — the idle
+ path is owned by qdshell, NOT weston.ini. Verify (a) the capability
+ gate: `qs ipc call qdwin capabilities` must report `idleDpms=true`
+ (needs a v26+ bind + ext-idle-notify); (b) the settings were written
+ to `~/.config/qdshell/settings.json` under `power.displayOff{AC,
+ Battery}` in MINUTES (not the retired `idle.screenOffTimeout`, and not
+ `~/.config/noctalia/`); (c) the user journal shows
+ `idle policy armed: ... displayOff=60000ms` after `noct_restart`.
