@@ -66,7 +66,7 @@ qs_ipc capabilities | grep -q 'bound=true' \
 
 VM5="qdistro-tier5-s21-$RANDOM"
 echo "VM5=$VM5"
-$VMEXEC "$VM" 'pkill -u root -f spawn-tier5.sh 2>/dev/null || true; sleep 1'
+$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; sleep 1'
 ```
 
 ## Steps
@@ -246,9 +246,9 @@ VM must read as "unknown, keep polling", NEVER as "gone" (that would false-pass
 this assertion on an outer-VM hiccup).
 
 ```bash
-for _ in $(seq 1 20); do
+for _ in $(seq 1 40); do
     res=$($VMEXEC "$VM" "w=present; d=present; o=present; \
-        pgrep -f 'spawn-tier5.sh.*$VM5' >/dev/null || w=gone; \
+        pgrep -f '[s]pawn-tier5.sh.*$VM5' >/dev/null || w=gone; \
         runuser -u admin -- virsh dominfo $VM5 >/dev/null 2>&1 || d=gone; \
         test -e /home/admin/.local/share/libvirt/images/$VM5.qcow2 || o=gone; \
         echo \"S3RESULT w=\$w d=\$d o=\$o\"") || { sleep 1; continue; }
@@ -260,7 +260,10 @@ for _ in $(seq 1 20); do
 done
 # Final S3 probe — print an unambiguous token; treat vm-exec transport failure
 # as ERROR (re-run), not as a pass.
-$VMEXEC "$VM" "pgrep -f 'spawn-tier5.sh.*$VM5' >/dev/null \
+# NOTE: the pgrep pattern uses the [s]pawn bracket trick so it cannot match the
+# probe shell's own command line (which literally contains this pgrep string) —
+# a plain 'spawn-tier5.sh.*$VM5' self-matches and false-reports STILL-RUNNING.
+$VMEXEC "$VM" "pgrep -f '[s]pawn-tier5.sh.*$VM5' >/dev/null \
     && echo S3-WRAPPER-STILL-RUNNING || echo S3-WRAPPER-GONE-EXPECTED" \
     || echo "S3-TRANSPORT-FAIL (outer vm-exec/qga failed; re-run — NOT a product result)"
 ```
@@ -268,7 +271,7 @@ $VMEXEC "$VM" "pgrep -f 'spawn-tier5.sh.*$VM5' >/dev/null \
 **Assert**: the final probe prints `S3-WRAPPER-GONE-EXPECTED` — no
 `spawn-tier5.sh` process remains for `$VM5`. In `--vm` mode the wrapper's loop
 ends when the single published app exits (detected via the guest agent), then
-its trap reaps the domain. `S3-WRAPPER-STILL-RUNNING` after the ~20s budget is
+its trap reaps the domain. `S3-WRAPPER-STILL-RUNNING` after the ~40s budget is
 the orphan leak this scenario guards; `S3-TRANSPORT-FAIL` is an
 infrastructure/ERROR result (the outer guest agent was unreachable), not a
 product FAIL — re-run.
@@ -303,7 +306,7 @@ $VMEXEC "$VM" 'ls -lh /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
 ### S6 — cleanup (defensive)
 
 ```bash
-$VMEXEC "$VM" "pkill -u root -f \"spawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
+$VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
                runuser -u admin -- virsh destroy $VM5 2>/dev/null || true; \
                runuser -u admin -- virsh undefine $VM5 2>/dev/null || true; \
                rm -f /home/admin/.local/share/libvirt/images/$VM5.qcow2"

@@ -31,9 +31,10 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
 $VMEXEC "$VM" 'command -v waypipe >/dev/null && command -v weston-terminal >/dev/null'
 $VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier5-vm'
 
-# Drain any leftover tier-5 spawn from a prior run.
-$VMEXEC "$VM" 'pkill -u root -f spawn-tier5.sh 2>/dev/null || true; \
-               pkill -u admin -f "waypipe.*vsock.*1:" 2>/dev/null || true; \
+# Drain any leftover tier-5 spawn from a prior run. ([s]pawn bracket trick so
+# the pkill pattern can't match the guest shell running this very command.)
+$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh" 2>/dev/null || true; \
+               pkill -u admin -f "[w]aypipe.*vsock.*1:" 2>/dev/null || true; \
                sleep 1'
 ```
 
@@ -41,13 +42,22 @@ $VMEXEC "$VM" 'pkill -u root -f spawn-tier5.sh 2>/dev/null || true; \
 
 ### S1 — spawn tier-5 loopback weston-terminal
 
+`spawn-tier5.sh` sources its helper via `$(dirname)/../lib/spawn-common.sh`,
+so `lib/` must be staged as a **sibling** of `tier5-vm/` and the script run
+from inside the copied `tier5-vm/`. (Mirrors `21-tier5-close-cleanup.md`'s
+staging; a flat copy of `tier5-vm` alone leaves `../lib` unresolved, so
+`gen_launch_token`/`qd_register_secctx_launch_record` go undefined and the
+launch token + lineage registration are silently skipped.)
+
 ```bash
 B64=$(base64 -w0 <<'EOF'
 rm -rf /tmp/qdistro-tier5
-cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5
+mkdir -p /tmp/qdistro-tier5
+cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
+cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-setsid bash /tmp/qdistro-tier5/spawn-tier5.sh --loopback -p 7791 \
+setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --loopback -p 7791 \
     -- weston-terminal </dev/null >/tmp/s19-spawn.log 2>&1 &
 disown
 sleep 3
@@ -62,26 +72,51 @@ $VMEXEC "$VM" 'grep "vsock listener ready cid=1 port=7791" /tmp/s19-spawn.log'
 ```
 Must print one matching line.
 
-### S2 — screenshot; tier-5 toplevel visible with tier5 title prefix
+**Verify** (staging guard): the `spawn-common.sh` helper sourced cleanly —
+no missing-sibling-`lib/` errors that would silently drop the launch token.
+```bash
+$VMEXEC "$VM" '! grep -qE "spawn-common\.sh: No such file|gen_launch_token: command not found|qd_register_secctx_launch_record: command not found" /tmp/s19-spawn.log'
+```
+Must exit 0 (no such errors present).
 
-Wait for the inner weston-terminal to map (~2s), then screenshot.
+### S2 — tier-5 toplevel reaches qdshell with the tier5 title prefix
+
+The **authoritative** check is qdwin's own journal. When the forwarded
+weston-terminal toplevel reaches the outer compositor, qdwin logs the
+title it assigned — which carries the tier-5 prefix. Screenshots taken
+over the SPICE/QXL framebuffer can show **stale** window chrome (a frame
+captured before the title repaint), so the journal — not the pixels — is
+ground truth here.
+
+Wait for the inner weston-terminal to map (~2s), then read the journal.
 
 ```bash
 sleep 2
+# Authoritative: qdwin received the forwarded toplevel and assigned it the
+# [tier5:loopback-<pid>] title prefix. The <pid> suffix varies — match the
+# prefix only. Wide --since window (this is a fresh disposable VM with a single
+# tier-5 spawn, so a stale match is impossible) tolerates a slow agent pausing
+# between the S1 map and this assertion.
+$VMEXEC "$VM" "journalctl --since '10min ago' | grep 'qdwin: toplevel_title' | grep -F '[tier5:loopback-' | head"
+```
+
+**Assert** (deterministic): the command prints at least one line — qdwin
+saw the forwarded toplevel and tagged it `[tier5:loopback-<pid>]`. This
+proves the loopback data path end-to-end (vsock → waypipe client →
+waypipe server → outer compositor) **and** the secctx title-prefix
+treatment, without depending on framebuffer freshness.
+
+Corroborating screenshot (best-effort, **NOT** load-bearing):
+
+```bash
 $VMGUI "$VM" screenshot /tmp/s19-loopback-toplevel.png
 ```
 
-**Assert** (agent-visual): the screenshot shows a weston-terminal
-window (dark terminal background, text cursor visible at top-left).
-Its title bar (or qdwin's chrome) shows the title prefix
-`[tier5:loopback-`. The exact suffix is `<pid>` so don't match it
-literally — confirm the `[tier5:loopback-` substring is present in
-the visible title.
-
-If the title bar doesn't render (`qdwin`-chrome only — no
-client-side decorations from weston-terminal), the prefix lives in
-the taskbar entry instead. Either is a PASS as long as the
-`[tier5:loopback-` prefix is visible somewhere on screen.
+Note in the report whether the `[tier5:loopback-` prefix is also visible
+in the window/taskbar chrome (and that a weston-terminal window with a
+dark background + top-left text cursor is shown). Do **not** FAIL on a
+stale or prefix-less screenshot when the journal assertion above passed —
+the journal is the ground truth.
 
 ### S3 — click into the terminal; verify input forwarded
 
@@ -119,17 +154,18 @@ $VMEXEC "$VM" "journalctl --since '1min ago' | grep -E 'qdwin:.*tier5|tier5.*qdw
 ```
 
 **Assert**: at least one journal line indicating qdwin saw the
-tier-5-tagged client or assigned chrome to its toplevel. If qdwin
-doesn't emit a tier5-tagged line today, note this as a logging gap
-(file as a follow-up) but don't FAIL the scenario — S2/S3 are the
-visual ground-truth here.
+tier-5-tagged client or assigned chrome to its toplevel. This overlaps
+S2's authoritative `toplevel_title` check; if this particular grep
+matches nothing but S2 passed, note it as a logging gap (file as a
+follow-up) and do **not** FAIL — S2's journal assertion is the
+deterministic ground-truth here.
 
 ### S5 — cleanup
 
 ```bash
-$VMEXEC "$VM" 'pkill -u root -f "spawn-tier5.sh.*loopback" 2>/dev/null || true; \
+$VMEXEC "$VM" 'pkill -u root -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true; \
                sleep 1; \
-               pkill -u root -f "spawn-tier5.sh.*loopback" 2>/dev/null || true'
+               pkill -u root -f "[s]pawn-tier5.sh.*loopback" 2>/dev/null || true'
 ```
 
 ## Known caveats
