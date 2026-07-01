@@ -31,6 +31,25 @@ The build steps assume these tools are on `PATH`:
   daemons.
 - **Python 3** + **pytest** — headless unit tests.
 - **npm** — WebExtension tests/builds.
+- **SELinux policy build tools** — needed when compiling qdistro `.te` modules
+  locally. On Tumbleweed:
+
+  ```sh
+  sudo zypper install selinux-policy-devel checkpolicy policycoreutils policycoreutils-devel policycoreutils-python-utils
+  ```
+
+  The qdistro SELinux module `Makefile`s call
+  `/usr/share/selinux/devel/Makefile`, which is provided by
+  `selinux-policy-devel`. If policy builds fail with that file missing, first
+  confirm the package is installed and the path exists:
+
+  ```sh
+  rpm -q selinux-policy-devel checkpolicy policycoreutils-devel
+  test -f /usr/share/selinux/devel/Makefile
+  ```
+
+  If the devel `Makefile` exists, the host has the policy build toolchain; later
+  `checkmodule` errors are policy/source issues, not missing host packages.
 
 `qdistro/ci/bin/qci preflight` checks the build/lint tools it can (meson, ninja,
 pkg-config, npm, ruff, mypy) plus virsh/KVM/VM tooling, and reports any that are
