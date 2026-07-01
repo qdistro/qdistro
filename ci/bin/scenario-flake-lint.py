@@ -461,20 +461,45 @@ def is_allowed(path: Path, rule: str,
     return None
 
 
-def default_paths(repo: Path) -> list[Path]:
-    roots = [
+# The qdistro-OWNED scenario roots: the migration metric for scenarios this repo
+# owns and can fix directly.
+def qdistro_owned_roots(repo: Path) -> list[Path]:
+    return [
         repo / "tests/integration/permissions-gui",
         repo / "tests/integration/qdwin-noctalia",
     ]
-    # Sibling repos' GUI scenarios live next to the qdistro checkout.
-    ws = repo.parent
-    for sib in ("qdwin/tests/gui", "qdwin/tests/apps", "qdlocker/tests/gui"):
-        roots.append(ws / sib)
+
+
+# The UMBRELLA scenario roots: the qdistro-owned set PLUS the sibling qdwin/
+# qdlocker roots — the same path set `qci gui` actually schedules. The readiness
+# metric for widening `qci gui` across the whole suite. Umbrella STRICT-clean must
+# never be conflated with qdistro-owned strict-clean.
+def umbrella_roots(repo: Path) -> list[Path]:
+    ws = repo.parent  # sibling repos live next to the qdistro checkout
+    return qdistro_owned_roots(repo) + [
+        ws / "qdwin/tests/gui",
+        ws / "qdwin/tests/apps",
+        ws / "qdlocker/tests/gui",
+    ]
+
+
+def _roots_to_files(roots: list[Path]) -> list[Path]:
     out: list[Path] = []
     for r in roots:
         if r.is_dir():
             out.extend(sorted(r.glob("[0-9][0-9]-*.md")))
     return out
+
+
+def paths_for_set(repo: Path, which: str) -> list[Path]:
+    if which == "qdistro":
+        return _roots_to_files(qdistro_owned_roots(repo))
+    return _roots_to_files(umbrella_roots(repo))
+
+
+def default_paths(repo: Path) -> list[Path]:
+    # Back-compat default = the umbrella set (the historic behaviour).
+    return paths_for_set(repo, "umbrella")
 
 
 def main(argv: list[str]) -> int:
@@ -489,13 +514,19 @@ def main(argv: list[str]) -> int:
                     "(default: ci/scenario-flake-allow.tsv beside the repo)")
     ap.add_argument("--no-allowlist", action="store_true",
                     help="ignore the allowlist (every finding counts)")
+    ap.add_argument("--set", choices=("qdistro", "umbrella"), default="umbrella",
+                    dest="path_set",
+                    help="which default path set to lint when no explicit paths "
+                         "are given: `qdistro` (qdistro-owned strict = "
+                         "permissions-gui + qdwin-noctalia) or `umbrella` (the "
+                         "full set qci gui schedules; default)")
     args = ap.parse_args(argv)
 
     repo = Path(__file__).resolve().parents[1].parent  # ci/bin -> repo root
     if args.paths:
         targets = [Path(p) for p in args.paths]
     else:
-        targets = default_paths(repo)
+        targets = paths_for_set(repo, args.path_set)
 
     allowlist: list[tuple[str, str, str]] = []
     if not args.no_allowlist:

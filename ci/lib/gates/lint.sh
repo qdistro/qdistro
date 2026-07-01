@@ -124,29 +124,51 @@ gate_lint() {
     # set QCI_FLAKE_STRICT=1 to hard-fail the gate on any non-allowlisted finding
     # (the Phase-1 exit criterion, adopted once the count is driven to the
     # allowlist).
-    local fl_script="$QCI_BIN_DIR/scenario-flake-lint.py" fl_findings
-    if [ -f "$fl_script" ] && command -v python3 >/dev/null 2>&1; then
-        local fl_strict=${QCI_FLAKE_STRICT:-0}
-        { echo; echo "## scenario flake-smell lint (strict=$fl_strict)"; } >> "$log_path"
-        python3 "$fl_script" --format gcc >> "$log_path" 2>>"$log_path"
-        fl_findings=$(python3 "$fl_script" --format summary 2>&1 >/dev/null \
+    lint_flake_smells "$log_path"
+
+    return "$EXIT_OK"
+}
+
+# TWO separate strict flake-smell metrics, recorded as SEPARATE rows so the report
+# can never conflate "qdistro-owned is strict-clean" with "umbrella is
+# strict-clean" (the plan's §3 requirement):
+#   qdistro-owned strict = qdistro/tests/integration/{permissions-gui,
+#                          qdwin-noctalia} — the migration metric for the scenarios
+#                          this repo owns and can fix directly.
+#   umbrella      strict = the SAME path set `qci gui` schedules (qdistro + sibling
+#                          qdwin/qdlocker roots) — the readiness metric for widening
+#                          `qci gui` across the whole suite.
+# Warn-only stays the default for BOTH; QCI_FLAKE_STRICT=1 escalates each to a fail
+# row exactly as before. Factored out of gate_lint so the two-row contract is
+# host-testable. Arg: log_path.
+lint_flake_smells() {
+    local log_path=$1
+    local fl_script="$QCI_BIN_DIR/scenario-flake-lint.py" fl_findings fl_set fl_subject
+    if [ ! -f "$fl_script" ] || ! command -v python3 >/dev/null 2>&1; then
+        record_skip lint flake-smells lint "scenario-flake-lint.py or python3 absent; skipping flake-smell lint"
+        return 0
+    fi
+    local fl_strict=${QCI_FLAKE_STRICT:-0}
+    { echo; echo "## scenario flake-smell lint (strict=$fl_strict)"; } >> "$log_path"
+    for fl_set in qdistro umbrella; do
+        fl_subject="flake-smells-$fl_set"
+        { echo; echo "### set=$fl_set"; } >> "$log_path"
+        python3 "$fl_script" --set "$fl_set" --format gcc >> "$log_path" 2>>"$log_path"
+        fl_findings=$(python3 "$fl_script" --set "$fl_set" --format summary 2>&1 >/dev/null \
             | awk '/scenario-flake-lint:/{print $2; exit}')
         [ -n "$fl_findings" ] 2>/dev/null || fl_findings=0
         if [ "$fl_findings" -eq 0 ] 2>/dev/null; then
-            log "lint: scenario flake-smells 0 finding(s)"
-            record_result lint flake-smells pass 0 pass lint "$log_path" "no flake-smell findings"
+            log "lint: scenario flake-smells[$fl_set] 0 finding(s)"
+            record_result lint "$fl_subject" pass 0 pass lint "$log_path" \
+                "no flake-smell findings ($fl_set set)"
         elif [ "$fl_strict" = 1 ]; then
-            log "lint: scenario flake-smells $fl_findings finding(s) (STRICT — failing)"
-            record_result lint flake-smells fail "$EXIT_HOST" lint lint "$log_path" \
-                "$fl_findings non-allowlisted flake-smell finding(s) (QCI_FLAKE_STRICT=1)"
+            log "lint: scenario flake-smells[$fl_set] $fl_findings finding(s) (STRICT — failing)"
+            record_result lint "$fl_subject" fail "$EXIT_HOST" lint lint "$log_path" \
+                "$fl_findings non-allowlisted flake-smell finding(s) in $fl_set set (QCI_FLAKE_STRICT=1)"
         else
-            log "lint: scenario flake-smells $fl_findings finding(s) (warn-only)"
-            record_result lint flake-smells skip 0 pass lint "$log_path" \
-                "$fl_findings flake-smell finding(s) (warn-only; migrate to waiter lib / scenario-tmpdir)"
+            log "lint: scenario flake-smells[$fl_set] $fl_findings finding(s) (warn-only)"
+            record_result lint "$fl_subject" skip 0 pass lint "$log_path" \
+                "$fl_findings flake-smell finding(s) in $fl_set set (warn-only; migrate to waiter lib / scenario-tmpdir)"
         fi
-    else
-        record_skip lint flake-smells lint "scenario-flake-lint.py or python3 absent; skipping flake-smell lint"
-    fi
-
-    return "$EXIT_OK"
+    done
 }
