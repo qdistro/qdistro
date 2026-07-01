@@ -240,22 +240,49 @@ record_dest() {
 # exist (serial runs). Fragments merge in sorted worker-name order for a
 # deterministic canonical file.
 merge_worker_fragments() {
-    local name d frag
+    local name d frag expected line nf malformed_total=0
     for name in results timings scenario-attempts host-load flake; do
         d="$RDIR/$name.d"
         [ -d "$d" ] || continue
+        # Expected per-row column count = the canonical header's field count
+        # (init_run wrote it). Deriving it from the header keeps this correct if a
+        # schema column is ever added. 0 (no header) => validation is skipped and
+        # rows are appended as-is (graceful degradation, never row loss).
+        expected=0
+        [ -f "$RDIR/$name.tsv" ] && \
+            expected=$(head -n1 "$RDIR/$name.tsv" 2>/dev/null | awk -F'\t' '{print NF}')
         while IFS= read -r frag; do
             if [ -s "$frag" ]; then
-                cat "$frag" >> "$RDIR/$name.tsv"
-                # A crashed worker's partial fragment may lack a trailing newline;
-                # guard so it can't concatenate with the next fragment's first row.
-                if [ "$(tail -c 1 "$frag" 2>/dev/null; printf x)" != $'\nx' ]; then
-                    printf '\n' >> "$RDIR/$name.tsv"
-                fi
+                # Validate each row's column count and QUARANTINE malformed rows: a
+                # worker killed mid-write can leave a short/truncated row that would
+                # otherwise silently misalign report parsing. Reading line-by-line
+                # and re-emitting each with its own newline also subsumes the old
+                # missing-trailing-newline guard. `|| [ -n "$line" ]` keeps a final
+                # unterminated (partial) row so it is quarantined, not dropped.
+                while IFS= read -r line || [ -n "$line" ]; do
+                    [ -n "$line" ] || continue
+                    if [ "$expected" -gt 0 ]; then
+                        nf=$(printf '%s' "$line" | awk -F'\t' '{print NF}')
+                        if [ "$nf" -ne "$expected" ]; then
+                            printf '%s\t%s\n' "$(basename "$frag")" "$line" >> "$d/malformed.log"
+                            malformed_total=$((malformed_total + 1))
+                            continue
+                        fi
+                    fi
+                    printf '%s\n' "$line" >> "$RDIR/$name.tsv"
+                done < "$frag"
             fi
             mv "$frag" "$frag.merged"
         done < <(find "$d" -maxdepth 1 -type f -name '*.tsv' | sort)
     done
+    # A nonzero quarantine count means a worker crashed mid-write — surface it as
+    # a loud runner-integrity row rather than letting a misaligned row skew the
+    # report silently.
+    if [ "$malformed_total" -gt 0 ]; then
+        log "merge_worker_fragments: quarantined $malformed_total malformed fragment row(s) — see *.d/malformed.log"
+        record_result runner-integrity fragment-rows fail "$EXIT_RUNNER" runner integrity "" \
+            "$malformed_total malformed worker-fragment row(s) quarantined (a worker crashed mid-write); see results.d/malformed.log"
+    fi
 }
 
 record_result() {
