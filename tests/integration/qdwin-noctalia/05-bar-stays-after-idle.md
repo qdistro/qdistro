@@ -176,7 +176,7 @@ DPMS-off period).
 "$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/05-wake.cur 2>/dev/null)
 [ -n "$cur" ] || { echo "FAIL: missing pre-idle/wake compositor cursor"; exit 1; }
 runuser -l admin -c "journalctl --user -u qdwin-compositor.service --after-cursor \"$cur\" --no-pager"' \
- > /tmp/05-weston.log
+ > "${QCI_SCENARIO_TMPDIR:-/tmp}/05-weston.log"
 ```
 
 **Assert (4.1):** zero `error <N>:` lines in the captured log.

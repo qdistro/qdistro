@@ -45,7 +45,7 @@ the Noctalia owl/moon wallpaper or a uniform configured background.
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
  "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '2 minutes ago' --no-pager\"" \
- > /tmp/01-weston.log
+ > "${QCI_SCENARIO_TMPDIR:-/tmp}/01-weston.log"
 ```
 
 **Assert (2.1):** at least one `qdwin: layer-shell mapped

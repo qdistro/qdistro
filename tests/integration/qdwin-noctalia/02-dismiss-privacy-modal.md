@@ -61,7 +61,7 @@ NEITHER of: "Privacy", "PRIVACY", "GOT IT", "Welcome to Noctalia",
 "$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/02-shell.cur 2>/dev/null)
 [ -n "$cur" ] || { echo "FAIL: missing pre-restart qdshell cursor"; exit 1; }
 runuser -l admin -c "journalctl --user -u qdshell.service --after-cursor \"$cur\" --no-pager"' \
-    > /tmp/02-shell.log
+    > "${QCI_SCENARIO_TMPDIR:-/tmp}/02-shell.log"
 ```
 
 **Assert (2.1):** zero protocol errors in the captured log.
