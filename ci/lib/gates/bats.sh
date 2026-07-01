@@ -146,6 +146,11 @@ gate_bats() {
     # Concurrency is capped at `jobs` via `wait -n` (reap one worker before
     # launching the next once at capacity).
     jobs=$(bats_job_count)
+    # Concurrency visibility (Phase 0 / H8): record the requested vs effective
+    # (RAM-clamped) parallelism in manifest.txt so a reader sees the caps without
+    # external monitor notes.
+    kv bats_jobs_requested "${QCI_JOBS:-auto}"
+    kv bats_jobs_effective "$jobs"
     # Per-worker result fragments (merged at finish_run) when >1 file runs
     # concurrently, so parallel appends never interleave and a crashed worker's
     # rows survive. Operator forces off with QCI_RESULT_FRAGMENTS=0.

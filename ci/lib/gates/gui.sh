@@ -988,9 +988,40 @@ gui_preflight_capabilities() {
     return 0
 }
 
+# Record the agent identity (H6a) into manifest.txt: the sanitized QCI_AGENT_CMD
+# template, the model (parsed from `--model X` or QCI_AGENT_MODEL), and a
+# best-effort `claude --version`. This is what distinguishes a CI run (standard
+# haiku command) from a debug rerun with a stronger model, and is the prerequisite
+# for never confusing debug rows with CI rows. Pure w.r.t. the run tree except the
+# kv writes; a missing QCI_AGENT_CMD is a no-op. Model parsing is host-testable via
+# gui_agent_model_from_cmd.
+gui_agent_model_from_cmd() {
+    local cmd=$1 model=""
+    model=$(printf '%s' "$cmd" | grep -oE -- '--model[= ]+[A-Za-z0-9._:-]+' | head -1 \
+        | sed -E 's/--model[= ]+//')
+    printf '%s' "$model"
+}
+
+record_agent_identity() {
+    local cmd=${QCI_AGENT_CMD:-} model="" ver=""
+    [ -n "$cmd" ] || return 0
+    # Scrub tabs/newlines so the value stays a single manifest line.
+    kv qci_agent_cmd "$(printf '%s' "$cmd" | tr '\t\n' '  ')"
+    model=$(gui_agent_model_from_cmd "$cmd")
+    [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
+    kv qci_agent_model "${model:-unknown}"
+    # Best-effort CLI version — only if the template invokes a `claude` binary,
+    # and bounded so a wedged CLI cannot stall the gate.
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then
+        ver=$(timeout 10 claude --version 2>/dev/null | head -1)
+        [ -n "$ver" ] && kv qci_agent_version "$ver"
+    fi
+}
+
 gate_gui() {
     qci_assert_run_dir || return $?
     qci_assert_vm_tools gui || return $?
+    record_agent_identity
     local explicit=${1:-} svm qdwin_svm="" rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0
     require=${QCI_REQUIRE_AGENT_GUI:-1}
     # Build per-run GUI goldens once per profile. The admin profile keeps the
@@ -1208,6 +1239,10 @@ gate_gui() {
             # Disposable: parallel pool, one fresh GUI VM per scenario.
             local jobs running=0 frag=0 worker_id
             jobs=$(gui_job_count)
+            # Concurrency visibility (Phase 0 / H8): record requested vs effective
+            # (RAM-clamped) GUI parallelism in manifest.txt.
+            kv gui_jobs_requested "${QCI_GUI_JOBS:-1}"
+            kv gui_jobs_effective "$jobs"
             # Route each concurrent worker's result rows to a per-worker fragment
             # (merged at finish_run) so parallel appends never interleave and a
             # crashed worker's rows survive. Auto-on when >1 worker; operator forces
