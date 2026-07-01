@@ -389,6 +389,14 @@ def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
     # bucketed out of the actionable clean-run metric.
     if status == "fail" and "external-network infra" in notes:
         return "external-network infra (guest fetch/registry failure during setup)"
+    # Blocked-on-infra cascade (H5): in a full run, a VM-dependent gate that was
+    # NOT run because an earlier VM gate already failed vm-provision. The failure
+    # has a single infra root cause (the earlier gate books the one actionable
+    # row); this cascade row is non-actionable but VISIBLE, like an unpopulated
+    # release manifest. Keys on the runner-generated "blocked-on-infra" note token
+    # so agent prose cannot spoof it.
+    if status == "blocked" and "blocked-on-infra" in notes:
+        return "blocked on upstream VM-provision infra failure (single root cause)"
     # NOTE: edit-guard failures are deliberately NOT bucketed here. An
     # unsanctioned protected-path edit is deterministic but still human-required
     # (sanction with --allow-test-edits, fix the tooling, or revert), and a

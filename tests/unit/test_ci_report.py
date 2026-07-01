@@ -175,6 +175,43 @@ def test_external_network_infra_is_nonactionable():
     assert report.nonactionable_failure_reason(r) is not None
 
 
+def test_blocked_on_infra_cascade_is_nonactionable():
+    # A VM-dependent gate skipped in a full run because an EARLIER VM gate failed
+    # vm-provision is one infra root cause, not an independent failure: the
+    # `blocked-on-infra` row must be bucketed non-actionable (but stays visible).
+    r = _row(gate="gui", subject="full-vm-cascade", status="blocked",
+             notes="blocked-on-infra: an earlier VM-dependent gate failed "
+                   "vm-provision (single infra root cause); skipped to avoid "
+                   "double-counting")
+    assert report.nonactionable_failure_reason(r) is not None
+
+
+def test_plain_blocked_without_infra_token_stays_actionable():
+    # A blocked row that is NOT the infra cascade (no runner token) stays
+    # actionable — the bucketing keys strictly on the "blocked-on-infra" marker.
+    r = _row(gate="bats", subject="x", status="blocked",
+             notes="blocked: preconditions not met")
+    assert report.nonactionable_failure_reason(r) is None
+
+
+def test_golden_failure_yields_one_actionable_row():
+    # H5 exit criterion: a simulated golden/provision failure (the vm-smoke gate
+    # books ONE actionable vm_provision fail) plus the two cascade-blocked gates
+    # must collapse to a SINGLE actionable row.
+    rows = [
+        _row(gate="vm-smoke", subject="golden-build", status="fail",
+             exit_class="vm_provision", notes="run-golden build failed"),
+        _row(gate="bats", subject="full-vm-cascade", status="blocked",
+             notes="blocked-on-infra: earlier VM gate failed vm-provision"),
+        _row(gate="gui", subject="full-vm-cascade", status="blocked",
+             notes="blocked-on-infra: earlier VM gate failed vm-provision"),
+    ]
+    actionable, expected = report.partition_failures(rows)
+    assert len(actionable) == 1
+    assert actionable[0]["gate"] == "vm-smoke"
+    assert len(expected) == 2
+
+
 def test_plain_product_error_stays_actionable():
     # A product ERROR that is NOT tagged external-network stays actionable — the
     # bucketing keys strictly on the runner-generated marker, never on generic

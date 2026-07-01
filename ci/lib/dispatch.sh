@@ -15,12 +15,26 @@ gate_full() {
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     gate_bootstrap_release_profile; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    gate_vm_smoke ""; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    gate_bats ""; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    gate_gui ""; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    # VM-dependent gates share ONE infra resource (libvirt provisioning + the
+    # per-run golden). When one fails with EXIT_VM_PROVISION that is a single
+    # infra root cause; running the rest into the same wall books N independent
+    # actionable failures for one problem (H5). Once a VM gate reports
+    # EXIT_VM_PROVISION, record the remaining VM gates as `blocked-on-infra`
+    # rows — non-actionable but visible in the report — instead of running them.
+    # The exit criterion is "a simulated golden failure yields ONE actionable row".
+    local gate_fn subj vm_infra=0
+    for gate_fn in gate_vm_smoke gate_bats gate_gui; do
+        subj=$(printf '%s' "${gate_fn#gate_}" | tr '_' '-')
+        if [ "$vm_infra" = 1 ]; then
+            record_blocked "$subj" full-vm-cascade "$EXIT_VM_PROVISION" vm \
+                "blocked-on-infra: an earlier VM-dependent gate failed vm-provision (single infra root cause); skipped to avoid double-counting"
+            log "gate_full: $subj blocked-on-infra (earlier VM gate failed vm-provision)"
+            continue
+        fi
+        "$gate_fn" ""; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+        [ "$step_rc" = "$EXIT_VM_PROVISION" ] && vm_infra=1
+    done
     return "$rc"
 }
 
