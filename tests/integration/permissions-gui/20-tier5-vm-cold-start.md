@@ -100,39 +100,62 @@ showing a stale/crashed state — FAIL.
 
 Budget 90s.
 
+`virsh domstate` is NOT a reliable liveness oracle for a tier-5 nested
+VM: under nested virt libvirt's `domstate` **lies**, reporting `shut
+off` while the backing qemu process is still ALIVE (this is the exact
+failure mode `tier5-vm/spawn-tier5.sh`'s `qemu_pids_for_domain` helper
+and commit `8ac0a39` were written for). So `domstate` is a DIAGNOSTIC
+here, not the verdict. The domain is **live** if `domstate=running` OR a
+real qemu process backs `guest=$VM5` AND the guest agent answers
+`guest-ping`. It is only genuinely DEAD (a real nested-VM death) when no
+backing qemu pid exists AND qga is unresponsive within the 90s budget.
+
 ```bash
-saw_running=0
-deadline=$((SECONDS + 90))
-while [ $SECONDS -lt $deadline ]; do
-    state=$($VMEXEC "$VM" "runuser -u admin -- virsh domstate $VM5 2>/dev/null || true" | tr -d '[:space:]')
-    case "$state" in
-        running) saw_running=1; break;;
-    esac
+# Run the whole liveness determination IN the outer VM (base64 to avoid
+# nested-quoting hell, like S1). Reuses spawn-tier5.sh's robust check:
+# pgrep -f "guest=$VM5," narrowed to real qemu by /proc/<pid>/comm.
+B64=$(base64 -w0 <<EOF
+VM5=$VM5
+deadline=\$((SECONDS + 90))
+verdict=DEAD; via=""; qpids=""
+while [ \$SECONDS -lt \$deadline ]; do
+    state=\$(runuser -u admin -- virsh domstate "\$VM5" 2>/dev/null | tr -d '[:space:]')
+    qpids=""
+    for p in \$(runuser -u admin -- pgrep -f "guest=\$VM5," 2>/dev/null); do
+        c=\$(cat "/proc/\$p/comm" 2>/dev/null) || continue
+        case "\$c" in qemu-system-*|qemu-kvm) qpids="\$qpids \$p" ;; esac
+    done
+    qga=\$(runuser -u admin -- virsh qemu-agent-command --timeout 5 "\$VM5" '{"execute":"guest-ping"}' 2>/dev/null)
+    if [ "\$state" = running ]; then verdict=LIVE; via="domstate=running"; break; fi
+    if [ -n "\$qpids" ] && printf '%s' "\$qga" | grep -q '"return"'; then
+        verdict=LIVE; via="qemu-pid+qga (domstate=\${state:-empty} LIES)"; break
+    fi
     sleep 2
 done
-
-# Tolerant re-confirm: a transient runuser/virsh transport blip under full-run load
-# must NOT read as "shut off" (the wait loop above already observed running, and S3/S4
-# prove liveness). Accept any live state; only treat an EXPLICIT terminal state seen on
-# CONSECUTIVE reads as real. Note: tr strips the space so "shut off" -> "shutoff".
-final=""
-terminal_hits=0
-for _ in 1 2 3 4 5; do
-    s=$($VMEXEC "$VM" "runuser -u admin -- virsh domstate $VM5 2>/dev/null || true" | tr -d '[:space:]')
-    case "$s" in
-        running|paused|idle|pmsuspended) final="$s"; terminal_hits=0; break;;
-        shutoff|crashed) final="$s"; terminal_hits=$((terminal_hits + 1)); [ "$terminal_hits" -ge 2 ] && break; sleep 1;;
-        "") sleep 1;;
-        *) final="$s"; sleep 1;;
-    esac
-done
+echo "S2_VERDICT=\$verdict"
+echo "S2_VIA=\$via"
+echo "--- diagnostics ---"
+echo "domstate: \$(runuser -u admin -- virsh domstate "\$VM5" 2>&1)"
+echo "qemu pids:\${qpids:- <none>}"
+for p in \$qpids; do echo "cmdline[\$p]: \$(tr '\0' ' ' </proc/\$p/cmdline 2>/dev/null)"; done
+echo "guest-ping: \$(runuser -u admin -- virsh qemu-agent-command --timeout 5 "\$VM5" '{"execute":"guest-ping"}' 2>&1)"
+tail -20 /tmp/s20-spawn.log 2>/dev/null
+EOF
+)
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash" 2>&1 | tee /tmp/s20-liveness.log
 ```
 
-**Assert**: `saw_running=1` AND `final` is NOT a confirmed terminal
-state (i.e. not `shutoff`/`crashed` seen on consecutive reads). FAIL
-if the wait loop never observed `running` (`saw_running=0`) — even if
-later queries are empty/transient — and attach the spawn log. A lone
-transient empty/error after a confirmed `running` is NOT a failure.
+**Assert**: the block prints `S2_VERDICT=LIVE` — the domain either
+reached `domstate=running` OR is provably alive via a real backing qemu
+pid + a `guest-ping` response even though `domstate` lied `shut off`
+(the `S2_VIA` line records which). **FAIL only** on `S2_VERDICT=DEAD` —
+NO accepted liveness proof within 90s: neither `domstate=running` nor a
+backing qemu pid answering `guest-ping` (a guest that never came up,
+OOM/panic'd so qemu exited, or is only a wedged qemu with a dead agent).
+Attach `/tmp/s20-liveness.log` + the spawn log. A `domstate=shut off`
+reading is NOT by itself a failure when qemu+qga prove the guest is
+alive. (S2 asserts LIVENESS only; S3 separately proves the publisher
+handshake and the visible toplevel.)
 
 ### S3 — wait for waypipe handshake; weston-terminal toplevel appears
 
