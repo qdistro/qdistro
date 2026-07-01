@@ -43,6 +43,47 @@ sleep 1.5
 
 ## Steps
 
+### Preflight — VM graphics backend is compositing
+
+Before any visual assertion, confirm the compositor is actually scanning
+out. On some VM graphics stacks libweston's DRM backend rejects every
+atomic KMS commit — the journal fills with `atomic: couldn't commit new
+state: Invalid argument` and `repaint-flush failed: Invalid argument`,
+the scanout goes black, and every screenshot below would be a false
+FAIL. That is an environment condition (VM graphics / KMS backend), not
+a qdlocker or qdwin defect: `doc/compositor.md` requires VM targets to
+work on virtio-gpu/virgl or pixman software rendering and forbids qdwin
+from depending on GPU acceleration. Detect it here and stop as ERROR so
+a pure graphics flake is not mistaken for an occlusion leak.
+
+```bash
+DRM_LOG=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"2 minutes ago\" --no-pager"' \
+  | grep -E "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
+DRM_FAILS=$(printf '%s\n' "$DRM_LOG" | grep -cE "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
+
+if [ "${DRM_FAILS:-0}" -ge 5 ]; then
+    echo "ERROR: VM graphics backend is failing DRM atomic commits" \
+         "($DRM_FAILS repeated 'atomic: couldn't commit new state' /" \
+         "'repaint-flush failed: Invalid argument' in the last 2 minutes)." \
+         "The compositor is not scanning" \
+         "out, so every screenshot below would be black — this is a VM" \
+         "graphics/KMS backend condition, NOT a qdlocker/qdwin occlusion" \
+         "defect. See doc/compositor.md (virtio-gpu/virgl or pixman must" \
+         "work; qdwin must not require GPU accel)." >&2
+    echo "--- offending compositor journal lines ---" >&2
+    printf '%s\n' "$DRM_LOG" | tail -20 >&2
+    exit 78  # hard ERROR (VM graphics backend) — BLOCKED, not a product FAIL
+fi
+```
+
+**Preflight gate:** fewer than 5 repeated `atomic: couldn't commit new
+state: Invalid argument` failures in the last 2 minutes (a healthy
+compositor emits zero; the flake bursts dozens per second). If the
+threshold is exceeded the scenario stops here classified **ERROR (VM
+graphics backend)** with the offending journal lines dumped — it is not
+a qdlocker occlusion FAIL. A clean journal proceeds to Step 1.
+
 ### Step 1 — baseline sentinel is visible
 
 ```bash
