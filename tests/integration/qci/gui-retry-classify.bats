@@ -112,6 +112,53 @@ setup() {
     [ "$(gui_classify_failure UNKNOWN 124 1 1)" = transport-timeout ]
 }
 
+# --- external-network classifier (arg 6) + gui_detect_external_network_marker ---
+
+@test "classify: ERROR + external-network marker -> external-network (NOT retriable)" {
+    [ "$(gui_classify_failure ERROR 0 0 0 0 1)" = external-network ]
+    run gui_classifier_retriable external-network
+    [ "$status" -ne 0 ]
+}
+
+@test "classify: ERROR without external-network marker stays product-error" {
+    [ "$(gui_classify_failure ERROR 0 0 0 0 0)" = product-error ]
+    # default 6th arg is 0
+    [ "$(gui_classify_failure ERROR 1 0)" = product-error ]
+}
+
+@test "classify: external-network flag does NOT flip a genuine product FAIL" {
+    # Only status=ERROR is reclassified; a FAIL with the flag set stays product-fail.
+    [ "$(gui_classify_failure FAIL 1 0 0 0 1)" = product-fail ]
+}
+
+@test "extnet marker: detects curl exit form '(56) Recv failure: Connection reset by peer'" {
+    local log="$BATS_TEST_TMPDIR/e1.log"
+    printf 'curl: (56) Recv failure: Connection reset by peer\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "extnet marker: detects a DNS resolution failure" {
+    local log="$BATS_TEST_TMPDIR/e2.log"
+    printf 'curl: (6) Could not resolve host: download.opensuse.org\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "extnet marker: detects a zypper download failure" {
+    local log="$BATS_TEST_TMPDIR/e3.log"
+    printf "Download (curl) error for 'https://download.opensuse.org/repo':\nError code: Connection failed\n" > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "extnet marker: an ordinary product ERROR is NOT an external-network marker" {
+    local log="$BATS_TEST_TMPDIR/e4.log"
+    printf 'ERROR: qdshell socket not found; setup could not proceed\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
 # --- gui_detect_agent_tooling_marker: log scan ---
 
 @test "tooling marker: detects 'bash: -c: option requires an argument'" {

@@ -379,6 +379,16 @@ def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
         or any(token in notes for token in interrupt_notes)
     ):
         return "run interrupted by operator"
+    # External-network infra: a GUI/agent scenario whose SETUP hit an upstream
+    # CDN/mirror/registry fetch failure (curl/zypper/registry download reset/
+    # timeout/DNS) is infra, not a product regression — an external outage must
+    # never read as a product failure. The gui gate tags the result note with a
+    # stable "external-network infra" marker (only when its anchored fetch-failure
+    # classifier fired), so keying on that runner-generated token here cannot be
+    # spoofed by agent prose. The row is still surfaced in the report, just
+    # bucketed out of the actionable clean-run metric.
+    if status == "fail" and "external-network infra" in notes:
+        return "external-network infra (guest fetch/registry failure during setup)"
     # NOTE: edit-guard failures are deliberately NOT bucketed here. An
     # unsanctioned protected-path edit is deterministic but still human-required
     # (sanction with --allow-test-edits, fix the tooling, or revert), and a
@@ -419,7 +429,17 @@ def partition_failures(
 # EXCLUDED: it can be prompt/scenario-shape correlated rather than an external
 # outage. See todo/qci1/04-followups-from-failure-review.md §A2.
 INFRA_BURST_CLASSIFIERS = frozenset(
-    {"agent-api-unreachable", "transport-timeout", "vm-provision", "golden-build"}
+    {
+        "agent-api-unreachable",
+        "transport-timeout",
+        "vm-provision",
+        "golden-build",
+        # An upstream CDN/mirror/registry fetch failure during scenario setup
+        # (curl/zypper/registry download reset/timeout/DNS): pure external
+        # infra. A contiguous run of these in one lane is an outage, not N
+        # product bugs. See gui.sh::gui_detect_external_network_marker.
+        "external-network",
+    }
 )
 
 

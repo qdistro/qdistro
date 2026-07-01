@@ -164,6 +164,32 @@ def test_real_product_and_infra_failures_are_actionable():
         assert report.nonactionable_failure_reason(r) is None, r["subject"]
 
 
+def test_external_network_infra_is_nonactionable():
+    # A GUI scenario whose SETUP hit an upstream CDN/registry fetch failure is
+    # infra, not a product regression: the gui gate tags the result note with the
+    # stable "external-network infra" marker, and it must be bucketed out of the
+    # actionable clean-run metric (but still surfaced).
+    r = _row(gate="gui", subject="permissions-gui/18-podapps-launcher-badge.md",
+             notes="external-network infra: agent status=ERROR rc=0 (guest fetch/"
+                   "registry failure during setup — upstream outage, not a product failure)")
+    assert report.nonactionable_failure_reason(r) is not None
+
+
+def test_plain_product_error_stays_actionable():
+    # A product ERROR that is NOT tagged external-network stays actionable — the
+    # bucketing keys strictly on the runner-generated marker, never on generic
+    # ERROR prose.
+    r = _row(gate="gui", subject="x", notes="agent status=ERROR rc=0")
+    assert report.nonactionable_failure_reason(r) is None
+
+
+def test_external_network_in_burst_allowlist():
+    # The external-network classifier must join the infra-burst allowlist so a
+    # contiguous run of upstream-fetch failures in one lane is surfaced as an
+    # outage, not N product bugs.
+    assert "external-network" in report.INFRA_BURST_CLASSIFIERS
+
+
 def test_partition_normalizes_status_like_the_classifier():
     # A padded / upper-cased status must not be silently dropped from BOTH
     # buckets — partition_failures normalizes the same way the classifier does.

@@ -334,6 +334,13 @@ gui_agent_verdict() {
 # It NEVER classifies a product/test failure as retriable:
 #   product-fail      status=FAIL   (agent ran the asserts; one failed)       NEVER retry
 #   product-error     status=ERROR  (agent couldn't set up preconditions)     NEVER retry
+#   external-network  status=ERROR + an unambiguous guest-side external FETCH
+#                     failure marker (curl/zypper/registry download reset/timeout/
+#                     DNS) during setup: an upstream CDN/mirror/registry outage,
+#                     pure INFRA — never a product regression. NOT auto-retriable
+#                     (re-running does not fix an upstream outage), but joins the
+#                     correlated-burst allowlist and is bucketed non-actionable in
+#                     the report so a CDN blip is not read as a product failure.
 #   no-verdict        UNKNOWN:0      (agent exited clean with no verdict)      NEVER retry
 #   agent-tooling     status=FAIL + an unambiguous SHELL COMMAND-CONSTRUCTION
 #                     error in the agent's OWN driver commands (malformed bash/sh
@@ -365,7 +372,7 @@ gui_agent_verdict() {
 # Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
 #       agent_api_marker(0/1, optional)
 gui_classify_failure() {
-    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0}
+    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0} extnet=${6:-0}
     case "$status" in
         FAIL)
             # A FAIL whose evidence shows the agent's OWN command was malformed is
@@ -375,7 +382,12 @@ gui_classify_failure() {
             # asserts and one genuinely failed; the marker's scope is UNKNOWN only.
             if [ "$tooling" = 1 ]; then printf 'agent-tooling'; else printf 'product-fail'; fi
             return ;;
-        ERROR) printf 'product-error'; return ;;
+        ERROR)
+            # An ERROR caused by an upstream external FETCH failure (curl/zypper/
+            # registry) during setup is infra, not a product/setup bug. Checked
+            # before the plain product-error so a CDN outage is not miscounted.
+            if [ "$extnet" = 1 ]; then printf 'external-network'; return; fi
+            printf 'product-error'; return ;;
         UNKNOWN)
             # LLM-provider connectivity loss is pure infra and rc-independent (the
             # observed outage produced both rc=0 and rc=1), so it is checked FIRST
@@ -489,6 +501,28 @@ gui_detect_agent_api_marker() {
     [ -f "$log_path" ] || return 1
     grep -qE \
         '^[[:space:]]*API Error: Unable to connect to API \((FailedToOpenSocket|ConnectionRefused)\)[[:space:]]*$' \
+        "$log_path" 2>/dev/null
+}
+
+# Host-side: does the agent log show an unambiguous EXTERNAL-NETWORK fetch
+# failure during scenario setup — a guest-side curl/zypper/registry download that
+# could not reach an upstream CDN/mirror/registry (e.g. scenario 18 building the
+# tier-2 weston-terminal image: `curl (56) Recv failure: Connection reset by
+# peer` against the openSUSE CDN)? Such a failure is INFRA, not a product bug: an
+# upstream outage must never read as a product-error. The marker set is anchored
+# to real fetch-tool error formats (curl's `(NN)` exit form, curl/wget transport
+# phrases, zypper download failures, and container-registry pull transport
+# errors), so a product log merely mentioning "connection" cannot flip a genuine
+# product ERROR. Because it only ever RECLASSIFIES an already-ERROR attempt from
+# product-error to external-network (both remain failures — it changes the BUCKET,
+# never flips to pass), a modestly broad pattern is acceptable. New external
+# fetch-failure formats are widened DELIBERATELY here. Reads the log file; returns
+# 0 when an external-network fetch-failure marker is present.
+gui_detect_external_network_marker() {
+    local log_path=$1
+    [ -f "$log_path" ] || return 1
+    grep -qEi \
+        'curl: \([0-9]+\)|wget: (unable to resolve|download timed out)|Recv failure: Connection reset by peer|Could not resolve host|Failed to connect to [^ ]+ port|Temporary failure in name resolution|Download \(curl\) error for|Error code: (Connection failed|Timeout)|Timeout exceeded when accessing|Curl error [0-9]+|(Download|Retrieving) .*(failed|timed out).*(mirror|repo|http)|Error: (initializing source|copying system image|pinging container registry|writing blob|reading blob|short read).*(timeout|refused|reset|no route|TLS handshake|unexpected EOF|i/o timeout)' \
         "$log_path" 2>/dev/null
 }
 
@@ -653,7 +687,7 @@ gui_run_scenario() {
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
-    local classifier="" transport=0 tooling=0 api=0
+    local classifier="" transport=0 tooling=0 api=0 extnet=0
     # Preserve the FIRST attempt's rc: the retry note + flake ledger below must
     # report the real cause, not a hard-coded 124. agent-tooling fails typically
     # carry rc=1, not the 124 that the transport-timeout path assumed.
@@ -662,7 +696,8 @@ gui_run_scenario() {
         gui_detect_transport_marker "$log_path" && transport=1
         gui_detect_agent_tooling_marker "$log_path" && tooling=1
         gui_detect_agent_api_marker "$log_path" && api=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api")
+        gui_detect_external_network_marker "$log_path" && extnet=1
+        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
     fi
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
@@ -727,13 +762,14 @@ gui_run_scenario() {
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
                 statusN=$(agent_artifact_status "$adirN" "$logN")
-                transportN=0; toolingN=0; apiN=0; classifierN=""
+                transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
                 if [ "$verdictN" = fail ]; then
                     gui_detect_transport_marker "$logN" && transportN=1
                     gui_detect_agent_tooling_marker "$logN" && toolingN=1
                     gui_detect_agent_api_marker "$logN" && apiN=1
-                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN")
+                    gui_detect_external_network_marker "$logN" && extnetN=1
+                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
                 fi
                 record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN" "$tsa" "$tsb" "$lane"
                 # Promote this attempt as the new current state; the loop guard
@@ -762,7 +798,17 @@ gui_run_scenario() {
     case "$verdict" in
         pass) record_result gui "$rel" pass 0 pass agent "$log_path" "$note" ;;
         skip) record_result gui "$rel" skip 0 pass agent "$log_path" "$note" ;;
-        *)    record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "$note"
+        *)    local fail_note=$note
+              # An external-network fetch failure during setup is infra, not a
+              # product regression: tag the result note with a stable marker the
+              # report keys on (nonactionable_failure_reason) so an upstream CDN/
+              # registry outage is bucketed non-actionable, not counted as a
+              # product failure. The row is still surfaced (Expected/non-actionable
+              # section), never hidden.
+              if [ "$classifier" = external-network ]; then
+                  fail_note="external-network infra: $note (guest fetch/registry failure during setup — upstream outage, not a product failure)"
+              fi
+              record_result gui "$rel" fail "$EXIT_GUI" gui agent "$log_path" "$fail_note"
               frc=$EXIT_GUI ;;
     esac
     t2=$(date +%s)
