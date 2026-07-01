@@ -1111,18 +1111,31 @@ class _SystemOps:
         the caller can fail closed on the should-never-happen >1 match.
 
         Raises OSError if the lookup ITSELF fails (podman missing, runuser
-        failure, rootless-storage error). This is deliberately NOT folded into
-        an empty list: for an explicit teardown surface, "the lookup failed"
-        must never be read as "no such disposable / already gone" — that would
-        fail OPEN (report a live container as torn down). Mirrors
-        ``container_exists``, which separates rc==1 (gone) from a failed check."""
-        proc = subprocess.run(
-            ["runuser", "-u", ADMIN_USER_NAME,
-             "--", "podman", "ps", "-a",
-             "--filter", "label=qdistro_disposable=1",
-             "--filter", f"label=qdistro_tier2_token={token}",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True)
+        failure, rootless-storage error) OR wedges past the ``timeout=`` bound.
+        This is deliberately NOT folded into an empty list: for an explicit
+        teardown surface, "the lookup failed" must never be read as "no such
+        disposable / already gone" — that would fail OPEN (report a live
+        container as torn down). Mirrors ``container_exists``, which separates
+        rc==1 (gone) from a failed check.
+
+        The ``timeout=`` is load-bearing for the taskbar Dispose action: this
+        lookup is the FIRST step of ``dispose_by_token`` on the synchronous
+        D-Bus method, so if ``podman ps`` wedges (storage lock, degraded
+        rootless/logind session) the whole DisposeByToken call blocks until the
+        CLIENT's D-Bus timeout instead of returning a typed error. A
+        TimeoutExpired is re-raised as OSError so ``dispose_by_token`` maps it to
+        an audited BadState (fail closed, fast) exactly like an rc!=0 lookup."""
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME,
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--filter", f"label=qdistro_tier2_token={token}",
+                 "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired as e:
+            raise OSError(f"podman ps by-token timed out after {e.timeout}s") \
+                from e
         if proc.returncode != 0:
             raise OSError(
                 f"podman ps by-token failed (rc={proc.returncode}): "
@@ -1249,17 +1262,25 @@ class _SystemOps:
         SEVERAL disposables, so a list (possibly >1) is the expected result.
 
         Raises OSError if the lookup ITSELF fails (podman missing, runuser
-        failure, rootless-storage error) — deliberately NOT folded into an empty
-        list: for an explicit teardown surface, 'the lookup failed' must never be
-        read as 'no such disposables / already gone' (that would fail OPEN).
-        Mirrors ``disp_containers_by_token``."""
-        proc = subprocess.run(
-            ["runuser", "-u", ADMIN_USER_NAME,
-             "--", "podman", "ps", "-a",
-             "--filter", "label=qdistro_disposable=1",
-             "--filter", f"label=qdistro_lease_workflow={workflow_id}",
-             "--format", "{{.Names}}"],
-            capture_output=True, text=True)
+        failure, rootless-storage error) OR wedges past the ``timeout=`` bound —
+        deliberately NOT folded into an empty list: for an explicit teardown
+        surface, 'the lookup failed' must never be read as 'no such disposables /
+        already gone' (that would fail OPEN). The ``timeout=`` mirrors
+        ``disp_containers_by_token``: this lookup is the first step of the
+        synchronous ``dispose_by_workflow`` teardown, so a wedged ``podman ps``
+        must surface as an audited BadState (via the OSError re-raise) rather
+        than block the caller until a client-side D-Bus timeout."""
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME,
+                 "--", "podman", "ps", "-a",
+                 "--filter", "label=qdistro_disposable=1",
+                 "--filter", f"label=qdistro_lease_workflow={workflow_id}",
+                 "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired as e:
+            raise OSError(
+                f"podman ps by-workflow timed out after {e.timeout}s") from e
         if proc.returncode != 0:
             raise OSError(
                 f"podman ps by-workflow failed (rc={proc.returncode}): "

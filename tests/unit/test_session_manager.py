@@ -2391,6 +2391,57 @@ class TestDispContainerRemoveTimeout:
             ops.disp_container_remove("qdistro-silo-browser")
 
 
+class TestDispLookupByTokenTimeout:
+    """The explicit-teardown lookups (disp_containers_by_token /
+    disp_containers_by_workflow) are the FIRST step of dispose_by_token /
+    dispose_by_workflow on the synchronous D-Bus method (the taskbar 'Dispose'
+    action). A wedged `podman ps` there must NOT block until the client-side
+    D-Bus timeout: the lookup bounds itself and re-raises the timeout as OSError
+    so the caller maps it to an audited BadState (fail closed, fast) — exactly
+    like an rc!=0 lookup, and never as an empty list (which would fail OPEN)."""
+    def test_by_token_passes_a_timeout(self, monkeypatch):
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["timeout"] = kw.get("timeout")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        sm._SystemOps().disp_containers_by_token(_LEASE_TOK)
+        assert seen["timeout"], "podman ps by-token must pass a timeout"
+
+    def test_by_token_timeout_raises_oserror(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def hang(argv, **kw):
+            assert kw.get("timeout"), "podman ps by-token must pass a timeout"
+            raise sm.subprocess.TimeoutExpired(argv, kw["timeout"])
+        monkeypatch.setattr(sm.subprocess, "run", hang)
+        # A wedged lookup is a FAILED lookup (OSError), never [] — dispose_by_token
+        # maps it to an audited BadState instead of hanging the D-Bus caller.
+        with pytest.raises(OSError):
+            ops.disp_containers_by_token(_LEASE_TOK)
+
+    def test_by_workflow_passes_a_timeout(self, monkeypatch):
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["timeout"] = kw.get("timeout")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        sm._SystemOps().disp_containers_by_workflow("step-1")
+        assert seen["timeout"], "podman ps by-workflow must pass a timeout"
+
+    def test_by_workflow_timeout_raises_oserror(self, monkeypatch):
+        ops = sm._SystemOps()
+
+        def hang(argv, **kw):
+            assert kw.get("timeout"), "podman ps by-workflow must pass a timeout"
+            raise sm.subprocess.TimeoutExpired(argv, kw["timeout"])
+        monkeypatch.setattr(sm.subprocess, "run", hang)
+        with pytest.raises(OSError):
+            ops.disp_containers_by_workflow("step-1")
+
+
 class TestDispLiveTokensFailClosed:
     """disp_live_tokens feeds the export-staging ORPHAN sweep, which DELETES
     every staging dir whose token is NOT in the returned set. So a parse FAILURE
