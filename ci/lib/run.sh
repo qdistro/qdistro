@@ -84,6 +84,12 @@ finish_run() {
     # a parallel gate wrote fragments; runs here too on an interrupted run (abort_run
     # routes through finish_run) so a killed pool's completed rows are not lost.
     merge_worker_fragments
+    # Reap any write-ahead orphan a worker left behind (spinner created a domain
+    # whose name we could not parse, or a worker killed mid-provision before it
+    # recorded the parsed name). Baseline-diff scoped, so pre-existing/concurrent
+    # VMs are never touched. Runs before golden cleanup so a leaked overlay cannot
+    # dangle a backing.
+    reap_writeahead_orphans
     # Reclaim per-run golden backing disks (kept if a failed worker was preserved).
     cleanup_run_goldens
     # Release-profile escalation (QCI_RELEASE=1): a `blocked` row in a

@@ -29,6 +29,60 @@ validate_vm() {
     return 0
 }
 
+# List qci domains (defined + running) whose name starts with $prefix, one per
+# line. Used by the write-ahead orphan-reaper. Pure w.r.t. libvirt read-only.
+vm_list_by_prefix() {
+    local prefix=$1 d
+    "${VIRSH[@]}" list --all --name 2>/dev/null | while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        case "$d" in "$prefix"*) printf '%s\n' "$d" ;; esac
+    done
+}
+
+# Reap qci disposable domains that (a) match a gate's unique write-ahead prefix,
+# (b) did NOT exist at the baseline captured just before this run's spinner ran
+# (so a pre-existing or concurrent-run VM is never touched — VM names are not
+# run-unique, only gate-prefixed, so the baseline diff is the shared-host safety
+# guard), and (c) are not already tracked in created-vms.txt. This is the backstop
+# for H2 (spinner created a domain but its name could not be parsed) and a worker
+# killed (kill -9) mid-provision before it could record the parsed name. Never
+# touches protected VMs or golden disks. Best-effort; never fatal.
+# Args: prefix baseline_csv(comma-separated names present before the spinner)
+reap_new_orphans() {
+    local prefix=$1 baseline_csv=${2:-} dom ddisk tracked=""
+    [ -n "$prefix" ] || return 0
+    [ -f "$RDIR/vm/created-vms.txt" ] && tracked=$(cat "$RDIR/vm/created-vms.txt" 2>/dev/null)
+    while IFS= read -r dom; do
+        [ -n "$dom" ] || continue
+        # Skip anything that existed at baseline (pre-existing / concurrent run).
+        case ",$baseline_csv," in *",$dom,"*) continue ;; esac
+        is_protected_vm "$dom" && continue
+        printf '%s\n' "$tracked" | grep -Fxq "$dom" && continue
+        log "reap_new_orphans: reaping untracked orphan $dom (write-ahead prefix $prefix)"
+        ddisk=$(vm_disk_path "$dom" 2>/dev/null || true)
+        "${VIRSH[@]}" destroy "$dom" >/dev/null 2>&1 || true
+        "${VIRSH[@]}" undefine "$dom" --nvram --managed-save >/dev/null 2>&1 \
+            || "${VIRSH[@]}" undefine "$dom" >/dev/null 2>&1 || true
+        [ -n "$ddisk" ] && [ -f "$ddisk" ] && safe_rm_overlay "$ddisk" >/dev/null 2>&1 || true
+    done < <(vm_list_by_prefix "$prefix")
+}
+
+# End-of-run / interrupt sweep: process any LEFTOVER write-ahead markers (a worker
+# that died mid-provision never removed its own). Each marker records the gate
+# prefix + the pre-spinner baseline, so reap_new_orphans reaps only this run's
+# untracked creations. Idempotent: markers are removed as they are processed.
+reap_writeahead_orphans() {
+    local wa_dir="$RDIR/vm/provisioning.d" waf prefix baseline
+    [ -d "$wa_dir" ] || return 0
+    for waf in "$wa_dir"/*.wa; do
+        [ -e "$waf" ] || continue
+        prefix=$(awk -F'\t' '$1=="prefix"{print $2; exit}' "$waf" 2>/dev/null)
+        baseline=$(awk -F'\t' '$1=="baseline"{print $2; exit}' "$waf" 2>/dev/null)
+        [ -n "$prefix" ] && reap_new_orphans "$prefix" "$baseline"
+        rm -f "$waf" 2>/dev/null || true
+    done
+}
+
 acquire_vm() {
     local gate=$1 explicit=${2:-} log_path vm spinner gui_session=""
     if [ -n "$explicit" ]; then
@@ -64,6 +118,19 @@ acquire_vm() {
     # heavy); override with QCI_VM_PROVISION_TIMEOUT_S.
     local prov_timeout=${QCI_VM_PROVISION_TIMEOUT_S:-1800} rc
     local t_start t_end
+    # Write-ahead (H2/H3): snapshot the domains that already carry this gate's
+    # unique prefix BEFORE the spinner, and drop a marker recording the prefix +
+    # baseline. If the spinner creates a domain but we cannot parse its name, or a
+    # worker is killed mid-provision before recording it, the domain is untracked;
+    # the baseline-diff reaper (reap_new_orphans / reap_writeahead_orphans) reaps
+    # only THIS run's untracked creations, never a pre-existing/concurrent-run VM.
+    local wa_prefix="qci-$gate-" wa_baseline wa_file=""
+    wa_baseline=$(vm_list_by_prefix "$wa_prefix" | tr '\n' ',')
+    if mkdir -p "$RDIR/vm/provisioning.d" 2>/dev/null; then
+        wa_file="$RDIR/vm/provisioning.d/${QCI_WORKER_ID:-main}-$$.wa"
+        { printf 'prefix\t%s\n' "$wa_prefix"; printf 'baseline\t%s\n' "$wa_baseline"; } \
+            > "$wa_file" 2>/dev/null || wa_file=""
+    fi
     t_start=$(date +%s)
     timeout "$prov_timeout" env \
         QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
@@ -74,22 +141,39 @@ acquire_vm() {
     t_end=$(date +%s)
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         log "acquire_vm: $spinner for $gate exceeded ${prov_timeout}s (bounded wait) — classifying vm_provision infra"
+        # A killed spinner may have left a half-created domain; reap this call's
+        # new orphans before the write-ahead marker is cleared.
+        reap_new_orphans "$wa_prefix" "$wa_baseline"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
         record_attempt "$gate" "$spinner" 1 TIMEOUT "$rc" vm-provision "$((t_end - t_start))" "" "$log_path" "$t_start" "$t_end" "$gate"
         record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM provisioning exceeded ${prov_timeout}s (bounded wait; likely wedged spinner or slow disk). Override with QCI_VM_PROVISION_TIMEOUT_S."
         return "$EXIT_VM_PROVISION"
     fi
     if [ "$rc" -ne 0 ]; then
+        # The spinner's own SPUN_OK teardown handles the clean-failure path, but
+        # reap any new orphan it left as a backstop.
+        reap_new_orphans "$wa_prefix" "$wa_baseline"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
         record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM creation failed"
         return "$EXIT_VM_PROVISION"
     fi
     vm=$(grep -E "^qci-[A-Za-z0-9._-]+$" "$log_path" | tail -n 1 | tr -d '[:space:]')
     [ -n "$vm" ] || vm=$(tail -n 1 "$log_path" | tr -d '[:space:]')
     if [ -z "$vm" ]; then
-        record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "$spinner produced no VM name"
+        # H2 zombie: the spinner succeeded (rc 0) but its output carried no
+        # parseable VM name, so a running domain it created is untracked and
+        # end-of-run cleanup would miss it. Reap this call's new orphans
+        # (baseline-diff scoped) before returning.
+        reap_new_orphans "$wa_prefix" "$wa_baseline"
+        [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
+        record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "$spinner produced no VM name (untracked domains reaped by baseline diff)"
         return "$EXIT_VM_PROVISION"
     fi
     CREATED_VMS+=("$vm")
     printf '%s\n' "$vm" >> "$RDIR/vm/created-vms.txt"
+    # Exact name now tracked in created-vms.txt; the write-ahead marker is no
+    # longer needed (its whole purpose was to cover the pre-record window).
+    [ -n "$wa_file" ] && rm -f "$wa_file" 2>/dev/null || true
     kv "vm_${gate}" "$vm"
     printf '%s\n' "$vm"
 }
