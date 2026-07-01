@@ -93,6 +93,32 @@ bats_run_disposable() {
     return "$frc"
 }
 
+# Assert every scheduled bats file has a UNIQUE basename (H10). Result rows and
+# per-file VM names key on the basename, so a duplicate would silently overwrite
+# one file's row / collide their scratch. The repo already carries a real cross-
+# dir dup (tests/integration/backup-rehearse-e2e.bats vs
+# tests/integration/vm/backup-rehearse-e2e.bats) but only the vm/ one is
+# scheduled today — this fires only if the SCHEDULED set itself ever contains a
+# duplicate basename (e.g. discovery is widened later). Echoes the colliding
+# pair(s); returns nonzero on any duplicate. Pure: reads only its path args.
+assert_unique_bats_basenames() {
+    local f base i dup=0
+    local seen_bases=() seen_paths=()
+    for f in "$@"; do
+        [ -n "$f" ] || continue
+        base=$(basename "$f")
+        for ((i = 0; i < ${#seen_bases[@]}; i++)); do
+            if [ "${seen_bases[$i]}" = "$base" ]; then
+                printf 'duplicate scheduled bats basename %s: %s AND %s\n' \
+                    "$base" "${seen_paths[$i]}" "$f"
+                dup=1
+            fi
+        done
+        seen_bases+=("$base"); seen_paths+=("$f")
+    done
+    [ "$dup" -eq 0 ]
+}
+
 gate_bats() {
     qci_assert_run_dir || return $?
     local explicit=${1:-}; shift || true
@@ -100,6 +126,14 @@ gate_bats() {
     local rc=$EXIT_OK file base frc running jobs
     if [ "${#files[@]}" -eq 0 ]; then
         while IFS= read -r file; do files+=("$file"); done < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+    fi
+    # H10: the scheduled set must have unique basenames (rows + VM names key on
+    # them). Fail the gate loudly before spinning any VM if it ever does not.
+    local dupmsg
+    if ! dupmsg=$(assert_unique_bats_basenames "${files[@]}"); then
+        log "bats gate: $dupmsg"
+        record_result runner-integrity bats-discovery fail "$EXIT_RUNNER" runner integrity "" "$dupmsg"
+        return "$EXIT_RUNNER"
     fi
     if ! command -v bats >/dev/null 2>&1; then
         record_blocked bats bats "$EXIT_PREFLIGHT" bats "bats executable not found"
