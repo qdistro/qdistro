@@ -19,7 +19,7 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
-$VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
+$VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 $VMEXEC "$VM" 'test -e /dev/kvm'
 $VMEXEC "$VM" 'test -f /var/lib/libvirt/images/qdistro-tier4-guest.qcow2'
 $VMEXEC "$VM" 'test -d /root/qdistro-src/qdistro/tier4-vm'
@@ -108,7 +108,7 @@ If the domain still exists but is not running, this command may print
 
 ```bash
 $VMEXEC "$VM" "runuser -u admin -- virsh qemu-agent-command $VM4 \
-  '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-lc\",\"pgrep -af qdistro-forward || true; pgrep -af qdistro-tier4-publisher || true\"]}}' \
+  '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/sh\",\"arg\":[\"-lc\",\"pgrep -af [q]distro-forward || true; pgrep -af [q]distro-tier4-publisher || true\"]}}' \
   2>/dev/null || echo missing"
 ```
 

@@ -23,7 +23,7 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 # Precondition: outer compositor + qdshell up.
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
-$VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
+$VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 
 # Precondition: tier-2 image built and weston-terminal container can
 # be spawned. s32 builds the image on first run; reuse if cached.

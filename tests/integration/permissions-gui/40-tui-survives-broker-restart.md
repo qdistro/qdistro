@@ -51,13 +51,13 @@ $VMGUI "$VM" screenshot /tmp/40-s1-empty.png
 
 ```bash
 # Note the broker's current PID before, and after — must differ.
-$VMEXEC "$VM" 'pgrep -f qdistro_admin_broker.py | head -1 > /tmp/40-pid-before'
+$VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/40-pid-before'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 2
-$VMEXEC "$VM" 'pgrep -f qdistro_admin_broker.py | head -1 > /tmp/40-pid-after'
+$VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/40-pid-after'
 $VMEXEC "$VM" 'echo before=$(cat /tmp/40-pid-before); echo after=$(cat /tmp/40-pid-after)'
 # TUI should still be alive.
-$VMEXEC "$VM" 'pgrep -u admin -f qdistro_admin_tui.py | head -1'
+$VMEXEC "$VM" 'pgrep -u admin -f "[q]distro_admin_tui.py" | head -1'
 ```
 
 **Assert:**

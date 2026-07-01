@@ -130,6 +130,16 @@ MD
     run lint "$good"; ! [[ "$output" == *"pgrep-self-match"* ]]
 }
 
+@test "flake-lint: a redirect fd (2>) is not mistaken for the pgrep pattern" {
+    # `pgrep -f "[g]uest=X," 2>/dev/null` is GUARDED; the stray `2` from the
+    # redirect must not be read as an unguarded pattern (regression).
+    local ok="$BATS_TEST_TMPDIR/35b-fd.md" bad="$BATS_TEST_TMPDIR/35c-fd.md"
+    printf '# x\n```bash\npgrep -f "[g]uest=$V," 2>/dev/null || exit 1\n```\n' > "$ok"
+    printf '# x\n```bash\npgrep -f guest=$V, 2>/dev/null || exit 1\n```\n' > "$bad"
+    run lint "$ok";  ! [[ "$output" == *"pgrep-self-match"* ]]
+    run lint "$bad"; [[ "$output" == *"pgrep-self-match"* ]]
+}
+
 @test "flake-lint: fires unscoped-tmp-path on a fixed /tmp write, not a scoped one" {
     local bad="$BATS_TEST_TMPDIR/37-tmp.md" good="$BATS_TEST_TMPDIR/38-tmp.md"
     printf '# x\n```bash\npgrep -x app > /tmp/07-pid.txt\ngrep -q 1 /tmp/07-pid.txt || exit 1\n```\n' > "$bad"

@@ -43,16 +43,16 @@ $VMGUI "$VM" screenshot /tmp/08-s1-empty.png
 
 ```bash
 # Note the broker's current PID before, and after — must differ.
-$VMEXEC "$VM" 'pgrep -f qdistro_admin_broker.py | head -1 > /tmp/08-pid-before'
+$VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/08-pid-before'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 2
-$VMEXEC "$VM" 'pgrep -f qdistro_admin_broker.py | head -1 > /tmp/08-pid-after'
+$VMEXEC "$VM" 'pgrep -f "[q]distro_admin_broker.py" | head -1 > /tmp/08-pid-after'
 # Print both pids as separate lines — "before=...\nafter=..." would
 # need embedded double quotes which vm-exec's JSON encoder doesn't
 # handle (AGENTS.md ). One cat per file keeps the payload quote-free.
 $VMEXEC "$VM" 'echo before=$(cat /tmp/08-pid-before); echo after=$(cat /tmp/08-pid-after)'
 # Admin app should still be alive.
-$VMEXEC "$VM" 'pgrep -u admin -f qdistro_admin_app.py | head -1'
+$VMEXEC "$VM" 'pgrep -u admin -f "[q]distro_admin_app.py" | head -1'
 ```
 
 **Assert:**

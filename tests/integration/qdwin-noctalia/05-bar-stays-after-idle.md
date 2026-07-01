@@ -48,7 +48,7 @@ qs_ipc() {
     if printf '%s' "$out" | grep -qiE 'no running instance|No such'; then
         local pid
         pid=$("$QDWIN_VM_EXEC" "$VMNAME" \
-            "pgrep -u admin -f 'qs -p $QS_PATH' | while read p; do \
+            "pgrep -u admin -f '[q]s -p $QS_PATH' | while read p; do \
                grep -q dbus-run-session /proc/\$p/cmdline 2>/dev/null || { echo \$p; break; }; done")
         [ -n "$pid" ] || { printf '%s\n' "$out"; return 1; }
         out=$("$QDWIN_VM_EXEC" "$VMNAME" \

@@ -40,7 +40,7 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 # Precondition: outer compositor + qdshell up.
 $VMEXEC "$VM" 'runuser -u admin -- test -S /run/user/1000/wayland-1'
-$VMEXEC "$VM" 'runuser -u admin -- pgrep -af 'qs -p' >/dev/null'
+$VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 
 # Precondition: nested KVM + base image + tier-5 source.
 $VMEXEC "$VM" 'test -e /dev/kvm'
@@ -121,7 +121,7 @@ verdict=DEAD; via=""; qpids=""
 while [ \$SECONDS -lt \$deadline ]; do
     state=\$(runuser -u admin -- virsh domstate "\$VM5" 2>/dev/null | tr -d '[:space:]')
     qpids=""
-    for p in \$(runuser -u admin -- pgrep -f "guest=\$VM5," 2>/dev/null); do
+    for p in \$(runuser -u admin -- pgrep -f "[g]uest=\$VM5," 2>/dev/null); do
         c=\$(cat "/proc/\$p/comm" 2>/dev/null) || continue
         case "\$c" in qemu-system-*|qemu-kvm) qpids="\$qpids \$p" ;; esac
     done

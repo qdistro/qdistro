@@ -125,6 +125,13 @@ def pgrep_f_patterns(line: str) -> list[str]:
         )
         if not has_f:
             continue
+        # Drop a trailing redirect file-descriptor left in the segment: args stop
+        # at `>` but a `2>/dev/null` leaves the bare `2` as the final token, which
+        # is NOT the pattern (e.g. `pgrep -f "[g]uest=X," 2>/dev/null`).
+        while len(words) >= 3 and words[-1].isdigit() and (words[-1] + ">") in line:
+            words.pop()
+        if len(words) < 3:
+            continue
         # pgrep takes one PATTERN operand; in these snippets it is the final
         # non-flag token. This intentionally is not a full pgrep option parser.
         pattern = words[-1]

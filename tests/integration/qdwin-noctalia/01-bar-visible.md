@@ -16,7 +16,7 @@ source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
 source ${QDISTRO_REPO}/tests/integration/qdwin-noctalia/noctalia-helpers.sh
 qdwin_set_vm "${VMNAME:-noctalia-vis-260503-1021}"
 
-pgrep -f "http.server 8765" >/dev/null || (
+pgrep -f "[h]ttp.server 8765" >/dev/null || (
  cd ${QDISTRO_REPO}/compositor && \
  python3 -m http.server 8765 --bind 127.0.0.1 >/tmp/qdistro-http.log 2>&1 &
 )
