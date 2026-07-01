@@ -635,7 +635,10 @@ gui_run_scenario() {
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
     ta0=$(date +%s)
-    QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+    # Export VMNAME so the scenario's `VM=${VMNAME:?...}` always resolves to the
+    # right disposable VM deterministically, instead of relying on the agent to
+    # set it from the prompt (or a racy `virsh list | head` fallback).
+    VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
         run_agent_command "$prompt" "$log_path"
     agent_rc=$?
     ta1=$(date +%s)
@@ -719,7 +722,7 @@ gui_run_scenario() {
                 suppress_idle_lock "$vmN"
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
-                QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
                     run_agent_command "$prompt" "$logN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end

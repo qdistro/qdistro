@@ -14,7 +14,7 @@ Run this after scenario 56 passes on the same image.
 ## Setup
 
 ```bash
-VM=${VMNAME:-$(virsh list --name --state-running | head -1)}
+VM=${VMNAME:?set VMNAME to the target VM (these scenarios are driven with an explicit VM)}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 

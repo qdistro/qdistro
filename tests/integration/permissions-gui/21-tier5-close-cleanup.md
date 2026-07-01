@@ -24,7 +24,7 @@ separately by `qdwin/tests/gui/08-titlebar-close-button.md`.
 ## Setup
 
 ```bash
-VM=${VMNAME:-$(virsh list --name --state-running | head -1)}
+VM=${VMNAME:?set VMNAME to the target VM (these scenarios are driven with an explicit VM)}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
