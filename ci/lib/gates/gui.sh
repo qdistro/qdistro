@@ -553,6 +553,30 @@ gui_detect_external_network_marker() {
     [ -n "$external" ]
 }
 
+# Classifier-drift alarm (H6b). A FAILING attempt that matched NO infra/tooling
+# marker (transport + agent-tooling + agent-api + external-network all 0) fell
+# through to a generic product-*/no-verdict/timeout/unknown classifier. That is
+# usually a real product signal — but it is ALSO exactly what happens when a
+# provider/CLI message string DRIFTS and an infra failure is silently demoted to
+# a product FAIL (the H6 concern). We cannot tell the two apart from the row
+# alone, so preserve the raw evidence: copy the LAST ~20 lines of the agent log
+# into a per-scenario sidecar under the artifact dir (never into the TSV — that
+# would bloat the fixed-column contract + break H4 column validation). report.py
+# counts these no-marker failing attempts so a RISING count is the drift alarm.
+# Args: log_path sidecar_path. Best-effort; a missing log is a silent no-op.
+gui_capture_unmatched_tail() {
+    local log_path=$1 sidecar=$2
+    [ -f "$log_path" ] || return 0
+    {
+        echo "# classifier-drift watch: failing attempt matched NO infra/tooling marker"
+        echo "# (transport/agent-tooling/agent-api/external-network detectors all 0)"
+        echo "# if an infra outage was silently demoted to product-fail, a drifted"
+        echo "# marker string is likely in the tail below — compare against the detectors."
+        echo "# --- last 20 lines of $(rel_path "$log_path") ---"
+        tail -n 20 "$log_path" 2>/dev/null
+    } >> "$sidecar"
+}
+
 run_agent_command() {
     local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded
     if [ -z "$cmd" ]; then
@@ -725,6 +749,12 @@ gui_run_scenario() {
         gui_detect_agent_api_marker "$log_path" && api=1
         gui_detect_external_network_marker "$log_path" && extnet=1
         classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api" "$extnet")
+        # Classifier-drift alarm (H6b): a fail with NO marker matched fell through
+        # to a generic classifier — snapshot the log tail so a drifted infra
+        # marker is not lost. report.py counts these rows (rising count => drift).
+        if [ "$((transport + tooling + api + extnet))" -eq 0 ]; then
+            gui_capture_unmatched_tail "$log_path" "${log_path%.agent.log}.unmatched-tail.txt"
+        fi
     fi
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
@@ -797,6 +827,9 @@ gui_run_scenario() {
                     gui_detect_agent_api_marker "$logN" && apiN=1
                     gui_detect_external_network_marker "$logN" && extnetN=1
                     classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN" "$extnetN")
+                    if [ "$((transportN + toolingN + apiN + extnetN))" -eq 0 ]; then
+                        gui_capture_unmatched_tail "$logN" "${logN%.agent.log}.unmatched-tail.txt"
+                    fi
                 fi
                 record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN" "$tsa" "$tsb" "$lane"
                 # Promote this attempt as the new current state; the loop guard

@@ -347,3 +347,45 @@ def test_burst_empty_and_healthy_runs_return_nothing():
     assert report.correlated_infra_bursts([]) == []
     assert report.correlated_infra_bursts(
         [_clean(end=1000 + i * 10) for i in range(20)]) == []
+
+
+# --- unmatched_classifier_attempts (classifier-drift watch, H6b) ---
+# A FAILING attempt whose classifier matched no infra/tooling marker fell through
+# to a generic bucket. A rising count is the drift alarm (an infra failure demoted
+# to product-fail by a changed provider/CLI string looks exactly like this).
+
+
+def test_unmatched_counts_generic_failing_classifiers():
+    atts = [
+        _att("product-fail", status="FAIL", rc="1"),
+        _att("product-error", status="ERROR", rc="1"),
+        _att("no-verdict", status="UNKNOWN", rc="0"),
+        _att("agent-timeout", status="UNKNOWN", rc="124"),
+        _att("unknown", status="UNKNOWN", rc="1"),
+    ]
+    out = report.unmatched_classifier_attempts(atts)
+    assert len(out) == 5
+
+
+def test_unmatched_excludes_marker_bearing_classifiers():
+    # Marker-bearing infra/tooling classifiers matched a marker => NOT drift.
+    atts = [_att(c, status="FAIL", rc="1") for c in report.MARKER_CLASSIFIERS]
+    assert report.unmatched_classifier_attempts(atts) == []
+
+
+def test_unmatched_excludes_clean_attempts():
+    # A clean PASS:0 or a SKIP is never a failing attempt, even if its (empty)
+    # classifier is not a marker.
+    atts = [
+        _clean(),
+        _att("", status="SKIP", rc="0"),
+        _att("", status="PASS", rc="0"),
+    ]
+    assert report.unmatched_classifier_attempts(atts) == []
+
+
+def test_unmatched_empty_classifier_on_a_failing_row_is_not_counted():
+    # A failing attempt with an EMPTY classifier is not a generic-bucket drift
+    # signal (nothing to compare); require a truthy generic classifier.
+    atts = [_att("", status="FAIL", rc="1")]
+    assert report.unmatched_classifier_attempts(atts) == []

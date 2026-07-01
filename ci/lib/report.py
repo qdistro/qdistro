@@ -443,6 +443,24 @@ INFRA_BURST_CLASSIFIERS = frozenset(
 )
 
 
+# Classifiers that were assigned because an anchored infra/tooling MARKER fired in
+# the agent log (see gui.sh::gui_classify_failure). A FAILING attempt whose
+# classifier is NOT one of these fell through to a generic product-*/no-verdict/
+# timeout/unknown bucket with no marker match — the classifier-drift signal (H6b):
+# usually a real product failure, but ALSO exactly what a drifted provider/CLI
+# message string looks like when it demotes an infra failure to product-fail. The
+# gui gate snapshots the log tail into a per-scenario `*.unmatched-tail.txt`
+# sidecar for these rows; report.py counts them so a RISING count is the alarm.
+MARKER_CLASSIFIERS = frozenset(
+    {
+        "agent-tooling",
+        "external-network",
+        "transport-timeout",
+        "agent-api-unreachable",
+    }
+)
+
+
 def _attempt_is_clean(a: dict[str, str]) -> bool:
     """An attempt that did NOT fail: an explicit PASS/rc=0, or a SKIP."""
     status = (a.get("status") or "").strip().upper()
@@ -457,6 +475,26 @@ def _infra_classifier(a: dict[str, str]) -> str | None:
         return None
     c = (a.get("classifier") or "").strip()
     return c if c in INFRA_BURST_CLASSIFIERS else None
+
+
+def unmatched_classifier_attempts(
+    attempts: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Report-only classifier-drift signal (H6b): FAILING attempts whose
+    classifier matched NO infra/tooling marker (a generic product-*/no-verdict/
+    timeout/unknown bucket). A clean (PASS/SKIP) attempt is never counted. A
+    rising count across runs is the drift alarm — an infra failure silently
+    demoted to a product FAIL by a changed provider/CLI message string looks
+    exactly like this. Pure => host-testable.
+    """
+    out: list[dict[str, str]] = []
+    for a in attempts:
+        if _attempt_is_clean(a):
+            continue
+        c = (a.get("classifier") or "").strip()
+        if c and c not in MARKER_CLASSIFIERS:
+            out.append(a)
+    return out
 
 
 def _epoch(a: dict[str, str]) -> int | None:
@@ -803,6 +841,32 @@ def generate_md(run_dir: Path) -> str:
             )
         lines.append("")
 
+    # Classifier-drift watch (report-only, H6b). Failing attempts that matched NO
+    # infra/tooling marker. A rising count is the alarm: a drifted provider/CLI
+    # message string can silently demote an infra failure to a product FAIL, and
+    # that demotion lands exactly here. Each row has a `*.unmatched-tail.txt`
+    # sidecar (agent log tail) beside its agent log for inspection.
+    unmatched = unmatched_classifier_attempts(attempts)
+    if unmatched:
+        lines.append("## Unmatched-classifier attempts (marker-drift watch)")
+        lines.append(
+            f"{len(unmatched)} failing attempt(s) matched NO infra/tooling marker "
+            "and fell through to a generic classifier. Usually real product "
+            "failures — but a rising count can mean a drifted provider/CLI marker "
+            "string is demoting infra failures to product-fail. Inspect the "
+            "`*.unmatched-tail.txt` sidecar beside each agent log. Reporting only."
+        )
+        lines.append("")
+        lines.append("| scenario | attempt | status | agent_rc | classifier | wall_s |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for a in unmatched:
+            lines.append(
+                f"| {a.get('subject', '?')} | {a.get('attempt', '')} | "
+                f"{a.get('status', '')} | {a.get('agent_rc', '')} | "
+                f"{a.get('classifier', '') or '—'} | {a.get('wall_s', '')} |"
+            )
+        lines.append("")
+
     host_load = read_tsv(run_dir / "host-load.tsv")
     if host_load:
         def _nums(key: str) -> list[float]:
@@ -910,7 +974,8 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
     rows = read_tsv(run_dir / "results.tsv")
     failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
     actionable, expected = partition_failures(rows)
-    bursts = correlated_infra_bursts(read_tsv(run_dir / "scenario-attempts.tsv"))
+    attempts = read_tsv(run_dir / "scenario-attempts.tsv")
+    bursts = correlated_infra_bursts(attempts)
     return {
         "run_id": manifest.get("run_id", run_dir.name),
         "gate": manifest.get("gate", ""),
@@ -939,6 +1004,10 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
         "first_actionable_failure": actionable[0] if actionable else None,
         # Report-only correlated infra-outage bursts (empty on a healthy run).
         "correlated_infra_bursts": bursts,
+        # Report-only classifier-drift signal (H6b): failing attempts that matched
+        # no infra/tooling marker. A rising count can mean a drifted marker string
+        # is demoting infra failures to product-fail.
+        "unmatched_classifier_attempts": len(unmatched_classifier_attempts(attempts)),
         "report_md": "report.md",
         "report_html": "report.html",
     }
