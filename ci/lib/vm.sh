@@ -290,7 +290,22 @@ ensure_run_golden() {
     esac
     RUN_GOLDEN_DISKS+=("$gdisk")
     kv "golden_${profile}_disk" "$gdisk"
-    log "per-run golden ($profile) ready: $gdisk (workers will clone from it)"
+    # Capability manifest: record what this golden was built WITH, so the gui
+    # scheduler (and a human reading artifacts) can tell which app-compatibility
+    # scenarios this golden can actually exercise. At minimum the QDWIN_APP_DEPS
+    # value — the golden build does not set it, so it inherits the run env (0 by
+    # default). A qdwin/tests/apps/* scenario scheduled against an app_deps=0
+    # golden is a deterministic SKIP (gui_scenario_app_deps_skip_reason), not an
+    # agent dispatch that fails closed on a missing verdict.
+    local cap_manifest="$RDIR/vm/golden-$profile.capabilities"
+    {
+        echo "profile=$profile"
+        echo "disk=$gdisk"
+        echo "qdwin_app_deps=${QDWIN_APP_DEPS:-0}"
+        echo "tier2_images=$tier2_images"
+    } > "$cap_manifest"
+    kv "golden_${profile}_qdwin_app_deps" "${QDWIN_APP_DEPS:-0}"
+    log "per-run golden ($profile) ready: $gdisk (workers will clone from it; qdwin_app_deps=${QDWIN_APP_DEPS:-0})"
     return 0
 }
 

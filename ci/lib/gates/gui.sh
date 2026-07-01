@@ -820,6 +820,32 @@ gui_scenario_tier_base_skip_reason() {
     return 0
 }
 
+# qdwin app-compatibility scenarios (qdwin/tests/apps/*.md) drive real desktop
+# apps (foot/xterm/gnome-text-editor/...) that are only installed when the golden
+# was built with QDWIN_APP_DEPS=1 (fresh-vm-bootstrap.sh §app-deps lane). The
+# default full-run golden is lean (QDWIN_APP_DEPS=0), so these scenarios have no
+# apps to exercise. Dispatching them to the agent anyway is exactly what produced
+# the run's fail-closed UNKNOWN (apps/04): the agent CORRECTLY judged SKIP but its
+# machine-readable verdict was not captured, so the row failed closed. Decide the
+# capability deterministically HERE — before the agent starts — so a golden that
+# lacks app deps yields a clean SKIP naming the missing capability, with no
+# reliance on the agent writing a verdict. Like the tier-base gate, this must run
+# BEFORE the qdwin-routing bypass in the dispatch loop (app scenarios are
+# qdwin-required). Pure (reads only its args) => host-testable. Echoes the skip
+# reason, or nothing when the scenario should run.
+#
+# Args: rel app_deps
+gui_scenario_app_deps_skip_reason() {
+    local rel=$1 app_deps=${2:-0}
+    case "$rel" in
+        qdwin/tests/apps/[0-9][0-9]-*.md)
+            [ "$app_deps" != 1 ] && \
+                printf '%s\n' "qdwin app-test deps not installed (golden built with QDWIN_APP_DEPS=0); rebuild with QDWIN_APP_DEPS=1 for the app-compatibility lane"
+            ;;
+    esac
+    return 0
+}
+
 # Tier-4/5 base-image opt-in skip is handled SEPARATELY by
 # gui_scenario_tier_base_skip_reason (above) so it can run BEFORE the
 # qdwin-routing bypass in the dispatch loop; this function stays purely about
@@ -995,6 +1021,19 @@ gate_gui() {
         kv vm_qdwin "$qdwin_svm"
     fi
 
+    # App-deps capability: the qdwin app-compatibility scenarios need real desktop
+    # apps that only exist when the golden was built with QDWIN_APP_DEPS=1. Probe
+    # the qdwin session VM for the canonical app-dep (`foot`) — authoritative for
+    # what the cloned qdwin workers will have, regardless of whether a golden was
+    # built. When absent, qdwin/tests/apps/* SKIP deterministically before the
+    # agent starts (see gui_scenario_app_deps_skip_reason).
+    local app_deps=0
+    if "$VM_TOOLS/vm-exec" "$qdwin_svm" "command -v foot >/dev/null 2>&1" >/dev/null 2>&1; then
+        app_deps=1
+    fi
+    kv gui_app_deps "$app_deps"
+    log "gui: qdwin app-deps capability app_deps=$app_deps (QDWIN_APP_DEPS golden knob; 0 => qdwin/tests/apps/* skip)"
+
     run_qdwin_executable_gui_smokes "$qdwin_svm"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
@@ -1059,9 +1098,10 @@ gate_gui() {
         # content, in EVERY path (this runs before the qdwin-routing bypass below
         # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
         # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
-        local tier_base_skip
+        local tier_base_skip app_deps_skip
         tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
             "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
+        app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
         elif [ -n "$tier_base_skip" ]; then
@@ -1069,6 +1109,12 @@ gate_gui() {
             # Runs BEFORE the qdwin-routing bypass below so it actually fires for
             # these qdwin-required scenarios in the default lane.
             skip_reason="$tier_base_skip"
+        elif [ -n "$app_deps_skip" ]; then
+            # qdwin app-compatibility scenario against a golden with no app deps:
+            # deterministic SKIP naming the missing capability, before the agent
+            # starts. Runs BEFORE the qdwin-routing bypass (app scenarios are
+            # qdwin-required) so it actually fires in the default lean lane.
+            skip_reason="$app_deps_skip"
         elif [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
             skip_reason=""
         else

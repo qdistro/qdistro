@@ -139,6 +139,46 @@ reason_full_stack() {
 }
 
 # ---------------------------------------------------------------------------
+# qdwin app-compatibility deps gate (gui_scenario_app_deps_skip_reason)
+# ---------------------------------------------------------------------------
+
+@test "gui app-deps skip: apps/04 SKIPs when the golden lacks app deps (app_deps=0)" {
+    run gui_scenario_app_deps_skip_reason \
+        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qdwin app-test deps not installed"* ]]
+    [[ "$output" == *"QDWIN_APP_DEPS=1"* ]]
+}
+
+@test "gui app-deps run: apps/04 RUNS when app deps are present (app_deps=1)" {
+    run gui_scenario_app_deps_skip_reason \
+        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui app-deps run: apps/05 gtk4 also gated on app deps" {
+    run gui_scenario_app_deps_skip_reason \
+        "qdwin/tests/apps/05-gtk4-gnome-text-editor.md" 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qdwin app-test deps not installed"* ]]
+}
+
+@test "gui app-deps run: a non-apps scenario is never app-deps-skipped" {
+    run gui_scenario_app_deps_skip_reason \
+        "qdwin/tests/gui/12-bar-no-overdraw.md" 0
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui app-deps run: default arg treats missing flag as absent (skip)" {
+    run gui_scenario_app_deps_skip_reason \
+        "qdwin/tests/apps/07-qt5-vlc.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qdwin app-test deps not installed"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # tier-4 scenarios (56, 57)
 # ---------------------------------------------------------------------------
 
