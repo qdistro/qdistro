@@ -335,6 +335,15 @@ gui_agent_verdict() {
 #   transport-timeout UNKNOWN + rc=124 + an unambiguous qemu GUEST-AGENT
 #                     CONNECTIVITY-loss marker in the log (the host could not talk
 #                     to the guest agent AT ALL) — pure INFRA                retriable
+#   agent-api-unreachable
+#                     UNKNOWN + an unambiguous LLM-PROVIDER connectivity-loss
+#                     marker in the log (the agent CLI could not open a socket to
+#                     the API at all — "API Error: Unable to connect to API
+#                     (FailedToOpenSocket|ConnectionRefused)"). Pure INFRA, and
+#                     independent of rc: the observed outage produced BOTH rc=0
+#                     and rc=1, so the provider marker — not the rc — is the
+#                     discriminator. Checked before no-verdict so a clean-exit
+#                     outage is not miscounted.                             retriable
 #   agent-timeout     UNKNOWN + rc=124, no connectivity marker: the agent ran out
 #                     of budget. DELIBERATELY NOT auto-retriable — a slow agent can
 #                     equally mean the PRODUCT hung, and retrying could flake-pass a
@@ -347,17 +356,25 @@ gui_agent_verdict() {
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
 # infra timeout. Pure (args only) => host-testable (gui-retry-classify.bats).
 # Args: status agent_rc transport_marker(0/1) agent_tooling_marker(0/1, optional)
+#       agent_api_marker(0/1, optional)
 gui_classify_failure() {
-    local status=$1 rc=$2 transport=$3 tooling=${4:-0}
+    local status=$1 rc=$2 transport=$3 tooling=${4:-0} api=${5:-0}
     case "$status" in
         FAIL)
             # A FAIL whose evidence shows the agent's OWN command was malformed is
             # not a trustworthy product result (the assertion target never ran).
             # Only status=FAIL is flipped — ERROR/PASS/SKIP/UNKNOWN are untouched.
+            # A provider-unreachable marker does NOT flip a FAIL: the agent ran the
+            # asserts and one genuinely failed; the marker's scope is UNKNOWN only.
             if [ "$tooling" = 1 ]; then printf 'agent-tooling'; else printf 'product-fail'; fi
             return ;;
         ERROR) printf 'product-error'; return ;;
         UNKNOWN)
+            # LLM-provider connectivity loss is pure infra and rc-independent (the
+            # observed outage produced both rc=0 and rc=1), so it is checked FIRST
+            # — before the rc=0 no-verdict branch — or a clean-exit outage would be
+            # miscounted as no-verdict and a rc=1 outage as generic `unknown`.
+            if [ "$api" = 1 ]; then printf 'agent-api-unreachable'; return; fi
             if [ "$rc" = 0 ]; then printf 'no-verdict'; return; fi
             if [ "$rc" = 124 ]; then
                 if [ "$transport" = 1 ]; then printf 'transport-timeout'; else printf 'agent-timeout'; fi
@@ -368,12 +385,14 @@ gui_classify_failure() {
 }
 
 # Pure: is a classifier eligible for an AUTOMATIC retry? ONLY the unambiguous
-# infra signature. agent-timeout is intentionally excluded (product-hang masking
+# infra signatures. agent-timeout is intentionally excluded (product-hang masking
 # risk); product-fail/error/no-verdict/unknown are never retriable by definition.
+# agent-api-unreachable is a pure LLM-provider outage (no product/guest state
+# involved) and so is safe to re-run on a fresh attempt.
 # Args: classifier
 gui_classifier_retriable() {
     case "$1" in
-        transport-timeout|agent-tooling) return 0 ;;
+        transport-timeout|agent-tooling|agent-api-unreachable) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -443,6 +462,26 @@ gui_detect_agent_tooling_marker() {
     [ -f "$log_path" ] || return 1
     grep -qE \
         '^[[:space:]]*(bash|sh|dash|/bin/sh|/bin/bash|/usr/bin/sh|/usr/bin/bash)(\[[0-9]+\])?:.*(-c: option requires an argument|unexpected EOF while looking for matching|syntax error near unexpected token|[Ss]yntax error: [Uu]nterminated quoted string)' \
+        "$log_path" 2>/dev/null
+}
+
+# Host-side: does the agent log show an unambiguous LLM-PROVIDER connectivity
+# failure — the agent CLI could not open a socket to the API AT ALL? This is the
+# discriminator for `agent-api-unreachable`: a provider/infra outage, not a
+# product or scenario result. The marker is TIGHT and ANCHORED to the agent CLI's
+# exact socket-level error format, at the START of a line, so a product log or an
+# agent narrative merely *mentioning* a connection error cannot flip a verdict.
+# It deliberately does NOT match generic `timeout`/DNS/TLS/HTTP-5xx strings, which
+# a real product or network scenario can legitimately produce; only the exact
+# "Unable to connect to API (FailedToOpenSocket|ConnectionRefused)" family — where
+# no socket was ever opened — qualifies. New provider reasons are widened
+# DELIBERATELY here, never loosened in the correlation layer. Reads the log file;
+# returns 0 when a provider-unreachable marker is present.
+gui_detect_agent_api_marker() {
+    local log_path=$1
+    [ -f "$log_path" ] || return 1
+    grep -qE \
+        '^[[:space:]]*API Error: Unable to connect to API \((FailedToOpenSocket|ConnectionRefused)\)[[:space:]]*$' \
         "$log_path" 2>/dev/null
 }
 
@@ -593,7 +632,7 @@ gui_run_scenario() {
     IFS=$'\t' read -r verdict note < <(gui_agent_verdict "$status" "$agent_rc")
     # Classify a failing attempt (mechanical signature only) for the attempt
     # ledger + the retry decision. Empty for pass/skip.
-    local classifier="" transport=0 tooling=0
+    local classifier="" transport=0 tooling=0 api=0
     # Preserve the FIRST attempt's rc: the retry note + flake ledger below must
     # report the real cause, not a hard-coded 124. agent-tooling fails typically
     # carry rc=1, not the 124 that the transport-timeout path assumed.
@@ -601,7 +640,8 @@ gui_run_scenario() {
     if [ "$verdict" = fail ]; then
         gui_detect_transport_marker "$log_path" && transport=1
         gui_detect_agent_tooling_marker "$log_path" && tooling=1
-        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling")
+        gui_detect_agent_api_marker "$log_path" && api=1
+        classifier=$(gui_classify_failure "$status" "$agent_rc" "$transport" "$tooling" "$api")
     fi
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
@@ -609,8 +649,9 @@ gui_run_scenario() {
     record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
-    # retriable signature (transport-timeout or agent-tooling — agent-timeout and
-    # any product-fail/error are excluded as masking risks) either records a
+    # retriable signature (transport-timeout, agent-tooling, or agent-api-unreachable
+    # — agent-timeout and any product-fail/error are excluded as masking risks)
+    # either records a
     # `would-retry` flake row (report-only) or, when QCI_GUI_RETRY enables it AND
     # this is a disposable (own) VM, runs UP TO N more attempts on FRESH VMs
     # (N = gui_retry_max). The loop re-classifies after EACH attempt and stops the
@@ -638,7 +679,7 @@ gui_run_scenario() {
                 vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
                 # Each retry writes to its OWN log + artifact dir so every attempt's
                 # evidence is preserved and each fresh agent starts clean.
-                local vmN logN adirN tsa tsb statusN verdictN noteN classifierN transportN toolingN
+                local vmN logN adirN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN
                 logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
                 adirN="${adir%.retry*}.retry${attempt}"
                 mkdir -p "$adirN"
@@ -657,12 +698,13 @@ gui_run_scenario() {
                 tsa=$(date +%s); run_agent_command "$prompt" "$logN"; agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
                 statusN=$(agent_artifact_status "$adirN" "$logN")
-                transportN=0; toolingN=0; classifierN=""
+                transportN=0; toolingN=0; apiN=0; classifierN=""
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
                 if [ "$verdictN" = fail ]; then
                     gui_detect_transport_marker "$logN" && transportN=1
                     gui_detect_agent_tooling_marker "$logN" && toolingN=1
-                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN")
+                    gui_detect_agent_api_marker "$logN" && apiN=1
+                    classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN")
                 fi
                 record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN"
                 # Promote this attempt as the new current state; the loop guard

@@ -72,15 +72,15 @@ setup() {
     [ "$(gui_classify_failure UNKNOWN 1 1)" = unknown ]
 }
 
-@test "classifier_retriable: only transport-timeout and agent-tooling are retriable" {
+@test "classifier_retriable: only the infra signatures are retriable" {
     for c in product-fail product-error no-verdict agent-timeout unknown ""; do
         run gui_classifier_retriable "$c"
         [ "$status" -ne 0 ]
     done
-    run gui_classifier_retriable transport-timeout
-    [ "$status" -eq 0 ]
-    run gui_classifier_retriable agent-tooling
-    [ "$status" -eq 0 ]
+    for c in transport-timeout agent-tooling agent-api-unreachable; do
+        run gui_classifier_retriable "$c"
+        [ "$status" -eq 0 ]
+    done
 }
 
 # --- agent-tooling: a FAIL whose evidence shows the agent's OWN command was
@@ -166,6 +166,98 @@ setup() {
 
 @test "tooling marker: missing log file is not a marker" {
     run gui_detect_agent_tooling_marker "$BATS_TEST_TMPDIR/nope.log"
+    [ "$status" -ne 0 ]
+}
+
+# --- agent-api-unreachable: an UNKNOWN attempt whose evidence shows the agent CLI
+# could not open a socket to the LLM provider AT ALL is pure infra, not a product
+# result. rc-independent (the observed outage produced both rc=0 and rc=1), scoped
+# to status=UNKNOWN, checked before the no-verdict branch. ---
+
+@test "classify: UNKNOWN + api marker -> agent-api-unreachable (retriable), any rc" {
+    [ "$(gui_classify_failure UNKNOWN 1 0 0 1)" = agent-api-unreachable ]
+    [ "$(gui_classify_failure UNKNOWN 0 0 0 1)" = agent-api-unreachable ]
+    [ "$(gui_classify_failure UNKNOWN 124 0 0 1)" = agent-api-unreachable ]
+    run gui_classifier_retriable agent-api-unreachable
+    [ "$status" -eq 0 ]
+}
+
+@test "classify: api marker takes precedence over no-verdict for UNKNOWN:0" {
+    # Without the marker a clean-exit UNKNOWN is no-verdict (never retriable); the
+    # provider outage must NOT be miscounted as an agent bug.
+    [ "$(gui_classify_failure UNKNOWN 0 0 0 0)" = no-verdict ]
+    [ "$(gui_classify_failure UNKNOWN 0 0 0 1)" = agent-api-unreachable ]
+}
+
+@test "classify: api marker does NOT flip a product FAIL/ERROR (scope is UNKNOWN)" {
+    # A real assertion FAIL/ERROR stays a product result even if a provider blip
+    # string is present — the agent ran the asserts.
+    [ "$(gui_classify_failure FAIL 1 0 0 1)" = product-fail ]
+    [ "$(gui_classify_failure ERROR 1 0 0 1)" = product-error ]
+}
+
+@test "classify: 5th arg defaults to 0 (historic 3/4-arg calls unaffected)" {
+    [ "$(gui_classify_failure UNKNOWN 1 0)" = unknown ]
+    [ "$(gui_classify_failure UNKNOWN 0 0 0)" = no-verdict ]
+}
+
+@test "classify: api marker wins even when rc=124 and transport marker is present" {
+    # Precedence lock-in: both are retriable infra, but the API marker is more
+    # specific to the observed outage. A later reorder must be intentional.
+    [ "$(gui_classify_failure UNKNOWN 124 1 0 1)" = agent-api-unreachable ]
+}
+
+# --- gui_detect_agent_api_marker: log scan ---
+
+@test "api marker: detects 'Unable to connect to API (FailedToOpenSocket)'" {
+    local log="$BATS_TEST_TMPDIR/a1.log"
+    printf 'API Error: Unable to connect to API (FailedToOpenSocket)\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "api marker: detects 'Unable to connect to API (ConnectionRefused)'" {
+    local log="$BATS_TEST_TMPDIR/a2.log"
+    printf 'some earlier output\nAPI Error: Unable to connect to API (ConnectionRefused)\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "api marker: a PROSE mention of the provider error does NOT match (anchor)" {
+    # An agent narrative discussing the failure mode must not flip a verdict.
+    local log="$BATS_TEST_TMPDIR/a3.log"
+    printf 'The test checks what happens when we get an API Error: Unable to connect to API (ConnectionRefused) response.\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "api marker: a generic connection/timeout string does NOT match (too broad)" {
+    local log="$BATS_TEST_TMPDIR/a4.log"
+    printf 'curl: (7) Failed to connect to example.com port 443: Connection refused\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -ne 0 ]
+    printf 'API Error: Unable to connect to API (Overloaded)\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "api marker: suffix text does NOT match the exact CLI line (end anchor)" {
+    local log="$BATS_TEST_TMPDIR/a5.log"
+    printf 'API Error: Unable to connect to API (ConnectionRefused): retrying\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "api marker: leading/trailing whitespace around the exact CLI line is accepted" {
+    # The [[:space:]]* allowance is intentional (log indentation / trailing CR).
+    local log="$BATS_TEST_TMPDIR/a6.log"
+    printf '  API Error: Unable to connect to API (FailedToOpenSocket)  \n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
+@test "api marker: missing log file is not a marker" {
+    run gui_detect_agent_api_marker "$BATS_TEST_TMPDIR/nope.log"
     [ "$status" -ne 0 ]
 }
 
