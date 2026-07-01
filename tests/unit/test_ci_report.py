@@ -197,3 +197,127 @@ def test_partition_failures_splits_and_preserves_order():
     assert [r["subject"] for r in actionable] == ["real-fail-1", "real-fail-2"]
     assert [r["subject"] for r, _ in expected] == ["unpopulated", "INT"]
     assert all(isinstance(reason, str) and reason for _, reason in expected)
+
+
+# --- correlated_infra_bursts (report-only outage detector) ---
+# A contiguous run of same-classifier infra failures in one lane is an OUTAGE,
+# not N product bugs. False POSITIVES (calling product bugs an outage) are the
+# dangerous direction, so the detector is conservative.
+
+
+def _att(cls, *, lane="admin", status="UNKNOWN", rc="1", end=None, subject="s"):
+    a = {"lane": lane, "classifier": cls, "status": status, "agent_rc": rc,
+         "subject": subject}
+    if end is not None:
+        a["end_epoch"] = str(end)
+    return a
+
+
+def _clean(*, lane="admin", end=None, subject="ok"):
+    return _att("", lane=lane, status="PASS", rc="0", end=end, subject=subject)
+
+
+def test_burst_detects_api_outage_run_within_window():
+    # 35 agent-api-unreachable in a row within ~20 min => one burst.
+    atts = [_att("agent-api-unreachable", end=1000 + i * 30, subject=f"s{i}")
+            for i in range(35)]
+    bursts = report.correlated_infra_bursts(atts)
+    assert len(bursts) == 1
+    b = bursts[0]
+    assert b["classifier"] == "agent-api-unreachable"
+    assert b["count"] == 35
+    assert b["trigger"] == "consecutive"
+    assert b["lane"] == "admin"
+
+
+def test_burst_consecutive_run_spread_past_window_is_not_a_burst():
+    # 6 infra fails spaced 10 min apart (>20 min total), each followed by passes,
+    # so no 5-in-a-row consecutive run AND infra is a minority of the last 10 =>
+    # neither trigger fires.
+    atts = []
+    t = 1000
+    for _ in range(6):
+        atts.append(_att("transport-timeout", end=t)); t += 600
+        atts.append(_clean(end=t)); t += 60
+        atts.append(_clean(end=t)); t += 60
+    assert report.correlated_infra_bursts(atts) == []
+
+
+def test_burst_product_failures_never_fire():
+    # 10 genuine product-fails (non-infra classifier) => no burst.
+    atts = [_att("product-fail", end=1000 + i * 20) for i in range(10)]
+    assert report.correlated_infra_bursts(atts) == []
+
+
+def test_burst_agent_tooling_is_excluded():
+    atts = [_att("agent-tooling", end=1000 + i * 20) for i in range(8)]
+    assert report.correlated_infra_bursts(atts) == []
+
+
+def test_burst_fraction_trigger_when_interleaved_with_passes():
+    # Parallel-worker interleave: passes break consecutiveness, but >=50% of the
+    # last 10 completions are the same infra classifier => fraction trigger.
+    atts = []
+    for i in range(10):
+        atts.append(_att("agent-api-unreachable", end=1000 + i * 40, subject=f"f{i}")
+                    if i % 2 == 0 else _clean(end=1000 + i * 40, subject=f"p{i}"))
+    bursts = report.correlated_infra_bursts(atts)
+    assert len(bursts) == 1
+    assert bursts[0]["trigger"] == "fraction"
+    assert bursts[0]["classifier"] == "agent-api-unreachable"
+
+
+def test_burst_is_per_lane_not_diluted_across_lanes():
+    # A qdwin-lane outage must fire even though the admin lane is all green.
+    atts = [_clean(lane="admin", end=1000 + i * 30) for i in range(20)]
+    atts += [_att("agent-api-unreachable", lane="qdwin", end=1000 + i * 30)
+             for i in range(6)]
+    bursts = report.correlated_infra_bursts(atts)
+    assert len(bursts) == 1
+    assert bursts[0]["lane"] == "qdwin"
+
+
+def test_burst_two_infra_classifiers_below_threshold_do_not_fire():
+    # 3 transport-timeout then 3 vm-provision: neither reaches min_run=5
+    # consecutively, and no single classifier is >=50% of the (6) last attempts.
+    atts = [_att("transport-timeout", end=1000 + i * 20) for i in range(3)]
+    atts += [_att("vm-provision", status="FAIL", end=1100 + i * 20) for i in range(3)]
+    assert report.correlated_infra_bursts(atts) == []
+
+
+def test_burst_without_epochs_still_surfaces_run_window_none():
+    # Old-schema rows (no end_epoch) keep file order; the run is still surfaced
+    # for a human, with window_s = None (time gate skipped).
+    atts = [_att("agent-api-unreachable") for _ in range(6)]
+    bursts = report.correlated_infra_bursts(atts)
+    assert len(bursts) == 1
+    assert bursts[0]["window_s"] is None
+
+
+def test_burst_finds_dense_subrun_inside_a_longer_run():
+    # 6 same-classifier infra fails at 0,5,10,15,20,25 min: the whole run spans
+    # 25 min (>window), but the first 5 are a valid 5-in-20-min burst. The
+    # sliding window must surface that subrun (count 5), not reject the run.
+    atts = [_att("agent-api-unreachable", end=1000 + i * 300) for i in range(6)]
+    bursts = report.correlated_infra_bursts(atts)
+    assert len(bursts) == 1
+    assert bursts[0]["trigger"] == "consecutive"
+    assert bursts[0]["count"] == 5
+    assert bursts[0]["window_s"] <= 1200
+
+
+def test_burst_fraction_does_not_fire_on_a_tied_top_classifier():
+    # 5 transport-timeout + 5 vm-provision in the last 10: each is >=50% but the
+    # top is not unique, so the (single-classifier) fraction trigger must not fire.
+    # Interleave so neither forms a 5-in-a-row consecutive run either.
+    atts = []
+    for i in range(10):
+        cls = "transport-timeout" if i % 2 == 0 else "vm-provision"
+        atts.append(_att(cls, status="FAIL", end=1000 + i * 30))
+    assert report.correlated_infra_bursts(atts) == []
+
+
+def test_burst_empty_and_healthy_runs_return_nothing():
+    assert report.correlated_infra_bursts([]) == []
+    assert report.correlated_infra_bursts(
+        [_clean(end=1000 + i * 10) for i in range(20)]) == []

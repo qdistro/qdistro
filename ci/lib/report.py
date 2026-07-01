@@ -411,6 +411,162 @@ def partition_failures(
     return actionable, expected
 
 
+# Classifiers that denote a pure infra/provider failure (not product/test). A
+# temporally contiguous run of these in ONE lane is an OUTAGE, not N independent
+# regressions — the signal correlated_infra_bursts() surfaces so a provider blip
+# is not read as a wave of product failures (and, later, so a lane can be
+# quarantined instead of booking N red rows). `agent-tooling` is deliberately
+# EXCLUDED: it can be prompt/scenario-shape correlated rather than an external
+# outage. See todo/qci1/04-followups-from-failure-review.md §A2.
+INFRA_BURST_CLASSIFIERS = frozenset(
+    {"agent-api-unreachable", "transport-timeout", "vm-provision", "golden-build"}
+)
+
+
+def _attempt_is_clean(a: dict[str, str]) -> bool:
+    """An attempt that did NOT fail: an explicit PASS/rc=0, or a SKIP."""
+    status = (a.get("status") or "").strip().upper()
+    rc = (a.get("agent_rc") or "").strip()
+    return status == "SKIP" or (status == "PASS" and rc == "0")
+
+
+def _infra_classifier(a: dict[str, str]) -> str | None:
+    """The attempt's classifier if it is a FAILING infra-allowlist attempt, else
+    None (a clean attempt, or a product/unknown failure)."""
+    if _attempt_is_clean(a):
+        return None
+    c = (a.get("classifier") or "").strip()
+    return c if c in INFRA_BURST_CLASSIFIERS else None
+
+
+def _epoch(a: dict[str, str]) -> int | None:
+    raw = (a.get("end_epoch") or "").strip()
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def correlated_infra_bursts(
+    attempts: list[dict[str, str]],
+    *,
+    min_run: int = 5,
+    window_s: int = 1200,
+    frac_last_n: int = 10,
+    frac_threshold: float = 0.5,
+) -> list[dict[str, object]]:
+    """Report-only: lanes where an infra outage produced a contiguous run of
+    same-classifier infra failures, so it is not mistaken for many product bugs.
+
+    Two independent triggers per lane (see 04-followups §A2):
+      - `consecutive`: >= ``min_run`` CONSECUTIVE failing attempts (in completion
+        order) sharing ONE infra-allowlist classifier, uninterrupted by any other
+        completion (a pass, skip, or differently-classified failure breaks the
+        run — the conservative choice for a report-only signal), AND spanning
+        <= ``window_s`` seconds when timestamps are present.
+      - `fraction`: >= ``frac_threshold`` of the last ``frac_last_n`` completed
+        attempts in the lane share ONE infra-allowlist classifier (catches an
+        outage interleaved with other work under parallel workers).
+
+    Completion order uses ``end_epoch`` when every row in the lane has one;
+    otherwise file order is kept and the time-window gate is skipped (the run is
+    still surfaced — this is report-only, a human reads it). At most one burst is
+    returned per lane (the higher-count trigger wins). Pure => host-testable.
+    """
+    # Group by lane, preserving input order within each lane.
+    lanes: dict[str, list[dict[str, str]]] = {}
+    for a in attempts:
+        lanes.setdefault((a.get("lane") or "").strip(), []).append(a)
+
+    bursts: list[dict[str, object]] = []
+    for lane, items in lanes.items():
+        ordered = items
+        have_epochs = all(_epoch(a) is not None for a in items)
+        if have_epochs:
+            # have_epochs guarantees every _epoch(a) is a real int; `or 0` only
+            # placates the type checker (the None branch is unreachable here).
+            ordered = sorted(items, key=lambda a: _epoch(a) or 0)
+
+        candidates: list[dict[str, object]] = []
+
+        # Trigger 1: maximal consecutive same-infra-classifier run.
+        run_cls: str | None = None
+        run: list[dict[str, str]] = []
+
+        def _flush(run_cls: str | None, run: list[dict[str, str]]) -> None:
+            if run_cls is None or len(run) < min_run:
+                return
+            first_idx = 0
+            last_idx = len(run) - 1
+            span: int | None = None
+            if have_epochs:
+                # Slide a window over the same-classifier run and take the LARGEST
+                # contiguous slice that still fits within window_s. Applying the
+                # gate to the whole run would wrongly reject a run whose endpoints
+                # straddle the window but which contains a valid dense subrun
+                # (e.g. 6 attempts over 25 min still contain a 5-in-20-min burst).
+                best: tuple[int, int, int] | None = None
+                left = 0
+                for right in range(len(run)):
+                    right_epoch = _epoch(run[right]) or 0
+                    while left <= right and right_epoch - (_epoch(run[left]) or 0) > window_s:
+                        left += 1
+                    count = right - left + 1
+                    if count >= min_run and (best is None or count > best[1] - best[0] + 1):
+                        best = (left, right, right_epoch - (_epoch(run[left]) or 0))
+                if best is None:
+                    return
+                first_idx, last_idx, span = best
+            candidates.append({
+                "lane": lane, "classifier": run_cls,
+                "count": last_idx - first_idx + 1,
+                "trigger": "consecutive", "window_s": span,
+                "first_subject": run[first_idx].get("subject", ""),
+                "last_subject": run[last_idx].get("subject", ""),
+            })
+
+        for a in ordered:
+            cls = _infra_classifier(a)
+            if cls is not None and cls == run_cls:
+                run.append(a)
+            elif cls is not None:
+                _flush(run_cls, run)
+                run_cls, run = cls, [a]
+            else:
+                _flush(run_cls, run)
+                run_cls, run = None, []
+        _flush(run_cls, run)
+
+        # Trigger 2: fraction of the last frac_last_n completed attempts. Requires
+        # a FULL window (>= frac_last_n completions) so a small, ambiguous sample
+        # (e.g. two infra classifiers tied at 3/6) can't fire it — an
+        # under-sampled lane relies on the consecutive trigger instead.
+        if len(ordered) >= frac_last_n:
+            tail = ordered[-frac_last_n:]
+            counts: dict[str, int] = {}
+            for a in tail:
+                cls = _infra_classifier(a)
+                if cls is not None:
+                    counts[cls] = counts.get(cls, 0) + 1
+            if counts:
+                # A TIE for the top classifier (e.g. 5 transport-timeout + 5
+                # vm-provision) is ambiguous — the section claims ONE shared
+                # classifier — so require a unique plurality, not just >= 50%.
+                ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+                cls, count = ranked[0]
+                top_is_unique = len(ranked) == 1 or ranked[1][1] < count
+                if top_is_unique and count >= frac_threshold * len(tail):
+                    candidates.append({
+                        "lane": lane, "classifier": cls, "count": count,
+                        "trigger": "fraction", "window_s": None,
+                        "first_subject": "", "last_subject": "",
+                        "sample": len(tail),
+                    })
+
+        if candidates:
+            bursts.append(max(candidates, key=lambda c: int(c["count"])))  # type: ignore[call-overload]
+    return bursts
+
+
 def generate_md(run_dir: Path) -> str:
     manifest = read_kv(run_dir / "manifest.txt")
     rows = read_tsv(run_dir / "results.tsv")
@@ -568,6 +724,34 @@ def generate_md(run_dir: Path) -> str:
     # source TSVs are optional — read_tsv() returns [] when absent, so legacy runs
     # render exactly as before (no heading). Reporting only; gates nothing.
     attempts = read_tsv(run_dir / "scenario-attempts.tsv")
+
+    # Correlated infra bursts (report-only): a contiguous run of same-classifier
+    # infra failures in one lane is an OUTAGE, not a wave of product bugs. Surfaced
+    # ABOVE the per-attempt table so a reader sees the systemic cause first.
+    bursts = correlated_infra_bursts(attempts)
+    if bursts:
+        lines.append("## Correlated infra bursts")
+        lines.append(
+            "A lane recorded a contiguous run of the SAME infra classifier — an "
+            "external outage, not independent product/test failures. Report-only: "
+            "no run is aborted (correlated quarantine is a later, opt-in step). "
+            "Treat these attempts as infra, not product signal."
+        )
+        lines.append("")
+        lines.append("| lane | classifier | count | trigger | window | first → last |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for burst in bursts:
+            win = burst.get("window_s")
+            win_str = f"{win}s" if isinstance(win, int) else "—"
+            span = ""
+            if burst.get("first_subject") or burst.get("last_subject"):
+                span = f"{burst.get('first_subject', '')} → {burst.get('last_subject', '')}"
+            lines.append(
+                f"| {burst.get('lane', '') or 'unknown'} | {burst.get('classifier', '')} | "
+                f"{burst.get('count', '')} | {burst.get('trigger', '')} | {win_str} | {span} |"
+            )
+        lines.append("")
+
     flaky_attempts = [
         a for a in attempts
         if (a.get("status") or "").upper() != "PASS" or (a.get("agent_rc") or "0") != "0"
@@ -694,6 +878,7 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
     rows = read_tsv(run_dir / "results.tsv")
     failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
     actionable, expected = partition_failures(rows)
+    bursts = correlated_infra_bursts(read_tsv(run_dir / "scenario-attempts.tsv"))
     return {
         "run_id": manifest.get("run_id", run_dir.name),
         "gate": manifest.get("gate", ""),
@@ -720,6 +905,8 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
         "actionable_failures": len(actionable),
         "expected_nonactionable_failures": len(expected),
         "first_actionable_failure": actionable[0] if actionable else None,
+        # Report-only correlated infra-outage bursts (empty on a healthy run).
+        "correlated_infra_bursts": bursts,
         "report_md": "report.md",
         "report_html": "report.html",
     }

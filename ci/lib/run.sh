@@ -37,7 +37,7 @@ init_run() {
     # depend on. scenario-attempts.tsv carries one row per agent attempt (so a
     # future retry shows as attempt 2); host-load.tsv samples the host contention
     # that drives the GUI flake variance.
-    printf 'gate\tsubject\tattempt\tstatus\tagent_rc\tclassifier\twall_s\tvm\tlog\n' > "$RDIR/scenario-attempts.tsv"
+    printf 'gate\tsubject\tattempt\tstatus\tagent_rc\tclassifier\twall_s\tvm\tlog\tstart_epoch\tend_epoch\tlane\n' > "$RDIR/scenario-attempts.tsv"
     printf 'gate\tsubject\tphase\tloadavg1\tmem_avail_mb\tqemu_vms\tepoch\n' > "$RDIR/host-load.tsv"
     # flake.tsv is the retry LEDGER (Phase 6): one row per failure that carried a
     # retriable infra signature — either `would-retry` (report-only, the default)
@@ -296,12 +296,19 @@ record_timing() {
 # verdict (PASS/FAIL/ERROR/SKIP/UNKNOWN) — distinct from the qci pass/fail row in
 # results.tsv — and `classifier` stays empty until the retry classifier (Phase 6)
 # fills it. OBSERVABILITY ONLY: nothing here gates a run.
-# Columns: gate subject attempt status agent_rc classifier wall_s vm log
+# start_epoch/end_epoch are absolute Unix seconds bounding the attempt (wall_s is
+# their difference); lane is the scheduling lane (e.g. admin|qdwin). Both feed the
+# report-only correlated-infra-burst detector (an outage is a temporally
+# contiguous run of same-classifier infra failures in one lane), which needs real
+# completion times, not just durations. All three are trailing/optional so older
+# readers and callers are unaffected.
+# Columns: gate subject attempt status agent_rc classifier wall_s vm log \
+#          start_epoch end_epoch lane
 record_attempt() {
-    local gate=$1 subject=$2 attempt=$3 status=$4 agent_rc=$5 classifier=${6:-} wall_s=${7:-} vm=${8:-} log_path=${9:-}
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    local gate=$1 subject=$2 attempt=$3 status=$4 agent_rc=$5 classifier=${6:-} wall_s=${7:-} vm=${8:-} log_path=${9:-} start_epoch=${10:-} end_epoch=${11:-} lane=${12:-}
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$attempt" "$status" "$agent_rc" "$classifier" "$wall_s" "$vm" \
-        "$(rel_path "$log_path")" >> "$RDIR/scenario-attempts.tsv"
+        "$(rel_path "$log_path")" "$start_epoch" "$end_epoch" "$lane" >> "$RDIR/scenario-attempts.tsv"
 }
 
 # Append one host-load sample — a cheap proxy for the contention that drives the

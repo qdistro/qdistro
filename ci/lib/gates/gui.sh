@@ -587,8 +587,11 @@ gui_job_count() {
 # timing, then release the VM. Self-contained for backgrounded pool execution.
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
-    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name lane
     rel=${scenario#$WORKSPACE/}
+    # Scheduling lane for the attempt ledger + correlated-burst detector: a qdwin
+    # scenario runs on the heavier gui-qdwin profile, everything else on gui-admin.
+    if gui_scenario_requires_qdwin "$rel"; then lane=qdwin; else lane=admin; fi
     t0=$(date +%s)
     if [ -n "$provided" ]; then
         vm=$provided
@@ -646,7 +649,7 @@ gui_run_scenario() {
     # Per-attempt observability row: the RAW agent status + rc + wall seconds +
     # classifier, before the verdict collapses it. This is where the flake signal
     # lives (rc=124, UNKNOWN, slow walls under load).
-    record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path"
+    record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path" "$ta0" "$ta1" "$lane"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
     # retriable signature (transport-timeout, agent-tooling, or agent-api-unreachable
@@ -706,7 +709,7 @@ gui_run_scenario() {
                     gui_detect_agent_api_marker "$logN" && apiN=1
                     classifierN=$(gui_classify_failure "$statusN" "$agent_rc" "$transportN" "$toolingN" "$apiN")
                 fi
-                record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN"
+                record_attempt gui "$rel" "$ordinal" "$statusN" "$agent_rc" "$classifierN" "$((tsb - tsa))" "$vmN" "$logN" "$tsa" "$tsb" "$lane"
                 # Promote this attempt as the new current state; the loop guard
                 # re-evaluates verdict+classifier to decide whether to keep going.
                 status=$statusN; verdict=$verdictN; note=$noteN; classifier=$classifierN; log_path=$logN; adir=$adirN
