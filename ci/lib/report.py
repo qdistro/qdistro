@@ -340,25 +340,6 @@ def dependency_missing_skips(rows: list[dict[str, str]]) -> list[dict[str, str]]
     ]
 
 
-# Documented expected failures (Phase-5 `expected_failure=<reason>` policy, landed
-# early as a small data-driven slice): scenarios with a KNOWN, explained
-# limitation the project has decided NOT to treat as an actionable regression.
-# These are EXCLUDED from the clean-run metric but always SURFACED in the report's
-# Expected/non-actionable section — never hidden as a broad SKIP. Keyed by a
-# substring of the result `subject` (the scenario path). Widen DELIBERATELY, each
-# with a reason. A row that fails for one of these is expected; if the scenario is
-# ever fixed it simply passes (this bucket only applies to FAIL/BLOCKED rows).
-EXPECTED_FAILURE_SCENARIOS: dict[str, str] = {
-    "qdwin/tests/apps/05-gtk4-gnome-text-editor.md": (
-        "known rendering limitation: GTK4 draws via wl_egl_window (EGL), not "
-        "wl_shm, so on the GUI VM's software pixman/llvmpipe backend every "
-        "screenshot is black — no pixels reach the compositor. Expected-fail until "
-        "the GUI VM gains a GL-capable display backend; a compatibility-lane "
-        "concern, not core QCI robustness."
-    ),
-}
-
-
 def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
     """Classify a FAIL/BLOCKED row that is EXPECTED / operator-driven rather than
     an actionable product-or-test regression.
@@ -408,12 +389,6 @@ def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
     # bucketed out of the actionable clean-run metric.
     if status == "fail" and "external-network infra" in notes:
         return "external-network infra (guest fetch/registry failure during setup)"
-    # Documented expected-failure scenarios (known limitations, e.g. GTK4-on-pixman
-    # black canvas). Keyed on the scenario path in the subject; surfaced but not
-    # counted as an actionable regression.
-    for needle, reason in EXPECTED_FAILURE_SCENARIOS.items():
-        if needle in subject:
-            return f"expected failure ({needle}): {reason}"
     # NOTE: edit-guard failures are deliberately NOT bucketed here. An
     # unsanctioned protected-path edit is deterministic but still human-required
     # (sanction with --allow-test-edits, fix the tooling, or revert), and a
