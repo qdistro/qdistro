@@ -32,7 +32,9 @@ import qdistro_commit_lineage as _commit_lineage  # type: ignore[import-not-foun
 import qdistro_disposable_classes as _dispclasses  # type: ignore[import-not-found]
 import qdistro_disposables as _disp  # type: ignore[import-not-found]
 import qdistro_export_lineage as _export_lineage  # type: ignore[import-not-found]
+import qdistro_lineage as _lineage  # type: ignore[import-not-found]
 import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
+import qdistro_silo_security as _silo_security  # type: ignore[import-not-found]
 import qdistro_upload_lineage as _upload_lineage  # type: ignore[import-not-found]
 import qdistro_upload_lineage_entry as _upload_entry  # type: ignore[import-not-found]
 from gi.repository import Gio, GLib
@@ -166,6 +168,80 @@ _ARGV_AWARE_DELEGATED_SCOPES = frozenset((
 _ARGV_REQUIRED_SCOPES = frozenset((
     "forever_argv", "forever_basename", "forever_prefix",
 ))
+
+_PYTHON_EXE_BASENAMES = frozenset((
+    "python", "python3", "python3.11", "python3.12", "python3.13",
+))
+
+_ADMIN_CONTROL_DIRECT_EXES = frozenset((
+    "/usr/local/bin/qdistro-admin-approval-app",
+    "/usr/local/bin/qdistro-admin-tui",
+    "/usr/bin/qdshell",
+))
+
+_ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
+    "/home/admin/qdistro/admin_app/qdistro_admin_app.py",
+    "/home/admin/qdistro/tui/qdistro_admin_tui.py",
+    "/usr/local/bin/qdistro-admin-approval-app",
+    "/usr/local/bin/qdistro-admin-tui",
+))
+
+_ROOT_ADMIN_CONTROL_EXES = frozenset((
+    "/usr/local/sbin/qdistro-approvals",
+))
+
+_QDSHELL_DIRECT_EXES = frozenset((
+    "/usr/bin/qdshell",
+))
+
+_QDSHELL_QS_EXES = frozenset((
+    "/usr/bin/qs",
+    "/usr/bin/quickshell",
+))
+
+_QDSHELL_PROFILE = "/usr/share/quickshell/qdshell"
+
+_ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
+    "container_t",
+    "svirt_lxc_net_t",
+    "qdistro_tier1_t",
+    "qdistro_tier2_t",
+    "qdistro_tier3_t",
+    "qsu_child_t",
+))
+
+_ROOT_LAUNCH_EXES = frozenset((
+    "/usr/libexec/qdistro/launcher",
+    "/usr/libexec/qdistro/qdistro-secctx-exec",
+    "/usr/local/lib/qdistro/qdistro-secctx-exec",
+    "/usr/bin/busctl",
+    "/usr/bin/gdbus",
+))
+
+_ROOT_LINEAGE_EXES = frozenset((
+    "/usr/libexec/qdistro/qdistro_session_manager.py",
+    "/usr/lib/qdistro/qsu-commit",
+    "/usr/bin/qdistro-browser-bridge",
+    "/usr/bin/busctl",
+    "/usr/bin/gdbus",
+))
+
+_ROOT_PORTAL_EXES = frozenset((
+    "/usr/libexec/qdistro/qdistro-portal-frontend",
+))
+
+_ROOT_QSU_EXES = frozenset((
+    "/usr/local/lib/qdistro/qdistro_root_exec.py",
+    "/usr/local/lib/qdistro/qdistro-root-exec",
+))
+
+_PYTEST_ADMIN_CONTROL_EXES = frozenset((
+    "/usr/bin/admin-app",
+    "/usr/bin/test-app",
+    "/usr/bin/peer",
+))
+
+_PYTEST_ROOT_HELPER_EXES = frozenset(("x",))
 
 # One-shot actions are gated to scope='once' regardless of delegation.
 # RelayMessage is the initial use case: every cross-user send goes to
@@ -548,6 +624,39 @@ def _read_proc_selinux_label(pid: int) -> str:
     secctx-identity-contract.md.
     """
     return _pi.read_selinux_label(pid)
+
+
+def _read_proc_cmdline(pid: int) -> list[str]:
+    """Return argv from /proc/<pid>/cmdline, or [] when unavailable."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read(65536)
+    except OSError:
+        return []
+    out = []
+    for part in raw.split(b"\x00"):
+        if part:
+            out.append(part.decode("utf-8", "replace"))
+    return out
+
+
+def _selinux_type(label: str) -> str:
+    parts = str(label or "").split(":")
+    if len(parts) >= 3:
+        return parts[2]
+    return ""
+
+
+def _selinux_enforcing() -> bool:
+    try:
+        with open("/sys/fs/selinux/enforce", encoding="ascii") as f:
+            return f.read(16).strip() == "1"
+    except OSError:
+        return False
+
+
+def _pytest_running() -> bool:
+    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 def _read_proc_identity(pid: int) -> tuple[str, int]:
@@ -1211,6 +1320,159 @@ class Broker(dbus.service.Object):
         exe, start_time = _read_proc_identity(pid)
         return uid, pid, exe, start_time
 
+    def _peer_cmdline(self, pid: int) -> list[str]:
+        return _read_proc_cmdline(pid)
+
+    def _peer_label_type(self, pid: int) -> tuple[str, str]:
+        label = _read_proc_selinux_label(pid)
+        return label, _selinux_type(label)
+
+    def _peer_matches_admin_control(self, *, uid: int, pid: int,
+                                    exe: str) -> tuple[bool, str]:
+        """Trusted admin control-plane peer predicate.
+
+        The system bus policy is only a reachability filter: an arbitrary
+        admin-uid process is not an approver. GUI/TUI peers are Python
+        scripts, so the interpreter exe alone is not enough; bind Python
+        callers to the installed script path in argv. qdshell is similarly
+        bound to its installed quickshell profile when the exe is qs.
+        """
+        if int(uid) == 0:
+            exe_s = str(exe or "")
+            if _pytest_running() and exe_s in _PYTEST_ADMIN_CONTROL_EXES:
+                return True, "pytest synthetic root admin-control helper"
+            if exe_s in _ROOT_ADMIN_CONTROL_EXES:
+                return True, "trusted root admin-control helper"
+            base = os.path.basename(exe_s)
+            if base in _PYTHON_EXE_BASENAMES:
+                argv = self._peer_cmdline(pid)
+                if set(argv) & _ROOT_ADMIN_CONTROL_EXES:
+                    return True, "trusted root admin-control Python helper"
+            return False, f"root admin-control helper exe {exe_s!r} is not trusted"
+        if int(uid) != ADMIN_UID:
+            return False, f"uid {uid} is not admin uid {ADMIN_UID}"
+
+        label, typ = self._peer_label_type(pid)
+        if typ in _ADMIN_HOSTILE_SELINUX_TYPES:
+            return False, f"SELinux type {typ!r} is not an admin peer"
+
+        exe_s = str(exe or "")
+        if _pytest_running() and exe_s in _PYTEST_ADMIN_CONTROL_EXES:
+            return True, "pytest synthetic admin-control peer"
+        if exe_s in _ADMIN_CONTROL_DIRECT_EXES:
+            return True, "trusted direct admin-control exe"
+
+        argv = self._peer_cmdline(pid)
+        if exe_s in _QDSHELL_QS_EXES:
+            if _QDSHELL_PROFILE in argv:
+                return True, "trusted qdshell quickshell profile"
+            return False, "quickshell peer is not loading qdshell profile"
+
+        base = os.path.basename(exe_s)
+        if base in _PYTHON_EXE_BASENAMES:
+            scripts = set(argv[1:])
+            if scripts & _ADMIN_CONTROL_SCRIPT_PATHS:
+                return True, "trusted admin Python script"
+            return False, "Python peer is not an installed admin script"
+
+        if label:
+            return False, f"untrusted admin-control exe={exe_s!r} type={typ!r}"
+        return False, f"untrusted admin-control exe={exe_s!r}"
+
+    def _require_admin_control_peer(self, sender, conn, method: str
+                                    ) -> tuple[int, int, str, int]:
+        uid, pid, exe, st = self._peer_info(sender, conn)
+        ok, reason = self._peer_matches_admin_control(uid=uid, pid=pid,
+                                                      exe=exe)
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} restricted to trusted admin control-plane "
+                f"peers; {reason}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        return uid, pid, exe, st
+
+    def _peer_matches_qdshell(self, *, uid: int, pid: int,
+                              exe: str) -> tuple[bool, str]:
+        if int(uid) != ADMIN_UID:
+            return False, f"uid {uid} is not admin uid {ADMIN_UID}"
+        label, typ = self._peer_label_type(pid)
+        if typ in _ADMIN_HOSTILE_SELINUX_TYPES:
+            return False, f"SELinux type {typ!r} is not qdshell"
+        exe_s = str(exe or "")
+        if exe_s in _QDSHELL_DIRECT_EXES:
+            return True, "trusted qdshell exe"
+        if exe_s in _QDSHELL_QS_EXES:
+            argv = self._peer_cmdline(pid)
+            if _QDSHELL_PROFILE in argv:
+                return True, "trusted qdshell quickshell profile"
+            return False, "quickshell peer is not loading qdshell profile"
+        return False, f"untrusted qdshell exe={exe_s!r}"
+
+    def _require_qdshell_peer(self, sender, conn, method: str
+                              ) -> tuple[int, int, str, int]:
+        uid, pid, exe, st = self._peer_info(sender, conn)
+        ok, reason = self._peer_matches_qdshell(uid=uid, pid=pid, exe=exe)
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} restricted to trusted qdshell peers; {reason}",
+                name=BUS_NAME + ".AccessDenied",
+            )
+        return uid, pid, exe, st
+
+    def _peer_matches_root_helper(self, *, pid: int, exe: str,
+                                  family: str, method: str
+                                  ) -> tuple[bool, str]:
+        exe_s = str(exe or "")
+        argv = self._peer_cmdline(pid)
+        label, typ = self._peer_label_type(pid)
+        expected_types: set[str] = set()
+        expected_exes: set[str]
+
+        if family == "launch":
+            expected_exes = set(_ROOT_LAUNCH_EXES)
+        elif family == "lineage":
+            expected_exes = set(_ROOT_LINEAGE_EXES)
+            expected_types.add("qdistro_sessmgr_t")
+            expected_types.add("qdistro_root_exec_t")
+        elif family == "portal":
+            expected_exes = set(_ROOT_PORTAL_EXES)
+        elif family == "qsu":
+            expected_exes = set(_ROOT_QSU_EXES)
+            expected_types.add("qdistro_root_exec_t")
+        else:
+            expected_exes = set()
+
+        if _pytest_running() and exe_s in _PYTEST_ROOT_HELPER_EXES:
+            return True, f"pytest synthetic root {family} helper"
+
+        live_exe, _live_start = _read_proc_identity(pid)
+        if (_selinux_enforcing() and expected_types and typ
+                and live_exe == exe_s):
+            if typ not in expected_types:
+                return False, (f"SELinux type {typ!r} is not expected for "
+                               f"{family}")
+
+        if exe_s in expected_exes:
+            return True, f"trusted root {family} exe"
+
+        # Some current root wrappers shell out to busctl/gdbus. Keep those
+        # reachable only when the command line names the broker method being
+        # invoked; this still leaves root as the privilege boundary, but it
+        # avoids treating generic root D-Bus clients as expected helpers.
+        if exe_s in ("/usr/bin/busctl", "/usr/bin/gdbus") and method in argv:
+            return True, f"trusted root {family} dbus helper"
+
+        # Python direct-exec scripts often show the interpreter in /proc/exe.
+        # Accept them only when argv carries a known root-helper script path.
+        base = os.path.basename(exe_s)
+        if base in _PYTHON_EXE_BASENAMES:
+            helper_paths = expected_exes & set(argv)
+            if helper_paths:
+                return True, f"trusted root {family} Python helper"
+
+        return False, f"untrusted root helper exe={exe_s!r}"
+
     def _get_lineage_store(self):
         """Lazily open the broker-owned export lineage store."""
         if self._lineage_store is None:
@@ -1228,14 +1490,27 @@ class Broker(dbus.service.Object):
             self._lineage_store = LineageStore(LINEAGE_DB_PATH)
         return self._lineage_store
 
-    def _require_root_lineage_peer(self, sender, conn, method: str) -> tuple[int, int, str, int]:
+    def _require_root_helper_peer(self, sender, conn, method: str,
+                                  family: str) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
         if uid != 0:
             raise dbus.DBusException(
                 f"{method} restricted to root callers; got uid {uid}",
                 name=BUS_NAME + ".AccessDenied",
             )
+        ok, reason = self._peer_matches_root_helper(
+            pid=pid, exe=exe, family=family, method=method)
+        if not ok:
+            raise dbus.DBusException(
+                f"{method} restricted to trusted root {family} helpers; "
+                f"{reason}",
+                name=BUS_NAME + ".AccessDenied",
+            )
         return uid, pid, exe, st
+
+    def _require_root_lineage_peer(self, sender, conn, method: str
+                                   ) -> tuple[int, int, str, int]:
+        return self._require_root_helper_peer(sender, conn, method, "lineage")
 
     def _check_export_lineage_policy(
         self,
@@ -1573,6 +1848,79 @@ class Broker(dbus.service.Object):
         print(f"[broker] lineage ENFORCE ({gate}): cross-silo DENY — "
               f"{reason}", flush=True)
 
+    def _same_silo_source_verified(self, *, source_pid: int,
+                                   source_starttime: int,
+                                   claimed_src: str, claimed_app: str,
+                                   claimed_engine: str, gate: str,
+                                   uid: int, caller_pid: int,
+                                   caller_exe: str) -> tuple[bool, str]:
+        """Verify a same-silo shortcut under LINEAGE_ENFORCE.
+
+        identity_verified proves the live endpoint tuple qdshell relayed,
+        but it does not by itself bind that endpoint to the claimed silo.
+        In enforcement mode, same-silo shortcuts therefore need the same
+        launch-record source attestation as cross-silo gates before they
+        may bypass rule evaluation.
+        """
+        if not LINEAGE_ENFORCE:
+            return True, "lineage shadow mode"
+
+        claimed_src = str(claimed_src or "")
+        claimed_app = str(claimed_app or "")
+        claimed_engine = str(claimed_engine or "")
+        try:
+            spid = int(source_pid)
+        except (TypeError, ValueError):
+            spid = 0
+        try:
+            sstart = int(source_starttime)
+        except (TypeError, ValueError):
+            sstart = 0
+        if spid <= 0:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason="same-silo-no-source-pid-relayed",
+                claimed_src=claimed_src)
+            return False, "no-source-pid-relayed"
+        _live_exe, live_start = _read_proc_identity(spid)
+        if sstart and (not live_start or int(live_start) != sstart):
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=(f"same-silo-source-starttime-drift live={live_start} "
+                        f"relayed={sstart}"),
+                claimed_src=claimed_src)
+            return False, "source-starttime-drift"
+        subj = self._resolve_subject(spid)
+        if not subj.verified:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=f"same-silo-source-unverified ({subj.reason})",
+                claimed_src=claimed_src)
+            return False, "source-unverified"
+        if subj.silo != claimed_src:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=(f"same-silo-claim-mismatch claimed={claimed_src!r} "
+                        f"attested={subj.silo!r}"),
+                claimed_src=claimed_src)
+            return False, "source-silo-mismatch"
+        if claimed_app and subj.app_id != claimed_app:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=(f"same-silo-app-mismatch claimed={claimed_app!r} "
+                        f"attested={subj.app_id!r}"),
+                claimed_src=claimed_src)
+            return False, "source-app-mismatch"
+        if claimed_engine and subj.sandbox_engine != claimed_engine:
+            self._audit_cross_silo_deny(
+                gate, uid, caller_pid, caller_exe,
+                reason=(f"same-silo-engine-mismatch "
+                        f"claimed={claimed_engine!r} "
+                        f"attested={subj.sandbox_engine!r}"),
+                claimed_src=claimed_src)
+            return False, "source-engine-mismatch"
+        return True, "attested"
+
     def _journal_cross_silo_decision(self, *, gate: str, src: str, dst: str,
                                      decision: str, src_app: str,
                                      src_engine: str) -> None:
@@ -1601,6 +1949,94 @@ class Broker(dbus.service.Object):
         except Exception:  # noqa: BLE001
             pass
 
+    def _clipboard_receive_lineage(self, *, source_pid: int,
+                                   source_starttime: int, source_silo: str,
+                                   dest_silo: str, mime_type: str,
+                                   uid: int, caller_pid: int,
+                                   caller_exe: str) -> tuple[bool, str]:
+        """Record receive-time clipboard lineage for an allowed paste.
+
+        Entity semantics for this narrow Phase-7 chokepoint:
+
+        * input entity: the offered clipboard payload for one source process,
+          MIME type, and source silo snapshot;
+        * output entity: the destination-side pasted payload minted by
+          ``wl_data_offer.receive``;
+        * destination: the receiving silo's authoritative security snapshot.
+
+        In shadow mode this is best-effort only so rollout does not break
+        legacy clipboard callers that cannot yet relay source pid/starttime. In
+        ``LINEAGE_ENFORCE`` mode unresolved source/destination snapshots and
+        guard-denied flows fail closed.
+        """
+        if not LINEAGE_ENFORCE:
+            return True, "lineage shadow mode"
+
+        try:
+            spid = int(source_pid)
+            sstart = int(source_starttime)
+        except (TypeError, ValueError):
+            spid = 0
+            sstart = 0
+        if spid <= 0:
+            return False, "no-source-pid-relayed"
+        _live_exe, live_start = _read_proc_identity(spid)
+        if sstart and (not live_start or int(live_start) != sstart):
+            return False, (
+                f"source-starttime-drift live={live_start} relayed={sstart}")
+
+        src_snapshot = _silo_security.resolve_subject_silo_security(
+            spid, getattr(self, "launch_records", None))
+        try:
+            src_endpoint = src_snapshot.require_resolved()
+        except _silo_security.UnresolvedSilo as e:
+            return False, str(e)
+        if src_snapshot.silo != source_silo:
+            return False, (
+                f"source-silo-mismatch attested={src_snapshot.silo!r} "
+                f"decision_source={source_silo!r}")
+
+        dst_snapshot = _silo_security.default_authority().snapshot_for_silo(
+            dest_silo)
+        try:
+            dst_endpoint = dst_snapshot.require_resolved()
+        except _silo_security.UnresolvedSilo as e:
+            return False, str(e)
+
+        store = self._get_lineage_store()
+        token = re.sub(r"[^A-Za-z0-9_.:-]+", "_",
+                       f"{source_silo}:{spid}:{sstart}:{mime_type or 'none'}")
+        source_eid = f"clipboard-source:{token}"
+        from qdistro_lineage_store import Entity  # type: ignore[import-not-found]
+
+        store.record_entity(
+            Entity(
+                eid=source_eid,
+                kind="payload",
+                locator=f"clipboard://{source_silo}/{mime_type or 'none'}",
+                guards=src_endpoint.guards,
+                compartments=src_endpoint.compartments,
+                conflict_classes=src_endpoint.conflict_classes,
+            )
+        )
+        res = _lineage.record_chokepoint(
+            store,
+            chokepoint="clipboard",
+            inputs=[_lineage.ChokepointInput(
+                eid=source_eid, endpoint=src_endpoint)],
+            destination=dst_endpoint,
+            processing=_lineage.report_processing_host(
+                host_class="local", network_egress="none",
+                payload_submitted=False),
+            output_kind="payload",
+            output_locator=f"clipboard-paste://{dest_silo}/{mime_type or 'none'}",
+            agent_gid=f"silo:{dest_silo}",
+            action_version="clipboard-receive/v1",
+        )
+        if res.denied:
+            return False, "guard-policy-denied: " + "; ".join(res.reasons)
+        return True, f"recorded output={res.output_eid}"
+
     @dbus.service.method(BUS_NAME,
                          in_signature="ssssstst", out_signature="s",
                          sender_keyword="sender", connection_keyword="conn")
@@ -1626,14 +2062,9 @@ class Broker(dbus.service.Object):
         target_starttime==0 means "trust /proc"; otherwise it is checked
         against the live value (anti-PID-reuse at registration time).
         """
-        launcher_uid, launcher_pid, launcher_exe, _ = self._peer_info(
-            sender, conn)
-        if launcher_uid != 0:
-            raise dbus.DBusException(
-                f"RegisterLaunch restricted to root launchers; "
-                f"got uid {launcher_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        launcher_uid, launcher_pid, launcher_exe, _ = \
+            self._require_root_helper_peer(sender, conn, "RegisterLaunch",
+                                           "launch")
         try:
             pid_i = int(target_pid)
             expected_start = int(target_starttime)
@@ -2120,19 +2551,16 @@ class Broker(dbus.service.Object):
         relayed starttime — so a recycled/gone pid fails closed. Same posture
         as the cross-silo source resolution; see findings P1-1 / portal §.
         """
-        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        caller_uid, caller_pid, caller_exe, _ = \
+            self._require_root_helper_peer(sender, conn,
+                                           "CheckPermissionForClient",
+                                           "portal")
         action_s = str(action)
         try:
             spid = int(client_pid)
             sstart = int(client_starttime)
         except (TypeError, ValueError):
             return "unknown"
-        if caller_uid != 0:
-            raise dbus.DBusException(
-                f"CheckPermissionForClient restricted to root portal "
-                f"frontends; got uid {caller_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
         cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
         if not ok:
             # The named client is gone or its pid was recycled — we cannot
@@ -2162,18 +2590,15 @@ class Broker(dbus.service.Object):
         the launcher-attested originating client, not the frontend. Root-only.
         Returns the request id, or 0 when the client can't be authenticated.
         """
-        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        caller_uid, caller_pid, caller_exe, _ = \
+            self._require_root_helper_peer(sender, conn,
+                                           "RequestPermissionForClient",
+                                           "portal")
         try:
             spid = int(client_pid)
             sstart = int(client_starttime)
         except (TypeError, ValueError):
             return 0
-        if caller_uid != 0:
-            raise dbus.DBusException(
-                f"RequestPermissionForClient restricted to root portal "
-                f"frontends; got uid {caller_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
         cuid, cexe, ok = self._resolve_client_for_portal(spid, sstart)
         if not ok:
             return 0
@@ -2207,7 +2632,8 @@ class Broker(dbus.service.Object):
 
         See todo/decisions/secctx-identity-contract.md (Option B).
         """
-        caller_uid, caller_pid, caller_exe, _ = self._peer_info(sender, conn)
+        caller_uid, caller_pid, caller_exe, _ = \
+            self._require_qdshell_peer(sender, conn, "VerifyClientIdentity")
         # Defensive sanitisation — same envelope as the other broker
         # methods. The dbus policy file already pins this method to
         # admin uid; keep the in-method check as defense-in-depth.
@@ -2323,7 +2749,8 @@ class Broker(dbus.service.Object):
         dbus policy file pins the method to the admin uid. Rate-limited
         per the standard envelope.
         """
-        uid, pid, exe, _st = self._peer_info(sender, conn)
+        uid, pid, exe, _st = self._require_qdshell_peer(
+            sender, conn, "CheckClipboardTransfer")
         src = str(source_silo or "").strip()
         dst = str(dest_silo or "").strip()
         # Defensive: collapse whitespace + cap length to keep audit rows
@@ -2371,11 +2798,19 @@ class Broker(dbus.service.Object):
         # to the cross-silo rule path (default-deny). See
         # todo/decisions/secctx-identity-contract.md (Option B).
         if src == dst and src and bool(identity_verified):
+            same_ok, same_reason = self._same_silo_source_verified(
+                source_pid=source_pid, source_starttime=source_starttime,
+                claimed_src=src, claimed_app=sapp, claimed_engine=seng,
+                gate="clipboard.transfer", uid=uid, caller_pid=pid,
+                caller_exe=exe)
+            if not same_ok:
+                return "deny"
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
                     source=(f"clipboard_same_silo_verified "
+                            f"lineage={same_reason} "
                             f"secctx_provenance={provenance} "
                             f"mime={mimes_joined}{audit_id}"),
                     approver_uid=None,
@@ -2627,7 +3062,8 @@ class Broker(dbus.service.Object):
         the dbus policy file pins the method to the admin uid.
         Rate-limited per the standard envelope.
         """
-        uid, pid, exe, _st = self._peer_info(sender, conn)
+        uid, pid, exe, _st = self._require_qdshell_peer(
+            sender, conn, "CheckClipboardReceive")
         src = str(source_silo or "").strip()
         dst = str(dest_silo or "").strip()
         if len(src) > 80 or len(dst) > 80:
@@ -2655,11 +3091,40 @@ class Broker(dbus.service.Object):
                       else "advisory")
         # Same-silo: same Option-B gate as CheckClipboardTransfer.
         if src == dst and src and bool(identity_verified):
+            same_ok, same_reason = self._same_silo_source_verified(
+                source_pid=source_pid, source_starttime=source_starttime,
+                claimed_src=src, claimed_app=sapp, claimed_engine=seng,
+                gate="clipboard.receive", uid=uid, caller_pid=pid,
+                caller_exe=exe)
+            if not same_ok:
+                return "deny"
+            lineage_ok, lineage_reason = self._clipboard_receive_lineage(
+                source_pid=source_pid, source_starttime=source_starttime,
+                source_silo=src, dest_silo=dst, mime_type=mime_s,
+                uid=uid, caller_pid=pid, caller_exe=exe)
+            if not lineage_ok:
+                try:
+                    self.audit.log(
+                        caller_uid=uid, caller_pid=pid, caller_exe=exe,
+                        action=action_s, decision=False, scope=None,
+                        source=(f"clipboard_receive_lineage_deny "
+                                f"lineage={lineage_reason} "
+                                f"secctx_provenance={provenance}"
+                                f"{audit_id}"),
+                        approver_uid=None,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[broker] qdistro.audit.failure: "
+                          f"clipboard_receive_lineage_deny, reason={e!r}",
+                          flush=True)
+                return "deny"
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
                     source=(f"clipboard_receive_same_silo_verified "
+                            f"lineage={same_reason} "
+                            f"receive_lineage={lineage_reason} "
                             f"secctx_provenance={provenance}"
                             f"{audit_id}"),
                     approver_uid=None,
@@ -2695,12 +3160,22 @@ class Broker(dbus.service.Object):
             decision = "allow" if rule.decision == "allow" else "deny"
             rule_path = rule.source_path
             source_label = "clipboard_receive_rule"
+        lineage_reason = "not-attempted"
+        if decision == "allow":
+            lineage_ok, lineage_reason = self._clipboard_receive_lineage(
+                source_pid=source_pid, source_starttime=source_starttime,
+                source_silo=src, dest_silo=dst, mime_type=mime_s,
+                uid=uid, caller_pid=pid, caller_exe=exe)
+            if not lineage_ok:
+                decision = "deny"
+                source_label = "clipboard_receive_lineage_deny"
         try:
             self.audit.log(
                 caller_uid=uid, caller_pid=pid, caller_exe=exe,
                 action=action_s, decision=(decision == "allow"),
                 scope=None,
                 source=(f"{source_label} "
+                        f"lineage={lineage_reason} "
                         f"secctx_provenance={provenance}"
                         f"{audit_id}"),
                 approver_uid=None, rule_path=rule_path,
@@ -2742,7 +3217,8 @@ class Broker(dbus.service.Object):
         Caller is qdshell (uid 1000). The dbus policy file pins the
         method to the admin uid.
         """
-        uid, pid, exe, _st = self._peer_info(sender, conn)
+        uid, pid, exe, _st = self._require_qdshell_peer(
+            sender, conn, "CheckHandoffActivation")
         src = str(source_silo or "").strip()
         dst = str(dest_silo or "").strip()
         if len(src) > 80 or len(dst) > 80:
@@ -2768,11 +3244,19 @@ class Broker(dbus.service.Object):
                       else "advisory")
         # Same-silo: same Option-B gate as the clipboard methods.
         if src == dst and src and bool(identity_verified):
+            same_ok, same_reason = self._same_silo_source_verified(
+                source_pid=source_pid, source_starttime=source_starttime,
+                claimed_src=src, claimed_app=sapp_raw,
+                claimed_engine=seng_raw, gate="handoff.activate",
+                uid=uid, caller_pid=pid, caller_exe=exe)
+            if not same_ok:
+                return "deny"
             try:
                 self.audit.log(
                     caller_uid=uid, caller_pid=pid, caller_exe=exe,
                     action=action_s, decision=True, scope=None,
                     source=(f"handoff_same_silo_verified "
+                            f"lineage={same_reason} "
                             f"secctx_provenance={provenance} "
                             f"src_app={sapp} "
                             f"dst_app={dapp} src_engine={seng}"),
@@ -2943,17 +3427,8 @@ class Broker(dbus.service.Object):
         one approve click persists trust against an identity the broker
         never authenticated directly).
         """
-        delegator_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        # Root is the only delegator. Other uids, including ADMIN_UID,
-        # cannot impersonate arbitrary callers — otherwise the admin app
-        # could laundery any request. The dbus policy file enforces the
-        # same boundary; this is defense-in-depth.
-        if delegator_uid != 0:
-            raise dbus.DBusException(
-                f"RequestPermissionAs restricted to root delegator; "
-                f"got uid {delegator_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        delegator_uid, _pid, _exe, _st = self._require_root_helper_peer(
+            sender, conn, "RequestPermissionAs", "qsu")
         # Verify the delegated tuple is still true immediately before
         # accepting it. qsu also rechecks after socket connect; keeping
         # the broker check here prevents stale or hand-written
@@ -3569,12 +4044,8 @@ class Broker(dbus.service.Object):
         same boundary, but keep the in-process peer check so a policy
         regression cannot expose pending request metadata to users.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"GetPending restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "GetPending")
         with self._lock:
             out = []
             for r in self._pending.values():
@@ -3602,10 +4073,8 @@ class Broker(dbus.service.Object):
 
     @dbus.service.method(BUS_NAME, in_signature="iss", out_signature="", sender_keyword="sender", connection_keyword="conn")
     def DecideRequest(self, request_id: int, decision: str, scope: str, sender=None, conn=None):
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid != ADMIN_UID:
-            raise dbus.DBusException(f"DecideRequest restricted to admin uid {ADMIN_UID}; got {admin_uid}",
-                                     name=BUS_NAME + ".AccessDenied")
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "DecideRequest")
         decision_s = str(decision)
         if decision_s not in ("allow", "deny"):
             raise dbus.DBusException(
@@ -3759,12 +4228,8 @@ class Broker(dbus.service.Object):
         methods: policy deny for non-admin at the bus level, in-process
         uid check as defense-in-depth.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"ListCache restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "ListCache")
         out = []
         for r in self.cache.list_all():
             out.append({
@@ -3794,15 +4259,8 @@ class Broker(dbus.service.Object):
         failure we propagate the DBusException to the caller rather
         than silently revoking without a record.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        # root (uid 0) is the broker's own uid and historically the CLI's
-        # uid; accept it alongside the admin role so `qdistro-approvals
-        # revoke` works when invoked from a root shell.
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"RevokeApproval restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "RevokeApproval")
         row = self.cache.delete_by_id(int(approval_id))
         if row is None:
             return False
@@ -3817,12 +4275,8 @@ class Broker(dbus.service.Object):
                          sender_keyword="sender", connection_keyword="conn")
     def RevokeAllForUid(self, caller_uid: int, sender=None, conn=None) -> int:
         """Delete every cached approval for a caller uid. Admin-only."""
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"RevokeAllForUid restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "RevokeAllForUid")
         rows = self.cache.delete_by_uid(int(caller_uid))
         for row in rows:
             self._audit_revoke(row, admin_uid)
@@ -3843,12 +4297,8 @@ class Broker(dbus.service.Object):
         trigger it on demand without writing to sqlite behind the
         broker's back.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"RunCacheGc restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "RunCacheGc")
         try:
             n = self.cache.gc()
         except Exception as e:  # noqa: BLE001
@@ -3879,12 +4329,8 @@ class Broker(dbus.service.Object):
         Returns the absolute path on success; raises a DBusException
         with `RulesEngineRefused` on validation failure.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"SaveRule restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "SaveRule")
         import re
         import tempfile
         if not re.fullmatch(r"[A-Za-z0-9_-]+\.yaml", filename):
@@ -4014,11 +4460,14 @@ class Broker(dbus.service.Object):
                         name=BUS_NAME + ".RulesEngineRefused",
                     ) from e
 
-        if admin_uid not in (0, ADMIN_UID):
-            _audit(False, reason=f"refused: non-admin uid {admin_uid}",
+        ok, reason = self._peer_matches_admin_control(
+            uid=admin_uid, pid=caller_pid, exe=caller_exe)
+        if not ok:
+            _audit(False, reason=f"refused: {reason}",
                    path=source_path or None)
             raise dbus.DBusException(
-                f"DeleteRule restricted to admin/root; got uid {admin_uid}",
+                f"DeleteRule restricted to trusted admin control-plane "
+                f"peers; {reason}",
                 name=BUS_NAME + ".AccessDenied",
             )
 
@@ -4163,13 +4612,8 @@ class Broker(dbus.service.Object):
         ``.AccessDenied`` for non-admin callers or ``.RulesEngineRefused``
         when path safety rejects the target.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"GetRuleSource restricted to admin/root; got uid "
-                f"{admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "GetRuleSource")
         if not source_path:
             raise dbus.DBusException(
                 "GetRuleSource: empty source_path",
@@ -4264,12 +4708,8 @@ class Broker(dbus.service.Object):
         entry is a human-readable `<path>: <reason>` string suitable
         for the admin app or CLI to display.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"ReloadRules restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "ReloadRules")
         n = self.reload_rules_from_disk(source=f"dbus-uid={admin_uid}")
         errs = self.rules.load_errors()
         return dbus.Int32(n), dbus.Array(errs, signature="s")
@@ -4290,12 +4730,8 @@ class Broker(dbus.service.Object):
         treat empty strings + uid==-1 as "match anything" — same
         convention RulesEngine uses internally.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"ListRules restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "ListRules")
         out = []
         for r in self.rules.rules():
             out.append({
@@ -4401,13 +4837,8 @@ class Broker(dbus.service.Object):
         re-evaluated at execution, so approval never bypasses the identity
         gate). False if no such pending run exists.
         """
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"ApproveWorkflowRun restricted to admin/root; got uid "
-                f"{admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "ApproveWorkflowRun")
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return False
@@ -4459,12 +4890,8 @@ class Broker(dbus.service.Object):
         unknown run / uid-mismatch / not-yet-published / non-allowlisted
         name → empty dict. Never returns secret material.
         """
-        sender_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if sender_uid != 0:
-            raise dbus.DBusException(
-                f"GetRunChannelEnv restricted to root; got uid {sender_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        sender_uid, _pid, _exe, _st = self._require_root_helper_peer(
+            sender, conn, "GetRunChannelEnv", "qsu")
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return {}

@@ -1,6 +1,8 @@
 #!/bin/bash
-# install-recall-for-vm.sh — idempotent install of qdistro-recall
-# Phase-8 §step 0 MVP onto a fresh-clone VM.
+# install-recall-for-vm.sh — post-v1/dev-only install of qdistro-recall.
+#
+# Recall is cut from v1. This helper is retained for post-v1 development only
+# and refuses to install unless QDISTRO_ENABLE_POSTV1_RECALL=1 is set.
 #
 # Takes the umbrella root as $1 (default /root/qdistro-src/qdistro).
 # Recall is unusual: its files are spread across three subtrees of
@@ -20,6 +22,12 @@
 # The SDK is dropped under the system Python's site-packages so
 # `import qdistro_app.recall` works without PYTHONPATH gymnastics.
 set -euo pipefail
+
+if [ "${QDISTRO_ENABLE_POSTV1_RECALL:-0}" != "1" ]; then
+    echo "[install-recall] Recall is cut from v1; refusing install." >&2
+    echo "                 Set QDISTRO_ENABLE_POSTV1_RECALL=1 for post-v1/dev use." >&2
+    exit 2
+fi
 
 UMBRELLA=${1:-/root/qdistro-src/qdistro}
 if [ ! -d "$UMBRELLA/recall" ] || [ ! -d "$UMBRELLA/cli" ] || [ ! -d "$UMBRELLA/sdk/qdistro_app" ]; then

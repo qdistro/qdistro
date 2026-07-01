@@ -31,6 +31,7 @@ from qdistro_admin_rules import RulesEngine  # noqa: E402
 ADMIN_UID = B.ADMIN_UID
 NON_ADMIN_UID = 2000
 PEER_EXE = "/usr/local/lib/qdistro/qdistro-root-exec"
+ADMIN_EXE = "/usr/bin/qdshell"
 
 
 class _StubBroker(Broker):
@@ -52,7 +53,10 @@ class _StubBroker(Broker):
                  start: int = 0) -> None:
         self._peer_uid = uid
         self._peer_pid = pid
-        self._peer_exe = exe
+        if uid == ADMIN_UID and exe == PEER_EXE:
+            self._peer_exe = ADMIN_EXE
+        else:
+            self._peer_exe = exe
         self._peer_start = start
 
     def _peer_info(self, sender, conn):

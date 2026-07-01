@@ -44,7 +44,7 @@ def test_te_grants_dbus_acquire_svc_workaround():
 
 
 def test_te_phase2_is_enforcing():
-    """Phase 2 (0.2.0) drops the permissive tag — qdistro_pwd_t is
+    """Phase 2 drops the permissive tag — qdistro_pwd_t is
     fully enforced after the audit2allow harvest. Strip comment lines
     before scanning so historical mentions of the old `permissive`
     declaration in the descriptive header don't false-positive."""
@@ -53,8 +53,8 @@ def test_te_phase2_is_enforcing():
         ln for ln in te.splitlines() if not ln.lstrip().startswith("#"))
     assert "permissive qdistro_pwd_t;" not in rules_only, \
         "expected the `permissive qdistro_pwd_t;` rule to be removed in Phase 2"
-    # Module version bumped to 0.2.0.
-    assert "policy_module(qdistro_pwd, 0.2.0)" in te
+    # Module version bumped for the v1 release ratchets.
+    assert "policy_module(qdistro_pwd, 0.3.0)" in te
 
 
 def test_te_phase2_grants_sys_ptrace():
@@ -80,6 +80,30 @@ def test_te_grants_var_lib_access():
     # Vault + audit dirs need manage_*_perms.
     assert "qdistro_pwd_var_t:dir   manage_dir_perms" in te
     assert "qdistro_pwd_audit_t:dir   manage_dir_perms" in te
+
+
+def test_te_neverallow_ratchets_vault_files_and_daemon_ptrace():
+    """The v1 vault claim is compile-time ratcheted: later policy edits
+    cannot grant non-pwd domains vault-file access or ptrace against the
+    daemon without tripping neverallow checking."""
+    te = _read("qdistro_pwd.te")
+    assert re.search(
+        r"neverallow\s+\{\s*domain\s+-qdistro_pwd_t\s*\}\s+"
+        r"qdistro_pwd_var_t:file\s+\{[^}]*\bread\b[^}]*\bopen\b",
+        te,
+        re.S,
+    )
+    assert re.search(
+        r"neverallow\s+\{\s*domain\s+-qdistro_pwd_t\s*\}\s+"
+        r"qdistro_pwd_var_t:dir\s+\{[^}]*\bsearch\b",
+        te,
+        re.S,
+    )
+    assert re.search(
+        r"neverallow\s+\{\s*domain\s+-qdistro_pwd_t\s*\}\s+"
+        r"qdistro_pwd_t:process\s+ptrace\s*;",
+        te,
+    )
 
 
 def test_te_optional_tpm_and_polkit():

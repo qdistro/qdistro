@@ -21,7 +21,10 @@ broker's clipboard / handoff gates. Direct clients in tiers 0 and 1 use normal
 | 5. VM per-app | KVM + libvirt + waypipe over `AF_VSOCK` | Yes | **Experimental** |
 | 6. Remote machine | Separate physical machine; remote-output | No | Post-v1 |
 
-**Default tier for new user-silo apps:** tier 1.
+**Default tier for new user-silo apps:** tier 1 policy is shipped, but direct
+Tier-1 user launches are dev/test-only in hardened v1 until a root/broker
+launcher is wired. Use Tier 2 or Tier 3 for production launches that need
+authenticated compositor provenance today.
 
 > **v1 supported ladder is tiers 0–3** (decision D3,
 > `todo/decisions/v1-release-scope-2026-06-12.md`). **Tiers 4 and 5 ship as
@@ -42,14 +45,25 @@ Reserved for fully-trusted first-party apps.
 
 Sits between tier 0 (no containment) and tier 2 (rootless podman with own
 user namespace + nested compositor). The "lightest containment that's
-still enforced."
+still enforced" on the supported Tumbleweed hardened bootstrap path.
+`daily-driver` and `release` profiles refuse to finish unless SELinux is
+Enforcing; `--profile=dev` and `QDISTRO_ALLOW_PERMISSIVE=1` are explicit
+permissive/debug paths and are not release evidence.
 
 ### Threats tier 1 blocks
 
+> **v1 provenance scope:** the SELinux domain and broker launch gate ship, but
+> the direct `qdistro-tier1-spawn` entry point does not provide the trusted
+> root-parent secctx attestation in hardened profiles. It refuses untagged
+> direct launch unless `QDISTRO_PROFILE=dev` is set. The bullets below are the
+> intended Tier-1 policy boundary once a root/broker launcher path is added; do
+> not treat direct Tier-1 as a v1 production clipboard/handoff provenance
+> guarantee.
+
 - An app *in the same uid* reading another app's clipboard via Wayland
  selection without going through the broker gate.
-- The same app reading screen contents via a synthetic XWayland client or
- `/proc/<pid>/maps`-style introspection.
+- The same app using broad `/proc/<pid>/maps`-style introspection against
+ sibling domains.
 - The same app calling `setuid` / `ptrace` to escalate within the uid.
 - Random `/dev` / `/sys` access beyond the narrow allowed list.
 
@@ -63,12 +77,14 @@ still enforced."
 
 ### Implementation
 
-A custom SELinux module `qdistro_tier1` cloned from Fedora's `sandbox.te`
+The v1 tree ships a custom SELinux module `qdistro_tier1` cloned from Fedora's `sandbox.te`
 (the non-X variant — qdistro is Wayland-only) with Wayland, PipeWire,
 DRI, and broker rules layered on. A wrapper binary `qdistro-tier1-exec`
 wraps `qdistro-secctx-exec` with a `setexeccon()` call on the exec edge —
 two independent attestations of the same identity: SELinux type for
-enforcement, `wp_security_context_v1` tag for routing.
+enforcement, `wp_security_context_v1` tag for routing. In hardened v1, the
+secctx half requires a direct root launcher parent; the current direct helper
+therefore refuses untagged production launch rather than silently degrading.
 
 A spawn helper `qdistro-tier1-spawn` takes `(silo_user, app...)`, asks
 the broker for `qdistro.tier1.spawn:<canonical-app-path>`, and calls
@@ -81,10 +97,10 @@ launch.
 ### Filesystem labelling strategy
 
 **Type, not mount.** `$HOME` stays labelled `user_home_t`; a narrow
-interface allows reading a per-app whitelist (e.g., `~/.config/<app>`
-relabelled to `qdistro_tier1_config_t`). Per-app private state lives
-under `~/.local/share/qdistro/tier1/<app>/` and is pre-relabelled by the
-launcher.
+interface allows managing a per-app relabelled tree
+(`qdistro_tier1_config_t`). Per-app private state lives under
+`~/.local/share/qdistro/tier1/<app>/` and is pre-relabelled by the
+launcher. The v1 policy does not grant broad `user_home_t:file` reads.
 
 The seunshare-style alternative (tmpfs over `$HOME` and `/tmp`, relabelled
 `sandbox_file_t`) needs setuid root or `CAP_SYS_ADMIN` and inherits
@@ -169,22 +185,35 @@ time are bind-mounted in as individual files. The container therefore
 can't see the dbus session bus, ssh-agent, gnupg-agent, or sibling
 tier-2 sockets.
 
-Hardening flags applied by `tier2/spawn-tier2.sh` (overridable via
-`TIER2_*` env knobs):
+Hardening flags applied by `tier2/spawn-tier2.sh`:
 
   - `--cap-drop=ALL` (CapEff = 0)
   - `--security-opt=no-new-privileges`
-  - `--network=none` (default — relax with `TIER2_NETWORK=slirp4netns`)
+  - `--network=none` by default, or `slirp4netns` when the trusted
+    session-manager launch stanza requests egress
   - `--pids-limit=512` (only delegated cgroup controller in the
     typical Tumbleweed user@1000.service setup; memory/cpu need
     `Delegate=memory cpu pids io` drop-in to use)
   - `--ipc=private --pid=private`
   - `--read-only` rootfs + tmpfs at `/tmp`, `/var/cache`,
     `/home/admin/.cache`, `/run` (ENOSPC on any image-rootfs write)
+  - `--security-opt=seccomp=tier2/seccomp/<workload>.json`; missing profiles
+    fail closed in hardened v1 profiles
 
 The container's nested compositor (qdwin-shell.so) connects to the
 outer admin compositor's Wayland socket and advertises each inner
 toplevel via `qdwin_nested_manager_v1`.
+
+In hardened v1 (`QDISTRO_PROFILE=daily-driver|release`), Tier-2 launches use
+the root-launcher topology:
+`qdistro-tier2-silo@<name>.service` (root) →
+`qdistro-tier2-silo-launch` (`env -i`) →
+`spawn-tier2.sh TIER2_ROOT_LAUNCHER=1` →
+`runuser -u admin -- qdistro-secctx-exec` →
+rootless admin `podman run`. The root process exists only as the direct trusted
+parent for secctx and for bookkeeping; resolver, broker authorization, and
+podman run as admin. Direct admin `spawn-tier2.sh` launch is dev/test-only
+because it cannot produce qdwin's root-parent secctx attestation.
 
 `spawn-tier2.sh` gates every launch through broker `CheckPermission`
 before it creates the per-container runtime dir or runs podman. The

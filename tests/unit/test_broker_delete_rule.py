@@ -74,7 +74,7 @@ class TestDeleteRuleAccess:
 
     def test_root_deletes(self, broker):
         src = _seed_rule(broker)
-        broker.set_peer(uid=0)
+        broker.set_peer(uid=0, exe="/usr/local/sbin/qdistro-approvals")
         deleted, _count, _errors = broker.DeleteRule(src, "from-test")
         assert bool(deleted) is True
         assert not Path(src).exists()
@@ -159,7 +159,7 @@ class TestDeleteRuleAudit:
 
     def test_success_audited_with_caller_identity(self, broker):
         src = _seed_rule(broker)
-        broker.set_peer(uid=ADMIN_UID, pid=4321, exe="/usr/bin/admin-app")
+        broker.set_peer(uid=ADMIN_UID, pid=4321, exe="/usr/bin/qdshell")
         broker.DeleteRule(src, "from-test")
         rows = [r for r in self._rows(broker)
                 if r["action"] == "qdistro.rules.delete"]
@@ -167,7 +167,7 @@ class TestDeleteRuleAudit:
         row = rows[0]
         assert int(row["caller_uid"]) == ADMIN_UID
         assert int(row["caller_pid"]) == 4321
-        assert row["caller_exe"] == "/usr/bin/admin-app"
+        assert row["caller_exe"] == "/usr/bin/qdshell"
         assert bool(row["decision"]) is True
         assert "from-test" in str(row["source"])
         assert str(row["rule_path"]).endswith("to-delete.yaml")
@@ -183,7 +183,7 @@ class TestDeleteRuleAudit:
         row = rows[0]
         assert int(row["caller_uid"]) == NON_ADMIN_UID
         assert bool(row["decision"]) is False
-        assert "non-admin" in str(row["source"]).lower()
+        assert "not admin uid" in str(row["source"]).lower()
 
     def test_path_escape_refusal_audited(self, broker, rules_dir, tmp_path):
         outside = tmp_path / "secret.yaml"

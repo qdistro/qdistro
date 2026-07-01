@@ -4,6 +4,13 @@ The admin-side UI for reviewing and responding to permission requests.
 **Not a modal-dialog stack** — a persistent queue with a master-detail panel
 that stays open and accepts requests asynchronously.
 
+Authority is not granted to every process running as uid 1000. The broker
+accepts approval and rule/cache control methods only from trusted admin
+control-plane peers: the installed Qt admin app, the installed admin TUI,
+qdshell where applicable, or the root maintenance helper. The system-bus
+policy makes these methods reachable to the admin account, but the server-side
+peer identity check is the authority boundary.
+
 ## Never block admin's work
 
 Traditional polkit agents pop modal dialogs that steal focus and block

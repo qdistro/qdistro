@@ -84,7 +84,7 @@ CURSOR=$(awk -F': ' '/-- cursor:/ {print $2}' "$JCURSOR_FILE")
 # stdout before exec'ing podman.
 SPAWN_OUT=$(mktemp)
 # (no detach — caller backgrounds the whole spawn)
-    runuser -u admin -- bash "$TIER2_DIR/spawn-tier2.sh" \
+    runuser -u admin -- env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
         "$CONTAINER" "$WORKLOAD" -- weston-terminal \
         >"$SPAWN_OUT" 2>/tmp/s32-spawn.log &
 SPAWN_PID=$!

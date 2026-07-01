@@ -117,8 +117,8 @@ for helper in qdistro-print-attach-usb.sh qdistro-print-detach-usb.sh \
         esac
     fi
 done
-# domain-template.xml lives under /usr/share/qdistro/print-vm so the
-# install-print-vm CLI finds it at the standard system path.
+# domain-template.xml and the default USB manifest live under
+# /usr/share/qdistro/print-vm so the host CLIs find them at a standard path.
 DEST_TEMPLATE_DIR=/usr/share/qdistro/print-vm
 template_src=""
 if [ -f "$SRC/domain-template.xml" ]; then
@@ -130,6 +130,21 @@ if [ -n "$template_src" ]; then
     install -d -m 0755 "$DEST_TEMPLATE_DIR"
     install -m 0644 "$template_src" \
         "$DEST_TEMPLATE_DIR/domain-template.xml"
+fi
+manifest_src=""
+if [ -f "$SRC/printvm-manifest.json" ]; then
+    manifest_src="$SRC/printvm-manifest.json"
+elif [ -n "$SRC_VM" ] && [ -f "$SRC_VM/printvm-manifest.json" ]; then
+    manifest_src="$SRC_VM/printvm-manifest.json"
+fi
+if [ -n "$manifest_src" ]; then
+    install -d -m 0755 "$DEST_TEMPLATE_DIR"
+    install -m 0644 "$manifest_src" \
+        "$DEST_TEMPLATE_DIR/printvm-manifest.json"
+    install -d -m 0755 /etc/qdistro
+    if [ ! -e /etc/qdistro/printvm-manifest.json ]; then
+        install -m 0644 "$manifest_src" /etc/qdistro/printvm-manifest.json
+    fi
 fi
 # polkit actions for org.qdistro.print.* — safe to install even when
 # no admin agent is registered yet (polkitd just enumerates actions).

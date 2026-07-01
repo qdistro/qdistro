@@ -14,7 +14,7 @@
 ##   rationale and  for
 ##   the spike results that pinned the interface choices below.
 ## </desc>
-policy_module(qdistro_tier1, 0.4.0)
+policy_module(qdistro_tier1, 0.5.0)
 
 ########################################
 #
@@ -91,11 +91,10 @@ optional_policy(`
 # qdistro/tier1/<app> gets relabelled to qdistro_tier1_config_t and
 # is read/writable from this domain.
 
-# Read-only: home directory entries (so the app can list ~ but not
-# write to anything outside qdistro_tier1_config_t).
+# Read-only: home directory entries (so the app can traverse/list ~ but
+# not read files outside qdistro_tier1_config_t).
 allow qdistro_tier1_t user_home_dir_t:dir { read getattr search open };
 allow qdistro_tier1_t user_home_t:dir { read getattr search open };
-allow qdistro_tier1_t user_home_t:file { read getattr open };
 
 # Read+write: per-app config under ~/.local/share/qdistro/tier1.
 allow qdistro_tier1_t qdistro_tier1_config_t:dir manage_dir_perms;
@@ -193,9 +192,9 @@ qdistro_broker_dbus_chat(qdistro_tier1_t)
 #      future Tumbleweed policy bumps don't silently break us.
 
 # Self introspection — /proc/<self>/{stat,status,cmdline,maps,fd}.
-# Apps that link against glibc's malloc + tcmalloc both walk
-# /proc/<self>/maps on first allocation.
-domain_read_all_domains_state(qdistro_tier1_t)
+# Do not grant domain_read_all_domains_state(): tier1 must not read
+# sibling domains' /proc state. The enforcing VM probe is the ratchet for
+# discovering any narrower self-only interface needed by real workloads.
 
 # Name-resolution: nsswitch + /etc/passwd + /etc/group + locale
 # files. Required for getpwnam / getgrnam / locale_t setup which
@@ -228,10 +227,10 @@ optional_policy(`
 	allow qdistro_tier1_t system_dbusd_var_run_t:dir { search };
 ')
 
-# Apps may legitimately need to read their argv0 binary's actual
-# path for self-reflection (Qt's setApplicationFilePath, Python's
-# sys.executable). Reading /proc/<self>/exe is covered by
-# domain_read_all_domains_state above.
+# Apps may legitimately need to read their argv0 binary's actual path for
+# self-reflection (Qt's setApplicationFilePath, Python's sys.executable).
+# Keep this scoped to ordinary executable/config files; all-domain /proc
+# state remains intentionally ungranted.
 files_read_etc_files(qdistro_tier1_t)
 
 # Pseudo-tty access for shell-launched apps (sh -c '…' inherits

@@ -119,7 +119,10 @@ The set-side gate fires on every clipboard set:
 - qdshell resolves the source silo from the toplevel's identity
  (tier-3 silos via title-prefix / waypipe-secctx; tier-4/5 VMs via
  `wp_security_context_v1`; admin otherwise).
-- Same-silo transfers short-circuit to allow.
+- Same-silo transfers short-circuit to allow only after qdshell has verified
+ the endpoint identities; when `LINEAGE_ENFORCE` is on, the broker also
+ verifies the source pid/starttime against a launch record before taking
+ the shortcut.
 - Cross-silo transfers call `broker.CheckClipboardTransfer(source_silo,
  dest_silo, mime_types)`; a deny verdict triggers `clear_selection` on the
  compositor.

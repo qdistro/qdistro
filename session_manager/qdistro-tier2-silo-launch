@@ -135,7 +135,16 @@ ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
 # every podman/resolver/broker op to ADMIN_UID. If it cannot stamp the wire tag
 # it fails closed itself (exit 2), so a tagged silo or no silo — never an
 # un-tagged one.
-exec env \
+#
+# Use env -i so an ambient service/session environment cannot weaken the
+# sandbox posture with TIER2_ALLOW_PRIVESC, TIER2_KEEP_CAPS, a caller-selected
+# seccomp profile, or other spawn-tier2 knobs. Re-add only the trusted launch
+# stanza fields from the root-owned env file plus a deterministic PATH.
+exec env -i \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}" \
     TIER2_ROOT_LAUNCHER=1 \
     TIER2_ADMIN_UID="$ADMIN_UID" \
+    TIER2_SILO="$TIER2_SILO" \
+    TIER2_NETWORK="$TIER2_NETWORK" \
     "$SPAWN" "$QD_CONTAINER" "$QD_WORKLOAD" -- "${APP_ARGV[@]}"

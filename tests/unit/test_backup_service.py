@@ -105,7 +105,9 @@ class TestConfig:
         cfg = svc.load_config(_write_conf(tmp_path, body))
         meta = [s for s in cfg["subvols"] if s["name"] == "meta"][0]
         assert meta["collector"] and meta["paths"] == ["/etc/qdistro"]
-        assert meta["exclude"] == ["*.sock"]
+        assert "*.sock" in meta["exclude"]
+        assert "backup-sign-*" in meta["exclude"]
+        assert "identity/**" in meta["exclude"]
 
     def test_malformed_toml_fails(self, tmp_path):
         with pytest.raises(svc.BackupServiceError):
@@ -408,3 +410,40 @@ class TestCollector:
         svc.collect_metadata(sv, dest, "rsync -a", self.CREATE)
         assert not os.path.exists(os.path.join(dest, svc._src_subdir(str(src2))))
         assert os.path.isdir(os.path.join(dest, svc._src_subdir(str(src1))))
+
+    def test_backup_sign_key_name_is_excluded_by_default(self, tmp_path):
+        src = tmp_path / "etcq"
+        src.mkdir()
+        (src / "backup-sign-ed25519").write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n")
+        (src / "backup-recipients.txt").write_text("age1public\n")
+        sv = {"name": "m", "collector": True,
+              "paths": [str(src)], "exclude": list(svc._ENFORCED_COLLECT_EXCLUDES)}
+        dest = str(tmp_path / "stage")
+        svc.collect_metadata(sv, dest, "rsync -a", self.CREATE)
+        sub = os.path.join(dest, svc._src_subdir(str(src)))
+        assert not os.path.exists(os.path.join(sub, "backup-sign-ed25519"))
+        assert os.path.isfile(os.path.join(sub, "backup-recipients.txt"))
+
+    def test_private_key_marker_in_collector_fails_closed(self, tmp_path):
+        src = tmp_path / "etcq"
+        src.mkdir()
+        (src / "renamed-secret").write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n")
+        sv = {"name": "m", "collector": True,
+              "paths": [str(src)], "exclude": []}
+        with pytest.raises(svc.BackupServiceError) as ei:
+            svc.collect_metadata(sv, str(tmp_path / "stage"),
+                                 "rsync -a", self.CREATE)
+        assert "private-key marker" in str(ei.value)
+
+    def test_sensitive_key_filename_in_collector_fails_closed(self, tmp_path):
+        src = tmp_path / "etcq"
+        src.mkdir()
+        (src / "id_ed25519").write_text("not a marker but still key-shaped\n")
+        sv = {"name": "m", "collector": True,
+              "paths": [str(src)], "exclude": []}
+        with pytest.raises(svc.BackupServiceError) as ei:
+            svc.collect_metadata(sv, str(tmp_path / "stage"),
+                                 "rsync -a", self.CREATE)
+        assert "sensitive path" in str(ei.value)

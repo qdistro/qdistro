@@ -317,8 +317,9 @@ Implemented and exercised by tests today:
 - `RequestPermission` + `WaitForDecision` (sync wait), `CheckPermission`
   fast-path with `allow|deny|unknown` semantics, fire-and-forget
   `RequestPermission` (no waiter).
-- `DecideRequest` from admin TUI / Qt admin app, `ListCache`, `ListHistory`,
-  `RevokeApproval`, `RevokeAllForUid`, `RunCacheGc`, `RunAuditGc`.
+- `DecideRequest` from trusted admin TUI / Qt admin app identities,
+  `ListCache`, `ListHistory`, `RevokeApproval`, `RevokeAllForUid`,
+  `RunCacheGc`, `RunAuditGc`.
 - **Admin-app Rules tab + "Rule from this" button** — the Qt admin app
   has a `RulesTab` that lists existing rules via `ListRules`, adds/edits
   them via `SaveRule`, reloads via `ReloadRules`, and refreshes live on
@@ -336,7 +337,9 @@ Implemented and exercised by tests today:
 - Scope vocabulary: `once`, `1h`, `24h`, `forever`, `forever_exe`,
   `forever_argv`, `forever_basename`, `forever_prefix`.
 - Cross-silo clipboard policy (`CheckClipboardTransfer`): same-silo
-  short-circuit allow, cross-silo default-deny, opt-in via rule.
+  short-circuit allow only after qdshell identity verification (and launch
+  record verification when `LINEAGE_ENFORCE` is on), cross-silo default-deny,
+  opt-in via rule.
 - Per-uid + per-action rate limiting (`.RateLimited` D-Bus error).
 - Audit log with `source ∈ {prompt, cache, rule, revoke, hook,
   clipboard_same_silo, clipboard_rule, clipboard_default_deny}`.
@@ -406,13 +409,27 @@ SELinux-label axes are each additionally enforced only when both the
 forwarded and the live value are present (skipped, not failed, when
 unreadable / SELinux off), giving a hard floor of `(pid, starttime)`. The
 same-silo short-circuit in `CheckClipboardTransfer`,
-`CheckClipboardReceive`, and `CheckHandoffActivation` trusts qdshell's
-per-call `identity_verified` flag; qdshell sets it only after verifying
-**both** the source and destination endpoints, otherwise the decision
-falls through to the default-deny cross-silo rule path.
-`VerifyClientIdentity` and the three gate methods are denied to non-admin
-/ default-context users by D-Bus policy (`org.qdistro.AdminBroker1.conf`);
-only the admin uid and root may call them.
+`CheckClipboardReceive`, and `CheckHandoffActivation` accepts qdshell's
+per-call `identity_verified` flag only from a trusted qdshell peer. qdshell
+sets it only after verifying **both** the source and destination endpoints,
+otherwise the decision falls through to the default-deny cross-silo rule
+path. When `LINEAGE_ENFORCE` is enabled, the broker also resolves the
+source pid/starttime to a launch record before taking the same-silo
+shortcut; a verified endpoint whose launch record is missing, stale, or not
+bound to the claimed silo is denied rather than bypassing policy.
+
+`VerifyClientIdentity` and the three gate methods are reachable to the
+admin uid by D-Bus policy (`org.qdistro.AdminBroker1.conf`), but reachability
+is not authority. The broker accepts them only from the expected qdshell
+process identity (installed executable/profile path, plus SELinux type when
+the policy supplies one).
+
+Privileged control-plane methods (`DecideRequest`, cache revocation/listing,
+and rule save/reload surfaces) likewise do not trust uid 1000 alone. The
+broker requires the authenticated peer to match the installed admin GUI,
+admin TUI, qdshell, or root maintenance helper identity. Root-only lineage,
+launch, portal, and qsu bridge methods require uid 0 plus the expected
+broker-owned helper identity.
 
 Doc-only / not yet wired:
 

@@ -54,6 +54,12 @@ def test_launch_helper_admin_resolution_is_fail_closed_in_source() -> None:
     assert "TIER2_ROOT_LAUNCHER=1" in src, \
         "launcher must hand spawn-tier2 the root-launcher mode"
     assert 'TIER2_ADMIN_UID="$ADMIN_UID"' in src
+    assert "exec env -i" in src
+    assert 'TIER2_SILO="$TIER2_SILO"' in src
+    assert 'TIER2_NETWORK="$TIER2_NETWORK"' in src
+    assert "TIER2_ALLOW_PRIVESC=" not in src
+    assert "TIER2_KEEP_CAPS=" not in src
+    assert "TIER2_SECCOMP_PROFILE=" not in src
     # missing-user and uid-0 guards both exit nonzero before the spawn exec.
     assert "does not exist" in src and "exit 6" in src
     assert 'ADMIN_UID" != "0"' in src
@@ -179,6 +185,7 @@ def _recording_spawn(farm: Path) -> Path:
         'TIER2_ADMIN_UID, ...) then STOP before exec-ing the real spawn.\n'
         ': >"$rec"\n'
         'for a in "$@"; do\n'
+        '    [ "$a" = "-i" ] && continue\n'
         '    case "$a" in\n'
         '        *=*) printf "%s\\n" "$a" >>"$rec" ;;\n'
         '        *) break ;;\n'
@@ -214,6 +221,28 @@ def test_launch_resolves_fixed_admin(tmp_path: Path) -> None:
     recorded = rec.read_text()
     assert "TIER2_ROOT_LAUNCHER=1" in recorded
     assert "TIER2_ADMIN_UID=1000" in recorded, recorded
+    assert "TIER2_SILO=work" in recorded
+    assert "TIER2_NETWORK=none" in recorded
+
+
+def test_launch_scrubs_ambient_downgrade_env(tmp_path: Path) -> None:
+    _write_env_file(tmp_path, "work")
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
+    rec = _recording_spawn(farm)
+    env.update({
+        "TIER2_ALLOW_PRIVESC": "1",
+        "TIER2_KEEP_CAPS": "SYS_ADMIN",
+        "TIER2_SECCOMP_PROFILE": "/tmp/empty.json",
+        "TIER2_USE_SECCTX": "0",
+    })
+    res = _run_launch(tmp_path, "work", env)
+    assert res.returncode == 0, res.stderr
+    recorded = rec.read_text()
+    assert "TIER2_ROOT_LAUNCHER=1" in recorded
+    assert "TIER2_USE_SECCTX=" not in recorded
+    assert "TIER2_ALLOW_PRIVESC=" not in recorded
+    assert "TIER2_KEEP_CAPS=" not in recorded
+    assert "TIER2_SECCOMP_PROFILE=" not in recorded
 
 
 def test_launch_fails_closed_on_missing_admin(tmp_path: Path) -> None:

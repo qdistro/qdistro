@@ -81,7 +81,7 @@ class TestGetRuleSourceAccess:
 
     def test_root_reads(self, broker):
         src = _seed_rule(broker)
-        broker.set_peer(uid=0)
+        broker.set_peer(uid=0, exe="/usr/local/sbin/qdistro-approvals")
         assert str(broker.GetRuleSource(src)) == RAW_BODY
 
     def test_non_admin_refused(self, broker):

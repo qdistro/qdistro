@@ -169,6 +169,22 @@ Initial lineage should be captured at high-value boundaries:
 
 Finer file-line and UI-action lineage is a future direction.
 
+### Status
+
+The v1 lineage store and guard propagation core are implemented, but not every
+listed chokepoint reaches it yet. Clipboard paste/receive is the first
+receive-time derivative chokepoint: under broker `lineage_enforce`, the source
+payload entity is resolved from the relayed source pid/starttime and the
+launcher-attested silo-security snapshot, the destination is resolved from the
+silo-security authority, and `local-only` / `no-cross-contaminate` guard policy
+is evaluated before the paste is allowed. A denied receive records the activity
+and `used` edge but does not mint a clean derivative.
+
+Clipboard transfer/set-selection remains a permission and audit gate, not the
+derivative entity boundary. Archive extraction/import, workflow-run lineage,
+Recall lineage, credential-use lineage, and resource attach/detach lineage are
+still future work unless their specific broker path says otherwise.
+
 ## Data Mapping Granularity
 
 The default grain is whole-entity lineage. qdistro may add finer mapping where

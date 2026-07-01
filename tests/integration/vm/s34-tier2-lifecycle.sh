@@ -62,7 +62,7 @@ SPAWN_A_OUT=$(mktemp)
 SPAWN_B_OUT=$(mktemp)
 
 # (no detach — caller backgrounds the whole spawn)
-    runuser -u admin -- bash "$TIER2_DIR/spawn-tier2.sh" \
+    runuser -u admin -- env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
         "$A" "$WORKLOAD" -- weston-terminal \
         >"$SPAWN_A_OUT" 2>/tmp/s34-spawn-a.log &
 SPAWN_A_PID=$!
@@ -75,7 +75,7 @@ for _ in $(seq 1 30); do
 done
 
 # (no detach — caller backgrounds the whole spawn)
-    runuser -u admin -- bash "$TIER2_DIR/spawn-tier2.sh" \
+    runuser -u admin -- env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
         "$B" "$WORKLOAD" -- weston-terminal \
         >"$SPAWN_B_OUT" 2>/tmp/s34-spawn-b.log &
 SPAWN_B_PID=$!

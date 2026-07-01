@@ -69,6 +69,11 @@ per-user auth) only make sense once the model is clear.
 - **VMs exist for the real adversarial case.** The VM tiers on the
  [isolation ladder](isolation-tiers.md) are where containment hardens to
  actually-adversarial levels.
+- **Data at rest depends on encrypted root.** Daily-driver/release qdistro
+ installs require a LUKS/dm-crypt root device. Without that, offline access to
+ the disk bypasses runtime silo boundaries; the bootstrap only proceeds with
+ `QDISTRO_ALLOW_PLAINTEXT_ROOT=1`, which explicitly scopes the install to
+ runtime-only isolation.
 - **Untrusted update code runs in empty rooms.** Vendor auto-updaters, npm
  postinstall scripts, and unsigned plugin installers execute only inside
  template candidate builds, which contain no secrets, credentials, or user
@@ -116,9 +121,12 @@ implicit `NoNewPrivileges=yes`) or is a silent no-op on a rootless user
 manager (`IPAddressDeny=`/`SocketBindDeny=`, cgroup-eBPF, no delegation).
 So qdlocker carries NONE of these in its unit (proven live); its egress
 containment must come from the SELinux `neverallow` half and/or a
-system-layer firewall, not the `--user` unit. The session
-manager remains an explicit exception while it owns the netvm
-ubus-over-HTTP control client (`session_manager/qdistro_netvm_client.py`).
+system-layer firewall, not the `--user` unit. The session manager remains
+an explicit v1 exception: it is labelled `qdistro_sessmgr_t` for pwd
+WireGuard-key custody pins, but the domain is still policy-permissive
+while it owns the netvm ubus-over-HTTP control client
+(`session_manager/qdistro_netvm_client.py`) and awaits its full lifecycle
+AVC harvest.
 Release tracking lives in `todo/fable-release/02-security-gate.md` S5.
 Do not treat the broker pilot as evidence for those other domains.
 

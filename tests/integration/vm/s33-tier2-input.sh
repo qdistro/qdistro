@@ -66,7 +66,7 @@ CURSOR=$(journalctl -n0 --show-cursor 2>/dev/null \
 runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 SPAWN_OUT=$(mktemp)
 # (no detach — caller backgrounds the whole spawn)
-    runuser -u admin -- bash "$TIER2_DIR/spawn-tier2.sh" \
+    runuser -u admin -- env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
         "$CONTAINER" "$WORKLOAD" -- weston-terminal \
         >"$SPAWN_OUT" 2>/tmp/s33-spawn.log &
 SPAWN_PID=$!

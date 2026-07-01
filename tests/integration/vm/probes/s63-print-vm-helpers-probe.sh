@@ -18,6 +18,7 @@ INSTALL=/usr/local/bin/install-print-vm.sh
 ATTACH=/usr/local/bin/qdistro-print-attach-usb
 DETACH=/usr/local/bin/qdistro-print-detach-usb
 TEMPLATE=/usr/share/qdistro/print-vm/domain-template.xml
+USB_MANIFEST=/etc/qdistro/printvm-manifest.json
 POLICY=/usr/share/polkit-1/actions/org.qdistro.print.policy
 
 if ! [ -x "$INSTALL" ] || ! [ -x "$ATTACH" ] || ! [ -x "$DETACH" ]; then
@@ -64,6 +65,20 @@ if ! "$DETACH" --help 2>&1 | grep -q "vendor-product"; then
     exit 3
 fi
 echo "PASS: attach/detach --help"
+
+if [ ! -f "$USB_MANIFEST" ]; then
+    echo "FAIL: $USB_MANIFEST missing"
+    exit 4
+fi
+python3 - "$USB_MANIFEST" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    obj = json.load(f)
+assert obj.get("name") == "qdistro-print"
+assert isinstance(obj.get("usbHostdevAllow"), list)
+PY
+echo "PASS: print USB manifest installed"
 
 # Step 4 — polkit policy installed.
 if [ ! -f "$POLICY" ]; then

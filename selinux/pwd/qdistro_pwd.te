@@ -7,7 +7,7 @@
 ##   dirs, declares qdistro_pwd_t, init_daemon_domain transition,
 ##   initial allow set covering dbus-claim + vault dir + /proc identity.
 ##
-##   Phase 2 (0.2.0, this version): drops the permissive tag after
+##   Phase 2 (0.3.0, this version): drops the permissive tag after
 ##   audit2allow harvest from the representative workload (s60 +
 ##   s61 + portal-keys vault flow on val-260430-tasks090-094). New
 ##   allow lines:
@@ -28,12 +28,16 @@
 ##   Spec refs: doc/password-manager.md §"Daemon architecture",
 ##   doc/selinux.md §"Per-daemon module split".
 ## </desc>
-policy_module(qdistro_pwd, 0.2.0)
+policy_module(qdistro_pwd, 0.3.0)
 
 ########################################
 #
 # Declarations
 #
+
+require {
+    attribute domain;
+}
 
 # Daemon process domain + labelled exec.
 type qdistro_pwd_t;
@@ -156,3 +160,21 @@ optional_policy(`
 optional_policy(`
     systemd_dbus_chat_logind(qdistro_pwd_t)
 ')
+
+########################################
+#
+# Release ratchets
+#
+# The v1 product guarantee is that vault files are readable only by the
+# pwd daemon domain, and that other domains cannot ptrace the daemon for
+# resident vault keys. These assertions make future policy harvests fail
+# if they try to grant those powers back.
+
+neverallow { domain -qdistro_pwd_t } qdistro_pwd_var_t:dir {
+    add_name remove_name write read search open setattr rmdir
+};
+neverallow { domain -qdistro_pwd_t } qdistro_pwd_var_t:file {
+    read write append open create unlink rename setattr lock ioctl map
+    execute execute_no_trans entrypoint
+};
+neverallow { domain -qdistro_pwd_t } qdistro_pwd_t:process ptrace;

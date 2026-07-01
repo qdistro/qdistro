@@ -89,13 +89,15 @@ def test_trusted_marker_is_scoped_to_secctx_wrapper():
         assert "\n    QDISTRO_SECCTX_EXEC_TRUSTED_LAUNCHER=1 \\\n    \"${SECCTX_WRAP[@]}\"" not in text
 
 
-def test_tier1_tier2_direct_admin_degrades_untagged():
+def test_tier1_tier2_direct_admin_untagged_is_dev_only():
     tier1 = (ROOT / "selinux/tier1/spawn-tier1.sh").read_text(encoding="utf-8")
     tier2 = (ROOT / "tier2/spawn-tier2.sh").read_text(encoding="utf-8")
-    assert "running untagged" in tier1
-    assert "running un-tagged" in tier2
-    assert "secctx stamping now requires" not in tier1
-    assert "secctx stamping now requires" not in tier2
+    assert "dev profile running untagged" in tier1
+    assert "dev profile running un-tagged" in tier2
+    assert "hardened profile" in tier1
+    assert "hardened profile" in tier2
+    assert "direct Tier-1 launch is dev-only" in tier1
+    assert "direct Tier-2 launch has no trusted root launcher parent" in tier2
 
 
 def test_vm_secctx_integration_tests_do_not_use_dev_override():

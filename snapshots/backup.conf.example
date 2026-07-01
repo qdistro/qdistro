@@ -54,10 +54,18 @@ paths = [
     "/etc/qdistro",
     "/var/lib/qdistro/bindings",
     "/var/lib/qdistro/pins",
-    "/var/lib/qdistro/identity",
     "/etc/snapper/configs",
 ]
-exclude = ["*.sock", "*.lock"]
+exclude = [
+    "*.sock",
+    "*.lock",
+    "backup-sign-*",
+    "*.key",
+    "*.pem",
+    "id_*",
+    "identity/",
+    "identity/**",
+]
 
 # --- vault recovery bundle into the collector (06 §3.4 / §2c) -----------------
 # Folds the recovery-critical material into the named collector subvol's

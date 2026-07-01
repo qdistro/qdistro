@@ -52,13 +52,15 @@ QCI_JOBS=4 ci/bin/qci bats
 ci/bin/qci bats --vm my-test
 ```
 
-### Enforcing-mode pass (phase7-tier1-enforcing + phase7-broker-enforcing)
+### Enforcing-mode pass
 
 The standard `--from-baked` clone flips `/etc/selinux/config` to
-`SELINUX=permissive`, so both enforcing tests in `tiered-isolation.bats` cleanly
-SKIP. To run them as hard PASS, build a config-pinned-enforcing baked
-overlay and drive the bats subset over SSH (qga is denied under
-enforcing because `virt_qemu_ga_t` is too restricted):
+`SELINUX=permissive`, so enforcing tests in `tiered-isolation.bats` cleanly
+SKIP. The supported Tumbleweed `daily-driver`/`release` bootstrap path now
+requires SELinux Enforcing; use `QDISTRO_ALLOW_PERMISSIVE=1` only for
+documented AVC-harvest/debug runs. To run the VM lane as hard PASS, build a
+config-pinned-enforcing baked overlay and drive the bats subset over SSH (qga
+is denied under enforcing because `virt_qemu_ga_t` is too restricted):
 
 ```bash
 # One-time, ~10 min: bake an enforcing-config overlay on top of

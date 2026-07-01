@@ -133,6 +133,26 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q 'zypper -n "${gpg_flags\[@\]}" refresh' "$BOOT"
 }
 
+@test "hardening: SELinux is enforcing by default; permissive requires dev or explicit override" {
+    grep -q "QDISTRO_ALLOW_PERMISSIVE=1" "$BOOT"
+    grep -q 'target_mode="enforcing"' "$BOOT"
+    grep -q 'SELinux config: enforcing' "$BOOT"
+    grep -q 'setenforce 1' "$BOOT"
+    grep -q 'refuses to finish without enforcing' "$BOOT"
+
+    run grep -nE 'SELINUX=.*permissive|SELINUX=permissive' "$BOOT"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"sed -i 's/^SELINUX=.*/SELINUX=permissive/'"* ]]
+    grep -q 'target_mode="permissive"' "$BOOT"
+    grep -q 'QDISTRO_ALLOW_PERMISSIVE=1: hardened SELinux enforcing requirement overridden' "$BOOT"
+}
+
+@test "hardening: SELinux policy install failures are fatal in hardened profiles" {
+    grep -q "semodule not found.*requires SELinux policy install" "$BOOT"
+    grep -q "requires qdistro SELinux policy before enforcing" "$BOOT"
+    grep -q "install failed under permissive override/dev profile" "$BOOT"
+}
+
 @test "hardening: phone (cut from v1, D4) installer step is gated to the dev profile" {
     # Decision D4 cuts the phone companion from v1; the release/daily-driver
     # bootstrap must NOT lay down phone code. The chain marks `phone` dev-only
@@ -376,6 +396,94 @@ run_boot() { run bash "$BOOT" "$@"; }
     '
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARN:"* ]]
+}
+
+@test "disk-encryption: hardened profile refuses plaintext root without explicit override" {
+    helper="$(sed -n '/^root_block_device()/,/^}/p;/^block_device_is_crypt()/,/^}/p;/^root_is_encrypted()/,/^}/p;/^enforce_root_disk_encryption()/,/^}/p' "$BOOT")"
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/findmnt" <<'SH'
+#!/bin/bash
+echo /dev/sda2
+SH
+    cat >"$fakebin/lsblk" <<'SH'
+#!/bin/bash
+if [ "$3" = "TYPE" ]; then echo part; exit 0; fi
+if [ "$3" = "PKNAME" ]; then exit 0; fi
+exit 1
+SH
+    chmod +x "$fakebin/findmnt" "$fakebin/lsblk"
+    run bash -c '
+        . "'"$PROFILE_LIB"'"
+        QDISTRO_PROFILE=release; export QDISTRO_PROFILE
+        PATH="'"$fakebin"':$PATH"
+        die() { echo "DIE: $*"; exit 9; }
+        warn() { echo "WARN: $*"; }
+        log() { echo "LOG: $*"; }
+        '"$helper"'
+        enforce_root_disk_encryption
+    '
+    rm -rf "$fakebin"
+    [ "$status" -eq 9 ]
+    [[ "$output" == *"root filesystem is not encrypted"* ]]
+}
+
+@test "disk-encryption: hardened override documents runtime-only posture" {
+    helper="$(sed -n '/^root_block_device()/,/^}/p;/^block_device_is_crypt()/,/^}/p;/^root_is_encrypted()/,/^}/p;/^enforce_root_disk_encryption()/,/^}/p' "$BOOT")"
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/findmnt" <<'SH'
+#!/bin/bash
+echo /dev/sda2
+SH
+    cat >"$fakebin/lsblk" <<'SH'
+#!/bin/bash
+if [ "$3" = "TYPE" ]; then echo part; exit 0; fi
+if [ "$3" = "PKNAME" ]; then exit 0; fi
+exit 1
+SH
+    chmod +x "$fakebin/findmnt" "$fakebin/lsblk"
+    run bash -c '
+        . "'"$PROFILE_LIB"'"
+        QDISTRO_PROFILE=daily-driver; export QDISTRO_PROFILE
+        QDISTRO_ALLOW_PLAINTEXT_ROOT=1; export QDISTRO_ALLOW_PLAINTEXT_ROOT
+        PATH="'"$fakebin"':$PATH"
+        die() { echo "DIE: $*"; exit 9; }
+        warn() { echo "WARN: $*"; }
+        log() { echo "LOG: $*"; }
+        '"$helper"'
+        enforce_root_disk_encryption
+    '
+    rm -rf "$fakebin"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"runtime-only"* ]]
+}
+
+@test "disk-encryption: crypt root passes hardened profile" {
+    helper="$(sed -n '/^root_block_device()/,/^}/p;/^block_device_is_crypt()/,/^}/p;/^root_is_encrypted()/,/^}/p;/^enforce_root_disk_encryption()/,/^}/p' "$BOOT")"
+    fakebin="$(mktemp -d)"
+    cat >"$fakebin/findmnt" <<'SH'
+#!/bin/bash
+echo /dev/mapper/cryptroot
+SH
+    cat >"$fakebin/lsblk" <<'SH'
+#!/bin/bash
+if [ "$3" = "TYPE" ]; then echo crypt; exit 0; fi
+if [ "$3" = "PKNAME" ]; then exit 0; fi
+exit 1
+SH
+    chmod +x "$fakebin/findmnt" "$fakebin/lsblk"
+    run bash -c '
+        . "'"$PROFILE_LIB"'"
+        QDISTRO_PROFILE=release; export QDISTRO_PROFILE
+        PATH="'"$fakebin"':$PATH"
+        die() { echo "DIE: $*"; exit 9; }
+        warn() { echo "WARN: $*"; }
+        log() { echo "LOG: $*"; }
+        '"$helper"'
+        enforce_root_disk_encryption
+    '
+    rm -rf "$fakebin"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"root filesystem encryption: detected"* ]]
 }
 
 # --- D. profile library primitives --------------------------------------

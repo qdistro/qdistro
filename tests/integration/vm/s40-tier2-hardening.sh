@@ -104,7 +104,7 @@ done
 runuser -u admin -- podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 SPAWN_OUT=$(mktemp)
-runuser -u admin -- bash "$TIER2_DIR/spawn-tier2.sh" \
+runuser -u admin -- env QDISTRO_PROFILE=dev bash "$TIER2_DIR/spawn-tier2.sh" \
     "$CONTAINER" "$WORKLOAD" -- weston-terminal \
     >"$SPAWN_OUT" 2>/tmp/s40-spawn.log &
 SPAWN_PID=$!

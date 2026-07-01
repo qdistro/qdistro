@@ -54,6 +54,10 @@
 #                          foreground; container exit propagates to this
 #                          script's exit code.
 #   TIER2_DEBUG=1          Echo the resolved podman command before running.
+#   QDISTRO_PROFILE        dev | daily-driver | release. Defaults to the
+#                          hardened daily-driver posture. dev keeps direct
+#                          admin/test launches available; hardened profiles
+#                          require the root-launcher topology for secctx.
 #
 # Hardening knobs (defaults are the secure choice; relax for special
 # workloads only):
@@ -148,6 +152,19 @@ fi
 APP_ARGV=("$@")
 APP_NAME="${APP_ARGV[0]##*/}"
 
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}"
+case "$QDISTRO_PROFILE" in
+    dev|daily-driver|release) ;;
+    prod|production) QDISTRO_PROFILE=release ;;
+    daily|dd) QDISTRO_PROFILE=daily-driver ;;
+    *)
+        echo "spawn-tier2: unknown QDISTRO_PROFILE=$QDISTRO_PROFILE (want dev|daily-driver|release)" >&2
+        exit 2
+        ;;
+esac
+export QDISTRO_PROFILE
+is_hardened_profile() { [ "$QDISTRO_PROFILE" != "dev" ]; }
+
 # --- root-launcher mode (secctx wire-tag provenance) ---------------------
 # By default spawn-tier2 runs AS ADMIN (the qdistro-tier2-silo@.service unit
 # uses User=admin, and qshell/PodApps launch it as admin too). In that
@@ -190,6 +207,28 @@ if [ "${TIER2_ROOT_LAUNCHER:-0}" = "1" ]; then
         || { echo "spawn-tier2: cannot resolve a user name for uid" \
                   "$_root_admin_uid (root-launcher mode)" >&2; exit 1; }
     ROOT_LAUNCHER=1
+fi
+
+if [ "$ROOT_LAUNCHER" = 1 ] && is_hardened_profile; then
+    if [ "${TIER2_ALLOW_PRIVESC:-0}" = "1" ]; then
+        echo "spawn-tier2: TIER2_ALLOW_PRIVESC=1 is not accepted in root-launcher hardened profile '$QDISTRO_PROFILE'" >&2
+        exit 2
+    fi
+    if [ -n "${TIER2_KEEP_CAPS:-}" ]; then
+        echo "spawn-tier2: TIER2_KEEP_CAPS is not accepted in root-launcher hardened profile '$QDISTRO_PROFILE'" >&2
+        exit 2
+    fi
+    if [ -n "${TIER2_SECCOMP_PROFILE:-}" ]; then
+        echo "spawn-tier2: TIER2_SECCOMP_PROFILE is not accepted from env in root-launcher hardened profile '$QDISTRO_PROFILE'" >&2
+        exit 2
+    fi
+    case "${TIER2_NETWORK:-none}" in
+        none|slirp4netns) ;;
+        *)
+            echo "spawn-tier2: TIER2_NETWORK=${TIER2_NETWORK} is not an accepted hardened root-launcher network mode" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 # pm: route every podman invocation through the correct identity. In
@@ -699,6 +738,24 @@ if [ "$ROOT_LAUNCHER" = 1 ]; then
     fi
 fi
 
+if [ "$ROOT_LAUNCHER" != 1 ] && is_hardened_profile; then
+    if [ "$USE_SECCTX" != "1" ]; then
+        echo "spawn-tier2: TIER2_USE_SECCTX=0 is dev/test-only; hardened profile '$QDISTRO_PROFILE' requires root-launcher secctx provenance" >&2
+        exit 2
+    fi
+    if [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" = "1" ]; then
+        echo "spawn-tier2: QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 is dev-only; hardened profile '$QDISTRO_PROFILE' refuses it" >&2
+        exit 2
+    fi
+    if ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
+        echo "spawn-tier2: qdistro-secctx-exec not in PATH; hardened profile '$QDISTRO_PROFILE' refuses untagged direct launch" >&2
+        exit 2
+    fi
+    echo "spawn-tier2: direct Tier-2 launch has no trusted root launcher parent; hardened profile '$QDISTRO_PROFILE' refuses it" >&2
+    echo "             Route interactive launches through qdistro-tier2-silo@.service / qdistro-tier2-silo-launch, or set QDISTRO_PROFILE=dev for local tests." >&2
+    exit 2
+fi
+
 # Hardening defaults — secure, override via env for special workloads.
 TIER2_NETWORK_VAL="${TIER2_NETWORK:-none}"
 TIER2_PIDS_LIMIT_VAL="${TIER2_PIDS_LIMIT:-512}"
@@ -728,11 +785,11 @@ fi
 LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
 
 # Custom seccomp profile — deny-by-default, allows only the ~145
-# syscalls needed by bash/weston/weston-terminal/coreutils. Falls back
-# to podman's default profile if no profile found on the auto-detection
-# path (e.g. dev runs from a checkout that hasn't been installed). If
-# TIER2_SECCOMP_PROFILE was explicitly set via env but the file is
-# missing, we fail closed rather than silently dropping to the default.
+# syscalls needed by bash/weston/weston-terminal/coreutils. Hardened
+# profiles fail closed if no workload profile is found. The podman-default
+# fallback is dev-only for ad-hoc checkout runs. If TIER2_SECCOMP_PROFILE
+# was explicitly set via env but the file is missing, we fail closed rather
+# than silently dropping to the default.
 _seccomp_explicit="${TIER2_SECCOMP_PROFILE:-}"
 TIER2_SECCOMP_PROFILE="${TIER2_SECCOMP_PROFILE:-}"
 if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
@@ -747,7 +804,11 @@ if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
         fi
     done
     if [ -z "$TIER2_SECCOMP_PROFILE" ]; then
-        echo "spawn-tier2: WARN: no seccomp profile found for workload '$WORKLOAD'; using podman default" >&2
+        if is_hardened_profile; then
+            echo "spawn-tier2: FATAL: no seccomp profile found for workload '$WORKLOAD' in hardened profile '$QDISTRO_PROFILE'" >&2
+            exit 2
+        fi
+        echo "spawn-tier2: WARN: no seccomp profile found for workload '$WORKLOAD'; dev profile using podman default" >&2
     fi
 elif [ ! -f "$TIER2_SECCOMP_PROFILE" ]; then
     echo "spawn-tier2: FATAL: TIER2_SECCOMP_PROFILE=$_seccomp_explicit does not exist" >&2
@@ -1314,7 +1375,8 @@ if [ -n "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
     if [ -f "$TIER2_SECCOMP_PROFILE_RESOLVED" ]; then
         PODMAN_HARDENING+=( "--security-opt=seccomp=$TIER2_SECCOMP_PROFILE_RESOLVED" )
     else
-        echo "spawn-tier2-wrapper: WARN: seccomp profile $TIER2_SECCOMP_PROFILE_RESOLVED disappeared; using podman default" >&2
+        echo "spawn-tier2-wrapper: FATAL: seccomp profile $TIER2_SECCOMP_PROFILE_RESOLVED disappeared before podman run" >&2
+        exit 4
     fi
 fi
 if [ -n "$TIER2_KEEP_CAPS_RESOLVED" ]; then
@@ -1425,7 +1487,7 @@ if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; th
                 -- bash -c "$WRAPPER_BODY" &
     elif [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
         echo "spawn-tier2: WARN: secctx stamping requires a direct root launcher parent;" >&2
-        echo "             running un-tagged. Use the root launcher path (TIER2_ROOT_LAUNCHER=1)," >&2
+        echo "             dev profile running un-tagged. Use the root launcher path (TIER2_ROOT_LAUNCHER=1)," >&2
         echo "             or set QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
         bash -c "$WRAPPER_BODY" &
     else
@@ -1444,7 +1506,7 @@ if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; th
     fi
 else
     if [ "$USE_SECCTX" = "1" ]; then
-        echo "spawn-tier2: WARN: qdistro-secctx-exec not in PATH; running un-tagged" >&2
+        echo "spawn-tier2: WARN: qdistro-secctx-exec not in PATH; dev profile running un-tagged" >&2
     fi
     bash -c "$WRAPPER_BODY" &
 fi

@@ -1,0 +1,5 @@
+{
+  "name": "qdistro-print",
+  "_comment": "Declarative allowlist for USB printers that may be attached to the qdistro-print VM. Keep empty until an operator adds known printer VID:PID pairs.",
+  "usbHostdevAllow": []
+}

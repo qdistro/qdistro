@@ -109,7 +109,12 @@ boot via a vsock probe, then retries the connect.
 - `qdistro-print-attach-usb --vendor-product VVVV:PPPP` (or `--bus-addr
  BUS.ADDR`) attaches it to the CUPS VM via USB passthrough (qemu-xhci).
  Polkit-gated through `org.qdistro.print.attach-usb` (auth_admin
- defaults).
+ defaults). The helper is fail-closed: `pkcheck` must be present and must
+ approve the caller, and the target domain is pinned to `qdistro-print`.
+- USB attach also requires an operator-maintained VID:PID allowlist in
+ `/etc/qdistro/printvm-manifest.json` (`usbHostdevAllow`). The shipped
+ manifest is empty, so new printers are refused until admin adds the exact
+ vendor/product pair.
 - No other user session or container can claim that USB device.
 - If the printer is unplugged, the VM sees the disconnect; reconnection
  re-attaches automatically.

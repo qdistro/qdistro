@@ -25,8 +25,8 @@
 # Environment:
 #   TIER1_TITLE_PREFIX     window title prefix (default "[tier1:<silo>] ")
 #   TIER1_USE_SECCTX       1 (default) wraps via qdistro-secctx-exec.
-#                          0 runs without a Wayland secctx tag (qdshell
-#                          falls back to title-prefix silo resolution).
+#                          0 is dev/test-only and is refused in hardened
+#                          profiles because the launch would be untagged.
 #   TIER1_SECCTX_ENGINE    override sandbox_engine (default qdistro.tier1)
 #   TIER1_SECCTX_APPID     override app_id (default qdistro.tier1.<silo>)
 #   TIER1_DEBUG=1          print resolved command before exec
@@ -78,6 +78,23 @@ APPID="${TIER1_SECCTX_APPID:-qdistro.tier1.$SILO}"
 TITLE_PREFIX="${TIER1_TITLE_PREFIX:-[tier1:$SILO] }"
 ADMIN_UID="$(id -u)"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$ADMIN_UID}"
+
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}"
+case "$QDISTRO_PROFILE" in
+    dev|daily-driver|release) ;;
+    prod|production) QDISTRO_PROFILE=release ;;
+    daily|dd) QDISTRO_PROFILE=daily-driver ;;
+    *)
+        echo "[tier1] FAIL: unknown QDISTRO_PROFILE=$QDISTRO_PROFILE (want dev|daily-driver|release)" >&2
+        exit 2
+        ;;
+esac
+export QDISTRO_PROFILE
+is_hardened_profile() { [ "$QDISTRO_PROFILE" != "dev" ]; }
+if is_hardened_profile && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" = "1" ]; then
+    echo "[tier1] FAIL: QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 is dev-only; hardened profile '$QDISTRO_PROFILE' refuses it" >&2
+    exit 2
+fi
 
 # Per-app private state directory, relabelled to qdistro_tier1_config_t
 # by restorecon (spec/30 §"Filesystem labelling strategy" type-not-mount).
@@ -198,10 +215,31 @@ LAUNCHREC_PATH=""
 LAUNCHREC_TOKEN=""
 LAUNCHREC_FILE_ID=""
 
-if [ "$USE_SECCTX" = "1" ] && command -v qdistro-secctx-exec >/dev/null 2>&1; then
+if [ "$USE_SECCTX" != "1" ]; then
+    if is_hardened_profile; then
+        echo "[tier1] FAIL: TIER1_USE_SECCTX=0 is dev/test-only; hardened profile '$QDISTRO_PROFILE' requires a trusted secctx launch" >&2
+        exit 2
+    fi
+    echo "[tier1] WARN: TIER1_USE_SECCTX=0 — dev/test-only untagged Tier-1 launch" >&2
+elif ! command -v qdistro-secctx-exec >/dev/null 2>&1; then
+    if is_hardened_profile; then
+        echo "[tier1] FAIL: qdistro-secctx-exec not in PATH; hardened Tier-1 refuses untagged launch" >&2
+        exit 2
+    fi
+    echo "[tier1] WARN: qdistro-secctx-exec not in PATH; dev profile running untagged" >&2
+elif [ "$USE_SECCTX" = "1" ]; then
+    if is_hardened_profile && [ "${TIER1_ROOT_LAUNCHER:-0}" != "1" ]; then
+        echo "[tier1] FAIL: direct Tier-1 launch is dev-only; hardened profile '$QDISTRO_PROFILE' requires a root/broker launcher path" >&2
+        exit 2
+    fi
     if [ "$(id -u)" -ne 0 ] && [ "${QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED:-0}" != "1" ]; then
+        if is_hardened_profile; then
+            echo "[tier1] FAIL: direct Tier-1 launch has no trusted root launcher parent; hardened profile '$QDISTRO_PROFILE' refuses untagged launch" >&2
+            echo "        Use a root/broker launcher path, or set QDISTRO_PROFILE=dev for SELinux-only tests." >&2
+            exit 2
+        fi
         echo "[tier1] WARN: secctx stamping requires a direct root launcher parent;" >&2
-        echo "        running untagged. Use the root launcher/broker path, or set" >&2
+        echo "        dev profile running untagged. Use the root launcher/broker path, or set" >&2
         echo "        QDISTRO_SECCTX_EXEC_ALLOW_UNTRUSTED=1 only with QDWIN_SECCTX_OPEN=1 for dev tests." >&2
     else
         SECCTX_CMD=(

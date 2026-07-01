@@ -780,13 +780,9 @@ setup() {
     assert_output_contains "[s112] 8 passes, 0 failures"
 }
 
-@test "phase7-tier1-skeleton: spec/30 Tier-1 SELinux design + spike skeleton present" {
-    # Tier-1 is design + spike (spec/30, 2026-04-27 night). No runtime
-    # yet — six prior sessions deferred it. This bats just verifies the
-    # design doc, spike checklist, .te skeleton, spawn wrapper, and
-    # qdshell tier1 secctx parser all survived the bootstrap rsync.
-    # The implementation pass picks up from this baseline once the four
-    # blocking spikes in tier1/spike-checklist.md resolve.
+@test "phase7-tier1-skeleton: Tier-1 SELinux source inventory present" {
+    # Offline inventory check: runtime policy loading and AVC budget are
+    # covered by phase7-tier1-enforcing.
     stage_vm_driver "s50-tier1-skeleton.sh"
     vm_run "curl -fsS -o /tmp/s50.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s50-tier1-skeleton.sh && chmod +x /tmp/s50.sh && bash /tmp/s50.sh 2>/dev/null"
     assert_success
@@ -797,7 +793,7 @@ setup() {
     assert_output_contains "PASS: spike-checklist.md covers Spikes 1-5"
     assert_output_contains "PASS: qdistro_tier1.te declares type + Wayland connect interface"
     assert_output_contains "PASS: spawn-tier1.sh syntax-checks"
-    assert_output_contains "PASS: spec/30 Tier-1 design + skeleton present"
+    assert_output_contains "PASS: Tier-1 SELinux source inventory present"
 }
 
 

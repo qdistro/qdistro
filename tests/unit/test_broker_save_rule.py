@@ -80,7 +80,7 @@ class TestSaveRuleAccess:
         assert broker.rules_reloaded_signals[0] == 1
 
     def test_root_succeeds(self, broker):
-        broker.set_peer(uid=0)
+        broker.set_peer(uid=0, exe="/usr/local/sbin/qdistro-approvals")
         broker.SaveRule("from-root.yaml", VALID_BODY)
 
     def test_non_admin_refused(self, broker):

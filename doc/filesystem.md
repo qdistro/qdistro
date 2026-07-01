@@ -23,6 +23,12 @@ maintenance. Overriding this should require an explicit design decision.
  of mdraid or LVM RAID.
 - **ZFS is not used.** Out-of-tree kernel module, CDDL/GPL friction, no
  Tumbleweed-default integration with snapshots or zypper transactions.
+- **Daily-driver/release installs require encrypted root.** qdistro's silo
+ isolation is a runtime boundary; without LUKS/dm-crypt, a stolen disk or
+ offline boot can read every silo subvolume. `qdistro-bootstrap.sh` refuses
+ daily-driver/release installs when it cannot detect an encrypted root layer.
+ Operators who intentionally accept a runtime-only posture must set
+ `QDISTRO_ALLOW_PLAINTEXT_ROOT=1` for that bootstrap run.
 
 ## Subvolume layout
 
@@ -168,6 +174,10 @@ Scheduled backup of configured subvolumes to a remote target.
 - For each subvolume flagged for backup: take an incremental **read-only**
  snapshot, `btrfs send` the diff relative to the last backed-up snapshot,
  pipe through encryption to the destination.
+- Metadata collector subvolumes exclude known private key names by default
+ (`backup-sign-*`, `id_*`, `*.key`, `*.pem`, `identity/`) and scan the staged
+ tree for SSH/PEM/age private-key markers. A match aborts the backup before
+ any blob is published.
 - Destinations: trusted remote btrfs receiver (NAS) or encrypted-blob
  storage (S3-compatible).
 

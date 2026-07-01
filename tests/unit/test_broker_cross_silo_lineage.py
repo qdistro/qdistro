@@ -17,8 +17,8 @@ These tests prove:
   fail closed; only a registered + verified source whose attested silo
   satisfies a rule is allowed, and the claim is overridden by the attested
   value.
-- the same-silo `identity_verified` shortcut is unaffected (it never needed
-  a source pid and must keep working under enforce).
+- under enforce, the same-silo `identity_verified` shortcut also needs
+  launch-record verification before it can bypass rule evaluation.
 """
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from qdistro_admin_audit import AuditLog  # noqa: E402
 from qdistro_admin_ratelimit import RateLimiter  # noqa: E402
 from qdistro_admin_rules import RulesEngine  # noqa: E402
 from qdistro_launch_record import LaunchRecordStore  # noqa: E402
+from qdistro_lineage_store import LineageStore  # noqa: E402
 
 ADMIN_UID = 1000            # qdshell, the D-Bus caller of these gates
 QDSHELL_PID = 900
@@ -61,12 +62,16 @@ class _StubBroker(Broker):
         self._audit_retention_days = 0
         self._io_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.launch_records = LaunchRecordStore()
+        self._lineage_store = LineageStore(str(Path(audit_db).with_name("lineage.sqlite")))
         self.hooks = type("_NoHooks", (), {"query": lambda self, *a: None})()
         # The gates' D-Bus caller is always qdshell (admin uid).
         self._peer = (ADMIN_UID, QDSHELL_PID, QDSHELL_EXE, 1)
 
     def _peer_info(self, sender, conn):
         return self._peer
+
+    def _clipboard_receive_lineage(self, **_kwargs):
+        return True, "stubbed"
 
 
 @pytest.fixture
@@ -101,6 +106,25 @@ def fake_source_live(monkeypatch):
                         lambda pid: state["label"])
     monkeypatch.setattr(pi, "read_cgroup", lambda pid: state["cgroup"])
     return state
+
+
+@pytest.fixture
+def clean_silo_security_registry(tmp_path, monkeypatch):
+    p = tmp_path / "silo-security.toml"
+    p.write_text(
+        "[silo.user1]\n"
+        "guards = []\n"
+        "compartments = ['user1']\n"
+        "conflict_classes = ['clipboard']\n"
+        "\n"
+        "[silo.admin]\n"
+        "guards = []\n"
+        "compartments = ['admin']\n"
+        "conflict_classes = ['clipboard']\n"
+    )
+    p.chmod(0o644)
+    monkeypatch.setenv("QDISTRO_SILO_SECURITY", str(p))
+    return p
 
 
 def _transfer_rule(rules_dir: Path, *, src="user1", dst="admin",
@@ -218,15 +242,26 @@ class TestEnforce:
                          source_pid=SOURCE_PID,
                          source_starttime=SOURCE_START + 1) == "deny"
 
-    def test_same_silo_verified_shortcut_unaffected(self, broker, rules_dir,
-                                                    fake_source_live,
-                                                    monkeypatch):
+    def test_same_silo_verified_without_source_denied(self, broker, rules_dir,
+                                                      fake_source_live,
+                                                      monkeypatch):
         monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
         broker.rules.reload()
-        # Same silo + identity_verified → allowed before any source-pid
-        # resolution, with no record and no source pid.
+        # Same silo + identity_verified is not enough under enforcement:
+        # qdshell must relay the source pid/starttime so the broker can bind
+        # the claimed silo to a verified launch record.
         assert _transfer(broker, src="user1", dst="user1",
-                         identity_verified=True) == "allow"
+                         identity_verified=True) == "deny"
+
+    def test_same_silo_verified_registered_source_allows(
+            self, broker, rules_dir, fake_source_live, monkeypatch):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        broker.rules.reload()
+        _register_source(broker, silo="user1")
+        assert _transfer(broker, src="user1", dst="user1",
+                         identity_verified=True,
+                         source_pid=SOURCE_PID,
+                         source_starttime=SOURCE_START) == "allow"
 
 
 # --- the other two gates share the helper; spot-check enforce paths ----
@@ -243,7 +278,9 @@ class TestReceiveAndHandoff:
             "user1", "admin", "text/plain", "", "", "", False, 0, 0) == "deny"
 
     def test_receive_registered_source_allows(self, broker, rules_dir,
-                                              fake_source_live, monkeypatch):
+                                              fake_source_live,
+                                              clean_silo_security_registry,
+                                              monkeypatch):
         monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
         (rules_dir / "r.yaml").write_text(
             "- name: r\n  decision: allow\n  match:\n"
@@ -274,6 +311,23 @@ class TestReceiveAndHandoff:
         _register_source(broker, silo="user1")
         assert broker.CheckHandoffActivation(
             "user1", "admin", "", "", "", False,
+            SOURCE_PID, SOURCE_START) == "allow"
+
+    def test_receive_same_silo_registered_source_allows(
+            self, broker, fake_source_live, clean_silo_security_registry,
+            monkeypatch):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _register_source(broker, silo="user1")
+        assert broker.CheckClipboardReceive(
+            "user1", "user1", "text/plain", "", "", "", True,
+            SOURCE_PID, SOURCE_START) == "allow"
+
+    def test_handoff_same_silo_registered_source_allows(
+            self, broker, fake_source_live, monkeypatch):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _register_source(broker, silo="user1")
+        assert broker.CheckHandoffActivation(
+            "user1", "user1", "", "", "", True,
             SOURCE_PID, SOURCE_START) == "allow"
 
 

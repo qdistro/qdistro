@@ -2,11 +2,14 @@
 # Build + install the qdistro_pwd SELinux policy module on a fresh
 # clone. Idempotent.
 #
-# Module 0.2.0 (Phase 2, this revision): enforcing — permissive tag
+# Module 0.3.0 (Phase 2, this revision): enforcing — permissive tag
 # dropped after audit2allow harvest from s60 + s61 + portal-keys
 # vault flow on val-260430. Allow set extended for cert_t (Python
 # ssl module init), cgroup_t (/proc/<pid>/cgroup reads), and
 # self:capability sys_ptrace (cross-uid /proc/<other-uid>/exe).
+# Adds v1 neverallow ratchets for vault-file access and ptrace against
+# qdistro_pwd_t so later policy harvests cannot silently weaken the
+# documented vault boundary.
 #
 # Pre-reqs: selinux-policy-devel + checkpolicy + policycoreutils
 # (Tumbleweed: zypper install selinux-policy-devel checkpolicy policycoreutils).
@@ -63,5 +66,5 @@ if [ -f "$PWD_PY" ] && command -v restorecon >/dev/null 2>&1; then
     fi
 fi
 
-echo "[pwd-policy-install] OK — qdistro_pwd active (enforcing, 0.2.0)"
+echo "[pwd-policy-install] OK — qdistro_pwd active (enforcing, 0.3.0)"
 echo "[pwd-policy-install] interface dropped at $INCLUDE_DIR/qdistro_pwd.if"

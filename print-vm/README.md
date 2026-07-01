@@ -41,6 +41,16 @@ The qdistro-polkit-agent renders the prompt; default config maps
 `org.qdistro.print.*` to `broker` so admin sees the request in the
 admin-approval-app queue.
 
+Attach is pinned to the `qdistro-print` libvirt domain and checks
+`/etc/qdistro/printvm-manifest.json` before calling `virsh`. Add known USB
+printer IDs under `usbHostdevAllow`, for example:
+
+```json
+{ "name": "qdistro-print", "usbHostdevAllow": ["0411:00be"] }
+```
+
+An empty or missing manifest refuses every USB attach.
+
 ## CID
 
 Default vsock CID is `4`. If you change it (`QDISTRO_PRINT_VM_CID=5

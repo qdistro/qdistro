@@ -3,6 +3,21 @@
 A workflow is a policy-checkable plan that coordinates resources, actions,
 approvals, cleanup, and lineage. Workflows are not hardcoded product flows.
 
+## Status
+
+This document describes the workflow contract qdistro is building toward. The
+current v1 engine is a narrow execution substrate for approved, fail-closed
+steps such as secret delivery, broker / D-Bus calls, hooks, and related
+automation glue. It does not yet implement the full contract below.
+
+Not yet implemented in v1: declared compensation execution, cleanup-specific
+terminal states such as `cleanup_failed`, `compensation_failed`,
+`forced_release`, and `requires_human_review`, durable crash resume for running
+workflows, first-class data-flow records, and workflow-run / step / artifact
+lineage edges. Side-effecting actions such as browser upload, export, VM spawn,
+or remote mutation must not be treated as covered by this document's
+compensation guarantees until those mechanisms exist in code.
+
 ## Design Posture
 
 qdistro workflows are an implementation-agnostic orchestration contract. They

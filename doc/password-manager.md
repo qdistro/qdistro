@@ -51,7 +51,8 @@ session's lifecycle.
  (autotype flows), or locked while users are active.
 - **Access policy** — which users, which apps, which specific items can be
  read.
-- **Auto-lock** — on idle, on admin lock, on suspend, or explicit.
+- **Auto-lock** — on idle, qdwin/admin screen lock, logind
+ `PrepareForSleep(true)`, logind `Session.Lock`, or explicit lock.
 
 Typical vault arrangement:
 
@@ -84,7 +85,10 @@ on-disk version:
 
 - Runs as a dedicated uid `qdistro-pwd` with narrow capabilities (TPM
  access, vault-file read/write).
-- SELinux type `qdistro_pwd_t`. Only this type may read vault files.
+- SELinux type `qdistro_pwd_t`. On the supported Tumbleweed hardened
+ bootstrap path, SELinux runs Enforcing and the `qdistro_pwd` policy
+ carries `neverallow` ratchets so only this type may read vault files or
+ ptrace the daemon.
 - Exposes a socket at `/run/qdistro/pwd.sock`. Accessible from any user
  session subject to policy.
 - No network (its own netns with no interfaces).
@@ -217,7 +221,10 @@ below).
  override may use fingerprint instead.
 6. The vault transitions to `unlocked`. The request proceeds through
  normal policy.
-7. The vault relocks on idle, suspend, or explicit lock.
+7. The vault relocks on idle, qdwin/admin screen lock, logind
+ `PrepareForSleep(true)`, logind `Session.Lock`, or explicit lock. Relock
+ wipes resident keys and invalidates outstanding browser fill tokens before
+ emitting `VaultLocked`.
 
 ## Polkit agent
 

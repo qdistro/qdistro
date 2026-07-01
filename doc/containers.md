@@ -70,19 +70,30 @@ Trade-off: each `.desktop` entry binds to a single workload image. If
 a workload wants two related entries (`firefox`, `firefox-private`),
 they ride in the same image — fine, no inefficiency.
 
-## Architecture (one click → one window)
+## Architecture (v1 launch topology)
 
 ```
-admin compositor (qdwin) ← outer
+systemd qdistro-tier2-silo@<name>.service (User=root)
  │
- ▼ wayland-1 (UNIX socket, /run/user/1000/wayland-1)
+ ▼ qdistro-tier2-silo-launch
+ │   ├─ reads root-owned /run/qdistro/silo-launch/<name>.env
+ │   └─ exec env -i TIER2_ROOT_LAUNCHER=1 TIER2_ADMIN_UID=1000
+ │              TIER2_SILO=<binding> TIER2_NETWORK=<none|slirp4netns>
  │
-[qdistro-secctx-exec]    ← wraps the spawn with wp_security_context_v1
- │                         (sandbox_engine="qdistro.tier2",
- │                          app_id="<container>/<app>",
- │                          instance_id=<launch-token>)
- ▼
-[podman run --userns=keep-id -v /run/user/1000:/run/user/1000 ...]
+ ▼ spawn-tier2.sh
+ │   ├─ root supervisor only for secctx parentage/bookkeeping
+ │   └─ runuser -u admin for resolver, broker gate, secctx-exec, podman
+ │
+ ▼ qdistro-secctx-exec (admin uid, direct root parent)
+ │   wp_security_context_v1:
+ │     sandbox_engine="qdistro.tier2"
+ │     app_id="<container>/<app>"
+ │     instance_id=<launch-token>
+ │
+[podman run --userns=keep-id
+ │  -v /run/user/1000/qdistro-tier2/<token>:/run/user/1000
+ │  -v /run/user/1000/wayland-secctx-NN:/run/user/1000/wayland-secctx-NN
+ │  --security-opt=seccomp=tier2/seccomp/<workload>.json ...]
  │
  ▼ inside the container (uid 1000 via keep-id)
  │
@@ -102,6 +113,15 @@ admin compositor (qdwin) ← outer
 
 The chain is fully Linux-only, no VM, no remote protocol — just
 container userns + a nested compositor.
+
+In hardened v1 profiles (`daily-driver` / `release`), interactive Tier-2
+launches must enter through the root-launcher topology above. Direct
+`spawn-tier2.sh` admin launches are dev/test-only (`QDISTRO_PROFILE=dev`)
+because they cannot provide the direct root-parent attestation that
+`qdistro-secctx-exec` and qdwin require. The root-launch helper scrubs the
+ambient environment with `env -i`; only the trusted launch stanza is passed to
+`spawn-tier2.sh`, and root-launcher mode rejects privesc, added capabilities,
+caller-selected seccomp profiles, and unknown network modes.
 
 ## Secctx contract
 
@@ -123,6 +143,11 @@ field for the qdshell cold-start UX: qdshell reads LAUNCH_TOKEN from
 the matching `instance_id` to swap its placeholder taskbar entry for
 the real one. The auth boundaries are peer-uid filtering on
 `qdwin_nested_manager_v1`, the secctx listener, and the broker rules.
+
+The v1 hardened guarantee assumes a workload seccomp profile exists. If no
+`tier2/seccomp/<workload>.json` is found, hardened launches fail closed; using
+podman's default seccomp profile is only a `QDISTRO_PROFILE=dev` fallback for
+ad-hoc local testing.
 
 ## Launcher UX (qdshell)
 
@@ -167,8 +192,12 @@ qdbrowser, qfileman, and future VMApps badges share the same vocabulary.
 
 The visible UX while a container starts up:
 
-1. User clicks a badged app icon. qdshell calls `spawn-tier2.sh` and
-   reads LAUNCH_TOKEN from its stdout.
+1. User clicks a badged app icon. The v1 hardened launcher contract is that
+   qdshell starts the corresponding tier-2 silo unit; the unit calls
+   `qdistro-tier2-silo-launch` and `spawn-tier2.sh` in root-launcher mode.
+   Dev/CI-only direct launches may still call `spawn-tier2.sh` with
+   `QDISTRO_PROFILE=dev`. A caller that still invokes `spawn-tier2.sh`
+   directly in a hardened profile fails closed before a container is minted.
 2. qdshell inserts a **placeholder taskbar entry** into the Taskbar
    model immediately:
    - resolved icon (from host theme, or placeholder)

@@ -156,7 +156,7 @@ wall-clock budget.
 
 ```bash
 $VMEXEC "$VM" 'timeout 60 runuser -u admin -- bash -c "
-    TIER2_DETACH=1 /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
+    QDISTRO_PROFILE=dev TIER2_DETACH=1 /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
         tier2-c-ui weston-terminal -- weston-terminal &
     sleep 3
     /root/qdistro-src/qdistro/tier2/podapps-scan.sh tier2-c-ui"' \

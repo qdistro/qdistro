@@ -144,7 +144,7 @@ WORKLOAD_LOG=/tmp/s55-workload.log
 # qdistro-secctx-exec aborts before reaching qdistro-tier1-exec.
 # secctx is covered by s44; s55's job is the AVC budget under
 # enforcing.
-TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
+TIER1_USE_SECCTX_FLAG="QDISTRO_PROFILE=dev TIER1_USE_SECCTX=0"
 
 run_step() {
     local label="$1"; shift

@@ -41,6 +41,7 @@ Auto-lock: vaults relock after IDLE_TIMEOUT_S of no activity (default
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pwd as _pwd_mod
 import re
@@ -123,6 +124,8 @@ from qdistro_pwd_vault import (  # type: ignore[import-not-found]
     unlock_vault_tpm,
     vault_version,
 )
+
+log = logging.getLogger("qdistro-pwd")
 
 BUS_NAME = "org.qdistro.Pwd1"
 OBJ_PATH = "/org/qdistro/Pwd1"
@@ -550,6 +553,7 @@ def _request_app_context(
 class PwdDaemon(dbus.service.Object):
     def __init__(self, bus):
         super().__init__(bus, OBJ_PATH)
+        self._bus = bus
         # vault name → {"key": bytearray, "unlocked_at": ts, "last_use": ts}
         self._unlocked: dict[str, dict[str, Any]] = {}
         self._audit = PwdAuditLog(AUDIT_DB)
@@ -560,6 +564,7 @@ class PwdDaemon(dbus.service.Object):
         # Idle tick: every 30s, relock vaults that have been idle for
         # more than IDLE_TIMEOUT_S.
         GLib.timeout_add_seconds(30, self._idle_tick)
+        self._install_lifecycle_hooks(bus)
 
     # -- helpers -------------------------------------------------------
 
@@ -585,6 +590,12 @@ class PwdDaemon(dbus.service.Object):
         if uid != 0:
             raise PwdPolicyError(
                 f"operation requires root (broker), got uid {uid}")
+
+    def _require_admin_or_root(self, sender: str) -> None:
+        uid, _ = self._peer_info(sender)
+        if uid not in (0, ADMIN_UID):
+            raise PwdPolicyError(
+                f"operation requires root or admin uid {ADMIN_UID}, got {uid}")
 
     def _touch(self, vault: str) -> None:
         if vault in self._unlocked:
@@ -618,6 +629,66 @@ class PwdDaemon(dbus.service.Object):
         self._audit.record(
             "lock", name, decision="allow", reason=reason)
         return True
+
+    def _lock_all_unlocked(self, reason: str) -> list[str]:
+        locked = []
+        for name in list(self._unlocked):
+            if self._do_lock(name, reason=reason):
+                locked.append(name)
+        # Fill tokens are lifecycle-scoped grants. A whole-machine lock or
+        # suspend invalidates them even if a future bug leaves the browser
+        # vault out of _unlocked while tokens remain resident.
+        if self._fill_tokens:
+            self._fill_tokens = {}
+        for name in locked:
+            self.VaultLocked(name, reason)
+        if locked:
+            log.info("lifecycle relock reason=%s vaults=%s",
+                     reason, ",".join(locked))
+        return locked
+
+    def _install_lifecycle_hooks(self, bus) -> None:
+        """Subscribe to logind lifecycle signals.
+
+        qdlocker covers qdwin-originated manual/idle locks while it is alive.
+        The pwd daemon also listens directly to logind so suspend and logind
+        Session.Lock requests relock vaults even when qdlocker is restarting.
+        """
+        try:
+            mgr_obj = bus.get_object(
+                "org.freedesktop.login1", "/org/freedesktop/login1")
+            mgr = dbus.Interface(mgr_obj, "org.freedesktop.login1.Manager")
+            session_path = str(mgr.GetSessionByPID(os.getpid()))
+        except Exception:
+            log.exception("logind lifecycle hooks unavailable")
+            return
+
+        try:
+            bus.add_signal_receiver(
+                self._on_logind_session_lock,
+                signal_name="Lock",
+                dbus_interface="org.freedesktop.login1.Session",
+                path=session_path,
+            )
+        except Exception:
+            log.exception("could not subscribe to logind Session.Lock")
+
+        try:
+            bus.add_signal_receiver(
+                self._on_logind_prepare_for_sleep,
+                signal_name="PrepareForSleep",
+                dbus_interface="org.freedesktop.login1.Manager",
+                path="/org/freedesktop/login1",
+            )
+        except Exception:
+            log.exception("could not subscribe to logind PrepareForSleep")
+
+    def _on_logind_session_lock(self) -> None:
+        self._lock_all_unlocked("screen-lock")
+
+    def _on_logind_prepare_for_sleep(self, start: bool) -> None:
+        if bool(start):
+            self._lock_all_unlocked("suspend")
 
     # -- vault lifecycle -----------------------------------------------
 
@@ -868,6 +939,30 @@ class PwdDaemon(dbus.service.Object):
         if ok:
             self.VaultLocked(str(name), "explicit")
         return ok
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="as",
+                         sender_keyword="sender")
+    def LockAllVaults(self, reason: str, sender=None) -> list[str]:
+        """Relock every currently-unlocked vault for machine lifecycle events.
+
+        Intended callers are qdlocker (screen-lock requests) and root/admin
+        lifecycle helpers. Ordinary callers can still lock a named vault via
+        LockVault, but cannot stamp whole-machine lifecycle audit reasons.
+        """
+        self._require_admin_or_root(sender)
+        reason_s = str(reason)
+        allowed = {
+            "screen-lock",
+            "screen-lock:idle",
+            "screen-lock:lid",
+            "screen-lock:suspend",
+            "screen-lock:manual",
+            "suspend",
+            "logind-session-lock",
+        }
+        if reason_s not in allowed:
+            raise PwdPolicyError(f"invalid lifecycle lock reason {reason_s!r}")
+        return self._lock_all_unlocked(reason_s)
 
     @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="b",
                          sender_keyword="sender")

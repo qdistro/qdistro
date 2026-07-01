@@ -21,15 +21,22 @@ pytest.importorskip("dbus")
 import dbus  # noqa: E402
 
 import qdistro_admin_broker as B  # noqa: E402
+import qdistro_proc_identity as pi  # noqa: E402
 from qdistro_admin_broker import Broker  # noqa: E402
 from qdistro_admin_cache import ApprovalCache  # noqa: E402
 from qdistro_admin_audit import AuditLog  # noqa: E402
 from qdistro_admin_ratelimit import RateLimiter  # noqa: E402
 from qdistro_admin_rules import RulesEngine  # noqa: E402
+from qdistro_launch_record import LaunchRecordStore  # noqa: E402
+from qdistro_lineage_store import LineageStore  # noqa: E402
 
 
 ADMIN_UID = B.ADMIN_UID  # 1000
 QDSHELL_EXE = "/usr/bin/qdshell"
+SOURCE_PID = 66501
+SOURCE_UID = 4001
+SOURCE_EXE = "/usr/bin/firefox"
+SOURCE_START = 123456
 
 
 class _StubBroker(Broker):
@@ -49,6 +56,8 @@ class _StubBroker(Broker):
         self._peer_pid = 1
         self._peer_exe = QDSHELL_EXE
         self._peer_start = 0
+        self.launch_records = LaunchRecordStore()
+        self._lineage_store = LineageStore(str(Path(audit_db).with_name("lineage.sqlite")))
         self.pending_signals = []
         self.decided_signals = []
         self.rules_reloaded_signals = []
@@ -90,6 +99,58 @@ def _write_rule(rules_dir: Path, *, decision: str, action: str,
         f"  decision: {decision}\n"
         f"  match:\n"
         f"    action: {action!r}\n"
+    )
+
+
+@pytest.fixture
+def fake_source_live(monkeypatch):
+    state = {"exe": SOURCE_EXE, "starttime": SOURCE_START,
+             "uid": SOURCE_UID, "label": "", "cgroup": ""}
+
+    def _exe_start(pid):
+        if int(pid) == SOURCE_PID:
+            return state["exe"], state["starttime"]
+        return "?", 0
+
+    monkeypatch.setattr(pi, "read_exe_and_starttime", _exe_start)
+    monkeypatch.setattr(pi, "read_uid",
+                        lambda pid: state["uid"] if int(pid) == SOURCE_PID
+                        else None)
+    monkeypatch.setattr(pi, "read_selinux_label",
+                        lambda pid: state["label"])
+    monkeypatch.setattr(pi, "read_cgroup", lambda pid: state["cgroup"])
+    return state
+
+
+@pytest.fixture
+def silo_security_registry(tmp_path: Path, monkeypatch) -> Path:
+    p = tmp_path / "silo-security.toml"
+    p.write_text(
+        "[silo.work]\n"
+        "guards = ['local-only', 'no-cross-contaminate']\n"
+        "compartments = ['work']\n"
+        "conflict_classes = ['work-home']\n"
+        "\n"
+        "[silo.home]\n"
+        "guards = ['no-cross-contaminate']\n"
+        "compartments = ['home']\n"
+        "conflict_classes = ['work-home']\n"
+        "\n"
+        "[silo.clean]\n"
+        "guards = []\n"
+        "compartments = ['work']\n"
+        "conflict_classes = ['work-home']\n"
+    )
+    p.chmod(0o644)
+    monkeypatch.setenv("QDISTRO_SILO_SECURITY", str(p))
+    return p
+
+
+def _register_source(broker: _StubBroker, *, silo: str = "work") -> None:
+    broker.launch_records.register(
+        silo=silo, uid=SOURCE_UID, pid=SOURCE_PID,
+        starttime=SOURCE_START, exe=SOURCE_EXE,
+        sandbox_engine="qdistro.tier3", app_id=f"qdistro.tier3.{silo}",
     )
 
 
@@ -171,6 +232,61 @@ class TestCrossSilo:
         verdict = broker.CheckClipboardReceive(
             "user1", "admin", "text/plain")
         assert verdict == "deny"
+
+
+class TestReceiveLineage:
+    def test_no_cross_contaminate_denies_and_records_attempt(
+            self, broker, rules_dir, fake_source_live, silo_security_registry,
+            monkeypatch):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _write_rule(rules_dir, decision="allow",
+                    action="qdistro.clipboard.receive:work:home")
+        broker.rules.reload()
+        _register_source(broker, silo="work")
+
+        verdict = broker.CheckClipboardReceive(
+            "work", "home", "text/plain", "", "", "", False,
+            SOURCE_PID, SOURCE_START)
+
+        assert verdict == "deny"
+        row = broker._lineage_store._conn.execute(
+            "SELECT chokepoint, verdict FROM activities"
+        ).fetchone()
+        assert row == ("clipboard", "deny")
+        assert broker._lineage_store._conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE predicate='used'"
+        ).fetchone()[0] == 1
+        assert broker._lineage_store._conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE eid LIKE 'clipboard-source:%'"
+        ).fetchone()[0] == 1
+        assert broker._lineage_store._conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE predicate='wasDerivedFrom'"
+        ).fetchone()[0] == 0
+        audit = broker.audit.recent(1)[0]
+        assert audit["decision"] is False
+        assert "clipboard_receive_lineage_deny" in audit["source"]
+
+    def test_local_only_same_compartment_receive_records_derivative(
+            self, broker, fake_source_live, silo_security_registry,
+            monkeypatch):
+        monkeypatch.setattr(B, "LINEAGE_ENFORCE", True)
+        _register_source(broker, silo="work")
+
+        verdict = broker.CheckClipboardReceive(
+            "work", "work", "text/plain", "", "", "", True,
+            SOURCE_PID, SOURCE_START)
+
+        assert verdict == "allow"
+        row = broker._lineage_store._conn.execute(
+            "SELECT chokepoint, verdict FROM activities"
+        ).fetchone()
+        assert row == ("clipboard", "allow")
+        out_eid = broker._lineage_store._conn.execute(
+            "SELECT subject FROM edges WHERE predicate='wasDerivedFrom'"
+        ).fetchone()[0]
+        out = broker._lineage_store.get_entity(out_eid)
+        assert out.guards == frozenset({"local-only", "no-cross-contaminate"})
+        assert out.compartments == frozenset({"work"})
 
 
 # ---------------------------------------------------------------------

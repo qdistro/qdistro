@@ -95,9 +95,9 @@ fi
 COUNT_BEFORE=${COUNT_BEFORE:-0}
 
 if [ -x "$SPAWN" ] && command -v qdistro-tier1-exec >/dev/null 2>&1; then
-    TIER1_USE_SECCTX_FLAG=""
+    TIER1_USE_SECCTX_FLAG="QDISTRO_PROFILE=dev"
     command -v qdistro-secctx-exec >/dev/null 2>&1 \
-        || TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
+        || TIER1_USE_SECCTX_FLAG="QDISTRO_PROFILE=dev TIER1_USE_SECCTX=0"
     RULE_DIR=/etc/qdistro/rules.d
     mkdir -p "$RULE_DIR"
     cleanup_rules() {

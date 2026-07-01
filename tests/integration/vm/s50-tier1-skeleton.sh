@@ -1,12 +1,10 @@
 #!/bin/bash
 # In-VM driver for tiered-isolation.bats:phase7-tier1-skeleton.
 #
-# spec/30 — Tier-1 SELinux is design + spike skeleton only (six prior
-# sessions deferred the runtime). This driver confirms the source
+# Tier-1 SELinux source inventory. This driver confirms the source
 # artifacts survived the fresh-vm-bootstrap rsync into the VM at
-# /root/qdistro-src/qdistro/selinux/tier1/. It's intentionally
-# offline — no semodule, no dbus, no exec — so it stays green even
-# when SELinux is disabled or the policy hasn't been built/installed.
+# /root/qdistro-src/qdistro/selinux/tier1/. Runtime policy loading and AVC
+# budget are covered by s55-tier1-enforcing.sh.
 #
 # Paired bats @test: phase7-tier1-skeleton.
 # PASS strings here MUST match assert_output_contains in that block.
@@ -65,7 +63,7 @@ fi
 
 # --- summary -----------------------------------------------------------
 if [ "$FAILCOUNT" -eq 0 ]; then
-    pass "spec/30 Tier-1 design + skeleton present"
+    pass "Tier-1 SELinux source inventory present"
     echo "[s50] $PASSCOUNT passes, 0 failures"
     exit 0
 else

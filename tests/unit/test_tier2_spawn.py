@@ -131,6 +131,7 @@ def _run_spawn(
             "FAKE_EXPECT_ACTION": "qdistro.tier2.spawn:weston-terminal/weston-terminal",
             "HOME": str(tmp_path / "home"),
             "PATH": _tool_path(tmp_path, dbus_mode=dbus_mode),
+            "QDISTRO_PROFILE": "dev",
             "TIER2_OUTER_DISPLAY": "wayland-1",
             "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
             "TIER2_USE_SECCTX": "0",
@@ -218,6 +219,7 @@ def _run_disposable(
             "FAKE_EXPECT_ACTION": f"qdistro.dispose.spawn:{workload}",
             "HOME": str(tmp_path / "home"),
             "PATH": _tool_path(tmp_path, dbus_mode=dbus_mode),
+            "QDISTRO_PROFILE": "dev",
             "TIER2_OUTER_DISPLAY": "wayland-1",
             "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
             "TIER2_USE_SECCTX": "0",
@@ -414,6 +416,77 @@ def test_root_launcher_off_by_default_runs_untagged(tmp_path: Path) -> None:
     assert "LAUNCH_TOKEN=" in result.stdout
 
 
+def test_hardened_direct_spawn_rejects_secctx_disabled(tmp_path: Path) -> None:
+    result = _run_disposable(
+        tmp_path,
+        dbus_mode="allow",
+        extra_env={"QDISTRO_PROFILE": "release", "TIER2_USE_SECCTX": "0"},
+    )
+    assert result.returncode == 2
+    assert "TIER2_USE_SECCTX=0 is dev/test-only" in result.stderr
+    assert "LAUNCH_TOKEN=" not in result.stdout
+
+
+def test_hardened_direct_spawn_rejects_missing_root_launcher_parent(tmp_path: Path) -> None:
+    bindir = Path(_tool_path(tmp_path, dbus_mode="allow"))
+    secctx = bindir / "qdistro-secctx-exec"
+    secctx.write_text("#!/bin/sh\nexit 99\n")
+    secctx.chmod(0o755)
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    qdwin_shell = tmp_path / "qdwin-shell.so"
+    qdwin_shell.write_text("stub\n")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(runtime / "wayland-1"))
+    sock.listen(1)
+    try:
+        env = os.environ.copy()
+        env.update({
+            "FAKE_DBUS_MODE": "allow",
+            "FAKE_EXPECT_ACTION": "qdistro.dispose.spawn:pdf",
+            "HOME": str(tmp_path / "home"),
+            "PATH": str(bindir),
+            "QDISTRO_PROFILE": "release",
+            "TIER2_OUTER_DISPLAY": "wayland-1",
+            "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
+            "XDG_RUNTIME_DIR": str(runtime),
+        })
+        result = subprocess.run(
+            ["/bin/bash", str(SPAWN), "--disposable", "pdf",
+             "--", "mupdf", "/tmp/doc.pdf"],
+            cwd=str(ROOT), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    finally:
+        sock.close()
+
+    assert result.returncode == 2
+    assert "no trusted root launcher parent" in result.stderr
+    assert "LAUNCH_TOKEN=" not in result.stdout
+
+
+def test_root_launcher_hardened_rejects_downgrade_knobs_in_source() -> None:
+    src = SPAWN.read_text(encoding="utf-8")
+    assert "TIER2_ALLOW_PRIVESC=1 is not accepted" in src
+    assert "TIER2_KEEP_CAPS is not accepted" in src
+    assert "TIER2_SECCOMP_PROFILE is not accepted from env" in src
+    assert "TIER2_NETWORK=${TIER2_NETWORK} is not an accepted" in src
+    root_guard = src.index('if [ "$ROOT_LAUNCHER" = 1 ] && is_hardened_profile; then')
+    secctx_gate = src.index('if [ "$ROOT_LAUNCHER" = 1 ]; then', root_guard + 1)
+    assert root_guard < secctx_gate
+
+
+def test_hardened_missing_seccomp_fails_closed_in_source() -> None:
+    src = SPAWN.read_text(encoding="utf-8")
+    assert "FATAL: no seccomp profile found for workload" in src
+    assert "dev profile using podman default" in src
+    assert "FATAL: seccomp profile $TIER2_SECCOMP_PROFILE_RESOLVED disappeared" in src
+    assert "using podman default" not in src.split(
+        "FATAL: seccomp profile $TIER2_SECCOMP_PROFILE_RESOLVED disappeared", 1
+    )[1]
+
+
 # --- open-in-disposable (07-disposables-plan P2) --------------------------
 # These exercise the LOAD-BEARING trusted-path enforcement the codex design
 # review required: the qdistro.dispose.open:<class> gate + the RO input
@@ -453,6 +526,7 @@ def _run_open(
             "FAKE_EXPECT_ACTION": f"qdistro.dispose.spawn:{workload}",
             "HOME": str(tmp_path / "home"),
             "PATH": _tool_path(tmp_path, dbus_mode=dbus_mode),
+            "QDISTRO_PROFILE": "dev",
             "TIER2_OUTER_DISPLAY": "wayland-1",
             "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
             "TIER2_USE_SECCTX": "0",
@@ -633,6 +707,7 @@ def test_open_requires_disposable(tmp_path: Path) -> None:
             "FAKE_EXPECT_ACTION": "",
             "HOME": str(tmp_path / "home"),
             "PATH": _tool_path(tmp_path, dbus_mode="allow"),
+            "QDISTRO_PROFILE": "dev",
             "TIER2_OUTER_DISPLAY": "wayland-1",
             "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
             "TIER2_USE_SECCTX": "0",
@@ -688,6 +763,7 @@ def test_open_ignores_caller_registry_env(tmp_path: Path) -> None:
             "FAKE_EXPECT_ACTION": "",
             "HOME": str(tmp_path / "home"),
             "PATH": _tool_path(tmp_path, dbus_mode="allow"),
+            "QDISTRO_PROFILE": "dev",
             "TIER2_OUTER_DISPLAY": "wayland-1",
             "TIER2_QDWIN_SHELL_SO": str(qdwin_shell),
             "TIER2_USE_SECCTX": "0",

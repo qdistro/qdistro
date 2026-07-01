@@ -85,7 +85,7 @@ fi
 # exec then errors out before reaching qdistro-tier1-exec and the
 # type transition never fires. The secctx wrap itself is covered by
 # s44 (phase7-tier4-secctx-exec); s51's job is the SELinux pipeline.
-TIER1_USE_SECCTX_FLAG="TIER1_USE_SECCTX=0"
+TIER1_USE_SECCTX_FLAG="QDISTRO_PROFILE=dev TIER1_USE_SECCTX=0"
 
 # Run spawn-tier1.sh sleep 0.5 in the background; while it sleeps,
 # `ps -eo pid,label` should show the sleep PID under qdistro_tier1_t.

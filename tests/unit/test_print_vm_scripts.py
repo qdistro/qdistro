@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import textwrap
 
 import pytest
 
@@ -27,6 +28,7 @@ ATTACH = os.path.join(PRINT_VM_DIR, "qdistro-print-attach-usb.sh")
 DETACH = os.path.join(PRINT_VM_DIR, "qdistro-print-detach-usb.sh")
 BUILD = os.path.join(PRINT_VM_DIR, "build-print-image.sh")
 DOMAIN = os.path.join(PRINT_VM_DIR, "domain-template.xml")
+USB_MANIFEST = os.path.join(PRINT_VM_DIR, "printvm-manifest.json")
 JOBS = os.path.join(PRINT_VM_DIR, "qdistro-print-jobs")
 
 
@@ -55,6 +57,13 @@ class TestDomainTemplate:
         with open(DOMAIN) as f:
             body = f.read()
         assert "<vsock" in body and "__CID__" in body
+
+    def test_usb_manifest_defaults_deny(self):
+        import json
+        with open(USB_MANIFEST, encoding="utf-8") as f:
+            obj = json.load(f)
+        assert obj["name"] == "qdistro-print"
+        assert obj["usbHostdevAllow"] == []
 
 
 # -- install-print-vm.sh -----------------------------------------------
@@ -99,15 +108,52 @@ class TestInstallScript:
 # -- attach / detach ---------------------------------------------------
 
 class TestAttachDetach:
+    def _attach_sandbox(self, tmp_path, *, pkcheck_rc=0,
+                        manifest='{"usbHostdevAllow":["0411:1234"]}'):
+        sand = tmp_path / "sand"
+        sand.mkdir()
+        for tool in ("bash", "grep", "sed", "cat", "rm", "mktemp",
+                     "dirname", "head", "python3"):
+            real = shutil.which(tool)
+            if real:
+                os.symlink(real, str(sand / tool))
+        attach = tmp_path / "qdistro-print-attach-usb.sh"
+        shutil.copyfile(ATTACH, attach)
+        attach.chmod(0o755)
+        (tmp_path / "printvm-manifest.json").write_text(manifest)
+        (sand / "pkcheck").write_text(textwrap.dedent(f"""\
+            #!/bin/bash
+            printf '%s\\n' "$*" > {tmp_path}/pkcheck.args
+            exit {pkcheck_rc}
+        """))
+        (sand / "pkcheck").chmod(0o755)
+        (sand / "virsh").write_text(textwrap.dedent(f"""\
+            #!/bin/bash
+            if [ "$3" = "list" ]; then
+                echo qdistro-print
+                exit 0
+            fi
+            if [ "$3" = "attach-device" ]; then
+                echo "$4" > {tmp_path}/attached.vm
+                exit 0
+            fi
+            exit 99
+        """))
+        (sand / "virsh").chmod(0o755)
+        env = {"PATH": str(sand), "HOME": os.environ.get("HOME", "/tmp")}
+        return attach, env
+
     def test_attach_help(self):
         out = _run(["bash", ATTACH, "--help"])
         assert out.returncode == 0
         assert "vendor-product" in out.stdout
+        assert "--vm" not in out.stdout
 
     def test_detach_help(self):
         out = _run(["bash", DETACH, "--help"])
         assert out.returncode == 0
         assert "vendor-product" in out.stdout
+        assert "--vm" not in out.stdout
 
     def test_attach_requires_device_spec(self):
         out = _run(["bash", ATTACH])
@@ -116,6 +162,14 @@ class TestAttachDetach:
 
     def test_detach_requires_device_spec(self):
         out = _run(["bash", DETACH])
+        assert out.returncode == 2
+
+    def test_attach_rejects_malformed_vendor_product(self):
+        out = _run(["bash", ATTACH, "--vendor-product", "0411"])
+        assert out.returncode == 2
+
+    def test_detach_rejects_malformed_vendor_product(self):
+        out = _run(["bash", DETACH, "--vendor-product", "0411"])
         assert out.returncode == 2
 
     def test_attach_missing_virsh_errors(self, tmp_path):
@@ -133,6 +187,59 @@ class TestAttachDetach:
                    env=env)
         assert out.returncode == 1
         assert "virsh" in out.stderr
+
+    def test_attach_missing_pkcheck_fails_closed(self, tmp_path):
+        sand = tmp_path / "sand"
+        sand.mkdir()
+        for tool in ("bash",):
+            real = shutil.which(tool)
+            if real:
+                os.symlink(real, str(sand / tool))
+        (sand / "virsh").write_text("#!/bin/bash\nexit 0\n")
+        (sand / "virsh").chmod(0o755)
+        env = {"PATH": str(sand), "HOME": os.environ.get("HOME", "/tmp")}
+        out = _run(["bash", ATTACH, "--vendor-product", "0411:1234"], env=env)
+        assert out.returncode == 5
+        assert "pkcheck" in out.stderr
+        assert "refusing" in out.stderr
+
+    def test_attach_ignores_polkit_env_bypass(self, tmp_path):
+        attach, env = self._attach_sandbox(tmp_path, pkcheck_rc=42)
+        env["QDISTRO_PRINT_USB_NO_POLKIT"] = "1"
+        out = _run(["bash", str(attach), "--vendor-product", "0411:1234"], env=env)
+        assert out.returncode == 5
+        assert "polkit denied" in out.stderr
+        assert not (tmp_path / "attached.vm").exists()
+
+    def test_attach_pkcheck_process_uses_real_pid_only(self, tmp_path):
+        attach, env = self._attach_sandbox(tmp_path)
+        out = _run(["bash", str(attach), "--vendor-product", "0411:1234"], env=env)
+        assert out.returncode == 0, out.stderr
+        args = (tmp_path / "pkcheck.args").read_text()
+        assert "--process" in args
+        process_arg = args.split("--process ", 1)[1].split()[0]
+        assert "," not in process_arg
+
+    def test_attach_target_vm_is_pinned(self, tmp_path):
+        attach, env = self._attach_sandbox(tmp_path)
+        env["QDISTRO_PRINT_VM_NAME"] = "evil-vm"
+        out = _run(["bash", str(attach), "--vendor-product", "0411:1234"], env=env)
+        assert out.returncode == 0, out.stderr
+        assert (tmp_path / "attached.vm").read_text().strip() == "qdistro-print"
+
+    def test_attach_rejects_vm_argument(self, tmp_path):
+        attach, env = self._attach_sandbox(tmp_path)
+        out = _run(["bash", str(attach), "--vendor-product", "0411:1234",
+                    "--vm", "evil-vm"], env=env)
+        assert out.returncode == 2
+        assert "pinned" in out.stderr
+
+    def test_attach_requires_usb_allowlist_match(self, tmp_path):
+        attach, env = self._attach_sandbox(tmp_path, manifest='{"usbHostdevAllow":[]}')
+        out = _run(["bash", str(attach), "--vendor-product", "0411:1234"], env=env)
+        assert out.returncode == 7
+        assert "not in print VM usbHostdevAllow" in out.stderr
+        assert not (tmp_path / "attached.vm").exists()
 
 
 # -- build-print-image -------------------------------------------------

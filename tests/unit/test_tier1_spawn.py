@@ -58,10 +58,11 @@ def _run_spawn(tmp_path: Path, *, dbus_mode: str | None) -> subprocess.Completed
         "FAKE_DBUS_MODE": dbus_mode or "",
         "FAKE_EXPECT_ACTION": "qdistro.tier1.spawn:/usr/bin/true",
         "HOME": str(tmp_path / "home"),
-        "PATH": _tool_path(tmp_path, dbus_mode=dbus_mode),
-        "QDISTRO_TIER1_EXEC": str(_tier1_exec(tmp_path)),
-        "TIER1_USE_SECCTX": "0",
-    })
+            "PATH": _tool_path(tmp_path, dbus_mode=dbus_mode),
+            "QDISTRO_TIER1_EXEC": str(_tier1_exec(tmp_path)),
+            "QDISTRO_PROFILE": "dev",
+            "TIER1_USE_SECCTX": "0",
+        })
     return subprocess.run(
         ["/bin/bash", str(SPAWN), "work", "--", "/usr/bin/true"],
         cwd=str(ROOT),
@@ -106,3 +107,54 @@ def test_tier1_spawn_fails_closed_without_dbus_send(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "dbus-send not found" in result.stderr
+
+
+def test_tier1_hardened_rejects_secctx_disabled(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.update({
+        "FAKE_DBUS_MODE": "allow",
+        "FAKE_EXPECT_ACTION": "qdistro.tier1.spawn:/usr/bin/true",
+        "HOME": str(tmp_path / "home"),
+        "PATH": _tool_path(tmp_path, dbus_mode="allow"),
+        "QDISTRO_TIER1_EXEC": str(_tier1_exec(tmp_path)),
+        "QDISTRO_PROFILE": "release",
+        "TIER1_USE_SECCTX": "0",
+    })
+    result = subprocess.run(
+        ["/bin/bash", str(SPAWN), "work", "--", "/usr/bin/true"],
+        cwd=str(ROOT),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "dev/test-only" in result.stderr
+
+
+def test_tier1_hardened_rejects_direct_untagged_launch(tmp_path: Path) -> None:
+    bindir = Path(_tool_path(tmp_path, dbus_mode="allow"))
+    secctx = bindir / "qdistro-secctx-exec"
+    secctx.write_text("#!/bin/sh\nexit 99\n")
+    secctx.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "FAKE_DBUS_MODE": "allow",
+        "FAKE_EXPECT_ACTION": "qdistro.tier1.spawn:/usr/bin/true",
+        "HOME": str(tmp_path / "home"),
+        "PATH": str(bindir),
+        "QDISTRO_TIER1_EXEC": str(_tier1_exec(tmp_path)),
+        "QDISTRO_PROFILE": "release",
+    })
+    result = subprocess.run(
+        ["/bin/bash", str(SPAWN), "work", "--", "/usr/bin/true"],
+        cwd=str(ROOT),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "direct Tier-1 launch is dev-only" in result.stderr

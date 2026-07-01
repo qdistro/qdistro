@@ -1,9 +1,38 @@
 # SELinux (Tier-1 sandbox + broker compartment)
 
 Tier-1 is qdistro's "lightest containment that's still enforced" rung on
-the isolation ladder, and the default tier for new user-silo apps. This
-document covers the SELinux modules that implement tier-1 and the broker
-compartment that admin-broker code runs in.
+the isolation ladder. The policy module and broker gate ship in v1, but direct
+Tier-1 user launches are dev/test-only in hardened profiles until a root/broker
+launcher is wired for secctx provenance. This document covers the SELinux
+modules that implement tier-1 and the broker compartment that admin-broker code
+runs in.
+
+## v1 shipping posture
+
+On the supported v1 Tumbleweed bootstrap path, `daily-driver` and
+`release` profiles require SELinux Enforcing. The bootstrap installs the
+qdistro policy modules, writes `SELINUX=enforcing`, flips the live runtime
+with `setenforce 1`, and refuses to finish unless `getenforce` reports
+`Enforcing`. The only shipped permissive paths are the explicit
+`--profile=dev` developer profile and the documented
+`QDISTRO_ALLOW_PERMISSIVE=1` AVC-harvest/debug override. Release evidence
+must not use that override.
+
+The v1 enforcing guarantees are:
+
+- `qdistro_broker_t` and `qdistro_pwd_t` are enforcing domains.
+- `qdistro_pwd_t` is the only qdistro domain allowed to manage vault
+ files, with `neverallow` ratchets preventing other domains from reading
+ vault files or ptracing the daemon.
+- `qdistro_tier1_t` does not get broad `$HOME` file reads or
+ all-domain `/proc` state reads. Per-app state is the relabelled
+ `qdistro_tier1_config_t` tree.
+
+The session manager is deliberately narrower in v1: the process is
+labelled `qdistro_sessmgr_t` so pwd can pin WireGuard key custody to that
+SELinux peer label, but `qdistro_sessmgr_t` itself remains a permissive
+domain until the full lifecycle/netns AVC harvest is complete. Do not
+describe session-manager syscall/file confinement as a v1 guarantee.
 
 ## Threat model recap
 
@@ -12,10 +41,16 @@ Tier-1 sits between tier 0 (no containment, fully-trusted app) and tier 2
 
 **Tier-1 blocks:**
 
+> **v1 scope:** these are the intended Tier-1 policy guarantees when the app is
+> launched with both SELinux type transition and trusted secctx provenance.
+> `qdistro-tier1-spawn` now refuses untagged direct launch in
+> `daily-driver`/`release`; `TIER1_USE_SECCTX=0` is only for SELinux-only
+> dev/test probes (`QDISTRO_PROFILE=dev`).
+
 - An app *in the same uid* reading another app's clipboard via Wayland
  selection without going through qdshell's broker gate.
-- The same app reading screen contents via a synthetic XWayland client or
- `/proc/<pid>/maps`-style introspection.
+- The same app using broad `/proc/<pid>/maps`-style introspection against
+ sibling domains.
 - The same app calling `setuid` / `ptrace` to escalate within the uid.
 - Random `/dev` / `/sys` access beyond the narrow allowed list.
 
@@ -42,7 +77,9 @@ floor under the non-adversarial threat model.
  enforcement, `wp_security_context_v1` tag for routing.
 3. **Spawn helper `qdistro-tier1-spawn`** in bash that takes
  `(silo_user, app...)` arguments and calls the wrapper, mirroring the
- shape of `qdistro-tier3-spawn`.
+ shape of `qdistro-tier3-spawn`. In hardened v1 it requires the secctx wrapper
+ to be available and refuses the direct untrusted-parent path; disabling secctx
+ is an explicit dev/test mode.
 
 ### Alternatives considered
 
@@ -169,6 +206,12 @@ init), `cgroup_t:dir search + :file getattr` (`/proc/<pid>/cgroup`
 readers), and `self:capability sys_ptrace` for cross-uid
 `/proc/<other-uid>/exe` readlink (the SELinux check happens before the
 kernel cap check).
+
+The module also carries v1 `neverallow` ratchets: non-`qdistro_pwd_t`
+domains may not read/open/manage `qdistro_pwd_var_t` vault files, and may
+not ptrace `qdistro_pwd_t`. Those assertions are the policy-build guard
+behind the product claim that vault ciphertext on disk is readable only
+by the pwd daemon domain under an enforcing Tumbleweed install.
 
 ## Tier-2 policy module
 

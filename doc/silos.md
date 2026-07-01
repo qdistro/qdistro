@@ -38,6 +38,25 @@ Examples:
 - `calendar-work`: web app profile expected to open Google Calendar.
 - `libreoffice-work`: office app plus document state and file associations.
 
+## Status
+
+This document is the owner-facing contract qdistro is building toward; the v1
+runtime implements only a narrower slice. The shipped session manager has a
+low-level uid/cgroup lifecycle for created, stopped, starting, active,
+stopping, and failed sessions, plus crash-safe persistence for that lifecycle.
+Template bindings, candidate validation, promotion, and first-activation state
+snapshots are implemented in the template layer; see
+[templates.md](templates.md).
+
+The richer owner-facing silo model below is **not yet implemented** in v1:
+Markdown silo-definition parsing, bootstrap orchestration, declared actions,
+required health checks, health-gated readiness, degraded / needs-user-action /
+recovering / rollback-available states, and automatic rollback after failed
+required health checks. Until that layer lands, these sections are design
+requirements, not a production guarantee. A silo whose process starts but whose
+application-level health check would fail may still appear active to the
+low-level session manager.
+
 ## Silo Definition Files
 
 For now, silo definitions are predictable Markdown. They are intended to be

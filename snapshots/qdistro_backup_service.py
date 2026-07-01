@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import json
 import os
 import shlex
@@ -90,6 +91,29 @@ def _mkdir_private(path: str) -> None:
 
 DEFAULT_CONFIG = "/etc/qdistro/backup.conf"
 DEFAULT_STATE_DIR = "/var/lib/qdistro/backup"
+_PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN DSA PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"AGE-SECRET-KEY-",
+)
+_ENFORCED_COLLECT_EXCLUDES = (
+    "backup-sign-*",
+    "*.key",
+    "*.pem",
+    "id_*",
+    "identity/",
+    "identity/**",
+)
+_SENSITIVE_NAME_PATTERNS = (
+    "backup-sign-*",
+    "*.key",
+    "*.pem",
+    "id_*",
+)
 
 
 def _require(cond: bool, msg: str) -> None:
@@ -180,8 +204,10 @@ def load_config(path: str) -> dict:
             _require(isinstance(excludes, list) and
                      all(isinstance(p, str) for p in excludes),
                      f"subvol {name!r} 'exclude' must be a list of strings")
+            merged_excludes = list(dict.fromkeys(
+                list(excludes) + list(_ENFORCED_COLLECT_EXCLUDES)))
             subvols.append({"name": name, "collector": True,
-                            "paths": list(paths), "exclude": list(excludes)})
+                            "paths": list(paths), "exclude": merged_excludes})
         else:
             source = s.get("source")
             _require(isinstance(source, str) and bool(source),
@@ -500,6 +526,49 @@ def _src_subdir(src: str) -> str:
     return f"{mangled}-{h}"
 
 
+def _path_has_sensitive_name(path: str) -> bool:
+    base = os.path.basename(path)
+    return any(fnmatch.fnmatch(base, pat) for pat in _SENSITIVE_NAME_PATTERNS)
+
+
+def _bytes_have_private_marker(data: bytes) -> bool:
+    return any(marker in data for marker in _PRIVATE_KEY_MARKERS)
+
+
+def _assert_no_private_keys_under(root: str) -> None:
+    """Fail closed if the collector stage contains private key material.
+
+    The rsync exclude list catches known qdistro key names. This scan is the
+    second line of defence for renamed keys, age identities, or custom operator
+    paths that would otherwise enter the encrypted backup blob.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for dirname in dirnames:
+            p = os.path.join(dirpath, dirname)
+            if _path_has_sensitive_name(p):
+                raise BackupServiceError(
+                    f"metadata collector staged sensitive path {p!r} "
+                    "— refusing to put private key material in the backup")
+        for filename in filenames:
+            p = os.path.join(dirpath, filename)
+            if _path_has_sensitive_name(p):
+                raise BackupServiceError(
+                    f"metadata collector staged sensitive path {p!r} "
+                    "— refusing to put private key material in the backup")
+            if os.path.islink(p):
+                continue
+            try:
+                with open(p, "rb") as f:
+                    data = f.read()
+            except OSError as e:
+                raise BackupServiceError(
+                    f"metadata collector cannot inspect {p!r}: {e}") from e
+            if _bytes_have_private_marker(data):
+                raise BackupServiceError(
+                    f"metadata collector staged private-key marker in {p!r} "
+                    "— refusing to put private key material in the backup")
+
+
 def collect_metadata(sv: dict, dest: str, rsync_cmd: str,
                      subvol_create_cmd: str) -> str:
     """Stage a config-file set into ``dest`` and return ``dest``. ``dest`` must
@@ -556,6 +625,7 @@ def collect_metadata(sv: dict, dest: str, rsync_cmd: str,
             raise BackupServiceError(
                 f"metadata collect of {src!r} failed (rsync exit "
                 f"{proc.returncode})")
+        _assert_no_private_keys_under(sub)
     return dest
 
 

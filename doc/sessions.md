@@ -125,9 +125,12 @@ Lock-time defaults:
 | VR / immersive session | prefer presence/idle policy, not desktop lock alone |
 | Recall viewing (post-v1; cut from v1) | revoke viewer grant and clear decrypted results |
 
-The lock UI must show non-suppressible indicators for live microphone,
-camera, screencast/screen capture, system-audio capture, virtual input or
-accessibility control, and qdistro-specific network egress.
+Planned lock UI indicators: the lock surface should show non-suppressible
+state for live microphone, camera, screencast/screen capture, system-audio
+capture, virtual input or accessibility control, and qdistro-specific network
+egress. v1 does not yet wire the authoritative qdwin capture feed or
+session-manager egress feed into `qdlocker`, so those indicators are not a
+current shipped guarantee.
 
 User sessions do not run independent screenlockers and must not prompt for the
 admin/root password. When locked, the only unlock path is the admin locker. For
@@ -256,11 +259,10 @@ transient `Stopping` / `Deleting` states followed by the resting
 `Stopped` / row-deletion; treat unknown state strings as "transient,
 wait."
 
-The qdshell lock screen consumes the same `ListSilos` rows for the
-non-suppressible network-egress indicator. Active tier-3 rows with
-`egress: null` are shown as legacy host egress, `direct` and `wg:NAME`
-are shown by their policy, and `none` is treated as intentionally dark.
-The indicator refreshes on `SiloChanged` and by a safety-net poll.
+The planned lock-screen network-egress indicator will consume the same
+`ListSilos` rows. Active tier-3 rows with `egress: null` should be shown as
+legacy host egress, `direct` and `wg:NAME` by their policy, and `none` as
+intentionally dark. This is not wired into the v1 `qdlocker` UI yet.
 
 Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,

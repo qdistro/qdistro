@@ -212,6 +212,13 @@ when its guard set is narrower.
 | Backup/export | Local backup allowed; remote backup denied unless a policy-specific exception exists. |
 | Workflow step | Deny guarded inputs when effective processing host is remote or unknown. |
 
+Status: this table is the target guard contract. In v1, guard enforcement is
+implemented only on broker paths that explicitly call the lineage chokepoint
+layer. Clipboard paste/receive is the first receive-time derivative path under
+`lineage_enforce`; clipboard transfer/set-selection remains a permission/audit
+gate, and the other rows remain design requirements until their handlers wire
+`record_chokepoint` or an equivalent broker-owned guard decision.
+
 ## Hidden State
 
 Stores that can retain content from more than one silo must be session-scoped,

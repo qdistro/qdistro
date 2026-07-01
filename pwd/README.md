@@ -73,6 +73,13 @@ a `GetItem` / `IsUnlocked` / list activity in `QDISTRO_PWD_IDLE_S`
 seconds (default 600s). Each relock fires a `VaultLocked(name,
 "idle-timeout")` signal.
 
+Whole-machine lifecycle relock is also enforced. The daemon subscribes
+directly to logind `PrepareForSleep(true)` and `Session.Lock`, and qdlocker
+calls `LockAllVaults("screen-lock:<reason>")` when qdwin asks it to enter the
+locked state. Lifecycle relock wipes every resident vault key, clears
+outstanding browser Fill -> FillConfirm tokens, and emits
+`VaultLocked(name, reason)` for each vault it relocked.
+
 ## Vault file format
 
 JSON on disk under `/var/lib/qdistro/vaults/<name>.vault`, mode 0600.

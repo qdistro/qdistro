@@ -28,10 +28,12 @@
 #       qnotebook, qfileman.
 #  10.  Runs the existing scripts/install/install-*.sh installer chain
 #       (broker, session-manager, polkit, pwd, qsu, browser-bridge, phone,
-#       print, recall, snapshots, tier3, tier5).
+#       print, snapshots, tier3, tier5). Recall is cut from v1 and is not in
+#       the bootstrap chain.
 #  11.  Installs qdlocker systemd user service for admin.
 #  12.  Installs locker configuration via deploy/install-locker-config.sh.
-#  13.  (Tumbleweed) loads SELinux policy modules in permissive mode.
+#  13.  (Tumbleweed) loads SELinux policy modules; hardened profiles require
+#       enforcing mode unless QDISTRO_ALLOW_PERMISSIVE=1 is explicitly set.
 #  14.  Installs the qdwin user session for admin (weston + qdshell).
 #  15.  Configures greetd to autologin admin into the session (tty3).
 #  16.  (Opt-in) builds tier-4 guest base image.
@@ -147,7 +149,12 @@
 #   QDISTRO_SKIP_PACKAGES, QDISTRO_SKIP_GREETD,
 #   QDISTRO_SKIP_SUBVOLUMES, QDISTRO_SKIP_SOURCES,
 #   QDISTRO_SKIP_BUILD, QDISTRO_BUILD_TIER4_BASE,
-#   QDISTRO_RESET_PASSWORDS, QDISTRO_STRICT, QDISTRO_STATE_DIR.
+#   QDISTRO_RESET_PASSWORDS, QDISTRO_STRICT, QDISTRO_STATE_DIR,
+#   QDISTRO_ALLOW_PLAINTEXT_ROOT (explicit daily-driver/release override:
+#   runtime silo isolation only; no data-at-rest guarantee).
+#   QDISTRO_ALLOW_PERMISSIVE=1 is the documented hardened-profile escape
+#   hatch for SELinux AVC harvests; without it daily-driver/release installs
+#   require SELINUX=enforcing and a live enforcing runtime.
 
 set -euo pipefail
 
@@ -283,6 +290,56 @@ fail_subvol() {
     else
         die "$* — fatal in '$QDISTRO_PROFILE' profile (the per-silo subvolume is the snapshot/quota boundary; use --profile=dev to warn-and-continue)"
     fi
+}
+
+root_block_device() {
+    local src
+    src="$(findmnt -n -o SOURCE / 2>/dev/null | head -n1 | tr -d ' ' || true)"
+    src="${src%%[*}"
+    printf '%s' "$src"
+}
+
+block_device_is_crypt() {
+    local dev="$1" type base uuid
+    [ -n "$dev" ] || return 1
+    type="$(lsblk -n -o TYPE "$dev" 2>/dev/null | head -n1 | tr -d ' ' || true)"
+    [ "$type" = "crypt" ] && return 0
+    base="$(basename "$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")")"
+    uuid=""
+    if [ -r "/sys/class/block/$base/dm/uuid" ]; then
+        uuid="$(cat "/sys/class/block/$base/dm/uuid" 2>/dev/null || true)"
+    fi
+    case "$uuid" in CRYPT-*) return 0;; esac
+    return 1
+}
+
+root_is_encrypted() {
+    local dev parent i
+    dev="$(root_block_device)"
+    [ -n "$dev" ] || return 1
+    for i in 1 2 3 4 5; do
+        block_device_is_crypt "$dev" && return 0
+        parent="$(lsblk -n -o PKNAME "$dev" 2>/dev/null | head -n1 | tr -d ' ' || true)"
+        [ -n "$parent" ] || break
+        case "$parent" in
+            /dev/*) dev="$parent" ;;
+            *) dev="/dev/$parent" ;;
+        esac
+    done
+    return 1
+}
+
+enforce_root_disk_encryption() {
+    is_dev && return 0
+    if root_is_encrypted; then
+        log "root filesystem encryption: detected"
+        return 0
+    fi
+    if [ "${QDISTRO_ALLOW_PLAINTEXT_ROOT:-}" = "1" ]; then
+        warn "QDISTRO_ALLOW_PLAINTEXT_ROOT=1 set: proceeding without encrypted root; qdistro silo guarantees are runtime-only on this install"
+        return 0
+    fi
+    die "root filesystem is not encrypted (no dm-crypt/LUKS layer detected); daily-driver/release installs require encrypted root, or set QDISTRO_ALLOW_PLAINTEXT_ROOT=1 to accept runtime-only silo isolation"
 }
 
 require_root() {
@@ -1793,18 +1850,80 @@ install_selinux_policies() {
         warn "skipping SELinux policy modules — Ubuntu uses AppArmor (qdistro AppArmor policy is not yet packaged)"
         return 0
     fi
-    if ! command -v semodule >/dev/null 2>&1; then
-        warn "semodule not found; skipping SELinux policy install"
-        return 0
+    local allow_permissive="${QDISTRO_ALLOW_PERMISSIVE:-}"
+    local target_mode="enforcing"
+    if is_dev; then
+        target_mode="permissive"
+        warn "dev profile: SELinux global permissive is allowed for disposable AVC harvests — NOT a release default"
+    elif [ "$allow_permissive" = "1" ]; then
+        target_mode="permissive"
+        warn "QDISTRO_ALLOW_PERMISSIVE=1: hardened SELinux enforcing requirement overridden for this install"
+        warn "this override is for documented AVC-harvest/debug runs only; release evidence must omit it"
     fi
-    sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
+
+    if ! command -v semodule >/dev/null 2>&1; then
+        if [ "$target_mode" = "permissive" ]; then
+            warn "semodule not found; skipping SELinux policy install under permissive override/dev profile"
+            return 0
+        fi
+        die "semodule not found; '$QDISTRO_PROFILE' profile requires SELinux policy install and enforcing mode (set QDISTRO_ALLOW_PERMISSIVE=1 only for a documented AVC-harvest override)"
+    fi
+
+    if [ ! -e /etc/selinux/config ]; then
+        if [ "$target_mode" = "permissive" ]; then
+            warn "/etc/selinux/config missing; creating a minimal $target_mode config"
+            install -d -m 0755 /etc/selinux
+            printf 'SELINUX=%s\nSELINUXTYPE=targeted\n' "$target_mode" > /etc/selinux/config
+        else
+            die "/etc/selinux/config missing; '$QDISTRO_PROFILE' profile requires an SELinux-enabled Tumbleweed install"
+        fi
+    elif grep -q '^SELINUX=' /etc/selinux/config; then
+        sed -i "s/^SELINUX=.*/SELINUX=$target_mode/" /etc/selinux/config
+    else
+        printf '\nSELINUX=%s\n' "$target_mode" >> /etc/selinux/config
+    fi
+
+    if [ "$target_mode" = "enforcing" ]; then
+        log "  SELinux config: enforcing (daily-driver/release fail closed)"
+    else
+        log "  SELinux config: permissive (dev/explicit override)"
+    fi
+
     cd "$REPO_ROOT/qdistro"
     for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
         if [ -d "$pol" ] && [ -x "$pol/install-policy.sh" ]; then
             log "  -> $pol"
-            (cd "$pol" && bash install-policy.sh) || warn "$pol install failed"
+            if ! (cd "$pol" && bash install-policy.sh); then
+                if [ "$target_mode" = "permissive" ]; then
+                    warn "$pol install failed under permissive override/dev profile"
+                else
+                    die "$pol install failed; '$QDISTRO_PROFILE' profile requires qdistro SELinux policy before enforcing"
+                fi
+            fi
         fi
     done
+
+    if [ "$target_mode" = "enforcing" ]; then
+        if ! command -v getenforce >/dev/null 2>&1; then
+            die "getenforce not found; cannot prove SELinux enforcing in '$QDISTRO_PROFILE' profile"
+        fi
+        /usr/sbin/setenforce 1 2>/dev/null || setenforce 1 2>/dev/null \
+            || die "failed to switch SELinux to enforcing; ensure the kernel boots with SELinux enabled, or set QDISTRO_ALLOW_PERMISSIVE=1 only for a documented AVC-harvest override"
+        local mode
+        mode="$(getenforce 2>/dev/null || echo Unknown)"
+        if [ "$mode" != "Enforcing" ]; then
+            die "SELinux mode is $mode after setenforce 1; '$QDISTRO_PROFILE' profile refuses to finish without enforcing (set QDISTRO_ALLOW_PERMISSIVE=1 only for a documented AVC-harvest override)"
+        fi
+        log "  SELinux runtime: Enforcing"
+    else
+        if command -v setenforce >/dev/null 2>&1; then
+            /usr/sbin/setenforce 0 2>/dev/null || setenforce 0 2>/dev/null || true
+        fi
+        if command -v getenforce >/dev/null 2>&1; then
+            log "  SELinux runtime: $(getenforce 2>/dev/null || echo Unknown)"
+        fi
+        return 0
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1965,6 +2084,7 @@ main() {
 
     require_root
     detect_distro
+    enforce_root_disk_encryption
     prompt_inputs
 
     log "summary:"

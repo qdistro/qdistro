@@ -10,12 +10,19 @@ admin compositor (qdwin) ← outer
  │
  ▼ wayland-1 (UNIX socket, /run/user/1000/wayland-1)
  │
-[qdistro-secctx-exec]    ← wraps the spawn with wp_security_context_v1
- │                         (sandbox_engine="qdistro.tier2",
- │                          app_id="<container>/<app>",
- │                          instance_id=<launch-token>)
+[qdistro-tier2-silo@.service → qdistro-tier2-silo-launch]  ← v1 hardened path
+ │                         root parent, env -i, trusted TIER2_SILO/NETWORK
+ │
+[qdistro-secctx-exec]    ← run as admin under direct root parent
+ │                         wp_security_context_v1:
+ │                         sandbox_engine="qdistro.tier2",
+ │                         app_id="<container>/<app>",
+ │                         instance_id=<launch-token>
  ▼
-[podman run --userns=keep-id -v /run/user/1000:/run/user/1000 ...]
+[podman run --userns=keep-id
+ │  -v /run/user/1000/qdistro-tier2/<token>:/run/user/1000
+ │  -v /run/user/1000/wayland-secctx-NN:/run/user/1000/wayland-secctx-NN
+ │  --security-opt=seccomp=tier2/seccomp/<workload>.json ...]
  │
  ▼ inside the container
  │
@@ -103,12 +110,19 @@ user does not see the image boundary.
 # Build the weston-terminal image:
 bash tier2/make-tier2-image.sh weston-terminal
 
-# Spawn the workload:
-tier2/spawn-tier2.sh tier2-c1 weston-terminal -- weston-terminal
+# Dev-only direct spawn:
+QDISTRO_PROFILE=dev tier2/spawn-tier2.sh tier2-c1 weston-terminal -- weston-terminal
 
 # Stop:
 podman stop tier2-c1
 ```
+
+Hardened v1 launches (`daily-driver` / `release`) go through the
+`qdistro-tier2-silo@.service` root-launcher path. Direct admin
+`spawn-tier2.sh` is kept for local tests and diagnostics only because it cannot
+provide the root-parent secctx attestation. Root-launcher mode rejects privesc,
+added capabilities, caller-selected seccomp profiles, and network modes outside
+`none`/`slirp4netns`; missing workload seccomp profiles fail closed.
 
 ## Tests
 
