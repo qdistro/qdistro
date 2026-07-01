@@ -190,6 +190,25 @@ def test_external_network_in_burst_allowlist():
     assert "external-network" in report.INFRA_BURST_CLASSIFIERS
 
 
+def test_gtk4_black_canvas_is_expected_failure():
+    # apps/05 GTK4-on-pixman renders black by design of the software backend; it
+    # is a documented known limitation, excluded from the actionable metric but
+    # still surfaced. Keyed on the scenario path in the subject.
+    r = _row(gate="gui", subject="qdwin/tests/apps/05-gtk4-gnome-text-editor.md",
+             notes="agent status=FAIL rc=0")
+    reason = report.nonactionable_failure_reason(r)
+    assert reason is not None
+    assert "known rendering limitation" in reason
+
+
+def test_expected_failure_registry_does_not_over_match():
+    # A different apps scenario failing is still actionable — the expected-failure
+    # bucket keys on the exact documented path, not on "apps/" broadly.
+    r = _row(gate="gui", subject="qdwin/tests/apps/04-cursor-spam-suppressed.md",
+             notes="agent status=FAIL rc=0")
+    assert report.nonactionable_failure_reason(r) is None
+
+
 def test_partition_normalizes_status_like_the_classifier():
     # A padded / upper-cased status must not be silently dropped from BOTH
     # buckets — partition_failures normalizes the same way the classifier does.
