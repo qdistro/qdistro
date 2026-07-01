@@ -1,0 +1,10 @@
+# scenario-flake-allow.tsv — documented waivers for scenario-flake-lint.py --strict.
+# Columns (TAB-separated): path_substring<TAB>rule<TAB>reason
+#   path_substring  matched against the POSIX file path (a substring — use enough
+#                   of the path to identify ONE file)
+#   rule            ONE rule name to waive (e.g. screenshot-only-assert for an
+#                   explicit visual-rendering test). Reserve * for a file wholly
+#                   outside the lint contract — a visual test can still have a
+#                   real pgrep/tmp/source bug, so do not blanket-waive it.
+#   reason          why this finding is acceptable (shown in --strict output)
+# Keep this list SHORT and justified; prefer fixing the scenario over waiving.

@@ -114,24 +114,35 @@ gate_lint() {
         record_result lint md-structure skip 0 pass lint "$log_path" "$md_missing/$nmd scenarios missing headings (heuristic, non-fatal)"
     fi
 
-    # 4. flake-smell lint over GUI scenarios (warn-only). Flags the recurring
-    # flake sources (fixed sleeps before assertions, unscoped journal reads,
-    # one-shot systemctl/virsh, prose-only assertions) so they can be migrated to
-    # the waiter library. Reporting only — never hard-fails; the finding count is
-    # the migration progress metric.
+    # 4. flake-smell lint over GUI scenarios. Flags the recurring flake sources
+    # (fixed sleeps before assertions, unscoped journal reads, one-shot
+    # systemctl/virsh, relative source paths, self-matching pgrep, unscoped /tmp
+    # writes, screenshot-only asserts, backgrounded waits, prose-only assertions)
+    # so they can be migrated to the waiter library / scenario-tmpdir contract.
+    # The `fl_findings` count (non-allowlisted; ci/scenario-flake-allow.tsv waives
+    # documented cases) is the migration-progress metric. WARN-ONLY by default;
+    # set QCI_FLAKE_STRICT=1 to hard-fail the gate on any non-allowlisted finding
+    # (the Phase-1 exit criterion, adopted once the count is driven to the
+    # allowlist).
     local fl_script="$QCI_BIN_DIR/scenario-flake-lint.py" fl_findings
     if [ -f "$fl_script" ] && command -v python3 >/dev/null 2>&1; then
-        { echo; echo "## scenario flake-smell lint (warn-only)"; } >> "$log_path"
+        local fl_strict=${QCI_FLAKE_STRICT:-0}
+        { echo; echo "## scenario flake-smell lint (strict=$fl_strict)"; } >> "$log_path"
         python3 "$fl_script" --format gcc >> "$log_path" 2>>"$log_path"
         fl_findings=$(python3 "$fl_script" --format summary 2>&1 >/dev/null \
             | awk '/scenario-flake-lint:/{print $2; exit}')
         [ -n "$fl_findings" ] 2>/dev/null || fl_findings=0
-        log "lint: scenario flake-smells $fl_findings finding(s) (warn-only)"
         if [ "$fl_findings" -eq 0 ] 2>/dev/null; then
+            log "lint: scenario flake-smells 0 finding(s)"
             record_result lint flake-smells pass 0 pass lint "$log_path" "no flake-smell findings"
+        elif [ "$fl_strict" = 1 ]; then
+            log "lint: scenario flake-smells $fl_findings finding(s) (STRICT — failing)"
+            record_result lint flake-smells fail "$EXIT_HOST" lint lint "$log_path" \
+                "$fl_findings non-allowlisted flake-smell finding(s) (QCI_FLAKE_STRICT=1)"
         else
+            log "lint: scenario flake-smells $fl_findings finding(s) (warn-only)"
             record_result lint flake-smells skip 0 pass lint "$log_path" \
-                "$fl_findings flake-smell finding(s) (warn-only; migrate to waiter lib)"
+                "$fl_findings flake-smell finding(s) (warn-only; migrate to waiter lib / scenario-tmpdir)"
         fi
     else
         record_skip lint flake-smells lint "scenario-flake-lint.py or python3 absent; skipping flake-smell lint"
