@@ -492,7 +492,19 @@ def correlated_infra_bursts(
         run_cls: str | None = None
         run: list[dict[str, str]] = []
 
-        def _flush(run_cls: str | None, run: list[dict[str, str]]) -> None:
+        # `have_epochs`, `candidates`, and `lane` are loop-scoped; bind them as
+        # default args so the nested closure captures the CURRENT iteration's
+        # values (B023) rather than late-binding to whatever the loop left them
+        # at. `_flush` is only ever called synchronously within the same
+        # iteration, so this preserves behavior exactly while satisfying ruff.
+        def _flush(
+            run_cls: str | None,
+            run: list[dict[str, str]],
+            *,
+            have_epochs: bool = have_epochs,
+            candidates: list[dict[str, object]] = candidates,
+            lane: str = lane,
+        ) -> None:
             if run_cls is None or len(run) < min_run:
                 return
             first_idx = 0
