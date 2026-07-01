@@ -282,7 +282,19 @@ release_vm() {
         # (abort_run).
         if [ "${#RUN_GOLDEN_DISKS[@]}" -gt 0 ]; then
             GOLDEN_PRESERVE=1
-            mkdir -p "$RDIR/vm" && : > "$RDIR/vm/golden-preserve"
+            # H12: the parent (cleanup_run_goldens) learns of the preserve ONLY
+            # through this marker file — the GOLDEN_PRESERVE var above cannot cross
+            # the backgrounded worker subshell. If the marker write fails (disk
+            # full, unwritable dir), the parent could delete a golden this
+            # preserved overlay still backs, stranding the triage disk chain.
+            # VERIFY the write and, on any failure, log LOUDLY. cleanup_run_goldens
+            # additionally double-checks backing referrers, so a missing marker
+            # still takes the SAFE (preserve) path there.
+            if ! { mkdir -p "$RDIR/vm" && : > "$RDIR/vm/golden-preserve"; } 2>/dev/null \
+                 || [ ! -e "$RDIR/vm/golden-preserve" ]; then
+                log "WARNING: FAILED to write golden-preserve marker ($RDIR/vm/golden-preserve) for preserved VM $vm — golden deletion now relies on the backing-referrer safety check in cleanup_run_goldens"
+                printf 'golden_preserve_marker_write_failed=%s\n' "$vm" >> "$RDIR/manifest.txt" 2>/dev/null || true
+            fi
         fi
         local preserved_state notes
         if [ "${QCI_KEEP_FAILED_VM_RUNNING:-0}" = 1 ]; then
@@ -488,6 +500,27 @@ ensure_run_golden() {
     return 0
 }
 
+# Return 0 if any qci-* overlay in the images dir still names $golden (by
+# basename) as its qcow2 backing file — deleting $golden would then strand that
+# overlay's disk chain. Cheap: one `qemu-img info` per overlay. Used as H12's
+# belt-and-suspenders: even if the preserve marker was never written, a golden
+# with a surviving referrer is never deleted. Pure w.r.t. read-only qemu-img.
+golden_has_backing_referrer() {
+    local golden=$1 img_dir gbase ov obacking
+    [ -n "$golden" ] || return 1
+    command -v qemu-img >/dev/null 2>&1 || return 1
+    img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
+    gbase=$(basename -- "$golden")
+    for ov in "$img_dir"/qci-*.qcow2; do
+        [ -e "$ov" ] || continue
+        [ "$ov" = "$golden" ] && continue
+        obacking=$(qemu-img info "$ov" 2>/dev/null | sed -n 's/^backing file: //p' | head -n1)
+        [ -n "$obacking" ] || continue
+        case "$obacking" in *"$gbase"*) return 0 ;; esac
+    done
+    return 1
+}
+
 # Remove golden backing disks at end of run — but ONLY once no worker overlay
 # can still reference them. If a failed worker was PRESERVED for triage, its
 # overlay's backing chain points at the golden, so we keep the golden too.
@@ -500,6 +533,15 @@ cleanup_run_goldens() {
         # GOLDEN_PRESERVE var is an in-parent fallback (abort_run path).
         if [ "$GOLDEN_PRESERVE" = 1 ] || [ -e "$RDIR/vm/golden-preserve" ]; then
             log "preserving golden backing $d (a failed worker overlay was preserved and references it)"
+            printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
+            continue
+        fi
+        # H12 belt-and-suspenders: the marker write can fail inside the worker
+        # subshell (disk full/unwritable), which would otherwise let us delete a
+        # golden a preserved overlay still backs. Independently verify no
+        # surviving overlay references this golden as backing before deleting it.
+        if golden_has_backing_referrer "$d"; then
+            log "preserving golden backing $d (an existing overlay still references it as backing; preserve marker missing?)"
             printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
             continue
         fi
