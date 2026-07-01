@@ -1111,11 +1111,18 @@ gate_gui() {
             release_vm "$svm" "$rc"
         else
             # Disposable: parallel pool, one fresh GUI VM per scenario.
-            local jobs running=0
+            local jobs running=0 frag=0 worker_id
             jobs=$(gui_job_count)
+            # Route each concurrent worker's result rows to a per-worker fragment
+            # (merged at finish_run) so parallel appends never interleave and a
+            # crashed worker's rows survive. Auto-on when >1 worker; operator forces
+            # off with QCI_RESULT_FRAGMENTS=0.
+            [ "$jobs" -gt 1 ] && frag=${QCI_RESULT_FRAGMENTS:-1}
             log "gui gate: ${#to_run[@]} agent scenarios on disposable VMs, up to $jobs in parallel (set QCI_GUI_JOBS to override)"
             for scenario in "${to_run[@]}"; do
-                gui_run_scenario "$scenario" &
+                worker_id=$(worker_fragment_id gui "${scenario#"$WORKSPACE"/}")
+                QCI_RESULT_FRAGMENTS="$frag" QCI_WORKER_ID="$worker_id" \
+                    gui_run_scenario "$scenario" &
                 running=$((running + 1))
                 if [ "$running" -ge "$jobs" ]; then
                     wait -n; frc=$?

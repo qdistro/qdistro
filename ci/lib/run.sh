@@ -79,6 +79,11 @@ finish_run() {
     local rc=$1
     FINALIZING=1
     [ -n "$RDIR" ] || exit "$rc"
+    # Fold any per-worker result fragments back into the canonical TSVs BEFORE the
+    # release-escalation scan and report.py read them. Idempotent + a no-op unless
+    # a parallel gate wrote fragments; runs here too on an interrupted run (abort_run
+    # routes through finish_run) so a killed pool's completed rows are not lost.
+    merge_worker_fragments
     # Reclaim per-run golden backing disks (kept if a failed worker was preserved).
     cleanup_run_goldens
     # Release-profile escalation (QCI_RELEASE=1): a `blocked` row in a
@@ -124,6 +129,16 @@ abort_run() {
     local sig=$1
     [ "$FINALIZING" = 1 ] && exit "$EXIT_RUNNER"
     log "received $sig; preserving created VMs and finalizing run"
+    # Stop and reap any still-running background worker subshells FIRST, so
+    # finish_run's merge_worker_fragments can't run while a worker is still
+    # appending to its fragment (the no-concurrent-writer invariant). A worker's
+    # partial fragment is preserved and merged — that is the crash-diagnosis point.
+    local pids=()
+    mapfile -t pids < <(jobs -pr)
+    if [ "${#pids[@]}" -gt 0 ]; then
+        kill "${pids[@]}" 2>/dev/null || true
+        wait "${pids[@]}" 2>/dev/null || true
+    fi
     local vm
     if [ -n "$RDIR" ] && [ -f "$RDIR/vm/created-vms.txt" ]; then
         while IFS= read -r vm; do
@@ -176,6 +191,67 @@ category_for() {
     echo unit
 }
 
+# Where a per-worker record row is appended. Under a PARALLEL worker pool the gate
+# sets QCI_RESULT_FRAGMENTS=1 and each worker exports a unique QCI_WORKER_ID, so
+# rows land in a per-worker fragment `$RDIR/<name>.d/<worker>.tsv` instead of the
+# shared `$RDIR/<name>.tsv`; the parent merges fragments after the pool joins
+# (merge_worker_fragments). This removes the dependence on append atomicity under
+# concurrency and preserves a crashed worker's rows for post-mortem. A SERIAL run
+# (no worker id) writes the canonical file exactly as before — the default path is
+# byte-identical, so nothing changes unless a gate opts a parallel pool in.
+# Args: name (the TSV basename without .tsv). Pure (env + args) => host-testable.
+# A collision-proof, length-bounded worker id: a readable slug (truncated) plus a
+# short stable hash of the FULL subject, so two files/scenarios that share a
+# basename (foo/x.bats vs bar/x.bats) never share a fragment (which would
+# reintroduce the concurrent append we are removing), and a very long path cannot
+# produce an overlong filename. Args: gate subject(relative path).
+worker_fragment_id() {
+    local gate=$1 subject=$2 slug hash
+    slug=$(safe_name "$subject")
+    slug=${slug:0:96}
+    hash=$(printf '%s' "$subject" | cksum | awk '{print $1}')
+    printf '%s-%s-%s' "$gate" "$slug" "$hash"
+}
+
+record_dest() {
+    local name=$1
+    if [ "${QCI_RESULT_FRAGMENTS:-0}" = 1 ] && [ -n "${QCI_WORKER_ID:-}" ]; then
+        local d="$RDIR/$name.d"
+        # On mkdir failure (disk/permissions), fall back to the canonical file so
+        # the row is still recorded (degraded to O_APPEND) rather than lost.
+        if mkdir -p "$d" 2>/dev/null; then
+            printf '%s/%s/%s.tsv' "$RDIR" "$name.d" "$QCI_WORKER_ID"
+            return
+        fi
+    fi
+    printf '%s/%s.tsv' "$RDIR" "$name"
+}
+
+# Merge per-worker fragments back into the canonical TSVs. A gate calls this AFTER
+# its worker pool has joined. Idempotent: each fragment is appended once then
+# renamed `.merged` (kept for post-mortem, never re-merged), so a second gate's
+# merge skips an earlier gate's fragments. A no-op when no `.d` fragment dirs
+# exist (serial runs). Fragments merge in sorted worker-name order for a
+# deterministic canonical file.
+merge_worker_fragments() {
+    local name d frag
+    for name in results timings scenario-attempts host-load flake; do
+        d="$RDIR/$name.d"
+        [ -d "$d" ] || continue
+        while IFS= read -r frag; do
+            if [ -s "$frag" ]; then
+                cat "$frag" >> "$RDIR/$name.tsv"
+                # A crashed worker's partial fragment may lack a trailing newline;
+                # guard so it can't concatenate with the next fragment's first row.
+                if [ "$(tail -c 1 "$frag" 2>/dev/null; printf x)" != $'\nx' ]; then
+                    printf '\n' >> "$RDIR/$name.tsv"
+                fi
+            fi
+            mv "$frag" "$frag.merged"
+        done < <(find "$d" -maxdepth 1 -type f -name '*.tsv' | sort)
+    done
+}
+
 record_result() {
     local gate=$1 subject=$2 status=$3 exit_code=$4 exit_class=$5 kind=$6 log_path=${7:-} notes=${8:-} category=${9:-}
     notes=${notes//$'\t'/ }
@@ -187,7 +263,7 @@ record_result() {
     [ -n "$category" ] || category=$(category_for "$gate" "$kind")
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$status" "$exit_code" "$exit_class" "$kind" \
-        "$(rel_path "$log_path")" "$notes" "$category" >> "$RDIR/results.tsv"
+        "$(rel_path "$log_path")" "$notes" "$category" >> "$(record_dest results)"
 }
 
 collect_repo_state() {
@@ -287,7 +363,7 @@ record_blocked() {
 # provision_s = VM acquire/boot time; work_s = test/agent run; total_s = sum.
 record_timing() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$RDIR/timings.tsv"
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "$(record_dest timings)"
 }
 
 # Append one per-attempt row for an agent scenario. A single `printf >>` is
@@ -308,7 +384,7 @@ record_attempt() {
     local gate=$1 subject=$2 attempt=$3 status=$4 agent_rc=$5 classifier=${6:-} wall_s=${7:-} vm=${8:-} log_path=${9:-} start_epoch=${10:-} end_epoch=${11:-} lane=${12:-}
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$attempt" "$status" "$agent_rc" "$classifier" "$wall_s" "$vm" \
-        "$(rel_path "$log_path")" "$start_epoch" "$end_epoch" "$lane" >> "$RDIR/scenario-attempts.tsv"
+        "$(rel_path "$log_path")" "$start_epoch" "$end_epoch" "$lane" >> "$(record_dest scenario-attempts)"
 }
 
 # Per-scenario / per-worker HOST scratch directory, unique under the run tree.
@@ -339,7 +415,7 @@ record_host_load() {
     [ -n "$vms" ] || vms=0
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$gate" "$subject" "$phase" "${load:-?}" "${avail:-?}" "$vms" "$(date +%s)" \
-        >> "$RDIR/host-load.tsv"
+        >> "$(record_dest host-load)"
 }
 
 # Append one retry-ledger row. One `printf >>` = atomic. The `action` records
@@ -355,5 +431,5 @@ record_flake() {
         retry_status=${5:-} attempts=${6:-1} action=${7:-} log_path=${8:-}
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$subject" "$classifier" "$first_status" "$first_rc" "$retry_status" \
-        "$attempts" "$action" "$(rel_path "$log_path")" >> "$RDIR/flake.tsv"
+        "$attempts" "$action" "$(rel_path "$log_path")" >> "$(record_dest flake)"
 }

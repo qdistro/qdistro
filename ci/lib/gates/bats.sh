@@ -146,10 +146,19 @@ gate_bats() {
     # Concurrency is capped at `jobs` via `wait -n` (reap one worker before
     # launching the next once at capacity).
     jobs=$(bats_job_count)
+    # Per-worker result fragments (merged at finish_run) when >1 file runs
+    # concurrently, so parallel appends never interleave and a crashed worker's
+    # rows survive. Operator forces off with QCI_RESULT_FRAGMENTS=0.
+    local frag=0 worker_id
+    [ "$jobs" -gt 1 ] && frag=${QCI_RESULT_FRAGMENTS:-1}
     log "bats gate: ${#run_files[@]} files on disposable VMs, up to $jobs in parallel (set QCI_JOBS to override)"
     running=0
     for file in "${run_files[@]}"; do
-        bats_run_disposable "$file" &
+        # Full relative path (not just basename) so two files sharing a basename
+        # across dirs never collide onto one fragment.
+        worker_id=$(worker_fragment_id bats "${file#"$WORKSPACE"/}")
+        QCI_RESULT_FRAGMENTS="$frag" QCI_WORKER_ID="$worker_id" \
+            bats_run_disposable "$file" &
         running=$((running + 1))
         if [ "$running" -ge "$jobs" ]; then
             wait -n; frc=$?
