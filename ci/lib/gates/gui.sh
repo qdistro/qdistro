@@ -518,12 +518,39 @@ gui_detect_agent_api_marker() {
 # never flips to pass), a modestly broad pattern is acceptable. New external
 # fetch-failure formats are widened DELIBERATELY here. Reads the log file; returns
 # 0 when an external-network fetch-failure marker is present.
+# A local / SLIRP / loopback / RFC1918 endpoint. Scenarios routinely curl the
+# VM-local SLIRP host (10.0.2.2), loopback services (127.0.0.1/::1), and private
+# services — a fetch failure against THOSE is a harness/vm-hostfwd or product bug,
+# NOT an upstream outage, so it must stay ACTIONABLE. A leading boundary keeps
+# e.g. "110.0.2.2" from matching the 10.x branch.
+_QCI_LOCAL_HOST_RE='(localhost|::1|(^|[^0-9.])(127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}))'
+
 gui_detect_external_network_marker() {
     local log_path=$1
     [ -f "$log_path" ] || return 1
-    grep -qEi \
-        'curl: \([0-9]+\)|wget: (unable to resolve|download timed out)|Recv failure: Connection reset by peer|Could not resolve host|Failed to connect to [^ ]+ port|Temporary failure in name resolution|Download \(curl\) error for|Error code: (Connection failed|Timeout)|Timeout exceeded when accessing|Curl error [0-9]+|(Download|Retrieving) .*(failed|timed out).*(mirror|repo|http)|Error: (initializing source|copying system image|pinging container registry|writing blob|reading blob|short read).*(timeout|refused|reset|no route|TLS handshake|unexpected EOF|i/o timeout)' \
-        "$log_path" 2>/dev/null
+    # (a) Inherently-EXTERNAL fetch failures: DNS name-resolution failures (a
+    # numeric loopback/SLIRP/RFC1918 literal is never resolved, so "Could not
+    # resolve host" only ever applies to a real external name) and zypper/mirror/
+    # container-registry transport errors. These are external by construction.
+    if grep -qEi \
+        'Could not resolve host|Temporary failure in name resolution|Download \(curl\) error for|Error code: (Connection failed|Timeout)|Timeout exceeded when accessing|Curl error [0-9]+|(Download|Retrieving) .*(failed|timed out).*(mirror|repo|http)|Error: (initializing source|copying system image|pinging container registry|writing blob|reading blob|short read).*(timeout|refused|reset|no route|TLS handshake|unexpected EOF|i/o timeout)' \
+        "$log_path" 2>/dev/null; then
+        return 0
+    fi
+    # (b) Generic curl/wget TRANSPORT errors (restricted to transport curl exit
+    # codes — couldn't-resolve/connect/timeout/SSL/recv/send, NOT HTTP-status
+    # codes like 22 where the server DID answer). Count these as external ONLY
+    # when the failing line does NOT reference a local/SLIRP/loopback/RFC1918
+    # endpoint. A bare "curl: (56) Recv failure" with no host on the line is the
+    # observed CDN-reset case and stays external; a "Failed to connect to 10.0.2.2"
+    # is local and stays actionable.
+    local candidates external
+    candidates=$(grep -Ei \
+        'curl: \((5|6|7|18|28|35|52|55|56)\)|wget: (unable to resolve|download timed out)|Recv failure: Connection reset by peer|Failed to connect to [^ ]+ port' \
+        "$log_path" 2>/dev/null)
+    [ -n "$candidates" ] || return 1
+    external=$(printf '%s\n' "$candidates" | grep -Eiv "$_QCI_LOCAL_HOST_RE")
+    [ -n "$external" ]
 }
 
 run_agent_command() {

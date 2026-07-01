@@ -159,6 +159,38 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+@test "extnet marker: a SLIRP-host (10.0.2.2) connect failure is NOT external (stays actionable)" {
+    # In-VM staging fetch over SLIRP hostfwd: a harness/vm bug, not a CDN outage.
+    local log="$BATS_TEST_TMPDIR/e5.log"
+    printf 'curl: (7) Failed to connect to 10.0.2.2 port 8123: Connection refused\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "extnet marker: a loopback HTTP-500 (curl 22) is NOT external (product endpoint)" {
+    # curl (22) = server answered with an error; the connection succeeded, and the
+    # endpoint is loopback — a product assertion, must stay actionable.
+    local log="$BATS_TEST_TMPDIR/e6.log"
+    printf 'curl: (22) The requested URL returned error: 500 http://127.0.0.1:9911/api/health\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "extnet marker: a private-range (192.168.x) connect failure is NOT external" {
+    local log="$BATS_TEST_TMPDIR/e7.log"
+    printf 'curl: (28) Failed to connect to 192.168.1.50 port 443: Connection timed out\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -ne 0 ]
+}
+
+@test "extnet marker: an EXTERNAL host connect failure IS external" {
+    # A real external endpoint with a routable name/host stays external.
+    local log="$BATS_TEST_TMPDIR/e8.log"
+    printf 'curl: (7) Failed to connect to download.opensuse.org port 443: Connection refused\n' > "$log"
+    run gui_detect_external_network_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
 # --- gui_detect_agent_tooling_marker: log scan ---
 
 @test "tooling marker: detects 'bash: -c: option requires an argument'" {
