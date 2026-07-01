@@ -57,11 +57,27 @@ acquire_vm() {
         gui-qdwin|gui-qdwin-*) golden_backing="$RUN_GOLDEN_GUI_QDWIN" ;;
         gui|gui-admin|gui-admin-*|gui-*) golden_backing="$RUN_GOLDEN_GUI_ADMIN" ;;
     esac
-    QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
-    QCI_RUN_GOLDEN_BACKING="$golden_backing" \
-    QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
+    # Bounded wait (H1): a wedged spinner or a slow/stuck disk must not stall the
+    # whole run silently. `timeout` caps the spinner; a breach is classified as
+    # vm_provision infra (feeds the correlated-burst detector) with a clear note.
+    # Generous default (a from-golden clone is fast, but a no-golden full build is
+    # heavy); override with QCI_VM_PROVISION_TIMEOUT_S.
+    local prov_timeout=${QCI_VM_PROVISION_TIMEOUT_S:-1800} rc
+    local t_start t_end
+    t_start=$(date +%s)
+    timeout "$prov_timeout" env \
+        QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+        QCI_RUN_GOLDEN_BACKING="$golden_backing" \
+        QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
-    local rc=$?
+    rc=$?
+    t_end=$(date +%s)
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        log "acquire_vm: $spinner for $gate exceeded ${prov_timeout}s (bounded wait) — classifying vm_provision infra"
+        record_attempt "$gate" "$spinner" 1 TIMEOUT "$rc" vm-provision "$((t_end - t_start))" "" "$log_path" "$t_start" "$t_end" "$gate"
+        record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM provisioning exceeded ${prov_timeout}s (bounded wait; likely wedged spinner or slow disk). Override with QCI_VM_PROVISION_TIMEOUT_S."
+        return "$EXIT_VM_PROVISION"
+    fi
     if [ "$rc" -ne 0 ]; then
         record_result "$gate" "$spinner" fail "$EXIT_VM_PROVISION" vm_provision vm "$log_path" "VM creation failed"
         return "$EXIT_VM_PROVISION"
@@ -237,13 +253,35 @@ ensure_run_golden() {
     log="$RDIR/vm/golden-$profile.log"
     mkdir -p "$(dirname "$log")"
     log "building per-run golden ($profile): one-time compositor build for this run"
+    # Bounded wait (H1): the one-time compositor build is the single longest
+    # serial step of a run; a wedged build must time out instead of stalling the
+    # whole run silently. Generous default (full compositor build + optional tier-2
+    # image prebake); override with QCI_GOLDEN_BUILD_TIMEOUT_S. A breach is
+    # classified as golden-build infra and recorded as its OWN attempt row (with
+    # start/end epochs) so the correlated-burst detector and timing views see it.
+    local gb_timeout=${QCI_GOLDEN_BUILD_TIMEOUT_S:-3600} gb_start gb_end
+    gb_start=$(date +%s)
     # Full build (QCI_RUN_GOLDEN_BACKING unset => normal bootstrap path).
-    QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
-    QCI_RUN_GOLDEN_BACKING="" \
-    QDISTRO_BUILD_TIER2_IMAGES="$tier2_images" \
-    QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
+    timeout "$gb_timeout" env \
+        QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
+        QCI_RUN_GOLDEN_BACKING="" \
+        QDISTRO_BUILD_TIER2_IMAGES="$tier2_images" \
+        QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-golden-$profile" > "$log" 2>&1
     rc=$?
+    gb_end=$(date +%s)
+    # Golden build attempt row: golden builds were previously invisible in the
+    # attempt ledger (only a result row on failure). Record every build outcome as
+    # an attempt so its duration and epochs are visible for p99 tuning + bursts.
+    local gb_status=DONE gb_cls=""
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then gb_status=TIMEOUT; gb_cls=golden-build
+    elif [ "$rc" -ne 0 ]; then gb_status=FAIL; gb_cls=golden-build; fi
+    record_attempt "$profile" "golden-build" 1 "$gb_status" "$rc" "$gb_cls" "$((gb_end - gb_start))" "" "$log" "$gb_start" "$gb_end" "golden-$profile"
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        log "golden build ($profile) exceeded ${gb_timeout}s (bounded wait) — classifying golden-build infra"
+        record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "golden build exceeded ${gb_timeout}s (bounded wait; wedged build or slow disk). Override with QCI_GOLDEN_BUILD_TIMEOUT_S."
+        return "$EXIT_VM_PROVISION"
+    fi
     if [ "$rc" -ne 0 ]; then
         record_result "$profile" "golden-build" fail "$EXIT_VM_PROVISION" vm_provision vm "$log" "run-golden build failed (rc=$rc)"
         return "$EXIT_VM_PROVISION"
