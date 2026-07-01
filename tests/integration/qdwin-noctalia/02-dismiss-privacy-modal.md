@@ -15,8 +15,8 @@ in via an upstream cherry-pick, this test catches it.
 ## Setup
 
 ```bash
-source qdwin/tests/gui/qdwin-helpers.sh
-source tests/integration/qdwin-noctalia/noctalia-helpers.sh
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
+source ${QDISTRO_REPO}/tests/integration/qdwin-noctalia/noctalia-helpers.sh
 qdwin_set_vm "${VMNAME:?set VMNAME to a running qdshell-on-qdwin VM}"
 
 # Reset state so the first-run wizard *would* trigger if it still

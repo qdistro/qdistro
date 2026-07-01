@@ -15,8 +15,8 @@ This exercises:
 ## Setup
 
 ```bash
-source qdwin/tests/gui/qdwin-helpers.sh
-source tests/integration/qdwin-noctalia/noctalia-helpers.sh
+source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh
+source ${QDISTRO_REPO}/tests/integration/qdwin-noctalia/noctalia-helpers.sh
 qdwin_set_vm "${VMNAME:-noctalia-vis-260503-1021}"
 noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 

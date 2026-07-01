@@ -19,6 +19,23 @@ PROJECTS=(
     qterminator
 )
 
+# Export a host-side <NAME>_REPO=$WORKSPACE/<name> per project (plus WORKSPACE and
+# QDISTRO_REPO). GUI scenarios run in the agent's child shell and source helpers
+# via ${QDWIN_REPO}/... / ${QDISTRO_REPO}/...; these vars were process-local, so
+# the child inherited none and the anchored paths resolved to empty unless the
+# agent guessed. Exporting makes the anchored form cwd-independent. WORKSPACE is
+# set by bin/qci before this module is sourced.
+if [ -n "${WORKSPACE:-}" ]; then
+    export WORKSPACE
+    [ -n "${QDISTRO_REPO:-}" ] && export QDISTRO_REPO
+    _repo_var=""
+    for _repo_proj in "${PROJECTS[@]}"; do
+        _repo_var=$(printf '%s' "$_repo_proj" | tr '[:lower:]-' '[:upper:]_')_REPO
+        export "${_repo_var}=$WORKSPACE/$_repo_proj"
+    done
+    unset _repo_proj _repo_var
+fi
+
 EXIT_OK=0
 EXIT_USAGE=2
 EXIT_PREFLIGHT=10

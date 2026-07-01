@@ -27,7 +27,10 @@ Same orchestrator/runner split as the sibling harness.
 
 ## Helper script
 
-Reuse `qdwin/tests/gui/qdwin-helpers.sh`. The qdshell-specific
+Reuse `${QDWIN_REPO}/tests/gui/qdwin-helpers.sh` (source it via the
+exported `${QDWIN_REPO}`/`${QDISTRO_REPO}` paths, NOT a cwd-relative
+path — the qci runner exports a `<NAME>_REPO` for every project so the
+anchored form resolves wherever the agent runs). The qdshell-specific
 helpers (`qdwin_ctrl`, `qdwin_session_healthy`) don't apply here —
 Noctalia has no equivalent ctrl-socket. Instead use:
 
@@ -71,7 +74,9 @@ If picking up this harness from scratch:
 1. Check the VM is up: `virsh list --all | grep noctalia-vis`.
  If not, clone from `layershell-260502-2322` per
  `scripts/noctalia/setup-noctalia-graphical.sh`.
-2. Source the helper: `source qdwin/tests/gui/qdwin-helpers.sh`
+2. Source the helpers via their exported-repo paths:
+ `source ${QDWIN_REPO}/tests/gui/qdwin-helpers.sh` and
+ `source ${QDISTRO_REPO}/tests/integration/qdwin-noctalia/noctalia-helpers.sh`,
  then `qdwin_set_vm noctalia-vis-…`.
 3. `noct_session_healthy` should return 0.
 4. Pick a scenario, follow its setup → steps → asserts.
