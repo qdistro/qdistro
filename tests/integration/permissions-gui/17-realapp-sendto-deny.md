@@ -71,9 +71,9 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  dbus-send --session --print-reply \
  --dest=org.qdistro.Qnotebook.uid3000 \
  /org/qdistro/App1 \
- org.qdistro.App1.GetLastReceived' > /tmp/17-baseline.out 2>&1
+ org.qdistro.App1.GetLastReceived' > "${QCI_SCENARIO_TMPDIR:-/tmp}/17-baseline.out" 2>&1
 echo "=== pre-deny baseline ==="
-cat /tmp/17-baseline.out
+cat "${QCI_SCENARIO_TMPDIR:-/tmp}/17-baseline.out"
 ```
 
 ## Steps
@@ -130,8 +130,8 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  dbus-send --session --print-reply \
  --dest=org.qdistro.Qnotebook.uid3000 \
  /org/qdistro/App1 \
- org.qdistro.App1.GetLastReceived' > /tmp/17-after.out 2>&1
-cat /tmp/17-after.out
+ org.qdistro.App1.GetLastReceived' > "${QCI_SCENARIO_TMPDIR:-/tmp}/17-after.out" 2>&1
+cat "${QCI_SCENARIO_TMPDIR:-/tmp}/17-after.out"
 
 $VMEXEC "$VM" 'cat /tmp/17-relay.out'
 
@@ -145,7 +145,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**:
-- `/tmp/17-after.out` does NOT contain `please_deny_me`.
+- `${QCI_SCENARIO_TMPDIR:-/tmp}/17-after.out` does NOT contain `please_deny_me`.
  (It may equal the baseline captured in Setup, or be empty if
  work2's qnotebook had no prior Receive this session.)
 - `/tmp/17-relay.out` contains EITHER
