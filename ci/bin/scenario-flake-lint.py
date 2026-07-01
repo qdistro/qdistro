@@ -86,7 +86,14 @@ PGREP_CMD_RE = re.compile(r"(?<![\w-])pgrep\b(?P<args>[^;&|<>\n#]*)")
 # /tmp path token. A bare `NAME=/tmp/...` assignment is deliberately NOT a write
 # — scenarios legitimately set hostile env vars (LD_PRELOAD=/tmp/evil.so, a
 # security test) that are not scratch. Dynamic paths ($…) are caller-excluded.
-_TMP_PATH = r"(/tmp/[^\s;'\"|)&<>]+)"
+# The path token stops at a backtick too, so a command-substitution terminator
+# (`echo `cmd > /tmp/x``) is not swallowed into the path and then mis-read as a
+# "dynamic" (hence exempt) path by TMP_SCOPED_HINT_RE.
+_TMP_PATH = r"(/tmp/[^\s;'\"|)&<>`]+)"
+# NOTE: this requires whitespace after `>`/`tee`, so a compact `>/tmp/x` is not
+# matched — a separate known matcher-completeness gap (surfaces ~116 mostly
+# guest-heredoc compact redirects), tracked for its own batch rather than folded
+# into the host/guest-boundary change here.
 TMP_REDIR_RE = re.compile(r"(?:>>?|(?<![<>])\btee\b(?:\s+-a)?)\s+" + _TMP_PATH)
 # Screenshot/OCR capture vs a structured (IPC/journal/process/protocol) probe.
 SCREENSHOT_RE = re.compile(
@@ -141,6 +148,178 @@ def pgrep_f_patterns(line: str) -> list[str]:
 # A /tmp path token is scoped (safe) if it carries a dynamic/per-run component.
 TMP_SCOPED_HINT_RE = re.compile(r"\$|`|mktemp")
 
+# A guest-exec wrapper command word: $VMEXEC / "$QDWIN_VM_EXEC" / ${FOO_VM_EXEC},
+# quoted or not. A `/tmp/...` WRITE that lands inside such a wrapper's remote
+# command argument runs in a DISPOSABLE per-scenario guest VM (fresh per scenario
+# AND per retry), so it cannot collide with a parallel host run — the premise of
+# unscoped-tmp-path. We must NOT exempt host-side writes, so the detection is
+# conservative: only a write proven to sit inside a wrapper's quoted remote arg is
+# exempted; anything ambiguous stays flagged. NOTE: $VMGUI is deliberately NOT a
+# wrapper — `vm-gui screenshot /tmp/x.png` writes a HOST artifact and must stay
+# flagged; and a top-level `runuser -c` is host-side unless already nested inside a
+# wrapper span (which the scanner covers for free).
+# Env-var-style wrappers ($VMEXEC / "$QDWIN_VM_EXEC" / ${FOO_VM_EXEC}) and the
+# bareword `vm_ssh` helper (run-55 defines it as an ssh-into-guest runner). The
+# bareword form needs a left word-boundary check (see the scanner) so `myvm_ssh`
+# does not arm.
+_GUEST_WRAPPER = (
+    r'"?\$\{?(?:VMEXEC|QDWIN_VM_EXEC|[A-Z][A-Z0-9_]*_VM_EXEC)\}?"?'
+    r"|vm_ssh\b"
+)
+_GUEST_WRAPPER_RE = re.compile(_GUEST_WRAPPER)
+
+
+def guest_exec_write_columns(body: list[str]) -> tuple[list[set[int]], list[int]]:
+    """For each line in a fenced block return (guest_columns, code_len):
+      guest_columns[off] - the set of column indices that lie inside a guest-exec
+        wrapper's quoted remote-command argument (possibly opened on an earlier
+        line — remote strings routinely span real newlines). A tmp-write whose
+        redirect operator starts at such a column is guest-side and exempt.
+      code_len[off] - the length of the code portion of the line, i.e. the column
+        where a QUOTE-AWARE top-level `#` comment begins (or len(line) if none).
+        Callers must slice `raw[:code_len]` instead of the quote-unaware
+        `raw.split("#")[0]`, else a `#` literal inside a remote string truncates a
+        following same-line HOST write out of view.
+
+    Conservative char scanner. State carried across lines:
+      guest_open  - inside an unclosed quote that is a wrapper remote arg
+      gq          - that quote char ('"' honours \\-escapes; "'" does not)
+      plain_quote - inside a NON-wrapper quote (so separators/quotes inside it,
+                    e.g. the "$VM" name arg, don't disarm or mis-open)
+      armed       - a wrapper token was seen; the next quote(s) it introduces are
+                    its args -> treat as guest. Persists across a trailing-`\\`
+                    continuation and until a top-level command separator or a
+                    newline that does not continue an open guest span.
+
+    Correctness-critical exclusions (never exempt a HOST write):
+    - Inside a DOUBLE-quoted guest span, an UNescaped `$(...)` / backtick is
+      expanded by the HOST shell before the wrapper runs, so a redirect there
+      writes on the host — those columns are NOT marked guest. (In a
+      single-quoted span the same text is literal and stays guest; an escaped
+      `\\$(` in a "..." span is likewise guest.)
+    - `#` starts a comment only OUTSIDE any quote (quote-aware), so a literal `#`
+      inside a remote string can't truncate the line and leak an open guest span
+      into the next (host) line; and a comment apostrophe can't open a stray quote.
+    - A line with a top-level `eval` re-parses its arguments as shell, which can
+      turn a quoted `>` into a host redirect — refuse all exemptions on such lines.
+    """
+    masks: list[set[int]] = []
+    code_lens: list[int] = []
+    guest_open = False
+    gq = ""
+    subst_depth = 0   # >0: inside $(...) host command-sub in a "..." guest span
+    subst_q = ""      # quote char open INSIDE $(...) (so a quoted `)` doesn't close it)
+    in_backtick = False  # inside `...` host command-sub in a "..." guest span
+    armed = False
+    eval_active = False  # a top-level `eval` governs this logical command (carries
+    #                      across `\`-continuations); refuse exemptions while set
+    for raw in body:
+        line = raw
+        plain_quote = ""
+        cols: set[int] = set()
+        code_len = len(line)
+        i, n = 0, len(line)
+        while i < n:
+            c = line[i]
+            if guest_open:
+                # Host command substitution inside a "..." guest span: its columns
+                # are host-expanded, so do NOT mark them guest (a `>` there flags).
+                # Track quotes INSIDE the substitution so a quoted `)` (e.g.
+                # `$(printf ')' > /tmp/x)`) doesn't end it early and re-expose the
+                # host redirect as guest.
+                if subst_depth > 0:
+                    if subst_q:
+                        if subst_q == '"' and c == "\\":
+                            i += 2
+                            continue
+                        if c == subst_q:
+                            subst_q = ""
+                    elif c in "\"'":
+                        subst_q = c
+                    elif c == "(":
+                        subst_depth += 1
+                    elif c == ")":
+                        subst_depth -= 1
+                    i += 1
+                    continue
+                if in_backtick:
+                    if c == "`":
+                        in_backtick = False
+                    i += 1
+                    continue
+                if gq == '"' and c == "\\":
+                    cols.add(i)
+                    if i + 1 < n:
+                        cols.add(i + 1)
+                    i += 2
+                    continue
+                if gq == '"' and c == "$" and i + 1 < n and line[i + 1] == "(":
+                    subst_depth = 1
+                    i += 2
+                    continue
+                if gq == '"' and c == "`":
+                    in_backtick = True
+                    i += 1
+                    continue
+                cols.add(i)
+                if c == gq:
+                    guest_open = False
+                    gq = ""
+                i += 1
+                continue
+            if plain_quote:
+                if plain_quote == '"' and c == "\\":
+                    i += 2
+                    continue
+                if c == plain_quote:
+                    plain_quote = ""
+                i += 1
+                continue
+            # Outside any quote. `#` at a word boundary starts a comment -> the
+            # rest of the physical line is not code (quote-aware, unlike a naive
+            # split: a `#` inside a remote string never reaches here).
+            if c == "#" and (i == 0 or line[i - 1] in " \t;&|("):
+                code_len = i
+                break
+            # A wrapper token arms the guest state and is consumed whole (including
+            # its own optional surrounding quotes) so we don't misread
+            # `"$QDWIN_VM_EXEC"`'s quotes as a plain string. It arms only at a left
+            # word-boundary, so `myvm_ssh` / `FOO_VMEXEC` in a longer word does not.
+            if i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_"):
+                if line.startswith("eval", i) and (
+                    i + 4 >= n or not (line[i + 4].isalnum() or line[i + 4] == "_")
+                ):
+                    eval_active = True
+                m = _GUEST_WRAPPER_RE.match(line, i)
+                if m:
+                    armed = True
+                    i = m.end()
+                    continue
+            if c in "\"'":
+                if armed:
+                    guest_open = True
+                    gq = c
+                    cols.add(i)
+                else:
+                    plain_quote = c
+                i += 1
+                continue
+            if c in ";|&" or line[i:i + 2] in ("&&", "||"):
+                armed = False
+            i += 1
+        # A top-level `eval` can re-parse a quoted `>` into a host redirect; refuse
+        # every exemption on the whole logical command (the eval line AND its
+        # `\`-continuation lines) rather than reason about the re-parse.
+        masks.append(set() if eval_active else cols)
+        code_lens.append(code_len)
+        # End of physical line. If no guest span is still open, `armed`/`eval_active`
+        # only survive a trailing-backslash continuation (wrapper/eval on one line,
+        # its arg on the next); otherwise a fresh command starts next line -> reset.
+        if not guest_open and not line.rstrip().endswith("\\"):
+            armed = False
+            eval_active = False
+    return masks, code_lens
+
 
 def fenced_bash_blocks(text: str) -> list[tuple[int, list[str]]]:
     """Return (start_line_1based, lines) for each ``` fenced block that looks
@@ -173,6 +352,7 @@ def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
     any_structured = False
     for start, body in blocks:
         has_code = has_code or bool(body)
+        guest_cols, code_lens = guest_exec_write_columns(body)
         for off, raw in enumerate(body):
             lineno = start + off
             line = raw.split("#", 1)[0]  # ignore trailing comments for matching
@@ -219,8 +399,15 @@ def lint_markdown(path: Path) -> list[tuple[int, str, str]]:
                     findings.append((lineno, "pgrep-self-match",
                                      "pgrep -f without a bracket guard can match its "
                                      "own argv; use a guard like [s]pawn or pgrep -x"))
-            for m in TMP_REDIR_RE.finditer(line):
+            # Use the QUOTE-AWARE code length, not the naive `#`-split `line`, so a
+            # host write after a `#` that is literal-inside-a-remote-string is still
+            # seen (a naive split would truncate it out of view).
+            for m in TMP_REDIR_RE.finditer(raw[:code_lens[off]]):
                 tmp = m.group(1)
+                # Exempt writes inside a guest-exec wrapper's remote arg: they
+                # land in a disposable per-scenario VM and cannot collide.
+                if m.start() in guest_cols[off]:
+                    continue
                 if not TMP_SCOPED_HINT_RE.search(tmp):
                     findings.append((lineno, "unscoped-tmp-path",
                                      f"write to fixed scratch path {tmp!r} with no "

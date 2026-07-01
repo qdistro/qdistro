@@ -211,3 +211,116 @@ MD
     run lint --strict --allowlist "$al" "$f"
     [ "$status" -eq 0 ]
 }
+
+# unscoped-tmp-path host/guest boundary: a /tmp write inside a guest-exec wrapper
+# lands in a disposable per-scenario VM and must NOT be flagged; a host-side write
+# (including a redirect that lands AFTER the wrapper's remote string closes) must.
+@test "flake-lint: unscoped-tmp-path flags a HOST-side /tmp write" {
+    local f="$BATS_TEST_TMPDIR/50-host.md"
+    printf '# x\n```bash\necho hi > /tmp/50-host.out\nfoo | tee /tmp/50-t.out\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"50-host.out"*"unscoped-tmp-path"* ]] || [[ "$output" == *"unscoped-tmp-path"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: unscoped-tmp-path does NOT flag a guest-side write inside \$VMEXEC" {
+    local f="$BATS_TEST_TMPDIR/51-guest.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" '"'"'cmd | head -1 > /tmp/51-guest.out'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: unscoped-tmp-path exempts a multi-line guest remote string" {
+    local f="$BATS_TEST_TMPDIR/52-ml.md"
+    # single-quoted remote spanning real newlines (the 58/59 fold pattern)
+    printf '# x\n```bash\n$VMEXEC "$VM" '"'"'a=1\ncmd > /tmp/52-g.cur\nb'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: unscoped-tmp-path exempts the vm_ssh wrapper" {
+    local f="$BATS_TEST_TMPDIR/53-vmssh.md"
+    printf '# x\n```bash\nvm_ssh '"'"'qsu /usr/bin/id > /tmp/53-qsu.log 2>&1'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: unscoped-tmp-path FLAGS a host redirect after the guest string closes" {
+    local f="$BATS_TEST_TMPDIR/54-after.md"
+    # the `| tee /tmp/x` runs on the HOST, capturing the wrapper's stdout
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo hi" 2>&1 | tee /tmp/54-host.log\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"54-host.log"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a comment apostrophe does not defeat guest-exec exemption" {
+    local f="$BATS_TEST_TMPDIR/55-apos.md"
+    printf '# x\n```bash\n# note the broker'"'"'s pid first\n$VMEXEC "$VM" '"'"'pgrep x | head -1 > /tmp/55-pid'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: unscoped-tmp-path FLAGS a host \$(...) redirect inside a double-quoted guest arg" {
+    local f="$BATS_TEST_TMPDIR/56-subst.md"
+    # $() is host-expanded before $VMEXEC runs -> the redirect writes on the HOST
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo $(printf x > /tmp/56-host-subst)"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"56-host-subst"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a literal \$() in a SINGLE-quoted guest arg stays exempt" {
+    local f="$BATS_TEST_TMPDIR/57-litsubst.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" '"'"'sh -c "echo $(id > /tmp/57-guest)"'"'"'\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" != *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a '#' inside a guest remote string does not leak into the next host line" {
+    local f="$BATS_TEST_TMPDIR/58-hash.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo # literal"\necho x > /tmp/58-host-after-hash\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"58-host-after-hash"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a top-level 'eval' refuses the guest exemption" {
+    local f="$BATS_TEST_TMPDIR/59-eval.md"
+    printf '# x\n```bash\neval $VMEXEC "$VM" "echo x > /tmp/59-eval-host"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"59-eval-host"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a quoted ')' inside \$() does not re-expose a host redirect as guest" {
+    local f="$BATS_TEST_TMPDIR/60-qp.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo $(printf '"'"')'"'"' > /tmp/60-qp-host)"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"60-qp-host"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a '#' literal in a guest arg does not hide a same-line host write" {
+    local f="$BATS_TEST_TMPDIR/61-slhash.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo # literal"; echo x > /tmp/61-sl-host\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"61-sl-host"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: 'eval' guard carries across a backslash continuation" {
+    local f="$BATS_TEST_TMPDIR/62-evalcont.md"
+    printf '# x\n```bash\neval \\\n$VMEXEC "$VM" "echo x > /tmp/62-ec-host"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"62-ec-host"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
+
+@test "flake-lint: a backtick host redirect is flagged (path stops at the backtick)" {
+    local f="$BATS_TEST_TMPDIR/63-bt.md"
+    printf '# x\n```bash\n$VMEXEC "$VM" "echo `printf x > /tmp/63-bt-host`"\n```\n' > "$f"
+    run lint "$f"
+    [[ "$output" == *"63-bt-host"* ]]
+    [[ "$output" == *"unscoped-tmp-path"* ]]
+}
