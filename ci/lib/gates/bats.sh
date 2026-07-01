@@ -47,14 +47,21 @@ bats_job_count() {
 # artifact dir) is either a single-line O_APPEND or a path unique to this VM.
 bats_run_one() {
     qci_assert_vm_exists "$1" "bats:$(basename "$2")" || return $?
-    local vm=$1 file=$2 base log_path gate_rc
+    local vm=$1 file=$2 base log_path gate_rc slug scratch
     base=$(basename "$file")
     log_path="$RDIR/bats/$base.log"
     mkdir -p "$(dirname "$log_path")"
+    # Per-file isolated scratch dir (host) + slug (guest suffix), so a bats file
+    # routes scratch here instead of a collision-prone fixed path once the pool
+    # runs several files in parallel.
+    slug=$(safe_name "$base")
+    scratch=$(scenario_scratch_dir bats "$slug")
+    mkdir -p "$scratch"
     log "bats $base on $vm"
     (
         cd "$QDISTRO_REPO" || exit 2
-        VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" bats "$file"
+        VM_NAME="$vm" QCI_OFFLINE="$QCI_OFFLINE" \
+            QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" bats "$file"
     ) > "$log_path" 2>&1
     gate_rc=$?
     collect_vm_artifacts "$vm" "bats-${base%.bats}"

@@ -311,6 +311,19 @@ record_attempt() {
         "$(rel_path "$log_path")" "$start_epoch" "$end_epoch" "$lane" >> "$RDIR/scenario-attempts.tsv"
 }
 
+# Per-scenario / per-worker HOST scratch directory, unique under the run tree.
+# Every agent scenario and bats worker gets its OWN so a fixed shared path (a
+# /tmp/*.log, a singleton port-lock file, a "latest artifact" guess) cannot
+# collide once GUI/bats lanes run in parallel. Lives under the run dir so it is
+# preserved with the run's artifacts for triage and reclaimed when the run dir is
+# cleaned. Exported to workers as QCI_SCENARIO_TMPDIR (see gui.sh / bats.sh); a
+# QCI_SCENARIO_SLUG is exported alongside so a scenario on a SHARED session VM can
+# also isolate GUEST scratch (e.g. /tmp/qci-$QCI_SCENARIO_SLUG). Pure (reads only
+# $RDIR + args) => host-testable. Args: gate slug
+scenario_scratch_dir() {
+    printf '%s/%s/%s.scratch' "$RDIR" "$1" "$2"
+}
+
 # Append one host-load sample — a cheap proxy for the contention that drives the
 # GUI flake variance (8-vs-25 fails on the same code is host-load-driven). Sample
 # at scenario start and end so a slow/failed attempt can be correlated with the

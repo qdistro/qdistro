@@ -130,7 +130,7 @@ agent_scenarios() {
 }
 
 write_agent_prompt() {
-    local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} rel
+    local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} scratch=${5:-} slug=${6:-} rel
     rel=${scenario#$WORKSPACE/}
     # Per-attempt artifact dir so a retry's agent writes its status/report to its
     # OWN directory and never clobbers the first attempt's evidence (the audit
@@ -155,6 +155,13 @@ Rules:
 - Before returning, write \`$artifact_dir/status.txt\`
   containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - Use VMNAME=$vm.
+- Scratch files: use isolated per-scenario scratch instead of fixed shared paths
+  so parallel runs never collide. On the HOST, write scratch under
+  \`\$QCI_SCENARIO_TMPDIR\` (=\`$scratch\`). For GUEST scratch, use the literal
+  per-scenario directory \`/tmp/qci-$slug/\` and create it before use. The
+  \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
+  shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
+  Do NOT write to bare fixed paths like \`/tmp/foo.log\`.
 - Execute setup, steps, assertions, and cleanup serially.
 - Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
 - Diagnose your OWN tooling before blaming the product:
@@ -609,10 +616,17 @@ gui_run_scenario() {
         own=1
     fi
     t1=$(date +%s)
-    prompt="$RDIR/agent-notes/$(safe_name "$rel").prompt.md"
-    log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
+    local slug scratch
+    slug=$(safe_name "$rel")
+    prompt="$RDIR/agent-notes/$slug.prompt.md"
+    log_path="$RDIR/gui/$slug.agent.log"
     mkdir -p "$(dirname "$log_path")"
-    write_agent_prompt "$vm" "$scenario" "$prompt"
+    # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
+    # shared session VM). Passed to the agent's env at run_agent_command so a
+    # scenario routes scratch here instead of a collision-prone fixed /tmp path.
+    scratch=$(scenario_scratch_dir gui "$slug")
+    mkdir -p "$scratch"
+    write_agent_prompt "$vm" "$scenario" "$prompt" "" "$scratch" "$slug"
     # Deliver the guest waiter library so the scenario can source
     # /tmp/qci-gui-waiters.sh (best-effort; a scenario that needs it and lacks it
     # fails its own assertion loudly).
@@ -621,7 +635,8 @@ gui_run_scenario() {
     log "agent scenario $rel on $vm"
     record_host_load gui "$rel" start
     ta0=$(date +%s)
-    run_agent_command "$prompt" "$log_path"
+    QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+        run_agent_command "$prompt" "$log_path"
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
@@ -682,10 +697,15 @@ gui_run_scenario() {
                 vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
                 # Each retry writes to its OWN log + artifact dir so every attempt's
                 # evidence is preserved and each fresh agent starts clean.
-                local vmN logN adirN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN
+                local vmN logN adirN scratchN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN
                 logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
                 adirN="${adir%.retry*}.retry${attempt}"
                 mkdir -p "$adirN"
+                # Fresh host scratch PER RETRY so stale scratch from the failed
+                # attempt can't leak into the retry (mirrors the per-attempt
+                # logN/adirN discipline).
+                scratchN=$(scenario_scratch_dir gui "${slug}-retry${attempt}")
+                mkdir -p "$scratchN"
                 vmN=$(acquire_vm "$gate_name" "")
                 if [ -z "$vmN" ]; then
                     log "agent scenario $rel: retry $attempt VM provision failed; keeping the previous verdict"
@@ -694,11 +714,14 @@ gui_run_scenario() {
                     break
                 fi
                 vm=$vmN; vm_live=1
-                write_agent_prompt "$vmN" "$scenario" "$prompt" "$adirN"
+                write_agent_prompt "$vmN" "$scenario" "$prompt" "$adirN" "$scratchN" "$slug"
                 install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
                 suppress_idle_lock "$vmN"
                 record_host_load gui "$rel" start
-                tsa=$(date +%s); run_agent_command "$prompt" "$logN"; agent_rc=$?; tsb=$(date +%s)
+                tsa=$(date +%s)
+                QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                    run_agent_command "$prompt" "$logN"
+                agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""
