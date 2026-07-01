@@ -33,6 +33,7 @@ from .controller import LockController
 from .ctrl import CtrlSocket
 from .idle import IdleWatcher
 from .logind import LogindWatcher
+from .pwd_lifecycle import PwdLifecycleNotifier
 from .wayland import LockerClient, LockerEvents
 
 log = logging.getLogger("qdlocker.app")
@@ -340,12 +341,14 @@ class WaylandBridge(QObject):
         self,
         controller: LockController,
         idle_watcher: IdleWatcher | None = None,
+        pwd_lifecycle: PwdLifecycleNotifier | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._client: LockerClient | None = None
         self._idle_watcher = idle_watcher
+        self._pwd_lifecycle = pwd_lifecycle
         self._initially_locked = False
         self._locked = False
         # `_locked` mirrors *intent*: it is set True on the request path
@@ -423,6 +426,11 @@ class WaylandBridge(QObject):
             self._locked = initially_locked
             self.lockedChanged.emit(initially_locked)
         self.lockedChangedForCtrl.emit(initially_locked)
+        if initially_locked and self._pwd_lifecycle is not None:
+            try:
+                self._pwd_lifecycle.notify_screen_lock("manual")
+            except Exception:
+                log.exception("pwd lifecycle relock notification failed")
 
     @pyqtSlot(bool)
     def _on_locked_changed(self, locked: bool) -> None:
@@ -475,6 +483,11 @@ class WaylandBridge(QObject):
         except Exception:
             log.exception("controller.notify_lock_begin raised")
         log.info("lock_requested reason=%s", reason_name)
+        if self._pwd_lifecycle is not None:
+            try:
+                self._pwd_lifecycle.notify_screen_lock(reason_name)
+            except Exception:
+                log.exception("pwd lifecycle relock notification failed")
         # Mirror intent locally BEFORE issuing the requests so a
         # second lock_requested arriving on the same event-loop tick
         # (compositor + client-side idle racing) gets caught by the
@@ -539,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
         fprintd_enabled=bool(config["fprintd_enabled"]),
     )
     controller = LockController(auth)
-    bridge = WaylandBridge(controller)
+    bridge = WaylandBridge(controller, pwd_lifecycle=PwdLifecycleNotifier())
 
     events = LockerEvents(
         on_ready=bridge._thread_on_ready,

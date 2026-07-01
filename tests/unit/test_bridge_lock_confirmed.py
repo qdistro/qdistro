@@ -37,6 +37,13 @@ def _make_bridge():
     return bridge, controller
 
 
+def _make_bridge_with_pwd_notifier():
+    controller = MagicMock()
+    notifier = MagicMock()
+    bridge = WaylandBridge(controller, pwd_lifecycle=notifier)
+    return bridge, controller, notifier
+
+
 def test_compositor_confirm_fires_callback(qapp):
     bridge, _ = _make_bridge()
     fired: list[int] = []
@@ -138,6 +145,36 @@ def test_initially_locked_seeds_compositor_confirmed(qapp):
     # Suspend request while already (compositor-)locked -> immediate confirm.
     bridge._on_lock_requested(2)
     assert fired == [1]
+
+
+def test_new_lock_request_notifies_pwd_lifecycle(qapp):
+    bridge, _, notifier = _make_bridge_with_pwd_notifier()
+    client = MagicMock()
+    bridge.attach(client)
+
+    bridge._on_lock_requested(3)
+
+    notifier.notify_screen_lock.assert_called_once_with("manual")
+    client.set_locked.assert_called_once_with(True)
+
+
+def test_already_locked_request_does_not_notify_pwd_again(qapp):
+    bridge, _, notifier = _make_bridge_with_pwd_notifier()
+    bridge._on_lock_requested(0)
+    notifier.notify_screen_lock.assert_called_once_with("idle")
+    notifier.notify_screen_lock.reset_mock()
+
+    bridge._on_lock_requested(2)
+
+    notifier.notify_screen_lock.assert_not_called()
+
+
+def test_initially_locked_ready_notifies_pwd_lifecycle(qapp):
+    bridge, _, notifier = _make_bridge_with_pwd_notifier()
+
+    bridge._on_ready(True)
+
+    notifier.notify_screen_lock.assert_called_once_with("manual")
 
 
 def test_lock_request_does_not_double_confirm_without_compositor(qapp):
