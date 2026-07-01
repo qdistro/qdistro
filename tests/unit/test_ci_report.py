@@ -426,3 +426,33 @@ def test_unmatched_empty_classifier_on_a_failing_row_is_not_counted():
     # signal (nothing to compare); require a truthy generic classifier.
     atts = [_att("", status="FAIL", rc="1")]
     assert report.unmatched_classifier_attempts(atts) == []
+
+
+# --- timeout_near_misses (report-only, §4) ---
+# Attempts within 90% of the effective agent work-timeout ceiling: a signal that
+# a per-scenario timeout budget is too tight, tuned from data not guessed.
+
+
+def _att_wall(wall, *, subject="s"):
+    return {"subject": subject, "wall_s": str(wall), "status": "PASS",
+            "agent_rc": "0", "classifier": ""}
+
+
+def test_near_miss_flags_at_or_above_90pct():
+    # ceiling 300 => threshold 270. 271 and 300 flag; 269 does not.
+    atts = [_att_wall(269, subject="under"), _att_wall(271, subject="near"),
+            _att_wall(300, subject="at")]
+    out = report.timeout_near_misses(atts, 300)
+    assert [a["subject"] for a in out] == ["near", "at"]
+
+
+def test_near_miss_unbounded_ceiling_flags_nothing():
+    # timeout 0 (unbounded / not configured) => no ceiling, nothing flagged.
+    atts = [_att_wall(99999)]
+    assert report.timeout_near_misses(atts, 0) == []
+
+
+def test_near_miss_ignores_nonnumeric_wall():
+    atts = [_att_wall(280), {"subject": "x", "wall_s": "", "status": "PASS"}]
+    out = report.timeout_near_misses(atts, 300)
+    assert len(out) == 1

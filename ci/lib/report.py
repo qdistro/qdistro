@@ -505,6 +505,28 @@ def unmatched_classifier_attempts(
     return out
 
 
+def timeout_near_misses(
+    attempts: list[dict[str, str]], timeout_s: int, *, frac: float = 0.9
+) -> list[dict[str, str]]:
+    """Report-only (§4): attempts whose wall_s came within ``frac`` of the effective
+    agent work-timeout ceiling. A near-miss means the ceiling is too tight for that
+    scenario (or the scenario is too heavy for the lane) — surface it so ceilings
+    are tuned from data instead of guessed. ``timeout_s`` <= 0 (unbounded) => no
+    ceiling, so nothing is flagged. Pure => host-testable.
+    """
+    if timeout_s <= 0:
+        return []
+    threshold = frac * timeout_s
+    out: list[dict[str, str]] = []
+    for a in attempts:
+        raw = (a.get("wall_s") or "").strip()
+        if not raw.isdigit():
+            continue
+        if int(raw) >= threshold:
+            out.append(a)
+    return out
+
+
 def _epoch(a: dict[str, str]) -> int | None:
     raw = (a.get("end_epoch") or "").strip()
     if not raw.isdigit():
@@ -875,6 +897,31 @@ def generate_md(run_dir: Path) -> str:
             )
         lines.append("")
 
+    # Timeout near-miss (report-only, §4). Attempts whose wall_s came within 90% of
+    # the effective agent work-timeout ceiling recorded in the manifest — a signal
+    # that a per-scenario timeout budget is too tight (or the scenario too heavy for
+    # its lane), so ceilings can be tuned from data rather than guessed.
+    agent_timeout_s = int(manifest.get("qci_agent_timeout_s", "0") or 0)
+    near_misses = timeout_near_misses(attempts, agent_timeout_s)
+    if near_misses:
+        lines.append("## Timeout near-misses")
+        lines.append(
+            f"{len(near_misses)} attempt(s) ran >=90% of the effective agent "
+            f"work-timeout ceiling ({agent_timeout_s}s). A too-tight ceiling turns a "
+            "slow-but-fine scenario into a spurious timeout — tune the per-scenario "
+            "budget or move the scenario to a heavier lane. Reporting only."
+        )
+        lines.append("")
+        lines.append("| scenario | attempt | wall_s | ceiling_s | status | classifier |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for a in near_misses:
+            lines.append(
+                f"| {a.get('subject', '?')} | {a.get('attempt', '')} | "
+                f"{a.get('wall_s', '')} | {agent_timeout_s} | "
+                f"{a.get('status', '')} | {a.get('classifier', '') or '—'} |"
+            )
+        lines.append("")
+
     host_load = read_tsv(run_dir / "host-load.tsv")
     if host_load:
         def _nums(key: str) -> list[float]:
@@ -1016,6 +1063,13 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
         # no infra/tooling marker. A rising count can mean a drifted marker string
         # is demoting infra failures to product-fail.
         "unmatched_classifier_attempts": len(unmatched_classifier_attempts(attempts)),
+        # Report-only §4 timeout near-miss count: attempts within 90% of the
+        # effective agent work-timeout ceiling (0 when unbounded/none configured).
+        "timeout_near_misses": len(
+            timeout_near_misses(
+                attempts, int(manifest.get("qci_agent_timeout_s", "0") or 0)
+            )
+        ),
         "report_md": "report.md",
         "report_html": "report.html",
     }

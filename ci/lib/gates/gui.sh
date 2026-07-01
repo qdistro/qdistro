@@ -1067,6 +1067,10 @@ record_agent_identity() {
     [ -n "$cmd" ] || return 0
     # Scrub tabs/newlines so the value stays a single manifest line.
     kv qci_agent_cmd "$(printf '%s' "$cmd" | tr '\t\n' '  ')"
+    # Effective host-side agent work-timeout ceiling (seconds; 0 = unbounded). The
+    # report flags attempts whose wall_s exceeds 90% of this so a too-tight ceiling
+    # is tuned from data (§4 timeout near-miss). See run_agent_command's `to`.
+    kv qci_agent_timeout_s "${QCI_AGENT_TIMEOUT:-0}"
     model=$(gui_agent_model_from_cmd "$cmd")
     [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
     kv qci_agent_model "${model:-unknown}"
