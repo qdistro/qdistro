@@ -8,3 +8,7 @@
 #                   real pgrep/tmp/source bug, so do not blanket-waive it.
 #   reason          why this finding is acceptable (shown in --strict output)
 # Keep this list SHORT and justified; prefer fixing the scenario over waiving.
+permissions-gui/18-podapps-launcher-badge.md	unscoped-journal	diagnostic NOTE-only read (|| true); verdict is the badge screenshot + secctx assert, not this line
+permissions-gui/20-tier5-vm-cold-start.md	unscoped-journal	soft cross-check; prose says do not FAIL if sparse — S3 visual is the load-bearing assertion
+permissions-gui/52-qsu-invalid-target-user-rejected.md	unscoped-journal	nice-to-have log tail; rejection is asserted by handler exit + prose, not this read
+permissions-gui/56-tier4-rdp-window-visible.md	unscoped-journal	secondary journal/process cross-check; missing input-claim line is WARN, paired pgrep carries the verdict

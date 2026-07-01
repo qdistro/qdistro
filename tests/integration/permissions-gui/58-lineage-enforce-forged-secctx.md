@@ -89,11 +89,13 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMEXEC "$VM" 'install -d -m 0755 /etc/qdistro'
 $VMEXEC "$VM" 'grep -q "^lineage_enforce" /etc/qdistro/broker.conf 2>/dev/null \
   || echo "lineage_enforce = true" >> /etc/qdistro/broker.conf'
-$VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 1
-# Confirm the posture is logged at startup.
-$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service --since "-10s" \
-  | grep -m1 lineage_enforce'
+# Capture a journal cursor, restart, then wait for the startup posture line to
+# appear AFTER the cursor — proves THIS restart logged it, not a stale line.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
+cur=$(journalctl -u qdistro-admin-broker.service -n0 --show-cursor 2>/dev/null | sed -n "s/^-- cursor: //p")
+[ -n "$cur" ] || { echo "FAIL: could not capture journal cursor"; exit 1; }
+systemctl restart qdistro-admin-broker.service
+await_journal_line_after_cursor "$cur" "lineage_enforce" 30 1 -u qdistro-admin-broker.service'
 ```
 
 **Assert**: the journal line reads `lineage_enforce=True`.

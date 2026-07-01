@@ -203,7 +203,7 @@ the terminal. This proves input event → host waypipe-client →
 vsock → in-guest waypipe-server → in-guest weston-terminal works
 end-to-end. Soft-pass if ydotool unavailable (see caveats).
 
-### S5 — journal cross-check (load-bearing)
+### S5 — journal cross-check (soft / diagnostic)
 
 ```bash
 $VMEXEC "$VM" "journalctl --since '3min ago' | grep -E 'qdwin:.*qdistro\.tier5\.' | head -20"
