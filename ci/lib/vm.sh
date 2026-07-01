@@ -135,6 +135,7 @@ acquire_vm() {
     timeout "$prov_timeout" env \
         QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
         QCI_RUN_GOLDEN_BACKING="$golden_backing" \
+        QDWIN_APP_DEPS="${QDWIN_APP_DEPS:-0}" \
         QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-$gate" > "$log_path" 2>&1
     rc=$?
@@ -350,6 +351,7 @@ ensure_run_golden() {
         QDWIN_VM_TEMPLATE="${QDWIN_VM_TEMPLATE:-qdistro-template}" \
         QCI_RUN_GOLDEN_BACKING="" \
         QDISTRO_BUILD_TIER2_IMAGES="$tier2_images" \
+        QDWIN_APP_DEPS="${QDWIN_APP_DEPS:-0}" \
         QDISTRO_VM_GUI_SESSION="${gui_session:-${QDISTRO_VM_GUI_SESSION:-}}" \
         "$VM_TOOLS/$spinner" "qci-golden-$profile" > "$log" 2>&1
     rc=$?
