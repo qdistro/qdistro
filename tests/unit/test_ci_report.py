@@ -100,3 +100,100 @@ def test_mixed_rows_partition():
     flagged = report.dependency_missing_skips(rows)
     assert [r["notes"] for r in flagged] == [
         "shellcheck not installed", "no module named 'gi'"]
+
+
+# --- nonactionable_failure_reason / partition_failures (Phase-1 clean-run) ---
+# REPORT-ONLY: separates expected/operator FAIL/BLOCKED rows (release pins
+# absent, operator interrupt, policy gate) from actionable product/test/infra
+# failures. A misclassification either hides a real failure (bad) or lets an
+# expected row keep the run permanently red (the bug this fixes).
+
+
+def _row(**kw):
+    base = {"status": "fail", "gate": "gui", "subject": "s", "notes": ""}
+    base.update(kw)
+    return base
+
+
+def test_release_manifest_blocked_is_nonactionable():
+    r = _row(gate="release-manifest", subject="unpopulated", status="blocked",
+             notes="manifest unpopulated — no release pins")
+    assert report.nonactionable_failure_reason(r) is not None
+
+
+def test_operator_interrupt_is_nonactionable():
+    for subj in ("INT", "TERM"):
+        r = _row(gate="lifecycle", subject=subj, notes="run interrupted")
+        assert report.nonactionable_failure_reason(r) is not None
+    # matched via notes even if the subject differs
+    assert report.nonactionable_failure_reason(
+        _row(gate="lifecycle", subject="SIGHUP", notes="run interrupted")) is not None
+
+
+def test_edit_guard_stays_actionable():
+    # An unsanctioned protected-path edit is deterministic but human-required;
+    # bucketing it would hide a future regression where a test/agent path starts
+    # touching protected files. It must remain in the actionable count.
+    r = _row(gate="edit-guard", subject="changed-paths",
+             notes="2 protected edits not sanctioned")
+    assert report.nonactionable_failure_reason(r) is None
+
+
+def test_lifecycle_notes_match_is_not_over_broad():
+    # A lifecycle row that merely mentions "interrupted" in a diagnostic context
+    # (not as the terminal cause) is NOT bucketed.
+    r = _row(gate="lifecycle", subject="cleanup",
+             notes="worker 3 reported an interrupted download, retried ok")
+    assert report.nonactionable_failure_reason(r) is None
+    # But the real operator-interrupt phrasings ARE bucketed.
+    assert report.nonactionable_failure_reason(
+        _row(gate="lifecycle", subject="cleanup", notes="run interrupted")) is not None
+
+
+def test_real_product_and_infra_failures_are_actionable():
+    # A GUI scenario fail, a bats fail, a vm_provision fail, and an API-outage
+    # row are all actionable — none may be silently bucketed as "expected".
+    for r in (
+        _row(gate="gui", subject="permissions-gui/21-tier5-close-cleanup.md",
+             notes="agent status=FAIL rc=0"),
+        _row(gate="bats", subject="silo-egress.bats", notes="raw_rc=1"),
+        _row(gate="gui", subject="x", notes="agent command rc=1 status=UNKNOWN"),
+        _row(gate="gui-admin", subject="golden-build", exit_class="vm_provision",
+             notes="run-golden build failed"),
+    ):
+        assert report.nonactionable_failure_reason(r) is None, r["subject"]
+
+
+def test_partition_normalizes_status_like_the_classifier():
+    # A padded / upper-cased status must not be silently dropped from BOTH
+    # buckets — partition_failures normalizes the same way the classifier does.
+    rows = [
+        _row(status="FAIL", gate="gui", subject="upper-fail"),
+        _row(status=" fail ", gate="gui", subject="padded-fail"),
+        _row(status="Blocked", gate="release-manifest", subject="unpopulated"),
+    ]
+    actionable, expected = report.partition_failures(rows)
+    assert [r["subject"] for r in actionable] == ["upper-fail", "padded-fail"]
+    assert [r["subject"] for r, _ in expected] == ["unpopulated"]
+
+
+def test_pass_and_skip_rows_are_never_nonactionable_failures():
+    # The classifier only speaks to FAIL/BLOCKED; a pass/skip returns None.
+    assert report.nonactionable_failure_reason(_row(status="pass")) is None
+    assert report.nonactionable_failure_reason(
+        _row(status="skip", gate="release-manifest")) is None
+
+
+def test_partition_failures_splits_and_preserves_order():
+    rows = [
+        {"status": "pass", "gate": "host", "subject": "ok"},
+        _row(gate="gui", subject="real-fail-1"),
+        _row(gate="release-manifest", subject="unpopulated", status="blocked"),
+        _row(gate="gui", subject="real-fail-2"),
+        _row(gate="lifecycle", subject="INT", notes="run interrupted"),
+        {"status": "skip", "gate": "host", "subject": "skipme"},
+    ]
+    actionable, expected = report.partition_failures(rows)
+    assert [r["subject"] for r in actionable] == ["real-fail-1", "real-fail-2"]
+    assert [r["subject"] for r, _ in expected] == ["unpopulated", "INT"]
+    assert all(isinstance(reason, str) and reason for _, reason in expected)

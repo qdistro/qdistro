@@ -340,12 +340,84 @@ def dependency_missing_skips(rows: list[dict[str, str]]) -> list[dict[str, str]]
     ]
 
 
+def nonactionable_failure_reason(row: dict[str, str]) -> str | None:
+    """Classify a FAIL/BLOCKED row that is EXPECTED / operator-driven rather than
+    an actionable product-or-test regression.
+
+    Phase-1 "clean run" is measured on ACTIONABLE failures only (see
+    todo/qci1/04-followups-from-failure-review.md §E): a run must not read
+    permanently red because release pins are expectedly absent, an operator
+    Ctrl-C'd the run, or a deterministic policy gate fired. These rows stay in
+    results.tsv and the report — they are bucketed, never hidden — but they do
+    not count toward the robustness metric that gates widening parallelism.
+
+    REPORT-ONLY: this changes no pass/fail. Returns a short reason string when
+    the row is expected/non-actionable, else None. Pure (reads only the row
+    dict) so it is host-testable without a run tree.
+    """
+    status = (row.get("status") or "").strip().lower()
+    if status not in {"fail", "blocked"}:
+        return None
+    gate = (row.get("gate") or "").strip().lower()
+    subject = (row.get("subject") or "").strip()
+    notes = (row.get("notes") or "").strip().lower()
+    # Release pins are expectedly unpopulated outside an RC cut.
+    if gate == "release-manifest" and status == "blocked":
+        return "release manifest unpopulated (no RC cut expected)"
+    # Operator interrupt (Ctrl-C / SIGTERM): the run was killed by hand, so the
+    # incomplete tail is not a product signal. Match explicit interrupt phrases
+    # only — a lifecycle row must not be bucketed just because "interrupted"
+    # appears somewhere in a diagnostic note.
+    interrupt_notes = (
+        "run interrupted",
+        "interrupted by operator",
+        "received sigint",
+        "received sigterm",
+    )
+    if gate == "lifecycle" and (
+        subject.upper() in {"INT", "TERM", "SIGINT", "SIGTERM"}
+        or any(token in notes for token in interrupt_notes)
+    ):
+        return "run interrupted by operator"
+    # NOTE: edit-guard failures are deliberately NOT bucketed here. An
+    # unsanctioned protected-path edit is deterministic but still human-required
+    # (sanction with --allow-test-edits, fix the tooling, or revert), and a
+    # blanket exclusion would hide a future regression where a test/agent path
+    # unexpectedly starts touching protected files. It stays actionable.
+    return None
+
+
+def partition_failures(
+    rows: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[tuple[dict[str, str], str]]]:
+    """Split FAIL/BLOCKED rows into (actionable, expected).
+
+    `actionable` is the Phase-1 clean-run set. `expected` pairs each
+    non-actionable row with its reason. Order is preserved within each bucket.
+    """
+    actionable: list[dict[str, str]] = []
+    expected: list[tuple[dict[str, str], str]] = []
+    for r in rows:
+        # Normalize status the SAME way nonactionable_failure_reason() does, so a
+        # padded/upper-cased status can never be silently dropped from both buckets.
+        status = (r.get("status") or "").strip().lower()
+        if status not in {"fail", "blocked"}:
+            continue
+        reason = nonactionable_failure_reason(r)
+        if reason is None:
+            actionable.append(r)
+        else:
+            expected.append((r, reason))
+    return actionable, expected
+
+
 def generate_md(run_dir: Path) -> str:
     manifest = read_kv(run_dir / "manifest.txt")
     rows = read_tsv(run_dir / "results.tsv")
     repos = read_tsv(run_dir / "repo-state.tsv")
     counts = status_counts(rows)
     failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
+    actionable, expected = partition_failures(rows)
     skips = [r for r in rows if r.get("status") == "skip"]
 
     title = manifest.get("run_id", run_dir.name)
@@ -356,6 +428,13 @@ def generate_md(run_dir: Path) -> str:
             lines.append(f"- **{key}**: `{manifest[key]}`")
     if counts:
         lines.append("- **results**: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    # Normalized clean-run signal (Phase-1). Distinguishes ACTIONABLE failures
+    # (product/test/infra to triage) from EXPECTED/operator rows (release pins
+    # absent, operator interrupt, policy gate). Report-only: gates nothing.
+    lines.append(
+        f"- **actionable failures**: {len(actionable)} "
+        f"(Phase-1 clean-run metric; excludes {len(expected)} expected/non-actionable)"
+    )
     lines.append("")
 
     # Confidence taxonomy breakdown (additive; see ci/TAXONOMY.md). Groups
@@ -394,9 +473,9 @@ def generate_md(run_dir: Path) -> str:
                 )
             lines.append("")
 
-    if failures:
+    if actionable:
         lines.append("## Failures and blocked work")
-        for row in failures:
+        for row in actionable:
             subject = row.get("subject", "?")
             gate = row.get("gate", "?")
             status = row.get("status", "?").upper()
@@ -422,7 +501,31 @@ def generate_md(run_dir: Path) -> str:
             lines.append("")
     else:
         lines.append("## Failures and blocked work")
-        lines.append("No failing or blocked result rows were recorded.")
+        if expected:
+            lines.append(
+                "No actionable failures. Only expected/non-actionable rows were "
+                "recorded (see below)."
+            )
+        else:
+            lines.append("No failing or blocked result rows were recorded.")
+        lines.append("")
+
+    if expected:
+        lines.append("## Expected / non-actionable")
+        lines.append(
+            "FAIL/BLOCKED rows that are expected or operator-driven, not product/"
+            "test regressions. Excluded from the Phase-1 clean-run metric; kept "
+            "here for the audit trail."
+        )
+        lines.append("")
+        for row, reason in expected:
+            log = md_link(run_dir, row.get("log", ""), "log")
+            suffix = f" ({log})" if log else ""
+            lines.append(
+                f"- **{row.get('status', '?').upper()}** "
+                f"{row.get('gate', '?')} / {row.get('subject', '?')} — "
+                f"{reason}{suffix}"
+            )
         lines.append("")
 
     if skips:
@@ -590,6 +693,7 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
     manifest = read_kv(run_dir / "manifest.txt")
     rows = read_tsv(run_dir / "results.tsv")
     failures = [r for r in rows if r.get("status") in {"fail", "blocked"}]
+    actionable, expected = partition_failures(rows)
     return {
         "run_id": manifest.get("run_id", run_dir.name),
         "gate": manifest.get("gate", ""),
@@ -608,6 +712,14 @@ def generate_summary(run_dir: Path) -> dict[str, object]:
             for r in dependency_missing_skips(rows)
         ],
         "first_failure": failures[0] if failures else None,
+        # Phase-1 normalized clean-run signal (additive; see report.py
+        # partition_failures). `actionable_failures` is the metric that gates
+        # widening parallelism; `first_actionable_failure` is added alongside the
+        # legacy `first_failure` (unchanged) so downstream consumers get the
+        # normalized signal without a semantics change.
+        "actionable_failures": len(actionable),
+        "expected_nonactionable_failures": len(expected),
+        "first_actionable_failure": actionable[0] if actionable else None,
         "report_md": "report.md",
         "report_html": "report.html",
     }
