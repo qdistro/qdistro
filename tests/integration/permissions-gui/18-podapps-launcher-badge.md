@@ -114,13 +114,8 @@ esac
 # via vm-gui, which talks to ydotoold over /run/user/1000/ydotool.sock. If the
 # daemon is down or the socket is missing, every keystroke is silently dropped
 # and the launcher never opens — fail fast here rather than timing out.
-case "$($VMEXEC "$VM" 'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active ydotoold.service' 2>/dev/null)" in
-    active) ;;
-    *)
-        echo "FAIL(setup): ydotoold not active / ydotool socket missing — launcher keystrokes would be dropped"
-        exit 1
-        ;;
-esac
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_user_unit_active ydotoold.service admin' \
+  || { echo "FAIL(setup): ydotoold not active / ydotool socket missing — launcher keystrokes would be dropped"; exit 1; }
 $VMEXEC "$VM" 'test -S /run/user/1000/ydotool.sock' \
   || { echo "FAIL(setup): ydotoold not active / ydotool socket missing — launcher keystrokes would be dropped"; exit 1; }
 ```

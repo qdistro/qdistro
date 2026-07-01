@@ -17,7 +17,7 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 # Precondition: broker running, no pending requests, admin compositor session up.
-$VMEXEC "$VM" 'systemctl is-active qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1'
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; true'
 ```

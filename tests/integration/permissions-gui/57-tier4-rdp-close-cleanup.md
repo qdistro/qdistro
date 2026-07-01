@@ -84,7 +84,7 @@ the screenshot; tier-4 close should be direct for this transport.
 ### S3 — process cleanup
 
 ```bash
-$VMEXEC "$VM" "runuser -u admin -- virsh domstate $VM4 2>/dev/null || echo missing"
+$VMEXEC "$VM" "runuser -u admin -- bash -c 'source /tmp/qci-gui-waiters.sh && await_domain_gone $VM4; rc=\$?; virsh domstate $VM4 2>/dev/null || echo missing; exit \$rc'"
 $VMEXEC "$VM" 'pgrep -af "tier4-.*rdp|VSOCK-CONNECT|freerdp|xfreerdp|wlfreerdp|sdl-freerdp" || true'
 $VMEXEC "$VM" 'tail -80 /tmp/s57-tier4-rdp.log'
 ```

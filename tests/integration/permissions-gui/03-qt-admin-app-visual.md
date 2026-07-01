@@ -18,7 +18,7 @@ VM=${VMNAME:-qdistro-dev-260421-0052}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
-$VMEXEC "$VM" 'systemctl is-active qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1'
 # Clean slate: no stray admin app, no stray qterminal+TUI, no stray test.
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'

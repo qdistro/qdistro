@@ -19,7 +19,7 @@ VM=${VMNAME:-qdistro-dev-260421-0052}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
-$VMEXEC "$VM" 'systemctl is-active qdistro-admin-broker.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_system_unit_active qdistro-admin-broker.service'
 $VMEXEC "$VM" 'pkill -u admin qterminal 2>/dev/null; pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 ```
 

@@ -63,3 +63,86 @@ setup() {
     run _await "second try" 10 1 probe
     [ "$status" -eq 0 ]
 }
+
+@test "await_system_unit_active: passes when systemctl reports active" {
+    systemctl() { [ "$1" = is-active ] && echo active; }
+    export -f systemctl
+    run await_system_unit_active some.service 2 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_system_unit_active: TIMES OUT loudly on a non-active state" {
+    systemctl() { [ "$1" = is-active ] && echo activating; }
+    export -f systemctl
+    run await_system_unit_active some.service 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"system unit active: some.service"* ]]
+    [[ "$output" == *"state=activating"* ]]
+}
+
+@test "await_system_unit_active: succeeds once the unit flips to active mid-wait" {
+    local n="$BATS_TEST_TMPDIR/svc"; echo 0 > "$n"
+    systemctl() {
+        [ "$1" = is-active ] || return 0
+        local c; c=$(cat "$n"); c=$((c + 1)); echo "$c" > "$n"
+        if [ "$c" -ge 2 ]; then echo active; else echo activating; fi
+    }
+    export -f systemctl
+    run await_system_unit_active some.service 5 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_domain_gone: passes when the domain is absent (virsh errors)" {
+    virsh() { return 1; }   # domstate on an undefined domain errors, empty stdout
+    export -f virsh
+    run await_domain_gone gone-dom 2 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_domain_gone: passes on a terminal non-running state" {
+    virsh() { [ "$1" = domstate ] && echo "shut off"; }
+    export -f virsh
+    run await_domain_gone dom 2 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_domain_gone: accepts a crashed domain as reaped (terminal)" {
+    virsh() { [ "$1" = domstate ] && echo crashed; }
+    export -f virsh
+    run await_domain_gone dom 2 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_domain_gone: TIMES OUT loudly while the domain is still running" {
+    virsh() { [ "$1" = domstate ] && echo running; }
+    export -f virsh
+    run await_domain_gone dom 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"domain reaped (absent or terminally stopped): dom"* ]]
+    [[ "$output" == *"domstate=running"* ]]
+}
+
+@test "await_domain_gone: does NOT accept a live/transitional state (paused) as reaped" {
+    # paused/pmsuspended/blocked are non-running but the domain still exists —
+    # they must NOT satisfy the reap check.
+    virsh() { [ "$1" = domstate ] && echo paused; }
+    export -f virsh
+    run await_domain_gone dom 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"domstate=paused"* ]]
+}
+
+@test "await_domain_gone: succeeds once the domain stops running mid-wait" {
+    local n="$BATS_TEST_TMPDIR/dom"; echo 0 > "$n"
+    virsh() {
+        [ "$1" = domstate ] || return 0
+        local c; c=$(cat "$n"); c=$((c + 1)); echo "$c" > "$n"
+        if [ "$c" -ge 2 ]; then echo "shut off"; else echo running; fi
+    }
+    export -f virsh
+    run await_domain_gone dom 5 1
+    [ "$status" -eq 0 ]
+}

@@ -87,6 +87,23 @@ _probe_user_unit_active() {
     [ "$state" = active ]
 }
 
+# await_system_unit_active <unit> [timeout] [interval]
+# System-scope counterpart of await_user_unit_active: wait until a SYSTEM systemd
+# unit reports `active` (`systemctl is-active <unit>`, no --user). Use for
+# preconditions on system services (e.g. a broker socket unit) that a fresh VM
+# may still be starting when the scenario begins.
+await_system_unit_active() {
+    local unit=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "system unit active: $unit" "$timeout" "$interval" \
+        _probe_system_unit_active "$unit"
+}
+_probe_system_unit_active() {
+    local unit=$1 state
+    state=$(systemctl is-active "$unit" 2>/dev/null)
+    printf 'state=%s' "${state:-unknown}"
+    [ "$state" = active ]
+}
+
 # await_journal_line_after_cursor <cursor> <ere-pattern> [timeout] [interval] [journalctl-args...]
 # Wait for a journal line matching <ere-pattern> that appears AFTER <cursor>.
 # Capture the cursor BEFORE the action you are about to drive, e.g.:
@@ -151,4 +168,27 @@ _probe_domstate() {
     state=$(virsh domstate "$dom" 2>/dev/null | tr -d '\r' | head -n1)
     printf 'domstate=%s' "${state:-<empty>}"
     [ "$state" = "$want" ]
+}
+
+# await_domain_gone <domain> [timeout] [interval]
+# Wait until <domain> is REAPED — either undefined/absent (domstate errors →
+# empty read) or in a TERMINAL stopped state ("shut off", crashed). This is the
+# reap-verification counterpart of await_domstate: after driving a window/VM
+# close, a one-shot domstate can still catch the guest mid-teardown; poll until
+# it is genuinely gone. Deliberately keeps waiting on live/transitional states
+# (running, paused, pmsuspended, blocked, "in shutdown") — those do NOT prove the
+# domain was reaped, so accepting them would mask an incomplete teardown.
+await_domain_gone() {
+    local dom=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "domain reaped (absent or terminally stopped): $dom" "$timeout" "$interval" \
+        _probe_domain_gone "$dom"
+}
+_probe_domain_gone() {
+    local dom=$1 state
+    state=$(virsh domstate "$dom" 2>/dev/null | tr -d '\r' | head -n1)
+    printf 'domstate=%s' "${state:-<absent>}"
+    case "$state" in
+        ""|"shut off"|crashed) return 0 ;;
+        *) return 1 ;;
+    esac
 }
