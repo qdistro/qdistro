@@ -84,6 +84,10 @@ finish_run() {
     # a parallel gate wrote fragments; runs here too on an interrupted run (abort_run
     # routes through finish_run) so a killed pool's completed rows are not lost.
     merge_worker_fragments
+    # Runner-integrity self-check (H9): the merged rows must not out-severity the
+    # pool-accumulated rc. A pool-gate `fail` row with a rc=0 finish means the
+    # `wait -n` plumbing dropped a worker's nonzero exit; fail the run loudly.
+    rc=$(pool_rc_selfcheck "$rc")
     # Reap any write-ahead orphan a worker left behind (spinner created a domain
     # whose name we could not parse, or a worker killed mid-provision before it
     # recorded the parsed name). Baseline-diff scoped, so pre-existing/concurrent
@@ -283,6 +287,36 @@ merge_worker_fragments() {
         record_result runner-integrity fragment-rows fail "$EXIT_RUNNER" runner integrity "" \
             "$malformed_total malformed worker-fragment row(s) quarantined (a worker crashed mid-write); see results.d/malformed.log"
     fi
+}
+
+# Pool-rc vs recorded-rows self-check (H9). The parallel bats/gui gates accumulate
+# their gate rc from `wait -n` worker statuses — correct bash, but fragile against
+# future edits: a lost/misread status could let the gate return 0 while a worker
+# recorded a `fail` row. Every worker records a result row, so after the fragments
+# are merged assert the finish rc is at least as severe as those rows: a `fail` row
+# from a POOL gate (bats/gui) with a rc=0 finish means the pool plumbing dropped a
+# worker's nonzero exit. Record a loud runner-integrity FAIL row and escalate rc
+# to EXIT_RUNNER (same precedent as H4's integrity row). Scope is the pool gates
+# ONLY — serial gates set rc via `return`, not `wait -n`, and legitimately record a
+# fail row alongside a non-fatal gate rc (e.g. warn-only lint under strict) — and a
+# runner-integrity row is excluded so the check never re-triggers on itself.
+# One cheap pass over results.tsv. Args: incoming rc. Echoes the (possibly
+# escalated) rc. Factored out of finish_run so it is host-testable with stub rows.
+pool_rc_selfcheck() {
+    local rc=$1 fail_rows nfail
+    [ "$rc" -eq 0 ] || { printf '%s' "$rc"; return; }
+    [ -f "$RDIR/results.tsv" ] || { printf '%s' "$rc"; return; }
+    fail_rows=$(awk -F'\t' '
+        NR > 1 && $3 == "fail" && ($1 == "bats" || $1 == "gui") { print $1 "/" $2 }
+    ' "$RDIR/results.tsv")
+    if [ -n "$fail_rows" ]; then
+        nfail=$(printf '%s\n' "$fail_rows" | grep -c .)
+        record_result runner-integrity pool-rc fail "$EXIT_RUNNER" runner integrity "" \
+            "pool rc=0 but $nfail pool-gate fail row(s) recorded — the wait -n plumbing lost a worker's nonzero exit: $(printf '%s' "$fail_rows" | tr '\n' ' ')"
+        log "pool_rc_selfcheck: pool rc=0 but $nfail fail row(s) present; escalating to EXIT_RUNNER"
+        rc=$EXIT_RUNNER
+    fi
+    printf '%s' "$rc"
 }
 
 record_result() {
