@@ -92,13 +92,28 @@ gate_selftest() {
     # nested qci invocations cannot pollute $RDIR (or recurse into runs/).
     local sf_runs
     sf_runs=$(mktemp -d "${TMPDIR:-/tmp}/qci-selftest.XXXXXX")
+    # Env scrub for the nested bats: this gate runs INSIDE the already-bootstrapped
+    # qci process, so every WORKSPACE and <NAME>_REPO that bootstrap.sh exports is
+    # in the environment. env-repo-exports.bats asserts "no WORKSPACE => <NAME>_REPO
+    # is [unset]", which cannot hold if the vars are inherited. Strip WORKSPACE and
+    # each PROJECTS-derived <NAME>_REPO so the nested bats see a clean slate; the
+    # qci runner rediscovers both from bin/qci's own location, so this does not
+    # affect the self-test's real qci invocations. Derived from PROJECTS so it can
+    # never rot when a project is added.
+    local -a sf_scrub=(-u WORKSPACE)
+    local _sf_proj _sf_var
+    for _sf_proj in "${PROJECTS[@]}"; do
+        _sf_var=$(printf '%s' "$_sf_proj" | tr '[:lower:]-' '[:upper:]_')_REPO
+        sf_scrub+=(-u "$_sf_var")
+    done
+    unset _sf_proj _sf_var
     # Run the suite from the repo root: the contract bats resolve some inputs by
     # repo-relative path (e.g. `qci replay tests/integration/vm/x.bats`), so the
     # suite assumes cwd == the qdistro checkout. The bats files are absolute
     # (from `find $QDISTRO_REPO/...`), so the cd doesn't affect discovery. This
     # makes selftest cwd-independent — it passes whether qci was invoked via
     # `just` (cwd=ci/), from the repo root, or from anywhere else.
-    if ( cd "$QDISTRO_REPO" && QCI_IN_SELFTEST=1 QCI_RUNS_DIR="$sf_runs" bats "${bats_files[@]}" ) >> "$log_path" 2>&1; then
+    if ( cd "$QDISTRO_REPO" && QCI_IN_SELFTEST=1 QCI_RUNS_DIR="$sf_runs" env "${sf_scrub[@]}" bats "${bats_files[@]}" ) >> "$log_path" 2>&1; then
         record_result selftest qci-bats pass 0 pass selftest "$log_path" "${#bats_files[@]} qci self-test files passed"
     else
         rc=$EXIT_BATS

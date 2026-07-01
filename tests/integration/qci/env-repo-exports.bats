@@ -38,3 +38,25 @@ child_val() {
     run env -u WORKSPACE bash -c "source '$BOOT' >/dev/null 2>&1; printf '[%s]' \"\${QDWIN_REPO:-unset}\""
     [ "$output" = "[unset]" ]
 }
+
+@test "a discovered QDISTRO_REPO is NOT clobbered by \$WORKSPACE/qdistro (copied/renamed checkout)" {
+    # bin/qci discovers QDISTRO_REPO from the dispatcher's own location and
+    # exports it before sourcing bootstrap. When qci runs from a copied/renamed
+    # checkout (e.g. the edit-guard throwaway repo at $BATS_TMP/repo) that path
+    # is NOT $WORKSPACE/qdistro. The PROJECTS loop must keep the discovered value
+    # or the git-derived edit-guard checks query a nonexistent tree.
+    run env WORKSPACE=/ws QDISTRO_REPO=/some/copied/repo \
+        bash -c "source '$BOOT' >/dev/null 2>&1; bash -c 'printf %s \"\$QDISTRO_REPO\"'"
+    [ "$output" = "/some/copied/repo" ]
+    # Sibling repos are still derived from WORKSPACE — only qdistro is pinned.
+    run env WORKSPACE=/ws QDISTRO_REPO=/some/copied/repo \
+        bash -c "source '$BOOT' >/dev/null 2>&1; bash -c 'printf %s \"\$QDWIN_REPO\"'"
+    [ "$output" = "/ws/qdwin" ]
+}
+
+@test "QDISTRO_REPO is derived from WORKSPACE when not pre-discovered" {
+    # Sourced standalone with only WORKSPACE (no discovered QDISTRO_REPO), the
+    # loop must still derive QDISTRO_REPO=$WORKSPACE/qdistro so the anchored
+    # ${QDISTRO_REPO}/... helper paths resolve.
+    [ "$(child_val QDISTRO_REPO)" = "/ws/qdistro" ]
+}

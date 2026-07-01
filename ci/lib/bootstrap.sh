@@ -27,10 +27,23 @@ PROJECTS=(
 # set by bin/qci before this module is sourced.
 if [ -n "${WORKSPACE:-}" ]; then
     export WORKSPACE
-    [ -n "${QDISTRO_REPO:-}" ] && export QDISTRO_REPO
     _repo_var=""
     for _repo_proj in "${PROJECTS[@]}"; do
         _repo_var=$(printf '%s' "$_repo_proj" | tr '[:lower:]-' '[:upper:]_')_REPO
+        # QDISTRO_REPO is special: bin/qci discovers it from the dispatcher's OWN
+        # location ($QCI_DIR/..) and exports it BEFORE sourcing this module. That
+        # discovered path is authoritative and is NOT always $WORKSPACE/qdistro —
+        # the edit-guard throwaway fixtures (and any copied/renamed checkout) run
+        # qci from $BATS_TMP/repo, whose parent holds no `qdistro` dir. Deriving
+        # QDISTRO_REPO=$WORKSPACE/qdistro here would clobber the real path and
+        # send the git-derived edit-guard checks at a nonexistent tree (which
+        # then take the fail-safe "no base ref" path instead of reporting
+        # PROTECTED). So: keep an already-discovered QDISTRO_REPO; only derive it
+        # from WORKSPACE when it was not set (e.g. bootstrap sourced standalone).
+        if [ "$_repo_proj" = qdistro ] && [ -n "${QDISTRO_REPO:-}" ]; then
+            export QDISTRO_REPO
+            continue
+        fi
         export "${_repo_var}=$WORKSPACE/$_repo_proj"
     done
     unset _repo_proj _repo_var
