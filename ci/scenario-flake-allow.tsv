@@ -12,3 +12,5 @@ permissions-gui/18-podapps-launcher-badge.md	unscoped-journal	diagnostic NOTE-on
 permissions-gui/20-tier5-vm-cold-start.md	unscoped-journal	soft cross-check; prose says do not FAIL if sparse — S3 visual is the load-bearing assertion
 permissions-gui/52-qsu-invalid-target-user-rejected.md	unscoped-journal	nice-to-have log tail; rejection is asserted by handler exit + prose, not this read
 permissions-gui/56-tier4-rdp-window-visible.md	unscoped-journal	secondary journal/process cross-check; missing input-claim line is WARN, paired pgrep carries the verdict
+permissions-gui/19-tier5-loopback-visible.md	unscoped-journal	S4 is an explicit soft cross-check (prose: do not FAIL, S2 journal assert is ground truth); S2 itself is now cursor-scoped
+qdwin-noctalia/01-bar-visible.md	unscoped-journal	session/boot-horizon inspection: layer-shell mapping evidence is emitted at session boot before scenario-start; not a post-action event

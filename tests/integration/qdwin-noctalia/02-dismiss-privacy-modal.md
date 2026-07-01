@@ -30,6 +30,11 @@ ADMIN_USER=$("$QDWIN_VM_EXEC" "$VMNAME" 'getent passwd 1000 | cut -d: -f1' 2>/de
         /home/$ADMIN_USER/.config/noctalia \
         /run/user/1000/quickshell
 "
+# Cursor before the restart so Step 2's clean-startup check scopes to THIS
+# scenario's qdshell restart, not a stale prior startup in a --since window.
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  "runuser -l admin -c \"journalctl --user -u qdshell.service -n0 --show-cursor 2>/dev/null\" \
+     | sed -n 's/^-- cursor: //p' > /tmp/02-shell.cur"
 noct_restart
 sleep 2
 ```
@@ -53,8 +58,9 @@ NEITHER of: "Privacy", "PRIVACY", "GOT IT", "Welcome to Noctalia",
 ### Step 2 — service log
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" \
-    "runuser -l admin -c \"journalctl --user -u qdshell.service --since '30 seconds ago' --no-pager\"" \
+"$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/02-shell.cur 2>/dev/null)
+[ -n "$cur" ] || { echo "FAIL: missing pre-restart qdshell cursor"; exit 1; }
+runuser -l admin -c "journalctl --user -u qdshell.service --after-cursor \"$cur\" --no-pager"' \
     > /tmp/02-shell.log
 ```
 

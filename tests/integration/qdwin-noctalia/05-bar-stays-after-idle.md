@@ -105,22 +105,20 @@ json.dump(d, open(p,'w'), indent=2)
 PY
  chown -R '$ADMIN_USER:' /home/$ADMIN_USER/.config/qdshell
 "
+# Cursor BEFORE the restart so the arm-line check proves THIS restart armed the
+# policy, not a stale prior arm line inside a --since window.
+"$QDWIN_VM_EXEC" "$VMNAME" "journalctl _UID=1000 -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p' > /tmp/05-arm.cur"
 noct_restart
 
 # Fail fast (don't burn the 75s idle wait) if the policy didn't actually arm:
 # the proven smoke asserts the same 'idle policy armed: ... displayOff=60000ms'
-# journal line. Poll briefly after the restart; a missing line means the
-# write-path/schema is wrong, not that DPMS is slow.
-ARMED=
-for _ in $(seq 1 10); do
-    ARMED=$("$QDWIN_VM_EXEC" "$VMNAME" \
-        "journalctl _UID=1000 --since '40 seconds ago' --no-pager 2>/dev/null || true" \
-        2>/dev/null | grep -E 'idle policy armed:.*displayOff=60000ms' | tail -1)
-    [ -n "$ARMED" ] && break
-    sleep 1
-done
-echo "idle-arm journal: ${ARMED:-<not found>}"
-[ -n "$ARMED" ] || { echo "FAIL: qdshell did not arm displayOff=60000ms after settings write (schema/path regression?)"; exit 1; }
+# journal line. Wait (bounded) for it AFTER the restart cursor; a missing line
+# means the write-path/schema is wrong, not that DPMS is slow.
+"$QDWIN_VM_EXEC" "$VMNAME" 'source /tmp/qci-gui-waiters.sh
+cur=$(cat /tmp/05-arm.cur 2>/dev/null)
+[ -n "$cur" ] || { echo "FAIL: missing pre-restart journal cursor"; exit 1; }
+await_journal_line_after_cursor "$cur" "idle policy armed:.*displayOff=60000ms" 15 1 _UID=1000' \
+    || { echo "FAIL: qdshell did not arm displayOff=60000ms after settings write (schema/path regression?)"; exit 1; }
 ```
 
 ## Steps
@@ -141,6 +139,11 @@ noct_screenshot_awake /tmp/05-step1-awake.png
 > wait (any pointer/key activity resets ext-idle-notify and re-arms the timer).
 
 ```bash
+# Cursor before the idle wait so Step 4's clean-log + wake-remap checks scope to
+# THIS idle/wake cycle, not a stale line in a --since '1 minute ago' window.
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null\" \
+     | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur"
 # 60s display-off timeout (1-minute minimum) + grace; no input this period.
 sleep 75
 qdwin_screenshot /tmp/05-step2-asleep.png
@@ -170,15 +173,16 @@ DPMS-off period).
 ### Step 4 — confirm clean journal
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" \
- "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '1 minute ago' --no-pager\"" \
+"$QDWIN_VM_EXEC" "$VMNAME" 'cur=$(cat /tmp/05-wake.cur 2>/dev/null)
+[ -n "$cur" ] || { echo "FAIL: missing pre-idle/wake compositor cursor"; exit 1; }
+runuser -l admin -c "journalctl --user -u qdwin-compositor.service --after-cursor \"$cur\" --no-pager"' \
  > /tmp/05-weston.log
 ```
 
 **Assert (4.1):** zero `error <N>:` lines in the captured log.
-**Assert (4.2):** at least one `qdwin: layer-shell mapped` line
-between step 2 and step 3 timestamps (proving Noctalia repainted
-on wake).
+**Assert (4.2):** at least one `qdwin: layer-shell mapped` line in the
+captured log (which spans from the pre-idle cursor through wake), proving
+Noctalia repainted on wake during this idle/wake cycle.
 
 ## Cleanup
 

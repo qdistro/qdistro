@@ -38,13 +38,23 @@ noct_session_healthy || { echo "FAIL: noctalia not healthy"; exit 1; }
 #     never re-fires on a runtime move, so it is a boot precondition,
 #     not a per-move assertion.
 # Mirrors the journalctl style in noct_layer_mapped_count_since.
-cursor_layer_nonzero_alpha_since() {
-    local since="${1:-1 minute ago}"
+# Count runtime cursor-plane remaps with nonzero alpha AFTER a journal cursor
+# captured immediately before the move. Cursor-scoped, not a --since window: a
+# same-second stale remap from a prior move can no longer satisfy the assert.
+cursor_layer_nonzero_alpha_after() {
+    local cur="$1"
     "$QDWIN_VM_EXEC" "$VMNAME" \
-        "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '$since' --no-pager\" \
+        "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --after-cursor '$cur' --no-pager\" \
             | grep 'mapped on cursor_layer' \
             | grep -oE 'nonzero_alpha=[0-9]+' | grep -vc 'nonzero_alpha=0$'" \
         2>/dev/null | tail -1
+}
+# Capture the current qdwin-compositor user-journal cursor (empty string on
+# failure). Call immediately BEFORE a cursor move to scope the per-move assert.
+compositor_journal_cursor() {
+    "$QDWIN_VM_EXEC" "$VMNAME" \
+        "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service -n0 --show-cursor 2>/dev/null\" \
+            | sed -n 's/^-- cursor: //p'"
 }
 # Boot precondition: the default cursor sprite was registered once at
 # session start. Greps the whole boot (`-b`), NOT a runtime `--since`,
@@ -68,7 +78,7 @@ cursor_sprite_registered_at_boot() {
 ### Step 1 — park cursor in the dark wallpaper area
 
 ```bash
-SINCE_STEP1=$(date '+%H:%M:%S')
+CUR_STEP1=$(compositor_journal_cursor)
 qdwin_mouse_move 1500 600
 sleep 1
 qdwin_screenshot /tmp/04-step1-wallpaper-area.png
@@ -83,7 +93,7 @@ screenshot` cannot capture the hardware cursor PLANE, so assert the
 compositor's own journal rather than the screenshot:
 
 ```bash
-[ "$(cursor_layer_nonzero_alpha_since "$SINCE_STEP1")" -ge 1 ] \
+[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP1")" -ge 1 ] \
     || { echo "FAIL: cursor not mapped on cursor_layer with nonzero_alpha"; exit 1; }
 ```
 
@@ -94,7 +104,7 @@ NOT required to pass (the hw-cursor plane is invisible to virsh).
 ### Step 2 — move cursor onto a bar widget (clock area)
 
 ```bash
-SINCE_STEP2=$(date '+%H:%M:%S')
+CUR_STEP2=$(compositor_journal_cursor)
 qdwin_mouse_move 1700 15
 sleep 1
 qdwin_screenshot /tmp/04-step2-clock-hover.png
@@ -105,7 +115,7 @@ still mapped on the cursor plane with non-zero alpha after the move
 to the bar (the hover keeps the sprite live):
 
 ```bash
-[ "$(cursor_layer_nonzero_alpha_since "$SINCE_STEP2")" -ge 1 ] \
+[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP2")" -ge 1 ] \
     || { echo "FAIL: cursor not mapped on cursor_layer after bar hover"; exit 1; }
 ```
 
@@ -123,7 +133,7 @@ confirm the cursor moved to the new position.
 ### Step 3 — sweep cursor across the bar
 
 ```bash
-SINCE_STEP3=$(date '+%H:%M:%S')
+CUR_STEP3=$(compositor_journal_cursor)
 for x in 100 400 700 1000 1300 1600 1900; do
  qdwin_mouse_move "$x" 15
  sleep 0.2
@@ -138,7 +148,7 @@ the sweep (the cursor followed the motion). Assert the journal, not
 the screenshot (the final position (1900, 15) is soft-only):
 
 ```bash
-[ "$(cursor_layer_nonzero_alpha_since "$SINCE_STEP3")" -ge 1 ] \
+[ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP3")" -ge 1 ] \
     || { echo "FAIL: cursor not mapped on cursor_layer during sweep"; exit 1; }
 ```
 **Assert (3.2):** Noctalia is still alive — `noct_session_healthy`.

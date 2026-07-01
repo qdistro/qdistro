@@ -79,6 +79,9 @@ runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+# Cursor BEFORE the approve keystroke, so S4's double-decide invariant scopes to
+# broker lines emitted by THIS decision, not a stale prior request.
+$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service -n0 --show-cursor 2>/dev/null | sed -n "s/^-- cursor: //p" > /tmp/35-decide.cur'
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 1.5
 
@@ -99,13 +102,21 @@ $VMEXEC "$VM" 'wait $(cat /tmp/35-work.pid) 2>/dev/null; cat /tmp/35-work.log'
 ### S4 — invariant: TUI didn't try to double-decide
 
 ```bash
-$VMEXEC "$VM" 'journalctl -u qdistro-admin-broker.service --since "1 minute ago" \
-  | grep -E "(invalid|gone|already|stale).*request" || true'
+$VMEXEC "$VM" 'cur=$(cat /tmp/35-decide.cur 2>/dev/null)
+[ -n "$cur" ] || { echo "FAIL: missing S3 decide cursor"; exit 1; }
+if journalctl -u qdistro-admin-broker.service --after-cursor "$cur" --no-pager \
+     | grep -E "(invalid|gone|already|stale).*request"; then
+  echo "FAIL: TUI double-decided (invalid/gone/already/stale request after the Qt approve)"
+  exit 1
+fi
+echo "OK: no double-decide lines after the approve cursor"'
 ```
 
-**Assert**: zero lines matching that pattern. A double-decide
-attempt from the TUI would show as `"DecideRequest: request_id N
-gone"` or similar in the broker log.
+**Assert**: the command prints `OK: no double-decide ...` and exits 0. A
+double-decide attempt from the TUI would show as `"DecideRequest: request_id N
+gone"` or similar in the broker log AFTER the approve cursor and FAIL the check.
+Because the read is cursor-scoped (not a `--since` window), a stale prior-request
+line can no longer cause a false failure.
 
 ## Teardown
 

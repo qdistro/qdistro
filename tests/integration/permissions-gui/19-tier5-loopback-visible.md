@@ -63,6 +63,9 @@ disown
 sleep 3
 EOF
 )
+# Capture a journal cursor BEFORE the tier-5 spawn so S2's title-prefix
+# assertion can scope to lines emitted by THIS spawn, not a stale prior one.
+$VMEXEC "$VM" 'journalctl -n0 --show-cursor 2>/dev/null | sed -n "s/^-- cursor: //p" > /tmp/s19-journal.cur'
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 ```
 
@@ -91,13 +94,15 @@ ground truth here.
 Wait for the inner weston-terminal to map (~2s), then read the journal.
 
 ```bash
-sleep 2
 # Authoritative: qdwin received the forwarded toplevel and assigned it the
 # [tier5:loopback-<pid>] title prefix. The <pid> suffix varies — match the
-# prefix only. Wide --since window (this is a fresh disposable VM with a single
-# tier-5 spawn, so a stale match is impossible) tolerates a slow agent pausing
-# between the S1 map and this assertion.
-$VMEXEC "$VM" "journalctl --since '10min ago' | grep 'qdwin: toplevel_title' | grep -F '[tier5:loopback-' | head"
+# prefix only. Scope to journal lines AFTER the pre-spawn cursor captured in S1
+# so a stale prior tier-5 line can't satisfy it; the bounded waiter tolerates a
+# slow agent pausing between the S1 map and this assertion.
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
+cur=$(cat /tmp/s19-journal.cur 2>/dev/null)
+[ -n "$cur" ] || { echo "FAIL: missing S1 journal cursor"; exit 1; }
+await_journal_line_after_cursor "$cur" "qdwin: toplevel_title.*\[tier5:loopback-" 30 1'
 ```
 
 **Assert** (deterministic): the command prints at least one line — qdwin
@@ -147,7 +152,7 @@ If `ydotool` isn't installed (`uinput` kernel module missing — see
 **soft pass** — note the input-injection limitation and move on.
 Don't FAIL on it.
 
-### S4 — journal cross-check (load-bearing)
+### S4 — journal cross-check (soft / diagnostic)
 
 ```bash
 $VMEXEC "$VM" "journalctl --since '1min ago' | grep -E 'qdwin:.*tier5|tier5.*qdwin' | head -20"
