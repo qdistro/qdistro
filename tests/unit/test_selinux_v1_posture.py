@@ -35,6 +35,13 @@ def test_tier1_policy_does_not_grant_broad_proc_or_home_file_reads() -> None:
     assert "qdistro_tier1_config_t:file manage_file_perms" in te
 
 
+def test_tier1_make_stages_broker_interface_for_fresh_checkout_builds() -> None:
+    mk = _read("selinux/tier1/Makefile")
+    assert "../broker/qdistro_broker.if" in mk
+    assert "LOCAL_DEVEL_ROOT" in mk
+    assert "SHAREDIR=\"$(LOCAL_DEVEL_ROOT)\"" in mk
+
+
 def test_session_manager_permissive_tag_is_explicitly_scoped() -> None:
     te = _read("selinux/session_manager/qdistro_session_manager.te")
     assert "permissive qdistro_sessmgr_t;" in _rules_only(te)
