@@ -84,9 +84,13 @@ finish_run() {
     # a parallel gate wrote fragments; runs here too on an interrupted run (abort_run
     # routes through finish_run) so a killed pool's completed rows are not lost.
     merge_worker_fragments
-    # Runner-integrity self-check (H9): the merged rows must not out-severity the
-    # pool-accumulated rc. A pool-gate `fail` row with a rc=0 finish means the
-    # `wait -n` plumbing dropped a worker's nonzero exit; fail the run loudly.
+    # Runner-integrity escalations: (a) quarantined malformed fragment rows must
+    # fail the RUN, not just record a fail row (codex review finding — the row
+    # alone leaves rc=0 because pool_rc_selfcheck excludes runner-integrity rows);
+    # (b) the merged rows must not out-severity the pool-accumulated rc — a
+    # pool-gate `fail` row with a rc=0 finish means the `wait -n` plumbing dropped
+    # a worker's nonzero exit; fail the run loudly.
+    rc=$(fragment_integrity_rc "$rc")
     rc=$(pool_rc_selfcheck "$rc")
     # Reap any write-ahead orphan a worker left behind (spinner created a domain
     # whose name we could not parse, or a worker killed mid-provision before it
@@ -286,7 +290,30 @@ merge_worker_fragments() {
         log "merge_worker_fragments: quarantined $malformed_total malformed fragment row(s) — see *.d/malformed.log"
         record_result runner-integrity fragment-rows fail "$EXIT_RUNNER" runner integrity "" \
             "$malformed_total malformed worker-fragment row(s) quarantined (a worker crashed mid-write); see results.d/malformed.log"
+        # Accumulate into the run-global so finish_run can escalate the PROCESS
+        # exit code (fragment_integrity_rc): the fail row alone is not enough —
+        # pool_rc_selfcheck deliberately ignores runner-integrity rows, so without
+        # this a run with quarantined rows could still exit 0.
+        MERGE_MALFORMED_TOTAL=$(( ${MERGE_MALFORMED_TOTAL:-0} + malformed_total ))
     fi
+}
+
+# Escalate a clean rc when malformed fragment rows were quarantined this run.
+# merge_worker_fragments records a runner-integrity fail row for them, but a
+# result row does not change the process exit code by itself, and
+# pool_rc_selfcheck deliberately excludes runner-integrity rows (it must not
+# re-trigger on its own row) — so without this a run whose only failure is a
+# quarantined fragment row would exit 0 with an actionable fail row in
+# results.tsv. A nonzero incoming rc keeps its original (more specific) class.
+# Args: incoming rc. Echoes the (possibly escalated) rc. Host-testable.
+fragment_integrity_rc() {
+    local rc=$1
+    if [ "$rc" -eq 0 ] && [ "${MERGE_MALFORMED_TOTAL:-0}" -gt 0 ]; then
+        log "fragment_integrity_rc: $MERGE_MALFORMED_TOTAL malformed fragment row(s) quarantined but rc=0; escalating to EXIT_RUNNER"
+        printf '%s' "$EXIT_RUNNER"
+        return 0
+    fi
+    printf '%s' "$rc"
 }
 
 # Pool-rc vs recorded-rows self-check (H9). The parallel bats/gui gates accumulate

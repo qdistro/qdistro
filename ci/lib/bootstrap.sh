@@ -81,6 +81,7 @@ RUN_GOLDEN_DISKS=()
 GOLDEN_INFLIGHT_VMS=()   # golden VMs mid-build (for interrupt cleanup)
 GOLDEN_PRESERVE=0        # set if a preserved failed worker may back-reference a golden
 FINALIZING=0
+MERGE_MALFORMED_TOTAL=0  # malformed fragment rows quarantined this run (escalates rc)
 
 # QCI_OFFLINE=1 forces a host-only / no-egress posture for VM tests:
 #   - tests/scenarios see QCI_OFFLINE=1 in their environment and are expected

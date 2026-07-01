@@ -62,3 +62,29 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     grep -q 'b.bats' "$RDIR/results.tsv"
     ! grep -q 'runner-integrity' "$RDIR/results.tsv"
 }
+
+# --- rc escalation (codex review finding): a quarantined row must fail the RUN,
+# --- not just record a fail row — pool_rc_selfcheck excludes runner-integrity
+# --- rows, so fragment_integrity_rc is the only thing standing between a crashed
+# --- worker and a green exit code.
+
+@test "quarantined rows escalate a clean rc to EXIT_RUNNER" {
+    printf 'bats\ttrunc.bats\tfail\t35\tbats\n' > "$RDIR/results.d/w3.tsv"
+    merge_worker_fragments
+    [ "$MERGE_MALFORMED_TOTAL" -gt 0 ]
+    [ "$(fragment_integrity_rc 0)" = "$EXIT_RUNNER" ]
+}
+
+@test "quarantined rows do NOT overwrite a nonzero rc's original class" {
+    printf 'bats\ttrunc.bats\tfail\t35\tbats\n' > "$RDIR/results.d/w4.tsv"
+    merge_worker_fragments
+    [ "$(fragment_integrity_rc 35)" = "35" ]
+}
+
+@test "a clean merge leaves rc untouched" {
+    printf 'bats\tc.bats\tpass\t0\tpass\tbats\t\t\tintegration\n' \
+        > "$RDIR/results.d/w5.tsv"
+    MERGE_MALFORMED_TOTAL=0
+    merge_worker_fragments
+    [ "$(fragment_integrity_rc 0)" = "0" ]
+}
