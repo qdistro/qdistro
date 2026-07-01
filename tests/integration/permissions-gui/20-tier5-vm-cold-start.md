@@ -142,7 +142,7 @@ echo "guest-ping: \$(runuser -u admin -- virsh qemu-agent-command --timeout 5 "\
 tail -20 /tmp/s20-spawn.log 2>/dev/null
 EOF
 )
-$VMEXEC "$VM" "echo $B64 | base64 -d | bash" 2>&1 | tee /tmp/s20-liveness.log
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash" 2>&1 | tee "${QCI_SCENARIO_TMPDIR:-/tmp}/s20-liveness.log"
 ```
 
 **Assert**: the block prints `S2_VERDICT=LIVE` — the domain either
@@ -152,7 +152,7 @@ pid + a `guest-ping` response even though `domstate` lied `shut off`
 NO accepted liveness proof within 90s: neither `domstate=running` nor a
 backing qemu pid answering `guest-ping` (a guest that never came up,
 OOM/panic'd so qemu exited, or is only a wedged qemu with a dead agent).
-Attach `/tmp/s20-liveness.log` + the spawn log. A `domstate=shut off`
+Attach `${QCI_SCENARIO_TMPDIR:-/tmp}/s20-liveness.log` + the spawn log. A `domstate=shut off`
 reading is NOT by itself a failure when qemu+qga prove the guest is
 alive. (S2 asserts LIVENESS only; S3 separately proves the publisher
 handshake and the visible toplevel.)

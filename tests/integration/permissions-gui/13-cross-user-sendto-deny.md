@@ -79,8 +79,8 @@ $VMEXEC "$VM" 'runuser -u work2 -- env \
  dbus-send --session --print-reply \
  --dest=org.qdistro.StubNotepad.uid3000 \
  /org/qdistro/App1 \
- org.qdistro.App1.GetDocument' > /tmp/13-doc.out 2>&1
-cat /tmp/13-doc.out
+ org.qdistro.App1.GetDocument' > "${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out" 2>&1
+cat "${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out"
 
 # Sender observed a Denied error.
 $VMEXEC "$VM" 'cat /tmp/13-relay.out'
@@ -95,7 +95,7 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 ```
 
 **Assert**:
-- `/tmp/13-doc.out` does NOT contain `deny_me_please`.
+- `${QCI_SCENARIO_TMPDIR:-/tmp}/13-doc.out` does NOT contain `deny_me_please`.
 - `/tmp/13-relay.out` contains the substring
  `org.qdistro.AdminBroker1.Denied` in the error name. (A NoReply
  instead is acceptable only if the admin click came after
@@ -107,5 +107,5 @@ $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.
 
 ```bash
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
-$VMEXEC "$VM" 'rm -f /tmp/13-relay.out /tmp/13-relay.pid /tmp/13-doc.out'
+$VMEXEC "$VM" 'rm -f /tmp/13-relay.out /tmp/13-relay.pid'
 ```

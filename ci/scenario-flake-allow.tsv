@@ -16,3 +16,8 @@ permissions-gui/19-tier5-loopback-visible.md	unscoped-journal	S4 is an explicit 
 qdwin-noctalia/01-bar-visible.md	unscoped-journal	session/boot-horizon inspection: layer-shell mapping evidence is emitted at session boot before scenario-start; not a post-action event
 permissions-gui/11-cross-user-sendto-headless.md	unscoped-tmp-path	guest script assembled via base64 heredoc, decoded+run in disposable per-scenario VM (guest /tmp, no host collision)
 permissions-gui/15-realapp-sendto-headless.md	unscoped-tmp-path	guest script assembled via base64 heredoc, decoded+run in disposable per-scenario VM (guest /tmp, no host collision)
+permissions-gui/07-cli-roundtrip.md	unscoped-tmp-path	07-revoke.txt written inside base64 heredoc decoded+run in the disposable per-scenario VM (guest /tmp, no host collision)
+permissions-gui/28-rule-exe-glob-match.md	unscoped-tmp-path	28-rid.out/28-work-alt.{log,pid} all written inside the S3 base64 heredoc decoded+run in the guest VM (guest /tmp, no host collision)
+permissions-gui/31-fire-and-forget-request.md	unscoped-tmp-path	31-s1.out written inside a base64 heredoc decoded+run in the guest VM (guest /tmp, no host collision)
+permissions-gui/38-listrules-surface.md	unscoped-tmp-path	38-listrules-work.out written inside a base64 heredoc decoded+run in the guest VM; the host 38-listrules.out capture is scoped to $QCI_SCENARIO_TMPDIR
+permissions-gui/39-saverule-validation-rejects-bad-yaml.md	unscoped-tmp-path	39-s{1,2,3}.out written inside base64 heredocs decoded+run in the guest VM; the host pre/post-count files are scoped to $QCI_SCENARIO_TMPDIR

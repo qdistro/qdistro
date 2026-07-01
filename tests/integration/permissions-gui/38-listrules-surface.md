@@ -73,10 +73,10 @@ $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
   --dest=org.qdistro.AdminBroker1 \
   /org/qdistro/AdminBroker1 \
   org.qdistro.AdminBroker1.ListRules' \
-  | tee /tmp/38-listrules.out
+  | tee "${QCI_SCENARIO_TMPDIR:-/tmp}/38-listrules.out"
 ```
 
-**Assert** (textual analysis of `/tmp/38-listrules.out`):
+**Assert** (textual analysis of `${QCI_SCENARIO_TMPDIR:-/tmp}/38-listrules.out`):
 - Three dict entries in the outer array.
 - One entry has `name="narrow-py"`, `decision="allow"`,
   `action="scenario38.narrow"`, `exe="/usr/bin/python3.13"`,

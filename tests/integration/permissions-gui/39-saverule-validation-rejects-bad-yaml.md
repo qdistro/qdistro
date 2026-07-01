@@ -32,8 +32,8 @@ $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
   --dest=org.qdistro.AdminBroker1 \
   /org/qdistro/AdminBroker1 \
   org.qdistro.AdminBroker1.ListRules' \
-  | grep -c '"name"' > /tmp/39-pre-count.txt
-PRE_COUNT=$(cat /tmp/39-pre-count.txt)
+  | grep -c '"name"' > "${QCI_SCENARIO_TMPDIR:-/tmp}/39-pre-count.txt"
+PRE_COUNT=$(cat "${QCI_SCENARIO_TMPDIR:-/tmp}/39-pre-count.txt")
 echo "pre-count = $PRE_COUNT"
 ```
 
@@ -116,8 +116,8 @@ $VMEXEC "$VM" 'runuser -u admin -- dbus-send --system --print-reply \
   --dest=org.qdistro.AdminBroker1 \
   /org/qdistro/AdminBroker1 \
   org.qdistro.AdminBroker1.ListRules' \
-  | grep -c '"name"' > /tmp/39-post-count.txt
-diff /tmp/39-pre-count.txt /tmp/39-post-count.txt
+  | grep -c '"name"' > "${QCI_SCENARIO_TMPDIR:-/tmp}/39-post-count.txt"
+diff "${QCI_SCENARIO_TMPDIR:-/tmp}/39-pre-count.txt" "${QCI_SCENARIO_TMPDIR:-/tmp}/39-post-count.txt"
 ```
 
 **Assert**: `diff` exits 0 — the rule count is identical to S0.

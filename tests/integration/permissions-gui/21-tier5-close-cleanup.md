@@ -151,7 +151,7 @@ fi
 # first frame. Persist the handle so S2 doesn't depend on the shell variable
 # surviving across fenced blocks (the runner does not guarantee one persistent
 # shell). Then capture the visual frame for the assertion.
-printf '%s' "$handle" > /tmp/s21-handle
+printf '%s' "$handle" > "${QCI_SCENARIO_TMPDIR:-/tmp}/s21-handle"
 sleep 1
 $VMGUI "$VM" screenshot /tmp/s21-running.png
 ```
@@ -175,7 +175,7 @@ not by clicking the title-bar glyph. `$handle` is the tier-5
 toplevel handle the S1 readiness gate already learned.
 
 ```bash
-handle=$(cat /tmp/s21-handle 2>/dev/null)
+handle=$(cat "${QCI_SCENARIO_TMPDIR:-/tmp}/s21-handle" 2>/dev/null)
 [ -n "$handle" ] || { echo "ERROR: no tier-5 handle persisted from S1 (cannot drive close)"; exit 2; }
 
 # Journal cursor BEFORE the close so the asserts below cannot match a stale
