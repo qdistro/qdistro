@@ -290,6 +290,72 @@ class TestScopeReset:
 
 
 # ---------------------------------------------------------------------------
+# Scope transmission — the Ctrl+Y approve path must carry the selected scope
+# ---------------------------------------------------------------------------
+
+class TestScopeSurvivesApprove:
+    """Ground-truth for permissions-gui/04-qt-admin-app-approve: an admin who
+    selects the "1 hour" scope and then approves (Ctrl+Y) must have that scope
+    reach the broker — not the default `once`.
+
+    These exercise the product path directly (no GUI/broker) so they catch a
+    real scope-transmission regression regardless of any test-input artifact
+    in the integration scenario.
+    """
+
+    def _checked_scope(self, detail: DetailPane) -> str:
+        for key, rb in detail._scope_buttons:
+            if rb.isChecked():
+                return key
+        return "(none)"
+
+    def _shortcut(self, win, seq):
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        want = QKeySequence(seq).toString()
+        for sc in win.findChildren(QShortcut):
+            if sc.key().toString() == want:
+                return sc
+        raise AssertionError(f"no shortcut bound for {seq!r}")
+
+    def test_selected_1h_scope_is_emitted_on_allow(self, qapp):
+        detail = DetailPane()
+        detail.show_request(_req(1))
+        # Admin picks the "1 hour" scope radio.
+        for key, rb in detail._scope_buttons:
+            rb.setChecked(key == "1h")
+        assert self._checked_scope(detail) == "1h"
+
+        emitted = []
+        detail.decided.connect(
+            lambda rid, dec, scope: emitted.append((rid, dec, scope)))
+        detail._emit("allow")
+
+        assert emitted == [(1, "allow", "1h")]
+
+    def test_scope_shortcut_then_ctrl_y_transmits_1h(self, qapp):
+        # Full keyboard path exactly as the scenario intends: the scope
+        # shortcut (Ctrl+Shift+2 -> "1h") ticks the radio, then Ctrl+Y
+        # approves. The emitted decision must carry "1h".
+        broker = _make_stub_broker()
+        broker.get_pending.return_value = [_req(1)]
+        win = MainWindow(broker)
+        win.tabs.setCurrentWidget(win.pending_tab)
+        win.detail.show_request(_req(1))
+
+        emitted = []
+        win.detail.decided.connect(
+            lambda rid, dec, scope: emitted.append((rid, dec, scope)))
+
+        # Ctrl+Shift+2 selects the 1-hour scope (unguarded scope key).
+        self._shortcut(win, "Ctrl+Shift+2").activated.emit()
+        assert self._checked_scope(win.detail) == "1h"
+
+        # Ctrl+Y approves the current request from the Pending tab.
+        self._shortcut(win, "Ctrl+Y").activated.emit()
+        assert emitted == [(1, "allow", "1h")]
+
+
+# ---------------------------------------------------------------------------
 # Item 3 — ScopeNotPermitted surfaces inline + stays retryable
 # ---------------------------------------------------------------------------
 

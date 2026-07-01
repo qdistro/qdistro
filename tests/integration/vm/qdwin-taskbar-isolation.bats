@@ -120,10 +120,35 @@ teardown_file() {
 @test "taskbar-isolation: the isolated disposable is a live container in admin's rootless store" {
     # shellcheck disable=SC1090
     source "$STATE"
-    vm_run_admin "podman ps --filter label=qdistro_disposable=1 --format '{{.Names}}'"
-    assert_success
     ensures "the isolated window the taskbar shows is backed by a real running disposable container"
-    assert_output_contains "$CONTAINER"
+    # qdwin can log the secctx commit a beat BEFORE admin's rootless podman has
+    # finished registering the --rm container, so a one-shot `podman ps` flakes
+    # when the listing lands inside that registration window. Poll for the
+    # SPECIFIC container (exact `podman container exists`, not a substring of a
+    # ps listing) for ~20s — mirroring the disp-secctx-wiretag probe's
+    # `for _ in $(seq 1 40); do as_admin podman container exists ...; sleep 0.5`
+    # registration poll (probe lines 218-226) and the seq-based waits elsewhere
+    # in this suite. This tolerates the lag WITHOUT weakening the assertion: a
+    # container that never lands in admin's store still fails after the deadline.
+    # On timeout, dump the disposable-labelled containers so the failure is
+    # debuggable.
+    vm_run_admin "
+      for i in \$(seq 1 40); do
+        podman container exists '$CONTAINER' && { echo FOUND; exit 0; }
+        sleep 0.5
+      done
+      echo '--- disposable-labelled containers in admin rootless store ---'
+      podman ps --filter label=qdistro_disposable=1 --format '{{.Names}}'
+      exit 1
+    "
+    if [ "$status" -eq 0 ] && grep -q FOUND <<<"$output"; then
+        check_pass "the isolated disposable is a live container in admin's rootless store" "$CONTAINER"
+    else
+        check_fail "container $CONTAINER exists in admin's rootless podman" \
+            "${output:-<no output>}" \
+            "the taskbar's isolated window is NOT backed by a running disposable in admin's rootless store"
+        fail_loud "disposable container $CONTAINER never registered in admin's rootless store within ~20s"
+    fi
 }
 
 @test "taskbar-isolation: the menu's Dispose action (DisposeByToken) tears the disposable down" {

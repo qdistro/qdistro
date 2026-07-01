@@ -70,14 +70,29 @@ $VMGUI "$VM" screenshot /tmp/45-s1-pending.png
 
 ```bash
 $VMGUI "$VM" screenshot /tmp/45-s2a-radios.png
-# Runner: click "Forever, this argv basename anywhere" (7th radio).
-$VMGUI "$VM" screenshot /tmp/45-s2b-selected.png
 
+# Select the `forever_basename` scope (7th radio, "Forever, this
+# argv basename anywhere") via the admin app's direct scope
+# shortcut. The scope keys map Ctrl+Shift+1..8 to
+# once/1h/24h/forever/forever_exe/forever_argv/forever_basename/
+# forever_prefix (admin_app/qdistro_admin_app.py:2040-2046), so
+# `forever_basename` is Ctrl+Shift+7. Mouse clicks to Qt/XWayland
+# are PLATFORM-BLOCKED on this template (AGENTS.md:166-176); the
+# blessed input path is `virsh send-key` at the virtual evdev
+# keyboard (AGENTS.md:146-164). Always windowactivate first so the
+# approvals window holds X focus when the evdev event arrives.
 B64=$(base64 -w0 <<'EOF'
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
   --name "admin approvals" windowactivate --sync
 EOF
 )
+$VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_7
+sleep 1
+$VMGUI "$VM" screenshot /tmp/45-s2b-selected.png
+
+# Approve the current request with the selected scope (Ctrl+Y →
+# admin_app/qdistro_admin_app.py:2028).
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_Y
 sleep 2

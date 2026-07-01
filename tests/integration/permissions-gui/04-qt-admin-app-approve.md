@@ -51,20 +51,20 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 
-# Select the "1 hour" radio via OCR-targeted click. Earlier
-# revisions of this scenario used Tab→Down keyboard nav, which
-# broke when the admin app's widget tree shifted (TAB walked
-# through the tab strip or button row and never landed on the
-# scope group). OCR-click on the visible label is layout-agnostic
-# — see `tests/integration/permissions-gui/AGENTS.md` .
-#
-# Runner:
-# 1. Ensure the admin approvals window has focus.
-# 2. Take a fresh screenshot of the current admin-app state.
-# 3. OCR that screenshot, find the visible text `1 hour`.
-# 4. Click ~15px to the LEFT of the label's left edge, at the
-# label's vertical midpoint — that's where the radio bullet
-# glyph lives (to the left of the label).
+# Select the "1 hour" scope via its dedicated keyboard shortcut.
+# The admin app binds Ctrl+Shift+1..8 directly to the scope radios
+# (once/1h/24h/forever/...), so Ctrl+Shift+2 ticks the "1 hour"
+# radio regardless of widget-tree layout or focus order. Earlier
+# revisions used Tab→Down keyboard nav, which broke when the widget
+# tree shifted (TAB walked the tab strip or button row and never
+# landed on the scope group); an OCR-targeted click on the label is
+# also fragile (radio-bullet offset guesswork). The scope keys are
+# unguarded (they only tick a radio and commit nothing) so they take
+# effect immediately, and the chord is delivered via `virsh send-key`
+# — the blessed input path for modifier chords on XWayland Qt apps.
+# See `tests/integration/permissions-gui/AGENTS.md`. The binding lives
+# in `qdistro_admin_app.py` at the `_mk_shortcut("Ctrl+Shift+{i+1}", ...)`
+# scope loop.
 B64=$(base64 -w0 <<'EOF'
 #!/bin/bash
 runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
@@ -72,8 +72,8 @@ runuser -u admin -- env DISPLAY=:0 xdotool search --sync \
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
-$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-pre-click.png
-# $VMGUI "$VM" click <cx> <cy> # computed from OCR bounding box of "1 hour"
+$VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-pre-select.png
+virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_LEFTSHIFT KEY_2
 sleep 0.3
 $VMGUI "$VM" screenshot /tmp/04-qt-admin-app-approve-s1-1h-selected.png
 ```
