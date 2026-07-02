@@ -352,7 +352,7 @@ gate_host() {
     # still accumulates INTER-batch within a single run.
     local _qd_pre _qd_post
     _qd_pre='# ALWAYS clear any stale coverage artifact (see comment above).
-rm -f .coverage .coverage-report.json
+rm -f .coverage .coverage.* .coverage-report.json
 if python3 -c "import pytest_cov" 2>/dev/null; then
     _COV_FLAGS="--cov=. --cov-report=term-missing --cov-report=json:.coverage-report.json --cov-append"
 else

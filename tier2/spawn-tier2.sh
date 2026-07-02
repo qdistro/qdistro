@@ -152,6 +152,14 @@ fi
 APP_ARGV=("$@")
 APP_NAME="${APP_ARGV[0]##*/}"
 
+if [ -z "${QDISTRO_PROFILE:-}" ] && [ -r /etc/qdistro/profile ]; then
+    # Disposable VM bootstraps persist QDISTRO_PROFILE=dev here so runuser-
+    # launched integration probes keep the dev profile without test-specific
+    # env plumbing. Real installs do not create this file and still default
+    # to the hardened daily-driver profile.
+    # shellcheck disable=SC1091
+    . /etc/qdistro/profile
+fi
 QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}"
 case "$QDISTRO_PROFILE" in
     dev|daily-driver|release) ;;

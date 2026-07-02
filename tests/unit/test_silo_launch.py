@@ -57,6 +57,8 @@ def test_launch_helper_admin_resolution_is_fail_closed_in_source() -> None:
     assert "exec env -i" in src
     assert 'TIER2_SILO="$TIER2_SILO"' in src
     assert 'TIER2_NETWORK="$TIER2_NETWORK"' in src
+    assert "safe_source_profile /etc/qdistro/profile" in src
+    assert 'QDISTRO_PROFILE="$QDISTRO_PROFILE"' in src
     assert "TIER2_ALLOW_PRIVESC=" not in src
     assert "TIER2_KEEP_CAPS=" not in src
     assert "TIER2_SECCOMP_PROFILE=" not in src
@@ -243,6 +245,33 @@ def test_launch_scrubs_ambient_downgrade_env(tmp_path: Path) -> None:
     assert "TIER2_ALLOW_PRIVESC=" not in recorded
     assert "TIER2_KEEP_CAPS=" not in recorded
     assert "TIER2_SECCOMP_PROFILE=" not in recorded
+
+
+def test_launch_scrubs_ambient_profile(tmp_path: Path) -> None:
+    _write_env_file(tmp_path, "work")
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
+    rec = _recording_spawn(farm)
+    env["QDISTRO_PROFILE"] = "dev"
+
+    res = _run_launch(tmp_path, "work", env)
+
+    assert res.returncode == 0, res.stderr
+    recorded = rec.read_text()
+    assert "QDISTRO_PROFILE=daily-driver" in recorded
+
+
+def test_launch_accepts_trusted_env_file_profile(tmp_path: Path) -> None:
+    f = _write_env_file(tmp_path, "work")
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write("QDISTRO_PROFILE='dev'\n")
+    farm, env = _farm(tmp_path, users={"admin": "1000"})
+    rec = _recording_spawn(farm)
+
+    res = _run_launch(tmp_path, "work", env)
+
+    assert res.returncode == 0, res.stderr
+    recorded = rec.read_text()
+    assert "QDISTRO_PROFILE=dev" in recorded
 
 
 def test_launch_fails_closed_on_missing_admin(tmp_path: Path) -> None:

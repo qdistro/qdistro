@@ -156,7 +156,8 @@ VERDICT_DENY=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
     "$DBUS_PATH" "$DBUS_IFACE.CheckClipboardTransfer" \
     "string:vm-$VM_TAG" "string:admin" \
     array:string:"text/plain" \
-    "string:test-source" "string:test-sink" "string:$ENGINE" 2>&1 \
+    "string:test-source" "string:test-sink" "string:$ENGINE" \
+    boolean:false uint32:0 uint64:0 2>&1 \
     | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g')
 
 if [ "$VERDICT_DENY" = "deny" ]; then
@@ -215,7 +216,8 @@ VERDICT_ALLOW=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
     "$DBUS_PATH" "$DBUS_IFACE.CheckClipboardTransfer" \
     "string:vm-$VM_TAG" "string:admin" \
     array:string:"text/plain" \
-    "string:test-source" "string:test-sink" "string:$ENGINE" 2>&1 \
+    "string:test-source" "string:test-sink" "string:$ENGINE" \
+    boolean:false uint32:0 uint64:0 2>&1 \
     | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g')
 
 if [ "$VERDICT_ALLOW" = "allow" ]; then

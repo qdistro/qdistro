@@ -484,23 +484,23 @@ gui_detect_agent_tooling_marker() {
         "$log_path" 2>/dev/null
 }
 
-# Host-side: does the agent log show an unambiguous LLM-PROVIDER connectivity
-# failure — the agent CLI could not open a socket to the API AT ALL? This is the
-# discriminator for `agent-api-unreachable`: a provider/infra outage, not a
-# product or scenario result. The marker is TIGHT and ANCHORED to the agent CLI's
-# exact socket-level error format, at the START of a line, so a product log or an
-# agent narrative merely *mentioning* a connection error cannot flip a verdict.
-# It deliberately does NOT match generic `timeout`/DNS/TLS/HTTP-5xx strings, which
-# a real product or network scenario can legitimately produce; only the exact
-# "Unable to connect to API (FailedToOpenSocket|ConnectionRefused)" family — where
-# no socket was ever opened — qualifies. New provider reasons are widened
+# Host-side: does the agent log show an unambiguous LLM-PROVIDER failure before
+# the scenario could exercise product state? This is the discriminator for
+# `agent-api-unreachable`: a provider/infra outage, not a product or scenario
+# result. The marker is TIGHT and ANCHORED to exact agent CLI lines at the START
+# of a line, so a product log or an agent narrative merely *mentioning* a
+# connection error cannot flip a verdict. It deliberately does NOT match generic
+# `timeout`/DNS/TLS/HTTP-5xx strings, which a real product or network scenario
+# can legitimately produce; only the exact socket-level "Unable to connect to
+# API (FailedToOpenSocket|ConnectionRefused)" family and the exact provider quota
+# "You've hit your session limit" line qualify. New provider reasons are widened
 # DELIBERATELY here, never loosened in the correlation layer. Reads the log file;
 # returns 0 when a provider-unreachable marker is present.
 gui_detect_agent_api_marker() {
     local log_path=$1
     [ -f "$log_path" ] || return 1
     grep -qE \
-        '^[[:space:]]*API Error: Unable to connect to API \((FailedToOpenSocket|ConnectionRefused)\)[[:space:]]*$' \
+        "^[[:space:]]*(API Error: Unable to connect to API \\((FailedToOpenSocket|ConnectionRefused)\\)[[:space:]]*|You've hit your session limit.*)$" \
         "$log_path" 2>/dev/null
 }
 

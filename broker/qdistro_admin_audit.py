@@ -192,5 +192,19 @@ class AuditLog:
             return cur.rowcount or 0
 
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        lock = getattr(self, "_lock", None)
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return
+        if lock is None:
+            conn.close()
+        else:
+            with lock:
+                conn.close()
+        del self._conn
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

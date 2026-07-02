@@ -407,4 +407,14 @@ class ApprovalCache:
         return cur.rowcount or 0
 
     def close(self) -> None:
-        self._conn.close()
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return
+        conn.close()
+        del self._conn
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

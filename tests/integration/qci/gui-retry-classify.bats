@@ -302,6 +302,13 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "api marker: detects provider session-limit line" {
+    local log="$BATS_TEST_TMPDIR/a2b.log"
+    printf "You've hit your session limit · resets 3:40pm (Europe/Prague)\n" > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
 @test "api marker: a PROSE mention of the provider error does NOT match (anchor)" {
     # An agent narrative discussing the failure mode must not flip a verdict.
     local log="$BATS_TEST_TMPDIR/a3.log"

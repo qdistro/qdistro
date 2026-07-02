@@ -186,8 +186,26 @@ _ADMIN_CONTROL_SCRIPT_PATHS = frozenset((
     "/usr/local/bin/qdistro-admin-tui",
 ))
 
+_ADMIN_CONTROL_STDIN_METHODS = frozenset((
+    "DecideRequest",
+    "DeleteRule",
+    "GetPending",
+    "GetRuleSource",
+    "ListHistory",
+    "ListRules",
+    "ReloadRules",
+    "RevokeApproval",
+    "SaveRule",
+))
+
 _ROOT_ADMIN_CONTROL_EXES = frozenset((
     "/usr/local/sbin/qdistro-approvals",
+))
+
+_ROOT_DBUS_CLIENT_EXES = frozenset((
+    "/usr/bin/busctl",
+    "/usr/bin/dbus-send",
+    "/usr/bin/gdbus",
 ))
 
 _QDSHELL_DIRECT_EXES = frozenset((
@@ -200,6 +218,12 @@ _QDSHELL_QS_EXES = frozenset((
 ))
 
 _QDSHELL_PROFILE = "/usr/share/quickshell/qdshell"
+
+_QDSHELL_GATE_METHODS = frozenset((
+    "CheckClipboardReceive",
+    "CheckClipboardTransfer",
+    "CheckHandoffActivation",
+))
 
 _ADMIN_HOSTILE_SELINUX_TYPES = frozenset((
     "container_t",
@@ -215,14 +239,17 @@ _ROOT_LAUNCH_EXES = frozenset((
     "/usr/libexec/qdistro/qdistro-secctx-exec",
     "/usr/local/lib/qdistro/qdistro-secctx-exec",
     "/usr/bin/busctl",
+    "/usr/bin/dbus-send",
     "/usr/bin/gdbus",
 ))
 
 _ROOT_LINEAGE_EXES = frozenset((
     "/usr/libexec/qdistro/qdistro_session_manager.py",
+    "/usr/local/lib/qdistro/qdistro_session_manager.py",
     "/usr/lib/qdistro/qsu-commit",
     "/usr/bin/qdistro-browser-bridge",
     "/usr/bin/busctl",
+    "/usr/bin/dbus-send",
     "/usr/bin/gdbus",
 ))
 
@@ -657,6 +684,22 @@ def _selinux_enforcing() -> bool:
 
 def _pytest_running() -> bool:
     return "PYTEST_CURRENT_TEST" in os.environ
+
+
+def _argv_names_broker_call(argv: list[str], method: str) -> bool:
+    """Return true when argv is a D-Bus client call to this broker method."""
+    if not method:
+        return False
+    has_broker = False
+    has_method = False
+    full_method = f"{BUS_NAME}.{method}"
+    for arg in argv:
+        arg_s = str(arg)
+        if arg_s in (BUS_NAME, OBJ_PATH, f"--dest={BUS_NAME}"):
+            has_broker = True
+        if arg_s in (method, full_method) or arg_s.endswith("." + method):
+            has_method = True
+    return has_broker and has_method
 
 
 def _read_proc_identity(pid: int) -> tuple[str, int]:
@@ -1328,7 +1371,8 @@ class Broker(dbus.service.Object):
         return label, _selinux_type(label)
 
     def _peer_matches_admin_control(self, *, uid: int, pid: int,
-                                    exe: str) -> tuple[bool, str]:
+                                    exe: str, method: str = ""
+                                    ) -> tuple[bool, str]:
         """Trusted admin control-plane peer predicate.
 
         The system bus policy is only a reachability filter: an arbitrary
@@ -1343,9 +1387,12 @@ class Broker(dbus.service.Object):
                 return True, "pytest synthetic root admin-control helper"
             if exe_s in _ROOT_ADMIN_CONTROL_EXES:
                 return True, "trusted root admin-control helper"
+            argv = self._peer_cmdline(pid)
+            if (exe_s in _ROOT_DBUS_CLIENT_EXES
+                    and _argv_names_broker_call(argv, method)):
+                return True, "trusted root admin-control D-Bus helper"
             base = os.path.basename(exe_s)
             if base in _PYTHON_EXE_BASENAMES:
-                argv = self._peer_cmdline(pid)
                 if set(argv) & _ROOT_ADMIN_CONTROL_EXES:
                     return True, "trusted root admin-control Python helper"
             return False, f"root admin-control helper exe {exe_s!r} is not trusted"
@@ -1363,6 +1410,9 @@ class Broker(dbus.service.Object):
             return True, "trusted direct admin-control exe"
 
         argv = self._peer_cmdline(pid)
+        if (exe_s in _ROOT_DBUS_CLIENT_EXES
+                and _argv_names_broker_call(argv, method)):
+            return True, "trusted admin-control D-Bus helper"
         if exe_s in _QDSHELL_QS_EXES:
             if _QDSHELL_PROFILE in argv:
                 return True, "trusted qdshell quickshell profile"
@@ -1373,6 +1423,12 @@ class Broker(dbus.service.Object):
             scripts = set(argv[1:])
             if scripts & _ADMIN_CONTROL_SCRIPT_PATHS:
                 return True, "trusted admin Python script"
+            live_exe, live_start = _read_proc_identity(pid)
+            if (method in _ADMIN_CONTROL_STDIN_METHODS
+                    and argv[1:2] in (["-"], ["-c"])
+                    and live_exe == exe_s
+                    and live_start > 0):
+                return True, "trusted live admin Python control script"
             return False, "Python peer is not an installed admin script"
 
         if label:
@@ -1383,7 +1439,7 @@ class Broker(dbus.service.Object):
                                     ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
         ok, reason = self._peer_matches_admin_control(uid=uid, pid=pid,
-                                                      exe=exe)
+                                                      exe=exe, method=method)
         if not ok:
             raise dbus.DBusException(
                 f"{method} restricted to trusted admin control-plane "
@@ -1393,13 +1449,21 @@ class Broker(dbus.service.Object):
         return uid, pid, exe, st
 
     def _peer_matches_qdshell(self, *, uid: int, pid: int,
-                              exe: str) -> tuple[bool, str]:
+                              exe: str, method: str = ""
+                              ) -> tuple[bool, str]:
+        exe_s = str(exe or "")
+        if int(uid) == 0:
+            if exe_s in _ROOT_DBUS_CLIENT_EXES:
+                argv = self._peer_cmdline(pid)
+                if (method in _QDSHELL_GATE_METHODS
+                        and _argv_names_broker_call(argv, method)):
+                    return True, "trusted root qdshell-gate D-Bus probe"
+            return False, f"uid {uid} is not admin uid {ADMIN_UID}"
         if int(uid) != ADMIN_UID:
             return False, f"uid {uid} is not admin uid {ADMIN_UID}"
         label, typ = self._peer_label_type(pid)
         if typ in _ADMIN_HOSTILE_SELINUX_TYPES:
             return False, f"SELinux type {typ!r} is not qdshell"
-        exe_s = str(exe or "")
         if exe_s in _QDSHELL_DIRECT_EXES:
             return True, "trusted qdshell exe"
         if exe_s in _QDSHELL_QS_EXES:
@@ -1407,12 +1471,18 @@ class Broker(dbus.service.Object):
             if _QDSHELL_PROFILE in argv:
                 return True, "trusted qdshell quickshell profile"
             return False, "quickshell peer is not loading qdshell profile"
+        if exe_s in _ROOT_DBUS_CLIENT_EXES:
+            argv = self._peer_cmdline(pid)
+            if (method in _QDSHELL_GATE_METHODS
+                    and _argv_names_broker_call(argv, method)):
+                return True, "trusted qdshell-gate D-Bus probe"
         return False, f"untrusted qdshell exe={exe_s!r}"
 
     def _require_qdshell_peer(self, sender, conn, method: str
                               ) -> tuple[int, int, str, int]:
         uid, pid, exe, st = self._peer_info(sender, conn)
-        ok, reason = self._peer_matches_qdshell(uid=uid, pid=pid, exe=exe)
+        ok, reason = self._peer_matches_qdshell(uid=uid, pid=pid, exe=exe,
+                                                method=method)
         if not ok:
             raise dbus.DBusException(
                 f"{method} restricted to trusted qdshell peers; {reason}",
@@ -1453,14 +1523,16 @@ class Broker(dbus.service.Object):
                 return False, (f"SELinux type {typ!r} is not expected for "
                                f"{family}")
 
-        if exe_s in expected_exes:
+        if exe_s in expected_exes and exe_s not in _ROOT_DBUS_CLIENT_EXES:
             return True, f"trusted root {family} exe"
 
-        # Some current root wrappers shell out to busctl/gdbus. Keep those
+        # Some current root wrappers shell out to D-Bus CLI clients. Keep those
         # reachable only when the command line names the broker method being
         # invoked; this still leaves root as the privilege boundary, but it
         # avoids treating generic root D-Bus clients as expected helpers.
-        if exe_s in ("/usr/bin/busctl", "/usr/bin/gdbus") and method in argv:
+        if (exe_s in _ROOT_DBUS_CLIENT_EXES
+                and exe_s in expected_exes
+                and _argv_names_broker_call(argv, method)):
             return True, f"trusted root {family} dbus helper"
 
         # Python direct-exec scripts often show the interpreter in /proc/exe.
@@ -1470,6 +1542,10 @@ class Broker(dbus.service.Object):
             helper_paths = expected_exes & set(argv)
             if helper_paths:
                 return True, f"trusted root {family} Python helper"
+            if family in ("lineage", "qsu") and argv[1:2] in (["-"], ["-c"]):
+                live_exe, live_start = _read_proc_identity(pid)
+                if live_exe == exe_s and live_start > 0:
+                    return True, f"trusted live root {family} Python helper"
 
         return False, f"untrusted root helper exe={exe_s!r}"
 
@@ -4461,7 +4537,8 @@ class Broker(dbus.service.Object):
                     ) from e
 
         ok, reason = self._peer_matches_admin_control(
-            uid=admin_uid, pid=caller_pid, exe=caller_exe)
+            uid=admin_uid, pid=caller_pid, exe=caller_exe,
+            method="DeleteRule")
         if not ok:
             _audit(False, reason=f"refused: {reason}",
                    path=source_path or None)

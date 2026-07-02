@@ -79,6 +79,7 @@ require_trusted_env "$ENV_FILE"
 # now ownership-verified above). `set -a` exports everything it defines so the
 # Python argv splitter (a subprocess) sees QD_WORKLOAD/QD_APP_ARGV_JSON, and
 # spawn-tier2 sees TIER2_SILO/TIER2_NETWORK.
+unset QDISTRO_PROFILE
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -88,6 +89,32 @@ set +a
 : "${QD_WORKLOAD:?launch env missing QD_WORKLOAD}"
 : "${QD_CONTAINER:?launch env missing QD_CONTAINER}"
 export TIER2_NETWORK="${TIER2_NETWORK:-none}"
+
+safe_source_profile() {
+    local f="$1" meta owner perms
+    [ -r "$f" ] || return 1
+    [ -f "$f" ] || return 1
+    meta="$(stat -c '%u %a' "$f" 2>/dev/null)" || return 1
+    owner="${meta%% *}"; perms="${meta##* }"
+    [ "$owner" = "0" ] || return 1
+    case "$perms" in *[2367]|*[2367]?) return 1 ;; esac
+    # shellcheck disable=SC1090
+    . "$f"
+}
+
+if [ -z "${QDISTRO_PROFILE:-}" ]; then
+    safe_source_profile /etc/qdistro/profile || true
+fi
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}"
+case "$QDISTRO_PROFILE" in
+    dev|daily-driver|release) ;;
+    prod|production) QDISTRO_PROFILE=release ;;
+    daily|dd) QDISTRO_PROFILE=daily-driver ;;
+    *)
+        echo "tier2-silo-launch: invalid QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2
+        exit 2
+        ;;
+esac
 
 # Re-split the JSON argv the daemon exported (no quoting hazards: it was
 # json.dumps'd). Empty/absent argv defaults to the workload binary name.
@@ -142,7 +169,7 @@ ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
 # stanza fields from the root-owned env file plus a deterministic PATH.
 exec env -i \
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    QDISTRO_PROFILE="${QDISTRO_PROFILE:-daily-driver}" \
+    QDISTRO_PROFILE="$QDISTRO_PROFILE" \
     TIER2_ROOT_LAUNCHER=1 \
     TIER2_ADMIN_UID="$ADMIN_UID" \
     TIER2_SILO="$TIER2_SILO" \

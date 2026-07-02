@@ -32,10 +32,27 @@
 
 set -eo pipefail
 
+# This bootstrap creates disposable integration-test VMs. The shared profile
+# contract keeps direct Tier-1/Tier-2 launches dev-only, while real installs
+# default to daily-driver via qdistro-bootstrap.sh.
+export QDISTRO_PROFILE="${QDISTRO_PROFILE:-dev}"
+case "$QDISTRO_PROFILE" in
+    dev|daily-driver|release) ;;
+    prod|production) QDISTRO_PROFILE=release ;;
+    daily|dd) QDISTRO_PROFILE=daily-driver ;;
+    *) echo "[bootstrap] invalid QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 2 ;;
+esac
+
 HOST="${QDISTRO_HTTP_HOST:-http://10.0.2.2:8765}"
 SRC=/root/qdistro-src
 
 log() { echo "[bootstrap] $*"; }
+
+install -d -o root -g root -m 0755 /etc/qdistro
+cat > /etc/qdistro/profile <<EOF
+QDISTRO_PROFILE=$QDISTRO_PROFILE
+EOF
+chmod 0644 /etc/qdistro/profile
 
 # ---- 0. Defensive masking ------------------------------------------------
 # jeos-firstboot fights us for tty1 and blocks multi-user.target;
@@ -71,9 +88,21 @@ done
 
 if [ -f "$SRC/qnotebook/pyproject.toml" ]; then
     log "installing qnotebook..."
-    zypper -n install --no-recommends python313-PyQt6 python313-mistune git \
-        >/dev/null 2>&1 || \
-        { log "  ERROR: zypper install of qnotebook deps failed"; exit 3; }
+    PY_PKG_PREFIX=$(python3 - <<'PY'
+import sys
+print(f"python{sys.version_info.major}{sys.version_info.minor}")
+PY
+)
+    zypper -n --no-gpg-checks refresh >/tmp/qnotebook-zypper-refresh.log 2>&1 \
+        || log "  WARN: zypper refresh before qnotebook deps failed; trying cached metadata"
+    QNOTEBOOK_ZYPPER_LOG=/tmp/qnotebook-zypper-install.log
+    if ! zypper -n install --no-recommends \
+            "$PY_PKG_PREFIX-PyQt6" "$PY_PKG_PREFIX-mistune" git \
+            >"$QNOTEBOOK_ZYPPER_LOG" 2>&1; then
+        log "  ERROR: zypper install of qnotebook deps failed"
+        tail -80 "$QNOTEBOOK_ZYPPER_LOG" | sed 's/^/[bootstrap]   zypper: /'
+        exit 3
+    fi
     PY_SITE=$(python3 - <<'PY'
 import sysconfig
 print(sysconfig.get_paths()["purelib"].replace("/usr/lib/", "/usr/local/lib/", 1))
