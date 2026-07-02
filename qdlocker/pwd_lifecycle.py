@@ -54,8 +54,7 @@ class PwdLifecycleNotifier:
                 bus.introspect(PWD_BUS, PWD_OBJ), timeout=2.0)
             obj = bus.get_proxy_object(PWD_BUS, PWD_OBJ, intro)
             iface = obj.get_interface(PWD_IFACE)
-            call = getattr(iface, "call_lock_all_vaults")
-            await asyncio.wait_for(call(reason), timeout=2.0)
+            await asyncio.wait_for(iface.call_lock_all_vaults(reason), timeout=2.0)
         finally:
             try:
                 await asyncio.wait_for(bus.disconnect(), timeout=1.0)
