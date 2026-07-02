@@ -49,7 +49,7 @@ inside the guest as a separate task.
 |---|---|---|
 | grain | one session per VM | one app per VM |
 | publisher | session launches arbitrary apps | publisher hard-codes one binary at build time |
-| guest RAM default | 512 MiB | 1 GiB |
+| guest RAM default | 2 GiB | 1 GiB |
 | CID range | 3..N | 100..N |
 | App1 bus name | (no entry) | `org.qdistro.Tier5bVM.uidNNNN` |
 | secctx engine | `qdistro.tier5` | `qdistro.tier5b` |

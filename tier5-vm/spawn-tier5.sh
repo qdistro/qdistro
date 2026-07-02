@@ -92,7 +92,7 @@
 #   TIER5_CID            (--vm only) override allocated CID.
 #   TIER5_BASE_DISK      (--vm only) override base disk path.
 #   TIER5_DISK_DIR       (--vm only) override per-VM disk dir.
-#   TIER5_MEM_KIB        (--vm only) guest RAM in KiB (default 1572864 = 1.5 GiB).
+#   TIER5_MEM_KIB        (--vm only) guest RAM in KiB (default 2097152 = 2 GiB).
 #   TIER5_SERIAL_LOG     (--vm only) path for a file-backed guest serial
 #                        console. Default unset = pty serial (interactive
 #                        `virsh console`). When set, the guest's boot
@@ -786,7 +786,7 @@ if ! run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
         fi
     fi
 
-    MEM_KIB="${TIER5_MEM_KIB:-1572864}"
+    MEM_KIB="${TIER5_MEM_KIB:-2097152}"
     NEW_MAC="52:54:00:$(printf '%02x:%02x:%02x' \
         $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))"
 

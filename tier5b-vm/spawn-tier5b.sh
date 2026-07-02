@@ -58,9 +58,7 @@
 #                        QDISTRO_TIER5B_DRY_RUN=1, to keep caller-
 #                        controlled file paths out of the prod path.
 #   TIER5B_DISK_DIR      override per-VM disk dir. (Same dry-run restriction.)
-#   TIER5B_MEM_KIB       guest RAM in KiB (default 1048576 = 1 GiB;
-#                        bigger than tier-5's 512 MiB because Firefox
-#                        + content process + GPU process is hungrier).
+#   TIER5B_MEM_KIB       guest RAM in KiB (default 1048576 = 1 GiB).
 #   TIER5B_DOMAIN_TEMPLATE override domain XML template path.
 #                        (Same dry-run restriction.)
 #   TIER5B_KEEP_DOMAIN=1 skip destroy+undefine on exit (debug).

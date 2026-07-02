@@ -73,13 +73,13 @@ chmod 600 "$CONF"
 SPAWN_LOG=/tmp/s49-spawn.log
 : >"$SPAWN_LOG"
 
-# 512 MiB nested guest (CI accommodation, same as s45/s47/s48). Scrub any
+# 2 GiB nested guest (same as s45/s48 and the GUI tier-5 scenarios). Scrub any
 # inherited lifecycle env vars: env has HIGHER precedence than the config file,
 # so an ambient TIER5_SHUTDOWN_METHOD (etc.) would mask the per-app resolution
 # this test is asserting and false-fail it.
 env -u TIER5_SHUTDOWN_METHOD -u TIER5_SHUTDOWN_GRACE_SECS \
     -u TIER5_IDLE_SHUTDOWN_SECS -u TIER5_LOWMEM_MB -u TIER5_POLICY_KEY \
-    TIER5_MEM_KIB=524288 TIER5_LIFECYCLE_CONF="$CONF" \
+    TIER5_MEM_KIB=2097152 TIER5_LIFECYCLE_CONF="$CONF" \
     bash "$SPAWN" --vm "$VM_NAME" --policy-key "$POLICY_KEY" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
@@ -125,7 +125,7 @@ virsh_admin qemu-agent-command --timeout 5 "$VM_NAME" \
     >/dev/null 2>&1 || true
 
 # Budget: app-exit detection (poll) + graceful shutdown (ACPI grace -> qga agent)
-# + undefine + unlink. Generous for a 512 MiB nested guest under CI.
+# + undefine + unlink. Generous for a 2 GiB nested guest under CI.
 deadline=$(( $(date +%s) + 60 ))
 GRACEFUL_SEEN=0; DOMAIN_GONE=0; OVERLAY_GONE=0
 while [ "$(date +%s)" -lt "$deadline" ]; do

@@ -2,7 +2,7 @@
      Substituted by spawn-tier5.sh in vm mode:
        __VM_NAME__       domain name
        __MAC__           virtio-net MAC (only used when TIER5_NETWORK=user)
-       __MEM_KIB__       memory in KiB (default 524288 = 512 MiB)
+       __MEM_KIB__       memory in KiB (default 2097152 = 2 GiB)
        __CID__           guest vsock CID (greater than 2; uniqueness
                          is the caller's responsibility)
        __DISK_PATH__     per-VM qcow2 overlay (linked clone of the

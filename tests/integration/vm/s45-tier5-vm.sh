@@ -61,13 +61,11 @@ CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
 SPAWN_LOG=/tmp/s45-spawn.log
 : >"$SPAWN_LOG"
 
-# Request a 512 MiB guest (TIER5_MEM_KIB) instead of spawn-tier5's 1.5 GiB
-# default. The bats VM is ~4 GiB and already runs the admin compositor, so only
-# ~1.3 GiB is free — over-committing a 1.5 GiB guest there made the guest
-# unstable (it sometimes died mid-run: "domain stopped"). 512 MiB fits with
-# headroom and is the value the sibling s47-tier5-audio.sh boots the same base
-# disk with. Nested-CI memory accommodation only; production keeps 1.5 GiB.
-TIER5_MEM_KIB=524288 \
+# Request a 2 GiB guest (TIER5_MEM_KIB). The former 512 MiB CI accommodation
+# was too tight for the guest kernel + compositor + app stack and could kill the
+# nested guest mid-boot. Keep the explicit value aligned with the GUI tier-5
+# scenarios and sibling lifecycle probes.
+TIER5_MEM_KIB=2097152 \
     bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!

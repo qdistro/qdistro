@@ -57,10 +57,10 @@ SPAWN_LOG=/tmp/s48-spawn.log
 waypipe_pids() { pgrep -u admin -x waypipe 2>/dev/null | sort -un; }
 WAYPIPE_BASELINE="$(waypipe_pids)"
 
-# 512 MiB guest (TIER5_MEM_KIB): the ~4 GiB bats VM has only ~1.3 GiB free, so a
-# 1.5 GiB nested guest is unstable here; 512 MiB fits (same value as
-# s45-tier5-vm.sh / s47-tier5-audio.sh). Nested-CI accommodation; prod keeps 1.5G.
-TIER5_MEM_KIB=524288 \
+# 2 GiB guest (TIER5_MEM_KIB): the former 512 MiB CI accommodation was too tight
+# for the guest kernel + compositor + app stack and could kill the nested guest
+# mid-boot. Keep this aligned with s45 and the GUI tier-5 scenarios.
+TIER5_MEM_KIB=2097152 \
     bash "$SPAWN" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!

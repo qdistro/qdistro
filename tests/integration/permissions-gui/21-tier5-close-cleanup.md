@@ -81,14 +81,15 @@ cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
 cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-# TIER5_MEM_KIB=524288 (512 MiB): the 1.5 GiB default overcommits the nested CI
-# VM and kills the guest mid-boot; mirror s45-tier5-vm.sh's CI accommodation.
+# TIER5_MEM_KIB=2097152 (2 GiB): the former 512 MiB CI accommodation was too
+# tight for the guest kernel + compositor + app stack and could kill the guest
+# mid-boot. Keep the scenario explicit so CI and the bats probes use one budget.
 # TIER5_SHUTDOWN_METHOD=force: this scenario is the orphan-resource-completeness
 # net (everything reclaimed after close), so it pins the deterministic hard reap
 # — independent of whether the test base image carries the guest power-button
 # wiring that graceful (the default) needs. The graceful ACPI path + per-app
 # policy are covered by tests/integration/vm/s49-tier5-graceful-shutdown.sh.
-TIER5_MEM_KIB=524288 TIER5_SHUTDOWN_METHOD=force setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
+TIER5_MEM_KIB=2097152 TIER5_SHUTDOWN_METHOD=force setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s21-spawn.log 2>&1 &
 disown
 EOF
@@ -108,7 +109,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 # transient empty/error read is NOT death; only an explicit terminal state on
 # consecutive reads is). The mapped-check is journal-cursor-scoped to THIS attempt.
 # Every non-mapped outcome ERRORs LOUD with a precise reason — a real nested-guest
-# death (512 MiB budget), a never-running guest, or alive-but-never-mapped are all
+# death (tier-5 memory budget), a never-running guest, or alive-but-never-mapped are all
 # genuine infra/product signals, never masked.
 mapped=0; saw_running=0; term_hits=0; reason=""; handle=""
 deadline=$((SECONDS + 180))
@@ -118,7 +119,7 @@ while [ $SECONDS -lt $deadline ]; do
         running|paused|idle|pmsuspended) saw_running=1; term_hits=0 ;;
         shutoff|crashed)
             term_hits=$((term_hits + 1))
-            [ "$term_hits" -ge 2 ] && { reason="guest domain reached terminal state '$state' on consecutive reads (real nested-guest death under TIER5_MEM_KIB=512MiB)"; break; } ;;
+            [ "$term_hits" -ge 2 ] && { reason="guest domain reached terminal state '$state' on consecutive reads (real nested-guest death under TIER5_MEM_KIB=2GiB)"; break; } ;;
     esac
     # Stage 1: learn OUR toplevel's qdwin handle from the secctx line that carries
     # our app_id (cursor-scoped, so a stale prior-attempt handle can't be picked

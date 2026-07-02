@@ -72,10 +72,10 @@ cp -r /root/qdistro-src/qdistro/tier5-vm /tmp/qdistro-tier5/tier5-vm
 cp -r /root/qdistro-src/qdistro/lib /tmp/qdistro-tier5/lib
 chmod -R a+rX /tmp/qdistro-tier5
 find /tmp/qdistro-tier5 -name '*.sh' -exec chmod a+rx {} +
-# TIER5_MEM_KIB=524288 (512 MiB): spawn-tier5.sh defaults to 1.5 GiB, which
-# overcommits the nested CI VM and kills the guest mid-boot ("domain stopped").
-# Mirror the s45-tier5-vm.sh CI accommodation so the nested guest fits.
-TIER5_MEM_KIB=524288 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
+# TIER5_MEM_KIB=2097152 (2 GiB): the former 512 MiB CI accommodation was too
+# tight for the guest kernel + compositor + app stack and could kill the guest
+# mid-boot. Keep the scenario explicit so CI and the bats probes use one budget.
+TIER5_MEM_KIB=2097152 setsid bash /tmp/qdistro-tier5/tier5-vm/spawn-tier5.sh --vm "$VM5" \
     -- weston-terminal </dev/null >/tmp/s20-spawn.log 2>&1 &
 disown
 EOF
