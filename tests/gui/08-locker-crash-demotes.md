@@ -44,13 +44,16 @@ qdlocker_ctrl status
 # user-manager lookup fails (rc=1) and the kill is a SILENT no-op.
 "$QDWIN_VM_EXEC" "$VMNAME" \
   'runuser -l admin -c "systemctl --user kill --signal=KILL qdlocker.service"'
-sleep 3
+sleep 0.5
 qdwin_screenshot /tmp/qdlocker-08-step2-locker-dead.png
 ```
 
-**Assert (2.1):** screenshot shows a black screen (no desktop content
-visible — the compositor is still locked, but the lock toplevel was
-demoted and its view hidden).
+**Assert (2.1):** screenshot should show either a transient black screen
+(lock toplevel demoted before restart) or a freshly restored qdlocker UI
+(systemd restarted the locker quickly). Do not require a fixed 3-second
+black frame; under `Restart=always`, the replacement locker can rebind
+before the screenshot. The load-bearing demotion proof is Step 3, and the
+fail-safe locked-state proof is Step 4/5.
 
 ### Step 3 — journal confirms demote-on-disconnect
 

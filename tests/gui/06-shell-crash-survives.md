@@ -78,13 +78,17 @@ forwarding survive the shell death.
 qdwin_send_key KEY_ENTER
 qdlocker_wait_for_unlock 5
 qdlocker_ctrl status
+qdlocker_ctrl unlock-result
 qdwin_screenshot /tmp/qdlocker-06-step4-unlocked.png
 ```
 
-**Assert (4.1):** `last=success`; `locked=False`.
-**Assert (4.2):** screenshot shows qdwin has brought qdshell back
-up — chrome around any pre-existing toplevels is rendered again.
-`systemctl --user is-active qdshell.service` reports `active`.
+**Assert (4.1):** `qdlocker_ctrl unlock-result` reports
+`last=success`; `qdlocker_ctrl status` reports `locked=False`.
+**Assert (4.2):** `systemctl --user is-active qdshell.service` reports
+`active`. The screenshot is supporting visual evidence only; if the
+framebuffer helper is on the wrong VT or catches the last lock frame while
+`locked=False` and Step 5 IPC succeeds, do not fail the product on the
+screenshot alone.
 
 ### Step 5 — qdshell is fully functional post-recovery
 
