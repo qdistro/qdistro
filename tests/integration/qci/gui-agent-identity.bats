@@ -21,6 +21,10 @@ setup() {
     [ "$(gui_agent_model_from_cmd 'claude --model=us.anthropic.claude-3-5')" = "us.anthropic.claude-3-5" ]
 }
 
+@test "model parse: codex -m short form" {
+    [ "$(gui_agent_model_from_cmd 'codex exec -m gpt-5.4-mini --dangerously-bypass-approvals-and-sandbox')" = "gpt-5.4-mini" ]
+}
+
 @test "model parse: no --model -> empty" {
     [ -z "$(gui_agent_model_from_cmd 'claude -p x --dangerously-skip-permissions')" ]
 }

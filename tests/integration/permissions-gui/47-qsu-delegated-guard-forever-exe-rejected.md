@@ -35,6 +35,12 @@ $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 $VMEXEC "$VM" 'systemctl restart qdistro-root-exec.socket'
 sleep 1
 
+# qsu must be a normal user-owned client process from the broker's point of
+# view; qdistro-root-exec captures the connecting peer's SO_PEERCRED uid and
+# forwards that to RequestPermissionAs. A setuid or root-launched qsu would
+# incorrectly mint rows for uid 0 and invalidate the scenario.
+$VMEXEC "$VM" 'stat -c "qsu-mode=%a owner=%U group=%G" /usr/local/bin/qsu; test "$(stat -c %a /usr/local/bin/qsu)" = 755'
+
 B64=$(base64 -w0 <<'EOF'
 sqlite3 /var/lib/qdistro/approvals/approvals.sqlite "DELETE FROM approvals WHERE action LIKE 'qsu.exec:%';"
 sqlite3 /var/lib/qdistro/audit/audit.sqlite "DELETE FROM audit WHERE action LIKE 'qsu.exec:%';"
@@ -61,17 +67,21 @@ $VMGUI "$VM" screenshot /tmp/47-s1-empty.png
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-sudo -u work bash -c '/usr/local/bin/qsu /bin/true \
+runuser -u work -- bash -c 'id -u > /tmp/47-qsu-caller-uid.txt; /usr/local/bin/qsu /bin/true \
   >/tmp/47-qsu.log 2>&1 & echo $! >/tmp/47-qsu.pid'
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 sleep 2
 $VMGUI "$VM" screenshot /tmp/47-s2-pending.png
+$VMEXEC "$VM" 'cat /tmp/47-qsu-caller-uid.txt; ps -o uid=,pid=,comm= -p "$(cat /tmp/47-qsu.pid)" 2>/dev/null || true'
 ```
 
 **Assert** (`/tmp/47-s2-pending.png`):
 - One pending row, action prefix `qsu.exec:root`.
+- The caller precheck printed uid `2000`; if it printed `0`, report
+ ERROR because the scenario launched qsu as root and any cache assertion
+ would be meaningless.
 - Detail pane shows `argv=/bin/true` (or `argv[00]=/bin/true`).
 - Scope radios visible include `Forever, only this exact program`
   and `Forever, only this exact argv tuple`.
@@ -161,6 +171,9 @@ $VMEXEC "$VM" 'wait $(cat /tmp/47-qsu.pid) 2>/dev/null; cat /tmp/47-qsu.log; ech
   ```
   Output: one row
   `2000|qsu.exec:root|argv_exact|...|["/bin/true"]|forever_argv`.
+  If the row has `caller_uid=0`, report FAIL and include the qsu mode,
+  caller precheck, and `qdistro-root-exec` journal lines; the delegated
+  path lost the original caller uid.
   The match_kind is `argv_exact` (forever_argv → argv_exact in
   `_VALID_SCOPES`); `match_value` carries the executable path and
   `argv` carries the pinned argv JSON.

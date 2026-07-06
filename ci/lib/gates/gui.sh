@@ -77,13 +77,20 @@ gui_scenario_requires_qdwin() {
         qdwin/tests/gui/[0-9][0-9]-*.md|\
         qdwin/tests/apps/[0-9][0-9]-*.md|\
         qdistro/tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
+        tests/integration/qdwin-noctalia/[0-9][0-9]-*.md|\
         qdlocker/tests/gui/[0-9][0-9]-*.md|\
         qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
+        tests/integration/permissions-gui/18-podapps-launcher-badge.md|\
         qdistro/tests/integration/permissions-gui/19-tier5-loopback-visible.md|\
+        tests/integration/permissions-gui/19-tier5-loopback-visible.md|\
         qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
+        tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\
         qdistro/tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
+        tests/integration/permissions-gui/21-tier5-close-cleanup.md|\
         qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
-        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
+        tests/integration/permissions-gui/56-tier4-rdp-window-visible.md|\
+        qdistro/tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md|\
+        tests/integration/permissions-gui/57-tier4-rdp-close-cleanup.md)
             return 0 ;;
         *)
             return 1 ;;
@@ -213,6 +220,15 @@ agent_artifact_status() {
     local artifact_dir=$1 log_path=$2 raw=""
     if [ -f "$artifact_dir/status.txt" ]; then
         raw=$(tr -d '\r' < "$artifact_dir/status.txt" | awk 'NF {print toupper($1); exit}')
+        # Some small-model runs wrote a literal trailing "n" instead of a
+        # newline (`PASSn`). Treat only that exact typo as the intended verdict;
+        # arbitrary words like PASSING still fail closed as UNKNOWN below.
+        case "$raw" in
+            PASSN) raw=PASS ;;
+            FAILN) raw=FAIL ;;
+            ERRORN) raw=ERROR ;;
+            SKIPN) raw=SKIP ;;
+        esac
     elif [ -f "$artifact_dir/report.md" ]; then
         raw=$(awk '
             NR > 30 { exit }
@@ -1049,16 +1065,16 @@ gui_preflight_capabilities() {
 }
 
 # Record the agent identity (H6a) into manifest.txt: the sanitized QCI_AGENT_CMD
-# template, the model (parsed from `--model X` or QCI_AGENT_MODEL), and a
-# best-effort `claude --version`. This is what distinguishes a CI run (standard
-# haiku command) from a debug rerun with a stronger model, and is the prerequisite
-# for never confusing debug rows with CI rows. Pure w.r.t. the run tree except the
-# kv writes; a missing QCI_AGENT_CMD is a no-op. Model parsing is host-testable via
+# template, the model (parsed from `--model X`, `-m X`, or QCI_AGENT_MODEL), and a
+# best-effort agent CLI version. This is what distinguishes a CI run from a debug
+# rerun with a stronger model, and is the prerequisite for never confusing debug
+# rows with CI rows. Pure w.r.t. the run tree except the kv writes; a missing
+# QCI_AGENT_CMD is a no-op. Model parsing is host-testable via
 # gui_agent_model_from_cmd.
 gui_agent_model_from_cmd() {
     local cmd=$1 model=""
-    model=$(printf '%s' "$cmd" | grep -oE -- '--model[= ]+[A-Za-z0-9._:-]+' | head -1 \
-        | sed -E 's/--model[= ]+//')
+    model=$(printf '%s' "$cmd" | grep -oE -- '(^|[[:space:]])(--model[= ]+|-m[= ]+)[A-Za-z0-9._:-]+' | head -1 \
+        | sed -E 's/^[[:space:]]*//; s/^(--model|-m)[= ]+//')
     printf '%s' "$model"
 }
 
@@ -1074,10 +1090,13 @@ record_agent_identity() {
     model=$(gui_agent_model_from_cmd "$cmd")
     [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
     kv qci_agent_model "${model:-unknown}"
-    # Best-effort CLI version — only if the template invokes a `claude` binary,
+    # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then
         ver=$(timeout 10 claude --version 2>/dev/null | head -1)
+        [ -n "$ver" ] && kv qci_agent_version "$ver"
+    elif printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])codex([[:space:]]|$)'; then
+        ver=$(timeout 10 codex --version 2>/dev/null | head -1)
         [ -n "$ver" ] && kv qci_agent_version "$ver"
     fi
 }

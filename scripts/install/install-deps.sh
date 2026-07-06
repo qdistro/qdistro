@@ -24,7 +24,7 @@ QDISTRO_PKGS=(
   # colour management (lcms2), DRM-backend display-info, and the X11
   # backend client libs. Runtime Mesa-libEGL1/GL1 above are not enough
   # to compile the renderer.
-  Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel lcms2-devel
+  Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel liblcms2-devel
   libdisplay-info-devel libX11-devel libxcb-devel
   # The shared "toytoolkit" lib (libweston shared/meson.build) is built
   # unconditionally and hard-requires cairo + libpng (+ pango/pangocairo/

@@ -29,6 +29,14 @@ verdict() {
     gui_agent_verdict "$1" "$2" | cut -f1
 }
 
+artifact_status() {
+    local d="$BATS_TMPDIR/status-artifact"
+    rm -rf "$d"
+    mkdir -p "$d"
+    printf '%s' "$1" > "$d/status.txt"
+    agent_artifact_status "$d" "$d/agent.log"
+}
+
 @test "verdict: PASS:0 -> pass" {
     [ "$(verdict PASS 0)" = pass ]
 }
@@ -75,6 +83,15 @@ verdict() {
 
 @test "verdict: garbage status -> fail" {
     [ "$(verdict WAT 0)" = fail ]
+}
+
+@test "artifact status: literal-n typo is normalized" {
+    [ "$(artifact_status PASSn)" = PASS ]
+    [ "$(artifact_status FAILn)" = FAIL ]
+}
+
+@test "artifact status: unrelated PASS prefix still fails closed" {
+    [ "$(artifact_status PASSING)" = UNKNOWN ]
 }
 
 @test "verdict: UNKNOWN:0 note records status and rc for triage" {

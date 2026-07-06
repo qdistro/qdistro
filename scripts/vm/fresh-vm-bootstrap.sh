@@ -125,6 +125,18 @@ meson setup build --wipe --prefix=/usr
 meson compile -C build
 meson install -C build
 
+# The shared base image can predate new vendored-libweston build dependencies.
+# Install the shippable production-profile deps here as a no-op on current bases
+# so per-run goldens do not silently degrade when an older baseweed-baked qcow2
+# is reused.
+log "ensuring vendored libweston production build deps..."
+zypper -n install --no-recommends \
+    Mesa-libEGL-devel Mesa-libGLESv2-devel Mesa-libGLESv3-devel \
+    libdisplay-info-devel libX11-devel libxcb-devel \
+    cairo-devel libpng16-devel libpng16-compat-devel pango-devel \
+    fontconfig-devel glib2-devel libva-devel liblcms2-devel \
+    || { log "  ERROR: zypper install of vendored libweston deps failed"; exit 3; }
+
 # ---- 2b. Build + stage vendored, patched libweston-14 -------------------
 # qdwin's layer-shell popup parenting needs soft-linked helper symbols
 # that only exist in the patched tree; stock libweston-14 cannot drive
@@ -134,11 +146,17 @@ meson install -C build
 # LD_LIBRARY_PATH + WESTON_MODULE_MAP at that tree.
 # Decision doc: qdwin/doc/decisions/0001-vendored-libweston-packaging.md
 log "building + staging vendored libweston (production profile)..."
-if [ -x "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" ]; then
-    bash "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin" \
-        || log "  WARN: vendored libweston staging failed — qdwin will fall back to distro libweston (layer-popup grab DEGRADED)"
-else
-    log "  WARN: install-vendored-libweston.sh missing — skipping vendored libweston"
+if [ ! -x "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" ]; then
+    log "  ERROR: install-vendored-libweston.sh missing — cannot stage vendored libweston"
+    exit 3
+fi
+if ! bash "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" "$SRC/qdwin"; then
+    log "  ERROR: vendored libweston staging failed — qdwin must not fall back to distro libweston in CI"
+    exit 3
+fi
+if [ ! -f /usr/libexec/qdistro/qdwin-libweston/lib64/libweston-14/drm-backend.so ]; then
+    log "  ERROR: staged vendored libweston missing drm-backend.so"
+    exit 3
 fi
 
 # ---- 3. Build qdistro daemons (C, against ../qdwin XML) ------------------
@@ -187,6 +205,12 @@ for entry in "${INSTALLERS[@]}"; do
     log "  running $(basename "$installer") <- $src_dir"
     bash "$installer" "$src_dir" || { echo "[bootstrap] $installer failed"; exit 3; }
 done
+
+# qdistro-approvals is the root/admin CLI used by the permissions GUI
+# scenarios and by operators over SSH. spin-test-vm-gui.sh staged it directly,
+# but the fresh-bootstrap path used by qci goldens did not, so admin-profile
+# scenarios could boot a VM with the broker installed but no CLI.
+install -m 0755 "$QD/cli/qdistro_approvals.py" /usr/local/sbin/qdistro-approvals
 
 # ---- 4b. Stage bats in-VM probes at /root/ ------------------------------
 # Bats tests in tests/integration/vm/*.bats run `bash

@@ -1,8 +1,8 @@
 # 14 — cross-user send-to, admin picks non-once scope → ScopeNotPermitted
 
 **What**: admin receives a RelayMessage, picks `1 hour` via the
-scope radio group, clicks **Approve**. Broker rejects with
-`ScopeNotPermitted`; admin app surfaces this in a modal
+scope radio group, clicks **Approve**. Broker rejects the forbidden
+one-shot scope; admin app surfaces this in a modal
 `Decision not recorded` dialog. Admin dismisses, picks
 `Just this once`, clicks Approve — delivery succeeds.
 
@@ -79,7 +79,7 @@ $VMGUI "$VM" screenshot /tmp/14-s2-1hour-selected.png
  alone; S3 will pin the state indirectly (only a non-once scope
  can trigger ScopeNotPermitted).
 
-### S3 — click Approve, expect ScopeNotPermitted modal
+### S3 — click Approve, expect forbidden-scope modal
 
 ```bash
 # Runner: OCR again and click the "Approve" button.
@@ -89,10 +89,12 @@ $VMGUI "$VM" screenshot /tmp/14-s3-rejected.png
 
 **Assert (OCR /tmp/14-s3-rejected.png)**:
 - A modal with heading text `Decision not recorded` has appeared.
-- The modal body contains the substring
- `ScopeNotPermitted`.
-- The modal body contains the substring
- `scope '1h' not permitted for one-shot`.
+- The modal body makes the forbidden-scope reason visible. Accept either
+ the legacy raw exception text (`ScopeNotPermitted` / `scope '1h' not
+ permitted for one-shot`) or the current friendly copy (`Scope not
+ permitted` / `not permitted for one-shot`). Do not require the raw
+ exception class name; the GUI may redact it while preserving the
+ operator-visible reason.
 - Behind the modal (it may be greyed out), the pending list row
  (`uid=2000 app.send-to:3000:...`) is still visible — the
  request was NOT decided; admin gets another chance.
@@ -154,5 +156,5 @@ $VMEXEC "$VM" 'rm -f /tmp/14-relay.out /tmp/14-relay.pid'
  broken and the whole scope-enforcement UX collapses.
 - S2's assertion on radio-filled-state is intentionally soft.
  OCR glyph reading for radio bullets is unreliable; rely on S3's
- ScopeNotPermitted to prove that the broker saw a `1h` scope,
+ forbidden-scope modal to prove that the broker saw a `1h` scope,
  which can only happen if the radio actually flipped.

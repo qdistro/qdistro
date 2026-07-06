@@ -100,8 +100,17 @@ claimed `work` source matches the `work:admin` rule with no source pid.
 
 ```bash
 $VMEXEC "$VM" 'install -d -m 0755 /etc/qdistro'
-$VMEXEC "$VM" 'grep -q "^lineage_enforce" /etc/qdistro/broker.conf 2>/dev/null \
-  || echo "lineage_enforce = true" >> /etc/qdistro/broker.conf'
+$VMEXEC "$VM" 'python3 - <<'"'"'PY'"'"'
+from pathlib import Path
+p = Path("/etc/qdistro/broker.conf")
+p.parent.mkdir(parents=True, exist_ok=True)
+lines = []
+if p.exists():
+    lines = [ln for ln in p.read_text().splitlines()
+             if not ln.strip().startswith("lineage_enforce")]
+lines.append("lineage_enforce = true")
+p.write_text("\n".join(lines) + "\n")
+PY'
 # Capture a journal cursor, restart, then wait for the posture line to appear
 # AFTER the cursor — proves THIS restart logged it, not a stale prior line.
 $VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh
@@ -282,6 +291,10 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
   `/tmp/cross-silo-src-helper.pid` is still live (`ps -p <pid>`) and that
   its `/proc/<pid>/exe` (coreutils `sleep`) matches what `RegisterLaunch`
   re-read — a relabel or exec-swap would fail the resolver's exe axis.
+- `RegisterLaunch` is restricted to trusted root lineage helpers. In this
+  headless broker scenario, run the Python snippets exactly as root inside
+  the VM through `$VMEXEC`; do not wrap them in `runuser -u admin`, and do
+  not substitute `/usr/bin/python3.13` from an untrusted user context.
 - This scenario exercises the broker + its launch-record store directly.
   The full app→qdwin→qdshell→broker relay of the source pid is covered by
   the qdshell binding/QML change (deployed in lockstep); registration by a

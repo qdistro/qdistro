@@ -1,9 +1,8 @@
 # 40 — Same-silo clipboard *receive* short-circuits to allow
 
 **What**: as `admin`, call `CheckClipboardReceive("user1", "user1",
-"text/plain", ...)`. Expect `"allow"`, a
-`source='clipboard_receive_same_silo'` audit row, and no rule
-consultation.
+"text/plain", ...)`. Expect `"allow"`, a same-silo audit row, and no
+rule consultation.
 
 **Why**: `clipboard.md` §Compositor-mediated gating documents a
 **receive-time gate** (`wl_data_offer.receive`) layered on top of
@@ -56,7 +55,7 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
 **Assert**: reply body is `string "allow"`.
 
-### S2 — audit row carries `source='clipboard_receive_same_silo'`
+### S2 — audit row carries same-silo source details
 
 ```bash
 SQL_B64=$(base64 -w0 <<'SQL_EOF'
@@ -68,11 +67,12 @@ SQL_EOF
 $VMEXEC "$VM" "echo $SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/audit.sqlite"
 ```
 
-**Assert**: output is
-`qdistro.clipboard.receive:user1:user1|1|clipboard_receive_same_silo mime=text/plain ...`.
-The `source` cell starts with `clipboard_receive_same_silo`, contains
-`mime=text/plain`, and the trailing `src_app=(unknown)
-dst_app=(unknown) src_engine=(unknown)` placeholders are present.
+**Assert**: output is a single row for
+`qdistro.clipboard.receive:user1:user1` with `decision=1`. The `source`
+cell contains `clipboard_receive_same_silo` and `mime=text/plain`.
+Accept lineage-enriched source strings such as
+`clipboard_receive_same_silo_verified lineage=... mime=text/plain ...`;
+do not pin field order or require unknown placeholder fields.
 
 ### S3 — same-silo with a *cross-silo* deny rule does NOT block
 

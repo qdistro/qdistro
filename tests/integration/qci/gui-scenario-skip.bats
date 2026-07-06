@@ -291,7 +291,13 @@ reason_full_stack() {
     run gui_scenario_requires_qdwin "qdistro/tests/integration/qdwin-noctalia/01-bar-visible.md"
     [ "$status" -eq 0 ]
 
+    run gui_scenario_requires_qdwin "tests/integration/qdwin-noctalia/01-bar-visible.md"
+    [ "$status" -eq 0 ]
+
     run gui_scenario_requires_qdwin "qdistro/tests/integration/permissions-gui/56-tier4-rdp-window-visible.md"
+    [ "$status" -eq 0 ]
+
+    run gui_scenario_requires_qdwin "tests/integration/permissions-gui/20-tier5-vm-cold-start.md"
     [ "$status" -eq 0 ]
 }
 
