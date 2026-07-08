@@ -27,6 +27,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtQml import QQmlApplicationEngine, qmlRegisterUncreatableType
+from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
 
 from .auth import AuthBackend
 from .controller import LockController
@@ -535,6 +536,24 @@ def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv
     QCoreApplication.setOrganizationName("qdistro")
     QCoreApplication.setApplicationName("qdlocker")
+
+    # qdlocker is a security surface: the lock screen MUST paint an opaque
+    # frame that occludes the desktop, and it must not depend on the host's
+    # GL/RHI stack being able to render one. GPU-less / software-GL hosts
+    # (nested-virt VMs on zink/llvmpipe) have produced a fully transparent
+    # lock buffer with Qt's default hardware scene-graph backend, leaking the
+    # desktop through the lock screen. Forcing the software scene graph makes
+    # the UI always rasterize (this is the actual fix; the alpha call below is
+    # only reinforcement). Must run before the first QQuickWindow (hence before
+    # the engine and, unambiguously in Python, before QGuiApplication) — Qt
+    # requires the backend be selected before any QQuickWindow is constructed.
+    QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
+    # Qt already defaults new Quick windows to no alpha buffer; pin it
+    # explicitly so a future Qt default change or an odd embedding can't slip a
+    # translucent lock surface past us. This does not, on its own, guarantee an
+    # opaque frame — setGraphicsApi(Software) above is what does.
+    QQuickWindow.setDefaultAlphaBuffer(False)
+
     app = QGuiApplication(argv)
 
     config = load_config()
@@ -575,6 +594,22 @@ def main(argv: list[str] | None = None) -> int:
     if not engine.rootObjects():
         log.error("QML failed to load")
         return 2
+
+    # Surface the *actual* scene-graph backend in the journal once it is chosen
+    # (the static QQuickWindow.graphicsApi() reads the default until a window's
+    # scenegraph initializes, so query the real window). A regression away from
+    # the software backend — which is what silently broke lock occlusion under
+    # software GL — then shows up here instead of only via the VM GUI scenario.
+    _lock_window = engine.rootObjects()[0]
+    _sg_ready = getattr(_lock_window, "sceneGraphInitialized", None)
+    if _sg_ready is not None:  # real QQuickWindow (not a test double)
+
+        def _log_sg_backend() -> None:
+            iface = _lock_window.rendererInterface()
+            api = iface.graphicsApi().name if iface is not None else "unknown"
+            log.info("qt quick scene-graph backend=%s", api)
+
+        _sg_ready.connect(_log_sg_backend)
 
     wayland_bound = False
     if os.environ.get("QDLOCKER_NO_WAYLAND") != "1":

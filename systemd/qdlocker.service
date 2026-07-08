@@ -57,6 +57,13 @@ Type=simple
 # deployed ExecStart path.
 ExecStart=/usr/local/bin/qdlocker
 Environment=QT_QPA_PLATFORM=wayland
+# Belt-and-suspenders for the software scene-graph backend that app.py already
+# forces via QQuickWindow.setGraphicsApi(Software): a lock screen must render an
+# opaque frame even where hardware GL is missing/broken (GPU-less / software-GL
+# VMs have produced a transparent lock buffer under the default backend). The
+# app.py call is authoritative; this env is a fallback in case of a launch path
+# that bypasses it.
+Environment=QT_QUICK_BACKEND=software
 Environment=QT_LOGGING_RULES=qt.qpa.wayland.debug=false
 # PYTHONNOUSERSITE=1: refuse to load user-site shims (a malicious
 # ~/.local/.../site-packages/pam.py would otherwise shadow the system
