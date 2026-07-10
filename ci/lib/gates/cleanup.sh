@@ -58,7 +58,7 @@ gate_cleanup() {
     # an overlay whose domain is already gone (the release_vm leak, or a SIGKILL'd
     # run) is invisible there and never reclaimed. Scan the images dir directly
     # and remove stale qci-*.qcow2 files that have no matching defined domain.
-    local img_dir defined_names orphans=0 f obase mt
+    local img_dir defined_names orphans=0 f obase mt ref_state
     img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
     defined_names=$("${VIRSH[@]}" list --all --name 2>/dev/null)
     for f in "$img_dir"/qci-*.qcow2; do
@@ -78,6 +78,14 @@ gate_cleanup() {
         fi
         if [ "$mt" -ge "$cutoff" ]; then
             echo "keep recent orphan $obase mtime=$mt" >> "$log_path"
+            continue
+        fi
+        # Undefined qci goldens are legitimate backing files for worker
+        # overlays. Never remove an old candidate until the same fail-closed
+        # backing-chain audit used by end-of-run golden cleanup proves it clear.
+        ref_state=$(backing_referrer_state "$f")
+        if [ "$ref_state" != clear ]; then
+            echo "keep orphan $obase (backing-referrer audit: $ref_state)" >> "$log_path"
             continue
         fi
         if [ "$dry" = 1 ]; then

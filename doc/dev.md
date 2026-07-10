@@ -92,8 +92,12 @@ Prerequisites for the libvirt session (set up once):
 sudo zypper install libvirt qemu-kvm virt-install virt-manager
 sudo usermod -aG libvirt $(whoami)
 # Then log out / log in for the group change to take effect.
-systemctl --user enable --now libvirtd.service   # or via virt-manager UI
+virsh -c qemu:///session list --all
 ```
+
+The final command verifies the per-user libvirt session used by qdistro. If it
+cannot connect, start the distro's system libvirt service/socket (or open
+virt-manager) and repeat the check; `libvirtd.service` is not a user unit.
 
 Integration tests run **inside the baked VM**. GUI tests must never
 run on the host (see [AGENTS.md](AGENTS.md)).

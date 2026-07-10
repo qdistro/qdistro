@@ -58,6 +58,7 @@ vitest tags), and the per-suite relabel action items.
 | Gate | Purpose |
 | --- | --- |
 | `preflight` | Verify sibling repos, libvirt session, VM tools, prebaked image, and common host tools. |
+| `lint` | Run warn-only shellcheck/scenario-structure metrics plus blocking Bats syntax and maintained-document local-link/anchor validation. `QCI_FLAKE_STRICT=1` also makes scenario flake findings fatal. |
 | `selftest` | Self-test the qci runner itself (no VM): run the host-only `tests/integration/qci/*.bats` suite that locks down the gate-runner contract — exit-class table, usage/unknown dispatch, headless gate manifest/results.tsv, and the affected/replay/offline plumbing. Runs first in `host`. |
 | `host` | Run host tests/builds across all sibling projects: Python pytest repos, WebExtension npm tests/builds, and qdwin/qdshell meson/QML checks. (The qdistro-site website is NOT built here — it ships via a separate website pipeline.) |
 | `vm-smoke` | Create or reuse a VM and verify the qdwin/qdshell session, Wayland socket, and core user services. |
@@ -67,6 +68,10 @@ vitest tags), and the per-suite relabel action items.
 | `full` | Run `preflight`, `host`, `release-manifest`, `bootstrap-release-profile`, `vm-smoke`, `bats`, and `gui`. |
 | `snapshot-daily` | Build a `qdistro-daily-YYYY-MM-DD` VM from current source state. |
 | `cleanup` | Remove stale `qci-*` disposable VMs/overlays. Never touches `qdistro-daily*`. |
+
+`QCI_RELEASE=1` strengthens `full`: every `skip` or `blocked` row from a
+release-relevant gate is fatal. Release evidence is green only when the
+required VM, Bats, GUI, manifest, and bootstrap-contract rows actually ran.
 
 ## Typical run
 

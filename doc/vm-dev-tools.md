@@ -79,7 +79,8 @@ cooperation for framebuffer capture.
 ### `vm-start-and-wait <vm>`
 
 Starts the VM if not running, then polls the guest agent until it
-responds (120 s timeout). Useful as the first line of every test script.
+responds (300 s timeout by default, configurable with
+`QD_VM_START_MAX_WAIT`). Useful as the first line of every test script.
 
 ## Integration with the dev cycle
 

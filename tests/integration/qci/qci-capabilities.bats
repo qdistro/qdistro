@@ -115,10 +115,15 @@ affected_gates() {
     [ "$output" = "bats" ]
 }
 
-@test "affected: docs-only changes fail safe to FULL set, never empty" {
-    run affected_gates README.md todo/notes.md docs/x.md
+@test "affected: maintained documentation selects link lint" {
+    run affected_gates README.md doc/support.md
     [ "$status" -eq 0 ]
-    # Must NOT silently skip coverage: widen to full instead of emitting "".
+    [ "$output" = "lint" ]
+}
+
+@test "affected: planning-only changes still fail safe to FULL set" {
+    run affected_gates todo/notes.md docs/x.md
+    [ "$status" -eq 0 ]
     [ "$output" = "lint host release-manifest bootstrap-release-profile image vm-smoke bats gui" ]
 }
 

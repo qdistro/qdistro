@@ -11,7 +11,7 @@
 # that calls `qci full`, never a `full: preflight host ...` dependency chain.
 #
 # Env knobs pass straight through (just inherits the caller's environment):
-#   QCI_RELEASE=1 just full        # release-profile: blocked rows are fatal
+#   QCI_RELEASE=1 just full        # release-profile: skips/blocked are fatal
 #   QCI_OFFLINE=1 just bats        # no-egress posture
 #   QCI_JOBS=4   just bats         # cap the disposable-VM pool
 # See README.md for the full knob list.
@@ -102,7 +102,7 @@ cleanup *args:
 full *args:
     {{qci}} full "$@"
 
-# Release-profile full run: a blocked release-relevant row is fatal (exit 15).
+# Release-profile full run: skipped/blocked release-relevant rows are fatal.
 release-full *args:
     QCI_RELEASE=1 {{qci}} full "$@"
 

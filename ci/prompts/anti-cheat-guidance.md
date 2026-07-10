@@ -26,7 +26,7 @@ the cheap ways to fake green; do none of them.
 
 3. **Do not turn a required failure into a warning or a skip.** qci
    already records a real status taxonomy — `pass`/`fail`/`skip`/`blocked`
-   into `results.tsv` (see `ci/bin/qci`, `record_skip`/`record_blocked`).
+   into `results.tsv` (see `ci/lib/run.sh`, `record_skip`/`record_blocked`).
    **Skip is not green.** A skip is an admission that the assertion did
    not run; do not reach for it to dodge a red gate. Visual scenario
    agents classify and explain failures, they do not turn a failing

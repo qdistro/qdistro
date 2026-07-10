@@ -60,8 +60,10 @@ host-only `tests/integration/qci/*.bats` contract suite) before trusting a run.
   Never regress a `require`/`fail_loud` (see
   `tests/integration/vm/helpers.bash`) back into a silent `skip`.
 - Skip is not green. qci records `pass`/`fail`/`skip`/`blocked` for a
-  reason (`record_skip`/`record_blocked` in `ci/bin/qci`); never convert a
+  reason (`record_skip`/`record_blocked` in `ci/lib/run.sh`); never convert a
   required failure into a warning or skip to dodge a red gate.
+- In `QCI_RELEASE=1` mode, both `skip` and `blocked` rows from release-relevant
+  gates are fatal because the release battery must actually exercise them.
 - A test's expected behavior changes only with a corresponding product-code
   change, and your report must name that change.
 - Every PASS cites evidence: command + output, journal delta, unit/socket

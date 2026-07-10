@@ -62,8 +62,8 @@ latest_run_dir() {
 # ---------------------------------------------------------------------------
 
 @test "contract: a passing headless gate records exit_class=pass and exit_code=0" {
-    # lint is pre-VM and never hard-fails (shellcheck/bats are warn/skip), so it
-    # is a deterministic 'pass' on any host.
+    # The maintained tree has valid Bats syntax and documentation links;
+    # shellcheck/flake migration findings remain warn-only by default.
     run "$QCI" lint
     [ "$status" -eq 0 ]
     local dir mf

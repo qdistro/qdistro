@@ -96,12 +96,11 @@ QCI_OFFLINE="${QCI_OFFLINE:-0}"
 [ "$QCI_OFFLINE" = 1 ] && export QCI_OFFLINE
 
 # QCI_RELEASE=1 is the release-profile mode (05-agent-test-plan.md §A): "green"
-# for the RC battery means ZERO blocked rows, not just zero failed rows. A
-# `blocked` row in a release-relevant gate (a missing prerequisite — no built
-# image, no test VM, an unpopulated/unsigned manifest) is recorded `blocked`
-# and exits 0 in normal mode; under QCI_RELEASE=1 it escalates the run to
-# EXIT_RELEASE so a missing prerequisite cannot pass as success at RC. Scoped to
-# the gates whose blocked rows mean "the release was not actually exercised";
+# for the RC battery means ZERO incomplete rows, not just zero failed rows. A
+# `blocked` or `skip` row in a release-relevant gate means required behavior was
+# not exercised; both escalate an otherwise-passing release run to EXIT_RELEASE.
+# Normal developer runs retain their non-fatal skip/blocked taxonomy. Scoped to
+# the gates where incomplete rows invalidate release evidence;
 # infra gates (preflight/selftest/lint/registry-check/affected/edit-guard) and
 # the D1-dropped `image` gate are intentionally excluded.
 QCI_RELEASE="${QCI_RELEASE:-0}"

@@ -58,14 +58,16 @@ git clone https://codeberg.org/qdistro/qdistro.git
 git clone https://codeberg.org/qdistro/qdwin.git
 git clone https://codeberg.org/qdistro/qdshell.git
 cd qdistro
-sudo bash scripts/install/qdistro-bootstrap.sh
+sudo bash scripts/install/qdistro-bootstrap.sh --profile=dev
 ```
 
 The bootstrap installs all dependencies, builds the compositor and daemons,
 clones the remaining components (qdgreeter, qdlocker, qdbrowser, qterminator,
 qnotebook, qfileman), and
 configures greetd. The first run takes a while. Idempotent — re-running is
-safe.
+safe. The explicit `dev` profile is required for this preview path: the default
+`daily-driver` profile requires a populated, signed release manifest, which is
+not published yet.
 
 **4. Reboot:**
 
@@ -75,13 +77,18 @@ sudo systemctl reboot
 
 On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
 
-**5. Try the isolation tiers:**
+**5. Try the available isolation paths:**
 
-| Tier | How to try |
-|------|-----------|
-| Tier 1 — native SELinux silo | Open qterminator. Run `id`. Each app launch starts in a silo. |
-| Tier 2 — container | Admin app → Silos → New → Container. Launch an app inside it. |
-| Tier 4 — VM (waypipe) | Admin app → Silos → New → VM. Open Chrome. |
+- **Named user silo:** in the admin app, open **Silos**, create a silo with a
+  name and unused uid, then use the lifecycle controls to start and stop it.
+- **Tier 2 container (developer preview):** from qterminator, build the minimum
+  workload image with
+  `cd ~/qdistro && bash tier2/make-tier2-image.sh weston-terminal`, then launch
+  it with `QDISTRO_PROFILE=dev /usr/bin/qdistro-tier2-spawn --disposable weston-terminal -- weston-terminal`.
+- **Tier 4 VM (experimental):** first rerun the bootstrap with
+  `--profile=dev --tier4-base`, then launch the built guest with
+  `cd ~/qdistro && sudo bash tier4-vm/spawn-tier4.sh demo-vm`. This path requires
+  nested KVM and is outside the v1 security guarantee.
 
 The admin app (tray icon) shows active silos, pending approvals, and audit history.
 

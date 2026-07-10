@@ -38,3 +38,4 @@ broker/qdistro_admin_broker.py	tests/unit/test_broker_check_permission.py	Admin 
 broker/qdistro_admin_broker.py	tests/unit/test_broker_record_selinux_avc.py	Admin broker: AVC recording path; mis-attribution = wrong silo blamed for a deny
 broker/qdistro_audisp_parser.py	tests/unit/test_audisp_parser.py	audispd plugin parser: processes UNTRUSTED kernel audit input; crash = silent audit loss
 broker/qdistro_vm_schema.py	tests/unit/test_vm_schema.py	VM silo manifest schema validator: fail-open = unauthorized guest service activation
+ci/bin/doc-link-lint.py	tests/integration/qci/doc-link-lint.bats	Documentation contract checker: broken setup and security-document links must fail deterministic lint

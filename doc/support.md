@@ -35,7 +35,8 @@ A useful report includes:
 - **Release identity** — the release manifest version (or the commit/tag your
   bootstrap pinned). v1 names a *signed manifest*, not a single tag.
 - **Relevant journal lines** — `journalctl -b` for the failing unit
-  (e.g. `journalctl -u qdistro-broker`, `-u greetd`, `-u 'qdistro-silo@*'`).
+  (e.g. `journalctl -u qdistro-admin-broker.service`, `-u greetd`,
+  `-u 'qdistro-silo@*'`).
   Redact anything sensitive first.
 - **Tier / silo** — which isolation tier and silo the problem occurred in.
 

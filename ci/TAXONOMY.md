@@ -54,7 +54,7 @@ python3 -m pytest -m "not slow and not needs_ssh"
 `results.tsv` (8 columns) simply renders with an empty category and skips
 the category section.
 
-The category is derived by `category_for()` in `ci/bin/qci` from a row's
+The category is derived by `category_for()` in `ci/lib/run.sh` from a row's
 gate + kind (a coarse, honest default: `bats`→`integration`, vm kinds→`vm`,
 gui/vision/image→`gui`, everything host-side→`unit`). A caller may pass an
 explicit 9th argument to `record_result` to override when a suite's true
@@ -97,24 +97,22 @@ action item rather than applied:
 
 ## Flake / retry notes (item 4 — convention)
 
-qci does not currently auto-retry a failed row, so there is no built-in
-retry count to surface. The cheap, additive convention is: when a row is
-known-flaky or was manually rerun, put a marker in its `notes` field —
-`flake: <why>` or `retried=N` — and the report's category/notes columns
-carry it through verbatim. If an automatic retry loop is added to qci later,
-it should emit `retried=N` into `notes` (and may add a dedicated column);
-the report already passes `notes` through unchanged, so no report change is
-needed for the convention to be visible today.
+Classified GUI retry is available through `QCI_GUI_RETRY=1`. It retries exactly
+once on a fresh VM and only for the narrow infrastructure/tooling classifiers
+listed in `ci/README.md`; product failures, missing verdicts, and agent timeouts
+are not retried. Every attempted retry is recorded in `flake.tsv`, and a
+retried pass carries the attempt count in its result notes, so retry cannot
+silently turn a flake green. Manual reruns should still put `flake: <why>` or
+`retried=N` in their notes when the relationship is known.
 
 ## Deferred P3 actions (out of scope for task 06)
 
 The following P3 items were explicitly deferred; they are recorded here so
 they are not lost:
 
-- **P3 action 3 — shared ruff blocking**: Extract the ruff lint invocation
-  into a shared helper and make it a hard gate failure rather than a warning.
-  Requires coordinating the ruff configuration across all product repos before
-  enabling as a blocker.
+- **P3 action 3 — shared ruff blocking (completed)**: `gate_host()` uses the
+  shared `ci/ruff-shared.toml` profile and treats findings as a host-gate
+  failure. A missing `ruff` executable remains an explicit skip.
 
 - **P3 action 4 — refactor pytest loop**: Replace the hand-rolled batched
   `for` loop in `gate_host()` with `pytest-xdist` or a cleaner dispatch.

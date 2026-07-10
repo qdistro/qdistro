@@ -115,8 +115,11 @@ affected_gates_for_path() {
         # Source under a component dir that the host gate builds/tests.
         src/*|broker/*|selinux/*|qsu/*|workflow/*)
             printf 'host\n' ;;
-        # Docs / notes / changelog: no gate.
-        *.md|todo/*|future/*|docs/*|*.txt|LICENSE|README*)
+        # Maintained project docs run the deterministic local-link/anchor lint.
+        doc/*|README*)
+            printf 'lint\n' ;;
+        # Planning notes / changelog: no gate.
+        *.md|todo/*|future/*|docs/*|*.txt|LICENSE)
             : ;;
         # 3. anything else is UNKNOWN -> full coverage (fail-safe).
         *)

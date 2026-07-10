@@ -322,6 +322,8 @@ continue for current tier-4/tier-5 images, but new VM-backed silos should carry
 a declarative guest definition, lock reference, build lineage, and qdistro
 runtime policy.
 
+<a id="tier-5-per-app-vm-windowed-linux-guest"></a>
+
 ## Tier 5 — per-app VM windowed (Linux guest)
 
 > **Experimental in v1 (D3).** Not part of the v1 security guarantee and not

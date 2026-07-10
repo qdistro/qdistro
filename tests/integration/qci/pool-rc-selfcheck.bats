@@ -58,8 +58,9 @@ _add() { printf '%s\t%s\t%s\t0\tpass\t%s\t\t\tintegration\n' "$1" "$2" "$3" "$4"
 }
 
 @test "a fail row from a SERIAL gate (lint) does not trigger the pool check" {
-    # warn-only lint under strict records a fail row while the gate returns OK;
-    # that is not a pool-plumbing bug, so H9 must not fire on it.
+    # Serial gates propagate their own return codes directly. This helper audits
+    # only background-pool status and must not reinterpret a synthetic serial row
+    # as a dropped worker exit.
     _add lint flake-smells-umbrella fail lint
     run pool_rc_selfcheck 0
     [ "$output" = "0" ]

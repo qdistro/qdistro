@@ -36,7 +36,7 @@ Tier 2 lands before tier 4 and tier 5 because:
   compositor as ordinary `xdg_toplevel`s tagged via
   `wp_security_context_v1`. PodApps and VMApps share the launcher
   vocabulary but **not** the nested-manager wiring — see
-  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest).
+  [isolation-tiers.md](isolation-tiers.md#tier-5-per-app-vm-windowed-linux-guest).
 
 ## Image-per-workload model
 
@@ -335,7 +335,7 @@ is delegated by default.
   ring colour differs (see [ui.md](ui.md#silo-badges)). Lands
   once spawn-tier5.sh hardening parity + tier-5 base image are
   hardened (see
-  [isolation-tiers.md](isolation-tiers.md#tier-5--per-app-vm-windowed-linux-guest)).
+  [isolation-tiers.md](isolation-tiers.md#tier-5-per-app-vm-windowed-linux-guest)).
 - **End-to-end click validation** is gated on synthetic input in the
   test VM. Wire-level correctness is journal-asserted by `phase7-tier2-*`
   today.

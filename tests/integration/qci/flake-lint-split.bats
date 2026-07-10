@@ -62,8 +62,9 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
 
 @test "gate lint: QCI_FLAKE_STRICT=1 escalates each dirty set to a fail row" {
     # Both sets currently carry non-allowlisted findings in-repo, so strict fails
-    # BOTH — proving the escalation semantics are preserved per-set.
-    QCI_FLAKE_STRICT=1 lint_flake_smells "$TMP/lint.log"
+    # BOTH and returns the host failure class to the enclosing lint gate.
+    QCI_FLAKE_STRICT=1 run lint_flake_smells "$TMP/lint.log"
+    [ "$status" -eq "$EXIT_HOST" ]
     grep -q '^flake-smells-qdistro	fail$' "$ROWS"
     grep -q '^flake-smells-umbrella	fail$' "$ROWS"
 }

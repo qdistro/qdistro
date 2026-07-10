@@ -500,32 +500,52 @@ ensure_run_golden() {
     return 0
 }
 
-# Return 0 if any qci-* overlay in the images dir still names $golden (by
-# basename) as its qcow2 backing file — deleting $golden would then strand that
-# overlay's disk chain. Cheap: one `qemu-img info` per overlay. Used as H12's
-# belt-and-suspenders: even if the preserve marker was never written, a golden
-# with a surviving referrer is never deleted. Pure w.r.t. read-only qemu-img.
-golden_has_backing_referrer() {
-    local golden=$1 img_dir gbase ov obacking
-    [ -n "$golden" ] || return 1
-    command -v qemu-img >/dev/null 2>&1 || return 1
+# Print `referred`, `clear`, or `unknown` after auditing whether another qci
+# overlay uses $candidate as its qcow2 backing file. Unknown is deliberately
+# distinct from clear: cleanup must keep a disk when qemu-img is unavailable or
+# cannot inspect any potential referrer.
+backing_referrer_state() {
+    local candidate=$1 img_dir ov info obacking candidate_real backing_real
+    [ -n "$candidate" ] || { printf 'unknown'; return; }
+    command -v qemu-img >/dev/null 2>&1 || { printf 'unknown'; return; }
     img_dir="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
-    gbase=$(basename -- "$golden")
+    candidate_real=$(readlink -m -- "$candidate" 2>/dev/null) \
+        || { printf 'unknown'; return; }
     for ov in "$img_dir"/qci-*.qcow2; do
         [ -e "$ov" ] || continue
-        [ "$ov" = "$golden" ] && continue
-        obacking=$(qemu-img info "$ov" 2>/dev/null | sed -n 's/^backing file: //p' | head -n1)
+        [ "$ov" = "$candidate" ] && continue
+        if ! info=$(qemu-img info "$ov" 2>/dev/null); then
+            printf 'unknown'
+            return
+        fi
+        obacking=$(printf '%s\n' "$info" | sed -n 's/^backing file: //p' | head -n1)
         [ -n "$obacking" ] || continue
-        case "$obacking" in *"$gbase"*) return 0 ;; esac
+        obacking=${obacking%% (actual path:*}
+        case "$obacking" in
+            /*) backing_real=$(readlink -m -- "$obacking" 2>/dev/null) ;;
+            *)  backing_real=$(readlink -m -- "$(dirname -- "$ov")/$obacking" 2>/dev/null) ;;
+        esac
+        [ -n "$backing_real" ] || { printf 'unknown'; return; }
+        if [ "$backing_real" = "$candidate_real" ]; then
+            printf 'referred'
+            return
+        fi
     done
-    return 1
+    printf 'clear'
+}
+
+# Compatibility predicate used by the H12 contract tests and callers that only
+# need the positive case. Unknown is nonzero; destructive callers must use the
+# three-state helper above and preserve on unknown.
+golden_has_backing_referrer() {
+    [ "$(backing_referrer_state "$1")" = referred ]
 }
 
 # Remove golden backing disks at end of run — but ONLY once no worker overlay
 # can still reference them. If a failed worker was PRESERVED for triage, its
 # overlay's backing chain points at the golden, so we keep the golden too.
 cleanup_run_goldens() {
-    local d
+    local d ref_state
     for d in "${RUN_GOLDEN_DISKS[@]:-}"; do
         [ -n "$d" ] || continue
         # Authoritative signal is the marker FILE written by release_vm (it
@@ -540,8 +560,9 @@ cleanup_run_goldens() {
         # subshell (disk full/unwritable), which would otherwise let us delete a
         # golden a preserved overlay still backs. Independently verify no
         # surviving overlay references this golden as backing before deleting it.
-        if golden_has_backing_referrer "$d"; then
-            log "preserving golden backing $d (an existing overlay still references it as backing; preserve marker missing?)"
+        ref_state=$(backing_referrer_state "$d")
+        if [ "$ref_state" != clear ]; then
+            log "preserving golden backing $d (backing-referrer audit: $ref_state)"
             printf 'preserved_golden_disk=%s\n' "$d" >> "$RDIR/manifest.txt"
             continue
         fi

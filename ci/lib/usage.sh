@@ -32,9 +32,10 @@ Usage:
   qci list-runs
 
 Notes:
-  qci lint    Static pre-VM lint: shellcheck (warn-by-default), bats syntax
-              validation, and a heuristic Markdown GUI-scenario structure
-              check. Runs without a VM; missing shellcheck/bats => skip+warn.
+  qci lint    Static pre-VM lint: shellcheck (warn-by-default), blocking bats
+              syntax and maintained-doc link checks, plus GUI-scenario structure
+              and flake metrics. Runs without a VM; missing shellcheck/bats =>
+              skip+warn. QCI_FLAKE_STRICT=1 makes flake findings fatal.
   qci selftest  Headless self-test of the qci runner itself: runs the host-only
               tests/integration/qci/*.bats suite (no VM, no libvirt) that locks
               down the gate-runner contract — exit-class table, usage/unknown
@@ -152,13 +153,13 @@ Environment:
                             podman/container/browser SLIRP-NAT egress audit is a
                             VM task (see todo); this is the env gate + the
                             test-annotation hook.
-  QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` row in
+  QCI_RELEASE=1             Release-profile mode (RC battery): a `blocked` or
+                            `skip` row in
                             a release-relevant gate (vm-smoke / bats / gui /
                             release-manifest / bootstrap-release-profile) is
                             FATAL, not exit-0. "Green" then
-                            means zero blocked rows — a missing prerequisite (no
-                            built image/VM, an unpopulated/unsigned manifest)
-                            cannot pass as success. Escalates an otherwise-passing
+                            means every required row ran — a missing prerequisite
+                            or skipped scenario cannot pass as success. Escalates an otherwise-passing
                             run to EXIT_RELEASE (15); a real failure keeps its own
                             class. Infra gates and the D1-dropped `image` gate are
                             excluded.

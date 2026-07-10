@@ -100,23 +100,18 @@ finish_run() {
     reap_writeahead_orphans
     # Reclaim per-run golden backing disks (kept if a failed worker was preserved).
     cleanup_run_goldens
-    # Release-profile escalation (QCI_RELEASE=1): a `blocked` row in a
+    # Release-profile escalation (QCI_RELEASE=1): a `blocked` or `skip` row in a
     # release-relevant gate means the release was not actually exercised — fail
     # closed. Only escalates a run that otherwise PASSED (rc==0); a real failure
-    # already carries its own exit class and takes precedence. The offending
-    # rows are recorded so the report shows WHY.
+    # already carries its own exit class and takes precedence.
     if [ "${QCI_RELEASE:-0}" = 1 ] && [ -f "$RDIR/results.tsv" ]; then
-        local blocked_rows
-        blocked_rows=$(awk -F'\t' -v g="$QCI_RELEASE_FATAL_GATES" '
-            BEGIN { n = split(g, a, " "); for (i = 1; i <= n; i++) fatal[a[i]] = 1 }
-            NR > 1 && $3 == "blocked" && ($1 in fatal) { print $1 "/" $2 }
-        ' "$RDIR/results.tsv")
-        if [ -n "$blocked_rows" ]; then
-            local blocked_count
-            blocked_count=$(printf '%s\n' "$blocked_rows" | grep -c .)
-            record_result release-profile blocked-rows fail "$EXIT_RELEASE" release release "" \
-                "QCI_RELEASE=1: $blocked_count blocked row(s) in release-relevant gates are fatal: $(printf '%s' "$blocked_rows" | tr '\n' ' ')"
-            log "release-profile: $blocked_count blocked row(s) fatal under QCI_RELEASE=1"
+        local incomplete_rows incomplete_count
+        incomplete_rows=$(release_profile_incomplete_rows "$RDIR/results.tsv")
+        if [ -n "$incomplete_rows" ]; then
+            incomplete_count=$(printf '%s\n' "$incomplete_rows" | grep -c .)
+            record_result release-profile incomplete-rows fail "$EXIT_RELEASE" release release "" \
+                "QCI_RELEASE=1: $incomplete_count skip/blocked row(s) in release-relevant gates are fatal: $(printf '%s' "$incomplete_rows" | tr '\n' ' ')"
+            log "release-profile: $incomplete_count skip/blocked row(s) fatal under QCI_RELEASE=1"
             [ "$rc" -eq 0 ] && rc=$EXIT_RELEASE
         fi
     fi
@@ -137,6 +132,19 @@ finish_run() {
         log "html:   $RDIR/report.html"
     fi
     exit "$rc"
+}
+
+# Print `<status>:<gate>/<subject>` for release-relevant rows that did not run
+# to a pass/fail verdict. Kept separate from finish_run for host-only contract
+# tests and report tooling.
+release_profile_incomplete_rows() {
+    local results=$1
+    awk -F'\t' -v g="$QCI_RELEASE_FATAL_GATES" '
+        BEGIN { n = split(g, a, " "); for (i = 1; i <= n; i++) fatal[a[i]] = 1 }
+        NR > 1 && ($3 == "blocked" || $3 == "skip") && ($1 in fatal) {
+            print $3 ":" $1 "/" $2
+        }
+    ' "$results"
 }
 
 abort_run() {

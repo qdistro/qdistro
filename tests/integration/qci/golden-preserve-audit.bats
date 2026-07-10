@@ -14,7 +14,7 @@
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
     TMP="$(mktemp -d)"
-    RDIR="$TMP/run"; mkdir -p "$RDIR/vm"
+    RDIR="$TMP/run"; mkdir -p "$RDIR/vm" "$RDIR/host"
     QDWIN_IMG_DIR="$TMP/images"; mkdir -p "$QDWIN_IMG_DIR"
     BIN="$TMP/bin"; mkdir -p "$BIN"
     cat > "$BIN/qemu-img" <<'EOF'
@@ -27,10 +27,26 @@ EOF
     chmod +x "$BIN/qemu-img"
     PATH="$BIN:$PATH"
     log() { :; }
+    EXIT_OK=0
+    EXIT_RUNNER=90
     GOLDEN_PRESERVE=0
     RUN_GOLDEN_DISKS=()
+    VIRSH=("$BIN/virsh")
+    cat > "$BIN/virsh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *"list --all --name"*) printf '%s\n' "${VIRSH_DEFINED_NAMES:-}" ;;
+esac
+exit 0
+EOF
+    chmod +x "$BIN/virsh"
+    qci_assert_run_dir() { :; }
+    record_result() { :; }
+    exit_class_name() { [ "$1" -eq 0 ] && printf pass || printf runner; }
     # shellcheck disable=SC1090
     source "$REPO_ROOT/ci/lib/vm.sh"
+    # shellcheck disable=SC1090
+    source "$REPO_ROOT/ci/lib/gates/cleanup.sh"
 }
 
 teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
@@ -84,4 +100,18 @@ mk_overlay() { : > "$QDWIN_IMG_DIR/$1"; echo "$2" > "$QDWIN_IMG_DIR/$1.backing";
     : > "$RDIR/vm/golden-preserve"
     cleanup_run_goldens
     [ -e "$g" ]
+}
+
+@test "cleanup gate preserves an old undefined disk while an overlay backs it" {
+    local g; g=$(mk_golden "qci-golden-bats-test.qcow2")
+    mk_overlay "qci-bats-worker.qcow2" "$g"
+    VIRSH_DEFINED_NAMES=qci-bats-worker
+    export VIRSH_DEFINED_NAMES
+    touch -d '2 hours ago' "$g" "$QDWIN_IMG_DIR/qci-bats-worker.qcow2"
+
+    gate_cleanup --age-hours 1
+
+    [ -e "$g" ]
+    grep -q 'keep orphan qci-golden-bats-test.qcow2 (backing-referrer audit: referred)' \
+        "$RDIR/host/cleanup.log"
 }

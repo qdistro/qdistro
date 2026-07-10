@@ -8,13 +8,17 @@
 # ---------------------------------------------------------------------------
 # Static pre-VM lint (additive, host-only, degrades gracefully).
 #
-# Three checks, all non-fatal by default:
+# Checks are warn-only unless they protect an executable contract:
 #   1. shellcheck over a bounded set of first-party shell scripts.
 #   2. bats syntax validation (bats --count) over the VM bats files.
 #   3. heuristic Markdown structure check over GUI scenarios.
+#   4. local-link and heading-anchor validation over maintained documentation.
+#   5. GUI scenario flake-smell lint (strict only with QCI_FLAKE_STRICT=1).
 # Missing shellcheck/bats => recorded as skip with a clear message.
-# This gate never hard-fails; it returns EXIT_OK so it can run in
-# preflight without changing preflight's required/optional pass-fail.
+# Shellcheck and scenario structure remain migration metrics. Bats parse errors,
+# broken documentation links, and strict flake findings return a nonzero class.
+# preflight deliberately ignores that return; standalone `qci lint` and affected
+# runs receive it.
 # ---------------------------------------------------------------------------
 lint_shell_files() {
     # Bounded, first-party set; excludes vendored/build trees.
@@ -27,6 +31,7 @@ lint_shell_files() {
 gate_lint() {
     qci_assert_run_dir || return $?
     local log_path="$RDIR/host/lint.log"
+    local rc=$EXIT_OK step_rc
     mkdir -p "$(dirname "$log_path")"
     : > "$log_path"
 
@@ -81,6 +86,7 @@ gate_lint() {
             record_result lint bats-syntax pass 0 pass lint "$log_path" "${#bats_files[@]} bats files parse cleanly"
         else
             record_result lint bats-syntax fail "$EXIT_BATS" bats lint "$log_path" "$bad bats files failed to parse"
+            rc=$EXIT_BATS
         fi
     else
         record_skip lint bats-syntax lint "bats not installed; skipping bats syntax validation"
@@ -114,7 +120,24 @@ gate_lint() {
         record_result lint md-structure skip 0 pass lint "$log_path" "$md_missing/$nmd scenarios missing headings (heuristic, non-fatal)"
     fi
 
-    # 4. flake-smell lint over GUI scenarios. Flags the recurring flake sources
+    # 4. Maintained documentation must not point at missing local files or
+    # headings. External URLs remain outside this deterministic host-only check.
+    local doc_lint="$QCI_BIN_DIR/doc-link-lint.py"
+    { echo; echo "## documentation local links"; } >> "$log_path"
+    if [ ! -f "$doc_lint" ] || ! command -v python3 >/dev/null 2>&1; then
+        record_result lint doc-links fail "$EXIT_HOST" host lint "$log_path" \
+            "doc-link-lint.py or python3 absent; cannot validate maintained documentation"
+        [ "$rc" -eq 0 ] && rc=$EXIT_HOST
+    elif python3 "$doc_lint" --root "$QDISTRO_REPO" >> "$log_path" 2>&1; then
+        record_result lint doc-links pass 0 pass lint "$log_path" \
+            "README, doc/, and ci/*.md local links valid"
+    else
+        record_result lint doc-links fail "$EXIT_HOST" host lint "$log_path" \
+            "broken local documentation link or heading anchor"
+        [ "$rc" -eq 0 ] && rc=$EXIT_HOST
+    fi
+
+    # 5. flake-smell lint over GUI scenarios. Flags the recurring flake sources
     # (fixed sleeps before assertions, unscoped journal reads, one-shot
     # systemctl/virsh, relative source paths, self-matching pgrep, unscoped /tmp
     # writes, screenshot-only asserts, backgrounded waits, prose-only assertions)
@@ -124,9 +147,10 @@ gate_lint() {
     # set QCI_FLAKE_STRICT=1 to hard-fail the gate on any non-allowlisted finding
     # (the Phase-1 exit criterion, adopted once the count is driven to the
     # allowlist).
-    lint_flake_smells "$log_path"
+    lint_flake_smells "$log_path"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    return "$EXIT_OK"
+    return "$rc"
 }
 
 # TWO separate strict flake-smell metrics, recorded as SEPARATE rows so the report
@@ -144,6 +168,7 @@ gate_lint() {
 lint_flake_smells() {
     local log_path=$1
     local fl_script="$QCI_BIN_DIR/scenario-flake-lint.py" fl_findings fl_set fl_subject
+    local rc=$EXIT_OK
     if [ ! -f "$fl_script" ] || ! command -v python3 >/dev/null 2>&1; then
         record_skip lint flake-smells lint "scenario-flake-lint.py or python3 absent; skipping flake-smell lint"
         return 0
@@ -165,10 +190,12 @@ lint_flake_smells() {
             log "lint: scenario flake-smells[$fl_set] $fl_findings finding(s) (STRICT — failing)"
             record_result lint "$fl_subject" fail "$EXIT_HOST" lint lint "$log_path" \
                 "$fl_findings non-allowlisted flake-smell finding(s) in $fl_set set (QCI_FLAKE_STRICT=1)"
+            rc=$EXIT_HOST
         else
             log "lint: scenario flake-smells[$fl_set] $fl_findings finding(s) (warn-only)"
             record_result lint "$fl_subject" skip 0 pass lint "$log_path" \
                 "$fl_findings flake-smell finding(s) in $fl_set set (warn-only; migrate to waiter lib / scenario-tmpdir)"
         fi
     done
+    return "$rc"
 }
