@@ -6,7 +6,7 @@ to be easy to modify with LLM assistance.
 
 This repository is the **umbrella** for qdistro: documentation,
 permission infrastructure, daemons, SDK, admin app, helper tools,
-build scripts, and integration tests.
+build scripts, integration tests, and the local CI harness.
 
 The current design shorthand is **one owner, many silos, dynamic sessions**.
 The owner is the single human and policy authority. Silos isolate data and
@@ -21,11 +21,28 @@ The desktop shell (a Noctalia QML fork) lives in
 
 ## Try qdistro
 
-**Status:** v0.1 — first public test release.
+**Status:** in active development. The supported way to try and test qdistro
+today is **inside a libvirt VM** (virt-manager / Virtual Machine Manager) on a
+host with nested KVM enabled — the full-stack integration and GUI test suites
+run in disposable libvirt VMs. Installing on bare metal follows the same steps
+but is currently untested and at your own risk.
 
-> **Hardware:** spare laptop, ≥16 GB RAM, ≥100 GB free disk, fingerprint reader optional but recommended. Fresh openSUSE Tumbleweed terminal-only install.
+> **Host requirements for the VM path:** a Linux host with libvirt + qemu-kvm,
+> nested virtualization enabled, and enough headroom to give the guest
+> ≥8 GB RAM and ≥60 GB disk.
+>
+> **Nested virtualization must be enabled explicitly** (e.g.
+> `options kvm_intel nested=1` / `options kvm_amd nested=1` in modprobe.d,
+> plus `<cpu mode='host-passthrough'/>` or virt-manager's "Copy host CPU
+> configuration" for the guest) — the VM-based isolation tiers run VMs inside
+> the VM. Be aware that nested virtualization enlarges the hypervisor attack
+> surface and is a potential **security risk** for the host; enable it on a
+> development machine, not on a host whose isolation guarantees you rely on.
 
-**1. Install Tumbleweed** from [get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or Server (no desktop needed). Create the first user as `admin`; qdistro reserves `admin` at uid 1000.
+**1. Create a VM and install Tumbleweed** from
+[get.opensuse.org](https://get.opensuse.org/tumbleweed/) — choose Minimal or
+Server (no desktop needed). Create the first user as `admin`; qdistro reserves
+`admin` at uid 1000.
 
 **2. Install git** (not pre-installed on Tumbleweed Minimal/Server):
 
@@ -47,7 +64,8 @@ sudo bash scripts/install/qdistro-bootstrap.sh
 The bootstrap installs all dependencies, builds the compositor and daemons,
 clones the remaining components (qdgreeter, qdlocker, qdbrowser, qterminator,
 qnotebook, qfileman), and
-configures greetd. Takes 10–20 minutes. Idempotent — re-running is safe.
+configures greetd. The first run takes a while. Idempotent — re-running is
+safe.
 
 **4. Reboot:**
 
@@ -62,7 +80,7 @@ On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
 | Tier | How to try |
 |------|-----------|
 | Tier 1 — native SELinux silo | Open qterminator. Run `id`. Each app launch starts in a silo. |
-| Tier 3 — container | Admin app → Silos → New → Container. Launch an app inside it. |
+| Tier 2 — container | Admin app → Silos → New → Container. Launch an app inside it. |
 | Tier 4 — VM (waypipe) | Admin app → Silos → New → VM. Open Chrome. |
 
 The admin app (tray icon) shows active silos, pending approvals, and audit history.
@@ -183,6 +201,8 @@ print-vm/           build scripts + libvirt template for the CUPS VM
 tier4-vm/           Tier-4 (Linux-guest VM) image build + spawn
 tier5-vm/           Tier-5 (audio-isolated VM) image build + spawn
 
+ci/                 local CI harness — the qci gate runner (see below)
+
 tests/
   unit/               pytest unit tests (headless, no D-Bus, no display)
   integration/
@@ -200,22 +220,55 @@ LICENSE             GPL-3.0-or-later
 
 ## Building and testing
 
+Testing happens at two layers, and the split is strict:
+
+1. **Headless host tests** — pytest unit suites, meson/QML checks, npm test
+   runs across all sibling repos. No display, no VM.
+2. **Full-stack integration** — bats suites and GUI scenarios that run only
+   **inside disposable libvirt VMs**. GUI tests are never run on the host:
+   they inject real input and would fight your live session.
+
+The day-to-day entry point for both is the local CI runner,
+[`ci/bin/qci`](ci/README.md):
+
 ```sh
-# Unit tests (headless, <1s):
+ci/bin/qci preflight    # verify libvirt session, sibling repos, host tools
+ci/bin/qci host         # all host-side tests/builds across sibling projects
+ci/bin/qci bats         # bats integration suites, one disposable VM per file,
+                        # run in parallel (QCI_JOBS=N to override)
+ci/bin/qci gui          # GUI scenarios in disposable VMs (see below)
+ci/bin/qci full         # everything
+```
+
+Every run writes a self-contained report (markdown + HTML, with logs,
+screenshots, and first-pass fix recommendations) under `ci/runs/`. Failed
+disposable VMs are preserved for triage; `ci/bin/qci triage --latest` is the
+place to start.
+
+**The GUI gate wants an agent.** The GUI scenarios are markdown playbooks that
+need a visual runner — a coding-agent CLI that can look at screenshots and
+drive the VM. Point `QCI_AGENT_CMD` at your agent and run the gate in a
+foreground terminal (it's the most direct way to watch the product actually
+work):
+
+```sh
+QCI_AGENT_CMD='your-agent-cli {prompt}' ci/bin/qci gui
+```
+
+See [ci/README.md](ci/README.md) for agent-command templating, concurrency
+and retry knobs, and the full gate reference.
+
+Lower-level pieces, when you need them directly:
+
+```sh
+# Unit tests (headless):
 pytest
 
-# Integration tests require a libvirt session + a built test VM.
-# The fixed qdistro test VM password is baked into the cloned VM's
-# user accounts.
-# QDWIN_VM_TEMPLATE is the libvirt domain whose XML is cloned for
-# each test VM; spin-test-vm.sh auto-creates it on first run.
+# A disposable test VM by hand. QDWIN_VM_TEMPLATE is the libvirt domain
+# whose XML is cloned for each test VM; spin-test-vm.sh auto-creates it
+# on first run.
 export QDWIN_VM_TEMPLATE=qdistro-template
 scripts/vm/spin-test-vm.sh my-test
-
-# The `bats` gate spins one disposable VM per test file and runs them in
-# parallel, auto-sizing concurrency to host RAM/cores (set QCI_JOBS=N to
-# override). Single file: `ci/bin/qci bats --file <path>`.
-ci/bin/qci bats
 ```
 
 For host prerequisites (libvirt, qemu-kvm, group membership), see
