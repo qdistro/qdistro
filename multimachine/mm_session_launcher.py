@@ -116,6 +116,19 @@ def _read_owned_json_fd(fd: int, label: str) -> object:
         raise ValueError(f"cannot read {label} fd: {exc}") from exc
 
 
+def _read_pid_fd(fd: int, label: str) -> int:
+    """Read one trusted process id without exposing it through argv or env."""
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            payload = stream.read(32)
+        value = int(payload.strip())
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"cannot read {label} fd: {exc}") from exc
+    if value <= 0:
+        raise ValueError(f"{label} must contain a positive pid")
+    return value
+
+
 def _read_pinned_authority_key(path: str = PINNED_AUTHORITY_KEY) -> bytes:
     """Read an independently enrolled root-owned Ed25519 trust anchor."""
     flags = os.O_RDONLY | os.O_CLOEXEC
@@ -146,17 +159,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - exec shell
                     help="inherited fd containing a signed pairing receipt")
     ap.add_argument("--streams-fd", type=int, required=True,
                     help="inherited fd containing control_host + streams")
+    ap.add_argument("--shell-pid-fd", type=int, required=True,
+                    help="inherited fd containing the trusted qdshell pid")
     ap.add_argument("--viewer-machine-id", required=True)
     ap.add_argument("--broker-program", default="/usr/local/bin/qdistro-mm-broker")
     args = ap.parse_args(argv)
-    if args.pairing_fd == args.streams_fd:
-        ap.error("--pairing-fd and --streams-fd must differ")
+    inherited_fds = {args.pairing_fd, args.streams_fd, args.shell_pid_fd}
+    if len(inherited_fds) != 3:
+        ap.error("--pairing-fd, --streams-fd, and --shell-pid-fd must differ")
 
     receipt = _read_owned_json_fd(args.pairing_fd, "pairing receipt")
     authority_key = _read_pinned_authority_key()
     session = _read_owned_json_fd(args.streams_fd, "stream session")
     combined = combine_verified_session(
         receipt, session, authority_key, args.viewer_machine_id)
+    combined["shell_pid"] = _read_pid_fd(args.shell_pid_fd, "qdshell pid")
     exec_broker(combined, args.broker_program)
     return 1
 

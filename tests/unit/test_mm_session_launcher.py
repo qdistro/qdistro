@@ -153,10 +153,18 @@ def _json_pipe(value: object) -> int:
     return read_fd
 
 
+def _text_pipe(value: str) -> int:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, value.encode("ascii"))
+    os.close(write_fd)
+    return read_fd
+
+
 def test_main_reads_owned_fds_and_hands_off_validated_snapshot(monkeypatch) -> None:
     receipt, public_key, session = _signed_inputs(int(time.time()))
     pairing_fd = _json_pipe(receipt)
     streams_fd = _json_pipe(session)
+    shell_pid_fd = _text_pipe("4242\n")
     observed = {}
 
     def fake_exec(config, program):
@@ -169,12 +177,15 @@ def test_main_reads_owned_fds_and_hands_off_validated_snapshot(monkeypatch) -> N
     result = launcher.main([
         "--pairing-fd", str(pairing_fd),
         "--streams-fd", str(streams_fd),
+        "--shell-pid-fd", str(shell_pid_fd),
         "--viewer-machine-id", "vm-viewer",
     ])
     assert result == 1  # a real exec never returns
-    assert observed["config"] == combine_session_snapshots(_pairing(), _session())
+    expected = combine_session_snapshots(_pairing(), _session())
+    expected["shell_pid"] = 4242
+    assert observed["config"] == expected
     assert observed["program"] == "/usr/local/bin/qdistro-mm-broker"
-    for fd in (pairing_fd, streams_fd):
+    for fd in (pairing_fd, streams_fd, shell_pid_fd):
         with pytest.raises(OSError):
             os.fstat(fd)
 

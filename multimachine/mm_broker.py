@@ -81,6 +81,14 @@ class SocketWrapperHandle:
 
         otp_r, otp_w = os.pipe()
         token_r, token_w = os.pipe()
+        open_fds = {otp_r, otp_w, token_r, token_w}
+
+        def close_fd(fd: int) -> None:
+            """Close each inherited-secret pipe endpoint at most once."""
+            if fd not in open_fds:
+                return
+            open_fds.remove(fd)
+            os.close(fd)
         argv = [
             wrapper_program,
             "--origin", spec.origin,
@@ -105,14 +113,14 @@ class SocketWrapperHandle:
                 self._proc = subprocess.Popen(
                     argv, pass_fds=(otp_r, token_r), start_new_session=True)
             finally:
-                os.close(otp_r)
-                os.close(token_r)
+                close_fd(otp_r)
+                close_fd(token_r)
             try:
                 os.write(otp_w, (otp + "\n").encode())
                 os.write(token_w, (teardown_token + "\n").encode())
             finally:
-                os.close(otp_w)
-                os.close(token_w)
+                close_fd(otp_w)
+                close_fd(token_w)
 
             deadline = time.monotonic() + ready_timeout
             while time.monotonic() < deadline:
@@ -125,9 +133,9 @@ class SocketWrapperHandle:
                 time.sleep(0.05)
             raise TimeoutError(f"wrapper socket was not ready: {socket_path}")
         except Exception:
-            for fd in (otp_r, otp_w, token_r, token_w):
+            for fd in tuple(open_fds):
                 try:
-                    os.close(fd)
+                    close_fd(fd)
                 except OSError:
                     pass
             self.abort()
@@ -233,6 +241,7 @@ class SessionConfig:
     control_host: str
     origin_authority: StaticOriginAuthority
     streams: tuple[ConfiguredStream, ...]
+    shell_pid: int | None = None
 
 
 def parse_session_config(raw: object) -> SessionConfig:
@@ -248,6 +257,11 @@ def parse_session_config(raw: object) -> SessionConfig:
     control_host = raw.get("control_host", "127.0.0.1")
     if not isinstance(control_host, str) or not control_host:
         raise ValueError("control_host must be a non-empty string")
+    shell_pid = raw.get("shell_pid")
+    if (shell_pid is not None
+            and (not isinstance(shell_pid, int) or isinstance(shell_pid, bool)
+                 or shell_pid <= 0)):
+        raise ValueError("shell_pid must be a positive integer")
     authority = StaticOriginAuthority.from_config(raw.get("origins"))
     stream_items = raw.get("streams")
     if not isinstance(stream_items, list) or not stream_items:
@@ -311,7 +325,36 @@ def parse_session_config(raw: object) -> SessionConfig:
         control_ports.add(control_port)
         rdp_endpoints.add(endpoint)
     return SessionConfig(control_host=control_host, origin_authority=authority,
-                         streams=tuple(streams))
+                         streams=tuple(streams), shell_pid=shell_pid)
+
+
+def dbus_sender_is_trusted_shell(bus, sender: str, shell_pid: int,
+                                 proc_root: str = "/proc") -> bool:
+    """Pin broker calls to qdshell or a directly spawned ``busctl`` helper.
+
+    qdshell currently reaches D-Bus through short-lived busctl children.  The
+    private bus alone is not the authority boundary: verify both the D-Bus
+    sender credential and the helper's exact parent/executable relationship.
+    """
+    try:
+        sender_pid = int(bus.call_blocking(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus",
+            "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+            "s", (sender,)))
+        if sender_pid == shell_pid:
+            return True
+        exe = os.path.realpath(os.readlink(
+            os.path.join(proc_root, str(sender_pid), "exe")))
+        if exe != "/usr/bin/busctl":
+            return False
+        stat_line = Path(proc_root, str(sender_pid), "stat").read_text()
+        close_paren = stat_line.rfind(")")
+        if close_paren < 0:
+            return False
+        fields = stat_line[close_paren + 1:].split()
+        return len(fields) > 1 and int(fields[1]) == shell_pid
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 # D-Bus-shaped events the session emits; the live D-Bus server maps these to
@@ -616,6 +659,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     #   "otp":"...", "control_capability":"..."}]}
     with os.fdopen(os.dup(args.config_fd), "r", encoding="utf-8") as stream:
         config = parse_session_config(json.load(stream))
+    if config.shell_pid is None:
+        raise ValueError("broker config must pin the trusted qdshell pid")
 
     runtime_parent = args.runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     socket_dir = Path(tempfile.mkdtemp(prefix="qdistro-mm-", dir=runtime_parent))
@@ -656,16 +701,26 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
         def __init__(self) -> None:
             super().__init__(name, DBUS_PATH)
 
-        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="b")
+        def _trusted(self, sender) -> bool:
+            return bool(sender) and dbus_sender_is_trusted_shell(
+                bus, str(sender), config.shell_pid)
+
+        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="b",
+                             sender_keyword="sender")
         def BindHandle(self, origin, stream_id, generation, secctx_app_id,
-                       handle):
+                       handle, sender=None):
+            if not self._trusted(sender):
+                return False
             return session.bind_handle(
                 str(secctx_app_id), int(handle), origin=str(origin),
                 stream_id=str(stream_id), generation=str(generation))
 
-        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="s")
+        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="s",
+                             sender_keyword="sender")
         def BindHandleIdentity(self, origin, stream_id, generation,
-                               secctx_app_id, handle):
+                               secctx_app_id, handle, sender=None):
+            if not self._trusted(sender):
+                return ""
             try:
                 accepted = session.bind_handle(
                     str(secctx_app_id), int(handle), origin=str(origin),
@@ -677,15 +732,21 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             except (KeyError, TypeError, ValueError):
                 return ""
 
-        @dbus.service.method(DBUS_NAME, in_signature="t", out_signature="b")
-        def RequestClose(self, handle):
+        @dbus.service.method(DBUS_NAME, in_signature="t", out_signature="b",
+                             sender_keyword="sender")
+        def RequestClose(self, handle, sender=None):
+            if not self._trusted(sender):
+                return False
             try:
                 return session.request_close(int(handle)) is not None
             except (KeyError, OSError, RuntimeError):
                 return False
 
-        @dbus.service.method(DBUS_NAME, in_signature="tsii", out_signature="b")
-        def RequestShellOperation(self, handle, operation, x, y):
+        @dbus.service.method(DBUS_NAME, in_signature="tsii", out_signature="b",
+                             sender_keyword="sender")
+        def RequestShellOperation(self, handle, operation, x, y, sender=None):
+            if not self._trusted(sender):
+                return False
             try:
                 return session.request_shell_op(
                     int(handle), str(operation), int(x), int(y)) is not None

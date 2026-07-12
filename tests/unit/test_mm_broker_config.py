@@ -62,6 +62,15 @@ def test_complete_config_is_parsed_and_authorized_before_startup() -> None:
     assert [stream.label for stream in parsed.streams] == ["a", "b"]
     assert [stream.spec.origin for stream in parsed.streams] == ["vm-a", "vm-b"]
     assert [stream.connect_timeout for stream in parsed.streams] == [30.0, 30.0]
+    assert parsed.shell_pid is None
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "123"])
+def test_invalid_shell_pid_is_rejected(value) -> None:
+    raw = _config()
+    raw["shell_pid"] = value
+    with pytest.raises(ValueError, match="shell_pid"):
+        parse_session_config(raw)
 
 
 @pytest.mark.parametrize(("mutate", "message"), [

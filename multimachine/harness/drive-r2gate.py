@@ -12,6 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 REPO = Path(__file__).resolve().parents[2]
@@ -126,8 +127,7 @@ def push_json(value: object, guest: str) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
         json.dump(value, stream, sort_keys=True, separators=(",", ":"))
         stream.flush()
-        be_a._push(args.vm_b, Path(stream.name), guest)
-    viewer_exec(f"chmod 0600 {guest}")
+        be_a._push(args.vm_b, Path(stream.name), guest, mode=0o600)
 
 
 def prepare_viewer_runtime(receipt: dict, streams: dict,
@@ -300,26 +300,51 @@ if args.r4:
     check("r4-source-popup-mapped",
           "POPUP_MAPPED parent=qdwin-popup-probe" in popup_log,
           repr(geometry))
-    check("r4-popup-clamped-at-source",
-          bool(geometry) and max(abs(geometry[0]), abs(geometry[1])) < 4096
-          and geometry[2:] == (180, 120), repr(geometry))
     source_c_shell = be_c._vmexec(
         args.vm_c,
         be_c._as_admin("cat /run/user/1000/bystander.out 2>/dev/null"),
         check=False)
     (BUNDLE / "source-c-bystander.log").write_text(
         source_c_shell, encoding="utf-8")
+    parent_match = re.search(
+        r"toplevel_geometry handle=1 x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)",
+        source_c_shell)
+    parent_geometry = (tuple(int(value) for value in parent_match.groups())
+                       if parent_match else ())
+    popup_inside_output = bool(geometry) and (
+        geometry[0] >= 0 and geometry[1] >= 0
+        and geometry[0] + geometry[2] <= W
+        and geometry[1] + geometry[3] <= H)
+    check("r4-popup-clamped-within-source-output",
+          popup_inside_output and geometry[2:] == (180, 120),
+          f"parent={parent_geometry!r} popup={geometry!r}")
     check("r4-popup-retains-one-parent-toplevel",
           source_c_shell.count("toplevel_added handle=") == 1
           and "toplevel_added handle=1" in source_c_shell)
     ipc("focus", handle_c); time.sleep(1)
     popup_shot = be_a.capture("vm-b", 0, BUNDLE / "popup-c.ppm")
     popup_image = load_image(popup_shot)
-    pink = ((popup_image[:, :, 0] > 180)
-            & (popup_image[:, :, 1] < 110)
-            & (popup_image[:, :, 2] > 35)).sum()
-    check("r4-popup-pixels-contained-in-trusted-proxy", int(pink) > 200,
-          f"pink_pixels={int(pink)}")
+    # The purpose-built probe paints its parent and popup with exact, unique
+    # colours. The parent's first pixel anchors VM-C's 640x400 decoded proxy;
+    # bound the popup's exact-pink component to that rectangle. This catches a
+    # popup rendered elsewhere in the viewer framebuffer.
+    parent_mask = np.all(popup_image == np.array([64, 64, 96]), axis=2)
+    pink_mask = np.all(popup_image == np.array([255, 0, 96]), axis=2)
+    parent_ys, parent_xs = parent_mask.nonzero()
+    proxy_bounds = ((int(parent_xs.min()), int(parent_ys.min()),
+                     int(parent_xs.min()) + W - 1,
+                     int(parent_ys.min()) + H - 1)
+                    if len(parent_xs) else ())
+    contained = False
+    inside_pink = 0
+    outside_pink = int(pink_mask.sum())
+    if proxy_bounds:
+        x0, y0, x1, y1 = proxy_bounds
+        inside_pink = int(pink_mask[y0:y1 + 1, x0:x1 + 1].sum())
+        outside_pink -= inside_pink
+        contained = inside_pink == 180 * 120 and outside_pink == 0
+    check("r4-popup-pixels-contained-in-vm-c-proxy", contained,
+          f"proxy={proxy_bounds!r} inside={inside_pink} outside={outside_pink}")
     current_rows = remote_rows()
     check("r4-popup-gains-no-independent-viewer-authority",
           len([row for row in current_rows if row.get("authorized")]) == 2
@@ -397,10 +422,6 @@ c2 = key_total(be_c.read_telemetry("vm-a", TEL_C))
 check("per-origin-input-enforced", a1 - a0 > 0 and c1 - c0 == 0
       and a2 - a1 == 0 and c2 - c1 == 0,
       f"A={a0}->{a1}->{a2} C={c0}->{c1}->{c2}")
-if args.r4:
-    check("r4-popup-cannot-steal-cross-origin-input",
-          a1 - a0 > 0 and c1 - c0 == 0 and c2 - c1 == 0)
-
 check("qdshell-close-dispatched", "true" in ipc("close", handle_a).lower())
 closed_rows = wait_rows(
     lambda rs: not any(r.get("authorized") and r.get("origin") == "vm-a"

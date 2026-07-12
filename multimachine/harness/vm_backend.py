@@ -22,6 +22,7 @@ import base64
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -158,10 +159,19 @@ class QciVMBackend:
                 f"{out.stderr.strip() or out.stdout.strip()}")
         return out.stdout
 
-    def _push(self, vm: str, local: Path, guest: str) -> None:
+    def _push(self, vm: str, local: Path, guest: str,
+              mode: int = 0o644) -> None:
         b64 = base64.b64encode(local.read_bytes()).decode()
         g = shlex.quote(guest)
-        self._vmexec(vm, f"printf '%s' '{b64}' | base64 -d > {g} && chmod 0644 {g}")
+        temporary = shlex.quote(guest + ".qdistro-push-tmp")
+        # vm-exec currently carries the transfer command through QGA argv, so
+        # this remains test-apparatus transport rather than a production secret
+        # channel.  Stage mode-0600 credentials atomically: there is no window
+        # where their final pathname exists with the generic 0644 push mode.
+        self._vmexec(
+            vm, f"umask 077; rm -f {temporary}; "
+            f"printf '%s' '{b64}' | base64 -d > {temporary} && "
+            f"chmod {mode:04o} {temporary} && mv -f {temporary} {g}")
 
     def _guest_link_dev(self, vm: str) -> str:
         """The guest's default-route NIC (e.g. ens2) — the configured
@@ -585,10 +595,11 @@ class QciVMBackend:
         credential_property = ""
         credential = f"/run/user/1000/{unit}-auth"
         if control_capability:
-            encoded = base64.b64encode(control_capability.encode()).decode()
-            self._vmexec(real, self._as_admin(
-                f"umask 077; printf '%s' {shlex.quote(encoded)} | base64 -d > "
-                f"{shlex.quote(credential)}"))
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8") as secret:
+                secret.write(control_capability)
+                secret.flush()
+                self._push(real, Path(secret.name), credential, mode=0o600)
+            self._vmexec(real, f"chown admin:admin {shlex.quote(credential)}")
             credential_property = (
                 f"--property=LoadCredential=mm-control-auth:{credential} ")
             auth_arg = " --auth-fd 3"

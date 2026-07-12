@@ -24,7 +24,12 @@ from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, viewer_close_requested,
     viewer_shell_requests, watch,
 )
-from multimachine.mm_broker import Event, MultiMachineSession, SocketWrapperHandle
+from multimachine.mm_broker import (
+    Event,
+    MultiMachineSession,
+    SocketWrapperHandle,
+    dbus_sender_is_trusted_shell,
+)
 from multimachine.origin_authority import (
     ATTACH_UI, RECEIVE_INPUT, OriginGrant, StaticOriginAuthority,
 )
@@ -261,6 +266,38 @@ def test_wrapper_socket_timeout_reaps_the_whole_startup_group(tmp_path):
     pid = int(pid_file.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_dbus_sender_is_pinned_to_shell_or_direct_busctl_child(
+        tmp_path, monkeypatch):
+    class Bus:
+        def call_blocking(self, bus_name, path, interface, method,
+                          signature, args):
+            assert (bus_name, path, interface, method, signature) == (
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s")
+            sender, = args
+            return {"shell": 4242, "helper": 4343, "stranger": 4444}[sender]
+
+    proc = tmp_path / "proc"
+    for pid, ppid in ((4343, 4242), (4444, 1)):
+        directory = proc / str(pid)
+        directory.mkdir(parents=True)
+        (directory / "stat").write_text(
+            f"{pid} (busctl helper) S {ppid} 0 0 0 0\n")
+
+    real_readlink = os.readlink
+
+    def readlink(path):
+        if str(path).startswith(str(proc)):
+            return "/usr/bin/busctl"
+        return real_readlink(path)
+
+    monkeypatch.setattr(os, "readlink", readlink)
+    bus = Bus()
+    assert dbus_sender_is_trusted_shell(bus, "shell", 4242, str(proc))
+    assert dbus_sender_is_trusted_shell(bus, "helper", 4242, str(proc))
+    assert not dbus_sender_is_trusted_shell(bus, "stranger", 4242, str(proc))
 
 
 def _setup_two(s, *, b_marker_dies=True):

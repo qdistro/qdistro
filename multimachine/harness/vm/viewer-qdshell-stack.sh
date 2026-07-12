@@ -64,8 +64,15 @@ export PATH="$mmbin:$PATH"
 exec 3<"$receipt"
 exec 4<"$streams"
 rm -f "$receipt" "$streams"
+/usr/bin/qs -p "$qdshell" --no-color -vv > /run/mm-vb/qdshell.log 2>&1 &
+shell=$!
+printf '%s\n' "$shell" > /run/mm-vb/qdshell.pid
+chmod 0600 /run/mm-vb/qdshell.pid
+exec 5</run/mm-vb/qdshell.pid
+rm -f /run/mm-vb/qdshell.pid
 "$mmbin/qdistro-mm-session-launcher" \
-  --pairing-fd 3 --streams-fd 4 --viewer-machine-id "$viewer" \
+  --pairing-fd 3 --streams-fd 4 --shell-pid-fd 5 \
+  --viewer-machine-id "$viewer" \
   --broker-program "$mmbin/qdistro-mm-broker" \
   > /run/mm-vb/broker.log 2>&1 &
 broker=$!
@@ -76,8 +83,6 @@ for _ in $(seq 1 80); do
 done
 busctl --user --no-pager status org.qdistro.MultiMachine1 >/dev/null 2>&1 \
   || { echo "broker did not claim D-Bus"; cat /run/mm-vb/broker.log; exit 8; }
-/usr/bin/qs -p "$qdshell" --no-color -vv > /run/mm-vb/qdshell.log 2>&1 &
-shell=$!
 wait "$shell"
 rc=$?
 kill "$broker" 2>/dev/null || true
