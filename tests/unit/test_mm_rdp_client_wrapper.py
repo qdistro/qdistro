@@ -76,6 +76,15 @@ class TestSpecValidation:
             with pytest.raises(SpecError):
                 _spec(allow_input=value).validate()
 
+    @pytest.mark.parametrize(("field", "value"), [
+        ("generation", True), ("generation", "51"),
+        ("rdp_port", False), ("rdp_port", 65536),
+        ("width", True), ("height", "400"),
+    ])
+    def test_integer_wire_fields_are_strict(self, field, value):
+        with pytest.raises(SpecError):
+            _spec(**{field: value}).validate()
+
     def test_dotted_or_ambiguous_stream_label_fails_closed(self):
         for app_id in ("qdistro.mm.vm-a.a.b", "qdistro.mm.vm-a.bad label",
                        "qdistro.mm.vm-a."):

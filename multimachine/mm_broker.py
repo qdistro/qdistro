@@ -43,7 +43,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol
 
 from .harness.viewer_broker import RemotePeer, ViewerBroker
 from .origin_authority import OriginGrant, StaticOriginAuthority
@@ -178,6 +178,108 @@ class _StreamReg:
     wrapper: WrapperHandle | None = None
     backend_lost_emitted: bool = False
     finalized: bool = False
+
+
+@dataclass(frozen=True)
+class ConfiguredStream:
+    """One fully parsed stream from the inherited session description."""
+
+    label: str
+    spec: StreamSpec
+    control_port: int
+    rdp_unit: str
+    marker_unit: str
+    otp: str
+    control_capability: str
+    connect_timeout: float
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """Side-effect-free, authority-checked broker startup configuration."""
+
+    control_host: str
+    origin_authority: StaticOriginAuthority
+    streams: tuple[ConfiguredStream, ...]
+
+
+def parse_session_config(raw: object) -> SessionConfig:
+    """Validate the entire inherited config before any live resource is opened.
+
+    In particular, a malformed or unauthorized later stream must not leave an
+    earlier control listener, upstream connection, or pixel wrapper running.
+    Pairing facts and secret-bearing stream material share the inherited-fd
+    trust boundary, but remain separate objects in the parsed result.
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError("broker config must be an object")
+    control_host = raw.get("control_host", "127.0.0.1")
+    if not isinstance(control_host, str) or not control_host:
+        raise ValueError("control_host must be a non-empty string")
+    authority = StaticOriginAuthority.from_config(raw.get("origins"))
+    stream_items = raw.get("streams")
+    if not isinstance(stream_items, list) or not stream_items:
+        raise ValueError("broker config must contain a non-empty streams array")
+
+    streams: list[ConfiguredStream] = []
+    labels: set[str] = set()
+    app_ids: set[str] = set()
+    control_ports: set[int] = set()
+    rdp_endpoints: set[tuple[str, int]] = set()
+    for index, item in enumerate(stream_items):
+        prefix = f"streams[{index}]"
+        if not isinstance(item, Mapping) or not isinstance(item.get("spec"), Mapping):
+            raise ValueError(f"{prefix} must be an object with a spec object")
+        label = item.get("label")
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"{prefix}.label must be a non-empty string")
+        if label in labels:
+            raise ValueError(f"duplicate stream label {label!r}")
+        try:
+            spec = StreamSpec(**item["spec"])
+            spec.validate()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{prefix}.spec is invalid: {exc}") from exc
+        authority.authorize(spec)
+
+        control_port = item.get("control_port")
+        if (not isinstance(control_port, int) or isinstance(control_port, bool)
+                or control_port <= 0 or control_port > 65535):
+            raise ValueError(f"{prefix}.control_port must be an integer 1..65535")
+        if control_port in control_ports:
+            raise ValueError(f"duplicate control_port {control_port}")
+        if spec.app_id in app_ids:
+            raise ValueError(f"duplicate secctx app_id {spec.app_id!r}")
+        endpoint = (spec.rdp_host, spec.rdp_port)
+        if endpoint in rdp_endpoints:
+            raise ValueError(f"duplicate RDP endpoint {endpoint!r}")
+
+        strings: dict[str, str] = {}
+        for name in ("rdp_unit", "marker_unit", "otp", "control_capability"):
+            value = item.get(name)
+            if not isinstance(value, str):
+                raise ValueError(f"{prefix}.{name} must be a string")
+            if name in ("otp", "control_capability") and not value:
+                raise ValueError(f"{prefix}.{name} must be non-empty")
+            strings[name] = value
+        connect_timeout = item.get("connect_timeout", 30.0)
+        if (not isinstance(connect_timeout, (int, float))
+                or isinstance(connect_timeout, bool) or connect_timeout <= 0):
+            raise ValueError(f"{prefix}.connect_timeout must be positive")
+
+        streams.append(ConfiguredStream(
+            label=label, spec=spec, control_port=control_port,
+            rdp_unit=strings["rdp_unit"], marker_unit=strings["marker_unit"],
+            otp=strings["otp"],
+            control_capability=strings["control_capability"],
+            connect_timeout=float(connect_timeout),
+        ))
+        labels.add(label)
+        app_ids.add(spec.app_id)
+        control_ports.add(control_port)
+        rdp_endpoints.add(endpoint)
+    return SessionConfig(control_host=control_host, origin_authority=authority,
+                         streams=tuple(streams))
 
 
 # D-Bus-shaped events the session emits; the live D-Bus server maps these to
@@ -439,10 +541,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     #   "control_port":5571, "rdp_unit":"...", "marker_unit":"...",
     #   "otp":"...", "control_capability":"..."}]}
     with os.fdopen(os.dup(args.config_fd), "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    if not isinstance(config, dict) or not isinstance(config.get("streams"), list):
-        raise ValueError("broker config must be an object with a streams array")
-    origin_authority = StaticOriginAuthority.from_config(config.get("origins"))
+        config = parse_session_config(json.load(stream))
 
     runtime_parent = args.runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     socket_dir = Path(tempfile.mkdtemp(prefix="qdistro-mm-", dir=runtime_parent))
@@ -460,8 +559,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
 
     pending_events: list[Event] = []
     session = MultiMachineSession(
-        control_host=str(config.get("control_host", "127.0.0.1")),
-        spawn_wrapper=spawn_wrapper, origin_authority=origin_authority,
+        control_host=config.control_host,
+        spawn_wrapper=spawn_wrapper, origin_authority=config.origin_authority,
         on_event=pending_events.append)
 
     # dbus-python matches the rest of qdistro's session daemons and is present in
@@ -523,27 +622,22 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
 
     session._on_event = emit
 
-    for raw in config["streams"]:
-        if not isinstance(raw, dict) or not isinstance(raw.get("spec"), dict):
-            raise ValueError("each stream must be an object with a spec object")
-        label = raw.get("label")
-        otp = raw.get("otp")
-        control_capability = raw.get("control_capability")
-        if not isinstance(label, str) or not label:
-            raise ValueError("stream label must be a non-empty string")
-        if not isinstance(otp, str) or not otp:
-            raise ValueError(f"{label}: otp must be a non-empty string")
-        if not isinstance(control_capability, str) or not control_capability:
-            raise ValueError(
-                f"{label}: control_capability must be a non-empty string")
-        spec = StreamSpec(**raw["spec"])
+    # Register every already-validated stream before opening any upstream
+    # connection or launching any backend. Duplicate identities/endpoints can
+    # therefore never produce a partially live session.
+    for configured in config.streams:
         session.register_stream(
-            label, spec=spec, rdp_unit=str(raw.get("rdp_unit", "")),
-            control_port=int(raw["control_port"]),
-            marker_unit=str(raw.get("marker_unit", "")),
-            control_capability=control_capability)
-        session.connect(label, timeout=float(raw.get("connect_timeout", 30.0)))
-        session.launch_backend(label, otp)
+            configured.label, spec=configured.spec,
+            rdp_unit=configured.rdp_unit,
+            control_port=configured.control_port,
+            marker_unit=configured.marker_unit,
+            control_capability=configured.control_capability)
+    # Connect all source control channels before launching the first pixel
+    # backend. A missing/unauthenticated source cannot leave a partial UI.
+    for configured in config.streams:
+        session.connect(configured.label, timeout=configured.connect_timeout)
+    for configured in config.streams:
+        session.launch_backend(configured.label, configured.otp)
 
     for event in pending_events:
         emit(event)

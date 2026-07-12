@@ -70,7 +70,8 @@ class StreamSpec:
             raise SpecError("empty origin")
         if not self.stream_id:
             raise SpecError("empty stream_id")
-        if self.generation <= 0:
+        if (not isinstance(self.generation, int)
+                or isinstance(self.generation, bool) or self.generation <= 0):
             raise SpecError(f"non-positive generation {self.generation}")
         # the secctx app_id is the attribution key: it MUST be the
         # qdistro.mm.<origin>.<stream> shape so the viewer binds the handle to
@@ -87,9 +88,13 @@ class StreamSpec:
             raise SpecError(f"bad app_id stream label {label!r}")
         if not self.instance_id:
             raise SpecError("empty instance_id")
-        if not self.rdp_host or self.rdp_port <= 0:
+        if (not self.rdp_host or not isinstance(self.rdp_port, int)
+                or isinstance(self.rdp_port, bool)
+                or self.rdp_port <= 0 or self.rdp_port > 65535):
             raise SpecError(f"bad rdp endpoint {self.rdp_host}:{self.rdp_port}")
-        if self.width <= 0 or self.height <= 0:
+        if (not isinstance(self.width, int) or isinstance(self.width, bool)
+                or not isinstance(self.height, int) or isinstance(self.height, bool)
+                or self.width <= 0 or self.height <= 0):
             raise SpecError(f"bad size {self.width}x{self.height}")
         if (not isinstance(self.allow_input, int)
                 or isinstance(self.allow_input, bool)
