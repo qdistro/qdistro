@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+"""Installed entry point for the trusted multi-machine session handoff."""
+import sys
+from pathlib import Path
+
+installed = Path("/usr/local/lib/qdistro")
+source_tree = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(installed if (installed / "multimachine").is_dir()
+                       else source_tree))
+
+from multimachine.mm_session_launcher import main
+
+raise SystemExit(main())

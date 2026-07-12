@@ -18,3 +18,10 @@ def test_installer_ships_paired_origin_authority() -> None:
         "mm_broker imports multimachine.origin_authority, so the VM runtime "
         "installer must copy origin_authority.py or the broker cannot start"
     )
+
+
+def test_installer_ships_trusted_session_launcher() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "mm_session_launcher.py" in text
+    assert '"$SRC/qdistro-mm-session-launcher"' in text
+    assert "/usr/local/bin/qdistro-mm-session-launcher" in text
