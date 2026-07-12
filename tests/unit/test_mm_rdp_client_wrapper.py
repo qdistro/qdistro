@@ -117,6 +117,7 @@ class TestArgv:
         assert "/size:640x400" in fd_args
         assert "/p:otp123" in fd_args                     # secret only in inherited fd
         assert any(a.startswith("/v:10.0.2.2:5555") for a in fd_args)
+        assert "/log-level:DEBUG" in fd_args              # proven SDL3 handshake path
 
     def test_empty_otp_fails_closed(self):
         w, _, _ = _wrapper()

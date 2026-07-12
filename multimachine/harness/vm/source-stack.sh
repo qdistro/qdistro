@@ -15,6 +15,7 @@ export XDG_RUNTIME_DIR=/run/user/1000
 # wayland-0 (was a HARDCODED `--wayland-display wayland-0` foot-gun, session-4).
 SOCK=${SOCK:-wayland-mm}
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
+OUTPUT_ID=${OUTPUT_ID:-1}
 MODE=${MODE:-full}
 # Marker frame cadence. A capture (`virsh screenshot`) of an ANIMATING marker can
 # catch a torn RDP frame mid-repaint (barcode CRC mismatch); ANIMATE_MS=0 = a
@@ -292,7 +293,7 @@ sleep 1.5
 FS_ARG=""; [ "${FS:-0}" = 1 ] && FS_ARG="--fullscreen"
 TEL_ARG=""; [ -n "$EXPORTED_TELEMETRY" ] && TEL_ARG="--telemetry $EXPORTED_TELEMETRY --label $EXPORTED_LABEL"
 RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
-  qdwin-marker-client --width $W --height $H --output-id 1 --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
+  qdwin-marker-client --width $W --height $H --output-id $OUTPUT_ID --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
 
 # 4) Discover the approved RDP port.
 RDP_PORT=""

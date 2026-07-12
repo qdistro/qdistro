@@ -149,6 +149,10 @@ class RdpClientWrapper:
             height=self.spec.height, fullscreen=False, username=self.spec.rdp_user,
             gfx_avc=self.gfx_avc, from_stdin=False)
         client[0] = self.rdp_client            # the resolved windowed FreeRDP
+        # This SDL3/FreeRDP build has a timing-sensitive TLS→MCS race at the
+        # default/INFO level; DEBUG reliably completes the gfx-channel handshake
+        # in the live R1/R2 viewer. Keep the deployed wrapper on the proven path.
+        client.append("/log-level:DEBUG")
         return client
 
     def build_fd_args(self, otp: str) -> bytes:
@@ -265,7 +269,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     import os
     import socket
     import subprocess
-    import sys
 
     ap = argparse.ArgumentParser(prog="qdistro-mm-rdp-client-wrapper")
     ap.add_argument("--origin", required=True)

@@ -281,10 +281,18 @@ class QciVMBackend:
         ``viewer``/``control_source`` — no ``generation``) so ``python3 -m
         multimachine.viewer`` and ``... .control_source`` run in-guest."""
         pkg = self.repo_dir / "multimachine"
-        self._vmexec(vm, f"mkdir -p {shlex.quote(guest_dir)}/multimachine")
-        for mod in ("__init__.py", "sidechannel.py", "bridge.py", "viewer.py",
-                    "control_source.py"):
+        self._vmexec(
+            vm, f"mkdir -p {shlex.quote(guest_dir)}/multimachine/harness")
+        for mod in (
+                "__init__.py", "sidechannel.py", "bridge.py", "viewer.py",
+                "control_source.py", "mm_broker.py", "mm_pairing_authority.py",
+                "mm_session_launcher.py", "origin_authority.py",
+                "rdp_client_wrapper.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
+        for mod in ("__init__.py", "viewer_broker.py"):
+            self._push(
+                vm, pkg / "harness" / mod,
+                f"{guest_dir}/multimachine/harness/{mod}")
 
     def launch_viewer(self, vm: str, *, control_host: str, control_port: int,
                       rdp_host: str, rdp_port: int, generation: int, otp: str,
@@ -538,7 +546,7 @@ class QciVMBackend:
                        source_machine: str, title: str, app_id: str,
                        req_w: int, req_h: int, marker_unit: str = "mm-marker",
                        unit: str = "mm-control", control_port: int | None = None,
-                       ) -> str:
+                       control_capability: str = "") -> str:
         """Start a VM-A control unit (impl-12): the control side-channel ORIGINATES
         in VM-A, not on the host. Pushes the ``multimachine`` pkg + adds the SLIRP
         hostfwd for the control port (mirroring the RDP relay), then runs
@@ -573,6 +581,17 @@ class QciVMBackend:
             f"systemctl --user reset-failed {unit} 2>/dev/null; "
             f"rm -f {log_file} {status_file}; true"),
             check=False)
+        auth_arg = ""
+        credential_property = ""
+        credential = f"/run/user/1000/{unit}-auth"
+        if control_capability:
+            encoded = base64.b64encode(control_capability.encode()).decode()
+            self._vmexec(real, self._as_admin(
+                f"umask 077; printf '%s' {shlex.quote(encoded)} | base64 -d > "
+                f"{shlex.quote(credential)}"))
+            credential_property = (
+                f"--property=LoadCredential=mm-control-auth:{credential} ")
+            auth_arg = " --auth-fd 3"
         argv = (
             "python3 -m multimachine.control_source "
             f"--port {port} --generation {generation} "
@@ -581,11 +600,17 @@ class QciVMBackend:
             f"--title {shlex.quote(title)} --app-id {shlex.quote(app_id)} "
             f"--req-w {req_w} --req-h {req_h} --marker-unit {shlex.quote(marker_unit)} "
             f"--emit-log {log_file} "
-            f"--status-file {status_file}")
+            f"--status-file {status_file}{auth_arg}")
+        command = argv
+        if control_capability:
+            body = ("exec 3<\"$CREDENTIALS_DIRECTORY/mm-control-auth\"; "
+                    f"exec {argv}")
+            command = f"bash -c {shlex.quote(body)}"
         out = self._vmexec(real, self._as_admin(
             f"systemd-run --user --collect --unit={unit} "
+            f"{credential_property}"
             "--setenv=PYTHONPATH=/tmp/mm "
-            f"{argv}"), check=False)
+            f"{command}"), check=False)
         if "Running as unit" not in out and f"{unit}.service" not in out:
             raise RuntimeError(f"systemd-run did not start {unit}:\n{out}")
         # wait for the unit to publish its listening status file (the bind succeeded
@@ -593,6 +618,9 @@ class QciVMBackend:
         for _ in range(40):
             st = self._read_control_status(real, status_file)
             if st.get("state") == "listening" and st.get("stream_id"):
+                if control_capability:
+                    self._vmexec(real, self._as_admin(
+                        f"rm -f {shlex.quote(credential)}"), check=False)
                 return st["stream_id"]
             time.sleep(0.25)
         raise RuntimeError(f"{unit} never published a listening status file")
@@ -729,7 +757,8 @@ class QciVMBackend:
         self, vm: str, *, generation: int, width: int, height: int,
         exported_telemetry: str, sentinel_telemetry: str,
         exported_label: str, sentinel_label: str,
-        allow_input: int = 1, fault: str = "") -> ViewStreamApproved:
+        allow_input: int = 1, fault: str = "",
+        output_id: int = 1) -> ViewStreamApproved:
         """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
         subscribed, writing per-seat input telemetry) + a subscribe. The SENTINEL is
         launched separately (:meth:`launch_sentinel`) AFTER the oracle, since a
@@ -746,6 +775,11 @@ class QciVMBackend:
         deterministically exercises its bounded-reconnect / give-up path."""
         real = self._real(vm)
         self._sentinel_label = sentinel_label
+        # Direct live-gate callers may wrap already-provisioned VMs without
+        # calling spin(), whose historical side effect installed this bridge.
+        # Make the source setup self-contained: its stable relay port must be
+        # reachable from the viewer through the source VM's QEMU host-forward.
+        self._ensure_hostfwd(real, self.relay_port)
         self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                    "/tmp/mm-source-stack.sh")
         # qdwin now spawns qdistro-forward with `--wayland-display <its own socket>`
@@ -753,6 +787,7 @@ class QciVMBackend:
         # channel on whatever socket our mm-qdwin listens on. No longer forced onto
         # wayland-0 — the default private SOCK=wayland-mm works (session-5 qdwin fix).
         env = (f"W={width} H={height} GEN={generation} FS=1 ANIMATE_MS=200 "
+               f"OUTPUT_ID={int(output_id)} "
                f"RELAY_PORT={self.relay_port} ALLOW_INPUT={int(allow_input)} "
                f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
                f"EXPORTED_LABEL={shlex.quote(exported_label)}"
