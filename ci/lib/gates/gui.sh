@@ -169,6 +169,12 @@ Rules:
   \`\$QCI_SCENARIO_SLUG\` variable is HOST-side only — it is not set inside guest
   shells unless you pass it through yourself (e.g. \`QCI_SCENARIO_SLUG=$slug\`).
   Do NOT write to bare fixed paths like \`/tmp/foo.log\`.
+- The agent process starts in a throwaway \`/tmp/qci-agent.XXXXXX\` working
+  directory. qci removes it after a successful attempt, preserves it after an
+  agent-command failure, and records the path in the agent log. Any tool that
+  accidentally writes a relative temporary output stays there instead of
+  polluting the source checkout. Required evidence must still be saved under the
+  artifact directory.
 - Execute setup, steps, assertions, and cleanup serially.
 - Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
 - Diagnose your OWN tooling before blaming the product:
@@ -594,10 +600,17 @@ gui_capture_unmatched_tail() {
 }
 
 run_agent_command() {
-    local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded
+    local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded workdir rc
     if [ -z "$cmd" ]; then
         return 127
     fi
+    # Agents occasionally invoke tools that treat an intended stdout formatter
+    # (for example ImageMagick's `txt:-`) as a relative output filename. Running
+    # from the source checkout then leaves that scratch artifact untracked at the
+    # repository root. Give every attempt a private, disposable cwd under /tmp;
+    # prompts and evidence paths are absolute, and repo access is through the
+    # exported *_REPO variables, so no scenario contract depends on cwd.
+    workdir=$(mktemp -d "${TMPDIR:-/tmp}/qci-agent.XXXXXX") || return 1
     # Host-side backstop timeout. QCI_AGENT_TIMEOUT (seconds) bounds the agent even
     # when the operator's QCI_AGENT_CMD does not self-wrap `timeout`; on expiry the
     # agent is killed (`timeout -k 15`, SIGTERM then SIGKILL after 15s) and the call
@@ -608,22 +621,34 @@ run_agent_command() {
     # fires first under a larger harness cap.
     local to=${QCI_AGENT_TIMEOUT:-0}
     [ "$to" -gt 0 ] 2>/dev/null || to=0
-    if [[ "$cmd" == *"{prompt}"* ]]; then
-        expanded=${cmd//\{prompt\}/$prompt}
-        if [ "$to" -gt 0 ]; then
-            timeout -k 15 "$to" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+    (
+        cd "$workdir" || exit 1
+        if [[ "$cmd" == *"{prompt}"* ]]; then
+            expanded=${cmd//\{prompt\}/$prompt}
+            if [ "$to" -gt 0 ]; then
+                timeout -k 15 "$to" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+            else
+                bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+            fi
         else
-            bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+            if [ "$to" -gt 0 ]; then
+                # shellcheck disable=SC2086
+                timeout -k 15 "$to" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+            else
+                # shellcheck disable=SC2086
+                $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+            fi
         fi
+    )
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        rm -rf -- "$workdir" 2>/dev/null || true
+        printf '\nqci_agent_workdir=%s (removed after success)\n' "$workdir" >> "$log_path"
     else
-        if [ "$to" -gt 0 ]; then
-            # shellcheck disable=SC2086
-            timeout -k 15 "$to" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
-        else
-            # shellcheck disable=SC2086
-            $cmd "$prompt" < /dev/null > "$log_path" 2>&1
-        fi
+        printf '\nqci_agent_workdir=%s (preserved after agent exit %s)\n' \
+            "$workdir" "$rc" >> "$log_path"
     fi
+    return "$rc"
 }
 
 gate_qdshell_ui_agent() {
