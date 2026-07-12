@@ -25,3 +25,8 @@ def test_installer_ships_trusted_session_launcher() -> None:
     assert "mm_session_launcher.py" in text
     assert '"$SRC/qdistro-mm-session-launcher"' in text
     assert "/usr/local/bin/qdistro-mm-session-launcher" in text
+
+
+def test_installer_ships_remote_adapter_core() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "remote_adapter.py" in text
