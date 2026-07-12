@@ -38,8 +38,10 @@
  *     qdistro-nested-pixelfeed <handle> <pw_node> [input_sink]
  *
  *     pw_node is qdwin's "weston.pipewire:<pid>:<output_name>" — we
- *     parse the last colon segment as the weston output name and
- *     resolve the actual PW node by TARGET_OBJECT="weston.<output>".
+ *     parse the nested pid and output name, then resolve the producer's
+ *     PipeWire Client by application.process.id and its Node by client.id +
+ *     node.name. TARGET_OBJECT uses that node's unique object.serial, so an
+ *     outer Weston exposing the same `weston.<output>` name cannot win.
  *
  * Env:
  *     WAYLAND_DISPLAY      — outer display socket (default wayland-0)
@@ -98,6 +100,7 @@
 
 #include "qdwin-shell-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "pw-target-resolver.h"
 
 /* DRM fourccs we may publish — keep local copies so we don't pull in
  * libdrm just for two constants. SPA_VIDEO_FORMAT_BGRx == bytes B,G,R,X
@@ -131,6 +134,9 @@ struct pf_state {
 	struct pw_context *pw_context;
 	struct pw_core *pw_core;
 	struct pw_stream *stream;
+	struct pw_registry *pw_registry;
+	struct spa_hook core_listener;
+	struct spa_hook registry_listener;
 	struct spa_hook stream_listener;
 	struct spa_video_info_raw format;
 	int format_known;
@@ -157,6 +163,18 @@ struct pf_state {
 	/* Resolved PW target — derived from argv pw_node. Owned. */
 	char *pw_target;
 	int   pw_pid;            /* parsed from "weston.pipewire:<pid>:..." */
+	int pw_sync_seq;
+	int pw_sync_done;
+	struct qdpf_pw_node_observation pw_candidates[32];
+	size_t pw_candidate_count;
+	int pw_observations_truncated;
+	struct pf_pw_client {
+		struct pf_state *st;
+		struct qdpf_pw_client_observation observed;
+		struct pw_client *proxy;
+		struct spa_hook listener;
+	} pw_clients[32];
+	size_t pw_client_count;
 
 	volatile sig_atomic_t stop;
 };
@@ -717,6 +735,90 @@ static const struct pw_stream_events stream_events = {
 	.process       = on_pw_process,
 };
 
+static void
+on_pw_core_done(void *data, uint32_t id, int seq)
+{
+	struct pf_state *st = data;
+	if (id == PW_ID_CORE && seq == st->pw_sync_seq) {
+		st->pw_sync_done = 1;
+		pw_thread_loop_signal(st->pw_loop, false);
+	}
+}
+
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+	.done = on_pw_core_done,
+};
+
+static void
+on_pw_client_info(void *data, const struct pw_client_info *info)
+{
+	struct pf_pw_client *client = data;
+	if (!info || !info->props)
+		return;
+	const char *pid = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_ID);
+	client->observed.pid_known =
+		pid && qdpf_parse_positive_pid(pid, &client->observed.pid) == 0;
+}
+
+static const struct pw_client_events client_events = {
+	PW_VERSION_CLIENT_EVENTS,
+	.info = on_pw_client_info,
+};
+
+static void
+on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
+		      const char *type, uint32_t version,
+		      const struct spa_dict *props)
+{
+	struct pf_state *st = data;
+	(void)permissions;
+	(void)version;
+	if (!props)
+		return;
+
+	if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+		if (st->pw_client_count >= 32) {
+			st->pw_observations_truncated = 1;
+			return;
+		}
+		struct pf_pw_client *entry =
+			&st->pw_clients[st->pw_client_count++];
+		entry->st = st;
+		entry->observed.id = id;
+		entry->proxy = pw_registry_bind(st->pw_registry, id, type,
+				PW_VERSION_CLIENT, 0);
+		if (entry->proxy)
+			pw_client_add_listener(entry->proxy, &entry->listener,
+					       &client_events, entry);
+		return;
+	}
+	if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !st->pw_target)
+		return;
+	const char *global_name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+	const char *client = spa_dict_lookup(props, PW_KEY_CLIENT_ID);
+	const char *serial = spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL);
+	if (!global_name || !client || !serial ||
+	    strcmp(global_name, st->pw_target) != 0)
+		return;
+	if (st->pw_candidate_count >= 32) {
+		st->pw_observations_truncated = 1;
+		return;
+	}
+	struct qdpf_pw_node_observation *candidate =
+		&st->pw_candidates[st->pw_candidate_count];
+	if (qdpf_parse_u32(client, &candidate->client_id) != 0 ||
+	    qdpf_parse_u64(serial, &candidate->serial) != 0)
+		return;
+	candidate->id = id;
+	st->pw_candidate_count++;
+}
+
+static const struct pw_registry_events registry_events = {
+	PW_VERSION_REGISTRY_EVENTS,
+	.global = on_pw_registry_global,
+};
+
 /* Start the PipeWire thread loop and connect the input stream. Mirrors
  * qdistro-forward's subsystem_start. Non-fatal: if anything fails we
  * log and keep the wl side running on the solid colour. */
@@ -751,12 +853,54 @@ pf_start_pipewire(struct pf_state *st)
 		pw_thread_loop_unlock(st->pw_loop);
 		return -1;
 	}
-
+	st->pw_registry = pw_core_get_registry(st->pw_core,
+		PW_VERSION_REGISTRY, 0);
+	pw_core_add_listener(st->pw_core, &st->core_listener,
+			     &core_events, st);
+	pw_registry_add_listener(st->pw_registry, &st->registry_listener,
+				 &registry_events, st);
+	st->pw_sync_done = 0;
+	st->pw_sync_seq = pw_core_sync(st->pw_core, PW_ID_CORE, 0);
+	while (!st->pw_sync_done)
+		pw_thread_loop_wait(st->pw_loop);
+	/* Registry callbacks bind Client proxies; a second barrier guarantees
+	 * their info events (including application.process.id) have arrived. */
+	st->pw_sync_done = 0;
+	st->pw_sync_seq = pw_core_sync(st->pw_core, PW_ID_CORE, 0);
+	while (!st->pw_sync_done)
+		pw_thread_loop_wait(st->pw_loop);
+	if (st->pw_observations_truncated) {
+		LOGE("pw: registry observations exceeded fixed capacity; "
+		     "refusing potentially ambiguous capture");
+		pw_thread_loop_unlock(st->pw_loop);
+		return -1;
+	}
+	struct qdpf_pw_client_observation clients[32];
+	for (size_t i = 0; i < st->pw_client_count; i++)
+		clients[i] = st->pw_clients[i].observed;
+	struct qdpf_pw_target target = {0};
+	enum qdpf_pw_resolve_result resolved = qdpf_resolve_pw_target(
+		st->pw_pid, clients, st->pw_client_count,
+		st->pw_candidates, st->pw_candidate_count, &target);
+	if (resolved != QDPF_PW_RESOLVE_OK) {
+		LOGE("pw: producer pid=%d node=%s not uniquely resolved "
+		     "(reason=%d clients=%zu candidates=%zu); refusing capture",
+		     st->pw_pid, st->pw_target, resolved, st->pw_client_count,
+		     st->pw_candidate_count);
+		pw_thread_loop_unlock(st->pw_loop);
+		return -1;
+	}
+	char target_id[32];
+	snprintf(target_id, sizeof target_id, "%llu",
+		 (unsigned long long)target.serial);
+	LOGI("pw: resolved producer pid=%d client=%u node=%u serial=%llu name=%s",
+	     st->pw_pid, target.client_id, target.node_id,
+	     (unsigned long long)target.serial, st->pw_target);
 	struct pw_properties *props = pw_properties_new(
 		PW_KEY_MEDIA_TYPE,     "Video",
 		PW_KEY_MEDIA_CATEGORY, "Capture",
 		PW_KEY_MEDIA_ROLE,     "Screen",
-		PW_KEY_TARGET_OBJECT,  st->pw_target,
+		PW_KEY_TARGET_OBJECT,  target_id,
 		PW_KEY_NODE_NAME,      "qdistro-nested-pixelfeed",
 		NULL);
 
@@ -800,8 +944,11 @@ pf_start_pipewire(struct pf_state *st)
 					(int64_t)0 /*LINEAR default*/,
 					(int64_t)0 /*LINEAR alt*/),
 			SPA_FORMAT_VIDEO_size,
-				SPA_POD_Rectangle(&SPA_RECTANGLE((uint32_t)st->width,
-								 (uint32_t)st->height)),
+				SPA_POD_CHOICE_RANGE_Rectangle(
+					&SPA_RECTANGLE((uint32_t)st->width,
+						       (uint32_t)st->height),
+					&SPA_RECTANGLE(1, 1),
+					&SPA_RECTANGLE(8192, 8192)),
 			SPA_FORMAT_VIDEO_framerate,
 				SPA_POD_Fraction(&SPA_FRACTION(0, 1)));
 	}
@@ -812,8 +959,11 @@ pf_start_pipewire(struct pf_state *st)
 		SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 		SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx),
 		SPA_FORMAT_VIDEO_size,
-			SPA_POD_Rectangle(&SPA_RECTANGLE((uint32_t)st->width,
-							 (uint32_t)st->height)),
+			SPA_POD_CHOICE_RANGE_Rectangle(
+				&SPA_RECTANGLE((uint32_t)st->width,
+					       (uint32_t)st->height),
+				&SPA_RECTANGLE(1, 1),
+				&SPA_RECTANGLE(8192, 8192)),
 		SPA_FORMAT_VIDEO_framerate,
 			SPA_POD_Fraction(&SPA_FRACTION(0, 1)));
 

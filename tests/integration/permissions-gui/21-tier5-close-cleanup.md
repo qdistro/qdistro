@@ -95,8 +95,10 @@ disown
 EOF
 )
 # Capture a compositor-journal cursor BEFORE the spawn so the mapped-check below
-# cannot be satisfied by a STALE app_id event from a prior attempt.
-CUR=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'")
+# cannot be satisfied by a STALE app_id event from a prior attempt. Persist it
+# inside the guest: visual agents do not guarantee that a host-shell variable
+# survives when they execute a long fenced block in smaller tool calls.
+$VMEXEC "$VM" "mkdir -p /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -n0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p' > /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur"
 
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
@@ -126,14 +128,14 @@ while [ $SECONDS -lt $deadline ]; do
     # up). The secctx line is emitted at security-context SETUP — necessary to map
     # app_id→handle, but NOT proof the window painted, hence stage 2.
     if [ -z "$handle" ]; then
-        handle=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor '$CUR' --no-pager -o cat 2>/dev/null | grep -F 'app_id=qdistro.tier5.$VM5' | grep -oE 'toplevel_security_context handle=[0-9]+' | grep -oE '[0-9]+' | head -1" | tr -d '[:space:]')
+        handle=$($VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -F 'app_id=qdistro.tier5.$VM5' | grep -oE 'toplevel_security_context handle=[0-9]+' | grep -oE '[0-9]+' | head -1" | tr -d '[:space:]')
     fi
     # Stage 2: that handle actually MAPPED. qdwin emits `qdwin: mapped handle=N`
     # ONLY after the toplevel's first buffer commit — i.e. it is painted, the same
     # condition the screenshot asserts. Matching `mapped` (not the earlier
     # secctx-committed setup line) is what makes this a true readiness gate and
     # avoids the original race where a screenshot beat the first frame.
-    if [ -n "$handle" ] && $VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor '$CUR' --no-pager -o cat 2>/dev/null | grep -qE 'qdwin: mapped handle=$handle '"; then
+    if [ -n "$handle" ] && $VMEXEC "$VM" "cur=\$(cat /tmp/qci-qdistro_tests_integration_permissions-gui_21-tier5-close-cleanup.md/journal.cur 2>/dev/null); [ -n \"\$cur\" ] || { echo MISSING_CURSOR >&2; exit 2; }; runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --after-cursor \"\$cur\" --no-pager -o cat 2>/dev/null | grep -qE 'qdwin: mapped handle=$handle '"; then
         mapped=1; break
     fi
     sleep 2

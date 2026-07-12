@@ -84,6 +84,17 @@ class ViewerBroker:
                    window_id: int = 0, allow_input: int = 1,
                    expect_generation: int | None = None,
                    control_capability: str = "") -> RemotePeer:
+        if label in self.peers:
+            raise ValueError(f"duplicate stream label {label!r}")
+        for existing in self.peers.values():
+            if existing.app_id == app_id:
+                raise ValueError(
+                    f"duplicate secctx app_id {app_id!r} for "
+                    f"{existing.label!r} and {label!r}")
+            if existing.control_port == control_port:
+                raise ValueError(
+                    f"duplicate control port {control_port} for "
+                    f"{existing.label!r} and {label!r}")
         peer = RemotePeer(
             label=label, origin=origin, app_id=app_id, rdp_unit=rdp_unit,
             relay_port=relay_port, control_port=control_port,
@@ -131,6 +142,11 @@ class ViewerBroker:
         if ann.meta.app_id != peer.app_id:
             raise RuntimeError(f"{label}: Announce app_id={ann.meta.app_id!r} "
                                f"!= expected {peer.app_id!r} (stale control?)")
+        if ann.meta.source_machine != peer.origin:
+            raise RuntimeError(
+                f"{label}: Announce source_machine="
+                f"{ann.meta.source_machine!r} != expected origin "
+                f"{peer.origin!r} (wrong origin?)")
         if peer.window_id and ann.meta.window_id != peer.window_id:
             raise RuntimeError(f"{label}: Announce window_id={ann.meta.window_id} "
                                f"!= expected {peer.window_id}")

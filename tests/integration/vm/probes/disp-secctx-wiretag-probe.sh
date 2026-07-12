@@ -38,6 +38,7 @@ RUNTIME_DIR="/run/user/$ADMIN_UID"
 OUTER=wayland-1
 WORKLOAD=weston-terminal                    # reuses the s32 tier-2 image
 IMAGE="qdistro/tier2-${WORKLOAD}:latest"
+ADVERTISE_ACTION="qdistro.nested.advertise:org.freedesktop.weston.wayland-terminal"
 RULE_DIR=/etc/qdistro/rules.d
 RULE_FILE="$RULE_DIR/zz-disp-wiretag-${WORKLOAD}-allow.yaml"
 TIER2_BUILD_DIR=/tmp/qd-disp-wiretag-tier2
@@ -101,16 +102,21 @@ cmd_setup() {
   decision: allow
   match:
     action: qdistro.dispose.spawn:${WORKLOAD}
+- name: disp-wiretag-${WORKLOAD}-nested-advertise-allow
+  decision: allow
+  match:
+    action: ${ADVERTISE_ACTION}
 EOF
     systemctl reload-or-restart qdistro-admin-broker.service 2>/dev/null || true
-    local reply=""
+    local reply="" advertise_reply=""
     for _ in $(seq 1 20); do
         reply=$(broker_check "qdistro.dispose.spawn:${WORKLOAD}")
-        [ "$reply" = "allow" ] && break
+        advertise_reply=$(broker_check "$ADVERTISE_ACTION")
+        [ "$reply" = "allow" ] && [ "$advertise_reply" = "allow" ] && break
         sleep 0.25
     done
-    [ "$reply" = "allow" ] \
-        || fail setup "broker did not load the disp allow rule (CheckPermission='$reply')"
+    [ "$reply" = "allow" ] && [ "$advertise_reply" = "allow" ] \
+        || fail setup "broker did not load the disp allow rules (spawn='$reply' nested-advertise='$advertise_reply')"
 
     clean_disp
     pass setup
