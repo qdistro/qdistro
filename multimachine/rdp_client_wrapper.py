@@ -185,11 +185,14 @@ class RdpClientWrapper:
         The broker calls this ONLY after it has seen the authoritative source
         ``Closed`` (or declared stream failure); this wrapper never tears down on
         its own and never on a viewer close-click."""
-        if stream_id != self.spec.stream_id:
+        if not isinstance(stream_id, str) or stream_id != self.spec.stream_id:
             return False
         if generation != self.spec.generation:
             return False
-        if not hmac.compare_digest(token, self._token):   # constant-time
+        # a non-str token (e.g. JSON null) would make compare_digest raise; a
+        # raised teardown reaches the socket loop's finally = tokenless kill of
+        # FreeRDP (mm-merge review HIGH). Type-check before the constant-time cmp.
+        if not isinstance(token, str) or not hmac.compare_digest(token, self._token):
             return False
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
@@ -202,7 +205,13 @@ def dispatch_request(w: RdpClientWrapper, req: dict) -> tuple[dict, bool]:
     request is rejected, never raised (codex impl-35 HIGH: a parse crash in the
     socket loop must NOT fall through to a tokenless teardown of FreeRDP). Pure +
     unit-tested; :func:`main`'s socket loop is just the transport around it."""
-    cmd = (req or {}).get("cmd")
+    # json.loads happily yields a str/list/int/bool for a non-object body; those
+    # are truthy so `(req or {})` does NOT normalise them and `.get` would raise
+    # (mm-merge review HIGH: a bare "x"/[1]/123 body crashed into the finally
+    # teardown). Anything that is not a JSON object is malformed → reject.
+    if not isinstance(req, dict):
+        return {"error": "malformed request (not an object)"}, False
+    cmd = req.get("cmd")
     if cmd == "status":
         return w.process_truth(), False
     if cmd == "teardown":
@@ -304,7 +313,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
                         req = {}
                     resp, accepted = dispatch_request(w, req)
                     conn.sendall((json.dumps(resp) + "\n").encode())
-            except OSError:
+            except Exception:
+                # ANY per-connection failure (socket error OR an unexpected
+                # dispatch bug) must stay contained here — never propagate to the
+                # finally, which would tokenlessly terminate FreeRDP (mm-merge
+                # review HIGH). dispatch_request already fails closed on malformed
+                # input; this is the belt-and-braces the contract promises.
                 continue
             if accepted:
                 break               # authorized teardown actioned — done
