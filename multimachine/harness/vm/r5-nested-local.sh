@@ -11,19 +11,16 @@ WLOG=$RT/outer.log
 NLOG=$RT/inner.log
 SLOG=$RT/qdshell.log
 APPLOG=$RT/app.log
-SHOT=$RT/proxy.png
 ACTION=qdistro.nested.advertise:qdwin-popup-probe
 APP_PID=
 INNER_PID=
 OUTER_PID=
 SHELL_PID=
-SDL_PID=
 
 cleanup() {
     set +e
     [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
     [ -n "$SHELL_PID" ] && kill "$SHELL_PID" 2>/dev/null
-    [ -n "$SDL_PID" ] && kill "$SDL_PID" 2>/dev/null
     pkill -9 -f qdistro-nested-pixelfeed 2>/dev/null
     [ -n "$INNER_PID" ] && kill "$INNER_PID" 2>/dev/null
     [ -n "$OUTER_PID" ] && kill "$OUTER_PID" 2>/dev/null
@@ -53,14 +50,12 @@ command -v weston >/dev/null || fail "weston missing"
 command -v qs >/dev/null || fail "qs missing"
 command -v qdistro-nested-pixelfeed >/dev/null || fail "pixelfeed missing"
 [ -x /tmp/r5-popup-probe ] || fail "staged popup probe missing"
-command -v weston-screenshooter >/dev/null || fail "screenshooter missing"
 [ -f "$QDSHELL/shell.qml" ] || fail "staged production qdshell missing"
 pgrep -x pipewire >/dev/null || fail "admin PipeWire daemon missing"
 
 systemctl stop mm-viewer-session mm-qdwin mm-seatd mm-ydotoold 2>/dev/null || true
 runuser -u admin -- systemctl --user stop noctalia-session noctalia-shell qdlocker qdshell.service 2>/dev/null || true
 pkill -9 -f '/usr/bin/qs -p /tmp/qdshell-r5' 2>/dev/null || true
-pkill -9 -f 'sdl-freerdp.*/v:127.0.0.1:3389' 2>/dev/null || true
 pkill -9 -f qdistro-nested-pixelfeed 2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 for _ in $(seq 1 50); do
@@ -112,9 +107,9 @@ chown admin:admin "$RT/outer.ini" "$RT/inner.ini"
 
 runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
     QDWIN_ALLOWED_UID=1000 QDWIN_ALLOWED_LOCKER_ANY=1 \
-    QDWIN_ENABLE_SCREENSHOOTER=1 QDWIN_NESTED_BROKER_REQUIRED=1 \
+    QDWIN_NESTED_BROKER_REQUIRED=1 \
     QDWIN_NESTED_S3D_TEST=1 \
-    weston --debug --config="$RT/outer.ini" \
+    weston --debug --width=1024 --height=640 --config="$RT/outer.ini" \
       --rdp-tls-cert=/home/admin/qdwin-rdp/rdp.crt \
       --rdp-tls-key=/home/admin/qdwin-rdp/rdp.key \
       --socket=$OUTER --log="$WLOG" &
@@ -122,10 +117,6 @@ OUTER_PID=$!
 wait_log "$WLOG" 'qdwin: shell loaded' 'outer qdwin startup'
 [ -S "$XRT/$OUTER" ] || fail "outer Wayland socket missing"
 
-runuser -u admin -- env SDL_VIDEODRIVER=dummy \
-    timeout 180 sdl-freerdp /v:127.0.0.1:3389 /cert:ignore \
-      /u:r5-seat /p:r5-seat >"$RT/freerdp.log" 2>&1 &
-SDL_PID=$!
 wait_log "$WLOG" "seat '" 'RDP-backed real seat'
 echo "PASS: outer qdwin started with an RDP-backed local seat"
 
@@ -148,7 +139,7 @@ echo "PASS: inner qdwin publisher bound qdwin_nested_v1 locally"
 runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
     WAYLAND_DISPLAY=$INNER /tmp/r5-popup-probe \
     --parent-w 400 --parent-h 300 --popup-w 180 --popup-h 120 \
-    --offset-x 100000 --offset-y 100000 --hold-seconds 120 \
+    --offset-x 40 --offset-y 50 --hold-seconds 120 \
     >"$APPLOG" 2>&1 &
 APP_PID=$!
 
@@ -167,12 +158,13 @@ wait_log "$NLOG" 'qdwin/nested: button handle=[0-9]+ btn=0x110 state=1' 'inner Q
 wait_log "$NLOG" 'qdwin/nested: button handle=[0-9]+ btn=0x110 state=0' 'inner QDNI button release'
 echo "PASS: real outer picker routed a per-proxy QDNI button into inner qdwin"
 
-mkdir -p "$RT/shots"; chown admin:admin "$RT/shots"
-runuser -u admin -- bash -c "cd '$RT/shots' && XDG_RUNTIME_DIR='$XRT' WAYLAND_DISPLAY='$OUTER' weston-screenshooter >/dev/null 2>&1"
-FRESH=$(ls -1t "$RT"/shots/wayland-screenshot-*.png 2>/dev/null | head -1)
-[ -n "$FRESH" ] || fail "screenshooter produced no framebuffer"
-mv "$FRESH" "$SHOT"; chown admin:admin "$SHOT"
-echo "PASS: captured outer framebuffer at $SHOT"
+touch "$RT/capture-ready"
+for _ in $(seq 1 100); do
+    [ -f "$RT/capture-done" ] && break
+    sleep 0.2
+done
+[ -f "$RT/capture-done" ] || fail "host did not capture the RDP framebuffer"
+echo "PASS: captured the decoded RDP framebuffer"
 
 runuser -u admin -- env XDG_RUNTIME_DIR=$XRT WAYLAND_DISPLAY=$OUTER \
     qs -p "$QDSHELL" ipc call qdwin closeWindow "$HANDLE" >/dev/null
