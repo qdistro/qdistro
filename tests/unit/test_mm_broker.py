@@ -23,6 +23,9 @@ from multimachine.control_source import (
     watch,
 )
 from multimachine.mm_broker import Event, MultiMachineSession, SocketWrapperHandle
+from multimachine.origin_authority import (
+    ATTACH_UI, RECEIVE_INPUT, OriginGrant, StaticOriginAuthority,
+)
 from multimachine.rdp_client_wrapper import StreamSpec
 from multimachine.sidechannel import ControlMessage, encode
 
@@ -157,8 +160,15 @@ def _session():
         n["i"] += 1
         return f"token-{n['i']}"
 
-    s = MultiMachineSession(spawn_wrapper=spawn, on_event=events.append,
-                            gen_token=gen_token)
+    authority = StaticOriginAuthority([
+        OriginGrant("vm-a", "owner-machines", 51,
+                    frozenset({ATTACH_UI, RECEIVE_INPUT})),
+        OriginGrant("vm-b", "owner-machines", 52,
+                    frozenset({ATTACH_UI, RECEIVE_INPUT})),
+    ])
+    s = MultiMachineSession(
+        spawn_wrapper=spawn, origin_authority=authority,
+        on_event=events.append, gen_token=gen_token)
     return s, events, wrappers
 
 
@@ -235,7 +245,7 @@ class TestMultiMachineSession:
         s.register_stream("a", spec=first, rdp_unit="rdp-a",
                           control_port=5001, marker_unit="marker-a")
         cases = [
-            ("a", _spec("x", "streamX", origin="vm-b"), 5002, 5560),
+            ("a", _spec("x", "streamX"), 5002, 5560),
             ("b", _spec("b", "streamA"), 5002, 5560),
             ("b", _spec("b", "streamB"), 5001, 5560),
             ("b", _spec("a", "streamB"), 5002, 5555),
@@ -298,6 +308,8 @@ class TestMultiMachineSession:
             assert s.broker.peers["a"].stream_id == "sid-A"
             announced = [e for e in events if e.kind == "announced"]
             assert {e.label for e in announced} == {"a", "b"}
+            assert {e.detail["trust_domain_id"] for e in announced} == {
+                "owner-machines"}
         finally:
             s.close()
 
@@ -337,6 +349,15 @@ class TestMultiMachineSession:
             assert s.bind_handle(app, 101, origin="vm-a", stream_id="sid-A",
                                  generation="51") is True
             assert s.broker.peers["a"].handle == 101
+            assert s.bound_identity(101) == {
+                "handle": 101,
+                "origin": "vm-a",
+                "stream_id": "sid-A",
+                "generation": 51,
+                "trust_domain_id": "owner-machines",
+                "allow_input": 1,
+            }
+            assert s.bound_identity(999) is None
         finally:
             s.close()
 

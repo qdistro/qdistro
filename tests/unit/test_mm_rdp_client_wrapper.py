@@ -71,6 +71,11 @@ class TestSpecValidation:
     def test_good_spec_validates(self):
         _spec().validate()      # no raise
 
+    def test_allow_input_is_boolean_integer(self):
+        for value in (-1, 2, "1", None, False, True):
+            with pytest.raises(SpecError):
+                _spec(allow_input=value).validate()
+
     def test_dotted_or_ambiguous_stream_label_fails_closed(self):
         for app_id in ("qdistro.mm.vm-a.a.b", "qdistro.mm.vm-a.bad label",
                        "qdistro.mm.vm-a."):

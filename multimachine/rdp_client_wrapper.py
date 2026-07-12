@@ -91,6 +91,10 @@ class StreamSpec:
             raise SpecError(f"bad rdp endpoint {self.rdp_host}:{self.rdp_port}")
         if self.width <= 0 or self.height <= 0:
             raise SpecError(f"bad size {self.width}x{self.height}")
+        if (not isinstance(self.allow_input, int)
+                or isinstance(self.allow_input, bool)
+                or self.allow_input not in (0, 1)):
+            raise SpecError(f"allow_input must be 0 or 1, got {self.allow_input!r}")
 
 
 class _Proc(Protocol):

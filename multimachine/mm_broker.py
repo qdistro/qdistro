@@ -11,8 +11,12 @@ VM-B. It is the authority codex impl-34 Q1 placed centrally:
   token-gated teardown — the wrapper is a SEPARATE process the session talks to
   over the wrapper's broker-private socket; injected here so the orchestration is
   unit-tested with a fake);
-- resolves viewer qdwin handles to streams by secctx ``app_id`` (impl-30 Q6) —
-  the ``BindHandle`` D-Bus method;
+- consumes paired-machine grants from the inherited configuration fd and
+  authorizes the exact dock generation, UI attachment, and input capability
+  before registry mutation or wrapper launch;
+- resolves viewer qdwin handles to streams by secctx ``app_id`` (impl-30 Q6),
+  while ``BindHandleIdentity`` returns the paired trust-domain facts only after
+  that correlation succeeds;
 - routes a viewer close UPSTREAM (``RequestClose``) and tears down the pixel
   backend ONLY after the authoritative source ``Closed`` (close ORDERING), with
   the broker-issued teardown token;
@@ -42,6 +46,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .harness.viewer_broker import RemotePeer, ViewerBroker
+from .origin_authority import OriginGrant, StaticOriginAuthority
 from .rdp_client_wrapper import StreamSpec
 
 
@@ -169,6 +174,7 @@ class _StreamReg:
     label: str
     spec: StreamSpec
     teardown_token: str
+    origin_grant: OriginGrant
     wrapper: WrapperHandle | None = None
     backend_lost_emitted: bool = False
     finalized: bool = False
@@ -194,10 +200,12 @@ class MultiMachineSession:
 
     def __init__(self, *, control_host: str = "127.0.0.1",
                  spawn_wrapper: Callable[..., WrapperHandle],
+                 origin_authority: StaticOriginAuthority,
                  on_event: Callable[[Event], None] | None = None,
                  gen_token: Callable[[], str] | None = None) -> None:
         self.broker = ViewerBroker(control_host=control_host)
         self._spawn_wrapper = spawn_wrapper
+        self._origin_authority = origin_authority
         self._on_event = on_event or (lambda e: None)
         self._gen_token = gen_token or (lambda: secrets.token_hex(16))
         self.regs: dict[str, _StreamReg] = {}
@@ -217,6 +225,7 @@ class MultiMachineSession:
         before either registry is mutated.  This matters once two origins may
         independently choose the same per-machine stream label (rung 2)."""
         spec.validate()
+        origin_grant = self._origin_authority.authorize(spec)
         for existing in self.regs.values():
             if (existing.spec.rdp_host, existing.spec.rdp_port) == \
                     (spec.rdp_host, spec.rdp_port):
@@ -231,7 +240,8 @@ class MultiMachineSession:
             expect_generation=spec.generation,
             control_capability=control_capability)
         reg = _StreamReg(label=label, spec=spec,
-                         teardown_token=teardown_token)
+                         teardown_token=teardown_token,
+                         origin_grant=origin_grant)
         self.regs[label] = reg
         return reg
 
@@ -253,7 +263,9 @@ class MultiMachineSession:
             reg.spec.validate()
         peer = self.broker.peers[label]
         self._emit("announced", label, stream_id=sid, app_id=peer.app_id,
-                   allow_input=peer.allow_input, generation=peer.generation)
+                   allow_input=peer.allow_input, generation=peer.generation,
+                   origin=peer.origin,
+                   trust_domain_id=reg.origin_grant.trust_domain_id)
         return sid
 
     # ---- pixel backend (wrapper) supervision --------------------------
@@ -286,6 +298,7 @@ class MultiMachineSession:
             return False
         label = match[0]
         peer = self.broker.peers[label]
+        reg = self.regs[label]
         # validate the redundant identity fields when the caller supplied them.
         if origin and origin != peer.origin:
             return False
@@ -302,8 +315,31 @@ class MultiMachineSession:
         if self.broker.peer_for_handle(handle) is not None:
             return False                      # handle already attributed elsewhere
         self.broker.bind_handle(label, handle)
-        self._emit("bound", label, handle=handle, stream_id=peer.stream_id)
+        self._emit("bound", label, handle=handle, stream_id=peer.stream_id,
+                   origin=peer.origin,
+                   trust_domain_id=reg.origin_grant.trust_domain_id)
         return True
+
+    def bound_identity(self, handle: int) -> dict | None:
+        """Return the broker-vouched presentation identity for a bound handle.
+
+        qdshell may use this only after :meth:`bind_handle` succeeds.  The
+        secctx-derived origin is not trust chrome by itself; this result joins
+        it to the paired grant and exact source-minted stream record."""
+        peer = self.broker.peer_for_handle(handle)
+        if peer is None:
+            return None
+        reg = self.regs.get(peer.label)
+        if reg is None:
+            return None
+        return {
+            "handle": handle,
+            "origin": peer.origin,
+            "stream_id": peer.stream_id,
+            "generation": peer.generation,
+            "trust_domain_id": reg.origin_grant.trust_domain_id,
+            "allow_input": peer.allow_input,
+        }
 
     # ---- close (source-mediated, ordered) -----------------------------
     def request_close(self, handle: int) -> str | None:
@@ -368,6 +404,8 @@ class MultiMachineSession:
         reg = self.regs.get(label)
         st["backend"] = (reg.wrapper.process_truth()
                          if reg and reg.wrapper is not None else None)
+        st["trust_domain_id"] = (
+            reg.origin_grant.trust_domain_id if reg else "")
         return st
 
     def close(self) -> None:
@@ -394,13 +432,17 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
 
     # The session description includes single-use RDP OTPs, so it is read from
     # an inherited fd, never argv or the environment.  Expected shape:
-    # {"control_host":"...", "streams":[{"label":"a", "spec":{...},
+    # {"control_host":"...", "origins":[{"machine_id":"vm-a",
+    #   "trust_domain_id":"owner-machines", "generation":51,
+    #   "capabilities":["attach_ui","receive_input"]}],
+    #   "streams":[{"label":"a", "spec":{...},
     #   "control_port":5571, "rdp_unit":"...", "marker_unit":"...",
     #   "otp":"...", "control_capability":"..."}]}
     with os.fdopen(os.dup(args.config_fd), "r", encoding="utf-8") as stream:
         config = json.load(stream)
     if not isinstance(config, dict) or not isinstance(config.get("streams"), list):
         raise ValueError("broker config must be an object with a streams array")
+    origin_authority = StaticOriginAuthority.from_config(config.get("origins"))
 
     runtime_parent = args.runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     socket_dir = Path(tempfile.mkdtemp(prefix="qdistro-mm-", dir=runtime_parent))
@@ -419,7 +461,8 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     pending_events: list[Event] = []
     session = MultiMachineSession(
         control_host=str(config.get("control_host", "127.0.0.1")),
-        spawn_wrapper=spawn_wrapper, on_event=pending_events.append)
+        spawn_wrapper=spawn_wrapper, origin_authority=origin_authority,
+        on_event=pending_events.append)
 
     # dbus-python matches the rest of qdistro's session daemons and is present in
     # the image.  Claim the name BEFORE launching FreeRDP: its toplevel can map
@@ -446,6 +489,20 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             return session.bind_handle(
                 str(secctx_app_id), int(handle), origin=str(origin),
                 stream_id=str(stream_id), generation=str(generation))
+
+        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="s")
+        def BindHandleIdentity(self, origin, stream_id, generation,
+                               secctx_app_id, handle):
+            try:
+                accepted = session.bind_handle(
+                    str(secctx_app_id), int(handle), origin=str(origin),
+                    stream_id=str(stream_id), generation=str(generation))
+                identity = session.bound_identity(int(handle)) if accepted else None
+                return (json.dumps(identity, sort_keys=True,
+                                   separators=(",", ":"))
+                        if identity is not None else "")
+            except (KeyError, TypeError, ValueError):
+                return ""
 
         @dbus.service.method(DBUS_NAME, in_signature="t", out_signature="b")
         def RequestClose(self, handle):
