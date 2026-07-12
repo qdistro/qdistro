@@ -105,6 +105,31 @@ run on the host (see [AGENTS.md](AGENTS.md)).
 For the qdshell QML stack: `cd qdshell && quickshell -p shell.qml`,
 but only inside a VM session where qdwin is the active compositor.
 
+### Agent-assisted GUI runner
+
+Keep Claude Haiku as the default visual runner for the mechanical markdown
+scenarios:
+
+```sh
+QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+  qdistro/ci/bin/qci gui
+```
+
+Codex with `gpt-5.6-luna` is a verified vision-capable fallback when Haiku is
+unavailable. Run it non-interactively and let qci place each attempt in its own
+temporary working directory:
+
+```sh
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_MODEL=gpt-5.6-luna \
+  qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
+```
+
+`--yolo` is appropriate here only because the runner controls a disposable VM
+and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
+interactive approval. The scenario still fails closed unless the agent writes
+an explicit passing verdict and exits zero.
+
 ## Tech stack
 
 - **PyQt6** 6.5+ (not PyQt5). Modern Qt, better Wayland support.
