@@ -46,7 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .harness.viewer_broker import RemotePeer, ViewerBroker
+from .harness.viewer_broker import ViewerBroker
 from .origin_authority import OriginGrant, StaticOriginAuthority
 from .rdp_client_wrapper import StreamSpec
 
@@ -433,6 +433,11 @@ class MultiMachineSession:
         label = match[0]
         peer = self.broker.peers[label]
         reg = self.regs[label]
+        # A closed stream record remains for audit/status, but it must never
+        # authorize a later toplevel that reuses either its old handle or its
+        # old secctx app_id. Only a fresh signed session may create a new grant.
+        if reg.finalized or peer.closed is not None:
+            return False
         # validate the redundant identity fields when the caller supplied them.
         if origin and origin != peer.origin:
             return False

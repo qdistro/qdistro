@@ -418,6 +418,10 @@ class TestMultiMachineSession:
             # handle retired so a reused qdwin handle can't resolve to the dead peer.
             assert s.broker.peers["a"].handle is None
             assert s.broker.peer_for_handle(101) is None
+            assert s.bind_handle("qdistro.mm.vm-a.streamA", 101) is False
+            assert s.bind_handle("qdistro.mm.vm-a.streamA", 303) is False
+            assert s.bound_identity(101) is None
+            assert s.bound_identity(303) is None
             n_closed = len([e for e in events if e.kind == "closed"])
             n_teardown = len(wa.teardown_calls)
             # second finalize is a no-op: no second teardown, no second event.
