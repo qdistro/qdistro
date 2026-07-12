@@ -32,8 +32,8 @@ class _StreamControl:
     with source-mediated-close wiring (CloseRequest stops the marker)."""
 
     def __init__(self, *, app_id, generation, window_id, stream_id,
-                 marker_dies=True):
-        src = SourceWindowInfo(window_id=window_id, source_machine="vm-a",
+                 marker_dies=True, source_machine="vm-a"):
+        src = SourceWindowInfo(window_id=window_id, source_machine=source_machine,
                                title="t", app_id=app_id, req_w=640, req_h=400)
         self.source = ControlSource.from_source(src, generation,
                                                 stream_id=stream_id)
@@ -134,11 +134,11 @@ class FakeWrapper:
         self._alive = False     # FreeRDP exits before any source Closed
 
 
-def _spec(label, stream_suffix, gen=51):
+def _spec(label, stream_suffix, gen=51, origin="vm-a"):
     return StreamSpec(
-        origin="vm-a", stream_id=f"expect-{label}", generation=gen,
-        app_id=f"qdistro.mm.vm-a.{stream_suffix}",
-        instance_id=f"vm-a-{stream_suffix}-1", rdp_host="10.0.2.2",
+        origin=origin, stream_id=f"expect-{label}", generation=gen,
+        app_id=f"qdistro.mm.{origin}.{stream_suffix}",
+        instance_id=f"{origin}-{stream_suffix}-1", rdp_host="10.0.2.2",
         rdp_port=5555 if label == "a" else 5560, width=640, height=400)
 
 
@@ -229,6 +229,66 @@ def _setup_two(s, *, b_marker_dies=True):
 
 
 class TestMultiMachineSession:
+    def test_registration_rejects_aliases_without_partial_state(self):
+        s, _events, _ = _session()
+        first = _spec("a", "streamA")
+        s.register_stream("a", spec=first, rdp_unit="rdp-a",
+                          control_port=5001, marker_unit="marker-a")
+        cases = [
+            ("a", _spec("x", "streamX", origin="vm-b"), 5002, 5560),
+            ("b", _spec("b", "streamA"), 5002, 5560),
+            ("b", _spec("b", "streamB"), 5001, 5560),
+            ("b", _spec("a", "streamB"), 5002, 5555),
+        ]
+        try:
+            for label, spec, control_port, relay_port in cases:
+                spec = StreamSpec(**{**spec.__dict__, "rdp_port": relay_port})
+                with pytest.raises(ValueError):
+                    s.register_stream(
+                        label, spec=spec, rdp_unit="rdp-other",
+                        control_port=control_port, marker_unit="marker-other")
+                assert set(s.regs) == {"a"}
+                assert set(s.broker.peers) == {"a"}
+        finally:
+            s.close()
+
+    def test_two_origins_same_stream_label_close_isolated(self):
+        """R2 first boundary: origin is part of identity and lifecycle routing."""
+        s, events, _ = _session()
+        ca = _StreamControl(
+            app_id="qdistro.mm.vm-a.shared", generation=51, window_id=1,
+            stream_id="sid-a", source_machine="vm-a")
+        cb = _StreamControl(
+            app_id="qdistro.mm.vm-b.shared", generation=52, window_id=2,
+            stream_id="sid-b", source_machine="vm-b")
+        s.register_stream(
+            "origin-a-shared", spec=_spec("a", "shared", origin="vm-a"),
+            rdp_unit="rdp-a", control_port=ca.port, marker_unit="marker-a")
+        s.register_stream(
+            "origin-b-shared", spec=_spec("b", "shared", gen=52, origin="vm-b"),
+            rdp_unit="rdp-b", control_port=cb.port, marker_unit="marker-b")
+        try:
+            s.connect("origin-a-shared")
+            s.connect("origin-b-shared")
+            s.launch_backend("origin-a-shared", "otp-a")
+            s.launch_backend("origin-b-shared", "otp-b")
+            assert s.bind_handle(
+                "qdistro.mm.vm-a.shared", 101, origin="vm-a",
+                stream_id="sid-a", generation=51)
+            assert s.bind_handle(
+                "qdistro.mm.vm-b.shared", 102, origin="vm-b",
+                stream_id="sid-b", generation=52)
+
+            assert s.request_close(101) == "origin-a-shared"
+            assert s.finalize_close("origin-a-shared", timeout=10)
+            assert s.regs["origin-a-shared"].wrapper.alive() is False
+            assert s.regs["origin-b-shared"].wrapper.alive() is True
+            assert s.broker.peers["origin-b-shared"].close_state == "open"
+            assert not any(e.kind == "closed" and
+                           e.label == "origin-b-shared" for e in events)
+        finally:
+            s.close()
+
     def test_connect_adopts_source_stream_id_and_announces(self):
         s, events, _ = _session()
         _setup_two(s)

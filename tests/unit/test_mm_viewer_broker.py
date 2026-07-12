@@ -24,12 +24,14 @@ class _FakeControl:
     sends a CloseRequest for our stream, reply with the source-driven Closed."""
 
     def __init__(self, stream_id="sid", window_id=1, generation=7,
-                 close_reason="viewer-close", capability=""):
+                 close_reason="viewer-close", capability="",
+                 source_machine="vm-a"):
         self.stream_id = stream_id
         self.window_id = window_id
         self.generation = generation
         self.close_reason = close_reason
         self.capability = capability
+        self.source_machine = source_machine
         self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.srv.bind(("127.0.0.1", 0))
@@ -41,7 +43,8 @@ class _FakeControl:
 
     def _serve(self):
         src = ControlSource.from_source(
-            SourceWindowInfo(window_id=self.window_id, source_machine="vm-a",
+            SourceWindowInfo(window_id=self.window_id,
+                             source_machine=self.source_machine,
                              title="marker", app_id="qdistro.mm.vm-a.streamA",
                              req_w=640, req_h=400),
             self.generation, stream_id=self.stream_id)
@@ -150,6 +153,22 @@ class TestBrokerConnectAndAnnounce:
             assert False, "expected a generation-mismatch RuntimeError"
         except RuntimeError as e:
             assert "generation" in str(e)
+        b.close()
+
+    def test_mismatched_source_machine_fails_closed(self):
+        # R2: app_id alone cannot let a control endpoint registered for origin A
+        # claim that its lifecycle authority is origin B.
+        fake = _FakeControl(source_machine="vm-b")
+        b = ViewerBroker(control_host="127.0.0.1")
+        b.add_stream("a", origin="vm-a", app_id="qdistro.mm.vm-a.streamA",
+                     rdp_unit="mm-rdp-a", relay_port=5555,
+                     control_port=fake.port, marker_unit="mm-marker",
+                     window_id=1)
+        try:
+            b.connect("a", timeout=5.0)
+            assert False, "expected a source-machine mismatch RuntimeError"
+        except RuntimeError as e:
+            assert "source_machine" in str(e) and "origin" in str(e)
         b.close()
 
 

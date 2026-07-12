@@ -210,15 +210,28 @@ class MultiMachineSession:
                         control_port: int, marker_unit: str,
                         control_capability: str = "") -> _StreamReg:
         """Register a stream the source announced. ``spec`` is the wrapper launch
-        spec (origin/stream_id/generation/app_id/...) — it is validated."""
+        spec (origin/stream_id/generation/app_id/...) — it is validated.
+
+        Registration is fail-closed and atomic: duplicate human labels, secctx
+        attribution keys, or transport endpoints are rejected by ``ViewerBroker``
+        before either registry is mutated.  This matters once two origins may
+        independently choose the same per-machine stream label (rung 2)."""
         spec.validate()
+        for existing in self.regs.values():
+            if (existing.spec.rdp_host, existing.spec.rdp_port) == \
+                    (spec.rdp_host, spec.rdp_port):
+                raise ValueError(
+                    f"duplicate RDP endpoint {spec.rdp_host}:{spec.rdp_port} "
+                    f"for {existing.label!r} and {label!r}")
+        teardown_token = self._gen_token()
         self.broker.add_stream(
             label, origin=spec.origin, app_id=spec.app_id, rdp_unit=rdp_unit,
             relay_port=spec.rdp_port, control_port=control_port,
             marker_unit=marker_unit, window_id=0, allow_input=spec.allow_input,
             expect_generation=spec.generation,
             control_capability=control_capability)
-        reg = _StreamReg(label=label, spec=spec, teardown_token=self._gen_token())
+        reg = _StreamReg(label=label, spec=spec,
+                         teardown_token=teardown_token)
         self.regs[label] = reg
         return reg
 
