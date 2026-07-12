@@ -167,6 +167,7 @@ struct pf_state {
 	int pw_sync_done;
 	struct qdpf_pw_node_observation pw_candidates[32];
 	size_t pw_candidate_count;
+	int pw_observations_truncated;
 	struct pf_pw_client {
 		struct pf_state *st;
 		struct qdpf_pw_client_observation observed;
@@ -777,8 +778,10 @@ on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
 		return;
 
 	if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
-		if (st->pw_client_count >= 32)
+		if (st->pw_client_count >= 32) {
+			st->pw_observations_truncated = 1;
 			return;
+		}
 		struct pf_pw_client *entry =
 			&st->pw_clients[st->pw_client_count++];
 		entry->st = st;
@@ -790,8 +793,7 @@ on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
 					       &client_events, entry);
 		return;
 	}
-	if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !st->pw_target ||
-	    st->pw_candidate_count >= 32)
+	if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !st->pw_target)
 		return;
 	const char *global_name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
 	const char *client = spa_dict_lookup(props, PW_KEY_CLIENT_ID);
@@ -799,6 +801,10 @@ on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
 	if (!global_name || !client || !serial ||
 	    strcmp(global_name, st->pw_target) != 0)
 		return;
+	if (st->pw_candidate_count >= 32) {
+		st->pw_observations_truncated = 1;
+		return;
+	}
 	struct qdpf_pw_node_observation *candidate =
 		&st->pw_candidates[st->pw_candidate_count];
 	if (qdpf_parse_u32(client, &candidate->client_id) != 0 ||
@@ -863,6 +869,12 @@ pf_start_pipewire(struct pf_state *st)
 	st->pw_sync_seq = pw_core_sync(st->pw_core, PW_ID_CORE, 0);
 	while (!st->pw_sync_done)
 		pw_thread_loop_wait(st->pw_loop);
+	if (st->pw_observations_truncated) {
+		LOGE("pw: registry observations exceeded fixed capacity; "
+		     "refusing potentially ambiguous capture");
+		pw_thread_loop_unlock(st->pw_loop);
+		return -1;
+	}
 	struct qdpf_pw_client_observation clients[32];
 	for (size_t i = 0; i < st->pw_client_count; i++)
 		clients[i] = st->pw_clients[i].observed;
