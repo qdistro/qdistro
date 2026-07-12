@@ -17,11 +17,13 @@ APP_PID=
 INNER_PID=
 OUTER_PID=
 SHELL_PID=
+SDL_PID=
 
 cleanup() {
     set +e
     [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
     [ -n "$SHELL_PID" ] && kill "$SHELL_PID" 2>/dev/null
+    [ -n "$SDL_PID" ] && kill "$SDL_PID" 2>/dev/null
     pkill -9 -f qdistro-nested-pixelfeed 2>/dev/null
     [ -n "$INNER_PID" ] && kill "$INNER_PID" 2>/dev/null
     [ -n "$OUTER_PID" ] && kill "$OUTER_PID" 2>/dev/null
@@ -58,6 +60,7 @@ pgrep -x pipewire >/dev/null || fail "admin PipeWire daemon missing"
 systemctl stop mm-viewer-session mm-qdwin mm-seatd mm-ydotoold 2>/dev/null || true
 runuser -u admin -- systemctl --user stop noctalia-session noctalia-shell qdlocker qdshell.service 2>/dev/null || true
 pkill -9 -f '/usr/bin/qs -p /tmp/qdshell-r5' 2>/dev/null || true
+pkill -9 -f 'sdl-freerdp.*/v:127.0.0.1:3389' 2>/dev/null || true
 pkill -9 -f qdistro-nested-pixelfeed 2>/dev/null || true
 pkill -9 -x weston 2>/dev/null || true
 for _ in $(seq 1 50); do
@@ -83,9 +86,15 @@ PY
 cat >"$RT/outer.ini" <<EOF
 [core]
 shell=/usr/lib64/weston/qdwin-shell.so
+backend=rdp-backend.so
+require-outputs=any
+renderer=pixman
 idle-time=0
 [shell]
 locking=false
+[output]
+name=rdp-0
+mode=1024x640
 EOF
 cat >"$RT/inner.ini" <<EOF
 [core]
@@ -105,13 +114,20 @@ runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
     QDWIN_ALLOWED_UID=1000 QDWIN_ALLOWED_LOCKER_ANY=1 \
     QDWIN_ENABLE_SCREENSHOOTER=1 QDWIN_NESTED_BROKER_REQUIRED=1 \
     QDWIN_NESTED_S3D_TEST=1 \
-    weston --backend=headless --renderer=pixman --debug \
-      --width=1024 --height=640 --config="$RT/outer.ini" \
+    weston --debug --config="$RT/outer.ini" \
+      --rdp-tls-cert=/home/admin/qdwin-rdp/rdp.crt \
+      --rdp-tls-key=/home/admin/qdwin-rdp/rdp.key \
       --socket=$OUTER --log="$WLOG" &
 OUTER_PID=$!
 wait_log "$WLOG" 'qdwin: shell loaded' 'outer qdwin startup'
 [ -S "$XRT/$OUTER" ] || fail "outer Wayland socket missing"
-echo "PASS: outer qdwin started on a headless local output"
+
+runuser -u admin -- env SDL_VIDEODRIVER=dummy \
+    timeout 180 sdl-freerdp /v:127.0.0.1:3389 /cert:ignore \
+      /u:r5-seat /p:r5-seat >"$RT/freerdp.log" 2>&1 &
+SDL_PID=$!
+wait_log "$WLOG" "seat '" 'RDP-backed real seat'
+echo "PASS: outer qdwin started with an RDP-backed local seat"
 
 runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
     WAYLAND_DISPLAY=$OUTER XDG_SESSION_TYPE=wayland \

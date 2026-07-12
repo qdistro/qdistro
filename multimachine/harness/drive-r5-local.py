@@ -72,7 +72,7 @@ for guest, name in (
         pass
 
 required = [
-    "PASS: outer qdwin started on a headless local output",
+    "PASS: outer qdwin started with an RDP-backed local seat",
     "PASS: production qdshell owns the outer shell role",
     "PASS: inner qdwin publisher bound qdwin_nested_v1 locally",
     "PASS: production pixelfeed bound a pixel surface to the proxy",
