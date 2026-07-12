@@ -1,0 +1,20 @@
+"""Static guard for the inert multi-machine VM runtime installer.
+
+The broker is copied as a plain Python package rather than installed from a
+wheel. Every sibling module imported by the broker therefore has to appear in
+the install script, or the first live launch fails before claiming its D-Bus
+name. Keep the paired-origin authority load-bearing in that deployed closure.
+"""
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[2]
+INSTALLER = REPO / "scripts/install/install-multimachine-for-vm.sh"
+
+
+def test_installer_ships_paired_origin_authority() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "origin_authority.py" in text, (
+        "mm_broker imports multimachine.origin_authority, so the VM runtime "
+        "installer must copy origin_authority.py or the broker cannot start"
+    )

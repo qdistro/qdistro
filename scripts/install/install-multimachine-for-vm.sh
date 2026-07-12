@@ -15,7 +15,7 @@ fi
 
 install -d -o root -g root -m 0755 "$DEST/harness" /usr/local/bin
 for module in __init__.py bridge.py control_source.py mm_broker.py \
-              rdp_client_wrapper.py sidechannel.py; do
+              origin_authority.py rdp_client_wrapper.py sidechannel.py; do
     install -o root -g root -m 0644 "$SRC/$module" "$DEST/$module"
 done
 install -o root -g root -m 0644 "$SRC/harness/__init__.py" \
