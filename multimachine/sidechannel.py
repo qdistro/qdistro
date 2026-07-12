@@ -125,6 +125,24 @@ class CloseRequest(ControlMessage):
     stream_id: str = ""
 
 
+class ShellOperation(str, Enum):
+    MINIMIZE = "minimize"
+    MAXIMIZE = "maximize"
+    RESTORE = "restore"
+    MOVE = "move"
+
+
+@dataclass(frozen=True)
+class ShellRequest(ControlMessage):
+    """viewer → source: request a source-owned remote shell operation."""
+
+    window_id: int = 0
+    stream_id: str = ""
+    operation: ShellOperation = ShellOperation.RESTORE
+    x: int = 0
+    y: int = 0
+
+
 @dataclass(frozen=True)
 class Closed(ControlMessage):
     """source → viewer: the toplevel is gone (maps to view_stream torn_down)."""
@@ -143,7 +161,8 @@ class Disconnect(ControlMessage):
 
 _TYPES = {
     "announce": Announce, "configure": Configure, "focus": Focus,
-    "title": TitleChanged, "close_request": CloseRequest, "closed": Closed,
+    "title": TitleChanged, "close_request": CloseRequest,
+    "shell_request": ShellRequest, "closed": Closed,
     "disconnect": Disconnect,
 }
 
@@ -190,6 +209,10 @@ def decode(raw: str) -> ControlMessage:
     if cls is CloseRequest:
         return CloseRequest("close_request", gen, d["window_id"],
                             d.get("stream_id", ""))
+    if cls is ShellRequest:
+        return ShellRequest(
+            "shell_request", gen, d["window_id"], d.get("stream_id", ""),
+            ShellOperation(d["operation"]), d.get("x", 0), d.get("y", 0))
     if cls is Closed:
         return Closed("closed", gen, d["window_id"], d.get("reason", ""),
                       d.get("stream_id", ""))

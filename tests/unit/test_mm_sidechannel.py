@@ -11,7 +11,7 @@ import pytest
 from multimachine.sidechannel import (
     Announce, Closed, CloseRequest, Configure, Disconnect, Focus,
     PointerPolicy, RemoteViewerState, RemoteWindowMeta, Sensitivity,
-    TitleChanged, decode, encode, map_torn_down,
+    ShellOperation, ShellRequest, TitleChanged, decode, encode, map_torn_down,
 )
 
 
@@ -38,6 +38,8 @@ class TestEncoding:
         Focus("focus", 2, 5, True),
         TitleChanged("title", 2, 5, "new"),
         CloseRequest("close_request", 2, 5),
+        ShellRequest("shell_request", 2, 5, "s5",
+                     ShellOperation.MOVE, 40, -12),
         Closed("closed", 2, 5, "app exited"),
         Disconnect("disconnect", 2, "link lost"),
     ])

@@ -493,6 +493,22 @@ class MultiMachineSession:
                    stream_id=peer.stream_id)
         return peer.label
 
+    def request_shell_op(self, handle: int, operation: str,
+                         x: int = 0, y: int = 0) -> str | None:
+        """Authorize a viewer shell operation by its broker-bound handle and
+        route it to the source. The viewer compositor never mutates the local
+        FreeRDP proxy as a substitute for source authority."""
+        peer = self.broker.peer_for_handle(handle)
+        if peer is None:
+            return None
+        reg = self.regs.get(peer.label)
+        if reg is None or reg.finalized or peer.closed is not None:
+            return None
+        self.broker.request_source_shell(peer.label, operation, x, y)
+        self._emit("shell_requested", peer.label, handle=handle,
+                   stream_id=peer.stream_id, operation=operation, x=x, y=y)
+        return peer.label
+
     def finalize_close(self, label: str, timeout: float = 20.0) -> bool:
         """Block until the authoritative source ``Closed`` arrives, THEN tear down
         ONLY this peer's pixel backend with the broker token. Returns True once the
@@ -666,6 +682,14 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             try:
                 return session.request_close(int(handle)) is not None
             except (KeyError, OSError, RuntimeError):
+                return False
+
+        @dbus.service.method(DBUS_NAME, in_signature="tsii", out_signature="b")
+        def RequestShellOperation(self, handle, operation, x, y):
+            try:
+                return session.request_shell_op(
+                    int(handle), str(operation), int(x), int(y)) is not None
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError):
                 return False
 
         @dbus.service.signal(DBUS_NAME, signature="sss")

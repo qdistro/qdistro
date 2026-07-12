@@ -41,7 +41,8 @@ from typing import Callable
 
 from .bridge import SourceWindowInfo, mint_stream_id
 from .sidechannel import (
-    Announce, CloseRequest, Closed, ControlMessage, RemoteWindowMeta, decode,
+    Announce, CloseRequest, Closed, ControlMessage, RemoteWindowMeta,
+    ShellOperation, ShellRequest, decode,
 )
 
 # What a single viewer-poll observed (one watch iteration):
@@ -127,6 +128,58 @@ def viewer_close_requested(chunk: str, stream_id: str) -> bool:
         if isinstance(msg, CloseRequest) and msg.stream_id == stream_id:
             return True
     return False
+
+
+def viewer_shell_requests(chunk: str, *, stream_id: str, generation: int,
+                          window_id: int) -> list[ShellRequest]:
+    """Return only shell requests bound to this exact live export.
+
+    The control socket is authenticated at connection time, but every request is
+    still correlated to generation + source window + source-minted stream id so
+    delayed bytes from an earlier export cannot mutate a replacement window.
+    Coordinates are deliberately bounded before they reach the source shell.
+    """
+    accepted: list[ShellRequest] = []
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = decode(line)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not isinstance(msg, ShellRequest):
+            continue
+        if (msg.stream_id != stream_id or msg.generation != generation
+                or msg.window_id != window_id):
+            continue
+        if (isinstance(msg.x, bool) or not isinstance(msg.x, int)
+                or isinstance(msg.y, bool) or not isinstance(msg.y, int)):
+            continue
+        if msg.operation is ShellOperation.MOVE:
+            if not (-32768 <= msg.x <= 32767 and -32768 <= msg.y <= 32767):
+                continue
+        elif msg.x != 0 or msg.y != 0:
+            continue
+        accepted.append(msg)
+    return accepted
+
+
+def shell_request_commands(msg: ShellRequest) -> tuple[str, ...]:
+    """Translate a validated request to qdwin-bystander FIFO commands."""
+    handle = msg.window_id
+    if msg.operation is ShellOperation.MINIMIZE:
+        return (f"min {handle}",)
+    if msg.operation is ShellOperation.MAXIMIZE:
+        return (f"max {handle}",)
+    if msg.operation is ShellOperation.RESTORE:
+        # Clear all source shell-owned special states, then unminimize. These
+        # commands are idempotent, making one remote restore state-independent.
+        return (f"fullscreen {handle} 0", f"restore {handle}",
+                f"raise {handle}")
+    if msg.operation is ShellOperation.MOVE:
+        return (f"move {handle} {msg.x} {msg.y}",)
+    raise ValueError(f"unsupported shell operation {msg.operation!r}")
 
 
 def active_state_alive(show_output: str) -> bool:
@@ -241,6 +294,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ap.add_argument("--marker-unit", default="mm-marker",
                     help="the systemd --user unit whose liveness is the source "
                          "toplevel lifetime proxy (impl-12)")
+    ap.add_argument(
+        "--command-fifo",
+        default=os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"),
+                             "qdwin-cmd.fifo"),
+                    help="source qdwin-bystander command FIFO used for R3 "
+                         "source-owned shell operations")
     ap.add_argument("--poll-interval", type=float, default=0.25)
     ap.add_argument("--accept-timeout", type=float, default=30.0)
     ap.add_argument("--auth-fd", type=int, default=-1,
@@ -353,6 +412,24 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
             subprocess.run(["systemctl", "--user", "stop", args.marker_unit],
                            capture_output=True, text=True)
             return "viewer-close"
+        for request in viewer_shell_requests(
+                rx["ready"], stream_id=source.meta.stream_id,
+                generation=source.generation,
+                window_id=source.meta.window_id):
+            commands = shell_request_commands(request)
+            try:
+                fd = os.open(args.command_fifo, os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.write(fd, ("\n".join(commands) + "\n").encode())
+                finally:
+                    os.close(fd)
+            except OSError as exc:
+                print(f"MM_CONTROL_SHELLREQ_REJECT operation="
+                      f"{request.operation.value} error={exc}", flush=True)
+                continue
+            print(f"MM_CONTROL_SHELLREQ operation={request.operation.value} "
+                  f"window_id={request.window_id} x={request.x} y={request.y}",
+                  flush=True)
         return None
 
     def is_source_alive() -> bool:

@@ -33,7 +33,9 @@ import socket
 import threading
 from dataclasses import dataclass, field
 
-from ..sidechannel import Announce, CloseRequest, Closed, decode, encode
+from ..sidechannel import (
+    Announce, CloseRequest, Closed, ShellOperation, ShellRequest, decode, encode,
+)
 
 
 @dataclass
@@ -230,6 +232,28 @@ class ViewerBroker:
         with self._lock:
             if peer.close_state == "open":
                 peer.close_state = "close_requested"
+
+    def request_source_shell(self, label: str, operation: str,
+                             x: int = 0, y: int = 0) -> None:
+        """Send an R3 shell operation upstream for one exact live export."""
+        peer = self.peers[label]
+        if peer._conn is None or not peer.stream_id:
+            raise RuntimeError(f"{label}: not connected / no stream_id")
+        if peer.close_state != "open":
+            raise RuntimeError(f"{label}: shell operation on {peer.close_state} peer")
+        op = ShellOperation(operation)
+        if isinstance(x, bool) or not isinstance(x, int):
+            raise ValueError("shell x must be an integer")
+        if isinstance(y, bool) or not isinstance(y, int):
+            raise ValueError("shell y must be an integer")
+        if op is ShellOperation.MOVE:
+            if not (-32768 <= x <= 32767 and -32768 <= y <= 32767):
+                raise ValueError("move coordinates out of range")
+        elif x != 0 or y != 0:
+            raise ValueError("coordinates are valid only for move")
+        msg = ShellRequest("shell_request", peer.generation, peer.window_id,
+                           peer.stream_id, op, x, y)
+        peer._conn.sendall((encode(msg) + "\n").encode())
 
     def note_backend_exit(self, label: str) -> None:
         """The peer's pixel backend (windowed FreeRDP) exited. This is NOT source

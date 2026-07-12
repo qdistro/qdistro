@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R2 live gate: two origins through signed launcher + broker + real qdshell."""
+"""R2/R3 live gate through signed launcher + broker + real qdshell."""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,8 @@ ap.add_argument("vm_b", help="viewer running broker + qdshell")
 ap.add_argument("--qdshell", type=Path,
                 default=Path(os.environ.get("QDSHELL_REPO",
                                             "/home/play2/qdistro/qdshell")))
+ap.add_argument("--r3", action="store_true",
+                help="also prove source-mediated remote shell operations")
 args = ap.parse_args()
 
 W, H = 640, 400
@@ -43,7 +45,7 @@ CAP_A = secrets.token_urlsafe(24)
 CAP_C = secrets.token_urlsafe(24)
 TEL_A = "/run/user/1000/mm-r2-a.json"
 TEL_C = "/run/user/1000/mm-r2-c.json"
-BUNDLE = Path("/tmp/mm-live/r2-real")
+BUNDLE = Path("/tmp/mm-live/r3-real" if args.r3 else "/tmp/mm-live/r2-real")
 BUNDLE.mkdir(parents=True, exist_ok=True)
 
 be_a = QciVMBackend(args.vm_a, args.vm_b, REPO, relay_port=RDP_A,
@@ -274,6 +276,64 @@ check("unpaired-origin-has-no-shell-authority",
 
 handle_a = authorized["vm-a"]["handle"]
 handle_c = authorized["vm-c"]["handle"]
+if args.r3:
+    check("unpaired-origin-has-no-r3-authority",
+          "false" in ipc("maximize", evil.get("handle", 0)).lower()
+          and "false" in ipc("move", evil.get("handle", 0), 40, 30).lower())
+    operations = [
+        ("restore", ()),       # clear the marker's initial client fullscreen
+        ("move", (40, 30)),
+        ("maximize", ()),
+        ("restore", ()),
+        ("minimize", ()),
+        ("restore", ()),
+    ]
+    dispatched = True
+    for method, values in operations:
+        dispatched = dispatched and "true" in ipc(
+            method, handle_a, *values).lower()
+        time.sleep(0.4)
+    check("r3-shell-operations-dispatched", dispatched)
+
+    expected_source_lines = (
+        "set_fullscreen handle=1 fs=0",
+        "request_set_position handle=1 outer=",
+        "set_maximized handle=1 max=1",
+        "set_maximized handle=1 max=0",
+        "set_minimized handle=1",
+        "request_raise handle=1 unminimised",
+    )
+    source_shell_log = ""
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        source_shell_log = be_a._vmexec(
+            args.vm_a,
+            be_a._as_admin(
+                "journalctl --user -u mm-qdwin --no-pager --since '-2 min'"),
+            check=False)
+        if all(line in source_shell_log for line in expected_source_lines):
+            break
+        time.sleep(0.5)
+    (BUNDLE / "source-a-shell.log").write_text(
+        source_shell_log, encoding="utf-8")
+    check("r3-operations-applied-at-source",
+          all(line in source_shell_log for line in expected_source_lines),
+          "missing=" + repr([
+              line for line in expected_source_lines
+              if line not in source_shell_log]))
+    source_bystander = be_a._vmexec(
+        args.vm_a,
+        be_a._as_admin("cat /run/user/1000/bystander.out 2>/dev/null"),
+        check=False)
+    (BUNDLE / "source-a-bystander.log").write_text(
+        source_bystander, encoding="utf-8")
+    check("r3-move-request-preserved",
+          "cmd move handle=1 x=40 y=30" in source_bystander)
+    check("r3-peer-b-remains-open",
+          any(row.get("authorized") and row.get("origin") == "vm-c"
+              for row in remote_rows())
+          and be_c.marker_unit_alive("vm-a"))
+
 ipc("focus", handle_a); time.sleep(1)
 a0 = key_total(be_a.read_telemetry("vm-a", TEL_A))
 c0 = key_total(be_c.read_telemetry("vm-a", TEL_C))

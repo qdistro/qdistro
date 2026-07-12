@@ -15,20 +15,21 @@ import socket
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
 from multimachine.bridge import SourceWindowInfo
 from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, viewer_close_requested,
-    watch,
+    viewer_shell_requests, watch,
 )
 from multimachine.mm_broker import Event, MultiMachineSession, SocketWrapperHandle
 from multimachine.origin_authority import (
     ATTACH_UI, RECEIVE_INPUT, OriginGrant, StaticOriginAuthority,
 )
 from multimachine.rdp_client_wrapper import StreamSpec
-from multimachine.sidechannel import ControlMessage, encode
+from multimachine.sidechannel import ControlMessage, ShellOperation, encode
 
 
 class _StreamControl:
@@ -44,6 +45,8 @@ class _StreamControl:
         self._marker_dies = marker_dies
         self.marker_alive = True
         self.sent: list[dict] = []
+        self.shell_requests = []
+        self.shell_event = threading.Event()
         self.reason = ""
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -90,6 +93,13 @@ class _StreamControl:
                 if self._marker_dies:
                     self.marker_alive = False
                 return "viewer-close"
+            requests = viewer_shell_requests(
+                rx["ready"], stream_id=self.source.meta.stream_id,
+                generation=self.source.generation,
+                window_id=self.source.meta.window_id)
+            if requests:
+                self.shell_requests.extend(requests)
+                self.shell_event.set()
             return None
 
         self.reason = watch(self.source, is_source_alive=lambda: self.marker_alive,
@@ -404,6 +414,37 @@ class TestMultiMachineSession:
                 "allow_input": 1,
             }
             assert s.bound_identity(999) is None
+        finally:
+            s.close()
+
+    def test_shell_operations_are_bound_and_source_mediated(self):
+        s, events, _ = _session()
+        ca, _cb = _setup_two(s)
+        try:
+            assert s.request_shell_op(999, "maximize") is None
+            assert s.bind_handle("qdistro.mm.vm-a.streamA", 101)
+            assert s.request_shell_op(101, "maximize") == "a"
+            assert s.request_shell_op(101, "restore") == "a"
+            assert s.request_shell_op(101, "move", 40, -12) == "a"
+            assert s.request_shell_op(101, "minimize") == "a"
+            deadline = time.monotonic() + 2
+            while len(ca.shell_requests) < 4 and time.monotonic() < deadline:
+                ca.shell_event.wait(0.05)
+                ca.shell_event.clear()
+            assert [(msg.operation, msg.x, msg.y)
+                    for msg in ca.shell_requests] == [
+                (ShellOperation.MAXIMIZE, 0, 0),
+                (ShellOperation.RESTORE, 0, 0),
+                (ShellOperation.MOVE, 40, -12),
+                (ShellOperation.MINIMIZE, 0, 0),
+            ]
+            shell_events = [e for e in events if e.kind == "shell_requested"]
+            assert [e.detail["operation"] for e in shell_events] == [
+                "maximize", "restore", "move", "minimize"]
+            with pytest.raises(ValueError):
+                s.request_shell_op(101, "move", 40000, 0)
+            with pytest.raises(ValueError):
+                s.request_shell_op(101, "fullscreen")
         finally:
             s.close()
 

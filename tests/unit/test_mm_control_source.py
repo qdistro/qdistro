@@ -10,10 +10,12 @@ from __future__ import annotations
 from multimachine.bridge import SourceWindowInfo
 from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, active_state_alive,
-    authenticate_viewer, viewer_close_requested, watch,
+    authenticate_viewer, shell_request_commands, viewer_close_requested,
+    viewer_shell_requests, watch,
 )
 from multimachine.sidechannel import (
-    Announce, CloseRequest, Closed, RemoteViewerState, decode, encode,
+    Announce, CloseRequest, Closed, RemoteViewerState, ShellOperation,
+    ShellRequest, decode, encode,
 )
 
 
@@ -165,6 +167,49 @@ class TestViewerCloseRequested:
         # a single recv() can deliver several newline-delimited messages.
         chunk = "garbage\n" + self._wire("other") + "\n" + self._wire("sid") + "\n"
         assert viewer_close_requested(chunk, "sid") is True
+
+
+class TestViewerShellRequests:
+    def _wire(self, operation, *, stream_id="sid", window_id=1, gen=7,
+              x=0, y=0):
+        return encode(ShellRequest(
+            "shell_request", gen, window_id, stream_id, operation, x, y))
+
+    def test_exact_live_identity_and_commands(self):
+        chunk = "\n".join([
+            self._wire(ShellOperation.MAXIMIZE),
+            self._wire(ShellOperation.MOVE, x=40, y=-12),
+            self._wire(ShellOperation.RESTORE),
+        ])
+        got = viewer_shell_requests(
+            chunk, stream_id="sid", generation=7, window_id=1)
+        assert [msg.operation for msg in got] == [
+            ShellOperation.MAXIMIZE, ShellOperation.MOVE,
+            ShellOperation.RESTORE,
+        ]
+        assert shell_request_commands(got[0]) == ("max 1",)
+        assert shell_request_commands(got[1]) == ("move 1 40 -12",)
+        assert shell_request_commands(got[2]) == (
+            "fullscreen 1 0", "restore 1", "raise 1")
+
+    def test_stale_mismatched_and_malformed_requests_rejected(self):
+        wires = [
+            self._wire(ShellOperation.MINIMIZE, stream_id="old"),
+            self._wire(ShellOperation.MINIMIZE, window_id=2),
+            self._wire(ShellOperation.MINIMIZE, gen=6),
+            self._wire(ShellOperation.MINIMIZE, x=1),
+            self._wire(ShellOperation.MOVE, x=40000),
+            "not-json",
+        ]
+        assert viewer_shell_requests(
+            "\n".join(wires), stream_id="sid", generation=7,
+            window_id=1) == []
+
+    def test_minimize_command(self):
+        msg = viewer_shell_requests(
+            self._wire(ShellOperation.MINIMIZE), stream_id="sid",
+            generation=7, window_id=1)[0]
+        assert shell_request_commands(msg) == ("min 1",)
 
 
 class TestWatchViewerClose:
