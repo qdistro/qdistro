@@ -83,6 +83,17 @@ dep_freerdp        = dependency('freerdp3',        required: false)
 dep_winpr          = dependency('winpr3',          required: false)
 dep_pipewire       = dependency('libpipewire-0.3', required: false)
 
+pw_target_resolver = static_library(
+  'qdistro-pw-target-resolver',
+  'nested-pixelfeed/pw-target-resolver.c',
+)
+pw_target_resolver_test = executable(
+  'test-pw-target-resolver',
+  'nested-pixelfeed/test-pw-target-resolver.c',
+  link_with: pw_target_resolver,
+)
+test('pw-target-resolver', pw_target_resolver_test)
+
 if dep_freerdp_shadow.found() and dep_freerdp.found() and dep_winpr.found() and dep_pipewire.found()
   executable('qdistro-forward',
     sources: [
@@ -112,6 +123,7 @@ if dep_pipewire.found()
       linux_dmabuf_client_header,
       linux_dmabuf_protocol_code,
     ],
+    link_with: pw_target_resolver,
     dependencies: [dep_wayland_client, dep_pipewire],
     install: true,
     install_dir: get_option('bindir'),

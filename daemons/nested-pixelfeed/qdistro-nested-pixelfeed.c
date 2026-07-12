@@ -100,6 +100,7 @@
 
 #include "qdwin-shell-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "pw-target-resolver.h"
 
 /* DRM fourccs we may publish — keep local copies so we don't pull in
  * libdrm just for two constants. SPA_VIDEO_FORMAT_BGRx == bytes B,G,R,X
@@ -162,20 +163,13 @@ struct pf_state {
 	/* Resolved PW target — derived from argv pw_node. Owned. */
 	char *pw_target;
 	int   pw_pid;            /* parsed from "weston.pipewire:<pid>:..." */
-	uint32_t pw_client_id;
-	uint32_t pw_target_id;
-	uint32_t pw_target_serial;
 	int pw_sync_seq;
 	int pw_sync_done;
-	struct {
-		uint32_t id;
-		uint32_t client_id;
-		uint32_t serial;
-	} pw_candidates[32];
+	struct qdpf_pw_node_observation pw_candidates[32];
 	size_t pw_candidate_count;
 	struct pf_pw_client {
 		struct pf_state *st;
-		uint32_t id;
+		struct qdpf_pw_client_observation observed;
 		struct pw_client *proxy;
 		struct spa_hook listener;
 	} pw_clients[32];
@@ -762,8 +756,8 @@ on_pw_client_info(void *data, const struct pw_client_info *info)
 	if (!info || !info->props)
 		return;
 	const char *pid = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_ID);
-	if (pid && atoi(pid) == client->st->pw_pid)
-		client->st->pw_client_id = client->id;
+	client->observed.pid_known =
+		pid && qdpf_parse_positive_pid(pid, &client->observed.pid) == 0;
 }
 
 static const struct pw_client_events client_events = {
@@ -788,7 +782,7 @@ on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
 		struct pf_pw_client *entry =
 			&st->pw_clients[st->pw_client_count++];
 		entry->st = st;
-		entry->id = id;
+		entry->observed.id = id;
 		entry->proxy = pw_registry_bind(st->pw_registry, id, type,
 				PW_VERSION_CLIENT, 0);
 		if (entry->proxy)
@@ -805,11 +799,12 @@ on_pw_registry_global(void *data, uint32_t id, uint32_t permissions,
 	if (!global_name || !client || !serial ||
 	    strcmp(global_name, st->pw_target) != 0)
 		return;
-	st->pw_candidates[st->pw_candidate_count].id = id;
-	st->pw_candidates[st->pw_candidate_count].client_id =
-		(uint32_t)strtoul(client, NULL, 10);
-	st->pw_candidates[st->pw_candidate_count].serial =
-		(uint32_t)strtoul(serial, NULL, 10);
+	struct qdpf_pw_node_observation *candidate =
+		&st->pw_candidates[st->pw_candidate_count];
+	if (qdpf_parse_u32(client, &candidate->client_id) != 0 ||
+	    qdpf_parse_u64(serial, &candidate->serial) != 0)
+		return;
+	candidate->id = id;
 	st->pw_candidate_count++;
 }
 
@@ -868,25 +863,27 @@ pf_start_pipewire(struct pf_state *st)
 	st->pw_sync_seq = pw_core_sync(st->pw_core, PW_ID_CORE, 0);
 	while (!st->pw_sync_done)
 		pw_thread_loop_wait(st->pw_loop);
-	for (size_t i = 0; i < st->pw_candidate_count; i++) {
-		if (st->pw_candidates[i].client_id == st->pw_client_id) {
-			st->pw_target_id = st->pw_candidates[i].id;
-			st->pw_target_serial = st->pw_candidates[i].serial;
-			break;
-		}
-	}
-
-	if (st->pw_target_serial == 0) {
-		LOGE("pw: producer pid=%d node=%s not uniquely resolved; "
-		     "refusing ambiguous capture", st->pw_pid, st->pw_target);
+	struct qdpf_pw_client_observation clients[32];
+	for (size_t i = 0; i < st->pw_client_count; i++)
+		clients[i] = st->pw_clients[i].observed;
+	struct qdpf_pw_target target = {0};
+	enum qdpf_pw_resolve_result resolved = qdpf_resolve_pw_target(
+		st->pw_pid, clients, st->pw_client_count,
+		st->pw_candidates, st->pw_candidate_count, &target);
+	if (resolved != QDPF_PW_RESOLVE_OK) {
+		LOGE("pw: producer pid=%d node=%s not uniquely resolved "
+		     "(reason=%d clients=%zu candidates=%zu); refusing capture",
+		     st->pw_pid, st->pw_target, resolved, st->pw_client_count,
+		     st->pw_candidate_count);
 		pw_thread_loop_unlock(st->pw_loop);
 		return -1;
 	}
-	char target_id[16];
-	snprintf(target_id, sizeof target_id, "%u", st->pw_target_serial);
-	LOGI("pw: resolved producer pid=%d client=%u node=%u serial=%u name=%s",
-	     st->pw_pid, st->pw_client_id, st->pw_target_id,
-	     st->pw_target_serial, st->pw_target);
+	char target_id[32];
+	snprintf(target_id, sizeof target_id, "%llu",
+		 (unsigned long long)target.serial);
+	LOGI("pw: resolved producer pid=%d client=%u node=%u serial=%llu name=%s",
+	     st->pw_pid, target.client_id, target.node_id,
+	     (unsigned long long)target.serial, st->pw_target);
 	struct pw_properties *props = pw_properties_new(
 		PW_KEY_MEDIA_TYPE,     "Video",
 		PW_KEY_MEDIA_CATEGORY, "Capture",
