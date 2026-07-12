@@ -131,9 +131,20 @@ validate_secctx(const char *engine, const char *app_id, const char *instance_id)
 {
 	if (validate_token("sandbox-engine", engine, 64, 0) < 0)
 		return -1;
-	if (strncmp(engine, "qdistro.tier", strlen("qdistro.tier")) != 0) {
+	/* Recognized qdistro sandbox engines: the tier-2..5 app silos
+	 * (qdistro.tier*) and the multi-machine display peer engine
+	 * (qdistro.mm), which tags windowed remote-peer clients (e.g. the
+	 * Phase-2 rung-1 FreeRDP view backend) so the shell can attribute
+	 * them by secctx, not by spoofable title/pixels. */
+	/* qdistro.mm is matched exactly or as a dotted child (qdistro.mm.<...>),
+	 * NOT as a bare prefix — so a look-alike like "qdistro.mmevil" is
+	 * rejected. (The legacy qdistro.tier check keeps its prefix form.) */
+	if (strncmp(engine, "qdistro.tier", strlen("qdistro.tier")) != 0 &&
+	    strcmp(engine, "qdistro.mm") != 0 &&
+	    strncmp(engine, "qdistro.mm.", strlen("qdistro.mm.")) != 0) {
 		fprintf(stderr,
-			"qdistro-secctx-exec: sandbox-engine must start with qdistro.tier\n");
+			"qdistro-secctx-exec: sandbox-engine must start with "
+			"qdistro.tier or be qdistro.mm[.<...>]\n");
 		return -1;
 	}
 	if (validate_token("app-id", app_id, 128, 1) < 0)

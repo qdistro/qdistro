@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -62,6 +63,13 @@
 #define LOGE(fmt, ...) fprintf(stderr, "[qfwd %d ERR] " fmt "\n", (int)getpid(), ##__VA_ARGS__)
 #define QFWD_MAX_TOKEN_LEN 4096
 #define QFWD_MAX_PASSWORD_LEN 4096
+
+/* QDISTRO_FORWARD_DEBUG=1 enables the dev-only frame dumps + per-frame log spam
+ * (impl-24): they do disk I/O / hold the surface lock and have no place in the
+ * steady-state frame producer. Read once in main(). */
+static int g_debug;
+
+static uint32_t now_ms(void);   /* CLOCK_MONOTONIC ms; defined below */
 
 /* ---------- argv ---------- */
 
@@ -345,12 +353,44 @@ typedef struct qfwd_subsystem {
 
 	/* Negotiated stream format. */
 	struct spa_video_info_raw format;
-	int format_known;
+
+	/* impl-24 solidity: negotiation/frame watchdog + diagnostics. Timestamps
+	 * are CLOCK_MONOTONIC ms (0 = not-yet). Written on the pw thread (single
+	 * writer per field), read by the main wait loop's watchdog — C11 atomics
+	 * (not volatile) so the cross-thread access is well-defined, not a data
+	 * race (codex impl-25). `format_known_ms` is published BEFORE `format_known`
+	 * so a reader that sees format_known==1 always sees a non-zero ms. */
+	_Atomic uint32_t stream_active_ms;    /* pw_stream_set_active(true) */
+	_Atomic uint32_t format_known_ms;     /* first SPA_PARAM_Format */
+	_Atomic uint32_t first_frame_ms;      /* first valid copied frame */
+	_Atomic uint32_t last_frame_ms;       /* most recent valid copied frame */
+	_Atomic unsigned long valid_frames;
+	_Atomic unsigned long invalid_frames;
+	_Atomic int format_known;     /* published (release) AFTER format_known_ms */
+	int format_warned;            /* main-loop only: logged no-format error once */
+	int frame_warned;             /* main-loop only: logged no-first-frame once */
+
+	/* item 6 (codex impl-28): bounded PipeWire reconnect. The pw thread writes
+	 * pw_state on every state change and bumps pw_error_generation on each
+	 * PW_STREAM_STATE_ERROR; the main wait loop reads them (acquire) and owns the
+	 * reconnect/backoff/give-up state machine (so stream lifetime is only ever
+	 * mutated from the main thread under pw_thread_loop_lock, never re-entrantly
+	 * inside a pw callback). */
+	_Atomic unsigned pw_error_generation;   /* ++ on each stream ERROR */
+	_Atomic int pw_state;                   /* last enum pw_stream_state (-1 init) */
 } qfwd_subsystem;
 
 static rdpShadowServer *g_server;
 static qfwd_subsystem *g_subsystem;
 static volatile sig_atomic_t g_stop_flag;
+/* item 6: set by the main loop when the bounded PipeWire reconnect gives up (or a
+ * non-recoverable internal failure occurs). Distinct from g_stop_flag (a clean
+ * signal/operator shutdown → exit 0): g_fatal → exit NON-ZERO so qdwin's pidfd
+ * death-watch tears the stream down and posts torn_down("forward exited"). */
+static int g_fatal;
+/* item 6 VM-test-only fault injection (env QDISTRO_FORWARD_FAULT). NONE in prod. */
+static enum { QFWD_FAULT_NONE, QFWD_FAULT_TRANSIENT, QFWD_FAULT_PERSISTENT }
+	g_fault_mode = QFWD_FAULT_NONE;
 
 /* ---------- PipeWire ---------- */
 
@@ -360,7 +400,32 @@ static volatile sig_atomic_t g_dump_request;
 static void on_stream_state_changed(void *data, enum pw_stream_state old,
 				    enum pw_stream_state state, const char *error)
 {
-	(void)data; (void)old;
+	qfwd_subsystem *s = data;
+	(void)old;
+	/* item 6: publish the state for the main-loop reconnect/recovery detector
+	 * (single writer = this pw thread). */
+	if (s)
+		atomic_store(&s->pw_state, (int)state);
+	if (state == PW_STREAM_STATE_ERROR) {
+		/* impl-24: was silent at INFO — a stream error meant a black RDP
+		 * view with no signal. Surface it loudly with the context an
+		 * operator needs (the #1 cause is a --width/--height vs weston
+		 * [pipewire] output-mode mismatch). item 6: ALSO bump the error
+		 * generation so the main loop runs the bounded reconnect/give-up
+		 * state machine — we do NOT mutate stream lifetime from inside this
+		 * pw-thread callback (re-entrant); the main loop owns that. The
+		 * `error` string is callback-scoped, so log it here. */
+		LOGE("pw stream ERROR: %s (target node=%s requested=BGRx %dx%d @0/1; "
+		     "format_known=%d valid_frames=%lu) — check weston [pipewire] "
+		     "output mode vs --width/--height",
+		     error ? error : "(no detail)", g_args.pipewire_node,
+		     g_args.width, g_args.height,
+		     s ? atomic_load(&s->format_known) : -1,
+		     s ? atomic_load(&s->valid_frames) : 0);
+		if (s)
+			atomic_fetch_add(&s->pw_error_generation, 1);
+		return;
+	}
 	LOGI("pw stream state: %s%s%s", pw_stream_state_as_string(state),
 	     error ? " err=" : "", error ? error : "");
 }
@@ -382,7 +447,12 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 		return;
 
 	s->format = info.info.raw;
-	s->format_known = 1;
+	/* publish the timestamp BEFORE format_known so the watchdog can never see
+	 * format_known==1 with format_known_ms==0 (which would false-fire the
+	 * no-first-frame check via `now - 0`) — codex impl-25. */
+	if (!atomic_load(&s->format_known_ms))
+		atomic_store(&s->format_known_ms, now_ms());
+	atomic_store(&s->format_known, 1);
 	LOGI("pw format: %dx%d fmt=%d (BGRA=%d RGBA=%d BGRx=%d)",
 	     s->format.size.width, s->format.size.height, s->format.format,
 	     SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_BGRx);
@@ -479,13 +549,16 @@ static void on_stream_process(void *data)
 {
 	qfwd_subsystem *s = data;
 	static unsigned long frame_count = 0;
-	if ((frame_count++ % 60) == 0)
-		LOGI("on_stream_process tick frame=%lu", frame_count);
+	frame_count++;
+	if (g_debug && (frame_count % 60) == 1)
+		LOGI("on_stream_process tick frame=%lu valid=%lu invalid=%lu",
+		     frame_count, atomic_load(&s->valid_frames),
+		     atomic_load(&s->invalid_frames));
 	struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
 	if (!b)
 		return;
 
-	if (!s->format_known) {
+	if (!atomic_load_explicit(&s->format_known, memory_order_relaxed)) {
 		pw_stream_queue_buffer(s->stream, b);
 		return;
 	}
@@ -514,13 +587,16 @@ static void on_stream_process(void *data)
 		? s->format.size.height : surface->height;
 	struct qfwd_frame_view frame;
 	if (qfwd_validate_frame(buf, &s->format, fw, fh, &frame) < 0) {
-		LOGE("dropping invalid PipeWire frame");
+		unsigned long n = atomic_fetch_add(&s->invalid_frames, 1) + 1;
+		/* rate-limit the drop log so a persistently-bad source can't spam */
+		if (g_debug || (n & (n - 1)) == 0)
+			LOGE("dropping invalid PipeWire frame (#%lu)", n);
 		pw_stream_queue_buffer(s->stream, b);
 		return;
 	}
 	const uint8_t *src = frame.src;
 	uint32_t src_stride = frame.stride;
-	if (frame_count <= 3 && frame.size >= 8) {
+	if (g_debug && frame_count <= 3 && frame.size >= 8) {
 		uint32_t flags = buf->datas[0].chunk ? buf->datas[0].chunk->flags : 0;
 		LOGI("buf: type=%u flags=0x%x size=%u stride=%u offset=%u "
 		     "first8=%02x%02x%02x%02x%02x%02x%02x%02x",
@@ -556,6 +632,14 @@ static void on_stream_process(void *data)
 
 	LeaveCriticalSection(&surface->lock);
 
+	/* impl-24: frame liveness bookkeeping (read by the watchdog). Single
+	 * writer (this pw thread), atomic for the cross-thread read. */
+	uint32_t fnow = now_ms();
+	atomic_fetch_add(&s->valid_frames, 1);
+	atomic_store(&s->last_frame_ms, fnow);
+	if (!atomic_load(&s->first_frame_ms))
+		atomic_store(&s->first_frame_ms, fnow);
+
 	pw_stream_queue_buffer(s->stream, b);
 
 	/* Auto-dump frames 1, 5, 30, 60 — these give a snapshot of:
@@ -568,8 +652,9 @@ static void on_stream_process(void *data)
 	 * wins — the smoke test reads the file after a few seconds and
 	 * gets the freshest frame the producer happened to deliver.
 	 * SIGUSR1 forces an unscheduled dump on the next frame. */
-	if (frame_count == 1 || frame_count == 5 ||
-	    frame_count == 30 || frame_count == 60 || g_dump_request) {
+	if (g_dump_request ||
+	    (g_debug && (frame_count == 1 || frame_count == 5 ||
+			 frame_count == 30 || frame_count == 60))) {
 		g_dump_request = 0;
 		qfwd_dump_surface_ppm(surface);
 	}
@@ -613,35 +698,13 @@ static int qfwd_subsystem_uninit(rdpShadowSubsystem *base)
 	return 1;
 }
 
-static int qfwd_subsystem_start(rdpShadowSubsystem *base)
+/* Create + connect the capture stream on s->core. CALLER MUST HOLD
+ * pw_thread_loop_lock(s->loop). Returns 1 on success; on failure destroys any
+ * partial stream, leaves s->stream == NULL, and returns <= 0. Shared by
+ * subsystem_start and the item-6 reconnect path (codex impl-28) so both build the
+ * EXACT same stream (BGRx, requested WxH, 0/1 framerate). */
+static int qfwd_pw_create_stream_locked(qfwd_subsystem *s)
 {
-	qfwd_subsystem *s = (qfwd_subsystem *)base;
-
-	s->loop = pw_thread_loop_new("qfwd-pw", NULL);
-	if (!s->loop) {
-		LOGE("pw_thread_loop_new failed");
-		return -1;
-	}
-	s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), NULL, 0);
-	if (!s->context) {
-		LOGE("pw_context_new failed");
-		return -1;
-	}
-
-	if (pw_thread_loop_start(s->loop) < 0) {
-		LOGE("pw_thread_loop_start failed");
-		return -1;
-	}
-
-	pw_thread_loop_lock(s->loop);
-
-	s->core = pw_context_connect(s->context, NULL, 0);
-	if (!s->core) {
-		LOGE("pw_context_connect failed: %m");
-		pw_thread_loop_unlock(s->loop);
-		return -1;
-	}
-
 	struct pw_properties *props = pw_properties_new(
 		PW_KEY_MEDIA_TYPE,     "Video",
 		PW_KEY_MEDIA_CATEGORY, "Capture",
@@ -653,7 +716,6 @@ static int qfwd_subsystem_start(rdpShadowSubsystem *base)
 	s->stream = pw_stream_new(s->core, "qdistro-forward", props);
 	if (!s->stream) {
 		LOGE("pw_stream_new failed");
-		pw_thread_loop_unlock(s->loop);
 		return -1;
 	}
 
@@ -690,11 +752,101 @@ static int qfwd_subsystem_start(rdpShadowSubsystem *base)
 		params, 1);
 	if (rc < 0) {
 		LOGE("pw_stream_connect failed: %s", spa_strerror(rc));
+		/* codex impl-29 LOW: the listener is already added; remove the embedded
+		 * spa_hook before destroying this partial stream so the reused hook is
+		 * cleanly unlinked (mirrors the reconnect destroy path). */
+		spa_hook_remove(&s->stream_listener);
+		pw_stream_destroy(s->stream);
+		s->stream = NULL;
+		return rc;
+	}
+
+	pw_stream_set_active(s->stream, true);
+	atomic_store(&s->stream_active_ms, now_ms()); /* impl-24: watchdog t0 */
+	return 1;
+}
+
+/* item 6 (codex impl-28): tear down ONLY the capture stream and recreate it
+ * against the same target node, keeping loop/context/core. Takes the thread-loop
+ * lock itself (pausing the pw thread at a safe boundary so on_process / state
+ * callbacks cannot run while we mutate stream lifetime), resets all stream-derived
+ * capture state, then rebuilds the stream. Returns 1 on a live recreated stream,
+ * <= 0 on failure (caller counts a failed attempt and backs off). In PERSISTENT
+ * fault-injection mode it force-fails (destroy, no recreate) so the give-up path
+ * is exercised deterministically without needing a real persistent PW error. */
+static int qfwd_pw_reconnect(qfwd_subsystem *s)
+{
+	if (!s || !s->loop || !s->core)
+		return -1;
+
+	pw_thread_loop_lock(s->loop);
+
+	if (s->stream) {
+		spa_hook_remove(&s->stream_listener);   /* unlink while old list alive */
+		pw_stream_destroy(s->stream);
+		s->stream = NULL;
+	}
+
+	/* Reset all stream-derived state BEFORE the new stream can fire callbacks,
+	 * so the watchdog re-baselines and stale frame/format timing can't leak into
+	 * the new episode (codex impl-28 step 2/3). */
+	atomic_store(&s->format_known, 0);
+	atomic_store(&s->format_known_ms, 0);
+	atomic_store(&s->first_frame_ms, 0);
+	atomic_store(&s->last_frame_ms, 0);
+	atomic_store(&s->valid_frames, 0);
+	atomic_store(&s->invalid_frames, 0);
+	atomic_store(&s->stream_active_ms, 0);
+	atomic_store(&s->pw_state, -1);
+	s->format_warned = 0;
+	s->frame_warned = 0;
+
+	if (g_fault_mode == QFWD_FAULT_PERSISTENT) {
+		/* simulate "every recreated stream fails immediately" — exercise the
+		 * bounded give-up + non-zero exit path deterministically. */
+		pw_thread_loop_unlock(s->loop);
+		return 0;
+	}
+
+	int rc = qfwd_pw_create_stream_locked(s);
+	pw_thread_loop_unlock(s->loop);
+	return rc;
+}
+
+static int qfwd_subsystem_start(rdpShadowSubsystem *base)
+{
+	qfwd_subsystem *s = (qfwd_subsystem *)base;
+
+	s->loop = pw_thread_loop_new("qfwd-pw", NULL);
+	if (!s->loop) {
+		LOGE("pw_thread_loop_new failed");
+		return -1;
+	}
+	s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), NULL, 0);
+	if (!s->context) {
+		LOGE("pw_context_new failed");
+		return -1;
+	}
+
+	if (pw_thread_loop_start(s->loop) < 0) {
+		LOGE("pw_thread_loop_start failed");
+		return -1;
+	}
+
+	pw_thread_loop_lock(s->loop);
+
+	s->core = pw_context_connect(s->context, NULL, 0);
+	if (!s->core) {
+		LOGE("pw_context_connect failed: %m");
 		pw_thread_loop_unlock(s->loop);
 		return -1;
 	}
 
-	pw_stream_set_active(s->stream, true);
+	atomic_store(&s->pw_state, -1);         /* item 6: until first state cb */
+	if (qfwd_pw_create_stream_locked(s) < 0) {
+		pw_thread_loop_unlock(s->loop);
+		return -1;
+	}
 	pw_thread_loop_unlock(s->loop);
 
 	LOGI("subsystem started, pw target=%s rdp_port=%d %dx%d",
@@ -1192,23 +1344,40 @@ static void qfwd_dump_surface_ppm(rdpShadowSurface *surface)
 	if (!path || !*path)
 		path = "/tmp/qfwd-dump.ppm";
 
-	FILE *f = fopen(path, "wb");
-	if (!f) {
-		LOGE("dump: fopen %s: %m", path);
-		return;
-	}
-
+	/* impl-24: snapshot the surface UNDER the lock, then convert + write the
+	 * PPM AFTER unlocking — never hold the encoder surface lock across disk I/O
+	 * (the old code fprintf'd + fwrote every row while holding it). */
 	EnterCriticalSection(&surface->lock);
 	uint32_t w = surface->width;
 	uint32_t h = surface->height;
 	uint32_t s = surface->scanline;
-	const uint8_t *src = surface->data;
+	/* The conversion loop reads w*4 bytes per row from the snapshot and writes
+	 * w*3 per row; guard the dimensions (incl. scanline >= w*4 and overflow)
+	 * so neither can run past the snapshot, independent of word size (codex
+	 * impl-25). */
+	int dims_ok = w && h && s >= (uint64_t)w * 4 &&
+		      h <= SIZE_MAX / s && w <= SIZE_MAX / 3;
+	size_t snap_size = dims_ok ? (size_t)s * h : 0;
+	uint8_t *snap = dims_ok ? malloc(snap_size) : NULL;
+	if (snap)
+		memcpy(snap, surface->data, snap_size);
+	LeaveCriticalSection(&surface->lock);
+	if (!snap) {
+		LOGE("dump: bad dims or alloc failed (%ux%u scanline=%u)", w, h, s);
+		return;
+	}
 
+	FILE *f = fopen(path, "wb");
+	if (!f) {
+		LOGE("dump: fopen %s: %m", path);
+		free(snap);
+		return;
+	}
 	fprintf(f, "P6\n%u %u\n255\n", w, h);
-	uint8_t *row = malloc(w * 3);
+	uint8_t *row = malloc((size_t)w * 3);
 	if (row) {
 		for (uint32_t y = 0; y < h; y++) {
-			const uint8_t *p = src + y * s;
+			const uint8_t *p = snap + (size_t)y * s;
 			for (uint32_t x = 0; x < w; x++) {
 				/* shadow surface stored as BGRX (PIXEL_FORMAT_BGRX32);
 				 * PPM wants RGB. */
@@ -1216,14 +1385,15 @@ static void qfwd_dump_surface_ppm(rdpShadowSurface *surface)
 				row[x*3 + 1] = p[x*4 + 1];
 				row[x*3 + 2] = p[x*4 + 0];
 			}
-			fwrite(row, 1, w * 3, f);
+			fwrite(row, 1, (size_t)w * 3, f);
 		}
 		free(row);
+		LOGI("dump: wrote %ux%u to %s", w, h, path);
+	} else {
+		LOGE("dump: row alloc failed; wrote header only to %s", path);
 	}
-	LeaveCriticalSection(&surface->lock);
-
+	free(snap);
 	fclose(f);
-	LOGI("dump: wrote %ux%u to %s", w, h, path);
 }
 
 /* ---------- main ---------- */
@@ -1236,6 +1406,25 @@ int main(int argc, char **argv)
 	sigset_t empty;
 	sigemptyset(&empty);
 	sigprocmask(SIG_SETMASK, &empty, NULL);
+
+	{
+		const char *d = getenv("QDISTRO_FORWARD_DEBUG");
+		g_debug = d && *d && strcmp(d, "0") != 0;   /* =0 / empty = off */
+	}
+
+	{
+		/* item 6 (codex impl-28): VM-TEST-ONLY fault injection — deterministic
+		 * exercise of the bounded-reconnect state machine (a real transient
+		 * weston PipeWire stream ERROR is flaky to induce). Unset/empty in prod. */
+		const char *f = getenv("QDISTRO_FORWARD_FAULT");
+		if (f && !strcmp(f, "transient"))
+			g_fault_mode = QFWD_FAULT_TRANSIENT;
+		else if (f && !strcmp(f, "persistent"))
+			g_fault_mode = QFWD_FAULT_PERSISTENT;
+		if (g_fault_mode != QFWD_FAULT_NONE)
+			LOGE("QDISTRO_FORWARD_FAULT=%s — fault injection ACTIVE "
+			     "(test build behavior, not production)", f);
+	}
 
 	if (parse_args(argc, argv) < 0) {
 		clear_owned_password();
@@ -1321,6 +1510,25 @@ int main(int argc, char **argv)
 	LOGI("shadow_server running, port=%d, target=%s",
 	     g_args.rdp_port, g_args.pipewire_node);
 
+	/* item 6 (codex impl-28): bounded PipeWire reconnect state machine, driven
+	 * here on the main wait loop (NOT in the pw-thread callback). rc_active=0 is
+	 * HEALTHY; on a new error generation we enter an episode, retry the stream
+	 * recreate with exponential backoff (250ms·2ⁿ, cap 5s, ±20% jitter), and on
+	 * exhausting the budget (5 attempts or 30s) set g_fatal + exit non-zero so
+	 * qdwin's pidfd death-watch tears the stream down. */
+	int rc_active = 0;
+	unsigned rc_attempts = 0;
+	uint32_t rc_first_error_ms = 0;
+	uint32_t rc_next_attempt_ms = 0;
+	uint32_t rc_backoff_ms = 0;
+	unsigned rc_handled_gen = 0;
+	int rc_fault_injected = 0;
+	/* codex impl-29 MED: after a recreate that left a LIVE stream, wait for it to
+	 * settle (PAUSED/STREAMING) or to emit a NEWER error before counting another
+	 * attempt or declaring give-up — else attempt 5 false-fatals a stream still in
+	 * async negotiation. Cleared when a newer error supersedes that attempt. */
+	int rc_waiting_for_recovery = 0;
+
 	for (;;) {
 		DWORD wr = WaitForSingleObject(g_server->thread, 250);
 		if (wr != WAIT_TIMEOUT)
@@ -1328,6 +1536,131 @@ int main(int argc, char **argv)
 		if (g_stop_flag) {
 			shadow_server_stop(g_server);
 			break;
+		}
+		/* impl-24 watchdog: loud, actionable diagnostics on a stalled
+		 * pipeline. Note weston's pipewire output is damage-driven
+		 * (framerate 0/1), so a STATIC source legitimately produces few
+		 * frames — we only warn on NO format / NO first frame, never on
+		 * "frames went quiet." Reconnect (below) triggers ONLY on an actual
+		 * stream ERROR, never on these quiet-frame watchdog timeouts. */
+		qfwd_subsystem *s = g_subsystem;
+		uint32_t active_at = s ? atomic_load(&s->stream_active_ms) : 0;
+		if (active_at) {
+			uint32_t now = now_ms();
+			int known = atomic_load(&s->format_known);
+			uint32_t known_at = atomic_load(&s->format_known_ms);
+			uint32_t first_at = atomic_load(&s->first_frame_ms);
+			if (!known && !s->format_warned &&
+			    (now - active_at) > 3000) {
+				s->format_warned = 1;
+				LOGE("no PipeWire format negotiated for node %s after 3s "
+				     "(requested BGRx %dx%d @0/1) — check the weston "
+				     "[pipewire] output mode matches --width/--height; "
+				     "serving a black RDP view until a format is agreed",
+				     g_args.pipewire_node, g_args.width, g_args.height);
+			}
+			int peers = (g_server && g_server->clients)
+				? (int)ArrayList_Count(g_server->clients) : 0;
+			if (known && !first_at && !s->frame_warned &&
+			    peers > 0 && (now - known_at) > 5000) {
+				s->frame_warned = 1;
+				LOGE("PipeWire format negotiated but NO frame after 5s "
+				     "with %d RDP peer(s) connected (node=%s, "
+				     "invalid_frames=%lu) — source may be stuck or all "
+				     "frames are failing validation",
+				     peers, g_args.pipewire_node,
+				     atomic_load(&s->invalid_frames));
+			}
+		}
+
+		/* ---- item 6: bounded PipeWire reconnect / fatal exit ---------- */
+		if (s) {
+			uint32_t now = now_ms();
+			/* fault injection (VM test only): once the stream is genuinely
+			 * STREAMING with frames, synthesize ONE error to drive the
+			 * reconnect state machine — TRANSIENT recovers (real recreate),
+			 * PERSISTENT force-fails every attempt → give up → exit non-zero. */
+			if (g_fault_mode != QFWD_FAULT_NONE && !rc_fault_injected
+			    && !rc_active
+			    && atomic_load(&s->pw_state) == PW_STREAM_STATE_STREAMING
+			    && atomic_load(&s->valid_frames) > 0) {
+				rc_fault_injected = 1;
+				LOGE("FAULT-INJECT: synthesizing one PipeWire stream error "
+				     "(mode=%s) to exercise reconnect",
+				     g_fault_mode == QFWD_FAULT_PERSISTENT
+				     ? "persistent" : "transient");
+				atomic_fetch_add(&s->pw_error_generation, 1);
+			}
+			unsigned gen = atomic_load(&s->pw_error_generation);
+			if (!rc_active && gen != rc_handled_gen) {
+				rc_active = 1;
+				rc_handled_gen = gen;
+				rc_attempts = 0;
+				rc_backoff_ms = 0;
+				rc_first_error_ms = now;
+				rc_next_attempt_ms = now;   /* first attempt ~immediately */
+				LOGE("PipeWire stream error (gen=%u) — starting bounded "
+				     "reconnect (cap 5 attempts / 30s)", gen);
+			}
+			if (rc_active) {
+				int st = atomic_load(&s->pw_state);
+				unsigned cur = atomic_load(&s->pw_error_generation);
+				/* codex impl-29 MED: an error NEWER than the one our last
+				 * attempt re-baselined to means that recreated stream itself
+				 * failed — stop waiting on it so the next backoff attempt (and
+				 * the give-up budget) can proceed. */
+				if (rc_waiting_for_recovery && cur != rc_handled_gen)
+					rc_waiting_for_recovery = 0;
+				/* recovery: only AFTER ≥1 recreate attempt (the old stream
+				 * may still read STREAMING at injection time), with no error
+				 * NEWER than that attempt, the stream healthy again (codex
+				 * impl-28: reset on PAUSED, not first frame — damage-driven). */
+				if (rc_attempts > 0
+				    && g_fault_mode != QFWD_FAULT_PERSISTENT
+				    && cur == rc_handled_gen
+				    && (st == PW_STREAM_STATE_PAUSED ||
+					st == PW_STREAM_STATE_STREAMING)) {
+					LOGI("PipeWire stream recovered after %u attempt(s)",
+					     rc_attempts);
+					rc_active = 0;
+					rc_waiting_for_recovery = 0;
+				} else if ((rc_attempts >= 5 && !rc_waiting_for_recovery) ||
+					   (now - rc_first_error_ms) > 30000) {
+					/* give up on 5 FAILED attempts, or the 30s wall-clock
+					 * backstop (the ultimate bound even while still waiting on
+					 * a live-but-stuck recreate). codex impl-29 MED: NOT fatal
+					 * merely because attempt 5 just left a live stream that has
+					 * not yet published PAUSED/STREAMING. */
+					LOGE("FATAL: PipeWire reconnect budget exhausted "
+					     "(%u attempts, %ums) — exiting non-zero so "
+					     "qdwin tears the stream down", rc_attempts,
+					     now - rc_first_error_ms);
+					g_fatal = 1;
+					shadow_server_stop(g_server);
+					break;
+				} else if ((int32_t)(now - rc_next_attempt_ms) >= 0
+					   && !rc_waiting_for_recovery) {
+					rc_attempts++;
+					int ok = qfwd_pw_reconnect(s);
+					/* codex impl-29 MED: re-baseline so "recovered" means no
+					 * error NEWER than THIS replacement stream; a live recreate
+					 * then waits to settle before another attempt or give-up. */
+					rc_handled_gen = atomic_load(&s->pw_error_generation);
+					rc_waiting_for_recovery = (ok > 0);
+					rc_backoff_ms = rc_backoff_ms
+						? (rc_backoff_ms * 2) : 250;
+					if (rc_backoff_ms > 5000)
+						rc_backoff_ms = 5000;
+					/* ±20% jitter without Math.random: derive from the
+					 * monotonic clock (80–120% of backoff). */
+					uint32_t jit = rc_backoff_ms *
+						(80 + (now_ms() % 41)) / 100;
+					rc_next_attempt_ms = now_ms() + jit;
+					LOGI("PipeWire reconnect attempt %u: %s "
+					     "(next in ~%ums)", rc_attempts,
+					     ok > 0 ? "stream recreated" : "failed", jit);
+				}
+			}
 		}
 	}
 	WaitForSingleObject(g_server->thread, INFINITE);
@@ -1338,5 +1671,8 @@ int main(int argc, char **argv)
 	clear_owned_password();
 	clear_owned_access_token();
 	pw_deinit();
-	return 0;
+	/* item 6: non-zero on an unrecoverable transport failure (g_fatal) so qdwin's
+	 * pidfd death-watch emits torn_down("forward exited"); 0 on a clean
+	 * signal/operator stop (g_stop_flag) or the shadow thread exiting normally. */
+	return g_fatal ? EXIT_FAILURE : 0;
 }
