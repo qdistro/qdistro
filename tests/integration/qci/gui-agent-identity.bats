@@ -13,6 +13,12 @@ setup() {
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
 
+teardown() {
+    if [ -n "${PRESERVED_AGENT_CWD:-}" ]; then
+        rm -rf -- "$PRESERVED_AGENT_CWD"
+    fi
+}
+
 @test "model parse: --model sonnet" {
     [ "$(gui_agent_model_from_cmd 'claude -p x --model sonnet')" = sonnet ]
 }
@@ -51,4 +57,43 @@ setup() {
 @test "record_agent_identity: unknown model when none parseable" {
     QCI_AGENT_CMD='myagent --run {prompt}' record_agent_identity
     grep -q '^qci_agent_model=unknown' "$KV_OUT"
+}
+
+@test "run_agent_command: relative tool outputs stay in a cleaned temporary cwd" {
+    local prompt="$BATS_TEST_TMPDIR/prompt.md"
+    local log="$BATS_TEST_TMPDIR/agent.log"
+    local cwd_record="$BATS_TEST_TMPDIR/agent-cwd.txt"
+    printf '# fixture\n' > "$prompt"
+    export QCI_AGENT_CWD_RECORD="$cwd_record"
+
+    QCI_AGENT_CMD='printf "%s\n" "$PWD" > "$QCI_AGENT_CWD_RECORD"; : > "txt:-"; test -f "txt:-"; # {prompt}' \
+        run run_agent_command "$prompt" "$log"
+
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    local agent_cwd
+    agent_cwd=$(cat "$cwd_record")
+    [[ "$agent_cwd" == "${TMPDIR:-/tmp}"/qci-agent.* ]]
+    [ ! -d "$agent_cwd" ]
+    grep -Fxq "qci_agent_workdir=$agent_cwd (removed after success)" "$log"
+    [ ! -e "$REPO_ROOT/txt:-" ]
+}
+
+@test "run_agent_command: failed agent preserves temporary cwd and logs its path" {
+    local prompt="$BATS_TEST_TMPDIR/prompt.md"
+    local log="$BATS_TEST_TMPDIR/agent.log"
+    local cwd_record="$BATS_TEST_TMPDIR/agent-cwd.txt"
+    printf '# fixture\n' > "$prompt"
+    export QCI_AGENT_CWD_RECORD="$cwd_record"
+
+    QCI_AGENT_CMD='printf "%s\n" "$PWD" > "$QCI_AGENT_CWD_RECORD"; : > "failure-evidence.txt"; exit 7; # {prompt}' \
+        run run_agent_command "$prompt" "$log"
+
+    [ "$status" -eq 7 ] || { echo "$output" >&2; return 1; }
+    PRESERVED_AGENT_CWD=$(cat "$cwd_record")
+    [[ "$PRESERVED_AGENT_CWD" == "${TMPDIR:-/tmp}"/qci-agent.* ]]
+    [ -f "$PRESERVED_AGENT_CWD/failure-evidence.txt" ]
+    grep -Fxq \
+        "qci_agent_workdir=$PRESERVED_AGENT_CWD (preserved after agent exit 7)" \
+        "$log"
+    [ ! -e "$REPO_ROOT/failure-evidence.txt" ]
 }
