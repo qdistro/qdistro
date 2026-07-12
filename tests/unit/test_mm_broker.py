@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
+import textwrap
 import threading
+
+import pytest
 
 from multimachine.bridge import SourceWindowInfo
 from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, viewer_close_requested,
     watch,
 )
-from multimachine.mm_broker import Event, MultiMachineSession
+from multimachine.mm_broker import Event, MultiMachineSession, SocketWrapperHandle
 from multimachine.rdp_client_wrapper import StreamSpec
 from multimachine.sidechannel import ControlMessage, encode
 
@@ -156,6 +160,58 @@ def _session():
     s = MultiMachineSession(spawn_wrapper=spawn, on_event=events.append,
                             gen_token=gen_token)
     return s, events, wrappers
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+def test_live_wrapper_socket_plumbing_keeps_secrets_off_argv(tmp_path):
+    """Exercise the broker side of the real fd + Unix-socket contract."""
+    helper = tmp_path / "fake-wrapper"
+    helper.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import argparse, json, os, socket, sys
+        ap = argparse.ArgumentParser()
+        ap.add_argument('--control-socket', required=True)
+        ap.add_argument('--otp-fd', type=int, required=True)
+        ap.add_argument('--teardown-token-fd', type=int, required=True)
+        args, _ = ap.parse_known_args()
+        with os.fdopen(args.otp_fd) as f:
+            otp = f.readline().strip()
+        with os.fdopen(args.teardown_token_fd) as f:
+            token = f.readline().strip()
+        assert otp not in sys.argv and token not in sys.argv
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(args.control_socket)
+        os.chmod(args.control_socket, 0o600)
+        srv.listen(2)
+        while True:
+            conn, _ = srv.accept()
+            with conn:
+                req = json.loads(conn.recv(4096))
+                if req.get('cmd') == 'status':
+                    resp = {{'alive': True, 'exit_status': None}}
+                    done = False
+                else:
+                    ok = req.get('token') == token
+                    resp = {{'accepted': ok}}
+                    done = ok
+                conn.sendall((json.dumps(resp) + '\\n').encode())
+            if done:
+                break
+        srv.close()
+        """))
+    helper.chmod(0o700)
+    spec = _spec("a", "streamA")
+    sock = tmp_path / "wrapper.sock"
+    wrapper = SocketWrapperHandle(
+        spec, teardown_token="broker-secret", otp="rdp-secret",
+        socket_path=str(sock), wrapper_program=str(helper), ready_timeout=5)
+    assert wrapper.process_truth()["alive"] is True
+    assert wrapper.teardown(spec.stream_id, spec.generation,
+                            "wrong-secret") is False
+    assert wrapper.teardown(spec.stream_id, spec.generation,
+                            "broker-secret") is True
+    wrapper._proc.wait(timeout=5)
 
 
 def _setup_two(s, *, b_marker_dies=True):

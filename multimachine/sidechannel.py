@@ -273,9 +273,15 @@ class RemoteViewerState:
         if isinstance(msg, Announce):
             sid = msg.meta.stream_id
             # stream_id is the per-export join key: it must be present and not
-            # collide with a live proxy (replay / cross-stream attachment).
+            # collide with a live proxy (replay / cross-stream attachment).  A
+            # live window_id is equally exclusive: replacing it in-place would
+            # orphan the previous decoder process in RemoteViewer.procs.
             if not sid:
                 self.rejected.append((msg.generation, msg.type, "empty-stream-id"))
+                return False
+            if msg.meta.window_id in self.windows:
+                self.rejected.append((msg.generation, msg.type,
+                                      "duplicate-window-id"))
                 return False
             if any(w.stream_id == sid for w in self.windows.values()):
                 self.rejected.append((msg.generation, msg.type, "duplicate-stream-id"))

@@ -30,8 +30,15 @@ thin, not-unit-tested shell).
 """
 from __future__ import annotations
 
+import json
+import os
 import secrets
+import socket
+import subprocess
+import tempfile
+import time
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable, Protocol
 
 from .harness.viewer_broker import RemotePeer, ViewerBroker
@@ -46,6 +53,115 @@ class WrapperHandle(Protocol):
     def alive(self) -> bool: ...
     def process_truth(self) -> dict: ...
     def teardown(self, stream_id: str, generation: int, token: str) -> bool: ...
+
+
+class SocketWrapperHandle:
+    """Live broker-side handle for one wrapper subprocess.
+
+    OTP and teardown token are delivered through inherited pipes.  Neither
+    secret is placed in argv or the environment.  All subsequent supervision
+    uses the wrapper's mode-0600 Unix socket.
+    """
+
+    def __init__(self, spec: StreamSpec, *, teardown_token: str, otp: str,
+                 socket_path: str, wrapper_program: str,
+                 rdp_client: str = "sdl-freerdp",
+                 secctx_exec: str = "qdistro-secctx-exec",
+                 ready_timeout: float = 15.0) -> None:
+        self.spec = spec
+        self.socket_path = socket_path
+        self._proc: subprocess.Popen | None = None
+
+        otp_r, otp_w = os.pipe()
+        token_r, token_w = os.pipe()
+        argv = [
+            wrapper_program,
+            "--origin", spec.origin,
+            "--stream-id", spec.stream_id,
+            "--generation", str(spec.generation),
+            "--app-id", spec.app_id,
+            "--instance-id", spec.instance_id,
+            "--rdp-host", spec.rdp_host,
+            "--rdp-port", str(spec.rdp_port),
+            "--width", str(spec.width),
+            "--height", str(spec.height),
+            "--rdp-user", spec.rdp_user,
+            "--allow-input", str(spec.allow_input),
+            "--rdp-client", rdp_client,
+            "--secctx-exec", secctx_exec,
+            "--control-socket", socket_path,
+            "--otp-fd", str(otp_r),
+            "--teardown-token-fd", str(token_r),
+        ]
+        try:
+            self._proc = subprocess.Popen(argv, pass_fds=(otp_r, token_r),
+                                          start_new_session=True)
+        finally:
+            os.close(otp_r)
+            os.close(token_r)
+        try:
+            os.write(otp_w, (otp + "\n").encode())
+            os.write(token_w, (teardown_token + "\n").encode())
+        finally:
+            os.close(otp_w)
+            os.close(token_w)
+
+        deadline = time.monotonic() + ready_timeout
+        while time.monotonic() < deadline:
+            if os.path.exists(socket_path):
+                return
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"wrapper exited before its socket was ready: "
+                    f"status={self._proc.returncode}")
+            time.sleep(0.05)
+        raise TimeoutError(f"wrapper socket was not ready: {socket_path}")
+
+    def _request(self, request: dict) -> dict:
+        data = (json.dumps(request, separators=(",", ":")) + "\n").encode()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(self.socket_path)
+            client.sendall(data)
+            buf = b""
+            while b"\n" not in buf and len(buf) <= 65536:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        if b"\n" not in buf:
+            raise RuntimeError("wrapper returned no complete response")
+        response = json.loads(buf.split(b"\n", 1)[0])
+        if not isinstance(response, dict):
+            raise RuntimeError("wrapper returned a non-object response")
+        return response
+
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def process_truth(self) -> dict:
+        try:
+            return self._request({"cmd": "status"})
+        except (OSError, ValueError, RuntimeError):
+            status = None if self._proc is None else self._proc.poll()
+            return {
+                "stream_id": self.spec.stream_id,
+                "generation": self.spec.generation,
+                "app_id": self.spec.app_id,
+                "pid": None if self._proc is None else self._proc.pid,
+                "alive": status is None and self._proc is not None,
+                "exit_status": status,
+            }
+
+    def teardown(self, stream_id: str, generation: int, token: str) -> bool:
+        try:
+            response = self._request({
+                "cmd": "teardown", "stream_id": stream_id,
+                "generation": generation, "token": token,
+            })
+        except (OSError, ValueError, RuntimeError):
+            return False
+        return response.get("accepted") is True
 
 
 @dataclass
@@ -91,7 +207,8 @@ class MultiMachineSession:
 
     # ---- registration + connect (fail-closed Announce match) ----------
     def register_stream(self, label: str, *, spec: StreamSpec, rdp_unit: str,
-                        control_port: int, marker_unit: str) -> _StreamReg:
+                        control_port: int, marker_unit: str,
+                        control_capability: str = "") -> _StreamReg:
         """Register a stream the source announced. ``spec`` is the wrapper launch
         spec (origin/stream_id/generation/app_id/...) — it is validated."""
         spec.validate()
@@ -99,7 +216,8 @@ class MultiMachineSession:
             label, origin=spec.origin, app_id=spec.app_id, rdp_unit=rdp_unit,
             relay_port=spec.rdp_port, control_port=control_port,
             marker_unit=marker_unit, window_id=0, allow_input=spec.allow_input,
-            expect_generation=spec.generation)
+            expect_generation=spec.generation,
+            control_capability=control_capability)
         reg = _StreamReg(label=label, spec=spec, teardown_token=self._gen_token())
         self.regs[label] = reg
         return reg
@@ -249,8 +367,137 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     ``org.qdistro.MultiMachine1`` for qdshell. The orchestration core is
     unit-tested; only the D-Bus server + real wrapper subprocess/socket plumbing
     live here. (Wired in the live-gate step — see the session-11 RESUME HERE.)"""
-    raise NotImplementedError(
-        "qdistro-mm-broker D-Bus shell is wired in the live-gate integration step")
+    import argparse
+    import signal
+
+    ap = argparse.ArgumentParser(prog="qdistro-mm-broker")
+    ap.add_argument("--config-fd", type=int, default=0,
+                    help="fd containing the one-shot JSON session description")
+    ap.add_argument("--wrapper-program", default="qdistro-mm-rdp-client-wrapper")
+    ap.add_argument("--rdp-client", default="sdl-freerdp")
+    ap.add_argument("--secctx-exec", default="qdistro-secctx-exec")
+    ap.add_argument("--runtime-dir", default="")
+    args = ap.parse_args(argv)
+
+    # The session description includes single-use RDP OTPs, so it is read from
+    # an inherited fd, never argv or the environment.  Expected shape:
+    # {"control_host":"...", "streams":[{"label":"a", "spec":{...},
+    #   "control_port":5571, "rdp_unit":"...", "marker_unit":"...",
+    #   "otp":"...", "control_capability":"..."}]}
+    with os.fdopen(os.dup(args.config_fd), "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    if not isinstance(config, dict) or not isinstance(config.get("streams"), list):
+        raise ValueError("broker config must be an object with a streams array")
+
+    runtime_parent = args.runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    socket_dir = Path(tempfile.mkdtemp(prefix="qdistro-mm-", dir=runtime_parent))
+    socket_dir.chmod(0o700)
+    wrapper_index = {"value": 0}
+
+    def spawn_wrapper(spec: StreamSpec, *, teardown_token: str,
+                      otp: str) -> SocketWrapperHandle:
+        wrapper_index["value"] += 1
+        path = socket_dir / f"wrapper-{wrapper_index['value']}.sock"
+        return SocketWrapperHandle(
+            spec, teardown_token=teardown_token, otp=otp,
+            socket_path=str(path), wrapper_program=args.wrapper_program,
+            rdp_client=args.rdp_client, secctx_exec=args.secctx_exec)
+
+    pending_events: list[Event] = []
+    session = MultiMachineSession(
+        control_host=str(config.get("control_host", "127.0.0.1")),
+        spawn_wrapper=spawn_wrapper, on_event=pending_events.append)
+
+    # dbus-python matches the rest of qdistro's session daemons and is present in
+    # the image.  Claim the name BEFORE launching FreeRDP: its toplevel can map
+    # immediately, and qdshell's one-shot BindHandle must never race a missing
+    # bus name. Calls queue until the GLib loop starts after initialization.
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+
+    DBUS_NAME = "org.qdistro.MultiMachine1"
+    DBUS_PATH = "/org/qdistro/MultiMachine1"
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    name = dbus.service.BusName(DBUS_NAME, bus=bus, do_not_queue=True)
+
+    class MultiMachineDBus(dbus.service.Object):
+        def __init__(self) -> None:
+            super().__init__(name, DBUS_PATH)
+
+        @dbus.service.method(DBUS_NAME, in_signature="sssst", out_signature="b")
+        def BindHandle(self, origin, stream_id, generation, secctx_app_id,
+                       handle):
+            return session.bind_handle(
+                str(secctx_app_id), int(handle), origin=str(origin),
+                stream_id=str(stream_id), generation=str(generation))
+
+        @dbus.service.method(DBUS_NAME, in_signature="t", out_signature="b")
+        def RequestClose(self, handle):
+            try:
+                return session.request_close(int(handle)) is not None
+            except (KeyError, OSError, RuntimeError):
+                return False
+
+        @dbus.service.signal(DBUS_NAME, signature="sss")
+        def BrokerEvent(self, kind, label, detail_json):
+            return None
+
+    service = MultiMachineDBus()
+
+    def emit(event: Event) -> None:
+        service.BrokerEvent(event.kind, event.label,
+                            json.dumps(event.detail, sort_keys=True))
+
+    session._on_event = emit
+
+    for raw in config["streams"]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("spec"), dict):
+            raise ValueError("each stream must be an object with a spec object")
+        label = raw.get("label")
+        otp = raw.get("otp")
+        control_capability = raw.get("control_capability")
+        if not isinstance(label, str) or not label:
+            raise ValueError("stream label must be a non-empty string")
+        if not isinstance(otp, str) or not otp:
+            raise ValueError(f"{label}: otp must be a non-empty string")
+        if not isinstance(control_capability, str) or not control_capability:
+            raise ValueError(
+                f"{label}: control_capability must be a non-empty string")
+        spec = StreamSpec(**raw["spec"])
+        session.register_stream(
+            label, spec=spec, rdp_unit=str(raw.get("rdp_unit", "")),
+            control_port=int(raw["control_port"]),
+            marker_unit=str(raw.get("marker_unit", "")),
+            control_capability=control_capability)
+        session.connect(label, timeout=float(raw.get("connect_timeout", 30.0)))
+        session.launch_backend(label, otp)
+
+    for event in pending_events:
+        emit(event)
+    pending_events.clear()
+
+    def supervise() -> bool:
+        session.poll_backends()
+        # Source-driven Closed may arrive without a viewer RequestClose.  It is
+        # authoritative in either case and must trigger ordered finalization.
+        for label, reg in tuple(session.regs.items()):
+            peer = session.broker.peers.get(label)
+            if peer is not None and peer.closed is not None and not reg.finalized:
+                session.finalize_close(label, timeout=0)
+        return True
+
+    GLib.timeout_add(100, supervise)
+    loop = GLib.MainLoop()
+    signal.signal(signal.SIGTERM, lambda *_: loop.quit())
+    signal.signal(signal.SIGINT, lambda *_: loop.quit())
+    try:
+        loop.run()
+    finally:
+        session.close()
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

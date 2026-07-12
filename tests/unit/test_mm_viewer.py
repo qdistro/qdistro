@@ -90,6 +90,14 @@ class TestAnnounceLaunch:
         assert ("stale-generation" in r for r in
                 [x[2] for x in v.state.rejected])
 
+    def test_reannounce_live_window_does_not_leak_decoder(self):
+        v, launched = _viewer()
+        assert v.on_message(_announce(wid=1, sid="first"))
+        first = v.procs[1]
+        assert not v.on_message(_announce(wid=1, sid="second"))
+        assert v.procs == {1: first}
+        assert len(launched) == 1
+
 
 class TestLifecycle:
     def test_focus_and_title_and_configure_apply(self):

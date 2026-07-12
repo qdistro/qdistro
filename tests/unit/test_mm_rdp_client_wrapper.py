@@ -71,6 +71,12 @@ class TestSpecValidation:
     def test_good_spec_validates(self):
         _spec().validate()      # no raise
 
+    def test_dotted_or_ambiguous_stream_label_fails_closed(self):
+        for app_id in ("qdistro.mm.vm-a.a.b", "qdistro.mm.vm-a.bad label",
+                       "qdistro.mm.vm-a."):
+            with pytest.raises(SpecError):
+                _spec(app_id=app_id).validate()
+
     def test_empty_token_is_rejected(self):
         with pytest.raises(SpecError):
             RdpClientWrapper(_spec(), teardown_token="", spawn=lambda a: _FakeProc())
@@ -89,10 +95,14 @@ class TestArgv:
         # everything after "--" is the FreeRDP child argv.
         client = argv[argv.index("--") + 1:]
         assert client[0] == "wlfreerdp"                   # resolved windowed client
-        assert "/f" not in client                         # windowed, never fullscreen
-        assert "/size:640x400" in client
-        assert "/p:otp123" in client                      # single-use OTP on the child
-        assert any(a.startswith("/v:10.0.2.2:5555") for a in client)
+        assert "/p:otp123" not in client                  # OTP absent from every argv
+        assert "/args-from:fd:0" in client                # delivered via inherited fd
+        assert len(client) == 2                            # args-from must stand alone
+        fd_args = w.build_fd_args("otp123").decode().splitlines()
+        assert "/f" not in fd_args                        # windowed, never fullscreen
+        assert "/size:640x400" in fd_args
+        assert "/p:otp123" in fd_args                     # secret only in inherited fd
+        assert any(a.startswith("/v:10.0.2.2:5555") for a in fd_args)
 
     def test_empty_otp_fails_closed(self):
         w, _, _ = _wrapper()

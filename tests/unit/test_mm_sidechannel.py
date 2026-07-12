@@ -140,6 +140,14 @@ class TestStreamIdentitySafety:
         assert not v.apply(Announce("announce", 1, _meta(2, stream_id="dup")))
         assert any(r[2] == "duplicate-stream-id" for r in v.rejected)
 
+    def test_duplicate_live_window_id_rejected(self):
+        v = RemoteViewerState(generation=1)
+        assert v.apply(Announce("announce", 1, _meta(1, stream_id="old")))
+        assert not v.apply(Announce("announce", 1,
+                                    _meta(1, stream_id="replacement")))
+        assert v.windows[1].stream_id == "old"
+        assert any(r[2] == "duplicate-window-id" for r in v.rejected)
+
     def test_control_for_wrong_stream_rejected(self):
         # window_id reused across exports in the SAME generation: a delayed
         # Configure/Closed from the prior export (different stream_id) must not

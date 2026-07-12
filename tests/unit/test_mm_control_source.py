@@ -10,7 +10,7 @@ from __future__ import annotations
 from multimachine.bridge import SourceWindowInfo
 from multimachine.control_source import (
     VIEWER_ALIVE, VIEWER_DATA, VIEWER_EOF, ControlSource, active_state_alive,
-    viewer_close_requested, watch,
+    authenticate_viewer, viewer_close_requested, watch,
 )
 from multimachine.sidechannel import (
     Announce, CloseRequest, Closed, RemoteViewerState, decode, encode,
@@ -21,6 +21,15 @@ def _src(window_id=1):
     return SourceWindowInfo(
         window_id=window_id, source_machine="vm-a", title="marker",
         app_id="qdwin-marker-client", req_w=1280, req_h=800)
+
+
+def test_control_capability_authentication_fails_closed():
+    good = '{"v":1,"type":"authenticate","capability":"secret"}'
+    assert authenticate_viewer(good, "secret")
+    for raw in ('{"v":1,"type":"authenticate","capability":"wrong"}',
+                '[]', 'not-json',
+                '{"v":1,"type":"other","capability":"secret"}'):
+        assert not authenticate_viewer(raw, "secret")
 
 
 class TestControlSourceMessages:

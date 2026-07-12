@@ -11,8 +11,9 @@ that:
   the RDP pixels use: a VM-A QEMU ``hostfwd_add`` exposes it on host loopback, VM-B
   connects via ``10.0.2.2:<port>`` over its own NAT — symmetric with the relay),
 - accepts the single viewer client and emits the source-derived ``Announce``
-  (built IN-GUEST; ``stream_id`` minted in-guest — it is an opaque correlation
-  token, not a credential, and the shipped qdwin approval carries none), then
+  only after an optional inherited-fd capability handshake (built IN-GUEST;
+  ``stream_id`` minted in-guest — it is an opaque correlation token, not a
+  credential, and is never disclosed to an unauthenticated connector), then
 - runs a **watcher** that emits ``Closed`` when the SOURCE toplevel dies, driven by
   the source itself (the exported marker's own unit going inactive), NOT by a host
   inject. A viewer detach (socket EOF) is NOT source death → it emits NO ``Closed``
@@ -33,6 +34,8 @@ liveness probe for the live two-VM gate.
 """
 from __future__ import annotations
 
+import hmac
+import json
 from dataclasses import dataclass
 from typing import Callable
 
@@ -45,6 +48,27 @@ from .sidechannel import (
 VIEWER_ALIVE = "alive"   # idle (poll timed out) — connection healthy, no data
 VIEWER_DATA = "data"     # the viewer sent upstream bytes (e.g. CloseRequest)
 VIEWER_EOF = "eof"       # the viewer socket closed (detach) — NOT source death
+
+
+def authenticate_viewer(raw: str, expected_capability: str) -> bool:
+    """Validate the broker's first control-channel message.
+
+    No ``Announce`` (and thus no source-minted stream_id) is disclosed until
+    this capability matches. Malformed and non-object messages fail closed.
+    """
+    if not isinstance(expected_capability, str) or not expected_capability:
+        return False
+    try:
+        request = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(request, dict):
+        return False
+    presented = request.get("capability")
+    return (request.get("v") == 1
+            and request.get("type") == "authenticate"
+            and isinstance(presented, str)
+            and hmac.compare_digest(presented, expected_capability))
 
 
 @dataclass
@@ -192,11 +216,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     The real socket + ``systemctl --user is-active`` liveness probe live here;
     :class:`ControlSource` + :func:`watch` (unit-tested) hold the logic."""
     import argparse
-    import json
     import os
     import select
     import socket
     import subprocess
+    import time
 
     from .sidechannel import encode
 
@@ -219,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
                          "toplevel lifetime proxy (impl-12)")
     ap.add_argument("--poll-interval", type=float, default=0.25)
     ap.add_argument("--accept-timeout", type=float, default=30.0)
+    ap.add_argument("--auth-fd", type=int, default=-1,
+                    help="fd containing the control capability; when set, no "
+                         "Announce is sent before authentication")
     ap.add_argument("--emit-log", default="",
                     help="append each control message SENT here (evidence: what "
                          "VM-A produced, incl. the in-guest-minted stream_id)")
@@ -227,6 +254,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
                          "FILE-BASED handshake the harness reads (codex impl-13: no "
                          "scraping a --collect transient unit's journal)")
     args = ap.parse_args(argv)
+
+    control_capability = ""
+    if args.auth_fd >= 0:
+        with os.fdopen(os.dup(args.auth_fd), "r", encoding="utf-8") as authf:
+            control_capability = authf.readline().strip()
+        if not control_capability:
+            ap.error("--auth-fd supplied an empty control capability")
 
     src = SourceWindowInfo(
         window_id=args.window_id, source_machine=args.source_machine,
@@ -251,8 +285,26 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     write_status("listening")          # publishes the in-guest-minted stream_id
     print(f"MM_CONTROL_LISTEN host={args.host} port={args.port} "
           f"stream_id={source.meta.stream_id}", flush=True)
-    srv.settimeout(args.accept_timeout)
-    conn, peer = srv.accept()
+    accept_deadline = time.monotonic() + args.accept_timeout
+    while True:
+        srv.settimeout(max(0.01, accept_deadline - time.monotonic()))
+        conn, peer = srv.accept()
+        if not control_capability:
+            break
+        conn.settimeout(max(0.01, accept_deadline - time.monotonic()))
+        auth = b""
+        while b"\n" not in auth and len(auth) <= 4096:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            auth += chunk
+        if (b"\n" in auth and len(auth) <= 4096
+                and authenticate_viewer(
+                    auth.split(b"\n", 1)[0].decode("utf-8", "replace"),
+                    control_capability)):
+            break
+        print(f"MM_CONTROL_AUTH_REJECT peer={peer}", flush=True)
+        conn.close()
     conn.settimeout(None)
     print(f"MM_CONTROL_VIEWER_CONNECTED peer={peer}", flush=True)
 

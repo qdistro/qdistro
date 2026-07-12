@@ -19,11 +19,12 @@ Invariants this enforces (the honesty fence):
   broker-issued token for the matching ``(stream_id, generation)``. The close
   button NEVER reaches here — it routes upstream as a ``CloseRequest``; this
   wrapper terminates FreeRDP only on the broker's post-``Closed`` teardown.
-- **The OTP never rides the wrapper's own launch argv** (impl-34 Q5; impl-3
-  finding 5): the broker hands it over the control channel; only the short-lived,
-  single-use FreeRDP child carries ``/p:<otp>`` (this FreeRDP build mis-negotiates
-  the ``/from-stdin`` path to dim AVC — see :func:`multimachine.bridge.rdp_client_argv`;
-  the OTP is consumed on connect so the leak window is empty).
+- **The OTP never rides any process argv** (impl-34 Q5; impl-3 finding 5): the
+  broker hands it to this wrapper over an inherited fd; the wrapper gives
+  FreeRDP ``/p:<otp>`` through FreeRDP's ``/args-from:fd:<n>`` channel.  This
+  preserves the proven ``/p`` parsing/codec path without exposing the value in
+  ``/proc/<pid>/cmdline`` (the direct ``/from-stdin`` credential path on this
+  build mis-negotiates dim AVC).
 
 The pure contract (spec validation, argv build, token-gated teardown, process
 truth) is :class:`RdpClientWrapper`, unit-tested headless; :func:`main` wires the
@@ -33,6 +34,7 @@ IPC, impl-34 Q2).
 from __future__ import annotations
 
 import hmac
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Callable, Protocol
@@ -77,6 +79,12 @@ class StreamSpec:
         if not self.app_id.startswith(want_prefix):
             raise SpecError(
                 f"app_id {self.app_id!r} must start with {want_prefix!r}")
+        label = self.app_id[len(want_prefix):]
+        # qdshell splits this app_id at its last dot.  A dotted label would make
+        # it derive a different origin than this spec and black-hole close.  Keep
+        # the final segment deliberately boring and unambiguous.
+        if re.fullmatch(r"[A-Za-z0-9_-]+", label) is None:
+            raise SpecError(f"bad app_id stream label {label!r}")
         if not self.instance_id:
             raise SpecError("empty instance_id")
         if not self.rdp_host or self.rdp_port <= 0:
@@ -107,7 +115,8 @@ class RdpClientWrapper:
                  spawn: Callable[[list[str]], _Proc],
                  secctx_exec: str = "qdistro-secctx-exec",
                  rdp_client: str = "sdl-freerdp",
-                 gfx_avc: bool = False) -> None:
+                 gfx_avc: bool = False,
+                 credential_args_fd: int = 0) -> None:
         spec.validate()
         if not teardown_token:
             raise SpecError("empty teardown_token (teardown would be unguarded)")
@@ -117,30 +126,42 @@ class RdpClientWrapper:
         self.secctx_exec = secctx_exec
         self.rdp_client = rdp_client
         self.gfx_avc = gfx_avc
+        self.credential_args_fd = credential_args_fd
         self._proc: _Proc | None = None
         self._started = False
 
     # ---- launch -------------------------------------------------------
-    def build_argv(self, otp: str) -> list[str]:
-        """The full ``qdistro-secctx-exec … -- <freerdp …>`` argv. The OTP rides
-        ONLY the short-lived FreeRDP child (single-use; see module docstring); it
-        is never on this wrapper's own launch argv."""
+    def _client_args(self, otp: str) -> list[str]:
         if not otp:
             raise SpecError("empty OTP")
         approved = ViewStreamApproved("", self.spec.rdp_port, "", otp)
-        # windowed (never /f), RFX full-range (gfx_avc off), OTP on /p (the proven
-        # rung-1 path — /from-stdin mis-negotiates dim AVC on this build).
         client = rdp_client_argv(
             approved, host=self.spec.rdp_host, width=self.spec.width,
             height=self.spec.height, fullscreen=False, username=self.spec.rdp_user,
             gfx_avc=self.gfx_avc, from_stdin=False)
         client[0] = self.rdp_client            # the resolved windowed FreeRDP
+        return client
+
+    def build_fd_args(self, otp: str) -> bytes:
+        """FreeRDP arguments for ``/args-from:fd`` (one argument per line)."""
+        client = self._client_args(otp)
+        return ("\n".join(client[1:]) + "\n").encode()
+
+    def build_argv(self, otp: str) -> list[str]:
+        """Build the secctx-wrapped process argv without embedding the OTP.
+
+        FreeRDP requires ``/args-from`` to be its only command-line option, so
+        every real client option (including ``/p``) is supplied by
+        :meth:`build_fd_args` through the inherited fd.
+        """
+        if not otp:
+            raise SpecError("empty OTP")
         return [
             self.secctx_exec,
             "--sandbox-engine", "qdistro.mm",
             "--app-id", self.spec.app_id,
             "--instance-id", self.spec.instance_id,
-            "--", *client,
+            "--", self.rdp_client, f"/args-from:fd:{self.credential_args_fd}",
         ]
 
     def start(self, otp: str) -> int:
@@ -270,11 +291,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
         app_id=args.app_id, instance_id=args.instance_id, rdp_host=args.rdp_host,
         rdp_port=args.rdp_port, width=args.width, height=args.height,
         rdp_user=args.rdp_user, allow_input=args.allow_input)
+    # FreeRDP parses /p through /args-from:fd, retaining the proven /p codec
+    # behavior while keeping the OTP off every process argv and environment.
+    credential_r, credential_w = os.pipe()
     w = RdpClientWrapper(
         spec, teardown_token=token,
-        spawn=lambda a: subprocess.Popen(a),
-        secctx_exec=args.secctx_exec, rdp_client=args.rdp_client)
-    pid = w.start(otp)
+        spawn=lambda a: subprocess.Popen(a, pass_fds=(credential_r,)),
+        secctx_exec=args.secctx_exec, rdp_client=args.rdp_client,
+        credential_args_fd=credential_r)
+    try:
+        os.write(credential_w, w.build_fd_args(otp))
+        os.close(credential_w)
+        credential_w = -1
+        pid = w.start(otp)
+    finally:
+        if credential_w >= 0:
+            os.close(credential_w)
+        os.close(credential_r)
     print(f"MM_WRAPPER_STARTED stream_id={spec.stream_id} pid={pid} "
           f"argv={shlex.join(w.build_argv('<otp>'))}", flush=True)
 

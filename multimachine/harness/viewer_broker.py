@@ -28,6 +28,7 @@ handle back to its `stream_id` for the close request.
 """
 from __future__ import annotations
 
+import json
 import socket
 import threading
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ class RemotePeer:
     window_id: int = 0
     allow_input: int = 1
     expect_generation: int | None = None    # verified against the Announce
+    control_capability: str = field(default="", repr=False)
     # learned at runtime:
     stream_id: str = ""
     handle: int | None = None
@@ -80,12 +82,14 @@ class ViewerBroker:
     def add_stream(self, label: str, *, origin: str, app_id: str, rdp_unit: str,
                    relay_port: int, control_port: int, marker_unit: str,
                    window_id: int = 0, allow_input: int = 1,
-                   expect_generation: int | None = None) -> RemotePeer:
+                   expect_generation: int | None = None,
+                   control_capability: str = "") -> RemotePeer:
         peer = RemotePeer(
             label=label, origin=origin, app_id=app_id, rdp_unit=rdp_unit,
             relay_port=relay_port, control_port=control_port,
             marker_unit=marker_unit, window_id=window_id, allow_input=allow_input,
-            expect_generation=expect_generation)
+            expect_generation=expect_generation,
+            control_capability=control_capability)
         self.peers[label] = peer
         return peer
 
@@ -110,6 +114,10 @@ class ViewerBroker:
                                      timeout=timeout)
         s.settimeout(None)
         peer._conn = s
+        if peer.control_capability:
+            auth = {"v": 1, "type": "authenticate",
+                    "capability": peer.control_capability}
+            s.sendall((json.dumps(auth, separators=(",", ":")) + "\n").encode())
         # read the Announce synchronously so the stream_id is known on return.
         ann = self._read_message(peer, timeout=timeout)
         if not isinstance(ann, Announce):
@@ -175,7 +183,10 @@ class ViewerBroker:
                         msg = decode(line)
                     except (ValueError, KeyError):
                         continue
-                    if isinstance(msg, Closed) and msg.stream_id == peer.stream_id:
+                    if (isinstance(msg, Closed)
+                            and msg.stream_id == peer.stream_id
+                            and msg.generation == peer.generation
+                            and msg.window_id == peer.window_id):
                         with self._lock:
                             peer.closed = msg
                             peer.close_state = "closed"
