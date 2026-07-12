@@ -75,6 +75,11 @@ class StaticOriginAuthority:
             if not isinstance(item, Mapping):
                 raise OriginAuthorizationError(
                     f"origins[{index}] must be an object")
+            expected = {
+                "machine_id", "trust_domain_id", "generation", "capabilities"}
+            if set(item) != expected:
+                raise OriginAuthorizationError(
+                    f"origins[{index}] fields do not match grant schema")
             machine_id = item.get("machine_id")
             trust_domain_id = item.get("trust_domain_id")
             generation = item.get("generation")
