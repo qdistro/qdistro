@@ -69,7 +69,11 @@ def viewer_exec(command: str, *, check_result: bool = True) -> str:
 
 
 def ipc(method: str, *values: object) -> str:
-    argv = " ".join(["qs", "ipc", "call", "multimachine", method,
+    # The production stack is launched from an explicit copied config path.
+    # `qs ipc` otherwise selects the absent "default" config and never reaches
+    # the running instance (it can look like an empty model to the row parser).
+    argv = " ".join(["qs", "-p", "/tmp/qdshell-r2", "ipc", "call",
+                     "multimachine", method,
                      *(str(value) for value in values)])
     command = ("env XDG_RUNTIME_DIR=/run/mm-vb WAYLAND_DISPLAY=wayland-vb "
                f"{argv}")

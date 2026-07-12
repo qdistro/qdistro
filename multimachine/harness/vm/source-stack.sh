@@ -245,6 +245,13 @@ fi
 
 # Clean prior run (incl. the 2nd-export units so a crashed prior run can't poison
 # this one — codex impl-16; esp. mm-relay2 holding port 5560).
+# The qci GUI image normally boots its production qdwin session too.  That
+# compositor publishes its own `weston.pipewire-0`; leaving it alive beside this
+# dedicated compositor makes PipeWire's name-based target selection ambiguous
+# (and can bind the production session's different-sized output).  Source VMs are
+# disposable gate fixtures, so isolate the graph before creating the test source.
+systemctl --user stop qdwin-session.target qdshell.service \
+  qdwin-compositor.service 2>/dev/null || true
 systemctl --user stop mm-qdwin mm-marker mm-sentinel mm-bystander mm-relay \
   mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
 systemctl --user reset-failed mm-marker2 mm-bystander2 mm-relay2 2>/dev/null || true
@@ -278,6 +285,14 @@ RUN --unit=mm-qdwin --setenv=QDWIN_ALLOWED_UID=1000 --setenv=QDWIN_ALLOWED_LOCKE
     --width=$W --height=$H --socket=$SOCK >/dev/null 2>&1
 for _ in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/$SOCK" ] && break; sleep 0.2; done
 if [ ! -S "$XDG_RUNTIME_DIR/$SOCK" ]; then echo "FAIL: qdwin socket never appeared"; journalctl --user -u mm-qdwin --no-pager|tail -20; exit 7; fi
+# Name targeting is safe only when this dedicated producer is unique.  Check the
+# live PipeWire registry rather than trusting process cleanup timing.
+PW_NODE_COUNT=$(pw-dump 2>/dev/null | grep -c '"node.name": "weston.pipewire-0"' || true)
+if [ "$PW_NODE_COUNT" != 1 ]; then
+  echo "FAIL: expected one weston.pipewire-0 producer, found $PW_NODE_COUNT"
+  pw-dump 2>/dev/null | grep -B2 -A8 '"node.name": "weston.pipewire-0"' || true
+  exit 7
+fi
 echo "qdwin up on $XDG_RUNTIME_DIR/$SOCK"
 
 # 2) Bystander first (so --subscribe last catches the EXPORTED marker's
