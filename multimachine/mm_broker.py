@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import tempfile
@@ -58,6 +59,7 @@ class WrapperHandle(Protocol):
     def alive(self) -> bool: ...
     def process_truth(self) -> dict: ...
     def teardown(self, stream_id: str, generation: int, token: str) -> bool: ...
+    def abort(self) -> None: ...
 
 
 class SocketWrapperHandle:
@@ -99,28 +101,37 @@ class SocketWrapperHandle:
             "--teardown-token-fd", str(token_r),
         ]
         try:
-            self._proc = subprocess.Popen(argv, pass_fds=(otp_r, token_r),
-                                          start_new_session=True)
-        finally:
-            os.close(otp_r)
-            os.close(token_r)
-        try:
-            os.write(otp_w, (otp + "\n").encode())
-            os.write(token_w, (teardown_token + "\n").encode())
-        finally:
-            os.close(otp_w)
-            os.close(token_w)
+            try:
+                self._proc = subprocess.Popen(
+                    argv, pass_fds=(otp_r, token_r), start_new_session=True)
+            finally:
+                os.close(otp_r)
+                os.close(token_r)
+            try:
+                os.write(otp_w, (otp + "\n").encode())
+                os.write(token_w, (teardown_token + "\n").encode())
+            finally:
+                os.close(otp_w)
+                os.close(token_w)
 
-        deadline = time.monotonic() + ready_timeout
-        while time.monotonic() < deadline:
-            if os.path.exists(socket_path):
-                return
-            if self._proc.poll() is not None:
-                raise RuntimeError(
-                    f"wrapper exited before its socket was ready: "
-                    f"status={self._proc.returncode}")
-            time.sleep(0.05)
-        raise TimeoutError(f"wrapper socket was not ready: {socket_path}")
+            deadline = time.monotonic() + ready_timeout
+            while time.monotonic() < deadline:
+                if os.path.exists(socket_path):
+                    return
+                if self._proc.poll() is not None:
+                    raise RuntimeError(
+                        f"wrapper exited before its socket was ready: "
+                        f"status={self._proc.returncode}")
+                time.sleep(0.05)
+            raise TimeoutError(f"wrapper socket was not ready: {socket_path}")
+        except Exception:
+            for fd in (otp_r, otp_w, token_r, token_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self.abort()
+            raise
 
     def _request(self, request: dict) -> dict:
         data = (json.dumps(request, separators=(",", ":")) + "\n").encode()
@@ -167,6 +178,27 @@ class SocketWrapperHandle:
         except (OSError, ValueError, RuntimeError):
             return False
         return response.get("accepted") is True
+
+    def abort(self) -> None:
+        """Emergency cleanup for failed startup; terminate the whole wrapper group."""
+        proc = self._proc
+        if proc is None:
+            return
+        # Signal the process group even when the wrapper leader already exited:
+        # a child FreeRDP process may still survive in the session it created.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait(timeout=2)
 
 
 @dataclass
@@ -513,6 +545,27 @@ class MultiMachineSession:
     def close(self) -> None:
         self.broker.close()
 
+    def shutdown(self) -> None:
+        """Best-effort cleanup of every backend and control channel."""
+        for reg in self.regs.values():
+            wrapper = reg.wrapper
+            if wrapper is None:
+                continue
+            try:
+                wrapper.teardown(reg.spec.stream_id, reg.spec.generation,
+                                 reg.teardown_token)
+            except Exception:
+                pass
+            try:
+                wrapper.abort()
+            except Exception:
+                pass
+            reg.wrapper = None
+        try:
+            self.broker.close()
+        except Exception:
+            pass
+
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     """``qdistro-mm-broker``: stand up a :class:`MultiMachineSession`, spawn a real
@@ -622,22 +675,27 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
 
     session._on_event = emit
 
-    # Register every already-validated stream before opening any upstream
-    # connection or launching any backend. Duplicate identities/endpoints can
-    # therefore never produce a partially live session.
-    for configured in config.streams:
-        session.register_stream(
-            configured.label, spec=configured.spec,
-            rdp_unit=configured.rdp_unit,
-            control_port=configured.control_port,
-            marker_unit=configured.marker_unit,
-            control_capability=configured.control_capability)
-    # Connect all source control channels before launching the first pixel
-    # backend. A missing/unauthenticated source cannot leave a partial UI.
-    for configured in config.streams:
-        session.connect(configured.label, timeout=configured.connect_timeout)
-    for configured in config.streams:
-        session.launch_backend(configured.label, configured.otp)
+    try:
+        # Register every already-validated stream before opening any upstream
+        # connection or launching any backend. Duplicate identities/endpoints
+        # can therefore never produce a partially live session.
+        for configured in config.streams:
+            session.register_stream(
+                configured.label, spec=configured.spec,
+                rdp_unit=configured.rdp_unit,
+                control_port=configured.control_port,
+                marker_unit=configured.marker_unit,
+                control_capability=configured.control_capability)
+        # Connect all source control channels before launching the first pixel
+        # backend. A missing/unauthenticated source cannot leave a partial UI.
+        for configured in config.streams:
+            session.connect(configured.label,
+                            timeout=configured.connect_timeout)
+        for configured in config.streams:
+            session.launch_backend(configured.label, configured.otp)
+    except Exception:
+        session.shutdown()
+        raise
 
     for event in pending_events:
         emit(event)
@@ -660,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live shell
     try:
         loop.run()
     finally:
-        session.close()
+        session.shutdown()
     return 0
 
 

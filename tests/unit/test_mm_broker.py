@@ -10,6 +10,7 @@ memory. Only the wrapper subprocess + the D-Bus server are faked/omitted.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import textwrap
@@ -116,6 +117,7 @@ class FakeWrapper:
         self.otp = otp
         self._alive = True
         self.teardown_calls: list[tuple] = []
+        self.abort_calls = 0
 
     def alive(self):
         return self._alive
@@ -135,6 +137,10 @@ class FakeWrapper:
 
     def crash(self):
         self._alive = False     # FreeRDP exits before any source Closed
+
+    def abort(self):
+        self.abort_calls += 1
+        self._alive = False
 
 
 def _spec(label, stream_suffix, gen=51, origin="vm-a"):
@@ -224,6 +230,29 @@ def test_live_wrapper_socket_plumbing_keeps_secrets_off_argv(tmp_path):
     wrapper._proc.wait(timeout=5)
 
 
+def test_wrapper_socket_timeout_reaps_the_whole_startup_group(tmp_path):
+    """A wrapper that never exposes its socket must not survive constructor failure."""
+    pid_file = tmp_path / "wrapper.pid"
+    helper = tmp_path / "stuck-wrapper"
+    helper.write_text(textwrap.dedent(f"""\
+        #!{sys.executable}
+        import os, time
+        with open({str(pid_file)!r}, 'w') as stream:
+            stream.write(str(os.getpid()))
+        time.sleep(30)
+        """))
+    helper.chmod(0o700)
+    spec = _spec("a", "streamA")
+    with pytest.raises(TimeoutError):
+        SocketWrapperHandle(
+            spec, teardown_token="broker-secret", otp="rdp-secret",
+            socket_path=str(tmp_path / "missing.sock"),
+            wrapper_program=str(helper), ready_timeout=0.5)
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def _setup_two(s, *, b_marker_dies=True):
     ca = _StreamControl(app_id="qdistro.mm.vm-a.streamA", generation=51,
                         window_id=1, stream_id="sid-A")
@@ -239,6 +268,23 @@ def _setup_two(s, *, b_marker_dies=True):
 
 
 class TestMultiMachineSession:
+    def test_shutdown_tears_down_every_partial_backend(self):
+        s, _events, wrappers = _session()
+        ca, cb = _setup_two(s)
+        try:
+            assert len(wrappers) == 2
+            assert all(wrapper.alive() for wrapper in wrappers)
+            s.shutdown()
+            assert all(not wrapper.alive() for wrapper in wrappers)
+            assert [wrapper.teardown_calls for wrapper in wrappers] == [
+                [("sid-A", 51, "token-1")],
+                [("sid-B", 51, "token-2")],
+            ]
+            assert [wrapper.abort_calls for wrapper in wrappers] == [1, 1]
+        finally:
+            ca.stop()
+            cb.stop()
+
     def test_registration_rejects_aliases_without_partial_state(self):
         s, _events, _ = _session()
         first = _spec("a", "streamA")
