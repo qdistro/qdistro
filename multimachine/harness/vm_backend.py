@@ -758,7 +758,8 @@ class QciVMBackend:
         exported_telemetry: str, sentinel_telemetry: str,
         exported_label: str, sentinel_label: str,
         allow_input: int = 1, fault: str = "",
-        output_id: int = 1) -> ViewStreamApproved:
+        output_id: int = 1, source_client: str = "marker",
+        popup_binary: Path | None = None) -> ViewStreamApproved:
         """Bring up the confinement source on VM-A: the EXPORTED marker (fullscreen,
         subscribed, writing per-seat input telemetry) + a subscribe. The SENTINEL is
         launched separately (:meth:`launch_sentinel`) AFTER the oracle, since a
@@ -770,7 +771,10 @@ class QciVMBackend:
         attempted but the server-side permission bit must gate it, so NOTHING
         receives the presses.
 
-        ``fault`` (item 6, codex impl-28): if non-empty (``transient``/``persistent``),
+        ``source_client="popup"`` runs the persistent real xdg parent+popup R4
+        fixture from ``popup_binary`` while retaining the same source-owned unit
+        and close lifecycle. ``fault`` (item 6, codex impl-28): if non-empty
+        (``transient``/``persistent``),
         qdwin is started with ``QDISTRO_FORWARD_FAULT`` so each spawned forward
         deterministically exercises its bounded-reconnect / give-up path."""
         real = self._real(vm)
@@ -782,6 +786,15 @@ class QciVMBackend:
         self._ensure_hostfwd(real, self.relay_port)
         self._push(real, self.repo_dir / "multimachine/harness/vm/source-stack.sh",
                    "/tmp/mm-source-stack.sh")
+        popup_env = ""
+        if source_client == "popup":
+            if popup_binary is None:
+                raise ValueError("popup source requires popup_binary")
+            self._push(real, Path(popup_binary), "/tmp/qdwin-popup-probe")
+            self._vmexec(real, "chmod 0755 /tmp/qdwin-popup-probe")
+            popup_env = " SOURCE_CLIENT=popup POPUP_BIN=/tmp/qdwin-popup-probe"
+        elif source_client != "marker":
+            raise ValueError(f"unknown source_client {source_client!r}")
         # qdwin now spawns qdistro-forward with `--wayland-display <its own socket>`
         # (read from WAYLAND_DISPLAY, qdwin.c), so the forward claims the input
         # channel on whatever socket our mm-qdwin listens on. No longer forced onto
@@ -791,6 +804,7 @@ class QciVMBackend:
                f"RELAY_PORT={self.relay_port} ALLOW_INPUT={int(allow_input)} "
                f"EXPORTED_TELEMETRY={shlex.quote(exported_telemetry)} "
                f"EXPORTED_LABEL={shlex.quote(exported_label)}"
+               + popup_env
                + (f" FAULT={shlex.quote(fault)}" if fault else ""))
         out = self._vmexec(real, self._as_admin(
             f"{env} bash /tmp/mm-source-stack.sh"), timeout=180)

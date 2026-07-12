@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -33,6 +34,11 @@ ap.add_argument("--qdshell", type=Path,
                                             "/home/play2/qdistro/qdshell")))
 ap.add_argument("--r3", action="store_true",
                 help="also prove source-mediated remote shell operations")
+ap.add_argument("--r4", action="store_true",
+                help="also prove a contained real source xdg popup")
+ap.add_argument(
+    "--popup-binary", type=Path,
+    default=Path("/home/play2/qdistro/qdwin/build-qci/qdwin-popup-probe"))
 args = ap.parse_args()
 
 W, H = 640, 400
@@ -45,7 +51,10 @@ CAP_A = secrets.token_urlsafe(24)
 CAP_C = secrets.token_urlsafe(24)
 TEL_A = "/run/user/1000/mm-r2-a.json"
 TEL_C = "/run/user/1000/mm-r2-c.json"
-BUNDLE = Path("/tmp/mm-live/r3-real" if args.r3 else "/tmp/mm-live/r2-real")
+RUN_R3 = args.r3 or args.r4
+BUNDLE = Path("/tmp/mm-live/r4-real" if args.r4 else
+              "/tmp/mm-live/r3-real" if args.r3 else
+              "/tmp/mm-live/r2-real")
 BUNDLE.mkdir(parents=True, exist_ok=True)
 
 be_a = QciVMBackend(args.vm_a, args.vm_b, REPO, relay_port=RDP_A,
@@ -182,7 +191,9 @@ approval_a = be_a.setup_confinement_source(
 approval_c = be_c.setup_confinement_source(
     "vm-a", generation=GEN_C, width=W, height=H,
     exported_telemetry=TEL_C, sentinel_telemetry="",
-    exported_label="origin-c", sentinel_label="", allow_input=0, output_id=2)
+    exported_label="origin-c", sentinel_label="", allow_input=0, output_id=2,
+    source_client="popup" if args.r4 else "marker",
+    popup_binary=args.popup_binary if args.r4 else None)
 sid_a = be_a.launch_control(
     "vm-a", generation=GEN_A, window_id=1, source_machine="vm-a",
     title="origin A", app_id=APP_A, req_w=W, req_h=H,
@@ -276,7 +287,46 @@ check("unpaired-origin-has-no-shell-authority",
 
 handle_a = authorized["vm-a"]["handle"]
 handle_c = authorized["vm-c"]["handle"]
-if args.r3:
+if args.r4:
+    popup_log = be_c._vmexec(
+        args.vm_c,
+        be_c._as_admin(
+            "journalctl --user -u mm-marker --no-pager --since '-2 min'"),
+        check=False)
+    (BUNDLE / "source-c-popup.log").write_text(popup_log, encoding="utf-8")
+    match = re.search(
+        r"POPUP_GEOM (-?\d+) (-?\d+) (\d+) (\d+)", popup_log)
+    geometry = tuple(int(value) for value in match.groups()) if match else ()
+    check("r4-source-popup-mapped",
+          "POPUP_MAPPED parent=qdwin-popup-probe" in popup_log,
+          repr(geometry))
+    check("r4-popup-clamped-at-source",
+          bool(geometry) and max(abs(geometry[0]), abs(geometry[1])) < 4096
+          and geometry[2:] == (180, 120), repr(geometry))
+    source_c_shell = be_c._vmexec(
+        args.vm_c,
+        be_c._as_admin("cat /run/user/1000/bystander.out 2>/dev/null"),
+        check=False)
+    (BUNDLE / "source-c-bystander.log").write_text(
+        source_c_shell, encoding="utf-8")
+    check("r4-popup-retains-one-parent-toplevel",
+          source_c_shell.count("toplevel_added handle=") == 1
+          and "toplevel_added handle=1" in source_c_shell)
+    ipc("focus", handle_c); time.sleep(1)
+    popup_shot = be_a.capture("vm-b", 0, BUNDLE / "popup-c.ppm")
+    popup_image = load_image(popup_shot)
+    pink = ((popup_image[:, :, 0] > 180)
+            & (popup_image[:, :, 1] < 110)
+            & (popup_image[:, :, 2] > 35)).sum()
+    check("r4-popup-pixels-contained-in-trusted-proxy", int(pink) > 200,
+          f"pink_pixels={int(pink)}")
+    current_rows = remote_rows()
+    check("r4-popup-gains-no-independent-viewer-authority",
+          len([row for row in current_rows if row.get("authorized")]) == 2
+          and len([row for row in current_rows
+                   if row.get("authorized") and row.get("origin") == "vm-c"]) == 1)
+
+if RUN_R3:
     check("unpaired-origin-has-no-r3-authority",
           "false" in ipc("maximize", evil.get("handle", 0)).lower()
           and "false" in ipc("move", evil.get("handle", 0), 40, 30).lower())
@@ -347,6 +397,9 @@ c2 = key_total(be_c.read_telemetry("vm-a", TEL_C))
 check("per-origin-input-enforced", a1 - a0 > 0 and c1 - c0 == 0
       and a2 - a1 == 0 and c2 - c1 == 0,
       f"A={a0}->{a1}->{a2} C={c0}->{c1}->{c2}")
+if args.r4:
+    check("r4-popup-cannot-steal-cross-origin-input",
+          a1 - a0 > 0 and c1 - c0 == 0 and c2 - c1 == 0)
 
 check("qdshell-close-dispatched", "true" in ipc("close", handle_a).lower())
 closed_rows = wait_rows(
@@ -365,14 +418,31 @@ stale = [r for r in stale_rows if r.get("secctxAppId") == APP_A]
 check("closed-stream-secctx-reuse-denied",
       bool(stale) and all(not row.get("authorized") for row in stale), repr(stale))
 
+if args.r4:
+    check("r4-parent-close-dispatched", "true" in ipc("close", handle_c).lower())
+    popup_closed_rows = wait_rows(
+        lambda rs: not any(r.get("authorized") and r.get("origin") == "vm-c"
+                           for r in rs), timeout=30)
+    source_c_after = be_c._vmexec(
+        args.vm_c,
+        be_c._as_admin("cat /run/user/1000/bystander.out 2>/dev/null"),
+        check=False)
+    check("r4-parent-close-removes-child-at-source",
+          not be_c.marker_unit_alive("vm-a")
+          and "toplevel_removed handle=1" in source_c_after
+          and not any(row.get("authorized") and row.get("origin") == "vm-c"
+                      for row in popup_closed_rows))
+
 for name, command in {
     "broker.log": "cat /run/mm-vb/broker.log",
     "qdshell-final.log": "cat /run/mm-vb/qdshell.log",
     "source-a-control.jsonl": "cat /run/user/1000/mm-control-a.jsonl",
+    "source-c-control.jsonl": "cat /run/user/1000/mm-control-c.jsonl",
 }.items():
-    target = be_a if "source-a" in name else None
-    text = (target._vmexec(args.vm_a, target._as_admin(command), check=False)
-            if target else viewer_exec(command, check_result=False))
+    target = be_a if "source-a" in name else be_c if "source-c" in name else None
+    target_vm = args.vm_a if target is be_a else args.vm_c
+    text = (target._vmexec(target_vm, target._as_admin(command), check=False)
+            if target is not None else viewer_exec(command, check_result=False))
     (BUNDLE / name).write_text(text, encoding="utf-8")
 (BUNDLE / "results.json").write_text(
     json.dumps(results, indent=2, sort_keys=True), encoding="utf-8")

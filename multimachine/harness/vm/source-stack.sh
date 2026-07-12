@@ -17,6 +17,8 @@ SOCK=${SOCK:-wayland-mm}
 W=${W:-1280}; H=${H:-800}; GEN=${GEN:-20}; RELAY_PORT=${RELAY_PORT:-5555}
 OUTPUT_ID=${OUTPUT_ID:-1}
 MODE=${MODE:-full}
+SOURCE_CLIENT=${SOURCE_CLIENT:-marker}
+POPUP_BIN=${POPUP_BIN:-qdwin-popup-probe}
 # Marker frame cadence. A capture (`virsh screenshot`) of an ANIMATING marker can
 # catch a torn RDP frame mid-repaint (barcode CRC mismatch); ANIMATE_MS=0 = a
 # single STATIC frame, which the single-frame oracle reads deterministically.
@@ -174,11 +176,17 @@ locking=false
 num-outputs=4
 EOF
 
-  MM="/usr/lib64/libweston-14"
+  VROOT=/usr/libexec/qdistro/qdwin-libweston
+  MM="$VROOT/lib64/libweston-14"
+  LD_ARG="--setenv=LD_LIBRARY_PATH=$VROOT/lib64"
+  if [ ! -e "$VROOT/lib64/libweston-14.so.0" ]; then
+    MM="/usr/lib64/libweston-14"
+    LD_ARG=""
+  fi
   WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
   # qdwin inherits the QDWIN_CLAIMANT_* env → passes it to the spawned claimant.
   RUN --unit=mm-qdwin --setenv=QDWIN_ALLOWED_UID=1000 --setenv=QDWIN_ALLOWED_LOCKER_ANY=1 \
-    --setenv="WESTON_MODULE_MAP=$WMAP" \
+    --setenv="WESTON_MODULE_MAP=$WMAP" $LD_ARG \
     --setenv="QDWIN_FORWARD_BIN=$CLAIMANT_BIN" \
     --setenv="QDWIN_CLAIMANT_STATUS=$STATUS" --setenv="QDWIN_CLAIMANT_GO=$GO" \
     --setenv="QDWIN_CLAIMANT_INJECT_X=$INJ_X" --setenv="QDWIN_CLAIMANT_INJECT_Y=$INJ_Y" \
@@ -272,14 +280,20 @@ EOF
 
 # 1) Headless qdwin on a private socket. WESTON_MODULE_MAP lets qdwin-shell load
 #    pipewire-backend.so internally (the per-view capture pool) — same as prod.
-MM="/usr/lib64/libweston-14"
+VROOT=/usr/libexec/qdistro/qdwin-libweston
+MM="$VROOT/lib64/libweston-14"
+LD_ARG="--setenv=LD_LIBRARY_PATH=$VROOT/lib64"
+if [ ! -e "$VROOT/lib64/libweston-14.so.0" ]; then
+  MM="/usr/lib64/libweston-14"
+  LD_ARG=""
+fi
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 # item 6 (codex impl-28): optional VM-TEST-ONLY fault injection into the forward —
 # qdwin inherits QDISTRO_FORWARD_FAULT and passes it to each qdistro-forward it
 # spawns, so we can deterministically exercise the bounded-reconnect/give-up paths.
 FAULT_ARG=""; [ -n "${FAULT:-}" ] && FAULT_ARG="--setenv=QDISTRO_FORWARD_FAULT=$FAULT"
 RUN --unit=mm-qdwin --setenv=QDWIN_ALLOWED_UID=1000 --setenv=QDWIN_ALLOWED_LOCKER_ANY=1 \
-  --setenv="WESTON_MODULE_MAP=$WMAP" $FAULT_ARG \
+  --setenv="WESTON_MODULE_MAP=$WMAP" $LD_ARG $FAULT_ARG \
   weston --backend=headless-backend.so --backend=pipewire-backend.so --renderer=pixman \
     --config="$XDG_RUNTIME_DIR/mm-weston.ini" \
     --width=$W --height=$H --socket=$SOCK >/dev/null 2>&1
@@ -303,12 +317,18 @@ RUN --unit=mm-bystander --setenv=WAYLAND_DISPLAY=$SOCK \
   bash -c "qdwin-bystander --subscribe last $AI_ARG > $XDG_RUNTIME_DIR/bystander.out 2>&1"
 sleep 1.5
 
-# 3) EXPORTED marker (the subscribed source toplevel) WxH, animating. With
-#    EXPORTED_TELEMETRY it counts per-seat injected input (step-8 gate).
+# 3) EXPORTED source toplevel. Normal gates use the marker. R4 uses a real
+#    persistent xdg parent+popup pair; it remains one source toplevel/export.
 FS_ARG=""; [ "${FS:-0}" = 1 ] && FS_ARG="--fullscreen"
 TEL_ARG=""; [ -n "$EXPORTED_TELEMETRY" ] && TEL_ARG="--telemetry $EXPORTED_TELEMETRY --label $EXPORTED_LABEL"
-RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
-  qdwin-marker-client --width $W --height $H --output-id $OUTPUT_ID --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
+if [ "$SOURCE_CLIENT" = popup ]; then
+  RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
+    "$POPUP_BIN" --parent-w 400 --parent-h 300 --popup-w 180 --popup-h 120 \
+      --offset-x 100000 --offset-y 100000 --hold-seconds 300
+else
+  RUN --unit=mm-marker --setenv=WAYLAND_DISPLAY=$SOCK \
+    qdwin-marker-client --width $W --height $H --output-id $OUTPUT_ID --generation $GEN --frame 0 --animate-ms $ANIMATE_MS $FS_ARG $TEL_ARG
+fi
 
 # 4) Discover the approved RDP port.
 RDP_PORT=""
