@@ -68,6 +68,26 @@ def wait_guest_file(backend: QciVMBackend, vm: str, path: str,
     raise RuntimeError(f"guest {vm} did not create {path}")
 
 
+def wait_guest_file_or_peer_exit(
+        backend: QciVMBackend, vm: str, path: str,
+        peers: dict[str, subprocess.Popen[str]], timeout: float) -> None:
+    """Wait for readiness, but surface a failed product peer immediately."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if backend._vmexec(
+                vm, f"test -e {shlex.quote(path)} && echo ready",
+                check=False).strip() == "ready":
+            return
+        for role, process in peers.items():
+            if process.poll() is not None:
+                output, _ = process.communicate()
+                raise RuntimeError(
+                    f"{role} product peer exited before {path} "
+                    f"(rc={process.returncode})\n{output[-8000:]}")
+        time.sleep(0.2)
+    raise RuntimeError(f"guest {vm} did not create {path}")
+
+
 def parse_result(output: str) -> dict:
     for line in reversed(output.splitlines()):
         try:
@@ -127,24 +147,32 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
                "qdistro-mm-remote-pixelfeed qdistro-mm-remote-viewer-helper")
     backend._vmexec(
         vm, f"ninja -C /root/qdistro-src/qdistro/daemons/build {targets}")
+
+    # Both source and viewer run qdwin in this gate.  Stage the exact local
+    # compositor sources on both sides so a source-side lifecycle fix cannot
+    # be accidentally tested against whichever qdwin tree a preserved VM
+    # happened to contain from an earlier run.
+    for relative in (
+        "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
+    ):
+        backend._push_large(
+            vm, qdwin / relative,
+            "/root/qdistro-src/qdwin/" + relative)
+    backend._vmexec(vm, "rm -rf /root/qdistro-src/qdwin/build-r6")
+    backend._vmexec(
+        vm, "meson setup /root/qdistro-src/qdwin/build-r6 "
+            "/root/qdistro-src/qdwin")
+    backend._vmexec(
+        vm, "ninja -C /root/qdistro-src/qdwin/build-r6 qdwin-shell.so")
+    backend._vmexec(
+        vm, "install -m 0755 /root/qdistro-src/qdwin/build-r6/"
+            "qdwin-shell.so /usr/lib64/weston/qdwin-shell.so")
     if role == "source":
         backend._vmexec(
             vm, "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
                 "qdistro-mm-remote-source-helper /usr/bin/"
                 "qdistro-mm-remote-source-helper")
     else:
-        backend._push(
-            vm, qdwin / "qdwin/qdwin-logic.c",
-            "/root/qdistro-src/qdwin/qdwin/qdwin-logic.c")
-        backend._vmexec(vm, "rm -rf /root/qdistro-src/qdwin/build-r6")
-        backend._vmexec(
-            vm, "meson setup /root/qdistro-src/qdwin/build-r6 "
-                "/root/qdistro-src/qdwin")
-        backend._vmexec(
-            vm, "ninja -C /root/qdistro-src/qdwin/build-r6 qdwin-shell.so")
-        backend._vmexec(
-            vm, "install -m 0755 /root/qdistro-src/qdwin/build-r6/"
-                "qdwin-shell.so /usr/lib64/weston/qdwin-shell.so")
         backend._vmexec(
             vm, "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
                 "qdistro-mm-remote-pixelfeed /usr/bin/"
@@ -286,9 +314,10 @@ def main() -> int:
         viewer_peer = subprocess.Popen(
             [str(vm_exec), args.vm_viewer, viewer_cmd],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        wait_guest_file(
+        wait_guest_file_or_peer_exit(
             backend, args.vm_source,
-            "/run/mm-r6-source/transport-drop-ready", timeout=90)
+            "/run/mm-r6-source/transport-drop-ready",
+            {"source": source_peer, "viewer": viewer_peer}, timeout=90)
         dropped = backend._vmexec(
             args.vm_source,
             f"ss -K sport = :{args.port}; "
@@ -321,9 +350,21 @@ def main() -> int:
             (bundle / ("source-stack.log" if process is source_stack else
                        "viewer-stack.log")).write_text(output, encoding="utf-8")
 
+        for process, name, captured in (
+                (source_peer, "source-peer.log", source_output),
+                (viewer_peer, "viewer-peer.log", viewer_output)):
+            if process is None:
+                continue
+            output = captured
+            if not output:
+                try:
+                    output, _ = process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    output, _ = process.communicate()
+            (bundle / name).write_text(output, encoding="utf-8")
+
     assert source_peer is not None and viewer_peer is not None
-    (bundle / "source-peer.log").write_text(source_output, encoding="utf-8")
-    (bundle / "viewer-peer.log").write_text(viewer_output, encoding="utf-8")
     source = parse_result(source_output) if source_peer.returncode == 0 else {}
     viewer = parse_result(viewer_output) if viewer_peer.returncode == 0 else {}
     assertions = {

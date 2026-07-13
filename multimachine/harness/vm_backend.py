@@ -177,6 +177,42 @@ class QciVMBackend:
             f"printf '%s' '{b64}' | base64 -d > {temporary} && "
             f"chmod {mode:04o} {temporary} && mv -f {temporary} {g}")
 
+    def _push_large(self, vm: str, local: Path, guest: str,
+                    mode: int = 0o644, chunk_size: int = 48 * 1024) -> None:
+        """Atomically stage a file without exceeding QGA's argv limit.
+
+        ``_push`` is intentionally simple but base64-expands its whole payload
+        into one guest command.  Large compositor sources exceed the host's
+        exec argument limit before vm-exec can run.  Transfer bounded chunks
+        with the existing atomic primitive, append them in order in the guest,
+        then publish the completed file with one rename.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        data = local.read_bytes()
+        if len(data) <= chunk_size:
+            self._push(vm, local, guest, mode=mode)
+            return
+
+        guest_tmp = guest + f".qdistro-large-{os.getpid()}-tmp"
+        guest_chunk = guest_tmp + ".chunk"
+        quoted_tmp = shlex.quote(guest_tmp)
+        quoted_chunk = shlex.quote(guest_chunk)
+        quoted_guest = shlex.quote(guest)
+        self._vmexec(vm, f"umask 077; rm -f {quoted_tmp} {quoted_chunk}")
+        with tempfile.TemporaryDirectory(prefix="qdistro-vm-push-") as tmp:
+            local_chunk = Path(tmp) / "chunk"
+            for offset in range(0, len(data), chunk_size):
+                local_chunk.write_bytes(data[offset:offset + chunk_size])
+                self._push(vm, local_chunk, guest_chunk, mode=0o600)
+                self._vmexec(
+                    vm, f"dd if={quoted_chunk} of={quoted_tmp} "
+                        "oflag=append conv=notrunc status=none && "
+                        f"rm -f {quoted_chunk}")
+        self._vmexec(
+            vm, f"chmod {mode:04o} {quoted_tmp} && "
+                f"mv -f {quoted_tmp} {quoted_guest}")
+
     def _guest_link_dev(self, vm: str) -> str:
         """The guest's default-route NIC (e.g. ens2) — the configured
         ``link_dev`` ('eth0') is often wrong for this image (codex impl-6 M6)."""

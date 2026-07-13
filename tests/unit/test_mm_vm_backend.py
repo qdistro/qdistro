@@ -104,3 +104,31 @@ def test_push_uses_process_unique_atomic_staging_path(tmp_path):
     assert commands[0].count(temporary) == 4
     assert "chmod 0600" in commands[0]
     assert commands[0].endswith(f"mv -f {temporary} /tmp/mm/payload")
+
+
+def test_push_large_chunks_byte_exact_and_publishes_atomically(tmp_path):
+    payload = tmp_path / "large-payload"
+    expected = bytes(range(251)) * 5
+    payload.write_bytes(expected)
+    backend = QciVMBackend("vm-a", "vm-b", tmp_path)
+    commands = []
+    chunks = []
+
+    backend._vmexec = lambda _vm, command: commands.append(command)
+
+    def capture_push(_vm, local, guest, mode=0o644):
+        chunks.append((local.read_bytes(), guest, mode))
+
+    backend._push = capture_push
+    backend._push_large(
+        "vm-a", payload, "/root/src/large-payload",
+        mode=0o640, chunk_size=100)
+
+    assert b"".join(chunk for chunk, _guest, _mode in chunks) == expected
+    assert all(len(chunk) <= 100 for chunk, _guest, _mode in chunks)
+    assert all(guest.endswith(".chunk") for _chunk, guest, _mode in chunks)
+    assert all(mode == 0o600 for _chunk, _guest, mode in chunks)
+    assert len([command for command in commands if "oflag=append" in command]) == 13
+    assert commands[-1].endswith(
+        "mv -f /root/src/large-payload.qdistro-large-"
+        f"{os.getpid()}-tmp /root/src/large-payload")

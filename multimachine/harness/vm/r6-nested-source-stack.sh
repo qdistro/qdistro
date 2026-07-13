@@ -124,14 +124,23 @@ runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
 INNER_PID=$!
 wait_log "$RT/inner.log" 'nested-mode publisher ready' 'inner publisher'
 
+# `$!` is the root-owned runuser wrapper on this image, not the admin-owned
+# application.  Publish the shell pid from inside the target uid and exec the
+# probe in-place so the product peer's process-survival check targets the real
+# source app rather than failing on the wrapper's credentials.
 runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
-    WAYLAND_DISPLAY=$INNER /tmp/r5-popup-probe \
-    --parent-w 400 --parent-h 300 --popup-w 180 --popup-h 120 \
-    --offset-x 40 --offset-y 50 --hold-seconds 600 \
-    >"$RT/app.log" 2>&1 &
+    WAYLAND_DISPLAY=$INNER sh -c '
+        echo "$$" >"$1"
+        exec "$2" --parent-w 400 --parent-h 300 \
+            --popup-w 180 --popup-h 120 --offset-x 40 --offset-y 50 \
+            --hold-seconds 600
+    ' sh "$RT/app.pid" /tmp/r5-popup-probe >"$RT/app.log" 2>&1 &
 APP_PID=$!
-echo "$APP_PID" >"$RT/app.pid"
-chown admin:admin "$RT/app.pid"
+for _ in $(seq 1 50); do
+    [ -s "$RT/app.pid" ] && break
+    sleep 0.1
+done
+[ -s "$RT/app.pid" ] || fail "source app did not publish its pid"
 
 wait_log "$RT/outer.log" 'nested-toplevel advertise pw_node=' 'source advertise'
 wait_log "$RT/outer.log" 'holding_released handle=[0-9]+ via nested_proxy_decision/allow' 'broker allow'
