@@ -262,6 +262,12 @@ class RemoteAdapterEndpoint:
                     "op": "connected", "tls_version": tls.version(),
                     "peer_cert_sha256": peer_pin,
                     "epoch": self.binding.epoch,
+                    "display_identity": {
+                        "source_machine": self.binding.source_machine,
+                        "trust_domain_id": self.binding.trust_domain_id,
+                        "stream_id": self.binding.stream_id,
+                        "generation": self.binding.generation,
+                    },
                 })
                 reason = "network_lost"
                 try:

@@ -32,6 +32,7 @@ from multimachine.remote_adapter_transport import (
 from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
+    RemoteDisplayIdentity,
     StreamAnnouncement,
     decode_local_input_event,
     encode_input_event,
@@ -48,6 +49,22 @@ CONTROLLER_ENTRYPOINT = (
 SESSION = "viewer-session-7f5c"
 STREAM = "stream_0123456789abcdef"
 SECRET = bytes(range(32))
+DISPLAY_IDENTITY = RemoteDisplayIdentity(
+    source_machine="vm-source", trust_domain_id="owner-machines",
+    stream_id=STREAM, generation=51)
+
+
+def _connected(pin: str, epoch: int) -> dict:
+    return {
+        "op": "connected", "peer_cert_sha256": pin,
+        "tls_version": "TLSv1.3", "epoch": epoch,
+        "display_identity": {
+            "source_machine": DISPLAY_IDENTITY.source_machine,
+            "trust_domain_id": DISPLAY_IDENTITY.trust_domain_id,
+            "stream_id": DISPLAY_IDENTITY.stream_id,
+            "generation": DISPLAY_IDENTITY.generation,
+        },
+    }
 
 
 def _certificate(common_name: str) -> tuple[bytes, bytes, str]:
@@ -198,14 +215,8 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
         viewer_control.settimeout(10)
         source_connected = _event(source_control)
         viewer_connected = _event(viewer_control)
-        assert source_connected == {
-            "op": "connected", "peer_cert_sha256": VIEWER_PIN,
-            "tls_version": "TLSv1.3", "epoch": 1,
-        }
-        assert viewer_connected == {
-            "op": "connected", "peer_cert_sha256": SOURCE_PIN,
-            "tls_version": "TLSv1.3", "epoch": 1,
-        }
+        assert source_connected == _connected(VIEWER_PIN, 1)
+        assert viewer_connected == _connected(SOURCE_PIN, 1)
 
         _local_send(
             source_control, channel="control", kind="announce",
@@ -251,14 +262,8 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
         }
         source_reconnected = _event(source_control)
         viewer_reconnected = _event(viewer_control)
-        assert source_reconnected == {
-            "op": "connected", "peer_cert_sha256": VIEWER_PIN,
-            "tls_version": "TLSv1.3", "epoch": 2,
-        }
-        assert viewer_reconnected == {
-            "op": "connected", "peer_cert_sha256": SOURCE_PIN,
-            "tls_version": "TLSv1.3", "epoch": 2,
-        }
+        assert source_reconnected == _connected(VIEWER_PIN, 2)
+        assert viewer_reconnected == _connected(SOURCE_PIN, 2)
 
         # A fresh authenticated epoch resets channel sequence state while the
         # source process and both local controller sockets remain alive.
@@ -370,6 +375,8 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
             "connected", seq=1)
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
             "connected", seq=1)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "identity", seq=51, payload=DISPLAY_IDENTITY.encode())
 
         announcement = StreamAnnouncement(
             source_revision=7, width=4, height=3, stride=16,
@@ -425,6 +432,8 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
             "connected", seq=2)
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
             "connected", seq=2)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "identity", seq=51, payload=DISPLAY_IDENTITY.encode())
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
             "announce", seq=7,
             payload=encode_local_announcement(announcement))

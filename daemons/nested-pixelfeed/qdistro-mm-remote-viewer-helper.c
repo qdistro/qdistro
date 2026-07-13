@@ -49,12 +49,17 @@ struct state {
 	struct qdwin_nested_manager_v1 *manager;
 	struct qdwin_nested_toplevel_v1 *proxy;
 	uint32_t manager_name;
+	uint32_t manager_version;
 	uint64_t source_revision;
 	uint32_t width;
 	uint32_t height;
 	uint32_t stride;
 	char *app_id;
 	char *title;
+	char *source_machine;
+	char *trust_domain_id;
+	char *stream_id;
+	uint64_t generation;
 	uint8_t *pending_frame;
 	size_t pending_frame_len;
 	uint64_t pending_frame_seq;
@@ -254,10 +259,11 @@ registry_global(void *data, struct wl_registry *registry, uint32_t name,
 	struct state *state = data;
 	if (strcmp(interface, qdwin_nested_manager_v1_interface.name) != 0)
 		return;
-	uint32_t use_version = version > 2 ? 2 : version;
+	uint32_t use_version = version > 3 ? 3 : version;
 	state->manager = wl_registry_bind(registry, name,
 		&qdwin_nested_manager_v1_interface, use_version);
 	state->manager_name = name;
+	state->manager_version = use_version;
 }
 
 static void
@@ -324,7 +330,8 @@ start_wayland(struct state *state)
 		return -1;
 	state->registry = wl_display_get_registry(state->display);
 	wl_registry_add_listener(state->registry, &registry_listener, state);
-	if (wl_display_roundtrip(state->display) < 0 || !state->manager) {
+	if (wl_display_roundtrip(state->display) < 0 || !state->manager ||
+	    state->manager_version < 3) {
 		errno = EPROTO;
 		return -1;
 	}
@@ -362,6 +369,9 @@ static int
 advertise_proxy(struct state *state,
 		const struct qdmm_announcement_view *announcement)
 {
+	if (!state->source_machine || !state->trust_domain_id ||
+	    !state->stream_id || !state->generation)
+		return -1;
 	if (state->proxy)
 		return announcement_equal(state, announcement) ? 0 : -1;
 	state->app_id = copy_text(announcement->app_id, announcement->app_id_len);
@@ -381,6 +391,10 @@ advertise_proxy(struct state *state,
 		state->proxy, &proxy_listener, state);
 	qdwin_nested_toplevel_v1_set_geometry(
 		state->proxy, (int32_t)state->width, (int32_t)state->height);
+	qdwin_nested_toplevel_v1_set_remote_identity(
+		state->proxy, state->source_machine, state->trust_domain_id,
+		state->stream_id, (uint32_t)(state->generation >> 32),
+		(uint32_t)state->generation);
 	if (wl_display_roundtrip(state->display) < 0)
 		return -1;
 	LOGI("advertised source=%s app_id=%s geometry=%ux%u",
@@ -485,6 +499,44 @@ handle_controller(struct state *state)
 			     (unsigned long long)local.seq);
 		}
 		break;
+	case QDMM_LOCAL_IDENTITY: {
+		struct qdmm_identity_view identity;
+		if (qdmm_parse_identity(message, length, &identity) < 0 ||
+		    local.seq != identity.generation) {
+			rc = -1;
+			break;
+		}
+		if (state->source_machine) {
+			if (state->generation != identity.generation ||
+			    strlen(state->source_machine) != identity.source_machine_len ||
+			    strlen(state->trust_domain_id) != identity.trust_domain_id_len ||
+			    strlen(state->stream_id) != identity.stream_id_len ||
+			    memcmp(state->source_machine, identity.source_machine,
+				   identity.source_machine_len) != 0 ||
+			    memcmp(state->trust_domain_id, identity.trust_domain_id,
+				   identity.trust_domain_id_len) != 0 ||
+			    memcmp(state->stream_id, identity.stream_id,
+				   identity.stream_id_len) != 0)
+				rc = -1;
+			break;
+		}
+		state->source_machine = copy_text(
+			identity.source_machine, identity.source_machine_len);
+		state->trust_domain_id = copy_text(
+			identity.trust_domain_id, identity.trust_domain_id_len);
+		state->stream_id = copy_text(identity.stream_id, identity.stream_id_len);
+		if (!state->source_machine || !state->trust_domain_id ||
+		    !state->stream_id) {
+			rc = -1;
+			break;
+		}
+		state->generation = identity.generation;
+		LOGI("accepted controller display identity source=%s trust=%s "
+		     "stream=%s generation=%llu", state->source_machine,
+		     state->trust_domain_id, state->stream_id,
+		     (unsigned long long)state->generation);
+		break;
+	}
 	case QDMM_LOCAL_ANNOUNCE: {
 		struct qdmm_announcement_view announcement;
 		if (qdmm_parse_announcement(message, length, &announcement) < 0 ||
@@ -671,6 +723,9 @@ cleanup(struct state *state)
 	free(state->pending_frame);
 	free(state->app_id);
 	free(state->title);
+	free(state->source_machine);
+	free(state->trust_domain_id);
+	free(state->stream_id);
 }
 
 int

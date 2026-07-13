@@ -11,6 +11,7 @@ from multimachine.remote_nested_protocol import (
     FRAME_HEADER,
     LOCAL_HEADER,
     LocalBoundaryMessage,
+    RemoteDisplayIdentity,
     RawFrame,
     SourceHelperConfig,
     StreamAnnouncement,
@@ -174,6 +175,19 @@ def test_frame_must_match_announced_geometry() -> None:
 ])
 def test_local_helper_boundary_round_trip(message) -> None:
     assert LocalBoundaryMessage.decode(message.encode()) == message
+
+
+def test_remote_display_identity_round_trip_and_strict_validation() -> None:
+    identity = RemoteDisplayIdentity(
+        source_machine="vm-source", trust_domain_id="owner-machines",
+        stream_id="stream_0123456789abcdef", generation=51)
+    assert RemoteDisplayIdentity.decode(identity.encode()) == identity
+    with pytest.raises(RemoteAdapterError, match="source_machine"):
+        RemoteDisplayIdentity("bad machine", "owner", identity.stream_id, 1).encode()
+    with pytest.raises(RemoteAdapterError, match="stream_id"):
+        RemoteDisplayIdentity("source", "owner", "short", 1).encode()
+    with pytest.raises(RemoteAdapterError, match="length"):
+        RemoteDisplayIdentity.decode(identity.encode()[:-1])
 
 
 def test_local_helper_boundary_rejects_truncation_header_and_unknown_kind() -> None:

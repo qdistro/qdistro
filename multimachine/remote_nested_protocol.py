@@ -31,6 +31,8 @@ LOCAL_VERSION = 1
 LOCAL_HEADER = struct.Struct("!4sBBHQ")
 LOCAL_ANNOUNCE_MAGIC = b"QDMA"
 LOCAL_ANNOUNCE_HEADER = struct.Struct("!4sBBHQIIIHH")
+LOCAL_IDENTITY_MAGIC = b"QDMI"
+LOCAL_IDENTITY_HEADER = struct.Struct("!4sBBQHHH")
 SOURCE_CONFIG_MAGIC = b"QDMS"
 SOURCE_CONFIG_HEADER = struct.Struct("!4sBBHQHHHH")
 LOCAL_INPUT_STRUCTS = {
@@ -48,6 +50,8 @@ _PW_NODE = re.compile(
     r"weston\.pipewire:[1-9][0-9]{0,9}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _INPUT_SINK = re.compile(
     r"/.*/qdwin-nested-input-[1-9][0-9]*-[1-9][0-9]*\.sock\Z")
+_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_STREAM_ID = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 LOCAL_MESSAGE_TYPES = {
     "connected": 1,
     "announce": 2,
@@ -64,6 +68,7 @@ LOCAL_MESSAGE_TYPES = {
     "drop_transport": 13,
     "shutdown": 14,
     "close_request": 15,
+    "identity": 16,
 }
 _LOCAL_MESSAGE_NAMES = {
     value: key for key, value in LOCAL_MESSAGE_TYPES.items()
@@ -327,6 +332,62 @@ class RawFrame:
     def matches(self, announcement: StreamAnnouncement) -> bool:
         return (self.width, self.height, self.stride) == (
             announcement.width, announcement.height, announcement.stride)
+
+
+@dataclass(frozen=True)
+class RemoteDisplayIdentity:
+    """Authority-bound identity delivered only over the local helper socket."""
+
+    source_machine: str
+    trust_domain_id: str
+    stream_id: str
+    generation: int
+
+    def validate(self) -> None:
+        for name in ("source_machine", "trust_domain_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _IDENTITY.fullmatch(value) is None:
+                raise RemoteAdapterError(f"invalid display {name} {value!r}")
+        if (not isinstance(self.stream_id, str)
+                or _STREAM_ID.fullmatch(self.stream_id) is None):
+            raise RemoteAdapterError(f"invalid display stream_id {self.stream_id!r}")
+        _integer(self.generation, label="display generation",
+                 minimum=1, maximum=2**64 - 1)
+
+    def encode(self) -> bytes:
+        self.validate()
+        source = self.source_machine.encode("ascii")
+        trust = self.trust_domain_id.encode("ascii")
+        stream = self.stream_id.encode("ascii")
+        return LOCAL_IDENTITY_HEADER.pack(
+            LOCAL_IDENTITY_MAGIC, LOCAL_VERSION, 0, self.generation,
+            len(source), len(trust), len(stream)) + source + trust + stream
+
+    @classmethod
+    def decode(cls, payload: bytes) -> RemoteDisplayIdentity:
+        if (not isinstance(payload, bytes)
+                or len(payload) < LOCAL_IDENTITY_HEADER.size):
+            raise RemoteAdapterError("display identity is truncated")
+        magic, version, flags, generation, source_len, trust_len, stream_len = (
+            LOCAL_IDENTITY_HEADER.unpack(payload[:LOCAL_IDENTITY_HEADER.size]))
+        if magic != LOCAL_IDENTITY_MAGIC or version != LOCAL_VERSION or flags != 0:
+            raise RemoteAdapterError("unsupported display identity")
+        lengths = (source_len, trust_len, stream_len)
+        if any(length == 0 for length in lengths):
+            raise RemoteAdapterError("display identity field is empty")
+        if len(payload) != LOCAL_IDENTITY_HEADER.size + sum(lengths):
+            raise RemoteAdapterError("display identity length does not match header")
+        offset = LOCAL_IDENTITY_HEADER.size
+        fields = []
+        try:
+            for length in lengths:
+                fields.append(payload[offset:offset + length].decode("ascii"))
+                offset += length
+        except UnicodeDecodeError as exc:
+            raise RemoteAdapterError("display identity is not ASCII") from exc
+        identity = cls(fields[0], fields[1], fields[2], generation)
+        identity.validate()
+        return identity
 
 
 @dataclass(frozen=True)

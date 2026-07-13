@@ -6,6 +6,7 @@
 
 #define QDMM_LOCAL_HEADER_SIZE 16u
 #define QDMM_LOCAL_ANNOUNCE_HEADER_SIZE 32u
+#define QDMM_LOCAL_IDENTITY_HEADER_SIZE 20u
 #define QDMM_SOURCE_CONFIG_HEADER_SIZE 24u
 #define QDMM_FRAME_HEADER_SIZE 24u
 #define QDMM_MAX_MEDIA_BYTES (3u * 1024u * 1024u)
@@ -28,6 +29,7 @@ enum qdmm_local_kind {
 	QDMM_LOCAL_FOCUS = 11,
 	QDMM_LOCAL_DETACHED = 12,
 	QDMM_LOCAL_CLOSE_REQUEST = 15,
+	QDMM_LOCAL_IDENTITY = 16,
 };
 
 struct qdmm_local_message_view {
@@ -46,6 +48,16 @@ struct qdmm_announcement_view {
 	size_t app_id_len;
 	const uint8_t *title;
 	size_t title_len;
+};
+
+struct qdmm_identity_view {
+	uint64_t generation;
+	const uint8_t *source_machine;
+	size_t source_machine_len;
+	const uint8_t *trust_domain_id;
+	size_t trust_domain_id_len;
+	const uint8_t *stream_id;
+	size_t stream_id_len;
 };
 
 struct qdmm_source_config_view {
@@ -74,6 +86,9 @@ int qdmm_parse_local_message(const uint8_t *message, size_t length,
 
 int qdmm_parse_announcement(const uint8_t *message, size_t length,
 			    struct qdmm_announcement_view *out);
+
+int qdmm_parse_identity(const uint8_t *message, size_t length,
+			struct qdmm_identity_view *out);
 
 int qdmm_parse_source_config(const uint8_t *config, size_t length,
 			     struct qdmm_source_config_view *out);

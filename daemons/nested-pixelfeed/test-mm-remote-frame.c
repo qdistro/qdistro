@@ -132,6 +132,41 @@ main(void)
 	      bad_announce, sizeof bad_announce, &announced) < 0,
 	      "hostile announcement length accepted");
 
+	static const char source_machine[] = "vm-source";
+	static const char trust_domain[] = "owner-machines";
+	static const char stream_id[] = "stream_0123456789abcdef";
+	uint8_t identity[QDMM_LOCAL_HEADER_SIZE +
+		QDMM_LOCAL_IDENTITY_HEADER_SIZE + sizeof source_machine - 1 +
+		sizeof trust_domain - 1 + sizeof stream_id - 1] = {0};
+	memcpy(identity, "QDML", 4);
+	identity[4] = 1;
+	identity[5] = QDMM_LOCAL_IDENTITY;
+	write_u64(identity + 8, 51);
+	uint8_t *id = identity + QDMM_LOCAL_HEADER_SIZE;
+	memcpy(id, "QDMI", 4);
+	id[4] = 1;
+	write_u64(id + 6, 51);
+	write_u16(id + 14, sizeof source_machine - 1);
+	write_u16(id + 16, sizeof trust_domain - 1);
+	write_u16(id + 18, sizeof stream_id - 1);
+	uint8_t *id_text = id + QDMM_LOCAL_IDENTITY_HEADER_SIZE;
+	memcpy(id_text, source_machine, sizeof source_machine - 1);
+	id_text += sizeof source_machine - 1;
+	memcpy(id_text, trust_domain, sizeof trust_domain - 1);
+	id_text += sizeof trust_domain - 1;
+	memcpy(id_text, stream_id, sizeof stream_id - 1);
+	struct qdmm_identity_view parsed_identity;
+	CHECK(qdmm_parse_identity(identity, sizeof identity, &parsed_identity) == 0,
+	      "valid display identity rejected");
+	CHECK(parsed_identity.generation == 51 &&
+	      parsed_identity.source_machine_len == sizeof source_machine - 1 &&
+	      parsed_identity.trust_domain_id_len == sizeof trust_domain - 1 &&
+	      parsed_identity.stream_id_len == sizeof stream_id - 1,
+	      "display identity parsed incorrectly");
+	identity[sizeof identity - 1] = ' ';
+	CHECK(qdmm_parse_identity(identity, sizeof identity, &parsed_identity) < 0,
+	      "hostile display identity accepted");
+
 	static const char pw_node[] = "weston.pipewire:123:pipewire-0";
 	static const char input_sink[] =
 		"/run/user/1000/qdwin-nested-input-123-7.sock";

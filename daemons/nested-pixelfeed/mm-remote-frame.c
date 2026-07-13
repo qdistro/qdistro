@@ -91,13 +91,66 @@ qdmm_parse_local_message(const uint8_t *message, size_t length,
 	if (!message || !out || length < QDMM_LOCAL_HEADER_SIZE ||
 	    length > QDMM_MAX_LOCAL_BYTES || memcmp(message, "QDML", 4) != 0 ||
 	    message[4] != 1 || message[5] < QDMM_LOCAL_CONNECTED ||
-	    message[5] > QDMM_LOCAL_CLOSE_REQUEST ||
+	    message[5] > QDMM_LOCAL_IDENTITY ||
 	    message[6] != 0 || message[7] != 0)
 		return -1;
 	out->kind = message[5];
 	out->seq = read_be64(message + 8);
 	out->payload = message + QDMM_LOCAL_HEADER_SIZE;
 	out->payload_len = length - QDMM_LOCAL_HEADER_SIZE;
+	return 0;
+}
+
+static int
+identity_valid(const uint8_t *text, size_t length, int stream)
+{
+	if (!text || !length || length > 128)
+		return 0;
+	for (size_t i = 0; i < length; i++) {
+		uint8_t c = text[i];
+		int alpha_num = (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+		if (!alpha_num && !(i > 0 && (c == '_' || c == '-' ||
+		    (!stream && (c == '.' || c == ':')))))
+			return 0;
+	}
+	return !stream || length >= 16;
+}
+
+int
+qdmm_parse_identity(const uint8_t *message, size_t length,
+		    struct qdmm_identity_view *out)
+{
+	struct qdmm_local_message_view local;
+	if (!out || qdmm_parse_local_message(message, length, &local) < 0 ||
+	    local.kind != QDMM_LOCAL_IDENTITY ||
+	    local.payload_len < QDMM_LOCAL_IDENTITY_HEADER_SIZE)
+		return -1;
+	const uint8_t *identity = local.payload;
+	if (memcmp(identity, "QDMI", 4) != 0 || identity[4] != 1 ||
+	    identity[5] != 0)
+		return -1;
+	uint64_t generation = read_be64(identity + 6);
+	size_t source_len = read_be16(identity + 14);
+	size_t trust_len = read_be16(identity + 16);
+	size_t stream_len = read_be16(identity + 18);
+	if (!generation || source_len + trust_len + stream_len !=
+	    local.payload_len - QDMM_LOCAL_IDENTITY_HEADER_SIZE)
+		return -1;
+	const uint8_t *source = identity + QDMM_LOCAL_IDENTITY_HEADER_SIZE;
+	const uint8_t *trust = source + source_len;
+	const uint8_t *stream = trust + trust_len;
+	if (!identity_valid(source, source_len, 0) ||
+	    !identity_valid(trust, trust_len, 0) ||
+	    !identity_valid(stream, stream_len, 1))
+		return -1;
+	out->generation = generation;
+	out->source_machine = source;
+	out->source_machine_len = source_len;
+	out->trust_domain_id = trust;
+	out->trust_domain_id_len = trust_len;
+	out->stream_id = stream;
+	out->stream_id_len = stream_len;
 	return 0;
 }
 

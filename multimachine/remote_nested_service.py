@@ -27,6 +27,7 @@ from .remote_nested_protocol import (
     LOCAL_HEADER,
     LocalBoundaryMessage,
     RawFrame,
+    RemoteDisplayIdentity,
     StreamAnnouncement,
     decode_local_announcement,
     decode_local_input_event,
@@ -343,6 +344,7 @@ class RemoteNestedController:
         self._media_acked = 0
         self._pending_frame: RawFrame | None = None
         self._closing_after_send = False
+        self._display_identity: RemoteDisplayIdentity | None = None
 
     def run(self) -> None:
         try:
@@ -403,11 +405,35 @@ class RemoteNestedController:
             raise RemoteAdapterError("endpoint event is invalid")
         op = event["op"]
         if op == "connected":
+            if set(event) != {
+                    "op", "tls_version", "peer_cert_sha256", "epoch",
+                    "display_identity"}:
+                raise RemoteAdapterError(
+                    "endpoint connected fields do not match schema")
             epoch = _positive_integer(event.get("epoch"), label="connection epoch")
+            raw_identity = event.get("display_identity")
+            if not isinstance(raw_identity, Mapping) or set(raw_identity) != {
+                    "source_machine", "trust_domain_id", "stream_id",
+                    "generation"}:
+                raise RemoteAdapterError("endpoint display identity is invalid")
+            identity = RemoteDisplayIdentity(
+                source_machine=raw_identity["source_machine"],
+                trust_domain_id=raw_identity["trust_domain_id"],
+                stream_id=raw_identity["stream_id"],
+                generation=raw_identity["generation"])
+            identity.validate()
+            if self._display_identity not in (None, identity):
+                raise RemoteAdapterError(
+                    "endpoint display identity changed across reconnect")
+            self._display_identity = identity
             self.state.transport_connected(epoch)
             self._media_sent = self._media_acked = 0
             self._pending_frame = None
             self._send_helper(LocalBoundaryMessage("connected", seq=epoch))
+            if self.role == "viewer":
+                self._send_helper(LocalBoundaryMessage(
+                    "identity", seq=identity.generation,
+                    payload=identity.encode()))
             if (self.role == "source"
                     and isinstance(self.state, SourceNestedState)
                     and self.state.announcement is not None):

@@ -13,6 +13,7 @@ from multimachine.remote_adapter_transport import MAX_LOCAL_FRAME_BYTES, recv_fr
 from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
+    RemoteDisplayIdentity,
     StreamAnnouncement,
     decode_local_input_event,
     encode_local_announcement,
@@ -31,6 +32,9 @@ ANNOUNCEMENT = StreamAnnouncement(
 FRAMES = [
     RawFrame(4, 3, 16, bytes([value]) * 48) for value in (1, 2, 3)
 ]
+DISPLAY_IDENTITY = RemoteDisplayIdentity(
+    source_machine="vm-source", trust_domain_id="owner-machines",
+    stream_id="stream_0123456789abcdef", generation=51)
 
 
 def _controller(role: str):
@@ -43,6 +47,15 @@ def _controller(role: str):
 
 
 def _event(controller: RemoteNestedController, **event) -> None:
+    if event.get("op") == "connected":
+        event.setdefault("tls_version", "TLSv1.3")
+        event.setdefault("peer_cert_sha256", "a" * 64)
+        event.setdefault("display_identity", {
+            "source_machine": DISPLAY_IDENTITY.source_machine,
+            "trust_domain_id": DISPLAY_IDENTITY.trust_domain_id,
+            "stream_id": DISPLAY_IDENTITY.stream_id,
+            "generation": DISPLAY_IDENTITY.generation,
+        })
     controller._handle_endpoint(json.dumps(event).encode())
 
 
@@ -133,6 +146,8 @@ def test_viewer_controller_acks_only_helper_delivered_frames_and_sends_input() -
     try:
         _event(controller, op="connected", epoch=1)
         assert _helper_event(helper).kind == "connected"
+        assert _helper_event(helper) == LocalBoundaryMessage(
+            "identity", seq=51, payload=DISPLAY_IDENTITY.encode())
         _event(controller, **_received(
             channel="control", kind="announce", seq=1,
             payload=ANNOUNCEMENT.encode()))
@@ -170,6 +185,27 @@ def test_viewer_controller_acks_only_helper_delivered_frames_and_sends_input() -
             controller._handle_helper(LocalBoundaryMessage(
                 "key", payload=encode_local_input_event(
                     "key", {"code": 30, "pressed": True})))
+    finally:
+        endpoint.close()
+        helper.close()
+
+
+def test_viewer_controller_rejects_identity_change_across_reconnect() -> None:
+    controller, endpoint, helper = _controller("viewer")
+    try:
+        _event(controller, op="connected", epoch=1)
+        assert _helper_event(helper).kind == "connected"
+        assert _helper_event(helper).kind == "identity"
+        _event(controller, op="detached", epoch=1, releases=[])
+        assert _helper_event(helper) == LocalBoundaryMessage("detached", seq=1)
+        with pytest.raises(RemoteAdapterError, match="changed across reconnect"):
+            _event(controller, op="connected", epoch=2,
+                   display_identity={
+                       "source_machine": "other-source",
+                       "trust_domain_id": DISPLAY_IDENTITY.trust_domain_id,
+                       "stream_id": DISPLAY_IDENTITY.stream_id,
+                       "generation": DISPLAY_IDENTITY.generation,
+                   })
     finally:
         endpoint.close()
         helper.close()
