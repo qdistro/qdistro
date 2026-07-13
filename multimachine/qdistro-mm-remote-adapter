@@ -1,13 +1,13 @@
 #!/usr/bin/python3
-"""Installed entry point for the trusted R6 adapter-session handoff."""
+"""Installed entry point for the R6 pinned-TLS adapter."""
 import sys
 from pathlib import Path
 
 installed = Path("/usr/local/lib/qdistro")
 source_tree = Path(__file__).resolve().parents[1]
-source_module = source_tree / "multimachine/mm_remote_session_launcher.py"
+source_module = source_tree / "multimachine/remote_adapter_transport.py"
 sys.path.insert(0, str(source_tree if source_module.is_file() else installed))
 
-from multimachine.mm_remote_session_launcher import main
+from multimachine.remote_adapter_transport import main
 
 raise SystemExit(main())

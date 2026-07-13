@@ -38,3 +38,6 @@ def test_installer_ships_remote_session_authority_and_launcher() -> None:
     assert "mm_remote_session_launcher.py" in text
     assert '"$SRC/qdistro-mm-remote-session-launcher"' in text
     assert "/usr/local/bin/qdistro-mm-remote-session-launcher" in text
+    assert "remote_adapter_transport.py" in text
+    assert '"$SRC/qdistro-mm-remote-adapter"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-adapter" in text
