@@ -97,6 +97,12 @@ class RemoteNestedRegistry:
         self.programs = programs
         self._process_factory = process_factory
         self._running: dict[tuple[str, str], _RunningStream] = {}
+        # Survives detach/poll within this dock-session owner. A remount is a
+        # new authority generation; accepting the same/older generation after
+        # its process tree disappeared would let a cached grant resurrect a
+        # stale attachment. Transport reconnects within one generation remain
+        # inside the R6 supervisor and do not pass through this registry seam.
+        self._last_generation: dict[tuple[str, str], int] = {}
 
     @property
     def keys(self) -> tuple[tuple[str, str], ...]:
@@ -192,6 +198,10 @@ class RemoteNestedRegistry:
                 self._validate_spec(spec)
                 if spec.key in self._running or spec.key in keys:
                     raise ValueError("duplicate nested stream identity")
+                previous = self._last_generation.get(spec.key)
+                if previous is not None and spec.generation <= previous:
+                    raise ValueError(
+                        "nested stream remount generation must increase")
                 if fds.intersection(spec.owned_fds):
                     raise ValueError("nested streams cannot share inherited fds")
                 keys.add(spec.key)
@@ -212,6 +222,7 @@ class RemoteNestedRegistry:
                 self._close_fds(spec.owned_fds)
             for spec, process in started:
                 self._running[spec.key] = _RunningStream(spec, process)
+                self._last_generation[spec.key] = spec.generation
         except BaseException:
             started_keys = {spec.key for spec, _process in started}
             for spec in pending:
@@ -245,11 +256,23 @@ class RemoteNestedRegistry:
         self._stop_process(running.process)
         return True
 
-    def stop_all(self) -> None:
+    def detach_all(self) -> tuple[tuple[str, str], ...]:
+        """Atomically remove every shared-GUI attachment.
+
+        The active map is cleared before child termination begins, so callers
+        and concurrent status polling can never observe a half-detached set.
+        Source applications are not children of these supervisors and remain
+        clients of their local qdwin. Returned keys are the exact attachment
+        set which was revoked; a later add requires a newer generation.
+        """
         running = tuple(self._running.values())
         self._running.clear()
         for stream in running:
             self._stop_process(stream.process)
+        return tuple(stream.spec.key for stream in running)
+
+    def stop_all(self) -> None:
+        self.detach_all()
 
     def __enter__(self) -> "RemoteNestedRegistry":
         return self

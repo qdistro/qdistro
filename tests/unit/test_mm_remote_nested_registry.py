@@ -42,11 +42,12 @@ class FakeProcess:
         return self.returncode
 
 
-def spec(origin: str, stream: str, port: int, *, source: bool = False):
+def spec(origin: str, stream: str, port: int, *, source: bool = False,
+         generation: int = 7):
     count = 7 if source else 5
     fds = [os.open("/dev/null", os.O_RDONLY) for _ in range(count)]
     return RemoteNestedStreamSpec(
-        origin_machine_id=origin, stream_id=stream, generation=7,
+        origin_machine_id=origin, stream_id=stream, generation=generation,
         host="127.0.0.1", port=port,
         grant_fd=fds[0], secret_fd=fds[1], tls_cert_fd=fds[2],
         tls_key_fd=fds[3], peer_cert_fd=fds[4],
@@ -130,6 +131,39 @@ def test_remove_stops_only_exact_stream():
     assert processes[0].terminated
     assert not processes[1].terminated
     assert registry.keys == (("source-a", "b"),)
+
+
+def test_detach_is_atomic_and_remount_requires_fresh_generation():
+    processes = []
+
+    def factory(*args, **kwargs):
+        process = FakeProcess(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    registry = RemoteNestedRegistry(
+        role="viewer", local_machine_id="viewer-b", session_id="dock-7",
+        process_factory=factory)
+    registry.add_many((spec("source-a", "a", 14401, generation=7),
+                       spec("source-a", "b", 14402, generation=7)))
+
+    detached = registry.detach_all()
+
+    assert detached == (("source-a", "a"), ("source-a", "b"))
+    assert registry.keys == ()
+    assert all(process.terminated for process in processes)
+
+    stale = spec("source-a", "a", 14401, generation=7)
+    with pytest.raises(ValueError, match="generation must increase"):
+        registry.add(stale)
+    assert_closed(stale)
+    assert len(processes) == 2
+
+    registry.add_many((spec("source-a", "a", 14401, generation=8),
+                       spec("source-a", "b", 14402, generation=8)))
+    assert registry.keys == (("source-a", "a"), ("source-a", "b"))
+    assert len(processes) == 4
+    assert not processes[2].terminated and not processes[3].terminated
 
 
 def test_duplicate_batch_rejects_before_spawn_and_closes_every_fd():
