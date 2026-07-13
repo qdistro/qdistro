@@ -124,11 +124,41 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
     for relative in (
         "Services/Qdwin/Qdwin.qml", "Services/Qdshell/BrokerGate.js",
         "Services/Qdwin/RemoteMachine.js",
+        "Services/Qdwin/RemoteMachineWindows.qml",
+        "Modules/Bar/Widgets/ActiveWindow.qml",
     ):
         backend._push(vm, qdshell / relative, f"/tmp/qdshell-r5/{relative}")
     if role == "source":
         backend._push(vm, popup, "/tmp/r5-popup-probe", mode=0o755)
 
+    # Both source and viewer run qdwin in this gate.  Stage the exact local
+    # compositor sources on both sides so a source-side lifecycle fix cannot
+    # be accidentally tested against whichever qdwin tree a preserved VM
+    # happened to contain from an earlier run.
+    for relative in (
+        "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
+        "qdwin/qdwin-nested-v1.xml", "qdwin/qdwin-shell-v1.xml",
+    ):
+        backend._push_large(
+            vm, qdwin / relative,
+            "/root/qdistro-src/qdwin/" + relative)
+    backend._vmexec(vm, "rm -rf /root/qdistro-src/qdwin/build-r6")
+    backend._vmexec(
+        vm, "meson setup /root/qdistro-src/qdwin/build-r6 "
+            "/root/qdistro-src/qdwin")
+    backend._vmexec(
+        vm, "ninja -C /root/qdistro-src/qdwin/build-r6 qdwin-shell.so")
+    backend._vmexec(
+        vm, "install -m 0755 /root/qdistro-src/qdwin/build-r6/"
+            "qdwin-shell.so /usr/lib64/weston/qdwin-shell.so; "
+            "install -m 0644 /root/qdistro-src/qdwin/qdwin/"
+            "qdwin-nested-v1.xml /usr/share/qdistro/protocols/; "
+            "install -m 0644 /root/qdistro-src/qdwin/qdwin/"
+            "qdwin-shell-v1.xml /usr/share/qdistro/protocols/")
+
+    # Rebuild the product helpers only after installing the matching qdwin
+    # protocol XML. This prevents preserved VM build trees from silently
+    # compiling a new helper against an older generated client header.
     daemon_files = (
         "daemons/meson.build",
         "daemons/nested-pixelfeed/mm-remote-frame-protocol.h",
@@ -148,25 +178,23 @@ def stage_product(backend: QciVMBackend, vm: str, role: str,
     backend._vmexec(
         vm, f"ninja -C /root/qdistro-src/qdistro/daemons/build {targets}")
 
-    # Both source and viewer run qdwin in this gate.  Stage the exact local
-    # compositor sources on both sides so a source-side lifecycle fix cannot
-    # be accidentally tested against whichever qdwin tree a preserved VM
-    # happened to contain from an earlier run.
+    # The v31 identity event terminates in qdshell's native binding. Stage and
+    # rebuild that binding as part of the same exact-source closure; copying
+    # QML alone would leave either live shell bound at v28 and make the new
+    # signal handler a QML load error.
     for relative in (
-        "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
+        "qml-plugin/qdwin-binding.cpp", "qml-plugin/qdwin-binding.h",
     ):
         backend._push_large(
-            vm, qdwin / relative,
-            "/root/qdistro-src/qdwin/" + relative)
-    backend._vmexec(vm, "rm -rf /root/qdistro-src/qdwin/build-r6")
+            vm, qdshell / relative,
+            "/root/qdistro-src/qdshell/" + relative)
     backend._vmexec(
-        vm, "meson setup /root/qdistro-src/qdwin/build-r6 "
-            "/root/qdistro-src/qdwin")
+        vm, "ninja -C /root/qdistro-src/qdshell/build "
+            "qml-plugin/libqdistro-qdwin.so")
     backend._vmexec(
-        vm, "ninja -C /root/qdistro-src/qdwin/build-r6 qdwin-shell.so")
-    backend._vmexec(
-        vm, "install -m 0755 /root/qdistro-src/qdwin/build-r6/"
-            "qdwin-shell.so /usr/lib64/weston/qdwin-shell.so")
+        vm, "install -m 0755 /root/qdistro-src/qdshell/build/"
+            "qml-plugin/libqdistro-qdwin.so /usr/share/qdistro/qml/"
+            "Qdistro/Qdwin/libqdistro-qdwin.so")
     if role == "source":
         backend._vmexec(
             vm, "install -m 0755 /root/qdistro-src/qdistro/daemons/build/"
@@ -372,6 +400,9 @@ def main() -> int:
         "viewer-product-tree-clean": viewer_peer.returncode == 0,
         "real-viewer-proxy-bound-pixels": viewer.get("proxy_bound_pixels") is True,
         "real-qdni-input-round-trip": source.get("input_round_trip") is True,
+        "authority-bound-protected-origin-badge": (
+            viewer.get("protected_identity_received") is True
+            and viewer.get("protected_badge_reported") is True),
         "disconnect-preserved-source-app": source.get("app_survived_detach") is True,
         "disconnect-preserved-viewer-proxy": viewer.get("detach_preserved_proxy") is True,
         "epoch-2-cached-pixels-decoder-acked": (

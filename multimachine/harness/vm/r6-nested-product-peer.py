@@ -190,6 +190,7 @@ def run_source(args: argparse.Namespace) -> dict:
 
 def run_viewer(args: argparse.Namespace) -> dict:
     weston = VIEWER_RT / "weston.log"
+    qdshell = VIEWER_RT / "qdshell.log"
     session_log = VIEWER_RT / "session.log"
     authority_fds = open_inputs(args)
     argv = supervisor_argv(args, authority_fds)
@@ -208,6 +209,20 @@ def run_viewer(args: argparse.Namespace) -> dict:
         wait_match(session_log, r"controller connected epoch=1")
         handle = int(wait_match(
             weston, r"nested-proxy: created handle=([0-9]+)").group(1))
+        wait_match(
+            qdshell,
+            rf"nested_proxy_remote_identity handle={handle} "
+            r"source=vm-source trust_domain=owner-machines "
+            r"stream=stream_r6_product_0123456789 generation=72")
+        badge = subprocess.run(
+            ["qs", "-p", "/tmp/qdshell-r5", "ipc", "call",
+             "multimachine", "list"], env=env, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True).stdout
+        if ("REMOTE vm-source @ owner-machines" not in badge
+                or '\"authorized\":true' not in badge):
+            raise RuntimeError(
+                "protected nested identity missing from shell IPC\n" + badge)
         wait_match(weston, rf"bind_proxy_pixels handle={handle}\b")
         wait_count(session_log, r"received media epoch start", 1)
         wait_match(session_log, r"controller detached epoch=1")
@@ -236,6 +251,8 @@ def run_viewer(args: argparse.Namespace) -> dict:
             "epoch_2_media_received": True,
             "close_requested_upstream": True,
             "source_close_removed_proxy": True,
+            "protected_identity_received": True,
+            "protected_badge_reported": True,
         }
     finally:
         if session.poll() is None:
