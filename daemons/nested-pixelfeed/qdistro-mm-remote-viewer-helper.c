@@ -478,7 +478,12 @@ handle_controller(struct state *state)
 	}
 	switch (local.kind) {
 	case QDMM_LOCAL_CONNECTED:
-		if (!local.seq || local.payload_len) rc = -1;
+		if (!local.seq || local.payload_len) {
+			rc = -1;
+		} else {
+			LOGI("controller connected epoch=%llu",
+			     (unsigned long long)local.seq);
+		}
 		break;
 	case QDMM_LOCAL_ANNOUNCE: {
 		struct qdmm_announcement_view announcement;
@@ -496,6 +501,9 @@ handle_controller(struct state *state)
 		if (qdmm_parse_frame(message, length, &frame) < 0 ||
 		    remember_frame(state, message, length, &frame) < 0)
 			rc = -1;
+		else if (frame.seq == 1)
+			LOGI("received media epoch start geometry=%ux%u",
+			     frame.width, frame.height);
 		break;
 	}
 	case QDMM_LOCAL_DETACHED:
@@ -505,6 +513,8 @@ handle_controller(struct state *state)
 		}
 		state->attached = 0;
 		forward_detached(state, message, length);
+		LOGI("controller detached epoch=%llu",
+		     (unsigned long long)local.seq);
 		break;
 	case QDMM_LOCAL_SOURCE_CLOSED:
 		if (!local.seq || local.payload_len) {

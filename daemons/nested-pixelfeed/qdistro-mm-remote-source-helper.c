@@ -697,6 +697,8 @@ handle_controller(struct state *state)
 			state->frame_pending = 1;
 			pthread_cond_signal(&state->frame_ready);
 		}
+		LOGI("controller connected epoch=%llu cached_frame=%d",
+		     (unsigned long long)local.seq, state->last_pixels != NULL);
 		pthread_mutex_unlock(&state->mutex);
 		break;
 	case QDMM_LOCAL_DETACHED:
@@ -708,11 +710,16 @@ handle_controller(struct state *state)
 		state->connected = 0;
 		state->media_seq = 0;
 		state->frame_pending = 0;
+		LOGI("controller detached epoch=%llu",
+		     (unsigned long long)local.seq);
 		pthread_mutex_unlock(&state->mutex);
 		break;
 	case QDMM_LOCAL_MEDIA_ACK:
-		if (!local.seq || local.payload_len)
+		if (!local.seq || local.payload_len) {
 			rc = -1;
+		} else if (local.seq == 1) {
+			LOGI("decoder acknowledged media epoch start");
+		}
 		break;
 	case QDMM_LOCAL_MOTION:
 	case QDMM_LOCAL_BUTTON:
