@@ -29,10 +29,19 @@ from multimachine.remote_adapter_transport import (
     recv_frame,
     send_frame,
 )
+from multimachine.remote_nested_protocol import encode_input_event
+from multimachine.remote_nested_protocol import (
+    LocalBoundaryMessage,
+    RawFrame,
+    StreamAnnouncement,
+)
+from multimachine.remote_nested_service import MAX_BOUNDARY_FRAME_BYTES
 
 
 REPO = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO / "multimachine/qdistro-mm-remote-adapter"
+CONTROLLER_ENTRYPOINT = (
+    REPO / "multimachine/qdistro-mm-remote-nested-controller")
 SESSION = "viewer-session-7f5c"
 STREAM = "stream_0123456789abcdef"
 SECRET = bytes(range(32))
@@ -132,6 +141,16 @@ def _event(sock: socket.socket) -> dict:
 def _drop_transport(sock: socket.socket) -> None:
     send_frame(
         sock, b'{"op":"drop_transport"}', maximum=MAX_LOCAL_FRAME_BYTES)
+
+
+def _boundary_send(sock: socket.socket, message: LocalBoundaryMessage) -> None:
+    send_frame(sock, message.encode(), maximum=MAX_BOUNDARY_FRAME_BYTES)
+
+
+def _boundary_event(sock: socket.socket) -> LocalBoundaryMessage:
+    payload = recv_frame(sock, maximum=MAX_BOUNDARY_FRAME_BYTES)
+    assert payload is not None
+    return LocalBoundaryMessage.decode(payload)
 
 
 def _wait(process: subprocess.Popen, label: str) -> None:
@@ -255,6 +274,19 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
             resumed = _event(source_control)
             assert (resumed["kind"], resumed["seq"]) == (
                 "key", 1 if pressed else 2)
+        for seq, (kind, event) in enumerate((
+            ("motion", {"x_fixed": 256, "y_fixed": -128}),
+            ("axis", {"axis": 0, "value_fixed": 120}),
+            ("focus", {"focused": True}),
+            ("button", {"code": 272, "pressed": True}),
+            ("button", {"code": 272, "pressed": False}),
+        ), start=3):
+            _local_send(
+                viewer_control, channel="input", kind=kind,
+                payload=encode_input_event(kind, event))
+            assert _event(viewer_control)["op"] == "sent"
+            resumed = _event(source_control)
+            assert (resumed["kind"], resumed["seq"]) == (kind, seq)
 
         viewer_control.close()
         detached = _event(source_control)
@@ -272,6 +304,155 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
         for fd in (source_config_fd, viewer_config_fd, source_fd, viewer_fd):
             if fd >= 0:
                 os.close(fd)
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+
+@pytest.mark.integration
+def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
+    source_endpoint, source_controller_endpoint = socket.socketpair()
+    source_controller_helper, source_helper = socket.socketpair()
+    viewer_endpoint, viewer_controller_endpoint = socket.socketpair()
+    viewer_controller_helper, viewer_helper = socket.socketpair()
+    source_fd = source_endpoint.detach()
+    source_controller_endpoint_fd = source_controller_endpoint.detach()
+    source_controller_helper_fd = source_controller_helper.detach()
+    viewer_fd = viewer_endpoint.detach()
+    viewer_controller_endpoint_fd = viewer_controller_endpoint.detach()
+    viewer_controller_helper_fd = viewer_controller_helper.detach()
+    source_config, viewer_config = _configs(source_fd, viewer_fd, _port())
+    source_config_fd = sealed_config_fd(source_config)
+    viewer_config_fd = sealed_config_fd(viewer_config)
+    inherited = [
+        source_fd, source_controller_endpoint_fd, source_controller_helper_fd,
+        viewer_fd, viewer_controller_endpoint_fd, viewer_controller_helper_fd,
+        source_config_fd, viewer_config_fd,
+    ]
+    processes = []
+    try:
+        viewer = subprocess.Popen(
+            [str(ENTRYPOINT), "--config-fd", str(viewer_config_fd)],
+            pass_fds=(viewer_config_fd, viewer_fd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append(viewer)
+        viewer_controller = subprocess.Popen(
+            [str(CONTROLLER_ENTRYPOINT), "--role", "viewer",
+             "--endpoint-fd", str(viewer_controller_endpoint_fd),
+             "--helper-fd", str(viewer_controller_helper_fd)],
+            pass_fds=(viewer_controller_endpoint_fd,
+                      viewer_controller_helper_fd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append(viewer_controller)
+        source = subprocess.Popen(
+            [str(ENTRYPOINT), "--config-fd", str(source_config_fd)],
+            pass_fds=(source_config_fd, source_fd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append(source)
+        source_controller = subprocess.Popen(
+            [str(CONTROLLER_ENTRYPOINT), "--role", "source",
+             "--endpoint-fd", str(source_controller_endpoint_fd),
+             "--helper-fd", str(source_controller_helper_fd)],
+            pass_fds=(source_controller_endpoint_fd,
+                      source_controller_helper_fd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append(source_controller)
+        for fd in inherited:
+            os.close(fd)
+        inherited = []
+        source_helper.settimeout(10)
+        viewer_helper.settimeout(10)
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "connected", seq=1)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "connected", seq=1)
+
+        announcement = StreamAnnouncement(
+            source_revision=7, width=4, height=3, stride=16,
+            app_id="org.example.Editor", title="Remote editor")
+        _boundary_send(source_helper, LocalBoundaryMessage(
+            "announce", payload=announcement.encode()))
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "announce", seq=7, payload=announcement.encode())
+
+        frames = [
+            RawFrame(4, 3, 16, bytes([value]) * 48)
+            for value in (1, 2, 3)
+        ]
+        for frame in frames:
+            _boundary_send(source_helper, LocalBoundaryMessage(
+                "frame", payload=frame.encode()))
+        delivered_1 = _boundary_event(viewer_helper)
+        delivered_2 = _boundary_event(viewer_helper)
+        assert [delivered_1.seq, delivered_2.seq] == [1, 2]
+        assert RawFrame.decode(delivered_1.payload) == frames[0]
+        assert RawFrame.decode(delivered_2.payload) == frames[1]
+
+        _boundary_send(
+            viewer_helper, LocalBoundaryMessage("decoder_ack", seq=1))
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "media_ack", seq=1)
+        delivered_3 = _boundary_event(viewer_helper)
+        assert delivered_3.seq == 3
+        assert RawFrame.decode(delivered_3.payload) == frames[2]
+        _boundary_send(
+            viewer_helper, LocalBoundaryMessage("decoder_ack", seq=3))
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "media_ack", seq=3)
+
+        key_down = encode_input_event(
+            "key", {"code": 42, "pressed": True})
+        _boundary_send(viewer_helper, LocalBoundaryMessage(
+            "key", payload=key_down))
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "key", payload=key_down)
+
+        _boundary_send(viewer_helper, LocalBoundaryMessage("drop_transport"))
+        released = _boundary_event(source_helper)
+        assert released.kind == "key"
+        assert json.loads(released.payload) == {"code": 42, "pressed": False}
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "detached", seq=1)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "detached", seq=1)
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "connected", seq=2)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "connected", seq=2)
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "announce", seq=7, payload=announcement.encode())
+
+        resumed = RawFrame(4, 3, 16, b"r" * 48)
+        _boundary_send(source_helper, LocalBoundaryMessage(
+            "frame", payload=resumed.encode()))
+        delivered = _boundary_event(viewer_helper)
+        assert delivered.seq == 1
+        assert RawFrame.decode(delivered.payload) == resumed
+        _boundary_send(
+            viewer_helper, LocalBoundaryMessage("decoder_ack", seq=1))
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "media_ack", seq=1)
+
+        _boundary_send(
+            source_helper, LocalBoundaryMessage("source_closed", seq=8))
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "source_closed", seq=8)
+        _wait(source_controller, "source nested controller")
+        assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
+            "detached", seq=2)
+        _boundary_send(viewer_helper, LocalBoundaryMessage("shutdown"))
+        _wait(viewer_controller, "viewer nested controller")
+        _wait(source, "source endpoint")
+        _wait(viewer, "viewer endpoint")
+    finally:
+        for helper in (source_helper, viewer_helper):
+            try:
+                helper.close()
+            except OSError:
+                pass
+        for fd in inherited:
+            os.close(fd)
         for process in processes:
             if process.poll() is None:
                 process.kill()

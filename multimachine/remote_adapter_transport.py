@@ -32,6 +32,7 @@ from .remote_adapter import (
     RemoteSessionKey,
     verify_tls_peer_certificate,
 )
+from .remote_nested_protocol import decode_input_event
 
 
 MAX_LOCAL_FRAME_BYTES = MAX_WIRE_BYTES + 4096
@@ -446,15 +447,11 @@ class RemoteAdapterEndpoint:
         if message.channel == "media":
             self._last_media_received = message.seq
         if self.runtime.role == "source" and message.channel == "input":
-            try:
-                event = json.loads(message.payload)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise RemoteAdapterError("input payload is not JSON") from exc
-            if not isinstance(event, Mapping) or set(event) != {"code", "pressed"}:
-                raise RemoteAdapterError("input payload fields do not match schema")
-            self._life.record_input(
-                epoch=self.binding.epoch, kind=message.kind,
-                code=event["code"], pressed=event["pressed"])
+            event = decode_input_event(message.kind, message.payload)
+            if message.kind in {"key", "button"}:
+                self._life.record_input(
+                    epoch=self.binding.epoch, kind=message.kind,
+                    code=event["code"], pressed=event["pressed"])
         self._send_local_event(local, {
             "op": "received", "channel": message.channel,
             "kind": message.kind, "seq": message.seq, "ack": message.ack,

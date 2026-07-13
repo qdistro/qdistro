@@ -303,7 +303,8 @@ class QciVMBackend:
                 "mm_remote_session_authority.py",
                 "mm_remote_session_launcher.py", "mm_session_launcher.py",
                 "origin_authority.py", "rdp_client_wrapper.py",
-                "remote_adapter.py", "remote_adapter_transport.py"):
+                "remote_adapter.py", "remote_adapter_transport.py",
+                "remote_nested_protocol.py", "remote_nested_service.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
         for mod in ("__init__.py", "viewer_broker.py"):
             self._push(

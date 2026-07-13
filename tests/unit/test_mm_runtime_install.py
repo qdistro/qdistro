@@ -30,6 +30,10 @@ def test_installer_ships_trusted_session_launcher() -> None:
 def test_installer_ships_remote_adapter_core() -> None:
     text = INSTALLER.read_text(encoding="utf-8")
     assert "remote_adapter.py" in text
+    assert "remote_nested_protocol.py" in text
+    assert "remote_nested_service.py" in text
+    assert '"$SRC/qdistro-mm-remote-nested-controller"' in text
+    assert "/usr/local/bin/qdistro-mm-remote-nested-controller" in text
 
 
 def test_installer_ships_remote_session_authority_and_launcher() -> None:
