@@ -20,7 +20,7 @@ for module in __init__.py bridge.py control_source.py mm_broker.py \
               origin_authority.py \
               rdp_client_wrapper.py remote_adapter.py \
               remote_nested_protocol.py remote_nested_service.py \
-              remote_nested_supervisor.py \
+              remote_nested_supervisor.py remote_nested_registry.py \
               remote_adapter_transport.py \
               sidechannel.py; do
     install -o root -g root -m 0644 "$SRC/$module" "$DEST/$module"
