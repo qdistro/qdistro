@@ -31,6 +31,13 @@ LOCAL_VERSION = 1
 LOCAL_HEADER = struct.Struct("!4sBBHQ")
 LOCAL_ANNOUNCE_MAGIC = b"QDMA"
 LOCAL_ANNOUNCE_HEADER = struct.Struct("!4sBBHQIIIHH")
+LOCAL_INPUT_STRUCTS = {
+    "motion": struct.Struct("!ii"),
+    "button": struct.Struct("!IB3x"),
+    "key": struct.Struct("!IB3x"),
+    "axis": struct.Struct("!Ii"),
+    "focus": struct.Struct("!B3x"),
+}
 INPUT_KINDS = frozenset({
     "motion", "button", "key", "axis", "focus",
 })
@@ -50,6 +57,7 @@ LOCAL_MESSAGE_TYPES = {
     "detached": 12,
     "drop_transport": 13,
     "shutdown": 14,
+    "close_request": 15,
 }
 _LOCAL_MESSAGE_NAMES = {
     value: key for key, value in LOCAL_MESSAGE_TYPES.items()
@@ -296,6 +304,45 @@ def encode_input_event(kind: str, event: Mapping) -> bytes:
 def decode_input_event(kind: str, payload: bytes) -> dict:
     return validate_input_event(
         kind, _json_object(payload, label="input event"))
+
+
+def encode_local_input_event(kind: str, event: Mapping) -> bytes:
+    """Fixed-width C-helper form of a validated semantic input event."""
+    normalized = validate_input_event(kind, event)
+    if kind == "motion":
+        return LOCAL_INPUT_STRUCTS[kind].pack(
+            normalized["x_fixed"], normalized["y_fixed"])
+    if kind in {"button", "key"}:
+        return LOCAL_INPUT_STRUCTS[kind].pack(
+            normalized["code"], int(normalized["pressed"]))
+    if kind == "axis":
+        return LOCAL_INPUT_STRUCTS[kind].pack(
+            normalized["axis"], normalized["value_fixed"])
+    assert kind == "focus"
+    return LOCAL_INPUT_STRUCTS[kind].pack(int(normalized["focused"]))
+
+
+def decode_local_input_event(kind: str, payload: bytes) -> dict:
+    """Decode only the exact fixed-width record for ``kind``."""
+    record = LOCAL_INPUT_STRUCTS.get(kind)
+    if record is None:
+        raise RemoteAdapterError("unsupported nested input kind")
+    if not isinstance(payload, bytes) or len(payload) != record.size:
+        raise RemoteAdapterError("local input payload length is invalid")
+    values = record.unpack(payload)
+    if kind == "motion":
+        event = {"x_fixed": values[0], "y_fixed": values[1]}
+    elif kind in {"button", "key"}:
+        if values[1] not in {0, 1}:
+            raise RemoteAdapterError("local input pressed flag is invalid")
+        event = {"code": values[0], "pressed": bool(values[1])}
+    elif kind == "axis":
+        event = {"axis": values[0], "value_fixed": values[1]}
+    else:
+        if values[0] not in {0, 1}:
+            raise RemoteAdapterError("local input focus flag is invalid")
+        event = {"focused": bool(values[0])}
+    return validate_input_event(kind, event)
 
 
 def validate_input_event(kind: str, event: Mapping) -> dict:

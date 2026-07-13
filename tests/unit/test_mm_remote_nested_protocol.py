@@ -15,8 +15,10 @@ from multimachine.remote_nested_protocol import (
     StreamAnnouncement,
     decode_input_event,
     decode_local_announcement,
+    decode_local_input_event,
     encode_input_event,
     encode_local_announcement,
+    encode_local_input_event,
 )
 
 
@@ -129,6 +131,10 @@ def test_frame_rejects_header_tampering_length_and_geometry_mismatch() -> None:
 ])
 def test_all_qdni_semantic_input_events_round_trip(kind, event) -> None:
     assert decode_input_event(kind, encode_input_event(kind, event)) == event
+    local = encode_local_input_event(kind, event)
+    assert decode_local_input_event(kind, local) == event
+    with pytest.raises(RemoteAdapterError, match="length"):
+        decode_local_input_event(kind, local + b"\0")
 
 
 @pytest.mark.parametrize("kind,event,match", [
@@ -143,6 +149,8 @@ def test_input_rejects_unknown_kinds_shapes_and_boolean_confusion(
         kind, event, match) -> None:
     with pytest.raises(RemoteAdapterError, match=match):
         encode_input_event(kind, event)
+    with pytest.raises(RemoteAdapterError, match=match):
+        encode_local_input_event(kind, event)
 
 
 def test_frame_must_match_announced_geometry() -> None:
@@ -155,10 +163,13 @@ def test_frame_must_match_announced_geometry() -> None:
     LocalBoundaryMessage(
         "announce", payload=encode_local_announcement(_announcement())),
     LocalBoundaryMessage("frame", seq=7, payload=_frame().encode()),
-    LocalBoundaryMessage("key", payload=b'{"code":30,"pressed":true}'),
+    LocalBoundaryMessage(
+        "key", payload=encode_local_input_event(
+            "key", {"code": 30, "pressed": True})),
     LocalBoundaryMessage("detached", seq=3, payload=b"[]"),
     LocalBoundaryMessage("drop_transport"),
     LocalBoundaryMessage("shutdown"),
+    LocalBoundaryMessage("close_request", seq=7),
 ])
 def test_local_helper_boundary_round_trip(message) -> None:
     assert LocalBoundaryMessage.decode(message.encode()) == message

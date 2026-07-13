@@ -29,12 +29,14 @@ from multimachine.remote_adapter_transport import (
     recv_frame,
     send_frame,
 )
-from multimachine.remote_nested_protocol import encode_input_event
 from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
     StreamAnnouncement,
+    decode_local_input_event,
+    encode_input_event,
     encode_local_announcement,
+    encode_local_input_event,
 )
 from multimachine.remote_nested_service import MAX_BOUNDARY_FRAME_BYTES
 
@@ -403,7 +405,7 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
         assert _boundary_event(source_helper) == LocalBoundaryMessage(
             "media_ack", seq=3)
 
-        key_down = encode_input_event(
+        key_down = encode_local_input_event(
             "key", {"code": 42, "pressed": True})
         _boundary_send(viewer_helper, LocalBoundaryMessage(
             "key", payload=key_down))
@@ -413,7 +415,8 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
         _boundary_send(viewer_helper, LocalBoundaryMessage("drop_transport"))
         released = _boundary_event(source_helper)
         assert released.kind == "key"
-        assert json.loads(released.payload) == {"code": 42, "pressed": False}
+        assert decode_local_input_event("key", released.payload) == {
+            "code": 42, "pressed": False}
         assert _boundary_event(source_helper) == LocalBoundaryMessage(
             "detached", seq=1)
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
@@ -436,6 +439,11 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
             viewer_helper, LocalBoundaryMessage("decoder_ack", seq=1))
         assert _boundary_event(source_helper) == LocalBoundaryMessage(
             "media_ack", seq=1)
+
+        _boundary_send(
+            viewer_helper, LocalBoundaryMessage("close_request", seq=7))
+        assert _boundary_event(source_helper) == LocalBoundaryMessage(
+            "close_request", seq=7)
 
         _boundary_send(
             source_helper, LocalBoundaryMessage("source_closed", seq=8))

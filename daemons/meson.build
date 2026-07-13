@@ -43,6 +43,21 @@ qdwin_shell_protocol_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+# qdwin_nested_v1 client header + protocol code for the R6 viewer publisher.
+qdwin_nested_xml = files(qdistro_protocols_dir / 'qdwin-nested-v1.xml')
+qdwin_nested_client_header = custom_target(
+  'qdwin-nested-v1-client-header',
+  input: qdwin_nested_xml,
+  output: 'qdwin-nested-v1-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+qdwin_nested_protocol_code = custom_target(
+  'qdwin-nested-v1-private-code',
+  input: qdwin_nested_xml,
+  output: 'qdwin-nested-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 # security-context-v1 (qdistro-secctx-exec).
 security_context_xml = files(
   wayland_protocols_dir / 'staging/security-context/security-context-v1.xml',
@@ -151,6 +166,21 @@ executable('qdistro-mm-remote-pixelfeed',
     'nested-pixelfeed/qdistro-mm-remote-pixelfeed.c',
     qdwin_shell_client_header,
     qdwin_shell_protocol_code,
+  ],
+  link_with: mm_remote_frame_protocol,
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
+
+# R6 viewer publisher. It terminates authenticated controller messages into a
+# local qdwin proxy plus same-uid frame/QDNI sockets. Remote paths and object
+# identifiers never enter either local protocol.
+executable('qdistro-mm-remote-viewer-helper',
+  sources: [
+    'nested-pixelfeed/qdistro-mm-remote-viewer-helper.c',
+    qdwin_nested_client_header,
+    qdwin_nested_protocol_code,
   ],
   link_with: mm_remote_frame_protocol,
   dependencies: [dep_wayland_client],

@@ -417,6 +417,35 @@ commit_frame(struct state *state, const struct qdmm_frame_view *frame)
 	return 0;
 }
 
+static int
+commit_blank(struct state *state)
+{
+	struct slot *slot = free_slot(state);
+	struct timespec deadline;
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += 5;
+	while (!slot) {
+		if (dispatch_wayland(state, 100) < 0)
+			return -1;
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (now.tv_sec >= deadline.tv_sec) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
+		slot = free_slot(state);
+	}
+	memset(slot->data, 0, slot->size);
+	slot->busy = 1;
+	wl_surface_attach(state->surface, slot->buffer, 0, 0);
+	wl_surface_damage_buffer(state->surface, 0, 0,
+		(int32_t)state->width, (int32_t)state->height);
+	wl_surface_commit(state->surface);
+	if (wl_display_flush(state->display) < 0 && errno != EAGAIN)
+		return -1;
+	return 0;
+}
+
 static void
 on_signal(int signal_number)
 {
@@ -473,6 +502,24 @@ main(int argc, char **argv)
 			LOGE("local frame read: %s", strerror(errno));
 			result = 4;
 			break;
+		}
+		struct qdmm_local_message_view local;
+		if (qdmm_parse_local_message(message, length, &local) < 0) {
+			LOGE("invalid local boundary packet");
+			free(message);
+			result = 5;
+			break;
+		}
+		if (local.kind == QDMM_LOCAL_DETACHED) {
+			if (!local.seq || local.payload_len ||
+			    (started && commit_blank(&g_state) < 0)) {
+				LOGE("invalid or failed detach blank");
+				free(message);
+				result = 5;
+				break;
+			}
+			free(message);
+			continue;
 		}
 		struct qdmm_frame_view frame;
 		if (qdmm_parse_frame(message, length, &frame) < 0) {

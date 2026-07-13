@@ -29,8 +29,10 @@ from .remote_nested_protocol import (
     RawFrame,
     StreamAnnouncement,
     decode_local_announcement,
+    decode_local_input_event,
     decode_input_event,
     encode_local_announcement,
+    encode_local_input_event,
     encode_input_event,
 )
 
@@ -147,6 +149,16 @@ class SourceNestedState:
             raise RemoteAdapterError("source input is disabled while detached")
         return InputInjection(kind=kind, event=decode_input_event(kind, payload))
 
+    def receive_close_request(self, source_revision: int) -> int:
+        if self.closed or not self.connected or self.announcement is None:
+            raise RemoteAdapterError(
+                "source close request arrived without a live stream")
+        source_revision = _positive_integer(
+            source_revision, label="source_revision")
+        if source_revision != self.source_revision:
+            raise ReplayError("close request source revision is stale")
+        return source_revision
+
     def transport_detached(
             self, epoch: int, releases: list[Mapping]) -> tuple[InputInjection, ...]:
         if epoch != self.epoch or not self.connected:
@@ -221,6 +233,11 @@ class ViewerNestedState:
                 raise ReplayError("duplicate source announcement")
             if announcement.source_revision < self.source_revision:
                 raise ReplayError("source reconciliation revision is stale")
+            if (announcement.source_revision == self.source_revision
+                    and self.announcement is not None
+                    and announcement != self.announcement):
+                raise ReplayError(
+                    "source reconciliation changed without a new revision")
             self.source_revision = announcement.source_revision
             self.announcement = announcement
             self.source_alive = True
@@ -273,6 +290,17 @@ class ViewerNestedState:
         return EndpointRequest(
             channel="input", kind=kind,
             payload=encode_input_event(kind, event))
+
+    def request_close(self, source_revision: int) -> EndpointRequest:
+        if not self.connected or not self.attached or not self.source_alive:
+            raise RemoteAdapterError("viewer close is disabled while detached")
+        source_revision = _positive_integer(
+            source_revision, label="source_revision")
+        if source_revision != self.source_revision:
+            raise ReplayError("viewer close source revision is stale")
+        return EndpointRequest(
+            channel="control", kind="close_request",
+            payload=_source_closed_payload(source_revision))
 
     def transport_detached(self, epoch: int) -> None:
         if epoch != self.epoch or not self.connected:
@@ -395,7 +423,7 @@ class RemoteNestedController:
                 for injection in self.state.transport_detached(epoch, releases):
                     self._send_helper(LocalBoundaryMessage(
                         injection.kind,
-                        payload=encode_input_event(
+                        payload=encode_local_input_event(
                             injection.kind, injection.event)))
             else:
                 assert isinstance(self.state, ViewerNestedState)
@@ -442,7 +470,14 @@ class RemoteNestedController:
             injection = self.state.receive_input(kind, payload)
             self._send_helper(LocalBoundaryMessage(
                 injection.kind,
-                payload=encode_input_event(injection.kind, injection.event)))
+                payload=encode_local_input_event(
+                    injection.kind, injection.event)))
+            return
+        if channel == "control" and kind == "close_request":
+            revision = self.state.receive_close_request(
+                _decode_source_closed(payload))
+            self._send_helper(LocalBoundaryMessage(
+                "close_request", seq=revision))
             return
         if channel == "control" and kind == "media_ack":
             ack = _positive_integer(ack, label="media acknowledgement")
@@ -536,8 +571,14 @@ class RemoteNestedController:
                 raise RemoteAdapterError("decoder_ack helper payload must be empty")
             self._send_endpoint(self.state.decoder_acknowledged(message.seq))
             return
+        if message.kind == "close_request":
+            if message.payload:
+                raise RemoteAdapterError(
+                    "close_request helper payload must be empty")
+            self._send_endpoint(self.state.request_close(message.seq))
+            return
         if message.kind in INPUT_KINDS:
-            event = decode_input_event(message.kind, message.payload)
+            event = decode_local_input_event(message.kind, message.payload)
             self._send_endpoint(self.state.send_input(message.kind, event))
             return
         raise RemoteAdapterError("viewer helper message is not allowed")

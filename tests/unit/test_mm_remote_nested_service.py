@@ -39,6 +39,11 @@ def test_source_to_viewer_announce_frame_decode_ack_and_input() -> None:
     assert landed.event == {"x_fixed": 256, "y_fixed": -128}
     assert not landed.synthetic
 
+    close_request = viewer.request_close(7)
+    assert (close_request.channel, close_request.kind) == (
+        "control", "close_request")
+    assert source.receive_close_request(7) == 7
+
 
 def test_decoder_window_is_bounded_and_ack_is_delivery_owned() -> None:
     source, viewer = _attach()
@@ -122,6 +127,12 @@ def test_reconcile_cannot_roll_back_source_revision() -> None:
         app_id="org.example.Editor", title="stale")
     with pytest.raises(ReplayError, match="revision"):
         viewer.receive_control("reconcile", older.encode())
+    changed_without_revision = StreamAnnouncement(
+        source_revision=7, width=4, height=3, stride=16,
+        app_id="org.example.Editor", title="changed")
+    with pytest.raises(ReplayError, match="changed"):
+        viewer.receive_control(
+            "reconcile", changed_without_revision.encode())
 
 
 def test_duplicate_announce_and_unknown_control_fail_closed() -> None:
@@ -130,4 +141,3 @@ def test_duplicate_announce_and_unknown_control_fail_closed() -> None:
         viewer.receive_control("announce", ANNOUNCEMENT.encode())
     with pytest.raises(RemoteAdapterError, match="unsupported"):
         viewer.receive_control("clipboard", b"{}")
-

@@ -14,7 +14,9 @@ from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
     StreamAnnouncement,
+    decode_local_input_event,
     encode_local_announcement,
+    encode_local_input_event,
     encode_input_event,
 )
 from multimachine.remote_nested_service import (
@@ -94,13 +96,22 @@ def test_source_controller_coalesces_frames_releases_input_and_reconciles() -> N
         key = encode_input_event("key", {"code": 42, "pressed": True})
         _event(controller, **_received(
             channel="input", kind="key", seq=1, payload=key))
-        assert _helper_event(helper) == LocalBoundaryMessage("key", payload=key)
+        assert _helper_event(helper) == LocalBoundaryMessage(
+            "key", payload=encode_local_input_event(
+                "key", {"code": 42, "pressed": True}))
+
+        _event(controller, **_received(
+            channel="control", kind="close_request", seq=2,
+            payload=b'{"source_revision":7}'))
+        assert _helper_event(helper) == LocalBoundaryMessage(
+            "close_request", seq=7)
 
         _event(controller, op="detached", epoch=1,
                releases=[{"kind": "key", "code": 42}])
         release = _helper_event(helper)
         assert release.kind == "key"
-        assert json.loads(release.payload) == {"code": 42, "pressed": False}
+        assert decode_local_input_event("key", release.payload) == {
+            "code": 42, "pressed": False}
         assert _helper_event(helper) == LocalBoundaryMessage("detached", seq=1)
 
         _event(controller, op="connected", epoch=2)
@@ -136,18 +147,24 @@ def test_viewer_controller_acks_only_helper_delivered_frames_and_sends_input() -
         ack = _endpoint_request(endpoint)
         assert (ack["kind"], ack["ack"]) == ("media_ack", 1)
 
-        motion = encode_input_event(
+        motion = encode_local_input_event(
             "motion", {"x_fixed": 256, "y_fixed": -128})
         controller._handle_helper(LocalBoundaryMessage(
             "motion", payload=motion))
         outgoing = _endpoint_request(endpoint)
         assert (outgoing["channel"], outgoing["kind"]) == ("input", "motion")
 
+        controller._handle_helper(LocalBoundaryMessage(
+            "close_request", seq=7))
+        close_request = _endpoint_request(endpoint)
+        assert (close_request["channel"], close_request["kind"]) == (
+            "control", "close_request")
+
         _event(controller, op="detached", epoch=1, releases=[])
         assert _helper_event(helper) == LocalBoundaryMessage("detached", seq=1)
         with pytest.raises(RemoteAdapterError, match="disabled"):
             controller._handle_helper(LocalBoundaryMessage(
-                "key", payload=encode_input_event(
+                "key", payload=encode_local_input_event(
                     "key", {"code": 30, "pressed": True})))
     finally:
         endpoint.close()
