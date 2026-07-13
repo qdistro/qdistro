@@ -6,10 +6,12 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +25,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from multimachine.harness.vm_backend import QciVMBackend  # noqa: E402
+from multimachine.harness.netem import profile  # noqa: E402
 from multimachine.mm_pairing_authority import public_key_bytes  # noqa: E402
 from multimachine.mm_remote_session_authority import (  # noqa: E402
     issue_remote_session_grant,
@@ -72,8 +75,13 @@ def main() -> int:
     ap.add_argument("vm_source")
     ap.add_argument("vm_viewer")
     ap.add_argument("--port", type=int, default=14443)
+    ap.add_argument("--profile", default="lan-clean")
     args = ap.parse_args()
-    bundle = Path("/tmp/mm-live/r6-wire")
+    netem = profile(args.profile)
+    if netem.hard_drop:
+        raise SystemExit("disconnect is a transition, not a steady wire profile")
+    suffix = "" if args.profile == "lan-clean" else f"-{args.profile}"
+    bundle = Path(f"/tmp/mm-live/r6-wire{suffix}")
     bundle.mkdir(parents=True, exist_ok=True)
     backend = QciVMBackend(args.vm_source, args.vm_viewer, REPO)
     backend._ensure_hostfwd(args.vm_source, args.port)
@@ -141,18 +149,38 @@ def main() -> int:
     ]
     source_cmd = " ".join([
         "python3", "/tmp/r6-wire-peer.py", "--role", "source",
-        "--host", "0.0.0.0", *base])
+        "--host", "0.0.0.0", "--profile", args.profile, *base])
     viewer_cmd = " ".join([
         "python3", "/tmp/r6-wire-peer.py", "--role", "viewer",
-        "--host", "10.0.2.2", *base])
-    source_process = subprocess.Popen(
-        [str(vm_exec), args.vm_source, source_cmd],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    viewer_process = subprocess.Popen(
-        [str(vm_exec), args.vm_viewer, viewer_cmd],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    source_output, _ = source_process.communicate(timeout=90)
-    viewer_output, _ = viewer_process.communicate(timeout=90)
+        "--host", "10.0.2.2", "--profile", args.profile, *base])
+    netem_devs = {
+        vm: backend._guest_link_dev(vm)
+        for vm in (args.vm_source, args.vm_viewer)
+    }
+    for vm, dev in netem_devs.items():
+        backend._vmexec(
+            vm, shlex.join(netem.tc_del(dev)) + " 2>/dev/null || true")
+        backend._vmexec(vm, shlex.join(netem.tc_add(dev)))
+    source_process = viewer_process = None
+    try:
+        source_process = subprocess.Popen(
+            [str(vm_exec), args.vm_source, source_cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        viewer_process = subprocess.Popen(
+            [str(vm_exec), args.vm_viewer, viewer_cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        source_output, _ = source_process.communicate(timeout=90)
+        viewer_output, _ = viewer_process.communicate(timeout=90)
+    finally:
+        for vm, dev in netem_devs.items():
+            backend._vmexec(
+                vm, shlex.join(netem.tc_del(dev)) + " 2>/dev/null || true",
+                check=False)
+        for process in (source_process, viewer_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+    assert source_process is not None and viewer_process is not None
     (bundle / "source.log").write_text(source_output, encoding="utf-8")
     (bundle / "viewer.log").write_text(viewer_output, encoding="utf-8")
     source = parse_result(source_output) if source_process.returncode == 0 else {}
@@ -174,12 +202,36 @@ def main() -> int:
         "authenticated-input-landed": (
             source.get("input_received", {}).get("kind") == "key"),
         "disconnect-released-held-input": (
-            source.get("detached", {}).get("releases")
+            source.get("detached_epoch_1", {}).get("epoch") == 1
+            and source.get("detached_epoch_1", {}).get("releases")
             == [{"code": 42, "kind": "key"}]),
+        "reconnected-with-fresh-authenticated-epoch": (
+            source.get("reconnected", {}).get("epoch") == 2
+            and viewer.get("reconnected", {}).get("epoch") == 2
+            and source.get("reconnected", {}).get("tls_version") == "TLSv1.3"
+            and viewer.get("reconnected", {}).get("tls_version") == "TLSv1.3"
+            and source.get("reconnected", {}).get("peer_cert_sha256")
+            == viewer_pin
+            and viewer.get("reconnected", {}).get("peer_cert_sha256")
+            == source_pin),
+        "resumed-control-reset-sequence": (
+            source.get("reconcile_sent", {}).get("seq") == 1
+            and viewer.get("reconcile_received", {}).get("kind")
+            == "reconcile"
+            and viewer.get("reconcile_received", {}).get("seq") == 1),
+        "resumed-input-reset-sequence": (
+            [item.get("seq") for item in source.get("resumed_input", [])]
+            == [1, 2]
+            and all(item.get("kind") == "key"
+                    for item in source.get("resumed_input", []))),
+        "second-disconnect-had-no-stuck-input": (
+            source.get("detached_epoch_2", {}).get("epoch") == 2
+            and source.get("detached_epoch_2", {}).get("releases") == []),
     }
     result = {
-        "schema": "qdistro-mm-r6-wire-evidence-v1",
-        "profile": "lan-clean",
+        "schema": "qdistro-mm-r6-wire-evidence-v2",
+        "profile": args.profile,
+        "netem": asdict(netem),
         "source_vm": args.vm_source,
         "viewer_vm": args.vm_viewer,
         "assertions": assertions,

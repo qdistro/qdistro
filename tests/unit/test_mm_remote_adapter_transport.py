@@ -129,6 +129,11 @@ def _event(sock: socket.socket) -> dict:
     return json.loads(payload)
 
 
+def _drop_transport(sock: socket.socket) -> None:
+    send_frame(
+        sock, b'{"op":"drop_transport"}', maximum=MAX_LOCAL_FRAME_BYTES)
+
+
 def _wait(process: subprocess.Popen, label: str) -> None:
     try:
         stdout, stderr = process.communicate(timeout=10)
@@ -151,16 +156,19 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
     viewer_config_fd = sealed_config_fd(viewer_config)
     processes = []
     try:
-        source = subprocess.Popen(
-            [str(ENTRYPOINT), "--config-fd", str(source_config_fd)],
-            pass_fds=(source_config_fd, source_fd),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        processes.append(source)
+        # Deliberately start the connector first. It must retry the complete
+        # TCP+TLS establishment rather than treating a pre-listener refusal/EOF
+        # as an authenticated session failure.
         viewer = subprocess.Popen(
             [str(ENTRYPOINT), "--config-fd", str(viewer_config_fd)],
             pass_fds=(viewer_config_fd, viewer_fd),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         processes.append(viewer)
+        source = subprocess.Popen(
+            [str(ENTRYPOINT), "--config-fd", str(source_config_fd)],
+            pass_fds=(source_config_fd, source_fd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        processes.append(source)
         for fd in (source_config_fd, viewer_config_fd, source_fd, viewer_fd):
             os.close(fd)
         source_config_fd = viewer_config_fd = source_fd = viewer_fd = -1
@@ -170,11 +178,11 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
         viewer_connected = _event(viewer_control)
         assert source_connected == {
             "op": "connected", "peer_cert_sha256": VIEWER_PIN,
-            "tls_version": "TLSv1.3",
+            "tls_version": "TLSv1.3", "epoch": 1,
         }
         assert viewer_connected == {
             "op": "connected", "peer_cert_sha256": SOURCE_PIN,
-            "tls_version": "TLSv1.3",
+            "tls_version": "TLSv1.3", "epoch": 1,
         }
 
         _local_send(
@@ -210,10 +218,48 @@ def test_two_real_processes_exchange_control_bounded_media_input_and_cleanup() -
         landed = _event(source_control)
         assert (landed["channel"], landed["kind"]) == ("input", "key")
 
+        _drop_transport(viewer_control)
+        assert _event(viewer_control) == {
+            "op": "transport_drop_requested", "epoch": 1}
+        assert _event(viewer_control) == {
+            "op": "detached", "epoch": 1, "releases": []}
+        assert _event(source_control) == {
+            "op": "detached", "epoch": 1,
+            "releases": [{"code": 42, "kind": "key"}],
+        }
+        source_reconnected = _event(source_control)
+        viewer_reconnected = _event(viewer_control)
+        assert source_reconnected == {
+            "op": "connected", "peer_cert_sha256": VIEWER_PIN,
+            "tls_version": "TLSv1.3", "epoch": 2,
+        }
+        assert viewer_reconnected == {
+            "op": "connected", "peer_cert_sha256": SOURCE_PIN,
+            "tls_version": "TLSv1.3", "epoch": 2,
+        }
+
+        # A fresh authenticated epoch resets channel sequence state while the
+        # source process and both local controller sockets remain alive.
+        _local_send(
+            source_control, channel="control", kind="reconcile",
+            payload=b'{"source_revision":1}')
+        assert _event(source_control) == {
+            "channel": "control", "op": "sent", "seq": 1}
+        reconciled = _event(viewer_control)
+        assert (reconciled["kind"], reconciled["seq"]) == ("reconcile", 1)
+        for pressed in (True, False):
+            _local_send(
+                viewer_control, channel="input", kind="key",
+                payload=json.dumps({"code": 30, "pressed": pressed}).encode())
+            assert _event(viewer_control)["op"] == "sent"
+            resumed = _event(source_control)
+            assert (resumed["kind"], resumed["seq"]) == (
+                "key", 1 if pressed else 2)
+
         viewer_control.close()
         detached = _event(source_control)
         assert detached == {
-            "op": "detached", "releases": [{"code": 42, "kind": "key"}]}
+            "op": "detached", "epoch": 2, "releases": []}
         source_control.close()
         _wait(viewer, "viewer endpoint")
         _wait(source, "source endpoint")

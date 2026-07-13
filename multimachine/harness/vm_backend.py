@@ -19,6 +19,7 @@ but does NOT undefine the domain — the caller owns VM teardown).
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shlex
 import subprocess
@@ -163,7 +164,10 @@ class QciVMBackend:
               mode: int = 0o644) -> None:
         b64 = base64.b64encode(local.read_bytes()).decode()
         g = shlex.quote(guest)
-        temporary = shlex.quote(guest + ".qdistro-push-tmp")
+        # Separate harness processes may stage to the same pre-provisioned VM.
+        # A per-process pathname keeps their atomic renames independent.
+        temporary = shlex.quote(
+            guest + f".qdistro-push-{os.getpid()}-tmp")
         # vm-exec currently carries the transfer command through QGA argv, so
         # this remains test-apparatus transport rather than a production secret
         # channel.  Stage mode-0600 credentials atomically: there is no window

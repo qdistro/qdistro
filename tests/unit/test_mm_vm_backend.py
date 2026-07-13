@@ -6,10 +6,13 @@ those methods do, since a regression there silently mis-drives a real VM.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from multimachine.harness.vm_backend import (
-    arg_value, hostfwd_add_hmp, hostfwd_present, is_marker_argv, parse_approved)
+    QciVMBackend, arg_value, hostfwd_add_hmp, hostfwd_present, is_marker_argv,
+    parse_approved)
 
 
 # Real `info usernet` output (qemu:///session, virtio-net user hub) — the format
@@ -85,3 +88,19 @@ class TestArgv:
         assert arg_value(argv, "--width") == "1280"
         assert arg_value(argv, "--frame", "0") == "0"   # default when absent
         assert arg_value(argv, "--missing") is None
+
+
+def test_push_uses_process_unique_atomic_staging_path(tmp_path):
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"wire gate")
+    backend = QciVMBackend("vm-a", "vm-b", tmp_path)
+    commands = []
+    backend._vmexec = lambda _vm, command: commands.append(command)
+
+    backend._push("vm-a", payload, "/tmp/mm/payload", mode=0o600)
+
+    assert len(commands) == 1
+    temporary = f"/tmp/mm/payload.qdistro-push-{os.getpid()}-tmp"
+    assert commands[0].count(temporary) == 4
+    assert "chmod 0600" in commands[0]
+    assert commands[0].endswith(f"mv -f {temporary} /tmp/mm/payload")

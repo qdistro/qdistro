@@ -9,7 +9,6 @@ import os
 import socket
 import subprocess
 import sys
-from pathlib import Path
 
 sys.path.insert(0, "/tmp/mm")
 
@@ -44,11 +43,18 @@ def event(controller: socket.socket) -> dict:
     return json.loads(payload)
 
 
+def drop_transport(controller: socket.socket) -> None:
+    send_frame(
+        controller, b'{"op":"drop_transport"}',
+        maximum=MAX_LOCAL_FRAME_BYTES)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--role", choices=("source", "viewer"), required=True)
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--profile", required=True)
     ap.add_argument("--grant", required=True)
     ap.add_argument("--secret", required=True)
     ap.add_argument("--cert", required=True)
@@ -89,7 +95,7 @@ def main() -> int:
     for fd in (grant_fd, secret_fd, cert_fd, key_fd, peer_fd, endpoint_fd):
         os.close(fd)
     controller.settimeout(20)
-    result = {"role": args.role, "profile": "lan-clean"}
+    result = {"role": args.role, "profile": args.profile}
     try:
         connected = event(controller)
         result["connected"] = connected
@@ -105,7 +111,14 @@ def main() -> int:
                  payload=b"frame-three")
             result["third_sent"] = event(controller)
             result["input_received"] = event(controller)
-            result["detached"] = event(controller)
+            result["detached_epoch_1"] = event(controller)
+            result["reconnected"] = event(controller)
+            send(controller, channel="control", kind="reconcile",
+                 payload=b'{"source_revision":1}')
+            result["reconcile_sent"] = event(controller)
+            result["resumed_input"] = [event(controller), event(controller)]
+            result["detached_epoch_2"] = event(controller)
+            controller.close()
         else:
             result["announce_received"] = event(controller)
             first = event(controller)
@@ -117,6 +130,17 @@ def main() -> int:
             send(controller, channel="input", kind="key",
                  payload=b'{"code":42,"pressed":true}')
             result["input_sent"] = event(controller)
+            drop_transport(controller)
+            result["drop_requested"] = event(controller)
+            result["detached_epoch_1"] = event(controller)
+            result["reconnected"] = event(controller)
+            result["reconcile_received"] = event(controller)
+            for pressed in (True, False):
+                send(controller, channel="input", kind="key",
+                     payload=json.dumps({
+                         "code": 30, "pressed": pressed,
+                     }, separators=(",", ":")).encode())
+                event(controller)
             controller.close()
         stdout, stderr = process.communicate(timeout=20)
         result["endpoint_returncode"] = process.returncode
