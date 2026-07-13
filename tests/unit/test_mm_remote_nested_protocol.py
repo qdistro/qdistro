@@ -12,6 +12,7 @@ from multimachine.remote_nested_protocol import (
     LOCAL_HEADER,
     LocalBoundaryMessage,
     RawFrame,
+    SourceHelperConfig,
     StreamAnnouncement,
     decode_input_event,
     decode_local_announcement,
@@ -201,3 +202,25 @@ def test_local_binary_announcement_round_trip_and_rejects_hostile_lengths() -> N
     hostile[0:4] = b"NOPE"
     with pytest.raises(RemoteAdapterError, match="unsupported"):
         decode_local_announcement(bytes(hostile))
+
+
+def test_source_helper_config_round_trip_and_rejects_remote_path_shapes() -> None:
+    config = SourceHelperConfig(
+        source_revision=7,
+        pw_node="weston.pipewire:123:pipewire-0",
+        input_sink="/run/user/1000/qdwin-nested-input-123-7.sock",
+        app_id="org.example.Editor", title="Remote editor")
+    assert SourceHelperConfig.decode(config.encode()) == config
+    for changes, match in (
+        ({"pw_node": "attacker.node"}, "pw_node"),
+        ({"input_sink": "/tmp/evil.sock"}, "input_sink"),
+        ({"input_sink": "/run/user/1000/../evil/qdwin-nested-input-1-1.sock"},
+         "input_sink"),
+    ):
+        values = {**config.__dict__, **changes}
+        with pytest.raises(RemoteAdapterError, match=match):
+            SourceHelperConfig(**values).encode()
+    hostile = bytearray(config.encode())
+    hostile[-1:] = b""
+    with pytest.raises(RemoteAdapterError, match="header"):
+        SourceHelperConfig.decode(bytes(hostile))

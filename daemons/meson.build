@@ -97,6 +97,7 @@ dep_freerdp_shadow = dependency('freerdp-shadow3', required: false)
 dep_freerdp        = dependency('freerdp3',        required: false)
 dep_winpr          = dependency('winpr3',          required: false)
 dep_pipewire       = dependency('libpipewire-0.3', required: false)
+dep_threads        = dependency('threads')
 
 pw_target_resolver = static_library(
   'qdistro-pw-target-resolver',
@@ -154,8 +155,21 @@ if dep_pipewire.found()
     install: true,
     install_dir: get_option('bindir'),
   )
+
+  # R6 source helper: strictly resolves the local Weston PipeWire producer,
+  # copies BGRx into bounded controller frames, and injects authenticated
+  # return input through the peer-credential-vouched local QDNI sink.
+  executable('qdistro-mm-remote-source-helper',
+    sources: [
+      'nested-pixelfeed/qdistro-mm-remote-source-helper.c',
+    ],
+    link_with: [mm_remote_frame_protocol, pw_target_resolver],
+    dependencies: [dep_pipewire, dep_threads],
+    install: true,
+    install_dir: get_option('bindir'),
+  )
 else
-  message('qdistro-nested-pixelfeed skipped — libpipewire-0.3 not found')
+  message('qdistro nested pixelfeed/source helper skipped — libpipewire-0.3 not found')
 endif
 
 # R6 viewer-local remote frame feeder. It deliberately has no PipeWire

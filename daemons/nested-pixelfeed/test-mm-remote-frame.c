@@ -132,6 +132,62 @@ main(void)
 	      bad_announce, sizeof bad_announce, &announced) < 0,
 	      "hostile announcement length accepted");
 
+	static const char pw_node[] = "weston.pipewire:123:pipewire-0";
+	static const char input_sink[] =
+		"/run/user/1000/qdwin-nested-input-123-7.sock";
+	uint8_t source_config[QDMM_SOURCE_CONFIG_HEADER_SIZE +
+		sizeof pw_node - 1 + sizeof input_sink - 1 +
+		sizeof app_id - 1 + sizeof title - 1] = {0};
+	memcpy(source_config, "QDMS", 4);
+	source_config[4] = 1;
+	write_u64(source_config + 8, 7);
+	write_u16(source_config + 16, sizeof pw_node - 1);
+	write_u16(source_config + 18, sizeof input_sink - 1);
+	write_u16(source_config + 20, sizeof app_id - 1);
+	write_u16(source_config + 22, sizeof title - 1);
+	uint8_t *config_text = source_config + QDMM_SOURCE_CONFIG_HEADER_SIZE;
+	memcpy(config_text, pw_node, sizeof pw_node - 1);
+	config_text += sizeof pw_node - 1;
+	memcpy(config_text, input_sink, sizeof input_sink - 1);
+	config_text += sizeof input_sink - 1;
+	memcpy(config_text, app_id, sizeof app_id - 1);
+	config_text += sizeof app_id - 1;
+	memcpy(config_text, title, sizeof title - 1);
+	struct qdmm_source_config_view source;
+	CHECK(qdmm_parse_source_config(
+	      source_config, sizeof source_config, &source) == 0,
+	      "valid sealed source helper config rejected");
+	CHECK(source.source_revision == 7 &&
+	      source.pw_node_len == sizeof pw_node - 1 &&
+	      source.input_sink_len == sizeof input_sink - 1,
+	      "source helper config parsed incorrectly");
+	uint8_t built_announce[256];
+	size_t built_announce_len = 0;
+	CHECK(qdmm_build_announcement_wire(
+	      &source, 4, 3, 16, built_announce, sizeof built_announce,
+	      &built_announce_len) == 0,
+	      "source helper announcement build failed");
+	CHECK(qdmm_parse_announcement(
+	      built_announce + 4, built_announce_len - 4, &announced) == 0 &&
+	      announced.source_revision == 7,
+	      "source-built announcement did not parse");
+	uint8_t built_frame[4 + sizeof message];
+	size_t built_frame_len = 0;
+	CHECK(qdmm_build_frame_wire(
+	      9, 4, 3, 16, frame + QDMM_FRAME_HEADER_SIZE, 48,
+	      built_frame, sizeof built_frame, &built_frame_len) == 0,
+	      "source helper frame build failed");
+	CHECK(qdmm_parse_frame(
+	      built_frame + 4, built_frame_len - 4, &parsed) == 0 &&
+	      parsed.seq == 9 && parsed.pixels[0] == 0x5a,
+	      "source-built frame did not parse");
+	uint8_t bad_config[sizeof source_config];
+	memcpy(bad_config, source_config, sizeof bad_config);
+	memcpy(bad_config + QDMM_SOURCE_CONFIG_HEADER_SIZE, "attacker.node", 13);
+	CHECK(qdmm_parse_source_config(
+	      bad_config, sizeof bad_config, &source) < 0,
+	      "non-Weston PipeWire target accepted");
+
 	uint8_t qdni[QDMM_MAX_QDNI_PACKET_SIZE] = {0};
 	write_le32(qdni, 0x49444e51u);
 	qdni[4] = 1;

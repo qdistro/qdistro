@@ -31,6 +31,8 @@ LOCAL_VERSION = 1
 LOCAL_HEADER = struct.Struct("!4sBBHQ")
 LOCAL_ANNOUNCE_MAGIC = b"QDMA"
 LOCAL_ANNOUNCE_HEADER = struct.Struct("!4sBBHQIIIHH")
+SOURCE_CONFIG_MAGIC = b"QDMS"
+SOURCE_CONFIG_HEADER = struct.Struct("!4sBBHQHHHH")
 LOCAL_INPUT_STRUCTS = {
     "motion": struct.Struct("!ii"),
     "button": struct.Struct("!IB3x"),
@@ -42,6 +44,10 @@ INPUT_KINDS = frozenset({
     "motion", "button", "key", "axis", "focus",
 })
 _APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+_PW_NODE = re.compile(
+    r"weston\.pipewire:[1-9][0-9]{0,9}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_INPUT_SINK = re.compile(
+    r"/.*/qdwin-nested-input-[1-9][0-9]*-[1-9][0-9]*\.sock\Z")
 LOCAL_MESSAGE_TYPES = {
     "connected": 1,
     "announce": 2,
@@ -160,6 +166,72 @@ class StreamAnnouncement:
             title=value["title"])
         announcement.validate()
         return announcement
+
+
+@dataclass(frozen=True)
+class SourceHelperConfig:
+    source_revision: int
+    pw_node: str
+    input_sink: str
+    app_id: str
+    title: str
+
+    def validate(self) -> None:
+        _integer(
+            self.source_revision, label="source_revision",
+            minimum=1, maximum=2**63 - 1)
+        pw_node = _text(self.pw_node, label="pw_node", allow_empty=False)
+        if len(pw_node.encode("ascii", errors="ignore")) != len(pw_node):
+            raise RemoteAdapterError("pw_node must be ASCII")
+        if len(pw_node) > 128 or _PW_NODE.fullmatch(pw_node) is None:
+            raise RemoteAdapterError("pw_node has invalid syntax")
+        input_sink = _text(
+            self.input_sink, label="input_sink", allow_empty=False)
+        if (len(input_sink.encode("ascii", errors="ignore")) != len(input_sink)
+                or len(input_sink) > 107
+                or _INPUT_SINK.fullmatch(input_sink) is None
+                or "/../" in input_sink or input_sink.endswith("/..")):
+            raise RemoteAdapterError("input_sink has invalid syntax")
+        _text(self.app_id, label="app_id", allow_empty=False)
+        if _APP_ID.fullmatch(self.app_id) is None:
+            raise RemoteAdapterError("app_id has invalid syntax")
+        _text(self.title, label="title", allow_empty=True)
+
+    def encode(self) -> bytes:
+        self.validate()
+        fields = [
+            self.pw_node.encode("ascii"), self.input_sink.encode("ascii"),
+            self.app_id.encode("utf-8"), self.title.encode("utf-8"),
+        ]
+        return SOURCE_CONFIG_HEADER.pack(
+            SOURCE_CONFIG_MAGIC, LOCAL_VERSION, 0, 0,
+            self.source_revision, *(len(field) for field in fields),
+        ) + b"".join(fields)
+
+    @classmethod
+    def decode(cls, payload: bytes) -> SourceHelperConfig:
+        if not isinstance(payload, bytes) or len(payload) < SOURCE_CONFIG_HEADER.size:
+            raise RemoteAdapterError("source helper config is truncated")
+        magic, version, kind, flags, revision, *lengths = (
+            SOURCE_CONFIG_HEADER.unpack(payload[:SOURCE_CONFIG_HEADER.size]))
+        if magic != SOURCE_CONFIG_MAGIC or version != LOCAL_VERSION:
+            raise RemoteAdapterError("unsupported source helper config")
+        if kind != 0 or flags != 0 or sum(lengths) != (
+                len(payload) - SOURCE_CONFIG_HEADER.size):
+            raise RemoteAdapterError("source helper config header is invalid")
+        offset = SOURCE_CONFIG_HEADER.size
+        values = []
+        try:
+            for index, length in enumerate(lengths):
+                raw = payload[offset:offset + length]
+                values.append(raw.decode("ascii" if index < 2 else "utf-8"))
+                offset += length
+        except UnicodeDecodeError as exc:
+            raise RemoteAdapterError(
+                "source helper config text encoding is invalid") from exc
+        config = cls(revision, *values)
+        config.validate()
+        return config
 
 
 def encode_local_announcement(announcement: StreamAnnouncement) -> bytes:

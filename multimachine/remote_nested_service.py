@@ -534,6 +534,11 @@ class RemoteNestedController:
             return
         if message.kind == "frame":
             frame = RawFrame.decode(message.payload)
+            if not self.state.connected:
+                # A frame already committed to the local socket can race the
+                # endpoint's detach notification. It belongs to the expired
+                # media epoch and must not revive or fail the detached source.
+                return
             if self._media_sent - self._media_acked >= MAX_LOCAL_DECODE_PENDING:
                 # Producer never blocks the app/compositor: retain only the
                 # newest complete frame until the decoder advances its window.

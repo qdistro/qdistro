@@ -62,6 +62,13 @@ write_be32(uint8_t *p, uint32_t value)
 }
 
 static void
+write_be16(uint8_t *p, uint16_t value)
+{
+	value = htons(value);
+	memcpy(p, &value, sizeof value);
+}
+
+static void
 write_le16(uint8_t *p, uint16_t value)
 {
 	p[0] = (uint8_t)value;
@@ -187,6 +194,203 @@ qdmm_parse_announcement(const uint8_t *message, size_t length,
 	out->app_id_len = app_len;
 	out->title = title;
 	out->title_len = title_len;
+	return 0;
+}
+
+static int
+safe_ascii_component(const uint8_t *text, size_t length)
+{
+	if (!text || !length)
+		return 0;
+	for (size_t i = 0; i < length; i++) {
+		uint8_t c = text[i];
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+			return 0;
+	}
+	return 1;
+}
+
+static int
+pw_node_valid(const uint8_t *text, size_t length)
+{
+	static const char prefix[] = "weston.pipewire:";
+	if (!text || length <= sizeof prefix - 1 || length > 128 ||
+	    memcmp(text, prefix, sizeof prefix - 1) != 0)
+		return 0;
+	size_t at = sizeof prefix - 1;
+	if (text[at] < '1' || text[at] > '9')
+		return 0;
+	size_t digits = 0;
+	while (at < length && text[at] >= '0' && text[at] <= '9') {
+		at++;
+		digits++;
+	}
+	if (!digits || digits > 10 || at >= length || text[at++] != ':')
+		return 0;
+	return length - at <= 64 &&
+	       safe_ascii_component(text + at, length - at);
+}
+
+static int
+positive_decimal(const uint8_t *text, size_t length)
+{
+	if (!text || !length || text[0] < '1' || text[0] > '9')
+		return 0;
+	for (size_t i = 1; i < length; i++)
+		if (text[i] < '0' || text[i] > '9')
+			return 0;
+	return 1;
+}
+
+static int
+input_sink_valid(const uint8_t *text, size_t length)
+{
+	static const char prefix[] = "qdwin-nested-input-";
+	static const char suffix[] = ".sock";
+	if (!text || length < 2 || length > 107 || text[0] != '/')
+		return 0;
+	for (size_t i = 0; i + 2 < length; i++)
+		if (text[i] == '/' && text[i + 1] == '.' && text[i + 2] == '.' &&
+		    (i + 3 == length || text[i + 3] == '/'))
+			return 0;
+	const uint8_t *slash = text;
+	for (size_t i = 0; i < length; i++)
+		if (text[i] == '/') slash = text + i + 1;
+	size_t basename_len = length - (size_t)(slash - text);
+	if (basename_len <= sizeof prefix + sizeof suffix - 2 ||
+	    memcmp(slash, prefix, sizeof prefix - 1) != 0 ||
+	    memcmp(text + length - (sizeof suffix - 1),
+		   suffix, sizeof suffix - 1) != 0)
+		return 0;
+	const uint8_t *numbers = slash + sizeof prefix - 1;
+	size_t numbers_len = basename_len - (sizeof prefix - 1) -
+		(sizeof suffix - 1);
+	const uint8_t *dash = memchr(numbers, '-', numbers_len);
+	if (!dash)
+		return 0;
+	return positive_decimal(numbers, (size_t)(dash - numbers)) &&
+	       positive_decimal(dash + 1,
+		numbers_len - (size_t)(dash + 1 - numbers));
+}
+
+int
+qdmm_parse_source_config(const uint8_t *config, size_t length,
+			 struct qdmm_source_config_view *out)
+{
+	if (!config || !out || length < QDMM_SOURCE_CONFIG_HEADER_SIZE ||
+	    memcmp(config, "QDMS", 4) != 0 || config[4] != 1 ||
+	    config[5] != 0 || config[6] != 0 || config[7] != 0)
+		return -1;
+	uint64_t revision = read_be64(config + 8);
+	size_t pw_len = read_be16(config + 16);
+	size_t input_len = read_be16(config + 18);
+	size_t app_len = read_be16(config + 20);
+	size_t title_len = read_be16(config + 22);
+	if (!revision || revision > INT64_MAX ||
+	    pw_len + input_len + app_len + title_len !=
+	    length - QDMM_SOURCE_CONFIG_HEADER_SIZE)
+		return -1;
+	const uint8_t *pw_node = config + QDMM_SOURCE_CONFIG_HEADER_SIZE;
+	const uint8_t *input_sink = pw_node + pw_len;
+	const uint8_t *app_id = input_sink + input_len;
+	const uint8_t *title = app_id + app_len;
+	if (!pw_node_valid(pw_node, pw_len) ||
+	    !input_sink_valid(input_sink, input_len) ||
+	    !app_id_valid(app_id, app_len) ||
+	    !utf8_text_valid(title, title_len))
+		return -1;
+	out->source_revision = revision;
+	out->pw_node = pw_node;
+	out->pw_node_len = pw_len;
+	out->input_sink = input_sink;
+	out->input_sink_len = input_len;
+	out->app_id = app_id;
+	out->app_id_len = app_len;
+	out->title = title;
+	out->title_len = title_len;
+	return 0;
+}
+
+int
+qdmm_build_announcement_wire(
+	const struct qdmm_source_config_view *config,
+	uint32_t width, uint32_t height, uint32_t stride,
+	uint8_t *out, size_t out_size, size_t *out_len)
+{
+	if (!config || !out || !out_len || !config->source_revision ||
+	    !width || !height || width > QDMM_MAX_DIMENSION ||
+	    height > QDMM_MAX_DIMENSION || stride != width * 4u ||
+	    (uint64_t)stride * height + QDMM_FRAME_HEADER_SIZE >
+	    QDMM_MAX_MEDIA_BYTES || config->app_id_len > UINT16_MAX ||
+	    config->title_len > UINT16_MAX)
+		return -1;
+	size_t payload_len = QDMM_LOCAL_ANNOUNCE_HEADER_SIZE +
+		config->app_id_len + config->title_len;
+	size_t message_len = QDMM_LOCAL_HEADER_SIZE + payload_len;
+	if (out_size < 4 + message_len)
+		return -1;
+	write_be32(out, (uint32_t)message_len);
+	memcpy(out + 4, "QDML", 4);
+	out[8] = 1;
+	out[9] = QDMM_LOCAL_ANNOUNCE;
+	out[10] = 0;
+	out[11] = 0;
+	write_be64(out + 12, config->source_revision);
+	uint8_t *a = out + 4 + QDMM_LOCAL_HEADER_SIZE;
+	memcpy(a, "QDMA", 4);
+	a[4] = 1;
+	a[5] = 1;
+	a[6] = 0;
+	a[7] = 0;
+	write_be64(a + 8, config->source_revision);
+	write_be32(a + 16, width);
+	write_be32(a + 20, height);
+	write_be32(a + 24, stride);
+	write_be16(a + 28, (uint16_t)config->app_id_len);
+	write_be16(a + 30, (uint16_t)config->title_len);
+	memcpy(a + QDMM_LOCAL_ANNOUNCE_HEADER_SIZE,
+	       config->app_id, config->app_id_len);
+	memcpy(a + QDMM_LOCAL_ANNOUNCE_HEADER_SIZE + config->app_id_len,
+	       config->title, config->title_len);
+	*out_len = 4 + message_len;
+	return 0;
+}
+
+int
+qdmm_build_frame_wire(uint64_t seq,
+	uint32_t width, uint32_t height, uint32_t stride,
+	const uint8_t *pixels, size_t pixels_len,
+	uint8_t *out, size_t out_size, size_t *out_len)
+{
+	if (!seq || !width || !height || width > QDMM_MAX_DIMENSION ||
+	    height > QDMM_MAX_DIMENSION || stride != width * 4u || !pixels ||
+	    pixels_len != (uint64_t)stride * height ||
+	    pixels_len + QDMM_FRAME_HEADER_SIZE > QDMM_MAX_MEDIA_BYTES)
+		return -1;
+	size_t message_len = QDMM_LOCAL_HEADER_SIZE + QDMM_FRAME_HEADER_SIZE +
+		pixels_len;
+	if (!out || !out_len || out_size < 4 + message_len)
+		return -1;
+	write_be32(out, (uint32_t)message_len);
+	memcpy(out + 4, "QDML", 4);
+	out[8] = 1;
+	out[9] = QDMM_LOCAL_FRAME;
+	out[10] = 0;
+	out[11] = 0;
+	write_be64(out + 12, seq);
+	uint8_t *frame = out + 4 + QDMM_LOCAL_HEADER_SIZE;
+	memcpy(frame, "QDMF", 4);
+	frame[4] = 1;
+	frame[5] = 1;
+	frame[6] = 0;
+	frame[7] = 0;
+	write_be32(frame + 8, width);
+	write_be32(frame + 12, height);
+	write_be32(frame + 16, stride);
+	write_be32(frame + 20, (uint32_t)pixels_len);
+	memcpy(frame + QDMM_FRAME_HEADER_SIZE, pixels, pixels_len);
+	*out_len = 4 + message_len;
 	return 0;
 }
 

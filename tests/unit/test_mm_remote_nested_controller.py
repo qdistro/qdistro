@@ -114,6 +114,10 @@ def test_source_controller_coalesces_frames_releases_input_and_reconciles() -> N
             "code": 42, "pressed": False}
         assert _helper_event(helper) == LocalBoundaryMessage("detached", seq=1)
 
+        controller._handle_helper(LocalBoundaryMessage(
+            "frame", payload=FRAMES[0].encode()))
+        assert not select.select([endpoint], [], [], 0)[0]
+
         _event(controller, op="connected", epoch=2)
         assert _helper_event(helper) == LocalBoundaryMessage("connected", seq=2)
         reconcile = _endpoint_request(endpoint)
