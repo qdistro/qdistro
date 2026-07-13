@@ -14,6 +14,7 @@ from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
     StreamAnnouncement,
+    encode_local_announcement,
     encode_input_event,
 )
 from multimachine.remote_nested_service import (
@@ -71,7 +72,7 @@ def test_source_controller_coalesces_frames_releases_input_and_reconciles() -> N
         assert _helper_event(helper) == LocalBoundaryMessage("connected", seq=1)
 
         controller._handle_helper(LocalBoundaryMessage(
-            "announce", payload=ANNOUNCEMENT.encode()))
+            "announce", payload=encode_local_announcement(ANNOUNCEMENT)))
         announce = _endpoint_request(endpoint)
         assert (announce["channel"], announce["kind"]) == ("control", "announce")
 
@@ -121,7 +122,8 @@ def test_viewer_controller_acks_only_helper_delivered_frames_and_sends_input() -
             channel="control", kind="announce", seq=1,
             payload=ANNOUNCEMENT.encode()))
         assert _helper_event(helper) == LocalBoundaryMessage(
-            "announce", seq=7, payload=ANNOUNCEMENT.encode())
+            "announce", seq=7,
+            payload=encode_local_announcement(ANNOUNCEMENT))
 
         _event(controller, **_received(
             channel="media", kind="frame_bgrx", seq=1,

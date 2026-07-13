@@ -94,6 +94,17 @@ pw_target_resolver_test = executable(
 )
 test('pw-target-resolver', pw_target_resolver_test)
 
+mm_remote_frame_protocol = static_library(
+  'qdistro-mm-remote-frame-protocol',
+  'nested-pixelfeed/mm-remote-frame.c',
+)
+mm_remote_frame_protocol_test = executable(
+  'test-mm-remote-frame-protocol',
+  'nested-pixelfeed/test-mm-remote-frame.c',
+  link_with: mm_remote_frame_protocol,
+)
+test('mm-remote-frame-protocol', mm_remote_frame_protocol_test)
+
 if dep_freerdp_shadow.found() and dep_freerdp.found() and dep_winpr.found() and dep_pipewire.found()
   executable('qdistro-forward',
     sources: [
@@ -131,6 +142,21 @@ if dep_pipewire.found()
 else
   message('qdistro-nested-pixelfeed skipped — libpipewire-0.3 not found')
 endif
+
+# R6 viewer-local remote frame feeder. It deliberately has no PipeWire
+# dependency: authenticated remote frames become freshly allocated local SHM
+# buffers and pass through qdwin's existing same-uid bind_proxy_pixels gate.
+executable('qdistro-mm-remote-pixelfeed',
+  sources: [
+    'nested-pixelfeed/qdistro-mm-remote-pixelfeed.c',
+    qdwin_shell_client_header,
+    qdwin_shell_protocol_code,
+  ],
+  link_with: mm_remote_frame_protocol,
+  dependencies: [dep_wayland_client],
+  install: true,
+  install_dir: get_option('bindir'),
+)
 
 # qdistro-secctx-exec: wp_security_context_v1 wrapper for non-secctx
 # clients. Required for tier-3+ sandboxing.

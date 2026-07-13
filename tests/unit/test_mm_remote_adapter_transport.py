@@ -34,6 +34,7 @@ from multimachine.remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
     StreamAnnouncement,
+    encode_local_announcement,
 )
 from multimachine.remote_nested_service import MAX_BOUNDARY_FRAME_BYTES
 
@@ -372,9 +373,10 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
             source_revision=7, width=4, height=3, stride=16,
             app_id="org.example.Editor", title="Remote editor")
         _boundary_send(source_helper, LocalBoundaryMessage(
-            "announce", payload=announcement.encode()))
+            "announce", payload=encode_local_announcement(announcement)))
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
-            "announce", seq=7, payload=announcement.encode())
+            "announce", seq=7,
+            payload=encode_local_announcement(announcement))
 
         frames = [
             RawFrame(4, 3, 16, bytes([value]) * 48)
@@ -421,7 +423,8 @@ def test_real_endpoints_and_nested_controllers_reconnect_and_resume() -> None:
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
             "connected", seq=2)
         assert _boundary_event(viewer_helper) == LocalBoundaryMessage(
-            "announce", seq=7, payload=announcement.encode())
+            "announce", seq=7,
+            payload=encode_local_announcement(announcement))
 
         resumed = RawFrame(4, 3, 16, b"r" * 48)
         _boundary_send(source_helper, LocalBoundaryMessage(

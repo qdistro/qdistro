@@ -28,7 +28,9 @@ from .remote_nested_protocol import (
     LocalBoundaryMessage,
     RawFrame,
     StreamAnnouncement,
+    decode_local_announcement,
     decode_input_event,
+    encode_local_announcement,
     encode_input_event,
 )
 
@@ -467,7 +469,7 @@ class RemoteNestedController:
             else:
                 self._send_helper(LocalBoundaryMessage(
                     "announce", seq=announcement.source_revision,
-                    payload=announcement.encode()))
+                    payload=encode_local_announcement(announcement)))
             return
         if channel == "media" and kind == "frame_bgrx":
             frame = self.state.receive_media(seq, payload)
@@ -493,7 +495,7 @@ class RemoteNestedController:
             return
         if message.kind == "announce":
             self._send_endpoint(self.state.announce(
-                StreamAnnouncement.decode(message.payload)))
+                decode_local_announcement(message.payload)))
             return
         if message.kind == "frame":
             frame = RawFrame.decode(message.payload)

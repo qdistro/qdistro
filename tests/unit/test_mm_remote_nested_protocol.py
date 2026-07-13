@@ -14,7 +14,9 @@ from multimachine.remote_nested_protocol import (
     RawFrame,
     StreamAnnouncement,
     decode_input_event,
+    decode_local_announcement,
     encode_input_event,
+    encode_local_announcement,
 )
 
 
@@ -150,7 +152,8 @@ def test_frame_must_match_announced_geometry() -> None:
 
 @pytest.mark.parametrize("message", [
     LocalBoundaryMessage("connected", seq=2),
-    LocalBoundaryMessage("announce", payload=_announcement().encode()),
+    LocalBoundaryMessage(
+        "announce", payload=encode_local_announcement(_announcement())),
     LocalBoundaryMessage("frame", seq=7, payload=_frame().encode()),
     LocalBoundaryMessage("key", payload=b'{"code":30,"pressed":true}'),
     LocalBoundaryMessage("detached", seq=3, payload=b"[]"),
@@ -174,3 +177,16 @@ def test_local_helper_boundary_rejects_truncation_header_and_unknown_kind() -> N
         LocalBoundaryMessage.decode(bytes(valid))
     with pytest.raises(RemoteAdapterError, match="kind"):
         LocalBoundaryMessage("clipboard").encode()
+
+
+def test_local_binary_announcement_round_trip_and_rejects_hostile_lengths() -> None:
+    encoded = encode_local_announcement(_announcement())
+    assert decode_local_announcement(encoded) == _announcement()
+    hostile = bytearray(encoded)
+    hostile[-1:] = b""
+    with pytest.raises(RemoteAdapterError, match="length"):
+        decode_local_announcement(bytes(hostile))
+    hostile = bytearray(encoded)
+    hostile[0:4] = b"NOPE"
+    with pytest.raises(RemoteAdapterError, match="unsupported"):
+        decode_local_announcement(bytes(hostile))

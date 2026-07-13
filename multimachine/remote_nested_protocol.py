@@ -29,6 +29,8 @@ FRAME_HEADER = struct.Struct("!4sBBHIIII")
 LOCAL_MAGIC = b"QDML"
 LOCAL_VERSION = 1
 LOCAL_HEADER = struct.Struct("!4sBBHQ")
+LOCAL_ANNOUNCE_MAGIC = b"QDMA"
+LOCAL_ANNOUNCE_HEADER = struct.Struct("!4sBBHQIIIHH")
 INPUT_KINDS = frozenset({
     "motion", "button", "key", "axis", "focus",
 })
@@ -150,6 +152,46 @@ class StreamAnnouncement:
             title=value["title"])
         announcement.validate()
         return announcement
+
+
+def encode_local_announcement(announcement: StreamAnnouncement) -> bytes:
+    """Binary C-helper form of a validated network announcement."""
+    announcement.validate()
+    app_id = announcement.app_id.encode("utf-8")
+    title = announcement.title.encode("utf-8")
+    return LOCAL_ANNOUNCE_HEADER.pack(
+        LOCAL_ANNOUNCE_MAGIC, LOCAL_VERSION, FRAME_FORMAT_BGRX, 0,
+        announcement.source_revision, announcement.width,
+        announcement.height, announcement.stride,
+        len(app_id), len(title),
+    ) + app_id + title
+
+
+def decode_local_announcement(payload: bytes) -> StreamAnnouncement:
+    if (not isinstance(payload, bytes)
+            or len(payload) < LOCAL_ANNOUNCE_HEADER.size):
+        raise RemoteAdapterError("local announcement is truncated")
+    (magic, version, pixel_format, flags, source_revision, width, height,
+     stride, app_len, title_len) = LOCAL_ANNOUNCE_HEADER.unpack(
+        payload[:LOCAL_ANNOUNCE_HEADER.size])
+    if (magic != LOCAL_ANNOUNCE_MAGIC or version != LOCAL_VERSION
+            or pixel_format != FRAME_FORMAT_BGRX or flags != 0):
+        raise RemoteAdapterError("unsupported local announcement")
+    if app_len + title_len != len(payload) - LOCAL_ANNOUNCE_HEADER.size:
+        raise RemoteAdapterError("local announcement length does not match header")
+    app_start = LOCAL_ANNOUNCE_HEADER.size
+    title_start = app_start + app_len
+    try:
+        app_id = payload[app_start:title_start].decode("utf-8")
+        title = payload[title_start:].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RemoteAdapterError(
+            "local announcement text is not UTF-8") from exc
+    announcement = StreamAnnouncement(
+        source_revision=source_revision, width=width, height=height,
+        stride=stride, app_id=app_id, title=title)
+    announcement.validate()
+    return announcement
 
 
 @dataclass(frozen=True)
