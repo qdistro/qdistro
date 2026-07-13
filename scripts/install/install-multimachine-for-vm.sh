@@ -15,7 +15,9 @@ fi
 
 install -d -o root -g root -m 0755 "$DEST/harness" /usr/local/bin
 for module in __init__.py bridge.py control_source.py mm_broker.py \
-              mm_pairing_authority.py mm_session_launcher.py origin_authority.py \
+              mm_pairing_authority.py mm_remote_session_authority.py \
+              mm_remote_session_launcher.py mm_session_launcher.py \
+              origin_authority.py \
               rdp_client_wrapper.py remote_adapter.py \
               sidechannel.py; do
     install -o root -g root -m 0644 "$SRC/$module" "$DEST/$module"
@@ -28,6 +30,8 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-broker" \
     /usr/local/bin/qdistro-mm-broker
 install -o root -g root -m 0755 "$SRC/qdistro-mm-session-launcher" \
     /usr/local/bin/qdistro-mm-session-launcher
+install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-session-launcher" \
+    /usr/local/bin/qdistro-mm-remote-session-launcher
 install -o root -g root -m 0755 "$SRC/qdistro-mm-rdp-client-wrapper" \
     /usr/local/bin/qdistro-mm-rdp-client-wrapper
 
