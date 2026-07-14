@@ -35,8 +35,21 @@ sys.path.insert(0, str(REPO))
 from multimachine.harness import capture as capture_mod  # noqa: E402
 from multimachine.harness import marker, oracle  # noqa: E402
 from multimachine.harness.vm_backend import QciVMBackend  # noqa: E402
+from multimachine.display_slot_controller import (  # noqa: E402
+    ControllerEvent,
+    DisplaySlotController,
+    PrimaryDisplayEndpoint,
+    SplitDisplaySlotExecutor,
+)
 from multimachine.mm_display_authority import issue_display_grant  # noqa: E402
 from multimachine.mm_pairing_authority import public_key_bytes  # noqa: E402
+from multimachine.remote_display_slot import (  # noqa: E402
+    ActionKind,
+    DisplaySlotSpec,
+    RemoteDisplaySlot,
+    SlotAction,
+    SlotPhase,
+)
 
 
 W, H = 1280, 800
@@ -209,12 +222,13 @@ def _carrier_certificate(common_name: str) -> tuple[bytes, bytes, str]:
 
 
 def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
-                         vm_viewer: str) -> None:
+                         vm_viewer: str) -> dict[int, dict]:
     """Stage two strictly increasing one-shot grants for attach + redock."""
     authority = Ed25519PrivateKey.generate()
     primary_cert, primary_key, primary_pin = _carrier_certificate("r9-primary")
     peer_cert, peer_key, peer_pin = _carrier_certificate("r9-peer")
     issued_at = int(time.time())
+    payloads: dict[int, dict] = {}
     with tempfile.TemporaryDirectory(prefix="r9-carrier-") as temporary:
         root = Path(temporary)
         authority_path = root / "authority.pub"
@@ -238,6 +252,7 @@ def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
                 issued_at=issued_at, handoff_expires_at=issued_at + 300,
                 lease_expires_at=issued_at + 3600, heartbeat_ms=1000,
                 private_key=authority)
+            payloads[generation] = dict(receipt["payload"])
             grant_path = root / f"grant-{generation}.json"
             layout_path = root / f"layout-{generation}.json"
             secret_path = root / f"secret-{generation}"
@@ -271,6 +286,7 @@ def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
                     files[name] = path
                 for name, path in files.items():
                     backend._push(vm, path, f"{guest}/{name}", mode=0o600)
+    return payloads
 
 
 def start_carrier(backend: QciVMBackend, vm: str, *, role: str,
@@ -330,6 +346,131 @@ def shell_layout(backend: QciVMBackend, vm: str, *, generation: int,
     if result != {"action": action, "generation": generation, "ok": True}:
         raise RuntimeError(f"qdshell layout action failed: {result}")
     return result
+
+
+class LiveShellEndpoint:
+    def __init__(self, backend: QciVMBackend, vm: str):
+        self.backend = backend
+        self.vm = vm
+        self.results: list[dict] = []
+
+    def perform(self, action: SlotAction, grant: dict) -> None:
+        verb = {
+            ActionKind.PRIMARY_ENABLE_OUTPUT: "enable",
+            ActionKind.PRIMARY_DISABLE_OUTPUT: "disable",
+        }[action.kind]
+        self.results.append(shell_layout(
+            self.backend, self.vm, generation=grant["generation"],
+            action=verb))
+
+    def safe_state_confirmed(self, slot_name: str) -> bool:
+        try:
+            state = source_probe(
+                self.backend, self.vm, f"--expect-state={slot_name}:0")
+            return "enabled=0" in state
+        except Exception:
+            return False
+
+
+class LivePrimaryLocalEndpoint:
+    """Harness binding for input/release/transfer actions outside qdshell."""
+
+    def __init__(self):
+        self.input_enabled = False
+        self.actions: list[str] = []
+
+    def perform(self, action: SlotAction, _grant: dict) -> None:
+        self.actions.append(action.kind.value)
+        if action.kind is ActionKind.PRIMARY_ENABLE_INPUT:
+            self.input_enabled = True
+        elif action.kind is ActionKind.PRIMARY_DISABLE_INPUT:
+            self.input_enabled = False
+
+    def safe_state_confirmed(self, _slot_name: str) -> bool:
+        return not self.input_enabled
+
+
+class LivePeerPanelEndpoint:
+    """Reserve the viewer kiosk before the carrier may show remote pixels."""
+
+    def __init__(self, backend: QciVMBackend, vm: str):
+        self.backend = backend
+        self.vm = vm
+        self.prepared = False
+        self.reserved = False
+
+    def perform(self, action: SlotAction, _grant: dict) -> None:
+        if action.kind is ActionKind.PEER_BLANK_PANEL:
+            if not self.prepared:
+                output = self.backend._vmexec(
+                    self.vm, "bash /tmp/r9-rdp-viewer-stack.sh", timeout=120)
+                if "R9_VIEWER_READY" not in output:
+                    raise RuntimeError(f"viewer setup failed: {output}")
+                self.prepared = True
+            self.backend._vmexec(
+                self.vm, "systemctl stop mm-r9-rdp 2>/dev/null || true")
+            self.reserved = True
+        elif action.kind is ActionKind.PEER_UNBLANK_PANEL:
+            self.reserved = False
+        else:
+            raise RuntimeError(f"peer endpoint cannot perform {action.kind}")
+
+    def safe_state_confirmed(self, _slot_name: str) -> bool:
+        return not self.reserved
+
+
+class LiveCarrierEndpoint:
+    """Own both pinned-mTLS carrier processes and the thin-client lifetime."""
+
+    def __init__(self, backend: QciVMBackend, source_vm: str, viewer_vm: str):
+        self.backend = backend
+        self.source_vm = source_vm
+        self.viewer_vm = viewer_vm
+        self.active_generation: int | None = None
+
+    def perform(self, action: SlotAction, grant: dict) -> None:
+        generation = grant["generation"]
+        if action.kind is ActionKind.OPEN_AUTHENTICATED_CARRIER:
+            start_carrier(
+                self.backend, self.source_vm, role="primary",
+                generation=generation)
+            wait_carrier_listener(
+                self.backend, self.source_vm, port=3389,
+                label=f"primary carrier generation {generation}")
+            start_carrier(
+                self.backend, self.viewer_vm, role="peer",
+                generation=generation)
+            wait_carrier_listener(
+                self.backend, self.viewer_vm, port=3390,
+                label=f"peer carrier generation {generation}")
+            self.backend._vmexec(
+                self.viewer_vm,
+                f"rm -f {VIEWER_RT}/rdp.log; systemctl start mm-r9-rdp")
+            wait_rdp(self.backend, self.viewer_vm)
+            self.active_generation = generation
+        elif action.kind is ActionKind.CLOSE_CARRIER:
+            self.backend._vmexec(
+                self.viewer_vm,
+                "systemctl stop mm-r9-rdp 2>/dev/null || true")
+            for vm, role, runtime in (
+                (self.source_vm, "primary", SOURCE_RT),
+                (self.viewer_vm, "peer", VIEWER_RT),
+            ):
+                wait_guest(
+                    self.backend, vm,
+                    f"grep -q '\"closed_by\"' {runtime}/"
+                    f"carrier-g{generation}.log && echo closed",
+                    timeout=10,
+                    label=f"{role} carrier generation {generation} detach")
+                self.backend._vmexec(
+                    vm, f"systemctl stop mm-r9-carrier-{role}-g{generation} "
+                    "2>/dev/null || true")
+            self.active_generation = None
+        else:
+            raise RuntimeError(f"carrier endpoint cannot perform {action.kind}")
+
+    def safe_state_confirmed(self, _slot_name: str) -> bool:
+        return self.active_generation is None
 
 
 def wait_rdp(backend: QciVMBackend, vm: str, *, timeout: float = 50) -> None:
@@ -413,7 +554,7 @@ def main() -> int:
     stage(backend, args.vm_source, args.vm_viewer, args.qdwin, args.qdshell)
     # Generate after the potentially long qdwin build so the five-minute
     # signed handoff window is fresh when the endpoints actually connect.
-    stage_carrier_grants(backend, args.vm_source, args.vm_viewer)
+    grants = stage_carrier_grants(backend, args.vm_source, args.vm_viewer)
     backend._vmexec(
         args.vm_source,
         f"test ! -d {SOURCE_RT} || touch {SOURCE_RT}/stop; "
@@ -445,11 +586,33 @@ def main() -> int:
             args.vm_source, f"cat {SOURCE_RT}/qdshell.pid").strip())
         assertions["real_qdshell_bound_as_output_authority"] = shell_pid > 1
 
-        # The controller publishes one generation-bound slot delta. qdshell
-        # authenticates to that service, builds a full atomic layout from its
-        # live snapshot, and acknowledges only qdwin's tagged result.
-        details["generation_90_enable"] = shell_layout(
-            backend, args.vm_source, generation=GENERATION, action="enable")
+        shell_endpoint = LiveShellEndpoint(backend, args.vm_source)
+        local_endpoint = LivePrimaryLocalEndpoint()
+        peer_endpoint = LivePeerPanelEndpoint(backend, args.vm_viewer)
+        carrier_endpoint = LiveCarrierEndpoint(
+            backend, args.vm_source, args.vm_viewer)
+        controller_events: list[ControllerEvent] = []
+        controller_time = [time.time()]
+
+        def controller_clock() -> float:
+            return controller_time[0]
+
+        primary_endpoint = PrimaryDisplayEndpoint(
+            shell_layout=shell_endpoint, local=local_endpoint)
+        controller = DisplaySlotController(
+            RemoteDisplaySlot(
+                DisplaySlotSpec("rdp-0"), clock=controller_clock),
+            SplitDisplaySlotExecutor(
+                primary=primary_endpoint, peer=peer_endpoint,
+                carrier=carrier_endpoint),
+            clock=controller_clock, audit=controller_events.append)
+
+        # The real controller owns the whole order: reserve peer panel, await
+        # qdshell's exact tagged apply, open both carriers, then enable input.
+        controller.attach(grants[GENERATION])
+        details["generation_90_enable"] = shell_endpoint.results[-1]
+        assertions["controller_generation_90_active"] = (
+            controller.phase is SlotPhase.ACTIVE)
         enabled = source_probe(
             backend, args.vm_source, "--expect-heads=2",
             "--expect-state=rdp-0:1")
@@ -457,14 +620,6 @@ def main() -> int:
             "name=headless enabled=1 pos=0,0" in enabled
             and f"name=rdp-0 enabled=1 pos={W},0" in enabled)
 
-        viewer_setup = backend._vmexec(
-            args.vm_viewer, "bash /tmp/r9-rdp-viewer-stack.sh", timeout=120)
-        if "R9_VIEWER_READY" not in viewer_setup:
-            raise RuntimeError(f"viewer setup failed: {viewer_setup}")
-        start_carrier(
-            backend, args.vm_viewer, role="peer", generation=GENERATION)
-        wait_carrier_listener(
-            backend, args.vm_viewer, port=3390, label="peer carrier generation 90")
         source_boundary = backend._vmexec(
             args.vm_source,
             f"stat -c '%a %U %G' {SOURCE_RT}/rdp-listener.sock; "
@@ -479,8 +634,6 @@ def main() -> int:
             and "0.0.0.0:3390" not in viewer_boundary)
         details["primary_carrier_listener"] = source_boundary.splitlines()[1:]
         details["peer_carrier_listener"] = viewer_boundary.splitlines()
-        backend._vmexec(args.vm_viewer, "systemctl start mm-r9-rdp")
-        wait_rdp(backend, args.vm_viewer)
         first = capture_viewer(
             backend, args.vm_viewer, args.bundle / "attached-epoch1.ppm")
         details["epoch1_pixels"] = assert_remote_half(first)
@@ -511,20 +664,16 @@ def main() -> int:
         details["input_before"] = before["totals"]
         details["input_after"] = after["totals"]
 
-        # Fail-safe order: cut the client/input carrier first, then remove the
-        # leased output from the desktop. R8 rescues any crossing windows.
-        backend._vmexec(args.vm_viewer, "systemctl stop mm-r9-rdp")
-        wait_guest(
-            backend, args.vm_source,
-            f"grep -q '\"closed_by\"' {SOURCE_RT}/carrier-g90.log && echo closed",
-            timeout=10, label="primary carrier generation 90 detach")
-        wait_guest(
-            backend, args.vm_viewer,
-            f"grep -q '\"closed_by\"' {VIEWER_RT}/carrier-g90.log && echo closed",
-            timeout=10, label="peer carrier generation 90 detach")
+        # Advance the controller's deterministic lease clock beyond one missed
+        # heartbeat. Its real endpoints must cut input/carrier, disable through
+        # qdshell, and release the peer reservation in state-machine order.
+        assert controller.heartbeat(GENERATION)
+        controller_time[0] += grants[GENERATION]["heartbeat_ms"] / 1000 + 0.1
+        assert controller.tick()
+        assertions["controller_heartbeat_timeout_reached_failed_safe"] = (
+            controller.phase is SlotPhase.FAILED_SAFE)
         assertions["signed_pinned_mtls_carrier_closed_on_disconnect"] = True
-        details["generation_90_disable"] = shell_layout(
-            backend, args.vm_source, generation=GENERATION, action="disable")
+        details["generation_90_disable"] = shell_endpoint.results[-1]
         disabled = source_probe(
             backend, args.vm_source, "--expect-state=rdp-0:0")
         assertions["qdshell_disconnect_disables_output_slot"] = (
@@ -536,6 +685,9 @@ def main() -> int:
             backend, args.vm_source, "--expect-state=rdp-0:0")
         assertions["separate_same_uid_output_client_is_denied"] = (
             "denied" in denied and "enabled=0" in denied_state)
+        controller.reset_failed_safe()
+        assertions["controller_reset_requires_live_safe_endpoints"] = (
+            controller.phase is SlotPhase.DISABLED)
         assert_alive(backend, args.vm_source, initial_pids)
         assertions["disconnect_preserves_compositor_and_source_app"] = True
         time.sleep(1)
@@ -545,22 +697,10 @@ def main() -> int:
         assertions["detached_peer_does_not_show_stale_remote_pixels"] = (
             float(blank.mean()) < 12.0)
 
-        start_carrier(
-            backend, args.vm_source, role="primary", generation=GENERATION + 1)
-        wait_carrier_listener(
-            backend, args.vm_source, port=3389,
-            label="primary carrier generation 91")
-        details["generation_91_enable"] = shell_layout(
-            backend, args.vm_source, generation=GENERATION + 1,
-            action="enable")
-        start_carrier(
-            backend, args.vm_viewer, role="peer", generation=GENERATION + 1)
-        wait_carrier_listener(
-            backend, args.vm_viewer, port=3390,
-            label="peer carrier generation 91")
-        backend._vmexec(args.vm_viewer, "rm -f /run/mm-r9-viewer/rdp.log; "
-                        "systemctl start mm-r9-rdp")
-        wait_rdp(backend, args.vm_viewer)
+        controller.attach(grants[GENERATION + 1])
+        details["generation_91_enable"] = shell_endpoint.results[-1]
+        assertions["controller_generation_91_active"] = (
+            controller.phase is SlotPhase.ACTIVE)
         # R8 correctly rescued the original crossing window onto the surviving
         # local output at detach. Reattachment must not silently teleport a
         # window the user may have moved meanwhile. Place a fresh test window
@@ -585,6 +725,20 @@ def main() -> int:
             "reattach_composites_fresh_pixels_without_authority_or_app_restart"
         ] = True
         assertions["redock_requires_strictly_newer_carrier_generation"] = True
+        controller.detach(GENERATION + 1)
+        assertions["controller_clean_detach_returns_disabled"] = (
+            controller.phase is SlotPhase.DISABLED)
+        details["controller_actions"] = [
+            {
+                "generation": event.generation,
+                "phase": event.phase,
+                "kind": event.kind,
+                "action": event.action,
+                "ok": event.ok,
+                "detail": event.detail,
+            }
+            for event in controller_events
+        ]
         assertions["all_hard_assertions"] = all(assertions.values())
         if not assertions["all_hard_assertions"]:
             raise AssertionError(f"R9 assertion failure: {assertions}")

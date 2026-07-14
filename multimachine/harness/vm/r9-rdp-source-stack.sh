@@ -94,20 +94,6 @@ grep -q 'qdwin: shell loaded' "$RT/weston.log" || fail "qdwin shell not loaded"
 grep -q 'RDP TLS support activated on external listener' "$RT/weston.log" || \
     fail "external listener did not retain inner RDP TLS"
 
-# The product carrier is the sole network listener. It admits exactly one
-# signed generation over pinned mutual TLS, then connects qdwin's mode-0600
-# AF_UNIX listener. qdwin itself owns no TCP listener.
-systemd-run --collect --unit=mm-r9-carrier-primary-g90 \
-    --property=StandardOutput=append:$RT/carrier-g90.log \
-    --property=StandardError=append:$RT/carrier-g90.log \
-    /tmp/r9-display-carrier-launch.py --role primary \
-    --bundle /tmp/r9-carrier-g90
-for _ in $(seq 1 50); do
-    ss -ltn | grep -q ":${PORT} " && break
-    sleep 0.1
-done
-ss -ltn | grep -q ":${PORT} " || fail "mTLS display carrier did not listen"
-
 # The backend creates rdp-0 at startup.  Product v1 reserves a bounded slot and
 # makes it non-desktop until a generation-bound display lease is admitted.
 run_admin /tmp/r9-qdwin-output-probe --apply --disable=rdp-0 \
