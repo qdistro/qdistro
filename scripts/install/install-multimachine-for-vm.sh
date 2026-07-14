@@ -17,12 +17,14 @@ install -d -o root -g root -m 0755 "$DEST/harness" /usr/local/bin
 for module in __init__.py bridge.py control_source.py mm_broker.py \
               mm_pairing_authority.py mm_remote_session_authority.py \
               mm_display_authority.py \
+              mm_display_carrier_launcher.py \
               mm_remote_session_launcher.py mm_session_launcher.py \
               origin_authority.py \
               rdp_client_wrapper.py remote_adapter.py \
               remote_nested_protocol.py remote_nested_service.py \
               remote_nested_supervisor.py remote_nested_registry.py \
               remote_display_slot.py \
+              display_carrier.py display_carrier_endpoint.py \
               remote_adapter_transport.py \
               sidechannel.py; do
     install -o root -g root -m 0644 "$SRC/$module" "$DEST/$module"
@@ -39,6 +41,10 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-session-launcher" \
     /usr/local/bin/qdistro-mm-remote-session-launcher
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-adapter" \
     /usr/local/bin/qdistro-mm-remote-adapter
+install -o root -g root -m 0755 "$SRC/qdistro-mm-display-carrier-launcher" \
+    /usr/local/bin/qdistro-mm-display-carrier-launcher
+install -o root -g root -m 0755 "$SRC/qdistro-mm-display-carrier" \
+    /usr/local/bin/qdistro-mm-display-carrier
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-controller" \
     /usr/local/bin/qdistro-mm-remote-nested-controller
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-session" \
