@@ -16,11 +16,13 @@ GEN=${GEN:-90}
 PORT=${PORT:-3389}
 APP_PID=
 WESTON_PID=
+RELAY_PID=
 
 cleanup() {
     set +e
     [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
     [ -n "$WESTON_PID" ] && kill "$WESTON_PID" 2>/dev/null
+    [ -n "$RELAY_PID" ] && kill "$RELAY_PID" 2>/dev/null
     rm -f "$XRT/$SOCK" "$XRT/$SOCK.lock"
 }
 trap cleanup EXIT
@@ -36,7 +38,8 @@ run_admin() {
         WAYLAND_DISPLAY=$SOCK "$@"
 }
 
-for command in weston /tmp/r9-qdwin-output-probe /tmp/r9-qdwin-marker-client; do
+for command in weston socat /tmp/r9-qdwin-output-probe \
+    /tmp/r9-qdwin-marker-client /tmp/r9-rdp-external-launch.py; do
     command -v "$command" >/dev/null 2>&1 || [ -x "$command" ] || \
         fail "missing $command"
 done
@@ -72,16 +75,11 @@ mode=${W}x${H}
 EOF
 chown admin:admin "$RT/weston.ini"
 
-runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
-    QDWIN_ALLOWED_UID=1000 QDWIN_ALLOWED_LOCKER_ANY=1 \
-    QDWIN_ENABLE_SCREENSHOOTER=1 \
-    QDWIN_TEST_PLACE_APPID=qdwin-marker-client \
-    QDWIN_TEST_PLACE_X=$((W - SEAM)) QDWIN_TEST_PLACE_Y=200 \
-    weston --backends=headless,rdp --renderer=pixman \
-      --config="$RT/weston.ini" --width="$W" --height="$H" --port="$PORT" \
-      --rdp-tls-cert=/home/admin/qdwin-rdp/rdp.crt \
-      --rdp-tls-key=/home/admin/qdwin-rdp/rdp.key \
-      --socket=$SOCK --log="$RT/weston.log" &
+/tmp/r9-rdp-external-launch.py --runtime "$RT" --xdg-runtime "$XRT" \
+    --config "$RT/weston.ini" --socket "$SOCK" \
+    --rdp-module /tmp/r9-rdp-backend.so --shell /tmp/r9-qdwin-shell.so \
+    --cert /home/admin/qdwin-rdp/rdp.crt \
+    --key /home/admin/qdwin-rdp/rdp.key --width "$W" --height "$H" &
 WESTON_PID=$!
 
 for _ in $(seq 1 100); do
@@ -90,6 +88,14 @@ for _ in $(seq 1 100); do
 done
 [ -S "$XRT/$SOCK" ] || fail "source qdwin socket missing"
 grep -q 'qdwin: shell loaded' "$RT/weston.log" || fail "qdwin shell not loaded"
+grep -q 'RDP TLS support activated on external listener' "$RT/weston.log" || \
+    fail "external listener did not retain inner RDP TLS"
+
+# Test-only stand-in for the future paired mTLS relay. qdwin itself owns no TCP
+# listener; only this root process can reach its mode-0600 AF_UNIX listener.
+socat TCP-LISTEN:${PORT},bind=0.0.0.0,reuseaddr,fork \
+    UNIX-CONNECT:"$RT/rdp-listener.sock" >"$RT/relay.log" 2>&1 &
+RELAY_PID=$!
 
 # The backend creates rdp-0 at startup.  Product v1 reserves a bounded slot and
 # makes it non-desktop until a generation-bound display lease is admitted.
@@ -107,8 +113,7 @@ runuser -u admin -- env HOME=/home/admin XDG_RUNTIME_DIR=$XRT \
       >"$RT/marker.log" 2>&1 &
 APP_PID=$!
 echo "$APP_PID" >"$RT/app.pid"
-echo "$WESTON_PID" >"$RT/weston.pid"
-chown admin:admin "$RT/app.pid" "$RT/weston.pid"
+chown admin:admin "$RT/app.pid"
 sleep 1
 kill -0 "$APP_PID" 2>/dev/null || fail "marker exited before attach"
 touch "$RT/ready"

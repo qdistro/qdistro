@@ -34,13 +34,17 @@ VIEWER_RT = "/run/mm-r9-viewer"
 
 
 def wait_guest(backend: QciVMBackend, vm: str, command: str, *,
-               timeout: float = 60, label: str) -> str:
+               timeout: float = 60, label: str,
+               process: subprocess.Popen[str] | None = None) -> str:
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
         last = backend._vmexec(vm, command, check=False)
         if last.strip():
             return last
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(
+                f"{label} process exited early with rc={process.returncode}")
         time.sleep(0.25)
     raise RuntimeError(f"timed out waiting for {label}; last={last!r}")
 
@@ -52,6 +56,10 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         backend._push(
             vm, REPO / "multimachine/harness/vm" / name,
             f"/tmp/{name}", mode=0o755)
+    backend._push(
+        vm_source,
+        REPO / "multimachine/harness/vm/r9-rdp-external-launch.py",
+        "/tmp/r9-rdp-external-launch.py", mode=0o755)
 
     for relative in (
         "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
@@ -63,6 +71,11 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         backend._push_large(
             vm_source, qdwin / relative,
             "/root/qdistro-src/qdwin/" + relative)
+    backend._push_large(
+        vm_source,
+        qdwin / "libweston-vendored/src/libweston/backend-rdp/rdp.c",
+        "/root/qdistro-src/qdwin/libweston-vendored/src/"
+        "libweston/backend-rdp/rdp.c")
     backend._vmexec(
         vm_source,
         "rm -rf /root/qdistro-src/qdwin/build-r9-live && "
@@ -75,7 +88,24 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         "install -m 0755 /root/qdistro-src/qdwin/build-r9-live/"
         "qdwin-output-probe /tmp/r9-qdwin-output-probe && "
         "install -m 0755 /root/qdistro-src/qdwin/build-r9-live/"
-        "qdwin-marker-client /tmp/r9-qdwin-marker-client",
+        "qdwin-marker-client /tmp/r9-qdwin-marker-client && "
+        "rm -rf /root/qdistro-src/qdwin/libweston-vendored/src/build-r9-rdp && "
+        "meson setup /root/qdistro-src/qdwin/libweston-vendored/src/build-r9-rdp "
+        "/root/qdistro-src/qdwin/libweston-vendored/src "
+        "-Dbackend-drm=false -Dbackend-rdp=true -Dbackend-vnc=false "
+        "-Dbackend-pipewire=false -Dbackend-wayland=false -Dbackend-x11=false "
+        "-Dbackend-headless=true -Dbackend-default=headless -Drenderer-gl=false "
+        "-Dxwayland=false -Dremoting=false -Dpipewire=false "
+        "-Dcolor-management-lcms=false -Dscreenshare=false "
+        "-Dshell-desktop=false -Dshell-fullscreen=false -Dshell-ivi=false "
+        "-Dshell-kiosk=false -Dimage-jpeg=false -Dimage-webp=false "
+        "-Dsystemd=false -Dtools='' -Dtests=false -Ddemo-clients=false "
+        "-Dsimple-clients='' -Ddoc=false -Dwcap-decode=false && "
+        "ninja -C /root/qdistro-src/qdwin/libweston-vendored/src/build-r9-rdp "
+        "libweston/backend-rdp/rdp-backend.so && "
+        "install -m 0755 /root/qdistro-src/qdwin/libweston-vendored/src/"
+        "build-r9-rdp/libweston/backend-rdp/rdp-backend.so "
+        "/tmp/r9-rdp-backend.so",
         timeout=300)
 
 
@@ -178,7 +208,7 @@ def main() -> int:
             f"test -e {SOURCE_RT}/ready && "
             f"test -s {SOURCE_RT}/weston.pid && "
             f"test -s {SOURCE_RT}/app.pid && echo ready",
-            timeout=60, label="source stack")
+            timeout=60, label="source stack", process=source)
         initial_pids = pids(backend, args.vm_source)
         initial = source_probe(
             backend, args.vm_source, "--expect-heads=2",
