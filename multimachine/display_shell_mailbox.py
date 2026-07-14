@@ -16,6 +16,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from collections import deque
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Callable, Mapping
@@ -25,6 +26,7 @@ from .remote_display_slot import ActionKind, SlotAction
 
 SCHEMA = "qdistro-mm-shell-layout-v1"
 RESULTS = frozenset({"applied", "failed", "cancelled"})
+MAX_CONSUMED_REQUEST_IDS = 4096
 
 
 class DisplayShellError(RuntimeError):
@@ -101,7 +103,16 @@ class DisplayShellMailbox:
         self._condition = threading.Condition()
         self._pending: _Pending | None = None
         self._last_generation = 0
+        self._consumed_order: deque[str] = deque()
         self._consumed_ids: set[str] = set()
+
+    def _consume(self, request_id: str) -> None:
+        if request_id in self._consumed_ids:
+            return
+        self._consumed_ids.add(request_id)
+        self._consumed_order.append(request_id)
+        while len(self._consumed_order) > MAX_CONSUMED_REQUEST_IDS:
+            self._consumed_ids.remove(self._consumed_order.popleft())
 
     @staticmethod
     def _request_from(action: SlotAction, grant: Mapping, *,
@@ -148,7 +159,7 @@ class DisplayShellMailbox:
             while self._pending is not None and self._pending.result is None:
                 remaining = deadline - self.clock()
                 if remaining <= 0:
-                    self._consumed_ids.add(request.request_id)
+                    self._consume(request.request_id)
                     self._pending = None
                     self._condition.notify_all()
                     raise DisplayShellError("qdshell layout acknowledgement timed out")
@@ -157,7 +168,7 @@ class DisplayShellMailbox:
             if pending is None:
                 raise DisplayShellError("shell layout request was cancelled")
             result = pending.result
-            self._consumed_ids.add(request.request_id)
+            self._consume(request.request_id)
             self._pending = None
             self._condition.notify_all()
             if result != "applied":
@@ -171,7 +182,7 @@ class DisplayShellMailbox:
             if self._pending is None or self._pending.claimed:
                 return None
             if self.clock() >= self._pending.request.expires_at:
-                self._consumed_ids.add(self._pending.request.request_id)
+                self._consume(self._pending.request.request_id)
                 self._pending = None
                 self._condition.notify_all()
                 return None
@@ -200,7 +211,7 @@ class DisplayShellMailbox:
         """Fail an outstanding waiter during controller shutdown."""
         with self._condition:
             if self._pending is not None:
-                self._consumed_ids.add(self._pending.request.request_id)
+                self._consume(self._pending.request.request_id)
                 self._pending = None
                 self._condition.notify_all()
 

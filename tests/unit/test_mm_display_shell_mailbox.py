@@ -8,6 +8,7 @@ import pytest
 from multimachine.display_shell_mailbox import (
     DisplayShellError,
     DisplayShellMailbox,
+    MAX_CONSUMED_REQUEST_IDS,
 )
 from multimachine.remote_display_slot import ActionKind, SlotAction
 
@@ -177,3 +178,13 @@ def test_cancel_unblocks_waiter_and_safe_state_requires_no_pending_request() -> 
     assert len(errors) == 1
     assert "cancelled" in str(errors[0])
     assert mailbox.safe_state_confirmed("rdp-0")
+
+
+def test_replay_memory_is_bounded() -> None:
+    mailbox = DisplayShellMailbox(clock=Clock())
+    for index in range(MAX_CONSUMED_REQUEST_IDS + 7):
+        mailbox._consume(f"{index:032x}")
+    assert len(mailbox._consumed_ids) == MAX_CONSUMED_REQUEST_IDS
+    assert len(mailbox._consumed_order) == MAX_CONSUMED_REQUEST_IDS
+    assert f"{0:032x}" not in mailbox._consumed_ids
+    assert f"{MAX_CONSUMED_REQUEST_IDS + 6:032x}" in mailbox._consumed_ids
