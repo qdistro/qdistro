@@ -27,6 +27,8 @@ for module in __init__.py bridge.py control_source.py mm_broker.py \
               display_shell_mailbox.py \
               display_shell_service.py \
               display_carrier.py display_carrier_endpoint.py \
+              display_panel_agent.py display_panel_endpoint.py \
+              mm_display_panel_launcher.py \
               remote_adapter_transport.py \
               sidechannel.py; do
     install -o root -g root -m 0644 "$SRC/$module" "$DEST/$module"
@@ -47,6 +49,10 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-display-carrier-launcher" \
     /usr/local/bin/qdistro-mm-display-carrier-launcher
 install -o root -g root -m 0755 "$SRC/qdistro-mm-display-carrier" \
     /usr/local/bin/qdistro-mm-display-carrier
+install -o root -g root -m 0755 "$SRC/qdistro-mm-display-panel-launcher" \
+    /usr/local/bin/qdistro-mm-display-panel-launcher
+install -o root -g root -m 0755 "$SRC/qdistro-mm-display-panel" \
+    /usr/local/bin/qdistro-mm-display-panel
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-controller" \
     /usr/local/bin/qdistro-mm-remote-nested-controller
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-session" \

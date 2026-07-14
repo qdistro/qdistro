@@ -104,6 +104,8 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         for program in (
             "qdistro-mm-display-carrier-launcher",
             "qdistro-mm-display-carrier",
+            "qdistro-mm-display-panel-launcher",
+            "qdistro-mm-display-panel",
         ):
             backend._push(
                 vm, REPO / "multimachine" / program,
@@ -420,15 +422,17 @@ class LivePeerPanelEndpoint:
     def _state(self) -> str:
         output = self.backend._vmexec(
             self.viewer_vm,
-            f"cat {VIEWER_RT}/panel-state.json 2>/dev/null || true",
+            "local=$(systemctl is-active mm-r9-local-panel.service "
+            "2>/dev/null || true); "
+            "remote=$(systemctl is-active mm-r9-rdp.service "
+            "2>/dev/null || true); printf '%s %s' \"$local\" \"$remote\"",
             check=False)
-        try:
-            state = json.loads(output)
-        except (TypeError, ValueError):
-            return "missing"
-        if state.get("schema") != 1 or not isinstance(state.get("state"), str):
-            return "invalid"
-        return state["state"]
+        local, _, remote = output.strip().partition(" ")
+        if local == "active" and remote != "active":
+            return "safe"
+        if local != "active":
+            return "reserved"
+        return "invalid"
 
     def _command(self, generation: int, kind: str, *, check: bool = True) -> dict:
         output = self.backend._vmexec(
@@ -463,8 +467,7 @@ class LivePeerPanelEndpoint:
         self._stop(generation)
         self.backend._vmexec(
             self.source_vm,
-            f"rm -f {SOURCE_RT}/panel-control.ready "
-            f"{SOURCE_RT}/panel-control.sock; "
+            f"rm -f /run/qdistro/mm-r9-panel-g{generation}.sock; "
             f"systemctl reset-failed {primary_unit} 2>/dev/null || true; "
             f"systemd-run --collect --unit={primary_unit} "
             f"--property=StandardOutput=append:{SOURCE_RT}/panel-g{generation}.log "
@@ -472,6 +475,10 @@ class LivePeerPanelEndpoint:
             "--setenv=PYTHONPATH=/tmp/mm /usr/bin/python3 "
             "/tmp/r9-panel-control.py --role primary "
             f"--bundle /tmp/r9-carrier-g{generation} --runtime {SOURCE_RT}")
+        wait_guest(
+            self.backend, self.source_vm,
+            "ss -ltn | grep -q ':3388 ' && echo listening",
+            timeout=10, label=f"panel listener generation {generation}")
         self.backend._vmexec(
             self.viewer_vm,
             f"systemctl reset-failed {peer_unit} 2>/dev/null || true; "
@@ -483,7 +490,7 @@ class LivePeerPanelEndpoint:
             f"--bundle /tmp/r9-carrier-g{generation} --runtime {VIEWER_RT}")
         wait_guest(
             self.backend, self.source_vm,
-            f"test -e {SOURCE_RT}/panel-control.ready && echo ready",
+            f"test -S /run/qdistro/mm-r9-panel-g{generation}.sock && echo ready",
             timeout=20, label=f"panel control generation {generation}")
 
     def perform(self, action: SlotAction, grant: dict) -> None:
@@ -790,8 +797,9 @@ def main() -> int:
         time.sleep(grants[GENERATION]["heartbeat_ms"] / 1000 + 0.5)
         wait_guest(
             backend, args.vm_viewer,
-            f"grep -q '\"state\": \"safe\"' "
-            f"{VIEWER_RT}/panel-state.json && echo safe",
+            "test \"$(systemctl is-active mm-r9-local-panel.service)\" = "
+            "active && ! systemctl is-active --quiet mm-r9-rdp.service && "
+            "echo safe",
             timeout=5, label="independent peer panel expiry")
         assertions["peer_restores_panel_without_primary_timeout"] = True
         try:

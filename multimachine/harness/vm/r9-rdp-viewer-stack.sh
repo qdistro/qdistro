@@ -73,6 +73,15 @@ StandardOutput=append:$RT/rdp.log
 StandardError=append:$RT/rdp.log
 Restart=no
 EOF
+cat >/run/systemd/system/mm-r9-local-panel.service <<EOF
+[Unit]
+Description=R9 fixture local-desktop panel owner
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
+RemainAfterExit=yes
+EOF
 systemctl daemon-reload
+systemctl start mm-r9-local-panel.service
 touch "$RT/ready"
 echo "R9_VIEWER_READY socket=$RT/$SOCK"

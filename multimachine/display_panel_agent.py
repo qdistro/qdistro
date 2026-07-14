@@ -267,6 +267,9 @@ class PanelPrimaryClient:
                 raise PanelControlError("panel response is invalid")
             return response["result"]
 
+    def close(self) -> None:
+        self.sock.close()
+
 
 def accept_primary_control(identity: DisplayCarrierIdentity, *,
                            listener: socket.socket) -> PanelPrimaryClient:
