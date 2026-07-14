@@ -19,8 +19,10 @@ fail() {
     exit 1
 }
 
-systemctl stop mm-r9-rdp mm-r9-weston mm-r9-ydotoold 2>/dev/null || true
-systemctl reset-failed mm-r9-rdp mm-r9-weston mm-r9-ydotoold 2>/dev/null || true
+systemctl stop mm-r9-rdp mm-r9-weston mm-r9-ydotoold \
+    mm-r9-carrier-peer-g90 mm-r9-carrier-peer-g91 2>/dev/null || true
+systemctl reset-failed mm-r9-rdp mm-r9-weston mm-r9-ydotoold \
+    mm-r9-carrier-peer-g90 mm-r9-carrier-peer-g91 2>/dev/null || true
 systemctl stop greetd-qdwin greetd qdistro-session-manager 2>/dev/null || true
 runuser -u admin -- systemctl --user stop noctalia-session noctalia-shell \
     qdlocker 2>/dev/null || true
@@ -66,7 +68,7 @@ Environment=HOME=/root
 Environment=WAYLAND_DISPLAY=$SOCK
 Environment=SDL_VIDEODRIVER=wayland
 Environment=SDL_RENDER_DRIVER=software
-ExecStart=/usr/bin/sdl-freerdp /v:$HOST:$PORT /u:r9 /p:r9 /scale:100 /cert:ignore /gfx:AVC444:off,AVC420:off /size:${W}x${H} /f /log-level:DEBUG
+ExecStart=/usr/bin/sdl-freerdp /v:127.0.0.1:3390 /u:r9 /p:r9 /scale:100 /cert:ignore /gfx:AVC444:off,AVC420:off /size:${W}x${H} /f /log-level:DEBUG
 StandardOutput=append:$RT/rdp.log
 StandardError=append:$RT/rdp.log
 Restart=no

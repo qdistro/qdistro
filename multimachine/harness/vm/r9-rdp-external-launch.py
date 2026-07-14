@@ -4,7 +4,7 @@
 The real pairing service will own socket creation and mTLS relay admission.
 This helper proves the privilege boundary: root creates a private AF_UNIX
 listener, passes only its fd to an admin-owned qdwin, and never exposes a qdwin
-TCP listener.  The VM gate's root socat is only an outer-relay surrogate.
+TCP listener.  The signed-grant mTLS carrier is the only network ingress.
 """
 from __future__ import annotations
 

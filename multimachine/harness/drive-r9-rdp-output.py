@@ -10,13 +10,22 @@ It deliberately makes no physical-panel latency or native-feel claim.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
@@ -24,11 +33,14 @@ sys.path.insert(0, str(REPO))
 from multimachine.harness import capture as capture_mod  # noqa: E402
 from multimachine.harness import marker, oracle  # noqa: E402
 from multimachine.harness.vm_backend import QciVMBackend  # noqa: E402
+from multimachine.mm_display_authority import issue_display_grant  # noqa: E402
+from multimachine.mm_pairing_authority import public_key_bytes  # noqa: E402
 
 
 W, H = 1280, 800
 MW, MH, SEAM, OY = 512, 400, 256, 200
 GENERATION = 90
+SESSION_ID = "r9-display-session"
 SOURCE_RT = "/run/mm-r9-source"
 VIEWER_RT = "/run/mm-r9-viewer"
 
@@ -60,6 +72,19 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         vm_source,
         REPO / "multimachine/harness/vm/r9-rdp-external-launch.py",
         "/tmp/r9-rdp-external-launch.py", mode=0o755)
+    for vm in (vm_source, vm_viewer):
+        backend._push_mm_package(vm)
+        backend._push(
+            vm,
+            REPO / "multimachine/harness/vm/r9-display-carrier-launch.py",
+            "/tmp/r9-display-carrier-launch.py", mode=0o755)
+        for program in (
+            "qdistro-mm-display-carrier-launcher",
+            "qdistro-mm-display-carrier",
+        ):
+            backend._push(
+                vm, REPO / "multimachine" / program,
+                f"/tmp/mm/multimachine/{program}", mode=0o755)
 
     for relative in (
         "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
@@ -107,6 +132,115 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         "build-r9-rdp/libweston/backend-rdp/rdp-backend.so "
         "/tmp/r9-rdp-backend.so",
         timeout=300)
+
+
+def _carrier_certificate(common_name: str) -> tuple[bytes, bytes, str]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    certificate = (x509.CertificateBuilder()
+                   .subject_name(name)
+                   .issuer_name(name)
+                   .public_key(key.public_key())
+                   .serial_number(x509.random_serial_number())
+                   .not_valid_before(now - timedelta(minutes=1))
+                   .not_valid_after(now + timedelta(days=1))
+                   .add_extension(
+                       x509.BasicConstraints(ca=True, path_length=0), True)
+                   .add_extension(x509.ExtendedKeyUsage([
+                       ExtendedKeyUsageOID.SERVER_AUTH,
+                       ExtendedKeyUsageOID.CLIENT_AUTH,
+                   ]), False)
+                   .sign(key, hashes.SHA256()))
+    cert_pem = certificate.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption())
+    pin = hashlib.sha256(
+        certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
+    return cert_pem, key_pem, pin
+
+
+def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
+                         vm_viewer: str) -> None:
+    """Stage two strictly increasing one-shot grants for attach + redock."""
+    authority = Ed25519PrivateKey.generate()
+    primary_cert, primary_key, primary_pin = _carrier_certificate("r9-primary")
+    peer_cert, peer_key, peer_pin = _carrier_certificate("r9-peer")
+    issued_at = int(time.time())
+    with tempfile.TemporaryDirectory(prefix="r9-carrier-") as temporary:
+        root = Path(temporary)
+        authority_path = root / "authority.pub"
+        authority_path.write_bytes(public_key_bytes(authority.public_key()))
+        for vm in (vm_source, vm_viewer):
+            backend._push(vm, authority_path, "/tmp/r9-authority.pub", mode=0o600)
+            backend._vmexec(
+                vm, "install -D -o root -g root -m 0644 /tmp/r9-authority.pub "
+                "/etc/qdistro/multimachine/pairing-authority.ed25519.pub")
+
+        for generation in (GENERATION, GENERATION + 1):
+            secret = os.urandom(32)
+            receipt = issue_display_grant(
+                primary_machine="r9-primary", peer_machine="r9-peer",
+                trust_domain_id="r9-owner-machines", generation=generation,
+                session_id=SESSION_ID, slot_name="rdp-0",
+                logical_x=W, logical_y=0, width=W, height=H, scale=1,
+                allow_input=True, carrier_secret=secret,
+                primary_tls_cert_sha256=primary_pin,
+                peer_tls_cert_sha256=peer_pin,
+                issued_at=issued_at, handoff_expires_at=issued_at + 300,
+                lease_expires_at=issued_at + 3600, heartbeat_ms=1000,
+                private_key=authority)
+            grant_path = root / f"grant-{generation}.json"
+            secret_path = root / f"secret-{generation}"
+            grant_path.write_text(
+                json.dumps(receipt, sort_keys=True), encoding="utf-8")
+            secret_path.write_bytes(secret)
+            endpoint_material = {
+                vm_source: (primary_cert, primary_key, peer_cert),
+                vm_viewer: (peer_cert, peer_key, primary_cert),
+            }
+            for vm, (local_cert, local_key, peer_certificate) in endpoint_material.items():
+                guest = f"/tmp/r9-carrier-g{generation}"
+                backend._vmexec(vm, f"rm -rf {guest}; install -d -m 0700 {guest}")
+                files = {
+                    "grant.json": grant_path,
+                    "secret": secret_path,
+                }
+                for name, content in (
+                    ("local.crt", local_cert),
+                    ("local.key", local_key),
+                    ("peer.crt", peer_certificate),
+                ):
+                    path = root / f"{vm}-{generation}-{name}"
+                    path.write_bytes(content)
+                    files[name] = path
+                for name, path in files.items():
+                    backend._push(vm, path, f"{guest}/{name}", mode=0o600)
+
+
+def start_carrier(backend: QciVMBackend, vm: str, *, role: str,
+                  generation: int) -> None:
+    unit = f"mm-r9-carrier-{role}-g{generation}"
+    log = (f"{SOURCE_RT}/carrier-g{generation}.log" if role == "primary"
+           else f"{VIEWER_RT}/carrier-g{generation}.log")
+    backend._vmexec(
+        vm, f"systemctl stop {unit} 2>/dev/null || true; "
+        f"systemctl reset-failed {unit} 2>/dev/null || true; "
+        f"systemd-run --collect --unit={unit} "
+        f"--property=StandardOutput=append:{log} "
+        f"--property=StandardError=append:{log} "
+        f"/tmp/r9-display-carrier-launch.py --role {role} "
+        f"--bundle /tmp/r9-carrier-g{generation}")
+
+
+def wait_carrier_listener(backend: QciVMBackend, vm: str, *, port: int,
+                          label: str) -> None:
+    wait_guest(
+        backend, vm,
+        f"ss -ltn | grep -q ':{port} ' && echo listening",
+        timeout=10, label=label)
 
 
 def source_probe(backend: QciVMBackend, vm: str, *args: str) -> str:
@@ -194,6 +328,9 @@ def main() -> int:
         vm_a=args.vm_source, vm_b=args.vm_viewer, repo_dir=REPO,
         out_w=W, out_h=H)
     stage(backend, args.vm_source, args.vm_viewer, args.qdwin)
+    # Generate after the potentially long qdwin build so the five-minute
+    # signed handoff window is fresh when the endpoints actually connect.
+    stage_carrier_grants(backend, args.vm_source, args.vm_viewer)
     backend._vmexec(args.vm_source, f"rm -rf {SOURCE_RT}")
     source = subprocess.Popen(
         [str(REPO / "scripts/vm/vm-exec"), args.vm_source,
@@ -231,6 +368,24 @@ def main() -> int:
             args.vm_viewer, "bash /tmp/r9-rdp-viewer-stack.sh", timeout=120)
         if "R9_VIEWER_READY" not in viewer_setup:
             raise RuntimeError(f"viewer setup failed: {viewer_setup}")
+        start_carrier(
+            backend, args.vm_viewer, role="peer", generation=GENERATION)
+        wait_carrier_listener(
+            backend, args.vm_viewer, port=3390, label="peer carrier generation 90")
+        source_boundary = backend._vmexec(
+            args.vm_source,
+            f"stat -c '%a %U %G' {SOURCE_RT}/rdp-listener.sock; "
+            "ss -ltnp | grep ':3389 '")
+        viewer_boundary = backend._vmexec(
+            args.vm_viewer, "ss -ltnp | grep ':3390 '")
+        assertions["qdwin_ingress_is_root_only_private_unix_socket"] = (
+            source_boundary.splitlines()[0] == "600 root root"
+            and "qdwin" not in source_boundary.lower())
+        assertions["peer_raw_rdp_ingress_is_loopback_only"] = (
+            "127.0.0.1:3390" in viewer_boundary
+            and "0.0.0.0:3390" not in viewer_boundary)
+        details["primary_carrier_listener"] = source_boundary.splitlines()[1:]
+        details["peer_carrier_listener"] = viewer_boundary.splitlines()
         backend._vmexec(args.vm_viewer, "systemctl start mm-r9-rdp")
         wait_rdp(backend, args.vm_viewer)
         first = capture_viewer(
@@ -266,6 +421,15 @@ def main() -> int:
         # Fail-safe order: cut the client/input carrier first, then remove the
         # leased output from the desktop. R8 rescues any crossing windows.
         backend._vmexec(args.vm_viewer, "systemctl stop mm-r9-rdp")
+        wait_guest(
+            backend, args.vm_source,
+            f"grep -q '\"closed_by\"' {SOURCE_RT}/carrier-g90.log && echo closed",
+            timeout=10, label="primary carrier generation 90 detach")
+        wait_guest(
+            backend, args.vm_viewer,
+            f"grep -q '\"closed_by\"' {VIEWER_RT}/carrier-g90.log && echo closed",
+            timeout=10, label="peer carrier generation 90 detach")
+        assertions["signed_pinned_mtls_carrier_closed_on_disconnect"] = True
         source_probe(backend, args.vm_source, "--apply", "--disable=rdp-0")
         disabled = source_probe(
             backend, args.vm_source, "--expect-state=rdp-0:0")
@@ -279,9 +443,19 @@ def main() -> int:
         assertions["detached_peer_does_not_show_stale_remote_pixels"] = (
             float(blank.mean()) < 12.0)
 
+        start_carrier(
+            backend, args.vm_source, role="primary", generation=GENERATION + 1)
+        wait_carrier_listener(
+            backend, args.vm_source, port=3389,
+            label="primary carrier generation 91")
         source_probe(
             backend, args.vm_source, "--apply", "--enable=rdp-0",
             f"--position={W},0")
+        start_carrier(
+            backend, args.vm_viewer, role="peer", generation=GENERATION + 1)
+        wait_carrier_listener(
+            backend, args.vm_viewer, port=3390,
+            label="peer carrier generation 91")
         backend._vmexec(args.vm_viewer, "rm -f /run/mm-r9-viewer/rdp.log; "
                         "systemctl start mm-r9-rdp")
         wait_rdp(backend, args.vm_viewer)
@@ -308,11 +482,20 @@ def main() -> int:
         assertions[
             "reattach_composites_fresh_pixels_without_authority_or_app_restart"
         ] = True
+        assertions["redock_requires_strictly_newer_carrier_generation"] = True
         assertions["all_hard_assertions"] = all(assertions.values())
         if not assertions["all_hard_assertions"]:
             raise AssertionError(f"R9 assertion failure: {assertions}")
     finally:
         backend._vmexec(args.vm_viewer, "systemctl stop mm-r9-rdp", check=False)
+        for vm, role in (
+            (args.vm_source, "primary"), (args.vm_viewer, "peer"),
+        ):
+            backend._vmexec(
+                vm, "systemctl stop "
+                f"mm-r9-carrier-{role}-g{GENERATION} "
+                f"mm-r9-carrier-{role}-g{GENERATION + 1} 2>/dev/null || true",
+                check=False)
         backend._vmexec(
             args.vm_source, "systemctl stop mm-r9-reattach 2>/dev/null || true",
             check=False)
@@ -339,9 +522,10 @@ def main() -> int:
         "schema": 1,
         "scenario": "r9-precreated-rdp-output-two-vm",
         "scope": "software geometry/lifecycle/input; no physical-feel claim",
-        "transport": "Weston RDP backend + FreeRDP 3",
+        "transport": (
+            "signed-grant pinned-mTLS carrier + qdwin inner RDP TLS + FreeRDP 3"),
         "topology": {"source": args.vm_source, "viewer": args.vm_viewer},
-        "generation": GENERATION,
+        "generations": [GENERATION, GENERATION + 1],
         "source_pids": {"weston": initial_pids[0], "app": initial_pids[1]},
         "assertions": assertions,
         "details": details,
