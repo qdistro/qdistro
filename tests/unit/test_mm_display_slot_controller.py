@@ -1,6 +1,8 @@
 """R9 trusted controller ordering, failure, heartbeat, and reset tests."""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from multimachine.display_slot_controller import (
@@ -261,6 +263,30 @@ def test_split_heartbeat_renews_only_peer_enforcement_point() -> None:
     assert peer.heartbeats == [7]
     assert primary.heartbeats == []
     assert carrier.heartbeats == []
+
+
+def test_attach_renews_peer_while_authenticated_carrier_blocks() -> None:
+    class SlowCarrier(Executor):
+        def perform(self, action: SlotAction, payload) -> None:
+            if action.kind is ActionKind.OPEN_AUTHENTICATED_CARRIER:
+                time.sleep(0.12)
+            super().perform(action, payload)
+
+    primary = Executor()
+    peer = Executor()
+    carrier = SlowCarrier()
+    events: list[ControllerEvent] = []
+    owner = DisplaySlotController(
+        RemoteDisplaySlot(DisplaySlotSpec("rdp-0"), clock=Clock()),
+        SplitDisplaySlotExecutor(
+            primary=primary, peer=peer, carrier=carrier),
+        clock=Clock(), audit=events.append)
+
+    owner.attach(grant(heartbeat_ms=100))
+
+    assert owner.phase is SlotPhase.ACTIVE
+    assert len(peer.heartbeats) >= 5
+    assert sum(event.kind == "attach-heartbeat" for event in events) >= 5
 
 
 def test_peer_heartbeat_failure_runs_full_fail_safe() -> None:

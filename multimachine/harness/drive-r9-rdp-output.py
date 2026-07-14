@@ -89,6 +89,10 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         vm_source,
         REPO / "multimachine/harness/vm/r9-shell-layout-service.py",
         "/tmp/r9-shell-layout-service.py", mode=0o755)
+    backend._push(
+        vm_source,
+        REPO / "multimachine/harness/vm/r9-dock-endpoint-command.py",
+        "/tmp/r9-dock-endpoint-command.py", mode=0o755)
     for vm in (vm_source, vm_viewer):
         backend._push_mm_package(vm)
         backend._push(
@@ -302,6 +306,8 @@ def start_carrier(backend: QciVMBackend, vm: str, *, role: str,
            else f"{VIEWER_RT}/carrier-g{generation}.log")
     backend._vmexec(
         vm, f"systemctl stop {unit} 2>/dev/null || true; "
+        + ("rm -f /run/qdistro/mm-display-carrier-supervisor.sock; "
+           if role == "primary" else "") +
         f"systemctl reset-failed {unit} 2>/dev/null || true; "
         f"systemd-run --collect --unit={unit} "
         f"--property=StandardOutput=append:{log} "
@@ -569,7 +575,7 @@ class LivePeerPanelEndpoint:
         self._stop(generation)
         self.backend._vmexec(
             self.source_vm,
-            f"rm -f /run/qdistro/mm-r9-panel-g{generation}.sock; "
+            "rm -f /run/qdistro/mm-display-peer-panel.sock; "
             f"systemctl reset-failed {primary_unit} 2>/dev/null || true; "
             f"systemd-run --collect --unit={primary_unit} "
             f"--property=StandardOutput=append:{SOURCE_RT}/panel-g{generation}.log "
@@ -592,7 +598,7 @@ class LivePeerPanelEndpoint:
             f"--bundle /tmp/r9-carrier-g{generation} --runtime {VIEWER_RT}")
         wait_guest(
             self.backend, self.source_vm,
-            f"test -S /run/qdistro/mm-r9-panel-g{generation}.sock && echo ready",
+            "test -S /run/qdistro/mm-display-peer-panel.sock && echo ready",
             timeout=20, label=f"panel control generation {generation}")
 
     def perform(self, action: SlotAction, grant: dict) -> None:
@@ -618,7 +624,7 @@ class LivePeerPanelEndpoint:
             # idempotent restoration rather than attempting resurrection.
             if self._state() != "safe":
                 response = self._command(generation, "release", check=False)
-                if response != {"ok": True, "result": "released"}:
+                if response != {"ok": True, "result": "restored"}:
                     raise RuntimeError(f"panel release failed: {response}")
             self._stop(generation)
             if self._state() != "safe":
@@ -650,40 +656,47 @@ class LiveCarrierEndpoint:
         self.viewer_vm = viewer_vm
         self.active_generation: int | None = None
 
+    def _command(self, generation: int, action: str) -> str:
+        output = self.backend._vmexec(
+            self.source_vm,
+            "runuser -u admin -- env PYTHONPATH=/tmp/mm /usr/bin/python3 "
+            "/tmp/r9-dock-endpoint-command.py --role carrier "
+            "--path /run/qdistro/mm-display-carrier-supervisor.sock "
+            f"--action {action} --generation {generation} "
+            f"--session-id {SESSION_ID}",
+            timeout=35)
+        response = json.loads(output.splitlines()[-1])
+        if response.get("ok") is not True:
+            raise RuntimeError(f"carrier {action} failed: {response}")
+        return str(response["result"])
+
     def perform(self, action: SlotAction, grant: dict) -> None:
         generation = grant["generation"]
         if action.kind is ActionKind.OPEN_AUTHENTICATED_CARRIER:
             start_carrier(
                 self.backend, self.source_vm, role="primary",
                 generation=generation)
-            wait_carrier_listener(
-                self.backend, self.source_vm, port=3389,
-                label=f"primary carrier generation {generation}")
+            wait_guest(
+                self.backend, self.source_vm,
+                "test -S /run/qdistro/mm-display-carrier-supervisor.sock "
+                "&& echo ready", timeout=10,
+                label=f"primary carrier agent generation {generation}")
             start_carrier(
                 self.backend, self.viewer_vm, role="peer",
                 generation=generation)
             wait_carrier_listener(
                 self.backend, self.viewer_vm, port=3390,
                 label=f"peer carrier generation {generation}")
-            self.backend._vmexec(
-                self.viewer_vm,
-                f"rm -f {VIEWER_RT}/rdp.log; systemctl start mm-r9-rdp")
-            wait_rdp(self.backend, self.viewer_vm)
+            if self._command(generation, "open") != "ready":
+                raise RuntimeError("carrier supervisor did not become ready")
             self.active_generation = generation
         elif action.kind is ActionKind.CLOSE_CARRIER:
-            self.backend._vmexec(
-                self.viewer_vm,
-                "systemctl stop mm-r9-rdp 2>/dev/null || true")
-            for vm, role, runtime in (
-                (self.source_vm, "primary", SOURCE_RT),
-                (self.viewer_vm, "peer", VIEWER_RT),
+            if self._command(generation, "close") != "closed":
+                raise RuntimeError("carrier supervisor did not close")
+            for vm, role in (
+                (self.source_vm, "primary"),
+                (self.viewer_vm, "peer"),
             ):
-                wait_guest(
-                    self.backend, vm,
-                    f"grep -q '\"closed_by\"' {runtime}/"
-                    f"carrier-g{generation}.log && echo closed",
-                    timeout=10,
-                    label=f"{role} carrier generation {generation} detach")
                 self.backend._vmexec(
                     vm, f"systemctl stop mm-r9-carrier-{role}-g{generation} "
                     "2>/dev/null || true")
@@ -697,6 +710,10 @@ class LiveCarrierEndpoint:
     def alive(self, generation: int) -> bool:
         if generation != self.active_generation:
             return False
+        try:
+            agent_alive = self._command(generation, "alive") == "alive"
+        except Exception:
+            return False
         source_active = self.backend._vmexec(
             self.source_vm,
             f"systemctl is-active mm-r9-carrier-primary-g{generation} "
@@ -709,7 +726,7 @@ class LiveCarrierEndpoint:
             self.viewer_vm,
             "systemctl is-active mm-r9-rdp 2>/dev/null || true",
             check=False).strip()
-        return (source_active == "active" and peer_active == "active"
+        return (agent_alive and source_active == "active" and peer_active == "active"
                 and rdp_active == "active")
 
 
@@ -867,6 +884,8 @@ def main() -> int:
             == local_endpoint.pre_gate_input[1])
         assert controller.heartbeat(GENERATION)
         assertions["authenticated_peer_panel_lease_renewed"] = True
+        wait_rdp(backend, args.vm_viewer)
+        assert controller.heartbeat(GENERATION)
         enabled = source_probe(
             backend, args.vm_source, "--expect-heads=2",
             "--expect-state=rdp-0:1")
@@ -953,6 +972,15 @@ def main() -> int:
             backend, args.vm_source, "--expect-state=rdp-0:0")
         assertions["separate_same_uid_output_client_is_denied"] = (
             "denied" in denied and "enabled=0" in denied_state)
+        safe_states = {
+            "shell": shell_endpoint.safe_state_confirmed("rdp-0"),
+            "primary": local_endpoint.safe_state_confirmed("rdp-0"),
+            "carrier": carrier_endpoint.safe_state_confirmed("rdp-0"),
+            "panel": peer_endpoint.safe_state_confirmed("rdp-0"),
+        }
+        details["generation_90_safe_states"] = safe_states
+        if not all(safe_states.values()):
+            raise AssertionError(f"failed-safe endpoint state: {safe_states}")
         controller.reset_failed_safe()
         assertions["controller_reset_requires_live_safe_endpoints"] = (
             controller.phase is SlotPhase.DISABLED)

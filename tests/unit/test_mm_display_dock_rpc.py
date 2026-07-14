@@ -12,9 +12,8 @@ from multimachine.display_dock_rpc import (
     JsonEndpointClient,
     RpcCarrierFactory,
     RpcPanelEndpoint,
-    RpcPrimarySafetyEndpoint,
 )
-from multimachine.remote_display_slot import ActionKind, HeldInput, SlotAction
+from multimachine.remote_display_slot import ActionKind, SlotAction
 
 
 def grant() -> dict:
@@ -67,8 +66,6 @@ def client(path: Path, role: str) -> JsonEndpointClient:
 def test_role_adapters_emit_only_fixed_actions_and_exact_identity(
         tmp_path: Path) -> None:
     server = EndpointServer(tmp_path / "endpoint.sock", {
-        "synthesize-releases": "released",
-        "clear-transfers": "cleared",
         "peer-blank-panel": "reserved",
         "heartbeat": "renewed",
         "peer-unblank-panel": "restored",
@@ -78,14 +75,6 @@ def test_role_adapters_emit_only_fixed_actions_and_exact_identity(
         "close": "closed",
     })
     try:
-        safety = RpcPrimarySafetyEndpoint(
-            client(server.path, "primary-safety"))
-        safety.perform(SlotAction(
-            ActionKind.SYNTHESIZE_RELEASES,
-            (HeldInput("key", 30),)), grant())
-        safety.perform(SlotAction(ActionKind.CLEAR_TRANSFERS), grant())
-        assert safety.safe_state_confirmed("rdp-0")
-
         panel = RpcPanelEndpoint(client(server.path, "peer-panel"))
         panel.perform(SlotAction(ActionKind.PEER_BLANK_PANEL), grant())
         panel.heartbeat(90, grant())
@@ -105,8 +94,8 @@ def test_role_adapters_emit_only_fixed_actions_and_exact_identity(
         "schema", "role", "action", "generation", "session_id",
         "slot_name", "releases",
     }
-    assert first["role"] == "primary-safety"
-    assert first["releases"] == [{"kind": "key", "code": 30}]
+    assert first["role"] == "peer-panel"
+    assert first["releases"] == []
     assert all(request["generation"] == 90 for request in server.requests)
     assert all(request["session_id"] == "dock-90"
                for request in server.requests)
@@ -118,11 +107,8 @@ def test_wrong_role_and_action_fail_before_broadening_authority(
     try:
         with pytest.raises(ValueError, match="wrong endpoint role"):
             RpcPanelEndpoint(client(server.path, "carrier"))
-        safety = RpcPrimarySafetyEndpoint(
-            client(server.path, "primary-safety"))
-        with pytest.raises(Exception, match="input/output action"):
-            safety.perform(
-                SlotAction(ActionKind.PRIMARY_ENABLE_INPUT), grant())
+        with pytest.raises(ValueError, match="role is invalid"):
+            client(server.path, "primary-safety")
     finally:
         server.close()
     assert server.requests == []

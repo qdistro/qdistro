@@ -71,9 +71,15 @@ def main() -> int:
     if args.role == "primary":
         command += [
             "--backend-unix-path", "/run/mm-r9-source/rdp-listener.sock",
+            "--control-unix-path",
+            "/run/qdistro/mm-display-carrier-supervisor.sock",
+            "--control-uid", "1000", "--control-gid", "1000",
         ]
     else:
-        command += ["--primary-host", "10.0.2.2", "--primary-port", "3389"]
+        command += [
+            "--primary-host", "10.0.2.2", "--primary-port", "3389",
+            "--client-unit", "mm-r9-rdp.service",
+        ]
     os.execv(launcher, command)
     return 1
 

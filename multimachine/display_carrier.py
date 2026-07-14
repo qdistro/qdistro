@@ -353,17 +353,23 @@ class RelayResult:
 
 def relay_streams(left: socket.socket, right: socket.socket, *,
                   lease_expires_at: int,
-                  clock: Callable[[], float] = time.time) -> RelayResult:
+                  clock: Callable[[], float] = time.time,
+                  stop_requested: Callable[[], bool] | None = None,
+                  ) -> RelayResult:
     """Relay bounded chunks until EOF or lease expiry; retain no stale pixels."""
     if clock() >= lease_expires_at:
         raise DisplayCarrierError("display carrier lease has expired")
     counters = {left: 0, right: 0}
     while True:
+        if stop_requested is not None and stop_requested():
+            return RelayResult(
+                "controller-close", counters[left], counters[right])
         remaining = lease_expires_at - clock()
         if remaining <= 0:
             return RelayResult("lease-expired", counters[left], counters[right])
+        poll = 0.1 if stop_requested is not None else 1.0
         readable, _, _ = select.select(
-            [left, right], [], [], min(1.0, remaining))
+            [left, right], [], [], min(poll, remaining))
         for source in readable:
             target = right if source is left else left
             try:
@@ -444,7 +450,10 @@ class DisplayCarrierIdentity:
 
 def serve_primary_once(identity: DisplayCarrierIdentity, *,
                        listener: socket.socket, backend_unix_path: str,
-                       clock: Callable[[], float] = time.time) -> RelayResult:
+                       clock: Callable[[], float] = time.time,
+                       on_ready: Callable[[], None] | None = None,
+                       stop_requested: Callable[[], bool] | None = None,
+                       ) -> RelayResult:
     """Admit one peer, connect qdwin's private listener, and relay until detach."""
     identity.validate()
     if identity.role != "primary":
@@ -466,9 +475,11 @@ def serve_primary_once(identity: DisplayCarrierIdentity, *,
         backend.connect(backend_unix_path)
         backend.settimeout(None)
         tls.settimeout(None)
+        if on_ready is not None:
+            on_ready()
         return relay_streams(
             tls, backend, lease_expires_at=identity.binding.lease_expires_at,
-            clock=clock)
+            clock=clock, stop_requested=stop_requested)
     finally:
         if backend is not None:
             backend.close()
@@ -481,13 +492,14 @@ def serve_primary_once(identity: DisplayCarrierIdentity, *,
 def serve_peer_once(identity: DisplayCarrierIdentity, *,
                     local_listener: socket.socket, primary_host: str,
                     primary_port: int,
-                    clock: Callable[[], float] = time.time) -> RelayResult:
+                    clock: Callable[[], float] = time.time,
+                    on_authenticated: Callable[[], None] | None = None,
+                    ) -> RelayResult:
     """Accept one local FreeRDP client and carry it to the paired primary."""
     identity.validate()
     if identity.role != "peer":
         raise DisplayCarrierError("peer carrier requires peer identity")
-    local_listener.settimeout(CONNECT_TIMEOUT_SECONDS)
-    local, _address = local_listener.accept()
+    local = None
     raw = None
     tls = None
     try:
@@ -499,13 +511,18 @@ def serve_peer_once(identity: DisplayCarrierIdentity, *,
             local_certificate_pem=identity.local_certificate_pem,
             local_private_key_pem=identity.local_private_key_pem,
             peer_certificate_pem=identity.peer_certificate_pem)
+        if on_authenticated is not None:
+            on_authenticated()
+        local_listener.settimeout(CONNECT_TIMEOUT_SECONDS)
+        local, _address = local_listener.accept()
         local.settimeout(None)
         tls.settimeout(None)
         return relay_streams(
             local, tls, lease_expires_at=identity.binding.lease_expires_at,
             clock=clock)
     finally:
-        local.close()
+        if local is not None:
+            local.close()
         if tls is not None:
             tls.close()
         elif raw is not None:

@@ -146,20 +146,25 @@ def test_owner_orders_attach_renewal_and_detach() -> None:
 
     assert rig.owner.phase is SlotPhase.ACTIVE
     assert rig.owner.status().session_id == "dock-40"
-    assert rig.events[:4] == [
+    assert rig.events[:7] == [
         "panel-reserve",
+        "panel-heartbeat",
         "primary-enable-output",
+        "panel-heartbeat",
         "carrier-session-start",
+        "panel-heartbeat",
         "input-on",
     ]
     assert rig.owner.status().next_heartbeat == 100.5
 
+    attach_heartbeats = rig.events.count("panel-heartbeat")
     rig.now = 100.49
     assert rig.owner.poll() is False
-    assert "panel-heartbeat" not in rig.events
+    assert rig.events.count("panel-heartbeat") == attach_heartbeats
     rig.now = 100.5
     assert rig.owner.poll() is False
     assert rig.events[-1] == "panel-heartbeat"
+    assert rig.events.count("panel-heartbeat") == attach_heartbeats + 1
     assert rig.owner.status().next_heartbeat == 101.0
 
     before_detach = len(rig.events)

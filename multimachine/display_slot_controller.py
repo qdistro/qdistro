@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol
 
 from .remote_display_slot import (
+    ActionKind,
     DisplaySlotError,
     RemoteDisplaySlot,
     SlotAction,
@@ -202,6 +203,45 @@ class DisplaySlotController:
             raise
         self._emit("action-complete", action=action)
 
+    def _renew_during_attach(self) -> None:
+        if self._grant is None or not self.slot.heartbeat(self.slot.generation):
+            raise DisplayControllerError("display lease expired during attach")
+        self.executor.heartbeat(self.slot.generation, self._grant)
+        self._emit("attach-heartbeat")
+
+    def _perform_carrier_with_renewal(self, action: SlotAction) -> None:
+        """Keep the peer-owned reservation alive during carrier admission."""
+        assert self._grant is not None
+        heartbeat_ms = int(self._grant["heartbeat_ms"])
+        completed = threading.Event()
+        errors: list[BaseException] = []
+
+        def perform() -> None:
+            try:
+                self._perform(action)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        worker = threading.Thread(
+            target=perform, name="display-carrier-attach", daemon=True)
+        worker.start()
+        interval = max(0.05, heartbeat_ms / 2000.0)
+        renewal_error: BaseException | None = None
+        while not completed.wait(interval):
+            try:
+                self._renew_during_attach()
+            except BaseException as exc:
+                renewal_error = exc
+                completed.wait()
+                break
+        worker.join()
+        if renewal_error is not None:
+            raise renewal_error
+        if errors:
+            raise errors[0]
+
     def _perform_teardown(self, actions: tuple[SlotAction, ...]) -> list[str]:
         failures: list[str] = []
         # Never stop a safety sequence at its first failed cleanup.  In
@@ -230,7 +270,14 @@ class DisplaySlotController:
                 actions = self.slot.begin_attach(self._grant)
                 self._emit("attach-begin")
                 for action in actions:
-                    self._perform(action)
+                    if action.kind is ActionKind.OPEN_AUTHENTICATED_CARRIER:
+                        self._perform_carrier_with_renewal(action)
+                    else:
+                        self._perform(action)
+                    # The panel reservation begins at the first action. Renew
+                    # after every completed attach boundary so cumulative
+                    # qdshell/carrier latency cannot consume its whole lease.
+                    self._renew_during_attach()
                 for action in self.slot.carrier_connected(self.slot.generation):
                     self._perform(action)
                 self._emit("attach-complete")

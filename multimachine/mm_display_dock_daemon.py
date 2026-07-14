@@ -151,8 +151,10 @@ def build_service(args, *, shell_pid: int | None = None,
     """Build the daemon graph; kept injectable for host deployment tests."""
     layout = DisplayShellMailbox(clock=clock, request_timeout=15)
     input_mailbox = DisplayShellInputMailbox(clock=clock, request_timeout=15)
-    panel_client = JsonEndpointClient(args.panel_socket, role="peer-panel")
-    carrier_client = JsonEndpointClient(args.carrier_socket, role="carrier")
+    panel_client = JsonEndpointClient(
+        args.panel_socket, role="peer-panel", timeout=15)
+    carrier_client = JsonEndpointClient(
+        args.carrier_socket, role="carrier", timeout=30)
     panel = RpcPanelEndpoint(panel_client)
     carrier_factory = RpcCarrierFactory(carrier_client)
     carrier = CarrierSupervisorEndpoint(

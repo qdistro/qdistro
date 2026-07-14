@@ -35,8 +35,7 @@ def payload(bundle: Path) -> dict:
 
 
 def control_path(bundle: Path) -> str:
-    generation = payload(bundle)["generation"]
-    return f"/run/qdistro/mm-r9-panel-g{generation}.sock"
+    return "/run/qdistro/mm-display-peer-panel.sock"
 
 
 def run_endpoint(bundle: Path, role: str, primary_host: str) -> int:
@@ -68,7 +67,7 @@ def run_endpoint(bundle: Path, role: str, primary_host: str) -> int:
         command += [
             "--listener-fd", str(listener.fileno()),
             "--control-unix-path", control_path(bundle),
-            "--control-uid", "0", "--control-gid", "0",
+            "--control-uid", "1000", "--control-gid", "1000",
         ]
     else:
         command += [
@@ -81,12 +80,24 @@ def run_endpoint(bundle: Path, role: str, primary_host: str) -> int:
 
 
 def run_command(bundle: Path, kind: str) -> int:
-    endpoint = "/tmp/mm/multimachine/qdistro-mm-display-panel"
-    os.execv(endpoint, [
-        endpoint, "--control-unix-path", control_path(bundle),
-        "--command", kind,
-    ])
-    return 1
+    from multimachine.display_dock_rpc import JsonEndpointClient
+
+    grant = payload(bundle)
+    action = {
+        "reserve": "peer-blank-panel",
+        "heartbeat": "heartbeat",
+        "release": "peer-unblank-panel",
+        "status": "safe",
+    }[kind]
+    # Fixture bundle is root-owned, while the product endpoint admits only the
+    # admin-owned dock daemon. Drop after reading the public grant projection.
+    os.setgid(1000)
+    os.setuid(1000)
+    client = JsonEndpointClient(
+        control_path(bundle), role="peer-panel", timeout=15)
+    result = client.request(action, grant)
+    print(json.dumps({"ok": True, "result": result}, sort_keys=True))
+    return 0
 
 
 def main() -> int:

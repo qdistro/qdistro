@@ -345,6 +345,7 @@ class QciVMBackend:
                 "remote_nested_protocol.py", "remote_nested_service.py",
                 "remote_nested_supervisor.py", "remote_nested_registry.py",
                 "remote_display_slot.py", "display_slot_controller.py",
+                "display_dock_rpc.py",
                 "display_shell_mailbox.py",
                 "display_shell_service.py",
                 "display_carrier.py",

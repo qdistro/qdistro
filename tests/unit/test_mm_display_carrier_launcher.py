@@ -96,12 +96,15 @@ def _build(role: str, listener: socket.socket, *, now: int,
             local_certificate_pem=PRIMARY_CERT,
             local_private_key_pem=PRIMARY_KEY,
             peer_certificate_pem=PEER_CERT,
-            backend_unix_path="/run/qdistro/rdp-0.sock", **common)
+            backend_unix_path="/run/qdistro/rdp-0.sock",
+            control_unix_path="/run/qdistro/mm-display-carrier-supervisor.sock",
+            control_uid=1000, control_gid=1000, **common)
     return build_verified_carrier_config(
         local_certificate_pem=PEER_CERT,
         local_private_key_pem=PEER_KEY,
         peer_certificate_pem=PRIMARY_CERT,
-        primary_host="primary.internal", primary_port=3389, **common)
+        primary_host="primary.internal", primary_port=3389,
+        client_unit="qdistro-remote-panel@rdp-0.service", **common)
 
 
 def test_verified_primary_and_peer_configs_round_trip() -> None:
@@ -118,10 +121,16 @@ def test_verified_primary_and_peer_configs_round_trip() -> None:
         peer_listener.close()
     assert primary.identity.role == "primary"
     assert primary.identity.binding.generation == 101
-    assert primary.target == {"backend_unix_path": "/run/qdistro/rdp-0.sock"}
+    assert primary.target == {
+        "backend_unix_path": "/run/qdistro/rdp-0.sock",
+        "control_unix_path": "/run/qdistro/mm-display-carrier-supervisor.sock",
+        "control_uid": 1000,
+        "control_gid": 1000,
+    }
     assert peer.identity.role == "peer"
     assert peer.target == {
         "primary_host": "primary.internal", "primary_port": 3389,
+        "client_unit": "qdistro-remote-panel@rdp-0.service",
     }
 
 
@@ -142,7 +151,9 @@ def test_authority_signature_machine_and_secret_are_load_bearing() -> None:
                 local_private_key_pem=PRIMARY_KEY,
                 peer_certificate_pem=PEER_CERT,
                 listener_fd=listener.fileno(),
-                backend_unix_path="/run/qdistro/rdp-0.sock", now=lambda: now)
+                backend_unix_path="/run/qdistro/rdp-0.sock",
+                control_unix_path="/run/qdistro/mm-display-carrier-supervisor.sock",
+                control_uid=1000, control_gid=1000, now=lambda: now)
         with pytest.raises(ValueError, match="secret digest"):
             _build("primary", listener, now=now, secret=b"x" * 32)
     finally:

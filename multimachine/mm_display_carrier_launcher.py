@@ -11,6 +11,7 @@ import argparse
 import base64
 import binascii
 import os
+import re
 import socket
 import time
 from dataclasses import asdict, dataclass
@@ -23,6 +24,7 @@ from .display_carrier import (
     DisplayCarrierIdentity,
 )
 from .mm_display_authority import DisplayGrantVerifier
+from .display_dock_rpc import validate_endpoint_path
 from .mm_remote_session_launcher import _read_pem_fd, _read_secret_fd
 from .mm_session_launcher import (
     _read_owned_json_fd,
@@ -38,8 +40,11 @@ _CONFIG_FIELDS = frozenset({
 _TLS_FIELDS = frozenset({
     "local_certificate", "local_private_key", "peer_certificate",
 })
-_PRIMARY_TARGET_FIELDS = frozenset({"backend_unix_path"})
-_PEER_TARGET_FIELDS = frozenset({"primary_host", "primary_port"})
+_PRIMARY_TARGET_FIELDS = frozenset({
+    "backend_unix_path", "control_unix_path", "control_uid", "control_gid",
+})
+_PEER_TARGET_FIELDS = frozenset({"primary_host", "primary_port", "client_unit"})
+_UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,126}\.service\Z")
 
 
 def _encode(value: bytes) -> str:
@@ -93,17 +98,33 @@ def _validate_target(target: object, *, role: str) -> dict:
         if (not isinstance(path, str) or not path.startswith("/run/")
                 or len(path) > 107 or "/../" in path or path.endswith("/..")):
             raise ValueError("qdwin private listener path is invalid")
+        control_path = validate_endpoint_path(target["control_unix_path"])
+        control_uid = target["control_uid"]
+        control_gid = target["control_gid"]
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+               for value in (control_uid, control_gid)):
+            raise ValueError("display carrier controller identity is invalid")
+        return {
+            "backend_unix_path": path,
+            "control_unix_path": control_path,
+            "control_uid": control_uid,
+            "control_gid": control_gid,
+        }
     else:
         if set(target) != _PEER_TARGET_FIELDS:
             raise ValueError("peer display carrier target fields are invalid")
         host = target["primary_host"]
         port = target["primary_port"]
+        client_unit = target["client_unit"]
         if (not isinstance(host, str) or not host or len(host) > 255
                 or any(char.isspace() for char in host)):
             raise ValueError("primary display carrier host is invalid")
         if (not isinstance(port, int) or isinstance(port, bool)
                 or port <= 0 or port > 65535):
             raise ValueError("primary display carrier port is invalid")
+        if (not isinstance(client_unit, str)
+                or _UNIT_RE.fullmatch(client_unit) is None):
+            raise ValueError("peer display carrier client unit is invalid")
     return dict(target)
 
 
@@ -166,7 +187,10 @@ def build_verified_carrier_config(
         local_certificate_pem: bytes, local_private_key_pem: bytes,
         peer_certificate_pem: bytes, listener_fd: int,
         backend_unix_path: str | None = None,
+        control_unix_path: str | None = None,
+        control_uid: int | None = None, control_gid: int | None = None,
         primary_host: str | None = None, primary_port: int | None = None,
+        client_unit: str | None = None,
         now: Callable[[], float] | None = None) -> dict:
     verifier_args = {"role": role, "local_machine_id": local_machine_id}
     if now is not None:
@@ -177,9 +201,18 @@ def build_verified_carrier_config(
         receipt, session_id=session_id, carrier_secret=secret)
     binding = DisplayCarrierBinding.from_verified_payload(payload)
     if role == "primary":
-        target = {"backend_unix_path": backend_unix_path}
+        target = {
+            "backend_unix_path": backend_unix_path,
+            "control_unix_path": control_unix_path,
+            "control_uid": control_uid,
+            "control_gid": control_gid,
+        }
     else:
-        target = {"primary_host": primary_host, "primary_port": primary_port}
+        target = {
+            "primary_host": primary_host,
+            "primary_port": primary_port,
+            "client_unit": client_unit,
+        }
     config = {
         "schema": SCHEMA,
         "role": role,
@@ -224,8 +257,12 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - exec shell
     ap.add_argument("--local-machine-id", required=True)
     ap.add_argument("--session-id", required=True)
     ap.add_argument("--backend-unix-path")
+    ap.add_argument("--control-unix-path")
+    ap.add_argument("--control-uid", type=int)
+    ap.add_argument("--control-gid", type=int)
     ap.add_argument("--primary-host")
     ap.add_argument("--primary-port", type=int)
+    ap.add_argument("--client-unit")
     ap.add_argument("--carrier-program",
                     default="/usr/local/bin/qdistro-mm-display-carrier")
     args = ap.parse_args(argv)
@@ -249,7 +286,10 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - exec shell
         peer_certificate_pem=peer_certificate,
         listener_fd=args.listener_fd,
         backend_unix_path=args.backend_unix_path,
-        primary_host=args.primary_host, primary_port=args.primary_port)
+        control_unix_path=args.control_unix_path,
+        control_uid=args.control_uid, control_gid=args.control_gid,
+        primary_host=args.primary_host, primary_port=args.primary_port,
+        client_unit=args.client_unit)
     exec_carrier(config, args.carrier_program)
     return 1
 
