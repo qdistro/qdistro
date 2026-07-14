@@ -38,18 +38,13 @@ sys.path.insert(0, str(REPO))
 from multimachine.harness import capture as capture_mod  # noqa: E402
 from multimachine.harness import marker, oracle  # noqa: E402
 from multimachine.harness.vm_backend import QciVMBackend  # noqa: E402
-from multimachine.display_slot_controller import (  # noqa: E402
-    ControllerEvent,
-    DisplaySlotController,
-    PrimaryDisplayEndpoint,
-    SplitDisplaySlotExecutor,
-)
+from multimachine.display_dock_session import DisplayDockSession  # noqa: E402
+from multimachine.display_slot_controller import ControllerEvent  # noqa: E402
 from multimachine.mm_display_authority import issue_display_grant  # noqa: E402
 from multimachine.mm_pairing_authority import public_key_bytes  # noqa: E402
 from multimachine.remote_display_slot import (  # noqa: E402
     ActionKind,
     DisplaySlotSpec,
-    RemoteDisplaySlot,
     SlotAction,
     SlotPhase,
 )
@@ -650,6 +645,24 @@ class LiveCarrierEndpoint:
     def safe_state_confirmed(self, _slot_name: str) -> bool:
         return self.active_generation is None
 
+    def alive(self, generation: int) -> bool:
+        if generation != self.active_generation:
+            return False
+        source_active = self.backend._vmexec(
+            self.source_vm,
+            f"systemctl is-active mm-r9-carrier-primary-g{generation} "
+            "2>/dev/null || true", check=False).strip()
+        peer_active = self.backend._vmexec(
+            self.viewer_vm,
+            f"systemctl is-active mm-r9-carrier-peer-g{generation} "
+            "2>/dev/null || true", check=False).strip()
+        rdp_active = self.backend._vmexec(
+            self.viewer_vm,
+            "systemctl is-active mm-r9-rdp 2>/dev/null || true",
+            check=False).strip()
+        return (source_active == "active" and peer_active == "active"
+                and rdp_active == "active")
+
 
 def wait_rdp(backend: QciVMBackend, vm: str, *, timeout: float = 50) -> None:
     wait_guest(
@@ -782,14 +795,10 @@ def main() -> int:
         def controller_clock() -> float:
             return controller_time[0]
 
-        primary_endpoint = PrimaryDisplayEndpoint(
-            shell_layout=shell_endpoint, local=local_endpoint)
-        controller = DisplaySlotController(
-            RemoteDisplaySlot(
-                DisplaySlotSpec("rdp-0"), clock=controller_clock),
-            SplitDisplaySlotExecutor(
-                primary=primary_endpoint, peer=peer_endpoint,
-                carrier=carrier_endpoint),
+        controller = DisplayDockSession(
+            slot=DisplaySlotSpec("rdp-0"), shell_layout=shell_endpoint,
+            primary_local=local_endpoint, peer_panel=peer_endpoint,
+            carrier=carrier_endpoint,
             clock=controller_clock, audit=controller_events.append)
 
         # The real controller owns the whole order: reserve peer panel, await
@@ -798,6 +807,9 @@ def main() -> int:
         details["generation_90_enable"] = shell_endpoint.results[-1]
         assertions["controller_generation_90_active"] = (
             controller.phase is SlotPhase.ACTIVE)
+        assertions["broker_owned_display_dock_session_active"] = (
+            controller.status().session_id == SESSION_ID
+            and controller.status().generation == GENERATION)
         assert controller.heartbeat(GENERATION)
         assertions["authenticated_peer_panel_lease_renewed"] = True
         enabled = source_probe(
@@ -942,6 +954,9 @@ def main() -> int:
         controller.detach(GENERATION + 1)
         assertions["controller_clean_detach_returns_disabled"] = (
             controller.phase is SlotPhase.DISABLED)
+        assertions["broker_retires_display_session_authority_on_detach"] = (
+            controller.status().session_id is None
+            and controller.status().next_heartbeat is None)
         details["controller_actions"] = [
             {
                 "generation": event.generation,
