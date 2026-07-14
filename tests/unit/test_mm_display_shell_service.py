@@ -5,7 +5,11 @@ import json
 import threading
 
 from multimachine.display_shell_mailbox import DisplayShellMailbox
-from multimachine.display_shell_service import DisplayShellServiceCore
+from multimachine.display_shell_service import (
+    DBUS_NAME,
+    DBUS_PATH,
+    DisplayShellServiceCore,
+)
 from multimachine.remote_display_slot import ActionKind, SlotAction
 
 
@@ -62,3 +66,8 @@ def test_empty_sender_and_malformed_ack_fail_closed() -> None:
         "", request_id="a" * 32, generation=1, result="applied")
     assert not core.acknowledge_layout(
         ":1.shell", request_id="a" * 32, generation=1, result="bogus")
+
+
+def test_bus_identity_is_dedicated_to_display_transactions() -> None:
+    assert DBUS_NAME == "org.qdistro.MultiMachineDisplay1"
+    assert DBUS_PATH == "/org/qdistro/MultiMachineDisplay1"

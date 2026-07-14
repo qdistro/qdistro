@@ -66,3 +66,27 @@ def create_dbus_service(bus, bus_name, core: DisplayShellServiceCore):
                 generation=int(generation), result=str(result))
 
     return DisplayShellDBus()
+
+
+def register_authenticated_service(mailbox: DisplayShellMailbox, *,
+                                   shell_pid: int, bus=None):
+    """Own the display bus name and pin calls to the enrolled qdshell pid."""
+    if (not isinstance(shell_pid, int) or isinstance(shell_pid, bool)
+            or shell_pid <= 0):
+        raise ValueError("qdshell pid must be positive")
+    import dbus
+    import dbus.service
+
+    from .mm_broker import dbus_sender_is_trusted_shell
+
+    session_bus = bus or dbus.SessionBus()
+    name = dbus.service.BusName(
+        DBUS_NAME, bus=session_bus, allow_replacement=False,
+        replace_existing=False, do_not_queue=True)
+    core = DisplayShellServiceCore(
+        mailbox,
+        trusted_sender=lambda sender: dbus_sender_is_trusted_shell(
+            session_bus, sender, shell_pid))
+    service = create_dbus_service(session_bus, name, core)
+    # Keep both BusName and object alive; losing either withdraws authority.
+    return name, service
