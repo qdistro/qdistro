@@ -1,0 +1,68 @@
+"""Authenticated D-Bus facade for qdshell display-layout transactions.
+
+The service deliberately has only claim and acknowledge methods.  It does not
+accept a caller-supplied layout.  The controller publishes requests after grant
+verification; this facade authenticates the D-Bus sender as qdshell (or its
+direct ``busctl`` child) before exposing or completing one.
+"""
+from __future__ import annotations
+
+import json
+from typing import Callable
+
+from .display_shell_mailbox import DisplayShellError, DisplayShellMailbox
+
+
+DBUS_NAME = "org.qdistro.MultiMachineDisplay1"
+DBUS_PATH = "/org/qdistro/MultiMachineDisplay1"
+
+
+class DisplayShellServiceCore:
+    """Pure authorization/error boundary used by the thin live D-Bus object."""
+
+    def __init__(self, mailbox: DisplayShellMailbox, *,
+                 trusted_sender: Callable[[str], bool]):
+        self.mailbox = mailbox
+        self.trusted_sender = trusted_sender
+
+    def claim_layout(self, sender: str) -> str:
+        if not sender or not self.trusted_sender(sender):
+            return ""
+        request = self.mailbox.claim()
+        if request is None:
+            return ""
+        return json.dumps(request, sort_keys=True, separators=(",", ":"))
+
+    def acknowledge_layout(self, sender: str, *, request_id: str,
+                           generation: int, result: str) -> bool:
+        if not sender or not self.trusted_sender(sender):
+            return False
+        try:
+            self.mailbox.acknowledge(
+                request_id=request_id, generation=generation, result=result)
+            return True
+        except (DisplayShellError, TypeError, ValueError):
+            return False
+
+
+def create_dbus_service(bus, bus_name, core: DisplayShellServiceCore):
+    """Create the dbus-python object; imports stay out of host-only tests."""
+    import dbus.service
+
+    class DisplayShellDBus(dbus.service.Object):
+        def __init__(self) -> None:
+            super().__init__(bus_name, DBUS_PATH)
+
+        @dbus.service.method(DBUS_NAME, in_signature="", out_signature="s",
+                             sender_keyword="sender")
+        def ClaimLayout(self, sender=None):
+            return core.claim_layout(str(sender or ""))
+
+        @dbus.service.method(DBUS_NAME, in_signature="sts", out_signature="b",
+                             sender_keyword="sender")
+        def AcknowledgeLayout(self, request_id, generation, result, sender=None):
+            return core.acknowledge_layout(
+                str(sender or ""), request_id=str(request_id),
+                generation=int(generation), result=str(result))
+
+    return DisplayShellDBus()

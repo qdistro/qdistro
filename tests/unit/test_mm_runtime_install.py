@@ -56,6 +56,8 @@ def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
     assert "mm_display_authority.py" in text
     assert "remote_display_slot.py" in text
     assert "display_slot_controller.py" in text
+    assert "display_shell_mailbox.py" in text
+    assert "display_shell_service.py" in text
     assert "mm_display_carrier_launcher.py" in text
     assert "display_carrier.py" in text
     assert "display_carrier_endpoint.py" in text

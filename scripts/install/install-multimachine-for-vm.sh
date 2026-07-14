@@ -24,6 +24,8 @@ for module in __init__.py bridge.py control_source.py mm_broker.py \
               remote_nested_protocol.py remote_nested_service.py \
               remote_nested_supervisor.py remote_nested_registry.py \
               remote_display_slot.py display_slot_controller.py \
+              display_shell_mailbox.py \
+              display_shell_service.py \
               display_carrier.py display_carrier_endpoint.py \
               remote_adapter_transport.py \
               sidechannel.py; do

@@ -7,6 +7,7 @@ from multimachine.display_slot_controller import (
     ControllerEvent,
     DisplayControllerError,
     DisplaySlotController,
+    PrimaryDisplayEndpoint,
     SplitDisplaySlotExecutor,
 )
 from multimachine.remote_display_slot import (
@@ -240,3 +241,31 @@ def test_split_safe_confirmation_checks_all_three_endpoints() -> None:
     primary.confirmed = False
     carrier.confirmed = False
     assert not split.fail_safe_confirmed("rdp-0")
+
+
+def test_primary_endpoint_exposes_only_output_actions_to_qdshell() -> None:
+    shell = Executor()
+    local = Executor()
+    primary = PrimaryDisplayEndpoint(shell_layout=shell, local=local)
+    payload = grant()
+    for kind in (
+        ActionKind.PRIMARY_ENABLE_OUTPUT,
+        ActionKind.PRIMARY_ENABLE_INPUT,
+        ActionKind.PRIMARY_DISABLE_INPUT,
+        ActionKind.SYNTHESIZE_RELEASES,
+        ActionKind.CLEAR_TRANSFERS,
+        ActionKind.PRIMARY_DISABLE_OUTPUT,
+    ):
+        primary.perform(SlotAction(kind), payload)
+    assert kinds(shell) == [
+        ActionKind.PRIMARY_ENABLE_OUTPUT,
+        ActionKind.PRIMARY_DISABLE_OUTPUT,
+    ]
+    assert kinds(local) == [
+        ActionKind.PRIMARY_ENABLE_INPUT,
+        ActionKind.PRIMARY_DISABLE_INPUT,
+        ActionKind.SYNTHESIZE_RELEASES,
+        ActionKind.CLEAR_TRANSFERS,
+    ]
+    with pytest.raises(DisplayControllerError, match="not owned"):
+        primary.perform(SlotAction(ActionKind.PEER_BLANK_PANEL), payload)

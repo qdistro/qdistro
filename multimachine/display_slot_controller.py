@@ -98,6 +98,44 @@ class SplitDisplaySlotExecutor:
         return all(results)
 
 
+class PrimaryDisplayEndpoint:
+    """Split primary output mutation from other primary-local operations.
+
+    Output enable/disable must round-trip through authenticated qdshell. Input
+    gating, held releases, and transfer cleanup stay in the primary controller
+    runtime. This prevents the shell mailbox from growing into a general remote
+    action interface.
+    """
+
+    _SHELL_ACTIONS = frozenset({
+        "primary-enable-output", "primary-disable-output",
+    })
+    _LOCAL_ACTIONS = frozenset({
+        "primary-enable-input", "primary-disable-input",
+        "synthesize-releases", "clear-transfers",
+    })
+
+    def __init__(self, *, shell_layout: DisplayActionEndpoint,
+                 local: DisplayActionEndpoint):
+        self.shell_layout = shell_layout
+        self.local = local
+
+    def perform(self, action: SlotAction, grant: Mapping) -> None:
+        kind = action.kind.value
+        if kind in self._SHELL_ACTIONS:
+            self.shell_layout.perform(action, grant)
+        elif kind in self._LOCAL_ACTIONS:
+            self.local.perform(action, grant)
+        else:
+            raise DisplayControllerError(
+                f"action is not owned by the primary endpoint: {kind}")
+
+    def safe_state_confirmed(self, slot_name: str) -> bool:
+        shell_safe = self.shell_layout.safe_state_confirmed(slot_name)
+        local_safe = self.local.safe_state_confirmed(slot_name)
+        return shell_safe and local_safe
+
+
 class DisplayControllerError(RuntimeError):
     """A controller transition failed and fail-safe handling was attempted."""
 
