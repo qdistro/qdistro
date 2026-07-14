@@ -49,7 +49,7 @@ class EndpointServer:
                 self.requests.append(request)
                 result = self.results.get(request["action"], "unexpected")
                 client.sendall((json.dumps({
-                    "ok": result not in {"unexpected", "unsafe"},
+                    "ok": result not in {"unexpected", "unsafe", "dead"},
                     "result": result,
                 }) + "\n").encode())
 
@@ -124,5 +124,19 @@ def test_unsafe_probe_is_false_not_an_rpc_exception(tmp_path: Path) -> None:
         carrier._last_grant = grant()
         assert panel.safe_state_confirmed("rdp-0") is False
         assert carrier.safe("rdp-0") is False
+    finally:
+        server.close()
+
+
+def test_dead_carrier_probe_is_false_not_an_rpc_exception(
+        tmp_path: Path) -> None:
+    server = EndpointServer(tmp_path / "endpoint.sock", {
+        "open": "ready", "alive": "dead",
+    })
+    try:
+        carrier = RpcCarrierFactory(client(server.path, "carrier"))
+        session = carrier.start(grant())
+        assert session.ready() is True
+        assert session.alive() is False
     finally:
         server.close()

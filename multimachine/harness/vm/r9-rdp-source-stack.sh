@@ -17,11 +17,23 @@ PORT=${PORT:-3389}
 APP_PID=
 WESTON_PID=
 SHELL_PID=
+SHELL_UNIT=/home/admin/.config/systemd/user/qdshell.service
+SHELL_UNIT_SAVED=$RT/qdshell.service.saved
 
 cleanup() {
     set +e
     [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
-    systemctl stop mm-r9-qdshell 2>/dev/null || true
+    runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+        systemctl --user stop qdshell.service 2>/dev/null || true
+    if [ -f "$SHELL_UNIT_SAVED" ]; then
+        install -o admin -g admin -m 0644 "$SHELL_UNIT_SAVED" "$SHELL_UNIT"
+    else
+        rm -f "$SHELL_UNIT"
+    fi
+    runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+        systemctl --user daemon-reload 2>/dev/null || true
     [ -n "$WESTON_PID" ] && kill "$WESTON_PID" 2>/dev/null
     systemctl stop mm-r9-carrier-primary-g90 mm-r9-carrier-primary-g91 \
         2>/dev/null || true
@@ -104,16 +116,36 @@ run_admin /tmp/r9-qdwin-output-probe --expect-heads=2 \
 
 # qdwin permits the bootstrap disable before its trusted shell binds. From
 # this point onward only this qdshell PID may submit output configurations.
-systemctl stop mm-r9-qdshell 2>/dev/null || true
-systemctl reset-failed mm-r9-qdshell 2>/dev/null || true
-systemd-run --collect --unit=mm-r9-qdshell --uid=admin \
-    --setenv=HOME=/home/admin --setenv=XDG_RUNTIME_DIR=$XRT \
-    --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
-    --setenv=WAYLAND_DISPLAY=$SOCK --setenv=QT_QPA_PLATFORM=wayland \
-    --setenv=QML_IMPORT_PATH=/tmp/r9-qml:/usr/share/qdistro/qml \
-    /usr/bin/qs --no-duplicate=false --path /tmp/r9-qdshell
+install -d -o admin -g admin -m 0700 "$(dirname "$SHELL_UNIT")"
+[ ! -f "$SHELL_UNIT" ] || cp -a "$SHELL_UNIT" "$SHELL_UNIT_SAVED"
+cat >"$SHELL_UNIT" <<EOF
+[Unit]
+Description=R9 product qdshell authority
+[Service]
+Type=simple
+Environment=HOME=/home/admin
+Environment=XDG_RUNTIME_DIR=$XRT
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus
+Environment=WAYLAND_DISPLAY=$SOCK
+Environment=QT_QPA_PLATFORM=wayland
+Environment=QML_IMPORT_PATH=/tmp/r9-qml:/usr/share/qdistro/qml
+ExecStart=/usr/bin/qs --no-duplicate=false --path /tmp/r9-qdshell
+EOF
+chown admin:admin "$SHELL_UNIT"
+chmod 0644 "$SHELL_UNIT"
+runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+    systemctl --user daemon-reload
+runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+    systemctl --user reset-failed qdshell.service 2>/dev/null || true
+runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+    systemctl --user start qdshell.service
 for _ in $(seq 1 100); do
-    SHELL_PID=$(systemctl show -p MainPID --value mm-r9-qdshell)
+    SHELL_PID=$(runuser -u admin -- env XDG_RUNTIME_DIR=$XRT \
+        DBUS_SESSION_BUS_ADDRESS=unix:path=$XRT/bus \
+        systemctl --user show -p MainPID --value qdshell.service)
     [ "$SHELL_PID" -gt 0 ] 2>/dev/null && \
         grep -q "shell bound (uid=1000 pid=$SHELL_PID)" "$RT/weston.log" && break
     sleep 0.2

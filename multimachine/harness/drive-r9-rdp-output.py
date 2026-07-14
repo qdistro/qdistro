@@ -93,6 +93,10 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         vm_source,
         REPO / "multimachine/harness/vm/r9-dock-endpoint-command.py",
         "/tmp/r9-dock-endpoint-command.py", mode=0o755)
+    backend._push(
+        vm_source,
+        REPO / "multimachine/harness/vm/r9-dock-daemon-command.py",
+        "/tmp/r9-dock-daemon-command.py", mode=0o755)
     for vm in (vm_source, vm_viewer):
         backend._push_mm_package(vm)
         backend._push(
@@ -112,6 +116,33 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
             backend._push(
                 vm, REPO / "multimachine" / program,
                 f"/tmp/mm/multimachine/{program}", mode=0o755)
+
+    for name, mode in (
+        ("qdistro-mm-display-dock", 0o755),
+        ("qdistro-mm-display-dock.service", 0o644),
+        ("qdistro-mm-display-tmpfiles.conf", 0o644),
+    ):
+        backend._push(
+            vm_source, REPO / "multimachine" / name,
+            f"/tmp/mm/multimachine/{name}", mode=mode)
+    backend._vmexec(
+        vm_source,
+        "install -d -o root -g root -m 0755 "
+        "/usr/local/lib/qdistro/multimachine /usr/local/bin "
+        "/usr/lib/tmpfiles.d; "
+        "install -o root -g root -m 0644 /tmp/mm/multimachine/*.py "
+        "/usr/local/lib/qdistro/multimachine/; "
+        "install -o root -g root -m 0755 "
+        "/tmp/mm/multimachine/qdistro-mm-display-dock "
+        "/usr/local/bin/qdistro-mm-display-dock; "
+        "install -o root -g root -m 0644 "
+        "/tmp/mm/multimachine/qdistro-mm-display-dock.service "
+        "/etc/systemd/system/qdistro-mm-display-dock.service; "
+        "install -o root -g root -m 0644 "
+        "/tmp/mm/multimachine/qdistro-mm-display-tmpfiles.conf "
+        "/usr/lib/tmpfiles.d/qdistro-mm-display.conf; "
+        "systemd-tmpfiles --create "
+        "/usr/lib/tmpfiles.d/qdistro-mm-display.conf; systemctl daemon-reload")
 
     for relative in (
         "qdwin/qdwin.c", "qdwin/qdwin-logic.c", "qdwin/qdwin-logic.h",
@@ -232,7 +263,11 @@ def _carrier_certificate(common_name: str) -> tuple[bytes, bytes, str]:
 
 
 def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
-                         vm_viewer: str) -> dict[int, dict]:
+                         vm_viewer: str, *,
+                         generations: tuple[int, ...] = (
+                             GENERATION, GENERATION + 1),
+                         read_only: frozenset[int] = frozenset(),
+                         ) -> dict[int, dict]:
     """Stage two strictly increasing one-shot grants for attach + redock."""
     authority = Ed25519PrivateKey.generate()
     primary_cert, primary_key, primary_pin = _carrier_certificate("r9-primary")
@@ -249,14 +284,14 @@ def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
                 vm, "install -D -o root -g root -m 0644 /tmp/r9-authority.pub "
                 "/etc/qdistro/multimachine/pairing-authority.ed25519.pub")
 
-        for generation in (GENERATION, GENERATION + 1):
+        for generation in generations:
             secret = os.urandom(32)
             receipt = issue_display_grant(
                 primary_machine="r9-primary", peer_machine="r9-peer",
                 trust_domain_id="r9-owner-machines", generation=generation,
                 session_id=SESSION_ID, slot_name="rdp-0",
                 logical_x=W, logical_y=0, width=W, height=H, scale=1,
-                allow_input=True, carrier_secret=secret,
+                allow_input=generation not in read_only, carrier_secret=secret,
                 primary_tls_cert_sha256=primary_pin,
                 peer_tls_cert_sha256=peer_pin,
                 issued_at=issued_at, handoff_expires_at=issued_at + 300,
@@ -306,8 +341,6 @@ def start_carrier(backend: QciVMBackend, vm: str, *, role: str,
            else f"{VIEWER_RT}/carrier-g{generation}.log")
     backend._vmexec(
         vm, f"systemctl stop {unit} 2>/dev/null || true; "
-        + ("rm -f /run/qdistro/mm-display-carrier-supervisor.sock; "
-           if role == "primary" else "") +
         f"systemctl reset-failed {unit} 2>/dev/null || true; "
         f"systemd-run --collect --unit={unit} "
         f"--property=StandardOutput=append:{log} "
@@ -575,7 +608,6 @@ class LivePeerPanelEndpoint:
         self._stop(generation)
         self.backend._vmexec(
             self.source_vm,
-            "rm -f /run/qdistro/mm-display-peer-panel.sock; "
             f"systemctl reset-failed {primary_unit} 2>/dev/null || true; "
             f"systemd-run --collect --unit={primary_unit} "
             f"--property=StandardOutput=append:{SOURCE_RT}/panel-g{generation}.log "
@@ -601,17 +633,20 @@ class LivePeerPanelEndpoint:
             "test -S /run/qdistro/mm-display-peer-panel.sock && echo ready",
             timeout=20, label=f"panel control generation {generation}")
 
+    def prepare_generation(self, generation: int) -> None:
+        if not self.prepared:
+            output = self.backend._vmexec(
+                self.viewer_vm, "bash /tmp/r9-rdp-viewer-stack.sh",
+                timeout=120)
+            if "R9_VIEWER_READY" not in output:
+                raise RuntimeError(f"viewer setup failed: {output}")
+            self.prepared = True
+        self._start(generation)
+
     def perform(self, action: SlotAction, grant: dict) -> None:
         generation = grant["generation"]
         if action.kind is ActionKind.PEER_BLANK_PANEL:
-            if not self.prepared:
-                output = self.backend._vmexec(
-                    self.viewer_vm, "bash /tmp/r9-rdp-viewer-stack.sh",
-                    timeout=120)
-                if "R9_VIEWER_READY" not in output:
-                    raise RuntimeError(f"viewer setup failed: {output}")
-                self.prepared = True
-            self._start(generation)
+            self.prepare_generation(generation)
             response = self._command(generation, "reserve")
             if response != {"ok": True, "result": "reserved"}:
                 raise RuntimeError(f"panel reserve failed: {response}")
@@ -670,23 +705,26 @@ class LiveCarrierEndpoint:
             raise RuntimeError(f"carrier {action} failed: {response}")
         return str(response["result"])
 
+    def prepare_generation(self, generation: int) -> None:
+        start_carrier(
+            self.backend, self.source_vm, role="primary",
+            generation=generation)
+        wait_guest(
+            self.backend, self.source_vm,
+            "test -S /run/qdistro/mm-display-carrier-supervisor.sock "
+            "&& echo ready", timeout=10,
+            label=f"primary carrier agent generation {generation}")
+        start_carrier(
+            self.backend, self.viewer_vm, role="peer",
+            generation=generation)
+        wait_carrier_listener(
+            self.backend, self.viewer_vm, port=3390,
+            label=f"peer carrier generation {generation}")
+
     def perform(self, action: SlotAction, grant: dict) -> None:
         generation = grant["generation"]
         if action.kind is ActionKind.OPEN_AUTHENTICATED_CARRIER:
-            start_carrier(
-                self.backend, self.source_vm, role="primary",
-                generation=generation)
-            wait_guest(
-                self.backend, self.source_vm,
-                "test -S /run/qdistro/mm-display-carrier-supervisor.sock "
-                "&& echo ready", timeout=10,
-                label=f"primary carrier agent generation {generation}")
-            start_carrier(
-                self.backend, self.viewer_vm, role="peer",
-                generation=generation)
-            wait_carrier_listener(
-                self.backend, self.viewer_vm, port=3390,
-                label=f"peer carrier generation {generation}")
+            self.prepare_generation(generation)
             if self._command(generation, "open") != "ready":
                 raise RuntimeError("carrier supervisor did not become ready")
             self.active_generation = generation
@@ -733,10 +771,12 @@ class LiveCarrierEndpoint:
 def wait_rdp(backend: QciVMBackend, vm: str, *, timeout: float = 50) -> None:
     wait_guest(
         backend, vm,
-        f"grep -q 'Loading Dynamic Virtual Channel rdpgfx' {VIEWER_RT}/rdp.log "
-        "2>/dev/null && echo decoded",
+        "pid=$(systemctl show -p MainPID --value mm-r9-rdp.service); "
+        "systemctl is-active --quiet mm-r9-rdp.service && "
+        f"grep -q \"\\[$pid:.*SurfaceFrameMarker: action: End\" "
+        f"{VIEWER_RT}/rdp.log 2>/dev/null && echo decoded",
         timeout=timeout, label="FreeRDP rdpgfx decode")
-    time.sleep(2)
+    time.sleep(1)
 
 
 def capture_viewer(backend: QciVMBackend, vm: str, path: Path) -> np.ndarray:

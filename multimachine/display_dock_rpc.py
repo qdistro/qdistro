@@ -208,6 +208,9 @@ class JsonEndpointClient:
         if (not response["ok"] and action in {"safe", "recover"}
                 and response["result"] == "unsafe"):
             return "unsafe"
+        if (not response["ok"] and action == "alive"
+                and response["result"] == "dead"):
+            return "dead"
         if not response["ok"]:
             raise DisplayDockRpcError(
                 f"{self.role} endpoint rejected {action}: {response['result']}")
