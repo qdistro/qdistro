@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import threading
 
-from multimachine.display_shell_mailbox import DisplayShellMailbox
+from multimachine.display_shell_mailbox import (
+    DisplayShellInputMailbox,
+    DisplayShellMailbox,
+)
 from multimachine.display_shell_service import (
     DBUS_NAME,
     DBUS_PATH,
@@ -71,3 +74,37 @@ def test_empty_sender_and_malformed_ack_fail_closed() -> None:
 def test_bus_identity_is_dedicated_to_display_transactions() -> None:
     assert DBUS_NAME == "org.qdistro.MultiMachineDisplay1"
     assert DBUS_PATH == "/org/qdistro/MultiMachineDisplay1"
+
+
+def test_only_trusted_qdshell_can_complete_input_gate() -> None:
+    ready = threading.Event()
+    layout = DisplayShellMailbox()
+    input_mailbox = DisplayShellInputMailbox(on_pending=ready.set)
+    core = DisplayShellServiceCore(
+        layout, input_mailbox=input_mailbox,
+        trusted_sender=lambda sender: sender == ":1.shell")
+    errors: list[BaseException] = []
+
+    def publish() -> None:
+        try:
+            input_mailbox.perform(
+                SlotAction(ActionKind.PRIMARY_ENABLE_INPUT), _grant())
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=publish)
+    worker.start()
+    assert ready.wait(1)
+    assert core.claim_input(":1.attacker") == ""
+    encoded = core.claim_input(":1.shell")
+    request = json.loads(encoded)
+    assert request["enabled"] is True
+    assert not core.acknowledge_input(
+        ":1.attacker", request_id=request["request_id"],
+        generation=9, result="applied")
+    assert core.acknowledge_input(
+        ":1.shell", request_id=request["request_id"],
+        generation=9, result="applied")
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert errors == []

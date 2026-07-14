@@ -115,6 +115,8 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         "test-client/qdwin-output-probe.c",
         "test-client/qdwin-marker-client.c",
         "qdwin/wlr-output-management-unstable-v1.xml",
+        "libweston-vendored/src/include/libweston/backend-rdp.h",
+        "libweston-vendored/src/libweston/backend-rdp/rdp.h",
     ):
         backend._push_large(
             vm_source, qdwin / relative,
@@ -416,6 +418,32 @@ def shell_layout(backend: QciVMBackend, vm: str, *, generation: int,
     return result
 
 
+def shell_input(backend: QciVMBackend, vm: str, *, generation: int,
+                action: str) -> dict:
+    """Apply one input gate through controller → qdshell → qdwin RDP API."""
+    if action not in {"enable", "disable"}:
+        raise ValueError(f"unsupported shell input action: {action}")
+    unit = f"mm-r9-shell-input-g{generation}-{action}"
+    grant = f"{SOURCE_RT}/layout-g{generation}.json"
+    status = f"{SOURCE_RT}/input-g{generation}-{action}-status.json"
+    output = backend._vmexec(
+        vm,
+        f"rm -f {status}; "
+        f"systemctl stop {unit} 2>/dev/null || true; "
+        f"systemctl reset-failed {unit} 2>/dev/null || true; "
+        f"systemd-run --quiet --wait --collect --unit={unit} --uid=admin "
+        "--setenv=HOME=/home/admin --setenv=XDG_RUNTIME_DIR=/run/user/1000 "
+        "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+        "--setenv=PYTHONPATH=/tmp/mm /usr/bin/python3 "
+        "/tmp/r9-shell-layout-service.py "
+        f"--shell-pid $(cat {SOURCE_RT}/qdshell.pid) --grant {grant} "
+        f"--plane input --action {action} --status {status}; cat {status}")
+    result = json.loads(output.splitlines()[-1])
+    if result != {"action": action, "generation": generation, "ok": True}:
+        raise RuntimeError(f"qdshell input action failed: {result}")
+    return result
+
+
 class LiveShellEndpoint:
     def __init__(self, backend: QciVMBackend, vm: str):
         self.backend = backend
@@ -441,17 +469,38 @@ class LiveShellEndpoint:
 
 
 class LivePrimaryLocalEndpoint:
-    """Harness binding for input/release/transfer actions outside qdshell."""
+    """Bind primary safety actions to qdshell's real qdwin RDP input gate."""
 
-    def __init__(self):
+    def __init__(self, backend: QciVMBackend, vm: str, viewer_vm: str):
+        self.backend = backend
+        self.vm = vm
+        self.viewer_vm = viewer_vm
         self.input_enabled = False
         self.actions: list[str] = []
+        self.pre_gate_input: tuple[int, int] | None = None
 
-    def perform(self, action: SlotAction, _grant: dict) -> None:
+    def perform(self, action: SlotAction, grant: dict) -> None:
         self.actions.append(action.kind.value)
         if action.kind is ActionKind.PRIMARY_ENABLE_INPUT:
+            before = json.loads(self.backend._vmexec(
+                self.vm, f"cat {SOURCE_RT}/marker-telemetry.json"))
+            self.backend._vmexec(
+                self.viewer_vm,
+                "YDOTOOL_SOCKET=/run/.ydotool_socket "
+                "ydotool key 30:1 30:0; sleep 0.4")
+            after = json.loads(self.backend._vmexec(
+                self.vm, f"cat {SOURCE_RT}/marker-telemetry.json"))
+            self.pre_gate_input = (
+                before["totals"]["key_press"],
+                after["totals"]["key_press"])
+            shell_input(
+                self.backend, self.vm, generation=grant["generation"],
+                action="enable")
             self.input_enabled = True
         elif action.kind is ActionKind.PRIMARY_DISABLE_INPUT:
+            shell_input(
+                self.backend, self.vm, generation=grant["generation"],
+                action="disable")
             self.input_enabled = False
 
     def safe_state_confirmed(self, _slot_name: str) -> bool:
@@ -784,7 +833,8 @@ def main() -> int:
             first_position["outer"] == [W - SEAM, OY, MW, MH])
 
         shell_endpoint = LiveShellEndpoint(backend, args.vm_source)
-        local_endpoint = LivePrimaryLocalEndpoint()
+        local_endpoint = LivePrimaryLocalEndpoint(
+            backend, args.vm_source, args.vm_viewer)
         peer_endpoint = LivePeerPanelEndpoint(
             backend, args.vm_source, args.vm_viewer)
         carrier_endpoint = LiveCarrierEndpoint(
@@ -810,6 +860,11 @@ def main() -> int:
         assertions["broker_owned_display_dock_session_active"] = (
             controller.status().session_id == SESSION_ID
             and controller.status().generation == GENERATION)
+        details["pre_gate_key_counts"] = local_endpoint.pre_gate_input
+        assertions["rdp_input_is_denied_before_authenticated_enable"] = (
+            local_endpoint.pre_gate_input is not None
+            and local_endpoint.pre_gate_input[0]
+            == local_endpoint.pre_gate_input[1])
         assert controller.heartbeat(GENERATION)
         assertions["authenticated_peer_panel_lease_renewed"] = True
         enabled = source_probe(
@@ -948,6 +1003,11 @@ def main() -> int:
         assertions["redock_requires_strictly_newer_carrier_generation"] = True
         final_weston_log = backend._vmexec(
             args.vm_source, f"cat {SOURCE_RT}/weston.log")
+        assertions["qdwin_enforces_authenticated_rdp_input_gate"] = (
+            final_weston_log.count(
+                "remote input gate output=rdp-0 enabled=1 result=applied") >= 2
+            and final_weston_log.count(
+                "remote input gate output=rdp-0 enabled=0 result=applied") >= 2)
         assertions["production_qdwin_has_no_test_placement_path"] = (
             "TEST placement" not in final_weston_log
             and "QDWIN_TEST_PLACE" not in final_weston_log)

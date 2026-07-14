@@ -16,7 +16,10 @@ from pathlib import Path
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-from multimachine.display_shell_mailbox import DisplayShellMailbox
+from multimachine.display_shell_mailbox import (
+    DisplayShellInputMailbox,
+    DisplayShellMailbox,
+)
 from multimachine.display_shell_service import register_authenticated_service
 from multimachine.remote_display_slot import ActionKind, SlotAction
 
@@ -26,24 +29,30 @@ def main() -> int:
     ap.add_argument("--shell-pid", type=int, required=True)
     ap.add_argument("--grant", type=Path, required=True)
     ap.add_argument("--action", choices=("enable", "disable"), required=True)
+    ap.add_argument("--plane", choices=("output", "input"), default="output")
     ap.add_argument("--status", type=Path, required=True)
     args = ap.parse_args()
 
     grant = json.loads(args.grant.read_text(encoding="utf-8"))
     DBusGMainLoop(set_as_default=True)
     mailbox = DisplayShellMailbox(request_timeout=15)
+    input_mailbox = DisplayShellInputMailbox(request_timeout=15)
     registration = register_authenticated_service(
-        mailbox, shell_pid=args.shell_pid)
+        mailbox, shell_pid=args.shell_pid, input_mailbox=input_mailbox)
     assert registration
     loop = GLib.MainLoop()
     result: dict = {}
 
     def execute() -> None:
-        kind = (ActionKind.PRIMARY_ENABLE_OUTPUT
-                if args.action == "enable"
-                else ActionKind.PRIMARY_DISABLE_OUTPUT)
+        kinds = {
+            ("output", "enable"): ActionKind.PRIMARY_ENABLE_OUTPUT,
+            ("output", "disable"): ActionKind.PRIMARY_DISABLE_OUTPUT,
+            ("input", "enable"): ActionKind.PRIMARY_ENABLE_INPUT,
+            ("input", "disable"): ActionKind.PRIMARY_DISABLE_INPUT,
+        }
+        target = mailbox if args.plane == "output" else input_mailbox
         try:
-            mailbox.perform(SlotAction(kind), grant)
+            target.perform(SlotAction(kinds[(args.plane, args.action)]), grant)
             result.update(ok=True, action=args.action,
                           generation=grant["generation"])
         except Exception as exc:

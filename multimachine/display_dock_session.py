@@ -62,20 +62,34 @@ class PrimarySafetyEndpoint:
     from accidentally becoming a product implementation.
     """
 
-    def __init__(self, *, set_input_enabled: Callable[[bool], None],
+    def __init__(self, *,
+                 set_input_enabled: Callable[[bool], None] | None = None,
+                 input_gate: DisplayActionEndpoint | None = None,
                  synthesize_releases: Callable[[tuple], None],
                  clear_transfers: Callable[[], None],
                  safe_probe: Callable[[str], bool]):
+        if (set_input_enabled is None) == (input_gate is None):
+            raise ValueError(
+                "primary safety needs exactly one real input gate adapter")
         self.set_input_enabled = set_input_enabled
+        self.input_gate = input_gate
         self.synthesize_releases = synthesize_releases
         self.clear_transfers = clear_transfers
         self.safe_probe = safe_probe
 
     def perform(self, action: SlotAction, _grant: Mapping) -> None:
         if action.kind is ActionKind.PRIMARY_ENABLE_INPUT:
-            self.set_input_enabled(True)
+            if self.input_gate is not None:
+                self.input_gate.perform(action, _grant)
+            else:
+                assert self.set_input_enabled is not None
+                self.set_input_enabled(True)
         elif action.kind is ActionKind.PRIMARY_DISABLE_INPUT:
-            self.set_input_enabled(False)
+            if self.input_gate is not None:
+                self.input_gate.perform(action, _grant)
+            else:
+                assert self.set_input_enabled is not None
+                self.set_input_enabled(False)
         elif action.kind is ActionKind.SYNTHESIZE_RELEASES:
             self.synthesize_releases(action.releases)
         elif action.kind is ActionKind.CLEAR_TRANSFERS:
@@ -85,7 +99,9 @@ class PrimarySafetyEndpoint:
                 f"primary safety endpoint cannot perform {action.kind.value}")
 
     def safe_state_confirmed(self, slot_name: str) -> bool:
-        return self.safe_probe(slot_name) is True
+        input_safe = (True if self.input_gate is None
+                      else self.input_gate.safe_state_confirmed(slot_name))
+        return input_safe and self.safe_probe(slot_name) is True
 
 
 class PanelControlEndpoint:

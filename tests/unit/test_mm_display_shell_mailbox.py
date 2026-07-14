@@ -7,6 +7,7 @@ import pytest
 
 from multimachine.display_shell_mailbox import (
     DisplayShellError,
+    DisplayShellInputMailbox,
     DisplayShellMailbox,
     MAX_CONSUMED_REQUEST_IDS,
 )
@@ -188,3 +189,84 @@ def test_replay_memory_is_bounded() -> None:
     assert len(mailbox._consumed_order) == MAX_CONSUMED_REQUEST_IDS
     assert f"{0:032x}" not in mailbox._consumed_ids
     assert f"{MAX_CONSUMED_REQUEST_IDS + 6:032x}" in mailbox._consumed_ids
+
+
+def test_input_gate_request_is_exact_secret_free_and_tracks_safe_state() -> None:
+    ready = threading.Event()
+    ids = iter(("6" * 32, "a" * 32))
+    mailbox = DisplayShellInputMailbox(
+        clock=Clock(), request_id=lambda: next(ids), on_pending=ready.set)
+    errors: list[BaseException] = []
+    worker = threading.Thread(target=run_perform, args=(
+        mailbox, ActionKind.PRIMARY_ENABLE_INPUT, grant(), errors, []))
+    worker.start()
+    assert ready.wait(1)
+    request = mailbox.claim()
+    assert request == {
+        "schema": "qdistro-mm-shell-input-v1",
+        "request_id": "6" * 32,
+        "generation": 7,
+        "session_id": "display-session",
+        "slot_name": "rdp-0",
+        "enabled": True,
+        "expires_at": 1010,
+    }
+    assert "secret" not in repr(request)
+    mailbox.acknowledge(
+        request_id=request["request_id"], generation=7, result="applied")
+    worker.join(timeout=1)
+    assert errors == []
+    assert not mailbox.safe_state_confirmed("rdp-0")
+
+    ready.clear()
+    worker = threading.Thread(target=run_perform, args=(
+        mailbox, ActionKind.PRIMARY_DISABLE_INPUT, grant(), errors, []))
+    worker.start()
+    assert ready.wait(1)
+    request = mailbox.claim()
+    assert request is not None and request["enabled"] is False
+    mailbox.acknowledge(
+        request_id=request["request_id"], generation=7, result="applied")
+    worker.join(timeout=1)
+    assert errors == []
+    assert mailbox.safe_state_confirmed("rdp-0")
+
+
+def test_input_gate_rejects_wrong_action_result_and_reenable_generation() -> None:
+    ready = threading.Event()
+    ids = iter(("7" * 32, "8" * 32, "9" * 32, "a" * 32))
+    mailbox = DisplayShellInputMailbox(
+        clock=Clock(), request_id=lambda: next(ids), on_pending=ready.set)
+    with pytest.raises(DisplayShellError, match="only primary input"):
+        mailbox.perform(
+            SlotAction(ActionKind.PRIMARY_ENABLE_OUTPUT), grant())
+
+    errors: list[BaseException] = []
+    worker = threading.Thread(target=run_perform, args=(
+        mailbox, ActionKind.PRIMARY_ENABLE_INPUT, grant(), errors, []))
+    worker.start()
+    assert ready.wait(1)
+    request = mailbox.claim()
+    assert request is not None
+    mailbox.acknowledge(
+        request_id=request["request_id"], generation=7, result="failed")
+    worker.join(timeout=1)
+    assert len(errors) == 1 and "failed" in str(errors[0])
+
+    # A failed compositor apply does not consume generation authority; a fresh
+    # request id may retry. Once applied, the same generation cannot re-enable.
+    ready.clear()
+    errors.clear()
+    worker = threading.Thread(target=run_perform, args=(
+        mailbox, ActionKind.PRIMARY_ENABLE_INPUT, grant(), errors, []))
+    worker.start()
+    assert ready.wait(1)
+    request = mailbox.claim()
+    assert request is not None
+    mailbox.acknowledge(
+        request_id=request["request_id"], generation=7, result="applied")
+    worker.join(timeout=1)
+    assert errors == []
+    with pytest.raises(DisplayShellError, match="enable generation is stale"):
+        mailbox.perform(
+            SlotAction(ActionKind.PRIMARY_ENABLE_INPUT), grant())

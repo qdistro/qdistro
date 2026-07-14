@@ -50,6 +50,19 @@ class FakeShell:
         return not self.enabled
 
 
+class FakeInputGate:
+    def __init__(self, events: list[str]):
+        self.events = events
+        self.enabled = False
+
+    def perform(self, action, _grant) -> None:
+        self.events.append("gate:" + action.kind.value)
+        self.enabled = action.kind is ActionKind.PRIMARY_ENABLE_INPUT
+
+    def safe_state_confirmed(self, _slot_name: str) -> bool:
+        return not self.enabled
+
+
 class FakeCarrierSession:
     def __init__(self, events: list[str], *, ready: bool = True,
                  on_close=lambda: None):
@@ -157,6 +170,33 @@ def test_owner_orders_attach_renewal_and_detach() -> None:
         "input-off", "releases:0", "transfers-cleared",
         "carrier-session-close", "primary-disable-output", "panel-release",
     ]
+
+
+def test_primary_safety_requires_one_input_adapter_and_delegates_gate() -> None:
+    common = {
+        "synthesize_releases": lambda _releases: None,
+        "clear_transfers": lambda: None,
+        "safe_probe": lambda _slot: True,
+    }
+    with pytest.raises(ValueError, match="exactly one real input gate"):
+        PrimarySafetyEndpoint(**common)
+    with pytest.raises(ValueError, match="exactly one real input gate"):
+        PrimarySafetyEndpoint(
+            set_input_enabled=lambda _enabled: None,
+            input_gate=FakeInputGate([]), **common)
+
+    events: list[str] = []
+    gate = FakeInputGate(events)
+    endpoint = PrimarySafetyEndpoint(input_gate=gate, **common)
+    endpoint.perform(
+        type("Action", (), {"kind": ActionKind.PRIMARY_ENABLE_INPUT})(),
+        grant())
+    assert events == ["gate:primary-enable-input"]
+    assert not endpoint.safe_state_confirmed("rdp-0")
+    endpoint.perform(
+        type("Action", (), {"kind": ActionKind.PRIMARY_DISABLE_INPUT})(),
+        grant())
+    assert endpoint.safe_state_confirmed("rdp-0")
 
 
 def test_carrier_loss_converges_to_failed_safe() -> None:
