@@ -49,3 +49,9 @@ def test_installer_ships_remote_session_authority_and_launcher() -> None:
     assert "remote_adapter_transport.py" in text
     assert '"$SRC/qdistro-mm-remote-adapter"' in text
     assert "/usr/local/bin/qdistro-mm-remote-adapter" in text
+
+
+def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "mm_display_authority.py" in text
+    assert "remote_display_slot.py" in text
