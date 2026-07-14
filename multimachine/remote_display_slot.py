@@ -144,6 +144,15 @@ class RemoteDisplaySlot:
     def generation(self) -> int:
         return self.grant.generation if self.grant else self.last_generation
 
+    def restore_last_generation(self, generation: int) -> None:
+        """Restore replay state before a restarted owner accepts commands."""
+        if (self.phase is not SlotPhase.DISABLED or self.grant is not None
+                or not isinstance(generation, int)
+                or isinstance(generation, bool) or generation < 0):
+            raise DisplaySlotError(
+                "display slot generation recovery is invalid")
+        self.last_generation = max(self.last_generation, generation)
+
     def _check_generation(self, generation: int) -> None:
         if self.grant is None or generation != self.grant.generation:
             raise DisplaySlotError("display slot generation is stale")
@@ -171,13 +180,9 @@ class RemoteDisplaySlot:
             raise DisplaySlotError("display grant exceeds slot scale bound")
         if grant.width * grant.height > 67_108_864:
             raise DisplaySlotError("display grant pixel count is out of bounds")
-        # Weston RDP injects input on the same accepted peer socket. Until an
-        # input-filtering RDP shim exists, a display-only grant cannot be
-        # enforced server-side and must fail closed rather than trusting client
-        # flags. v1 display peers are explicitly console-equivalent.
-        if not grant.allow_input:
-            raise DisplaySlotError(
-                "RDP v1 requires console-equivalent input authority")
+        # RDP pixels and input share one peer socket, but qdwin's backend input
+        # gate starts disabled. A read-only grant is therefore enforceable: the
+        # carrier may connect while carrier_connected() omits input admission.
         now = self.clock()
         if now >= grant.lease_expires_at:
             raise DisplaySlotError("display lease has already expired")
@@ -201,7 +206,9 @@ class RemoteDisplaySlot:
         if not self._lease_valid():
             return self.fail_safe("display lease expired during attach")
         self.phase = SlotPhase.ACTIVE
-        return (SlotAction(ActionKind.PRIMARY_ENABLE_INPUT),)
+        if self.grant.allow_input:
+            return (SlotAction(ActionKind.PRIMARY_ENABLE_INPUT),)
+        return ()
 
     def heartbeat(self, generation: int) -> bool:
         self._check_generation(generation)
@@ -218,7 +225,8 @@ class RemoteDisplaySlot:
     def input_event(self, generation: int, *, kind: str,
                     code: int, pressed: bool) -> None:
         self._check_generation(generation)
-        if self.phase is not SlotPhase.ACTIVE or not self._lease_valid():
+        if (self.phase is not SlotPhase.ACTIVE or not self._lease_valid()
+                or not self.grant.allow_input):  # type: ignore[union-attr]
             raise DisplaySlotError("display input is disabled")
         if kind not in {"key", "button"}:
             raise DisplaySlotError("held input kind is invalid")

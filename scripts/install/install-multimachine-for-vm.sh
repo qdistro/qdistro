@@ -24,6 +24,8 @@ for module in __init__.py bridge.py control_source.py mm_broker.py \
               remote_nested_protocol.py remote_nested_service.py \
               remote_nested_supervisor.py remote_nested_registry.py \
               remote_display_slot.py display_slot_controller.py \
+              display_dock_session.py display_dock_service.py \
+              display_dock_rpc.py mm_display_dock_daemon.py \
               display_shell_mailbox.py \
               display_shell_service.py \
               display_carrier.py display_carrier_endpoint.py \
@@ -53,6 +55,10 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-display-panel-launcher" \
     /usr/local/bin/qdistro-mm-display-panel-launcher
 install -o root -g root -m 0755 "$SRC/qdistro-mm-display-panel" \
     /usr/local/bin/qdistro-mm-display-panel
+install -o root -g root -m 0755 "$SRC/qdistro-mm-display-dock" \
+    /usr/local/bin/qdistro-mm-display-dock
+install -o root -g root -m 0644 "$SRC/qdistro-mm-display-dock.service" \
+    /etc/systemd/system/qdistro-mm-display-dock.service
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-controller" \
     /usr/local/bin/qdistro-mm-remote-nested-controller
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-session" \
@@ -60,4 +66,5 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-session" \
 install -o root -g root -m 0755 "$SRC/qdistro-mm-rdp-client-wrapper" \
     /usr/local/bin/qdistro-mm-rdp-client-wrapper
 
-echo "qdistro multi-machine runtime installed (not auto-started)"
+systemctl daemon-reload
+echo "qdistro multi-machine runtime installed (display dock remains inert until configured)"

@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+"""Installed entry point for the primary display dock-session owner."""
+import sys
+from pathlib import Path
+
+installed = Path("/usr/local/lib/qdistro")
+source_tree = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(installed if (installed / "multimachine").is_dir()
+                       else source_tree))
+
+from multimachine.mm_display_dock_daemon import main
+
+raise SystemExit(main())

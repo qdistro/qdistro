@@ -72,3 +72,11 @@ def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
     assert "/usr/local/bin/qdistro-mm-display-panel-launcher" in text
     assert '"$SRC/qdistro-mm-display-panel"' in text
     assert "/usr/local/bin/qdistro-mm-display-panel" in text
+    assert "display_dock_session.py" in text
+    assert "display_dock_service.py" in text
+    assert "display_dock_rpc.py" in text
+    assert "mm_display_dock_daemon.py" in text
+    assert '"$SRC/qdistro-mm-display-dock"' in text
+    assert "/usr/local/bin/qdistro-mm-display-dock" in text
+    assert '"$SRC/qdistro-mm-display-dock.service"' in text
+    assert "/etc/systemd/system/qdistro-mm-display-dock.service" in text

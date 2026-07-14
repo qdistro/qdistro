@@ -293,6 +293,11 @@ class DisplayDockSession:
             self._grant = None
             self._next_heartbeat = None
 
+    def restore_last_generation(self, generation: int) -> None:
+        """Seed replay state after external startup recovery reached safe."""
+        with self._lock:
+            self.controller.slot.restore_last_generation(generation)
+
     def shutdown(self) -> None:
         """Best-effort normal detach; failed cleanup remains FAILED_SAFE."""
         with self._lock:

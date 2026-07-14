@@ -78,6 +78,7 @@ def test_enable_is_exact_secret_free_and_requires_matching_ack() -> None:
     assert errors == []
     assert completed == [True]
     assert mailbox.claim() is None
+    assert not mailbox.safe_state_confirmed("rdp-0")
 
 
 @pytest.mark.parametrize("field,value,match", [
@@ -149,6 +150,7 @@ def test_enable_generation_must_increase_but_same_generation_can_disable() -> No
 
     assert complete(ActionKind.PRIMARY_ENABLE_OUTPUT, grant()) == []
     assert complete(ActionKind.PRIMARY_DISABLE_OUTPUT, grant()) == []
+    assert mailbox.safe_state_confirmed("rdp-0")
     errors = complete(ActionKind.PRIMARY_ENABLE_OUTPUT, grant())
     assert len(errors) == 1
     assert "generation is stale" in str(errors[0])
@@ -189,6 +191,32 @@ def test_replay_memory_is_bounded() -> None:
     assert len(mailbox._consumed_order) == MAX_CONSUMED_REQUEST_IDS
     assert f"{0:032x}" not in mailbox._consumed_ids
     assert f"{MAX_CONSUMED_REQUEST_IDS + 6:032x}" in mailbox._consumed_ids
+
+
+@pytest.mark.parametrize(("mailbox_type", "action"), [
+    (DisplayShellMailbox, ActionKind.PRIMARY_DISABLE_OUTPUT),
+    (DisplayShellInputMailbox, ActionKind.PRIMARY_DISABLE_INPUT),
+])
+def test_safety_off_remains_authorized_after_lease_expiry(
+        mailbox_type, action) -> None:
+    ready = threading.Event()
+    mailbox = mailbox_type(
+        clock=Clock(), request_id=lambda: "e" * 32, on_pending=ready.set)
+    expired = grant()
+    expired["lease_expires_at"] = 999
+    errors: list[BaseException] = []
+    worker = threading.Thread(target=run_perform, args=(
+        mailbox, action, expired, errors, []))
+    worker.start()
+    assert ready.wait(1)
+    request = mailbox.claim()
+    assert request is not None and request["enabled"] is False
+    assert request["expires_at"] == 1010
+    mailbox.acknowledge(
+        request_id=request["request_id"], generation=7, result="applied")
+    worker.join(timeout=1)
+    assert errors == []
+    assert mailbox.safe_state_confirmed("rdp-0")
 
 
 def test_input_gate_request_is_exact_secret_free_and_tracks_safe_state() -> None:

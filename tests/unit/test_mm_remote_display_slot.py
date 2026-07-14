@@ -72,6 +72,17 @@ def test_attach_order_never_exposes_input_before_panel_and_output_authority():
     assert slot.generation == 90
 
 
+def test_read_only_grant_never_admits_rdp_input() -> None:
+    clock = Clock()
+    slot = RemoteDisplaySlot(DisplaySlotSpec("rdp-0"), clock=clock)
+    slot.begin_attach(payload(allow_input=False))
+    assert slot.carrier_connected(90) == ()
+    assert slot.phase is SlotPhase.ACTIVE
+    with pytest.raises(DisplaySlotError, match="input is disabled"):
+        slot.input_event(90, kind="key", code=30, pressed=True)
+    assert kinds(slot.begin_detach(90))[0] is ActionKind.PRIMARY_DISABLE_INPUT
+
+
 def test_detach_order_cuts_input_and_carrier_before_output_and_panel_release():
     slot, _ = active_slot()
     slot.input_event(90, kind="key", code=30, pressed=True)
@@ -139,12 +150,22 @@ def test_redock_requires_strictly_new_generation_even_after_fail_safe():
     assert slot.generation == 91
 
 
+def test_restart_restores_last_generation_before_accepting_grants() -> None:
+    slot = RemoteDisplaySlot(DisplaySlotSpec("rdp-0"), clock=Clock())
+    slot.restore_last_generation(90)
+    assert slot.generation == 90
+    with pytest.raises(DisplaySlotError, match="generation must increase"):
+        slot.begin_attach(payload(generation=90))
+    slot.begin_attach(payload(generation=91))
+    with pytest.raises(DisplaySlotError, match="recovery is invalid"):
+        slot.restore_last_generation(92)
+
+
 @pytest.mark.parametrize(("changes", "message"), [
     ({"slot_name": "rdp-1"}, "different slot"),
     ({"width": 9000}, "mode bound"),
     ({"height": 5000}, "mode bound"),
     ({"scale": 3}, "scale bound"),
-    ({"allow_input": False}, "console-equivalent input"),
 ])
 def test_slot_rejects_unenforceable_or_out_of_pool_grant(changes, message):
     slot = RemoteDisplaySlot(DisplaySlotSpec("rdp-0"), clock=Clock())

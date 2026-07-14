@@ -1,6 +1,7 @@
 """External-authority grant for one leased RDP display-output slot.
 
-The receipt authorizes display capture and console-equivalent RDP input.  It
+The receipt authorizes display capture and, only when ``allow_input`` is true,
+console-equivalent RDP input.  It
 contains no carrier secret: the authority hands the same random 32-byte secret
 to the two endpoints on separate sealed descriptors, and the signed digest
 prevents substitution.  RDP is exposed only behind the separately authenticated

@@ -104,6 +104,7 @@ class DisplayShellMailbox:
         self._condition = threading.Condition()
         self._pending: _Pending | None = None
         self._last_generation = 0
+        self._output_enabled = False
         self._consumed_order: deque[str] = deque()
         self._consumed_ids: set[str] = set()
 
@@ -142,7 +143,11 @@ class DisplayShellMailbox:
     def perform(self, action: SlotAction, grant: Mapping) -> None:
         """Publish one action and wait for qdshell's exact async apply verdict."""
         deadline = self.clock() + self.request_timeout
-        expiry = min(int(deadline + 0.999), int(grant.get("lease_expires_at", 0)))
+        # Safety-off must remain available after lease expiry; otherwise the
+        # event that requires teardown would also make teardown unrepresentable.
+        expiry = int(deadline + 0.999)
+        if action.kind is ActionKind.PRIMARY_ENABLE_OUTPUT:
+            expiry = min(expiry, int(grant.get("lease_expires_at", 0)))
         request = self._request_from(
             action, grant, request_id=self.request_id(), expires_at=expiry)
         request.validate(now=self.clock())
@@ -174,6 +179,7 @@ class DisplayShellMailbox:
             self._condition.notify_all()
             if result != "applied":
                 raise DisplayShellError(f"qdshell layout result was {result}")
+            self._output_enabled = request.enabled
             if request.enabled:
                 self._last_generation = request.generation
 
@@ -218,7 +224,7 @@ class DisplayShellMailbox:
 
     def safe_state_confirmed(self, _slot_name: str) -> bool:
         with self._condition:
-            return self._pending is None
+            return self._pending is None and not self._output_enabled
 
 
 @dataclass(frozen=True)
@@ -303,7 +309,11 @@ class DisplayShellInputMailbox:
 
     def perform(self, action: SlotAction, grant: Mapping) -> None:
         deadline = self.clock() + self.request_timeout
-        expiry = min(int(deadline + 0.999), int(grant.get("lease_expires_at", 0)))
+        # Disabling is a recovery operation and remains valid after the lease
+        # itself expires. Enabling is still capped by signed lease authority.
+        expiry = int(deadline + 0.999)
+        if action.kind is ActionKind.PRIMARY_ENABLE_INPUT:
+            expiry = min(expiry, int(grant.get("lease_expires_at", 0)))
         request = self._request_from(
             action, grant, request_id=self.request_id(), expires_at=expiry)
         request.validate(now=self.clock())
