@@ -55,6 +55,7 @@ def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
     text = INSTALLER.read_text(encoding="utf-8")
     assert "mm_display_authority.py" in text
     assert "remote_display_slot.py" in text
+    assert "display_slot_controller.py" in text
     assert "mm_display_carrier_launcher.py" in text
     assert "display_carrier.py" in text
     assert "display_carrier_endpoint.py" in text

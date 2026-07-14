@@ -344,7 +344,8 @@ class QciVMBackend:
                 "remote_adapter.py", "remote_adapter_transport.py",
                 "remote_nested_protocol.py", "remote_nested_service.py",
                 "remote_nested_supervisor.py", "remote_nested_registry.py",
-                "remote_display_slot.py", "display_carrier.py",
+                "remote_display_slot.py", "display_slot_controller.py",
+                "display_carrier.py",
                 "display_carrier_endpoint.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
         for mod in ("__init__.py", "viewer_broker.py"):
