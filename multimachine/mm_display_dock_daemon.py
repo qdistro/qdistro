@@ -146,6 +146,20 @@ def recovery_grant(previous: Mapping | None, *, slot_name: str) -> dict:
     }
 
 
+def recover_fixed_endpoint(client: JsonEndpointClient, grant: Mapping, *,
+                           allow_absent: bool) -> bool:
+    """Recover one fixed role without treating an unknown live agent as safe.
+
+    A missing/refused socket is acceptable only for a durably disabled or
+    never-initialized dock.  A prior unsafe phase requires the exact sealed
+    generation to answer, preserving fail-closed crash recovery.
+    """
+    try:
+        return client.request("recover", grant) == "safe"
+    except (FileNotFoundError, ConnectionRefusedError):
+        return allow_absent
+
+
 def build_service(args, *, shell_pid: int | None = None,
                   clock=time.time):
     """Build the daemon graph; kept injectable for host deployment tests."""
@@ -177,15 +191,18 @@ def build_service(args, *, shell_pid: int | None = None,
 
     def recover(previous: Mapping | None) -> bool:
         grant = recovery_grant(previous, slot_name=args.slot_name)
+        allow_absent = previous is None or previous.get("phase") == "disabled"
         # Safety-off actions are deliberately ordered before carrier/output
         # retirement. Endpoint `recover` is idempotent and must independently
         # confirm its local resources are safe.
         input_mailbox.perform(
             SlotAction(ActionKind.PRIMARY_DISABLE_INPUT), grant)
-        if carrier_client.request("recover", grant) != "safe":
+        if not recover_fixed_endpoint(
+                carrier_client, grant, allow_absent=allow_absent):
             return False
         layout.perform(SlotAction(ActionKind.PRIMARY_DISABLE_OUTPUT), grant)
-        if panel_client.request("recover", grant) != "safe":
+        if not recover_fixed_endpoint(
+                panel_client, grant, allow_absent=allow_absent):
             return False
         return (input_mailbox.safe_state_confirmed(args.slot_name)
                 and layout.safe_state_confirmed(args.slot_name))

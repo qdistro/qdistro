@@ -11,7 +11,7 @@ from typing import Callable
 
 from .display_panel_agent import (
     PanelActions,
-    PanelControlError,
+    PanelPeerRestored,
     PanelLeaseState,
     accept_primary_control,
     connect_peer_control,
@@ -57,11 +57,10 @@ class PrimaryPanelAgent:
     def fail_closed(self, error: BaseException) -> bool:
         self.panel.close()
         self.disconnected = True
-        # The peer emits EOF only after serve_authenticated_panel's finally
-        # block restored local ownership. A timeout/reset is not equivalent;
-        # it remains unsafe until the peer-owned heartbeat deadline.
-        if (isinstance(error, PanelControlError)
-                and str(error) == "panel peer disconnected"):
+        # Only the authenticated explicit restored event is proof. Bare EOF,
+        # timeout, reset, SIGKILL and OOM death remain indistinguishable and
+        # therefore unsafe until the peer-owned heartbeat deadline.
+        if isinstance(error, PanelPeerRestored):
             self._safe = True
         self._deadline_safe()
         return self._safe

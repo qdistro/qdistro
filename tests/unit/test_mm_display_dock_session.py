@@ -69,12 +69,14 @@ class FakeCarrierSession:
         self.events = events
         self.is_ready = ready
         self.is_alive = True
+        self.alive_calls = 0
         self.on_close = on_close
 
     def ready(self) -> bool:
         return self.is_ready
 
     def alive(self) -> bool:
+        self.alive_calls += 1
         return self.is_alive
 
     def close(self) -> None:
@@ -222,6 +224,20 @@ def test_carrier_loss_converges_to_failed_safe() -> None:
     assert rig.owner.phase is SlotPhase.DISABLED
     rig.owner.attach(grant(generation=41))
     assert rig.owner.generation == 41
+
+
+def test_carrier_health_rpc_is_rate_limited_below_service_poll_rate() -> None:
+    rig = Rig()
+    rig.owner.attach(grant())
+    assert rig.carrier_session is not None
+    attach_calls = rig.carrier_session.alive_calls
+    for now in (100.0, 100.05, 100.10, 100.20, 100.24):
+        rig.now = now
+        assert rig.owner.poll() is False
+    assert rig.carrier_session.alive_calls == attach_calls + 1
+    rig.now = 100.25
+    assert rig.owner.poll() is False
+    assert rig.carrier_session.alive_calls == attach_calls + 2
 
 
 def test_peer_owned_expiry_makes_renewal_fail_safe_and_release_idempotent() -> None:

@@ -49,7 +49,8 @@ class EndpointServer:
                 self.requests.append(request)
                 result = self.results.get(request["action"], "unexpected")
                 client.sendall((json.dumps({
-                    "ok": result != "unexpected", "result": result,
+                    "ok": result not in {"unexpected", "unsafe"},
+                    "result": result,
                 }) + "\n").encode())
 
     def close(self) -> None:
@@ -112,3 +113,16 @@ def test_wrong_role_and_action_fail_before_broadening_authority(
     finally:
         server.close()
     assert server.requests == []
+
+
+def test_unsafe_probe_is_false_not_an_rpc_exception(tmp_path: Path) -> None:
+    server = EndpointServer(tmp_path / "endpoint.sock", {"safe": "unsafe"})
+    try:
+        panel = RpcPanelEndpoint(client(server.path, "peer-panel"))
+        panel._grant = grant()
+        carrier = RpcCarrierFactory(client(server.path, "carrier"))
+        carrier._last_grant = grant()
+        assert panel.safe_state_confirmed("rdp-0") is False
+        assert carrier.safe("rdp-0") is False
+    finally:
+        server.close()

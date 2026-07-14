@@ -29,10 +29,17 @@ _REQUEST_FIELDS = frozenset({
     "schema", "seq", "kind", "session_id", "generation", "slot_name",
 })
 _KINDS = frozenset({"reserve", "heartbeat", "release", "status"})
+_RESTORED_EVENT_FIELDS = frozenset({
+    "schema", "event", "session_id", "generation", "slot_name",
+})
 
 
 class PanelControlError(RuntimeError):
     """Panel authority, sequencing, framing, or local action failed."""
+
+
+class PanelPeerRestored(PanelControlError):
+    """The authenticated peer explicitly confirmed local panel restoration."""
 
 
 class PanelActions(Protocol):
@@ -64,10 +71,14 @@ class PanelLeaseState:
     """Pure peer-local lease state with independent fail-safe restoration."""
 
     def __init__(self, spec: PanelLeaseSpec, actions: PanelActions, *,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 monotonic_clock: Callable[[], float] | None = None):
         self.spec = spec
         self.actions = actions
         self.clock = clock
+        self.monotonic_clock = (
+            monotonic_clock if monotonic_clock is not None
+            else (time.monotonic if clock is time.time else clock))
         self.reserved = False
         self.deadline: float | None = None
         self.terminal = False
@@ -75,12 +86,12 @@ class PanelLeaseState:
     def _expired(self) -> bool:
         now = self.clock()
         return (now >= self.spec.lease_expires_at
-                or (self.deadline is not None and now > self.deadline))
+                or (self.deadline is not None
+                    and self.monotonic_clock() > self.deadline))
 
     def _renew_deadline(self) -> None:
-        self.deadline = min(
-            self.clock() + self.spec.heartbeat_ms / 1000.0,
-            float(self.spec.lease_expires_at))
+        self.deadline = (
+            self.monotonic_clock() + self.spec.heartbeat_ms / 1000.0)
 
     def reserve(self) -> str:
         if self.terminal:
@@ -131,7 +142,8 @@ class PanelLeaseState:
     def poll_timeout(self) -> float:
         if not self.reserved or self.deadline is None:
             return 1.0
-        return max(0.0, min(1.0, self.deadline - self.clock(),
+        return max(0.0, min(1.0,
+                            self.deadline - self.monotonic_clock(),
                             self.spec.lease_expires_at - self.clock()))
 
 
@@ -207,12 +219,15 @@ def serve_authenticated_panel(sock: socket.socket, state: PanelLeaseState) -> No
     """Serve until EOF/error; every exit path restores a reserved panel."""
     reader = _FrameReader()
     protocol = PanelPeerProtocol(state)
+    restoration_confirmed = False
     try:
         while True:
             readable, _, _ = select.select(
                 [sock], [], [], state.poll_timeout())
             if not readable:
-                state.tick()
+                if state.tick():
+                    restoration_confirmed = state.status() == "safe"
+                    return
                 continue
             payload = sock.recv(4096)
             if not payload:
@@ -220,7 +235,27 @@ def serve_authenticated_panel(sock: socket.socket, state: PanelLeaseState) -> No
             for request in reader.feed(payload):
                 sock.sendall(_frame(protocol.handle(request)))
     finally:
-        state.expire()
+        # Bare TLS EOF cannot prove that this finally block ran: SIGKILL and
+        # OOM death also produce EOF.  Only emit the authenticated event after
+        # restoration completed and the concrete panel adapter confirms safe.
+        if state.expire():
+            restoration_confirmed = state.status() == "safe"
+        elif state.terminal:
+            restoration_confirmed = state.status() == "safe"
+        if restoration_confirmed:
+            spec = state.spec
+            try:
+                sock.sendall(_frame(_canonical({
+                    "schema": SCHEMA,
+                    "event": "restored",
+                    "session_id": spec.session_id,
+                    "generation": spec.generation,
+                    "slot_name": spec.slot_name,
+                })))
+            except (BrokenPipeError, ConnectionError, OSError):
+                # The primary may be the side that disappeared. Peer-local
+                # restoration remains authoritative when it cannot be acked.
+                pass
 
 
 class PanelPrimaryClient:
@@ -256,6 +291,15 @@ class PanelPrimaryClient:
                 response = json.loads(frames[0])
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise PanelControlError("panel response is not JSON") from exc
+            if (isinstance(response, Mapping)
+                    and set(response) == _RESTORED_EVENT_FIELDS
+                    and response["schema"] == SCHEMA
+                    and response["event"] == "restored"
+                    and response["session_id"] == self.spec.session_id
+                    and response["generation"] == self.spec.generation
+                    and response["slot_name"] == self.spec.slot_name):
+                raise PanelPeerRestored(
+                    "panel peer confirmed local restoration")
             expected = {"schema", "seq", "kind", "result"}
             if (not isinstance(response, Mapping) or set(response) != expected
                     or response["schema"] != SCHEMA

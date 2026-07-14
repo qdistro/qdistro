@@ -11,6 +11,7 @@ import os
 import socket
 import stat
 import struct
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -37,21 +38,47 @@ def peer_uid(client: socket.socket) -> int:
     return uid
 
 
-def prepare_endpoint_listener(path: str, *, uid: int,
-                              gid: int) -> socket.socket:
+def prepare_endpoint_listener(path: str, *, uid: int, gid: int,
+                              path_prefix: str = "/run/qdistro/",
+                              directory_uid: int = 0) -> socket.socket:
     """Bind a fixed role socket without replacing another live/stale owner."""
     if any(not isinstance(value, int) or isinstance(value, bool) or value < 0
            for value in (uid, gid)):
         raise ValueError("display dock endpoint owner is invalid")
-    endpoint = Path(validate_endpoint_path(path))
+    endpoint = Path(validate_endpoint_path(path, prefix=path_prefix))
     parent = endpoint.parent
     parent.mkdir(mode=0o750, parents=True, exist_ok=True)
     info = parent.stat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
-            or info.st_mode & 0o022):
+    controller_can_traverse = bool(
+        (info.st_gid == gid and info.st_mode & stat.S_IXGRP)
+        or info.st_mode & stat.S_IXOTH)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != directory_uid
+            or info.st_mode & 0o022 or not controller_can_traverse):
         raise DisplayDockRpcError("display dock endpoint directory is unsafe")
-    if endpoint.exists() or endpoint.is_symlink():
-        raise DisplayDockRpcError("display dock endpoint socket already exists")
+    try:
+        existing = endpoint.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if (not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != uid):
+            raise DisplayDockRpcError(
+                "display dock endpoint socket already exists")
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.2)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            # Only the root-owned, non-writable parent can name this socket.
+            # ECONNREFUSED proves no listener owns the stale inode.
+            endpoint.unlink()
+        except OSError as exc:
+            raise DisplayDockRpcError(
+                "display dock endpoint socket ownership is ambiguous") from exc
+        else:
+            raise DisplayDockRpcError(
+                "display dock endpoint socket already has a listener")
+        finally:
+            probe.close()
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         listener.bind(path)
@@ -71,7 +98,15 @@ def receive_endpoint_request(client: socket.socket, *, role: str,
                              actions: frozenset[str]) -> str:
     """Parse one exact request and bind it to this sealed generation."""
     data = bytearray()
+    timeout = client.gettimeout()
+    deadline = None if timeout is None else time.monotonic() + timeout
     while b"\n" not in data and len(data) <= MAX_REQUEST_BYTES:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DisplayDockRpcError(
+                    "display dock endpoint request timed out")
+            client.settimeout(remaining)
         chunk = client.recv(min(4096, MAX_REQUEST_BYTES + 1 - len(data)))
         if not chunk:
             break
@@ -100,9 +135,15 @@ def send_endpoint_response(client: socket.socket, *, ok: bool,
                            result: str) -> None:
     if not isinstance(result, str) or len(result) > 128:
         raise ValueError("display dock endpoint result is invalid")
-    client.sendall((json.dumps(
-        {"ok": ok, "result": result}, sort_keys=True,
-        separators=(",", ":")) + "\n").encode())
+    try:
+        client.sendall((json.dumps(
+            {"ok": ok, "result": result}, sort_keys=True,
+            separators=(",", ":")) + "\n").encode())
+    except (BrokenPipeError, ConnectionError):
+        # The endpoint transition already happened. A disappearing authorized
+        # caller must not kill the generation agent; the dock owner will
+        # observe the failed RPC and execute its fail-safe sequence.
+        return
 
 
 def validate_endpoint_path(path: str, *, prefix: str = "/run/qdistro/") -> str:
@@ -164,6 +205,9 @@ class JsonEndpointClient:
                 or len(response["result"]) > 128):
             raise DisplayDockRpcError(
                 f"{self.role} endpoint response is invalid")
+        if (not response["ok"] and action in {"safe", "recover"}
+                and response["result"] == "unsafe"):
+            return "unsafe"
         if not response["ok"]:
             raise DisplayDockRpcError(
                 f"{self.role} endpoint rejected {action}: {response['result']}")

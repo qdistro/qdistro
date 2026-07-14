@@ -211,6 +211,7 @@ class DisplayDockSession:
         self.carrier = carrier
         self._grant: ActiveDisplayGrant | None = None
         self._next_heartbeat: float | None = None
+        self._next_carrier_probe: float | None = None
         self._lock = threading.RLock()
         self.controller = DisplaySlotController(
             slot=RemoteDisplaySlot(slot, clock=clock),
@@ -248,6 +249,7 @@ class DisplayDockSession:
             # interval for scheduling jitter and a bounded control round-trip.
             self._next_heartbeat = (
                 self.clock() + grant.heartbeat_ms / 2000.0)
+            self._next_carrier_probe = self.clock()
 
     def heartbeat(self, generation: int) -> bool:
         with self._lock:
@@ -267,11 +269,21 @@ class DisplayDockSession:
             if self.phase not in {SlotPhase.ENABLING, SlotPhase.ACTIVE}:
                 return False
             generation = self.generation
-            if not self.carrier.alive(generation):
-                self.controller.carrier_lost(
-                    generation, reason="authenticated carrier process lost")
-                self._next_heartbeat = None
-                return True
+            now = self.clock()
+            if (self._next_carrier_probe is None
+                    or now >= self._next_carrier_probe):
+                if not self.carrier.alive(generation):
+                    self.controller.carrier_lost(
+                        generation,
+                        reason="authenticated carrier process lost")
+                    self._next_heartbeat = None
+                    self._next_carrier_probe = None
+                    return True
+                # The carrier RPC is a process/socket health probe, not a
+                # scheduler tick. Four probes per second catches loss well
+                # inside the shortest one-second panel heartbeat without
+                # churning twenty Unix connections per second.
+                self._next_carrier_probe = now + 0.25
             if self.controller.tick():
                 self._next_heartbeat = None
                 return True
@@ -286,12 +298,14 @@ class DisplayDockSession:
             self.controller.detach(generation)
             self._grant = None
             self._next_heartbeat = None
+            self._next_carrier_probe = None
 
     def reset_failed_safe(self) -> None:
         with self._lock:
             self.controller.reset_failed_safe()
             self._grant = None
             self._next_heartbeat = None
+            self._next_carrier_probe = None
 
     def restore_last_generation(self, generation: int) -> None:
         """Seed replay state after external startup recovery reached safe."""
@@ -304,6 +318,7 @@ class DisplayDockSession:
             if self.phase in {SlotPhase.ENABLING, SlotPhase.ACTIVE}:
                 self.detach(self.generation)
             self._next_heartbeat = None
+            self._next_carrier_probe = None
 
     def serve(self, stop: threading.Event, *, poll_interval: float = 0.05) -> None:
         if poll_interval <= 0 or poll_interval > 1:

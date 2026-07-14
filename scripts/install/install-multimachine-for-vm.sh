@@ -59,6 +59,10 @@ install -o root -g root -m 0755 "$SRC/qdistro-mm-display-dock" \
     /usr/local/bin/qdistro-mm-display-dock
 install -o root -g root -m 0644 "$SRC/qdistro-mm-display-dock.service" \
     /etc/systemd/system/qdistro-mm-display-dock.service
+install -d -o root -g root -m 0755 /usr/lib/tmpfiles.d
+install -o root -g root -m 0644 "$SRC/qdistro-mm-display-tmpfiles.conf" \
+    /usr/lib/tmpfiles.d/qdistro-mm-display.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/qdistro-mm-display.conf
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-controller" \
     /usr/local/bin/qdistro-mm-remote-nested-controller
 install -o root -g root -m 0755 "$SRC/qdistro-mm-remote-nested-session" \

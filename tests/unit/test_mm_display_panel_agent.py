@@ -15,6 +15,7 @@ from multimachine.display_panel_agent import (
     PanelControlError,
     PanelLeaseSpec,
     PanelLeaseState,
+    PanelPeerRestored,
     PanelPeerProtocol,
     PanelPrimaryClient,
     serve_authenticated_panel,
@@ -93,6 +94,20 @@ def test_panel_lease_expires_locally_and_cannot_be_resurrected() -> None:
         state.heartbeat()
 
 
+def test_relative_panel_deadline_uses_monotonic_clock() -> None:
+    wall = Clock()
+    monotonic = Clock(50)
+    actions = Actions()
+    state = PanelLeaseState(
+        PanelLeaseSpec.from_verified_payload(payload()), actions,
+        clock=wall, monotonic_clock=monotonic)
+    state.reserve()
+    wall.value -= 500
+    monotonic.value += 1.01
+    assert state.tick()
+    assert actions.calls[-1] == ("restore", "rdp-0")
+
+
 def test_protocol_rejects_stale_generation_schema_drift_and_replay() -> None:
     actions = Actions()
     protocol = PanelPeerProtocol(PanelLeaseState(
@@ -157,6 +172,29 @@ def test_partial_frame_cannot_block_independent_expiry() -> None:
     assert actions.calls[-1] == ("restore", "rdp-0")
     primary.close()
     worker.join(timeout=1)
+
+
+def test_expiry_sends_authenticated_restoration_event_before_close() -> None:
+    peer, primary = socket.socketpair()
+    actions = Actions()
+    spec = PanelLeaseSpec(
+        session_id="display-session", generation=90, slot_name="rdp-0",
+        heartbeat_ms=50, lease_expires_at=int(time.time()) + 60)
+    state = PanelLeaseState(spec, actions)
+    worker = threading.Thread(
+        target=serve_authenticated_panel, args=(peer, state), daemon=True)
+    worker.start()
+    client = PanelPrimaryClient(primary, spec)
+    assert client.request("reserve") == "reserved"
+    deadline = time.monotonic() + 1
+    while state.reserved and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(PanelPeerRestored, match="confirmed"):
+        client.request("status")
+    worker.join(timeout=1)
+    primary.close()
+    assert not worker.is_alive()
+    assert actions.calls[-1] == ("restore", "rdp-0")
 
 
 def test_release_is_terminal_and_safe_status_does_not_renew() -> None:

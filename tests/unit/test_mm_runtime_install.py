@@ -80,3 +80,6 @@ def test_installer_ships_r9_display_authority_and_slot_controller() -> None:
     assert "/usr/local/bin/qdistro-mm-display-dock" in text
     assert '"$SRC/qdistro-mm-display-dock.service"' in text
     assert "/etc/systemd/system/qdistro-mm-display-dock.service" in text
+    assert '"$SRC/qdistro-mm-display-tmpfiles.conf"' in text
+    assert "/usr/lib/tmpfiles.d/qdistro-mm-display.conf" in text
+    assert "systemd-tmpfiles --create" in text

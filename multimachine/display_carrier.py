@@ -460,6 +460,10 @@ def serve_primary_once(identity: DisplayCarrierIdentity, *,
         raise DisplayCarrierError("primary carrier requires primary identity")
     listener.settimeout(CONNECT_TIMEOUT_SECONDS)
     raw, _address = listener.accept()
+    # accept() returns a blocking socket on modern Python even when the
+    # listener has a timeout. Bound the unauthenticated TLS handshake too, so
+    # a connect-and-stall peer cannot pin this sealed generation forever.
+    raw.settimeout(CONNECT_TIMEOUT_SECONDS)
     tls = None
     backend = None
     try:

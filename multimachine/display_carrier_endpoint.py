@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import signal
 import socket
 import subprocess
@@ -46,6 +47,7 @@ class PrimaryCarrierAgent:
         self.ready = threading.Event()
         self.stop = threading.Event()
         self.error: BaseException | None = None
+        self.opened = False
 
     def _run(self) -> None:
         try:
@@ -57,8 +59,9 @@ class PrimaryCarrierAgent:
             self.error = exc
 
     def open(self) -> str:
-        if self.worker is not None:
+        if self.worker is not None or self.opened:
             return "rejected"
+        self.opened = True
         self.stop.clear()
         self.ready.clear()
         self.error = None
@@ -160,7 +163,13 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - subprocess
                     primary_port=runtime.target["primary_port"],
                     on_authenticated=lambda: _systemctl("start", unit))
             finally:
-                _systemctl("stop", unit)
+                try:
+                    _systemctl("stop", unit)
+                except Exception:
+                    # Teardown failure must be visible, but must not replace
+                    # the carrier/TLS failure that caused this finally block.
+                    logging.exception(
+                        "display carrier could not stop peer client unit")
         print(json.dumps({
             "closed_by": result.closed_by,
             "left_to_right": result.left_to_right,

@@ -38,6 +38,34 @@ def test_recovery_grant_uses_durable_projection_or_safe_baseline() -> None:
     }, slot_name="rdp-0") == durable
 
 
+class _RecoveryClient:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+
+    def request(self, action, grant):
+        assert action == "recover"
+        assert grant["slot_name"] == "rdp-0"
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_absent_fixed_endpoint_is_safe_only_for_disabled_baseline() -> None:
+    grant = daemon.recovery_grant(None, slot_name="rdp-0")
+    missing = _RecoveryClient(error=FileNotFoundError())
+    refused = _RecoveryClient(error=ConnectionRefusedError())
+    assert daemon.recover_fixed_endpoint(
+        missing, grant, allow_absent=True) is True
+    assert daemon.recover_fixed_endpoint(
+        refused, grant, allow_absent=True) is True
+    assert daemon.recover_fixed_endpoint(
+        missing, grant, allow_absent=False) is False
+    assert daemon.recover_fixed_endpoint(
+        _RecoveryClient(result="unsafe"), grant,
+        allow_absent=True) is False
+
+
 def test_control_listener_replaces_only_owned_stale_socket(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     path = tmp_path / "control.sock"

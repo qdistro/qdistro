@@ -8,6 +8,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import multimachine.display_carrier as carrier_module
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -131,6 +132,24 @@ def test_tls_material_requires_exact_signed_pins_and_matching_key() -> None:
 def test_identity_requires_separately_delivered_grant_secret() -> None:
     with pytest.raises(DisplayCarrierError, match="secret digest mismatch"):
         _identity("primary", secret=b"x" * 32).validate()
+
+
+def test_primary_bounds_unauthenticated_tls_handshake(monkeypatch) -> None:
+    monkeypatch.setattr(carrier_module, "CONNECT_TIMEOUT_SECONDS", 0.05)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    stalled = socket.create_connection(listener.getsockname(), timeout=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            serve_primary_once(
+                _identity("primary"), listener=listener,
+                backend_unix_path="/does/not/matter")
+    finally:
+        stalled.close()
+        listener.close()
+    assert time.monotonic() - started < 1
 
 
 def test_handoff_proof_is_mutual_and_replay_is_rejected() -> None:

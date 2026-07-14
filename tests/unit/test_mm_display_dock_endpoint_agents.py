@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from types import SimpleNamespace
@@ -9,10 +10,14 @@ from types import SimpleNamespace
 import pytest
 
 import multimachine.display_carrier_endpoint as carrier_endpoint
-from multimachine.display_panel_agent import PanelControlError
+from multimachine.display_panel_agent import (
+    PanelControlError,
+    PanelPeerRestored,
+)
 from multimachine.display_dock_rpc import (
     DisplayDockRpcError,
     SCHEMA,
+    prepare_endpoint_listener,
     receive_endpoint_request,
 )
 from multimachine.display_panel_endpoint import PrimaryPanelAgent
@@ -58,6 +63,26 @@ def test_endpoint_request_is_exact_and_sealed_generation_bound() -> None:
     ):
         with pytest.raises(DisplayDockRpcError, match="sealed authority"):
             _parse(_request(**change))
+
+
+def test_fixed_listener_reaps_only_an_owned_refused_stale_socket(
+        tmp_path) -> None:
+    tmp_path.chmod(0o750)
+    path = tmp_path / "endpoint.sock"
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+    listener = prepare_endpoint_listener(
+        str(path), uid=os.geteuid(), gid=os.getegid(),
+        path_prefix=str(tmp_path) + "/", directory_uid=os.geteuid())
+    try:
+        with pytest.raises(DisplayDockRpcError, match="has a listener"):
+            prepare_endpoint_listener(
+                str(path), uid=os.geteuid(), gid=os.getegid(),
+                path_prefix=str(tmp_path) + "/", directory_uid=os.geteuid())
+    finally:
+        listener.close()
+        path.unlink()
 
 
 class FakePanel:
@@ -117,13 +142,26 @@ def test_panel_disconnect_is_safe_only_after_peer_owned_deadline() -> None:
     assert agent.perform("peer-unblank-panel") == "restored"
 
 
-def test_panel_graceful_eof_proves_peer_finally_restored_ownership() -> None:
+def test_panel_bare_eof_does_not_claim_peer_restored_ownership() -> None:
+    now = [100.0]
+    panel = FakePanel({"reserve": ["reserved"]})
+    agent = PrimaryPanelAgent(
+        panel, heartbeat_seconds=8, clock=lambda: now[0])
+    assert agent.perform("peer-blank-panel") == "reserved"
+    assert not agent.fail_closed(PanelControlError("panel peer disconnected"))
+    assert agent.perform("safe") == "unsafe"
+    now[0] = 108.0
+    assert agent.perform("safe") == "safe"
+    assert agent.perform("peer-unblank-panel") == "restored"
+
+
+def test_panel_explicit_restored_event_is_immediately_authoritative() -> None:
     panel = FakePanel({"reserve": ["reserved"]})
     agent = PrimaryPanelAgent(panel, heartbeat_seconds=8)
     assert agent.perform("peer-blank-panel") == "reserved"
-    assert agent.fail_closed(PanelControlError("panel peer disconnected"))
+    assert agent.fail_closed(PanelPeerRestored(
+        "panel peer confirmed local restoration"))
     assert agent.perform("safe") == "safe"
-    assert agent.perform("peer-unblank-panel") == "restored"
 
 
 def test_carrier_agent_reports_ready_alive_close_and_idempotent_recovery(
@@ -147,3 +185,4 @@ def test_carrier_agent_reports_ready_alive_close_and_idempotent_recovery(
     assert agent.perform("close") == "closed"
     assert agent.perform("safe") == "safe"
     assert agent.perform("recover") == "safe"
+    assert agent.perform("open") == "rejected"
