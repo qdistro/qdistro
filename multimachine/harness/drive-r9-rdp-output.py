@@ -1001,6 +1001,12 @@ def main() -> int:
             "reattach_composites_fresh_pixels_without_authority_or_app_restart"
         ] = True
         assertions["redock_requires_strictly_newer_carrier_generation"] = True
+        controller.detach(GENERATION + 1)
+        assertions["controller_clean_detach_returns_disabled"] = (
+            controller.phase is SlotPhase.DISABLED)
+        assertions["broker_retires_display_session_authority_on_detach"] = (
+            controller.status().session_id is None
+            and controller.status().next_heartbeat is None)
         final_weston_log = backend._vmexec(
             args.vm_source, f"cat {SOURCE_RT}/weston.log")
         assertions["qdwin_enforces_authenticated_rdp_input_gate"] = (
@@ -1008,15 +1014,12 @@ def main() -> int:
                 "remote input gate output=rdp-0 enabled=1 result=applied") >= 2
             and final_weston_log.count(
                 "remote input gate output=rdp-0 enabled=0 result=applied") >= 2)
+        assertions["qdwin_drains_session_state_before_carrier_close"] = (
+            final_weston_log.count(
+                "remote output drain output=rdp-0 result=applied") >= 2)
         assertions["production_qdwin_has_no_test_placement_path"] = (
             "TEST placement" not in final_weston_log
             and "QDWIN_TEST_PLACE" not in final_weston_log)
-        controller.detach(GENERATION + 1)
-        assertions["controller_clean_detach_returns_disabled"] = (
-            controller.phase is SlotPhase.DISABLED)
-        assertions["broker_retires_display_session_authority_on_detach"] = (
-            controller.status().session_id is None
-            and controller.status().next_heartbeat is None)
         details["controller_actions"] = [
             {
                 "generation": event.generation,

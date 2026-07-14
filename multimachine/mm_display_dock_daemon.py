@@ -16,7 +16,6 @@ from .display_dock_rpc import (
     JsonEndpointClient,
     RpcCarrierFactory,
     RpcPanelEndpoint,
-    RpcPrimarySafetyEndpoint,
 )
 from .display_dock_service import (
     DisplayDockServiceCore,
@@ -44,7 +43,6 @@ from .remote_display_slot import (
 
 DEFAULT_CONTROL = "/run/qdistro-mm-display-dock/control.sock"
 DEFAULT_STATUS = "/var/lib/qdistro-mm-display-dock/status.json"
-DEFAULT_SAFETY = "/run/qdistro/mm-display-primary-safety.sock"
 DEFAULT_PANEL = "/run/qdistro/mm-display-peer-panel.sock"
 DEFAULT_CARRIER = "/run/qdistro/mm-display-carrier-supervisor.sock"
 
@@ -98,12 +96,10 @@ def prepare_control_listener(path: str, *, controller_uid: int) -> socket.socket
 
 
 class PrimaryLocalEndpoint:
-    """Combine qdwin input admission with fixed primary-safety RPC."""
+    """Use one qdwin transaction for input release and session-state drain."""
 
-    def __init__(self, input_mailbox: DisplayShellInputMailbox,
-                 safety: RpcPrimarySafetyEndpoint):
+    def __init__(self, input_mailbox: DisplayShellInputMailbox):
         self.input_mailbox = input_mailbox
-        self.safety = safety
 
     def perform(self, action: SlotAction, grant: Mapping) -> None:
         if action.kind in {
@@ -111,12 +107,20 @@ class PrimaryLocalEndpoint:
             ActionKind.PRIMARY_DISABLE_INPUT,
         }:
             self.input_mailbox.perform(action, grant)
+        elif action.kind in {
+            ActionKind.SYNTHESIZE_RELEASES,
+            ActionKind.CLEAR_TRANSFERS,
+        }:
+            # A successful disable acknowledgement now means qdwin released
+            # backend-held input *and* completed the R8 DND/IME/selection drain.
+            if not self.input_mailbox.safe_state_confirmed(str(grant["slot_name"])):
+                raise DockServiceError(
+                    "qdwin safety boundary was not confirmed")
         else:
-            self.safety.perform(action, grant)
+            raise DockServiceError("primary local action is invalid")
 
     def safe_state_confirmed(self, slot_name: str) -> bool:
-        return (self.input_mailbox.safe_state_confirmed(slot_name)
-                and self.safety.safe_state_confirmed(slot_name))
+        return self.input_mailbox.safe_state_confirmed(slot_name)
 
 
 def recovery_grant(previous: Mapping | None, *, slot_name: str) -> dict:
@@ -147,11 +151,8 @@ def build_service(args, *, shell_pid: int | None = None,
     """Build the daemon graph; kept injectable for host deployment tests."""
     layout = DisplayShellMailbox(clock=clock, request_timeout=15)
     input_mailbox = DisplayShellInputMailbox(clock=clock, request_timeout=15)
-    safety_client = JsonEndpointClient(
-        args.safety_socket, role="primary-safety")
     panel_client = JsonEndpointClient(args.panel_socket, role="peer-panel")
     carrier_client = JsonEndpointClient(args.carrier_socket, role="carrier")
-    safety = RpcPrimarySafetyEndpoint(safety_client)
     panel = RpcPanelEndpoint(panel_client)
     carrier_factory = RpcCarrierFactory(carrier_client)
     carrier = CarrierSupervisorEndpoint(
@@ -161,7 +162,7 @@ def build_service(args, *, shell_pid: int | None = None,
             args.slot_name, max_width=args.max_width,
             max_height=args.max_height, max_scale=args.max_scale),
         shell_layout=layout,
-        primary_local=PrimaryLocalEndpoint(input_mailbox, safety),
+        primary_local=PrimaryLocalEndpoint(input_mailbox),
         peer_panel=panel, carrier=carrier, clock=clock)
     public_key = _read_pinned_authority_key()
     verifier = DisplayGrantVerifier.from_public_bytes(
@@ -179,8 +180,6 @@ def build_service(args, *, shell_pid: int | None = None,
         # confirm its local resources are safe.
         input_mailbox.perform(
             SlotAction(ActionKind.PRIMARY_DISABLE_INPUT), grant)
-        if safety_client.request("recover", grant) != "safe":
-            return False
         if carrier_client.request("recover", grant) != "safe":
             return False
         layout.perform(SlotAction(ActionKind.PRIMARY_DISABLE_OUTPUT), grant)
@@ -206,7 +205,6 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - live daemo
     ap.add_argument("--controller-uid", type=int, default=0)
     ap.add_argument("--control-path", default=DEFAULT_CONTROL)
     ap.add_argument("--status-path", default=DEFAULT_STATUS)
-    ap.add_argument("--safety-socket", default=DEFAULT_SAFETY)
     ap.add_argument("--panel-socket", default=DEFAULT_PANEL)
     ap.add_argument("--carrier-socket", default=DEFAULT_CARRIER)
     ap.add_argument("--max-width", type=int, default=7680)
