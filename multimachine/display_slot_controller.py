@@ -35,6 +35,9 @@ class DisplaySlotExecutor(Protocol):
     def fail_safe_confirmed(self, slot_name: str) -> bool:
         """Return true only when input/carrier/output/panel are locally safe."""
 
+    def heartbeat(self, generation: int, grant: Mapping) -> None:
+        """Renew the independently enforced peer panel lease or raise."""
+
 
 class DisplayActionEndpoint(Protocol):
     """One local half of the distributed display transaction."""
@@ -96,6 +99,13 @@ class SplitDisplaySlotExecutor:
             self.peer.safe_state_confirmed(slot_name),
         ]
         return all(results)
+
+    def heartbeat(self, generation: int, grant: Mapping) -> None:
+        renew = getattr(self.peer, "heartbeat", None)
+        if renew is None:
+            raise DisplayControllerError(
+                "peer display endpoint cannot renew its panel lease")
+        renew(generation, grant)
 
 
 class PrimaryDisplayEndpoint:
@@ -244,6 +254,19 @@ class DisplaySlotController:
                 self._emit("heartbeat-rejected", ok=False, detail="stale-generation")
                 raise
             if accepted:
+                if self._grant is None:
+                    raise DisplayControllerError(
+                        "display controller has no heartbeat grant")
+                try:
+                    self.executor.heartbeat(generation, self._grant)
+                except Exception as exc:
+                    self._emit("peer-heartbeat-failed", ok=False,
+                               detail=type(exc).__name__)
+                    failures = self._fail_safe("peer panel heartbeat failed")
+                    suffix = (f"; teardown failures={failures}"
+                              if failures else "")
+                    raise DisplayControllerError(
+                        "peer panel heartbeat failed" + suffix) from exc
                 self._emit("heartbeat")
                 return True
             failures = self._fail_safe("display heartbeat rejected")

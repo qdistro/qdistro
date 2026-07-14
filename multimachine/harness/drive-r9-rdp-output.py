@@ -418,6 +418,10 @@ class LivePeerPanelEndpoint:
     def safe_state_confirmed(self, _slot_name: str) -> bool:
         return not self.reserved
 
+    def heartbeat(self, generation: int, grant: dict) -> None:
+        if generation != grant["generation"] or not self.reserved:
+            raise RuntimeError("peer panel lease is not reserved")
+
 
 class LiveCarrierEndpoint:
     """Own both pinned-mTLS carrier processes and the thin-client lifetime."""

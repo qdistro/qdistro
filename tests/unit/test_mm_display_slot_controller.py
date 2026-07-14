@@ -33,6 +33,8 @@ class Executor:
         self.actions: list[SlotAction] = []
         self.fail: set[ActionKind] = set()
         self.confirmed = True
+        self.heartbeats: list[int] = []
+        self.fail_heartbeat = False
 
     def perform(self, action: SlotAction, grant) -> None:
         assert grant["session_id"] == "display-session"
@@ -46,6 +48,12 @@ class Executor:
 
     def safe_state_confirmed(self, slot_name: str) -> bool:
         return self.fail_safe_confirmed(slot_name)
+
+    def heartbeat(self, generation: int, grant) -> None:
+        assert grant["generation"] == generation
+        self.heartbeats.append(generation)
+        if self.fail_heartbeat:
+            raise OSError("peer heartbeat failed")
 
 
 def grant(*, generation: int = 7, expires: int = 5000,
@@ -241,6 +249,42 @@ def test_split_safe_confirmation_checks_all_three_endpoints() -> None:
     primary.confirmed = False
     carrier.confirmed = False
     assert not split.fail_safe_confirmed("rdp-0")
+
+
+def test_split_heartbeat_renews_only_peer_enforcement_point() -> None:
+    primary = Executor()
+    peer = Executor()
+    carrier = Executor()
+    split = SplitDisplaySlotExecutor(
+        primary=primary, peer=peer, carrier=carrier)
+    split.heartbeat(7, grant())
+    assert peer.heartbeats == [7]
+    assert primary.heartbeats == []
+    assert carrier.heartbeats == []
+
+
+def test_peer_heartbeat_failure_runs_full_fail_safe() -> None:
+    primary = Executor()
+    peer = Executor()
+    carrier = Executor()
+    split = SplitDisplaySlotExecutor(
+        primary=primary, peer=peer, carrier=carrier)
+    owner = DisplaySlotController(
+        RemoteDisplaySlot(DisplaySlotSpec("rdp-0"), clock=Clock()), split,
+        clock=Clock())
+    owner.attach(grant())
+    peer.fail_heartbeat = True
+    with pytest.raises(DisplayControllerError, match="peer panel heartbeat"):
+        owner.heartbeat(7)
+    assert owner.phase is SlotPhase.FAILED_SAFE
+    assert kinds(primary)[-4:] == [
+        ActionKind.PRIMARY_DISABLE_INPUT,
+        ActionKind.SYNTHESIZE_RELEASES,
+        ActionKind.CLEAR_TRANSFERS,
+        ActionKind.PRIMARY_DISABLE_OUTPUT,
+    ]
+    assert kinds(carrier)[-1:] == [ActionKind.CLOSE_CARRIER]
+    assert kinds(peer)[-1:] == [ActionKind.PEER_UNBLANK_PANEL]
 
 
 def test_primary_endpoint_exposes_only_output_actions_to_qdshell() -> None:

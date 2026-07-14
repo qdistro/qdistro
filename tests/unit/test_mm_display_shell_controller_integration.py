@@ -30,6 +30,9 @@ class Endpoint:
     def safe_state_confirmed(self, _slot_name: str) -> bool:
         return True
 
+    def heartbeat(self, _generation: int, _grant) -> None:
+        pass
+
 
 def grant() -> dict:
     return {
