@@ -5,6 +5,8 @@ This establishes software/runtime behavior only: one qdwin owns an adjacent
 headless + RDP topology, a real FreeRDP thin client decodes the remote half of
 one straddling toplevel, input returns through the RDP seat, and a full
 disconnect/disable/re-enable/reconnect cycle preserves the compositor and app.
+Every runtime slot mutation passes through the authenticated qdshell executor;
+a separate same-uid output client is denied while that shell is bound.
 It deliberately makes no physical-panel latency or native-feel claim.
 """
 from __future__ import annotations
@@ -62,7 +64,7 @@ def wait_guest(backend: QciVMBackend, vm: str, command: str, *,
 
 
 def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
-          qdwin: Path) -> None:
+          qdwin: Path, qdshell: Path) -> None:
     for vm, name in ((vm_source, "r9-rdp-source-stack.sh"),
                      (vm_viewer, "r9-rdp-viewer-stack.sh")):
         backend._push(
@@ -72,6 +74,10 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         vm_source,
         REPO / "multimachine/harness/vm/r9-rdp-external-launch.py",
         "/tmp/r9-rdp-external-launch.py", mode=0o755)
+    backend._push(
+        vm_source,
+        REPO / "multimachine/harness/vm/r9-shell-layout-service.py",
+        "/tmp/r9-shell-layout-service.py", mode=0o755)
     for vm in (vm_source, vm_viewer):
         backend._push_mm_package(vm)
         backend._push(
@@ -131,6 +137,46 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         "install -m 0755 /root/qdistro-src/qdwin/libweston-vendored/src/"
         "build-r9-rdp/libweston/backend-rdp/rdp-backend.so "
         "/tmp/r9-rdp-backend.so",
+        timeout=300)
+
+    # Run the product shell, not a second output-management probe. The VM's
+    # installed QML tree supplies ordinary desktop components; overlay the
+    # exact multi-machine files under test and build the native qdwin binding
+    # against the just-built protocol package.
+    qdshell_root = "/root/qdistro-src/qdshell-r9"
+    backend._vmexec(
+        vm_source,
+        f"rm -rf {qdshell_root} /tmp/r9-qdshell /tmp/r9-qml; "
+        f"install -d {qdshell_root}/qml-plugin; "
+        "cp -a /usr/share/quickshell/qdshell /tmp/r9-qdshell; "
+        "install -d /tmp/r9-qml/Qdistro/Qdwin")
+    for relative in (
+        "meson.build", "qml-plugin/meson.build", "qml-plugin/qmldir",
+        "qml-plugin/qdwin-binding.cpp", "qml-plugin/qdwin-binding.h",
+        "qml-plugin/ctrl-server.cpp", "qml-plugin/ctrl-server.h",
+        "qml-plugin/qdistro-qdwin-plugin.cpp",
+    ):
+        backend._push_large(
+            vm_source, qdshell / relative, f"{qdshell_root}/{relative}")
+    for relative in (
+        "shell.qml", "Services/Qdwin/Qdwin.qml",
+        "Services/Qdwin/OutputLayout.js",
+        "Services/Qdwin/RemoteDisplayLease.js",
+        "Services/Qdwin/RemoteDisplayLease.qml",
+    ):
+        backend._push_large(
+            vm_source, qdshell / relative, f"/tmp/r9-qdshell/{relative}")
+    backend._vmexec(
+        vm_source,
+        "PKG_CONFIG_PATH=/root/qdistro-src/qdwin/build-r9-live/"
+        f"meson-uninstalled meson setup {qdshell_root}/build {qdshell_root} && "
+        "PKG_CONFIG_PATH=/root/qdistro-src/qdwin/build-r9-live/"
+        f"meson-uninstalled ninja -C {qdshell_root}/build && "
+        f"install -m 0755 {qdshell_root}/build/qml-plugin/"
+        "libqdistro-qdwin.so /tmp/r9-qml/Qdistro/Qdwin/"
+        "libqdistro-qdwin.so && "
+        f"install -m 0644 {qdshell_root}/qml-plugin/qmldir "
+        "/tmp/r9-qml/Qdistro/Qdwin/qmldir",
         timeout=300)
 
 
@@ -193,10 +239,17 @@ def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
                 lease_expires_at=issued_at + 3600, heartbeat_ms=1000,
                 private_key=authority)
             grant_path = root / f"grant-{generation}.json"
+            layout_path = root / f"layout-{generation}.json"
             secret_path = root / f"secret-{generation}"
             grant_path.write_text(
                 json.dumps(receipt, sort_keys=True), encoding="utf-8")
+            layout_path.write_text(
+                json.dumps(receipt["payload"], sort_keys=True),
+                encoding="utf-8")
             secret_path.write_bytes(secret)
+            backend._push(
+                vm_source, layout_path,
+                f"/tmp/r9-layout-g{generation}.json", mode=0o600)
             endpoint_material = {
                 vm_source: (primary_cert, primary_key, peer_cert),
                 vm_viewer: (peer_cert, peer_key, primary_cert),
@@ -249,6 +302,34 @@ def source_probe(backend: QciVMBackend, vm: str, *args: str) -> str:
         vm, "runuser -u admin -- env HOME=/home/admin "
         "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=r9-source "
         f"/tmp/r9-qdwin-output-probe {suffix}")
+
+
+def shell_layout(backend: QciVMBackend, vm: str, *, generation: int,
+                 action: str) -> dict:
+    """Apply one signed slot delta through controller → qdshell → qdwin."""
+    if action not in {"enable", "disable"}:
+        raise ValueError(f"unsupported shell layout action: {action}")
+    unit = f"mm-r9-shell-layout-g{generation}-{action}"
+    grant = f"{SOURCE_RT}/layout-g{generation}.json"
+    status = f"{SOURCE_RT}/layout-g{generation}-{action}-status.json"
+    output = backend._vmexec(
+        vm,
+        f"install -o admin -g admin -m 0600 "
+        f"/tmp/r9-layout-g{generation}.json {grant}; "
+        f"rm -f {status}; "
+        f"systemctl stop {unit} 2>/dev/null || true; "
+        f"systemctl reset-failed {unit} 2>/dev/null || true; "
+        f"systemd-run --quiet --wait --collect --unit={unit} --uid=admin "
+        "--setenv=HOME=/home/admin --setenv=XDG_RUNTIME_DIR=/run/user/1000 "
+        "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+        "--setenv=PYTHONPATH=/tmp/mm /usr/bin/python3 "
+        "/tmp/r9-shell-layout-service.py "
+        f"--shell-pid $(cat {SOURCE_RT}/qdshell.pid) --grant {grant} "
+        f"--action {action} --status {status}; cat {status}")
+    result = json.loads(output.splitlines()[-1])
+    if result != {"action": action, "generation": generation, "ok": True}:
+        raise RuntimeError(f"qdshell layout action failed: {result}")
+    return result
 
 
 def wait_rdp(backend: QciVMBackend, vm: str, *, timeout: float = 50) -> None:
@@ -319,6 +400,8 @@ def main() -> int:
     ap.add_argument("--vm-viewer", required=True)
     ap.add_argument("--qdwin", type=Path,
                     default=Path("/home/play2/qdistro/qdwin"))
+    ap.add_argument("--qdshell", type=Path,
+                    default=Path("/home/play2/qdistro/qdshell"))
     ap.add_argument("--bundle", type=Path,
                     default=Path("/tmp/mm-live/r9-rdp-output"))
     args = ap.parse_args()
@@ -327,11 +410,17 @@ def main() -> int:
     backend = QciVMBackend(
         vm_a=args.vm_source, vm_b=args.vm_viewer, repo_dir=REPO,
         out_w=W, out_h=H)
-    stage(backend, args.vm_source, args.vm_viewer, args.qdwin)
+    stage(backend, args.vm_source, args.vm_viewer, args.qdwin, args.qdshell)
     # Generate after the potentially long qdwin build so the five-minute
     # signed handoff window is fresh when the endpoints actually connect.
     stage_carrier_grants(backend, args.vm_source, args.vm_viewer)
-    backend._vmexec(args.vm_source, f"rm -rf {SOURCE_RT}")
+    backend._vmexec(
+        args.vm_source,
+        f"test ! -d {SOURCE_RT} || touch {SOURCE_RT}/stop; "
+        "systemctl stop mm-r9-qdshell 2>/dev/null || true; "
+        "for i in $(seq 1 50); do "
+        "test ! -S /run/user/1000/r9-source && break; sleep 0.2; done; "
+        f"test ! -S /run/user/1000/r9-source; rm -rf {SOURCE_RT}")
     source = subprocess.Popen(
         [str(REPO / "scripts/vm/vm-exec"), args.vm_source,
          "bash /tmp/r9-rdp-source-stack.sh"],
@@ -352,15 +441,19 @@ def main() -> int:
             "--expect-state=rdp-0:0")
         assertions["precreated_slot_starts_disabled"] = "enabled=0" in initial
 
-        # Lease-admission analogue: enable only the reserved RDP head and place
-        # it adjacent to the local headless output.
-        source_probe(
-            backend, args.vm_source, "--apply", "--enable=rdp-0",
-            f"--position={W},0")
+        shell_pid = int(backend._vmexec(
+            args.vm_source, f"cat {SOURCE_RT}/qdshell.pid").strip())
+        assertions["real_qdshell_bound_as_output_authority"] = shell_pid > 1
+
+        # The controller publishes one generation-bound slot delta. qdshell
+        # authenticates to that service, builds a full atomic layout from its
+        # live snapshot, and acknowledges only qdwin's tagged result.
+        details["generation_90_enable"] = shell_layout(
+            backend, args.vm_source, generation=GENERATION, action="enable")
         enabled = source_probe(
             backend, args.vm_source, "--expect-heads=2",
             "--expect-state=rdp-0:1")
-        assertions["slot_enabled_as_adjacent_output"] = (
+        assertions["qdshell_enabled_slot_as_adjacent_output"] = (
             "name=headless enabled=1 pos=0,0" in enabled
             and f"name=rdp-0 enabled=1 pos={W},0" in enabled)
 
@@ -430,10 +523,19 @@ def main() -> int:
             f"grep -q '\"closed_by\"' {VIEWER_RT}/carrier-g90.log && echo closed",
             timeout=10, label="peer carrier generation 90 detach")
         assertions["signed_pinned_mtls_carrier_closed_on_disconnect"] = True
-        source_probe(backend, args.vm_source, "--apply", "--disable=rdp-0")
+        details["generation_90_disable"] = shell_layout(
+            backend, args.vm_source, generation=GENERATION, action="disable")
         disabled = source_probe(
             backend, args.vm_source, "--expect-state=rdp-0:0")
-        assertions["disconnect_disables_output_slot"] = "enabled=0" in disabled
+        assertions["qdshell_disconnect_disables_output_slot"] = (
+            "enabled=0" in disabled)
+        denied = source_probe(
+            backend, args.vm_source, "--apply", "--enable=rdp-0",
+            f"--position={W},0", "--expect-denied")
+        denied_state = source_probe(
+            backend, args.vm_source, "--expect-state=rdp-0:0")
+        assertions["separate_same_uid_output_client_is_denied"] = (
+            "denied" in denied and "enabled=0" in denied_state)
         assert_alive(backend, args.vm_source, initial_pids)
         assertions["disconnect_preserves_compositor_and_source_app"] = True
         time.sleep(1)
@@ -448,9 +550,9 @@ def main() -> int:
         wait_carrier_listener(
             backend, args.vm_source, port=3389,
             label="primary carrier generation 91")
-        source_probe(
-            backend, args.vm_source, "--apply", "--enable=rdp-0",
-            f"--position={W},0")
+        details["generation_91_enable"] = shell_layout(
+            backend, args.vm_source, generation=GENERATION + 1,
+            action="enable")
         start_carrier(
             backend, args.vm_viewer, role="peer", generation=GENERATION + 1)
         wait_carrier_listener(
@@ -509,6 +611,11 @@ def main() -> int:
                 source_output, _ = source.communicate()
         elif source.stdout is not None:
             source_output = source.stdout.read()
+        backend._vmexec(
+            args.vm_source,
+            "systemctl stop mm-r9-qdshell 'mm-r9-shell-layout-*' "
+            "2>/dev/null || true",
+            check=False)
         (args.bundle / "source-stack.log").write_text(
             source_output, encoding="utf-8")
         for vm, path, name in (
@@ -523,10 +630,14 @@ def main() -> int:
         "scenario": "r9-precreated-rdp-output-two-vm",
         "scope": "software geometry/lifecycle/input; no physical-feel claim",
         "transport": (
-            "signed-grant pinned-mTLS carrier + qdwin inner RDP TLS + FreeRDP 3"),
+            "signed-grant authenticated qdshell layout + pinned-mTLS carrier "
+            "+ qdwin inner RDP TLS + FreeRDP 3"),
         "topology": {"source": args.vm_source, "viewer": args.vm_viewer},
         "generations": [GENERATION, GENERATION + 1],
-        "source_pids": {"weston": initial_pids[0], "app": initial_pids[1]},
+        "source_pids": {
+            "weston": initial_pids[0], "app": initial_pids[1],
+            "qdshell": shell_pid,
+        },
         "assertions": assertions,
         "details": details,
     }
