@@ -65,6 +65,7 @@ def main() -> int:
         "QDWIN_TEST_PLACE_APPID": "qdwin-marker-client",
         "QDWIN_TEST_PLACE_X": str(args.width - 256),
         "QDWIN_TEST_PLACE_Y": "200",
+        "QDWIN_RDP_INITIAL_MODE": f"{args.width}x{args.height}",
         "WESTON_MODULE_MAP": module_map,
     })
     command = [
