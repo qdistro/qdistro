@@ -348,6 +348,7 @@ class QciVMBackend:
                 "display_shell_mailbox.py",
                 "display_shell_service.py",
                 "display_carrier.py",
+                "display_panel_agent.py",
                 "display_carrier_endpoint.py"):
             self._push(vm, pkg / mod, f"{guest_dir}/multimachine/{mod}")
         for mod in ("__init__.py", "viewer_broker.py"):

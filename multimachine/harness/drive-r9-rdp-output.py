@@ -97,6 +97,10 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
             vm,
             REPO / "multimachine/harness/vm/r9-display-carrier-launch.py",
             "/tmp/r9-display-carrier-launch.py", mode=0o755)
+        backend._push(
+            vm,
+            REPO / "multimachine/harness/vm/r9-panel-control.py",
+            "/tmp/r9-panel-control.py", mode=0o755)
         for program in (
             "qdistro-mm-display-carrier-launcher",
             "qdistro-mm-display-carrier",
@@ -250,7 +254,7 @@ def stage_carrier_grants(backend: QciVMBackend, vm_source: str,
                 primary_tls_cert_sha256=primary_pin,
                 peer_tls_cert_sha256=peer_pin,
                 issued_at=issued_at, handoff_expires_at=issued_at + 300,
-                lease_expires_at=issued_at + 3600, heartbeat_ms=1000,
+                lease_expires_at=issued_at + 3600, heartbeat_ms=8000,
                 private_key=authority)
             payloads[generation] = dict(receipt["payload"])
             grant_path = root / f"grant-{generation}.json"
@@ -310,6 +314,15 @@ def wait_carrier_listener(backend: QciVMBackend, vm: str, *, port: int,
         backend, vm,
         f"ss -ltn | grep -q ':{port} ' && echo listening",
         timeout=10, label=label)
+
+
+def configure_panel_control_forward(backend: QciVMBackend, vm: str) -> None:
+    backend._virsh(
+        "qemu-monitor-command", vm, "--hmp",
+        "hostfwd_remove tcp:127.0.0.1:3388", check=False)
+    backend._virsh(
+        "qemu-monitor-command", vm, "--hmp",
+        "hostfwd_add tcp:127.0.0.1:3388-:3388")
 
 
 def source_probe(backend: QciVMBackend, vm: str, *args: str) -> str:
@@ -391,36 +404,132 @@ class LivePrimaryLocalEndpoint:
 
 
 class LivePeerPanelEndpoint:
-    """Reserve the viewer kiosk before the carrier may show remote pixels."""
+    """Drive the viewer's independently expiring authenticated panel agent."""
 
-    def __init__(self, backend: QciVMBackend, vm: str):
+    def __init__(self, backend: QciVMBackend, source_vm: str, viewer_vm: str):
         self.backend = backend
-        self.vm = vm
+        self.source_vm = source_vm
+        self.viewer_vm = viewer_vm
         self.prepared = False
-        self.reserved = False
+        self.active_generation: int | None = None
 
-    def perform(self, action: SlotAction, _grant: dict) -> None:
+    @staticmethod
+    def _unit(role: str, generation: int) -> str:
+        return f"mm-r9-panel-{role}-g{generation}"
+
+    def _state(self) -> str:
+        output = self.backend._vmexec(
+            self.viewer_vm,
+            f"cat {VIEWER_RT}/panel-state.json 2>/dev/null || true",
+            check=False)
+        try:
+            state = json.loads(output)
+        except (TypeError, ValueError):
+            return "missing"
+        if state.get("schema") != 1 or not isinstance(state.get("state"), str):
+            return "invalid"
+        return state["state"]
+
+    def _command(self, generation: int, kind: str, *, check: bool = True) -> dict:
+        output = self.backend._vmexec(
+            self.source_vm,
+            "env PYTHONPATH=/tmp/mm /usr/bin/python3 "
+            "/tmp/r9-panel-control.py --role command "
+            f"--bundle /tmp/r9-carrier-g{generation} "
+            f"--runtime {SOURCE_RT} --kind {kind}",
+            check=check)
+        lines = [line for line in output.splitlines() if line.startswith("{")]
+        if not lines:
+            if check:
+                raise RuntimeError(f"panel {kind} returned no response: {output}")
+            return {"ok": False, "error": "no-response"}
+        return json.loads(lines[-1])
+
+    def _stop(self, generation: int) -> None:
+        self.backend._vmexec(
+            self.source_vm,
+            f"systemctl stop {self._unit('primary', generation)} "
+            "2>/dev/null || true",
+            check=False)
+        self.backend._vmexec(
+            self.viewer_vm,
+            f"systemctl stop {self._unit('peer', generation)} "
+            "2>/dev/null || true",
+            check=False)
+
+    def _start(self, generation: int) -> None:
+        primary_unit = self._unit("primary", generation)
+        peer_unit = self._unit("peer", generation)
+        self._stop(generation)
+        self.backend._vmexec(
+            self.source_vm,
+            f"rm -f {SOURCE_RT}/panel-control.ready "
+            f"{SOURCE_RT}/panel-control.sock; "
+            f"systemctl reset-failed {primary_unit} 2>/dev/null || true; "
+            f"systemd-run --collect --unit={primary_unit} "
+            f"--property=StandardOutput=append:{SOURCE_RT}/panel-g{generation}.log "
+            f"--property=StandardError=append:{SOURCE_RT}/panel-g{generation}.log "
+            "--setenv=PYTHONPATH=/tmp/mm /usr/bin/python3 "
+            "/tmp/r9-panel-control.py --role primary "
+            f"--bundle /tmp/r9-carrier-g{generation} --runtime {SOURCE_RT}")
+        self.backend._vmexec(
+            self.viewer_vm,
+            f"systemctl reset-failed {peer_unit} 2>/dev/null || true; "
+            f"systemd-run --collect --unit={peer_unit} "
+            f"--property=StandardOutput=append:{VIEWER_RT}/panel-g{generation}.log "
+            f"--property=StandardError=append:{VIEWER_RT}/panel-g{generation}.log "
+            "--setenv=PYTHONPATH=/tmp/mm /usr/bin/python3 "
+            "/tmp/r9-panel-control.py --role peer "
+            f"--bundle /tmp/r9-carrier-g{generation} --runtime {VIEWER_RT}")
+        wait_guest(
+            self.backend, self.source_vm,
+            f"test -e {SOURCE_RT}/panel-control.ready && echo ready",
+            timeout=20, label=f"panel control generation {generation}")
+
+    def perform(self, action: SlotAction, grant: dict) -> None:
+        generation = grant["generation"]
         if action.kind is ActionKind.PEER_BLANK_PANEL:
             if not self.prepared:
                 output = self.backend._vmexec(
-                    self.vm, "bash /tmp/r9-rdp-viewer-stack.sh", timeout=120)
+                    self.viewer_vm, "bash /tmp/r9-rdp-viewer-stack.sh",
+                    timeout=120)
                 if "R9_VIEWER_READY" not in output:
                     raise RuntimeError(f"viewer setup failed: {output}")
                 self.prepared = True
-            self.backend._vmexec(
-                self.vm, "systemctl stop mm-r9-rdp 2>/dev/null || true")
-            self.reserved = True
+            self._start(generation)
+            response = self._command(generation, "reserve")
+            if response != {"ok": True, "result": "reserved"}:
+                raise RuntimeError(f"panel reserve failed: {response}")
+            if self._state() != "reserved":
+                raise RuntimeError("viewer did not enforce panel reservation")
+            self.active_generation = generation
         elif action.kind is ActionKind.PEER_UNBLANK_PANEL:
-            self.reserved = False
+            # Expiry closes the generation before controller cleanup reaches
+            # this action. Treat already-safe peer state as successful,
+            # idempotent restoration rather than attempting resurrection.
+            if self._state() != "safe":
+                response = self._command(generation, "release", check=False)
+                if response != {"ok": True, "result": "released"}:
+                    raise RuntimeError(f"panel release failed: {response}")
+            self._stop(generation)
+            if self._state() != "safe":
+                raise RuntimeError("viewer panel is not locally safe")
+            self.active_generation = None
         else:
             raise RuntimeError(f"peer endpoint cannot perform {action.kind}")
 
     def safe_state_confirmed(self, _slot_name: str) -> bool:
-        return not self.reserved
+        return self.active_generation is None and self._state() == "safe"
 
     def heartbeat(self, generation: int, grant: dict) -> None:
-        if generation != grant["generation"] or not self.reserved:
+        if (generation != grant["generation"]
+                or generation != self.active_generation):
             raise RuntimeError("peer panel lease is not reserved")
+        response = self._command(generation, "heartbeat")
+        if response != {"ok": True, "result": "renewed"}:
+            raise RuntimeError(f"panel heartbeat failed: {response}")
+        if self._state() != "reserved":
+            raise RuntimeError("viewer panel lease was not renewed")
 
 
 class LiveCarrierEndpoint:
@@ -556,6 +665,7 @@ def main() -> int:
         vm_a=args.vm_source, vm_b=args.vm_viewer, repo_dir=REPO,
         out_w=W, out_h=H)
     stage(backend, args.vm_source, args.vm_viewer, args.qdwin, args.qdshell)
+    configure_panel_control_forward(backend, args.vm_source)
     # Generate after the potentially long qdwin build so the five-minute
     # signed handoff window is fresh when the endpoints actually connect.
     grants = stage_carrier_grants(backend, args.vm_source, args.vm_viewer)
@@ -592,7 +702,8 @@ def main() -> int:
 
         shell_endpoint = LiveShellEndpoint(backend, args.vm_source)
         local_endpoint = LivePrimaryLocalEndpoint()
-        peer_endpoint = LivePeerPanelEndpoint(backend, args.vm_viewer)
+        peer_endpoint = LivePeerPanelEndpoint(
+            backend, args.vm_source, args.vm_viewer)
         carrier_endpoint = LiveCarrierEndpoint(
             backend, args.vm_source, args.vm_viewer)
         controller_events: list[ControllerEvent] = []
@@ -617,6 +728,8 @@ def main() -> int:
         details["generation_90_enable"] = shell_endpoint.results[-1]
         assertions["controller_generation_90_active"] = (
             controller.phase is SlotPhase.ACTIVE)
+        assert controller.heartbeat(GENERATION)
+        assertions["authenticated_peer_panel_lease_renewed"] = True
         enabled = source_probe(
             backend, args.vm_source, "--expect-heads=2",
             "--expect-state=rdp-0:1")
@@ -642,6 +755,7 @@ def main() -> int:
             backend, args.vm_viewer, args.bundle / "attached-epoch1.ppm")
         details["epoch1_pixels"] = assert_remote_half(first)
         assertions["rdp_decodes_only_remote_straddle_half_1to1"] = True
+        assert controller.heartbeat(GENERATION)
 
         before = json.loads(backend._vmexec(
             args.vm_source, f"cat {SOURCE_RT}/marker-telemetry.json"))
@@ -668,13 +782,25 @@ def main() -> int:
         details["input_before"] = before["totals"]
         details["input_after"] = after["totals"]
 
-        # Advance the controller's deterministic lease clock beyond one missed
-        # heartbeat. Its real endpoints must cut input/carrier, disable through
-        # qdshell, and release the peer reservation in state-machine order.
         assert controller.heartbeat(GENERATION)
-        controller_time[0] += grants[GENERATION]["heartbeat_ms"] / 1000 + 0.1
-        assert controller.tick()
-        assertions["controller_heartbeat_timeout_reached_failed_safe"] = (
+        # Leave the source controller's deterministic lease clock untouched.
+        # The viewer must independently expire on real wall time and restore
+        # itself. Only the next source heartbeat discovers that peer-local
+        # enforcement already closed the generation and enters fail-safe.
+        time.sleep(grants[GENERATION]["heartbeat_ms"] / 1000 + 0.5)
+        wait_guest(
+            backend, args.vm_viewer,
+            f"grep -q '\"state\": \"safe\"' "
+            f"{VIEWER_RT}/panel-state.json && echo safe",
+            timeout=5, label="independent peer panel expiry")
+        assertions["peer_restores_panel_without_primary_timeout"] = True
+        try:
+            controller.heartbeat(GENERATION)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("expired peer panel heartbeat was accepted")
+        assertions["peer_heartbeat_failure_reached_failed_safe"] = (
             controller.phase is SlotPhase.FAILED_SAFE)
         assertions["signed_pinned_mtls_carrier_closed_on_disconnect"] = True
         details["generation_90_disable"] = shell_endpoint.results[-1]
@@ -705,6 +831,7 @@ def main() -> int:
         details["generation_91_enable"] = shell_endpoint.results[-1]
         assertions["controller_generation_91_active"] = (
             controller.phase is SlotPhase.ACTIVE)
+        assert controller.heartbeat(GENERATION + 1)
         # R8 correctly rescued the original crossing window onto the surviving
         # local output at detach. Reattachment must not silently teleport a
         # window the user may have moved meanwhile. Place a fresh test window
@@ -748,6 +875,17 @@ def main() -> int:
             raise AssertionError(f"R9 assertion failure: {assertions}")
     finally:
         backend._vmexec(args.vm_viewer, "systemctl stop mm-r9-rdp", check=False)
+        for generation in (GENERATION, GENERATION + 1):
+            backend._vmexec(
+                args.vm_source,
+                f"systemctl stop mm-r9-panel-primary-g{generation} "
+                "2>/dev/null || true",
+                check=False)
+            backend._vmexec(
+                args.vm_viewer,
+                f"systemctl stop mm-r9-panel-peer-g{generation} "
+                "2>/dev/null || true",
+                check=False)
         for vm, role in (
             (args.vm_source, "primary"), (args.vm_viewer, "peer"),
         ):
@@ -774,6 +912,9 @@ def main() -> int:
             "systemctl stop mm-r9-qdshell 'mm-r9-shell-layout-*' "
             "2>/dev/null || true",
             check=False)
+        backend._virsh(
+            "qemu-monitor-command", args.vm_source, "--hmp",
+            "hostfwd_remove tcp:127.0.0.1:3388", check=False)
         (args.bundle / "source-stack.log").write_text(
             source_output, encoding="utf-8")
         for vm, path, name in (
@@ -789,7 +930,8 @@ def main() -> int:
         "scope": "software geometry/lifecycle/input; no physical-feel claim",
         "transport": (
             "signed-grant authenticated qdshell layout + pinned-mTLS carrier "
-            "+ qdwin inner RDP TLS + FreeRDP 3"),
+            "+ independent pinned-mTLS panel lease + qdwin inner RDP TLS "
+            "+ FreeRDP 3"),
         "topology": {"source": args.vm_source, "viewer": args.vm_viewer},
         "generations": [GENERATION, GENERATION + 1],
         "source_pids": {

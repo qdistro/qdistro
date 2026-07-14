@@ -370,10 +370,21 @@ def relay_streams(left: socket.socket, right: socket.socket, *,
                 payload = source.recv(COPY_CHUNK_BYTES)
             except ssl.SSLWantReadError:
                 continue
+            except (ConnectionResetError, ConnectionAbortedError,
+                    ssl.SSLEOFError):
+                closed_by = "left" if source is left else "right"
+                return RelayResult(
+                    closed_by, counters[left], counters[right])
             if not payload:
                 closed_by = "left" if source is left else "right"
                 return RelayResult(closed_by, counters[left], counters[right])
-            target.sendall(payload)
+            try:
+                target.sendall(payload)
+            except (BrokenPipeError, ConnectionResetError,
+                    ConnectionAbortedError, ssl.SSLEOFError):
+                closed_by = "left" if target is left else "right"
+                return RelayResult(
+                    closed_by, counters[left], counters[right])
             counters[source] += len(payload)
 
 

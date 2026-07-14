@@ -226,6 +226,49 @@ def test_relay_is_byte_exact_bounded_and_ends_on_disconnect() -> None:
     right_client.close()
 
 
+class _DisconnectingSocket:
+    def __init__(self, sock: socket.socket, *, operation: str):
+        self.sock = sock
+        self.operation = operation
+
+    def fileno(self) -> int:
+        return self.sock.fileno()
+
+    def recv(self, size: int) -> bytes:
+        if self.operation == "recv":
+            raise ConnectionResetError("test reset")
+        return self.sock.recv(size)
+
+    def sendall(self, payload: bytes) -> None:
+        if self.operation == "send":
+            raise BrokenPipeError("test broken pipe")
+        self.sock.sendall(payload)
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_closed_by"),
+    (("recv", "left"), ("send", "right")),
+)
+def test_relay_treats_abrupt_endpoint_reset_as_disconnect(
+        operation: str, expected_closed_by: str) -> None:
+    left_client, left_socket = socket.socketpair()
+    right_socket, right_client = socket.socketpair()
+    left = _DisconnectingSocket(left_socket, operation=operation)
+    right = _DisconnectingSocket(right_socket, operation=operation)
+    left_client.sendall(b"make-left-readable")
+
+    result = relay_streams(
+        left, right, lease_expires_at=int(time.time()) + 60)
+
+    assert result.closed_by == expected_closed_by
+    assert result.left_to_right == 0
+    assert result.right_to_left == 0
+    left_client.close()
+    left_socket.close()
+    right_socket.close()
+    right_client.close()
+
+
 def _receive_exact(sock: socket.socket, size: int) -> bytes:
     result = bytearray()
     while len(result) < size:
