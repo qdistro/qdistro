@@ -5,6 +5,7 @@ The real pairing service will own socket creation and mTLS relay admission.
 This helper proves the privilege boundary: root creates a private AF_UNIX
 listener, passes only its fd to an admin-owned qdwin, and never exposes a qdwin
 TCP listener.  The signed-grant mTLS carrier is the only network ingress.
+Window placement remains entirely on qdwin's production shell protocol path.
 """
 from __future__ import annotations
 
@@ -62,9 +63,6 @@ def main() -> int:
         "QDWIN_ALLOWED_UID": str(user.pw_uid),
         "QDWIN_ALLOWED_LOCKER_ANY": "1",
         "QDWIN_ENABLE_SCREENSHOOTER": "1",
-        "QDWIN_TEST_PLACE_APPID": "qdwin-marker-client",
-        "QDWIN_TEST_PLACE_X": str(args.width - 256),
-        "QDWIN_TEST_PLACE_Y": "200",
         "QDWIN_RDP_INITIAL_MODE": f"{args.width}x{args.height}",
         "WESTON_MODULE_MAP": module_map,
     })

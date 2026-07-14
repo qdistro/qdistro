@@ -6,7 +6,9 @@ headless + RDP topology, a real FreeRDP thin client decodes the remote half of
 one straddling toplevel, input returns through the RDP seat, and a full
 disconnect/disable/re-enable/reconnect cycle preserves the compositor and app.
 Every runtime slot mutation passes through the authenticated qdshell executor;
-a separate same-uid output client is denied while that shell is bound.
+a separate same-uid output client is denied while that shell is bound. Both
+straddling windows are positioned through the production qdshell v30 protocol,
+without qdwin's compile-time test placement hook.
 It deliberately makes no physical-panel latency or native-feel claim.
 """
 from __future__ import annotations
@@ -15,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -130,7 +133,7 @@ def stage(backend: QciVMBackend, vm_source: str, vm_viewer: str,
         vm_source,
         "rm -rf /root/qdistro-src/qdwin/build-r9-live && "
         "meson setup /root/qdistro-src/qdwin/build-r9-live "
-        "/root/qdistro-src/qdwin -Denable_test_place=true && "
+        "/root/qdistro-src/qdwin && "
         "ninja -C /root/qdistro-src/qdwin/build-r9-live "
         "qdwin-shell.so qdwin-output-probe qdwin-marker-client && "
         "install -m 0755 /root/qdistro-src/qdwin/build-r9-live/"
@@ -333,6 +336,61 @@ def source_probe(backend: QciVMBackend, vm: str, *args: str) -> str:
         vm, "runuser -u admin -- env HOME=/home/admin "
         "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=r9-source "
         f"/tmp/r9-qdwin-output-probe {suffix}")
+
+
+def position_marker_through_shell(
+        backend: QciVMBackend, vm: str, *, excluded: set[int] | None = None,
+        timeout: float = 10) -> dict[str, object]:
+    """Move the newest marker through qdshell's exclusive v30 binding."""
+    excluded = excluded or set()
+    deadline = time.monotonic() + timeout
+    handles: list[int] = []
+    log = ""
+    while time.monotonic() < deadline:
+        log = backend._vmexec(vm, f"cat {SOURCE_RT}/weston.log")
+        handles = [
+            int(value) for value in re.findall(
+                r"toplevel_added handle=(\d+).*app_id=qdwin-marker-client",
+                log)
+            if int(value) not in excluded
+        ]
+        if handles:
+            break
+        time.sleep(0.2)
+    if not handles:
+        raise RuntimeError("timed out discovering fresh marker handle")
+
+    handle = handles[-1]
+    shell_pid = int(backend._vmexec(
+        vm, f"cat {SOURCE_RT}/qdshell.pid").strip())
+    output = backend._vmexec(
+        vm,
+        "runuser -u admin -- env HOME=/home/admin "
+        "XDG_RUNTIME_DIR=/run/user/1000 "
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+        "WAYLAND_DISPLAY=r9-source "
+        f"qs ipc --pid {shell_pid} call qdwin positionWindow "
+        f"{handle} {W - SEAM} {OY}")
+
+    expected = (
+        f"request_set_position handle={handle} outer=({W - SEAM},{OY}) "
+        f"size={MW}x{MH}")
+    while time.monotonic() < deadline:
+        log = backend._vmexec(vm, f"cat {SOURCE_RT}/weston.log")
+        matching = [line for line in log.splitlines() if expected in line]
+        if matching:
+            if any("(clamped)" in line for line in matching):
+                raise AssertionError(
+                    f"qdshell cross-output position was clamped: {matching[-1]}")
+            return {
+                "handle": handle,
+                "outer": [W - SEAM, OY, MW, MH],
+                "ipc_output": output.strip(),
+                "compositor_log": matching[-1],
+            }
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"timed out waiting for qdshell position acknowledgement: {expected}")
 
 
 def shell_layout(backend: QciVMBackend, vm: str, *, generation: int,
@@ -706,6 +764,11 @@ def main() -> int:
         shell_pid = int(backend._vmexec(
             args.vm_source, f"cat {SOURCE_RT}/qdshell.pid").strip())
         assertions["real_qdshell_bound_as_output_authority"] = shell_pid > 1
+        first_position = position_marker_through_shell(
+            backend, args.vm_source)
+        details["generation_90_shell_position"] = first_position
+        assertions["real_qdshell_positions_cross_output_window"] = (
+            first_position["outer"] == [W - SEAM, OY, MW, MH])
 
         shell_endpoint = LiveShellEndpoint(backend, args.vm_source)
         local_endpoint = LivePrimaryLocalEndpoint()
@@ -855,7 +918,14 @@ def main() -> int:
             "/tmp/r9-qdwin-marker-client --width 512 --height 400 "
             "--seam-x 256 --output-id 9 --generation 90 --frame 2 "
             "--animate-ms 200")
-        time.sleep(1)
+        second_position = position_marker_through_shell(
+            backend, args.vm_source,
+            excluded={int(first_position["handle"])})
+        details["generation_91_shell_position"] = second_position
+        assertions["redock_window_uses_new_qdshell_position_request"] = (
+            second_position["outer"] == [W - SEAM, OY, MW, MH]
+            and second_position["handle"] != first_position["handle"])
+        time.sleep(0.5)
         second = capture_viewer(
             backend, args.vm_viewer, args.bundle / "attached-epoch2.ppm")
         details["epoch2_pixels"] = assert_remote_half(second)
@@ -864,6 +934,11 @@ def main() -> int:
             "reattach_composites_fresh_pixels_without_authority_or_app_restart"
         ] = True
         assertions["redock_requires_strictly_newer_carrier_generation"] = True
+        final_weston_log = backend._vmexec(
+            args.vm_source, f"cat {SOURCE_RT}/weston.log")
+        assertions["production_qdwin_has_no_test_placement_path"] = (
+            "TEST placement" not in final_weston_log
+            and "QDWIN_TEST_PLACE" not in final_weston_log)
         controller.detach(GENERATION + 1)
         assertions["controller_clean_detach_returns_disabled"] = (
             controller.phase is SlotPhase.DISABLED)
