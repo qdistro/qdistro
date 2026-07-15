@@ -11,6 +11,15 @@
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
     SPINNER="$REPO_ROOT/scripts/vm/spin-test-vm.sh"
+    BOOTSTRAP="$REPO_ROOT/scripts/vm/fresh-vm-bootstrap.sh"
+}
+
+@test "app-deps golden includes Thunar desktop-location providers" {
+    [ -f "$BOOTSTRAP" ]
+    # Ensures the visual GTK3 compatibility scenario gets the standard
+    # Recent/Trash/Computer/Network sidebar instead of a partial Thunar UI.
+    run grep -E '_app_pkgs=.*thunar gvfs gvfs-backends' "$BOOTSTRAP"
+    [ "$status" -eq 0 ]
 }
 
 @test "spin-test-vm.sh forwards QDWIN_APP_DEPS into the in-guest bootstrap env" {

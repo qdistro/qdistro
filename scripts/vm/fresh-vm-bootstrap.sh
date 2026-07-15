@@ -333,13 +333,16 @@ zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
 # package that fails to install just leaves its one app test infra-blocked.
 if [ "${QDWIN_APP_DEPS:-0}" = 1 ]; then
     log "installing qdwin app-test deps (best-effort; QDWIN_APP_DEPS=0 to skip)..."
-    # Map: firefox=MozillaFirefox, gtk4=gnome-text-editor, gtk3=thunar,
+    # Map: firefox=MozillaFirefox, gtk4=gnome-text-editor, gtk3=thunar.
+    # Thunar's expected Recent/Trash/Computer/Network locations are provided
+    # by gvfs + gvfs-backends; installing thunar alone leaves a misleadingly
+    # functional but incomplete file-manager test surface.
     # qt5=vlc, electron=chromium, wxwidgets=audacity, tk=python3-tk,
     # fltk demo needs fltk-devel+gcc-c++, swing=java(jdk for javac), imlib2=feh.
     # Fonts: xterm's `-fa Monospace` (Xft) and most toolkits need a real font
     # backing fontconfig's Monospace/Sans aliases — without dejavu/liberation
     # the image has no scalable Monospace and xterm refuses to start.
-    _app_pkgs="MozillaFirefox xterm foot gnome-text-editor thunar vlc chromium \
+    _app_pkgs="MozillaFirefox xterm foot gnome-text-editor thunar gvfs gvfs-backends vlc chromium \
 audacity python3-tk fltk fltk-devel gcc-c++ feh \
 java-21-openjdk java-21-openjdk-devel java-17-openjdk java-17-openjdk-devel \
 dejavu-fonts liberation-fonts"

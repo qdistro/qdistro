@@ -125,6 +125,19 @@ QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
 ```
 
+For the complete GUI matrix, including real third-party application coverage,
+build a clean app-deps golden and use eight disposable VM workers:
+
+```sh
+QCI_GUI_JOBS=8 QDWIN_APP_DEPS=1 \
+QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+  qdistro/ci/bin/qci gui
+```
+
+The app-deps image includes the GVfs providers required for Thunar's standard
+Recent, Trash, Computer, and Network locations; a partial file-manager UI is a
+bake failure, not a reason to relax the visual scenario.
+
 `--yolo` is appropriate here only because the runner controls a disposable VM
 and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
 interactive approval. The scenario still fails closed unless the agent writes
