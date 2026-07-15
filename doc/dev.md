@@ -157,6 +157,12 @@ Haiku and Luna:
   so `virsh -c qemu:///session`, `vm-exec`, and `vm-gui` can drive the guest.
 - qci fails closed before provisioning when `bubblewrap` is unavailable. Do not
   work around this by running a GUI scenario directly on the workstation.
+- The disposable `gui-qdwin` image pins Weston's Pixman renderer. The
+  interactive desktop defaults to GL for its hardware cursor plane, but GUI CI
+  has no host viewer and therefore gains nothing from that path. On virtio-gpu,
+  GL/KMS can reject atomic commits when a full-output lock surface appears and
+  produce a false black screenshot; Pixman keeps lock-screen and application
+  rendering deterministic inside the VM.
 
 Consequently, a scenario must never call `virt-manager`, `virt-viewer`,
 `remote-viewer`, `xdg-open`, or a graphical app on the host. Inspect images from

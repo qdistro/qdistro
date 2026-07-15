@@ -129,6 +129,8 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
         fi
         runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' >/dev/null 2>&1 \
             || { echo "[gui-spin] ERROR: qdwin session units not active on qdwin clone"; exit 1; }
+        grep -qx 'renderer=pixman' /home/admin/weston.ini \
+            || { echo "[gui-spin] ERROR: qdwin golden clone lost its pixman renderer pin"; exit 1; }
         echo "[gui-spin] qdwin clone session up (wayland-1)"
     fi
     # The baked install surface the scenarios require — fail-closed on core bits
@@ -415,9 +417,37 @@ else
     #     pulled in by qdwin-session.target — see install-qdwin-session-for-vm.sh).
     #     Ensure the target is enabled + (re)started (idempotent — bootstrap
     #     normally already has wayland-1 up) and wait for the wayland-1 socket.
+    # GUI CI has no host-side SPICE/RDP viewer, so it does not need the GL-only
+    # virtio cursor-plane path used by an interactive desktop. Pin Pixman in
+    # disposable qdwin workers: virtio-gpu's GL/KMS path can begin rejecting
+    # every atomic commit when a full-output LOCK-layer surface appears, leaving
+    # screenshots black even though the locker and input protocol are healthy.
+    # Pixman renders the same guest UI deterministically and keeps every GUI
+    # pixel inside the VM. This is test-profile policy only; production's
+    # install-qdwin-session-for-vm.sh continues to default to renderer=gl.
+    if grep -q '^renderer=' /home/admin/weston.ini; then
+        sed -i 's/^renderer=.*/renderer=pixman/' /home/admin/weston.ini
+    else
+        sed -i '/^\[core\]$/a renderer=pixman' /home/admin/weston.ini
+    fi
+    grep -qx 'renderer=pixman' /home/admin/weston.ini \
+        || { echo "[gui-spin] ERROR: failed to pin qdwin GUI renderer to pixman"; exit 1; }
+
     systemctl daemon-reload
     runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
     runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
+    # Bootstrap normally started the session before this test-profile layer was
+    # applied. Restart the compositor so the new renderer is active in the
+    # golden, then reconnect its shell and optional standalone locker peers.
+    runuser -l admin -c 'systemctl --user restart qdwin-compositor.service'
+    for _i in $(seq 1 30); do
+        [ -S /run/user/1000/wayland-1 ] && break
+        sleep 0.5
+    done
+    [ -S /run/user/1000/wayland-1 ] \
+        || { echo "[gui-spin] ERROR: qdwin compositor restart did not recreate wayland-1"; exit 1; }
+    runuser -l admin -c 'systemctl --user restart qdshell.service'
+    runuser -l admin -c 'systemctl --user try-restart qdlocker.service 2>/dev/null' || true
 
     # Wait up to 60s for admin's wayland-1 socket (qdwin compositor up). The
     # compositor restarts on-failure, so give it longer than the labwc path.
@@ -465,6 +495,8 @@ else
     ls -ld /usr/libexec/qdistro/qdwin-libweston/lib64 2>&1 \
         || echo "WARN: vendored libweston not installed (popup clamp/grab will be absent)"
     runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' 2>&1 || true
+    grep -qx 'renderer=pixman' /home/admin/weston.ini \
+        || { echo "ERROR: qdwin GUI test profile is not using pixman"; exit 1; }
     ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
 fi
 echo "--- done ---"
