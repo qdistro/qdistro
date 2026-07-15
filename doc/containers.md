@@ -321,10 +321,11 @@ is delegated by default.
 
 ## Future work
 
-- **Delegate-side silo badge** ([ui.md](ui.md#silo-badges) — ring tint
-  + bottom-right glyph). PodAppsProvider currently prefixes each
-  entry's description with `[tier2/<container>]` as a stand-in;
-  the launcher / taskbar delegate badge is the real fix.
+- **Complete silo-badge parity** ([ui.md](ui.md#silo-badges)). The launcher
+  now renders PodAppsProvider's bottom-right `container` glyph on a bright
+  magenta tier-2 badge and retains `[tier2/<container>]` as a redundant text
+  cue. The deterministic per-silo ring tint and matching taskbar/dock overlay
+  remain to be applied to every surface.
 - **Tier-5 VMApps service**: shares the launcher / taskbar / badge
   vocabulary with PodApps but **not** the wayland transport. Tier-5
   apps arrive at the outer compositor as ordinary `xdg_toplevel`s
