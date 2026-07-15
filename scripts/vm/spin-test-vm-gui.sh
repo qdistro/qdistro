@@ -131,6 +131,8 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
             || { echo "[gui-spin] ERROR: qdwin session units not active on qdwin clone"; exit 1; }
         grep -qx 'renderer=pixman' /home/admin/weston.ini \
             || { echo "[gui-spin] ERROR: qdwin golden clone lost its pixman renderer pin"; exit 1; }
+        grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+            || { echo "[gui-spin] ERROR: qdwin golden clone lost its fixed GUI-test output mode"; exit 1; }
         echo "[gui-spin] qdwin clone session up (wayland-1)"
     fi
     # The baked install surface the scenarios require — fail-closed on core bits
@@ -423,15 +425,26 @@ else
     # every atomic commit when a full-output LOCK-layer surface appears, leaving
     # screenshots black even though the locker and input protocol are healthy.
     # Pixman renders the same guest UI deterministically and keeps every GUI
-    # pixel inside the VM. This is test-profile policy only; production's
-    # install-qdwin-session-for-vm.sh continues to default to renderer=gl.
+    # pixel inside the VM. Pin the output to the VM helper's 1280x800 QMP
+    # coordinate space too: if Weston switches from the firmware 1280x800 mode
+    # to production's 1920x1080 after a test samples the framebuffer, absolute
+    # tablet input is rescaled between observation and injection. Fixed mode +
+    # renderer are test-profile policy only; production's installer continues
+    # to default to renderer=gl and its normal 1920x1080 output.
     if grep -q '^renderer=' /home/admin/weston.ini; then
         sed -i 's/^renderer=.*/renderer=pixman/' /home/admin/weston.ini
     else
         sed -i '/^\[core\]$/a renderer=pixman' /home/admin/weston.ini
     fi
+    if grep -q '^mode=' /home/admin/weston.ini; then
+        sed -i 's/^mode=.*/mode=1280x800@60/' /home/admin/weston.ini
+    else
+        sed -i '/^\[output\]$/a mode=1280x800@60' /home/admin/weston.ini
+    fi
     grep -qx 'renderer=pixman' /home/admin/weston.ini \
         || { echo "[gui-spin] ERROR: failed to pin qdwin GUI renderer to pixman"; exit 1; }
+    grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+        || { echo "[gui-spin] ERROR: failed to pin qdwin GUI output to 1280x800"; exit 1; }
 
     systemctl daemon-reload
     runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
@@ -497,6 +510,8 @@ else
     runuser -l admin -c 'systemctl --user is-active qdwin-compositor.service qdshell.service' 2>&1 || true
     grep -qx 'renderer=pixman' /home/admin/weston.ini \
         || { echo "ERROR: qdwin GUI test profile is not using pixman"; exit 1; }
+    grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
+        || { echo "ERROR: qdwin GUI test profile is not using its fixed 1280x800 mode"; exit 1; }
     ps -ef | grep -E "[w]eston|[q]s -p|quickshell" | head -5 || true
 fi
 echo "--- done ---"

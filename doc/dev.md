@@ -157,7 +157,10 @@ Haiku and Luna:
   so `virsh -c qemu:///session`, `vm-exec`, and `vm-gui` can drive the guest.
 - qci fails closed before provisioning when `bubblewrap` is unavailable. Do not
   work around this by running a GUI scenario directly on the workstation.
-- The disposable `gui-qdwin` image pins Weston's Pixman renderer. The
+- The disposable `gui-qdwin` image pins Weston's Pixman renderer and a fixed
+  1280×800 output mode. The fixed mode keeps QMP tablet coordinates stable
+  between screenshot-based observation and input injection; production keeps
+  its normal output mode. The
   interactive desktop defaults to GL for its hardware cursor plane, but GUI CI
   has no host viewer and therefore gains nothing from that path. On virtio-gpu,
   GL/KMS can reject atomic commits when a full-output lock surface appears and
