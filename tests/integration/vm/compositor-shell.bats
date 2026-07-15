@@ -37,7 +37,8 @@ teardown_file() {
 # Full "real user" round-trip on top of the greeter boot path:
 #   login → click the upper-left ROCKET icon (the qdshell launcher /
 #   "start" button) → launch foot from the launcher → type `ls /` →
-#   verify the listing is printed on screen (grim + tesseract OCR).
+#   verify the listing is printed on screen (host-side libvirt display capture,
+#   then guest-side tesseract OCR).
 # Driver: tests/integration/vm/s103-launcher-foot-roundtrip.sh, staged
 # over the host HTTP server (same pattern as app-launcher.bats).
 @test "launcher-foot-roundtrip: rocket icon click launches foot, runs ls / and prints output" {
@@ -58,6 +59,36 @@ teardown_file() {
     assert_output_contains "PASS: foot terminal launched from the launcher"
     assert_output_contains "PASS: foot terminal is up and focused"
     assert_output_contains "PASS: typed 'ls /' into foot"
-    assert_output_contains "PASS: foot printed the root listing"
-    assert_output_contains "PASS: launcher → foot → command round-trip end-to-end"
+    assert_output_contains "READY: foot output is mapped for host display capture"
+
+    # qdwin intentionally has no wlr-screencopy global, and Weston 14's capture
+    # client is incompatible with this image's system-weston/vendored-libweston
+    # boundary. Capture the actual virtual display from outside the guest. This
+    # is the same honest pixel source a person sees through SPICE/RDP.
+    local shot="$BATS_TEST_TMPDIR/s103-foot.png"
+    run virsh screenshot "$VM_NAME" "$shot"
+    assert_success
+    [ -s "$shot" ] || fail_loud "virsh screenshot produced no image at $shot"
+
+    # tesseract is baked in the VM. Serve the just-captured pixels over the
+    # already-private driver HTTP server so OCR remains hermetic to the image.
+    cp "$shot" "$(_qd_driver_stage_dir)/s103-foot.png"
+    vm_run "command -v tesseract >/dev/null"
+    require "tesseract not installed on VM (needed for launcher visual assertion)"
+    vm_run "curl -fsS -o /tmp/s103-foot.png http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s103-foot.png && tesseract /tmp/s103-foot.png - 2>/dev/null"
+    assert_success
+
+    local ocr_text="$output" hits=0 d
+    for d in usr etc bin var lib home tmp dev proc sbin boot run opt root; do
+        grep -qiw "$d" <<<"$ocr_text" && hits=$((hits + 1))
+    done
+    if [ "$hits" -lt 2 ]; then
+        echo "--- OCR output (matched only $hits root entries) ---" >&2
+        echo "$ocr_text" >&2
+        return 1
+    fi
+
+    echo "PASS: foot printed the root listing (OCR matched $hits root entries)"
+    echo "PASS: launcher → foot → command round-trip end-to-end"
+    vm_run "pkill -9 -x foot >/dev/null 2>&1 || true"
 }

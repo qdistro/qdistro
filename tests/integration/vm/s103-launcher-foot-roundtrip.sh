@@ -22,8 +22,9 @@
 #                  Enter; the top result (the foot terminal) launches.
 #   4. WAIT      — wait for foot's toplevel to map in qdwin.
 #   5. TYPE      — type `ls /` into the now-focused terminal and Enter.
-#   6. VERIFY    — screenshot + OCR; assert the root directory listing
-#                  (usr / etc / bin / …) is actually printed on screen.
+#   6. VERIFY    — the host Bats test captures the VM display with libvirt
+#                  and sends the image back for OCR, asserting that the root
+#                  directory listing (usr / etc / bin / …) is on screen.
 #
 # Every PASS string below is load-bearing — compositor-shell.bats
 # asserts on each one. Renaming a PASS line WILL silently green-wash
@@ -35,8 +36,10 @@
 #     /dev/uinput available). Missing tool/socket -> clean SKIP.
 #   - foot installed with a .desktop entry (so it shows in the launcher
 #     app list). foot ships /usr/share/applications/foot.desktop.
-#   - grim + tesseract for the on-screen output check (same OCR path as
-#     s100). tesseract missing -> degraded process-only check.
+#   - The enclosing host test provides the screenshot + OCR assertion. qdwin
+#     deliberately does not expose the wlr-screencopy protocol grim requires,
+#     and the Weston 14 screenshooter is not compatible across the VM's
+#     system-weston/vendored-libweston boundary.
 #   - A test password via $QDGREETER_TEST_PASSWORD and the staged
 #     /root/s100-type-password.sh helper (same as s100). When the VM is
 #     already logged in the login step is a no-op.
@@ -146,7 +149,14 @@ foot_mapped() {
              | grep -qiE 'qdwin: mapped handle=[0-9]+ .*foot|toplevel_added .*foot'
 }
 
-CANDIDATES=("24 20" "32 22" "18 16" "44 24" "28 30")
+# ydotoold's virtual absolute device can expose a 4x coordinate transform
+# under the VM's 1920x1080 virtual DRM output (for example, requesting 6,5
+# lands at compositor coordinate 24,20).  Small points remain inside the
+# launcher's upper-left capsule with either a 1x or 4x transform, while the
+# older 18..44 points miss below/right of the 31px bar at 4x.  Try the
+# transform-safe points first and retain the wider points for other themes.
+CANDIDATES=("6 5" "8 5" "5 4" "11 6" "7 7"
+            "24 20" "32 22" "18 16" "44 24" "28 30")
 CLICKED_AT=""
 for xy in "${CANDIDATES[@]}"; do
     read -r CX CY <<<"$xy"
@@ -176,9 +186,6 @@ if [[ -n "$CLICKED_AT" ]]; then
     pass "foot terminal launched from the launcher"
 else
     fail "foot never launched after clicking the rocket icon"
-    SHOT=/tmp/s103-miss.png
-    as_admin grim "$SHOT" >/dev/null 2>&1 \
-        && note "diagnostic screenshot at $SHOT"
     journalctl --after-cursor="$CURSOR" 2>/dev/null | tail -30 >&2 || true
     echo "[s103] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
@@ -200,41 +207,13 @@ yd key 28:1 28:0           # Enter — run the command
 sleep 1.5                  # let ls output render
 pass "typed 'ls /' into foot"
 
-# ---------------------------------------------------------------------------
-# Step 6 — VERIFY the listing actually printed, by OCR'ing the screen.
-# `ls /` prints the well-known root entries; we require at least two to
-# survive OCR noise (same grim+tesseract path as s100).
-# ---------------------------------------------------------------------------
-SHOT=/tmp/s103-foot.png
-as_admin grim "$SHOT" >/dev/null 2>&1 || fail "grim screenshot failed"
-[[ -s "$SHOT" ]] || fail "screenshot $SHOT missing or empty"
-
-if command -v tesseract >/dev/null 2>&1; then
-    OCR_TEXT=$(tesseract "$SHOT" - 2>/dev/null || true)
-    HITS=0
-    for d in usr etc bin var lib home tmp dev proc sbin boot run opt root; do
-        printf '%s\n' "$OCR_TEXT" | grep -qiw "$d" && HITS=$((HITS + 1))
-    done
-    if [[ "$HITS" -ge 2 ]]; then
-        pass "foot printed the root listing (OCR matched $HITS root entries)"
-    else
-        fail "OCR found only $HITS root entries on screen — 'ls /' output not visible"
-        note "OCR dump follows:"; printf '%s\n' "$OCR_TEXT" | head -40 >&2
-    fi
-else
-    # No OCR — fall back to proving foot is alive and a `ls` child ran.
-    note "tesseract not installed; OCR substring check skipped (degraded)"
-    pgrep -x foot >/dev/null 2>&1 \
-        && pass "foot printed the root listing (OCR matched 2 root entries)" \
-        || fail "foot process gone — cannot confirm command output"
-fi
-
-# Cleanup.
-pkill -9 -x foot >/dev/null 2>&1 || true
-
+# Leave foot mapped: compositor-shell.bats now takes the authoritative display
+# capture from the host with `virsh screenshot`, then sends that image back to
+# this VM's tesseract.  A guest Wayland client cannot independently capture the
+# qdwin output, by design.
 if [[ "$FAILCOUNT" -eq 0 ]]; then
-    pass "launcher → foot → command round-trip end-to-end"
-    echo "[s103] $PASSCOUNT passes, 0 failures"
+    echo "READY: foot output is mapped for host display capture"
+    echo "[s103] $PASSCOUNT passes, 0 failures; host OCR pending"
     exit 0
 else
     echo "[s103] $PASSCOUNT passes, $FAILCOUNT failures"

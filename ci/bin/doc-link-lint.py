@@ -10,7 +10,6 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-
 LINK_RE = re.compile(
     r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)"
 )
