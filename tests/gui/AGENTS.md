@@ -47,8 +47,9 @@ wall-clock parallelism, clone the base VM per
   scenario runs. Nothing to do by hand;
   just be aware production locker sockets answer `error: command
   unavailable` to those three commands.
-- The qdshell ctrl-socket at `/run/user/1000/qdshell.sock` is still
-  available for navigating the desktop *outside* the locker.
+- The shipping Quickshell qdshell does not implement the removed qdshell.py
+  launcher ctrl commands. Start throwaway test applications directly in the
+  guest user session (scenario 01 uses a transient `systemd-run --user` unit).
 - The **qdlocker** ctrl-socket at `/run/user/1000/qdlocker.sock` is
   the load-bearing introspection surface for this harness — every
   lock-state assertion goes through it.
@@ -94,11 +95,11 @@ qdlocker_session_healthy || { echo "session not up"; exit 2; }
 ```
 
 `qdlocker-helpers.sh` sources `qdwin-helpers.sh` from the qdwin
-sibling repo (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`,
-`qdwin_qmp_key`, `qdwin_ctrl` all work as documented in qdwin's
-AGENTS.md) and adds locker-specific accessors. `qdwin_ctrl` depends
-on qdshell's optional test ctrl-socket; qdlocker core scenarios should
-prefer the qdlocker helpers and direct VM commands when possible.
+sibling repo (so `qdwin_send_key`, `qdwin_chord`, `qdwin_screenshot`, and
+`qdwin_qmp_key` work as documented in qdwin's AGENTS.md) and adds
+locker-specific accessors. qdlocker core scenarios use the qdlocker socket,
+Quickshell IPC where explicitly required, and direct VM commands; they must
+not depend on the removed qdshell.py ctrl API.
 
 - `qdlocker_ctrl <command>` — talks to `/run/user/1000/qdlocker.sock`
   via the guest's socat. Commands: `status`, `lock`,

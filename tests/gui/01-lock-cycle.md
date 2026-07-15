@@ -44,11 +44,18 @@ case "$(qdlocker_ctrl status 2>/dev/null)" in
         ;;
 esac
 
-# Spawn a foot so we can verify post-unlock keyboard works.
-"$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x foot 2>/dev/null; sleep 1' >/dev/null
-qdwin_ctrl "launcher-toggle" >/dev/null
-qdwin_ctrl "launcher-type foot" >/dev/null
-qdwin_ctrl "launcher-activate" >/dev/null
+# Spawn a foot directly in the guest user session so the scenario does not
+# depend on the removed qdshell.py launcher ctrl commands. systemd-run returns
+# after the transient unit is accepted and keeps the app detached from
+# vm-exec's guest-agent command channel.
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'pkill -u admin -x foot 2>/dev/null; \
+   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+     systemctl --user reset-failed qdlocker-test-foot.service 2>/dev/null || true; \
+   runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+     systemd-run --user --collect --unit=qdlocker-test-foot \
+       --setenv=WAYLAND_DISPLAY=wayland-1 \
+       foot --title qdlocker-test' >/dev/null
 sleep 1.5
 ```
 
@@ -109,17 +116,13 @@ qdwin_send_key KEY_ENTER
 qdlocker_wait_for_unlock 5
 qdwin_screenshot /tmp/qdlocker-01-step4-unlocked.png
 qdlocker_ctrl status
-qdwin_ctrl "locker"
 ```
 
 **Assert (4.1):** qdlocker ctrl reports `last=success`; status
 reports `locked=False`.
-**Assert (4.2):** _Optional — requires `qdwin_ctrl "locker"` to be
-implemented in qdshell, which it currently is not._ When available,
-verify `locked=False attached=no` — the lock-surface proxy was
-destroyed, not just the flag flipped (B1 regression guard from
-qdwin/tests/gui/03-locker-cycle.md:94). Until then, equivalent
-proof comes from the qdwin journal line `qdwin:
+**Assert (4.2):** verify the lock-surface proxy was destroyed, not just
+the flag flipped (B1 regression guard from
+qdwin/tests/gui/03-locker-cycle.md:94), using the qdwin journal line `qdwin:
 locked_changed=0 cause=locker_set_locked`:
 
 ```bash
@@ -145,7 +148,10 @@ qdwin_screenshot /tmp/qdlocker-01-step5-post.png
 ## Cleanup
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x foot 2>/dev/null; true' >/dev/null
+"$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+     systemctl --user stop qdlocker-test-foot.service 2>/dev/null || true; \
+   pkill -u admin -x foot 2>/dev/null || true' >/dev/null
 ```
 
 ## Pass criteria
