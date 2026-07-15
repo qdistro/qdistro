@@ -129,14 +129,17 @@ normal desktop content leaked through the lock screen.
 ### Step 4 — compositor journal corroborates fullscreen origin
 
 ```bash
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"1 minute ago\" --no-pager"' \
-  | grep -E "set_fullscreen handle=.* outer=${SW}x${SH} at \\(0,0\\)|promoted locker toplevel"
+LOCKER_LOG=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"')
+printf '%s\n' "$LOCKER_LOG" \
+  | grep -E "set_fullscreen handle=.* outer=${SW}x${SH} at \\(0,0\\)"
+printf '%s\n' "$LOCKER_LOG" | grep "promoted locker toplevel"
 ```
 
 **Assert (4.1):** journal contains both the locker promotion and a
 fullscreen placement at `(0,0)`. This is not a substitute for the
-pixel check; it narrows the failure if Step 3 fails.
+pixel check; it narrows the failure if Step 3 fails. Use the current boot
+because visual inspection can take longer than a wall-clock journal window.
 
 ## Cleanup
 
