@@ -157,6 +157,12 @@ Artifact directory:
 Rules:
 - Read the nearest AGENTS.md before executing the scenario.
 - Do not edit source files.
+- Every graphical process, dialog, compositor, and input action belongs inside
+  the disposable VM named above. Never launch a host GUI program (including
+  virt-manager, virt-viewer, remote-viewer, xdg-open, or an app under the host
+  DISPLAY/Wayland session). Drive the guest only through the repository's
+  vm-exec/vm-gui helpers and virsh. qci deliberately makes the host desktop
+  sockets unavailable to this agent process.
 - Save screenshots, OCR output, command logs, and notes under:
   \`$artifact_dir/\`
 - Before returning, write \`$artifact_dir/status.txt\`
@@ -599,9 +605,61 @@ gui_capture_unmatched_tail() {
     } >> "$sidecar"
 }
 
+# Detach every host-side GUI controller from the developer's desktop. The
+# graphical system under test lives in the disposable VM; host processes only
+# orchestrate libvirt, move evidence, and call a non-interactive visual model.
+# Keep XDG_RUNTIME_DIR unchanged because qemu:///session's libvirt socket lives
+# below it. WAYLAND_DISPLAY and the session-bus address are instead pointed at
+# deliberately nonexistent endpoints; run_agent_command additionally hides the
+# real socket files in a mount namespace.
+gui_isolate_host_desktop() {
+    export DISPLAY=
+    export WAYLAND_DISPLAY=qci-host-display-disabled
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null
+    export XAUTHORITY=/dev/null
+    export XDG_SESSION_TYPE=tty
+    export XDG_ACTIVATION_TOKEN=
+    export DESKTOP_STARTUP_ID=
+    export QT_QPA_PLATFORM=offscreen
+    export GDK_BACKEND=headless
+    export SDL_VIDEODRIVER=dummy
+    export BROWSER=/bin/false
+    export SSH_ASKPASS=/bin/false
+    export SSH_ASKPASS_REQUIRE=never
+    export SUDO_ASKPASS=/bin/false
+    export GIT_ASKPASS=/bin/false
+    export NO_AT_BRIDGE=1
+    export QCI_HOST_GUI_ISOLATED=1
+}
+
+# Populate an argv array with the mandatory host-desktop mount sandbox. The
+# root filesystem remains writable because agents must write evidence and use
+# repository VM helpers. Only desktop entry points are hidden: all X11 sockets,
+# the live Wayland socket(s), and the user session bus. The libvirt sockets under
+# XDG_RUNTIME_DIR/libvirt remain visible, so virsh qemu:///session still works.
+gui_host_sandbox_args() {
+    local -n out=$1
+    local runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} host_socket
+    command -v bwrap >/dev/null 2>&1 || return 127
+    out=(bwrap --die-with-parent --dev-bind / /)
+    if [ -d /tmp/.X11-unix ]; then
+        out+=(--tmpfs /tmp/.X11-unix)
+    fi
+    for host_socket in "$runtime"/wayland-* "$runtime"/bus; do
+        [ -S "$host_socket" ] || continue
+        out+=(--ro-bind /dev/null "$host_socket")
+    done
+}
+
 run_agent_command() {
     local prompt=$1 log_path=$2 cmd=${QCI_AGENT_CMD:-} expanded workdir rc
+    local -a host_sandbox=()
     if [ -z "$cmd" ]; then
+        return 127
+    fi
+    gui_isolate_host_desktop
+    if ! gui_host_sandbox_args host_sandbox; then
+        printf 'qci: bubblewrap is required to isolate GUI agents from the host desktop\n' > "$log_path"
         return 127
     fi
     # Agents occasionally invoke tools that treat an intended stdout formatter
@@ -626,17 +684,17 @@ run_agent_command() {
         if [[ "$cmd" == *"{prompt}"* ]]; then
             expanded=${cmd//\{prompt\}/$prompt}
             if [ "$to" -gt 0 ]; then
-                timeout -k 15 "$to" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                timeout -k 15 "$to" "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
             else
-                bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
+                "${host_sandbox[@]}" bash -lc "$expanded" < /dev/null > "$log_path" 2>&1
             fi
         else
             if [ "$to" -gt 0 ]; then
                 # shellcheck disable=SC2086
-                timeout -k 15 "$to" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+                timeout -k 15 "$to" "${host_sandbox[@]}" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
             else
                 # shellcheck disable=SC2086
-                $cmd "$prompt" < /dev/null > "$log_path" 2>&1
+                "${host_sandbox[@]}" $cmd "$prompt" < /dev/null > "$log_path" 2>&1
             fi
         fi
     )
@@ -1128,6 +1186,14 @@ record_agent_identity() {
 
 gate_gui() {
     qci_assert_run_dir || return $?
+    gui_isolate_host_desktop
+    if ! command -v bwrap >/dev/null 2>&1; then
+        record_blocked gui host-desktop-isolation "$EXIT_GUI" infra \
+            "bubblewrap is required: refusing to expose GUI agents to the host desktop"
+        return "$EXIT_GUI"
+    fi
+    kv gui_host_desktop_isolated 1
+    kv gui_host_agent_sandbox bubblewrap
     qci_assert_vm_tools gui || return $?
     record_agent_identity
     local explicit=${1:-} svm qdwin_svm="" rc=$EXIT_OK scenario rel require step_rc legacy_ctrl=0 nested_kvm=0 qdshell_active=0

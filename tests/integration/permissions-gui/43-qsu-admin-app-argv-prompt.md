@@ -74,10 +74,10 @@ $VMGUI "$VM" screenshot /tmp/43-s2-pending.png
 - The detail pane (right side or below the table) reads:
   - `uid=2000  pid=<some pid>`.
   - `Action: qsu.exec:root`.
-  - `exe` is the qsu client's process executable. In the current
-    Python-installed qsu path this is expected to be `/usr/bin/python`
-    or `/usr/bin/python3.13`; the requested command itself is verified
-    through the `argv` details below.
+  - `exe` is the qsu client's process executable,
+    `/usr/local/bin/qsu`. qsu is an installed C binary so its stable
+    process identity can be audited independently of the requested
+    command, which is verified through the `argv` details below.
   - `Details: ...` containing `argv=/bin/true` (and
     `argv[00]=/bin/true`, `target_user=root`).
 - The Scope panel renders all eight radios with these EXACT labels

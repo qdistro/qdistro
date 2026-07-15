@@ -89,7 +89,7 @@ qdistro/scripts/vm/spin-test-vm.sh validation-$(date +%y%m%d%H%M)
 Prerequisites for the libvirt session (set up once):
 
 ```sh
-sudo zypper install libvirt qemu-kvm virt-install virt-manager
+sudo zypper install libvirt qemu-kvm virt-install virt-manager bubblewrap
 sudo usermod -aG libvirt $(whoami)
 # Then log out / log in for the group change to take effect.
 virsh -c qemu:///session list --all
@@ -129,6 +129,26 @@ QCI_AGENT_MODEL=gpt-5.6-luna \
 and must invoke `virsh`, `vm-exec`, and evidence-writing commands without an
 interactive approval. The scenario still fails closed unless the agent writes
 an explicit passing verdict and exits zero.
+
+The qci GUI gate enforces a host/guest boundary for every runner, including
+Haiku and Luna:
+
+- Graphical applications, compositors, dialogs, screenshots, and input run only
+  in disposable VMs. The host process is a non-interactive controller.
+- Before any GUI gate starts, qci detaches its controller processes from the
+  host `DISPLAY`, Wayland display, desktop activation variables, askpass
+  programs, browser launcher, and D-Bus session bus.
+- Each markdown-scenario agent is additionally placed in a Bubblewrap mount
+  namespace where `/tmp/.X11-unix`, the host Wayland sockets, and the user
+  session-bus socket are hidden. The per-user libvirt sockets remain available,
+  so `virsh -c qemu:///session`, `vm-exec`, and `vm-gui` can drive the guest.
+- qci fails closed before provisioning when `bubblewrap` is unavailable. Do not
+  work around this by running a GUI scenario directly on the workstation.
+
+Consequently, a scenario must never call `virt-manager`, `virt-viewer`,
+`remote-viewer`, `xdg-open`, or a graphical app on the host. Inspect images from
+the artifact directory through the visual model; operate the GUI through the VM
+helpers named in the scenario.
 
 ## Tech stack
 

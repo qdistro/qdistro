@@ -175,20 +175,17 @@ sleep 1
 
 # 2. Root registers the helper's live pid + starttime as a tier-1 work app.
 B64=$(base64 -w0 <<'EOF'
-python3 - <<'PY'
-import dbus
-pid = int(open("/tmp/lineage-helper.pid").read().strip())
-# starttime from /proc field 22 (split past the right paren).
-data = open(f"/proc/{pid}/stat","rb").read()
-st = int(data[data.rfind(b")")+2:].split()[19])
-exe = __import__("os").readlink(f"/proc/{pid}/exe")
-bus = dbus.SystemBus()
-obj = bus.get_object("org.qdistro.AdminBroker1","/org/qdistro/AdminBroker1")
-iface = dbus.Interface(obj,"org.qdistro.AdminBroker1")
-rid = iface.RegisterLaunch("work","qdistro.tier1","qdistro.tier1.work",
-                           "i1", exe, dbus.UInt64(pid), "", dbus.UInt64(st))
-print("registered", rid, "pid", pid, "starttime", st)
-PY
+PID=$(cat /tmp/lineage-helper.pid)
+ST=$(python3 -c "d=open('/proc/$PID/stat','rb').read(); print(int(d[d.rfind(b')')+2:].split()[19]))")
+EXE=$(readlink "/proc/$PID/exe")
+RID=$(dbus-send --system --print-reply=literal \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RegisterLaunch \
+  string:"work" string:"qdistro.tier1" string:"qdistro.tier1.work" \
+  string:"i1" string:"$EXE" uint64:"$PID" string:"" uint64:"$ST")
+test -n "$RID"
+printf 'registered %s pid %s starttime %s\n' "$RID" "$PID" "$ST"
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -200,7 +197,8 @@ $VMEXEC "$VM" 'cat /tmp/lineage-helper.out'
 ```
 
 **Assert**:
-- The `RegisterLaunch` python prints `registered <hex> pid <n> starttime <n>`.
+- The trusted root `dbus-send` launcher prints
+  `registered <hex> pid <n> starttime <n>`.
 - `/tmp/lineage-helper.out` contains `allow`. The helper passed **no**
   `sandbox_engine`; the broker resolved its live pid to the launch
   record and supplied `qdistro.tier1`, so the rule matched. This is the

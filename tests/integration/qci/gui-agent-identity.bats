@@ -97,3 +97,25 @@ teardown() {
         "$log"
     [ ! -e "$REPO_ROOT/failure-evidence.txt" ]
 }
+
+@test "run_agent_command: host desktop sockets and activation channels are isolated" {
+    command -v bwrap >/dev/null 2>&1 || skip "bubblewrap not installed"
+    local prompt="$BATS_TEST_TMPDIR/prompt.md"
+    local log="$BATS_TEST_TMPDIR/agent.log"
+    local env_record="$BATS_TEST_TMPDIR/agent-env.txt"
+    printf '# fixture\n' > "$prompt"
+    export QCI_AGENT_ENV_RECORD="$env_record"
+
+    DISPLAY=:99 \
+    WAYLAND_DISPLAY=wayland-0 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/999/bus \
+    QCI_AGENT_CMD='printf "DISPLAY=%s\nWAYLAND_DISPLAY=%s\nDBUS_SESSION_BUS_ADDRESS=%s\nBROWSER=%s\nQCI_HOST_GUI_ISOLATED=%s\n" "$DISPLAY" "$WAYLAND_DISPLAY" "$DBUS_SESSION_BUS_ADDRESS" "$BROWSER" "$QCI_HOST_GUI_ISOLATED" > "$QCI_AGENT_ENV_RECORD"; test ! -S /tmp/.X11-unix/X0; test ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wayland-0"; test ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus"; # {prompt}' \
+        run run_agent_command "$prompt" "$log"
+
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    grep -Fxq 'DISPLAY=' "$env_record"
+    grep -Fxq 'WAYLAND_DISPLAY=qci-host-display-disabled' "$env_record"
+    grep -Fxq 'DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null' "$env_record"
+    grep -Fxq 'BROWSER=/bin/false' "$env_record"
+    grep -Fxq 'QCI_HOST_GUI_ISOLATED=1' "$env_record"
+}

@@ -166,19 +166,17 @@ subject (no launch record) → cross-silo fails closed.
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-python3 - <<'PY'
-import dbus, os
-pid = int(open("/tmp/cross-silo-src-helper.pid").read().strip())
-d = open(f"/proc/{pid}/stat","rb").read()
-st = int(d[d.rfind(b")")+2:].split()[19])
-exe = os.readlink(f"/proc/{pid}/exe")
-bus = dbus.SystemBus()
-ifc = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
-        "/org/qdistro/AdminBroker1"), "org.qdistro.AdminBroker1")
-rid = ifc.RegisterLaunch("work","qdistro.tier3","qdistro.tier3.work",
-        "i1", exe, dbus.UInt64(pid), "", dbus.UInt64(st))
-print("registered", rid, "pid", pid, "starttime", st)
-PY
+PID=$(cat /tmp/cross-silo-src-helper.pid)
+ST=$(python3 -c "d=open('/proc/$PID/stat','rb').read(); print(int(d[d.rfind(b')')+2:].split()[19]))")
+EXE=$(readlink "/proc/$PID/exe")
+RID=$(dbus-send --system --print-reply=literal \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RegisterLaunch \
+  string:"work" string:"qdistro.tier3" string:"qdistro.tier3.work" \
+  string:"i1" string:"$EXE" uint64:"$PID" string:"" uint64:"$ST")
+test -n "$RID"
+printf 'registered %s pid %s starttime %s\n' "$RID" "$PID" "$ST"
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -212,19 +210,16 @@ idempotent on the live process), then have the caller forge
 
 ```bash
 B64=$(base64 -w0 <<'EOF'
-python3 - <<'PY'
-import dbus, os
-pid = int(open("/tmp/cross-silo-src-helper.pid").read().strip())
-d = open(f"/proc/{pid}/stat","rb").read()
-st = int(d[d.rfind(b")")+2:].split()[19])
-exe = os.readlink(f"/proc/{pid}/exe")
-bus = dbus.SystemBus()
-ifc = dbus.Interface(bus.get_object("org.qdistro.AdminBroker1",
-        "/org/qdistro/AdminBroker1"), "org.qdistro.AdminBroker1")
-ifc.RegisterLaunch("scratch","qdistro.tier3","qdistro.tier3.scratch",
-        "i1", exe, dbus.UInt64(pid), "", dbus.UInt64(st))
-print("re-registered as scratch")
-PY
+PID=$(cat /tmp/cross-silo-src-helper.pid)
+ST=$(python3 -c "d=open('/proc/$PID/stat','rb').read(); print(int(d[d.rfind(b')')+2:].split()[19]))")
+EXE=$(readlink "/proc/$PID/exe")
+dbus-send --system --print-reply \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.RegisterLaunch \
+  string:"scratch" string:"qdistro.tier3" string:"qdistro.tier3.scratch" \
+  string:"i1" string:"$EXE" uint64:"$PID" string:"" uint64:"$ST"
+echo "re-registered as scratch"
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
@@ -291,10 +286,11 @@ $VMEXEC "$VM" "echo $AUDIT_SQL_B64 | base64 -d | sqlite3 /var/lib/qdistro/audit/
   `/tmp/cross-silo-src-helper.pid` is still live (`ps -p <pid>`) and that
   its `/proc/<pid>/exe` (coreutils `sleep`) matches what `RegisterLaunch`
   re-read — a relabel or exec-swap would fail the resolver's exe axis.
-- `RegisterLaunch` is restricted to trusted root lineage helpers. In this
-  headless broker scenario, run the Python snippets exactly as root inside
-  the VM through `$VMEXEC`; do not wrap them in `runuser -u admin`, and do
-  not substitute `/usr/bin/python3.13` from an untrusted user context.
+- `RegisterLaunch` is restricted to trusted root launch helpers. In this
+  headless broker scenario, the registration calls use root `dbus-send`
+  with `RegisterLaunch` named in its live command line, matching the
+  broker's narrow trusted-helper rule. Do not wrap them in
+  `runuser -u admin` or replace them with a generic interpreter process.
 - This scenario exercises the broker + its launch-record store directly.
   The full app→qdwin→qdshell→broker relay of the source pid is covered by
   the qdshell binding/QML change (deployed in lockstep); registration by a

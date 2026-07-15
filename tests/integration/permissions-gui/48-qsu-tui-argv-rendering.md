@@ -80,10 +80,10 @@ $VMGUI "$VM" screenshot /tmp/48-s2-tui-pending.png
 - TUI's right detail pane contains, on separate lines:
   - `uid=2000  pid=…` (chip-coloured).
   - `Action: qsu.exec:root`.
-  - exe path for the qsu client process in dim text. In the
-    current Python-installed qsu path this is expected to be
-    `/usr/bin/python` or `/usr/bin/python3.13`; the requested
-    command itself is verified through the Argv line below.
+  - exe path for the qsu client process in dim text:
+    `/usr/local/bin/qsu`. qsu is an installed C binary so its
+    stable process identity can be audited independently of the
+    requested command, which is verified through the Argv line below.
   - **`Argv: /bin/sh -c 'echo hi'`** — bold, on its OWN line.
     The argument `echo hi` must appear quoted (`'echo hi'`)
     because shlex.join handles the embedded space.
