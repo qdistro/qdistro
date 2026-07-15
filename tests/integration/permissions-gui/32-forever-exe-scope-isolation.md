@@ -175,7 +175,11 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
 $VMEXEC "$VM" 'touch /tmp/32-release-wait'
-$VMEXEC "$VM" 'wait $(cat /tmp/32-perl.pid) 2>/dev/null; cat /tmp/32-perl.log'
+$VMEXEC "$VM" 'for i in $(seq 1 100); do
+  grep -q DENIED /tmp/32-perl.log 2>/dev/null && break
+  sleep 0.1
+done
+cat /tmp/32-perl.log'
 ```
 
 **Assert**: `/tmp/32-perl.log` contains `DENIED`.
