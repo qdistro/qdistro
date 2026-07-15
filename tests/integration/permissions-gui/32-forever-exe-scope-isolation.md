@@ -23,6 +23,7 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f qdistro-test-permission 2>/dev/null; true'
 $VMEXEC "$VM" 'pkill -u work -f "perl /tmp/32-" 2>/dev/null; true'
+$VMEXEC "$VM" 'rm -f /tmp/32-release-wait'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
 sleep 1
 
@@ -130,6 +131,12 @@ my $obj = $svc->get_object("/org/qdistro/AdminBroker1",
                            "org.qdistro.AdminBroker1");
 my $rid = $obj->RequestPermission("test.action", { caller => "perl-32" });
 print "rid=$rid\n";
+# A visual runner can spend longer than Net::DBus's default method timeout
+# inspecting the pending screenshot. Keep this SAME caller alive, but do not
+# enter the blocking D-Bus method until S5 has delivered the decision.
+while (!-e "/tmp/32-release-wait") {
+    select undef, undef, undef, 0.1;
+}
 my $ok = $obj->WaitForDecision(int $rid);
 print($ok ? "ALLOWED\n" : "DENIED\n");
 PERL
@@ -167,6 +174,7 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 virsh send-key "$VM" --codeset linux KEY_LEFTCTRL KEY_N
 sleep 1
+$VMEXEC "$VM" 'touch /tmp/32-release-wait'
 $VMEXEC "$VM" 'wait $(cat /tmp/32-perl.pid) 2>/dev/null; cat /tmp/32-perl.log'
 ```
 
