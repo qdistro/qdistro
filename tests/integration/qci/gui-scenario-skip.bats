@@ -306,6 +306,34 @@ reason_full_stack() {
     [ "$status" -ne 0 ]
 }
 
+@test "gui classify: canonical path behind workspace symlink keeps qdwin identity" {
+    local fixture="$BATS_TEST_TMPDIR/scenario-roots"
+    mkdir -p "$fixture/workspace" "$fixture/real-qdwin/tests/apps"
+    ln -s "$fixture/real-qdwin" "$fixture/workspace/qdwin"
+    touch "$fixture/real-qdwin/tests/apps/01-firefox.md"
+
+    WORKSPACE="$fixture/workspace"
+    QDWIN_REPO="$fixture/workspace/qdwin"
+    run gui_scenario_rel "$fixture/real-qdwin/tests/apps/01-firefox.md"
+    [ "$status" -eq 0 ]
+    [ "$output" = "qdwin/tests/apps/01-firefox.md" ]
+    run gui_scenario_requires_qdwin "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "gui classify: qdistro worktree path keeps qdistro identity" {
+    local fixture="$BATS_TEST_TMPDIR/qdistro-worktree"
+    mkdir -p "$fixture/tests/integration/permissions-gui"
+    touch "$fixture/tests/integration/permissions-gui/18-podapps-launcher-badge.md"
+
+    QDISTRO_REPO="$fixture"
+    run gui_scenario_rel "$fixture/tests/integration/permissions-gui/18-podapps-launcher-badge.md"
+    [ "$status" -eq 0 ]
+    [ "$output" = "qdistro/tests/integration/permissions-gui/18-podapps-launcher-badge.md" ]
+    run gui_scenario_requires_qdwin "$output"
+    [ "$status" -eq 0 ]
+}
+
 @test "gui run: legacy qdwin md RUNS when legacy ctrl-socket present" {
     run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222"
     [ "$status" -eq 0 ]

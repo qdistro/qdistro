@@ -71,6 +71,41 @@ run_qdwin_executable_gui_smokes() {
     return "$rc"
 }
 
+# Return a stable, logical workspace-relative identity for a GUI scenario.
+#
+# Explicit --scenario arguments may name the canonical target of a workspace
+# symlink (for example /home/me/ws/qdwin/... while WORKSPACE/qdwin is a
+# symlink), and qdistro itself may be running from a git worktree outside the
+# normal WORKSPACE/qdistro path.  Raw prefix stripping misclassified those
+# paths as gui-admin, so qdwin/qdlocker scenarios booted the wrong VM profile.
+# Canonicalize both sides and map known project roots back to project/path.
+gui_scenario_rel() {
+    local scenario=$1 canonical root project repo_var repo
+    canonical=$(readlink -f -- "$scenario" 2>/dev/null) || canonical=$scenario
+
+    for project in qdistro qdwin qdshell qdlocker; do
+        if [ "$project" = qdistro ]; then
+            repo=${QDISTRO_REPO:-}
+        else
+            repo_var=$(printf '%s' "$project" | tr '[:lower:]-' '[:upper:]_')_REPO
+            repo=${!repo_var:-${WORKSPACE:-}/$project}
+        fi
+        [ -n "$repo" ] || continue
+        root=$(readlink -f -- "$repo" 2>/dev/null) || root=$repo
+        case "$canonical" in
+            "$root"/*)
+                printf '%s/%s\n' "$project" "${canonical#"$root"/}"
+                return 0
+                ;;
+        esac
+    done
+
+    case "$scenario" in
+        "${WORKSPACE:-}"/*) printf '%s\n' "${scenario#"$WORKSPACE"/}" ;;
+        *) printf '%s\n' "$scenario" ;;
+    esac
+}
+
 gui_scenario_requires_qdwin() {
     local rel=$1
     case "$rel" in
@@ -138,7 +173,7 @@ agent_scenarios() {
 
 write_agent_prompt() {
     local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} scratch=${5:-} slug=${6:-} rel
-    rel=${scenario#$WORKSPACE/}
+    rel=$(gui_scenario_rel "$scenario")
     # Per-attempt artifact dir so a retry's agent writes its status/report to its
     # OWN directory and never clobbers the first attempt's evidence (the audit
     # trail that makes classified retry acceptable). Defaults to the canonical dir.
@@ -779,7 +814,7 @@ gui_job_count() {
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
     local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name lane
-    rel=${scenario#$WORKSPACE/}
+    rel=$(gui_scenario_rel "$scenario")
     # Scheduling lane for the attempt ledger + correlated-burst detector: a qdwin
     # scenario runs on the heavier gui-qdwin profile, everything else on gui-admin.
     if gui_scenario_requires_qdwin "$rel"; then lane=qdwin; else lane=admin; fi
@@ -1325,7 +1360,7 @@ gate_gui() {
     # unless qdwin was explicitly disabled for an admin-only run.
     local to_run=() log_path
     while IFS= read -r scenario; do
-        rel=${scenario#$WORKSPACE/}
+        rel=$(gui_scenario_rel "$scenario")
         log_path="$RDIR/gui/$(safe_name "$rel").agent.log"
         mkdir -p "$(dirname "$log_path")"
         # QCI_OFFLINE annotation hook: registry network=external GUI scenarios
