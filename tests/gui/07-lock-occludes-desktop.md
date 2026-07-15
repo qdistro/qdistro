@@ -58,9 +58,11 @@ a pure graphics flake is not mistaken for an occlusion leak.
 
 ```bash
 DRM_LOG=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --since \"2 minutes ago\" --no-pager"' \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"' \
   | grep -E "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
 DRM_FAILS=$(printf '%s\n' "$DRM_LOG" | grep -cE "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
+printf '%s\n' "${DRM_FAILS:-0}" \
+  > "${QCI_SCENARIO_TMPDIR:-/tmp}/07-drm-baseline-count"
 
 if [ "${DRM_FAILS:-0}" -ge 5 ]; then
     echo "ERROR: VM graphics backend is failing DRM atomic commits" \
@@ -78,9 +80,10 @@ fi
 ```
 
 **Preflight gate:** fewer than 5 repeated `atomic: couldn't commit new
-state: Invalid argument` failures in the last 2 minutes (a healthy
-compositor emits zero; the flake bursts dozens per second). If the
-threshold is exceeded the scenario stops here classified **ERROR (VM
+state: Invalid argument` failures in the current boot (a healthy
+compositor emits zero; the flake bursts dozens per second). The count is saved
+so Step 2 can also detect a graphics failure triggered by mapping the lock UI.
+If the threshold is exceeded, the scenario stops here classified **ERROR (VM
 graphics backend)** with the offending journal lines dumped — it is not
 a qdlocker occlusion FAIL. A clean journal proceeds to Step 1.
 
@@ -103,10 +106,25 @@ qdlocker_wait_for_lock 5
 sleep 0.5
 qdwin_screenshot /tmp/qdlocker-07-step2-locked.png
 qdlocker_ctrl status
+
+# A virtio-gpu GL/KMS failure can begin only when the full-output lock surface
+# maps, after the preflight passed. Detect new failures before judging pixels.
+DRM_BASELINE=$(cat "${QCI_SCENARIO_TMPDIR:-/tmp}/07-drm-baseline-count")
+DRM_AFTER=$("$QDWIN_VM_EXEC" "$VMNAME" \
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"' \
+  | grep -cE "atomic: couldn't commit new state: Invalid argument|repaint-flush failed: Invalid argument" || true)
+if [ $(( DRM_AFTER - DRM_BASELINE )) -ge 5 ]; then
+    echo "ERROR: VM graphics backend began rejecting DRM commits after lock" \
+         "($(( DRM_AFTER - DRM_BASELINE )) new failures); screenshot evidence is invalid" >&2
+    exit 78
+fi
 ```
 
 **Assert (2.1):** `qdlocker_ctrl status` reports `locked=True`.
 **Assert (2.2):** screenshot shows qdlocker UI.
+**Graphics gate:** no burst of new DRM atomic/repaint failures appeared after
+the lock surface mapped. A burst is an environment **ERROR**, not a black-UI
+product failure.
 
 ### Step 3 — no sentinel pixels remain in edge bands
 
