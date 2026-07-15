@@ -40,13 +40,19 @@ A simple check: pick row y=15, count distinct colors > 5.
 **Assert (1.3):** the bottom 80% of the image (y >= 216) contains
 the Noctalia owl/moon wallpaper or a uniform configured background.
 
-### Step 2 — verify layer-shell journal is clean
+### Step 2 — verify current-boot layer-shell journal is clean
 
 ```bash
 "$QDWIN_VM_EXEC" "$VMNAME" \
- "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --since '2 minutes ago' --no-pager\"" \
+ "runuser -l admin -c \"journalctl --user -u qdwin-compositor.service --boot --no-pager\"" \
  > "${QCI_SCENARIO_TMPDIR:-/tmp}/01-weston.log"
 ```
+
+The disposable worker can be healthy for several minutes before a visual
+runner reaches this step. Use the current boot rather than a wall-clock window
+so the compositor-start mapping evidence cannot age out while the test is
+running. A clean current-boot journal is also stronger than checking only the
+last two minutes for protocol errors.
 
 **Assert (2.1):** at least one `qdwin: layer-shell mapped
 ns=qdshell-bar-content-` line is present.
