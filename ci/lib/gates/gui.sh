@@ -171,6 +171,27 @@ agent_scenarios() {
     done
 }
 
+# Reject an explicit scenario typo before qci builds a golden, starts a VM, or
+# launches a GUI-capable agent. The normal scenario producer emits only files
+# found by globs, but `qci gui --scenario ...` replaces it with operator input;
+# letting a missing path reach the worker used to spend a full image bake and
+# then invite the model to improvise a different scenario.
+gui_validate_scenarios() {
+    local scenario rc=0
+    while IFS= read -r scenario; do
+        if [ -z "$scenario" ]; then
+            record_blocked gui '<missing>' "$EXIT_USAGE" args \
+                "--scenario requires an existing readable .md file"
+            rc=$EXIT_USAGE
+        elif [ "${scenario##*.}" != md ] || [ ! -f "$scenario" ] || [ ! -r "$scenario" ]; then
+            record_blocked gui "$scenario" "$EXIT_USAGE" args \
+                "GUI scenario must be an existing readable .md file; rejected before VM provisioning"
+            rc=$EXIT_USAGE
+        fi
+    done < <(agent_scenarios)
+    return "$rc"
+}
+
 write_agent_prompt() {
     local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} scratch=${5:-} slug=${6:-} rel
     rel=$(gui_scenario_rel "$scenario")
@@ -1221,6 +1242,10 @@ record_agent_identity() {
 
 gate_gui() {
     qci_assert_run_dir || return $?
+    # This must remain ahead of host-desktop setup, golden provisioning, and VM
+    # acquisition. Invalid operator input is an args error, not expensive VM
+    # infrastructure work and never a reason to start a visual agent.
+    gui_validate_scenarios || return $?
     gui_isolate_host_desktop
     if ! command -v bwrap >/dev/null 2>&1; then
         record_blocked gui host-desktop-isolation "$EXIT_GUI" infra \

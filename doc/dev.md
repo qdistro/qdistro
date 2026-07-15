@@ -157,6 +157,10 @@ Haiku and Luna:
   so `virsh -c qemu:///session`, `vm-exec`, and `vm-gui` can drive the guest.
 - qci fails closed before provisioning when `bubblewrap` is unavailable. Do not
   work around this by running a GUI scenario directly on the workstation.
+- Every explicit `--scenario` path must name an existing readable Markdown
+  playbook. qci validates the complete list before it builds a golden, starts a
+  VM, or launches an agent; a stale path is a usage error, never an invitation
+  for the model to substitute a different test.
 - The disposable `gui-qdwin` image pins Weston's Pixman renderer and a fixed
   1280×800 output mode. The fixed mode keeps QMP tablet coordinates stable
   between screenshot-based observation and input injection; production keeps
@@ -170,7 +174,9 @@ Haiku and Luna:
 Consequently, a scenario must never call `virt-manager`, `virt-viewer`,
 `remote-viewer`, `xdg-open`, or a graphical app on the host. Inspect images from
 the artifact directory through the visual model; operate the GUI through the VM
-helpers named in the scenario.
+helpers named in the scenario. Do not execute a Markdown GUI playbook directly;
+use `qci gui` so the disposable-VM routing and host-session isolation are always
+applied.
 
 ## Tech stack
 
