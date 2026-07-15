@@ -19,7 +19,7 @@ Same orchestrator/runner split as the sibling harness.
 - Default VM name pattern: `noctalia-vis-YYMMDD-HHMM`. The reference
  setup VM as of 2026-05-03 is `noctalia-vis-260503-1021` (clone of
  `weston-desktop-260422-1604`-derived `layershell-260502-2322`).
-- Resolution: 1920×1080 (set in `weston.ini` `[output]`).
+- Resolution: 1280×800 at 60 Hz, pinned by qci's GUI golden build.
 - Backend: `drm-backend.so` with `renderer=pixman` (no GL — virtio-gpu
  in our VMs has no accel3d; Mesa GLES backend segfaults).
 - Auth: admin / `Pa_ssw0rd45`; admin user must be in `video,input,render,seat`
@@ -45,7 +45,7 @@ Noctalia has no equivalent ctrl-socket. Instead use:
 
 | Surface | Works? | Notes |
 |---|---|---|
-| Bar visible at top | ✅ | layer 2, 1920×31 |
+| Bar visible at top | ✅ | layer 2, 1280×31 |
 | Wallpaper visible | ✅ | layer 0 (BACKGROUND) |
 | Left-click bar widgets opening **layer-surface panels** | ✅ | Noctalia opens settings/control-center as new layer surfaces |
 | Cursor visible / moves | ✅ | virtio-gpu cursor plane |

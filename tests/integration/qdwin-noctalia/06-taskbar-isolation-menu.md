@@ -72,8 +72,8 @@ sleep 3
 noct_screenshot_awake /tmp/06-step2-desktop.png
 ```
 **Assert (2.1):** `/tmp/06-step2-desktop.png` shows (a) the qdshell **bar** along
-the very top edge of the screen, and (b) a window titled roughly **"Weston
-Compositor"** in the middle. The background is a plain solid colour (no picture)
+the very top edge of the screen, and (b) a window titled **"Wayland Terminal"**
+in the middle. The background is a plain solid colour (no picture)
 — the bar and window stand out against it. The disposable's **taskbar item** is
 the small entry the new window added to the bar, in the **top-left** group of
 bar icons.
@@ -86,7 +86,7 @@ right-click that opens its isolation menu is finicky, so this step is
 identity and the Dispose action are gated deterministically in steps 1 and 4).
 
 The taskbar item is the small coloured square the new window added to the bar,
-in the top-left icon group. On the default 1920×1080 session it sits at about
+in the top-left icon group. On the fixed 1280×800 GUI-CI session it sits at about
 `(205, 16)`. Right-click it and screenshot:
 
 ```bash

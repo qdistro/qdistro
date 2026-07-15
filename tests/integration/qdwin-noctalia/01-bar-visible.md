@@ -33,11 +33,12 @@ noct_session_healthy || { echo "FAIL: qdshell.service not active"; exit 1; }
 noct_screenshot_awake /tmp/01-step1-baseline.png
 ```
 
-**Assert (1.1):** the screenshot resolution is 1920×1080.
+**Assert (1.1):** the screenshot resolution is 1280×800 (the fixed GUI-CI
+output geometry).
 **Assert (1.2):** the top 31 px contain visible non-black pixels —
 this is the Noctalia bar (`qdshell-bar-content` layer surface).
 A simple check: pick row y=15, count distinct colors > 5.
-**Assert (1.3):** the bottom 80% of the image (y >= 216) contains
+**Assert (1.3):** the bottom 80% of the image (y >= 160) contains
 the Noctalia owl/moon wallpaper or a uniform configured background.
 
 ### Step 2 — verify current-boot layer-shell journal is clean
