@@ -1204,7 +1204,8 @@ gui_preflight_capabilities() {
 }
 
 # Record the agent identity (H6a) into manifest.txt: the sanitized QCI_AGENT_CMD
-# template, the model (parsed from `--model X`, `-m X`, or QCI_AGENT_MODEL), and a
+# template, the model (QCI_AGENT_MODEL, parsed from `--model X`/`-m X`, or the
+# Haiku default), and a
 # best-effort agent CLI version. This is what distinguishes a CI run from a debug
 # rerun with a stronger model, and is the prerequisite for never confusing debug
 # rows with CI rows. Pure w.r.t. the run tree except the kv writes; a missing
@@ -1228,7 +1229,7 @@ record_agent_identity() {
     kv qci_agent_timeout_s "${QCI_AGENT_TIMEOUT:-0}"
     model=$(gui_agent_model_from_cmd "$cmd")
     [ -n "${QCI_AGENT_MODEL:-}" ] && model=$QCI_AGENT_MODEL
-    kv qci_agent_model "${model:-unknown}"
+    kv qci_agent_model "${model:-haiku}"
     # Best-effort CLI version — only if the template invokes a known agent binary,
     # and bounded so a wedged CLI cannot stall the gate.
     if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])claude([[:space:]]|$)'; then

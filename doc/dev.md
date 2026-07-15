@@ -115,6 +115,10 @@ QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --mode
   qdistro/ci/bin/qci gui
 ```
 
+The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
+named in `QCI_AGENT_CMD`, and finally `haiku`. Set `QCI_AGENT_MODEL` whenever a
+generic wrapper selects the model outside the visible command template.
+
 Codex with `gpt-5.6-luna` is a verified vision-capable fallback when Haiku is
 unavailable. Run it non-interactively and let qci place each attempt in its own
 temporary working directory:
