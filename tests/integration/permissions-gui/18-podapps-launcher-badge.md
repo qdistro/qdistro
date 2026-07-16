@@ -33,12 +33,12 @@ $VMEXEC "$VM" 'runuser -u admin -- pgrep -af "[q]s -p" >/dev/null'
 # timeout, so the expensive build is NOT on S1's critical path and cannot
 # blow the scenario's wall-clock (rc=124) budget. A clean setup-failure
 # message makes a slow/failed build obvious instead of an opaque timeout.
-$VMEXEC "$VM" 'timeout 240 bash -c "
+$VMEXEC "$VM" 'timeout 240 runuser -u admin -- bash -c "
     podman image exists qdistro/tier2-weston-terminal:latest \
         || bash /root/qdistro-src/qdistro/tier2/make-tier2-image.sh weston-terminal"' \
   || { echo "FAIL(setup): tier-2 image build/check exceeded 240s or failed"; exit 1; }
 # Hard-assert the image now exists, so S1 only does the (fast) spawn+scan.
-$VMEXEC "$VM" 'podman image exists qdistro/tier2-weston-terminal:latest' \
+$VMEXEC "$VM" 'runuser -u admin -- podman image exists qdistro/tier2-weston-terminal:latest' \
   || { echo "FAIL(setup): qdistro/tier2-weston-terminal:latest missing after build"; exit 1; }
 
 # Precondition: the broker must ALLOW the tier-2 spawn gate for this workload.
@@ -194,6 +194,13 @@ $VMGUI "$VM" screenshot /tmp/s18-launcher-empty.png
 $VMGUI "$VM" key ctrl+space
 sleep 1
 
+# The combined launcher can contain more rows than fit in the viewport, and
+# provider Component.onCompleted order is not a stable visibility contract.
+# Filter by the unique container name so the screenshot proves the PodApps row
+# itself instead of merely proving that the first page contains other providers.
+$VMGUI "$VM" type "tier2-c-ui"
+sleep 0.3
+
 $VMGUI "$VM" screenshot /tmp/s18-launcher-open.png
 ```
 
@@ -223,7 +230,9 @@ launcher→tier-2-spawn journal contract is covered deterministically by
 an artifact-only exercise.
 
 ```bash
-# Type to filter to weston-terminal, then Enter.
+# Clear S2's unique PodApps filter, then type weston-terminal and press Enter.
+$VMGUI "$VM" key ctrl+a
+$VMGUI "$VM" key backspace
 $VMGUI "$VM" type "weston-terminal"
 sleep 0.3
 $VMGUI "$VM" key enter
@@ -286,7 +295,7 @@ analyze them, never fail on them.
 ### S5 — cleanup
 
 ```bash
-$VMEXEC "$VM" 'podman stop -t 2 tier2-c-ui >/dev/null 2>&1 || true'
+$VMEXEC "$VM" 'runuser -u admin -- podman stop -t 2 tier2-c-ui >/dev/null 2>&1 || true'
 $VMEXEC "$VM" 'pkill -u admin -f "spawn-tier2.sh tier2-c-ui" 2>/dev/null || true'
 # Remove the test-authored broker allow rule and reload, so subsequent
 # scenarios start from the fail-closed default (mirrors the probe teardown).
