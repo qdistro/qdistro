@@ -68,6 +68,18 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+@test "classify: PASS + nonzero rc + exact API marker retries but never passes directly" {
+    [ "$(gui_agent_verdict PASS 1 | cut -f1)" = fail ]
+    [ "$(gui_classify_failure PASS 1 0 0 1)" = agent-api-after-verdict ]
+    run gui_classifier_retriable agent-api-after-verdict
+    [ "$status" -eq 0 ]
+}
+
+@test "classify: PASS provider class requires both nonzero rc and exact marker" {
+    [ "$(gui_classify_failure PASS 1 0 0 0)" = unknown ]
+    [ "$(gui_classify_failure PASS 0 0 0 1)" = unknown ]
+}
+
 @test "classify: UNKNOWN with a non-124 rc is unknown, not a timeout class" {
     [ "$(gui_classify_failure UNKNOWN 1 1)" = unknown ]
 }
@@ -77,7 +89,7 @@ setup() {
         run gui_classifier_retriable "$c"
         [ "$status" -ne 0 ]
     done
-    for c in transport-timeout agent-tooling agent-api-unreachable; do
+    for c in transport-timeout agent-tooling agent-api-unreachable agent-api-after-verdict; do
         run gui_classifier_retriable "$c"
         [ "$status" -eq 0 ]
     done

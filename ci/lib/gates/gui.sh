@@ -442,13 +442,20 @@ gui_agent_verdict() {
 #                     and rc=1, so the provider marker — not the rc — is the
 #                     discriminator. Checked before no-verdict so a clean-exit
 #                     outage is not miscounted.                             retriable
+#   agent-api-after-verdict
+#                     PASS + nonzero rc + the same exact provider marker. The
+#                     agent wrote a positive artifact but its process did not
+#                     complete successfully, so the contradiction stays red;
+#                     a fresh-VM retry may resolve the provider-only epilogue.
+#                                                                            retriable
 #   agent-timeout     UNKNOWN + rc=124, no connectivity marker: the agent ran out
 #                     of budget. DELIBERATELY NOT auto-retriable — a slow agent can
 #                     equally mean the PRODUCT hung, and retrying could flake-pass a
 #                     real hang (codex). Surfaced for human triage / a Phase-5
 #                     scenario split instead.                              report-only
-#   unknown           anything else (incl. PASS:nonzero, a partial PASS/SKIP report
-#                     with rc=124 — inconsistent, NOT an unambiguous infra retry)
+#   unknown           anything else (incl. PASS:nonzero without the exact provider
+#                     marker, or a partial PASS/SKIP report with rc=124 —
+#                     inconsistent, NOT an unambiguous infra retry)
 #                                                                            NEVER retry
 # Keying on the PARSED status=UNKNOWN (not merely "no status.txt") is deliberate:
 # a partial report.md verdict + rc=124 is an inconsistent agent result, not an
@@ -472,6 +479,15 @@ gui_classify_failure() {
             # before the plain product-error so a CDN outage is not miscounted.
             if [ "$extnet" = 1 ]; then printf 'external-network'; return; fi
             printf 'product-error'; return ;;
+        PASS)
+            # Keep gui_agent_verdict fail-closed: PASS with nonzero rc is never
+            # accepted directly. When the exact provider marker explains the
+            # nonzero epilogue, however, it is safe to retry on a fresh VM. This
+            # covers Codex writing status.txt/report.md and then receiving the
+            # selected-model-capacity error while finalizing its response.
+            if [ "$rc" != 0 ] && [ "$api" = 1 ]; then
+                printf 'agent-api-after-verdict'; return
+            fi ;;
         UNKNOWN)
             # LLM-provider connectivity loss is pure infra and rc-independent (the
             # observed outage produced both rc=0 and rc=1), so it is checked FIRST
@@ -490,12 +506,14 @@ gui_classify_failure() {
 # Pure: is a classifier eligible for an AUTOMATIC retry? ONLY the unambiguous
 # infra signatures. agent-timeout is intentionally excluded (product-hang masking
 # risk); product-fail/error/no-verdict/unknown are never retriable by definition.
-# agent-api-unreachable is a pure LLM-provider outage (no product/guest state
-# involved) and so is safe to re-run on a fresh attempt.
+# agent-api-unreachable and agent-api-after-verdict are pure LLM-provider
+# failures (no product/guest failure signal) and are safe to re-run on a fresh
+# attempt. The latter still requires a fresh PASS; its first PASS is never
+# accepted directly because the process rc contradicted it.
 # Args: classifier
 gui_classifier_retriable() {
     case "$1" in
-        transport-timeout|agent-tooling|agent-api-unreachable) return 0 ;;
+        transport-timeout|agent-tooling|agent-api-unreachable|agent-api-after-verdict) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -568,10 +586,10 @@ gui_detect_agent_tooling_marker() {
         "$log_path" 2>/dev/null
 }
 
-# Host-side: does the agent log show an unambiguous LLM-PROVIDER failure before
-# the scenario could exercise product state? This is the discriminator for
-# `agent-api-unreachable`: a provider/infra outage, not a product or scenario
-# result. The marker is TIGHT and ANCHORED to exact agent CLI lines at the START
+# Host-side: does the agent log show an unambiguous LLM-PROVIDER failure? This is
+# the discriminator for `agent-api-unreachable` and
+# `agent-api-after-verdict`: a provider/infra outage, not a product failure. The
+# marker is TIGHT and ANCHORED to exact agent CLI lines at the START
 # of a line, so a product log or an agent narrative merely *mentioning* a
 # connection error cannot flip a verdict. It deliberately does NOT match generic
 # `timeout`/DNS/TLS/HTTP-5xx strings, which a real product or network scenario
@@ -919,8 +937,9 @@ gui_run_scenario() {
     record_attempt gui "$rel" 1 "$status" "$agent_rc" "$classifier" "$((ta1 - ta0))" "$vm" "$log_path" "$ta0" "$ta1" "$lane"
 
     # Classified retry (DEFAULT OFF = report-only). A failing attempt with a
-    # retriable signature (transport-timeout, agent-tooling, or agent-api-unreachable
-    # — agent-timeout and any product-fail/error are excluded as masking risks)
+    # retriable signature (transport-timeout, agent-tooling,
+    # agent-api-unreachable, or agent-api-after-verdict — agent-timeout and any
+    # product-fail/error are excluded as masking risks)
     # either records a
     # `would-retry` flake row (report-only) or, when QCI_GUI_RETRY enables it AND
     # this is a disposable (own) VM, runs UP TO N more attempts on FRESH VMs
