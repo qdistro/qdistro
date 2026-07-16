@@ -116,7 +116,9 @@ $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 mapped=0; saw_running=0; term_hits=0; reason=""; handle=""
 deadline=$((SECONDS + 180))
 while [ $SECONDS -lt $deadline ]; do
-    state=$($VMEXEC "$VM" "runuser -u admin -- virsh domstate $VM5 2>/dev/null || true" | tr -d '[:space:]')
+    state=$($VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+        HOME=/home/admin LIBVIRT_DEFAULT_URI=qemu:///session \
+        virsh domstate $VM5 2>/dev/null || true" | tr -d '[:space:]')
     case "$state" in
         running|paused|idle|pmsuspended) saw_running=1; term_hits=0 ;;
         shutoff|crashed)
@@ -252,7 +254,8 @@ this assertion on an outer-VM hiccup).
 for _ in $(seq 1 40); do
     res=$($VMEXEC "$VM" "w=present; d=present; o=present; \
         pgrep -f '[s]pawn-tier5.sh.*$VM5' >/dev/null || w=gone; \
-        runuser -u admin -- virsh dominfo $VM5 >/dev/null 2>&1 || d=gone; \
+        runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+        LIBVIRT_DEFAULT_URI=qemu:///session virsh dominfo $VM5 >/dev/null 2>&1 || d=gone; \
         test -e /home/admin/.local/share/libvirt/images/$VM5.qcow2 || o=gone; \
         echo \"S3RESULT w=\$w d=\$d o=\$o\"") || { sleep 1; continue; }
     # Require the structured token (proves the guest command actually ran), then
@@ -282,7 +285,9 @@ product FAIL — re-run.
 ### S4 — verify libvirt domain is gone
 
 ```bash
-$VMEXEC "$VM" "runuser -u admin -- virsh dominfo $VM5 2>&1 || echo no-such-domain"
+$VMEXEC "$VM" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 \
+    HOME=/home/admin LIBVIRT_DEFAULT_URI=qemu:///session \
+    virsh dominfo $VM5 2>&1 || echo no-such-domain"
 ```
 
 **Assert**: output contains `no-such-domain` (or
@@ -310,13 +315,21 @@ $VMEXEC "$VM" 'ls -lh /var/lib/libvirt/images/qdistro-tier5-base.qcow2'
 
 ```bash
 $VMEXEC "$VM" "pkill -u root -f \"[s]pawn-tier5.sh.*$VM5\" 2>/dev/null || true; \
-               runuser -u admin -- virsh destroy $VM5 2>/dev/null || true; \
-               runuser -u admin -- virsh undefine $VM5 2>/dev/null || true; \
+               runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+                 LIBVIRT_DEFAULT_URI=qemu:///session virsh destroy $VM5 2>/dev/null || true; \
+               runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 HOME=/home/admin \
+                 LIBVIRT_DEFAULT_URI=qemu:///session virsh undefine $VM5 2>/dev/null || true; \
                rm -f /home/admin/.local/share/libvirt/images/$VM5.qcow2"
 ```
 
 ## Known caveats
 
+- **Session libvirt environment is load-bearing**: every direct `virsh` probe
+  sets admin's `XDG_RUNTIME_DIR`, `HOME`, and `LIBVIRT_DEFAULT_URI`. Omitting
+  `XDG_RUNTIME_DIR` can connect the probe to a different socket-activated
+  session daemon, making a running product domain appear absent or exposing an
+  unrelated stale definition. Never shorten these probes to an environment-free
+  admin `virsh` invocation.
 - **IPC binding must be reachable**: `qs ipc -p $QS_PATH call qdwin
   closeWindow` needs the qdwin binding bound (`qs ipc capabilities`
   reporting `bound=true`, as scenario 16/17 assert). If the call
