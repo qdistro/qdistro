@@ -102,6 +102,10 @@
 #                        controlling TTY. The file is created/owned by the
 #                        admin user (the qemu:///session domain runs as
 #                        admin and must be able to open it for writing).
+#   TIER5_QGA_TIMEOUT_SECS
+#                        (--vm only) cold-boot deadline for qemu-guest-agent
+#                        guest-ping (30..600, default 180). Nested CI guests can
+#                        take longer than 90 seconds under parallel VM load.
 #   TIER5_DOMAIN_TEMPLATE
 #                        (--vm only) override domain XML template path.
 #   TIER5_KEEP_DOMAIN=1  (--vm only) skip destroy+undefine on exit
@@ -492,6 +496,8 @@ IDLE_SHUTDOWN_SECS="${TIER5_IDLE_SHUTDOWN_SECS:-$(resolve_policy IDLE_SHUTDOWN_S
 clamp_int IDLE_SHUTDOWN_SECS 0 0 86400
 LOWMEM_MB="${TIER5_LOWMEM_MB:-$(resolve_policy LOWMEM_MB)}"
 clamp_int LOWMEM_MB 0 0 1048576
+QGA_TIMEOUT_SECS="${TIER5_QGA_TIMEOUT_SECS:-180}"
+clamp_int QGA_TIMEOUT_SECS 180 30 600
 
 host_mem_avail_mb() {  # host MemAvailable in MiB, or "" if unreadable
     local kb
@@ -851,17 +857,19 @@ fi
 DOMAIN_DEFINED=1
 echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
 
-# Wait for qga.
+# Wait for qga. A deadline (rather than a fixed iteration count) keeps the
+# contract honest if individual virsh calls stall briefly under nested VM load.
 QGA_OK=0
-for i in $(seq 1 90); do
-    if run_as_admin virsh qemu-agent-command "$VM_NAME" \
+qga_deadline=$((SECONDS + QGA_TIMEOUT_SECS))
+while [ "$SECONDS" -lt "$qga_deadline" ]; do
+    if run_as_admin virsh qemu-agent-command --timeout 5 "$VM_NAME" \
         '{"execute":"guest-ping"}' >/dev/null 2>&1; then
         QGA_OK=1; break
     fi
     sleep 1
 done
 if [ "$QGA_OK" != "1" ]; then
-    echo "[tier5] FAIL: qemu-guest-agent never responded after 90s" >&2
+    echo "[tier5] FAIL: qemu-guest-agent never responded after ${QGA_TIMEOUT_SECS}s" >&2
     exit 7
 fi
 echo "[tier5] qga ready" >&2
