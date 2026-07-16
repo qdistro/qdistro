@@ -309,6 +309,13 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "api marker: detects Codex selected-model capacity line" {
+    local log="$BATS_TEST_TMPDIR/a2c.log"
+    printf 'ERROR: Selected model is at capacity. Please try a different model.\n' > "$log"
+    run gui_detect_agent_api_marker "$log"
+    [ "$status" -eq 0 ]
+}
+
 @test "api marker: a PROSE mention of the provider error does NOT match (anchor)" {
     # An agent narrative discussing the failure mode must not flip a verdict.
     local log="$BATS_TEST_TMPDIR/a3.log"

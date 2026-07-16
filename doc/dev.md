@@ -126,8 +126,13 @@ temporary working directory:
 ```sh
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
+QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
 ```
+
+The classified retry covers an exact provider-capacity response as well as a
+provider connection outage. It retries the selected model once on a fresh VM;
+it never retries a product `FAIL` or `ERROR`.
 
 For the complete GUI matrix, including real third-party application coverage,
 build a clean app-deps golden and use eight disposable VM workers:

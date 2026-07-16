@@ -156,8 +156,10 @@ wall-clock budget.
 
 ```bash
 $VMEXEC "$VM" 'timeout 60 runuser -u admin -- bash -c "
-    QDISTRO_PROFILE=dev TIER2_DETACH=1 /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
-        tier2-c-ui weston-terminal -- weston-terminal &
+    nohup env QDISTRO_PROFILE=dev TIER2_DETACH=1 \
+        /root/qdistro-src/qdistro/tier2/spawn-tier2.sh \
+        tier2-c-ui weston-terminal -- weston-terminal \
+        >/tmp/qci-permissions-gui-18-podapps-spawn.log 2>&1 </dev/null &
     sleep 3
     /root/qdistro-src/qdistro/tier2/podapps-scan.sh tier2-c-ui"' \
   || { echo "FAIL(S1): spawn+scan exceeded 60s or failed"; exit 1; }

@@ -82,6 +82,27 @@ esac
 
 mkdir -p "$CACHE_DIR"
 
+# Each scanner gets its own cache-local temporary file.  qdshell may trigger a
+# refresh while a manual/startup scan is already running; sharing a fixed
+# apps.json.tmp lets one process rename (and then another process truncate) the
+# same inode, publishing an empty or partial cache.  A unique file in the target
+# directory keeps the final rename atomic without cross-filesystem surprises.
+CACHE_TMP=$(mktemp "$CACHE_DIR/.apps.json.XXXXXX") \
+    || fail "could not create temporary cache in $CACHE_DIR"
+BLOB=""
+cleanup() {
+    [ -z "$BLOB" ] || rm -f -- "$BLOB"
+    [ -z "$CACHE_TMP" ] || rm -f -- "$CACHE_TMP"
+}
+trap cleanup EXIT
+
+publish_cache() {
+    chmod 0644 "$CACHE_TMP" || fail "could not set cache permissions"
+    mv -f -- "$CACHE_TMP" "$CACHE_DIR/apps.json" \
+        || fail "could not publish $CACHE_DIR/apps.json"
+    CACHE_TMP=""
+}
+
 # Enumerate desktop files inside the container. Both system-wide and
 # per-user XDG directories. Minimal containers may lack `find`, so we
 # use bash globbing instead — POSIX-portable and present in every
@@ -102,9 +123,8 @@ DESKTOP_LIST=$(qpodman exec "$CONTAINER" \
 # Dump file contents through a single tarball-style pipe (no per-file
 # qpodman exec overhead). Limit to first 500 entries defensively.
 if [ -z "$DESKTOP_LIST" ]; then
-    : >"$CACHE_DIR/apps.json.tmp"
-    echo "[]" >"$CACHE_DIR/apps.json.tmp"
-    mv "$CACHE_DIR/apps.json.tmp" "$CACHE_DIR/apps.json"
+    printf '[]\n' >"$CACHE_TMP" || fail "could not write empty cache"
+    publish_cache
     echo "podapps-scan: $CONTAINER → 0 entries (cache cleared)"
     exit 0
 fi
@@ -113,8 +133,7 @@ fi
 # multi-document blob with `--- FILE: <path>` separators for the
 # python parser. Cheap and adequate at < a-few-hundred entries per
 # container.
-BLOB=$(mktemp)
-trap 'rm -f "$BLOB"' EXIT
+BLOB=$(mktemp) || fail "could not create desktop-entry buffer"
 
 while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -122,7 +141,7 @@ while IFS= read -r f; do
     qpodman exec "$CONTAINER" cat "$f" 2>/dev/null || true
 done <<<"$DESKTOP_LIST" >"$BLOB"
 
-python3 - "$CONTAINER" "$WORKLOAD" "$BLOB" "$CACHE_DIR/apps.json.tmp" <<'PY'
+if ! python3 - "$CONTAINER" "$WORKLOAD" "$BLOB" "$CACHE_TMP" <<'PY'
 import configparser
 import io
 import json
@@ -198,6 +217,9 @@ with open(out_path, "w", encoding="utf-8") as fh:
 
 print(f"podapps-scan: {container} → {len(entries)} entries", file=sys.stderr)
 PY
+then
+    fail "desktop-entry parsing failed"
+fi
 
-mv "$CACHE_DIR/apps.json.tmp" "$CACHE_DIR/apps.json"
+publish_cache
 echo "podapps-scan: wrote $CACHE_DIR/apps.json"

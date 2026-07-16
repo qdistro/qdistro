@@ -577,14 +577,16 @@ gui_detect_agent_tooling_marker() {
 # `timeout`/DNS/TLS/HTTP-5xx strings, which a real product or network scenario
 # can legitimately produce; only the exact socket-level "Unable to connect to
 # API (FailedToOpenSocket|ConnectionRefused)" family and the exact provider quota
-# "You've hit your session limit" line qualify. New provider reasons are widened
+# "You've hit your session limit" and Codex's exact selected-model-capacity lines
+# qualify. Capacity is equally independent of guest/product state and is safe to
+# retry with the caller-selected model. New provider reasons are widened
 # DELIBERATELY here, never loosened in the correlation layer. Reads the log file;
 # returns 0 when a provider-unreachable marker is present.
 gui_detect_agent_api_marker() {
     local log_path=$1
     [ -f "$log_path" ] || return 1
     grep -qE \
-        "^[[:space:]]*(API Error: Unable to connect to API \\((FailedToOpenSocket|ConnectionRefused)\\)[[:space:]]*|You've hit your session limit.*)$" \
+        "^[[:space:]]*(API Error: Unable to connect to API \\((FailedToOpenSocket|ConnectionRefused)\\)[[:space:]]*|You've hit your session limit.*|ERROR: Selected model is at capacity\\. Please try a different model\\.[[:space:]]*)$" \
         "$log_path" 2>/dev/null
 }
 
