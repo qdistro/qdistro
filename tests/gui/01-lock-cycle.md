@@ -135,6 +135,10 @@ locked_changed=0 cause=locker_set_locked`:
 ### Step 5 — post-unlock typing reaches foot
 
 ```bash
+# The lock promotion can bisect the Ctrl+Alt+L chord: QEMU delivered the
+# releases while the overlay owned input, so explicitly resynchronize the
+# normal seat before proving post-unlock terminal routing.
+qdwin_release_modifiers
 qdwin_type_lower "echo after"
 qdwin_send_key KEY_ENTER
 sleep 1

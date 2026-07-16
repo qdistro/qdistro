@@ -169,6 +169,12 @@ not depend on the removed qdshell.py ctrl API.
    all three keys then releases simultaneously and the binding never
    fires.
 
+   The promotion can also bisect that chord: its release events may arrive
+   while the lock overlay owns input, leaving the restored normal seat with a
+   stale modifier. After unlocking, call `qdwin_release_modifiers` before any
+   assertion that types ordinary text into a client. This is an idempotent
+   seat resynchronization, not a retry or a weakened text assertion.
+
 5. **The fingerprint subscription is one-shot.** scenario 02 calls
    `EmitMatch` on the fake fprintd; if you call it twice in the same
    lock cycle, the second emission is dropped (the subscription was
