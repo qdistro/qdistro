@@ -524,6 +524,33 @@ qemu_pids_for_domain() {
     printf '%s' "$out"
 }
 
+domain_is_defined() {
+    run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1
+}
+
+# Try the ordinary undefine first. If libvirt reports retained per-domain state
+# or metadata, remove only that ephemeral VM state and retry. Do not ask libvirt
+# to remove storage: the wrapper owns the overlay and unlinks it only after the
+# domain definition is confirmed gone.
+undefine_domain() {
+    local err
+    if err=$(run_as_admin virsh undefine "$VM_NAME" 2>&1); then
+        return 0
+    fi
+    echo "[tier5] WARN: undefine $VM_NAME failed: $err" >&2
+    if ! domain_is_defined; then
+        return 0
+    fi
+    if err=$(run_as_admin virsh undefine "$VM_NAME" \
+        --managed-save --snapshots-metadata --checkpoints-metadata \
+        --nvram --tpm 2>&1); then
+        echo "[tier5] undefine $VM_NAME succeeded after removing retained metadata" >&2
+        return 0
+    fi
+    echo "[tier5] WARN: metadata-aware undefine $VM_NAME failed: $err" >&2
+    return 1
+}
+
 # reap_domain [force] — stop the domain, undefine it, unlink the overlay.
 # Graceful (default): ACPI power-button (`virsh shutdown --mode acpi`, the owner-
 # requested mechanism). If the guest is still up after SHUTDOWN_GRACE_SECS, try
@@ -584,10 +611,13 @@ reap_domain() {
         [ -n "$qpids" ] && run_as_admin kill -9 $qpids 2>/dev/null || true
     fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        run_as_admin virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
-        run_as_admin virsh dominfo "$VM_NAME" >/dev/null 2>&1 || break
+        undefine_domain || true
+        domain_is_defined || return 0
         sleep 0.5
     done
+    echo "[tier5] ERROR: domain $VM_NAME remains defined after teardown" >&2
+    run_as_admin virsh dominfo "$VM_NAME" >&2 || true
+    return 1
 }
 
 # idle_keep_warm — after the published app exits, optionally keep the (now idle)
@@ -651,18 +681,32 @@ cleanup() {
             fi
         fi
     fi
+    local domain_reaped=1
     if [ "$MODE" = "vm" ] && [ "$DOMAIN_DEFINED" = "1" ] && \
        [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
-        reap_domain "$force"
+        reap_domain "$force" || domain_reaped=0
     fi
     if [ "$MODE" = "vm" ] && [ "$DISK_CREATED" = "1" ] && \
-       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ]; then
+       [ "${TIER5_KEEP_DOMAIN:-0}" != "1" ] && [ "$domain_reaped" = "1" ]; then
         rm -f "$DISK" 2>/dev/null || true
     fi
+    if [ "$domain_reaped" != "1" ]; then
+        echo "[tier5] ERROR: retaining overlay $DISK because $VM_NAME is still defined" >&2
+        return 1
+    fi
+    return 0
 }
-# Normal exit (incl. the wait loop's app-exit path) -> graceful teardown.
+cleanup_on_exit() {
+    local rc=$?
+    trap - EXIT
+    cleanup 0 || { [ "$rc" -ne 0 ] || rc=5; }
+    exit "$rc"
+}
+# Normal exit (incl. the wait loop's app-exit path) -> graceful teardown. A
+# successful app must not hide an incomplete domain reap: promote cleanup
+# failure to a setup/bridge failure while preserving any earlier nonzero code.
 # INT/TERM -> force (fast) teardown; drop the EXIT trap so it can't double-run.
-trap 'cleanup 0' EXIT
+trap cleanup_on_exit EXIT
 trap 'trap - EXIT INT TERM; cleanup 1; exit 130' INT
 trap 'trap - EXIT INT TERM; cleanup 1; exit 143' TERM
 
