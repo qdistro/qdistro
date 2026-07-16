@@ -59,13 +59,18 @@ CURSOR=$(journalctl --since=now -n0 --show-cursor 2>/dev/null \
     | awk -F': ' '/-- cursor:/ {print $2}')
 
 SPAWN_LOG=/tmp/s45-spawn.log
+SERIAL_LOG=/tmp/s45-tier5-serial.log
 : >"$SPAWN_LOG"
+rm -f "$SERIAL_LOG"
 
 # Request a 2 GiB guest (TIER5_MEM_KIB). The former 512 MiB CI accommodation
 # was too tight for the guest kernel + compositor + app stack and could kill the
 # nested guest mid-boot. Keep the explicit value aligned with the GUI tier-5
 # scenarios and sibling lifecycle probes.
 TIER5_MEM_KIB=2097152 \
+TIER5_QGA_TIMEOUT_SECS=180 \
+TIER5_SERIAL_LOG="$SERIAL_LOG" \
+TIER5_KEEP_DOMAIN=1 \
     bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
@@ -112,18 +117,27 @@ done
     && pass "host-side waypipe-client vsock listener ready" \
     || fail "host-side waypipe-client vsock listener never came up within 10s"
 
-# spawn-tier5.sh emits "[tier5] qga ready" once guest-ping responds.
+# spawn-tier5.sh emits "[tier5] qga ready" once guest-ping responds. Its
+# cold-boot budget is 180s; allow another 30s for process scheduling and log
+# observation, while also stopping promptly if the wrapper has already failed.
 QGA_OK=0
-deadline=$(( $(date +%s) + 120 ))
+deadline=$(( $(date +%s) + 210 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if grep -q "qga ready" "$SPAWN_LOG" 2>/dev/null; then
         QGA_OK=1; break
     fi
+    kill -0 "$SPAWN_PID" 2>/dev/null || break
     sleep 1
 done
 [ "$QGA_OK" = "1" ] \
     && pass "guest qemu-guest-agent responded" \
-    || fail "guest qemu-guest-agent never responded within 120s"
+    || {
+        echo "--- tier-5 spawn log ---" >&2
+        cat "$SPAWN_LOG" >&2 || true
+        echo "--- tier-5 guest serial tail ---" >&2
+        tail -200 "$SERIAL_LOG" >&2 2>/dev/null || true
+        fail "guest qemu-guest-agent never responded within the 180s spawn deadline"
+    }
 
 # spawn-tier5.sh emits "[tier5] guest publisher pid=N running" once
 # guest-exec delivers the publisher start.
@@ -133,6 +147,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     if grep -q "guest publisher pid=" "$SPAWN_LOG" 2>/dev/null; then
         PUBLISHER_OK=1; break
     fi
+    kill -0 "$SPAWN_PID" 2>/dev/null || break
     sleep 1
 done
 [ "$PUBLISHER_OK" = "1" ] \

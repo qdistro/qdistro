@@ -82,6 +82,21 @@ The wrapper supports two modes:
  client. So inside guest, `waypipe server -s 2:PORT --vsock`
  reaches the host's listener.
 
+## Cold-boot budget and diagnostics
+
+`--vm` waits up to 180 seconds for `qemu-guest-agent` by default. Nested guests
+can take substantially longer than ordinary VMs to boot while an eight-worker
+CI run is creating other domains. Set `TIER5_QGA_TIMEOUT_SECS` to override the
+deadline; values are validated and clamped to 30–600 seconds. Each guest-agent
+request is itself bounded to five seconds, so an unresponsive agent cannot make
+the overall deadline unbounded.
+
+Set `TIER5_SERIAL_LOG` to an admin-writable path to retain the guest serial
+console. The tier-5 VM integration probe uses `/tmp/s45-tier5-serial.log` and
+keeps the domain/overlay until its assertions finish, then reaps both in its
+exit trap. A failed cold boot therefore reports the spawn log and the last 200
+serial lines instead of only reporting a guest-agent timeout.
+
 ## Limitations of the MVP
 
 - **Only the loopback mode is fully wired** in this initial
