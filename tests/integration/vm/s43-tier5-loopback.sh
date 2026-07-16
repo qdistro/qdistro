@@ -25,13 +25,18 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SRC=/root/qdistro-src/qdistro
 TIER5_DIR=/tmp/qdistro-tier5
+# Stage the shared library too so a standalone replay is independent of files
+# left in /tmp by earlier tiered-isolation cases.
 if [ -d "$SRC/tier5-vm" ]; then
     rm -rf "$TIER5_DIR" 2>/dev/null || true
-    cp -r "$SRC/tier5-vm" "$TIER5_DIR"
+    mkdir -p "$TIER5_DIR"
+    cp -r "$SRC/tier5-vm" "$TIER5_DIR/tier5-vm"
+    cp -r "$SRC/lib" "$TIER5_DIR/lib"
     chmod -R a+rX "$TIER5_DIR"
     find "$TIER5_DIR" -name '*.sh' -exec chmod a+rx {} +
 fi
-[ -d "$TIER5_DIR" ] || skip "tier5-vm source not unpacked at $TIER5_DIR"
+SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
+[ -f "$SPAWN" ] || skip "tier5-vm source not unpacked at $SPAWN"
 command -v waypipe >/dev/null 2>&1 || skip "waypipe not installed in this VM"
 command -v wayland-info >/dev/null 2>&1 || skip "wayland-info (wayland-utils) not installed in this VM"
 
@@ -59,7 +64,7 @@ SPAWN_LOG=/tmp/s43-spawn.log
 : >"$SPAWN_LOG"
 PORT=7791
 
-bash "$TIER5_DIR/spawn-tier5.sh" --loopback -p "$PORT" \
+bash "$SPAWN" --loopback -p "$PORT" \
     -- wayland-info >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 

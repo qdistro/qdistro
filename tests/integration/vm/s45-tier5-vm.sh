@@ -28,13 +28,19 @@ skip() { echo "SKIP: $*"; exit 0; }
 
 SRC=/root/qdistro-src/qdistro
 TIER5_DIR=/tmp/qdistro-tier5
+# Keep tier5-vm and lib as siblings: spawn-tier5.sh sources
+# ../lib/spawn-common.sh. Depending on /tmp/lib left by an earlier Bats case
+# made this probe pass in the suite but fail when replayed on its own.
 if [ -d "$SRC/tier5-vm" ]; then
     rm -rf "$TIER5_DIR" 2>/dev/null || true
-    cp -r "$SRC/tier5-vm" "$TIER5_DIR"
+    mkdir -p "$TIER5_DIR"
+    cp -r "$SRC/tier5-vm" "$TIER5_DIR/tier5-vm"
+    cp -r "$SRC/lib" "$TIER5_DIR/lib"
     chmod -R a+rX "$TIER5_DIR"
     find "$TIER5_DIR" -name '*.sh' -exec chmod a+rx {} +
 fi
-[ -d "$TIER5_DIR" ] || skip "tier5-vm source not unpacked at $TIER5_DIR"
+SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
+[ -f "$SPAWN" ] || skip "tier5-vm source not unpacked at $SPAWN"
 
 BASE=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
 [ -f "$BASE" ] || skip "tier-5 base image $BASE not built; run tier5-vm/build-guest-image.sh first"
@@ -71,7 +77,7 @@ TIER5_MEM_KIB=2097152 \
 TIER5_QGA_TIMEOUT_SECS=180 \
 TIER5_SERIAL_LOG="$SERIAL_LOG" \
 TIER5_KEEP_DOMAIN=1 \
-    bash "$TIER5_DIR/spawn-tier5.sh" --vm "$VM_NAME" \
+    bash "$SPAWN" --vm "$VM_NAME" \
     -- weston-terminal >"$SPAWN_LOG" 2>&1 &
 SPAWN_PID=$!
 
