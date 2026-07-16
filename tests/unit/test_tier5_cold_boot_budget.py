@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN = (ROOT / "tier5-vm/spawn-tier5.sh").read_text()
 PROBE = (ROOT / "tests/integration/vm/s45-tier5-vm.sh").read_text()
+LOOPBACK_PROBE = (ROOT / "tests/integration/vm/s43-tier5-loopback.sh").read_text()
 
 
 def test_spawn_has_bounded_configurable_qga_deadline():
@@ -22,3 +23,10 @@ def test_vm_probe_retains_boot_evidence_until_assertions_finish():
     assert "TIER5_KEEP_DOMAIN=1" in PROBE
     assert 'tail -200 "$SERIAL_LOG"' in PROBE
     assert PROBE.count('kill -0 "$SPAWN_PID"') == 2
+
+
+def test_standalone_probes_stage_spawn_common_beside_tier5():
+    for source in (PROBE, LOOPBACK_PROBE):
+        assert 'cp -r "$SRC/tier5-vm" "$TIER5_DIR/tier5-vm"' in source
+        assert 'cp -r "$SRC/lib" "$TIER5_DIR/lib"' in source
+        assert 'SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"' in source
