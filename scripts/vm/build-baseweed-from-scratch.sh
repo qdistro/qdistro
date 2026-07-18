@@ -35,6 +35,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# Disposable dev builder (hardcoded VM password + NOPASSWD admin). The base
+# cloud image, however, becomes every VM's root disk — verify it regardless.
+export QDISTRO_PROFILE="${QDISTRO_PROFILE:-dev}"
+
 FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,13 +73,13 @@ done
 
 install -d "$CACHE_DIR" "$IMG"
 
-if [ ! -s "$CLOUD_CACHE" ]; then
-    echo "[scratch] downloading Tumbleweed Minimal-VM cloud image..."
-    wget -q --show-progress -O "$CLOUD_CACHE.partial" "$CLOUD_URL"
-    mv "$CLOUD_CACHE.partial" "$CLOUD_CACHE"
-else
-    echo "[scratch] cloud base already cached ($(du -h "$CLOUD_CACHE" | cut -f1))"
-fi
+# J25: verified download. The cloud qcow2 becomes the root-disk base of every
+# VM built from this image, so refuse to proceed unless it matches the
+# openSUSE-signed checksum (an existing cache is re-verified, not trusted).
+# shellcheck source=lib/opensuse-cloud-image.sh
+. "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
+download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" \
+    || { echo "[scratch] ERROR: base cloud image failed openSUSE signature/digest verification; refusing to build on an unverified root image" >&2; exit 4; }
 
 rm -f "$PARTIAL"
 echo "[scratch] resizing cloud image to 25 GB..."
@@ -97,7 +102,7 @@ virt-customize \
     --run-command 'getent group wheel >/dev/null && usermod -aG wheel admin || true' \
     --run-command "echo 'admin:${VM_PASSWORD}' | chpasswd" \
     --run-command "echo 'admin ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/99-admin && chmod 0440 /etc/sudoers.d/99-admin" \
-    --run-command 'zypper -n --no-gpg-checks refresh' \
+    --run-command 'zypper -n refresh' \
     --run-command 'zypper -n install --no-recommends qemu-guest-agent' \
     --run-command 'systemctl enable qemu-guest-agent.service' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \

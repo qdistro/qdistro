@@ -97,7 +97,17 @@ prep_image() {
     esac
     local dest="$IMG_DIR/qdistro-baremetal-test-$distro.qcow2"
 
-    if [ ! -s "$cache" ]; then
+    if [ "$distro" = "tumbleweed" ]; then
+        # J25: this shares tumbleweed-cloud-base.qcow2 with
+        # build-baseweed-from-scratch.sh, so an unverified download here would
+        # poison that cache too. Route through the signed-verification helper.
+        # shellcheck source=../vm/lib/opensuse-cloud-image.sh
+        . "$SCRIPT_DIR/../vm/lib/opensuse-cloud-image.sh"
+        download_verified_cloud_image "$url" "$cache" \
+            || { log "[$distro] ERROR: cloud image failed openSUSE signature/digest verification"; return 1; }
+    elif [ ! -s "$cache" ]; then
+        # NOTE (J25): the ubuntu base is not openSUSE-signed and has no
+        # verification helper yet — a separate follow-up. Transport is https.
         log "[$distro] downloading cloud image..."
         wget -q --show-progress -O "$cache.partial" "$url"
         mv "$cache.partial" "$cache"
@@ -122,7 +132,7 @@ prep_image() {
     log "[$distro] customizing: root pw + qga + ssh..."
     local pkg_install
     case "$distro" in
-        tumbleweed) pkg_install='zypper -n --no-gpg-checks install qemu-guest-agent openssh' ;;
+        tumbleweed) pkg_install='zypper -n install qemu-guest-agent openssh' ;;  # J25: verify signatures
         ubuntu)     pkg_install='apt-get update && apt-get install -y qemu-guest-agent openssh-server' ;;
     esac
     # Mirror build-baseweed-from-scratch.sh: SELinux permissive (so qga

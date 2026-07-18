@@ -81,6 +81,33 @@ if [ "${BASH_SOURCE[0]:-$0}" != "${0}" ]; then
     return 0 2>/dev/null || true
 fi
 
-zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+# --- executed mode ---------------------------------------------------------
+# J25: GPG checking is profile-gated. `dev` (disposable VM) may skip signature
+# checks for stale/local mirrors; daily-driver/release MUST verify repo
+# signatures — an unsigned/tampered mirror could ship a malicious root
+# package. The flag array is empty in hardened profiles so zypper's default
+# (gpg-checks ON) applies.
+_ID_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-profile.sh
+. "$_ID_DIR/lib/qdistro-profile.sh"
+resolve_profile || exit 2
+
+gpg_flags=()
+if is_dev; then
+    gpg_flags=( --no-gpg-checks )
+    echo "[install-deps] WARN: dev profile: zypper --no-gpg-checks (unsigned repo metadata accepted) — NOT a release default" >&2
+fi
+
+# J25: don't `|| true`-swallow a refresh failure. In hardened profiles a failed
+# refresh (which includes a signature failure) is fatal unless the operator
+# explicitly opts into stale cached metadata; dev proceeds on cache with a warn.
+if ! zypper -n "${gpg_flags[@]}" refresh; then
+    if is_dev || [ "${QDISTRO_ALLOW_STALE_ZYPPER_METADATA:-0}" = 1 ]; then
+        echo "[install-deps] WARN: zypper refresh failed; proceeding on cached metadata (install may fail)" >&2
+    else
+        echo "[install-deps] ERROR: zypper refresh failed in '$QDISTRO_PROFILE' profile (set QDISTRO_ALLOW_STALE_ZYPPER_METADATA=1 to override)" >&2
+        exit 1
+    fi
+fi
 zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
 echo "[install-deps] DONE"

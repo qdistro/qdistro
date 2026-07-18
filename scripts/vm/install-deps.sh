@@ -118,6 +118,9 @@ if [ "${BASH_SOURCE[0]:-$0}" != "${0}" ]; then
     return 0 2>/dev/null || true
 fi
 
-zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+# J25: verify repo signatures (no --no-gpg-checks) and don't swallow a refresh
+# failure. This VM-side deps install feeds baseweed builder VMs whose output
+# can back a release image build, so it must not accept unsigned metadata.
+zypper -n refresh
 zypper -n install --no-recommends "${QDISTRO_PKGS[@]}" 2>&1 | tail -10
 echo "[install-deps] DONE"

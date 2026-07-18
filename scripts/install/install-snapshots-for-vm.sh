@@ -20,6 +20,12 @@
 # resolves.
 set -euo pipefail
 
+# J25: profile gate for the rage-encryption install below.
+_IS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-profile.sh
+. "$_IS_DIR/lib/qdistro-profile.sh"
+resolve_profile || exit 2
+
 SRC=${1:-/root/snapshots-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-snapshots] missing source dir $SRC" >&2
@@ -37,9 +43,23 @@ DEST_SYSD=/etc/systemd/system
 # encryptor present. Best-effort: a network hiccup here is surfaced loudly by
 # the backup-btrfs-e2e.bats setup, not silently swallowed by skipping the lane.
 if ! command -v rage >/dev/null 2>&1; then
-    zypper -n --no-gpg-checks install rage-encryption >/dev/null 2>&1 \
-        || echo "[install-snapshots] WARN: rage-encryption install failed; " \
-                "backups cannot encrypt until 'rage' is present" >&2
+    # J25: rage is the BACKUP-ENCRYPTION tool — installing it from an unsigned
+    # mirror could substitute a weakened build. GPG checking is profile-gated
+    # (dev may skip; hardened verifies). And in hardened profiles a failed
+    # install is FATAL: a snapshot/backup feature that silently can't encrypt
+    # is worse than a loud stop. dev keeps the best-effort warn (a disposable
+    # VM surfaces it in the backup-btrfs-e2e lane).
+    rage_gpg_flags=()
+    is_dev && rage_gpg_flags=( --no-gpg-checks )
+    if ! zypper -n "${rage_gpg_flags[@]}" install rage-encryption; then
+        msg="[install-snapshots] rage-encryption install failed; backups cannot encrypt until 'rage' is present"
+        if is_dev; then
+            echo "$msg (dev profile: continuing)" >&2
+        else
+            echo "ERROR: $msg" >&2
+            exit 1
+        fi
+    fi
 fi
 
 install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_BIN" "$DEST_SYSD"

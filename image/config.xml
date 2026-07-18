@@ -70,11 +70,15 @@
           home="/home/user"  id="1001" groups="users,video,audio,input"/>
   </users>
 
+  <!-- HTTPS transport (J25): plain http:// leaves repo metadata + RPMs open to
+       a MITM/poisoned-mirror substituting a trojaned package into the baked
+       image. kiwi still verifies the openSUSE repo GPG signatures; https adds
+       transport integrity + confidentiality on top. -->
   <repository type="rpm-md" alias="Tumbleweed-OSS">
-    <source path="http://download.opensuse.org/tumbleweed/repo/oss/"/>
+    <source path="https://download.opensuse.org/tumbleweed/repo/oss/"/>
   </repository>
   <repository type="rpm-md" alias="Tumbleweed-NonOSS">
-    <source path="http://download.opensuse.org/tumbleweed/repo/non-oss/"/>
+    <source path="https://download.opensuse.org/tumbleweed/repo/non-oss/"/>
   </repository>
 
   <packages type="image">

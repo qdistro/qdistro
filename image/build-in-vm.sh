@@ -161,9 +161,16 @@ EOS
 
 #-- 7. Install kiwi inside the VM ---------------------------------------------
 log "installing kiwi-ng inside VM (idempotent zypper)"
+# J25: this builds the SHIPPED image (release profile). No --no-gpg-checks and
+# no `|| true` — a release image build MUST fail if it cannot refresh verified
+# repo metadata, rather than baking packages from an unsigned/tampered mirror.
+# J25: this host script runs under `set -euo pipefail`, so a failed (now
+# gpg-verified) `zypper refresh` propagates out of `vms` and fails this whole
+# `vms | tee` pipeline (pipefail) — the release build stops here rather than
+# proceeding to install kiwi from unsigned/tampered metadata.
 vms <<'EOS' | tee "$LOGS/kiwi-install.log"
 set -eu
-zypper -n --no-gpg-checks refresh >/dev/null 2>&1 || true
+zypper -n refresh
 zypper -n install --no-recommends python3-kiwi kiwi-systemdeps 2>&1 | tail -10
 EOS
 

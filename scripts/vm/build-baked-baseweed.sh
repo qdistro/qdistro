@@ -132,7 +132,7 @@ virt-customize \
     --memsize 4096 \
     --smp 4 \
     -a "$PARTIAL" \
-    --run-command 'zypper -n --no-gpg-checks refresh' \
+    --run-command 'zypper -n refresh' \
     --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
@@ -160,19 +160,23 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
     BAKED_CACHE="$CACHE_DIR/tier5-base-customized.qcow2"
     CLOUD_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
     install -d "$CACHE_DIR"
-    if [ ! -s "$CLOUD_CACHE" ]; then
-        echo "[bake] one-time host download of tier-5 cloud base → $CLOUD_CACHE"
-        wget -q --show-progress -O "$CLOUD_CACHE.partial" "$CLOUD_URL" \
-            && mv "$CLOUD_CACHE.partial" "$CLOUD_CACHE"
-        if [ ! -s "$CLOUD_CACHE" ]; then
-            echo "[bake] WARN: cloud download failed; tier-5 bake skipped" >&2
-            rm -f "$CLOUD_CACHE.partial"
-        fi
-    else
-        echo "[bake] tier-5 cloud base already cached ($(du -h "$CLOUD_CACHE" | cut -f1))"
-    fi
-    if [ -s "$CLOUD_CACHE" ]; then
-        if [ ! -s "$BAKED_CACHE" ]; then
+    # J25 (fail-closed): the tier-5 cloud base becomes a bootable guest disk
+    # baked into every --from-baked overlay, so bake ONLY when it verifies.
+    # Gating on the helper's EXIT STATUS — not `[ -s cache ]` — means a
+    # stale/unverified pre-existing cache the helper refused is never baked in.
+    # shellcheck source=lib/opensuse-cloud-image.sh
+    . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
+    if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"; then
+        # J25 (fail-closed): the customized derivative (tier5-base-customized.qcow2)
+        # is bound to THIS verified cloud digest via a provenance stamp. Reuse it
+        # only when the stamp matches; otherwise rebuild from the verified base so
+        # a stale, tampered, or pre-J25 derivative is never uploaded into the overlay.
+        CLOUD_DIGEST="$(sha256sum "$CLOUD_CACHE" | awk '{print $1}')"
+        if [ -s "$BAKED_CACHE" ] && [ "$(cat "$BAKED_CACHE.provenance" 2>/dev/null)" = "$CLOUD_DIGEST" ]; then
+            echo "[bake] tier-5 customized base already cached (provenance-verified)"
+        else
+            [ -s "$BAKED_CACHE" ] && echo "[bake] tier-5 customized base missing/mismatched provenance; rebuilding from verified base" >&2
+            rm -f "$BAKED_CACHE" "$BAKED_CACHE.provenance"
             echo "[bake] customizing tier-5 base on host (waypipe + qga + publisher)..."
             cp --reflink=auto "$CLOUD_CACHE" "$BAKED_CACHE.partial"
             PUBLISHER_TMP="$(mktemp /tmp/qd-pub-XXXXXX.sh)"
@@ -186,7 +190,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 | sed '1d;$d' >"$PUBLISHER_TMP"
             chmod +x "$PUBLISHER_TMP"
             virt-customize -a "$BAKED_CACHE.partial" \
-                --run-command 'zypper -n --no-gpg-checks refresh' \
+                --run-command 'zypper -n refresh' \
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \
                 `# in-guest publisher cannot launch a renderable client` \
@@ -227,9 +231,8 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             rm -f "$PUBLISHER_TMP"
             virt-sparsify --in-place "$BAKED_CACHE.partial" 2>/dev/null || true
             mv "$BAKED_CACHE.partial" "$BAKED_CACHE"
+            printf '%s\n' "$CLOUD_DIGEST" > "$BAKED_CACHE.provenance"
             echo "[bake] tier-5 customized base cached → $BAKED_CACHE ($(du -h "$BAKED_CACHE" | cut -f1))"
-        else
-            echo "[bake] tier-5 customized base already cached ($(du -h "$BAKED_CACHE" | cut -f1))"
         fi
         echo "[bake] uploading tier-5 base into baked overlay..."
         virt-customize -a "$PARTIAL" \
@@ -238,6 +241,8 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             --run-command 'chmod 0644 /var/lib/libvirt/images/qdistro-tier5-base.qcow2' \
             >/dev/null
         echo "[bake] tier-5 base uploaded into baked overlay"
+    else
+        echo "[bake] WARN: cloud base download/verification failed; tier-5 bake skipped" >&2
     fi
 fi
 
