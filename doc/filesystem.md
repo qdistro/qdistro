@@ -146,9 +146,11 @@ two flavours, both behind admin-app confirm dialogs:
 
 > **v1 status: shipped, in two pieces that are not yet wired together.**
 > 1. **Scheduled export** runs on the `qdistro-backup.timer` →
->    `qdistro-backup.service` units, which execute the legacy encrypted-export
->    pipeline `qdistro-snap-export run` (`snapshots/qdistro_snap_export_cli.py`,
->    the `btrfs send | rage -e | ssh` flow below). The unit is
+>    `qdistro-backup.service` units, which execute `qdistro-backup-run`
+>    (`snapshots/qdistro_backup_service.py`) over the signed-manifest engine —
+>    the same `btrfs send | rage -e | ssh` flow below, but built as argv lists
+>    with no local `bash -c` wrapper, and emitting a per-run signed manifest.
+>    The unit is
 >    `ConditionPathExists`-gated on `/etc/qdistro/backup.conf`, so a vanilla
 >    install does not back up until configured.
 > 2. **Signed-manifest verify + restore (DR)** is the separate, shipped
@@ -161,12 +163,13 @@ two flavours, both behind admin-app confirm dialogs:
 >    `tests/unit/test_vault_recovery.py`, and the host-runnable
 >    `tests/integration/backup-e2e.bats`.
 >
-> **Remaining gap:** the scheduled timer still drives the *unmanifested* legacy
-> export; wiring the timer to emit + verify signed manifests (so scheduled
-> runs and DR share one tamper-evident object) is tracked in
-> `todo/fable-release/03-release-engineering.md` (R1). Run the DR CLI directly
-> for verify/restore; do not run the raw restore idiom below standalone (it
-> skips the verify gate).
+> The legacy unsigned `qdistro-snap-export` CLI (which wrapped the export
+> pipeline in a `bash -c` string) was **removed** — it interpolated the
+> ssh_target/remote_path into a shell command, a command injection
+> (opus-security-review HIGH #4). The scheduled timer now drives only the
+> signed-manifest `qdistro-backup-run`. Run the DR CLI directly for
+> verify/restore; do not run the raw restore idiom below standalone (it skips
+> the verify gate).
 
 Scheduled backup of configured subvolumes to a remote target.
 

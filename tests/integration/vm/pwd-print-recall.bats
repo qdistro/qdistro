@@ -156,7 +156,7 @@ setup() {
     assert_output_contains "PASS: v1 Recall cut probe"
 }
 
-@test "phase8-snapshots-probe: spec/19 — Snapper bridge engine + qdistro-snap-export + qdistro-backup unit" {
+@test "phase8-snapshots-probe: spec/19 — Snapper bridge engine + signed-manifest qdistro-backup unit" {
     if ! vm_run "test -f /root/s68-snapshots-probe.sh && echo HAVE_SCRIPT"; then
         fail_loud "s68 script absent (rerun fresh-vm-bootstrap.sh after snapshots task)"
     fi
@@ -166,10 +166,8 @@ setup() {
         fail_loud "snapshot surfaces not installed (legacy bake)"
     fi
     assert_output_contains "PASS: snapshot surfaces installed"
-    assert_output_contains "PASS: qdistro-snap-export print-cmd renders the canonical pipeline"
-    assert_output_contains "PASS: check-recipients accepts a valid file"
-    assert_output_contains "PASS: check-recipients rejects empty file"
-    assert_output_contains "PASS: qdistro_snapshots imports cleanly"
+    assert_output_contains "PASS: qdistro-backup CLI responds"
+    assert_output_contains "PASS: qdistro_snapshots imports cleanly (legacy shim removed)"
     assert_output_contains "PASS: qdistro-backup.service + .timer parse"
     assert_output_contains "PASS: §spec/19 Phase-8 MVP snapshot probe"
 }

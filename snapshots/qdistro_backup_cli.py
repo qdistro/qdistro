@@ -2,9 +2,10 @@
 (06-backup-dr §3-§4): backup -> verify -> restore over the
 ``send | rage -e | ssh`` pipeline, with a per-run signed manifest.
 
-This wraps the low-level render in qdistro_snapshots.render_backup_command
-with the manifest layer (qdistro_backup_manifest) so a restore can prove the
-blob set is authentic, gapless and fresh BEFORE trusting it.
+It drives the ``btrfs send | rage -e | ssh`` pipeline as argv lists (no shell)
+under the manifest layer (qdistro_backup_manifest) so a restore can prove the
+blob set is authentic, gapless and fresh BEFORE trusting it. (It does not use
+the removed unsigned ``qdistro_snapshots.render_backup_command`` shim.)
 
 Security posture (fail-closed by default):
 - verify/restore REQUIRE ``--allowed-signers`` (signature check) unless the

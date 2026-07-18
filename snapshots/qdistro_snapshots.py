@@ -241,33 +241,11 @@ def parse_backup_recipients(text: str) -> list[str]:
     return out
 
 
-def render_backup_command(
-        snap_path: str,
-        parent_snap_path: str | None,
-        recipients_file: str,
-        ssh_target: str,
-        remote_path: str,
-) -> list[str]:
-    """Build the canonical encrypted-export command list per
-    spec/19 §"Encryption pipeline". Returns a list suitable for
-    `subprocess.run(..., check=True)` with `shell=True`.
-
-    Output is a single shell pipeline string wrapped as
-    ``["bash", "-c", "..."]``. The remote_path is shell-quoted;
-    snap paths are passed through `repr()`-style quoting which
-    rejects shell metacharacters (the broker validates upstream).
-    """
-    if not snap_path or " " in snap_path or ";" in snap_path:
-        raise ValueError("invalid snap_path")
-    if parent_snap_path and (" " in parent_snap_path
-                              or ";" in parent_snap_path):
-        raise ValueError("invalid parent_snap_path")
-    if " " in recipients_file or ";" in recipients_file:
-        raise ValueError("invalid recipients_file")
-    parent = (f"-p {parent_snap_path}" if parent_snap_path else "")
-    pipeline = (
-        f"btrfs send {parent} {snap_path} "
-        f"| rage -e -R {recipients_file} "
-        f"| ssh {ssh_target} 'cat > {remote_path}'"
-    )
-    return ["bash", "-c", pipeline]
+# NOTE: the legacy ``render_backup_command`` / ``qdistro-snap-export`` shell
+# pipeline builder was removed (opus-security-review HIGH #4): it wrapped an
+# unvalidated ``btrfs send | rage -e | ssh`` string in ``bash -c``, so a
+# ssh_target/remote_path containing shell metacharacters was a command
+# injection. The scheduled backup path (``qdistro-backup.service`` →
+# ``qdistro-backup-run``) uses the signed-manifest engine
+# (``qdistro_backup_cli`` / ``qdistro_backup_manifest``), which builds argv
+# lists with no shell — see ``doc/filesystem.md`` §Backup.

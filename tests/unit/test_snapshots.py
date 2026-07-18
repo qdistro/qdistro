@@ -194,50 +194,7 @@ class TestParseRecipients:
         assert sn.parse_backup_recipients(None) == []  # type: ignore
 
 
-# ---- backup command rendering ----
-
-class TestBackupCommand:
-    def test_full_pipeline(self):
-        cmd = sn.render_backup_command(
-            snap_path="/.snapshots/42/snapshot",
-            parent_snap_path="/.snapshots/41/snapshot",
-            recipients_file="/etc/qdistro/backup-recipients.txt",
-            ssh_target="user@nas.local",
-            remote_path="/backups/root/42.btrfs.age",
-        )
-        assert cmd[0] == "bash"
-        assert cmd[1] == "-c"
-        pipeline = cmd[2]
-        assert "btrfs send -p /.snapshots/41/snapshot " \
-               "/.snapshots/42/snapshot" in pipeline
-        assert "rage -e -R /etc/qdistro/backup-recipients.txt" \
-               in pipeline
-        assert "ssh user@nas.local" in pipeline
-        assert "/backups/root/42.btrfs.age" in pipeline
-
-    def test_no_parent(self):
-        cmd = sn.render_backup_command(
-            snap_path="/.snapshots/1/snapshot",
-            parent_snap_path=None,
-            recipients_file="/etc/qdistro/backup-recipients.txt",
-            ssh_target="user@nas.local",
-            remote_path="/backups/root/1.btrfs.age",
-        )
-        # No "-p" argument when parent is None.
-        assert " -p " not in cmd[2]
-        assert "btrfs send  /.snapshots/1/snapshot" in cmd[2]
-
-    def test_rejects_shell_metacharacters(self):
-        for bad in (" ", ";"):
-            try:
-                sn.render_backup_command(
-                    snap_path=f"/x{bad}y",
-                    parent_snap_path=None,
-                    recipients_file="/r",
-                    ssh_target="u@h",
-                    remote_path="/p")
-            except ValueError:
-                pass
-            else:
-                raise AssertionError(
-                    f"expected ValueError for {bad!r}")
+# The legacy ``render_backup_command`` shell-pipeline builder and its tests
+# were removed (opus-security-review HIGH #4 — command injection). The
+# scheduled backup path is the signed-manifest engine; see
+# ``test_backup_manifest.py`` / ``test_backup_cli.py``.

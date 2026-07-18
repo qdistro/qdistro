@@ -4,11 +4,9 @@
 #
 # Drops:
 #   /usr/libexec/qdistro/qdistro_snapshots.py        # engine (+ broker)
-#   /usr/libexec/qdistro/qdistro_snap_export_cli.py  # OLD CLI module (kept)
 #   /usr/libexec/qdistro/qdistro_backup_manifest.py  # signed-manifest layer
 #   /usr/libexec/qdistro/qdistro_backup_cli.py       # backup/verify/restore CLI
 #   /usr/libexec/qdistro/qdistro_backup_service.py   # daily-service DRIVER
-#   /usr/local/bin/qdistro-snap-export               # OLD CLI shim (kept)
 #   /usr/local/bin/qdistro-backup                    # backup/verify/restore shim
 #   /usr/local/bin/qdistro-backup-run                # driver shim (live path)
 #   /etc/systemd/system/qdistro-backup.service       # daily signed-manifest backup
@@ -47,7 +45,6 @@ fi
 install -d -m 0755 "$DEST_LIB_QDISTRO" "$DEST_BIN" "$DEST_SYSD"
 
 install -m 0644 "$SRC/qdistro_snapshots.py"        "$DEST_LIB_QDISTRO/"
-install -m 0644 "$SRC/qdistro_snap_export_cli.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_manifest.py"  "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_cli.py"       "$DEST_LIB_QDISTRO/"
 install -m 0644 "$SRC/qdistro_backup_service.py"   "$DEST_LIB_QDISTRO/"
@@ -64,13 +61,9 @@ install -m 0644 "$SRC/qdistro_backup_recovery.py"  "$DEST_LIB_QDISTRO/"
 # (idempotent, identical content).
 install -m 0644 "$SRC/qdistro_snap_swap.py"        "$DEST_LIB_QDISTRO/"
 
-cat >"$DEST_BIN/qdistro-snap-export" <<'CLI'
-#!/bin/bash
-exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_snap_export_cli.py "$@"
-CLI
-chmod 0755 "$DEST_BIN/qdistro-snap-export"
-
 # Signed-manifest backup/verify/restore CLI (engine) + the daily-service driver.
+# (The legacy unsigned ``qdistro-snap-export`` shim was removed — command
+# injection, opus-security-review HIGH #4; the signed engine below supersedes it.)
 cat >"$DEST_BIN/qdistro-backup" <<'CLI'
 #!/bin/bash
 exec /usr/bin/python3 /usr/libexec/qdistro/qdistro_backup_cli.py "$@"

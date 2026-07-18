@@ -67,7 +67,6 @@ COVERED = [
     ("cli/qdistro_recall_cli.py", "qdistro-recall"),
     ("cli/qdistro_recall_admin_cli.py", "qdistro-recall-admin"),
     ("cli/qdistro_approvals.py", "qdistro-approvals"),
-    ("snapshots/qdistro_snap_export_cli.py", "qdistro-snap-export"),
     ("phone/qdistro_phone_cli.py", "qdistro-phone"),
     ("pwd/qdistro-pwd-admin.py", "qdistro-pwd-admin"),
     ("daemons/forward/qdistro-forward.py", "qdistro-forward"),

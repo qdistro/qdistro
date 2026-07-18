@@ -7,8 +7,9 @@ Description=qdistro signed-manifest backup (06-backup-dr §2-§4)
 # state after the remote durably holds (and reads back matching) the new run.
 #
 # When backup.conf is absent the unit ConditionPathExists-skips, so a vanilla
-# install doesn't fail. The OLD env-var qdistro-snap-export CLI stays installed
-# for compatibility/debugging but is no longer the live path.
+# install doesn't fail. (The old unsigned qdistro-snap-export CLI was removed —
+# command injection, opus-security-review HIGH #4; this signed-manifest driver
+# is the only export path.)
 ConditionPathExists=/etc/qdistro/backup.conf
 
 [Service]

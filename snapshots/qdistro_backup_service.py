@@ -2,8 +2,9 @@
 
 Wires the live ``qdistro-backup.service`` to the signed-manifest engine
 (``qdistro_backup_cli`` / ``qdistro_backup_manifest``) over a SUBVOLUME SET
-read from ``/etc/qdistro/backup.conf`` (TOML), replacing the old single-subvol
-unsigned ``qdistro-snap-export`` path (06-backup-dr §2-§4).
+read from ``/etc/qdistro/backup.conf`` (TOML). This fully replaces the old
+single-subvol unsigned ``qdistro-snap-export`` path, which has been removed
+(command injection — opus-security-review HIGH #4) (06-backup-dr §2-§4).
 
 What the driver owns that the engine does not:
 
