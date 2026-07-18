@@ -225,3 +225,101 @@ def test_unsupported_version_rejected(vd, mock_be):
     open(vault_path(vd, "v"), "w").write(json.dumps(body))
     with pytest.raises(VaultIntegrityError):
         vault_version(vd, "v")
+
+
+# -- PIN is never placed on tpm2-tools argv (leak via /proc/<pid>/cmdline) -----
+#
+# The Tpm2ToolsBackend must pass the PIN to tpm2_create/tpm2_unseal via stdin
+# (``-p file:-``), NOT ``-p hex:<pin>`` on argv. These tests stub ``_run`` so
+# no real TPM is needed: they capture every invocation and assert the PIN
+# bytes appear only in stdin, never in argv.
+
+class _CapturingTpm(Tpm2ToolsBackend):
+    """Tpm2ToolsBackend whose ``_run`` records calls and fakes the TPM.
+
+    ``tpm2_readpublic`` succeeds (primary already present), and
+    ``tpm2_create``/``tpm2_load`` write the output files the caller reads
+    back, so seal()/unseal() complete without a TPM.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[dict] = []
+
+    def _run(self, *args, input_bytes=None, cwd=None):
+        self.calls.append({"argv": list(args), "input": input_bytes})
+        # Write any requested output files so the caller's reads succeed.
+        for i, a in enumerate(args):
+            if a in ("-r", "-u", "-c") and i + 1 < len(args):
+                try:
+                    with open(args[i + 1], "wb") as f:
+                        f.write(b"\x00")
+                except OSError:
+                    pass
+        # tpm2_unseal returns the sealed secret on stdout.
+        if args and args[0] == "tpm2_unseal":
+            return 0, b"secret", b""
+        return 0, b"", b""
+
+
+def _assert_pin_off_argv(calls, pin: bytes):
+    hexpin = pin.hex()
+    expected_stdin = b"hex:" + hexpin.encode("ascii")
+    saw_file_stdin = False
+    for c in calls:
+        argv_str = " ".join(c["argv"])
+        assert "hex:" + hexpin not in argv_str, f"PIN on argv: {c['argv']}"
+        assert pin.decode("latin-1") not in argv_str, f"PIN on argv: {c['argv']}"
+        if "file:-" in argv_str or "+file:-" in argv_str:
+            saw_file_stdin = True
+            # Delivered on stdin as ``hex:<pin.hex()>`` so tpm2-tools decodes it
+            # back to exactly ``pin`` (byte-identical to the old argv path).
+            assert c["input"] == expected_stdin, "PIN must be hex-encoded on stdin"
+    assert saw_file_stdin, "expected a tpm2 call to read the PIN from stdin"
+
+
+def test_seal_passes_pin_on_stdin_not_argv():
+    be = _CapturingTpm()
+    pin = b"987654"
+    be.seal(b"master-key-bytes", pin)
+    create_calls = [c for c in be.calls if c["argv"][:1] == ["tpm2_create"]]
+    assert create_calls, "tpm2_create was not invoked"
+    _assert_pin_off_argv(be.calls, pin)
+
+
+def test_unseal_passes_pin_on_stdin_not_argv():
+    be = _CapturingTpm()
+    pin = b"987654"
+    blob = {"priv": _b64("x"), "pub": _b64("y"), "auth_set": True}
+    be.unseal(blob, pin)
+    unseal_calls = [c for c in be.calls if c["argv"][:1] == ["tpm2_unseal"]]
+    assert unseal_calls, "tpm2_unseal was not invoked"
+    _assert_pin_off_argv(be.calls, pin)
+
+
+def _b64(s: str) -> str:
+    import base64
+    return base64.b64encode(s.encode()).decode("ascii")
+
+
+# The stdin payload must decode (as tpm2-tools decodes ``hex:``) back to the
+# EXACT PIN bytes — including PINs that would break a raw ``file:-`` feed
+# (trailing CR/LF stripped, or an auth-prefix reinterpreted by tpm2-tools).
+@pytest.mark.parametrize("pin", [
+    b"987654",
+    b"123456\n",       # raw file:- would strip the trailing \n
+    b"abc\r\n",        # raw file:- would strip trailing \r\n
+    b"hex:313233",     # raw file:- would reinterpret the hex: prefix -> b"123"
+    b"str:abc",        # raw file:- would reinterpret the str: prefix -> b"abc"
+    b"file:/tmp/x",    # raw file:- would attempt nested file read
+    b"\x00\x01\xff",   # arbitrary bytes incl NUL
+])
+def test_pin_stdin_is_byte_exact(pin):
+    from qdistro_pwd_tpm import _pin_stdin  # type: ignore[import-not-found]
+    payload = _pin_stdin(pin)
+    assert payload.startswith(b"hex:")
+    # tpm2-tools decodes ``hex:<h>`` by hex-decoding <h> -> must equal pin.
+    decoded = bytes.fromhex(payload[len(b"hex:"):].decode("ascii"))
+    assert decoded == pin
+    # And the raw PIN never appears verbatim in the payload for the risky cases.
+    assert payload != pin

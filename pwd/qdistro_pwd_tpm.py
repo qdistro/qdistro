@@ -96,7 +96,8 @@ When both ``pcrs`` is non-empty AND ``auth_pin`` is non-empty,
 
 The seal blob carries ``combined_auth: True`` so unseal knows to
 replay both ops + supply the PIN via the
-``-p session:<sess>+hex:<pin>`` syntax. Mismatched PCR state
+``-p session:<sess>+file:-`` syntax (PIN on stdin, not argv).
+Mismatched PCR state
 surfaces as ``TpmAuthFailed`` (boot tampered); wrong PIN surfaces
 as ``TpmAuthFailed`` from ``tpm2_unseal``'s authorisation check.
 
@@ -182,6 +183,20 @@ def _b64e(b: bytes) -> str:
 
 def _b64d(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"))
+
+
+def _pin_stdin(auth_pin: bytes) -> bytes:
+    """Encode a PIN for delivery to tpm2-tools ``-p file:-`` (stdin).
+
+    Returns ``b"hex:" + auth_pin.hex()``. tpm2-tools reads the stdin bytes,
+    strips a trailing CR/LF, then re-parses ``hex:``/``str:``/``file:``
+    prefixes — so feeding the raw PIN would NOT reproduce the auth-value of the
+    old argv ``-p hex:<pin.hex()>`` for PINs ending in CR/LF or starting with an
+    auth prefix. Feeding the hex form decodes back to exactly ``auth_pin``,
+    keeping the value byte-identical to the legacy path (backward-compatible
+    with already-sealed blobs) while never placing the secret on argv.
+    """
+    return b"hex:" + auth_pin.hex().encode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +302,8 @@ class Tpm2ToolsBackend:
 
         spec/13 §"combined PCR + PIN seal" (task 103): the same trial
         flow during unseal asserts the live PCR state AND the supplied
-        auth-value via session:<sess>+hex:<pin> tpm2_unseal -p syntax.
+        auth-value via session:<sess>+file:- tpm2_unseal -p syntax
+        (the PIN is fed on stdin, never on argv).
         """
         sess = os.path.join(work, "policy.session")
         digest = os.path.join(work, "policy.digest")
@@ -359,9 +375,20 @@ class Tpm2ToolsBackend:
             ]
             if pcrs:
                 args.extend(["-L", os.path.join(work, "policy.digest")])
+            pin_stdin: bytes | None = None
             if auth_pin:
-                args.extend(["-p", "hex:" + auth_pin.hex()])
-            rc, _, err = self._run(*args)
+                # Pass the PIN via stdin (tpm2-tools ``file:-``) rather than on
+                # argv: ``-p hex:<pin>`` is world-readable via
+                # /proc/<pid>/cmdline. We feed ``hex:<pin.hex()>`` on stdin (not
+                # the raw PIN): tpm2-tools' file/stdin reader strips a trailing
+                # CR/LF and re-parses ``hex:``/``str:``/``file:`` prefixes, so a
+                # raw feed would NOT be byte-identical to the old argv
+                # ``hex:<pin.hex()>``. Feeding the hex form decodes back to the
+                # exact original PIN bytes, so existing sealed blobs still
+                # unseal — but the secret never appears on argv.
+                args.extend(["-p", "file:-"])
+                pin_stdin = _pin_stdin(auth_pin)
+            rc, _, err = self._run(*args, input_bytes=pin_stdin)
             if rc != 0:
                 raise TpmBackendError(
                     f"tpm2_create failed: rc={rc} stderr={err.decode(errors='replace')!r}")
@@ -418,8 +445,8 @@ class Tpm2ToolsBackend:
             # spec/13 §"combined PCR + PIN seal" (task 103): when the
             # blob carries `combined_auth: True`, the trial policy at
             # seal time included a policyauthvalue assertion — replay
-            # that here AND pass the PIN via the session's +hex:<pin>
-            # suffix so unseal needs both factors.
+            # that here AND pass the PIN via the session's +file:-
+            # suffix (stdin) so unseal needs both factors.
             if pcrs:
                 rc, _, err = self._run("tpm2_startauthsession",
                                        "--policy-session",
@@ -449,18 +476,24 @@ class Tpm2ToolsBackend:
                             f"tpm2_policyauthvalue (replay) failed: rc={rc} "
                             f"stderr={err.decode(errors='replace')!r}")
             args = ["tpm2_unseal", "-c", ctx_path]
+            pin_stdin: bytes | None = None
             if combined_auth:
                 # session+pin combined auth: the session asserts PCR +
-                # the policyauthvalue requirement; the +hex:<pin> piece
-                # supplies the actual auth-value.
-                args.extend(["-p",
-                             "session:" + sess_path
-                             + "+hex:" + auth_pin.hex()])
+                # the policyauthvalue requirement; the ``+file:-`` piece
+                # supplies the actual auth-value from stdin (kept off argv —
+                # /proc/<pid>/cmdline is world-readable). The stdin payload is
+                # ``hex:<pin.hex()>`` so it decodes to the exact PIN bytes (see
+                # _pin_stdin / seal()).
+                args.extend(["-p", "session:" + sess_path + "+file:-"])
+                pin_stdin = _pin_stdin(auth_pin)
             elif pcrs:
                 args.extend(["-p", "session:" + sess_path])
             elif auth_pin or blob.get("auth_set"):
-                args.extend(["-p", "hex:" + auth_pin.hex()])
-            rc, out, err = self._run(*args)
+                # Auth-value from stdin (``file:-``) instead of argv
+                # ``hex:<pin>`` — byte-identical value, but not leaked via /proc.
+                args.extend(["-p", "file:-"])
+                pin_stdin = _pin_stdin(auth_pin)
+            rc, out, err = self._run(*args, input_bytes=pin_stdin)
             if pcrs:
                 self._run("tpm2_flushcontext", sess_path, "-Q")
             if rc != 0:
