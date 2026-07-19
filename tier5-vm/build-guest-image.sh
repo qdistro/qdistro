@@ -210,6 +210,16 @@ echo "[tier5-build] customizing..."
 virt-customize -a "$BASE_QCOW" \
     --install waypipe,wayland-utils,qemu-guest-agent,kbd,alsa-utils,weston,MozillaFirefox,baobab,gnome-text-editor,nautilus,gnome-calculator,libqt5-qtwayland,qt6-wayland,kcalc,dolphin,konsole,kate,fontconfig,dejavu-fonts,liberation-fonts,cantarell-fonts,google-noto-sans-fonts,google-noto-serif-fonts,google-noto-sans-mono-fonts,google-noto-coloremoji-fonts,google-noto-sans-cjk-fonts \
     --run-command 'systemctl enable qemu-guest-agent.service' \
+    `# The host drives the tier-5 publisher via qga guest-exec. Current` \
+    `# Tumbleweed ships qemu-guest-agent 11.x with guest-exec BLOCKED by` \
+    `# default (FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status")` \
+    `# and the unit at UMask=0077 — so guest-exec fails outright and any file` \
+    `# it stages is unreadable by non-root. That makes the publisher never` \
+    `# report a pid (phase7-tier5-vm). Restore guest-exec + 0022, same as the` \
+    `# baseweed bake.` \
+    --run-command 'printf "# qdistro CI: allow guest-exec (qemu-ga 11.x blocks it by default).\nFILTER_RPC_ARGS=\"\"\n" > /etc/sysconfig/qemu-ga' \
+    --mkdir /etc/systemd/system/qemu-guest-agent.service.d \
+    --run-command 'printf "[Service]\nUMask=0022\n" > /etc/systemd/system/qemu-guest-agent.service.d/umask.conf' \
     --run-command 'systemctl enable serial-getty@ttyS0.service' \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
     --run-command 'rm -f /var/lib/YaST2/reconfig_system 2>/dev/null || true' \
