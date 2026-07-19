@@ -135,6 +135,11 @@ install -d -o root -g root -m 0755 /usr/share/quickshell
 rm -rf /usr/share/quickshell/qdshell
 cp -r "$QDSHELL_SRC" /usr/share/quickshell/qdshell
 chown -R root:root /usr/share/quickshell/qdshell
+# qdshell.service runs as the session user (admin), so the QML tree MUST be
+# world-readable. A hardened root umask (077, current Tumbleweed default) makes
+# the cp -r above land 0700/0600 → "Could not open config file .../shell.qml"
+# and qdshell dies. Force readability regardless of the ambient umask.
+chmod -R u=rwX,go=rX /usr/share/quickshell/qdshell
 
 # 3b. Qdistro.Qdwin QML plugin — qdshell's native binding to
 # qdwin_shell_v1. Built from qdshell/qml-plugin/ (which reads the

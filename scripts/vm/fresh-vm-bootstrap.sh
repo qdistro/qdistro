@@ -32,6 +32,15 @@
 
 set -eo pipefail
 
+# Current Tumbleweed hardened its default umask to 077 (via /etc/login.defs +
+# pam_umask), so every file/dir this bootstrap creates AS ROOT (cp -r, install,
+# tar) lands 0700/0600 — unreadable by the non-root session users. That silently
+# breaks anything root stages for admin/silo to read: the system-wide qdshell
+# QML at /usr/share/quickshell/qdshell/ (qdshell.service runs as admin →
+# "Could not open config file .../shell.qml"), staged client scripts, etc.
+# The scripts here assume the historical 022. Restore it for the whole bootstrap.
+umask 022
+
 # This bootstrap creates disposable integration-test VMs. The shared profile
 # contract keeps direct Tier-1/Tier-2 launches dev-only, while real installs
 # default to daily-driver via qdistro-bootstrap.sh.
