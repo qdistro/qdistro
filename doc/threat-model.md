@@ -215,8 +215,10 @@ Do not treat the broker pilot as evidence for those other domains.
   pointer. **Residual (gating, not detection):** four privileged inherited globals
   still classify ORDINARY and remain visible to silo clients —
   `weston_direct_display_v1` and `weston_content_protection` (advertised on the
-  DRM backend, `backend-drm/drm.c`), `weston_debug_v1`, and `xx_color_manager_v4`
-  (only when the compositor enables them). Unlike capture/touch-calibration these
+  DRM backend, `backend-drm/drm.c`), `weston_debug_v1`, and `wp_color_manager_v1`
+  (the weston-16 stable colour-management protocol, which supersedes the
+  `xx_color_manager_v4` staging draft carried by weston-14; only when the
+  compositor enables them). Unlike capture/touch-calibration these
   have **no qdwin-reachable `wl_global *`** to gate by pointer identity: libweston
   discards the `wl_global_create` result for direct-display/content-protection/
   color-manager (bare `if (!wl_global_create(...))`, not stored in any compositor
