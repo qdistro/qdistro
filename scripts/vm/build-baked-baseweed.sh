@@ -137,6 +137,12 @@ virt-customize \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
     --run-command 'systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true' \
     --run-command 'systemctl mask greetd.service 2>/dev/null || true' \
+    `# qemu-guest-agent 11.x (current Tumbleweed) ships a default` \
+    `# FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status" in` \
+    `# /usr/etc/sysconfig/qemu-ga, which disables the guest-exec RPC vm-exec` \
+    `# relies on (10.2.2 did not). Clear the block list via the /etc override` \
+    `# (later EnvironmentFile wins) so vm-exec works first boot.` \
+    --run-command 'printf "# qdistro CI: allow guest-exec for vm-exec (qemu-ga 11.x blocks it by default).\nFILTER_RPC_ARGS=\"\"\n" > /etc/sysconfig/qemu-ga' \
     --run-command 'sed -i -e "s/^GRUB_TERMINAL_OUTPUT=.*/GRUB_TERMINAL_OUTPUT=\"console\"/" /etc/default/grub; grep -q "^GRUB_TERMINAL_OUTPUT=" /etc/default/grub || echo "GRUB_TERMINAL_OUTPUT=\"console\"" >>/etc/default/grub' \
     --run-command 'sed -i -e "s/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=\"text\"/" /etc/default/grub; grep -q "^GRUB_GFXPAYLOAD_LINUX=" /etc/default/grub || echo "GRUB_GFXPAYLOAD_LINUX=\"text\"" >>/etc/default/grub' \
     --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
