@@ -296,11 +296,14 @@ fi
 # (5) Phase-1 post-allow routing assertion on the SAME handle: now pickable +
 # routes. Require BOTH pick_matched=1 (real picker resolves to the proxy) and
 # active_input_proxy_matched=1 (the focus tracker armed the QDNI forward).
-for i in $(seq 1 12); do
-    grep -q "S3d route-test handle=$HANDLE" "$WLOG" 2>/dev/null && break
+# Wait for the DEFINITIVE result line (carries pick_matched=), not the
+# deferred-fire "route-retry" re-arm messages qdwin emits while the headless
+# view_list rebuilds; take the last so a retried resolution wins.
+for i in $(seq 1 18); do
+    grep -q "S3d route-test handle=$HANDLE .*pick_matched=" "$WLOG" 2>/dev/null && break
     sleep 1
 done
-S3D_LINE=$(grep "S3d route-test handle=$HANDLE" "$WLOG" | head -1)
+S3D_LINE=$(grep "S3d route-test handle=$HANDLE .*pick_matched=" "$WLOG" | tail -1)
 echo "post-allow route-test: ${S3D_LINE:-<none>}"
 if echo "$S3D_LINE" | grep -qE 'pick_matched=1 active_input_proxy_matched=1'; then
     echo "PASS: post-allow S3d route-test — SAME proxy now pickable + active_input_proxy armed"

@@ -252,11 +252,15 @@ echo "PASS: no phantom host-output toplevel from the nested publisher (pid=$NPID
 # --- S3d ROUTING assertion (outer side) -----------------------------
 # Wait for the route-test log; qdwin fires it on a deferred one-shot timer
 # (~500ms after advertise, post-repaint), so allow a few seconds.
-for i in $(seq 1 10); do
-    grep -q 'qdwin/nested-proxy: S3d route-test' "$WLOG" 2>/dev/null && break
+# Wait for the DEFINITIVE result line — the one carrying pick_matched= — not the
+# deferred-fire "route-retry" re-arm messages qdwin emits while the headless
+# view_list is still being rebuilt (see qdwin.c S3d pick_retries). Take the last
+# such line so a retried resolution wins over any earlier transient.
+for i in $(seq 1 15); do
+    grep -q 'qdwin/nested-proxy: S3d route-test .*pick_matched=' "$WLOG" 2>/dev/null && break
     sleep 1
 done
-S3D_LINE=$(grep 'qdwin/nested-proxy: S3d route-test' "$WLOG" | head -1)
+S3D_LINE=$(grep 'qdwin/nested-proxy: S3d route-test .*pick_matched=' "$WLOG" | tail -1)
 echo "S3d line: ${S3D_LINE:-<none>}"
 # pick_matched=1 is the load-bearing assertion: it proves the REAL compositor
 # picker (weston_compositor_pick_view) resolves to the proxy view — i.e. the
