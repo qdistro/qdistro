@@ -212,6 +212,13 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 --run-command 'zypper -n install --no-recommends waypipe wayland-utils qemu-guest-agent kbd alsa-utils weston dejavu-fonts fontconfig' \
                 --run-command 'fc-cache -f || true' \
                 --run-command 'systemctl enable qemu-guest-agent.service' \
+                `# The host launches the publisher via qga guest-exec; current TW` \
+                `# ships qemu-ga 11.x with guest-exec BLOCKED + UMask=0077, so the` \
+                `# publisher never launches / never reports a pid (phase7-tier5-vm).` \
+                `# Restore guest-exec + 0022 (same as the outer baseweed bake).` \
+                --run-command 'printf "# qdistro CI: allow guest-exec (qemu-ga 11.x blocks it by default).\nFILTER_RPC_ARGS=\"\"\n" > /etc/sysconfig/qemu-ga' \
+                --mkdir /etc/systemd/system/qemu-guest-agent.service.d \
+                --run-command 'printf "[Service]\nUMask=0022\n" > /etc/systemd/system/qemu-guest-agent.service.d/umask.conf' \
                 --run-command 'systemctl enable serial-getty@ttyS0.service' \
                 `# Mask jeos-firstboot/cloud-init: the stock Tumbleweed Cloud` \
                 `# image runs the firstboot wizard on ttyS0, which blocks` \
