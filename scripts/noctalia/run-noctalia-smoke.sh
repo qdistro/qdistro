@@ -16,7 +16,7 @@ QDWIN_USE_VENDORED_LIBWESTON="${QDWIN_USE_VENDORED_LIBWESTON:-0}"
 QDWIN_VENDORED_LIBWESTON_PREFIX="${QDWIN_VENDORED_LIBWESTON_PREFIX:-/usr/libexec/qdistro/qdwin-libweston}"
 WESTON_LD_PREFIX=""
 if [ "$QDWIN_USE_VENDORED_LIBWESTON" = "1" ]; then
-    if [ ! -f "$QDWIN_VENDORED_LIBWESTON_PREFIX/lib64/libweston-16.so.0.0.0" ]; then
+    if ! ls "$QDWIN_VENDORED_LIBWESTON_PREFIX"/lib64/libweston-16.so.0* >/dev/null 2>&1; then
         echo "ERROR: QDWIN_USE_VENDORED_LIBWESTON=1 but no vendored .so at $QDWIN_VENDORED_LIBWESTON_PREFIX/lib64" >&2
         exit 2
     fi
