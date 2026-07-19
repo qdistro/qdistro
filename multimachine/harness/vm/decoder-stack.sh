@@ -9,7 +9,7 @@ RT=/run/mm-b
 SOCK=wayland-b
 HOST=${HOST:-10.0.2.2}; PORT=${PORT:-5555}; OTP=${OTP:?need OTP}
 W=${W:-1280}; H=${H:-800}; TTY=${TTY:-2}
-MM=/usr/lib64/libweston-14
+MM=/usr/lib64/libweston-16
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 systemctl stop mm-weston mm-viewer 2>/dev/null || true

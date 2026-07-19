@@ -250,7 +250,7 @@ EOF
 
 # Vendored libweston: qdwin's layer-shell popup parenting needs the
 # soft-linked helper symbols that only exist in qdistro's patched
-# libweston-14 (see qdwin/doc/decisions/0001-vendored-libweston-packaging.md).
+# libweston-16 (see qdwin/doc/decisions/0001-vendored-libweston-packaging.md).
 # install-vendored-libweston.sh stages a self-contained tree under
 # $QDWIN_LIBWESTON. The system `weston` binary loads the patched core
 # via LD_LIBRARY_PATH and ALL backends from the same tree via
@@ -260,7 +260,7 @@ EOF
 # layer-popup grab paths log DEGRADED and Quickshell popups parented to
 # layer surfaces will not grab; that is the documented fallback.
 QDWIN_LIBWESTON=${QDWIN_LIBWESTON:-/usr/libexec/qdistro/qdwin-libweston}
-QDWIN_LIBWESTON_MODDIR="$QDWIN_LIBWESTON/lib64/libweston-14"
+QDWIN_LIBWESTON_MODDIR="$QDWIN_LIBWESTON/lib64/libweston-16"
 QDWIN_MODULE_MAP=""
 QDWIN_VENDORED=0
 if [ -f "$QDWIN_LIBWESTON_MODDIR/drm-backend.so" ]; then
@@ -270,10 +270,10 @@ if [ -f "$QDWIN_LIBWESTON_MODDIR/drm-backend.so" ]; then
     QDWIN_MOD_BASE="$QDWIN_LIBWESTON_MODDIR"
     echo "qdwin session: vendored libweston present — modules mapped to $QDWIN_LIBWESTON_MODDIR"
 else
-    # Fallback: distro libweston-14, default loader path (no
+    # Fallback: distro libweston-16, default loader path (no
     # LD_LIBRARY_PATH so the absent vendored dir is not in the search
     # path). Layer-popup grab degrades — documented fallback.
-    QDWIN_MOD_BASE="/usr/lib64/libweston-14"
+    QDWIN_MOD_BASE="/usr/lib64/libweston-16"
     echo "WARN: vendored libweston not found at $QDWIN_LIBWESTON_MODDIR —" \
          "qdwin session will use distro libweston (layer-popup grab DEGRADED)." \
          "Run install-vendored-libweston.sh to ship the patched tree."
@@ -293,11 +293,11 @@ for _mod in drm-backend.so gl-renderer.so color-lcms.so \
     QDWIN_MODULE_MAP="${QDWIN_MODULE_MAP:+$QDWIN_MODULE_MAP;}$_mod=$QDWIN_MOD_BASE/$_mod"
 done
 
-# XWayland: weston's `xwayland.so` is a libweston-14 module (same dir as the
-# backends: vendored $QDWIN_LIBWESTON/lib64/libweston-14/ if the production
-# build shipped one, else the distro /usr/lib64/libweston-14/xwayland.so from
+# XWayland: weston's `xwayland.so` is a libweston-16 module (same dir as the
+# backends: vendored $QDWIN_LIBWESTON/lib64/libweston-16/ if the production
+# build shipped one, else the distro /usr/lib64/libweston-16/xwayland.so from
 # the weston package). We map it by name->path through WESTON_MODULE_MAP and
-# enable it the SUPPORTED weston-14 way: `[core] xwayland=true`. The old
+# enable it the SUPPORTED weston-16 way: `[core] xwayland=true`. The old
 # `modules=xwayland.so` load is FATAL on weston 14 ("Old Xwayland module
 # loading detected"), so we never use it.
 #
@@ -307,16 +307,16 @@ done
 # XWayland exactly as before (X11 app tests stay infra-blocked — status quo,
 # NOT a golden-build break). A prior revision fail-closed on the wrong path and
 # aborted the whole image build; we never do that.
-# weston's xwayland.so is a libweston module in the libweston-14/ dir. Prefer
+# weston's xwayland.so is a libweston module in the libweston-16/ dir. Prefer
 # the vendored copy if the production profile built one (ABI-matched to the
 # patched core); otherwise fall back to the DISTRO module
-# (/usr/lib64/libweston-14/xwayland.so from the weston package — same pinned
+# (/usr/lib64/libweston-16/xwayland.so from the weston package — same pinned
 # 14.0.x, so it loads fine against the vendored core via LD_LIBRARY_PATH). The
 # current vendored build skips the xwayland subdir, so the distro module is the
 # normal case.
 QDWIN_XWAYLAND_SO=""
-for _cand in "$QDWIN_LIBWESTON/lib64/libweston-14/xwayland.so" \
-             "/usr/lib64/libweston-14/xwayland.so"; do
+for _cand in "$QDWIN_LIBWESTON/lib64/libweston-16/xwayland.so" \
+             "/usr/lib64/libweston-16/xwayland.so"; do
     if [ -f "$_cand" ]; then QDWIN_XWAYLAND_SO="$_cand"; break; fi
 done
 if [ -n "$QDWIN_XWAYLAND_SO" ]; then
@@ -332,7 +332,7 @@ if [ -n "$QDWIN_XWAYLAND_SO" ]; then
     chown admin:users /home/admin/weston.ini
     echo "qdwin session: XWayland enabled (xwayland=true) — xwayland.so mapped to $QDWIN_XWAYLAND_SO"
 else
-    echo "WARN: no xwayland.so under vendored or /usr/lib64/libweston-14/ —" \
+    echo "WARN: no xwayland.so under vendored or /usr/lib64/libweston-16/ —" \
          "qdwin session starts WITHOUT XWayland (X11 app tests infra-blocked)." \
          "Install the weston package / restage libweston with the xwayland module."
 fi

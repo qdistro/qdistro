@@ -24,7 +24,7 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 RUN zypper --non-interactive --gpg-auto-import-keys refresh \
  && zypper --non-interactive install --no-recommends \
         weston \
-        libweston-14 \
+        libweston-16 \
         libpipewire-0_3-0 \
         libwayland-client0 \
         libwayland-server0 \

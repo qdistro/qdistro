@@ -24,7 +24,7 @@ Environment=XDG_SESSION_TYPE=wayland
 # against. The remaining backends stay on the distro copies (packaged
 # drivers); they don't touch the cursor path.
 Environment=LD_LIBRARY_PATH=/usr/libexec/qdistro/qdwin-libweston/lib64
-Environment=WESTON_MODULE_MAP=drm-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-14/drm-backend.so;gl-renderer.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-14/gl-renderer.so;color-lcms.so=/usr/lib64/libweston-14/color-lcms.so;headless-backend.so=/usr/lib64/libweston-14/headless-backend.so;pipewire-backend.so=/usr/lib64/libweston-14/pipewire-backend.so;rdp-backend.so=/usr/lib64/libweston-14/rdp-backend.so;wayland-backend.so=/usr/lib64/libweston-14/wayland-backend.so;x11-backend.so=/usr/lib64/libweston-14/x11-backend.so;xwayland.so=/usr/lib64/libweston-14/xwayland.so
+Environment=WESTON_MODULE_MAP=drm-backend.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so;gl-renderer.so=/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/gl-renderer.so;color-lcms.so=/usr/lib64/libweston-16/color-lcms.so;headless-backend.so=/usr/lib64/libweston-16/headless-backend.so;pipewire-backend.so=/usr/lib64/libweston-16/pipewire-backend.so;rdp-backend.so=/usr/lib64/libweston-16/rdp-backend.so;wayland-backend.so=/usr/lib64/libweston-16/wayland-backend.so;x11-backend.so=/usr/lib64/libweston-16/x11-backend.so;xwayland.so=/usr/lib64/libweston-16/xwayland.so
 # qdwin's protocol surface (qdwin_shell_v1 v14, qdwin_locker_v1,
 # wp_security_context_v1) is compiled into qdwin-shell.so; weston
 # loads it as a plugin via shell= in weston.ini.

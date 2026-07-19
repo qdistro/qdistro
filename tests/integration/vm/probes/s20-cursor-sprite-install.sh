@@ -2,7 +2,7 @@
 # §6.6 follow-up — cursor-shape sprite-install smoke.
 #
 # Per the §6.7(b) parking notes + §6.6 follow-up research (qdwin.c
-# cursor-shape block): libweston-14 exposes weston_pointer::sprite as
+# cursor-shape block): libweston-16 exposes weston_pointer::sprite as
 # a public field + weston_buffer_create_solid_rgba / weston_surface_
 # attach_solid as public APIs. That's enough to do per-shape solid-
 # colour sprite install without an internal wl_client worker thread.

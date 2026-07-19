@@ -657,7 +657,7 @@ install_packages_ubuntu() {
     # install continues so the user can build it from source after.
     local pkgs=(
         # compositor + graphics
-        weston libweston-14-dev
+        weston libweston-16-dev
         libfreerdp3-dev libfreerdp-server3-dev libwinpr3-dev freerdp3-x11
         libpixman-1-dev
         libwayland-dev wayland-protocols libxkbcommon-dev libevdev-dev
@@ -723,7 +723,7 @@ install_packages_ubuntu() {
         warn "the following packages were NOT found in apt and were skipped:"
         for p in "${missing[@]}"; do warn "  - $p"; done
         warn "you may need to build these from source or enable a PPA."
-        warn "common culprits on 26.04: quickshell, libweston-14-dev (if upstream is on 13)."
+        warn "common culprits on 26.04: quickshell, libweston-16-dev (if upstream lags on 15)."
     fi
 }
 

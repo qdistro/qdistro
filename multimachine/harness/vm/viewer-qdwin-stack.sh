@@ -30,7 +30,7 @@ RDP_PORT_B=${RDP_PORT_B:?need RDP_PORT_B}; OTP_B=${OTP_B:?need OTP_B}
 STREAM_A=${STREAM_A:-streamA}; STREAM_B=${STREAM_B:-streamB}
 ORIGIN=${ORIGIN:-vm-a}
 W=${W:-1280}; H=${H:-800}; RDP_USER=${RDP_USER:-mm}
-MM=/usr/lib64/libweston-14
+MM=/usr/lib64/libweston-16
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 # find a windowed-capable FreeRDP client (prefer the SDL frontend the Phase-1

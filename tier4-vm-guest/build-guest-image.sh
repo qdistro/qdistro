@@ -366,7 +366,7 @@ echo "[tier4-guest-build] customizing..."
 # expects. Adding it now to match the spec's explicit list and avoid
 # silent divergence.
 virt-customize -a "$BASE_QCOW" \
-    --install "weston,libweston-14,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal,virtiofsd-client,socat,pipewire,freerdp,freerdp-server" \
+    --install "weston,libweston-16,waypipe,qemu-guest-agent,kbd,alsa-utils,weston-terminal,virtiofsd-client,socat,pipewire,freerdp,freerdp-server" \
     --copy-in "$QDWIN_SO:/usr/lib64/weston/" \
     --copy-in "$QDWIN_BYSTANDER:/usr/bin/" \
     --run-command 'chmod +x /usr/bin/qdwin-bystander' \

@@ -26,7 +26,7 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 # RPM Requires (nss, the GTK stack Chromium links) are pulled regardless, but
 # the ones the slice depends on are listed explicitly so a base/repo change
 # surfaces as a build failure, not a blank page at runtime:
-#   - weston + libweston-14 + the wayland/Mesa/xkb libs: the nested-publisher
+#   - weston + libweston-16 + the wayland/Mesa/xkb libs: the nested-publisher
 #     floor (same as tier2-weston-terminal).
 #   - chromium: the browser payload.
 #   - libgtk-3-0: Chromium's GTK runtime (file dialogs, theming).
@@ -40,7 +40,7 @@ FROM registry.opensuse.org/opensuse/tumbleweed:latest
 RUN zypper --non-interactive --gpg-auto-import-keys refresh \
  && zypper --non-interactive install --no-recommends \
         weston \
-        libweston-14 \
+        libweston-16 \
         libpipewire-0_3-0 \
         libwayland-client0 \
         libwayland-server0 \

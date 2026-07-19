@@ -177,10 +177,10 @@ num-outputs=4
 EOF
 
   VROOT=/usr/libexec/qdistro/qdwin-libweston
-  MM="$VROOT/lib64/libweston-14"
+  MM="$VROOT/lib64/libweston-16"
   LD_ARG="--setenv=LD_LIBRARY_PATH=$VROOT/lib64"
-  if [ ! -e "$VROOT/lib64/libweston-14.so.0" ]; then
-    MM="/usr/lib64/libweston-14"
+  if [ ! -e "$VROOT/lib64/libweston-16.so.0" ]; then
+    MM="/usr/lib64/libweston-16"
     LD_ARG=""
   fi
   WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
@@ -281,10 +281,10 @@ EOF
 # 1) Headless qdwin on a private socket. WESTON_MODULE_MAP lets qdwin-shell load
 #    pipewire-backend.so internally (the per-view capture pool) — same as prod.
 VROOT=/usr/libexec/qdistro/qdwin-libweston
-MM="$VROOT/lib64/libweston-14"
+MM="$VROOT/lib64/libweston-16"
 LD_ARG="--setenv=LD_LIBRARY_PATH=$VROOT/lib64"
-if [ ! -e "$VROOT/lib64/libweston-14.so.0" ]; then
-  MM="/usr/lib64/libweston-14"
+if [ ! -e "$VROOT/lib64/libweston-16.so.0" ]; then
+  MM="/usr/lib64/libweston-16"
   LD_ARG=""
 fi
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"

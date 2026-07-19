@@ -19,7 +19,7 @@ GEN=${GEN:?need GEN}; OTP=${OTP:?need OTP}
 W=${W:-1280}; H=${H:-800}; RDP_USER=${RDP_USER:-mm}
 MMDIR=${MMDIR:-/tmp/mm}                         # PYTHONPATH holding multimachine/
 STATUS_FILE=${STATUS_FILE:-$RT/viewer-status.json}
-MM=/usr/lib64/libweston-14
+MM=/usr/lib64/libweston-16
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 systemctl stop mm-weston mm-viewer 2>/dev/null || true

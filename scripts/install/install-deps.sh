@@ -9,7 +9,7 @@
 #                virt-customize at-rest instead of in-VM zypper-via-qga).
 set -eo pipefail
 QDISTRO_PKGS=(
-  weston weston-devel libweston-14 libweston-14-0
+  weston weston-devel libweston-16 libweston-16-0
   freerdp freerdp-sdl freerdp-server freerdp-devel winpr-devel
   libpixman-1-0 libpixman-1-0-devel
   pipewire wireplumber pipewire-tools pipewire-devel libpipewire-0_3-0
@@ -19,7 +19,7 @@ QDISTRO_PKGS=(
   libinput-devel libgbm-devel libdrm-devel seatd-devel
   libXcursor-devel adwaita-icon-theme xcursor-themes
   # Devel headers for building the production profile of qdistro's
-  # vendored libweston-14 (libweston-vendored/build-libweston.sh
+  # vendored libweston-16 (libweston-vendored/build-libweston.sh
   # QDWIN_LIBWESTON_PROFILE=production): GL renderer (Mesa EGL/GLES),
   # colour management (lcms2), DRM-backend display-info, and the X11
   # backend client libs. Runtime Mesa-libEGL1/GL1 above are not enough

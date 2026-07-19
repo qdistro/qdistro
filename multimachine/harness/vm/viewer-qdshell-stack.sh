@@ -10,7 +10,7 @@ VIEWER_ID=${VIEWER_MACHINE_ID:?need VIEWER_MACHINE_ID}
 QDSHELL=${QDSHELL_PATH:-/tmp/qdshell-r2}
 MMROOT=${MMROOT:-/tmp/mm}
 MMBIN=$MMROOT/multimachine
-MM=/usr/lib64/libweston-14
+MM=/usr/lib64/libweston-16
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 for command in weston qs qdistro-secctx-exec sdl-freerdp busctl; do

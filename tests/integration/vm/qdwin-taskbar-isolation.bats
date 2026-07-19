@@ -37,7 +37,7 @@ setup_file() {
     # --- preconditions (fail LOUD, per the suite convention) ---------------
     vm_run "test -S /run/user/1000/wayland-1"
     require "no qdwin compositor on wayland-1 — this lane needs a live qdwin session"
-    vm_run "pmap \$(pgrep -x weston | head -1) 2>/dev/null | grep -q '/usr/libexec/qdistro/qdwin-libweston/.*/libweston-14\.so'"
+    vm_run "pmap \$(pgrep -x weston | head -1) 2>/dev/null | grep -q '/usr/libexec/qdistro/qdwin-libweston/.*/libweston-16\.so'"
     require "compositor is NOT on vendored libweston — the layer-popup isolation menu paths are absent (rebake with cairo-devel)"
     vm_run "test -x /usr/bin/qdistro-tier2-spawn && command -v qdistro-secctx-exec >/dev/null && test -f $PROBE"
     require "tier-2 spawn stack incomplete (qdistro-tier2-spawn / qdistro-secctx-exec / the probe must be installed)"

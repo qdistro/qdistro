@@ -104,7 +104,7 @@ the VM, rebuilds qdwin + daemons, and reruns the install scripts.
 Installed once via `zypper install` after cloning baseweed:
 
 ```
-weston weston-devel libweston-14 libweston-14-0
+weston weston-devel libweston-16 libweston-16-0
 freerdp freerdp-sdl freerdp-server freerdp-devel winpr-devel
 libpixman-1-0 libpixman-1-0-devel
 pipewire wireplumber pipewire-tools pipewire-devel libpipewire-0_3-0

@@ -10,7 +10,7 @@
  * Architecture: see the architecture doc.
  * the per-view RDP design notes.
  *
- *     qdwin (libweston-14)  --pipewire-output-->  pw_stream INPUT
+ *     qdwin (libweston-16)  --pipewire-output-->  pw_stream INPUT
  *                                                       |
  *                                                       v
  *                                        on_process: dequeue buffer

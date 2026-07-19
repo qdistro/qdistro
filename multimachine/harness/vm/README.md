@@ -30,7 +30,7 @@ RELAY_PORT=<fixed>` and leaves `RDP_PASSWORD=<otp>` in
 `/run/user/1000/bystander.out`.
 
 Critical envs it sets for qdwin: `WESTON_MODULE_MAP` (so qdwin-shell loads
-`pipewire-backend.so` from `/usr/lib64/libweston-14`) and a weston.ini with
+`pipewire-backend.so` from `/usr/lib64/libweston-16`) and a weston.ini with
 `[pipewire] num-outputs=4` — without the PipeWire **backend** loaded the per-view
 subscribe is denied "no free pipewire output".
 
@@ -62,7 +62,7 @@ Why these choices (hard-won, session 2):
 - **weston (5b)**, not SDL-kmsdrm (5a): SDL kmsdrm connected + decoded but never
   took the CRTC / VT graphics mode when launched head-less (no logind/active VT) —
   the capture showed only its text stderr. weston via seatd owns DRM cleanly.
-- **seatd**: libseat here has no `builtin` backend and weston 14 needs
+- **seatd**: libseat here has no `builtin` backend and weston 16 needs
   seatd/logind; `seatd` is a tiny package (zypper) — the bake should include it.
 
 ## capture + verdict

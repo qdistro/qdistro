@@ -119,8 +119,8 @@
 
     <!-- qdistro userspace runtime deps (mirrors qdistro/scripts/install/install-deps.sh) -->
     <package name="weston"/>
-    <package name="libweston-14"/>
-    <package name="libweston-14-0"/>
+    <package name="libweston-16"/>
+    <package name="libweston-16-0"/>
     <package name="freerdp"/>
     <package name="freerdp-sdl"/>
     <package name="freerdp-server"/>

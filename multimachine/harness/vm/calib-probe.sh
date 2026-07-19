@@ -21,7 +21,7 @@ W=${W:-1280}; H=${H:-800}
 GEN=${GEN:-1}; ANIMATE_MS=${ANIMATE_MS:-200}
 TELEMETRY=${TELEMETRY:-$RT/calib-probe.json}
 LABEL=${LABEL:-calib}
-MM=/usr/lib64/libweston-14
+MM=/usr/lib64/libweston-16
 WMAP="drm-backend.so=$MM/drm-backend.so;gl-renderer.so=$MM/gl-renderer.so;color-lcms.so=$MM/color-lcms.so;headless-backend.so=$MM/headless-backend.so;pipewire-backend.so=$MM/pipewire-backend.so;rdp-backend.so=$MM/rdp-backend.so;wayland-backend.so=$MM/wayland-backend.so;x11-backend.so=$MM/x11-backend.so;xwayland.so=$MM/xwayland.so"
 
 systemctl stop mm-weston mm-viewer mm-calib 2>/dev/null || true

@@ -285,7 +285,7 @@ fi
 echo "=== #X XWayland binary installed + weston module loaded ==="
 # The xwayland PACKAGE provides /usr/bin/Xwayland (the X server weston's
 # xwayland.so module execs). install-qdwin-session-for-vm.sh maps the
-# libweston-14 xwayland.so module via WESTON_MODULE_MAP and sets weston.ini
+# libweston-16 xwayland.so module via WESTON_MODULE_MAP and sets weston.ini
 # `[core] xwayland=true`, so weston loads it at session start.
 if command -v Xwayland >/dev/null 2>&1; then
     PASS "xwayland: /usr/bin/Xwayland installed ($(command -v Xwayland))"

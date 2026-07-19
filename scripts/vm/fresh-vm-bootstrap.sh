@@ -10,7 +10,7 @@
 # Prerequisites (handled by build-baked-baseweed.sh):
 #   - SELinux permissive
 #   - admin user (uid 1000) present
-#   - meson + ninja + gcc/cc + libweston-14-devel + wayland-protocols
+#   - meson + ninja + gcc/cc + libweston-16-devel + wayland-protocols
 #     (gcc is required: install-qsu-for-vm.sh compiles qsu.c into the
 #      /usr/local/bin/qsu ELF binary so /proc/<pid>/exe is unambiguous)
 #   - quickshell + qt6-* for qdshell
@@ -140,9 +140,9 @@ zypper -n install --no-recommends \
     fontconfig-devel glib2-devel libva-devel liblcms2-devel \
     || { log "  ERROR: zypper install of vendored libweston deps failed"; exit 3; }
 
-# ---- 2b. Build + stage vendored, patched libweston-14 -------------------
+# ---- 2b. Build + stage vendored, patched libweston-16 -------------------
 # qdwin's layer-shell popup parenting needs soft-linked helper symbols
-# that only exist in the patched tree; stock libweston-14 cannot drive
+# that only exist in the patched tree; stock libweston-16 cannot drive
 # the get_popup / layer-popup-grab paths. Build the production profile
 # and stage it under /usr/libexec/qdistro/qdwin-libweston/ — the qdwin
 # systemd unit (written by install-qdwin-session-for-vm.sh below) points
@@ -157,7 +157,7 @@ if ! bash "$SRC/qdistro/scripts/install/install-vendored-libweston.sh" "$SRC/qdw
     log "  ERROR: vendored libweston staging failed — qdwin must not fall back to distro libweston in CI"
     exit 3
 fi
-if [ ! -f /usr/libexec/qdistro/qdwin-libweston/lib64/libweston-14/drm-backend.so ]; then
+if [ ! -f /usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so ]; then
     log "  ERROR: staged vendored libweston missing drm-backend.so"
     exit 3
 fi

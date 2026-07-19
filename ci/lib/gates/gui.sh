@@ -57,7 +57,7 @@ run_qdwin_executable_gui_smokes() {
     local vlw_file vlw_prefix loaded_lw
     vlw_file="$WORKSPACE/qdwin/tests/gui/agent-vendored-libweston-verify.sh"
     vlw_prefix="${QDWIN_VENDORED_LIBWESTON_PREFIX:-/usr/libexec/qdistro/qdwin-libweston}"
-    loaded_lw=$("$VM_TOOLS/vm-exec" "$vm" "pmap \$(pgrep -x weston | head -n1) 2>/dev/null | grep -o '/[^ ]*libweston-14\.so[^ ]*' | sort -u | head -n1" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
+    loaded_lw=$("$VM_TOOLS/vm-exec" "$vm" "pmap \$(pgrep -x weston | head -n1) 2>/dev/null | grep -o '/[^ ]*libweston-[0-9]*\.so[^ ]*' | sort -u | head -n1" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
     if [ ! -x "$vlw_file" ]; then
         record_blocked gui "agent-vendored-libweston-verify.sh" "$EXIT_GUI" gui "scenario script missing or not executable"
         [ "$rc" -eq 0 ] && rc=$EXIT_GUI

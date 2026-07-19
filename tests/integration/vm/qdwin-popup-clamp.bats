@@ -5,8 +5,8 @@
 # (the spoofing surface a malicious client would use to paint over other
 # windows / off-screen) MUST be pulled back inside the output. The clamp is
 # the pure kernel qdwin_xdg_constrain_geometry() in the VENDORED, patched
-# libweston-14 (libweston-vendored/.../desktop/xdg-shell.c); stock
-# libweston-14 has no such constraint and echoes the requested offset
+# libweston-16 (libweston-vendored/.../desktop/xdg-shell.c); stock
+# libweston-16 has no such constraint and echoes the requested offset
 # straight through. The kernel's in-bounds invariant is pinned host-side by
 # qdwin/tests/unit/test-qdwin-logic.c; THIS lane proves the clamp is actually
 # wired and active in a live qdwin session — i.e. the compositor loaded the
@@ -37,9 +37,9 @@ setup_file() {
     # The clamp lives in the VENDORED libweston. Post-bake (cairo-devel in
     # install-deps.sh + the fixed install-vendored-libweston.sh) this is a
     # SHIPPED deliverable, not optional — so fail LOUD (not skip) if the
-    # compositor is running stock libweston-14: that means the vendored build/
+    # compositor is running stock libweston-16: that means the vendored build/
     # staging regressed and the clamp is silently absent.
-    vm_run "pmap \$(pgrep -x weston | head -1) 2>/dev/null | grep -q '/usr/libexec/qdistro/qdwin-libweston/.*/libweston-14\.so'"
+    vm_run "pmap \$(pgrep -x weston | head -1) 2>/dev/null | grep -q '/usr/libexec/qdistro/qdwin-libweston/.*/libweston-16\.so'"
     require "compositor is NOT running the vendored libweston (popup clamp absent) — vendored build/staging regressed; check install-vendored-libweston.sh + cairo-devel in install-deps.sh"
 
     vm_run "test -x /usr/bin/qdwin-popup-probe"
