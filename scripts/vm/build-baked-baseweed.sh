@@ -143,6 +143,13 @@ virt-customize \
     `# relies on (10.2.2 did not). Clear the block list via the /etc override` \
     `# (later EnvironmentFile wins) so vm-exec works first boot.` \
     --run-command 'printf "# qdistro CI: allow guest-exec for vm-exec (qemu-ga 11.x blocks it by default).\nFILTER_RPC_ARGS=\"\"\n" > /etc/sysconfig/qemu-ga' \
+    `# qemu-guest-agent.service ships UMask=0077 on current Tumbleweed. Every` \
+    `# vm-exec command runs via guest-exec -> /bin/sh -c (a qemu-ga child), so` \
+    `# that umask makes all provisioning + bats-staged files 0700/0600 —` \
+    `# unreadable by the non-root session/silo users they are staged for` \
+    `# (qdshell QML, /tmp client scripts, ...). Restore the historical 0022.` \
+    --mkdir /etc/systemd/system/qemu-guest-agent.service.d \
+    --run-command 'printf "[Service]\nUMask=0022\n" > /etc/systemd/system/qemu-guest-agent.service.d/umask.conf' \
     --run-command 'sed -i -e "s/^GRUB_TERMINAL_OUTPUT=.*/GRUB_TERMINAL_OUTPUT=\"console\"/" /etc/default/grub; grep -q "^GRUB_TERMINAL_OUTPUT=" /etc/default/grub || echo "GRUB_TERMINAL_OUTPUT=\"console\"" >>/etc/default/grub' \
     --run-command 'sed -i -e "s/^GRUB_GFXPAYLOAD_LINUX=.*/GRUB_GFXPAYLOAD_LINUX=\"text\"/" /etc/default/grub; grep -q "^GRUB_GFXPAYLOAD_LINUX=" /etc/default/grub || echo "GRUB_GFXPAYLOAD_LINUX=\"text\"" >>/etc/default/grub' \
     --run-command 'grub2-mkconfig -o /boot/grub2/grub.cfg' \
