@@ -748,6 +748,15 @@ if [ "${QDISTRO_BUILD_TIER2_IMAGES:-0}" = "1" ]; then
         log "  ERROR: tier2/make-tier2-image.sh not staged; cannot pre-build tier-2 images"
         exit 1
     fi
+    # The source is staged under root's home (/root/qdistro-src, mode 700), but
+    # the tier-2 images build rootless AS admin (uid 1000), which then cannot
+    # traverse /root NOR read the tar-extracted source tree (make-tier2-image.sh
+    # + its podman build context) — "bash: .../make-tier2-image.sh: Permission
+    # denied". Make /root traversable (not listable) and the staged source
+    # world-readable so admin can reach the known paths. Test-VM only (no secrets
+    # in the source tree).
+    chmod 0711 /root 2>/dev/null || true
+    chmod -R a+rX "$SRC" 2>/dev/null || true
     log "pre-building tier-2 podman images (QDISTRO_BUILD_TIER2_IMAGES=1)..."
     if ! runuser -u admin -- bash "$SRC/qdistro/tier2/make-tier2-image.sh"; then
         log "  ERROR: tier-2 image pre-build failed"
