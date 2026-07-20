@@ -146,12 +146,17 @@ noct_screenshot_awake /tmp/05-step1-awake.png
      | sed -n 's/^-- cursor: //p' > /tmp/05-wake.cur"
 # 60s display-off timeout (1-minute minimum) + grace; no input this period.
 sleep 75
-qdwin_screenshot /tmp/05-step2-asleep.png
+# DPMS verdict comes from sysfs, NOT a screenshot: while the output is
+# DPMS-off the compositor suspends repaint, so the shell-capture path
+# (qdwin_screenshot) cannot service a capture until wake — and the kernel
+# DRM connector state is the ground truth for "display off" anyway.
+"$QDWIN_VM_EXEC" "$VMNAME" 'cat /sys/class/drm/card0-Virtual-1/dpms' \
+    > /tmp/05-step2-dpms.txt
 ```
 
-**Assert (2.1):** screenshot is mostly black (avg brightness < 5).
-This confirms DPMS off fired. If still bright, the idle/DPMS policy isn't
-armed — diagnose `qs ipc call qdwin capabilities` (idleDpms) and the
+**Assert (2.1):** `/tmp/05-step2-dpms.txt` reads exactly `Off`.
+This confirms DPMS off fired. If it still reads `On`, the idle/DPMS policy
+isn't armed — diagnose `qs ipc call qdwin capabilities` (idleDpms) and the
 qdshell `power.displayOff*` settings, and the user journal for
 `idle policy armed: ... displayOff=60000ms`.
 

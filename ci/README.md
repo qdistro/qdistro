@@ -185,6 +185,8 @@ The executable qdwin smokes run before the markdown assignments:
 - `qdwin/tests/gui/agent-protocol-audit.sh`
 - `qdwin/tests/gui/agent-cursor-clickthrough-smoke.sh`
 - `qdwin/tests/gui/agent-click-smoke.sh`
+- `qdwin/tests/gui/agent-shell-capture-smoke.sh` (skips with a rebake hint
+  when the golden's compositor unit lacks `QDWIN_ENABLE_SHELL_CAPTURE=1`)
 
 The qdshell UI vision pytest is also wired into `gui`; it uses the same local
 Codex-backed settings as the rest of the GUI gate.

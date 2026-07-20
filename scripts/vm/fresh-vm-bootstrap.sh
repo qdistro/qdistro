@@ -455,6 +455,10 @@ modprobe uinput >/dev/null 2>&1 || log "  WARN: uinput module unavailable; ydoto
 
 # ---- 6. Install qdwin session (weston + qdshell user units) -------------
 log "installing qdwin session (qdwin-compositor + qdshell user units via qdwin-session.target)..."
+# QDWIN_ENABLE_SHELL_CAPTURE=1 is test-VM-only: it arms the in-compositor
+# shell-capture authority the GUI harness observes through. The production
+# installer callers (image/config.sh, qdistro-bootstrap.sh) must not set it.
+QDWIN_ENABLE_SHELL_CAPTURE=1 \
 bash "$SRC/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
     "$SRC/qdshell" \
     || { echo "[bootstrap] qdwin-session install failed"; exit 3; }

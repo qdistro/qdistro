@@ -1934,6 +1934,9 @@ install_qdwin_session() {
     # Pass QDISTRO_SRC so the helper can locate tier2/spawn-tier2.sh; otherwise it
     # defaults to /root/qdistro-src/qdistro and silently skips Tier-2 helper install
     # on non-/root source trees (e.g. /opt/qdistro-src).
+    # Production install: never bake the test-only shell-capture authority,
+    # even if the invoking shell still exports it from a test run.
+    unset QDWIN_ENABLE_SHELL_CAPTURE
     QDISTRO_SRC="$REPO_ROOT/qdistro" \
     bash "$REPO_ROOT/qdistro/scripts/install/install-qdwin-session-for-vm.sh" \
         "$REPO_ROOT/qdshell"

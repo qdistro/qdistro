@@ -176,6 +176,11 @@ chmod +x "$SHIMS"/loginctl "$SHIMS"/runuser
 # The kiwi image build never runs fresh-vm-bootstrap.sh, so create the libseat
 # `seat` group here first or the usermod aborts config.sh (set -e).
 getent group seat >/dev/null || groupadd -r seat
+# Production image: the shell-capture authority must never be baked in. The
+# installer only emits it when the caller exports QDWIN_ENABLE_SHELL_CAPTURE,
+# but unset it explicitly so an operator's inherited test environment cannot
+# leak it into a shipped unit.
+unset QDWIN_ENABLE_SHELL_CAPTURE
 PATH="$SHIMS:$PATH" bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
 rm -rf "$SHIMS"
 

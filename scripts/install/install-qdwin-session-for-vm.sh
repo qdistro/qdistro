@@ -357,6 +357,16 @@ fi
 # it must NOT be enabled directly under default.target (that would
 # auto-start a second compositor racing the target for wayland-1).
 # Keeps the VM-tuned XDG_RUNTIME_DIR + dynamic module map / LD path.
+#
+# Shell-capture authority (QDWIN_ENABLE_SHELL_CAPTURE): strictly opt-in from
+# the caller's environment. This installer is also the SINGLE SOURCE for the
+# production session units (image/config.sh kiwi bake, qdistro-bootstrap.sh
+# real-machine install), and production compositors must NOT expose the
+# capture authority. Only the test-VM bake (fresh-vm-bootstrap.sh) sets it.
+QDWIN_CAPTURE_LINE=""
+if [ "${QDWIN_ENABLE_SHELL_CAPTURE:-0}" = "1" ]; then
+    QDWIN_CAPTURE_LINE="Environment=QDWIN_ENABLE_SHELL_CAPTURE=1"
+fi
 cat > /home/admin/.config/systemd/user/qdwin-compositor.service <<EOF
 [Unit]
 Description=qdwin compositor (libweston + qdwin-shell.so)
@@ -367,6 +377,7 @@ Type=simple
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_SESSION_TYPE=wayland
+$QDWIN_CAPTURE_LINE
 $QDWIN_LD_LINE
 Environment=WESTON_MODULE_MAP=$QDWIN_MODULE_MAP
 ExecStart=/usr/bin/weston --config=%h/weston.ini --socket=wayland-1

@@ -6,8 +6,26 @@
 # shellcheck shell=bash
 
 run_qdwin_executable_gui_smokes() {
-    local vm=$1 rc=$EXIT_OK scenario file step_rc
+    local vm=$1 qdwin_capture=${2:-1} rc=$EXIT_OK scenario file step_rc
     export VMNAME="$vm"
+    # Every executable smoke takes at least one qdwin_screenshot(), which now
+    # requires the golden's shell-capture bake. On an old golden, skip the
+    # WHOLE lane with the same rebake hint the vision/markdown lanes use —
+    # one consistent capability signal, no partial hard-fails.
+    if [ "$qdwin_capture" = 0 ]; then
+        for scenario in \
+            agent-mvp-session-smoke.sh \
+            agent-protocol-audit.sh \
+            agent-cursor-clickthrough-smoke.sh \
+            agent-click-smoke.sh \
+            agent-vendored-libweston-verify.sh \
+            agent-shell-capture-smoke.sh
+        do
+            record_result gui "qdwin-$scenario" skip 0 pass gui "" \
+                "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
+        done
+        return 0
+    fi
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
         for scenario in \
             agent-mvp-session-smoke.sh \
@@ -18,6 +36,7 @@ run_qdwin_executable_gui_smokes() {
             record_result gui "qdwin-$scenario" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
         done
         record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
+        record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" "QCI_GUI_SKIP_QDWIN=1: qdwin-dependent smoke skipped"
         return 0
     fi
     if ! "$VM_TOOLS/vm-exec" "$vm" "test -S /run/user/1000/wayland-1 && ! pgrep -x labwc >/dev/null && runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active qdwin-compositor.service qdshell.service qdistro-cursor-sprites.service >/dev/null" >/dev/null 2>&1; then
@@ -30,6 +49,7 @@ run_qdwin_executable_gui_smokes() {
             record_result gui "qdwin-$scenario" skip 0 pass gui "" "qdwin production session not active in this VM profile"
         done
         record_result gui "qdwin-agent-vendored-libweston-verify.sh" skip 0 pass gui "" "qdwin production session not active in this VM profile"
+        record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" "qdwin production session not active in this VM profile"
         return 0
     fi
     for scenario in \
@@ -66,6 +86,26 @@ run_qdwin_executable_gui_smokes() {
             "session not running vendored libweston (loaded: ${loaded_lw:-unknown}); layer-popup grab discriminators N/A"
     else
         run_logged gui "qdwin-agent-vendored-libweston-verify.sh" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$vlw_file'" ""; step_rc=$?
+        [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+    fi
+
+    # agent-shell-capture-smoke.sh gates the in-compositor shell-authorized
+    # capture path (the ONLY sanctioned visual-evidence source — virsh only
+    # sees the tty on these headless VMs). It requires a golden whose
+    # compositor unit sets QDWIN_ENABLE_SHELL_CAPTURE=1 (fresh-vm-bootstrap
+    # bakes this); on an older golden, skip with a rebake hint rather than
+    # hard-fail the pipeline.
+    local sc_file sc_env
+    sc_file="$WORKSPACE/qdwin/tests/gui/agent-shell-capture-smoke.sh"
+    sc_env=$("$VM_TOOLS/vm-exec" "$vm" "pid=\$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdwin-compositor.service -p MainPID --value); tr '\0' '\n' </proc/\$pid/environ 2>/dev/null | grep -c '^QDWIN_ENABLE_SHELL_CAPTURE=1\$'" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
+    if [ ! -x "$sc_file" ]; then
+        record_blocked gui "agent-shell-capture-smoke.sh" "$EXIT_GUI" gui "scenario script missing or not executable"
+        [ "$rc" -eq 0 ] && rc=$EXIT_GUI
+    elif [ "${sc_env:-0}" != "1" ]; then
+        record_result gui "qdwin-agent-shell-capture-smoke.sh" skip 0 pass gui "" \
+            "compositor lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (golden predates shell capture; rebake with fresh-vm-bootstrap)"
+    else
+        run_logged gui "qdwin-agent-shell-capture-smoke.sh" "$EXIT_GUI" gui "$WORKSPACE/qdwin" "VMNAME='$vm' '$sc_file'" ""; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     fi
     return "$rc"
@@ -788,7 +828,8 @@ run_agent_command() {
 gate_qdshell_ui_agent() {
     # Runs the qdshell agent-assisted UI vision pytest. The harness drives the
     # LIVE qdshell session inside the qdwin VM acquired by gate_gui (IPC over
-    # wayland-1 via vm-exec, screenshots via `virsh screenshot`), because the
+    # wayland-1 via vm-exec, screenshots via qdwin's in-compositor
+    # shell-authorized capture — virsh only sees the tty console), because the
     # host headless nested compositor SIGSEGVs quickshell during early
     # FileView settings load (see
     # todo/qdwin-vm/agent-ui-harness-headless-quickshell-crash.md). codex
@@ -1367,7 +1408,21 @@ gate_gui() {
     kv gui_app_deps "$app_deps"
     log "gui: qdwin app-deps capability app_deps=$app_deps (QDWIN_APP_DEPS golden knob; 0 => qdwin/tests/apps/* skip)"
 
-    run_qdwin_executable_gui_smokes "$qdwin_svm"; step_rc=$?
+    # Shell-capture capability probe (once, from the service MainPID environ).
+    # Every qdwin visual assertion now flows through the in-compositor
+    # shell-authorized capture; a golden baked before QDWIN_ENABLE_SHELL_CAPTURE
+    # cannot produce visual evidence, so ALL capture-dependent lanes (smoke,
+    # qdshell-ui vision, qdwin markdown scenarios) skip CONSISTENTLY with the
+    # same rebake hint instead of hard-failing one by one.
+    local qdwin_capture=1 capture_env
+    if [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && [ -n "$qdwin_svm" ]; then
+        capture_env=$("$VM_TOOLS/vm-exec" "$qdwin_svm" "pid=\$(runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show qdwin-compositor.service -p MainPID --value); tr '\0' '\n' </proc/\$pid/environ 2>/dev/null | grep -c '^QDWIN_ENABLE_SHELL_CAPTURE=1\$'" 2>/dev/null | grep -v '^\[vm-exec\]' | tr -d '\r')
+        [ "${capture_env:-0}" = "1" ] || qdwin_capture=0
+    fi
+    kv gui_qdwin_capture "$qdwin_capture"
+    log "gui: qdwin shell-capture capability qdwin_capture=$qdwin_capture (0 => golden predates QDWIN_ENABLE_SHELL_CAPTURE; rebake with fresh-vm-bootstrap; capture-dependent lanes skip)"
+
+    run_qdwin_executable_gui_smokes "$qdwin_svm" "$qdwin_capture"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     # The vision harness needs a LIVE qdshell quickshell session on wayland-1.
     # Authoritatively probe qdshell.service (the deployed qs unit) + the
@@ -1380,6 +1435,9 @@ gate_gui() {
     if [ "${QCI_GUI_SKIP_QDWIN:-0}" = 1 ]; then
         record_result gui qdshell-ui skip 0 pass vision "" \
             "QCI_GUI_SKIP_QDWIN=1: qdwin/qdshell vision harness skipped"
+    elif [ "$qdwin_capture" = 0 ]; then
+        record_result gui qdshell-ui skip 0 pass vision "" \
+            "golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (vision harness needs the shell-capture path; rebake with fresh-vm-bootstrap)"
     elif [ "$qdshell_session" = 1 ]; then
         gate_qdshell_ui_agent "$qdwin_svm"; step_rc=$?
         [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
@@ -1448,6 +1506,13 @@ gate_gui() {
             # starts. Runs BEFORE the qdwin-routing bypass (app scenarios are
             # qdwin-required) so it actually fires in the default lean lane.
             skip_reason="$app_deps_skip"
+        elif [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && [ "$qdwin_capture" = 0 ] && \
+                gui_scenario_requires_qdwin "$rel"; then
+            # Golden predates the in-compositor shell-capture path: every
+            # visual assertion in a qdwin scenario would fail at the first
+            # qdwin_screenshot. Same capability skip as the smoke/vision
+            # lanes — one consistent rebake signal, not N confusing failures.
+            skip_reason="golden lacks QDWIN_ENABLE_SHELL_CAPTURE=1 (qdwin_screenshot needs the shell-capture path); rebake the golden with fresh-vm-bootstrap"
         elif [ -z "$explicit" ] && [ "${QCI_GUI_SKIP_QDWIN:-0}" != 1 ] && gui_scenario_requires_qdwin "$rel"; then
             skip_reason=""
         else
