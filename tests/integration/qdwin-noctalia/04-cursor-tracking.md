@@ -75,11 +75,17 @@ cursor_sprite_registered_at_boot() {
 
 ## Steps
 
+All coordinates below are authored for the GUI CI display profile of
+**1280x800** (`QDWIN_SCREEN_W`/`QDWIN_SCREEN_H` defaults in
+`qdwin-helpers.sh`). Keep every move strictly in-bounds — an
+off-screen QMP move lands nowhere, produces no cursor remap, and
+hard-fails the journal asserts even though the cursor code is fine.
+
 ### Step 1 — park cursor in the dark wallpaper area
 
 ```bash
 CUR_STEP1=$(compositor_journal_cursor)
-qdwin_mouse_move 1500 600
+qdwin_mouse_move 1000 600
 sleep 1
 qdwin_screenshot /tmp/04-step1-wallpaper-area.png
 ```
@@ -98,14 +104,14 @@ compositor's own journal rather than the screenshot:
 ```
 
 The `/tmp/04-step1-wallpaper-area.png` screenshot is kept as soft
-corroboration only — a visible arrow near (1500, 600) is a bonus but
+corroboration only — a visible arrow near (1000, 600) is a bonus but
 NOT required to pass (the hw-cursor plane is invisible to virsh).
 
 ### Step 2 — move cursor onto a bar widget (clock area)
 
 ```bash
 CUR_STEP2=$(compositor_journal_cursor)
-qdwin_mouse_move 1700 15
+qdwin_mouse_move 1130 15
 sleep 1
 qdwin_screenshot /tmp/04-step2-clock-hover.png
 ```
@@ -134,7 +140,7 @@ confirm the cursor moved to the new position.
 
 ```bash
 CUR_STEP3=$(compositor_journal_cursor)
-for x in 100 400 700 1000 1300 1600 1900; do
+for x in 100 300 500 700 900 1100 1260; do
  qdwin_mouse_move "$x" 15
  sleep 0.2
 done
@@ -145,7 +151,7 @@ qdwin_screenshot /tmp/04-step3-sweep-end.png
 **Assert (3.1) — compositor evidence (load-bearing):** the cursor
 sprite stayed mapped on the cursor plane with non-zero alpha through
 the sweep (the cursor followed the motion). Assert the journal, not
-the screenshot (the final position (1900, 15) is soft-only):
+the screenshot (the final position (1260, 15) is soft-only):
 
 ```bash
 [ "$(cursor_layer_nonzero_alpha_after "$CUR_STEP3")" -ge 1 ] \
@@ -157,7 +163,7 @@ protocol errors.
 
 ## Cleanup
 
-None. Cursor parked at (1900, 15) is fine.
+None. Cursor parked at (1260, 15) is fine.
 
 ## Pass criteria
 
