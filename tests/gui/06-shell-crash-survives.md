@@ -8,8 +8,12 @@ the screen is locked:
    the LOCK layer).
 2. qdlocker keeps receiving `overlay_key` events.
 3. Auth still succeeds.
-4. After unlock, qdwin's `Restart=always` on qdshell brings the
-   shell back in the unlocked state.
+4. qdshell comes back. systemd (`Restart=on-failure` on the deployed
+   unit) respawns it after the KILL; a respawn that lands while the
+   screen is still locked must SURVIVE its startup config push (qdwin
+   drops, rather than fatally rejects, the locked-gated
+   `set_pointer_config`/`set_key_repeat` snapshots), so the shell is
+   alive and functional after unlock.
 
 This is the regression test for the architectural decision to split
 qdlocker out of qdshell. If a shell crash drops the screen unlocked,
@@ -99,8 +103,8 @@ screenshot alone.
 ```
 
 **Assert (5.1):** systemd reports `active` and Quickshell IPC answers
-the `qdwin capabilities` call. qdshell came back online via
-`Restart=always`.
+the `qdwin capabilities` call. qdshell came back online via its
+unit's `Restart=on-failure`.
 
 ## Cleanup
 
@@ -127,9 +131,18 @@ neither process owns the other.
   needs the seat/session, which logind might tear down when the
   shell exits. Check `loginctl list-sessions` inside the VM; if the
   admin session is gone, the shell's
-  `Restart=always` plus its own logind activation should bring it
+  `Restart=on-failure` plus its own logind activation should bring it
   back, but a transient PAM failure is possible. Re-run after the
   retry path is wired in `auth.py`.
+- Step 5 FAIL with `Result=start-limit-hit`, `NRestarts>=5`, and a
+  Quickshell crash-loop logging `wl_display_flush ... Broken pipe` —
+  qdwin is fatally rejecting the restarted shell's startup
+  `set_pointer_config`/`set_key_repeat` while locked (a
+  `wl_resource_post_error(LOCKED)` instead of a logged drop), so every
+  respawn during the lock dies and burns the unit's
+  `StartLimitBurst=5/30s`, leaving the desktop dead even after unlock.
+  The locked gate for those two session-config snapshots must refuse
+  by DROPPING the request, never by posting a fatal protocol error.
 - Step 4 reports `locked=False` but screenshot still shows lock UI —
   qdwin destroyed the lock_surface resource but did not flip the
   compositor state machine. B1-style bug; see qdwin's 03-locker-cycle
