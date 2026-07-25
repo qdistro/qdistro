@@ -133,47 +133,54 @@ Lock-time defaults:
 
 The lock surface must show non-suppressible state for live microphone,
 camera, screencast/screen capture, system-audio capture, virtual input or
-accessibility control, and qdistro-specific network egress. What ships in
-qdshell's lock surface (`Modules/LockScreen/LockScreenPanel.qml`) today:
+accessibility control, and qdistro-specific network egress.
 
-- **Network egress** — from `SessionManager1.ListSilos` via
- `Services/Qdistro/SiloEgressService.qml`. Authoritative (see the D-Bus
- section below for the row semantics).
-- **Microphone, camera, screencast, system-audio capture** — from the
- PipeWire graph via `Services/Qdistro/CaptureStateService.qml`
- (`pw-dump` for state, `pw-mon` for change notification, plus a slow
- poll). PipeWire is the cross-silo observation point because silos get a
- bind-mounted view of admin's `pipewire-0` socket and tier-5 VMs route
- audio through the host daemon; a running capture stream in that graph is
- real capture.
-- **Virtual input / accessibility control** — **not observable.** qdwin
- filters the `zwp_virtual_keyboard` / `zwp_input_method` globals but emits
- no event for a bound client, so nothing can report this kind.
+`qdlocker` owns the runtime lock surface, so that is where the shipped
+indicators live (`qdlocker/qdlocker/indicators.py` + `qml/LockUI.qml`).
+qdshell also carries the same derivation
+(`Services/Qdistro/CaptureStateService.qml`, `SiloEgressService.qml`,
+`Modules/LockScreen/`), but qdshell's own `WlSessionLock` lock screen is the
+**deprecated** path that qdwin does not implement — treat that copy as the
+feed for a future unlocked-session indicator, not as a lock guarantee.
 
-Each kind resolves to `active`, `clear`, or `unverified`, and the indicator
-is designed to **fail visible**: a kind reads `clear` only when the observer
-positively covers its negative case. It does not for
+What is observable:
 
-- camera opened directly on `/dev/videoN` (never enters the PipeWire graph),
-- a direct `weston_capture_v1` screen grab (qdwin knows, but reports
- nothing — the observable screencast signal is the `weston.pipewire-N`
- node the view-stream path publishes),
-- virtual input (no observer at all),
+- **Network egress** — `SessionManager1.ListSilos` (row semantics in the
+ D-Bus section below). The session manager is authoritative; an
+ unreachable one renders as *unverified*, not as "no egress".
+- **Microphone, camera, screencast, system-audio capture** — the PipeWire
+ graph, read with `pw-dump`. PipeWire is the widest observation point
+ available because silos get a bind-mounted view of admin's `pipewire-0`
+ socket, per-session daemons link upward into admin's graph, and qdwin's
+ view-stream path pins a forwarded toplevel onto a weston
+ `backend-pipewire` output whose node is named `weston.pipewire-N`.
+- **Virtual input / accessibility control** — **not observable at all.**
+ qdwin filters the `zwp_virtual_keyboard` / `zwp_input_method` globals but
+ emits no event for a bound client.
 
-so those kinds render a visible "unverified" `?` rather than silence, and a
-dead or stale (>15 s) observer drives **every** kind to `unverified`. The
-lock surface also drops its pre-lock reading when it appears, so nothing
-observed while unlocked can be presented as locked-machine state. The
-indicator has no settings toggle in either compact or full layout.
+**Fail visible, not fail silent.** PipeWire yields a trustworthy *positive*
+— a running capture stream is real capture, attributed to a real client —
+but no trustworthy *negative* for any kind:
 
-Closing the remaining blind spots needs new authoritative feeds: a qdwin
-event enumerating `weston_capture_v1` / view-stream clients and bound
-virtual-input/IME clients, and a device-grant registry for direct
-`/dev/videoN` opens. Until those exist, "unverified" is the honest reading,
-not a bug.
+- a policy-approved fullscreen session may hold a direct device grant
+ (`devices.md`, `games.md`: `/dev/video*`, or `audio` group + `/dev/snd/*`)
+ and never appear in the graph at all;
+- a direct `weston_capture_v1` screen grab does not appear either;
+- virtual input has no observer.
 
-The standalone `qdlocker` lock UI has no capture indicators; the shipped
-indicators above are qdshell's lock surface only.
+So **no kind is ever reported as "clear"**. Each kind is either `active`
+(positively observed) or `unverified` (a visible `?`), and a dead, failed,
+killed or stale observer drives every kind to `unverified`. The lock surface
+observes only while locked and drops any pre-lock reading on the lock edge,
+so nothing seen while unlocked is presented as locked-machine state. No
+setting gates any of it, and an output whose decorative content is blanked
+still carries the indicators.
+
+Making a kind report "clear" requires a real authoritative feed first: a
+qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
+virtual-input/IME clients, and a device-grant registry covering direct
+`/dev/video*` and `/dev/snd/*` opens. Until those exist, a permanent
+"unverified" is the honest reading, not a bug.
 
 User sessions do not run independent screenlockers and must not prompt for the
 admin/root password. When locked, the only unlock path is the admin locker. For
@@ -302,10 +309,12 @@ transient `Stopping` / `Deleting` states followed by the resting
 `Stopped` / row-deletion; treat unknown state strings as "transient,
 wait."
 
-qdshell's lock-screen network-egress indicator consumes these same
-`ListSilos` rows. Active tier-3 rows with `egress: null` should be shown as
+The lock-screen network-egress indicator consumes these same `ListSilos`
+rows (`qdlocker/qdlocker/indicators.py`, and qdshell's `SiloEgressService`
+for its own surfaces). Active tier-3 rows with `egress: null` should be shown as
 legacy host egress, `direct` and `wg:NAME` by their policy, and `none` as
-intentionally dark. The standalone `qdlocker` UI does not consume them.
+intentionally dark. A `ListSilos` call that fails renders as *unverified*
+on the lock surface rather than as "no egress".
 
 Error names live under `org.qdistro.SessionManager1.*`:
 `UnknownSilo`, `SiloExists`, `SiloBusy`, `BadState`, `BadArgument`,
