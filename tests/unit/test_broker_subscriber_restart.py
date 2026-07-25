@@ -102,9 +102,11 @@ def _private_bus():
     calls ``QApplication.processEvents()`` around every subsequent test
     boundary, and Qt on Linux runs on QEventDispatcherGlib — i.e. it iterates
     exactly this context. So the FIRST test after this module used to kill the
-    run (rc=1, ~20% in, no output). CI never saw it because ci/lib/gates/host.sh
-    runs pytest one file per process, so no QApplication ever coexists with
-    these connections.
+    run (rc=1, ~20% in, no output). CI did not see it because
+    ci/lib/gates/host.sh runs the unit tests in sorted 30-file batches, which
+    puts the admin Qt files (sorted positions 3-6) in batch 1 and this module
+    (position 59) in batch 2 — their QApplication and these connections never
+    coexist in one pytest process.
 
     Disabling the flag makes a disconnect an ordinary no-op for the process,
     which is what a test-owned connection must be.
@@ -192,13 +194,32 @@ def _run_loop_until(predicate, timeout_s: float = 5.0) -> bool:
         loop.quit()
         return False
 
-    GLib.timeout_add(10, _poll)
-    GLib.timeout_add(int(timeout_s * 1000), _deadline)
-    loop.run()
+    # Only the callback that quit the loop removes itself: on success
+    # _deadline survives for the rest of its timeout, and on timeout _poll
+    # keeps returning True forever, its closure pinning the predicate (and
+    # therefore the broker/subscriber objects) on the default main context.
+    # Destroy whichever source is left, on every exit path.
+    poll_id = GLib.timeout_add(10, _poll)
+    deadline_id = GLib.timeout_add(int(timeout_s * 1000), _deadline)
+    try:
+        loop.run()
+    finally:
+        context = GLib.MainContext.default()
+        for source_id in (poll_id, deadline_id):
+            source = context.find_source_by_id(source_id)
+            if source is not None:
+                source.destroy()
     # Final check (predicate may have flipped between last poll and quit).
     if predicate():
         result["ok"] = True
     return result["ok"]
+
+
+def _close_bus(bus) -> None:
+    try:
+        bus.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @pytest.fixture
@@ -206,10 +227,7 @@ def session_bus():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = _private_bus()
     yield bus
-    try:
-        bus.close()
-    except Exception:  # noqa: BLE001
-        pass
+    _close_bus(bus)
 
 
 def _emit_and_wait(emit_fn, predicate, timeout_s: float = 5.0) -> bool:
@@ -224,7 +242,7 @@ def _emit_and_wait(emit_fn, predicate, timeout_s: float = 5.0) -> bool:
 
 class TestLiveSubscriberAcrossRestart:
 
-    def test_subscriber_receives_after_restart(self, session_bus):
+    def test_subscriber_receives_after_restart(self, session_bus, request):
         bus = session_bus
 
         # --- Subscribe FIRST (live, bus_name-free), before any broker
@@ -263,6 +281,10 @@ class TestLiveSubscriberAcrossRestart:
         # same well-known name, different unique name. A bus_name= filter
         # would have pinned the subscriber to unique1 and gone deaf here.
         bus2 = _private_bus()
+        # Register the close BEFORE anything below can fail: an assertion
+        # abort would otherwise skip the cleanup tail and leave bus2 (and the
+        # well-known name it owns) live for the rest of the session.
+        request.addfinalizer(lambda: _close_bus(bus2))
         name2 = dbus.service.BusName(BUS_NAME, bus2, do_not_queue=True)
         unique2 = bus2.get_unique_name()
         broker2 = _BrokerSignalObject(bus2, OBJ_PATH)
@@ -292,7 +314,6 @@ class TestLiveSubscriberAcrossRestart:
         assert sub.pending == [202]
         assert sub.decided == [(202, "deny")]
 
-        # cleanup
+        # cleanup (bus2 itself is closed by the finalizer registered above)
         broker2.remove_from_connection()
         del name2
-        bus2.close()

@@ -502,12 +502,21 @@ except Exception:  # pragma: no cover
     not _HAVE_DBUS or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"),
     reason="no session bus available",
 )
-def test_dbus_signal_real_session_bus():
+def test_dbus_signal_real_session_bus(request):
     # Private connection with the GLib main loop attached: the shared
     # dbus.SessionBus() cache may hold a loop-less connection created by
     # an earlier test, on which exporting the emitter would raise.
+    #
+    # The connection must be closed when the test ends, or the emitter and its
+    # randomized well-known name outlive it for the whole pytest process. It
+    # must also have exit_on_disconnect cleared FIRST: libdbus defaults that on
+    # and calls a C exit(1) when the queued Disconnected is dispatched off the
+    # default GLib context, which is exactly how this module's sibling
+    # test_broker_subscriber_restart.py used to kill whole-directory runs.
     glib_loop = DBusGMainLoop(set_as_default=True)
     bus = dbus.SessionBus(private=True, mainloop=glib_loop)
+    bus.set_exit_on_disconnect(False)
+    request.addfinalizer(bus.close)
     name = f"org.qdistro.WorkflowTest{uuid.uuid4().hex[:8]}"
     bus_name = dbus.service.BusName(name, bus)
     iface = name
@@ -521,6 +530,8 @@ def test_dbus_signal_real_session_bus():
             pass
 
     emitter = Emitter()
+    # LIFO: unexport the object before the connection closes.
+    request.addfinalizer(emitter.remove_from_connection)
     fired = []
     # Drive a short-lived GLib main loop on THIS (main) thread rather than
     # letting the trigger spin its own loop thread. A live PyQt6
