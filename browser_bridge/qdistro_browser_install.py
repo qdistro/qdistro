@@ -110,7 +110,46 @@ def firefox_extension_id_for_mode(mode: str) -> str:
             f"(expected one of {sorted(FIREFOX_MODE_IDS)})") from None
 
 
-DEFAULT_CHROMIUM_EXTENSION_ID = "qdistroqdistroqdistroqdistroaaaaaaaa"
+# Chromium-family extension id of the canonical qdchrome extension.
+#
+# A Chromium extension id is the first 16 bytes of the SHA-256 of the
+# extension's DER public key, hex-encoded and then mapped 0-9a-f -> a-p:
+# ALWAYS 32 characters, ALWAYS in [a-p]. ``qdchrome-extension`` pins its
+# PUBLIC key in ``manifest.chromium.json``'s ``"key"`` field, so a
+# developer-mode "Load unpacked" of ``dist/chromium/`` yields this id on
+# every rebuild — which is what makes the v1 manual-load flow work with a
+# pre-written native-messaging manifest (see
+# ``doc/browser-extension-install.md``). A future packed CRX carries the
+# same id ONLY if it is signed with the matching PRIVATE key; and because
+# the pinned key is public, the id identifies a key namespace, never the
+# authorship of the loaded code.
+#
+# R4 finding: this default used to be the placeholder
+# ``"qdistroqdistroqdistroqdistroaaaaaaaa"`` — 36 characters, and
+# containing letters outside [a-p], so it is not even a syntactically
+# valid id. Every Chromium-family native-messaging manifest written by
+# the default install path therefore authorized an extension that cannot
+# exist, and the real extension was rejected by the browser with
+# "Access to the specified native messaging host is forbidden". The
+# Firefox side of the same bug was fixed as finding #13; the Chromium
+# side was not. Like ``STANDALONE_FIREFOX_EXTENSION_ID`` this is a
+# known-shipped literal (the sibling repo is not part of this package's
+# source tree on an installed system); the cross-repo contract — that it
+# equals the id derived from ``qdchrome-extension/manifest.chromium.json``
+# ``"key"`` — is asserted by the unit suite when that repo is checked out.
+DEFAULT_CHROMIUM_EXTENSION_ID = "ammgnkddbnjdhikklpljgiclldedgncf"
+
+
+def chromium_extension_id_is_wellformed(ext_id: str) -> bool:
+    """True when ``ext_id`` has the Chromium extension-id shape: exactly
+    32 characters drawn from ``a``-``p``.
+
+    Used to fail closed rather than write a native-messaging manifest
+    whose ``allowed_origins`` can never match a real extension (the
+    placeholder-default bug above).
+    """
+    return (len(ext_id) == 32
+            and all("a" <= c <= "p" for c in ext_id))
 
 # Per-browser native-messaging host-manifest directories. Keyed by
 # the short browser name passed on the CLI; values are paths
@@ -374,6 +413,17 @@ def main(argv: list[str] | None = None) -> int:
         args.firefox_extension_id
         if args.firefox_extension_id is not None
         else firefox_extension_id_for_mode(args.firefox_mode))
+    # Fail closed on a malformed Chromium id: a manifest whose
+    # ``allowed_origins`` cannot match any real extension is worse than no
+    # manifest — the browser reports only "Access to the specified native
+    # messaging host is forbidden", with nothing pointing at the id.
+    if (any(b in CHROMIUM_FAMILY for b in browsers)
+            and not chromium_extension_id_is_wellformed(
+                args.chromium_extension_id)):
+        raise SystemExit(
+            f"invalid chromium extension id: {args.chromium_extension_id!r} "
+            "(must be exactly 32 characters in [a-p] — the mapped SHA-256 "
+            "prefix of the extension's public key)")
     if args.print:
         for b in browsers:
             body = render_manifest(

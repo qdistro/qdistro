@@ -481,14 +481,33 @@ fi'
             echo "true"
         fi
     }
-    c="npm test && npm run build"
+    # Cross-repo protocol drift guard (07-release-checklist.md "Extension
+    # contract drift guard"; R4). Both extension repos carry a BYTE-IDENTICAL
+    # tests/fixtures/golden-frames.js — the bridge wire-protocol contract — with
+    # no workspace linking them. tests/golden-frames-drift.test.js compares them,
+    # but in a single-repo clone the sibling is absent and the comparison
+    # skips-with-warning. qci ALWAYS vendors both repos (preflight requires every
+    # PROJECTS entry), so make the absence FATAL here: this is the gate that
+    # ships the extensions, and a silently-skipped cross-repo check is exactly
+    # how the two protocol copies would drift apart unnoticed.
+    #
+    # QDISTRO_SIBLING_GOLDEN is set EXPLICITLY from $WORKSPACE rather than
+    # relying on the test's ../../<sibling> default: under a git worktree
+    # checkout the repo's parent dir is .worktrees/, where a *stale* sibling
+    # worktree can be picked up (it would then compare against the wrong tree).
+    _ext_drift_env() {
+        # $1 = sibling repo name
+        printf "export QDISTRO_REQUIRE_SIBLING=1 QDISTRO_SIBLING_GOLDEN=%q; " \
+            "$WORKSPACE/$1/tests/fixtures/golden-frames.js"
+    }
+    c="$(_ext_drift_env qdfirefox-extension)npm test && npm run build"
     run_logged host qdchrome-extension "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdchrome-extension" "$RDIR/host" "qdchrome-extension")"
     run_logged host qdchrome-extension-coverage "$EXIT_HOST" npm "$WORKSPACE/qdchrome-extension" "$c" "coverage (report-only)" || true
     coverage_floor_check qdchrome-extension "$RDIR/host/qdchrome-extension-coverage.json"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-    c="npm test && npm run build"
+    c="$(_ext_drift_env qdchrome-extension)npm test && npm run build"
     run_logged host qdfirefox-extension "$EXIT_HOST" npm "$WORKSPACE/qdfirefox-extension" "$c" ""; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
     c="$(_ext_cov_artifact_cmd "$WORKSPACE/qdfirefox-extension" "$RDIR/host" "qdfirefox-extension")"

@@ -12,8 +12,10 @@ Integration.
 > [firefox-containers.md](firefox-containers.md). Most desktop integrations
 > below remain specified/planned Phase-9 work.
 >
-> P0-1, P0-2, P0-3, and P0-4 are landed. P0-5/P0-6 remain open deployment or
-> policy decisions; see the defect index. Recall capture is cut from v1, so
+> P0-1 through P0-5 are landed. P0-6 (extension distribution) is closed for
+> v1 as documented manual load — see
+> [browser-extension-install.md](browser-extension-install.md) and the defect
+> index. Recall capture is cut from v1, so
 > `recall.push` is not registered in the bridge dispatch table.
 
 ## Supported-browser matrix
@@ -367,10 +369,16 @@ lifetime:
 
 ## Per-user, per-browser installation
 
-The admin panel has an "Install qdistro browser integration" action per
-user-browser combination. **Production deployment depends on several
-external pipelines that are not yet in place** — see "Deployment gaps"
-below.
+> **Planned vs shipped.** An admin-panel "Install qdistro browser
+> integration" action per user-browser combination is *planned*; no such
+> action exists in `admin_app/` today. The shipped v1 mechanism is the
+> `qdistro-browser-install` CLI plus a manual extension load.
+
+**v1 has no signed extension distribution channel: the extension is loaded
+manually, per user, per browser.** The
+operator-facing procedure, its friction, and its security implications are
+[browser-extension-install.md](browser-extension-install.md); the pipelines
+that would replace it are post-v1 (see "Deployment gaps" below).
 
 1. Write the native-messaging manifest to the correct location:
  - **Firefox**: `~<user>/.mozilla/native-messaging-hosts/qdistro.json`
@@ -391,10 +399,19 @@ below.
  receive them via stdio; it receives the calling extension's identity
  via argv (see §Identity chain step 3).
 
-2. Install the extension. Distribution constraints:
+2. Install the extension. **In v1 this step is manual** — build the
+ artifact from the manifest-pinned extension checkout and load it
+ yourself (Firefox: `about:debugging` temporary add-on, removed on every
+ browser restart; Chromium: developer-mode "Load unpacked", which
+ persists and keeps a stable id because the extension's public key is
+ pinned in `manifest.chromium.json`). Full procedure, friction, and
+ threat discussion:
+ [browser-extension-install.md](browser-extension-install.md).
+
+ The signed-distribution constraints that shape the post-v1 channel:
  - **Firefox**: every XPI must be signed by Mozilla AMO, even when
  self-distributed (unlisted). Build pipeline depends on AMO's
- self-distribution sign API.
+ self-distribution sign API. An enterprise policy does not waive it.
  - **Chromium**: CRX signed by qdistro's own key. Force-installed via
  the `ExtensionInstallForcelist` policy file pointing at an
  `update.xml` hosted by qdistro.
@@ -403,7 +420,10 @@ below.
  domain, or enrolled in Chrome Enterprise Core. Not in scope for
  the Linux desktop target.
 
-3. Register the user-browser pair in the daemon's policy.
+3. *(Planned, not implemented.)* Register the user-browser pair in the
+ daemon's policy. There is no command or code for this step today — the
+ Phase-9 per-op policy file it belongs to is itself unimplemented
+ (§"Daemon policy"). Nothing in the v1 install flow requires it.
 
 The bridge binary lives at a fixed path `/usr/lib/qdistro/browser-bridge`
 — one binary used by all users' browsers. Policy distinguishes callers
@@ -413,13 +433,20 @@ binary; the bridge's parent-exe allowlist is the only barrier against
 that, which is why the allowlist must not be env-overridable in
 production builds (see P0-2).
 
-### Deployment gaps (not yet resolved)
+### Deployment gaps (v1 disposition: manual load, signed channel post-v1)
+
+R4 resolved these by **choosing manual load for v1** rather than building a
+signing pipeline for a private-alpha audience (D12). They are not silently
+open: each is a named post-v1 item, and the v1 substitute is documented in
+[browser-extension-install.md](browser-extension-install.md).
 
 | Gap | Owner | Status |
 |---|---|---|
-| qdistro CRX signing key custody | release engineering | TBD |
-| `update.xml` hosting endpoint | release engineering | installer defaults to `https://example.invalid/…` |
-| AMO self-distribution build pipeline | release engineering | TBD |
+| qdistro CRX signing key custody | release engineering | **post-v1** — v1 loads unpacked; the pinned public key keeps the *unpacked* id stable, but a CRX keeps that id only if signed with the matching private key, which has no custody story yet |
+| `update.xml` hosting endpoint | release engineering | **post-v1** — no endpoint; installer default is `https://example.invalid/…`, so `--install-policy` must not be used in v1 |
+| AMO self-distribution build pipeline | release engineering | **post-v1** — `build-extension.sh --sign` exists but is inert without AMO credentials; v1 uses `about:debugging` temporary load (re-load on every restart) |
+| Force-install policy scripts (`install-system-policy.sh`, both repos) | release engineering | **scaffolding** — they reference `/usr/share/qdistro/extensions/…`, a path nothing populates in v1 |
+| Auto-update + revocation for a shipped extension | release engineering | **post-v1** — no update channel and no kill switch; a fix reaches users only by rebuild + re-load |
 | Air-gapped fallback (no AMO / no update.xml) | architecture | not designed |
 
 ## Failure modes
@@ -617,7 +644,7 @@ Historical fix-plan details were pruned from the public repo. Summary:
 | P0-3 | `recall.push` accepts extension-supplied `user` field — cross-silo write primitive | High | ✅ landed (commit `0c3a7a8`) |
 | P0-4 | Browser allowlist (Brave/Vivaldi/Chrome/Edge) ships default-on with no opt-in flag | Medium | ✅ landed — optional browsers default-off, admin opt-in via root-owned `/etc/qdistro/browser-bridge-allowlist.conf` (see note) |
 | P0-5 | Extension manifests don't declare permissions for any op past `ping` | Medium (Phase 9 blocker) | ✅ standalone manifests tightened to the minimal serviced-op set + closed-set test (bundled copy follow-up) — see note |
-| P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | → deferred to release-engineering (`03`) |
+| P0-6 | CRX signing key, `update.xml` hosting, AD/Azure-AD requirement on Windows unspecified | Medium (deployment blocker) | ✅ closed for v1 by R4 — manual load documented in [browser-extension-install.md](browser-extension-install.md); signed distribution is post-v1 (see note) |
 
 **P0-4/5/6 disposition (D5 op-set freeze + D2 Recall cut, 2026-06-12):**
 
@@ -658,7 +685,22 @@ Historical fix-plan details were pruned from the public repo. Summary:
   is now aligned too: its manifests also drop `activeTab` and `webNavigation`,
   and `browser_bridge/extension/tests/manifest.permissions.test.js` pins the
   absent permissions, host grants, and empty optional-permission buckets.
-- **P0-6 — deferred to release-engineering.** CRX signing key custody,
-  `update.xml` hosting, and the Windows AD/Azure-AD enrollment requirement are
-  distribution concerns, not bridge-security defects; they are tracked in
-  `todo/fable-release/03-release-engineering.md` (extension distribution).
+- **P0-6 — closed for v1 as "manual load", not as "solved".** CRX signing key
+  custody, `update.xml` hosting, and the Windows AD/Azure-AD enrollment
+  requirement are distribution concerns, not bridge-security defects. R4
+  (`todo/fable-release/03-release-engineering.md`) explicitly permits
+  documenting manual load for v1, and D12 (private alpha) makes an AMO/CRX
+  signing pipeline disproportionate. The v1 answer is therefore
+  [browser-extension-install.md](browser-extension-install.md): build the
+  artifact from the manifest-pinned extension source and hand-load it
+  (Firefox temporary add-on — gone on every restart; Chromium unpacked —
+  persistent, stable id). What that costs — no publisher signature at load
+  time, no auto-update, no revocation — is stated there rather than papered
+  over. The signing/hosting pipeline moves to the post-v1 list.
+  Two install-path defects found while closing this and fixed here: the
+  installer's default Chromium extension id was the placeholder
+  `qdistroqdistroqdistroqdistroaaaaaaaa` (not a valid Chromium id at all, so
+  every Chromium-family native-messaging manifest authorized an extension that
+  cannot exist), and the extension repos were absent from the bootstrap fetch
+  set and the release manifest's repo set, so no pinned extension source
+  reached an install.

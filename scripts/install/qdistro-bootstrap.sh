@@ -1051,6 +1051,10 @@ repo_present() {
     case "$repo" in
         qdistro) [ -d "$REPO_ROOT/$repo/daemons" ] ;;
         qdwin|qdshell) [ -f "$REPO_ROOT/$repo/meson.build" ] ;;
+        # The browser extensions are npm/WebExtension trees, not python
+        # packages — they have no pyproject.toml.
+        qdchrome-extension|qdfirefox-extension) \
+            [ -f "$REPO_ROOT/$repo/package.json" ] ;;
         *) [ -f "$REPO_ROOT/$repo/pyproject.toml" ] ;;
     esac
 }
@@ -1284,7 +1288,7 @@ fetch_sources() {
         # at its manifest pin before any build runs (no-op under dev).
         if ! is_dev; then
             local repo
-            for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
+            for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension; do
                 repo_present "$repo" && verify_repo_pin "$repo"
             done
         fi
@@ -1298,6 +1302,15 @@ fetch_sources() {
     done
 
     for repo in qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
+        fetch_repo "$repo" optional
+    done
+
+    # Browser extensions (R4). Source-only: nothing here is built or installed
+    # into a browser by the bootstrap — v1 has no signed extension channel, so
+    # the extension is MANUALLY loaded by the user (doc/browser-extension-
+    # install.md). They are fetched anyway so the tree the user loads is the
+    # manifest-pinned, signature-covered source rather than an ad-hoc clone.
+    for repo in qdchrome-extension qdfirefox-extension; do
         fetch_repo "$repo" optional
     done
 
