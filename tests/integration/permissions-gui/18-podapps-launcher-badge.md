@@ -268,6 +268,16 @@ in `tiered-isolation.bats:phase7-tier2-podman`. This mirrors the journal-side
 twin `tests/integration/vm/s60-launcher-podapp-click.sh`, which likewise treats a
 missing post-Enter advertise as a NOTE.
 
+Until tracker J12 this line was not merely non-deterministic here — it was
+**unproducible in any topology**, because a tier-2 window arrives as a nested
+proxy and qdwin skipped proxies in its `toplevel_security_context` sender. Both
+halves of that (the un-tagged launch and the skipped proxy) are fixed, and the
+deterministic proof — a real `LaunchPodApp` click whose secctx commit AND
+nested-proxy forward both carry the token the D-Bus reply returned — lives in
+`tests/integration/vm/podapp-launch-wiretag.bats`. The NOTE here stays a NOTE
+for its own reason: S3's `type+Enter` cannot deterministically select the
+tier-2 entry.
+
 **Diagnostic artifact only** (do NOT analyze, do NOT affect the verdict):
 `/tmp/s18-warm.png` records whether the taskbar entry is now at full opacity
 with no spinner overlay. Leave it as an artifact for the S3/S4 cold-start

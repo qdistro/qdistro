@@ -1,0 +1,100 @@
+#!/bin/bash
+# qdistro-podapp-stop <launch-token> — ExecStop of
+# qdistro-podapp@<launch-token>.service.
+#
+# The unit runs as ROOT (so spawn-tier2's root-launcher mode can stamp the
+# secctx wire tag — see qdistro-podapp@.service). The container itself runs in
+# the ADMIN user's rootless podman, so a root `podman stop` would query root's
+# empty store and never find the container, orphaning it. This helper resolves
+# the fixed admin user, fails closed on a missing user or uid 0, and drops to
+# that uid with the right XDG_RUNTIME_DIR so `podman stop` reaches the
+# admin-rootless conmon.
+#
+# Unlike the silo analogue, the container name is NOT derivable from the
+# instance name (the instance is the launch token), so the launch env file is
+# the only source for it. A missing file therefore means we cannot act at all;
+# we say so and exit nonzero. The unit invokes us with `-` (best-effort), so
+# that does not fail `systemctl stop`. A PRESENT env file must be safe to
+# source as root — a tampered file is a hard fail, never silently sourced.
+set -u
+
+TOKEN="${1:?usage: qdistro-podapp-stop <launch-token>}"
+[[ "$TOKEN" =~ ^[0-9a-f]{32}$ ]] || {
+    echo "podapp-stop: launch token must be 32 lowercase hex digits" >&2
+    exit 2
+}
+
+# QDISTRO_PODAPP_LAUNCH_ENV_DIR is a TEST-ONLY override (see the launch
+# helper); production never sets it and the safe-source guard applies
+# regardless of path.
+ENV_DIR="${QDISTRO_PODAPP_LAUNCH_ENV_DIR:-/run/qdistro/podapp-launch}"
+ENV_FILE="${ENV_DIR}/${TOKEN}.env"
+
+# SECURITY: we run as ROOT, so `.`-sourcing is root code execution — only
+# source a file that is a regular file owned BY US (the sourcing euid, root in
+# prod) and NOT group/other-writable. The check is euid-relative so it is
+# correct in prod and under unprivileged host tests.
+if [ ! -e "$ENV_FILE" ]; then
+    echo "podapp-stop: no launch env at $ENV_FILE — cannot resolve the" \
+         "container name for token $TOKEN" >&2
+    exit 3
+fi
+_me="$(id -u)"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "podapp-stop: launch env $ENV_FILE is not a regular file —" \
+         "refusing to source as root" >&2
+    exit 4
+fi
+_meta="$(stat -c '%u %a' "$ENV_FILE" 2>/dev/null)" \
+    || { echo "podapp-stop: cannot stat launch env $ENV_FILE" >&2; exit 4; }
+_owner="${_meta%% *}"; _perms="${_meta##* }"
+if [ "$_owner" != "$_me" ]; then
+    echo "podapp-stop: launch env $ENV_FILE owned by uid $_owner, not" \
+         "the sourcing uid $_me — refusing to source untrusted content" >&2
+    exit 4
+fi
+case "$_perms" in
+    *[2367])  echo "podapp-stop: launch env $ENV_FILE is other-writable" \
+                   "(mode $_perms) — refusing to source as root" >&2; exit 4 ;;
+esac
+case "$_perms" in
+    *[2367]?) echo "podapp-stop: launch env $ENV_FILE is group-writable" \
+                   "(mode $_perms) — refusing to source as root" >&2; exit 4 ;;
+esac
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+
+[ -n "${QD_CONTAINER:-}" ] || {
+    echo "podapp-stop: launch env $ENV_FILE has no QD_CONTAINER" >&2
+    exit 4
+}
+
+ADMIN_USER="admin"
+ADMIN_UID="$(id -u "$ADMIN_USER" 2>/dev/null || true)"
+if [ -z "$ADMIN_UID" ]; then
+    echo "podapp-stop: admin user '$ADMIN_USER' does not exist" \
+         "— cannot stop $QD_CONTAINER" >&2
+    exit 3
+fi
+if [ "$ADMIN_UID" = "0" ]; then
+    # Refuse to "stop" via root's store — that would silently no-op while the
+    # admin-rootless container lives on. Fail closed.
+    echo "podapp-stop: resolved admin uid 0 for '$ADMIN_USER' — refusing" \
+         "(rootless podman must run as a non-root uid)" >&2
+    exit 3
+fi
+if [ "$ADMIN_UID" != "1000" ]; then
+    echo "podapp-stop: admin user '$ADMIN_USER' resolves to uid $ADMIN_UID —" \
+         "qdistro requires admin uid 1000; cannot stop $QD_CONTAINER" >&2
+    exit 3
+fi
+
+PODMAN="$(command -v podman || echo /usr/bin/podman)"
+
+# Drop to admin with the admin runtime dir so podman talks to the admin's
+# rootless conmon. -t 10 mirrors the silo ExecStop grace.
+exec runuser -u "$ADMIN_USER" -- env \
+    XDG_RUNTIME_DIR="/run/user/${ADMIN_UID}" \
+    "$PODMAN" stop -t 10 "$QD_CONTAINER"

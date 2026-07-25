@@ -51,6 +51,7 @@ class _FakeOps:
         self.cgroup_freeze_should_fail = False
         self.systemctl_calls: list[tuple[str, str]] = []
         self.launch_envs: dict[str, str] = {}   # name → env file content
+        self.podapp_launch_envs: dict[str, str] = {}  # token → env content
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
@@ -255,6 +256,15 @@ class _FakeOps:
 
     def remove_launch_env(self, name: str) -> None:
         self.launch_envs.pop(name, None)
+
+    # pod-app launch env (tracker J12 Fix A) — a separate dir keyed by launch
+    # token, so it gets its own fake store rather than sharing launch_envs.
+    def write_podapp_launch_env(self, token: str, content: str):
+        self.podapp_launch_envs[token] = content
+        return Path("/run/qdistro/podapp-launch") / f"{token}.env"
+
+    def remove_podapp_launch_env(self, token: str) -> None:
+        self.podapp_launch_envs.pop(token, None)
 
     def kill_pids(self, pids, sig: int) -> None:
         # Snapshot which cgroups are frozen at the moment we signal — a kill

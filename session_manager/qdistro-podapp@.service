@@ -1,0 +1,51 @@
+[Unit]
+Description=qdistro tier-2 pod app launch %i
+# Referenced by qdistro_session_manager.PODAPP_LAUNCHER_FMT
+# (qdistro-podapp@<launch-token>.service). The session manager (root) writes
+# /run/qdistro/podapp-launch/<token>.env, then `systemctl start`s this unit in
+# response to SessionManager1.LaunchPodApp. The instance is the 32-hex LAUNCH
+# TOKEN — not the container name — so it needs no systemd escaping and two
+# clicks never collide on one unit instance.
+After=qdistro-session-manager.service
+PartOf=qdistro-session-manager.service
+
+[Service]
+Type=simple
+# Run as ROOT — but ONLY as the trusted launcher PARENT, exactly as
+# qdistro-tier2-silo@.service does. spawn-tier2 is invoked with
+# TIER2_ROOT_LAUNCHER=1 (by qdistro-podapp-launch below), so it keeps root only
+# as the direct ancestor of qdistro-secctx-exec — what qdwin's root-parent
+# attestation requires to accept the secctx manager bind — and drops EVERY
+# podman op (and the binding resolver + broker gate) to the admin uid via
+# `runuser`. podman never runs as root.
+#
+# This replaces qdshell forking spawn-tier2 directly from the unprivileged
+# admin session on a launcher click: that caller had no root launcher parent,
+# so the app ran UN-TAGGED on the wire in dev, and on a hardened profile
+# spawn-tier2 refused it outright (tracker J12 Drop A).
+#
+# WARNING: do NOT "simplify" this to running podman as root — that breaks the
+# rootless admin-owned state mount. The privilege boundary is: root parent,
+# admin podman/resolver/broker.
+User=root
+ExecStart=/usr/libexec/qdistro/qdistro-podapp-launch %i
+# Stop the container EXPLICITLY, AS ADMIN. Rootless `podman run` in a non-tty
+# context does NOT proxy SIGTERM to the container — sig-proxy defaults off
+# without a tty — and conmon keeps the container alive in the admin user
+# manager scope, OUTSIDE this unit's cgroup. So a plain `systemctl stop` would
+# SIGTERM only the foreground supervisor, orphan the container, and time out.
+# Best-effort (`-`): an already-gone container must not fail the stop.
+ExecStop=-/usr/libexec/qdistro/qdistro-podapp-stop %i
+# A clean stop kills the container, so the supervising `podman run` returns 143
+# (SIGTERM) or 137 (SIGKILL after the -t grace); treat those as success so
+# `systemctl stop` leaves the unit inactive, not failed.
+SuccessExitStatus=143 137
+# No Restart: a pod app the user closed (or that crashed) must not be silently
+# relaunched — the click is the only thing that starts one.
+Restart=no
+# The launch stanza is single-use: once this instance is gone the token is
+# spent, so drop the /run file rather than leaving per-click litter behind.
+# Best-effort: a missing file is not an error.
+ExecStopPost=-/usr/bin/rm -f /run/qdistro/podapp-launch/%i.env
+StandardOutput=journal
+StandardError=journal

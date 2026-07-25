@@ -790,7 +790,27 @@ if [ ! -r "$SPAWN_COMMON" ]; then
     exit 5
 fi
 . "$SPAWN_COMMON"
-LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
+# TIER2_LAUNCH_TOKEN lets a TRUSTED launcher pre-commit the token instead of
+# reading it back off our stdout. The root-launcher topology needs this: when
+# the launch runs inside a systemd unit our stdout is the journal, not the
+# caller's pipe, so the D-Bus caller (qdshell, via
+# SessionManager1.LaunchPodApp) could not otherwise learn the token it has to
+# match against the toplevel's secctx instance-id to resolve its placeholder.
+# The token is correlation, not authorisation — it is the secctx instance-id,
+# the per-container dir name and a podman label, so a MALFORMED one would
+# corrupt those namespaces (path traversal via the per-container dir most of
+# all). Validate the exact shape the generator guarantees and fail closed;
+# never fall back to generating one, or a caller typo would silently produce a
+# token the caller is not watching for.
+if [ -n "${TIER2_LAUNCH_TOKEN:-}" ]; then
+    if ! [[ "$TIER2_LAUNCH_TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
+        echo "spawn-tier2: TIER2_LAUNCH_TOKEN must be 32 lowercase hex digits" >&2
+        exit 2
+    fi
+    LAUNCH_TOKEN="$TIER2_LAUNCH_TOKEN"
+else
+    LAUNCH_TOKEN="$(gen_launch_token "spawn-tier2")"
+fi
 
 # Custom seccomp profile — deny-by-default, allows only the ~145
 # syscalls needed by bash/weston/weston-terminal/coreutils. Hardened

@@ -72,13 +72,25 @@ they ride in the same image — fine, no inefficiency.
 
 ## Architecture (v1 launch topology)
 
+Two entry points share one topology. A **persistent templated silo** is
+started by the session manager's `StartSilo`; a **pod-app launcher click** goes
+through `LaunchPodApp` on the same daemon. Both end in a `User=root` unit whose
+only privilege role is to be `spawn-tier2.sh`'s trusted launcher parent.
+
 ```
-systemd qdistro-tier2-silo@<name>.service (User=root)
- │
- ▼ qdistro-tier2-silo-launch
+       StartSilo(name)                    LaunchPodApp(container, workload, argv)
+             │                                            │
+             │                                  returns the launch token
+             ▼                                            ▼
+systemd qdistro-tier2-silo@<name>.service    qdistro-podapp@<launch-token>.service
+        (User=root)                                  (User=root)
+ │                                            │
+ ▼ qdistro-tier2-silo-launch                  ▼ qdistro-podapp-launch
  │   ├─ reads root-owned /run/qdistro/silo-launch/<name>.env
+ │   │  (pod apps: /run/qdistro/podapp-launch/<launch-token>.env)
  │   └─ exec env -i TIER2_ROOT_LAUNCHER=1 TIER2_ADMIN_UID=1000
  │              TIER2_SILO=<binding> TIER2_NETWORK=<none|slirp4netns>
+ │              (pod apps: TIER2_LAUNCH_TOKEN=<token>, no TIER2_SILO)
  │
  ▼ spawn-tier2.sh
  │   ├─ root supervisor only for secctx parentage/bookkeeping
@@ -138,11 +150,29 @@ The broker's rules engine (`broker/qdistro_admin_rules.py`) matches on
 no `instance_id` field -- rules cannot select on it.
 
 `instance_id` is purely correlation, not auth. It is the load-bearing
-field for the qdshell cold-start UX: qdshell reads LAUNCH_TOKEN from
-`spawn-tier2.sh`'s stdout and waits for a `toplevel_added` carrying
-the matching `instance_id` to swap its placeholder taskbar entry for
-the real one. The auth boundaries are peer-uid filtering on
-`qdwin_nested_manager_v1`, the secctx listener, and the broker rules.
+field for the qdshell cold-start UX: qdshell waits for a
+`toplevel_security_context` carrying the matching `instance_id` to swap its
+placeholder taskbar entry for the real one. The auth boundaries are peer-uid
+filtering on `qdwin_nested_manager_v1`, the secctx listener, and the broker
+rules.
+
+Where the token comes from depends on the entry point. A silo launch reads it
+back from `spawn-tier2.sh`'s stdout. A pod-app click cannot — under a systemd
+unit that stdout is the journal, not the caller's pipe — so the daemon
+**generates** the token, hands it down as `TIER2_LAUNCH_TOKEN`, and returns it
+in the `LaunchPodApp` reply. `spawn-tier2.sh` validates the shape and fails
+closed rather than substituting one of its own, so the shell can never end up
+watching for a token that will never arrive. The daemon never accepts a token
+from its caller: it is a correlation identity, and letting a caller choose it
+would let one click collide with another's.
+
+Tier-2 app windows reach qdwin as **nested proxies**, which the
+`toplevel_security_context` sender used to skip unconditionally — so a
+perfectly tagged container still produced no event and every pod-app
+placeholder timed out. qdwin now forwards the *advertising* container
+connection's tag for a proxy (that connection is the sandboxed silo itself, so
+its tag is the right identity); an untagged advertiser still emits nothing,
+preserving the absence-means-not-sandboxed contract.
 
 The v1 hardened guarantee assumes a workload seccomp profile exists. If no
 `tier2/seccomp/<workload>.json` is found, hardened launches fail closed; using
@@ -192,12 +222,17 @@ qdbrowser, qfileman, and future VMApps badges share the same vocabulary.
 
 The visible UX while a container starts up:
 
-1. User clicks a badged app icon. The v1 hardened launcher contract is that
-   qdshell starts the corresponding tier-2 silo unit; the unit calls
-   `qdistro-tier2-silo-launch` and `spawn-tier2.sh` in root-launcher mode.
-   Dev/CI-only direct launches may still call `spawn-tier2.sh` with
-   `QDISTRO_PROFILE=dev`. A caller that still invokes `spawn-tier2.sh`
-   directly in a hardened profile fails closed before a container is minted.
+1. User clicks a badged app icon. qdshell calls
+   `SessionManager1.LaunchPodApp(container, workload, argv)` — it does **not**
+   fork `spawn-tier2.sh` itself. The daemon starts
+   `qdistro-podapp@<launch-token>.service`, which runs
+   `qdistro-podapp-launch` and then `spawn-tier2.sh` in root-launcher mode, and
+   returns the launch token synchronously. (A templated silo takes the
+   equivalent `StartSilo` path.) Dev/CI-only direct launches may still call
+   `spawn-tier2.sh` with `QDISTRO_PROFILE=dev`. A caller that invokes
+   `spawn-tier2.sh` directly in a hardened profile fails closed before a
+   container is minted — which is why forking it from the unprivileged shell
+   made a click a no-op on `daily-driver`/`release`.
 2. qdshell inserts a **placeholder taskbar entry** into the Taskbar
    model immediately:
    - resolved icon (from host theme, or placeholder)

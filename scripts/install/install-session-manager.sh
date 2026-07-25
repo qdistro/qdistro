@@ -128,6 +128,20 @@ install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-launch" \
 # user / uid 0.
 install -o root -g root -m 0755 "$SRC/qdistro-tier2-silo-stop" \
     "$DEST/qdistro-tier2-silo-stop"
+# Tracker J12 Fix A: the pod-app launcher unit + helpers. A launcher click
+# used to fork spawn-tier2 straight from the unprivileged qdshell session,
+# which has no root launcher parent — so the app's window arrived UN-TAGGED in
+# dev and the launch was refused outright on a hardened profile. The click now
+# goes through SessionManager1.LaunchPodApp, which starts
+# qdistro-podapp@<launch-token>.service: same root-parent/admin-podman split as
+# the tier-2 silo unit above.
+install -o root -g root -m 0644 "$SRC/qdistro-podapp@.service" \
+    /etc/systemd/system/qdistro-podapp@.service
+install -o root -g root -m 0755 "$SRC/qdistro-podapp-launch" \
+    "$DEST/qdistro-podapp-launch"
+install -o root -g root -m 0755 "$SRC/qdistro-podapp-stop" \
+    "$DEST/qdistro-podapp-stop"
+
 install -o root -g root -m 0644 "$SRC/qdistro_silo_launch.py" \
     "$DEST/qdistro_silo_launch.py"
 cat >"$DEST/qdistro-silo-launch" <<EOF

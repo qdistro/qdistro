@@ -28,6 +28,7 @@ import logging
 import os
 import pwd
 import re as _re
+import secrets
 import shlex
 import shutil
 import signal
@@ -180,6 +181,25 @@ SILO_NETWORK_MODES = ("none", "slirp4netns")
 # (the unit drops privileges to admin and runs spawn-tier2). Under /run so it
 # is tmpfs-backed and gone on reboot — the daemon rewrites it on each start.
 TIER2_LAUNCH_ENV_DIR = Path("/run/qdistro/silo-launch")
+
+# --- pod-app launches (tracker J12 Fix A) ----------------------------------
+# A launcher click on a container app used to fork spawn-tier2 DIRECTLY from
+# the unprivileged qdshell session. With no root launcher parent, spawn-tier2
+# took its un-tagged branch — the container's Wayland connection carried no
+# wp_security_context_v1, so the compositor could not identify the window — and
+# on a hardened profile it refused the launch outright, i.e. clicking a pod app
+# did nothing at all. LaunchPodApp routes the click through the same
+# root-launcher topology the tier-2 silos use: the daemon (root) writes the
+# stanza and starts a User=root unit that hands spawn-tier2
+# TIER2_ROOT_LAUNCHER=1. The unit instance is the 32-hex LAUNCH TOKEN, not the
+# container name — hex needs no systemd escaping, and two clicks on the same
+# app never collide on one instance.
+PODAPP_LAUNCHER_FMT = "qdistro-podapp@{token}.service"
+PODAPP_LAUNCH_ENV_DIR = Path("/run/qdistro/podapp-launch")
+# The token is the secctx instance-id spawn-tier2 stamps on the wire, and the
+# clicking shell matches it against toplevel_security_context to resolve its
+# launch placeholder. Same shape the shell's correlators already filter on.
+_LAUNCH_TOKEN_RE = _re.compile(r"^[0-9a-f]{32}$")
 
 # Per-silo network-namespace egress (todo/fable-networking task 3), applied only
 # to tier3-user silos that carry an explicit `egress` policy. A silo with no
@@ -610,8 +630,24 @@ class _SystemOps:
         return False
 
     def write_launch_env(self, name: str, content: str) -> Path:
-        TIER2_LAUNCH_ENV_DIR.mkdir(parents=True, exist_ok=True)
-        p = TIER2_LAUNCH_ENV_DIR / f"{name}.env"
+        return self._write_launch_env_in(TIER2_LAUNCH_ENV_DIR, name, content)
+
+    def write_podapp_launch_env(self, token: str, content: str) -> Path:
+        """Same root-TCB contract as write_launch_env, different directory:
+        pod-app stanzas are per-click and keyed by launch token, so they live
+        under their own dir and are dropped when the unit stops."""
+        return self._write_launch_env_in(PODAPP_LAUNCH_ENV_DIR, token, content)
+
+    def remove_podapp_launch_env(self, token: str) -> None:
+        try:
+            (PODAPP_LAUNCH_ENV_DIR / f"{token}.env").unlink()
+        except FileNotFoundError:
+            pass
+
+    def _write_launch_env_in(self, env_dir: Path, name: str,
+                             content: str) -> Path:
+        env_dir.mkdir(parents=True, exist_ok=True)
+        p = env_dir / f"{name}.env"
         tmp = p.with_suffix(".env.tmp")
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -2487,6 +2523,110 @@ class _SiloStore:
         lines = [f"{k}={shlex.quote(v)}" for k, v in kv] + [""]
         self._ops.write_launch_env(silo.name, "\n".join(lines))
 
+    # ---- pod-app launches (tracker J12 Fix A) -----------------------------
+
+    def launch_podapp(self, container: str, workload: str, argv_json: str,
+                      caller: dict[str, Any] | None = None) -> str:
+        """Launch one container app through the root-launcher topology and
+        return the launch token.
+
+        This is deliberately NOT a silo lifecycle operation: a pod app is a
+        per-click transient, it has no row in the store and no state machine.
+        What it borrows from the silo path is the privilege topology — a
+        User=root unit whose only job is to be spawn-tier2's trusted launcher
+        parent, so qdistro-secctx-exec can stamp the app's identity on the
+        Wayland wire. Forking spawn-tier2 from the unprivileged shell instead
+        (what a launcher click used to do) yields an un-tagged window in dev
+        and a refused launch on a hardened profile.
+
+        The token is generated HERE, never accepted from the caller: it is the
+        secctx instance-id, the per-container dir name and a podman label, so
+        letting a caller choose it would let one click collide with — or
+        impersonate — another's correlation identity. We return it so the shell
+        can resolve its placeholder off toplevel_security_context without
+        reading spawn-tier2's stdout (which is the journal under a unit).
+        """
+        container = self._validate_podapp_token("container", container)
+        workload = self._validate_podapp_token("workload", workload)
+        argv = self._validate_podapp_argv(argv_json)
+        token = secrets.token_hex(16)
+
+        kv = [
+            ("QD_LAUNCH_TOKEN", token),
+            ("QD_CONTAINER", container),
+            ("QD_WORKLOAD", workload),
+            ("QD_APP_ARGV_JSON", json.dumps(argv)),
+            # Pod apps get no network by default, matching the pre-J12 direct
+            # spawn (which set no TIER2_NETWORK at all). Widening this is a
+            # policy change, not a routing change, so it is out of scope here.
+            ("TIER2_NETWORK", "none"),
+        ]
+        # shlex.quote EVERY value: the launcher does `set -a; . envfile`, and
+        # the argv JSON contains brackets/quotes and may contain a single
+        # quote, which a naive wrapper could not represent.
+        content = "\n".join([f"{k}={shlex.quote(v)}" for k, v in kv] + [""])
+        unit = PODAPP_LAUNCHER_FMT.format(token=token)
+        try:
+            self._ops.write_podapp_launch_env(token, content)
+            self._ops.systemctl_start(unit)
+        except Exception as e:  # noqa: BLE001
+            # Never leave a stanza behind for a unit that did not start: it is
+            # a spent token nobody will clean up (the unit's ExecStopPost is
+            # what normally removes it).
+            try:
+                self._ops.remove_podapp_launch_env(token)
+            except Exception:  # noqa: BLE001
+                log.warning("could not remove pod-app launch env for %s", token)
+            log.error("pod-app launch of %r failed: %s", container, e)
+            self._audit_record("podapp-launch", container, decision="error",
+                               reason=str(e), caller=caller)
+            if isinstance(e, SessionError):
+                raise
+            raise SessionError(
+                f"pod-app launch of {container!r} failed: {e}") from e
+        log.info("LaunchPodApp container=%s workload=%s token=%s",
+                 container, workload, token)
+        self._audit_record("podapp-launch", container, decision="allow",
+                           reason=f"launched {workload} (token {token})",
+                           caller=caller)
+        return token
+
+    @staticmethod
+    def _validate_podapp_token(field: str, value: object) -> str:
+        # Same constraint the silo launch stanza uses: these cross into a
+        # root-sourced env file and then into podman/spawn-tier2 argv.
+        if not isinstance(value, str) or not value:
+            raise BadArgument(f"pod-app {field} is required")
+        if len(value) > 128:
+            raise BadArgument(f"pod-app {field} is too long")
+        if not _SAFE_TOKEN_RE.match(value) or ".." in value:
+            raise BadArgument(f"pod-app {field} is unsafe: {value!r}")
+        return value
+
+    @staticmethod
+    def _validate_podapp_argv(argv_json: object) -> list[str]:
+        if not isinstance(argv_json, str):
+            raise BadArgument("pod-app argv must be a JSON array string")
+        text = argv_json.strip()
+        if not text:
+            return []
+        try:
+            argv = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise BadArgument(f"pod-app argv is not valid JSON: {e}") from e
+        if not isinstance(argv, list) or not all(
+                isinstance(a, str) for a in argv):
+            raise BadArgument("pod-app argv must be a list of strings")
+        if len(argv) > 64:
+            raise BadArgument("pod-app argv has too many entries")
+        # The launcher re-splits argv on newlines after the JSON round-trip, so
+        # an embedded newline would silently become TWO arguments.
+        if any(("\n" in a or "\r" in a) for a in argv):
+            raise BadArgument("pod-app argv entries must be single-line")
+        if any(len(a) > 4096 for a in argv):
+            raise BadArgument("pod-app argv entry is too long")
+        return list(argv)
+
     def start(self, name: str, caller: dict[str, Any] | None = None) -> None:
         reason = "started"
         try:
@@ -4122,6 +4262,30 @@ if dbus is not None:
             try:
                 self.store.start(str(name), caller=caller)
                 log.info("StartSilo name=%s", name)
+            except SessionError as e:
+                raise _to_dbus_exception(e) from e
+
+        @dbus.service.method(BUS_NAME, in_signature="sss", out_signature="s",
+                             sender_keyword="sender",
+                             connection_keyword="conn")
+        def LaunchPodApp(self, container, workload, argv_json,
+                         sender=None, conn=None):
+            """Launch one container app under the root-launcher topology;
+            returns the 32-hex launch token (== the secctx instance-id the
+            window will carry, which the shell matches to resolve its launch
+            placeholder). Admin-gated like every other lifecycle method: this
+            starts a User=root unit, so a non-admin caller must never reach it.
+            """
+            caller = self._peer_caller(sender, conn)
+            try:
+                self._require_admin(sender, conn)
+            except SessionError as e:
+                self._audit_refusal("podapp-launch", container, caller, e)
+                raise _to_dbus_exception(e) from e
+            try:
+                return self.store.launch_podapp(
+                    str(container), str(workload), str(argv_json),
+                    caller=caller)
             except SessionError as e:
                 raise _to_dbus_exception(e) from e
 
