@@ -9,6 +9,7 @@ off the VM.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -96,6 +97,35 @@ def test_stop_helper_fails_closed_on_missing_admin_user(tmp_path: Path) -> None:
         env=env, capture_output=True, text=True, check=False, timeout=30)
     assert res.returncode != 0
     assert "does not exist" in res.stderr
+
+
+def test_helper_argv_split_preserves_empty_elements() -> None:
+    """`mapfile -t` on a newline-joined argv silently drops empty elements —
+    and a trailing empty one entirely — so the silo would be launched with a
+    DIFFERENT argv than its launch stanza specifies. The split must be
+    NUL-separated, the one byte a JSON argv element cannot contain. (Twin of
+    tests/unit/test_podapp_launch.py's check on qdistro-podapp-launch.)"""
+    src = _LAUNCH.read_text()
+    assert "mapfile -d '' -t APP_ARGV" in src, \
+        "argv must be split on NUL, not newlines"
+    assert '\\n".join(argv)' not in src, \
+        "the newline join drops empty argv elements"
+    # Run the actual splitter out of the shipped source rather than a copy, so
+    # this cannot pass against a stale duplicate of the pipeline.
+    start = src.index("mapfile -d '' -t APP_ARGV")
+    snippet = src[start:src.index("')", start) + 2]
+    script = (f'export QD_WORKLOAD=weston-terminal\n{snippet}\n'
+              'printf "%s\\n" "${#APP_ARGV[@]}"\n'
+              'printf "[%s]" "${APP_ARGV[@]}"\n')
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin",
+             "QD_APP_ARGV_JSON": json.dumps(["a", "", "b", ""])},
+        timeout=30)
+    assert out.returncode == 0, out.stderr
+    count, rendered = out.stdout.split("\n", 1)
+    assert count == "4", f"empty argv elements were dropped: {out.stdout!r}"
+    assert rendered.strip() == "[a][][b][]"
 
 
 def test_helpers_are_executable_shell() -> None:
