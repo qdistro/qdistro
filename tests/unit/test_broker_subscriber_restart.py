@@ -85,11 +85,40 @@ class _BrokerSignalObject(dbus.service.Object):
         super().__init__(conn, object_path)
 
 
+def _private_bus():
+    """Open a private session bus that cannot take the pytest process down.
+
+    MUST be used for every connection this module opens. libdbus defaults
+    ``exit_on_disconnect`` to TRUE, and ``DBusGMainLoop(set_as_default=True)``
+    attaches each connection's dispatch GSource to the DEFAULT GLib main
+    context. ``bus.close()`` does not dispatch the resulting ``Disconnected``
+    message — it only queues it; whoever iterates that context NEXT dispatches
+    it, and libdbus's exit-on-disconnect handler then calls ``_dbus_exit(1)``,
+    a C ``exit(1)`` that kills the interpreter with no exception, no traceback,
+    no pytest summary and no flushed stdout.
+
+    In a whole-directory ``python3 -m pytest tests/unit/`` run that "whoever"
+    is pytest-qt: once any admin Qt test has created a QApplication, pytest-qt
+    calls ``QApplication.processEvents()`` around every subsequent test
+    boundary, and Qt on Linux runs on QEventDispatcherGlib — i.e. it iterates
+    exactly this context. So the FIRST test after this module used to kill the
+    run (rc=1, ~20% in, no output). CI never saw it because ci/lib/gates/host.sh
+    runs pytest one file per process, so no QApplication ever coexists with
+    these connections.
+
+    Disabling the flag makes a disconnect an ordinary no-op for the process,
+    which is what a test-owned connection must be.
+    """
+    bus = dbus.SessionBus(private=True)
+    bus.set_exit_on_disconnect(False)
+    return bus
+
+
 def _session_bus_available() -> tuple[bool, str]:
     """Probe for a usable session bus. Returns (ok, reason)."""
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     try:
-        bus = dbus.SessionBus(private=True)
+        bus = _private_bus()
         bus.close()
         return True, ""
     except Exception as e:  # noqa: BLE001
@@ -175,7 +204,7 @@ def _run_loop_until(predicate, timeout_s: float = 5.0) -> bool:
 @pytest.fixture
 def session_bus():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SessionBus(private=True)
+    bus = _private_bus()
     yield bus
     try:
         bus.close()
@@ -233,7 +262,7 @@ class TestLiveSubscriberAcrossRestart:
         # name. This is what a service *restart* looks like on the bus:
         # same well-known name, different unique name. A bus_name= filter
         # would have pinned the subscriber to unique1 and gone deaf here.
-        bus2 = dbus.SessionBus(private=True)
+        bus2 = _private_bus()
         name2 = dbus.service.BusName(BUS_NAME, bus2, do_not_queue=True)
         unique2 = bus2.get_unique_name()
         broker2 = _BrokerSignalObject(bus2, OBJ_PATH)
