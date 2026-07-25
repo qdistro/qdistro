@@ -584,10 +584,18 @@ def main(argv: list[str] | None = None) -> int:
     bridge.attach(client)
 
     # Live-capture / egress indicators. These observe only while locked, and
-    # drop any pre-lock reading on the lock edge, so nothing seen while the
+    # drop any pre-lock reading on every lock edge, so nothing seen while the
     # machine was unlocked can be presented as locked-machine state.
+    #
+    # Deliberately wired to lockedChangedForCtrl, NOT lockedChanged:
+    # lockedChanged mirrors lock *intent* and is emitted before
+    # client.set_locked() reaches qdwin, and it does NOT re-fire when the
+    # compositor's authoritative locked_changed(1) arrives (the intent mirror
+    # is already true). lockedChangedForCtrl fires on ready, on lock intent
+    # AND on every compositor confirmation, so the confirmation invalidates
+    # the intent-time scan and launches a fresh one from the locked machine.
     indicators = LockIndicators()
-    bridge.lockedChanged.connect(indicators.set_locked)
+    bridge.lockedChangedForCtrl.connect(indicators.set_locked)
 
     engine = QQmlApplicationEngine()
     qdshell_path = _qdshell_import_path()

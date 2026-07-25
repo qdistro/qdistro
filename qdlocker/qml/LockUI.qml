@@ -31,10 +31,18 @@ Item {
 
   // Security indicator banner — sessions.md requires non-suppressible state
   // for live mic/camera/screencast/system-audio/virtual-input capture and
-  // qdistro network egress. Nothing gates this on a setting, and it stays up
-  // while any kind is merely UNVERIFIED (which, today, is always: qdistro has
-  // no authoritative negative for any capture kind, so "?" is the honest
-  // reading — see qdlocker/indicators.py).
+  // qdistro network egress. Nothing gates this on a setting.
+  //
+  // Three distinct severities, because they mean different things:
+  //   * observed capture (red) — a running PipeWire capture node, named by
+  //     its own client where the graph attributes one, otherwise reported as
+  //     device-level activity with the client unknown;
+  //   * observer failed (red) — no reading at all, which is NOT the same as
+  //     a quiet machine and must not look like one;
+  //   * coverage disclosure (dim) — the standing statement of what this
+  //     cannot see: direct /dev/snd + /dev/video grants, weston_capture_v1
+  //     grabs and virtual input are unmonitored, so "nothing observed" is
+  //     never "nothing is happening". See qdlocker/indicators.py.
   Rectangle {
     id: securityBanner
     anchors.top: parent.top
@@ -45,9 +53,13 @@ Item {
     radius: Style.radiusXS
     readonly property bool capturing: root.lockIndicators
                                       ? root.lockIndicators.captureActive : false
-    color: capturing ? Qt.alpha(Color.mError, 0.18)
-                     : Qt.alpha(Color.mOnSurfaceVariant, 0.10)
-    border.color: capturing ? Color.mError : Qt.alpha(Color.mOnSurfaceVariant, 0.35)
+    // No reading at all: either the observer object is missing or every kind
+    // is unverified with nothing observed.
+    readonly property bool observerDead: !root.lockIndicators
+    color: (capturing || observerDead) ? Qt.alpha(Color.mError, 0.18)
+                                       : Qt.alpha(Color.mOnSurfaceVariant, 0.10)
+    border.color: (capturing || observerDead) ? Color.mError
+                                              : Qt.alpha(Color.mOnSurfaceVariant, 0.35)
     border.width: Style.borderM
 
     Column {
@@ -56,33 +68,37 @@ Item {
       width: parent.width - Style.fontSizeXXL
       spacing: Style.fontSizeS
 
-      // Observer missing entirely (no context property) — say so.
+      // Observer missing entirely (no context property) — say so loudly.
       Text {
         width: parent.width
-        visible: !root.lockIndicators
-        text: "⚠ capture state unavailable — mic, camera and screen capture cannot be verified"
+        visible: securityBanner.observerDead
+        text: "⚠ capture monitoring unavailable — mic, camera and screen capture are NOT being observed"
         wrapMode: Text.WordWrap
         color: Color.mError
         font.pointSize: Style.fontSizeL
       }
 
-      // Positively observed capture.
+      // Positively observed capture. "LIVE CAPTURE" only when the graph
+      // attributes a client; device-level evidence says so instead.
       Text {
         width: parent.width
         visible: securityBanner.capturing
-        text: "⚠ LIVE CAPTURE: " + (root.lockIndicators
-                                    ? root.lockIndicators.captureDetail : "")
+        text: (root.lockIndicators && root.lockIndicators.captureAttributed
+               ? "⚠ LIVE CAPTURE: " : "⚠ CAPTURE ACTIVITY: ")
+              + (root.lockIndicators ? root.lockIndicators.captureDetail : "")
         wrapMode: Text.WordWrap
         color: Color.mError
         font.pointSize: Style.fontSizeL
       }
 
-      // Blind spots, stated out loud.
+      // Standing coverage disclosure. Deliberatelylow-key relative to the rows
+      // above: it is always true, so it must not compete with a real event.
       Text {
         width: parent.width
         visible: root.lockIndicators ? root.lockIndicators.captureUnverified : false
-        text: "? unverified: " + (root.lockIndicators
-                                  ? root.lockIndicators.captureUnverifiedLabel : "")
+        text: "capture monitoring: partial — no capture observed for "
+              + (root.lockIndicators ? root.lockIndicators.captureUnverifiedLabel : "")
+              + "; direct device grants and virtual input are not monitored"
         wrapMode: Text.WordWrap
         color: Color.mOnSurfaceVariant
         font.pointSize: Style.fontSizeM
@@ -101,9 +117,9 @@ Item {
       Text {
         width: parent.width
         visible: root.lockIndicators ? root.lockIndicators.egressUnverified : false
-        text: "? network egress state unverified (session manager unreachable)"
+        text: "⚠ network egress state unverified (session manager unreachable)"
         wrapMode: Text.WordWrap
-        color: Color.mOnSurfaceVariant
+        color: Color.mError
         font.pointSize: Style.fontSizeM
       }
     }

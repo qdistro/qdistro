@@ -250,6 +250,17 @@ class FakeClock:
         return self.t
 
 
+@pytest.fixture(scope="session")
+def qapp_offscreen():
+    import os
+    import sys
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtGui import QGuiApplication
+
+    yield QGuiApplication.instance() or QGuiApplication(sys.argv)
+
+
 @pytest.fixture
 def model():
     clock = FakeClock()
@@ -355,18 +366,59 @@ def test_scan_commands_are_killable_and_do_not_mask_failure():
 def test_app_wires_indicators_to_the_lock_edge():
     app = (REPO / "qdlocker" / "app.py").read_text()
     assert "from .indicators import LockIndicators" in app
-    assert "bridge.lockedChanged.connect(indicators.set_locked)" in app, (
-        "the observer must re-scan on the lock edge, not inherit pre-lock state")
+    assert "bridge.lockedChangedForCtrl.connect(indicators.set_locked)" in app, (
+        "the observer must be driven by the signal that also fires on the "
+        "compositor's authoritative locked_changed, not by the intent mirror")
     assert 'setContextProperty("indicators", indicators)' in app
+
+
+def test_compositor_confirmation_restarts_the_scan(qapp_offscreen, monkeypatch):
+    """Intent-time scans must not survive as locked-machine state.
+
+    `lockedChanged` fires when the lock is merely *requested* — before
+    qdwin has been told — and does not fire again when the compositor
+    confirms. The observer is therefore driven by `lockedChangedForCtrl`,
+    which fires on both, so the confirmation re-marks the reading stale and
+    launches a fresh scan from the actually-locked machine.
+    """
+    from unittest.mock import MagicMock
+
+    from qdlocker.app import WaylandBridge
+
+    bridge = WaylandBridge(MagicMock())
+    edges: list[bool] = []
+    bridge.lockedChangedForCtrl.connect(edges.append)
+
+    bridge._on_lock_requested(3)          # intent (machine still unlocked)
+    bridge._on_locked_changed(True)       # compositor confirmation
+    assert edges == [True, True], (
+        "confirmation must produce a second lock edge for the observer")
+
+    intent_only: list[bool] = []
+    bridge2 = WaylandBridge(MagicMock())
+    bridge2.lockedChanged.connect(intent_only.append)
+    bridge2._on_lock_requested(3)
+    bridge2._on_locked_changed(True)
+    assert intent_only == [True], (
+        "documents why lockedChanged alone is not enough: no confirmation edge")
 
 
 def test_lock_ui_renders_the_indicators_unsuppressed():
     ui = (REPO / "qdlocker" / "qml" / "LockUI.qml").read_text()
-    for prop in ("captureActive", "captureDetail", "captureUnverified",
-                 "captureUnverifiedLabel", "egressActive", "egressUnverified"):
+    for prop in ("captureActive", "captureAttributed", "captureDetail",
+                 "captureUnverified", "captureUnverifiedLabel",
+                 "egressActive", "egressUnverified"):
         assert prop in ui, f"LockUI must render {prop}"
-    # A missing context property must produce a warning, not a blank surface.
-    assert "capture state unavailable" in ui
+    # A missing observer must produce a loud warning, not a blank surface.
+    assert "capture monitoring unavailable" in ui
+    # Device-only evidence must not be shown with client-attributed certainty.
+    assert "LIVE CAPTURE" in ui and "CAPTURE ACTIVITY" in ui
+    # The standing coverage disclosure must not read as an all-clear.
+    assert "capture monitoring: partial" in ui
+    # The surface must never tell the owner the machine is clear: the code
+    # cannot establish that, so the word must not appear in any banner text.
+    for line in re.findall(r"text:.*", ui):
+        assert "clear" not in line.lower(), line
     # No config/settings expression may gate any indicator's visibility.
     for line in re.findall(r"visible:.*", ui):
         if "lockIndicators" in line:
@@ -417,6 +469,112 @@ def test_qt_observer_runs_scans_and_publishes_state(monkeypatch):
     assert obs.captureActive is False, "unlocking must drop the locked-state reading"
     assert obs.captureUnverified is True
     del app
+
+
+def test_superseded_scan_callbacks_cannot_touch_their_replacement(qapp_offscreen,
+                                                                  monkeypatch):
+    """A signal from a killed scan must not reach the replacement's state.
+
+    The callbacks are bound to the scan object, not to the observer name, so
+    a late `finished`/`errorOccurred`/timeout from a superseded run cannot
+    drain the current run's stdout, stop its timeout, kill its process, or
+    stamp a reading.
+    """
+    monkeypatch.setattr(I, "CAPTURE_CMD", ["sh", "-c", "exec sleep 5"])
+    monkeypatch.setattr(I, "EGRESS_CMD", ["sh", "-c", "exec sleep 5"])
+    obs = I.LockIndicators(poll_ms=100000)
+
+    obs.refresh()
+    old = obs._scans["capture"]
+    obs.refresh()
+    new = obs._scans["capture"]
+    assert old is not new
+
+    # Every late callback from the superseded scan is a no-op.
+    obs._on_finished(old, 0)
+    obs._on_error(old)
+    obs._on_timeout(old)
+    obs._on_ready_read(old)
+
+    assert obs._scans["capture"] is new, "the replacement must still be current"
+    assert new.timer.isActive(), "the replacement's hard timeout must still be armed"
+    assert obs.captureActive is False
+    assert obs.captureUnverified is True
+
+    obs.stop()
+    assert obs._scans == {}
+
+
+def test_oversized_output_is_killed_while_streaming(qapp_offscreen, monkeypatch,
+                                                    caplog):
+    """The cap is enforced during reading, not after buffering everything."""
+    monkeypatch.setattr(I, "MAX_DUMP_BYTES", 4096)
+    monkeypatch.setattr(I, "CAPTURE_CMD",
+                        ["sh", "-c", "exec head -c 200000 /dev/zero | tr '\\0' 'a'"])
+    monkeypatch.setattr(I, "EGRESS_CMD", ["sh", "-c", "exit 1"])
+    obs = I.LockIndicators(poll_ms=100000)
+    caplog.set_level("WARNING", logger="qdlocker.indicators")
+    obs.set_locked(True)
+
+    from PyQt6.QtCore import QEventLoop, QTimer
+    loop = QEventLoop()
+    QTimer.singleShot(1500, loop.quit)
+    loop.exec()
+
+    assert "capture" not in obs._scans, "the oversized scan must have been killed"
+    assert any("exceeded" in r.message for r in caplog.records), (
+        "the cap must fire while streaming, not after buffering the whole dump")
+    assert obs.captureActive is False
+    assert obs.captureUnverified is True
+    obs.stop()
+
+
+def test_stopping_silo_egress_is_still_shown():
+    """`Stopping` is transient but real.
+
+    The session manager emits it before SIGTERM, the grace wait, SIGKILL and
+    egress teardown, so the silo can still be on the network. Hiding the row
+    at that point is exactly the fail-silent case.
+    """
+    ok, rows = I.parse_list_silos(busctl([
+        {"name": "mail", "state": "Stopping", "egress": "wg:corp"},
+        {"name": "gone", "state": "Stopped", "egress": "direct"},
+    ]))
+    s = I.summarise_egress(ok, rows, fresh=True)
+    assert s["count"] == 1
+    assert s["detail"] == "mail:corp"
+
+
+def test_unknown_silo_state_is_flagged_not_dropped():
+    ok, rows = I.parse_list_silos(busctl([
+        {"name": "weird", "state": "Reticulating", "egress": "direct"}]))
+    s = I.summarise_egress(ok, rows, fresh=True)
+    assert s["count"] == 1
+    assert s["detail"] == "weird:direct?"
+
+
+def test_device_only_evidence_is_not_presented_as_client_attribution():
+    """A running source device proves activity, not which client.
+
+    Presenting `mic:Built-in Mic` as if it were an application would be a
+    claim the graph does not support.
+    """
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{"media.class": "Audio/Source", "node.description": "Built-in Mic"}),
+    ]))
+    s = I.summarise_capture(ok, nodes, fresh=True)
+    assert s["anyActive"] is True
+    assert s["attributed"] is False
+    assert s["activeDetail"] == "mic:Built-in Mic (device active, client unknown)"
+
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{"media.class": "Stream/Input/Audio", "application.name": "zoom"}),
+    ]))
+    s = I.summarise_capture(ok, nodes, fresh=True)
+    assert s["attributed"] is True
+    assert s["activeDetail"] == "mic:zoom"
 
 
 def test_no_kind_is_missing_a_label():

@@ -50,6 +50,7 @@ import json
 import logging
 import shutil
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger("qdlocker.indicators")
@@ -87,7 +88,17 @@ STALE_AFTER_S = 12.0
 # than chew the lock UI's main thread.
 MAX_DUMP_BYTES = 8_000_000
 
-_ACTIVE_SILO_STATES = frozenset({"Active", "ACTIVE", "active"})
+# States whose silo may still have live processes and therefore live egress.
+# `Stopping` is transient but real: the session manager emits it before
+# SIGTERM, the grace wait, SIGKILL and egress teardown, so a silo in that
+# state can still be talking to the network. Anything unrecognised is treated
+# the same way — a state string this code does not know is not evidence that
+# the silo went dark.
+_LIVE_SILO_STATES = frozenset({"Active", "ACTIVE", "active",
+                               "Stopping", "STOPPING", "stopping"})
+# States that positively mean "no processes": only these may hide a row.
+_DEAD_SILO_STATES = frozenset({"Created", "Stopped", "Frozen", "Deleting",
+                               "created", "stopped", "frozen", "deleting"})
 
 
 # --------------------------------------------------------------------------
@@ -191,35 +202,37 @@ def classify_node(node: dict) -> dict | None:
     # names the node `weston.pipewire-N` (qdwin.c, qdwin_view_stream_v1). A
     # live one means a screencast/remote-display stream is running right now.
     if name.startswith("weston.pipewire"):
-        return {"kind": "screencast", "app": app}
+        return {"kind": "screencast", "app": app, "evidence": "client"}
 
     if media_class.startswith("Stream/Input") or category == "capture":
         video = "Video" in media_class or media_type == "video"
         audio = "Audio" in media_class or media_type == "audio"
         if video:
-            return {"kind": "camera" if cameraish else "screencast", "app": app}
+            return {"kind": "camera" if cameraish else "screencast", "app": app,
+                    "evidence": "client"}
         if audio:
             kind = "systemAudio" if _truthy(props.get("stream.capture.sink")) else "microphone"
-            return {"kind": kind, "app": app}
+            return {"kind": kind, "app": app, "evidence": "client"}
         # Capture-shaped but we cannot tell what it captures. Still evidence.
-        return {"kind": "unattributed", "app": app}
+        return {"kind": "unattributed", "app": app, "evidence": "client"}
 
     # A producing video stream that is not a camera is a screen source.
     if media_class == "Stream/Output/Video":
-        return {"kind": "camera" if cameraish else "screencast", "app": app}
+        return {"kind": "camera" if cameraish else "screencast", "app": app,
+                "evidence": "client"}
 
     # Device-side nodes only run while something pulls from them, so a running
     # source device is itself evidence — including capture that reaches admin's
     # graph through a per-session PipeWire linking upward, where the
     # client-side stream node is not visible here.
     if media_class == "Audio/Source":
-        return {"kind": "microphone", "app": app}
+        return {"kind": "microphone", "app": app, "evidence": "device"}
     if media_class == "Video/Source":
         # A video *device* defaults the other way from a video *stream*: a
         # device node is a camera unless it names itself a screen source.
         screenish = any(h in haystack for h in ("screen", "desktop", "weston", "monitor"))
         return {"kind": "screencast" if screenish and not cameraish else "camera",
-                "app": app}
+                "app": app, "evidence": "device"}
 
     return None
 
@@ -242,13 +255,24 @@ def capture_entries(nodes: list[dict]) -> list[dict]:
             continue
         seen.add(key)
         out.append({"kind": hit["kind"], "app": hit["app"],
+                    "evidence": hit.get("evidence", "client"),
                     "label": KIND_LABELS[hit["kind"]]})
     out.sort(key=lambda e: (KINDS.index(e["kind"]), e["app"]))
     return out
 
 
 def _entry_text(entry: dict) -> str:
-    return f"{entry['label']}:{entry['app']}" if entry["app"] else entry["label"]
+    """Display text for one piece of evidence.
+
+    `client` evidence names the stream's own client; `device` evidence is a
+    running source *device* node, which proves something is pulling from it
+    but NOT which client — say so rather than presenting the device name as
+    an application.
+    """
+    text = f"{entry['label']}:{entry['app']}" if entry["app"] else entry["label"]
+    if entry.get("evidence") == "device":
+        text += " (device active, client unknown)"
+    return text
 
 
 def summarise_capture(ok: bool, nodes: list[dict], fresh: bool,
@@ -295,6 +319,10 @@ def summarise_capture(ok: bool, nodes: list[dict], fresh: bool,
         "activeLabel": (", ".join(shown) + f" +{extra}") if extra > 0 else ", ".join(shown),
         "activeDetail": ", ".join(_entry_text(e) for e in entries),
         "anyActive": bool(entries),
+        # True only when at least one piece of evidence names its own client.
+        # Device-node-only evidence is real activity but unattributed, and the
+        # UI must not present it with the same certainty.
+        "attributed": any(e.get("evidence") == "client" for e in entries),
         "unverifiedKinds": unverified,
         "unverifiedLabel": ", ".join(KIND_LABELS[k] for k in unverified),
         "anyUnverified": bool(unverified),
@@ -361,15 +389,22 @@ def egress_label(egress: str) -> str:
 def active_egress_rows(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows or []:
-        if str(row.get("state") or "") not in _ACTIVE_SILO_STATES:
+        state = str(row.get("state") or "")
+        if state in _DEAD_SILO_STATES:
             continue
         egress = normalise_egress(row.get("egress"))
         if egress == "none":
             continue
+        label = egress_label(egress)
+        if state not in _LIVE_SILO_STATES:
+            # Unknown state: show the row and say the state is unknown rather
+            # than silently dropping a possibly-live egress path.
+            label = f"{label}?" if label else "?"
         out.append({
             "name": str(row.get("name") or ""),
+            "state": state,
             "egress": egress,
-            "label": egress_label(egress),
+            "label": label,
         })
     out.sort(key=lambda r: r["name"])
     return out
@@ -525,6 +560,21 @@ except ImportError:  # pragma: no cover
 
 if QObject is not None:  # pragma: no cover - needs a Qt event loop
 
+    @dataclass
+    class _Scan:
+        """One in-flight observer run, with its own process, timer and buffer.
+
+        Callbacks are bound to the instance, never to the observer name, so a
+        signal arriving from a superseded run cannot touch its replacement.
+        """
+
+        name: str
+        generation: int
+        proc: QProcess
+        timer: QTimer
+        buf: bytearray = field(default_factory=bytearray)
+
+
     class LockIndicators(QObject):
         """Runs the observers while locked and exposes the state to QML.
 
@@ -545,12 +595,11 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
             super().__init__(parent)
             self._model = IndicatorModel()
             self._state = self._model.state()
-            self._procs: dict[str, QProcess] = {}
-            self._timers: dict[str, QTimer] = {}
-            # One result per (observer, generation): `finished` and
-            # `errorOccurred` can both fire for the same scan, and a late
-            # error must not clobber a result already accepted.
-            self._settled: set[tuple[str, int]] = set()
+            # One live scan per observer. Every callback carries the exact
+            # scan object it belongs to and returns immediately if that scan
+            # is no longer the current one — a signal from a killed process
+            # must never touch its replacement's process, timer or buffer.
+            self._scans: dict[str, _Scan] = {}
             self._poll = QTimer(self)
             self._poll.setInterval(poll_ms or self.POLL_MS)
             self._poll.timeout.connect(self.refresh)
@@ -558,6 +607,14 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
 
         # -- lifecycle ---------------------------------------------------
         def set_locked(self, locked: bool) -> None:
+            """Lock-edge handler.
+
+            Called on lock INTENT and again on the compositor's authoritative
+            confirmation (see app.py). Every True re-marks the reading stale
+            and starts a fresh scan, so a scan launched on intent — while the
+            machine was still unlocked — cannot survive as the locked
+            machine's state.
+            """
             if locked:
                 self.start()
             else:
@@ -574,7 +631,7 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
             self._running = False
             self._poll.stop()
             self._model.mark_stale()
-            for name in list(self._procs):
+            for name in list(self._scans):
                 self._kill(name)
             self._publish()
 
@@ -586,58 +643,83 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
 
         # -- process plumbing --------------------------------------------
         def _kill(self, name: str) -> None:
-            timer = self._timers.pop(name, None)
-            if timer is not None:
-                timer.stop()
-            proc = self._procs.pop(name, None)
-            if proc is not None:
-                proc.kill()
-                proc.deleteLater()
+            scan = self._scans.pop(name, None)
+            if scan is None:
+                return
+            scan.timer.stop()
+            # Inert the old object's signals before killing it, so its dying
+            # `finished`/`errorOccurred` cannot re-enter at all.
+            scan.proc.blockSignals(True)
+            scan.proc.kill()
+            scan.proc.deleteLater()
 
         def _spawn(self, name: str, argv: list[str], generation: int) -> None:
             self._kill(name)
             proc = QProcess(self)
             proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
-            proc.finished.connect(
-                lambda code, status, n=name, g=generation: self._on_finished(n, g, code))
-            proc.errorOccurred.connect(
-                lambda _err, n=name, g=generation: self._on_finished(n, g, 127))
-            self._procs[name] = proc
-
             timer = QTimer(self)
             timer.setSingleShot(True)
             timer.setInterval(self.SCAN_TIMEOUT_MS)
-            timer.timeout.connect(lambda n=name, g=generation: self._on_timeout(n, g))
-            self._timers[name] = timer
-            timer.start()
+            scan = _Scan(name=name, generation=generation, proc=proc, timer=timer)
+            self._scans[name] = scan
 
+            proc.readyReadStandardOutput.connect(lambda s=scan: self._on_ready_read(s))
+            proc.finished.connect(lambda _c, _s, sc=scan: self._on_finished(sc, _c))
+            proc.errorOccurred.connect(lambda _e, sc=scan: self._on_error(sc))
+            timer.timeout.connect(lambda sc=scan: self._on_timeout(sc))
+            timer.start()
             proc.start(argv[0], argv[1:])
 
-        def _on_timeout(self, name: str, generation: int) -> None:
-            log.warning("%s observer timed out; killing scan", name)
-            self._kill(name)
-            self._apply(name, generation, 124, "")
+        def _current(self, scan: _Scan) -> bool:
+            return self._scans.get(scan.name) is scan
 
-        def _on_finished(self, name: str, generation: int, exit_code: int) -> None:
-            proc = self._procs.get(name)
-            stdout = ""
-            if proc is not None:
-                try:
-                    stdout = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
-                except (UnicodeDecodeError, RuntimeError):
-                    stdout = ""
-            timer = self._timers.pop(name, None)
-            if timer is not None:
-                timer.stop()
-            self._apply(name, generation, exit_code, stdout)
+        def _on_ready_read(self, scan: _Scan) -> None:
+            """Stream stdout into a bounded buffer.
+
+            The cap is enforced while reading, not after the fact: an
+            unbounded graph must not be buffered in full and then rejected.
+            """
+            if not self._current(scan):
+                return
+            scan.buf += bytes(scan.proc.readAllStandardOutput())
+            if len(scan.buf) > MAX_DUMP_BYTES:
+                log.warning("%s observer output exceeded %d bytes; killing scan",
+                            scan.name, MAX_DUMP_BYTES)
+                self._kill(scan.name)
+                self._apply(scan.name, scan.generation, 125, "")
+
+        def _on_timeout(self, scan: _Scan) -> None:
+            if not self._current(scan):
+                return
+            log.warning("%s observer timed out; killing scan", scan.name)
+            self._kill(scan.name)
+            self._apply(scan.name, scan.generation, 124, "")
+
+        def _on_error(self, scan: _Scan) -> None:
+            if not self._current(scan):
+                return
+            self._kill(scan.name)
+            self._apply(scan.name, scan.generation, 127, "")
+
+        def _on_finished(self, scan: _Scan, exit_code: int) -> None:
+            if not self._current(scan):
+                return
+            scan.timer.stop()
+            try:
+                scan.buf += bytes(scan.proc.readAllStandardOutput())
+            except RuntimeError:  # process object already gone
+                pass
+            self._scans.pop(scan.name, None)
+            scan.proc.deleteLater()
+            if len(scan.buf) > MAX_DUMP_BYTES:
+                self._apply(scan.name, scan.generation, 125, "")
+                return
+            self._apply(scan.name, scan.generation, exit_code,
+                        scan.buf.decode("utf-8", "replace"))
 
         def _apply(self, name: str, generation: int, exit_code: int, stdout: str) -> None:
-            if (name, generation) in self._settled:
-                return
-            self._settled.add((name, generation))
-            if len(self._settled) > 64:
-                self._settled = {k for k in self._settled
-                                 if k[1] > self._model.generation - 8}
+            # The model discards anything whose generation is no longer
+            # current, so a late result cannot be stamped as the reading.
             if name == "capture":
                 self._model.apply_capture(generation, exit_code, stdout)
             else:
@@ -660,6 +742,16 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
         @pyqtProperty(str, notify=changed)
         def captureDetail(self) -> str:
             return str(self._state["capture"]["activeDetail"])
+
+        @pyqtProperty(bool, notify=changed)
+        def captureAttributed(self) -> bool:
+            """True when at least one observation names its own client.
+
+            Device-node-only evidence is real activity but does not establish
+            which client is capturing, so the UI must not present it with the
+            same certainty.
+            """
+            return bool(self._state["capture"]["attributed"])
 
         @pyqtProperty(bool, notify=changed)
         def captureUnverified(self) -> bool:
