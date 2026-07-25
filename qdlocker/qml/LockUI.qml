@@ -21,7 +21,93 @@ Item {
   id: root
   property var lockController
 
+  // Live-capture / network-egress indicators (contextProperty "indicators",
+  // see app.py and qdlocker/indicators.py). If the context property is missing
+  // the banner says so rather than rendering nothing: a lock surface that
+  // cannot observe capture must not look like a quiet machine.
+  property var lockIndicators: (typeof indicators !== "undefined") ? indicators : null
+
   Rectangle { anchors.fill: parent; color: Color.mSurface }
+
+  // Security indicator banner — sessions.md requires non-suppressible state
+  // for live mic/camera/screencast/system-audio/virtual-input capture and
+  // qdistro network egress. Nothing gates this on a setting, and it stays up
+  // while any kind is merely UNVERIFIED (which, today, is always: qdistro has
+  // no authoritative negative for any capture kind, so "?" is the honest
+  // reading — see qdlocker/indicators.py).
+  Rectangle {
+    id: securityBanner
+    anchors.top: parent.top
+    anchors.horizontalCenter: parent.horizontalCenter
+    anchors.topMargin: Style.fontSizeXXL
+    width: Math.min(parent.width * 0.9, 900)
+    height: bannerRows.implicitHeight + Style.fontSizeXXL
+    radius: Style.radiusXS
+    readonly property bool capturing: root.lockIndicators
+                                      ? root.lockIndicators.captureActive : false
+    color: capturing ? Qt.alpha(Color.mError, 0.18)
+                     : Qt.alpha(Color.mOnSurfaceVariant, 0.10)
+    border.color: capturing ? Color.mError : Qt.alpha(Color.mOnSurfaceVariant, 0.35)
+    border.width: Style.borderM
+
+    Column {
+      id: bannerRows
+      anchors.centerIn: parent
+      width: parent.width - Style.fontSizeXXL
+      spacing: Style.fontSizeS
+
+      // Observer missing entirely (no context property) — say so.
+      Text {
+        width: parent.width
+        visible: !root.lockIndicators
+        text: "⚠ capture state unavailable — mic, camera and screen capture cannot be verified"
+        wrapMode: Text.WordWrap
+        color: Color.mError
+        font.pointSize: Style.fontSizeL
+      }
+
+      // Positively observed capture.
+      Text {
+        width: parent.width
+        visible: securityBanner.capturing
+        text: "⚠ LIVE CAPTURE: " + (root.lockIndicators
+                                    ? root.lockIndicators.captureDetail : "")
+        wrapMode: Text.WordWrap
+        color: Color.mError
+        font.pointSize: Style.fontSizeL
+      }
+
+      // Blind spots, stated out loud.
+      Text {
+        width: parent.width
+        visible: root.lockIndicators ? root.lockIndicators.captureUnverified : false
+        text: "? unverified: " + (root.lockIndicators
+                                  ? root.lockIndicators.captureUnverifiedLabel : "")
+        wrapMode: Text.WordWrap
+        color: Color.mOnSurfaceVariant
+        font.pointSize: Style.fontSizeM
+      }
+
+      // Active silo network egress, and its own unverified case.
+      Text {
+        width: parent.width
+        visible: root.lockIndicators ? root.lockIndicators.egressActive : false
+        text: "network egress: " + (root.lockIndicators
+                                    ? root.lockIndicators.egressLabel : "")
+        wrapMode: Text.WordWrap
+        color: Color.mPrimary
+        font.pointSize: Style.fontSizeM
+      }
+      Text {
+        width: parent.width
+        visible: root.lockIndicators ? root.lockIndicators.egressUnverified : false
+        text: "? network egress state unverified (session manager unreachable)"
+        wrapMode: Text.WordWrap
+        color: Color.mOnSurfaceVariant
+        font.pointSize: Style.fontSizeM
+      }
+    }
+  }
 
   // Clock — updated by a Timer (`new Date()` in a binding is not
   // reactive).
