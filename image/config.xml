@@ -27,8 +27,14 @@
           firmware="uefi"
           installiso="true"
           installboot="install"
-          kernelcmdline="quiet systemd.default_vt=3"
+          kernelcmdline="quiet"
           efipartsize="512">
+      <!-- kernelcmdline deliberately does NOT carry a systemd.default_vt
+           setting. That is not a systemd option (no such key in logind's
+           config parser, kernel-command-line(7), or the systemd binaries),
+           so it was inert and only made it look as though the boot VT was
+           pinned by the kernel cmdline. Boot lands on tty3 because greetd's
+           [terminal] vt = 3 (deploy/greetd-config.toml) puts it there. -->
       <!-- installboot="install" makes "Install qdistro" the *default*
            (pre-highlighted) GRUB entry on the install ISO, so the
            unattended install-test driver no longer has to send a Down

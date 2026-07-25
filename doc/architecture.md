@@ -38,11 +38,25 @@ be visible in different sessions while commit authority remains separate.
 | tty3 | Admin graphical session | `greetd` → `qdgreeter` → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell) | Pinned; boots here by default; the PyQt locker is active from start. P01 wired this path in 2026-05; before that, greetd ran LXQt+labwc here. |
 | tty5+ | Pinned and dynamic sessions | `qdistro-session-manager` | TTY work sessions, fullscreen sessions, VM viewers, and special-role sessions; some slots may be pinned, remaining slots allocated dynamically. |
 
-Kernel cmdline: `systemd.default_vt=3`. Boot lands on admin.
+Boot lands on admin because greetd's `[terminal] vt = 3`
+(`deploy/greetd-config.toml`) puts it there. (Earlier revisions of this page
+credited a `systemd.default_vt=3` kernel cmdline; that is not a systemd option
+and never pinned anything — it has been removed from `image/config.xml`.)
 
 System policy prevents anything but the admin compositor from binding tty3.
 `agetty` on tty1 stays free of greetd so a broken greetd config does not take
 out the last-resort login.
+
+**tty3 is held exclusively by the compositor.** `getty@tty3` and `autovt@tty3`
+are masked at install time (`scripts/install/harden-compositor-vt.sh`, run by
+both the bootstrap and the image build). Masking — not merely leaving them
+disabled — is what closes the path: logind starts `autovt@ttyN` *by unit name*
+on demand for any VT inside `NAutoVTs` (default 6), so whenever tty3 is free
+(compositor wedged or crash-looping) a switch to it would otherwise spawn
+`agetty` there. That would put a text login on the graphical VT and, worse,
+revert the `K_OFF` console-keyboard mode seatd installs — the property that
+keeps keystrokes typed at a **locked** screen from reaching the kernel console
+and `login(1)`. Only tty3 is masked; tty1 and tty5+ are untouched.
 
 ## Isolation ladder
 

@@ -151,6 +151,34 @@ Do not treat the broker pilot as evidence for those other domains.
 
 ## Residual risk register
 
+- **Locked-session VT escape — the guarantee is `K_OFF`, not the absence of a
+  destination.** openSUSE's xkb-converted console keymap makes ordinary chords
+  kernel VT switches (`keycode 125 = Alt`, `alt keycode 105 = Decr_Console`, so
+  `Super+Left` is a console-switch chord), below the compositor and unaffected
+  by weston's `vt-switching=false` (which only covers weston's own
+  Ctrl+Alt+F1..F8 bindings). If such a chord reached the kernel console from a
+  **locked** screen it would abandon the locked compositor for a login prompt
+  and the user's next keystrokes — their unlock password — would land in
+  `login(1)`, recorded in cleartext as a failed-login *username* in the journal
+  and btmp. This was observed in the CI corpus (`FAILED LOGIN 1 FROM tty1`)
+  before the qdwin test lane was fixed.
+  What prevents it in production is that seatd holds the compositor VT's
+  console keyboard in `K_OFF`, so the keymap is never consulted. Verified live
+  on a production-path VM (2026-07-25): tty3 is `K_OFF` across greeter, active
+  session and locked session, and injecting the chord at the locked screen left
+  the active VT at tty3 with no `FAILED LOGIN` and an empty btmp — while the
+  same injection path demonstrably reached the locker ("Authentication
+  failed"). The one thing that can revert `K_OFF` is a getty's start-time TTY
+  reset, so `getty@tty3`/`autovt@tty3` are masked at install time
+  (`scripts/install/harden-compositor-vt.sh`); masking, not disabling, because
+  logind starts `autovt@ttyN` by unit name on demand. Guarded at runtime by
+  `tests/integration/vm/probes/vt-escape-lockdown.sh`.
+  **Accepted residual:** tty1's `agetty` remains a deliberate emergency console
+  (`doc/recovery.md`) and is therefore a real password-authenticated local
+  surface; removing VT *destinations* is explicitly not the security boundary.
+  Privileged local actors can still change VT (`chvt`, `VT_ACTIVATE`), and
+  kernel SysRq is a separate local-keyboard control plane that this entry does
+  not cover.
 - **qdwin output-manager pre-shell mutation:** before qdshell binds,
   `zwlr_output_manager_v1` apply/test mutation is admitted for
   `allowed_uid`, and for the explicit test posture `allowed_uid == -1`;

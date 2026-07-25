@@ -14,8 +14,20 @@ not wired, say so here rather than implying it works.
 
 | TTY | What runs | Wired by |
 |-----|-----------|----------|
-| tty3 | **Production session.** `greetd` → `qdgreeter` (graphical PAM via greetd JSON-IPC) → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell). Boots here by default (`systemd.default_vt=3`). | `deploy/greetd-config.toml`, `greetd.service` |
+| tty1 | **Emergency text console** — a raw `agetty`, no greetd. Deliberate: it is the last-resort login if greetd's config is broken. It is a password-authenticated surface, not a qdistro session. | distro default (`getty@tty1`) |
+| tty3 | **Production session.** `greetd` → `qdgreeter` (graphical PAM via greetd JSON-IPC) → `qdwin-session-launcher` → `qdwin-session.target` (qdwin compositor + qdshell). Boots here by default because greetd's `[terminal] vt = 3` puts it there. Held exclusively by the compositor: `getty@tty3`/`autovt@tty3` are masked (see below). | `deploy/greetd-config.toml`, `greetd.service`, `scripts/install/harden-compositor-vt.sh` |
 | tty5+ | Dynamic / pinned work sessions written by `qdistro-session-manager`. | session manager |
+
+> **No login prompt can appear on tty3.** logind starts `autovt@ttyN` by unit
+> name on demand for any VT within `NAutoVTs` (default 6), so a free tty3 would
+> otherwise get an `agetty` the moment anything switched to it — precisely in
+> Scenario A below, when the compositor is wedged. Install-time masking of
+> `getty@tty3`/`autovt@tty3` prevents that. It matters for more than tidiness:
+> a getty's start-time TTY reset reverts the `K_OFF` console-keyboard mode
+> seatd installs, and `K_OFF` on tty3 is what keeps keystrokes typed at a
+> **locked** screen from reaching the kernel console and `login(1)` — where an
+> unlock password is recorded in cleartext as a failed-login *username*.
+> Only tty3 is masked; the tty1 emergency console above is untouched.
 
 > **By design — there is no graphical escape hatch and no qdistro text-mode VT
 > login.** There is no tty4 fallback desktop (the legacy passwordless LXQt+labwc

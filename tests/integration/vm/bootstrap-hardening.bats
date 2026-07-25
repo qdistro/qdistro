@@ -29,6 +29,7 @@ setup() {
     IMAGE_CFG="$REPO_ROOT/image/config.sh"
     FRESH="$REPO_ROOT/scripts/vm/fresh-vm-bootstrap.sh"
     SPAWN_COMMON="$REPO_ROOT/lib/spawn-common.sh"
+    HARDEN_VT="$REPO_ROOT/scripts/install/harden-compositor-vt.sh"
     [ -f "$BOOT" ] || { echo "bootstrap not found at $BOOT" >&2; return 1; }
 }
 
@@ -39,6 +40,7 @@ run_boot() { run bash "$BOOT" "$@"; }
 # --- 0. syntax ----------------------------------------------------------
 @test "hardening: all touched scripts are syntactically valid bash" {
     for f in "$BOOT" "$PROFILE_LIB" "$IMAGE_CFG" "$FRESH" "$SPAWN_COMMON" \
+             "$HARDEN_VT" \
              "$REPO_ROOT/tier4-vm/spawn-tier4.sh" \
              "$REPO_ROOT/tier5-vm/spawn-tier5.sh" \
              "$REPO_ROOT/tier5b-vm/spawn-tier5b.sh"; do
@@ -265,6 +267,185 @@ run_boot() { run bash "$BOOT" "$@"; }
     grep -q -- "--system --no-create-home --home-dir /nonexistent" "$BOOT"
     grep -q "/usr/sbin/nologin _greeter" "$BOOT"
     grep -q -- "--system --no-create-home --home-dir /nonexistent" "$IMAGE_CFG"
+}
+
+# --- A2. Compositor-VT isolation ----------------------------------------
+# The locked-session VT escape: if a getty can take the compositor's VT its
+# start-time TTY reset reverts seatd's K_OFF, and keystrokes typed at a locked
+# screen fall through to the kernel console into login(1) (the unlock password
+# is then recorded in cleartext as a failed-login username). These are STATIC
+# invariants only — the load-bearing runtime guard is
+# tests/integration/vm/probes/vt-escape-lockdown.sh.
+
+# bats + `set -e`: a `! cmd` that is NOT the last command of a test has its
+# failure swallowed, so plain `! grep ...` lines assert nothing. Every negative
+# check below therefore goes through `run` + an explicit status assertion.
+refute_grep() { # refute_grep <pattern> <file>... — fails if the pattern matches
+    run grep -nE "$@"
+    [ "$status" -ne 0 ] || { echo "unexpected match:"$'\n'"$output" >&2; return 1; }
+}
+
+@test "vt-isolation: both install paths INVOKE harden-compositor-vt.sh" {
+    [ -x "$HARDEN_VT" ]
+    # Match the invocation, not a comment mentioning the filename: commenting
+    # the call out while leaving the rationale behind must turn this red.
+    grep -qE '^[^#]*harden-compositor-vt\.sh' "$BOOT"
+    grep -qE '^[^#]*harden-compositor-vt\.sh' "$IMAGE_CFG"
+}
+
+@test "vt-isolation: the compositor VT is MASKED, not merely disabled" {
+    # Mutation-sensitive: logind starts autovt@ttyN *by unit name* on demand
+    # for any VT inside NAutoVTs, so `systemctl disable` does not stop it.
+    # Downgrading this to disable-only must turn the test red.
+    grep -qE 'systemctl mask "\$unit"' "$HARDEN_VT"
+    grep -qE '\[ "\$state" != "masked" \]' "$HARDEN_VT"
+    # ...and the units it acts on are scoped to the compositor VT.
+    grep -q 'getty@tty\$VT.service autovt@tty\$VT.service' "$HARDEN_VT"
+}
+
+@test "vt-isolation: a running getty is stopped before masking" {
+    # Masking alone leaves an already-running instance holding the VT with a
+    # reset keyboard until reboot.
+    grep -q 'systemctl stop "\$unit"' "$HARDEN_VT"
+}
+
+@test "vt-isolation: the VT is parsed from greetd's [terminal] table, not hardcoded" {
+    grep -q 'section == "terminal"' "$HARDEN_VT"
+    refute_grep 'getty@tty3\.service' "$HARDEN_VT"
+}
+
+@test "vt-isolation: an undeterminable VT is FAIL-CLOSED, not a silent skip" {
+    # The whole fatal/warn wiring is decorative if "I could not work out what
+    # to harden" exits 0 — that is the likeliest real-world failure.
+    run bash "$HARDEN_VT" "$BATS_TEST_TMPDIR/nonexistent.toml"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"refusing to report a hardened install"* ]]
+
+    # greetd's own `vt = "next"` is legal config that makes the unit name
+    # unknowable at install time; it must fail with an actionable message.
+    printf '[terminal]\nvt = "next"\n' > "$BATS_TEST_TMPDIR/next.toml"
+    run bash "$HARDEN_VT" "$BATS_TEST_TMPDIR/next.toml"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"pin a numeric"* ]]
+}
+
+@test "vt-isolation: the parser accepts quoted values and rejects conflicts" {
+    extract_vt_parser
+    printf '[terminal]\r\nvt = "3"  ; trailing\r\n' > "$BATS_TEST_TMPDIR/quoted.toml"
+    run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$BATS_TEST_TMPDIR/quoted.toml'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "3" ]
+
+    # Two disagreeing [terminal] tables must not silently pick one — masking
+    # the wrong VT would brick the login path.
+    printf '[terminal]\nvt = 3\n[terminal]\nvt = 5\n' > "$BATS_TEST_TMPDIR/conflict.toml"
+    run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$BATS_TEST_TMPDIR/conflict.toml'"
+    [ "$status" -ne 0 ]
+}
+
+@test "vt-isolation: a quoted vt value with trailing junk is rejected" {
+    # Stripping ;/# comments BEFORE closing the quote would read
+    # `vt = "1;not-comment"` as 1 — a plausible-but-wrong VT, and 1 is tty1,
+    # the emergency console. Must be an error, not a silent mis-mask.
+    extract_vt_parser
+    for bad in '"1;not-comment"' '"3;not-comment"' '"3' '"3" junk'; do
+        printf '[terminal]\nvt = %s\n' "$bad" > "$BATS_TEST_TMPDIR/junk.toml"
+        run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$BATS_TEST_TMPDIR/junk.toml'"
+        [ "$status" -ne 0 ] || { echo "accepted malformed vt value: $bad -> $output" >&2; return 1; }
+    done
+}
+
+@test "vt-isolation: a compositor VT of tty1 is refused, not masked" {
+    # doc/recovery.md makes tty1 the last-resort login. Hardening a compositor
+    # configured there would mask the emergency console.
+    extract_vt_parser
+    printf '[terminal]\nvt = 1\n' > "$BATS_TEST_TMPDIR/tty1.toml"
+    run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$BATS_TEST_TMPDIR/tty1.toml'"
+    [ "$status" -ne 0 ]
+
+    run bash "$HARDEN_VT" "$BATS_TEST_TMPDIR/tty1.toml"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"emergency console"* ]]
+}
+
+# Extract greetd_compositor_vt() from the installer and run it standalone,
+# so the parser is exercised as shipped rather than reimplemented here.
+extract_vt_parser() {
+    sed -n '/^greetd_compositor_vt()/,/^}/p' "$HARDEN_VT" \
+        > "$BATS_TEST_TMPDIR/parser.sh"
+    [ -s "$BATS_TEST_TMPDIR/parser.sh" ]
+}
+
+@test "vt-isolation: the parser reads vt=3 out of the shipped greetd config" {
+    extract_vt_parser
+    run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$REPO_ROOT/deploy/greetd-config.toml'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "3" ]
+}
+
+@test "vt-isolation: the parser ignores a vt key outside [terminal]" {
+    # A loose grep would match the commented [initial_session] block or any
+    # other table; that would mask the WRONG VT.
+    extract_vt_parser
+    cat > "$BATS_TEST_TMPDIR/decoy.toml" <<'EOF'
+[default_session]
+vt = 9
+# [terminal]
+# vt = 8
+[terminal]
+vt = 4
+EOF
+    run bash -c ". '$BATS_TEST_TMPDIR/parser.sh'; greetd_compositor_vt '$BATS_TEST_TMPDIR/decoy.toml'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "4" ]
+}
+
+@test "vt-isolation: tty1's emergency console is NOT collateral damage" {
+    # doc/recovery.md keeps tty1 agetty deliberately. Nothing on the hardened
+    # path may mask or disable it.
+    refute_grep 'systemctl (mask|disable)[^|]*getty@tty1' \
+        "$HARDEN_VT" "$BOOT" "$IMAGE_CFG"
+}
+
+@test "vt-isolation: production does NOT copy the test lane's NAutoVTs=0/ReserveVT=0" {
+    # Right for a single-purpose GUI test VM (spin-test-vm-gui.sh), wrong for
+    # the product: tty5+ work sessions and the games VT-switch feature depend
+    # on multi-VT allocation, and it is not the security boundary anyway.
+    # Ignore comment lines: harden-compositor-vt.sh names both settings in its
+    # rationale precisely to say it does NOT apply them.
+    run bash -c "grep -vE '^[[:space:]]*#' '$BOOT' '$IMAGE_CFG' '$HARDEN_VT' \
+                 | grep -E 'NAutoVTs=0|ReserveVT=0'"
+    [ "$status" -ne 0 ] || { echo "unexpected test-lane VT settings on the production path:"$'\n'"$output" >&2; return 1; }
+    # ...and they ARE still present in the GUI test lane, so this test is
+    # asserting a real separation rather than a string that exists nowhere.
+    grep -q "NAutoVTs=0" "$REPO_ROOT/scripts/vm/spin-test-vm-gui.sh"
+}
+
+@test "vt-isolation: failure is fatal on the hardened profile, warn on dev" {
+    grep -q "fail_compositor_vt" "$BOOT"
+    run awk '/^fail_compositor_vt\(\)/,/^}/' "$BOOT"
+    [[ "$output" == *"if is_dev"* ]]
+    [[ "$output" == *"warn "* ]]
+    [[ "$output" == *"die "* ]]
+}
+
+@test "vt-isolation: the image build aborts when the VT is not secured" {
+    # Anchor on the actual invocation line, not the comment above it, and
+    # require the failure branch to exit — `|| true` must turn this red.
+    run awk '/^if ! bash .*harden-compositor-vt\.sh/,/^fi/' "$IMAGE_CFG"
+    [ -n "$output" ]
+    [[ "$output" == *"exit 1"* ]]
+    [[ "$output" != *"|| true"* ]]
+}
+
+@test "vt-isolation: the inert systemd.default_vt cmdline is gone" {
+    # Not a systemd option (absent from logind's config parser,
+    # kernel-command-line(7), and the systemd binaries), so it only made it
+    # look as though the boot VT was pinned. greetd's [terminal] vt does that.
+    # Scoped to the kernelcmdline attribute so the comment explaining the
+    # removal (which necessarily names the string) does not trip it.
+    refute_grep 'kernelcmdline="[^"]*systemd\.default_vt' "$REPO_ROOT/image/config.xml"
+    grep -qE '^[[:space:]]*vt[[:space:]]*=[[:space:]]*3' "$REPO_ROOT/deploy/greetd-config.toml"
 }
 
 # --- B. Profile gate behaviour ------------------------------------------

@@ -30,7 +30,11 @@ Each TTY starts a greetd instance with a role-specific config:
 | tty3 | `default_session.command = /usr/bin/qdgreeter` (deploy/greetd-config.toml) | Graphical qdgreeter → admin auth via greetd JSON-IPC → `qdwin-session-launcher` → `qdwin-session.target` → qdwin compositor + qdshell. |
 | tty5+ | Dynamic; session manager writes ephemeral configs | TTY work sessions, fullscreen user sessions, special-role sessions, or VM viewers. |
 
-`systemd.default_vt=3` boots to admin.
+greetd's `[terminal] vt = 3` boots to admin. (Not a kernel cmdline: the
+`systemd.default_vt=3` this page used to cite is not a systemd option.) tty3 is
+held exclusively by the compositor — `getty@tty3`/`autovt@tty3` are masked so
+logind cannot autospawn a login prompt on it when the VT is free; see
+`doc/architecture.md` "TTY layout".
 
 Admin-configured sessions may autostart or autologin before the owner performs
 the first admin login after boot. They may run background jobs and use network

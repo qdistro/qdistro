@@ -338,6 +338,19 @@ rm -f /etc/systemd/system/greetd-fallback.service /etc/greetd/config-fallback.to
 # passwordless LXQt+labwc escape hatch has been removed.)
 systemctl set-default graphical.target
 
+# Keep the compositor's VT exclusively the compositor's, so seatd's K_OFF on
+# it is never reverted by a getty and a locked screen cannot leak keystrokes
+# into the kernel console / login(1). Scoped to the compositor VT: tty1's
+# emergency agetty and tty5+ work sessions are untouched. Same helper the
+# bootstrap path runs — see scripts/install/harden-compositor-vt.sh.
+# REQUIRED gate: an image that ships with a getty able to take tty3 is a
+# lock-security regression, so a failure aborts the build.
+if ! bash "$QD/scripts/install/harden-compositor-vt.sh" /etc/greetd/config.toml; then
+    echo "[qdistro-image] FATAL: compositor VT is not exclusively the compositor's;" \
+         "a getty could take it and revert seatd's K_OFF. Aborting build." >&2
+    exit 1
+fi
+
 # Keep /root/qdistro-src on the image — the LLM-modifiability principle
 # in doc/overview.md requires editable Python services on disk. Drop the
 # meson build dirs and __pycache__ to save ~200MB of churn.

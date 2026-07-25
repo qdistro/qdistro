@@ -292,6 +292,22 @@ fail_subvol() {
     fi
 }
 
+# fail_compositor_vt — classify a compositor-VT isolation failure. If a getty
+# can take the compositor's VT it reverts seatd's K_OFF, and keystrokes typed
+# at a LOCKED screen fall through to the kernel console and into login(1),
+# where the unlock password is recorded in cleartext as a failed-login
+# username (journal + btmp). That is a lock-robustness / keystroke-isolation
+# failure, so a daily-driver/release install that cannot secure it must FAIL
+# VISIBLY. The dev profile may warn-and-continue (a disposable VM is not a
+# lock-security surface). Independent of --strict, like fail_subvol.
+fail_compositor_vt() {
+    if is_dev; then
+        warn "$*"
+    else
+        die "$* — fatal in '$QDISTRO_PROFILE' profile (a locked screen must not be able to leak keystrokes to a console login; use --profile=dev to warn-and-continue)"
+    fi
+}
+
 root_block_device() {
     local src
     src="$(findmnt -n -o SOURCE / 2>/dev/null | head -n1 | tr -d ' ' || true)"
@@ -2023,6 +2039,20 @@ configure_greetd() {
     # Production recovery is via GRUB (doc/recovery.md); the legacy tty4
     # passwordless LXQt+labwc escape hatch has been removed.
     systemctl set-default graphical.target
+
+    # Keep the compositor's VT exclusively the compositor's, so seatd's K_OFF
+    # on it is never reverted by a getty and a locked screen cannot leak
+    # keystrokes into the kernel console / login(1). Scoped to the compositor
+    # VT — tty1's emergency agetty and tty5+ work sessions are untouched. See
+    # harden-compositor-vt.sh for the full rationale and the live evidence.
+    if [ -x "$REPO_ROOT/qdistro/scripts/install/harden-compositor-vt.sh" ]; then
+        if ! "$REPO_ROOT/qdistro/scripts/install/harden-compositor-vt.sh" \
+                /etc/greetd/config.toml; then
+            fail_compositor_vt "the compositor VT is not exclusively the compositor's (a getty can take it and revert seatd's K_OFF)"
+        fi
+    else
+        fail_compositor_vt "harden-compositor-vt.sh missing; compositor-VT isolation NOT applied"
+    fi
 }
 
 # ---------------------------------------------------------------------------
