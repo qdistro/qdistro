@@ -399,14 +399,6 @@ fi'
     coverage_floor_check qdistro "$RDIR/host/qdistro-coverage.json"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
-    c="rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
-    run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-
-    c="find tests -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
-    run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
-    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
-
     # Headless gate for the SHIPPED (production-profile) vendored
     # libweston: builds it and asserts the four soft-linked
     # weston_desktop_xdg_popup_* helper symbols are exported + the qdistro
@@ -415,8 +407,30 @@ fi'
     # need devel packages absent on the runner can be toggled off via
     # QDWIN_LW_* without affecting the symbol assertion (the helpers live
     # in the always-built libweston-desktop core).
+    #
+    # ORDERING (J29): this runs BEFORE qdwin-meson on purpose. qdwin.c is
+    # ported to the libweston major pinned in libweston-vendored/VERSION (16),
+    # which is NEWER than any distro devel package (openSUSE Tumbleweed ships
+    # 14), so the vendored production prefix is the only source of a matching
+    # libweston-<major>.pc — i.e. it is now a BUILD DEPENDENCY of qdwin, not an
+    # independent packaging check. This gate builds that prefix (on demand,
+    # cached under QDWIN_LIBWESTON_PREFIX), so qdwin-meson below can configure
+    # against it.
     c="bash libweston-vendored/run-production-symbols-test.sh"
     run_logged host qdwin-vendored-libweston-symbols "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "vendored libweston production build exports popup helper symbols"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    # Configure qdwin against the vendored prefix's pkgconfig (see the ordering
+    # note above). pkgconfig-dir.sh prints that dir and exits nonzero when the
+    # prefix is absent; on that path we deliberately leave PKG_CONFIG_PATH
+    # alone so meson.build's own error explains what to build, rather than
+    # exporting a bogus entry.
+    c="_lwpc=\$(bash libweston-vendored/pkgconfig-dir.sh) || _lwpc=; export PKG_CONFIG_PATH=\"\${_lwpc:+\$_lwpc:}\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && meson test -C build-qci --print-errorlogs"
+    run_logged host qdwin-meson "$EXIT_BUILD" build "$WORKSPACE/qdwin" "$c" "qdwin build and meson tests"; step_rc=$?
+    [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
+
+    c="find tests -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
+    run_logged host qdwin-shell-syntax "$EXIT_HOST" syntax "$WORKSPACE/qdwin" "$c" "syntax check qdwin test helpers"; step_rc=$?
     [ "$rc" -eq 0 ] && [ "$step_rc" -ne 0 ] && rc=$step_rc
 
     c="export PKG_CONFIG_PATH=\"$WORKSPACE/qdwin/build-qci/meson-uninstalled:\${PKG_CONFIG_PATH:-}\" && rm -rf build-qci && meson setup build-qci --prefix=/usr && meson compile -C build-qci && scripts/ci-local.sh --no-int"

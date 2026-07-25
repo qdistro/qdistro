@@ -36,21 +36,46 @@
 set -euo pipefail
 
 QDWIN_SRC=${1:-/root/qdistro-src/qdwin}
-DEST=${DEST:-/usr/libexec/qdistro/qdwin-libweston}
+# The system install location. Kept as a named constant because step 3 scopes
+# its ABI hard-failure to "DEST is the real system path" (see there).
+DEFAULT_DEST=/usr/libexec/qdistro/qdwin-libweston
+DEST=${DEST:-$DEFAULT_DEST}
 PREFIX=${QDWIN_LIBWESTON_PREFIX:-/tmp/qdwin-libweston-prod-prefix}
 
 BUILD_SCRIPT="$QDWIN_SRC/libweston-vendored/build-libweston.sh"
 
 # J29 (weston 14->16): derive the libweston major/soname from qdwin's single
 # source of truth (libweston-vendored/VERSION) so this staging installer tracks
-# a version bump with no edits. Falls back to ${LIBWESTON_SONAME} for older trees that
-# predate lib-major.sh.
+# a version bump with no edits.
+#
+# When lib-major.sh is unreachable — a wrong/absent $1, or a pre-J29 qdwin
+# checkout that predates the helper — do NOT guess a hardcoded major. A wrong
+# guess does not fail: it makes find_srclib match a *different*, possibly stale
+# core in the same prefix and stage that instead, producing a silently wrong
+# tree (this is exactly how the prod-symbols gate staged a leftover
+# libweston-14 out of a 16 prefix). Derive the major from the built prefix
+# itself — the highest libweston-<N>.so.0* present — so the staged soname
+# always matches something real, and hard-fail if the prefix has none either.
 _LMAJ="$QDWIN_SRC/libweston-vendored/lib-major.sh"
-if [ -f "$_LMAJ" ]; then
+if [ -r "$_LMAJ" ]; then
     # shellcheck source=/dev/null
     . "$_LMAJ"
 else
-    LIBWESTON_SONAME="libweston-14"
+    _lw_found=$(ls -d "$PREFIX"/lib64/libweston-[0-9]*.so.0* \
+                      "$PREFIX"/lib/*/libweston-[0-9]*.so.0* \
+                      "$PREFIX"/lib/libweston-[0-9]*.so.0* 2>/dev/null \
+                | sed -n 's#.*/libweston-\([0-9][0-9]*\)\.so\.0.*#\1#p' \
+                | sort -rn | head -n1 || true)
+    if [ -z "$_lw_found" ]; then
+        echo "ERROR: cannot determine the vendored libweston major." >&2
+        echo "       '$_LMAJ' is not readable (pass the qdwin source tree as \$1)" >&2
+        echo "       and no libweston-<N>.so.0* exists under '$PREFIX' to infer it from." >&2
+        exit 2
+    fi
+    LIBWESTON_SONAME="libweston-${_lw_found}"
+    echo "NOTE: '$_LMAJ' unreadable; inferred $LIBWESTON_SONAME from $PREFIX." >&2
+    echo "      Pass the qdwin source tree as \$1 to use VERSION as the source of truth." >&2
+    unset _lw_found
 fi
 
 # Locate the source libdir under $PREFIX without assuming lib64: meson installs
@@ -104,23 +129,59 @@ if [ ! -f "$SRCLIB/${LIBWESTON_SONAME}/drm-backend.so" ]; then
 fi
 
 # 3. Verify the vendored core matches the system weston binary's SONAME
-#    expectation. The system `weston` links ${LIBWESTON_SONAME}.so.0; an ABI
-#    (SONAME-major) mismatch would crash at load. We only guard the
-#    major SONAME here — the patched tree is pinned to the same upstream
-#    14.0.x as the distro package (see libweston-vendored/VERSION).
-if command -v weston >/dev/null 2>&1; then
+#    expectation. The system `weston` frontend loads the core via
+#    LD_LIBRARY_PATH; a SONAME-major mismatch is not a load error but a silent
+#    ABI mismatch (differing struct layouts) that SIGABRTs the compositor.
+#
+#    Probe with `ldd`, NOT `objdump -p | NEEDED`: weston's DIRECT NEEDED list
+#    is only libexec_weston.so.0 (+libc) — libweston comes in one level down
+#    through that frontend library. The previous NEEDED-only scan therefore
+#    matched nothing, left $want empty, and skipped this whole check silently,
+#    so a 16 tree staged next to a 14 frontend reported success. ldd resolves
+#    the dependency transitively.
+if command -v weston >/dev/null 2>&1 && command -v ldd >/dev/null 2>&1; then
     # `head -n1` closes the pipe early, which under `pipefail` would make
     # the pipeline fail with SIGPIPE (141) and abort under `set -e`; grab
-    # the full NEEDED list first, then take the first match in the shell.
-    weston_needed=$(objdump -p "$(command -v weston)" 2>/dev/null \
-            | sed -n 's/.*NEEDED *\(libweston-[0-9]*\.so\.[0-9]*\).*/\1/p') || true
+    # the full list first, then take the first match in the shell.
+    #
+    # Compare MAJORS, and compare against the major that will actually be
+    # STAGED ($LIBWESTON_MAJOR) — not against the contents of $SRCLIB. The
+    # old `[ ! -e "$SRCLIB/$want" ]` test asked "does the source prefix hold
+    # the file weston wants", which a STALE sibling major left over in a
+    # shared prefix satisfies (this very prefix carried a leftover
+    # libweston-14 next to the current 16), reporting "provides it" while
+    # step 4 stages only $LIBWESTON_SONAME.
+    weston_needed=$(ldd "$(command -v weston)" 2>/dev/null \
+            | sed -n 's/.*[^a-z]libweston-\([0-9][0-9]*\)\.so\.[0-9]*.*/\1/p') || true
     want=${weston_needed%%$'\n'*}
-    if [ -n "$want" ] && [ ! -e "$SRCLIB/$want" ]; then
-        echo "ERROR: system weston needs '$want' but vendored prefix has none" >&2
-        ls -1 "$SRCLIB"/${LIBWESTON_SONAME}.so* >&2 || true
-        exit 2
+    if [ -n "$want" ] && [ "$want" != "$LIBWESTON_MAJOR" ]; then
+        # FATALITY IS SCOPED TO A REAL INSTALL. When DEST is the system
+        # location the staged tree is what the local weston will actually
+        # load, so a mismatch is a hard error. When DEST is elsewhere — the
+        # prod-symbols gate's throwaway staging dry-run, or staging into an
+        # image root — the relevant frontend is the TARGET image's weston (the
+        # golden image installs weston + libweston-16, see
+        # scripts/vm/install-deps.sh), not this host's. Failing there would
+        # only assert "the build host runs the same weston as the image",
+        # which is false by design on an openSUSE host shipping weston 14.
+        if [ "$DEST" = "$DEFAULT_DEST" ]; then
+            echo "ERROR: system weston links libweston-$want but this stages" \
+                 "$LIBWESTON_SONAME — an ABI mismatch that would SIGABRT the" \
+                 "compositor at startup." >&2
+            exit 2
+        fi
+        echo "NOTE: this host's weston links libweston-$want but the staged" \
+             "tree is $LIBWESTON_SONAME." >&2
+        echo "      Not fatal: DEST='$DEST' is not the system install path, so" >&2
+        echo "      the tree is destined for an image whose weston is" \
+             "$LIBWESTON_SONAME." >&2
+    elif [ -n "$want" ]; then
+        echo "ABI check: system weston links libweston-$want, matching the" \
+             "staged $LIBWESTON_SONAME"
+    else
+        echo "NOTE: could not resolve a libweston SONAME from the weston" \
+             "frontend; skipping the ABI check." >&2
     fi
-    [ -n "$want" ] && echo "ABI check: system weston needs $want, vendored prefix provides it"
 fi
 
 # 4. Stage the lib64 subtree. Replace atomically-ish: build into a
