@@ -1178,6 +1178,206 @@ verify_manifest_signature() {
     log "  source manifest signature OK"
 }
 
+# ---------------------------------------------------------------------------
+# Source-tree trust gate (root-run git / meson / pip out of $REPO_ROOT)
+# ---------------------------------------------------------------------------
+#
+# The signed source manifest authenticates COMMIT CONTENT. It says nothing
+# about the local repository configuration or the working tree around it, and
+# essentially every root step of this installer executes code out of
+# $REPO_ROOT: `git checkout` runs .git/hooks/post-checkout, `git` of any kind
+# honours .git/config (core.fsmonitor, core.pager, remote URLs, alias.*,
+# include.path, filter.*.clean/smudge, ...), `meson setup` executes
+# meson.build plus anything a stale build/ directory points at, `pip install`
+# executes setup.py/backend hooks, and the installer chain runs
+# $REPO_ROOT/qdistro/scripts/install/*.sh and $REPO_ROOT/qdistro/deploy/*
+# directly. None of that is covered by the manifest signature.
+#
+# So rather than enumerating the dangerous settings one by one, we refuse to
+# operate on a tree whose contents an unprivileged local user could have
+# influenced: every directory from / down to the tree must be owned by root
+# (or by our own euid when this runs unprivileged, e.g. under bats) and must
+# not be writable by group/other. Any symlink on the path is refused outright
+# rather than followed, so a user-controlled symlink cannot aim the gate at
+# one directory and the later root commands at another.
+#
+# NOTE: this deliberately does NOT add a `safe.directory` exception. git's own
+# dubious-ownership refusal is a second, independent layer; defeating it would
+# reopen exactly this hole.
+TRUST_WHY=""
+
+# qd_trusted_component <path> <leaf|ancestor> — 0 if <path> is a real (non
+# symlink) directory owned by root or by our euid, and not writable by other
+# users. A leaf must not be group/other-writable at all; an ancestor may be
+# when it also carries the sticky bit (/tmp), which prevents other users from
+# renaming or removing entries they do not own. Sets TRUST_WHY on failure.
+qd_trusted_component() {
+    local p="$1" kind="$2" uid mode m
+    if [ -L "$p" ]; then
+        TRUST_WHY="$p is a symlink (refusing to follow it)"
+        return 1
+    fi
+    if [ ! -d "$p" ]; then
+        TRUST_WHY="$p is not a directory"
+        return 1
+    fi
+    # One lstat for both fields (no -L: a symlink must be REFUSED above, never
+    # followed) so uid and mode cannot disagree about which inode we saw.
+    read -r uid mode < <(stat -c '%u %a' "$p" 2>/dev/null) \
+        || { TRUST_WHY="cannot stat $p"; return 1; }
+    [ -n "$uid" ] && [ -n "$mode" ] || { TRUST_WHY="cannot stat $p"; return 1; }
+    if [ "$uid" != "0" ] && [ "$uid" != "${EUID:-0}" ]; then
+        TRUST_WHY="$p is owned by uid $uid (not root, not the installing user)"
+        return 1
+    fi
+    m=$(( 8#$mode ))
+    if (( m & 0022 )); then
+        if [ "$kind" = leaf ] || ! (( m & 01000 )); then
+            TRUST_WHY="$p is writable by group/other (mode $mode)"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# assert_trusted_tree <abs-path> <description> — fail-closed unless <abs-path>
+# and every directory above it satisfy qd_trusted_component. No-op under dev
+# (disposable VMs deliberately build from a user checkout).
+declare -A TRUSTED_PATHS=()
+assert_trusted_tree() {
+    local target="$1" what="${2:-source tree}"
+    is_dev && return 0
+    case "$target" in
+        /*) ;;
+        *) die "$what: '$target' is not an absolute path; refusing to run root build/install steps against it" ;;
+    esac
+    # Collapse duplicate and trailing slashes so the component walk is exact.
+    while [ "$target" != "${target//\/\//\/}" ]; do target="${target//\/\//\/}"; done
+    [ "$target" = "/" ] || target="${target%/}"
+    # Memo: once a tree has passed, it is root-owned with no group/other write
+    # anywhere inside it, so no unprivileged process can change it afterwards.
+    # Re-scanning nine repositories (object stores included) at every build /
+    # pip / chain step would be pure cost.
+    [ -n "${TRUSTED_PATHS[$target]:-}" ] && return 0
+
+    TRUST_WHY=""
+    local acc="/" i n kind
+    local -a segs=()
+    if [ "$target" != "/" ]; then
+        IFS='/' read -r -a segs <<< "${target#/}"
+    fi
+    n=${#segs[@]}
+    qd_trusted_component / ancestor || trust_die "$what" "$target"
+    for ((i = 0; i < n; i++)); do
+        acc="${acc%/}/${segs[i]}"
+        if (( i == n - 1 )); then kind=leaf; else kind=ancestor; fi
+        qd_trusted_component "$acc" "$kind" || trust_die "$what" "$target"
+    done
+
+    qd_scan_tree "$target" || trust_die "$what" "$target"
+    TRUSTED_PATHS["$target"]=1
+}
+
+# qd_scan_tree <dir> — the second half of the gate: the pathname spine being
+# trusted says nothing about what is INSIDE the directory. Reject
+#   - any descendant writable by group/other, or owned by another uid;
+#   - any symlink whose target resolves OUTSIDE <dir> (a `build -> /tmp/evil`
+#     link survives `chown -R`/`chmod -R` with its nominal 0777 mode intact,
+#     and meson/ninja/pip follow it);
+#   - a scan that could not be completed. `find` errors are FATAL, not
+#     ignored: "we saw nothing bad" must not be confused with "we looked".
+# Deliberately NOT -xdev: a mounted subtree under the source root is part of
+# what root will read, so it is scanned (and, being foreign, rejected).
+qd_scan_tree() {
+    local dir="$1" bad links rc lnk rt
+    # NOTE on `|| rc=$?`: `set -e` would abort on a failing command
+    # substitution before we could inspect the status, and swallowing the
+    # status is precisely the fail-open bug we are avoiding here.
+    rc=0
+    bad="$(find "$dir" \
+              \( \( ! -type l -a -perm /022 \) \
+                 -o \( ! -uid 0 -a ! -uid "${EUID:-0}" \) \) \
+              -print -quit)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        TRUST_WHY="the permission scan of $dir did not complete (find exit $rc); refusing to assume it is clean"
+        return 1
+    fi
+    if [ -n "$bad" ]; then
+        TRUST_WHY="$bad inside it is writable by group/other or owned by another user"
+        return 1
+    fi
+    rc=0
+    # Newline-separated, NOT -print0: a command substitution cannot carry NUL
+    # bytes. A symlink whose NAME contains a newline therefore splits into two
+    # nonsense paths, each of which fails to resolve and is rejected below —
+    # fail-closed, which is the behaviour we want for such a path anyway.
+    links="$(find "$dir" -type l -print)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        TRUST_WHY="the symlink scan of $dir did not complete (find exit $rc); refusing to assume it is clean"
+        return 1
+    fi
+    if [ -n "$links" ]; then
+        while IFS= read -r lnk; do
+            [ -n "$lnk" ] || continue
+            rt="$(readlink -f -- "$lnk" 2>/dev/null || true)"
+            case "$rt" in
+                "$dir"|"$dir"/*) ;;
+                *)  TRUST_WHY="the symlink $lnk points outside the tree (-> ${rt:-<unresolvable>}), so its target is not covered by this gate"
+                    return 1 ;;
+            esac
+        done <<< "$links"
+    fi
+    return 0
+}
+
+# trust_die <description> <path> — the one remediation message for a failed
+# trust gate. Says exactly what is wrong and exactly what to do about it.
+trust_die() {
+    die "$1: refusing to run root build/install steps out of $2 — $TRUST_WHY.
+    Every directory from / down to that path must be a real directory owned by
+    root and not writable by group or other, because this installer executes
+    git hooks, meson.build, pip build backends and deploy/install scripts from
+    that tree AS ROOT. A user-writable source tree is a local root escalation,
+    and the signed source manifest does not cover it (it authenticates commit
+    content, not .git/config, .git/hooks, or untracked files).
+    Fix it by giving the installer a source root it owns from the start, and
+    letting it clone into that root itself:
+        sudo install -d -m 0755 -o root -g root /opt/qdistro-src
+        sudo $SCRIPT_PATH --repo-root=/opt/qdistro-src ...
+    (or install from a release image/package, where the sources are already
+    root-owned.)
+    Do NOT 'chown -R root:root' the tree you already have. Ownership is what
+    this gate uses as a PROXY FOR PROVENANCE: chowning a tree an unprivileged
+    user could write makes it pass the check without making its .git/config,
+    its ignored build/ state, or its symlinks any more trustworthy. A fresh
+    clone into a root-owned directory is the only remediation that actually
+    removes the attacker's content.
+    Do NOT work around it with 'git config --global safe.directory' either —
+    that disables git's own ownership protection and reopens the same hole."
+}
+
+# git_pinned <repo-dir> <git args...> — run git against a source checkout with
+# the settings that silently execute code, or silently substitute objects,
+# neutralised:
+#   core.hooksPath=/dev/null  no .git/hooks/* runs (the reported defect)
+#   core.fsmonitor=           no fsmonitor process is spawned
+#   GIT_NO_REPLACE_OBJECTS    refs/replace/* cannot make `checkout <pin>`
+#                             materialise a different tree than `rev-parse`
+#                             reports
+#   GIT_CONFIG_{GLOBAL,SYSTEM}=/dev/null
+#                             root's own ~/.gitconfig and /etc/gitconfig
+#                             cannot re-enable any of the above, and — the
+#                             point — a `safe.directory = *` there cannot
+#                             disable git's own dubious-ownership refusal,
+#                             which is our independent second layer.
+# The trust gate above is the real control; this is belt and braces so a
+# single missed gate is not immediately a root shell.
+git_pinned() {
+    local dir="$1"; shift
+    GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$dir" "$@"
+}
+
 # verify_repo_pin <repo> — in hardened profiles, ensure the checkout at
 # $REPO_ROOT/<repo> is exactly at its manifest-pinned commit; check it out if
 # a fetched full clone allows. FATAL on any mismatch / missing pin / detached
@@ -1192,17 +1392,40 @@ verify_repo_pin() {
     if ! printf '%s' "$pin" | grep -qE '^[0-9a-f]{40}$'; then
         die "$repo: manifest pin '$pin' is not a 40-hex commit SHA"
     fi
+    # BEFORE any git runs here: `git checkout` executes .git/hooks/post-checkout
+    # and every git command honours .git/config, neither of which the signed
+    # manifest covers. Refuse a tree (and a .git) an unprivileged user could
+    # have written to.
+    assert_trusted_tree "$REPO_ROOT/$repo" "$repo source checkout"
     [ -d "$REPO_ROOT/$repo/.git" ] || die "$repo: pinned profile needs a git checkout to verify $pin (found a non-git tree at $REPO_ROOT/$repo)"
+    assert_trusted_tree "$REPO_ROOT/$repo/.git" "$repo git directory"
     # Make sure the pinned object exists, then check it out.
-    if ! git -C "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null; then
-        git -C "$REPO_ROOT/$repo" fetch --quiet origin "$pin" 2>/dev/null || true
+    if ! git_pinned "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null; then
+        git_pinned "$REPO_ROOT/$repo" fetch --quiet origin "$pin" 2>/dev/null || true
     fi
-    git -C "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null \
+    git_pinned "$REPO_ROOT/$repo" cat-file -e "${pin}^{commit}" 2>/dev/null \
         || die "$repo: pinned commit $pin not present in checkout (shallow clone? fetch the pin or supply a full checkout)"
-    git -C "$REPO_ROOT/$repo" checkout --quiet --detach "$pin" \
+    git_pinned "$REPO_ROOT/$repo" checkout --quiet --detach "$pin" \
         || die "$repo: failed to check out pinned commit $pin"
-    head="$(git -C "$REPO_ROOT/$repo" rev-parse HEAD 2>/dev/null || true)"
+    head="$(git_pinned "$REPO_ROOT/$repo" rev-parse HEAD 2>/dev/null || true)"
     [ "$head" = "$pin" ] || die "$repo: HEAD ($head) != pinned $pin after checkout"
+
+    # The pin only constrains TRACKED content at that commit. `git checkout`
+    # leaves modified tracked files that already match the target commit's
+    # index state alone, and never removes untracked files — so a tree that
+    # passes the SHA check can still carry attacker- or accident-supplied
+    # source. Hardened profiles build only from a pristine tree.
+    local dirty
+    dirty="$(git_pinned "$REPO_ROOT/$repo" status --porcelain)" \
+        || die "$repo: could not compute working-tree status at $REPO_ROOT/$repo; a security assertion that cannot be evaluated is a FAILED assertion"
+    if [ -n "$dirty" ]; then
+        die "$repo: checkout at $REPO_ROOT/$repo is at pin $pin but the working tree is DIRTY (modified or untracked files); hardened profiles refuse to root-build content the signed manifest does not cover.
+    Offending entries:
+$(printf '%s\n' "$dirty" | head -20)
+    Do not try to clean it in place with root git commands — they consume the
+    same repository's configuration. Point --repo-root at a fresh, root-owned
+    directory and let the installer clone the pinned commit into it."
+    fi
 
     # If the manifest records a release tag for this repo, the tag must resolve
     # to the pinned commit. A MISMATCH is tamper-evidence (the manifest claims
@@ -1220,10 +1443,10 @@ verify_repo_pin() {
            || [ "${tag#*..}" != "$tag" ]; then
             die "$repo: manifest tag '$tag' is not a safe tag name (lint bypassed or hand-edited manifest)"
         fi
-        if ! git -C "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null 2>&1; then
-            git -C "$REPO_ROOT/$repo" fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+        if ! git_pinned "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null 2>&1; then
+            git_pinned "$REPO_ROOT/$repo" fetch --quiet origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
         fi
-        tag_commit="$(git -C "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
+        tag_commit="$(git_pinned "$REPO_ROOT/$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null || true)"
         if [ -z "$tag_commit" ]; then
             warn "  $repo: manifest records tag '$tag' but it is absent from the checkout (commit pin $pin still enforced)"
         elif [ "$tag_commit" != "$pin" ]; then
@@ -1278,6 +1501,15 @@ fetch_sources() {
     # unpopulated stub manifest.
     verify_manifest_signature
 
+    # Everything below runs root code out of $REPO_ROOT (clone target, build
+    # trees, deploy/ and scripts/install/ helpers the chain executes). Gate the
+    # root itself once, so a user-writable $REPO_ROOT cannot be swapped under a
+    # freshly cloned, freshly verified checkout. Create it first (root-owned,
+    # 0755) so a first run has something to gate; a pre-existing $REPO_ROOT is
+    # gated as it stands.
+    [ -e "$REPO_ROOT" ] || install -d -m 0755 "$REPO_ROOT"
+    assert_trusted_tree "$REPO_ROOT" "source root"
+
     if [ -n "$SKIP_SOURCES" ]; then
         log "skipping source acquisition (--skip-sources)"
         # Pre-staged checkouts are still root-built: verify each PRESENT repo is
@@ -1285,7 +1517,13 @@ fetch_sources() {
         if ! is_dev; then
             local repo
             for repo in qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman; do
-                repo_present "$repo" && verify_repo_pin "$repo"
+                # Any tree that EXISTS gets pin-verified, not just the ones
+                # repo_present's narrow marker set recognises: later steps run
+                # $REPO_ROOT/qdistro/scripts/install/*.sh, install
+                # $REPO_ROOT/qdistro/deploy/*, and read qdlocker's systemd/pam
+                # assets, none of which repo_present looks for. An existing but
+                # unrecognisable tree must FAIL, not silently skip the pin.
+                [ -e "$REPO_ROOT/$repo" ] && verify_repo_pin "$repo"
             done
         fi
         return 0
@@ -1339,6 +1577,8 @@ build_qdwin() {
         return 0
     fi
     log "building qdwin (libweston shell plugin)..."
+    # meson.build (and anything a stale build/ points at) executes as root.
+    assert_trusted_tree "$REPO_ROOT/qdwin" "qdwin build tree"
     cd "$REPO_ROOT/qdwin"
     # Core build: already fatal by default via `set -e`; explicit messages
     # mirror build_qdshell_plugin and keep behavior unchanged (fatal).
@@ -1359,6 +1599,7 @@ build_qdistro_daemons() {
         return 0
     fi
     log "building qdistro C daemons..."
+    assert_trusted_tree "$REPO_ROOT/qdistro/daemons" "qdistro daemons build tree"
     cd "$REPO_ROOT/qdistro/daemons"
     # Core build: already fatal by default via `set -e`; explicit messages
     # keep behavior unchanged (fatal).
@@ -1379,6 +1620,7 @@ build_qdshell_plugin() {
         return 0
     fi
     log "building qdshell QML plugin (libqdistro-qdwin.so)..."
+    assert_trusted_tree "$REPO_ROOT/qdshell" "qdshell build tree"
     cd "$REPO_ROOT/qdshell"
     if [ -f build/build.ninja ]; then
         meson setup build --reconfigure --prefix=/usr \
@@ -1404,6 +1646,9 @@ QDISTRO_OPT_PREFIX="${QDISTRO_OPT_PREFIX:-/opt/qdistro}"
 # manifest-pinned + verified (verify_repo_pin ran during fetch_sources).
 pip_install_one() {
     local app="$1" launcher
+    # pip executes the source tree's build backend (setup.py / PEP 517 hooks)
+    # as root; same exposure as the git/meson steps.
+    assert_trusted_tree "$REPO_ROOT/$app" "$app source tree"
     if is_dev; then
         # dev: write into /usr (collides with RPM ownership, but a throwaway
         # VM does not care). --prefix=/usr launchers land in /usr/bin.
@@ -1730,6 +1975,9 @@ run_installer_step() {
 
 install_python_modules() {
     local QD="$REPO_ROOT/qdistro"
+    # The chain below executes $QD/scripts/install/*.sh and installs
+    # $QD/deploy/* as root, so the tree must not be user-writable.
+    assert_trusted_tree "$QD" "qdistro source tree"
     cd "$QD"
 
     # Decide which steps to run based on the rerun/resume mode. Default
@@ -2116,6 +2364,19 @@ main() {
     fi
 
     require_root
+    # Deterministic file-creation mode for everything root does from here on
+    # (clones, meson/ninja output, pip trees). Without it a umask of 002
+    # inherited through sudo would make the installer's own output
+    # group-writable and then fail its own source-tree trust gate on the next
+    # run — and would be a real exposure on a machine with a shared group.
+    umask 022
+    # The installer keeps reading from $SCRIPT_DIR after this point — the
+    # signed-manifest verifier, the release keyring, the manifest itself,
+    # lib/qdistro-profile.sh, harden-compositor-vt.sh — and runs them as root.
+    # If that directory is user-writable, sudo-ing this script hands an
+    # unprivileged user root at the next re-read, so gate it exactly like the
+    # source trees (no-op under dev).
+    assert_trusted_tree "$SCRIPT_DIR" "installer directory"
     detect_distro
     enforce_root_disk_encryption
     prompt_inputs
