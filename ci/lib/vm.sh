@@ -583,8 +583,12 @@ collect_vm_artifacts() {
     "${VIRSH[@]}" screenshot "$vm" "$RDIR/screenshots/$label-final.ppm" >/dev/null 2>&1 || true
     vmx="$VM_TOOLS/vm-exec"
     [ -x "$vmx" ] || return 0
-    "$vmx" "$vm" "journalctl -b --no-pager 2>/dev/null | tail -400" > "$RDIR/journals/$label-system.log" 2>&1 || true
-    "$vmx" "$vm" "journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -400" > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
+    # 3000-line window: the old 400-line cap truncated the journal at the
+    # decisive instant of the scenario-19 VT-takeaway investigation
+    # (todo/screenshots/README.md). Seat/VT actors are preserved in full.
+    "$vmx" "$vm" "journalctl -b --no-pager 2>/dev/null | tail -3000" > "$RDIR/journals/$label-system.log" 2>&1 || true
+    "$vmx" "$vm" "journalctl _UID=1000 -b --no-pager 2>/dev/null | tail -3000" > "$RDIR/journals/$label-user-1000.log" 2>&1 || true
+    "$vmx" "$vm" "journalctl -b -u seatd -u systemd-logind -u 'getty@*' --no-pager 2>/dev/null" > "$RDIR/journals/$label-seat-vt.log" 2>&1 || true
     "$vmx" "$vm" "runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status qdwin-compositor.service qdshell.service qdlocker.service qdistro-cursor-sprites.service --no-pager 2>/dev/null || true" > "$outdir/systemctl-user-status.txt" 2>&1 || true
     "$vmx" "$vm" "WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 runuser -u admin -- wayland-info 2>/dev/null | head -240 || true" > "$outdir/wayland-info.txt" 2>&1 || true
     "$vmx" "$vm" "echo list | socat - UNIX-CONNECT:/run/user/1000/qdshell.sock 2>&1 | head -200 || true" > "$outdir/qdshell-list.txt" 2>&1 || true

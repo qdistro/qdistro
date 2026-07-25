@@ -49,6 +49,7 @@ A "cp -n ~/weston.ini ~/weston.ini.a1bak 2>/dev/null; cat > ~/weston.ini <<EOF
 shell=/usr/lib64/weston/qdwin-shell.so
 renderer=pixman
 idle-time=0
+vt-switching=false
 
 [shell]
 locking=false
