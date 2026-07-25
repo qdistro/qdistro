@@ -129,19 +129,21 @@ Lock-time defaults:
 | VR / immersive session | prefer presence/idle policy, not desktop lock alone |
 | Recall viewing (post-v1; cut from v1) | revoke viewer grant and clear decrypted results |
 
-### Lock UI indicators (shipped scope)
+### Lock UI indicators (partial lock-time capture observation)
 
 The lock surface must show non-suppressible state for live microphone,
 camera, screencast/screen capture, system-audio capture, virtual input or
 accessibility control, and qdistro-specific network egress.
 
-`qdlocker` owns the runtime lock surface, so that is where the shipped
-indicators live (`qdlocker/qdlocker/indicators.py` + `qml/LockUI.qml`).
-qdshell also carries the same derivation
+`qdlocker` owns the runtime lock surface, so that is where the indicators
+live (`qdlocker/qdlocker/indicators.py` + `qml/LockUI.qml`). qdshell carries
+an older, **experimental** derivation of the same idea
 (`Services/Qdistro/CaptureStateService.qml`, `SiloEgressService.qml`,
-`Modules/LockScreen/`), but qdshell's own `WlSessionLock` lock screen is the
-**deprecated** path that qdwin does not implement — treat that copy as the
-feed for a future unlocked-session indicator, not as a lock guarantee.
+`Modules/LockScreen/`) attached to its `WlSessionLock` lock screen — the
+deprecated path qdwin does not implement. That copy is not equivalent (it
+differs in polling, timeouts, freshness horizon and process lifecycle) and
+is not a lock guarantee; it must be reconciled with qdlocker's before any
+consumer instantiates it.
 
 What is observable:
 
@@ -158,9 +160,11 @@ What is observable:
  qdwin filters the `zwp_virtual_keyboard` / `zwp_input_method` globals but
  emits no event for a bound client.
 
-**Fail visible, not fail silent.** PipeWire yields a trustworthy *positive*
-— a running capture stream is real capture, attributed to a real client —
-but no trustworthy *negative* for any kind:
+**Fail visible, not fail silent.** Selected running PipeWire nodes are
+evidence of capture *activity*: where the graph carries a client, the client
+is named; where only a source *device* node is running, the activity is real
+but the client is not established, and the surface says so rather than
+implying attribution. There is no trustworthy *negative* for any kind:
 
 - a policy-approved fullscreen session may hold a direct device grant
  (`devices.md`, `games.md`: `/dev/video*`, or `audio` group + `/dev/snd/*`)
@@ -169,12 +173,27 @@ but no trustworthy *negative* for any kind:
 - virtual input has no observer.
 
 So **no kind is ever reported as "clear"**. Each kind is either `active`
-(positively observed) or `unverified` (a visible `?`), and a dead, failed,
-killed or stale observer drives every kind to `unverified`. The lock surface
-observes only while locked and drops any pre-lock reading on the lock edge,
-so nothing seen while unlocked is presented as locked-machine state. No
-setting gates any of it, and an output whose decorative content is blanked
-still carries the indicators.
+(positively observed) or `unverified`, and a dead, failed, killed or stale
+observer drives every kind to `unverified`. The surface distinguishes three
+severities: observed capture, observer-failed, and a standing coverage
+disclosure ("capture monitoring: partial — … direct device grants and
+virtual input are not monitored"), so a healthy quiet scan never reads the
+same as a dead observer, and neither reads as an all-clear.
+
+The lock surface observes only while locked. It re-marks its reading stale
+on both the lock *intent* edge and the compositor's authoritative
+`locked_changed`, so a scan launched while the machine was still unlocked
+cannot survive as locked-machine state. No setting gates any of it.
+
+**Known gaps (RC blockers, not shipped guarantees):**
+
+- **Multi-output.** qdlocker paints one fullscreen window; qdwin blacks the
+ remaining outputs but does not clone the locker surface, so on a
+ multi-output seat the indicators appear on one output only.
+- **No live gate has been run.** The derivation is unit-tested; it has not
+ been exercised against a real qdwin + qdlocker + PipeWire graph with an
+ actual mic/camera/screencast, nor across outputs or a locked-state
+ restart.
 
 Making a kind report "clear" requires a real authoritative feed first: a
 qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
