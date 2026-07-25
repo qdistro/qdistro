@@ -108,6 +108,23 @@ loginctl enable-linger admin
 # default. The s103-locker-idle.sh Test 3 sets QDLOCKER_IDLE_MS=2000
 # and expects the lock to fire within 10s; that path only works when
 # qdwin is running in internal-idle mode.
+#
+# vt-switching=false removes weston's built-in Ctrl+Alt+F1..F8 bindings
+# (libweston weston_setup_vt_switch_bindings, gated on compositor->vt_switching;
+# vt = key - KEY_F1 + 1). Leaving the default (true) makes a single stray chord
+# able to switch the VT away from the compositor, at which point seatd disables
+# the client seat, weston drops DRM master + closes every input device, and the
+# session is dead for the rest of the scenario — no repaint, so no screenshot
+# can be taken and the run reports ERROR even when the product assertion already
+# passed. qdwin/tests/gui/19-wm-policy.md lost a `qci full` run exactly this way
+# (a switch to tty6 mid-chord; `Started Getty on tty6` in the guest journal),
+# and the same signature recurred in run gui-20260719T210349Z.
+#
+# Nothing in the qdwin/qdlocker/permissions-gui suites drives Ctrl+Alt+Fn, and
+# this session is a single-seat appliance console with no second VT to reach, so
+# the bindings are pure downside here. NB: this closes the KEYBOARD path only —
+# a programmatic VT_ACTIVATE or a logind/seatd-initiated switch can still take
+# the seat, which is why the capture helper also recovers (qdwin_vt_recover).
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 backend=drm-backend.so,pipewire-backend.so
@@ -116,6 +133,7 @@ renderer=gl
 modules=
 xwayland=false
 idle-time=0
+vt-switching=false
 
 [shell]
 locking=false
