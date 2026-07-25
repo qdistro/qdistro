@@ -169,11 +169,22 @@ def test_bad_argv_json_is_refused(store, ops, argv_json):
 
 
 def test_argv_entry_with_newline_is_refused(store, ops):
-    """The helper re-splits argv on newlines after the JSON round-trip, so an
-    embedded newline would silently become TWO arguments."""
+    """Single-line argv is an API policy of this surface (the stanza we write
+    is one line per value). The helper itself transports newlines fine — it
+    splits on NUL — so this is policy, not a transport requirement."""
     with pytest.raises(BadArgument):
         store.launch_podapp("podapp-term", "weston-terminal",
                             json.dumps(["ok", "two\nargs"]))
+    assert ops.systemctl_calls == []
+
+
+def test_argv_entry_with_nul_is_refused(store, ops):
+    """NUL is the helper's argv separator, and json.loads decodes the \\u0000
+    escape into a real one — an accepted entry would split into TWO arguments
+    at exec time. It cannot appear in a real exec'd argv element either, so
+    reject it rather than re-encode."""
+    with pytest.raises(BadArgument):
+        store.launch_podapp("podapp-term", "weston-terminal", '["a\\u0000b"]')
     assert ops.systemctl_calls == []
 
 
@@ -239,7 +250,8 @@ def test_helper_argv_split_preserves_empty_elements():
     """`mapfile -t` on a newline-joined argv silently drops empty elements —
     and a trailing empty one entirely — so the app would be launched with a
     DIFFERENT argv than the caller asked for. The split must be NUL-separated,
-    the one byte a JSON argv element cannot contain."""
+    the one byte an exec'd argv element cannot contain (and the daemon's
+    validator rejects, including the \\u0000 JSON escape)."""
     src = _LAUNCH.read_text()
     assert "mapfile -d '' -t APP_ARGV" in src, \
         "argv must be split on NUL, not newlines"
@@ -261,6 +273,31 @@ def test_helper_argv_split_preserves_empty_elements():
     count, rendered = out.stdout.split("\n", 1)
     assert count == "4", f"empty argv elements were dropped: {out.stdout!r}"
     assert rendered.strip() == "[a][][b][]"
+
+
+def test_helper_argv_split_fails_closed_when_the_splitter_dies(tmp_path) -> None:
+    """`mapfile` reads a PROCESS SUBSTITUTION, so neither `pipefail` nor
+    mapfile's own status notices a failing splitter — without the `wait "$!"`
+    the helper would carry on with an EMPTY argv and exec anyway. Pin the
+    fail-closed status against the shipped source."""
+    src = _LAUNCH.read_text()
+    start = src.index("mapfile -d '' -t APP_ARGV")
+    end = src.index('wait "$!"', start) + len('wait "$!"')
+    snippet = src[start:end]
+    assert 'wait "$!"' in snippet, "the splitter's status must be waited on"
+    farm = tmp_path / "failbin"
+    farm.mkdir()
+    (farm / "python3").write_text("#!/bin/bash\nexit 42\n")
+    (farm / "python3").chmod(0o755)
+    import subprocess
+    script = ("set -euo pipefail\nexport QD_WORKLOAD=weston-terminal\n"
+              f"{snippet}\n" 'echo REACHED_EXEC\n')
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True,
+        env={"PATH": f"{farm}:/usr/bin:/bin", "QD_APP_ARGV_JSON": "[]"},
+        timeout=30)
+    assert out.returncode == 42, (out.returncode, out.stdout, out.stderr)
+    assert "REACHED_EXEC" not in out.stdout
 
 
 def test_helper_verifies_the_env_file_before_sourcing_it_as_root():
