@@ -111,20 +111,29 @@ loginctl enable-linger admin
 #
 # vt-switching=false removes weston's built-in Ctrl+Alt+F1..F8 bindings
 # (libweston weston_setup_vt_switch_bindings, gated on compositor->vt_switching;
-# vt = key - KEY_F1 + 1). Leaving the default (true) makes a single stray chord
-# able to switch the VT away from the compositor, at which point seatd disables
-# the client seat, weston drops DRM master + closes every input device, and the
-# session is dead for the rest of the scenario — no repaint, so no screenshot
-# can be taken and the run reports ERROR even when the product assertion already
-# passed. qdwin/tests/gui/19-wm-policy.md lost a `qci full` run exactly this way
-# (a switch to tty6 mid-chord; `Started Getty on tty6` in the guest journal),
-# and the same signature recurred in run gui-20260719T210349Z.
+# vt = key - KEY_F1 + 1). Losing the VT kills the seat: seatd revokes the evdev
+# fds, weston drops DRM master, and the session cannot repaint again — so from a
+# locked qdlocker session weston's own Ctrl+Alt+Fn was a seat-abandonment
+# vector. Nothing in qdistro registers Ctrl+Alt+Fn as a feature (qdgreeter has
+# its own chvt path and never goes through weston), and doc/recovery.md already
+# documents "no graphical escape hatch and no text-mode VT login" as design, so
+# removing the bindings is alignment rather than regression.
 #
-# Nothing in the qdwin/qdlocker/permissions-gui suites drives Ctrl+Alt+Fn, and
-# this session is a single-seat appliance console with no second VT to reach, so
-# the bindings are pure downside here. NB: this closes the KEYBOARD path only —
-# a programmatic VT_ACTIVATE or a logind/seatd-initiated switch can still take
-# the seat, which is why the capture helper also recovers (qdwin_vt_recover).
+# WHAT THIS IS *NOT*: it is not the fix for the qdwin/tests/gui/19-wm-policy.md
+# seat loss. An earlier revision of this comment claimed it was; that was wrong.
+# That scenario's Super+Left never reaches these bindings — it switches the VT
+# in the KERNEL console layer, because getty@tty1 shares the compositor's VT and
+# its TTY reset reverts seatd's K_OFF, and the openSUSE xkb-converted keymap has
+# `keycode 125 = Alt` + `alt keycode 105 = Decr_Console`
+# (/usr/share/kbd/keymaps/xkb/us.map.gz:92,106). The destination was always
+# tty6 because logind's ReserveVT defaults to 6 and marks it busy, so the
+# kernel's downward console scan stopped there. Reproduced live in the
+# preserved failing VM. That path is closed in the test profile by
+# scripts/vm/spin-test-vm-gui.sh (disable getty@tty1 + ReserveVT=0/NAutoVTs=0),
+# and survived at capture time by qdwin_vt_recover in qdwin-helpers.sh.
+#
+# Do not read a recurrence of the tty6 signature as "this setting did not
+# apply" — the two paths are independent.
 cat > /home/admin/weston.ini <<'EOF'
 [core]
 backend=drm-backend.so,pipewire-backend.so

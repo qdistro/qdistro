@@ -446,6 +446,48 @@ else
     grep -qx 'mode=1280x800@60' /home/admin/weston.ini \
         || { echo "[gui-spin] ERROR: failed to pin qdwin GUI output to 1280x800"; exit 1; }
 
+    # Make the compositor's VT unstealable by an injected chord.
+    #
+    # A GUI scenario that sends Super+Left (qdwin/tests/gui/19-wm-policy.md
+    # drives tile-left with it) was switching the VT away from the compositor,
+    # which kills the seat: seatd revokes the evdev fds, weston drops DRM
+    # master, and since capture is only serviced during a repaint EVERY later
+    # screenshot in the scenario fails. Two independent causes, both fixed here
+    # because either alone is sufficient and neither needs a golden rebake:
+    #
+    #  1. The chord reaches the KERNEL console, not just weston. weston shares
+    #     tty1 with a stock getty@tty1 (the autologin drop-in above is
+    #     labwc-only), and getty's start-time TTY reset reverts the K_OFF that
+    #     seatd installed — journals show injected keystrokes landing in
+    #     login(1) as `FAILED LOGIN 1 FROM tty1`. With the console keyboard
+    #     live, the openSUSE xkb-converted keymap makes Super+Left a console
+    #     switch outright: `keycode 125 = Alt` and `alt keycode 105 =
+    #     Decr_Console` (/usr/share/kbd/keymaps/xkb/us.map.gz:92,106).
+    #     Nothing in the qdwin profile uses tty1 — CI drives the VM over
+    #     qemu-guest-agent and serial-getty@ttyS0 — so disable it. That also
+    #     stops test keystrokes leaking into a login prompt.
+    #
+    #  2. Decr_Console had somewhere to land only because logind reserves a VT.
+    #     `ReserveVT` defaults to 6 and marks tty6 busy unconditionally, so the
+    #     kernel's downward scan (which wraps from 62) stopped at tty6 —
+    #     deterministically, which is why every occurrence names tty6.
+    #     ReserveVT=0 + NAutoVTs=0 leave tty2-6 unallocated, so the switch
+    #     becomes a no-op even if a console keyboard is somehow live.
+    #
+    # NB: this is NOT what weston.ini's vt-switching=false covers. That closes
+    # weston's own Ctrl+Alt+F1..F8 bindings, a separate path this chord never
+    # touches. Keep both.
+    systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
+    mkdir -p /etc/systemd/logind.conf.d
+    cat > /etc/systemd/logind.conf.d/99-qdwin-no-spare-vts.conf <<'EOF2'
+# qdwin GUI test profile: no reserved/auto VT for an injected console chord to
+# switch to. See spin-test-vm-gui.sh for the full rationale.
+[Login]
+ReserveVT=0
+NAutoVTs=0
+EOF2
+    systemctl restart systemd-logind >/dev/null 2>&1 || true
+
     systemctl daemon-reload
     runuser -l admin -c 'systemctl --user enable qdwin-session.target 2>/dev/null' || true
     runuser -l admin -c 'systemctl --user start qdwin-session.target' || true
