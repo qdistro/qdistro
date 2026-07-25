@@ -881,7 +881,7 @@ run_verify_pin() {
     run_verify_pin "$root" qdistro "$pin"
     [ "$status" -ne 0 ] \
         || { echo "escaping symlink accepted:"$'\n'"$output" >&2; return 1; }
-    [[ "$output" == *"points outside the tree"* ]] \
+    [[ "$output" == *"absolute or contains '..'"* ]] \
         || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
     [ ! -e "$root/qdistro.pwned" ]
 }
@@ -944,30 +944,83 @@ run_verify_pin() {
     # Regression for a fail-open serialization: `find -print` into a command
     # substitution loses NULs and strips trailing newlines, so a link named
     # "decoy\n" beside a benign "decoy" would be checked as "decoy" and the
-    # real escaping link never examined. The containment test therefore runs
-    # inside find, and only ONE offending pathname ever reaches the shell.
+    # real escaping link never examined. The rule is now decided by find
+    # itself against the link's own bytes; no list is ever parsed.
     local root="$BATS_TEST_TMPDIR/nl" pin
     mkdir -p "$root" "$BATS_TEST_TMPDIR/nl-outside"
     pin="$(hookrepo "$root/qdistro")"
-    ln -s "$root/qdistro" "$root/qdistro/decoy"
+    ln -s "." "$root/qdistro/decoy"
     ln -s "$BATS_TEST_TMPDIR/nl-outside" "$root/qdistro/decoy
 "
     run_verify_pin "$root" qdistro "$pin"
     [ "$status" -ne 0 ] \
         || { echo "newline-named escaping symlink accepted:"$'\n'"$output" >&2; return 1; }
-    [[ "$output" == *"points outside the tree"* ]] \
+    [[ "$output" == *"absolute or contains '..'"* ]] \
         || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
     [ ! -e "$root/qdistro.pwned" ]
 }
 
-@test "root-checkout: an in-tree symlink to a not-yet-existing path is accepted" {
-    # Complement to the above: containment, not existence, is the rule. The
-    # missing leaf lives inside the gated tree, so no unprivileged user can
-    # create it after the scan.
+@test "root-checkout: a sibling directory named '<tree>NEWLINE' cannot spoof containment" {
+    # `rt="$(readlink -f ...)"` strips trailing newlines, so a link to a
+    # sibling literally named "qdistro\n" produced a string equal to the
+    # gated tree's own path and was accepted. The syntactic rule never
+    # resolves the target, so the spoof has nothing to act on.
+    local root="$BATS_TEST_TMPDIR/spoof" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro
+"
+    ln -s "$root/qdistro
+" "$root/qdistro/sneaky"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "newline-sibling spoof accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: an EXTERNAL mutable relay cannot launder containment" {
+    # tree/link -> <outside>/relay/payload, with relay currently pointing back
+    # inside the tree. A "where does it land right now" check accepted this and
+    # then memoised the tree; the attacker repoints relay afterwards and
+    # nothing inside the accepted tree ever changed. A syntactic rule refuses
+    # the absolute link outright.
+    local root="$BATS_TEST_TMPDIR/relay" pin
+    mkdir -p "$root" "$BATS_TEST_TMPDIR/relaydir"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro/safe"
+    ln -s "$root/qdistro/safe" "$BATS_TEST_TMPDIR/relaydir/relay"
+    ln -s "$BATS_TEST_TMPDIR/relaydir/relay" "$root/qdistro/link"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "external mutable relay accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a '..' symlink that stays inside the tree is STILL refused" {
+    # `..` traversal walks through the parent directory, which the gate does
+    # not cover with leaf rules, so it is refused even when today's resolution
+    # happens to land back inside.
+    local root="$BATS_TEST_TMPDIR/dotdot" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro/a" "$root/qdistro/b"
+    ln -s "../b" "$root/qdistro/a/up"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "'..' symlink accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+}
+
+@test "root-checkout: a relative in-tree symlink to a not-yet-existing path is accepted" {
+    # Complement to the above: the rule is syntactic containment, not
+    # existence. A relative, `..`-free link cannot escape, and its missing leaf
+    # lives inside the gated tree where no unprivileged user can create it.
     local root="$BATS_TEST_TMPDIR/danglein" pin
     mkdir -p "$root"
     pin="$(hookrepo "$root/qdistro")"
-    ln -s "$root/qdistro/not-built-yet" "$root/qdistro/artifact"
+    ln -s "not-built-yet" "$root/qdistro/artifact"
     git -C "$root/qdistro" add -A
     git -C "$root/qdistro" -c user.email=t@t -c user.name=t commit -q -m link
     pin="$(git -C "$root/qdistro" rev-parse HEAD)"

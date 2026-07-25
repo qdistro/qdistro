@@ -1281,12 +1281,13 @@ assert_trusted_tree() {
 # qd_scan_tree <dir> — the second half of the gate: the pathname spine being
 # trusted says nothing about what is INSIDE the directory. Reject
 #   - any descendant writable by group/other, or owned by another uid;
-#   - any symlink whose target resolves OUTSIDE <dir> (a `build -> /tmp/evil`
-#     link survives `chown -R`/`chmod -R` with its nominal 0777 mode intact,
-#     and meson/ninja/pip follow it). A link to a not-yet-existing path INSIDE
-#     the tree is accepted: `readlink -f` resolves it, and the missing leaf
-#     cannot be created by an unprivileged user because its parent is inside
-#     the gated tree. A link to a missing path outside is rejected;
+#   - any symlink that is absolute or contains a `..` component, i.e. any
+#     symlink that could resolve outside the tree (a `build -> /tmp/evil` link
+#     survives `chown -R`/`chmod -R` with its nominal 0777 mode intact, and
+#     meson/ninja/pip follow it). Purely-relative, `..`-free links are
+#     accepted whether or not their target exists yet: they cannot escape, and
+#     a missing leaf inside the gated tree cannot be created by an
+#     unprivileged user;
 #   - a scan that could not be completed. `find` errors are FATAL, not
 #     ignored: "we saw nothing bad" must not be confused with "we looked".
 # Deliberately NOT -xdev: a mounted subtree under the source root is part of
@@ -1309,26 +1310,39 @@ qd_scan_tree() {
         TRUST_WHY="$bad inside it is writable by group/other or owned by another user"
         return 1
     fi
-    # Escaping symlinks. The containment test runs INSIDE find (`! -exec`), so
-    # the only thing that ever crosses back into the shell is a single
-    # offending pathname used for the message. Serialising the whole list into
-    # a variable is not an option: a command substitution cannot carry NUL, and
-    # newline-delimited output is forgeable — a symlink named "decoy\n" beside
-    # a benign "decoy" splits into pieces that check out while the real link
-    # goes unexamined.
+    # Escaping symlinks. The rule is deliberately SYNTACTIC, decided by find
+    # itself against the link's own bytes (`-lname`), with no shell, no
+    # `readlink`, and no command substitution anywhere in the decision:
+    #
+    #   a symlink inside the tree may only be RELATIVE and may not contain a
+    #   `..` component.
+    #
+    # Such a link cannot leave the tree: resolution starts inside, never
+    # ascends, never restarts at /, and every intermediate component it walks
+    # through is itself a gated entry subject to the same rule. Everything
+    # else is refused.
+    #
+    # Two earlier attempts at "resolve the link and check where it lands" were
+    # both fail-open and are the reason for this shape:
+    #   - `rt="$(readlink -f ...)"` strips trailing newlines, so a sibling
+    #     directory literally named "<tree>\n" resolves to a string equal to
+    #     the tree's own path and is accepted;
+    #   - a final-path check is only true at one instant. A link into an
+    #     EXTERNAL relay symlink that currently points back inside the tree
+    #     passes, and the attacker then repoints the relay — nothing inside
+    #     the (memoised, accepted) tree ever changed.
+    # A syntactic rule has neither failure mode.
     rc=0
     bad="$(find "$dir" -type l \
-              ! -exec sh -c '
-                    rt=$(readlink -f -- "$2" 2>/dev/null) || rt=
-                    case "$rt" in "$1"|"$1"/*) exit 0 ;; *) exit 1 ;; esac
-                ' _ "$dir" {} \; \
+              \( -lname '/*' -o -lname '..' -o -lname '../*' \
+                 -o -lname '*/..' -o -lname '*/../*' \) \
               -print -quit)" || rc=$?
     if [ "$rc" -ne 0 ]; then
         TRUST_WHY="the symlink scan of $dir did not complete (find exit $rc); refusing to assume it is clean"
         return 1
     fi
     if [ -n "$bad" ]; then
-        TRUST_WHY="the symlink $bad points outside the tree, so its target is not covered by this gate"
+        TRUST_WHY="the symlink $bad is absolute or contains '..', so it can resolve outside the tree (and through pathname components this gate does not cover)"
         return 1
     fi
     return 0
