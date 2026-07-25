@@ -1283,7 +1283,10 @@ assert_trusted_tree() {
 #   - any descendant writable by group/other, or owned by another uid;
 #   - any symlink whose target resolves OUTSIDE <dir> (a `build -> /tmp/evil`
 #     link survives `chown -R`/`chmod -R` with its nominal 0777 mode intact,
-#     and meson/ninja/pip follow it);
+#     and meson/ninja/pip follow it). A link to a not-yet-existing path INSIDE
+#     the tree is accepted: `readlink -f` resolves it, and the missing leaf
+#     cannot be created by an unprivileged user because its parent is inside
+#     the gated tree. A link to a missing path outside is rejected;
 #   - a scan that could not be completed. `find` errors are FATAL, not
 #     ignored: "we saw nothing bad" must not be confused with "we looked".
 # Deliberately NOT -xdev: a mounted subtree under the source root is part of
@@ -1306,26 +1309,27 @@ qd_scan_tree() {
         TRUST_WHY="$bad inside it is writable by group/other or owned by another user"
         return 1
     fi
+    # Escaping symlinks. The containment test runs INSIDE find (`! -exec`), so
+    # the only thing that ever crosses back into the shell is a single
+    # offending pathname used for the message. Serialising the whole list into
+    # a variable is not an option: a command substitution cannot carry NUL, and
+    # newline-delimited output is forgeable — a symlink named "decoy\n" beside
+    # a benign "decoy" splits into pieces that check out while the real link
+    # goes unexamined.
     rc=0
-    # Newline-separated, NOT -print0: a command substitution cannot carry NUL
-    # bytes. A symlink whose NAME contains a newline therefore splits into two
-    # nonsense paths, each of which fails to resolve and is rejected below —
-    # fail-closed, which is the behaviour we want for such a path anyway.
-    links="$(find "$dir" -type l -print)" || rc=$?
+    bad="$(find "$dir" -type l \
+              ! -exec sh -c '
+                    rt=$(readlink -f -- "$2" 2>/dev/null) || rt=
+                    case "$rt" in "$1"|"$1"/*) exit 0 ;; *) exit 1 ;; esac
+                ' _ "$dir" {} \; \
+              -print -quit)" || rc=$?
     if [ "$rc" -ne 0 ]; then
         TRUST_WHY="the symlink scan of $dir did not complete (find exit $rc); refusing to assume it is clean"
         return 1
     fi
-    if [ -n "$links" ]; then
-        while IFS= read -r lnk; do
-            [ -n "$lnk" ] || continue
-            rt="$(readlink -f -- "$lnk" 2>/dev/null || true)"
-            case "$rt" in
-                "$dir"|"$dir"/*) ;;
-                *)  TRUST_WHY="the symlink $lnk points outside the tree (-> ${rt:-<unresolvable>}), so its target is not covered by this gate"
-                    return 1 ;;
-            esac
-        done <<< "$links"
+    if [ -n "$bad" ]; then
+        TRUST_WHY="the symlink $bad points outside the tree, so its target is not covered by this gate"
+        return 1
     fi
     return 0
 }
@@ -2370,12 +2374,23 @@ main() {
     # group-writable and then fail its own source-tree trust gate on the next
     # run — and would be a real exposure on a machine with a shared group.
     umask 022
-    # The installer keeps reading from $SCRIPT_DIR after this point — the
-    # signed-manifest verifier, the release keyring, the manifest itself,
-    # lib/qdistro-profile.sh, harden-compositor-vt.sh — and runs them as root.
-    # If that directory is user-writable, sudo-ing this script hands an
-    # unprivileged user root at the next re-read, so gate it exactly like the
+    # $SCRIPT_DIR is where the installer keeps reading from after this point —
+    # the signed-manifest verifier, the release keyring, the manifest itself,
+    # harden-compositor-vt.sh — and it runs those as root. Gate it like the
     # source trees (no-op under dev).
+    #
+    # LIMITATION, stated plainly: this check CANNOT authenticate the bytes bash
+    # has already executed. This script and lib/qdistro-profile.sh were parsed
+    # and run before main() was entered (see the header at the top of the
+    # file), so a user-writable installer directory is already a root
+    # compromise by the time we get here — an attacker could simply have edited
+    # this function, or redefined is_dev so every gate becomes a no-op. An
+    # installer cannot bootstrap trust in its own running bytes; the bootstrap
+    # and the profile library must be authenticated OUT OF BAND, by the
+    # release/packaging entry point that delivers them (doc/release-signing.md,
+    # "Trusting the bootstrap itself"). What this call actually buys is the
+    # later re-reads, and a loud, early, actionable failure for the operator
+    # who is about to install from a directory nobody vouched for.
     assert_trusted_tree "$SCRIPT_DIR" "installer directory"
     detect_distro
     enforce_root_disk_encryption

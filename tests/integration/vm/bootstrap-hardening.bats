@@ -939,3 +939,55 @@ run_verify_pin() {
     printf '%s\n' "$body" | grep -q 'safe.directory' \
         || { echo "trust_die lost the safe.directory warning" >&2; return 1; }
 }
+
+@test "root-checkout: an escaping symlink whose NAME contains a newline is refused" {
+    # Regression for a fail-open serialization: `find -print` into a command
+    # substitution loses NULs and strips trailing newlines, so a link named
+    # "decoy\n" beside a benign "decoy" would be checked as "decoy" and the
+    # real escaping link never examined. The containment test therefore runs
+    # inside find, and only ONE offending pathname ever reaches the shell.
+    local root="$BATS_TEST_TMPDIR/nl" pin
+    mkdir -p "$root" "$BATS_TEST_TMPDIR/nl-outside"
+    pin="$(hookrepo "$root/qdistro")"
+    ln -s "$root/qdistro" "$root/qdistro/decoy"
+    ln -s "$BATS_TEST_TMPDIR/nl-outside" "$root/qdistro/decoy
+"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "newline-named escaping symlink accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"points outside the tree"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: an in-tree symlink to a not-yet-existing path is accepted" {
+    # Complement to the above: containment, not existence, is the rule. The
+    # missing leaf lives inside the gated tree, so no unprivileged user can
+    # create it after the scan.
+    local root="$BATS_TEST_TMPDIR/danglein" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    ln -s "$root/qdistro/not-built-yet" "$root/qdistro/artifact"
+    git -C "$root/qdistro" add -A
+    git -C "$root/qdistro" -c user.email=t@t -c user.name=t commit -q -m link
+    pin="$(git -C "$root/qdistro" rev-parse HEAD)"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -eq 0 ] \
+        || { echo "in-tree dangling symlink wrongly refused:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: the too-late self-gate is documented, not claimed closed" {
+    # The bootstrap and lib/qdistro-profile.sh execute BEFORE any gate can run.
+    # That cannot be fixed from inside the script; it must be an explicit,
+    # documented distribution precondition. Pin both halves so a later edit
+    # cannot quietly upgrade the limitation into a claimed guarantee.
+    body="$(sed -n '/^main() {/,/^}/p' "$BOOT")"
+    [ -n "$body" ]
+    printf '%s\n' "$body" | grep -qi 'CANNOT authenticate' \
+        || { echo "the SCRIPT_DIR gate no longer states its limitation:"$'\n'"$body" >&2; return 1; }
+    printf '%s\n' "$body" | grep -qi 'out of band' \
+        || { echo "the SCRIPT_DIR gate no longer names the out-of-band precondition" >&2; return 1; }
+    grep -qi 'Trusting the bootstrap itself' "$REPO_ROOT/doc/release-signing.md" \
+        || { echo "doc/release-signing.md lost the bootstrap-trust precondition section" >&2; return 1; }
+}
