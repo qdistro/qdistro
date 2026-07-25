@@ -198,17 +198,28 @@ def _run_loop_until(predicate, timeout_s: float = 5.0) -> bool:
     # _deadline survives for the rest of its timeout, and on timeout _poll
     # keeps returning True forever, its closure pinning the predicate (and
     # therefore the broker/subscriber objects) on the default main context.
-    # Destroy whichever source is left, on every exit path.
-    poll_id = GLib.timeout_add(10, _poll)
-    deadline_id = GLib.timeout_add(int(timeout_s * 1000), _deadline)
+    # Destroy both sources on every exit path.
+    #
+    # Hold the GLib.Source OBJECTS rather than the numeric ids GLib.timeout_add
+    # returns: an id is reusable the instant its source is destroyed, so
+    # find_source_by_id() on the callback that already removed itself may hand
+    # back an unrelated, newly attached source. Source.destroy() is idempotent,
+    # so destroying both is safe whichever one is already gone.
+    context = GLib.MainContext.default()
+
+    poll_source = GLib.timeout_source_new(10)
+    poll_source.set_callback(_poll)
+    poll_source.attach(context)
+
+    deadline_source = GLib.timeout_source_new(int(timeout_s * 1000))
+    deadline_source.set_callback(_deadline)
+    deadline_source.attach(context)
+
     try:
         loop.run()
     finally:
-        context = GLib.MainContext.default()
-        for source_id in (poll_id, deadline_id):
-            source = context.find_source_by_id(source_id)
-            if source is not None:
-                source.destroy()
+        poll_source.destroy()
+        deadline_source.destroy()
     # Final check (predicate may have flipped between last poll and quit).
     if predicate():
         result["ok"] = True
