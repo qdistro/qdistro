@@ -1,6 +1,6 @@
 [Unit]
 Description=qdistro screen locker (qdlocker)
-Documentation=https://codeberg.org/qdistro/qdlocker
+Documentation=https://github.com/qdistro/qdlocker
 # Peer to the shell — comes up alongside it, not after it. We use
 # After= (ordering only, not a hard dep) on the user-session unit
 # because qdshell may be slow to start and we don't want to block the
