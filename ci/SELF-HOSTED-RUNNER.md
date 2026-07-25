@@ -5,6 +5,13 @@ Status: **SCAFFOLD / NOT PROVISIONED.** This document plus
 registered yet; nothing runs automatically. The "Activation checklist" at the
 bottom is what a human must do to turn this on.
 
+> **Forge note (2026-07):** the project moved from Codeberg to GitHub. The
+> sibling-repo coordinates in `.forgejo/workflows/host-gate.yml` are updated to
+> the GitHub layout, but the *runner registration* steps below still describe
+> `forgejo-runner` against a Forgejo instance. Porting the runner itself to a
+> GitHub Actions self-hosted runner is a pending follow-up; whoever activates
+> this gate does that port first. Nothing here is on the install path.
+
 ## Why
 
 The central `qdistro` repo is the only repo in the monorepo with **no hosted

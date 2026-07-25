@@ -21,7 +21,7 @@
 #   6.  Fetches all qdistro repos (qdistro, qdwin, qdshell, qdlocker,
 #       qdbrowser, qdgreeter, qterminator, qnotebook, qfileman) — uses
 #       sibling checkouts under $REPO_ROOT if present, otherwise clones
-#       from Codeberg.
+#       from GitHub (see repo_url).
 #   7.  Builds qdwin (libweston shell plugin) and the qdistro C daemons.
 #   8.  Builds the qdshell QML plugin (libqdistro-qdwin.so).
 #   9.  pip-installs qdgreeter, qdlocker, qdbrowser, qterminator,
@@ -1037,11 +1037,19 @@ create_users() {
 # ---------------------------------------------------------------------------
 # 6. Source acquisition
 # ---------------------------------------------------------------------------
+# repo_url <local-checkout-name> — canonical upstream clone URL for a repo.
+# $1 is the LOCAL directory name under $REPO_ROOT (which the rest of this
+# script, the manifest, and the build steps key off), NOT necessarily the
+# upstream repository name: the 2026-07 Codeberg -> GitHub migration renamed
+# two repos (qfileman -> qdfileman, qterminator -> qdterm) and qnotebook /
+# qterminator live in their own GitHub orgs. Keep the local names stable and
+# map them here.
 repo_url() {
     case "$1" in
-        qnotebook)  echo "https://codeberg.org/qnotebook/qnotebook.git" ;;
-        qterminator) echo "https://codeberg.org/qterminator/qterminator.git" ;;
-        *)          echo "https://codeberg.org/qdistro/$1.git" ;;
+        qnotebook)   echo "https://github.com/qnotebook/qnotebook.git" ;;
+        qterminator) echo "https://github.com/qterminator/qdterm.git" ;;
+        qfileman)    echo "https://github.com/qdistro/qdfileman.git" ;;
+        *)           echo "https://github.com/qdistro/$1.git" ;;
     esac
 }
 

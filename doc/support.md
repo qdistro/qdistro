@@ -19,9 +19,9 @@ what you hit is already tracked.
 qdistro is many repositories, but issue intake is **centralized**:
 
 > **File issues at the meta tracker:
-> [codeberg.org/qdistro/qdistro/issues](https://codeberg.org/qdistro/qdistro/issues).**
+> [github.com/qdistro/qdistro/issues](https://github.com/qdistro/qdistro/issues).**
 
-Codeberg runs Forgejo, so this is a normal issue tracker. File everything there
+That is a normal GitHub issue tracker. File everything there
 even if you think the bug is in a component repo (`qdwin`, `qdshell`,
 `qdlocker`, …) — maintainers move or label it to the right component. One front
 door keeps users from having to know the repository split.
@@ -48,8 +48,10 @@ Do **not** open a public issue for a vulnerability. Security reports go through 
 private channel so a fix can ship before the details are public.
 
 > **Security contact:** `security@qdistro.org` *(placeholder — the published
-> address/key is finalized at the v1 release; until then, mark a Codeberg issue
-> confidential or contact a maintainer directly rather than posting details).*
+> address/key is finalized at the v1 release; until then, use GitHub's private
+> vulnerability reporting on
+> [github.com/qdistro/qdistro/security/advisories/new](https://github.com/qdistro/qdistro/security/advisories/new)
+> or contact a maintainer directly rather than posting details).*
 
 What we consider in scope follows the [threat model](threat-model.md): accidental
 cross-silo leaks, escape from a tier's confinement, broker/approval bypass,
