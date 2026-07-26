@@ -157,7 +157,8 @@ When enabled, the routing still has to happen — see B/C below.
 ### Option B — UserRelay-style narrow forward — **landed 2026-05-16 for all three ops**
 
 `UserRelay.ForwardBrowserBridgeOp(op, args_json, selector_json) -> reply_json`
-shipped in `qdistro_user_relay.py`. Cross-uid callers reach it on the
+implemented in `qdistro_user_relay.py` (in-tree; see the
+Reachability row). Cross-uid callers reach it on the
 system bus (`org.qdistro.UserRelay.uid<NNNN>`); the relay forwards to
 the user's `org.qdistro.BrowserBridge.<ppid>` via `RequestTabs`. Wire
 matches the bridge's `RequestTabs(s, s) -> s` so callers handle relay
@@ -202,9 +203,11 @@ malformed, or deny rules return `{"ok": false, "error":
 
 Trade-off accepted: the relay turns into a generic browser-bridge
 proxy. The narrow `Forward(kind, payload)` precedent does NOT carry
-over — every bridge op is now reachable cross-uid. If a future op
-needs admin sign-off, route *that op* through option C explicitly;
-don't broaden the relay's gate.
+over — the design exposes *every* bridge op cross-uid rather than an
+enumerated set. (In-tree only: see the Reachability row — no shipped
+install can currently reach any of them.) If a future op needs admin
+sign-off, route *that op* through option C explicitly; don't broaden
+the relay's gate.
 
 ### Option C — broker-mediated per-call admin approval
 
@@ -226,7 +229,7 @@ right-click.
 **Option B for all three ops.** The doc's earlier draft recommended
 hybrid B-for-list / C-for-create+remove. After implementation review,
 the broker layer adds enough operational complexity for write ops
-(per-call user prompt every container create) that we shipped pure B
+(per-call user prompt every container create) that we implemented pure B
 and left the option open to escalate writes to broker mediation if a
 real abuse vector surfaces. Each user-browser still has to be opted
 into "Containers in admin panel" before any cross-uid call lands;
@@ -331,6 +334,7 @@ forward-compatible regardless of which routing option above wins:
 | Cross-user admin opt-in | **Landed 2026-06-12**: Rules tab has a "Firefox containers cross-user opt-in" checkbox keyed by target uid; it saves/deletes the allow rule consumed by the relay. Tests: `tests/unit/test_admin_rules_tab.py`. |
 | D-Bus surface | No change required — reuses the existing `RequestTabs` entry point. |
 | Cross-user gate | Enforced by `qdistro-user-relay` against broker rules; default-deny when no opt-in rule exists. |
+| Reachability | **Partly fixed 2026-07-26 — F4 is NOT reachable end-to-end; do not claim it as a v1 feature.** Two of the three breaks are fixed. (1) The relay resolved `qdistro_admin_rules` via a checkout-only `../broker` path while being installed to `/usr/local/lib/qdistro`, so the import always failed, the failure was swallowed, and the gate denied unconditionally; the relay now installs to `/usr/libexec/qdistro` beside the broker modules and an import failure is loud (distinct reason `rules-import-error`, an ERROR line at module import, another in the daemon's startup preflight, and an ERROR on the first denied call followed by a rate-limited reminder carrying the suppressed count). (2) `install-user-relay-for-vm.sh` was in no production chain; it is now in `qdistro-bootstrap.sh`'s `installer_chain_entries` (both profiles) and in `image/config.sh`. Installed-layout coverage: `tests/unit/test_user_relay_installed_layout.py`. **Open follow-up F4-a (release blocker for F4 and for cross-silo Send-To):** `user_relay/org.qdistro.UserRelay.conf` grants `<allow own=...>` to exactly two identities — username `work` for `uid2000` and username `work2` for `uid3000`. The grant is keyed on the USERNAME, so a silo named anything else fails *even at uid 2000/3000*, and any uid outside {2000,3000} fails regardless of name. `qdistro_session_manager` accepts arbitrary silo names over uid 2000-60000 and issues no policy, so a production silo's relay cannot own its name and exits 78 (`RestartPreventExitStatus`, so it fails once and loudly rather than restart-looping). Needs per-silo policy fragments issued and revoked with the silo — the `.conf` header's "Phase 4 dynamic include.d" work. **Open follow-up F4-b:** `image/config.sh` stages the relay but does not install `install-session-manager.sh`, so on the kiwi release image the unit is present and nothing starts it. **Note:** even with F4-a and F4-b closed, the only in-tree caller of `ForwardBrowserBridgeOp` is the Recall admin surface, which is post-v1 (see the *First consumer* row) — F4 is a capability with no shipped consumer. Source: `todo/fable-release/10-reachability-audit-2026-07-26.md`, F4 row. |
 | Audit | Bridge-side journal logging follows the existing `qdistro-browser-bridge` pattern; consumer-side audit lives in whichever daemon ends up calling it. |
 
 ## Files
@@ -342,6 +346,8 @@ forward-compatible regardless of which routing option above wins:
 | `qdistro/browser_bridge/qdistro_browser_bridge.py` | `*.reply` registrations for the bridge → ext round trip |
 | `qdistro/browser_bridge/qdistro_browser_bridge_client.py` | Daemon-side helper: `call_bridge` (own-uid) + `call_via_relay` (cross-uid) |
 | `qdistro/user_relay/qdistro_user_relay.py` | `ForwardBrowserBridgeOp` cross-uid surface |
+| `qdistro/scripts/install/install-user-relay-for-vm.sh` | Installs the relay **into `/usr/libexec/qdistro`, beside the broker modules** — the gate's rules-engine import depends on that co-location |
+| `qdistro/tests/unit/test_user_relay_installed_layout.py` | Installed-layout (not checkout-layout) coverage of the gate |
 | `qdistro/doc/browser.md` | `containers.*` Operations entry referencing this doc |
 
 ## See also

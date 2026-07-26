@@ -1457,7 +1457,9 @@ INBOUND_EXTRACT_OPS: frozenset[str] = frozenset({
 #
 # Canonical install paths (see the daemons' .service ExecStart and
 # scripts/install/*): mpris -> /usr/libexec/qdistro, user-relay ->
-# /usr/local/lib/qdistro. Plausible alternate prefixes are included; every
+# /usr/libexec/qdistro (moved there 2026-07-26; the /usr/local/lib entry
+# stays for hosts installed before that). Plausible alternate prefixes are
+# included; every
 # entry is still gated by the root-owned/non-writable stat, so listing a
 # path that an unprivileged user could write would not weaken the check.
 # ``QDISTRO_BRIDGE_INBOUND_TRUSTED_SCRIPTS`` may NARROW this set (replace it

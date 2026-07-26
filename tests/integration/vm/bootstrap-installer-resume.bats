@@ -36,6 +36,7 @@ setup() {
         install-sdk-for-vm.sh
         install-broker-for-qdwin.sh
         install-session-manager.sh
+        install-user-relay-for-vm.sh
         install-polkit-agent-for-vm.sh
         install-pwd-for-vm.sh
         install-qsu-for-vm.sh
@@ -92,6 +93,7 @@ _trace_scripts() { awk '{print $1}' "$TRACE"; }
     expected="install-sdk-for-vm.sh
 install-broker-for-qdwin.sh
 install-session-manager.sh
+install-user-relay-for-vm.sh
 install-polkit-agent-for-vm.sh
 install-pwd-for-vm.sh
 install-qsu-for-vm.sh
@@ -111,6 +113,7 @@ install-tier5b-for-vm.sh"
     state_expected="sdk
 broker
 session-manager
+user-relay
 polkit
 pwd
 qsu
@@ -141,6 +144,7 @@ tier5b"
     grep -qx "install-broker-for-qdwin.sh $FAKE_QD/broker" "$TRACE"
     grep -qx "install-sdk-for-vm.sh $FAKE_QD/sdk/qdistro_app" "$TRACE"
     grep -qx "install-session-manager.sh $FAKE_QD/session_manager" "$TRACE"
+    grep -qx "install-user-relay-for-vm.sh $FAKE_QD/user_relay" "$TRACE"
     # portal-backend / tier3 / tier4-host / tier5 / tier5b -> bare QD
     grep -qx "install-portal-backend-for-vm.sh $FAKE_QD" "$TRACE"
     grep -qx "install-tier3-for-vm.sh $FAKE_QD" "$TRACE"
@@ -150,7 +154,7 @@ tier5b"
 
 @test "resume: with broker..qsu recorded, runs ONLY sdk plus browser-bridge..tier5b" {
     mkdir -p "$STATE_DIR"
-    printf 'broker\nsession-manager\npolkit\npwd\nqsu\n' \
+    printf 'broker\nsession-manager\nuser-relay\npolkit\npwd\nqsu\n' \
         > "$STATE_DIR/installer-chain.state"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
@@ -183,6 +187,7 @@ install-tier5b-for-vm.sh"
     expected="install-sdk-for-vm.sh
 install-broker-for-qdwin.sh
 install-session-manager.sh
+install-user-relay-for-vm.sh
 install-polkit-agent-for-vm.sh
 install-pwd-for-vm.sh
 install-browser-bridge-for-vm.sh
@@ -201,7 +206,7 @@ install-tier5b-for-vm.sh"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
     run bash -c 'wc -l < "'"$TRACE"'"'
-    [ "$(echo "$output" | tr -d ' ')" = "14" ]
+    [ "$(echo "$output" | tr -d ' ')" = "15" ]
     grep -q "install-sdk-for-vm.sh" "$TRACE"
     grep -q "install-broker-for-qdwin.sh" "$TRACE"
     grep -q "install-tier5b-for-vm.sh" "$TRACE"

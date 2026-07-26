@@ -15,9 +15,15 @@ User=%i
 # any uid that has a policy granting `own` for the per-uid name.
 Environment=XDG_RUNTIME_DIR=/run/user/%i
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus
-ExecStart=/usr/bin/python3 /usr/local/lib/qdistro/qdistro_user_relay.py
+ExecStart=/usr/bin/python3 /usr/libexec/qdistro/qdistro_user_relay.py
 Restart=on-failure
 RestartSec=2
+# 78 (EX_CONFIG) means the system bus refused this identity's
+# org.qdistro.UserRelay.uid<N> by static policy — see
+# org.qdistro.UserRelay.conf. That is a fact about the config, not a
+# transient fault, so restarting every 2s only churns the unit and
+# floods the journal. Every OTHER failure still restarts.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target

@@ -88,6 +88,7 @@ meson compile -C build
 cd "$QD"
 INSTALLERS=(
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
+    "scripts/install/install-user-relay-for-vm.sh      $QD/user_relay"
     "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"
