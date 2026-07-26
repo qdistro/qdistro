@@ -444,6 +444,13 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
             raise BadArgument(f"tier2-template launch.argv not valid JSON: {e}") from e
     if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
         raise BadArgument("tier2-template launch.argv must be a list of strings")
+    # NUL is the launcher's argv separator (and cannot appear in a real exec'd
+    # argv element anyway), so it must never survive validation — json.loads
+    # happily decodes the \u0000 escape into one.
+    if any("\0" in a for a in argv):
+        raise BadArgument("tier2-template launch.argv entries must not contain NUL")
+    # Single-line argv is a stanza policy (the rendered launch stanza is one
+    # line per value); the launcher itself transports newlines fine.
     if any(("\n" in a or "\r" in a) for a in argv):
         raise BadArgument("tier2-template launch.argv entries must be single-line")
     return {
@@ -2619,8 +2626,13 @@ class _SiloStore:
             raise BadArgument("pod-app argv must be a list of strings")
         if len(argv) > 64:
             raise BadArgument("pod-app argv has too many entries")
-        # The launcher re-splits argv on newlines after the JSON round-trip, so
-        # an embedded newline would silently become TWO arguments.
+        # NUL is the launcher's argv separator (and cannot appear in a real
+        # exec'd argv element anyway), so it must never survive validation —
+        # json.loads happily decodes the \u0000 escape into one.
+        if any("\0" in a for a in argv):
+            raise BadArgument("pod-app argv entries must not contain NUL")
+        # Single-line argv is an API policy (the stanza we write is one line per
+        # value); the launcher itself transports newlines fine.
         if any(("\n" in a or "\r" in a) for a in argv):
             raise BadArgument("pod-app argv entries must be single-line")
         if any(len(a) > 4096 for a in argv):

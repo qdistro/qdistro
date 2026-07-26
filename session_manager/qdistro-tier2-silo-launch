@@ -118,13 +118,28 @@ esac
 
 # Re-split the JSON argv the daemon exported (no quoting hazards: it was
 # json.dumps'd). Empty/absent argv defaults to the workload binary name.
-mapfile -t APP_ARGV < <(python3 -c '
+#
+# NUL-separated, not newline-separated: `mapfile -t` on a newline-joined string
+# silently drops empty elements (and a trailing empty one entirely), so an argv
+# containing "" would reach the app as a DIFFERENT argv than the caller asked
+# for. NUL is the one byte an exec'd argv element cannot contain (and the
+# daemon's validator rejects it outright, including the \u0000 JSON escape), so
+# the split is exact. The trailing separator keeps the last element from being
+# merged.
+#
+# `wait "$!"` is load-bearing: mapfile reads a PROCESS SUBSTITUTION, not a
+# pipeline, so neither `pipefail` nor mapfile's own status notices a failing
+# splitter — a missing python3 or a decode error would silently yield an EMPTY
+# argv and we would exec anyway. Waiting on the producer puts its status under
+# `set -e`, so we fail closed instead.
+mapfile -d '' -t APP_ARGV < <(python3 -c '
 import json, os, sys
 argv = json.loads(os.environ.get("QD_APP_ARGV_JSON", "[]") or "[]")
 if not argv:
     argv = [os.environ["QD_WORKLOAD"]]
-sys.stdout.write("\n".join(argv))
+sys.stdout.write("".join(a + "\0" for a in argv))
 ')
+wait "$!"
 
 # Resolve spawn-tier2 (installed wrapper, else dev tree).
 SPAWN=""
