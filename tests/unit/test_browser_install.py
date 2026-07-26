@@ -173,7 +173,13 @@ class TestFirefoxInstallModes:
         assert body["allowed_extensions"] == ["custom@x"]
 
 
-# ---- Firefox canonicalization (no third FF artifact) -------------
+# ---- Firefox artifact canonicalization (no THIRD FF artifact) ----
+#
+# Terminology note: "canonical" here means only "one of the two known
+# Firefox artifacts", not "recommended". For v1 the recommended artifact is
+# the standalone qdfirefox build; the bundled tree is a legacy compatibility
+# artifact with no origin allowlist (J11). See
+# doc/browser-extension-install.md.
 
 # Sibling qdchrome-extension repo. It is Chromium-only: it must NOT ship
 # a Firefox manifest/build, because such a build historically declared
@@ -245,6 +251,86 @@ class TestFirefoxArtifactCanonicalization:
                 "this repo is Chromium-only")
 
 
+# ---- Chromium extension-id contract (R4) -------------------------
+
+# Chromium-family id of the canonical qdchrome extension. Derived from
+# the public key pinned in qdchrome-extension/manifest.chromium.json, so
+# it is identical for the packed CRX and for a developer-mode "Load
+# unpacked" of dist/chromium/ — which is what makes the v1 manual-load
+# flow work against a pre-written native-messaging manifest.
+CHROMIUM_EXTENSION_ID = "ammgnkddbnjdhikklpljgiclldedgncf"
+
+
+def _chromium_id_from_key(b64_key: str) -> str:
+    """Chromium's id derivation: first 16 bytes of SHA-256 over the DER
+    public key, hex, mapped 0-9a-f -> a-p."""
+    import base64
+    import hashlib
+    digest = hashlib.sha256(base64.b64decode(b64_key)).hexdigest()[:32]
+    return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+
+
+class TestChromiumExtensionIdContract:
+    """R4: the installer's Chromium default used to be the placeholder
+    ``qdistroqdistroqdistroqdistroaaaaaaaa`` — 36 chars, letters outside
+    [a-p], i.e. not a valid Chromium extension id at all. Every
+    Chromium-family native-messaging manifest written by the default
+    install path authorized an extension that cannot exist, so the real
+    (packaged or unpacked) extension was refused by the browser. These
+    tests pin the fix, including against the sibling repo's manifest key.
+    """
+
+    def test_default_is_a_wellformed_chromium_id(self):
+        assert bi.chromium_extension_id_is_wellformed(
+            bi.DEFAULT_CHROMIUM_EXTENSION_ID)
+        assert bi.DEFAULT_CHROMIUM_EXTENSION_ID == CHROMIUM_EXTENSION_ID
+
+    def test_placeholder_is_rejected_as_malformed(self):
+        assert not bi.chromium_extension_id_is_wellformed(
+            "qdistroqdistroqdistroqdistroaaaaaaaa")
+        assert not bi.chromium_extension_id_is_wellformed("a" * 31)
+        assert not bi.chromium_extension_id_is_wellformed("z" * 32)
+
+    def test_default_equals_id_derived_from_qdchrome_manifest_key(self):
+        """Cross-repo CONTRACT TEST: the installer default MUST equal the
+        id Chromium derives from the ``key`` pinned in the sibling
+        qdchrome manifest. Skipped only when that repo isn't checked out."""
+        repo = _qdchrome_repo()
+        if repo is None:
+            pytest.skip("qdchrome-extension repo not in tree")
+        manifest = repo / "manifest.chromium.json"
+        if not manifest.exists():
+            pytest.skip("qdchrome-extension/manifest.chromium.json missing")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        key = data.get("key")
+        assert key, (
+            "qdchrome-extension/manifest.chromium.json lost its 'key' field — "
+            "without it the unpacked/dev-mode extension id is derived from "
+            "the load path and the pinned allowed_origins stops matching")
+        assert bi.DEFAULT_CHROMIUM_EXTENSION_ID == _chromium_id_from_key(key)
+
+    def test_cli_writes_the_real_id_by_default(self, tmp_path):
+        rc = bi.main(["--home", str(tmp_path), "--browsers", "chromium"])
+        assert rc == 0
+        path = (tmp_path
+                / ".config/chromium/NativeMessagingHosts/qdistro.json")
+        body = json.loads(path.read_text())
+        assert body["allowed_origins"] == [
+            f"chrome-extension://{CHROMIUM_EXTENSION_ID}/"]
+
+    def test_cli_refuses_a_malformed_explicit_id(self, tmp_path):
+        with pytest.raises(SystemExit):
+            bi.main(["--home", str(tmp_path), "--browsers", "chromium",
+                     "--chromium-extension-id", "not-an-id"])
+        assert not (tmp_path / ".config").exists()
+
+    def test_cli_firefox_only_is_unaffected_by_chromium_id_check(
+            self, tmp_path):
+        rc = bi.main(["--home", str(tmp_path), "--browsers", "firefox",
+                      "--chromium-extension-id", "not-an-id"])
+        assert rc == 0
+
+
 # ---- manifest rendering ------------------------------------------
 
 class TestManifestRendering:
@@ -261,10 +347,10 @@ class TestManifestRendering:
     def test_chromium_shape(self):
         body = bi.render_chromium_manifest(
             "/usr/lib/qdistro/browser-bridge",
-            "qdistroqdistroqdistroqdistroaaaaaaaa")
+            CHROMIUM_EXTENSION_ID)
         assert body["name"] == "qdistro"
         assert body["allowed_origins"] == [
-            "chrome-extension://qdistroqdistroqdistroqdistroaaaaaaaa/"
+            f"chrome-extension://{CHROMIUM_EXTENSION_ID}/"
         ]
         assert "allowed_extensions" not in body
 

@@ -35,3 +35,9 @@
 # qterminator  0000000000000000000000000000000000000000
 # qnotebook    0000000000000000000000000000000000000000
 # qfileman     0000000000000000000000000000000000000000
+# The browser extensions are source-only pins: the bootstrap clones them but
+# builds/installs nothing from them. v1 has no signed extension distribution
+# channel, so the user MANUALLY loads an extension built from this pinned
+# source — see doc/browser-extension-install.md.
+# qdchrome-extension  0000000000000000000000000000000000000000
+# qdfirefox-extension 0000000000000000000000000000000000000000

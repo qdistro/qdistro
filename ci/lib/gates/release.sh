@@ -45,7 +45,11 @@ gate_release_manifest() {
     # Release-grade completeness: the bootstrap's fatal fetch set must be pinned
     # (scripts/install/qdistro-bootstrap.sh: `for repo in qdistro qdwin qdshell`).
     local CORE_REPOS="qdistro qdwin qdshell"
-    local OPTIONAL_REPOS="qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman"
+    # The two extension repos are source-only optional fetches (R4): nothing is
+    # built from them, but a v1 user hand-builds the extension they load out of
+    # that checkout, so an unpinned extension repo is worth the same advisory
+    # WARN as any other optional repo.
+    local OPTIONAL_REPOS="qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension"
 
     {
         echo "## release-manifest gate (R1)"
