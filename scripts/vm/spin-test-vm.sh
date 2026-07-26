@@ -44,11 +44,16 @@ IMG="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 
 log() { echo "[spin-test-vm] $*" >&2; }
 
-# Sanity-check sibling checkout.
+# Sanity-check sibling checkout. qnotebook lives in its own GitHub org, so the
+# hint has to name the owner per repo rather than assume `qdistro/`.
 for sib in qdwin qdshell qnotebook; do
     if [ ! -d "$PARENT/$sib" ]; then
+        case "$sib" in
+            qnotebook) sib_url="https://github.com/qnotebook/qnotebook.git" ;;
+            *)         sib_url="https://github.com/qdistro/$sib.git" ;;
+        esac
         log "ERROR: sibling repo '$sib' not found at $PARENT/$sib"
-        log "       Clone codeberg.org/qdistro/$sib next to qdistro/"
+        log "       Clone $sib_url next to qdistro/"
         exit 2
     fi
 done

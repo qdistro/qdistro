@@ -182,7 +182,7 @@ run_boot() { run bash "$BOOT" "$@"; }
     # Release/daily-driver invariant (security-hardening carry-forward
     # "Bootstrap and packaging" + 03/R2): the bootstrap must not fetch root
     # code, repos, or packages over non-TLS http://. The release installer
-    # uses TLS exclusively today (sibling repos clone from https://codeberg.org;
+    # uses TLS exclusively today (sibling repos clone from https://github.com;
     # disposable http:// VM staging lives ONLY in the separate
     # install-*-for-vm.sh dev helpers, never here). So the invariant is simple
     # and absolute: NO plaintext `http://` on any non-comment line of the
@@ -195,7 +195,43 @@ run_boot() { run bash "$BOOT" "$@"; }
     # Positive control: the sibling-repo URL resolver emits TLS git remotes,
     # so the test fails if the resolver is gutted rather than only on http://.
     run grep -vE '^[[:space:]]*#' "$BOOT"
-    echo "$output" | grep -q "https://codeberg.org"
+    echo "$output" | grep -q "https://github.com"
+}
+
+@test "hardening: bootstrap clone URLs point at the current forge (github.com) only" {
+    # The project migrated off Codeberg to GitHub (2026-07). A clone URL left
+    # on the old forge sends a clean-room install at a repo the project no
+    # longer publishes to, so pin the host: every git remote the bootstrap
+    # emits must be https://github.com/, and the retired forge must not
+    # reappear on any executable line.
+    run grep -nE '^[[:space:]]*[^#].*codeberg\.org' "$BOOT"
+    [ "$status" -ne 0 ] || { echo "retired forge (codeberg.org) in bootstrap:"$'\n'"$output" >&2; return 1; }
+
+    # Every `.git` clone URL emitted by the resolver is a github.com URL.
+    run grep -oE 'https://[A-Za-z0-9._/-]+\.git' "$BOOT"
+    [ "$status" -eq 0 ] || { echo "no clone URLs found in bootstrap" >&2; return 1; }
+    local url
+    while read -r url; do
+        [ -z "$url" ] && continue
+        case "$url" in
+            https://github.com/*) ;;
+            *) echo "non-github clone URL in bootstrap: $url" >&2; return 1 ;;
+        esac
+    done <<< "$output"
+
+    # The renamed repos must resolve to their POST-migration upstream names,
+    # not their local checkout names (qfileman -> qdfileman, qterminator ->
+    # qdterm), or a clean-room install 404s on clone.
+    eval "$(awk '/^repo_url\(\)/,/^}/' "$BOOT")"
+    [ "$(repo_url qdistro)" = "https://github.com/qdistro/qdistro.git" ]
+    [ "$(repo_url qdwin)" = "https://github.com/qdistro/qdwin.git" ]
+    [ "$(repo_url qdshell)" = "https://github.com/qdistro/qdshell.git" ]
+    [ "$(repo_url qdlocker)" = "https://github.com/qdistro/qdlocker.git" ]
+    [ "$(repo_url qdbrowser)" = "https://github.com/qdistro/qdbrowser.git" ]
+    [ "$(repo_url qdgreeter)" = "https://github.com/qdistro/qdgreeter.git" ]
+    [ "$(repo_url qfileman)" = "https://github.com/qdistro/qdfileman.git" ]
+    [ "$(repo_url qnotebook)" = "https://github.com/qnotebook/qnotebook.git" ]
+    [ "$(repo_url qterminator)" = "https://github.com/qterminator/qdterm.git" ]
 }
 
 @test "hardening: tier5 secctx wrapper is fail-closed by default" {

@@ -14,9 +14,9 @@ required.
 
 ```sh
 mkdir qdistro-org && cd qdistro-org
-git clone https://codeberg.org/qdistro/qdistro.git
-git clone https://codeberg.org/qdistro/qdwin.git
-git clone https://codeberg.org/qdistro/qdshell.git
+git clone https://github.com/qdistro/qdistro.git
+git clone https://github.com/qdistro/qdwin.git
+git clone https://github.com/qdistro/qdshell.git
 ```
 
 (The "no system install required" above is about the repo *layout* — siblings

@@ -1,6 +1,6 @@
 [Unit]
 Description=qdistro cursor sprite supplier for qdwin
-Documentation=https://codeberg.org/qdistro/qdistro
+Documentation=https://github.com/qdistro/qdistro
 # The qdshell user session ships as qdshell.service (the deploy-named
 # unit; the legacy noctalia-shell.service alias was retired 2026-06-16).
 After=qdshell.service

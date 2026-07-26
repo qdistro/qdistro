@@ -15,9 +15,9 @@ Start with [doc/overview.md](doc/overview.md) and
 [doc/glossary.md](doc/glossary.md) for those terms.
 
 The compositor lives in a separate repo:
-[codeberg.org/qdistro/qdwin](https://codeberg.org/qdistro/qdwin).
+[github.com/qdistro/qdwin](https://github.com/qdistro/qdwin).
 The desktop shell (a Noctalia QML fork) lives in
-[codeberg.org/qdistro/qdshell](https://codeberg.org/qdistro/qdshell).
+[github.com/qdistro/qdshell](https://github.com/qdistro/qdshell).
 
 ## Try qdistro
 
@@ -54,9 +54,9 @@ sudo zypper install -y git
 is available by default for wheel members on Tumbleweed):
 
 ```sh
-git clone https://codeberg.org/qdistro/qdistro.git
-git clone https://codeberg.org/qdistro/qdwin.git
-git clone https://codeberg.org/qdistro/qdshell.git
+git clone https://github.com/qdistro/qdistro.git
+git clone https://github.com/qdistro/qdwin.git
+git clone https://github.com/qdistro/qdshell.git
 cd qdistro
 sudo bash scripts/install/qdistro-bootstrap.sh --profile=dev
 ```
@@ -93,7 +93,7 @@ On next boot, the qdgreeter login screen appears on tty3. Log in as `admin`.
 The admin app (tray icon) shows active silos, pending approvals, and audit history.
 
 **6. Report back:**
-File issues at [codeberg.org/qdistro/qdistro/issues](https://codeberg.org/qdistro/qdistro/issues).
+File issues at [github.com/qdistro/qdistro/issues](https://github.com/qdistro/qdistro/issues).
 Most useful: "I ran step X and Y was unclear / broken." See
 [doc/support.md](doc/support.md) for what to include, how security issues are
 handled privately, and the [known-regressions](doc/known-regressions.md) ledger.
@@ -106,9 +106,9 @@ with relative paths (`../qdwin`, `../qdshell`). Clone them like this:
 
 ```sh
 mkdir qdistro-org && cd qdistro-org
-git clone https://codeberg.org/qdistro/qdistro.git
-git clone https://codeberg.org/qdistro/qdwin.git
-git clone https://codeberg.org/qdistro/qdshell.git
+git clone https://github.com/qdistro/qdistro.git
+git clone https://github.com/qdistro/qdwin.git
+git clone https://github.com/qdistro/qdshell.git
 ```
 
 Resulting tree:
@@ -121,9 +121,23 @@ qdistro-org/
 ```
 
 That three-repo set is the minimum developer layout. The bootstrap and full
-desktop image also consume first-party app repos as siblings when present:
-`qdgreeter`, `qdlocker`, `qdbrowser`, `qterminator`, `qnotebook`, and
-`qfileman`.
+desktop image also consume first-party app repos as siblings when present.
+Three of them are not `github.com/qdistro/<dirname>` — two live in their own
+org and two were renamed upstream — so clone them by URL, keeping the sibling
+directory name on the left:
+
+```sh
+git clone https://github.com/qdistro/qdgreeter.git       qdgreeter
+git clone https://github.com/qdistro/qdlocker.git        qdlocker
+git clone https://github.com/qdistro/qdbrowser.git       qdbrowser
+git clone https://github.com/qterminator/qdterm.git      qterminator
+git clone https://github.com/qnotebook/qnotebook.git     qnotebook
+git clone https://github.com/qdistro/qdfileman.git       qfileman
+```
+
+The bootstrap clones these itself (`repo_url()` in
+`scripts/install/qdistro-bootstrap.sh` holds the same mapping); the commands
+above are only for a manual sibling checkout.
 
 Build order: `qdwin` first (the umbrella's daemons compile against qdwin's
 protocol XML at `../qdwin/qdwin/*.xml`), then `qdistro`, then `qdshell`. See
