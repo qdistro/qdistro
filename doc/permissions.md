@@ -13,7 +13,7 @@
  |
  v
  qdistro-admin-broker: policy pipeline
- 1. Declarative rules (YAML / TOML) -> allow / deny
+ 1. Declarative rules (YAML only) -> allow / deny
  2. Python hooks (if rules inconclusive) -> same actions
     [not reachable on a stock install — see "Python hooks" below]
  3. admin approval queue (the Qt admin app / admin TUI decide)
@@ -45,8 +45,13 @@ advertise. Twenty action IDs exist in the tree:
 | generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
 | `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
 
-So **ten actions ship and ten do not**. Every shipping one is a `pkexec`-style
-privileged-helper gate for a single subsystem; none is a cross-silo policy verb.
+So **ten actions ship and ten do not**. Each is scoped to a single subsystem;
+none is a cross-silo policy verb. They are not all the same shape:
+only the tier-3 and tier-5 actions carry an
+`org.freedesktop.policykit.exec.path` annotation, i.e. are true `pkexec` helper
+gates. `pwd.unlock` and the five print actions define an authorization ID with
+no exec path, checked by the owning daemon; qdbrowser's ten (uninstalled) are
+checked from application code via `pkcheck`.
 
 **These actions do reach the qdistro agent**, and that follows from their
 `<defaults>`, not from any `.rules` file. An action invokes whatever
@@ -442,8 +447,11 @@ stated from the lock side.
 qdistro implements a **custom portal backend** on top of this framework.
 Upstream Flatpak / GTK / Qt apps already use portals for file-picker, access
 prompts, and notifications. The qdistro portal backend routes those requests
-through the broker instead of the usual same-user approval. It is a PyQt
-service registered as `org.freedesktop.impl.portal.qdistro`.
+through the broker instead of the usual same-user approval. It is a
+`dbus-python` + GLib service (not PyQt, as this page previously said —
+`daemons/qdistro_portal_backend.py` imports `dbus`, `dbus.service` and
+`gi.repository.GLib`, and no Qt at all) registered as
+`org.freedesktop.impl.portal.qdistro`.
 
 > **Status (2026-07-26): ships, with a narrower interface set than portals
 > generally imply.** `portal-backend` is an unconditional step in the bootstrap
@@ -483,10 +491,10 @@ Implemented and exercised by tests today:
   ordering, hot-reload via inotify and SIGHUP, `SaveRule` validation,
   `ReloadRules`, `ListRules`.
 - Signals: `RequestPending`, `RequestDecided`, `ApprovalRevoked` (one
-  per row), `RulesReloaded`. `ApprovalRevoked` is **emitted but not
-  consumed** — no component tears anything down on it, so revocation
-  takes effect at the next check, not immediately (see "Revocation as a
-  signal").
+  per row), `RulesReloaded`. `ApprovalRevoked`'s only subscriber is the
+  Qt admin app, which refreshes its Cache tab and tray icon; **no
+  component tears anything down on it**, so revocation takes effect at
+  the next check, not immediately (see "Revocation as a signal").
 - Scope vocabulary: `once`, `1h`, `24h`, `forever`, `forever_exe`,
   `forever_argv`, `forever_basename`, `forever_prefix`.
 - Cross-silo clipboard policy (`CheckClipboardTransfer`): same-silo
