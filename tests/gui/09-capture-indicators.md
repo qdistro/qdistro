@@ -509,7 +509,7 @@ outranks every other finding in this scenario.
 **Assert (10.2) — the known gap, asserted as current behaviour:** the banner
 is on the PRIMARY output only, because qdlocker creates a single fullscreen
 window and qdwin fullscreens it onto `qdwin_primary_output()`. See
-`todo/fable-release/11-j28-multi-output-lock-indicators.md`. **When per-output
+`todo/fable-release/12-j28-multi-output-lock-indicators.md`. **When per-output
 locker windows land, 10.2 inverts** — the banner must then be present on every
 head, and this step becomes its gate.
 

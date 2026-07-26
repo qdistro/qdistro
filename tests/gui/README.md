@@ -49,7 +49,7 @@ bash -x 01-lock-cycle.md     # or feed step-by-step to an agent
   real mic/camera/screencast observed while locked, capture start and
   stop under lock, observer timeout must fail *visible*, `Stopping`
   silo egress, locked-state restart, and the known multi-output gap
-  (see `todo/fable-release/11-j28-multi-output-lock-indicators.md`).
+  (see `todo/fable-release/12-j28-multi-output-lock-indicators.md`).
 
 ## What these tests are NOT
 
