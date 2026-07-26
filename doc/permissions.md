@@ -142,36 +142,51 @@ Briefly:
  (Approve / Deny / Rule-from-this / Defer).
 - Non-modal — admin's other work is never blocked.
 - Keyboard-first triage; notifications don't steal focus.
-- Scope picker (once / 1h / 24h / forever / forever-this-argv) in the detail
- pane.
+- Scope picker in the detail pane. The full vocabulary is `once`, `1h`, `24h`,
+ `forever`, `forever_exe`, `forever_argv`, `forever_basename`,
+ `forever_prefix`. Note there is **no `per-session` scope** — nothing is
+ revoked on session stop.
 
 ## Declarative rules
 
-Admin authors rules in YAML or TOML, loaded by `qdistro-admin-broker` at
-startup and on SIGHUP.
+Admin authors rules in **YAML** (`.yaml` / `.yml`) under
+`/etc/qdistro/rules.d/`, loaded by `qdistro-admin-broker` at startup, on
+SIGHUP, and on inotify change. **TOML is not supported** — this page previously
+offered it, and a `.toml` file is simply not read.
 
 Rule shape:
 
 ```yaml
-- match:
-    action: org.qdistro.clipboard.send
-    source_user: work-user
-    target_user: dev-user
-    mime: text/plain
+- name: allow-work-to-dev-plain-text
+  match:
+    action: "qdistro.clipboard.transfer:work-user:dev-user"
+    mime_type: text/plain
   decision: allow
 
-- match:
-    action: org.qdistro.device.camera.claim
-    user: work-user
-    app: /usr/bin/notebook
+- name: deny-notebook-camera
+  match:
+    uid: 2000
+    exe: /usr/bin/notebook
   decision: deny
 ```
 
-`decision:` accepts exactly `allow` and `deny`
-(`qdistro_admin_rules._VALID_DECISIONS`); rule loading raises on anything else,
-so `prompt`, `allow_session`, `transform`, `warn`, `contaminate` and
-`declassify` are **not writable as rule decisions today** — they are model
-vocabulary, described below, with no rule-engine implementation.
+The loader is **strict and fail-per-entry**: an unrecognised key raises and the
+entry is dropped with a message in `load_errors()`, while the rest of the file
+loads. So a rule that looks plausible but uses a key the engine does not know
+silently does not apply. The exact vocabulary:
+
+- Top-level keys: `name`, `decision`, `match`, `scope`, `rationale`.
+- `match` keys: `uid`, `action`, `exe`, `app_id`, `sandbox_engine`,
+  `mime_type`, `argv_exact`, `argv_basename`, `argv_prefix`. Earlier examples
+  on this page used `source_user`, `target_user`, `mime`, `user` and `app` —
+  **none of those exist**, and a rule using them would have been rejected at
+  load. Source/destination silo is expressed inside the clipboard `action`
+  string, not as separate keys.
+- `decision:` accepts exactly `allow` and `deny`
+  (`qdistro_admin_rules._VALID_DECISIONS`). `prompt`, `allow_session`,
+  `transform`, `warn`, `contaminate` and `declassify` are **not writable as
+  rule decisions today** — they are model vocabulary, described below, with no
+  rule-engine implementation.
 
 Rules are matched top-to-bottom; first match wins. Unmatched requests do **not**
 fall through to a polkit prompt — the broker has no polkit escalation path.
