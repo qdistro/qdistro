@@ -70,8 +70,10 @@ def _bundled_firefox_extension_id() -> str:
 # refuse the canonical bundled extension.
 DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
 
-# The *standalone* qdfirefox extension is a SEPARATE artifact shipped from
-# the ``qdfirefox-extension`` repo; it declares a DIFFERENT gecko id
+# The *standalone* qdfirefox extension is a SEPARATE artifact, MANUALLY built
+# by the user from the ``qdfirefox-extension`` repo (v1 has no signed
+# extension channel and no installer ships it — see
+# ``doc/browser-extension-install.md``); it declares a DIFFERENT gecko id
 # (``qdistro-firefox@qdistro.local``) in its own ``manifest.json``. A user
 # who installed that standalone extension (rather than the bundled MV2
 # build) needs the native-messaging host to authorize THAT id, or the
@@ -86,10 +88,13 @@ DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
 # ``qdfirefox-extension/manifest.json`` when that repo is checked out.
 STANDALONE_FIREFOX_EXTENSION_ID = "qdistro-firefox@qdistro.local"
 
-# Firefox install modes. ``bundled`` authorizes the MV2 extension built
-# next to this installer (manifest.firefox.json); ``standalone`` (a.k.a.
-# the native-host install mode) authorizes the separately-shipped
-# qdfirefox extension. Each maps to its own default extension id so the
+# Firefox install modes. ``bundled`` authorizes the LEGACY MV2 extension
+# built next to this installer (manifest.firefox.json) — the flat tree with
+# no ``src/``/``gate.js`` and no origin allowlist that J11 found the installer
+# copying to /usr/share/qdistro/browser-extension/; ``standalone`` authorizes
+# the maintained qdfirefox extension the v1 install doc tells users to build.
+# NOTE the default below is still ``bundled`` for compatibility: v1 users must
+# pass ``--firefox-mode standalone`` explicitly. Each maps to its own default extension id so the
 # right ``allowed_extensions`` is written for what the user actually has.
 FIREFOX_MODE_IDS: dict[str, str] = {
     "bundled": DEFAULT_FIREFOX_EXTENSION_ID,

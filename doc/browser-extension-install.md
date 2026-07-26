@@ -47,11 +47,11 @@ built or root-installed from those trees.
 
 Be precise about what that buys you, because the next section depends on it:
 
-- The pin is verified **at fetch time**, against the commit *object*. It is
-  not re-checked when you later build, and neither `verify_repo_pin` nor
-  anything else rejects a working tree that has been modified or has
-  untracked files added after the checkout. Re-verify before you build (the
-  commands are in the next section).
+- The pin is verified **at fetch time**. `verify_repo_pin` does reject a
+  dirty or untracked checkout at that point, and the hardened bootstrap keeps
+  the tree root-owned afterwards (`assert_trusted_tree`). What it does **not**
+  do is re-run when you later build — so the recipe below re-checks HEAD and
+  cleanliness itself, immediately before exporting.
 - Because these repos are **optional**, a failed clone warns and the install
   continues — you then simply have no extension source and no browser
   integration. Under `--skip-sources` only *present* checkouts are pin-
