@@ -42,9 +42,14 @@ libweston is picked because:
  PipeWire + wayland-nested simultaneously, one config) is first-class.
 
 5. **Built-in RDP / capture.** Weston upstream ships `backend-rdp` (FreeRDP),
- `backend-pipewire`, and `weston_capture_v1`. RDP is qdistro's forwarding
- transport across the board — mature codec, native audio and clipboard
- channels, matches Mutter, KDE screen-share, and WSL2's `wslg` path.
+ `backend-pipewire`, and `weston_capture_v1` — mature codec, native audio and
+ clipboard channels, matching Mutter, KDE screen-share, and WSL2's `wslg` path.
+ In practice qdistro's shipped forwarding path is a standalone FreeRDP shadow
+ server (`daemons/forward/qdistro-forward.c`), not weston's `backend-rdp`;
+ `rdp-backend.so` is mapped in the compositor unit and used by diagnostics and
+ the test harness, but it is not what carries product traffic. Availability of
+ the upstream backend remains a reason to pick libweston; "RDP everywhere" is
+ not a description of the current wiring.
 
 6. **Effects outsourcing is architecturally correct.** Rich in-compositor
  effects are attack surface in the TCB. For qdistro, effects belong
@@ -72,33 +77,46 @@ Alternatives evaluated and rejected:
 ```
 +----------------------------------------------------+
 | qdshell: panels, system tray, notifications, |
-| admin panel, menus, locker UI |
-| (Qt + QML) |
-| |
-| Per-uid satellite clients: |
-| Qt-rendered window chrome, context menus|
-| (one per active uid) |
+| admin panel, menus |
+| (Qt + QML; exactly one instance, admin's) |
+| qdlocker: lock UI (separate PyQt process) |
 +----------------------------------------------------+
-| Session / policy glue: |
-| - lock state, render-policy decisions |
-| - nested-session lifecycle |
-| - qbus-admin endpoint |
-| - polkit agent integration |
-| - qdwin_shell_v1 private protocol |
-| (Python via CFFI against libweston) |
+| Out-of-process policy peers (Python / C++): |
+| - qdistro-admin-broker (org.qdistro.AdminBroker1)|
+| - qdistro-session-manager |
+| - qdistro-polkit-agent |
+| - qdshell's qml-plugin (C++), which speaks |
+| qdwin_shell_v1 on qdshell's behalf |
 +----------------------------------------------------+
 | qdwin: libweston plugin (C) |
-| - private protocol server |
-| - peer-uid enforcement |
+| - private protocol server (qdwin_shell_v1, |
+| qdwin_locker_v1, secctx, nested manager) |
+| - lock state + render policy |
 | - holding-state + chrome compositing |
 | - window placement / tiling policy |
 +----------------------------------------------------+
-| libweston core (C, upstream): |
+| libweston core (C, upstream + vendored patches): |
 | surfaces, input, output, DRM/KMS, damage |
 | tracking, cursor, seat, XWayland, backends |
 | (DRM, headless, wayland, RDP, PipeWire) |
 +----------------------------------------------------+
 ```
+
+Three things this diagram used to show that do not exist, called out because
+they change what a reader assumes is enforced:
+
+- **There is no Python-via-CFFI layer against libweston.** Lock state and
+ render policy live in C inside `qdwin-shell.so`; the Wayland-side glue lives
+ in C++ in `qdshell/qml-plugin/qdwin-binding.cpp`; qdlocker uses pywayland. The
+ only CFFI artefact in the tree is a dead Phase-6.0 spike whose cdef surface is
+ three log/version symbols, which no meson file, installer, or unit references.
+- **There are no per-uid satellite clients.** See "Single-shell-client model".
+- **"qbus-admin" is not a component.** The broker's bus name is
+ `org.qdistro.AdminBroker1`; "qbus" is shorthand for qdistro's D-Bus
+ conventions ([qbus.md](qbus.md)), not a daemon.
+- **"Peer-uid enforcement" is not a property of the view-stream path.** See
+ "Effects live outside the compositor" below. qdwin does enforce per-uid
+ visibility on privileged *globals*, which is a narrower thing.
 
 Qt and QML live strictly above the core; no Qt inside the pixel-pushing path.
 The shell plugin is small C (qdistro-specific policy); libweston's plumbing
@@ -119,10 +137,12 @@ Python + Qt modifiability for everything above it.
  shell — the script beats new C: it keeps the same runtime-editable
  transparency as the Python layer.
 
-- **Out-of-process consumers and satellite tooling** — qdshell, per-uid
- policy tools, effects consumers, install-time bindings, tests, anything
- that talks to the compositor over Wayland or qbus. **Python (+ PyQt6 where
- UI matters).** Fast iteration, memory safety, rich testing libraries.
+- **Out-of-process consumers and satellite tooling** — qdshell, qdlocker,
+ policy daemons, effects consumers, tests, anything that talks to the
+ compositor over Wayland or D-Bus. **Python (+ PyQt6 where UI matters)**, with
+ C++ where a Qt/QML plugin is the right shape (qdshell's `qml-plugin` speaks
+ the raw Wayland protocol). Fast iteration, memory safety, rich testing
+ libraries.
 
 The split is load-bearing for the security posture: keep the TCB compact and
 in C where auditability matters; push everything else outward where a different
@@ -130,15 +150,35 @@ language pays for itself.
 
 ## Chrome and content are independent
 
-Window decorations (titlebar, borders, buttons, context menus) and the content
-the user is working with (the application's `wl_surface`) are **independent
-compositional units**, in the same sense that a browser's UI chrome and the
-webpage are independent.
+> **Status: the protocol ships; no client uses it.** `attach_decoration` and the
+> four-surface chrome model are implemented in `qdwin-shell-v1.xml` and in the
+> qdwin server, and exercised by the C test client
+> (`qdwin/test-client/qdwin-probe.c`). **Nothing in qdshell calls it.**
+> `qdwin-binding.cpp` has no `attach_decoration` path, and its `chrome_button`
+> listener is an empty stub with no QML consumer. qdwin says so itself at the
+> `toplevel_added` path: "qdshell … does not attach qdwin SSD chrome for
+> ordinary local applications", and it deliberately does not require a
+> decoration request before a normal surface becomes visible.
+>
+> **What this means in practice.** Ordinary local applications on qdistro are
+> **undecorated by qdwin** and fall back to whatever client-side decoration they
+> draw themselves. qdshell does set a per-toplevel silo colour on qdwin
+> (`setBorderColor` → `qdwin_toplevel_border_rgba`), but qdwin's only reader of
+> that field is the `attach_decoration` handler — with no client attaching
+> decoration, the colour is stored and never painted. qdwin's own source calls
+> the SSD path "stub today". So there is no compositor-drawn trusted chrome
+> carrying silo identity on a v1 desktop; the four properties listed below are
+> properties of the design and are vacuous until a decorating client exists.
 
-- **Decoration is owned by qdshell.** The four chrome `wl_surface`s
- (north / east / south / west) are created by qdshell as a normal
- `wl_compositor.create_surface` user, attached via private protocol, and
- re-painted on qdshell's own schedule. qdshell receives input events on
+Window decorations (titlebar, borders, buttons, context menus) and the content
+the user is working with (the application's `wl_surface`) are designed as
+**independent compositional units**, in the same sense that a browser's UI
+chrome and the webpage are independent.
+
+- **Decoration is intended to be owned by qdshell.** The four chrome
+ `wl_surface`s (north / east / south / west) would be created by qdshell as a
+ normal `wl_compositor.create_surface` user, attached via private protocol, and
+ re-painted on qdshell's own schedule. qdshell would receive input events on
  those surfaces through standard `wl_pointer`, not a tunnelled extension.
 
 - **Content is owned by the application.** The content `wl_surface` receives
@@ -168,12 +208,27 @@ Properties this guarantees:
 
 ## Single-shell-client model
 
-Each uid runs one qdshell process. qdshell:
+> **Status: there is exactly one qdshell — admin's.** Per-uid qdshell instances
+> do not exist. The only per-uid unit is `qdshell-session-<name>@<uid>.service`,
+> whose helper joins the silo cgroup, drops privileges, and execs
+> `dbus-run-session sleep infinity` as a cgroup keep-alive; its own header says
+> "Real qdshell wiring layers on top of this in a follow-up task." A silo runs
+> no shell and no compositor client
+> ([sessions.md](sessions.md#d-bus-surface)).
+>
+> The security reading: qdwin's single bound shell is a single point of trust
+> today, and `qdwin_shell_require_bound()` — the gate on the private protocol —
+> means "is this admin's qdshell", not "is this the shell for the uid that owns
+> the object being asked about". Any doc statement that relies on separating one
+> uid's shell from another's is describing a future topology.
+
+The design is one qdshell process per uid. qdshell:
 
 - Binds `wl_seat` / `wl_pointer` directly; listens for chrome-surface input
  through standard Wayland.
 - Paints chrome on its own schedule, driven by `toplevel_state` and
- `toplevel_geometry` events from qdwin.
+ `toplevel_geometry` events from qdwin (design; see the chrome status note
+ above — no chrome is attached today).
 - Hosts the panel, menus, notifications, and admin overlays.
 
 Replacing qdshell with a different decorator (different glyphs, different
@@ -185,16 +240,29 @@ to paint and place via the private protocol.
 
 `wp_security_context_v1` and qdistro secctx tags provide authenticated client
 identity metadata: sandbox engine, app id, instance id, silo, and process
-identity. They are not isolation by themselves. The compositor still enforces
-policy by deciding which clients may use privileged protocols such as
-screencopy, virtual input, clipboard transfer, activation, and lock-time
-capture.
+identity. They are not isolation by themselves. The compositor enforces policy
+by deciding which clients may see and use privileged protocols. Precisely what
+that covers:
+
+| Surface | Enforced? |
+|---|---|
+| Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and the bind handlers additionally pin `allowed_ime_uid` + exe. |
+| Security-context manager | **Yes** — visible only to the bound shell or the authorized `qdistro-secctx-exec` helper. |
+| Clipboard transfer | **Yes** — set-time and receive-time gates into the broker ([clipboard.md](clipboard.md)), with the caveats recorded there. |
+| `xdg_activation_v1` | **Yes** — cross-uid activation stalls on a fail-closed broker check. |
+| `weston_capture_v1` (whole-output pixels) | **Global hidden from all but the bound shell**, and libweston defers access to a screenshot-authority callback that qdwin never registers — so capture requests default-deny today. The visible-but-unauthorized posture is a *latent* hole: registering any authority would restore capture to every client that can see the global, with no pin. |
+| Per-view capture (`qdwin_view_stream_v1`) | **No per-uid authorization.** See "Effects live outside the compositor". |
+| Lock-time capture | **No gate exists.** Lock state is not consulted on any capture or virtual-input path ([sessions.md](sessions.md)). |
+| screencopy | **Not applicable — qdistro implements no screencopy protocol.** There is no wlr-screencopy in the tree; earlier wording here named a protocol that does not exist. |
 
 The compositor must work across a wide range of graphics stacks — not just
 "modern GPU on bare metal." A large share of qdistro development and a real
 share of deployment happens inside VMs where GPU acceleration ranges from
 "virgl with accel3d=yes" to "virtio-gpu without 3D" to "no GPU at all."
-The compositor **does not require GPU acceleration**.
+The compositor is written so as not to depend on GPU acceleration — but see the
+renderer note below: **what ships pins `renderer=gl`**, so the pixman targets
+listed here are a design goal that the shipped configuration does not currently
+select.
 
 Target environments, in decreasing order:
 
@@ -210,10 +278,20 @@ Target environments, in decreasing order:
 
 Implications for the compositor:
 
-- **No renderer lock-in.** Auto-select between GL (native or virgl) and pixman
- at startup based on what the kernel/Mesa offers. libweston does this out of
- the box; the shell plugin contributes no renderer code and must not assume
- GL is present.
+- **No renderer lock-in *in the plugin*.** The shell plugin contributes no
+ renderer code and must not assume GL is present — that part is true and is
+ the property worth keeping.
+
+ **But the shipped configuration is not auto-selecting.**
+ `install-qdwin-session-for-vm.sh` writes `renderer=gl` into `weston.ini`
+ unconditionally, and `deploy/qdwin-compositor.service` documents why: GL is
+ required for the virtio-gpu hardware cursor plane, because libweston only
+ allocates the GBM cursor BOs on the GL path, and under pixman the cursor is
+ software-composited into the scanout and doubles with the SPICE host cursor.
+ GL runs on a software-only virtio-gpu via llvmpipe-over-GBM. There is no
+ startup auto-select between GL and pixman. Target 4 above ("no GPU /
+ framebuffer-only") is therefore untested-as-shipped, and a commit that breaks
+ the pixman path will not be caught by the default install.
 - **Effects are out-of-process.** Rich in-compositor effects disproportionately
  penalize software-rendered targets.
 - **No assumption of >60 Hz compositing.** Animations live in Qt shell clients
@@ -224,9 +302,13 @@ Implications for the compositor:
 ## Effects live outside the compositor
 
 Rich per-window visual effects (blur, shadows, rounded corners, colour
-transforms, magnifiers, recording overlays) are implemented as **separate
-Wayland clients** that subscribe to per-view pixel streams, apply shaders in
-their own process, and render the result as normal toplevel surfaces.
+transforms, magnifiers, recording overlays) are **designed to be** separate
+Wayland clients that subscribe to per-view pixel streams, apply shaders in
+their own process, and render the result as normal toplevel surfaces. **No such
+client exists in the tree**; the only `subscribe_view_stream` callers are a C
+test client and the VM-gated multimachine components. The architectural
+decision below is real and load-bearing; the effects tooling it anticipates is
+unwritten.
 
 The qdistro compositor ships **no built-in effects framework**. This is the
 opposite of KWin / Hyprland / Wayfire, which bake effect pipelines into the
@@ -245,34 +327,91 @@ Why:
  the compositor.
 4. **Crash blast radius** stays per-tool, not session-wide.
 
-The shared primitive is a private `qdistro_view_stream_v1` Wayland protocol
-that exposes per-view capture with peer-uid authorization. A uid's effects,
-recording, or RDP tools see only that uid's windows. Admin override goes
-through the broker with explicit approval and audit. Transport reuses
-libweston's `backend-pipewire` for the common case; a DMA-BUF direct path
-exists for low-latency same-GPU consumers.
+The shared primitive is a private Wayland protocol —
+`qdwin_view_stream_v1`, obtained via `qdwin_shell_v1.subscribe_view_stream`
+(this page previously named it `qdistro_view_stream_v1`, which does not exist).
 
-**Simple-effects escape hatch.** A small patch to `gl-renderer.c` accepts a
-per-surface 4×4 colour-matrix uniform, plumbed through the shell protocol. The
-matrix is the *only* effect mechanism supported in-compositor. Allowed:
-colour-matrix transforms (invert, tint, desaturate, hue shift) and per-surface
-alpha. Forbidden: anything that samples neighbouring pixels (no blur, no
-shadow, no convolution), and anything user-provided as raw GLSL.
+> **Status: per-view capture has no peer-uid authorization.** The only gate on
+> `qdwin_handle_subscribe_view_stream` is `qdwin_shell_require_bound()`. Once a
+> client is the bound shell, it may subscribe to **any** toplevel handle,
+> regardless of which uid owns that window. `qdwin-shell-v1.xml` states this
+> outright: "Admin approval is NOT done here … qdwin trusts its bound shell …
+> A future non-shell caller would gate behind a separate allowed-uid check."
+> There is no broker call, no approval, and no audit row on this path.
+>
+> **The residual risk this leaves.** The claim "a uid's effects, recording, or
+> RDP tools see only that uid's windows" is **not** enforced by the compositor.
+> What contains it today is topology, not policy: there is exactly one bound
+> shell (admin's), silos run no shell, and no effects or recording client
+> exists — so there is currently no non-admin subscriber to constrain. That is a
+> containment-by-absence argument, and it expires the moment a per-uid shell or
+> a second view-stream consumer ships. The allowed-uid check the protocol
+> anticipates must land before then.
+>
+> One thing the path *does* enforce per-stream: `allow_input` is per handle, and
+> when it is off the stream drops pointer, keyboard **and axis/scroll** events
+> — stricter than [window-handoff.md](window-handoff.md) previously described.
+
+Transport reuses libweston's `backend-pipewire` for the common case. **There is
+no DMA-BUF direct path**: `dmabuf` does not appear in `qdwin.c`, in
+`qdwin-shell-v1.xml`, in `daemons/forward/`, or in qdshell's qml-plugin. Adding
+one for low-latency same-GPU consumers remains a design option, not a shipped
+capability.
+
+**Simple-effects escape hatch — designed, not built.** The plan is a small patch
+to `gl-renderer.c` accepting a per-surface 4×4 colour-matrix uniform, plumbed
+through the shell protocol, as the *only* effect mechanism supported
+in-compositor: colour-matrix transforms (invert, tint, desaturate, hue shift)
+and per-surface alpha allowed; anything that samples neighbouring pixels (blur,
+shadow, convolution) and anything user-provided as raw GLSL forbidden.
+
+None of it exists. The vendored `gl-renderer.c` carries exactly one qdistro
+edit and it is capture retention, not a colour matrix. There is no per-surface
+matrix uniform, no per-surface alpha request, and no shell-protocol request to
+carry either. The *policy* — no user GLSL in the TCB, no neighbour-sampling
+effects — is the part that is decided; the mechanism is unimplemented.
 
 ## Vendored libweston
 
-qdistro vendors a small libweston patchset alongside its plugin. The vendoring
-is narrowly scoped: a `NULL`-parent fix in the popup-grab path that closes a
-crash class for popups whose parent has gone away before the grab dispatches.
-Stock libweston runs the compositor; the vendored `.so` is loaded only where
-the patch is needed and the result is regression-tested against both stock
-and vendored binaries.
+qdistro carries a **full weston-16 source tree** under
+`qdwin/libweston-vendored/src`, patched in place, and builds its own
+`libweston-16.so.0`, `drm-backend.so` and `gl-renderer.so` from it. Both of the
+claims this section used to make — "narrowly scoped to a `NULL`-parent popup
+fix" and "stock libweston runs the compositor" — are wrong, and both understated
+how much of the TCB qdistro owns.
 
-This trade-off is preferred over a full fork because:
+**What is actually patched.** Four changes are recorded as reproducible
+`.patch` files (`0001` NULL-parent xdg_popup, `0002` headless inert seat,
+`0003` headless 96-dpi physical size, `0004` install the XWayland API header),
+plus in-tree edits that have no `.patch` record: a positioner-snapshot security
+change with a new `qdwin-xdg-constrain.h` kernel under
+`src/libweston/desktop/`, a new public API entry in
+`include/libweston/desktop.h`, a virtio-gpu cursor-hotspot fix in
+`backend-drm/kms.c`, and a capture-retention edit in
+`renderer-gl/gl-renderer.c`.
 
-- The patch is small and reviewable.
-- Upstream libweston is conservatively maintained — full forks rapidly diverge.
-- Carrying a vendored `.so` is cheaper than carrying a fork.
+**What is actually loaded.** `deploy/qdwin-compositor.service` pins the vendored
+build **unconditionally**, not "only where the patch is needed":
+`LD_LIBRARY_PATH` points at `/usr/libexec/qdistro/qdwin-libweston/lib64`, and
+`WESTON_MODULE_MAP` routes `drm-backend.so` and `gl-renderer.so` to the vendored
+copies. (The remaining backends — headless, pipewire, rdp, wayland, x11,
+xwayland, color-lcms — stay on the distro packages.) The DRM backend must run
+against the vendored core it was built against, so this is not separable.
+
+**The residual risk this leaves.** qdistro is on the hook for a weston fork's
+security maintenance, not a patch's: distro updates to `libweston-16` do **not**
+reach the compositor's core, DRM backend, or GL renderer. Rebasing on an
+upstream weston bump is a tree-level operation. The in-tree edits with no
+`.patch` record are the ones most likely to be lost in such a rebase, and the
+positioner-snapshot change is security-relevant.
+
+The original rationale for vendoring rather than LD_PRELOADing still holds and
+is worth keeping: there is no separate `libweston-desktop.so`, and the
+protocol handler that needed patching
+(`weston_desktop_xdg_surface_protocol_get_popup`) is `static`, so its address
+never crosses a public symbol boundary and cannot be interposed. Replacing the
+whole library was the only shape that worked. What changed is that the
+replacement has since grown well past one patch.
 
 ## No scene graph
 
