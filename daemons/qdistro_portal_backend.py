@@ -44,7 +44,6 @@ import signal
 import stat
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 import dbus
@@ -53,12 +52,20 @@ import dbus.service
 from gi.repository import GLib
 
 # Shared /proc identity readers (anti-PID-reuse starttime anchor, exe
-# resolution). Lives under broker/; add it to sys.path so this daemon can
-# attest the *real* D-Bus sender (the XDG portal frontend) rather than
-# trusting an arbitrary same-session caller to be the frontend.
-_BROKER_DIR = Path(__file__).resolve().parent.parent / "broker"
-if str(_BROKER_DIR) not in sys.path:
-    sys.path.insert(0, str(_BROKER_DIR))
+# resolution), used to attest the *real* D-Bus sender (the XDG portal
+# frontend) rather than trusting an arbitrary same-session caller.
+#
+# No sys.path manipulation: the module resolves from this file's own
+# directory in BOTH layouts. Installed, install-portal-backend-for-vm.sh
+# copies broker/qdistro_proc_identity.py alongside this daemon into
+# /usr/lib/qdistro/daemons/ and systemd execs this file directly, so it
+# is sys.path[0]. In the checkout, pyproject.toml puts broker/ on
+# pytest's pythonpath.
+#
+# This used to prepend __file__/../../broker, which installed resolved to
+# /usr/lib/qdistro/broker — a directory nothing creates. The insert was
+# dead but read as the working wiring, hiding where resolution actually
+# comes from; the same shape was a LIVE break in user_relay (F4).
 try:
     import qdistro_proc_identity as _pi  # type: ignore[import-not-found]
 except Exception:  # noqa: BLE001 — readers are best-effort; absence = DENY

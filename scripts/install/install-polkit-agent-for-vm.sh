@@ -50,25 +50,46 @@ else
     echo "[install-polkit-agent] keeping existing $DEST_ETC/polkit-agent.conf"
 fi
 
-# Reload + enable (per-user, scoped to admin uid 1000 = admin).
-systemctl --user daemon-reload 2>/dev/null || true
+# Enable.
+#
+# `systemctl --global enable`, NOT the per-user `runuser -u admin --
+# systemctl --user enable --now` this used to do. That form failed on every
+# install and said OK anyway. This installer is chain step 5
+# (qdistro-bootstrap.sh) and the admin user manager does not exist until the
+# session is installed much later (fresh-vm-bootstrap.sh:462), so the enable
+# died with
+#
+#     Failed to connect to user scope bus via local transport: No such file
+#
+# — deterministically, on the release path, swallowed by the `| tail -5 ||
+# true` and followed by the script's own "OK" line. Nothing ever wrote the
+# .wants symlink, so the agent was disabled and had never run. VM-verified
+# 2026-07-26.
+#
+# --global writes /etc/systemd/user/qdwin-session.target.wants/ and needs no
+# running user manager, so it cannot fail for this reason. It applies to every
+# uid, which is correct and costs nothing: the unit is WantedBy the desktop
+# session target, and a silo uid never reaches it.
+systemctl daemon-reload 2>/dev/null || true
+if ! systemctl --global enable qdistro-polkit-agent.service >/dev/null 2>&1; then
+    echo "[install-polkit-agent] ERROR: could not enable qdistro-polkit-agent.service" >&2
+    echo "       the polkit agent would be installed and never started" >&2
+    exit 4
+fi
 
+# Opportunistic start, ONLY if the admin session is already up (a re-install
+# on a running system). Failure here is genuinely fine — the --global enable
+# above is what makes it come up on the next session — so unlike the old code
+# this is allowed to fail quietly, and it is not the thing the install depends
+# on.
 ADMIN_UID=1000
 ADMIN_USER=admin
-if id "$ADMIN_USER" >/dev/null 2>&1; then
-    # systemctl --user against a not-yet-fully-up session needs
-    # XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS — easiest is to
-    # invoke as the admin user under their existing graphical-session
-    # target via systemd's machinectl-shell, but for our purposes
-    # `runuser -u admin -- systemctl --user ...` works once linger is
-    # enabled (which fresh-vm-bootstrap.sh does).
+if id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
     runuser -u "$ADMIN_USER" -- env \
         XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
-        systemctl --user daemon-reload 2>/dev/null || true
-    runuser -u "$ADMIN_USER" -- env \
-        XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
-        systemctl --user enable --now qdistro-polkit-agent.service 2>&1 \
-        | tail -5 || true
+        systemctl --user start qdistro-polkit-agent.service >/dev/null 2>&1 \
+        || echo "[install-polkit-agent] note: no live admin session to start into;" \
+                "the agent starts with the next desktop session" >&2
 fi
 
 echo "[install-polkit-agent] OK — qdistro-polkit-agent installed at $DEST_LIB"

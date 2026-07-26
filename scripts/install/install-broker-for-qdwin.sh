@@ -82,19 +82,51 @@ install -d -o root -g root -m 0700 /var/lib/qdistro/lineage
 # 2b. Workflow orchestration package. The broker loads it in-process
 # and resolves a "workflow/" subdir beside itself (see
 # _workflow_dir_candidates). In the source tree it's a sibling of
-# broker/; here it's flattened into $DEST/workflow/. Best-effort: a
-# missing source dir just leaves the broker without workflows.
+# broker/; here it's flattened into $DEST/workflow/.
+#
+# The list below MUST be closed under the package's top-level imports.
+# It was not: condition_eval.py and agent_relay.py were omitted while
+# workflow_engine.py does a top-level `import condition_eval`, so on
+# every installed system `from workflow_engine import WorkflowEngine`
+# raised ModuleNotFoundError, the broker's best-effort handler left
+# self.workflow_engine = None, and ListWorkflows returned [] forever.
+# No test caught it because pyproject.toml puts workflow/ on pytest's
+# pythonpath, so the repo layout always resolves. The guard against a
+# repeat is tests/unit/test_broker_workflow_installed_layout.py, which parses
+# this loop and asserts closure at the INSTALLED destination.
+#
+# condition_eval.py additionally imports qdistro_proc_identity, which
+# is not in this package — it resolves because the broker installs it
+# into $DEST and $DEST is on sys.path (the broker's own sys.path[0]).
 WORKFLOW_SRC="$(dirname "$BROKER_SRC")/workflow"
-if [ -d "$WORKFLOW_SRC" ]; then
-    install -d -o root -g root -m 0755 "$DEST/workflow"
-    for f in __init__.py workflow_schema.py workflow_loader.py \
-             trigger_registry.py cron_parser.py audit_logger.py \
-             secret_delivery.py workflow_engine.py pwd_secret_source.py; do
-        [ -f "$WORKFLOW_SRC/$f" ] && \
-            install -o root -g root -m 0644 "$WORKFLOW_SRC/$f" \
-                "$DEST/workflow/$f"
-    done
+# Hard error on an absent source dir too. This used to be a best-effort
+# `if [ -d ... ]`, which meant a moved or renamed workflow/ reproduced
+# exactly the bug above — a broker that starts fine and silently has no
+# workflows — with no install-time signal. BROKER_SRC is always a full
+# checkout, so the directory being missing is a packaging fault, not a
+# supported configuration.
+if [ ! -d "$WORKFLOW_SRC" ]; then
+    echo "ERROR: workflow package not found at $WORKFLOW_SRC" >&2
+    echo "       expected it beside the broker source ($BROKER_SRC)" >&2
+    exit 2
 fi
+install -d -o root -g root -m 0755 "$DEST/workflow"
+for f in __init__.py workflow_schema.py workflow_loader.py \
+         trigger_registry.py cron_parser.py audit_logger.py \
+         secret_delivery.py workflow_engine.py pwd_secret_source.py \
+         condition_eval.py agent_relay.py; do
+    # Hard error, not a skip: a missing module here is invisible at
+    # install time and fatal at run time (the failure this comment
+    # documents). The old `[ -f ... ] && install ...` form also made
+    # the whole `set -e` script exit if the LAST entry was absent.
+    if [ ! -f "$WORKFLOW_SRC/$f" ]; then
+        echo "ERROR: workflow module $f missing from $WORKFLOW_SRC" >&2
+        echo "       the broker cannot load the workflow engine without it" >&2
+        exit 2
+    fi
+    install -o root -g root -m 0644 "$WORKFLOW_SRC/$f" \
+        "$DEST/workflow/$f"
+done
 
 # Apply qdistro_broker_exec_t label if the broker-policy module is
 # loaded. Best-effort: fresh-vm-bootstrap.sh runs broker-policy

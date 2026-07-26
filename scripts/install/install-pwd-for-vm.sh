@@ -42,6 +42,7 @@ DEST_POLKIT_ACTION=/usr/share/polkit-1/actions
 DEST_POLKIT_RULES=/usr/share/polkit-1/rules.d
 DEST_PORTAL_DIR=/usr/share/xdg-desktop-portal/portals
 DEST_PORTAL_CFG=/usr/share/xdg-desktop-portal
+DEST_DBUS_SESSION_SERVICES=/usr/share/dbus-1/services
 
 install -d -m 0755 "$DEST_LIB" "$DEST_BIN" "$DEST_DBUS" "$DEST_SYSD" "$DEST_USER_SYSD"
 install -d -m 0755 "$DEST_POLKIT_ACTION" "$DEST_POLKIT_RULES"
@@ -125,6 +126,15 @@ install -m 0644 "$SRC/org.qdistro.PortalSecret.portal" \
     "$DEST_PORTAL_DIR/org.qdistro.PortalSecret.portal"
 install -m 0644 "$SRC/qdistro-portals.conf" \
     "$DEST_PORTAL_CFG/qdistro-portals.conf"
+# Session-bus activation for the Secret backend. Without this, nothing
+# ever starts qdistro-pwd-portal.service: its [Install] target was
+# graphical-session.target (never reached on qdistro — the session
+# target is qdwin-session.target) and no installer enabled it. See
+# pwd/org.qdistro.PortalSecret.service for why activation rather than a
+# session unit is the right mechanism.
+install -d -m 0755 "$DEST_DBUS_SESSION_SERVICES"
+install -m 0644 "$SRC/org.qdistro.PortalSecret.service" \
+    "$DEST_DBUS_SESSION_SERVICES/org.qdistro.PortalSecret.service"
 
 # Polkit action + rule (Phase-8.2). Action defines org.qdistro.pwd.unlock;
 # rule routes non-admin callers through admin auth.
@@ -199,6 +209,28 @@ busctl --system --quiet call \
 # breaks `spin-test-vm.sh` chains that don't need pwd to be live).
 systemctl enable --now qdistro-pwd.service || \
     echo "[install-pwd] WARN: enable --now returned non-zero; sanity probe will retry" >&2
+
+# Per-user login oneshot that unlocks the portal-keys vault. Installed
+# since Phase-8.3 and enabled by NOTHING until 2026-07-26, so the
+# documented auto-unlock never ran on any install.
+#
+# `--global` (writes /etc/systemd/user/qdwin-session.target.wants/) rather
+# than a per-user enable: it must apply to whichever uid runs the desktop,
+# and it costs nothing for uids that never reach qdwin-session.target —
+# silo sessions do not, so this does not start anything in a silo. The
+# unit's own ConditionPathExists keeps it a clean SKIP until an admin has
+# actually sealed a portal-keys PIN.
+#
+# qdistro-pwd-portal.service is deliberately NOT enabled here: it is
+# D-Bus-activated via the org.qdistro.PortalSecret.service file installed
+# above, so nothing has to enable it for a Secret request to reach it.
+# That is not the same as "it never starts earlier": the unlock oneshot
+# has Wants=/After=qdistro-pwd-portal.service, so on a session where the
+# admin HAS sealed a portal-keys PIN the backend comes up as part of the
+# session transaction. Both routes are intended; neither is required for
+# the other to work.
+systemctl --global enable qdistro-portal-keys-unlock.service >/dev/null 2>&1 || \
+    echo "[install-pwd] WARN: could not globally enable qdistro-portal-keys-unlock.service" >&2
 
 # Sanity probe — broker will be active+listening within ~1s normally.
 for _ in 1 2 3 4 5; do
