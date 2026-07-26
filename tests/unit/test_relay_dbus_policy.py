@@ -451,6 +451,22 @@ class TestReconcile:
         assert issued == []
         assert ops.relay_policies == {}
 
+    def test_no_grant_when_the_uid_belongs_to_a_different_account_now(
+            self, store, ops):
+        """The sharper half of the zombie case. "Some account holds uid 4242"
+        is not "silo payroll still exists at uid 4242". The grant is
+        uid-keyed, so issuing it here would hand payroll's relay bus name to
+        whatever unrelated account was since given that uid."""
+        store.create("payroll", 4242)
+        ops.relay_policies.clear()
+        ops.users.pop("payroll")
+        ops.users["unrelated"] = 4242       # uid reused by someone else
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == [], (
+            "a grant for a deleted silo was issued to the account that now "
+            "holds its uid")
+        assert ops.relay_policies == {}
+
     def test_a_zombie_silo_can_still_be_deleted(self, store, ops):
         """The other half of the same crash. userdel must treat an absent
         user as done, or the silo is undeletable: delete() fails at userdel,

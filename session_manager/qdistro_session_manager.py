@@ -589,6 +589,22 @@ class _SystemOps:
         except KeyError:
             return False
 
+    def user_uid_matches(self, name: str, uid: int) -> bool:
+        """True if `name` is a real account AND it holds exactly `uid`.
+
+        Not the same question as uid_exists(). The relay grant is keyed on
+        the uid, so "some account holds 4242" is not good enough: if silo
+        `payroll` was deleted in a crash window that left its row behind,
+        and an unrelated account has since been given uid 4242, then
+        issuing payroll's grant hands that account the relay bus name.
+        The invariant is "the silo's own user still exists at the silo's
+        own uid", and it takes both halves to establish it.
+        """
+        try:
+            return int(pwd.getpwnam(str(name)).pw_uid) == int(uid)
+        except KeyError:
+            return False
+
     def uid_exists(self, uid: int) -> bool:
         try:
             pwd.getpwuid(int(uid))
@@ -740,6 +756,18 @@ class _SystemOps:
             os.fsync(f.fileno())
         os.chmod(tmp, 0o644)
         tmp.replace(p)
+        # ...and fsync the directory, so the rename itself is durable. Without
+        # this a crash can lose the directory entry on some filesystems even
+        # though the file's contents were synced.
+        try:
+            dfd = os.open(p.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError as e:
+            log.warning("could not fsync %s after writing %s: %s",
+                        p.parent, p.name, e)
         if reload:
             self._reload_dbus()
         return p
@@ -3385,17 +3413,25 @@ class _SiloStore:
             # for an identity that does not exist — and the admin's fix is to
             # delete the silo, which this would fight. Leave it alone and say
             # so; userdel now tolerates an absent user, so the delete works.
+            #
+            # The check is "does user <name> exist AND hold uid <uid>", not
+            # "does some account hold <uid>". The grant is uid-keyed, so if
+            # the silo's own user is gone and an unrelated account has since
+            # been given that uid, issuing the grant would hand that account
+            # the silo's relay bus name — the same crash-and-reuse hazard the
+            # zombie guard exists to close, just one step further along.
             try:
-                if not self._ops.uid_exists(uid):
+                if not self._ops.user_uid_matches(name, uid):
                     log.warning(
-                        "silo %r (uid %d) has a row but no Linux user — not "
-                        "issuing a relay grant. Delete the silo to clean it "
-                        "up; this is what a crash between userdel and the "
-                        "table save leaves behind.", name, uid)
+                        "silo %r (uid %d) has a row but no matching Linux "
+                        "user at that uid — not issuing a relay grant. "
+                        "Delete the silo to clean it up; this is what a "
+                        "crash between userdel and the table save leaves "
+                        "behind.", name, uid)
                     continue
             except Exception as e:  # noqa: BLE001
-                log.warning("relay-policy reconcile: could not check whether "
-                            "uid %d still exists (%s); proceeding", uid, e)
+                log.warning("relay-policy reconcile: could not check the "
+                            "Linux user for silo %r (%s); proceeding", name, e)
             try:
                 if name in have and self._ops.relay_policy_matches(name, uid):
                     continue

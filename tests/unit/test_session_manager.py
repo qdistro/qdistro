@@ -124,6 +124,9 @@ class _FakeOps:
     def uid_exists(self, uid: int) -> bool:
         return int(uid) in self.users.values()
 
+    def user_uid_matches(self, name: str, uid: int) -> bool:
+        return self.users.get(name) == int(uid)
+
     # ---- mutations --------------------------------------------------------
 
     def useradd(self, name: str, uid: int) -> None:
