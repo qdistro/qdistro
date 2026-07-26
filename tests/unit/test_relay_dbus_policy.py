@@ -27,6 +27,7 @@ These tests hold the fix at three levels:
 from __future__ import annotations
 
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -181,11 +182,33 @@ class TestFilenameMapping:
 
 class TestSystemOps:
 
+    # Uids the fake passwd below reports as absent. Tests that need the
+    # "unresolvable uid" path add to this; everything else is present, so
+    # these tests do not depend on the host's account table.
+    MISSING_UIDS: set[int] = set()
+
     @pytest.fixture
     def ops(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sm, "RELAY_POLICY_DIR", tmp_path / "system.d")
+        missing = set(self.MISSING_UIDS)
+
+        real_getpwuid = pwd.getpwuid
+
+        def fake_getpwuid(uid):
+            if int(uid) in missing:
+                raise KeyError(uid)
+            try:
+                return real_getpwuid(int(uid))
+            except KeyError:
+                # Present but not a host account: the tests here are about
+                # file handling, not about this host's /etc/passwd.
+                return pwd.struct_passwd(
+                    (f"silo{uid}", "x", int(uid), int(uid), "", "/", "/bin/sh"))
+
+        monkeypatch.setattr(sm.pwd, "getpwuid", fake_getpwuid)
         o = sm._SystemOps()
         monkeypatch.setattr(o, "_reload_dbus", lambda: None)
+        o._test_missing_uids = missing
         return o
 
     def test_write_then_list_then_remove(self, ops, tmp_path):
@@ -223,6 +246,33 @@ class TestSystemOps:
         p = Path(ops.write_relay_policy("payroll", 4242))
         p.write_text(p.read_text().replace("uid4242", "uid9999"))
         assert not ops.relay_policy_matches("payroll", 4242)
+
+    def test_refuses_to_write_a_fragment_for_a_uid_with_no_passwd_entry(
+            self, ops):
+        """Measured on dbus-broker-37: a fragment whose numeric `user=` NSS
+        cannot resolve makes the launcher abort on its next reload —
+
+            nss_cache_deinit: Assertion `... uid_tree)' failed
+            dbus-broker.service: Main process exited, code=dumped, 6/ABRT
+
+        — taking the whole system bus down. The failure is asymmetric: an
+        unresolvable *username* is only a log line, which is what the old
+        username-keyed policy produced. Keying on the uid is right for every
+        other reason, but it turns a warning into a bus core dump, so the
+        check belongs at the write rather than in each caller's ordering.
+        """
+        ops._test_missing_uids.add(59999)
+        with pytest.raises(ValueError, match="no passwd entry"):
+            ops.write_relay_policy("payroll", 59999)
+        assert ops.list_relay_policies() == [], (
+            "a fragment was left on disk for an unresolvable uid")
+
+    def test_the_guard_does_not_refuse_a_uid_that_does_exist(self, ops):
+        """Anti-vacuity: a guard that refused everything would also pass the
+        test above."""
+        ops._test_missing_uids.add(59999)
+        ops.write_relay_policy("payroll", 4242)
+        assert ops.list_relay_policies() == ["payroll"]
 
     def test_removing_an_absent_fragment_is_not_an_error(self, ops):
         ops.remove_relay_policy("never-existed")
@@ -467,6 +517,26 @@ class TestReconcile:
             "holds its uid")
         assert ops.relay_policies == {}
 
+    def test_an_unverifiable_identity_gets_no_grant(self, store, ops):
+        """If the passwd lookup that proves "this silo's user exists at this
+        silo's uid" cannot be completed — a transient NSS failure, an LDAP
+        backend that is down — the invariant is unknown, not satisfied. The
+        next step would write a uid-keyed grant, so proceeding would issue it
+        on the strength of a check that failed. A silo missing its grant for
+        one boot recovers at the next reconcile; a grant issued to the wrong
+        identity does not."""
+        store.create("payroll", 4242)
+        ops.relay_policies.clear()
+
+        def boom(name, uid):
+            raise OSError("NSS backend unavailable")
+        ops.user_uid_matches = boom
+
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == [], (
+            "a relay grant was issued even though the identity check failed")
+        assert ops.relay_policies == {}
+
     def test_a_zombie_silo_can_still_be_deleted(self, store, ops):
         """The other half of the same crash. userdel must treat an absent
         user as done, or the silo is undeletable: delete() fails at userdel,
@@ -495,24 +565,41 @@ class TestReconcile:
         assert store.reconcile_relay_policies() == ([], [])
         assert ops.dbus_reloads == 0
 
-    def test_autostart_pass_reconciles_before_starting_anything(
+    def test_autostart_pass_reconciles_before_anything_else(
             self, store, ops, monkeypatch):
-        """Order matters: a silo started without its grant gets a relay that
-        exits 78 and stays down for the rest of the session."""
+        """Order matters twice over.
+
+        A silo started without its grant gets a relay that exits 78 and stays
+        down for the rest of the session — so reconcile must precede start.
+
+        And it must precede the startup SWEEPS too. reap_disposable_containers
+        shells to `runuser -u admin -- podman ps` with no timeout; observed on
+        a VM, a wedged rootless podman blocked the daemon there for minutes,
+        D-Bus unresponsive and every silo's relay grant unreconciled. The one
+        startup step that silos cannot work without must not queue behind an
+        unbounded call to something else.
+        """
         store.create("payroll", 4242, autostart=True)
         ops.relay_policies.clear()
         seen: list[str] = []
-        real_reconcile = store.reconcile_relay_policies
-        monkeypatch.setattr(
-            store, "reconcile_relay_policies",
-            lambda: (seen.append("reconcile"), real_reconcile())[1])
-        real_start = store.start
-        monkeypatch.setattr(
-            store, "start",
-            lambda *a, **k: (seen.append("start"), real_start(*a, **k))[1])
+
+        def _spy(label, fn):
+            def wrapper(*a, **k):
+                seen.append(label)
+                return fn(*a, **k)
+            return wrapper
+
+        monkeypatch.setattr(store, "reconcile_relay_policies",
+                            _spy("reconcile", store.reconcile_relay_policies))
+        for label in ("reap_orphan_cgroups", "reap_disposable_containers",
+                      "reap_export_staging"):
+            monkeypatch.setattr(store, label,
+                                _spy(label, getattr(store, label)))
+        monkeypatch.setattr(store, "start", _spy("start", store.start))
+
         store.autostart_pass()
         assert seen and seen[0] == "reconcile", (
-            f"reconcile must run before the first start; got {seen}")
+            f"reconcile must run first in autostart_pass; got {seen}")
         assert ops.relay_policies == {"payroll": 4242}
 
 

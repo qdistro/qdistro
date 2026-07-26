@@ -192,6 +192,15 @@ systemctl reload dbus-broker.service 2>/dev/null \
 
 systemctl daemon-reload
 systemctl enable --now qdistro-session-manager.service
+# `enable --now` is a no-op against an ALREADY-RUNNING daemon, so on an
+# upgrade the new file lands on disk and the old code keeps serving from
+# memory — and the verify below passes, because the bus name is claimed by
+# the stale process. Observed live: an upgraded host silently ran the
+# previous session manager, which (among other things) issued no per-silo
+# relay policy. try-restart touches only an active unit, so this is a no-op
+# on a first install, where `enable --now` has just started it.
+# Mirrors install-user-relay-for-vm.sh, which already did this.
+systemctl try-restart qdistro-session-manager.service 2>/dev/null || true
 
 for _ in 1 2 3 4 5; do
     busctl list --no-pager 2>/dev/null \

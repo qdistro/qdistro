@@ -734,6 +734,32 @@ class _SystemOps:
 
     def write_relay_policy(self, name: str, uid: int,
                            reload: bool = True) -> Path:
+        # Refuse to write a fragment naming a uid with no passwd entry.
+        #
+        # This is not tidiness. Measured on dbus-broker-37: a fragment whose
+        # `user=` is a NUMERIC uid that NSS cannot resolve makes the launcher
+        # abort on its next reload —
+        #
+        #   Invalid user-name in .../foo.conf +3: user="4242"
+        #   nss-cache.c:90: nss_cache_deinit: Assertion `false &&
+        #       "c_rbtree_is_empty(&cache->uid_tree)"' failed.
+        #   dbus-broker.service: Main process exited, code=dumped, status=6/ABRT
+        #
+        # — taking the whole system bus down with it. The failure is
+        # asymmetric: an unresolvable *username* is only a log line, which is
+        # what the old username-keyed policy did. Keying on the uid is right
+        # for every other reason (see relay_policy_xml), but it converts a
+        # warning into a bus core dump, so the "does this uid exist" question
+        # has to be answered at the point of the write rather than left to
+        # each caller's ordering.
+        try:
+            pwd.getpwuid(int(uid))
+        except KeyError:
+            raise ValueError(
+                f"refusing to write a relay policy for silo {name!r}: uid "
+                f"{int(uid)} has no passwd entry. dbus-broker aborts on an "
+                f"unresolvable numeric user= at its next reload, which would "
+                f"take down the system bus.") from None
         p = RELAY_POLICY_DIR / relay_policy_filename(name)
         p.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-rename so the bus never sees a half-written fragment.
@@ -3430,8 +3456,20 @@ class _SiloStore:
                         "behind.", name, uid)
                     continue
             except Exception as e:  # noqa: BLE001
-                log.warning("relay-policy reconcile: could not check the "
-                            "Linux user for silo %r (%s); proceeding", name, e)
+                # Fail CLOSED. This check exists to establish an identity
+                # before writing a uid-keyed bus grant; if it cannot be
+                # completed the invariant is unknown, not satisfied. The very
+                # next steps would write the fragment, so proceeding here
+                # would issue a grant on the strength of a lookup that
+                # failed. A silo whose grant is missing for one boot is
+                # recoverable; a grant issued to the wrong identity is not.
+                log.error(
+                    "relay-policy reconcile: could not verify the Linux user "
+                    "for silo %r (%s) — NOT issuing its relay grant. Its "
+                    "relay will be refused org.qdistro.UserRelay.uid%d until "
+                    "this resolves and the daemon reconciles again.",
+                    name, e, uid)
+                continue
             try:
                 if name in have and self._ops.relay_policy_matches(name, uid):
                     continue
@@ -4225,6 +4263,18 @@ class _SiloStore:
         Active — admin can refreeze after the reboot if desired,
         but a frozen silo across a reboot is an invariant we don't
         try to preserve (the cgroup is gone)."""
+        # Relay grants FIRST, before any of the sweeps below.
+        #
+        # It used to run after them, and reap_disposable_containers() shells
+        # to `runuser -u admin -- podman ps` with no timeout. Observed on a
+        # VM: a wedged rootless podman blocked the daemon here for minutes
+        # with D-Bus unresponsive, and the relay grants unreconciled the
+        # whole time. A silo without its grant has no relay at all, so this
+        # is the one startup step that must not sit behind an unbounded call
+        # to something else. (The podman timeout is worth fixing on its own
+        # — see reap_disposable_containers — but ordering is the part that
+        # belongs to this concern.)
+        self.reconcile_relay_policies()
         # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
         # before we (re)start silos (02/S14a). Runs lock-free internally.
         self.reap_orphan_cgroups()
@@ -4234,10 +4284,6 @@ class _SiloStore:
         # Reap export-back staging orphaned by a disposable that crashed/closed
         # without an import (its payload has no live container to back it).
         self.reap_export_staging()
-        # Make the per-silo user-relay bus-name grants match the silo table
-        # BEFORE any silo is started: a silo that comes up without its grant
-        # gets a relay that exits 78 and stays down for the whole session.
-        self.reconcile_relay_policies()
         started: list[str] = []
         with self._lock:
             for silo in list(self._silos.values()):
