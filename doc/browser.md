@@ -197,10 +197,16 @@ install matches `qdistro-firefox@qdistro.local`.
 
 > **J11 caveat (open).** `install-browser-bridge-for-vm.sh` copies the
 > *bundled* tree to `/usr/share/qdistro/browser-extension/`, and that tree has
-> no `src/`, no `gate.js` and no origin allowlist; the closed-by-default gate
-> lives only in the standalone repos, which no installer ships. So the
-> extension the installer puts on disk is not the hardened one, and `bundled`
-> is also the installer's DEFAULT `--firefox-mode`. Tracked as J11 in
+> no `src/`, no `gate.js` and no origin allowlist at all — an origin gate
+> exists only in the standalone repos, which no installer ships. Those two
+> gates are **not** equivalent: `qdchrome-extension` is closed by default (an
+> empty allowlist denies every origin; an explicit `*` opts into all), while
+> `qdfirefox-extension` treats an empty allowlist as "all origins" until the
+> user populates it — J11's closed-by-default change landed in qdchrome only.
+> See the per-artifact table in
+> [browser-extension-install.md](browser-extension-install.md). So the
+> extension the installer puts on disk has no gate at all, and `bundled` is
+> also the installer's DEFAULT `--firefox-mode`. Tracked as J11 in
 > `todo/fable-release/10-reachability-audit-2026-07-26.md` and fixed
 > separately; [browser-extension-install.md](browser-extension-install.md)
 > steers users at the standalone artifacts in the meantime.

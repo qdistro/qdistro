@@ -67,7 +67,7 @@ def _bundled_firefox_extension_id() -> str:
 # from the bundled ``extension/manifest.firefox.json`` this installer
 # authorizes (``qdistro@qdistro.local``). A mismatch renders the native-
 # messaging manifest's ``allowed_extensions`` inert, so the bridge would
-# refuse the canonical bundled extension.
+# refuse the very (legacy) extension that mode exists to authorize.
 DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
 
 # The *standalone* qdfirefox extension is a SEPARATE artifact, MANUALLY built

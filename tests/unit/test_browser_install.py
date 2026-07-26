@@ -173,7 +173,13 @@ class TestFirefoxInstallModes:
         assert body["allowed_extensions"] == ["custom@x"]
 
 
-# ---- Firefox canonicalization (no third FF artifact) -------------
+# ---- Firefox artifact canonicalization (no THIRD FF artifact) ----
+#
+# Terminology note: "canonical" here means only "one of the two known
+# Firefox artifacts", not "recommended". For v1 the recommended artifact is
+# the standalone qdfirefox build; the bundled tree is a legacy compatibility
+# artifact with no origin allowlist (J11). See
+# doc/browser-extension-install.md.
 
 # Sibling qdchrome-extension repo. It is Chromium-only: it must NOT ship
 # a Firefox manifest/build, because such a build historically declared
