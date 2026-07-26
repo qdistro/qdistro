@@ -254,6 +254,13 @@ check_opt     "browser-bridge exec stub" /usr/lib/qdistro/browser-bridge
 check_opt     "browser-bridge host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_opt     "browser-allowlist shared module" /usr/libexec/qdistro/qdistro_browser_allowlist.py
 check_opt     "browser-install CLI"    /usr/local/bin/qdistro-browser-install
+# The user-relay must land in the SAME dir as the broker modules: its
+# Firefox-containers cross-uid gate imports qdistro_admin_rules from its own
+# directory. Installed anywhere else the gate fails closed forever (F4).
+check_req     "user-relay module"      /usr/libexec/qdistro/qdistro_user_relay.py
+check_req     "user-relay rules dep"   /usr/libexec/qdistro/qdistro_admin_rules.py
+check_req     "user-relay unit template" \
+    /etc/systemd/system/qdistro-user-relay@.service
 
 echo
 echo "-- utility app desktop integration assets --"

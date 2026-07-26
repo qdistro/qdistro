@@ -153,9 +153,22 @@ promotion, declassification), there is a capability-based delegation layer rathe
 than an "admin-app only" rule:
 
 - a grant maps a principal to a set of mutation scopes, each either a single
-  field (`security.guards`, `security.compartments`, `security.conflictClasses`,
-  `security.sensitivity`, `security.declassification`) or a wildcard
-  (`security.*` for all security fields, `*` unrestricted);
+  field (`security.guards`, `security.compartments`,
+  `security.conflict_classes`, `security.sensitivity`,
+  `security.declassification`) or a wildcard (`security.*` for all security
+  fields, `*` unrestricted);
+
+  > **Spelling, and why it differs from the YAML above.** Grant *scope tokens*
+  > are snake_case: the exact strings are pinned in
+  > `broker/qdistro_security_grants.py`'s `SECURITY_FIELDS`, and scope matching
+  > is exact-or-explicit-wildcard, so `security.conflictClasses` is not a
+  > narrower grant — it is an unknown token and the grant is **rejected** with a
+  > `GrantError`. The *metadata document* key really is camelCase
+  > (`conflictClasses`, read by `qdistro_guard_registry.py`), as shown in the
+  > YAML earlier on this page. Two surfaces, two spellings; neither is a typo.
+  > (`/etc/qdistro/silo-security.toml` is a third surface, and it is snake_case
+  > — it rejects a camelCase key rather than ignoring it.)
+
 - the broker checks grants fail-closed: the admin app is allowed by default;
   every other principal must hold a scope matching every field the change
   touches, or the whole mutation is denied with no write. Scope matching is
@@ -194,8 +207,8 @@ Allocation rules:
 - release category allocations when the attachment/session finalizer completes.
 
 MCS labels are receipts of runtime confinement. Durable policy still comes
-from `security.compartments`, `security.conflictClasses`, `security.guards`,
-lineage, and audit.
+from the `compartments`, `conflictClasses` and `guards` keys of a metadata
+document's `security` block, plus lineage and audit.
 
 ## Lineage And Audit
 

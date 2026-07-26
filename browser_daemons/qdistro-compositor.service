@@ -5,7 +5,19 @@ Description=qdistro browser screen-lock inhibit daemon (Bridge Phase-9e)
 # per-uid cap). Needs the system bus to reach org.freedesktop.login1.
 After=dbus.socket
 Requires=dbus.socket
-PartOf=graphical-session.target
+# qdwin-session.target, not graphical-session.target: qdistro never
+# reaches the latter (deploy/qdwin-session.target is the desktop
+# session), so this PartOf= never stopped the daemon at logout — it
+# lingered for the life of the user manager.
+#
+# Retargeting PartOf= ALONE would have been a regression, not a fix:
+# qdwin-session-launcher.sh stops the target when the session ends, so
+# the daemons would have been stopped and — being started only by
+# default.target, which the user manager reached long before, and
+# having no D-Bus activation file — never restarted until reboot. The
+# second WantedBy= below is what makes the session-scoped lifecycle
+# whole: stopped with the session, started again with the next one.
+PartOf=qdwin-session.target
 
 [Service]
 Type=dbus
@@ -23,3 +35,7 @@ SystemCallArchitectures=native
 
 [Install]
 WantedBy=default.target
+# Also wanted by the desktop session, so the PartOf= stop above has a
+# matching start. Harmless for uids that never reach the target (a
+# silo): default.target still starts the daemon there.
+WantedBy=qdwin-session.target

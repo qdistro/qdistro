@@ -2,7 +2,6 @@
 re-seal-on-new-TPM path. Pure unit; MockBackend stands in for the TPM."""
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -13,18 +12,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PWD_DIR = REPO_ROOT / "pwd"
 sys.path.insert(0, str(PWD_DIR))
 
-
-def _load(label: str, path: Path):
-    spec = importlib.util.spec_from_file_location(label, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[label] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-rec = _load("qdistro_vault_recovery", PWD_DIR / "qdistro_vault_recovery.py")
-vault = _load("qdistro_pwd_vault", PWD_DIR / "qdistro_pwd_vault.py")
-tpm = _load("qdistro_pwd_tpm", PWD_DIR / "qdistro_pwd_tpm.py")
+# Plain imports, NOT spec_from_file_location, so every test module shares the
+# SAME module objects. (test_vault_recovery_export.py's header already says
+# this; this file did not follow it, and that was a real bug.)
+#
+# What went wrong: the old `_load()` helper re-executed each module and
+# *overwrote* sys.modules["qdistro_pwd_tpm"] and ["qdistro_pwd_vault"] with
+# fresh objects, at module scope — so it ran during pytest's COLLECTION pass,
+# before any test in any file had run. Every class in those modules then
+# existed twice under one name.
+#
+# qdistro_pwd_vault.unlock_vault_tpm imports TpmAuthFailed *lazily, at call
+# time* (qdistro_pwd_vault.py:284-291, deliberately, to keep the v1 path
+# decoupled from the TPM module), so it resolved the SECOND class object while
+# the MockBackend under test — constructed from the first — raised the FIRST.
+# `except TpmAuthFailed` therefore did not catch it, the exception escaped
+# instead of being converted to VaultBadPassword, and five tests in
+# test_pwd_tpm.py and test_pwd_rotate_vault.py failed.
+#
+# The tell was that they passed in isolation and failed in a full run, with no
+# single file reproducing it — the poisoning happens at collection, so it
+# depends on which files are collected, not on execution order. Cost: a
+# permanently red full-suite run that everyone had learned to read past.
+import qdistro_pwd_tpm as tpm  # noqa: E402
+import qdistro_pwd_vault as vault  # noqa: E402
+import qdistro_vault_recovery as rec  # noqa: E402
 
 
 MK = bytes(range(32))  # a deterministic 32-byte master key

@@ -1901,6 +1901,7 @@ installer_chain_entries() {
 sdk|scripts/install/install-sdk-for-vm.sh|/sdk/qdistro_app
 broker|scripts/install/install-broker-for-qdwin.sh|/broker
 session-manager|scripts/install/install-session-manager.sh|/session_manager
+user-relay|scripts/install/install-user-relay-for-vm.sh|/user_relay
 polkit|scripts/install/install-polkit-agent-for-vm.sh|/polkit
 pwd|scripts/install/install-pwd-for-vm.sh|/pwd
 qsu|scripts/install/install-qsu-for-vm.sh|/qsu

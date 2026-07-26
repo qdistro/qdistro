@@ -1,6 +1,10 @@
 [Unit]
 Description=qdistro pwd XDG portal Secret backend (spec/13 Phase-8.3)
-PartOf=graphical-session.target
+# qdwin-session.target is the qdistro desktop session target (see
+# deploy/qdwin-session.target). graphical-session.target, which this
+# used to name, is never reached on a qdistro install: nothing binds
+# it, so both PartOf= and WantedBy= against it were inert.
+PartOf=qdwin-session.target
 
 [Service]
 Type=dbus
@@ -25,5 +29,10 @@ RestrictSUIDSGID=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 
+# Reached two ways, both intended: D-Bus activation via
+# /usr/share/dbus-1/services/org.qdistro.PortalSecret.service (which is
+# why no installer enables this unit), and as a session-transaction
+# dependency of qdistro-portal-keys-unlock.service, which Wants= it.
+# The [Install] section additionally lets a session pre-start it.
 [Install]
-WantedBy=graphical-session.target
+WantedBy=qdwin-session.target

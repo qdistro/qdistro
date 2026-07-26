@@ -14,13 +14,14 @@ import sys
 import time
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent.parent
-        / "recall" / "qdistro_recall_ingest.py")
-spec = importlib.util.spec_from_file_location(
-    "qdistro_recall_ingest", _MOD)
-ri = importlib.util.module_from_spec(spec)
-sys.modules["qdistro_recall_ingest"] = ri
-spec.loader.exec_module(ri)
+# Plain import, NOT spec_from_file_location + sys.modules assignment:
+# qdistro_recall_ingest is importable by name (its dir is on pytest's pythonpath) AND is
+# lazily imported at call time by product code, so re-executing it here
+# would create a second copy of every class and any cross-module
+# `except SomeError` would silently stop catching. That exact bug cost
+# five permanently-red tests via tests/unit/test_vault_recovery.py; see
+# tests/unit/test_no_duplicate_module_identity.py.
+import qdistro_recall_ingest as ri  # noqa: E402
 
 
 def _open_mem() -> sqlite3.Connection:

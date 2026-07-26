@@ -4,7 +4,7 @@ Documentation=https://qdistro.invalid/spec/13
 # Needs the per-user session bus and the system pwd daemon.
 After=qdistro-pwd-portal.service
 Wants=qdistro-pwd-portal.service
-PartOf=graphical-session.target
+PartOf=qdwin-session.target
 # SKIP cleanly if the admin hasn't sealed a PIN yet — the daemon
 # returns NotFound which the CLI exits non-zero on. We keep the
 # unit Type=oneshot RemainAfterExit=no so the failure doesn't
@@ -22,5 +22,10 @@ RemainAfterExit=no
 StandardOutput=journal
 StandardError=journal
 
+# WantedBy the target the qdistro desktop session actually reaches.
+# graphical-session.target, named here before 2026-07-26, is never
+# pulled in by anything qdistro ships, so this unit was installed,
+# never enabled, and would not have run even if it had been.
+# install-pwd-for-vm.sh now `systemctl --global enable`s it.
 [Install]
-WantedBy=graphical-session.target
+WantedBy=qdwin-session.target

@@ -188,12 +188,13 @@ install -m 0755 "$SRC/deploy/start-user-app.sh" \
 install -m 0755 "$SRC/cli/qdistro_approvals.py" \
                 /usr/local/sbin/qdistro-approvals
 install -d -o root -g root -m 0755 /usr/local/lib/qdistro/stubs
-install -m 0644 "$SRC/user_relay/qdistro_user_relay.py" \
-                /usr/local/lib/qdistro/qdistro_user_relay.py
-install -m 0644 "$SRC/user_relay/org.qdistro.UserRelay.conf" \
-                /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
-install -m 0644 "$SRC/user_relay/qdistro-user-relay@.service" \
-                /etc/systemd/system/qdistro-user-relay@.service
+# Relay: run the REAL installer rather than open-coding the file drop, so
+# the GUI harness exercises the production layout. It lands the module in
+# /usr/libexec/qdistro beside the broker modules (baked into the golden
+# image), which is what makes the Firefox-containers opt-in gate's
+# qdistro_admin_rules import resolve. Open-coding it here is how the
+# harness previously ended up one prefix behind the unit's ExecStart.
+bash "$SRC/scripts/install/install-user-relay-for-vm.sh" "$SRC/user_relay"
 install -d -o root -g root -m 0755 /etc/systemd/user
 install -m 0644 "$SRC/user_relay/qdistro-user-relay.service" \
                 /etc/systemd/user/qdistro-user-relay.service

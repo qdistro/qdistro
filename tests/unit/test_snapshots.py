@@ -10,13 +10,14 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_MOD = (Path(__file__).resolve().parent.parent.parent
-        / "snapshots" / "qdistro_snapshots.py")
-spec = importlib.util.spec_from_file_location(
-    "qdistro_snapshots", _MOD)
-sn = importlib.util.module_from_spec(spec)
-sys.modules["qdistro_snapshots"] = sn
-spec.loader.exec_module(sn)
+# Plain import, NOT spec_from_file_location + sys.modules assignment:
+# qdistro_snapshots is importable by name (its dir is on pytest's pythonpath) AND is
+# lazily imported at call time by product code, so re-executing it here
+# would create a second copy of every class and any cross-module
+# `except SomeError` would silently stop catching. That exact bug cost
+# five permanently-red tests via tests/unit/test_vault_recovery.py; see
+# tests/unit/test_no_duplicate_module_identity.py.
+import qdistro_snapshots as sn  # noqa: E402
 
 
 class FakeTransport:

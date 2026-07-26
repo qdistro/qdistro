@@ -6,7 +6,13 @@ Documentation=https://qdistro.invalid/spec/13
 # admin broker (broker delegation method).
 After=graphical-session-pre.target xdg-desktop-portal.service
 Wants=qdistro-admin-broker.service
-PartOf=graphical-session.target
+# qdwin-session.target, not graphical-session.target: nothing in a
+# qdistro install ever reaches graphical-session.target (see
+# deploy/qdwin-session.target), so both directives were inert. The
+# installer's `systemctl --user enable --now` masked this — the agent
+# started at install time and then never came back after a reboot,
+# because the .wants symlink hung off a target nothing activates.
+PartOf=qdwin-session.target
 
 [Service]
 Type=simple
@@ -24,4 +30,4 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK
 IPAddressDeny=any
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=qdwin-session.target
