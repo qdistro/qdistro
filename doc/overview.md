@@ -109,9 +109,20 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
   admin compositor as an ordinary Wayland client and binds `qdwin_locker_v1`;
   it is not hosted inside the compositor or the shell ([sessions.md](sessions.md)).
 - The `qdistro_app` SDK — Python library that first-party apps integrate with.
-- The remote-output thin client (on secondary machines).
+- The remote-output thin client (on secondary machines) — **VM-gated and
+  incomplete**. `install-multimachine-for-vm.sh` is not in the bootstrap chain,
+  and even where it runs it installs the broker/session/wrapper subset and
+  **not** `multimachine/viewer.py`; live viewer assembly stays under the VM
+  harness. There is no thin client to install on a secondary machine today.
 
-### Infrastructure — commodity C, used as-is
+### Infrastructure — commodity C/C++
+
+Mostly used as-is, with one significant exception: **libweston is not**. qdistro
+carries a full patched weston tree, including security and KMS changes that are
+not all recorded as `.patch` files, and qdwin is a custom shell plugin rather
+than stock configuration. See [compositor.md](compositor.md) for what is patched
+and for the install-time branch that decides whether a given machine runs the
+vendored tree or the distro one.
 
 - **libweston** — the Wayland reference compositor as a library; qdistro's
  compositor (qdwin) is a libweston shell plugin (see

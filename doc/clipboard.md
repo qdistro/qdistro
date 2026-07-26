@@ -129,7 +129,11 @@ explicit context-menu actions when policy allows them.
 > browser that explicitly disclaims any role in cross-silo transfers. There is
 > no format chooser, no preview step, no edit-before-paste, and no Markdown or
 > HTML sanitization anywhere in the tree. A cross-silo paste that policy allows
-> delivers the payload **as-is, in whatever MIME formats the source offered**.
+> delivers the **requested MIME's bytes as-is**, unpreviewed and unsanitized.
+> (Not *every* format the source offered: qdshell strips tier-4 offers down to
+> `text/plain` and `text/uri-list` and independently denies the stripped types
+> at receive time, and per-MIME broker rules can narrow other sources. What is
+> missing is content inspection, not format filtering.)
 > Do not rely on "safe Markdown by default" — it is not a default that exists.
 
 Sanitization is intended to create a tracked derivative rather than erase
@@ -295,9 +299,17 @@ Rules must handle MIME, not just plain text. Clipboards routinely carry:
  across uid boundaries)
 - `application/json` and app-specific types
 
-Policy language supports MIME glob matching. File-URI transfers across uid
-boundaries either fail (default) or trigger an admin-approved file-content
-read at the source with policy-controlled delivery at the target.
+Policy language supports MIME glob matching, on the receive gate.
+
+**File-URI transfers get no special handling today.** The intended behaviour is
+that a cross-uid file-URI transfer either fails by default or triggers an
+admin-approved file-content read at the source with policy-controlled delivery
+at the target. **That path does not exist** — it is part of the unimplemented
+rich-transfer feature above. The gates pass MIME *names* and an allow/deny
+verdict; nothing dereferences a URI or moves file bytes. An allowed
+`text/uri-list` is delivered as ordinary clipboard bytes, and the paths inside
+it are simply likely to be unreadable to the destination uid — a permission
+error at open time, not a policy decision.
 
 ## Primary selection vs clipboard
 
