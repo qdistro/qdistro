@@ -17,7 +17,7 @@
 # What it does:
 #   - Enumerates the qdistro source repos the bootstrap actually pins:
 #       qdistro qdwin qdshell qdlocker qdbrowser qdgreeter
-#       qterminator qnotebook qfileman
+#       qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension
 #     (the union of fetch_sources' fatal + optional sets — keep in sync).
 #   - For each repo, resolves the current HEAD commit SHA from a sibling
 #     checkout under --repo-root (default: parent dir of this repo, matching
@@ -74,12 +74,17 @@ REPO_ROOT="${REPO_ROOT:-/opt/qdistro-src}"
 
 # Authoritative repo set — the union of fetch_sources' fatal set
 # (qdistro qdwin qdshell) and its optional set (qdlocker qdbrowser qdgreeter
-# qterminator qnotebook qfileman) in qdistro-bootstrap.sh. Order is the order
-# the bootstrap fetches/verifies them, and the order the committed manifest's
+# qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension) in
+# qdistro-bootstrap.sh. The extension repos are source-only (nothing is built
+# or installed from them); they are pinned because v1 users MANUALLY load an
+# extension built from that source (doc/browser-extension-install.md), so the
+# pin is what makes the loaded artifact traceable to the signed release.
+# Order is the order the bootstrap fetches/verifies them, and the order the committed manifest's
 # example block lists them.
 QDISTRO_REPOS=(
     qdistro qdwin qdshell
     qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman
+    qdchrome-extension qdfirefox-extension
 )
 
 ALLOW_DIRTY=""

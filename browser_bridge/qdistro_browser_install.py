@@ -38,13 +38,13 @@ def _bundled_firefox_extension_id() -> str:
     """Read the gecko id of the *bundled* Firefox extension that this
     installer authorizes.
 
-    This installer ships next to ``browser_bridge/extension/`` and the
-    README directs users to run ``qdistro-browser-install --browsers
-    firefox`` to authorize the bundled extension built by
-    ``build-extension.sh`` from ``manifest.firefox.json``. The native-
-    messaging manifest's ``allowed_extensions`` MUST therefore match that
-    bundled manifest's ``browser_specific_settings.gecko.id`` — otherwise
-    the native-messaging host rejects the canonical bundled extension.
+    This installer ships next to ``browser_bridge/extension/``, the LEGACY
+    bundled tree that ``--firefox-mode bundled`` (the compatibility default)
+    authorizes. Whenever that mode is used, the native-messaging manifest's
+    ``allowed_extensions`` MUST match that bundled manifest's
+    ``browser_specific_settings.gecko.id`` — otherwise the native-messaging
+    host rejects the very extension the mode exists to authorize. v1 users
+    do NOT use this mode: see ``doc/browser-extension-install.md``.
 
     The bundled manifest is the single source of truth: read it at import
     time so the default can never silently drift from what is shipped.
@@ -67,11 +67,13 @@ def _bundled_firefox_extension_id() -> str:
 # from the bundled ``extension/manifest.firefox.json`` this installer
 # authorizes (``qdistro@qdistro.local``). A mismatch renders the native-
 # messaging manifest's ``allowed_extensions`` inert, so the bridge would
-# refuse the canonical bundled extension.
+# refuse the very (legacy) extension that mode exists to authorize.
 DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
 
-# The *standalone* qdfirefox extension is a SEPARATE artifact shipped from
-# the ``qdfirefox-extension`` repo; it declares a DIFFERENT gecko id
+# The *standalone* qdfirefox extension is a SEPARATE artifact, MANUALLY built
+# by the user from the ``qdfirefox-extension`` repo (v1 has no signed
+# extension channel and no installer ships it — see
+# ``doc/browser-extension-install.md``); it declares a DIFFERENT gecko id
 # (``qdistro-firefox@qdistro.local``) in its own ``manifest.json``. A user
 # who installed that standalone extension (rather than the bundled MV2
 # build) needs the native-messaging host to authorize THAT id, or the
@@ -86,10 +88,13 @@ DEFAULT_FIREFOX_EXTENSION_ID = _bundled_firefox_extension_id()
 # ``qdfirefox-extension/manifest.json`` when that repo is checked out.
 STANDALONE_FIREFOX_EXTENSION_ID = "qdistro-firefox@qdistro.local"
 
-# Firefox install modes. ``bundled`` authorizes the MV2 extension built
-# next to this installer (manifest.firefox.json); ``standalone`` (a.k.a.
-# the native-host install mode) authorizes the separately-shipped
-# qdfirefox extension. Each maps to its own default extension id so the
+# Firefox install modes. ``bundled`` authorizes the LEGACY MV2 extension
+# built next to this installer (manifest.firefox.json) — the flat tree with
+# no ``src/``/``gate.js`` and no origin allowlist that J11 found the installer
+# copying to /usr/share/qdistro/browser-extension/; ``standalone`` authorizes
+# the maintained qdfirefox extension the v1 install doc tells users to build.
+# NOTE the default below is still ``bundled`` for compatibility: v1 users must
+# pass ``--firefox-mode standalone`` explicitly. Each maps to its own default extension id so the
 # right ``allowed_extensions`` is written for what the user actually has.
 FIREFOX_MODE_IDS: dict[str, str] = {
     "bundled": DEFAULT_FIREFOX_EXTENSION_ID,
@@ -110,7 +115,46 @@ def firefox_extension_id_for_mode(mode: str) -> str:
             f"(expected one of {sorted(FIREFOX_MODE_IDS)})") from None
 
 
-DEFAULT_CHROMIUM_EXTENSION_ID = "qdistroqdistroqdistroqdistroaaaaaaaa"
+# Chromium-family extension id of the canonical qdchrome extension.
+#
+# A Chromium extension id is the first 16 bytes of the SHA-256 of the
+# extension's DER public key, hex-encoded and then mapped 0-9a-f -> a-p:
+# ALWAYS 32 characters, ALWAYS in [a-p]. ``qdchrome-extension`` pins its
+# PUBLIC key in ``manifest.chromium.json``'s ``"key"`` field, so a
+# developer-mode "Load unpacked" of ``dist/chromium/`` yields this id on
+# every rebuild — which is what makes the v1 manual-load flow work with a
+# pre-written native-messaging manifest (see
+# ``doc/browser-extension-install.md``). A future packed CRX carries the
+# same id ONLY if it is signed with the matching PRIVATE key; and because
+# the pinned key is public, the id identifies a key namespace, never the
+# authorship of the loaded code.
+#
+# R4 finding: this default used to be the placeholder
+# ``"qdistroqdistroqdistroqdistroaaaaaaaa"`` — 36 characters, and
+# containing letters outside [a-p], so it is not even a syntactically
+# valid id. Every Chromium-family native-messaging manifest written by
+# the default install path therefore authorized an extension that cannot
+# exist, and the real extension was rejected by the browser with
+# "Access to the specified native messaging host is forbidden". The
+# Firefox side of the same bug was fixed as finding #13; the Chromium
+# side was not. Like ``STANDALONE_FIREFOX_EXTENSION_ID`` this is a
+# known-shipped literal (the sibling repo is not part of this package's
+# source tree on an installed system); the cross-repo contract — that it
+# equals the id derived from ``qdchrome-extension/manifest.chromium.json``
+# ``"key"`` — is asserted by the unit suite when that repo is checked out.
+DEFAULT_CHROMIUM_EXTENSION_ID = "ammgnkddbnjdhikklpljgiclldedgncf"
+
+
+def chromium_extension_id_is_wellformed(ext_id: str) -> bool:
+    """True when ``ext_id`` has the Chromium extension-id shape: exactly
+    32 characters drawn from ``a``-``p``.
+
+    Used to fail closed rather than write a native-messaging manifest
+    whose ``allowed_origins`` can never match a real extension (the
+    placeholder-default bug above).
+    """
+    return (len(ext_id) == 32
+            and all("a" <= c <= "p" for c in ext_id))
 
 # Per-browser native-messaging host-manifest directories. Keyed by
 # the short browser name passed on the CLI; values are paths
@@ -327,10 +371,11 @@ def _build_argparser() -> argparse.ArgumentParser:
                    choices=sorted(FIREFOX_MODE_IDS),
                    default=DEFAULT_FIREFOX_MODE,
                    help="which Firefox extension this host authorizes: "
-                        "'bundled' (the MV2 build shipped with this "
-                        "package) or 'standalone' (the separately-shipped "
-                        "qdfirefox extension). Selects the default "
-                        "allowed-extensions id; overridden by "
+                        "'bundled' (the LEGACY MV2 build next to this "
+                        "package; no origin allowlist) or 'standalone' "
+                        "(the maintained qdfirefox extension the user "
+                        "builds themselves - the v1 choice). Selects the "
+                        "default allowed-extensions id; overridden by "
                         "--firefox-extension-id if given.")
     p.add_argument("--firefox-extension-id", default=None,
                    help="explicit Firefox extension id; overrides the "
@@ -374,6 +419,17 @@ def main(argv: list[str] | None = None) -> int:
         args.firefox_extension_id
         if args.firefox_extension_id is not None
         else firefox_extension_id_for_mode(args.firefox_mode))
+    # Fail closed on a malformed Chromium id: a manifest whose
+    # ``allowed_origins`` cannot match any real extension is worse than no
+    # manifest — the browser reports only "Access to the specified native
+    # messaging host is forbidden", with nothing pointing at the id.
+    if (any(b in CHROMIUM_FAMILY for b in browsers)
+            and not chromium_extension_id_is_wellformed(
+                args.chromium_extension_id)):
+        raise SystemExit(
+            f"invalid chromium extension id: {args.chromium_extension_id!r} "
+            "(must be exactly 32 characters in [a-p] — the mapped SHA-256 "
+            "prefix of the extension's public key)")
     if args.print:
         for b in browsers:
             body = render_manifest(
