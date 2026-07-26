@@ -425,7 +425,7 @@ def test_lock_ui_renders_the_indicators_unsuppressed():
             assert "config" not in line and "Settings" not in line, line
 
 
-def test_qt_observer_runs_scans_and_publishes_state(monkeypatch):
+def test_qt_observer_runs_scans_and_publishes_state(qapp_offscreen, monkeypatch):
     """End-to-end through the real QProcess plumbing, with stubbed tools.
 
     Covers the parts the pure-model tests cannot: that a scan is actually
@@ -433,10 +433,10 @@ def test_qt_observer_runs_scans_and_publishes_state(monkeypatch):
     surface reflects it. Uses `sh -c echo` fixtures so it is deterministic and
     does not depend on a live PipeWire graph.
     """
-    QCoreApplication = pytest.importorskip("PyQt6.QtCore").QCoreApplication
     QEventLoop = pytest.importorskip("PyQt6.QtCore").QEventLoop
     QTimer = pytest.importorskip("PyQt6.QtCore").QTimer
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = qapp_offscreen  # a QGuiApplication: QtQuick needs one, and a bare
+    # QCoreApplication created here would poison the QML tests below.
 
     monkeypatch.setattr(I, "CAPTURE_CMD",
                         ["sh", "-c", "exec printf '%s' " + repr(LIVE_MIC)])
@@ -702,6 +702,142 @@ def test_snapshot_line_is_machine_parseable(qapp_offscreen):
     # Every token must be key=value: detail strings are flattened so the whole
     # line stays parseable by the GUI gate.
     assert all("=" in tok for tok in line.split(" ")), line
+
+
+def test_monitor_source_is_system_audio_not_microphone():
+    """"Your mic is live" and "your speakers are being recorded" are
+    different statements to the owner. A running *monitor* source is the
+    latter, and must never raise a microphone alarm."""
+    assert I.classify_node({"state": "running", "props": {
+        "media.class": "Audio/Source",
+        "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
+    }})["kind"] == "systemAudio"
+    assert I.classify_node({"state": "running", "props": {
+        "media.class": "Audio/Source",
+        "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo",
+    }})["kind"] == "microphone"
+
+
+def _load_lock_ui(observer):
+    """Load the REAL LockUI.qml under a QQmlEngine with a fake observer.
+
+    Source-string assertions cannot prove a binding evaluates the way it
+    reads. This component is pure QtQuick + the local shim, so it loads
+    offscreen in the unit lane.
+    """
+    from PyQt6.QtCore import QUrl
+    from PyQt6.QtQml import QQmlComponent, QQmlEngine
+
+    qml_root = str(REPO / "qdlocker" / "qml")
+    engine = QQmlEngine()
+    engine.addImportPath(qml_root)
+    component = QQmlComponent(engine, QUrl.fromLocalFile(qml_root + "/LockUI.qml"))
+    obj = component.create()
+    assert obj is not None, [e.toString() for e in component.errors()]
+    # app.py supplies this via a context property; assigning it directly keeps
+    # the test independent of context-property plumbing while driving the same
+    # `root.lockIndicators` bindings.
+    obj.setProperty("lockIndicators", observer)
+    obj._observer = observer
+    # Keep the engine/component alive for the caller's assertions.
+    obj._engine = engine
+    obj._component = component
+    return obj
+
+
+from PyQt6.QtCore import QObject, pyqtProperty, pyqtSignal  # noqa: E402
+
+
+class _FakeObserver(QObject):
+    """Minimal stand-in exposing the properties LockUI binds to."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, *, observer_ok=True, active=False, attributed=False,
+                 unverified=True, egress_unverified=False):
+        super().__init__()
+        self._observer_ok = observer_ok
+        self._active = active
+        self._attributed = attributed
+        self._unverified = unverified
+        self._egress_unverified = egress_unverified
+
+    @pyqtProperty(bool, notify=changed)
+    def captureObserverOk(self):
+        return self._observer_ok
+
+    @pyqtProperty(bool, notify=changed)
+    def captureActive(self):
+        return self._active
+
+    @pyqtProperty(bool, notify=changed)
+    def captureAttributed(self):
+        return self._attributed
+
+    @pyqtProperty(str, notify=changed)
+    def captureDetail(self):
+        return "mic:zoom"
+
+    @pyqtProperty(bool, notify=changed)
+    def captureUnverified(self):
+        return self._unverified
+
+    @pyqtProperty(str, notify=changed)
+    def captureUnverifiedLabel(self):
+        return "camera, screen"
+
+    @pyqtProperty(bool, notify=changed)
+    def egressActive(self):
+        return False
+
+    @pyqtProperty(str, notify=changed)
+    def egressLabel(self):
+        return ""
+
+    @pyqtProperty(bool, notify=changed)
+    def egressUnverified(self):
+        return self._egress_unverified
+
+
+def _row(ui, name):
+    row = ui.findChild(QObject, name)
+    assert row is not None, f"{name} not found in the loaded LockUI"
+    return row
+
+
+def test_loaded_lock_ui_distinguishes_a_failed_observer_from_a_quiet_one(qapp_offscreen):
+    """Behavioural test of the real QML, not of its source text.
+
+    A failed observer must render the alarming failure row and must NOT
+    render the dim "partial coverage" row — otherwise an unobserved machine
+    looks like an observed, quiet one.
+    """
+    failed = _load_lock_ui(_FakeObserver(observer_ok=False))
+    assert _row(failed, "securityBanner").property("observerDead") is True
+    assert _row(failed, "captureFailedRow").property("visible") is True
+    assert _row(failed, "capturePartialRow").property("visible") is False
+
+    healthy = _load_lock_ui(_FakeObserver(observer_ok=True))
+    assert _row(healthy, "securityBanner").property("observerDead") is False
+    assert _row(healthy, "captureFailedRow").property("visible") is False
+    assert _row(healthy, "capturePartialRow").property("visible") is True, (
+        "a healthy observer with unverified kinds must still disclose coverage")
+
+
+def test_loaded_lock_ui_labels_unattributed_capture_differently(qapp_offscreen):
+    """`LIVE CAPTURE` is a claim about WHO; it may only appear when the graph
+    named a client."""
+    attributed = _load_lock_ui(_FakeObserver(active=True, attributed=True))
+    assert "LIVE CAPTURE" in _row(attributed, "captureActiveRow").property("text")
+
+    anonymous = _load_lock_ui(_FakeObserver(active=True, attributed=False))
+    text = _row(anonymous, "captureActiveRow").property("text")
+    assert "CAPTURE ACTIVITY" in text and "LIVE CAPTURE" not in text
+
+
+def test_loaded_lock_ui_shows_the_egress_failure_row(qapp_offscreen):
+    ui = _load_lock_ui(_FakeObserver(egress_unverified=True))
+    assert _row(ui, "egressUnverifiedRow").property("visible") is True
 
 
 def test_no_kind_is_missing_a_label():

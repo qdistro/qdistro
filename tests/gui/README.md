@@ -45,11 +45,16 @@ bash -x 01-lock-cycle.md     # or feed step-by-step to an agent
   `qdlocker_wait_for_unlock`, `qdlocker_assert_prompt_len`.
 - `01-lock-cycle.md` — manual lock → password type → unlock.
 - `02-fprintd-fallback.md` — fingerprint path on the system bus.
-- `09-capture-indicators.md` — J28 live-capture / egress indicators:
-  real mic/camera/screencast observed while locked, capture start and
-  stop under lock, observer timeout must fail *visible*, `Stopping`
-  silo egress, locked-state restart, and the known multi-output gap
-  (see `todo/fable-release/12-j28-multi-output-lock-indicators.md`).
+- `09-capture-indicators.md` — J28 live-capture / egress indicators.
+  Unconditional: quiet lock, a real `pw-record` mic capture started and
+  stopped *while locked*, observer timeout failing **visible**, silo
+  egress including transient `Stopping` and an unreachable session
+  manager, and a locked-state restart. Conditional (SKIP with a printed
+  reason): system audio (needs a default sink), camera (needs a
+  `Video/Source` node + gstreamer), screencast (needs a **manually**
+  driven qdwin view stream — the scenario does not reimplement a Wayland
+  client), and the second-output step, which documents the known
+  multi-output gap (`todo/fable-release/12-j28-multi-output-lock-indicators.md`).
 
 ## What these tests are NOT
 

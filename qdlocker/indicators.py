@@ -252,7 +252,13 @@ def classify_node(node: dict) -> dict | None:
     # graph through a per-session PipeWire linking upward, where the
     # client-side stream node is not visible here.
     if media_class == "Audio/Source":
-        return {"kind": "microphone", "app": app, "evidence": "device"}
+        # A monitor source is the SINK's monitor: something is recording what
+        # the machine is playing, not the microphone. Those are different
+        # statements to the owner, so never fold a monitor into "mic".
+        monitor = (name.endswith(".monitor") or ".monitor" in name
+                   or "monitor" in str(props.get("node.nick") or "").lower())
+        return {"kind": "systemAudio" if monitor else "microphone",
+                "app": app, "evidence": "device"}
     if media_class == "Video/Source":
         # A video *device* defaults the other way from a video *stream*: a
         # device node is a camera unless it names itself a screen source.

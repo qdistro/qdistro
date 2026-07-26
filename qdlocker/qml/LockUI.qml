@@ -45,6 +45,9 @@ Item {
   //     never "nothing is happening". See qdlocker/indicators.py.
   Rectangle {
     id: securityBanner
+    // objectName: addressable from tests/unit/test_indicators.py, which loads
+    // this component under a real QQmlEngine and drives a fake observer.
+    objectName: "securityBanner"
     anchors.top: parent.top
     anchors.horizontalCenter: parent.horizontalCenter
     anchors.topMargin: Style.fontSizeXXL
@@ -75,6 +78,7 @@ Item {
       // A wedged/killed/stale scan lands here, not in the dim row below.
       Text {
         width: parent.width
+        objectName: "captureFailedRow"
         visible: securityBanner.observerDead
         text: !root.lockIndicators
               ? "⚠ capture monitoring unavailable — mic, camera and screen capture are NOT being observed"
@@ -88,6 +92,7 @@ Item {
       // attributes a client; device-level evidence says so instead.
       Text {
         width: parent.width
+        objectName: "captureActiveRow"
         visible: securityBanner.capturing
         text: (root.lockIndicators && root.lockIndicators.captureAttributed
                ? "⚠ LIVE CAPTURE: " : "⚠ CAPTURE ACTIVITY: ")
@@ -101,6 +106,7 @@ Item {
       // above: it is always true, so it must not compete with a real event.
       Text {
         width: parent.width
+        objectName: "capturePartialRow"
         visible: root.lockIndicators
                  && root.lockIndicators.captureObserverOk
                  && root.lockIndicators.captureUnverified
@@ -124,6 +130,7 @@ Item {
       }
       Text {
         width: parent.width
+        objectName: "egressUnverifiedRow"
         visible: root.lockIndicators ? root.lockIndicators.egressUnverified : false
         text: "⚠ network egress state unverified (session manager unreachable)"
         wrapMode: Text.WordWrap

@@ -14,7 +14,10 @@ exit criterion 11 in `07-release-checklist.md`. The unit suite
 **real** graph, that the banner is painted, or that the running observer's
 lock-edge / timeout / freshness lifecycle behaves. That is what this is for.
 
-Two channels are asserted, and both are machine-checked:
+Two channels are used. The ctrl-socket channel is machine-checked at every
+step; banner pixels are machine-checked at the steps where the *rendering* is
+the property under test (1, 2, 3, 4, 7, 8.3) and merely recorded elsewhere —
+each step says which:
 
 1. **The running observer** — `qdlocker_ctrl indicators` returns a
    space-separated `key=value` line snapshotted from the live
@@ -27,7 +30,11 @@ Two channels are asserted, and both are machine-checked:
    ctrl-socket assertion is authoritative and the screenshot backs it up.
 
 Conditional steps SKIP with an explicit printed reason and are reported as
-SKIP — never silently passed.
+SKIP — never silently passed. Steps 4 (system audio), 5 (camera), 6
+(screencast) and 10 (second output) are conditional; 1, 2, 3, 7, 8 and 9 are
+not. Step 6 needs a **manually** driven view stream: the scenario does not
+reimplement a Wayland client, and its correlation check turns "no new node"
+into a SKIP rather than a pass.
 
 ## Setup
 
@@ -177,17 +184,27 @@ assert_ind_contains capture_detail mic
 qdwin_screenshot /tmp/qdlocker-09-step2-mic.png
 qdlocker_assert_color_present_in_crop \
   /tmp/qdlocker-09-step2-mic.png "$ERR" "$BANNER_CROP" banner-mic-alarm
-ind    # record the whole line in the report: it shows attribution
+ATTR=$(ind | tr ' ' '\n' | grep '^capture_attributed=' | cut -d= -f2)
+echo "capture_attributed=$ATTR"
+if [ "$ATTR" = "0" ]; then
+    assert_ind_contains capture_detail client_unknown
+else
+    ind | grep -q 'client_unknown' && {
+        echo "FAIL: capture_attributed=1 but the detail says client unknown" >&2
+        exit 1; }
+fi
 ```
 
 **Assert (2.1):** the running observer reports an active microphone without
 any lock/unlock cycle — the poll saw a capture that began while locked. This
 is the core J28 property.
 **Assert (2.2):** the banner turns alarming.
-**Assert (2.3):** record `capture_attributed`. If it is `1`, the banner must
-read `LIVE CAPTURE` and name the client; if `0`, it must read
-`CAPTURE ACTIVITY` and say `client unknown`. Either is acceptable — claiming
-attribution without a client name is not. Note which one this VM produces.
+**Assert (2.3):** the banner wording must match `capture_attributed`. Read the
+banner text off the screenshot: `1` requires `LIVE CAPTURE` **and** a client
+name; `0` requires `CAPTURE ACTIVITY` **and** `client unknown`. Either value is
+acceptable — the mismatch is not. `capture_detail` in the same line carries the
+suffix, so the two can be compared without OCR: with `ATTR=0` the detail must
+contain `client_unknown`, and with `ATTR=1` it must not.
 
 ### Step 3 — the capture stops while locked
 
@@ -222,6 +239,14 @@ else
     sleep 6
     assert_ind capture_active 1
     assert_ind_contains capture_kinds systemAudio
+    # The discrimination is the point: a monitor capture must NOT also raise a
+    # microphone alarm. "Your mic is live" and "your speakers are being
+    # recorded" are different statements to the owner.
+    if ind | tr ' ' '\n' | grep '^capture_kinds=' | grep -q microphone; then
+        echo "FAIL: sink-monitor capture also reported as microphone" >&2
+        ind >&2
+        exit 1
+    fi
     qdwin_screenshot /tmp/qdlocker-09-step4-sysaudio.png
     qdlocker_assert_color_present_in_crop \
       /tmp/qdlocker-09-step4-sysaudio.png "$ERR" "$BANNER_CROP" banner-sysaudio
@@ -264,11 +289,18 @@ else
         ) ! fakesink >/tmp/qdlocker-09-cam.log 2>&1 &
     "
     sleep 6
+    # The driver must actually be running, or a SKIP is masquerading as a pass.
+    "$QDWIN_VM_EXEC" "$VMNAME" 'pgrep -u admin -x gst-launch-1.0 >/dev/null' \
+      || { echo "SKIP (5): gst-launch-1.0 exited immediately; see" \
+                "/tmp/qdlocker-09-cam.log in the guest (node id parse?)." >&2; \
+           CAM_SKIPPED=1; }
+    if [ -z "${CAM_SKIPPED:-}" ]; then
     assert_ind capture_active 1
     assert_ind_contains capture_kinds camera
     qdwin_screenshot /tmp/qdlocker-09-step5-camera.png
     qdlocker_assert_color_present_in_crop \
       /tmp/qdlocker-09-step5-camera.png "$ERR" "$BANNER_CROP" banner-camera
+    fi
     "$QDWIN_VM_EXEC" "$VMNAME" 'pkill -u admin -x gst-launch-1.0 || true'
     sleep 7
 fi
@@ -279,7 +311,7 @@ If it lands in `screencast`, the camera hints (`media.role`, `device.api`,
 name matching) need this VM's real property shape added to them — capture the
 offending node's props into the report.
 
-### Step 6 — screencast via qdwin's view-stream (CONDITIONAL)
+### Step 6 — screencast via qdwin's view-stream (CONDITIONAL, MANUAL DRIVER)
 
 The only screencast signal the observer can see is the `weston.pipewire-N`
 node qdwin publishes when it pins a forwarded toplevel onto a
@@ -297,11 +329,14 @@ if [ ! -d "$MM" ]; then
     echo "SKIP (6): multimachine harness not present at $MM; screencast" \
          "classification not exercised." >&2
 else
-    echo "RUNNER: start a view stream for a toplevel using the mm harness" \
-         "(harness/vm_backend.py subscribe_view_stream) against $VMNAME," \
-         "then continue. If you cannot, report step 6 as SKIP — do NOT" \
-         "assert on a node you did not create." >&2
-    # ... harness invocation ...
+    # NOT AUTOMATED: this scenario does not reimplement a Wayland view-stream
+    # client, and the mm harness's subscribe_view_stream is not a standalone
+    # entry point for an arbitrary already-running toplevel — its source stack
+    # performs the subscription as part of a larger setup. So this step is a
+    # MANUAL driver: the runner starts a view stream by whatever means the mm
+    # lane uses, and the correlation below decides PASS/SKIP. A step that
+    # cannot create the node reports SKIP; it never reports PASS.
+    echo "RUNNER (manual): start a qdwin view stream against $VMNAME now." >&2
     sleep 5
     NODES_AFTER=$("$QDWIN_VM_EXEC" "$VMNAME" \
       'runuser -u admin -- env XDG_RUNTIME_DIR=/run/user/1000 pw-cli ls Node' \
@@ -406,17 +441,39 @@ qdwin_screenshot /tmp/qdlocker-09-step8-egress.png
     org.qdistro.SessionManager1 StopSilo si '$SILO' 30 >/dev/null 2>&1 &
 "
 sleep 4
-assert_ind egress_active 1     # still live: Stopping is not dark
-"$QDWIN_VM_EXEC" "$VMNAME" \
-  "busctl --system call org.qdistro.SessionManager1 /org/qdistro/SessionManager1 \
-     org.qdistro.SessionManager1 ListSilos" | tr -d '\r' | grep -o 'Stopping' \
-  || echo "NOTE: silo left Stopping before the sample; re-run with a longer grace" >&2
+# Correlate: the TARGET silo must be in Stopping in the SAME window in which
+# the indicator still shows it. Another active silo, or a sample taken before
+# the state transition, must not be able to satisfy this.
+# Reuse the production parser (the installed module) rather than hand-rolling
+# busctl string surgery in the harness.
+"$QDWIN_VM_EXEC" "$VMNAME" "cd / && runuser -u admin -- python3 -I -c \"
+import subprocess, sys
+from qdlocker import indicators as I
+out = subprocess.run(I.EGRESS_CMD, capture_output=True, text=True)
+ok, rows = I.parse_list_silos(out.stdout)
+assert ok, 'ListSilos unreadable'
+row = [r for r in rows if r.get('name') == '$SILO']
+assert row, 'silo $SILO absent from ListSilos'
+state = row[0].get('state')
+assert state == 'Stopping', (
+    'silo $SILO is ' + str(state) + ', not Stopping — the sample missed the '
+    'transient window. Re-run with a longer grace; this step cannot pass '
+    'without observing Stopping.')
+print('ok: silo $SILO is Stopping')
+\"" || exit 1
+assert_ind egress_active 1              # still live: Stopping is not dark
+assert_ind_contains egress_detail "$SILO"
 
 # Unreachable session manager must read UNVERIFIED, never "no egress".
 "$QDWIN_VM_EXEC" "$VMNAME" 'systemctl stop qdistro-session-manager.service'
 sleep 5
 assert_ind egress_observer failed
 assert_ind egress_active 0
+# The UI claim is asserted too: the egress-unverified row is drawn in mError,
+# so the banner band must contain the error colour even with capture quiet.
+qdwin_screenshot /tmp/qdlocker-09-step8-egress-unverified.png
+qdlocker_assert_color_present_in_crop \
+  /tmp/qdlocker-09-step8-egress-unverified.png "$ERR" "$BANNER_CROP" banner-egress-unverified
 "$QDWIN_VM_EXEC" "$VMNAME" 'systemctl start qdistro-session-manager.service'
 sleep 4
 assert_ind egress_observer ok
@@ -465,9 +522,15 @@ scanout the compositor never enabled — so the compositor's own output count
 is checked first.
 
 ```bash
+# qdwin's own enabled-output set, not DRM connector state: a connected
+# connector the compositor never enabled would make the black-screen assertion
+# below trivially green. The compositor logs an output_created per enabled
+# output; count the distinct names still present.
 OUTPUTS=$("$QDWIN_VM_EXEC" "$VMNAME" \
-  'grep -c "^connected$" /sys/class/drm/card*-*/status 2>/dev/null | \
-   awk -F: "{s+=\$2} END {print s+0}"')
+  'runuser -l admin -c "journalctl --user -u qdwin-compositor.service --boot --no-pager"' \
+  | grep -oE "output_created[^\n]*name=[A-Za-z0-9-]+" | grep -oE "name=[A-Za-z0-9-]+" \
+  | sort -u | wc -l)
+echo "qdwin enabled outputs: $OUTPUTS"
 if [ "${OUTPUTS:-0}" -lt 2 ]; then
     echo "SKIP (10): compositor has ${OUTPUTS:-0} connected output(s); re-run" \
          "on a two-head VM to exercise multi-output lock behaviour." >&2
@@ -480,8 +543,11 @@ else
         /tmp/qdlocker-09-step10-secondary.ppm --screen 1
     virsh -c qemu:///session screenshot "$VMNAME" \
         /tmp/qdlocker-09-step10-primary.ppm --screen 0
-    # Primary must carry the banner: with the observer healthy and quiet the
-    # banner is dim, so assert on the surface being the locker UI, not black.
+    # Primary must not be blank. NOTE: this is a weak check — it establishes
+    # that the locker surface is being painted, NOT that the J28 banner is
+    # present on it. Asserting the banner itself needs a text/pixel signature
+    # the runner can match; until that exists, treat 10.2 as observed, not
+    # gated.
     python3 - /tmp/qdlocker-09-step10-primary.ppm <<'EOF'
 import subprocess, sys
 out = subprocess.run(["convert", sys.argv[1], "-format", "%c",
@@ -549,9 +615,10 @@ sleep 2
   `assert_ind` would be vacuous. Report BLOCKED, never PASS.
 - **Step 2 passes but Step 3 never clears** — the poll or the freshness
   horizon is wedged; check the journal for a stuck scan.
-- **Step 4 classifies a monitor capture as `microphone`** — the
-  `stream.capture.sink` discriminator did not fire on this stack. Record the
-  node props; the two states say different things to the owner.
+- **Step 4 fails its "not microphone" check** — the `stream.capture.sink`
+  discriminator (or the `.monitor` name check on the device node) did not fire
+  on this stack. Record the node props; "your mic is live" and "your speakers
+  are being recorded" say different things to the owner.
 - **Step 7 shows the dim banner instead of an alarm** — the fail-visible
   property is broken: an unobserved machine looks safe. Most serious failure
   available here.
