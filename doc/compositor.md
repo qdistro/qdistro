@@ -201,10 +201,14 @@ Properties this guarantees:
 3. **Per-surface redraw budgets.** Chrome repaints don't ratchet the content
  size or trigger client reconfigures; content repaints don't re-stream
  chrome buffers.
-4. **Content-only forwarding works.** A per-view RDP stream can capture and
- forward just the content surface's pixels — the remote viewer sees the
- application output; the local user sees application + chrome composited
- together.
+4. **Content-only forwarding** — a design goal, not the implemented behaviour.
+ The aim is that a per-view stream forwards just the content surface's pixels,
+ so the remote viewer sees application output while the local user sees
+ application + chrome. What `subscribe_view_stream` actually implements is
+ self-described as "content+chrome": it pins the toplevel's content view *and*
+ every attached chrome view onto the PipeWire output together. The distinction
+ is unobservable today only because no client attaches chrome; if the
+ decoration path above is ever exercised, the stream composites it too.
 
 ## Single-shell-client model
 
@@ -247,7 +251,7 @@ that covers:
 | Surface | Enforced? |
 |---|---|
 | Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and both bind handlers go through `qdwin_ime_family_bind_allowed`, which rejects secctx-tagged clients again as defence in depth and then requires uid == `allowed_ime_uid`, erroring before the resource is created. Optional exe/SELinux-label pins fail closed when configured, but **nothing in the shipped configuration sets them** — so the effective gate is secctx-deny + uid. |
-| Security-context manager | **Yes** — visible only to the bound shell or the authorized `qdistro-secctx-exec` helper. |
+| Security-context manager | **Yes, in production** — visible only to the bound shell or the authorized `qdistro-secctx-exec` helper. `QDWIN_SECCTX_OPEN=1` makes `qdwin_secctx_client_is_authorized()` return true for **any** client, disabling both the global filter and the bind gate; it is a documented developer escape hatch and must not be set on a real install. |
 | Clipboard transfer | **Yes** — set-time and receive-time gates into the broker ([clipboard.md](clipboard.md)), with the caveats recorded there. |
 | `xdg_activation_v1` | **Yes** — cross-uid activation stalls on a fail-closed broker check. |
 | `weston_capture_v1` (whole-output pixels) | **Yes, doubly.** The global is hidden from every client but the bound shell by `qdwin_global_visible()`. Separately, libweston defers the capture *attempt* to a screenshot authority, and qdwin registers one **only** when `QDWIN_ENABLE_SHELL_CAPTURE=1` and `geteuid() == allowed_uid` — a dev/test opt-in that logs a WARNING, is emitted into the compositor unit only when the installer's caller exports it, and is explicitly `unset` by `qdistro-bootstrap.sh` and `image/config.sh`. **On a production install no authority is registered, so capture attempts hit libweston's fail-closed default and are denied.** When the opt-in is on, `qdwin_capture_auth_cb` re-checks the exact bound-shell `wl_client` and a single designated output at execution time, and authorizes nothing else. |
@@ -356,11 +360,14 @@ The shared primitive is a private Wayland protocol —
 > [window-handoff.md](window-handoff.md) for the handoff-side view of the same
 > mechanism.
 
-Transport reuses libweston's `backend-pipewire` for the common case. **There is
-no DMA-BUF direct path**: `dmabuf` does not appear in `qdwin.c`, in
-`qdwin-shell-v1.xml`, in `daemons/forward/`, or in qdshell's qml-plugin. Adding
-one for low-latency same-GPU consumers remains a design option, not a shipped
-capability.
+Transport reuses libweston's `backend-pipewire` for the common case. **The
+view-stream path has no DMA-BUF direct path**: `dmabuf` appears nowhere in
+`qdwin.c`, in `qdwin-shell-v1.xml`, or in `daemons/forward/`, and
+`subscribe_view_stream` offers only the PipeWire node. Adding one for
+low-latency same-GPU consumers remains a design option, not a shipped
+capability. (Scoped deliberately: DMA-BUF *is* mentioned in the separate
+whole-output `weston-output-capture` protocol that qdshell's qml-plugin also
+compiles against — that is a different capture surface, not this one.)
 
 **Simple-effects escape hatch — designed, not built.** The plan is a small patch
 to `gl-renderer.c` accepting a per-surface 4×4 colour-matrix uniform, plumbed
@@ -394,20 +401,50 @@ change with a new `qdwin-xdg-constrain.h` kernel under
 `backend-drm/kms.c`, and a capture-retention edit in
 `renderer-gl/gl-renderer.c`.
 
-**What is actually loaded.** `deploy/qdwin-compositor.service` pins the vendored
-build **unconditionally**, not "only where the patch is needed":
-`LD_LIBRARY_PATH` points at `/usr/libexec/qdistro/qdwin-libweston/lib64`, and
-`WESTON_MODULE_MAP` routes `drm-backend.so` and `gl-renderer.so` to the vendored
-copies. (The remaining backends — headless, pipewire, rdp, wayland, x11,
-xwayland, color-lcms — stay on the distro packages.) The DRM backend must run
-against the vendored core it was built against, so this is not separable.
+**What is actually loaded — and it is conditional at install time.** Ignore the
+static `deploy/qdwin-compositor.service` when reasoning about production:
+`image/config.sh` explicitly refuses to copy it, because
+`install-qdwin-session-for-vm.sh` is the single source for the session units and
+emits them with a *dynamically computed* module map. That installer branches on
+whether a vendored tree has been staged at
+`/usr/libexec/qdistro/qdwin-libweston/lib64/libweston-16/drm-backend.so`:
 
-**The residual risk this leaves.** qdistro is on the hook for a weston fork's
-security maintenance, not a patch's: distro updates to `libweston-16` do **not**
-reach the compositor's core, DRM backend, or GL renderer. Rebasing on an
-upstream weston bump is a tree-level operation. The in-tree edits with no
-`.patch` record are the ones most likely to be lost in such a rebase, and the
-positioner-snapshot change is security-relevant.
+- **Vendored branch.** `LD_LIBRARY_PATH` points at the staged tree and
+  `WESTON_MODULE_MAP` routes **every** backend present there — not just
+  drm-backend and gl-renderer — to that same tree, because the core↔backend ABI
+  is internal to libweston and they must come from one build. `xwayland.so` is
+  mapped separately and usually falls back to the distro copy, which the
+  vendored production build omits.
+- **Fallback branch.** If the tree is absent, the unit is written against distro
+  libweston with no `LD_LIBRARY_PATH` at all, and the installer prints a `WARN`:
+  layer-popup grab is **DEGRADED**, so Quickshell popups parented to layer
+  surfaces do not grab. This is the documented fallback, not an error.
+
+**Which branch a real install takes.** `install-vendored-libweston.sh` — the
+only thing that stages the tree — is invoked by exactly one caller:
+`scripts/vm/fresh-vm-bootstrap.sh`, the test-VM/golden-image path. **Neither
+`qdistro-bootstrap.sh` nor `image/config.sh` invokes it**, and the vendored
+build is deliberately not wired into qdwin's Meson build. So a machine brought
+up by the documented bootstrap runs **distro libweston** and takes the degraded
+branch; the fully vendored configuration is what CI VMs and golden images run.
+
+**The residual risk this leaves, in both directions.**
+
+- On a **bootstrapped** install, the patches are simply not present. That
+  includes the security-relevant ones: the positioner-snapshot constraint that
+  stops a client parking a spoofed `xdg_popup` over another silo's window to
+  phish a click lives only in the vendored tree. A stock bootstrap therefore
+  does **not** have that mitigation, and also loses layer-popup grab. Treat the
+  patched behaviour described elsewhere on this page as conditional on staging
+  the vendored tree.
+- On a **vendored** install, qdistro is on the hook for a weston fork's security
+  maintenance rather than a patch's: distro updates to `libweston-16` do not
+  reach the compositor's core or any mapped backend, and rebasing on an upstream
+  bump is a tree-level operation. The in-tree edits with no `.patch` record are
+  the ones most likely to be lost in such a rebase.
+
+The gap between those two configurations is itself the finding worth tracking:
+the security posture of a bootstrapped machine and of a CI VM are not the same.
 
 The original rationale for vendoring rather than LD_PRELOADing still holds and
 is worth keeping: there is no separate `libweston-desktop.so`, and the
