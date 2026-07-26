@@ -430,6 +430,68 @@ class TestLifecycle:
         assert ops.relay_policies == {"payroll": 4242}
 
 
+class TestDirectoryHazard:
+    """The policy DIRECTORY is the hazard surface, not any single file.
+
+    dbus-broker-launch inotify-watches /etc/dbus-1/system.d, and a reload
+    that meets a fragment whose numeric `user=` NSS cannot resolve aborts
+    the bus. So a perfectly good write for silo A can be what detonates a
+    bad fragment left behind for silo B. Every path that touches the
+    directory purges first.
+    """
+
+    def test_create_purges_a_stale_fragment_before_writing(self, store, ops):
+        store.create("old", 4242)
+        ops.users.pop("old")                # out-of-band userdel
+        store.create("fresh", 4243)
+        assert "old" not in ops.relay_policies, (
+            "create() wrote into a directory still holding a fragment for a "
+            "deleted user; its own write can trigger the reload that aborts "
+            "the bus on that fragment")
+        assert ops.relay_policies == {"fresh": 4243}
+
+    def test_create_refuses_when_the_stale_fragment_cannot_be_purged(
+            self, store, ops):
+        store.create("old", 4242)
+        ops.users.pop("old")
+        ops.relay_policy_remove_should_fail = True
+        with pytest.raises(SessionError, match="could not be removed"):
+            store.create("fresh", 4243)
+        assert "fresh" not in ops.users, "useradd was not rolled back"
+        assert store.get("old")             # the old row is untouched
+
+    def test_delete_purges_a_stale_fragment_before_reloading(
+            self, store, ops):
+        store.create("old", 4242)
+        store.create("live", 4243)
+        ops.users.pop("old")
+        store.delete("live")
+        assert ops.relay_policies == {}, (
+            "delete() reloaded the bus with a stale fragment still present")
+
+    def test_delete_refuses_when_the_stale_fragment_cannot_be_purged(
+            self, store, ops):
+        store.create("old", 4242)
+        store.create("live", 4243)
+        ops.users.pop("old")
+        ops.relay_policy_remove_should_fail = True
+        with pytest.raises(SessionError, match="could not be removed"):
+            store.delete("live")
+        assert store.get("live")
+
+    def test_a_second_unresolvable_policy_is_not_missed(self, store, ops):
+        """A hand-edited fragment can carry a resolvable numeric policy
+        followed by an unresolvable one. Stopping at the first match would
+        call the file safe; the second entry aborts the bus just as
+        thoroughly as the first."""
+        store.create("payroll", 4242)
+        ops.relay_policy_extra_uids["payroll"] = [59999]
+        _issued, revoked = store.reconcile_relay_policies()
+        assert revoked == ["payroll"], (
+            "a fragment carrying a second, unresolvable numeric user policy "
+            "was left on disk")
+
+
 class TestReconcile:
 
     def test_issues_grants_for_silos_that_predate_the_mechanism(

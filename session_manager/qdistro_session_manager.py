@@ -823,23 +823,30 @@ class _SystemOps:
                 out.append(silo)
         return out
 
-    def relay_policy_uid(self, name: str) -> int | None:
-        """The uid an existing fragment actually grants, or None if it cannot
-        be read or parsed.
+    def relay_policy_uids(self, name: str) -> list[int] | None:
+        """EVERY numeric `<policy user="N">` an existing fragment carries, or
+        None if it cannot be read or parsed.
 
         The reconcile needs this to spot a fragment naming a uid that no
         longer resolves — a hand edit, a torn write, an /etc restored from
-        backup. Such a file is not merely wrong, it aborts dbus-broker at
-        its next reload, so "unreadable" and "unparseable" both have to come
-        back as None and be treated as unsafe rather than ignored.
+        backup. Such a file is not merely wrong: it aborts dbus-broker at its
+        next reload, so "unreadable" and "unparseable" both come back as None
+        and are treated as unsafe rather than ignored.
+
+        All of them, not the first. A file we generated has exactly one
+        numeric user policy, but this function exists precisely for files
+        that are no longer what we generated. A hand edit that leaves a
+        resolvable numeric policy followed by an unresolvable one would look
+        safe if we stopped at the first match, and the second one is just as
+        fatal to the bus as the first.
         """
         p = RELAY_POLICY_DIR / relay_policy_filename(name)
         try:
             text = p.read_text(encoding="utf-8")
         except OSError:
             return None
-        m = _re.search(r'<policy\s+user="(\d+)"', text)
-        return int(m.group(1)) if m else None
+        return [int(m.group(1))
+                for m in _re.finditer(r'<policy\s+user="(\d+)"', text)]
 
     def relay_policy_matches(self, name: str, uid: int) -> bool:
         """True if the on-disk fragment for `name` is byte-identical to what
@@ -2668,6 +2675,17 @@ class _SiloStore:
                     if self._ops.uid_exists(uid):
                         raise SiloExists(
                             f"uid {uid} already in use on this system")
+                    # Before touching /etc/dbus-1/system.d at all: clear any
+                    # fragment that is unsafe to be in there when we write.
+                    # An out-of-band `userdel` since the last reconcile
+                    # leaves one naming an unresolvable uid, and OUR write
+                    # can be what triggers the reload that aborts the bus on
+                    # it. Refuse the create rather than fire the trigger.
+                    _rev, _unpurged = self._purge_unsafe_relay_fragments()
+                    if _unpurged:
+                        raise SessionError(
+                            "cannot create silo "
+                            f"{name!r}: {self._unsafe_fragment_error(_unpurged)}")
                     self._ops.useradd(name, uid)
                     # Issue this silo's user-relay bus-name grant. Without
                     # it qdistro-user-relay@<uid> is refused the name and
@@ -2734,6 +2752,17 @@ class _SiloStore:
                         msg = (f"silo {silo.name!r} is {silo.state}; "
                                f"stop it first")
                     raise SiloBusy(msg)
+                # Same preflight as create(). delete() removes this silo's
+                # fragment and reloads the bus; the reload is exactly what
+                # detonates an unrelated bad fragment. The purge normally
+                # removes the offending file itself — this only refuses when
+                # it could not, which is a filesystem problem the admin has
+                # to fix before any policy write is safe.
+                _rev, _unpurged = self._purge_unsafe_relay_fragments()
+                if _unpurged:
+                    raise SessionError(
+                        f"cannot delete silo {silo.name!r}: "
+                        f"{self._unsafe_fragment_error(_unpurged)}")
                 self._transition(silo, State.DELETING)
                 try:
                     self._ops.cgroup_remove(silo.name)
@@ -3432,37 +3461,33 @@ class _SiloStore:
         with self._lock:
             return self._reconcile_relay_policies_locked()
 
-    def _reconcile_relay_policies_locked(self) -> tuple[list[str], list[str]]:
-        """Two passes, in this order, and the order is the whole point.
+    def _purge_unsafe_relay_fragments(self) -> tuple[list[str], list[str]]:
+        """Remove every generated policy fragment that is unsafe to leave on
+        disk. Returns (revoked, unpurged). The caller must hold `_lock`.
 
-        PASS 1 purges every generated fragment that is unsafe to leave on
-        disk. PASS 2 writes the fragments that should exist. Nothing is
-        written until the purge has finished.
+        "Unsafe" is not "wrong". A fragment can be out of date and perfectly
+        inert; what makes one dangerous is that dbus-broker ABORTS when it
+        reloads a fragment whose numeric `user=` NSS cannot resolve (see
+        write_relay_policy). Combined with dbus-broker-launch's inotify watch
+        on /etc/dbus-1/system.d, that makes the whole directory the hazard
+        surface: any write in there, for any silo, can trigger the reload
+        that detonates a bad file left by something else entirely — an
+        out-of-band `userdel`, a restore from backup, a torn write.
 
-        The reason is a property of the directory rather than of any one
-        file. dbus-broker-launch inotify-watches /etc/dbus-1/system.d, so
-        ANY write in there — including a perfectly good one for a different
-        silo — can trigger a config reload; and a reload that encounters a
-        fragment whose numeric `user=` NSS cannot resolve does not skip it,
-        it aborts the bus (see write_relay_policy). So it is not enough to
-        refuse to write a bad fragment: a bad fragment already present has
-        to be gone before we touch the directory at all. If the purge fails
-        to remove one, we write nothing and reload nothing, because every
-        such action is a chance to detonate the one we could not remove.
+        So every path that touches this directory purges first. `unpurged`
+        being non-empty means a dangerous file is still there and the caller
+        must not write or reload: doing so is what sets it off.
         """
         want = {s.name: s.uid for s in self._silos.values()
                 if s.kind == KIND_TIER3_USER}
         try:
-            have = set(self._ops.list_relay_policies())
+            have = sorted(self._ops.list_relay_policies())
         except Exception as e:  # noqa: BLE001
-            log.warning("relay-policy reconcile: listing failed: %s", e)
+            log.warning("relay-policy purge: listing failed: %s", e)
             return ([], [])
-        issued: list[str] = []
         revoked: list[str] = []
-
-        # ---- PASS 1: purge ------------------------------------------------
         unpurged: list[str] = []
-        for name in sorted(have):
+        for name in have:
             reason = None
             if name not in want:
                 reason = "no such silo"
@@ -3476,51 +3501,85 @@ class _SiloStore:
                     # identity we may keep a bus grant for.
                     reason = f"identity check failed ({e})"
             if reason is None:
-                # The row and the account agree. The FILE may still name a
-                # uid that does not resolve — a hand edit, a torn write —
-                # and that is the shape that aborts the bus.
+                # Row and account agree. The FILE may still name a uid that
+                # does not resolve — a hand edit, a torn write — and that is
+                # the shape that aborts the bus.
                 try:
-                    fuid = self._ops.relay_policy_uid(name)
-                    if fuid is None:
+                    uids = self._ops.relay_policy_uids(name)
+                    if uids is None:
                         reason = "fragment unreadable or unparseable"
-                    elif not self._ops.uid_exists(fuid):
-                        reason = f"fragment names uid {fuid}, which has no " \
-                                 f"passwd entry"
+                    elif not uids:
+                        reason = "fragment grants no numeric user policy"
+                    else:
+                        bad = [u for u in uids if not self._ops.uid_exists(u)]
+                        if bad:
+                            reason = (f"fragment names uid(s) "
+                                      f"{', '.join(str(u) for u in bad)} "
+                                      f"with no passwd entry")
                 except Exception as e:  # noqa: BLE001
                     reason = f"could not read the fragment ({e})"
             if reason is None:
                 continue
-            log.warning("relay-policy reconcile: removing the fragment for "
-                        "%r (%s)", name, reason)
+            log.warning("relay-policy purge: removing the fragment for %r "
+                        "(%s)", name, reason)
             try:
                 self._ops.remove_relay_policy(name, reload=False)
                 revoked.append(name)
-                have.discard(name)
             except Exception as e:  # noqa: BLE001
                 unpurged.append(name)
                 log.error("could not remove the relay fragment for %r: %s — "
                           "it may name an unresolvable uid, and dbus-broker "
                           "aborts on that at its next reload", name, e)
+        return (revoked, unpurged)
 
+    def _unsafe_fragment_error(self, unpurged: list[str]) -> str:
+        return (
+            "the D-Bus policy directory holds a relay fragment that could "
+            "not be removed (" + ", ".join(repr(n) for n in unpurged) + "). "
+            "It may name a uid with no passwd entry, and writing or "
+            "reloading policy while it is present can abort the system bus. "
+            "Remove /etc/dbus-1/system.d/" + RELAY_POLICY_PREFIX +
+            "<name>.conf by hand and retry.")
+
+    def _reconcile_relay_policies_locked(self) -> tuple[list[str], list[str]]:
+        """Two passes, in this order, and the order is the whole point.
+
+        PASS 1 purges every fragment that is unsafe to leave on disk; PASS 2
+        writes the fragments that should exist. Nothing is written until the
+        purge has finished, because any write can trigger the reload that
+        aborts the bus on a bad file already present — see
+        _purge_unsafe_relay_fragments. If the purge could not remove
+        something, this writes nothing and reloads nothing: every such action
+        is a chance to detonate the one we could not remove.
+
+        This is also the upgrade path. Every silo on an already-installed
+        system was created before this mechanism existed, so none of them has
+        a grant; without a reconcile the fix would only ever work for silos
+        created after the upgrade, which is the same defect class one turn
+        later.
+        """
+        revoked, unpurged = self._purge_unsafe_relay_fragments()
+        issued: list[str] = []
         if unpurged:
-            log.error(
-                "relay-policy reconcile: aborting after failing to remove "
-                "%s. Writing or reloading now risks a system-bus abort on "
-                "%s a fragment that could not be purged; leaving the "
-                "directory untouched instead. Remove it by hand and restart "
-                "qdistro-session-manager.",
-                ", ".join(repr(n) for n in unpurged),
-                "" if len(unpurged) == 1 else "one of")
+            log.error("relay-policy reconcile: aborting — %s",
+                      self._unsafe_fragment_error(unpurged))
             return (issued, revoked)
 
-        # ---- PASS 2: issue ------------------------------------------------
+        want = {s.name: s.uid for s in self._silos.values()
+                if s.kind == KIND_TIER3_USER}
+        try:
+            have = set(self._ops.list_relay_policies())
+        except Exception as e:  # noqa: BLE001
+            log.warning("relay-policy reconcile: listing failed: %s", e)
+            return (issued, revoked)
+
         for name, uid in sorted(want.items()):
             if name in have:
-                # Survived the purge, so its identity and its uid are both
+                # Survived the purge, so its identity and its uids are both
                 # good. Only the exact expected CONTENT is left to check —
-                # presence alone would let a drifted fragment through, and
-                # the filename carries the name while the content carries
-                # the uid the granted bus name is built from.
+                # presence alone would let a drifted fragment through, since
+                # the filename carries the name while the content carries the
+                # uid the granted bus name is built from.
                 try:
                     if self._ops.relay_policy_matches(name, uid):
                         continue
@@ -3529,9 +3588,9 @@ class _SiloStore:
                                 "the fragment for %r (%s); rewriting it",
                                 name, e)
             else:
-                # No fragment. It may never have had one (the upgrade path)
-                # or the purge may have just removed a bad one. Either way
-                # the identity has to be established before we grant.
+                # No fragment: it never had one (the upgrade path), or the
+                # purge just removed a bad one. Either way the identity has
+                # to be established before we grant.
                 try:
                     if not self._ops.user_uid_matches(name, uid):
                         log.warning(

@@ -65,6 +65,8 @@ class _FakeOps:
         self.relay_policy_remove_should_fail = False
         # Fragments whose uid cannot be read back (torn write, hand edit).
         self.relay_policy_unreadable: set[str] = set()
+        # name -> extra numeric <policy user="N"> entries beyond the real one
+        self.relay_policy_extra_uids: dict[str, list[int]] = {}
         self.dbus_reloads = 0
         # Snapshot of self.cgroup_frozen taken on each kill_pids call.
         self.frozen_at_kill: dict[str, bool] = {}
@@ -167,10 +169,16 @@ class _FakeOps:
     def list_relay_policies(self) -> list[str]:
         return sorted(self.relay_policies)
 
-    def relay_policy_uid(self, name: str):
+    def relay_policy_uids(self, name: str):
         if name in self.relay_policy_unreadable:
             return None
-        return self.relay_policies.get(name)
+        # A real fragment can carry more than one numeric user policy once a
+        # human has edited it; relay_policy_extra_uids models that.
+        uid = self.relay_policies.get(name)
+        if uid is None:
+            return []
+        return [int(uid)] + [int(u) for u in
+                             self.relay_policy_extra_uids.get(name, [])]
 
     def relay_policy_matches(self, name: str, uid: int) -> bool:
         # The real ops compare the fragment's full text; the fragment's
