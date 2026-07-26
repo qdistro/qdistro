@@ -246,7 +246,7 @@ that covers:
 
 | Surface | Enforced? |
 |---|---|
-| Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and both bind handlers go through `qdwin_ime_family_bind_allowed`, a fail-closed uid + exe pin that rejects before the resource is created. |
+| Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and both bind handlers go through `qdwin_ime_family_bind_allowed`, which rejects secctx-tagged clients again as defence in depth and then requires uid == `allowed_ime_uid`, erroring before the resource is created. Optional exe/SELinux-label pins fail closed when configured, but **nothing in the shipped configuration sets them** — so the effective gate is secctx-deny + uid. |
 | Security-context manager | **Yes** — visible only to the bound shell or the authorized `qdistro-secctx-exec` helper. |
 | Clipboard transfer | **Yes** — set-time and receive-time gates into the broker ([clipboard.md](clipboard.md)), with the caveats recorded there. |
 | `xdg_activation_v1` | **Yes** — cross-uid activation stalls on a fail-closed broker check. |

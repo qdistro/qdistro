@@ -14,14 +14,17 @@ and sessions spawned by admin's session manager. There is only ever one human.
 Fingerprint = "the owner is present."
 
 This does not collapse work into one context. A session is a dynamic set of
-processes and attached or reserved resources. The owner may keep separate TTY
-sessions for strong mental separation, use a mixed desktop where multiple
-silos share one compositor, or run a headless session for an automated
-workflow.
+processes and attached or reserved resources. The design offers three shapes:
+separate TTY sessions for strong mental separation, a mixed desktop where
+multiple silos share one compositor, or a headless session for an automated
+workflow. **Only the mixed desktop ships.** There is no separate-TTY session
+launcher and no headless-session launcher in v1 — see the TTY table below.
 
 ## Session launch chain
 
-Each TTY starts a greetd instance with a role-specific config:
+The design is one greetd instance per TTY with a role-specific config. **One
+greetd config is installed**, for tty3 (`deploy/greetd-config.toml`, copied by
+`qdistro-bootstrap.sh`); nothing installs per-TTY instances.
 
 | TTY | greetd config | Runs |
 |-------|------------------------------------------|---------------------------------------------------------------------|
@@ -36,10 +39,13 @@ held exclusively by the compositor — `getty@tty3`/`autovt@tty3` are masked so
 logind cannot autospawn a login prompt on it when the VT is free; see
 `doc/architecture.md` "TTY layout".
 
-Admin-configured sessions may autostart or autologin before the owner performs
-the first admin login after boot. They may run background jobs and use network
-if their policy allows it, but they must not be visible or interactable until
-admin authenticates and the machine lock is cleared.
+**Planned:** admin-configured sessions may autostart or autologin before the
+owner performs the first admin login after boot, running background jobs and
+using network if their policy allows, but never visible or interactable until
+admin authenticates and the machine lock is cleared. No autostart/autologin
+scheduler exists — the session manager has no such path, and the only thing
+`StartSilo` starts is the cgroup keep-alive described under "Admin-controlled
+silo lifecycle".
 
 > **History:** before P01 (closed 2026-05), tty3 ran
 > `qdistro-startlxqtwayland` (LXQt+labwc) with qdshell as a
@@ -98,11 +104,13 @@ that part is genuinely in qdwin's hands rather than the locker's. When
 
 - No user-session surfaces are rendered.
 - No input is dispatched to user sessions.
-- Only the lock layer and the lock curtain render.
-  `qdwin_hide_non_lock_layers()` unsets the position of the background, normal,
-  panel, notification, launcher, popup, and all four layer-shell layers — the
-  admin background goes away too, which is blunter than this page previously
-  described.
+- No desktop or shell layer renders. `qdwin_hide_non_lock_layers()` unsets the
+  position of the background, normal, panel, notification, launcher, popup, and
+  all four layer-shell layers — the admin background goes away too, which is
+  blunter than this page previously described. The claim is that no
+  content-bearing layer survives, not that nothing else can paint: libweston's
+  own compositor-owned cursor and fade layers are separate and remain, which is
+  what lets the lock UI still show a pointer.
 
 The security consequence of the split is explicitly handled rather than
 accidental: a crashed or killed locker does **not** unlock the machine. qdwin's
@@ -155,9 +163,12 @@ already-approved network jobs, and other background work may continue.
 > (`qdwin_handle_subscribe_view_stream`) is gated by
 > `qdwin_shell_require_bound()` and nothing else; virtual input
 > (`zwp_virtual_keyboard_manager_v1`, and input-method-v2 through the same
-> helper) is gated fail-closed at *bind* time by
-> `qdwin_ime_family_bind_allowed`, a uid + exe pin. Neither gate consults
-> `locked`. Every `->locked` site in `qdwin.c` is layer hide/show, curtain,
+> helper) is gated at *bind* time by `qdwin_ime_family_bind_allowed`, which
+> rejects any secctx-tagged silo client outright and then requires the caller's
+> uid to match `allowed_ime_uid`. Optional executable and SELinux-label pins
+> exist and fail closed *when configured*, but **no production installer or
+> unit sets them**, so what ships is the secctx deny plus the uid check.
+> Neither gate consults `locked`. Every `->locked` site in `qdwin.c` is layer hide/show, curtain,
 > grabs, focus, activation, or lock-surface lifecycle. ("screencopy" in the
 > earlier wording named a protocol qdwin does not implement; there is no
 > wlr-screencopy in the tree at all.)
@@ -191,9 +202,11 @@ session-manager egress feed into `qdlocker`, so those indicators are not a
 current shipped guarantee.
 
 User sessions do not run independent screenlockers and must not prompt for the
-admin/root password. When locked, the only unlock path is the admin locker. For
-TTY sessions, the visible seat is forced to the admin lock surface or kept
-there.
+admin/root password. When locked, the only unlock path is the admin locker.
+(The intended rule for separate TTY sessions — that the visible seat is forced
+to the admin lock surface or kept there — has nothing to act on in v1, since no
+such sessions exist; and the actual VT mechanism is not lock-conditional at
+all, as below.)
 
 **VT switching is blocked unconditionally, not conditionally on the lock.**
 There is no lock-conditional VT gating anywhere in the tree. What ships is a
@@ -275,12 +288,15 @@ progress badges, but settle to a resting state within a few seconds.
 - **Created** — `useradd` happened, per-silo state dir exists, but
  `systemctl start` has never run for the silo. Initial state after
  `CreateSilo`.
-- **Active** — silo's launcher unit is running; cgroup is populated;
- surfaces render when admin is unlocked. (Spec's old "running.")
-- **Frozen** — cgroup-v2 `cgroup.freeze=1`; no CPU; surfaces hidden;
- admin can `ResumeSilo`. This is `cgroup.freeze`, not POSIX SIGSTOP —
- syscalls in flight unwind cleanly when thawed. (Spec's old
- "paused / frozen.")
+- **Active** — silo's launcher unit is running; cgroup is populated.
+ (Spec's old "running.") The surface behaviour this state is meant to
+ carry — surfaces render when admin is unlocked — is **planned**: the
+ launcher runs a cgroup keep-alive with no graphical client, so an
+ Active silo has no surfaces to render (see "D-Bus surface" below).
+- **Frozen** — cgroup-v2 `cgroup.freeze=1`; no CPU; admin can
+ `ResumeSilo`. This is `cgroup.freeze`, not POSIX SIGSTOP — syscalls in
+ flight unwind cleanly when thawed. (Spec's old "paused / frozen.")
+ The "surfaces hidden" half is likewise planned, for the same reason.
 - **Stopping** — transient. SIGTERM has been sent; the daemon is
  waiting for the grace window before SIGKILL. `SiloChanged` fires
  once on entry and once on Stopped.
@@ -365,13 +381,21 @@ The templated launcher unit **is** shipped and installed
 (`install-session-manager.sh` drops `qdshell-session@.service` plus the
 per-silo symlinks and the `qdshell-session-launcher` helper).
 
-What it is not, despite the name, is a session. The unit's sole job is to keep
-the silo's uid alive in `/sys/fs/cgroup/qdistro-silos/<name>/` so the session
-manager's `cgroup.events:populated` check reports the silo as live: the helper
-joins the cgroup, drops to the silo uid, and execs `dbus-run-session sleep
-infinity`. **No qdshell, no compositor client, and no shell runs inside a
+What it is not, despite the name, is a session. Its job is to keep the silo's
+uid alive in `/sys/fs/cgroup/qdistro-silos/<name>/` so the session manager's
+`cgroup.events:populated` check reports the silo as live: the helper joins the
+cgroup, drops to the silo uid with `setpriv`, and execs `dbus-run-session --
+sleep infinity`. **No qdshell, no compositor client, and no shell runs inside a
 silo.** The unit's own header says "Real qdshell wiring layers on top of this in
 a follow-up task."
+
+It does have one other shipped side effect, conditional on a unit that the
+installer chain does not currently install: if
+`/etc/systemd/system/qdistro-user-relay@.service` exists, the helper first
+enables linger for the silo uid and best-effort starts
+`qdistro-user-relay@<uid>.service`. `install-user-relay-for-vm.sh` is not in the
+bootstrap chain or `image/config.sh`, so on a stock install that branch is
+skipped entirely and the keep-alive is all that happens.
 
 This is worth stating plainly because several containment properties elsewhere
 in the docs are, today, vacuously true for that reason: a silo with no shell and
@@ -417,7 +441,10 @@ If the compositor crashes, or once admin has logged out:
 3. Admin authenticates again → sessions become reachable → the compositor
  renders allowed surfaces.
 
-If admin logs out deliberately, the flow is the same.
+A deliberate logout reaches the same end state — no desktop, nothing reachable
+until admin authenticates again — but by a different route: the compositor is
+*not* respawned by systemd (see `Restart=on-failure` above); greetd brings the
+greeter back on tty3 instead.
 
 Admin cannot log out in a way that leaves user sessions visibly active —
 rendering depends on admin's compositor. The admin session is the host, not
