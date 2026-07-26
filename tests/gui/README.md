@@ -45,6 +45,11 @@ bash -x 01-lock-cycle.md     # or feed step-by-step to an agent
   `qdlocker_wait_for_unlock`, `qdlocker_assert_prompt_len`.
 - `01-lock-cycle.md` — manual lock → password type → unlock.
 - `02-fprintd-fallback.md` — fingerprint path on the system bus.
+- `09-capture-indicators.md` — J28 live-capture / egress indicators:
+  real mic/camera/screencast observed while locked, capture start and
+  stop under lock, observer timeout must fail *visible*, `Stopping`
+  silo egress, locked-state restart, and the known multi-output gap
+  (see `todo/fable-release/11-j28-multi-output-lock-indicators.md`).
 
 ## What these tests are NOT
 
