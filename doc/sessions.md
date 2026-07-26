@@ -198,18 +198,25 @@ absent the indicator would read "unverified" forever — honest, but useless
 - **Multi-output.** qdlocker paints one fullscreen window and qdwin
  fullscreens it onto `qdwin_primary_output()`, so the indicators appear on
  the primary output only. The other outputs are covered by qdwin's opaque
- lock curtain, which spans the union bounding box of every output, and all
- non-lock layers are unset globally — so a secondary output is uniformly
- black rather than showing stale desktop content. Options and costs are in
+ lock curtain, which spans the union bounding box of the outputs present
+ when it was installed, and all non-lock layers are unset globally — so a
+ secondary output is uniformly black rather than showing stale desktop
+ content. An output hot-plugged *while locked* is **not** covered: qdwin
+ re-installs the curtain on output removal but not on output creation. Options and costs are in
  `todo/fable-release/11-j28-multi-output-lock-indicators.md`; the same note
  records two pre-existing qdwin defects found alongside (output hotplug
  while locked does not re-install the curtain, and
  `qdwin_locker_surface_v1.configure` is documented but never sent).
 - **No live gate has been run.** The derivation is unit-tested and the live
- scenario is written (`qdlocker/tests/gui/09-capture-indicators.md` — real
- mic/camera/screencast, capture start/stop under lock, observer timeout,
- `Stopping` egress, locked-state restart, second output), but it has not
- been executed against a real qdwin + qdlocker + PipeWire graph.
+ scenario is written (`qdlocker/tests/gui/09-capture-indicators.md`), but it
+ has not been executed against a real qdwin + qdlocker + PipeWire graph.
+ It asserts the state of the running observer through an
+ introspection-gated `indicators` ctrl verb plus banner pixels; its mic,
+ system-audio, observer-timeout, egress (including `Stopping` and an
+ unreachable session manager) and locked-restart steps are unconditional,
+ while camera, screencast and the second-output step SKIP with a printed
+ reason when the VM cannot provide the device, the multimachine harness or
+ a second head. Output hotplug while locked is a manual check, not a gate.
 
 Making a kind report "clear" requires a real authoritative feed first: a
 qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
