@@ -126,13 +126,20 @@ When admin deletes a cache row via `RevokeApproval(id)` or `RevokeAllForUid
 exe)` — one per deleted row. The intent is that subscribers which granted
 resources on the strength of the row listen for this and tear down immediately.
 
-> **Status: the signal has no consumer, so revocation is lazy.** The broker half
-> ships and is exercised by the GUI acceptance tests, but nothing in the product
-> subscribes to `ApprovalRevoked` to tear anything down. In particular qdshell
-> does not: it has no `ApprovalRevoked` handler, and it never opens
-> `qdwin_view_stream_v1` streams in the first place (the only
-> `subscribe_view_stream` callers in the tree are a C test client and the
-> VM-gated multimachine components).
+> **Status: the only consumer refreshes UI; nothing tears down, so revocation
+> is lazy.** The broker half ships and is exercised by the GUI acceptance tests.
+> There is exactly one subscriber — the Qt admin app, which on the signal
+> restarts a 250 ms coalescer that refreshes its Cache tab and updates the tray
+> icon, so it does not render rows the broker no longer holds. That is display
+> consistency, not enforcement, and the admin app itself ships in no production
+> installer ([sessions.md](sessions.md#admin-panel-operations)).
+>
+> **qdshell is not a consumer**, contrary to what this section used to say: it
+> has no `ApprovalRevoked` handler, and it never opens `qdwin_view_stream_v1`
+> streams in the first place (the only `subscribe_view_stream` callers in the
+> tree are a C test client and the VM-gated multimachine components). No
+> component anywhere destroys a stream, closes an fd, or releases a resource in
+> response to the signal.
 >
 > **The residual risk this leaves.** Revoking an approval deletes the cache row,
 > so the *next* `CheckPermission` for that `(uid, action, exe)` stops returning
