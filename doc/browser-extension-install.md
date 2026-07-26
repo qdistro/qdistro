@@ -30,7 +30,7 @@ table is a summary, not an exhaustive install record):
 | `/usr/libexec/qdistro/qdistro_browser_bridge.py` | the bridge itself |
 | `/usr/libexec/qdistro/qdistro_browser_install.py` | the manifest writer |
 | `/usr/local/bin/qdistro-browser-install` | CLI front for the above |
-| `/usr/share/qdistro/browser-extension/` | source of the *bundled* extension |
+| `/usr/share/qdistro/browser-extension/` | source of the *bundled* extension — **not the extension this page installs**, see the warning below |
 
 It does **not** install any extension into any browser profile, and it
 writes no packed artifact: there is no `/usr/share/qdistro/extensions/`
@@ -130,6 +130,22 @@ first-class build and the one this page uses. The bundled tree's Chromium
 manifest carries no `key` field, so it has no stable Chromium id — for
 Chromium-family browsers use `qdchrome-extension`.
 
+> **Do not load the copy the installer leaves in
+> `/usr/share/qdistro/browser-extension/`.** That directory is a copy of the
+> *bundled* tree, and the bundled tree is an older, flat extension: no `src/`
+> directory, no `gate.js`, and therefore **no origin allowlist at all** — the
+> closed-by-default gate that J11 added lives in `qdchrome-extension`/
+> `qdfirefox-extension`, which no installer ships. So the extension the
+> installer puts on disk is not the extension this page tells you to build,
+> and it is the weaker of the two. Build from the manifest-pinned standalone
+> repos as described below.
+>
+> That mismatch is tracked as **J11** in
+> `todo/fable-release/10-reachability-audit-2026-07-26.md` and is being fixed
+> separately (deciding which extension actually ships, and shipping it). Until
+> that lands, treat `/usr/share/qdistro/browser-extension/` as dead weight on
+> disk, not as an install source.
+
 ## Firefox
 
 ```bash
@@ -142,6 +158,10 @@ qdistro-browser-install --browsers firefox --firefox-mode standalone
 # -> ~/.mozilla/native-messaging-hosts/qdistro.json
 #    ("allowed_extensions": ["qdistro-firefox@qdistro.local"])
 ```
+
+`--firefox-mode standalone` is **not** optional here: the installer's default
+mode is `bundled`, which writes `allowed_extensions: ["qdistro@qdistro.local"]`
+— the id of the gate-less bundled tree, not of the extension you just built.
 
 Then, in Firefox: `about:debugging` → **This Firefox** → **Load Temporary
 Add-on…** → select `dist/firefox/manifest.json`. Verify with the toolbar

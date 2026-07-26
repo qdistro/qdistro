@@ -191,6 +191,16 @@ below uses the **bundled** id because `bundled` is the default install mode —
 swap it for `qdistro-firefox@qdistro.local` only when matching a standalone
 install.
 
+> **J11 caveat (open).** `install-browser-bridge-for-vm.sh` copies the
+> *bundled* tree to `/usr/share/qdistro/browser-extension/`, and that tree has
+> no `src/`, no `gate.js` and no origin allowlist; the closed-by-default gate
+> lives only in the standalone repos, which no installer ships. So the
+> extension the installer puts on disk is not the hardened one, and `bundled`
+> is also the installer's DEFAULT `--firefox-mode`. Tracked as J11 in
+> `todo/fable-release/10-reachability-audit-2026-07-26.md` and fixed
+> separately; [browser-extension-install.md](browser-extension-install.md)
+> steers users at the standalone artifacts in the meantime.
+
 The Chromium extension (`qdchrome-extension`) does **not** build a Firefox
 artifact: it formerly emitted an MV2 build under the same
 `qdistro@qdistro.local` id as the bundled extension — a drift trap (two
