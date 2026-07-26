@@ -150,13 +150,17 @@ already-approved network jobs, and other background work may continue.
 > design docs and in **no code file**. The approval-cache schema has no such
 > field, so the bit cannot be expressed. Neither the broker nor the session
 > manager reads lock state on any grant path, so it could not be evaluated
-> either. On the compositor side, `qdwin_handle_subscribe_view_stream` and
-> `qdwin_vk_manager_create_virtual_keyboard` are gated by
-> `qdwin_shell_require_bound()` **and nothing else** — there is no lock check on
-> capture or virtual-input creation. Every `->locked` site in `qdwin.c` is layer
-> hide/show, curtain, grabs, focus, activation, or lock-surface lifecycle.
-> ("screencopy" in the earlier wording named a protocol qdwin does not
-> implement; there is no wlr-screencopy in the tree at all.)
+> either. On the compositor side the privileged surfaces *are* gated — but on
+> identity, never on lock state. Per-view capture
+> (`qdwin_handle_subscribe_view_stream`) is gated by
+> `qdwin_shell_require_bound()` and nothing else; virtual input
+> (`zwp_virtual_keyboard_manager_v1`, and input-method-v2 through the same
+> helper) is gated fail-closed at *bind* time by
+> `qdwin_ime_family_bind_allowed`, a uid + exe pin. Neither gate consults
+> `locked`. Every `->locked` site in `qdwin.c` is layer hide/show, curtain,
+> grabs, focus, activation, or lock-surface lifecycle. ("screencopy" in the
+> earlier wording named a protocol qdwin does not implement; there is no
+> wlr-screencopy in the tree at all.)
 >
 > **The residual risk this leaves.** Locking the screen does not change what a
 > running silo or the shell is authorized to do. A capture or virtual-input

@@ -33,22 +33,42 @@ a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
 (`org.freedesktop.X` → `qdistro.X`; anything else → `qdistro.external.<id>`),
 and then calls the broker's `RequestPermission` to get a decision.
 
-Consequently there is **no `org.qdistro.*` polkit action namespace covering
-qdistro's own operations.** The only polkit action files in the tree are
-`pwd/org.qdistro.pwd.policy` (1 action) and `print/org.qdistro.print.policy`
-(5 actions), and no `.rules` file routes anything to the qdistro agent — the
-agent is registered as the session's authentication agent, which is what makes
-it see upstream actions at all. Broker action strings such as
-`qdistro.clipboard.transfer:<source>:<dest>` are **broker-internal rule-matching
-keys, not registered polkit actions**; writing a polkit policy against them has
-no effect. A rules-visible namespace for qdistro's own verbs (camera claim,
-clipboard send, window handoff, network join) is a design goal that is not
-implemented.
+Consequently there is **no general `org.qdistro.*` polkit action namespace
+covering qdistro's own operations.** Only two polkit action files ship —
+`pwd/org.qdistro.pwd.policy` (1 action, `org.qdistro.pwd.unlock`) and
+`print/org.qdistro.print.policy` (5 actions) — and three `.rules` files, of
+which exactly one routes anything toward the agent:
+
+- `pwd/qdistro-pwd.rules` (installed as `50-qdistro-pwd.rules`) returns `YES`
+  for admin/root on `org.qdistro.pwd.unlock` and `AUTH_ADMIN_KEEP` otherwise,
+  which does route that one action through whatever authentication agent is
+  registered. **This is the only qdistro-namespaced action wired to the agent.**
+- `pwd/qdistro-pwd-fprint.rules` runs the *opposite* direction: it **grants**
+  the `qdistro-pwd` uid implicit `YES` on three `net.reactivated.fprint.*`
+  actions, so fingerprint-gated unseal does not prompt for a password.
+- `50-qdistro-locker-idle.rules`, written inline by
+  `install-qdwin-session-for-vm.sh`, likewise **grants**: admin gets `YES` on
+  `org.freedesktop.login1.lock-sessions` so the locker can lock its own logind
+  session without a root-password prompt.
+
+Everything else in the qdistro action vocabulary is broker-internal. Strings
+such as `qdistro.clipboard.transfer:<source>:<dest>` are **rule-matching keys,
+not registered polkit actions**; writing a polkit policy or `.rules` file
+against them has no effect, and `org.qdistro.device.camera.claim`,
+`org.qdistro.clipboard.send`, `org.qdistro.window.handoff` and
+`org.qdistro.network.join_interactive` — previously listed here as live
+examples — are registered nowhere at all. A polkit-visible namespace for
+qdistro's own verbs is a design goal that is not implemented; note also that an
+unregistered `org.qdistro.*` id fed through the agent would map to
+`qdistro.external.org.qdistro.*`, not to itself.
 
 Actions operate on [resources](resources.md) and resource verbs. The action
-string remains the polkit namespace, but `details` should carry manifest-shaped
-resource identity, labels, typed security fields, lock state, workflow/run
-identity, and requested attachment semantics rather than a flat tag bag.
+string is the broker's rule-matching key. `details` is **intended** to carry
+manifest-shaped resource identity, labels, typed security fields, lock state,
+workflow/run identity, and requested attachment semantics rather than a flat
+tag bag; the shipped rule engine reads only the string selectors listed under
+"Declarative rules" from it, and lock state and workflow context are not among
+them.
 
 ## Two broker entry points — synchronous check vs long-term ask
 

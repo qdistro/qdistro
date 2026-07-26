@@ -241,8 +241,14 @@ carries:
 
 - Source silo, destination silo, timestamp.
 - MIME types.
-- Policy decision, with the verdict source (`clipboard_same_silo`,
- `clipboard_rule`, or `clipboard_default_deny`).
+- Policy decision, with the verdict source. Set-side labels are
+ `clipboard_same_silo` / `clipboard_same_silo_verified`, `clipboard_rule`,
+ `clipboard_default_deny`; receive-side labels mirror them
+ (`clipboard_receive_same_silo`, `..._same_silo_verified`,
+ `clipboard_receive_rule`, `clipboard_receive_default_deny`, plus
+ `clipboard_receive_lineage_deny`). Each row also carries the lineage reason
+ and the `secctx_provenance` tag (`launcher_gated` or `advisory`), so a
+ decision made without launcher-gated identity is filterable.
 
 Payloads are **never** logged, and there is no opt-in to log them. This is
 structural rather than a setting: `qdistro_admin_audit.py` has no content or

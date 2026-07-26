@@ -246,11 +246,11 @@ that covers:
 
 | Surface | Enforced? |
 |---|---|
-| Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and the bind handlers additionally pin `allowed_ime_uid` + exe. |
+| Input method / virtual keyboard | **Yes** — `qdwin_global_visible()` hides the globals from secctx-tagged silo clients, and both bind handlers go through `qdwin_ime_family_bind_allowed`, a fail-closed uid + exe pin that rejects before the resource is created. |
 | Security-context manager | **Yes** — visible only to the bound shell or the authorized `qdistro-secctx-exec` helper. |
 | Clipboard transfer | **Yes** — set-time and receive-time gates into the broker ([clipboard.md](clipboard.md)), with the caveats recorded there. |
 | `xdg_activation_v1` | **Yes** — cross-uid activation stalls on a fail-closed broker check. |
-| `weston_capture_v1` (whole-output pixels) | **Global hidden from all but the bound shell**, and libweston defers access to a screenshot-authority callback that qdwin never registers — so capture requests default-deny today. The visible-but-unauthorized posture is a *latent* hole: registering any authority would restore capture to every client that can see the global, with no pin. |
+| `weston_capture_v1` (whole-output pixels) | **Yes, doubly.** The global is hidden from every client but the bound shell by `qdwin_global_visible()`. Separately, libweston defers the capture *attempt* to a screenshot authority, and qdwin registers one **only** when `QDWIN_ENABLE_SHELL_CAPTURE=1` and `geteuid() == allowed_uid` — a dev/test opt-in that logs a WARNING, is emitted into the compositor unit only when the installer's caller exports it, and is explicitly `unset` by `qdistro-bootstrap.sh` and `image/config.sh`. **On a production install no authority is registered, so capture attempts hit libweston's fail-closed default and are denied.** When the opt-in is on, `qdwin_capture_auth_cb` re-checks the exact bound-shell `wl_client` and a single designated output at execution time, and authorizes nothing else. |
 | Per-view capture (`qdwin_view_stream_v1`) | **No per-uid authorization.** See "Effects live outside the compositor". |
 | Lock-time capture | **No gate exists.** Lock state is not consulted on any capture or virtual-input path ([sessions.md](sessions.md)). |
 | screencopy | **Not applicable — qdistro implements no screencopy protocol.** There is no wlr-screencopy in the tree; earlier wording here named a protocol that does not exist. |

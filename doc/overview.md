@@ -107,8 +107,18 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
 - **libweston** — the Wayland reference compositor as a library; qdistro's
  compositor (qdwin) is a libweston shell plugin (see
  [compositor](compositor.md)).
-- **PipeWire** — audio and camera virtualization, per-client streams.
-- **NetworkManager** — network configuration (admin-side only).
+- **PipeWire** — stock desktop audio (with wireplumber, as the distro ships
+ them), plus screen-pixel transport for the compositor's capture outputs via
+ libweston's `backend-pipewire`. The *device-mediation* role described in
+ [devices.md](devices.md) — per-user virtual sinks/sources, an admin-owned
+ daemon owning ALSA/V4L2/libcamera, policy-gated per-client streams — is **not
+ implemented**. qdistro ships no PipeWire mediation code, no qdistro
+ wireplumber policy, and no libcamera integration; the packages are installed
+ with distro defaults.
+- **NetworkManager** — network configuration. It is *intended* to be
+ admin-side only; nothing in the tree enforces that today, and the property
+ currently holds only because silo sessions run no shell and no NM client
+ (see [networking.md](networking.md)).
 - **systemd** — service management, user sessions, logind, timers.
 - **D-Bus** — IPC, configured per qdistro conventions (see [qbus](qbus.md)).
 - **polkit** — authorization layer.
