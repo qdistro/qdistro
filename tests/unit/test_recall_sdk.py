@@ -22,12 +22,15 @@ BB_DIR = REPO_ROOT / "browser_bridge"
 
 # Pre-import the engine so `import qdistro_recall_ingest` resolves
 # without going through /usr/libexec/qdistro.
-_eng_path = RECALL_DIR / "qdistro_recall_ingest.py"
-_spec = importlib.util.spec_from_file_location(
-    "qdistro_recall_ingest", _eng_path)
-_eng = importlib.util.module_from_spec(_spec)
-sys.modules["qdistro_recall_ingest"] = _eng
-_spec.loader.exec_module(_eng)
+#
+# Plain import, NOT spec_from_file_location + a sys.modules assignment:
+# recall/ is on pytest's pythonpath so the name already resolves, and
+# cli/qdistro_recall_cli.py imports this module lazily at call time — so
+# re-executing it here would leave two copies and any cross-module
+# `except SomeError` resolving the wrong one. That exact bug cost five
+# permanently-red tests via tests/unit/test_vault_recovery.py; see
+# tests/unit/test_no_duplicate_module_identity.py.
+import qdistro_recall_ingest as _eng  # noqa: E402,F401
 
 # Make the SDK importable.
 if str(SDK_DIR) not in sys.path:
