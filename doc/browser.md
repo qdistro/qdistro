@@ -176,20 +176,24 @@ identity is not trusted for policy.
 
 #### Firefox extension artifacts (two canonical, by install mode)
 
-There are **two** canonical Firefox extensions, deliberately distinct, each
+There are **two** Firefox extension artifacts, deliberately distinct, each
 authorized by its own `qdistro-browser-install --firefox-mode`:
 
-| Mode | Source of truth | gecko id |
-|------|-----------------|----------|
-| `bundled` (default) | `browser_bridge/extension/` (MV2, shipped next to the installer) | `qdistro@qdistro.local` |
-| `standalone` | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` |
+| Mode | Source of truth | gecko id | Status |
+|------|-----------------|----------|--------|
+| `bundled` (installer default) | `browser_bridge/extension/` (MV2, shipped next to the installer) | `qdistro@qdistro.local` | **legacy** — flat tree, no `src/`, no `gate.js`, no origin allowlist (J11) |
+| `standalone` | the `qdfirefox-extension` repo (MV3, first-class containers) | `qdistro-firefox@qdistro.local` | the maintained one; what v1 users load |
+
+`bundled` being the *default install mode* is a compatibility default, not a
+recommendation: the v1 procedure
+([browser-extension-install.md](browser-extension-install.md)) requires
+`--firefox-mode standalone`.
 
 `qdistro_browser_install.py` reads the bundled id from
 `browser_bridge/extension/manifest.firefox.json` and pins the standalone id as
 a cross-repo contract (asserted by the unit suite). The policy-match example
-below uses the **bundled** id because `bundled` is the default install mode —
-swap it for `qdistro-firefox@qdistro.local` only when matching a standalone
-install.
+below shows the **bundled** id purely because it is the CLI default — a v1
+install matches `qdistro-firefox@qdistro.local`.
 
 > **J11 caveat (open).** `install-browser-bridge-for-vm.sh` copies the
 > *bundled* tree to `/usr/share/qdistro/browser-extension/`, and that tree has
