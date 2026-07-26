@@ -55,6 +55,19 @@ class _FakeOps:
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
+        # silo name → uid, mirroring the per-silo relay policy fragments
+        # under /etc/dbus-1/system.d/ (F4-a).
+        self.relay_policies: dict[str, int] = {}
+        self.relay_policy_write_should_fail = False
+        # Per-silo failure injection, so a test can prove that ONE bad
+        # fragment does not stop the others being issued.
+        self.relay_policy_write_fails_for: set[str] = set()
+        self.relay_policy_remove_should_fail = False
+        # Fragments whose uid cannot be read back (torn write, hand edit).
+        self.relay_policy_unreadable: set[str] = set()
+        # name -> extra numeric <policy user="N"> entries beyond the real one
+        self.relay_policy_extra_uids: dict[str, list[int]] = {}
+        self.dbus_reloads = 0
         # Snapshot of self.cgroup_frozen taken on each kill_pids call.
         self.frozen_at_kill: dict[str, bool] = {}
         # When True, a tier-2 stop's fail-closed verification reports the
@@ -115,6 +128,9 @@ class _FakeOps:
     def uid_exists(self, uid: int) -> bool:
         return int(uid) in self.users.values()
 
+    def user_uid_matches(self, name: str, uid: int) -> bool:
+        return self.users.get(name) == int(uid)
+
     # ---- mutations --------------------------------------------------------
 
     def useradd(self, name: str, uid: int) -> None:
@@ -128,6 +144,47 @@ class _FakeOps:
             import subprocess
             raise subprocess.CalledProcessError(1, ["userdel", name])
         self.users.pop(name, None)
+
+    # ---- per-silo user-relay D-Bus policy (F4-a) --------------------------
+
+    def write_relay_policy(self, name: str, uid: int, reload: bool = True):
+        if self.relay_policy_write_should_fail is True or \
+                name in self.relay_policy_write_fails_for:
+            raise OSError(13, "Permission denied")
+        self.relay_policies[name] = int(uid)
+        if reload:
+            self.dbus_reloads += 1
+        return f"/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-{name}.conf"
+
+    def remove_relay_policy(self, name: str, reload: bool = True) -> None:
+        if self.relay_policy_remove_should_fail:
+            raise OSError(13, "Permission denied")
+        existed = self.relay_policies.pop(name, None) is not None
+        if existed and reload:
+            self.dbus_reloads += 1
+
+    def reload_dbus(self) -> None:
+        self.dbus_reloads += 1
+
+    def list_relay_policies(self) -> list[str]:
+        return sorted(self.relay_policies)
+
+    def relay_policy_uids(self, name: str):
+        if name in self.relay_policy_unreadable:
+            return None
+        # A real fragment can carry more than one numeric user policy once a
+        # human has edited it; relay_policy_extra_uids models that.
+        uid = self.relay_policies.get(name)
+        if uid is None:
+            return []
+        return [int(uid)] + [int(u) for u in
+                             self.relay_policy_extra_uids.get(name, [])]
+
+    def relay_policy_matches(self, name: str, uid: int) -> bool:
+        # The real ops compare the fragment's full text; the fragment's
+        # only variable content is (name, uid), so comparing the recorded
+        # uid is the faithful reduction.
+        return self.relay_policies.get(name) == int(uid)
 
     # ---- disposable containers --------------------------------------------
 

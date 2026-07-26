@@ -89,6 +89,12 @@ cd "$QD"
 INSTALLERS=(
     "scripts/install/install-broker-for-qdwin.sh       $QD/broker"
     "scripts/install/install-user-relay-for-vm.sh      $QD/user_relay"
+    # F4-b: without this the relay template is on the image and nothing
+    # ever starts it — qdistro-session-manager is what creates silos, starts
+    # qdistro-user-relay@<uid>, and (F4-a) issues each silo's relay bus-name
+    # policy. It is already in qdistro-bootstrap.sh's chain; the kiwi image
+    # staged the relay but not its only driver.
+    "scripts/install/install-session-manager.sh        $QD/session_manager"
     "scripts/install/install-polkit-agent-for-vm.sh    $QD/polkit"
     "scripts/install/install-pwd-for-vm.sh             $QD/pwd"
     "scripts/install/install-qsu-for-vm.sh             $QD/qsu"

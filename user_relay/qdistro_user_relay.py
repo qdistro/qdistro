@@ -664,15 +664,24 @@ def main() -> int:
     except dbus.DBusException as e:
         permanent = _is_permanent_name_denial(e)
         _log_error(
-            f"could not claim system-bus {system_name}: {e}. "
-            f"org.qdistro.UserRelay.conf grants <allow own=...> to exactly "
-            f"two identities — username 'work' for uid2000 and username "
-            f"'work2' for uid3000. The grant is keyed on the USERNAME, so a "
-            f"silo named anything else fails even at uid 2000/3000, and any "
-            f"uid outside {{2000,3000}} fails regardless of name. Neither "
-            f"cross-silo Send-To nor the Firefox-containers cross-uid opt-in "
-            f"can work for uid={uid} until per-silo policy is issued. See "
-            f"doc/firefox-containers.md 'Reachability' (follow-up F4-a).")
+            f"could not claim system-bus {system_name}: {e}. This name is "
+            f"granted by a per-silo policy fragment that "
+            f"qdistro-session-manager writes to "
+            f"/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-<name>.conf "
+            f"when the silo is created, and re-issues for every silo at its "
+            f"own startup. A refusal here means that fragment is missing, "
+            f"names a different user than the one running this relay, or the "
+            f"bus has not re-read its config since it was written. Check: "
+            f"(1) `grep -l 'user=\"{uid}\"' "
+            f"/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-*` — the "
+            f"fragment keys the grant on the NUMERIC uid, so there must be "
+            f"one naming {uid}; "
+            f"(2) `systemctl status qdistro-session-manager` — if it is not "
+            f"installed, nothing issues the grant at all; "
+            f"(3) `systemctl reload dbus.service`. Neither cross-silo "
+            f"Send-To nor the Firefox-containers cross-uid opt-in can work "
+            f"for uid={uid} until the grant is live. See "
+            f"doc/firefox-containers.md 'Reachability'.")
         if permanent:
             _log_error(
                 f"exiting {EXIT_POLICY_DENIED} (RestartPreventExitStatus) — "
