@@ -348,9 +348,13 @@ The shared primitive is a private Wayland protocol —
 > a second view-stream consumer ships. The allowed-uid check the protocol
 > anticipates must land before then.
 >
-> One thing the path *does* enforce per-stream: `allow_input` is per handle, and
-> when it is off the stream drops pointer, keyboard **and axis/scroll** events
-> — stricter than [window-handoff.md](window-handoff.md) previously described.
+> One thing the path *does* enforce per-stream: `allow_input` is per handle and
+> fail-closed. With `allow_input=0` the stream keeps its pixels and its
+> per-stream seat (for focus locking) but every injected event is dropped at the
+> `inject_*` boundary — pointer motion, buttons, keyboard **and axis/scroll**
+> alike. A read-only export cannot be driven by the remote subscriber. See
+> [window-handoff.md](window-handoff.md) for the handoff-side view of the same
+> mechanism.
 
 Transport reuses libweston's `backend-pipewire` for the common case. **There is
 no DMA-BUF direct path**: `dmabuf` does not appear in `qdwin.c`, in

@@ -54,12 +54,21 @@ so it is *meant* to differ per user.
 > the desktops inside embedded VMs. Treat every "change it once and everything
 > follows" statement on this page as a design target, not shipped behaviour.
 
-**Many sessions.** qdistro supports both coarse session separation and
-Qubes-style mixed desktops. A TTY session has its own compositor, shell, panel,
-clipboard surface, and notifications. A mixed session shows windows from
-multiple silos on one compositor, with silo identity carried by trusted chrome
-and cross-silo actions mediated by the broker. Both modes are valid; the owner
-chooses based on task, performance, and desired mental separation.
+**Many sessions.** qdistro's model has both coarse session separation and
+Qubes-style mixed desktops. A separate TTY session would have its own
+compositor, shell, panel, clipboard surface, and notifications. A mixed session
+shows windows from multiple silos on one compositor, with cross-silo actions
+mediated by the broker. Both modes are valid in the design; the owner chooses
+based on task, performance, and desired mental separation.
+
+> **Status: only the mixed mode exists, and only its brokering half.** v1 boots
+> one compositor on tty3; the additional per-TTY sessions are unimplemented
+> ([sessions.md](sessions.md)). Within the mixed desktop, the cross-silo
+> *brokering* is real (clipboard gates, activation gate), but the trusted
+> **chrome** that would make silo identity visible is not: no client attaches
+> qdwin's decoration protocol, so silo-coloured window chrome is not painted
+> ([compositor.md](compositor.md)). Silo identity is enforced in policy today,
+> not shown to the user.
 
 Sessions are not the same as silos. A development session may attach a
 source-code silo without commit authority. A commit session may attach the same
