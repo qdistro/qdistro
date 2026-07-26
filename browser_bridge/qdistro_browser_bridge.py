@@ -1382,9 +1382,11 @@ def heartbeat_loop(out_stream,
 # ops to the extension; anything else is denied before
 # enqueue_inbound_request runs (fail closed).
 #
-# This set is derived from the extension's REAL inbound dispatcher —
-# ``handleInboundRequest``'s ``switch (op)`` in
-# ``browser_bridge/extension/background.js``. Only ops the extension
+# This set is derived from the extension's REAL inbound dispatcher — the
+# ``dispatcher.register(...)`` calls across ``src/modules/`` in the
+# ``qdchrome-extension`` / ``qdfirefox-extension`` repos (it was derived
+# from the deleted vendored fork's ``handleInboundRequest`` switch until
+# J11 retired that tree). Only ops the extension
 # actually handles on the inbound path belong here. In particular:
 #
 #   * ``mpris.control`` IS a real inbound op (admin media widget ->
