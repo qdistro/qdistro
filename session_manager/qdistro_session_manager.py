@@ -538,10 +538,21 @@ def relay_policy_xml(name: str, uid: int) -> str:
     <allow receive_sender="{bus_name}"/>
   </policy>
 
-  <!-- Only this silo's own user may own this silo's relay name. The relay
+  <!-- Only this silo's own uid may own this silo's relay name. The relay
        derives the name from os.geteuid(), so it cannot ask for another
-       silo's name; this policy is what stops a silo that tries anyway. -->
-  <policy user="{name}">
+       silo's name; this policy is what stops a silo that tries anyway.
+
+       Keyed on the NUMERIC uid, not the username. dbus resolves a
+       `user=` attribute as a uid when it parses as one. The username is
+       the wrong key for two reasons: it is what made this whole grant
+       unreachable in the first place (the static rules named `work` and
+       `work2`, users nothing ever creates), and a username is recyclable
+       — userdel frees it, and a fragment stranded by a crash mid-delete
+       would then grant a silo's relay name to whoever next takes the
+       name. A uid is the silo's durable identity: it is what the relay
+       runs as (`User=%i` in qdistro-user-relay@.service), what it derives
+       its bus name from, and what the silo row is keyed on. -->
+  <policy user="{uid}">
     <allow own="{bus_name}"/>
   </policy>
 
@@ -659,22 +670,54 @@ class _SystemOps:
         # -r removes home dir + mail spool. -f forces removal even
         # if the user is logged in — we already killed everything
         # in the silo's cgroup before getting here.
-        subprocess.run(
+        #
+        # "No such user" is success, not failure. delete() runs userdel
+        # before it saves the silo table, so a crash in that window leaves a
+        # row whose Linux user is already gone; with check=True on every exit
+        # code that silo became UNDELETABLE — delete() failed at userdel,
+        # rolled back to Stopped, and re-issued its relay grant, forever.
+        # userdel exits 6 for "does not exist".
+        r = subprocess.run(
             ["userdel", "-r", "-f", str(name)],
-            check=True)
+            check=False, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        if r.returncode == 6 or "does not exist" in (r.stderr or ""):
+            log.info("userdel %r: already absent (rc=%d) — treating as done",
+                     name, r.returncode)
+            return
+        raise subprocess.CalledProcessError(
+            r.returncode, ["userdel", "-r", "-f", str(name)],
+            output=r.stdout, stderr=r.stderr)
 
     # ---- per-silo user-relay D-Bus policy (F4-a) --------------------------
 
     def _reload_dbus(self) -> None:
-        """Ask the running bus to re-read its configuration. Best-effort:
-        on a host with no live system bus (a kiwi chroot, a unit test box)
-        there is nothing to reload and that is not an error — the file on
-        disk is read at the bus's next start either way."""
-        subprocess.run(
-            ["systemctl", "reload", "dbus.service"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        """Ask the running bus to re-read its configuration.
 
-    def write_relay_policy(self, name: str, uid: int) -> Path:
+        Tries dbus-broker first, then dbus — the same order the rest of the
+        tree uses (spin-test-vm-gui.sh, install-session-manager.sh), because
+        the production bus is dbus-broker and `dbus.service` is only an alias
+        for it. Best-effort by necessity: in a kiwi chroot or a unit-test box
+        there is no live bus and the file on disk is read at the bus's next
+        start anyway. But "best-effort" must not mean "silent" — a grant that
+        is written and never loaded is a silo whose relay fails at first use,
+        so log when nothing could be reloaded.
+        """
+        for unit in ("dbus-broker.service", "dbus.service"):
+            r = subprocess.run(
+                ["systemctl", "reload", unit],
+                check=False, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            if r.returncode == 0:
+                return
+        log.warning(
+            "could not reload the system bus (tried dbus-broker.service and "
+            "dbus.service); relay policy changes will not take effect until "
+            "the bus restarts")
+
+    def write_relay_policy(self, name: str, uid: int,
+                           reload: bool = True) -> Path:
         p = RELAY_POLICY_DIR / relay_policy_filename(name)
         p.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-rename so the bus never sees a half-written fragment.
@@ -685,18 +728,33 @@ class _SystemOps:
         # line in the bus's log rather than a loud failure. Rename is atomic,
         # so the bus reads either the old fragment or the new one.
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(relay_policy_xml(name, uid), encoding="utf-8")
-        tmp.chmod(0o644)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(relay_policy_xml(name, uid))
+            f.flush()
+            # fsync before the rename. Without it a power loss can leave the
+            # renamed name pointing at a zero-length file: the bus drops the
+            # rule with one log line, the silo's relay exits 78 forever, and
+            # the fragment is still PRESENT so a presence-based reconcile
+            # would call it consistent. (The reconcile compares content now,
+            # so this is belt and braces — but the cheap half of it.)
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
         tmp.replace(p)
-        self._reload_dbus()
+        if reload:
+            self._reload_dbus()
         return p
 
-    def remove_relay_policy(self, name: str) -> None:
+    def remove_relay_policy(self, name: str, reload: bool = True) -> None:
         p = RELAY_POLICY_DIR / relay_policy_filename(name)
         existed = p.exists()
         p.unlink(missing_ok=True)
-        if existed:
+        if existed and reload:
             self._reload_dbus()
+
+    def reload_dbus(self) -> None:
+        """Public form, for callers that batch several fragment writes and
+        then reload once (the startup reconcile)."""
+        self._reload_dbus()
 
     def list_relay_policies(self) -> list[str]:
         """Silo names that currently have a generated policy fragment."""
@@ -710,6 +768,25 @@ class _SystemOps:
             if silo is not None:
                 out.append(silo)
         return out
+
+    def relay_policy_matches(self, name: str, uid: int) -> bool:
+        """True if the on-disk fragment for `name` is byte-identical to what
+        we would write for (name, uid) right now.
+
+        The reconcile needs this rather than mere presence. A fragment's
+        FILENAME carries the silo name but its CONTENT carries the uid, and
+        the uid is what the granted bus name is derived from. Checking only
+        that a file exists would let a silo whose uid changed keep a
+        fragment granting its OLD bus name — and silos.yaml is admin-editable,
+        so a hand-edited uid, a restore from backup, or a partial write all
+        produce exactly that. The relay would then be refused its name, on a
+        system where the reconcile had just run and reported everything fine.
+        """
+        p = RELAY_POLICY_DIR / relay_policy_filename(name)
+        try:
+            return p.read_text(encoding="utf-8") == relay_policy_xml(name, uid)
+        except OSError:
+            return False
 
     def make_state_dir(self, name: str, uid: int) -> Path:
         d = SILOS_STATE_DIR / name
@@ -3273,9 +3350,19 @@ class _SiloStore:
         Best-effort per silo: one unwritable fragment must not stop the
         daemon from starting. Returns (issued, revoked) silo names.
         """
+        # Held for the whole method, not just the snapshot. Today this runs
+        # from autostart_pass() before the GLib main loop dispatches any
+        # D-Bus call, so nothing can race it — but that is an accident of
+        # startup ordering, and if it ever stopped being true a CreateSilo
+        # landing between the snapshot and the orphan sweep would have its
+        # brand-new fragment deleted as an orphan. create()/delete() already
+        # serialise on this lock, so holding it here costs nothing.
         with self._lock:
-            want = {s.name: s.uid for s in self._silos.values()
-                    if s.kind == KIND_TIER3_USER}
+            return self._reconcile_relay_policies_locked()
+
+    def _reconcile_relay_policies_locked(self) -> tuple[list[str], list[str]]:
+        want = {s.name: s.uid for s in self._silos.values()
+                if s.kind == KIND_TIER3_USER}
         try:
             have = set(self._ops.list_relay_policies())
         except Exception as e:  # noqa: BLE001
@@ -3284,26 +3371,59 @@ class _SiloStore:
         issued: list[str] = []
         revoked: list[str] = []
         for name, uid in sorted(want.items()):
-            if name in have:
-                continue
+            # Presence is not enough. The filename carries the silo name but
+            # the CONTENT carries the uid, and the uid is what the granted
+            # bus name is built from — so a silo whose uid drifted (a
+            # hand-edited silos.yaml, a restore from backup, a half-written
+            # fragment) has a file that looks right and grants the wrong
+            # name. Rewrite whenever the fragment is not what we would write
+            # today; the write is idempotent and only reloads the bus when
+            # something actually changed.
+            # A silo row whose Linux user is gone is a zombie: delete() runs
+            # userdel before it saves the table, so a crash in that window
+            # leaves the row behind. Issuing a grant for it would arm a rule
+            # for an identity that does not exist — and the admin's fix is to
+            # delete the silo, which this would fight. Leave it alone and say
+            # so; userdel now tolerates an absent user, so the delete works.
             try:
-                self._ops.write_relay_policy(name, uid)
+                if not self._ops.uid_exists(uid):
+                    log.warning(
+                        "silo %r (uid %d) has a row but no Linux user — not "
+                        "issuing a relay grant. Delete the silo to clean it "
+                        "up; this is what a crash between userdel and the "
+                        "table save leaves behind.", name, uid)
+                    continue
+            except Exception as e:  # noqa: BLE001
+                log.warning("relay-policy reconcile: could not check whether "
+                            "uid %d still exists (%s); proceeding", uid, e)
+            try:
+                if name in have and self._ops.relay_policy_matches(name, uid):
+                    continue
+            except Exception as e:  # noqa: BLE001
+                log.warning("relay-policy reconcile: could not compare the "
+                            "fragment for %r (%s); rewriting it", name, e)
+            try:
+                # reload=False: one bus reload at the end covers every
+                # fragment this pass touched, instead of one per silo.
+                self._ops.write_relay_policy(name, uid, reload=False)
                 issued.append(name)
-                log.info("issued missing user-relay D-Bus policy for silo "
-                         "%r (uid %d)", name, uid)
+                log.info("issued or corrected user-relay D-Bus policy for "
+                         "silo %r (uid %d)", name, uid)
             except Exception as e:  # noqa: BLE001
                 log.error("could not issue the user-relay D-Bus policy for "
                           "silo %r: %s — its relay cannot claim "
                           "org.qdistro.UserRelay.uid%d", name, e, uid)
         for name in sorted(have - set(want)):
             try:
-                self._ops.remove_relay_policy(name)
+                self._ops.remove_relay_policy(name, reload=False)
                 revoked.append(name)
                 log.info("revoked orphaned user-relay D-Bus policy for %r "
                          "(no such silo)", name)
             except Exception as e:  # noqa: BLE001
                 log.error("could not revoke orphaned user-relay D-Bus policy "
                           "for %r: %s", name, e)
+        if issued or revoked:
+            self._ops.reload_dbus()
         return (issued, revoked)
 
     def reap_disposable_containers(self) -> list[str]:

@@ -61,7 +61,7 @@ _STATIC_CONF = _REPO / "user_relay" / "org.qdistro.UserRelay.conf"
 
 class TestPolicyDocument:
 
-    def test_grants_own_to_the_silo_user_and_nobody_else(self):
+    def test_grants_own_to_the_silo_uid_and_nobody_else(self):
         xml = relay_policy_xml("payroll", 4242)
         root = ET.fromstring(xml)
         owners = [
@@ -70,9 +70,26 @@ class TestPolicyDocument:
             for allow in pol.findall("allow")
             if allow.get("own") is not None
         ]
-        assert owners == [("payroll", "org.qdistro.UserRelay.uid4242")], (
+        assert owners == [("4242", "org.qdistro.UserRelay.uid4242")], (
             "exactly one identity may own a silo's relay name — the silo's "
-            f"own user. Got: {owners}")
+            f"own uid. Got: {owners}")
+
+    def test_the_grant_is_keyed_on_the_uid_not_the_username(self):
+        """Usernames are recyclable: userdel frees the name and the next
+        useradd can take it. A fragment stranded by a crash mid-delete would
+        then grant a silo's relay name to an unrelated new account. The uid
+        is the silo's durable identity and is what the relay runs as.
+
+        It is also the shape of the original bug: the static grants named
+        `work` and `work2`, users the install chain never creates.
+        """
+        xml = relay_policy_xml("payroll", 4242)
+        root = ET.fromstring(xml)
+        keys = [p.get("user") for p in root.findall("policy")
+                if p.get("user") is not None]
+        assert "payroll" not in keys, (
+            f"the fragment is keyed on the silo's username: {keys}")
+        assert "4242" in keys
 
     def test_root_may_call_the_relay(self):
         root = ET.fromstring(relay_policy_xml("payroll", 4242))
@@ -194,6 +211,19 @@ class TestSystemOps:
             "the bus loads *every* .conf in this directory; a stray temp "
             "file is at best a duplicate grant and at worst a parse error")
 
+    def test_matches_only_the_exact_expected_content(self, ops):
+        ops.write_relay_policy("payroll", 4242)
+        assert ops.relay_policy_matches("payroll", 4242)
+        assert not ops.relay_policy_matches("payroll", 5555), (
+            "a fragment granting uid5555's bus name was accepted as the "
+            "fragment for uid4242")
+        assert not ops.relay_policy_matches("legal", 4242)
+
+    def test_a_tampered_fragment_does_not_match(self, ops, tmp_path):
+        p = Path(ops.write_relay_policy("payroll", 4242))
+        p.write_text(p.read_text().replace("uid4242", "uid9999"))
+        assert not ops.relay_policy_matches("payroll", 4242)
+
     def test_removing_an_absent_fragment_is_not_an_error(self, ops):
         ops.remove_relay_policy("never-existed")
 
@@ -209,10 +239,17 @@ class TestSystemOps:
 
 
 class TestRealBusParser:
-    """Hand the generated fragment to the actual D-Bus config parser.
+    """Hand the generated fragment to a real D-Bus config parser.
 
     Everything above checks the fragment against our own idea of what it
-    should say; this checks it against the thing that has to accept it.
+    should say; this checks it against a parser that has to accept it.
+
+    **Scope, stated plainly:** this probes `dbus-daemon`, and production runs
+    `dbus-broker`, whose config parser is an independent implementation. So a
+    pass here means "valid busconfig", not "dbus-broker applies this grant".
+    The live claim — that dbus-broker honours the numeric `<policy user="N">`
+    form and that a real silo's relay ends up owning its name — is a VM gate,
+    not a unit test, and must not be inferred from these two cases.
 
     The failure mode is quiet. Measured on dbus-daemon 1.14: a malformed
     file under an <includedir> does NOT stop the bus. It logs
@@ -371,12 +408,76 @@ class TestReconcile:
         store.create("payroll", 4242)
         assert store.reconcile_relay_policies() == ([], [])
 
+    def test_corrects_a_fragment_whose_uid_drifted(self, store, ops):
+        """Presence is not correctness. The filename carries the silo NAME;
+        the uid — which the granted bus name is derived from — lives in the
+        content. silos.yaml is admin-editable, so a hand-edited uid, a
+        restore from backup, or a half-written fragment all leave a file
+        that looks present and grants the wrong name. A reconcile that
+        checked only presence would skip it and report everything fine."""
+        store.create("payroll", 4242)
+        ops.relay_policies["payroll"] = 5555        # drifted
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == ["payroll"], (
+            "the reconcile skipped a fragment that exists but grants the "
+            "wrong bus name")
+        assert revoked == []
+        assert ops.relay_policies == {"payroll": 4242}
+
     def test_one_bad_silo_does_not_stop_the_rest(self, store, ops):
+        """Two silos, one unwritable. The healthy one must still get its
+        grant — a reconcile that gave up on the first error would leave
+        every later silo's relay dead because of one bad file."""
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.relay_policies.clear()
+        ops.relay_policy_write_fails_for = {"legal"}
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == ["payroll"], (
+            "one unwritable fragment stopped the reconcile; "
+            f"issued={issued}")
+        assert ops.relay_policies == {"payroll": 4242}
+
+    def test_a_silo_row_whose_linux_user_is_gone_gets_no_grant(
+            self, store, ops):
+        """delete() runs userdel before it saves the table, so a crash in
+        that window leaves a row with no Linux user. Issuing a grant for it
+        arms a rule for an identity that does not exist, and fights the
+        admin's fix (deleting the silo)."""
         store.create("payroll", 4242)
         ops.relay_policies.clear()
-        ops.relay_policy_write_should_fail = True
+        ops.users.pop("payroll")            # the crash window
         issued, revoked = store.reconcile_relay_policies()
-        assert issued == []                  # logged, not raised
+        assert issued == []
+        assert ops.relay_policies == {}
+
+    def test_a_zombie_silo_can_still_be_deleted(self, store, ops):
+        """The other half of the same crash. userdel must treat an absent
+        user as done, or the silo is undeletable: delete() fails at userdel,
+        rolls back to Stopped, re-issues the grant, forever."""
+        store.create("payroll", 4242)
+        ops.users.pop("payroll")
+        store.delete("payroll")
+        assert store.list_silos() == []
+        assert ops.relay_policies == {}
+
+    def test_the_bus_is_reloaded_once_per_reconcile_not_once_per_silo(
+            self, store, ops):
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.relay_policies.clear()
+        ops.dbus_reloads = 0
+        issued, _ = store.reconcile_relay_policies()
+        assert len(issued) == 2
+        assert ops.dbus_reloads == 1, (
+            f"reconcile reloaded the bus {ops.dbus_reloads} times for "
+            "2 silos; the reload should be batched")
+
+    def test_a_no_op_reconcile_does_not_reload_the_bus(self, store, ops):
+        store.create("payroll", 4242)
+        ops.dbus_reloads = 0
+        assert store.reconcile_relay_policies() == ([], [])
+        assert ops.dbus_reloads == 0
 
     def test_autostart_pass_reconciles_before_starting_anything(
             self, store, ops, monkeypatch):
@@ -441,6 +542,35 @@ class TestInstalledPath:
         assert self._installer_lines(cfg, "install-session-manager.sh"), (
             "install-session-manager.sh is missing from image/config.sh's "
             "INSTALLERS list — the relay ships with no driver")
+
+    def test_the_gui_harness_issues_grants_for_its_hand_made_users(self):
+        """`spin-test-vm-gui.sh` creates `work` (2000) and `work2` (3000)
+        with a plain useradd, NOT through SessionManager1.CreateSilo, so they
+        have no row in silos.yaml and the session manager will never issue or
+        reconcile a fragment for them.
+
+        They did not need one while the static grants existed — those grants
+        were hardcoded to exactly these two names. Removing the static grants
+        leaves this harness as the one population that loses something, and
+        permissions-gui scenarios 11-17 assert the broker sees both relays.
+        Without the harness issuing its own fragments they fail at the next
+        golden rebake, which is late and confusing.
+
+        The harness must generate them from `relay_policy_xml` rather than
+        embed a copy of the XML, or a change to the policy format silently
+        leaves the harness behind — the same class of drift as the original
+        bug.
+        """
+        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        text = gui.read_text()
+        assert "relay_policy_xml" in text, (
+            "spin-test-vm-gui.sh creates work/work2 by hand but issues them "
+            "no user-relay policy; their relays will be refused their bus "
+            "names and permissions-gui 11-17 will fail")
+        assert "<allow own=" not in text, (
+            "spin-test-vm-gui.sh embeds a hand-written copy of the policy "
+            "XML; it must call relay_policy_xml so there is one source of "
+            "truth")
 
     def test_the_relay_diagnostic_points_at_the_real_mechanism(self):
         """The relay's name-refused message is the first thing an operator
