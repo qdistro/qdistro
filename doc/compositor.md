@@ -273,12 +273,15 @@ Target environments, in decreasing order:
 1. **Bare metal / GPU passthrough.** Native Mesa EGL/GL. Reference target.
 2. **VM with virtio-gpu + virgl.** Mesa virgl backend gives real GL
  acceleration. Fine for all workloads.
-3. **VM with virtio-gpu only (accel3d=no).** Software rendering (pixman).
- Usable for static-mostly workloads. ~30% of one vCPU at 1080p / 30-60 Hz
- is the working budget.
-4. **VM with no GPU / framebuffer-only.** Pixman + `headless` backend +
- RDP/PipeWire output. Equivalent to a "server-style install" — no local
- display, remote access only.
+3. **VM with virtio-gpu only (accel3d=no).** *Not selected by the shipped
+ installer.* The design target is software rendering (pixman), usable for
+ static-mostly workloads at a ~30%-of-one-vCPU budget at 1080p / 30-60 Hz.
+ What the installer actually writes is `renderer=gl`, which runs here over
+ llvmpipe-backed GBM rather than pixman.
+4. **VM with no GPU / framebuffer-only.** *Design target only; not produced by
+ any installer.* Would be pixman + `headless` backend + RDP/PipeWire output —
+ a "server-style install" with no local display. Nothing in the install path
+ emits that configuration today.
 
 Implications for the compositor:
 

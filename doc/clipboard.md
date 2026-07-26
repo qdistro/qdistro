@@ -155,9 +155,25 @@ where policy and brokering apply.
 The set-side gate fires on every clipboard set:
 
 - The compositor's `selection_set(seat, source_handle, mime_types,
- is_primary)` event reports each new clipboard selection, identifying the
- source by the focused-toplevel handle (Wayland only permits clients with
- keyboard focus to set selection).
+ is_primary)` event reports each new selection of either kind, identifying the
+ source by a toplevel handle.
+- **How that handle is resolved, and its limits.** `qdwin_emit_selection_set`
+ tries the *keyboard-focused* toplevel first, then falls back to any toplevel
+ owned by the source's `wl_client`, then to any toplevel sharing the source's
+ secctx `app_id`. The fallbacks exist because a focused toplevel is not always
+ available (RDP dummy backend, compositor-grab popup, off-screen surface) and
+ because tier-3 waypipe gives each launch a fresh `wl_client`.
+
+ The focus-first order is *not* a guarantee that the setter had focus. For the
+ regular `wl_data_device` path Wayland does restrict selection-setting to a
+ focused client, but **qdwin's primary-selection implementation applies no such
+ check**: `qdwin_primary_device_set_selection` discards both `client` and
+ `serial`, accepts the source, and broadcasts offers to every device on the
+ seat. So an untagged, unfocused client can set the primary selection and be
+ attributed to whatever toplevel currently holds keyboard focus. A tagged
+ source is still recovered correctly via the secctx sidecar; the exposure is
+ misattribution of an *untagged* primary setter, which then lands in the
+ admin/"untagged" equivalence class rather than being tied to its own silo.
 - qdshell resolves the source silo from the toplevel's identity. There is
  **one** mechanism, not two: the `wp_security_context_v1` `app_id` prefix, for
  both tier-3 and tier-4/5. The window title is delivered on `toplevel_added`
@@ -237,19 +253,27 @@ Two coordinated mitigations keep the channel alive under load:
 
 ## Audit
 
-Every gated cross-silo clipboard decision is audited by the broker. Each row
-carries:
+**Decisions that reach the broker** are written to the broker audit log, with
+source silo, destination silo, timestamp, the decision, and a verdict-source
+label:
 
-- Source silo, destination silo, timestamp.
-- MIME types.
-- Policy decision, with the verdict source. Set-side labels are
- `clipboard_same_silo` / `clipboard_same_silo_verified`, `clipboard_rule`,
- `clipboard_default_deny`; receive-side labels mirror them
- (`clipboard_receive_same_silo`, `..._same_silo_verified`,
- `clipboard_receive_rule`, `clipboard_receive_default_deny`, plus
- `clipboard_receive_lineage_deny`). Each row also carries the lineage reason
- and the `secctx_provenance` tag (`launcher_gated` or `advisory`), so a
- decision made without launcher-gated identity is filterable.
+- Set side: `clipboard_same_silo_verified`, `clipboard_rule`,
+ `clipboard_default_deny`. These rows carry the `secctx_provenance` tag
+ (`launcher_gated` or `advisory`) and the MIME list, so a decision made without
+ launcher-gated identity is filterable. They do **not** carry a `lineage=`
+ field.
+- Receive side: `clipboard_receive_same_silo`, `..._same_silo_verified`,
+ `clipboard_receive_rule`, `clipboard_receive_default_deny`, and
+ `clipboard_receive_lineage_deny`. These are the rows that carry the lineage
+ reason alongside provenance.
+
+**Not every denial produces a broker audit row.** Several verdicts are reached
+locally and leave only a journal line: unknown-identity denials, denials taken
+when the broker is unreachable, the tier-4 MIME check, and focus-aware-clear all
+resolve inside qdshell's `ClipboardGate`, and the cross-silo **primary**-receive
+denial happens inside qdwin, which never calls the broker on that path at all.
+Reading the broker audit log alone therefore under-reports clipboard denials; a
+complete picture needs the qdshell and compositor journals too.
 
 Payloads are **never** logged, and there is no opt-in to log them. This is
 structural rather than a setting: `qdistro_admin_audit.py` has no content or
