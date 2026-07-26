@@ -203,7 +203,7 @@ absent the indicator would read "unverified" forever — honest, but useless
  secondary output is uniformly black rather than showing stale desktop
  content. An output hot-plugged *while locked* is **not** covered: qdwin
  re-installs the curtain on output removal but not on output creation. Options and costs are in
- `todo/fable-release/11-j28-multi-output-lock-indicators.md`; the same note
+ `todo/fable-release/12-j28-multi-output-lock-indicators.md`; the same note
  records two pre-existing qdwin defects found alongside (output hotplug
  while locked does not re-install the curtain, and
  `qdwin_locker_surface_v1.configure` is documented but never sent).
