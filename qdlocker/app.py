@@ -701,7 +701,8 @@ def main(argv: list[str] | None = None) -> int:
         # user unit. A root-owned marker cannot be forged without root.
         introspection = _introspection_authorized()
         ctrl = CtrlSocket(controller, bridge, parent=app,
-                          introspection=introspection)
+                          introspection=introspection,
+                          indicators=indicators)
 
     app.aboutToQuit.connect(client.disconnect)
     if ctrl is not None:

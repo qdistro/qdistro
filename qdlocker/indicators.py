@@ -26,8 +26,18 @@ state is derived from ``pw-dump``. Egress comes from the session manager's
 
 FAIL VISIBLE, NOT FAIL SILENT
 -----------------------------
-PipeWire gives a trustworthy *positive* (a running capture stream is real
-capture) but no trustworthy *negative* for any kind:
+PipeWire gives a usable *positive* — selected running nodes are evidence that
+capture activity is happening — but the strength of that evidence varies, and
+node-only data does not always establish the consumer or the exact source:
+
+* ``client`` evidence: a capture stream node that names its own application.
+* ``stream`` evidence: a capture stream with no application name.
+* ``device`` evidence: a running source *device* node; something is pulling
+  from it, but which client is not visible here.
+
+Only ``client`` evidence counts as attributed; the surface labels the rest as
+"client unknown" rather than presenting a device or node description as if it
+were an application. There is no trustworthy *negative* for any kind:
 
 * camera and audio can be reached through direct device grants — a
   policy-approved fullscreen session may hold ``/dev/video*`` or an ``audio``
@@ -165,11 +175,24 @@ def _truthy(value: Any) -> bool:
 
 
 def _node_app(props: dict) -> str:
-    for key in ("application.name", "node.description", "node.name"):
+    """Best display name for the node.
+
+    `application.name` is a real client identity; the others are node
+    metadata. `_node_named_client` below is what decides whether we may claim
+    attribution, so a fallback here never upgrades the evidence tier.
+    """
+    for key in ("application.name", "application.process.binary",
+                "node.description", "node.name"):
         value = props.get(key)
         if value:
             return str(value).strip()
     return ""
+
+
+def _node_named_client(props: dict) -> bool:
+    """True only when the node carries a genuine client identity."""
+    return bool(str(props.get("application.name") or "").strip()
+                or str(props.get("application.process.binary") or "").strip())
 
 
 def classify_node(node: dict) -> dict | None:
@@ -191,6 +214,9 @@ def classify_node(node: dict) -> dict | None:
     role = str(props.get("media.role") or "").lower()
     api = str(props.get("device.api") or "").lower()
     app = _node_app(props)
+    # A capture stream that does not name a client is still real capture — it
+    # just cannot be attributed, so it must not be rendered as if it were.
+    stream_evidence = "client" if _node_named_client(props) else "stream"
     haystack = f"{name} {app}".lower()
     cameraish = (
         role == "camera"
@@ -202,24 +228,24 @@ def classify_node(node: dict) -> dict | None:
     # names the node `weston.pipewire-N` (qdwin.c, qdwin_view_stream_v1). A
     # live one means a screencast/remote-display stream is running right now.
     if name.startswith("weston.pipewire"):
-        return {"kind": "screencast", "app": app, "evidence": "client"}
+        return {"kind": "screencast", "app": app, "evidence": stream_evidence}
 
     if media_class.startswith("Stream/Input") or category == "capture":
         video = "Video" in media_class or media_type == "video"
         audio = "Audio" in media_class or media_type == "audio"
         if video:
             return {"kind": "camera" if cameraish else "screencast", "app": app,
-                    "evidence": "client"}
+                    "evidence": stream_evidence}
         if audio:
             kind = "systemAudio" if _truthy(props.get("stream.capture.sink")) else "microphone"
-            return {"kind": kind, "app": app, "evidence": "client"}
+            return {"kind": kind, "app": app, "evidence": stream_evidence}
         # Capture-shaped but we cannot tell what it captures. Still evidence.
-        return {"kind": "unattributed", "app": app, "evidence": "client"}
+        return {"kind": "unattributed", "app": app, "evidence": stream_evidence}
 
     # A producing video stream that is not a camera is a screen source.
     if media_class == "Stream/Output/Video":
         return {"kind": "camera" if cameraish else "screencast", "app": app,
-                "evidence": "client"}
+                "evidence": stream_evidence}
 
     # Device-side nodes only run while something pulls from them, so a running
     # source device is itself evidence — including capture that reaches admin's
@@ -264,14 +290,18 @@ def capture_entries(nodes: list[dict]) -> list[dict]:
 def _entry_text(entry: dict) -> str:
     """Display text for one piece of evidence.
 
-    `client` evidence names the stream's own client; `device` evidence is a
-    running source *device* node, which proves something is pulling from it
-    but NOT which client — say so rather than presenting the device name as
-    an application.
+    `client` evidence names the stream's own client (`application.name` /
+    `application.process.binary`). `stream` evidence is a real capture stream
+    with no client identity, and `device` evidence is a running source
+    *device* node — something is pulling from it, but not visibly who. Say so
+    rather than presenting node metadata as if it were an application.
     """
     text = f"{entry['label']}:{entry['app']}" if entry["app"] else entry["label"]
-    if entry.get("evidence") == "device":
+    evidence = entry.get("evidence")
+    if evidence == "device":
         text += " (device active, client unknown)"
+    elif evidence == "stream":
+        text += " (client unknown)"
     return text
 
 
@@ -646,12 +676,25 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
             scan = self._scans.pop(name, None)
             if scan is None:
                 return
+            self._dispose(scan)
+            scan.proc.kill()
+
+        def _dispose(self, scan: _Scan) -> None:
+            """Release a scan's Qt objects and buffer.
+
+            Timers and processes are parented to this long-lived singleton, so
+            without an explicit deleteLater() every poll would leak a QTimer
+            plus the _Scan its lambda captures (and the bytes it buffered) for
+            as long as the machine stays locked.
+            """
             scan.timer.stop()
-            # Inert the old object's signals before killing it, so its dying
+            scan.timer.blockSignals(True)
+            scan.timer.deleteLater()
+            # Inert the process's signals before disposal so a dying
             # `finished`/`errorOccurred` cannot re-enter at all.
             scan.proc.blockSignals(True)
-            scan.proc.kill()
             scan.proc.deleteLater()
+            scan.buf = bytearray()
 
         def _spawn(self, name: str, argv: list[str], generation: int) -> None:
             self._kill(name)
@@ -710,12 +753,11 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
             except RuntimeError:  # process object already gone
                 pass
             self._scans.pop(scan.name, None)
-            scan.proc.deleteLater()
-            if len(scan.buf) > MAX_DUMP_BYTES:
-                self._apply(scan.name, scan.generation, 125, "")
-                return
-            self._apply(scan.name, scan.generation, exit_code,
-                        scan.buf.decode("utf-8", "replace"))
+            oversized = len(scan.buf) > MAX_DUMP_BYTES
+            stdout = "" if oversized else scan.buf.decode("utf-8", "replace")
+            self._dispose(scan)
+            self._apply(scan.name, scan.generation,
+                        125 if oversized else exit_code, stdout)
 
         def _apply(self, name: str, generation: int, exit_code: int, stdout: str) -> None:
             # The model discards anything whose generation is no longer
@@ -730,7 +772,52 @@ if QObject is not None:  # pragma: no cover - needs a Qt event loop
             self._state = self._model.state()
             self.changed.emit()
 
+        def snapshot_line(self) -> str:
+            """One-line machine-readable state for the ctrl socket.
+
+            Introspection only (the ctrl socket gates this behind the
+            root-owned marker); it exists so the GUI gate can assert the state
+            of the RUNNING observer — its lock-edge rescan, timeout and
+            freshness behaviour — instead of re-deriving from a separate
+            process that shares none of that lifecycle.
+            """
+            cap = self._state["capture"]
+            egr = self._state["egress"]
+
+            def tok(value: str) -> str:
+                # Whole line must stay space-separated key=value, so detail
+                # strings (which contain ", " and spaces) are flattened.
+                return (str(value).replace(" ", "_") or "-")
+
+            return " ".join([
+                f"capture_observer={'ok' if cap['observerOk'] else 'failed'}",
+                f"capture_active={int(bool(cap['anyActive']))}",
+                f"capture_attributed={int(bool(cap['attributed']))}",
+                f"capture_kinds={','.join(cap['activeKinds']) or '-'}",
+                f"capture_unverified={','.join(cap['unverifiedKinds']) or '-'}",
+                f"egress_observer={'ok' if egr['observerOk'] else 'failed'}",
+                f"egress_active={int(bool(egr['active']))}",
+                f"egress_count={egr['count']}",
+                f"capture_detail={tok(cap['activeDetail']) or '-'}",
+                f"egress_detail={tok(egr['detail']) or '-'}",
+            ])
+
         # -- QML surface -------------------------------------------------
+        @pyqtProperty(bool, notify=changed)
+        def captureObserverOk(self) -> bool:
+            """False when the capture observer produced no usable reading.
+
+            A failed, killed, oversized or stale scan is NOT the same thing as
+            a healthy scan that saw nothing, and the lock surface renders the
+            two differently — a machine nobody is watching must not look like
+            a machine where nothing is happening.
+            """
+            return bool(self._state["capture"]["observerOk"])
+
+        @pyqtProperty(bool, notify=changed)
+        def egressObserverOk(self) -> bool:
+            return bool(self._state["egress"]["observerOk"])
+
         @pyqtProperty(bool, notify=changed)
         def captureActive(self) -> bool:
             return bool(self._state["capture"]["anyActive"])

@@ -577,6 +577,133 @@ def test_device_only_evidence_is_not_presented_as_client_attribution():
     assert s["activeDetail"] == "mic:zoom"
 
 
+def test_failed_observer_is_distinguishable_from_a_quiet_one(qapp_offscreen,
+                                                            monkeypatch):
+    """The whole point of the three severities.
+
+    A scan that failed and a scan that succeeded-but-saw-nothing both leave
+    every kind "unverified". If the surface cannot tell them apart, a machine
+    nobody is watching renders exactly like a machine where nothing is
+    happening — which is the failure this feature exists to prevent.
+    """
+    from PyQt6.QtCore import QEventLoop, QTimer
+
+    monkeypatch.setattr(I, "CAPTURE_CMD", ["sh", "-c", "exit 1"])
+    monkeypatch.setattr(I, "EGRESS_CMD", ["sh", "-c", "exit 1"])
+    obs = I.LockIndicators(poll_ms=100000)
+    obs.set_locked(True)
+    loop = QEventLoop()
+    QTimer.singleShot(1200, loop.quit)
+    loop.exec()
+
+    assert obs.captureObserverOk is False, "a failed scan is not a reading"
+    assert obs.captureUnverified is True
+    assert obs.captureActive is False
+    assert "capture_observer=failed" in obs.snapshot_line()
+
+    # Now a healthy scan that observes nothing: same "unverified" kinds, but
+    # the observer is OK, so the UI can render the two differently.
+    monkeypatch.setattr(I, "CAPTURE_CMD",
+                        ["sh", "-c", "exec printf '%s' "
+                         + repr(json.dumps([{"type": "PipeWire:Interface:Core", "id": 0}]))])
+    obs.refresh()
+    loop = QEventLoop()
+    QTimer.singleShot(1200, loop.quit)
+    loop.exec()
+    assert obs.captureObserverOk is True
+    assert obs.captureActive is False
+    assert obs.captureUnverified is True
+    assert "capture_observer=ok" in obs.snapshot_line()
+    obs.stop()
+
+
+def test_lock_ui_renders_observer_failure_as_an_alarm():
+    """Source-level pin for the QML that cannot be linted against qs.*/shim here."""
+    ui = (REPO / "qdlocker" / "qml" / "LockUI.qml").read_text()
+    assert "captureObserverOk" in ui, (
+        "the banner must key its alarm on observer health, not merely on the "
+        "context property existing")
+    assert "!root.lockIndicators.captureObserverOk" in ui
+    # The dim coverage row must NOT show while the observer is failed: that
+    # would read as 'we checked and it is partial' when nothing was checked.
+    partial = [ln for ln in ui.splitlines() if "capture monitoring: partial" in ln]
+    assert partial, "coverage disclosure row missing"
+    idx = ui.index("capture monitoring: partial")
+    preceding = ui[:idx].rsplit("Text {", 1)[-1]
+    assert "captureObserverOk" in preceding, (
+        "the partial-coverage row must be gated on a healthy observer")
+
+
+def test_repeated_polls_do_not_leak_timers_or_scans(qapp_offscreen, monkeypatch):
+    """Scans are Qt objects parented to a singleton that lives for the whole
+    lock. Without explicit disposal each poll would leak a QTimer plus the
+    _Scan its lambda captures (and everything that scan buffered), growing the
+    security process for as long as the machine stays locked."""
+    from PyQt6.QtCore import QEventLoop, QTimer
+
+    monkeypatch.setattr(I, "CAPTURE_CMD", ["sh", "-c", "exec true"])
+    monkeypatch.setattr(I, "EGRESS_CMD", ["sh", "-c", "exec true"])
+    obs = I.LockIndicators(poll_ms=100000)
+    for _ in range(20):
+        obs.refresh()
+        loop = QEventLoop()
+        QTimer.singleShot(60, loop.quit)
+        loop.exec()
+    # Let deleteLater() run.
+    loop = QEventLoop()
+    QTimer.singleShot(300, loop.quit)
+    loop.exec()
+
+    timers = [c for c in obs.children() if isinstance(c, QTimer)]
+    # Expected survivors: the poll timer only. Allow a small slack for a
+    # deletion still in flight, but not 20 rounds' worth.
+    assert len(timers) <= 3, f"leaked {len(timers)} QTimers across 20 polls"
+    assert len(obs._scans) <= 2
+    obs.stop()
+    assert obs._scans == {}
+
+
+def test_capture_stream_without_a_client_name_is_not_claimed_as_attributed():
+    """`application.name` is a client identity; `node.description` is not.
+
+    Presenting node metadata as though it named the capturing application
+    would be a claim the graph does not support.
+    """
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{"media.class": "Stream/Input/Audio",
+                           "node.description": "Some input stream"}),
+    ]))
+    s = I.summarise_capture(ok, nodes, fresh=True)
+    assert s["anyActive"] is True
+    assert s["attributed"] is False
+    assert s["activeDetail"] == "mic:Some input stream (client unknown)"
+
+    ok, nodes = I.parse_pw_dump(dump([
+        CORE,
+        node("running", **{"media.class": "Stream/Input/Audio",
+                           "application.process.binary": "obs"}),
+    ]))
+    s = I.summarise_capture(ok, nodes, fresh=True)
+    assert s["attributed"] is True
+    assert s["activeDetail"] == "mic:obs"
+
+
+def test_snapshot_line_is_machine_parseable(qapp_offscreen):
+    obs = I.LockIndicators(poll_ms=100000)
+    line = obs.snapshot_line()
+    fields = dict(kv.split("=", 1) for kv in line.split(" ") if "=" in kv)
+    for key in ("capture_observer", "capture_active", "capture_attributed",
+                "capture_kinds", "capture_unverified", "egress_observer",
+                "egress_active", "egress_count"):
+        assert key in fields, f"{key} missing from {line}"
+    assert fields["capture_observer"] == "failed", (
+        "an observer that has never produced a reading must not report ok")
+    # Every token must be key=value: detail strings are flattened so the whole
+    # line stays parseable by the GUI gate.
+    assert all("=" in tok for tok in line.split(" ")), line
+
+
 def test_no_kind_is_missing_a_label():
     assert set(I.KIND_LABELS) == set(I.KINDS)
     assert set(I.NEGATIVE_AUTHORITATIVE) == set(I.KINDS)

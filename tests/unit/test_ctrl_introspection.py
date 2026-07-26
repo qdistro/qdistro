@@ -90,7 +90,8 @@ def _make(qapp, auth, tmp_path, *, introspection):
 
 @pytest.mark.cheat_aware(
     protects="the ctrl socket's introspection commands (status, unlock-result, "
-    "prompt-text — the password-length side channel) are NOT served in "
+    "prompt-text — the password-length side channel — and indicators, "
+    "which discloses whether a capture is live) are NOT served in "
     "production; only the leak-free `lock` command is",
     severity="low-medium",
     cheats=[
@@ -109,7 +110,7 @@ def test_production_socket_is_lock_only(qapp, auth, tmp_path):
         assert _request(sock._path, "lock") == "ok"
         assert bridge.injected == [3]
         # Introspection commands are refused — no live state, no length channel.
-        for cmd in ("status", "unlock-result", "prompt-text"):
+        for cmd in ("status", "unlock-result", "prompt-text", "indicators"):
             assert _request(sock._path, cmd) == "error: command unavailable", (
                 f"{cmd} must be unavailable without introspection"
             )
@@ -126,5 +127,10 @@ def test_introspection_socket_serves_diagnostics(qapp, auth, tmp_path):
         assert _request(sock._path, "unlock-result").startswith("last=")
         # prompt-text returns the masked buffer form, never plaintext.
         assert _request(sock._path, "prompt-text") is not None
+        # J28: with no observer attached the snapshot must read FAILED, not
+        # empty — a harness reading it early must not see something that
+        # looks like a healthy quiet machine.
+        ind = _request(sock._path, "indicators")
+        assert ind is not None and "capture_observer=failed" in ind
     finally:
         sock.close()

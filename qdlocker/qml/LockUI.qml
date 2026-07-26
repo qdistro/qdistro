@@ -53,9 +53,12 @@ Item {
     radius: Style.radiusXS
     readonly property bool capturing: root.lockIndicators
                                       ? root.lockIndicators.captureActive : false
-    // No reading at all: either the observer object is missing or every kind
-    // is unverified with nothing observed.
+    // No usable reading: the observer object is missing entirely, or its last
+    // scan failed / was killed / aged out. This is deliberately NOT the same
+    // condition as "healthy scan, nothing observed" — that one is the dim
+    // coverage disclosure below.
     readonly property bool observerDead: !root.lockIndicators
+                                         || !root.lockIndicators.captureObserverOk
     color: (capturing || observerDead) ? Qt.alpha(Color.mError, 0.18)
                                        : Qt.alpha(Color.mOnSurfaceVariant, 0.10)
     border.color: (capturing || observerDead) ? Color.mError
@@ -68,11 +71,14 @@ Item {
       width: parent.width - Style.fontSizeXXL
       spacing: Style.fontSizeS
 
-      // Observer missing entirely (no context property) — say so loudly.
+      // Observer missing or not producing a usable reading — say so loudly.
+      // A wedged/killed/stale scan lands here, not in the dim row below.
       Text {
         width: parent.width
         visible: securityBanner.observerDead
-        text: "⚠ capture monitoring unavailable — mic, camera and screen capture are NOT being observed"
+        text: !root.lockIndicators
+              ? "⚠ capture monitoring unavailable — mic, camera and screen capture are NOT being observed"
+              : "⚠ capture monitoring FAILED — the last scan produced no usable reading; nothing is being observed"
         wrapMode: Text.WordWrap
         color: Color.mError
         font.pointSize: Style.fontSizeL
@@ -95,7 +101,9 @@ Item {
       // above: it is always true, so it must not compete with a real event.
       Text {
         width: parent.width
-        visible: root.lockIndicators ? root.lockIndicators.captureUnverified : false
+        visible: root.lockIndicators
+                 && root.lockIndicators.captureObserverOk
+                 && root.lockIndicators.captureUnverified
         text: "capture monitoring: partial — no capture observed for "
               + (root.lockIndicators ? root.lockIndicators.captureUnverifiedLabel : "")
               + "; direct device grants and virtual input are not monitored"
