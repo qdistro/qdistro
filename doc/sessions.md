@@ -151,7 +151,15 @@ What is observable:
  D-Bus section below). The session manager is authoritative; an
  unreachable one renders as *unverified*, not as "no egress".
 - **Microphone, camera, screencast, system-audio capture** — the PipeWire
- graph, read with `pw-dump`. PipeWire is the widest observation point
+ graph, read with `pw-dump`. The *kind* is derived from node properties
+ (`stream.capture.sink` and a `.monitor` name for system audio,
+ `media.role`/`device.api`/name hints for camera, qdwin's own
+ `weston.pipewire-N` for screencast). Where those hints are absent the
+ classification is a best guess from node metadata, not a link-graph
+ conclusion — an open review finding, recorded in
+ `todo/fable-release/12-j28-multi-output-lock-indicators.md`'s sibling
+ review notes, is that ambiguous cases should render as a generic
+ uncertain kind instead. PipeWire is the widest observation point
  available because silos get a bind-mounted view of admin's `pipewire-0`
  socket, per-session daemons link upward into admin's graph, and qdwin's
  view-stream path pins a forwarded toplevel onto a weston
@@ -211,12 +219,13 @@ absent the indicator would read "unverified" forever — honest, but useless
  scenario is written (`qdlocker/tests/gui/09-capture-indicators.md`), but it
  has not been executed against a real qdwin + qdlocker + PipeWire graph.
  It asserts the state of the running observer through an
- introspection-gated `indicators` ctrl verb plus banner pixels; its mic,
- system-audio, observer-timeout, egress (including `Stopping` and an
- unreachable session manager) and locked-restart steps are unconditional,
- while camera, screencast and the second-output step SKIP with a printed
- reason when the VM cannot provide the device, the multimachine harness or
- a second head. Output hotplug while locked is a manual check, not a gate.
+ introspection-gated `indicators` ctrl verb plus banner pixels. Its
+ quiet-lock, mic start/stop-while-locked, observer-timeout and egress
+ (including transient `Stopping` and an unreachable session manager) and
+ locked-restart steps are unconditional; system audio, camera, screencast
+ and the second-output step SKIP with a printed reason when the VM cannot
+ provide a default sink, a camera node, a manually driven view stream or a
+ second head. Output hotplug while locked is a manual check, not a gate.
 
 Making a kind report "clear" requires a real authoritative feed first: a
 qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
