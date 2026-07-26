@@ -33,11 +33,22 @@ a polkit `AuthenticationAgent`, receives *upstream* polkit actions (mostly
 (`org.freedesktop.X` → `qdistro.X`; anything else → `qdistro.external.<id>`),
 and then calls the broker's `RequestPermission` to get a decision.
 
-Consequently there is **no general `org.qdistro.*` polkit action namespace
-covering qdistro's own operations.** Only two polkit action files ship —
-`pwd/org.qdistro.pwd.policy` (1 action, `org.qdistro.pwd.unlock`) and
-`print/org.qdistro.print.policy` (5 actions) — and three `.rules` files, of
-which exactly one routes anything toward the agent:
+A real `org.qdistro.*` polkit namespace does exist, but it is **narrow and
+per-subsystem**, and it does not cover the cross-silo verbs this page used to
+advertise. Twenty action IDs exist in the tree:
+
+| Source | Actions |
+|---|---|
+| `pwd/org.qdistro.pwd.policy` | 1 — `org.qdistro.pwd.unlock` |
+| `print/org.qdistro.print.policy` | 5 — `print.{access,attach-usb,detach-usb,cancel-job,purge-jobs}` |
+| generated inline by `install-tier3-for-vm.sh` | 2 — `tier3.{spawn,cleanup}` |
+| generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
+| `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
+
+So sixteen actions ship and four more do not. Every one of them is a
+`pkexec`-style privileged-helper gate for one subsystem; none is a
+cross-silo policy verb. And three `.rules` files ship, of which exactly one
+routes anything toward the agent:
 
 - `pwd/qdistro-pwd.rules` (installed as `50-qdistro-pwd.rules`) returns `YES`
   for admin/root on `org.qdistro.pwd.unlock` and `AUTH_ADMIN_KEEP` otherwise,

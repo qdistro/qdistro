@@ -198,8 +198,9 @@ source_starttime)`. Rules can specify `mime_type:` (with fnmatch glob support �
 `text/*`, `image/*`, `application/*`) to allow or deny specific MIME shapes per
 source/dest pair.
 
-**This gate covers the regular clipboard only, not primary selection** — see
-"Primary selection vs clipboard" below.
+**This broker-backed receive gate covers the regular clipboard only.** Primary
+selection has its own, separate receive gate implemented inside the compositor
+— stricter, and with no rule path. See "Primary selection vs clipboard" below.
 
 ### Deny-storm robustness
 
@@ -279,29 +280,40 @@ read at the source with policy-controlled delivery at the target.
 Wayland distinguishes `primary` (middle-click selection) from `clipboard`
 (explicit copy).
 
-> **Status: primary selection is gated at set time only, and policy cannot
-> distinguish the two.** Two separate gaps:
->
-> 1. **No receive-time gate on primary.** The receive-time interception is a
->    wrap of `weston_data_source::send` on the regular clipboard data source.
->    `qdwin_primary_source_impl` is not wrapped, so
->    `zwp_primary_selection_offer_v1.receive` has no per-MIME, per-recipient
->    check. What still applies to primary is the set-time gate and
->    focus-aware-clear.
-> 2. **`is_primary` never reaches the broker.** The compositor reports it on
->    `selection_set`, but `QdwinBinding::checkClipboardTransfer` has no
->    `is_primary` parameter and the synthetic action string carries no
->    discriminator. **No rule can match on primary vs clipboard**, so "the same
->    policy framework, with different defaults" is not expressible — the same
->    rule applies to both, and it is the clipboard rule.
->
-> **The residual risk this leaves.** A middle-click paste across a silo boundary
-> is checked once, at selection time, on the coarse `(source, dest)` pair, and
-> is not re-checked per MIME type when the destination actually reads it. The
-> intent — that primary is more ephemeral and deserves less friction — is not
-> implemented as *less* friction; it is implemented as *less gating*, which is
-> the opposite of what "the same framework" implies. Making `is_primary` a
-> policy input is a prerequisite for any deliberate difference in defaults.
+Both are gated, at both set time and receive time — but **not by the same
+mechanism, and the defaults differ in the opposite direction from what this
+page used to claim.**
+
+**Set time — shared mechanism, and rules cannot tell the two apart.** The
+compositor reports `is_primary` on `selection_set`, and qdshell tracks primary
+and clipboard as separate per-seat selection kinds, clearing each independently
+(`clearSelection(seat, isPrimary)`). But the broker call it makes is the same
+one for both: `checkClipboardTransfer` has no `is_primary` parameter and the
+synthetic action string `qdistro.clipboard.transfer:<src>:<dst>` carries no
+discriminator. **No rule can match on primary vs clipboard**, so a deliberate
+difference in set-time defaults is not currently expressible; one rule governs
+both.
+
+**Receive time — different mechanisms, and primary is the stricter one.** The
+regular clipboard goes through the broker (`CheckClipboardReceive`, per-MIME,
+rule-capable, so an admin rule can allow a cross-silo paste). Primary selection
+does not reach the broker at all: `qdwin_primary_offer_receive` compares the
+source and destination clients' security contexts directly via
+`qdwin_primary_same_silo` and **hard-denies any cross-silo receive**, closing
+the fd so the receiver sees an empty paste. That check fails closed on
+incomplete identity (one client tagged and the other not, or a missing
+engine/app_id, is treated as cross-silo), and two untagged admin-uid clients
+count as same-silo.
+
+**What this means for policy.** Cross-silo primary paste is **default-deny with
+no rule override** — an admin cannot open it the way they can open a cross-silo
+clipboard paste, because there is no broker call to write a rule against. So
+"qdistro applies the same policy framework to both, but default rules differ —
+primary is often more ephemeral and gets less friction" is wrong twice over:
+the frameworks are different, and primary gets *more* friction, not less. A
+broker-rule allow path for cross-silo primary is a possible future addition,
+noted as such in the compositor source; default-deny is the deliberate secure
+baseline.
 
 ## Per-app policy via the SDK
 
