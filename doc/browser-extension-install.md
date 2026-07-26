@@ -91,14 +91,20 @@ SIGNER=<40-hex-release-key-fingerprint>
     "$MANIFEST" "$SIG" "$KEYRING" "$SIGNER"
 
 # 2. Exactly one pin for this repo, and the checkout is AT it and CLEAN.
+#    $SRC is ROOT-owned (the bootstrap cloned it), and git refuses to touch a
+#    repository owned by someone else — hence `-c safe.directory`, which is
+#    honoured in the command scope. `--no-optional-locks` keeps `status` from
+#    trying to refresh an index it cannot write.
+git_src() { git --no-optional-locks -c safe.directory="$SRC" -C "$SRC" "$@"; }
+
 PIN=$(awk -v r="$REPO" '/^[[:space:]]*#/{next} $1==r{print $2}' "$MANIFEST")
 [ "$(printf '%s\n' "$PIN" | grep -c .)" -eq 1 ] \
     || { echo "no unique pin for $REPO in $MANIFEST" >&2; exit 1; }
 printf '%s' "$PIN" | grep -qE '^[0-9a-f]{40}$' \
     || { echo "pin for $REPO is not a 40-hex sha" >&2; exit 1; }
-[ "$(git -C "$SRC" rev-parse HEAD)" = "$PIN" ] \
+[ "$(git_src rev-parse HEAD)" = "$PIN" ] \
     || { echo "$SRC HEAD is not the pinned commit" >&2; exit 1; }
-[ -z "$(git -C "$SRC" status --porcelain)" ] \
+[ -z "$(git_src status --porcelain)" ] \
     || { echo "$SRC has modified or untracked files" >&2; exit 1; }
 
 # 3. Export that commit into a FRESH directory you own, and build there.
@@ -106,7 +112,7 @@ printf '%s' "$PIN" | grep -qE '^[0-9a-f]{40}$' \
 #    overwrites archived paths but leaves stale extra files behind, and both
 #    build scripts glob src/modules/*.js, src/content/*.js and icons/*.)
 OUT=$(mktemp -d "$HOME/qdistro-ext.XXXXXX")
-git -C "$SRC" archive "$PIN" | tar -x -C "$OUT"
+git_src archive "$PIN" | tar -x -C "$OUT"
 cd "$OUT" && bash scripts/build-extension.sh
 ```
 
