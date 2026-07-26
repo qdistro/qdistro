@@ -38,13 +38,13 @@ def _bundled_firefox_extension_id() -> str:
     """Read the gecko id of the *bundled* Firefox extension that this
     installer authorizes.
 
-    This installer ships next to ``browser_bridge/extension/`` and the
-    README directs users to run ``qdistro-browser-install --browsers
-    firefox`` to authorize the bundled extension built by
-    ``build-extension.sh`` from ``manifest.firefox.json``. The native-
-    messaging manifest's ``allowed_extensions`` MUST therefore match that
-    bundled manifest's ``browser_specific_settings.gecko.id`` — otherwise
-    the native-messaging host rejects the canonical bundled extension.
+    This installer ships next to ``browser_bridge/extension/``, the LEGACY
+    bundled tree that ``--firefox-mode bundled`` (the compatibility default)
+    authorizes. Whenever that mode is used, the native-messaging manifest's
+    ``allowed_extensions`` MUST match that bundled manifest's
+    ``browser_specific_settings.gecko.id`` — otherwise the native-messaging
+    host rejects the very extension the mode exists to authorize. v1 users
+    do NOT use this mode: see ``doc/browser-extension-install.md``.
 
     The bundled manifest is the single source of truth: read it at import
     time so the default can never silently drift from what is shipped.
@@ -371,10 +371,11 @@ def _build_argparser() -> argparse.ArgumentParser:
                    choices=sorted(FIREFOX_MODE_IDS),
                    default=DEFAULT_FIREFOX_MODE,
                    help="which Firefox extension this host authorizes: "
-                        "'bundled' (the MV2 build shipped with this "
-                        "package) or 'standalone' (the separately-shipped "
-                        "qdfirefox extension). Selects the default "
-                        "allowed-extensions id; overridden by "
+                        "'bundled' (the LEGACY MV2 build next to this "
+                        "package; no origin allowlist) or 'standalone' "
+                        "(the maintained qdfirefox extension the user "
+                        "builds themselves - the v1 choice). Selects the "
+                        "default allowed-extensions id; overridden by "
                         "--firefox-extension-id if given.")
     p.add_argument("--firefox-extension-id", default=None,
                    help="explicit Firefox extension id; overrides the "

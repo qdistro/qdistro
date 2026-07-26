@@ -174,7 +174,7 @@ P0-1 fixed this path: the bridge parses argv at startup and treats the
 browser-supplied extension identity as authoritative. Stdio-provided extension
 identity is not trusted for policy.
 
-#### Firefox extension artifacts (two canonical, by install mode)
+#### Firefox extension artifacts (two, by install mode — one legacy)
 
 There are **two** Firefox extension artifacts, deliberately distinct, each
 authorized by its own `qdistro-browser-install --firefox-mode`:
@@ -209,7 +209,8 @@ The Chromium extension (`qdchrome-extension`) does **not** build a Firefox
 artifact: it formerly emitted an MV2 build under the same
 `qdistro@qdistro.local` id as the bundled extension — a drift trap (two
 distinct codebases, one id) — so that target was removed. Firefox ships from
-one of the two sources above only.
+one of the two sources above only, and for v1 that means the **standalone**
+one: the bundled row is the legacy artifact (see the J11 caveat above).
 
 ### 4. Daemon policy (Phase 9 — not implemented)
 

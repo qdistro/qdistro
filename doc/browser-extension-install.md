@@ -139,18 +139,36 @@ Chromium-family browsers use `qdchrome-extension`.
 > **Do not load the copy the installer leaves in
 > `/usr/share/qdistro/browser-extension/`.** That directory is a copy of the
 > *bundled* tree, and the bundled tree is an older, flat extension: no `src/`
-> directory, no `gate.js`, and therefore **no origin allowlist at all** — the
-> closed-by-default gate that J11 added lives in `qdchrome-extension`/
-> `qdfirefox-extension`, which no installer ships. So the extension the
-> installer puts on disk is not the extension this page tells you to build,
-> and it is the weaker of the two. Build from the manifest-pinned standalone
-> repos as described below.
+> directory, no `gate.js`, and therefore **no origin allowlist at all**. The
+> origin gate lives only in the standalone repos, which no installer ships. So
+> the extension the installer puts on disk is not the extension this page
+> tells you to build, and it is the weakest of the three. Build from the
+> manifest-pinned standalone repos as described below.
 >
 > That mismatch is tracked as **J11** in
 > `todo/fable-release/10-reachability-audit-2026-07-26.md` and is being fixed
 > separately (deciding which extension actually ships, and shipping it). Until
 > that lands, treat `/usr/share/qdistro/browser-extension/` as dead weight on
 > disk, not as an install source.
+
+### The origin gate differs per artifact — check yours
+
+The gate (`src/gate.js`) decides which page origins the content-script-initiated
+ops may run on. **It is not the same in the two standalone extensions**, and
+the doc-of-record for this is the code:
+
+| Artifact | Empty / unset allowlist | Opt-in to all origins |
+|---|---|---|
+| `qdchrome-extension` | **denies every origin** — closed by default (J11) | an explicit `*` entry |
+| `qdfirefox-extension` | **allows every origin** | n/a — empty already means all |
+| bundled legacy tree | no gate exists at all | n/a |
+
+So on Firefox a fresh install is **open until you populate the allowlist**:
+open the extension's options page and list the origins you want the
+password/page-extract content scripts to act on. J11's closed-by-default
+change landed in `qdchrome-extension` only; extending it to Firefox is not
+part of this page's scope, and until it lands the Firefox default is stated
+here rather than papered over.
 
 ## Firefox
 
@@ -192,6 +210,12 @@ way around that in v1:
   path is **never populated**, and an enterprise policy does not exempt an
   add-on from signing on release Firefox. The script is scaffolding for the
   post-v1 signed channel, **not** a v1 install path.
+
+**Populate the origin allowlist after loading.** `qdfirefox-extension`'s gate
+treats an *empty* allowlist as "all origins", so until you list origins in the
+extension's options page the password / page-extract content scripts are live
+on every site the `<all_urls>` grant covers. (`qdchrome-extension` is the other
+way round — closed until you add entries; see the gate table above.)
 
 **Temporary loading also bypasses the normal install UX.** `about:debugging`
 is a developer mechanism: it does not show the installation-time permission

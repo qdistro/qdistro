@@ -2,8 +2,10 @@
 
 > **Do not use this as the v1 install source.** This is the legacy *bundled*
 > extension: a flat tree with no `src/` directory, no `gate.js` and therefore
-> **no origin allowlist** — it does not carry the closed-by-default gate that
-> the maintained extensions have. `install-browser-bridge-for-vm.sh` still
+> **no origin allowlist at all** — unlike the maintained extensions, which do
+> have an origin gate (`qdchrome-extension`'s is closed by default per J11;
+> `qdfirefox-extension`'s is configurable but treats an empty allowlist as
+> "all origins"). `install-browser-bridge-for-vm.sh` still
 > copies this directory (this README included) to
 > `/usr/share/qdistro/browser-extension/`, so you may be reading it on an
 > installed system; that copy is compatibility baggage, not an install source.
