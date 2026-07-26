@@ -1,6 +1,6 @@
 [Unit]
 Description=qdshell desktop (Quickshell QML on top of qdwin)
-Documentation=https://codeberg.org/qdistro/qdshell
+Documentation=https://github.com/qdistro/qdshell
 After=qdwin-compositor.service
 Requires=qdwin-compositor.service
 PartOf=qdwin-session.target

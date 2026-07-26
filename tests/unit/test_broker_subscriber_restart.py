@@ -85,11 +85,42 @@ class _BrokerSignalObject(dbus.service.Object):
         super().__init__(conn, object_path)
 
 
+def _private_bus():
+    """Open a private session bus that cannot take the pytest process down.
+
+    MUST be used for every connection this module opens. libdbus defaults
+    ``exit_on_disconnect`` to TRUE, and ``DBusGMainLoop(set_as_default=True)``
+    attaches each connection's dispatch GSource to the DEFAULT GLib main
+    context. ``bus.close()`` does not dispatch the resulting ``Disconnected``
+    message — it only queues it; whoever iterates that context NEXT dispatches
+    it, and libdbus's exit-on-disconnect handler then calls ``_dbus_exit(1)``,
+    a C ``exit(1)`` that kills the interpreter with no exception, no traceback,
+    no pytest summary and no flushed stdout.
+
+    In a whole-directory ``python3 -m pytest tests/unit/`` run that "whoever"
+    is pytest-qt: once any admin Qt test has created a QApplication, pytest-qt
+    calls ``QApplication.processEvents()`` around every subsequent test
+    boundary, and Qt on Linux runs on QEventDispatcherGlib — i.e. it iterates
+    exactly this context. So the FIRST test after this module used to kill the
+    run (rc=1, ~20% in, no output). CI did not see it because
+    ci/lib/gates/host.sh runs the unit tests in sorted 30-file batches, which
+    puts the admin Qt files (sorted positions 3-6) in batch 1 and this module
+    (position 59) in batch 2 — their QApplication and these connections never
+    coexist in one pytest process.
+
+    Disabling the flag makes a disconnect an ordinary no-op for the process,
+    which is what a test-owned connection must be.
+    """
+    bus = dbus.SessionBus(private=True)
+    bus.set_exit_on_disconnect(False)
+    return bus
+
+
 def _session_bus_available() -> tuple[bool, str]:
     """Probe for a usable session bus. Returns (ok, reason)."""
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     try:
-        bus = dbus.SessionBus(private=True)
+        bus = _private_bus()
         bus.close()
         return True, ""
     except Exception as e:  # noqa: BLE001
@@ -163,24 +194,51 @@ def _run_loop_until(predicate, timeout_s: float = 5.0) -> bool:
         loop.quit()
         return False
 
-    GLib.timeout_add(10, _poll)
-    GLib.timeout_add(int(timeout_s * 1000), _deadline)
-    loop.run()
+    # Only the callback that quit the loop removes itself: on success
+    # _deadline survives for the rest of its timeout, and on timeout _poll
+    # keeps returning True forever, its closure pinning the predicate (and
+    # therefore the broker/subscriber objects) on the default main context.
+    # Destroy both sources on every exit path.
+    #
+    # Hold the GLib.Source OBJECTS rather than the numeric ids GLib.timeout_add
+    # returns: an id is reusable the instant its source is destroyed, so
+    # find_source_by_id() on the callback that already removed itself may hand
+    # back an unrelated, newly attached source. Source.destroy() is idempotent,
+    # so destroying both is safe whichever one is already gone.
+    context = GLib.MainContext.default()
+
+    poll_source = GLib.timeout_source_new(10)
+    poll_source.set_callback(_poll)
+    poll_source.attach(context)
+
+    deadline_source = GLib.timeout_source_new(int(timeout_s * 1000))
+    deadline_source.set_callback(_deadline)
+    deadline_source.attach(context)
+
+    try:
+        loop.run()
+    finally:
+        poll_source.destroy()
+        deadline_source.destroy()
     # Final check (predicate may have flipped between last poll and quit).
     if predicate():
         result["ok"] = True
     return result["ok"]
 
 
-@pytest.fixture
-def session_bus():
-    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SessionBus(private=True)
-    yield bus
+def _close_bus(bus) -> None:
     try:
         bus.close()
     except Exception:  # noqa: BLE001
         pass
+
+
+@pytest.fixture
+def session_bus():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = _private_bus()
+    yield bus
+    _close_bus(bus)
 
 
 def _emit_and_wait(emit_fn, predicate, timeout_s: float = 5.0) -> bool:
@@ -195,7 +253,7 @@ def _emit_and_wait(emit_fn, predicate, timeout_s: float = 5.0) -> bool:
 
 class TestLiveSubscriberAcrossRestart:
 
-    def test_subscriber_receives_after_restart(self, session_bus):
+    def test_subscriber_receives_after_restart(self, session_bus, request):
         bus = session_bus
 
         # --- Subscribe FIRST (live, bus_name-free), before any broker
@@ -233,7 +291,11 @@ class TestLiveSubscriberAcrossRestart:
         # name. This is what a service *restart* looks like on the bus:
         # same well-known name, different unique name. A bus_name= filter
         # would have pinned the subscriber to unique1 and gone deaf here.
-        bus2 = dbus.SessionBus(private=True)
+        bus2 = _private_bus()
+        # Register the close BEFORE anything below can fail: an assertion
+        # abort would otherwise skip the cleanup tail and leave bus2 (and the
+        # well-known name it owns) live for the rest of the session.
+        request.addfinalizer(lambda: _close_bus(bus2))
         name2 = dbus.service.BusName(BUS_NAME, bus2, do_not_queue=True)
         unique2 = bus2.get_unique_name()
         broker2 = _BrokerSignalObject(bus2, OBJ_PATH)
@@ -263,7 +325,6 @@ class TestLiveSubscriberAcrossRestart:
         assert sub.pending == [202]
         assert sub.decided == [(202, "deny")]
 
-        # cleanup
+        # cleanup (bus2 itself is closed by the finalizer registered above)
         broker2.remove_from_connection()
         del name2
-        bus2.close()

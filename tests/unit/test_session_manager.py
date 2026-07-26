@@ -1099,6 +1099,20 @@ class TestTier2TemplateKind:
         with pytest.raises(BadArgument):
             sm.validate_launch("tier2-template", bad)
 
+    def test_validate_launch_rejects_nul_in_argv(self):
+        """NUL is the launcher's argv separator, and json.loads decodes the
+        \\u0000 escape into a real one — so a stanza carrying it would split
+        into two argv elements at exec time. It cannot appear in a real exec'd
+        argv element either, so reject it here rather than re-encode."""
+        with pytest.raises(BadArgument):
+            sm.validate_launch("tier2-template", {
+                "workload": "w", "template_silo": "s", "network": "none",
+                "argv": '["a\\u0000b"]'})
+        with pytest.raises(BadArgument):
+            sm.validate_launch("tier2-template", {
+                "workload": "w", "template_silo": "s", "network": "none",
+                "argv": ["a\0b"]})
+
     def test_create_tier2_no_useradd(self, store, ops):
         store.create("browser1", sm.TIER2_LAUNCH_OWNER_UID,
                      kind="tier2-template", launch=dict(_LAUNCH))

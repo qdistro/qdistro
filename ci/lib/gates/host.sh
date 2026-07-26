@@ -358,7 +358,19 @@ if python3 -c "import pytest_cov" 2>/dev/null; then
 else
     _COV_FLAGS=""
 fi'
-    _qd_post='if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
+    # Cross-batch smoke: the 30-file batching above splits the admin Qt files
+    # (sorted positions 3-6) from test_broker_subscriber_restart.py (position
+    # 59), so no batch ever holds a QApplication AND a closing D-Bus test. That
+    # blind spot let a leaked exit-on-disconnect connection kill whole-directory
+    # `pytest tests/unit/` runs for a long time while CI stayed green. Run one
+    # deliberate mixed process — Qt creator + the D-Bus closer + a test after it
+    # — so the interaction is covered here too. Sub-second.
+    _qd_post='PYTEST_QT_API=pyqt6 QT_API=pyqt6 QDISTRO_REQUIRE_PYQT6=1 \
+python3 -m pytest \
+    tests/unit/test_admin_widgets_logic.py \
+    tests/unit/test_broker_subscriber_restart.py \
+    tests/unit/test_broker_upload_lineage.py || rc=1
+if [ -n "$_COV_FLAGS" ] && [ -f .coverage-report.json ]; then
     python3 -c "
 import json, sys
 try:

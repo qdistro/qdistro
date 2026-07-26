@@ -9,6 +9,7 @@ off the VM.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -96,6 +97,60 @@ def test_stop_helper_fails_closed_on_missing_admin_user(tmp_path: Path) -> None:
         env=env, capture_output=True, text=True, check=False, timeout=30)
     assert res.returncode != 0
     assert "does not exist" in res.stderr
+
+
+def test_helper_argv_split_preserves_empty_elements() -> None:
+    """`mapfile -t` on a newline-joined argv silently drops empty elements —
+    and a trailing empty one entirely — so the silo would be launched with a
+    DIFFERENT argv than its launch stanza specifies. The split must be
+    NUL-separated, the one byte an exec'd argv element cannot contain (and
+    the daemon's validator rejects). (Twin of
+    tests/unit/test_podapp_launch.py's check on qdistro-podapp-launch.)"""
+    src = _LAUNCH.read_text()
+    assert "mapfile -d '' -t APP_ARGV" in src, \
+        "argv must be split on NUL, not newlines"
+    assert '\\n".join(argv)' not in src, \
+        "the newline join drops empty argv elements"
+    # Run the actual splitter out of the shipped source rather than a copy, so
+    # this cannot pass against a stale duplicate of the pipeline.
+    start = src.index("mapfile -d '' -t APP_ARGV")
+    snippet = src[start:src.index("')", start) + 2]
+    script = (f'export QD_WORKLOAD=weston-terminal\n{snippet}\n'
+              'printf "%s\\n" "${#APP_ARGV[@]}"\n'
+              'printf "[%s]" "${APP_ARGV[@]}"\n')
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin",
+             "QD_APP_ARGV_JSON": json.dumps(["a", "", "b", ""])},
+        timeout=30)
+    assert out.returncode == 0, out.stderr
+    count, rendered = out.stdout.split("\n", 1)
+    assert count == "4", f"empty argv elements were dropped: {out.stdout!r}"
+    assert rendered.strip() == "[a][][b][]"
+
+
+def test_helper_argv_split_fails_closed_when_the_splitter_dies(tmp_path: Path) -> None:
+    """`mapfile` reads a PROCESS SUBSTITUTION, so neither `pipefail` nor
+    mapfile's own status notices a failing splitter — without the `wait "$!"`
+    the helper would carry on with an EMPTY argv and exec anyway. Pin the
+    fail-closed status against the shipped source."""
+    src = _LAUNCH.read_text()
+    start = src.index("mapfile -d '' -t APP_ARGV")
+    end = src.index('wait "$!"', start) + len('wait "$!"')
+    snippet = src[start:end]
+    assert 'wait "$!"' in snippet, "the splitter's status must be waited on"
+    farm = tmp_path / "failbin"
+    farm.mkdir()
+    (farm / "python3").write_text("#!/bin/bash\nexit 42\n")
+    (farm / "python3").chmod(0o755)
+    script = ("set -euo pipefail\nexport QD_WORKLOAD=weston-terminal\n"
+              f"{snippet}\n" 'echo REACHED_EXEC\n')
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True,
+        env={"PATH": f"{farm}:/usr/bin:/bin", "QD_APP_ARGV_JSON": "[]"},
+        timeout=30)
+    assert out.returncode == 42, (out.returncode, out.stdout, out.stderr)
+    assert "REACHED_EXEC" not in out.stdout
 
 
 def test_helpers_are_executable_shell() -> None:

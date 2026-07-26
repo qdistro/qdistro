@@ -1,6 +1,6 @@
 [Unit]
 Description=qdistro desktop session (qdwin compositor + qdshell)
-Documentation=https://codeberg.org/qdistro/qdistro
+Documentation=https://github.com/qdistro/qdistro
 # qdwin-session.target is what greetd's [default_session].command
 # resolves to (via deploy/qdwin-session-launcher.sh). It wants both
 # the compositor and the shell; the compositor starts first, the
