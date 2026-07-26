@@ -731,3 +731,352 @@ SH
     [[ "$output" == *"hardened"* ]]
     [[ "$output" == *"not-dev"* ]]
 }
+
+# --- E. Root checkout / source-tree trust gate --------------------------
+#
+# Threat model: an unprivileged local user owns (or can write to) the source
+# checkout the operator later root-installs from. The signed source manifest
+# authenticates COMMIT CONTENT only — it cannot cover .git/hooks, .git/config,
+# or untracked files. verify_repo_pin used to run `git checkout --detach` as
+# root against that tree, which executes .git/hooks/post-checkout as root.
+#
+# These tests run as the invoking (non-root) uid; the gate accepts a tree owned
+# by root OR by our own euid, so "attacker-writable" is modelled with
+# group/other write bits, which is the property that actually matters.
+
+# hookrepo <dir> — build a two-commit git repo at <dir> with a post-checkout
+# hook that drops a marker file at <dir>.pwned. Echoes the FIRST commit sha
+# (the "pin"); HEAD is left on the second commit so a checkout really moves.
+hookrepo() {
+    local dir="$1" pin
+    mkdir -p "$dir"
+    git -C "$dir" init -q
+    git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+    pin="$(git -C "$dir" rev-parse HEAD)"
+    git -C "$dir" -c user.email=t@t -c user.name=t commit -q --allow-empty -m two
+    printf '#!/bin/sh\ntouch %s\n' "$dir.pwned" > "$dir/.git/hooks/post-checkout"
+    chmod 0755 "$dir/.git/hooks/post-checkout"
+    printf '%s\n' "$pin"
+}
+
+# run_verify_pin <root> <repo> <pin> — drive the REAL verify_repo_pin from the
+# REAL bootstrap in a hardened profile against <root>/<repo>.
+run_verify_pin() {
+    local root="$1" repo="$2" pin="$3" mf="$1/manifest.txt"
+    printf '%s\t%s\n' "$repo" "$pin" > "$mf"
+    run bash -c '
+        set -uo pipefail
+        export QDISTRO_PROFILE=release
+        export QDISTRO_REPO_ROOT="'"$root"'"
+        export QDISTRO_SOURCE_MANIFEST="'"$mf"'"
+        . "'"$BOOT"'" >/dev/null 2>&1
+        REPO_ROOT="'"$root"'"
+        SOURCE_MANIFEST="'"$mf"'"
+        verify_repo_pin "'"$repo"'"
+    '
+}
+
+@test "root-checkout: a planted post-checkout hook does NOT execute as root" {
+    local root="$BATS_TEST_TMPDIR/ok" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -eq 0 ] || { echo "verify_repo_pin failed on a TRUSTED tree:"$'\n'"$output" >&2; return 1; }
+    # The pin was actually checked out ...
+    [ "$(git -C "$root/qdistro" rev-parse HEAD)" = "$pin" ]
+    # ... and the hook did NOT run.
+    [ ! -e "$root/qdistro.pwned" ] \
+        || { echo "post-checkout hook EXECUTED during root pin verification" >&2; return 1; }
+}
+
+@test "root-checkout: a user-writable source checkout is REFUSED before any git runs" {
+    local root="$BATS_TEST_TMPDIR/ww" pin head_before
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    head_before="$(git -C "$root/qdistro" rev-parse HEAD)"
+    chmod 0777 "$root/qdistro"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "world-writable checkout was ACCEPTED:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"writable by group/other"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    # The message must tell the operator what to do.
+    [[ "$output" == *"--repo-root"* ]]
+    [[ "$output" == *"chown -R root:root"* ]]
+    # No checkout happened, and no hook ran.
+    [ "$(git -C "$root/qdistro" rev-parse HEAD)" = "$head_before" ]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a user-writable PARENT of the checkout is refused too" {
+    local root="$BATS_TEST_TMPDIR/wwparent" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    chmod 0777 "$root"            # parent writable: the tree can be swapped
+    run_verify_pin "$root" qdistro "$pin"
+    chmod 0755 "$root"
+    [ "$status" -ne 0 ] \
+        || { echo "world-writable PARENT was accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"writable by group/other"* ]]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a group/other-writable file INSIDE the tree is refused" {
+    # `chown -R root:root` without `chmod -R go-w` leaves attacker-writable
+    # content inside a spine that looks fine. deploy/*, scripts/install/*.sh,
+    # meson.build and .git/hooks/* all execute as root, so the gate must look
+    # past the pathname spine into the tree.
+    local root="$BATS_TEST_TMPDIR/inner" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    chmod 0666 "$root/qdistro/.git/hooks/post-checkout"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "writable content inside the tree was accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"writable by group/other or owned by another user"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a symlinked .git is refused, not followed" {
+    local root="$BATS_TEST_TMPDIR/link" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mv "$root/qdistro/.git" "$root/elsewhere.git"
+    ln -s "$root/elsewhere.git" "$root/qdistro/.git"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "symlinked .git was accepted:"$'\n'"$output" >&2; return 1; }
+    # Either layer may catch it first (the whole-tree symlink scan sees an
+    # escaping link; the spine walk sees a symlinked component) — both are a
+    # refusal that names the symlink.
+    [[ "$output" == *"symlink"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a DIRTY tree at the pinned commit is refused" {
+    # HEAD == pin, so `git checkout --detach $pin` is a no-op and leaves both
+    # the modified tracked file and the untracked one in place — content the
+    # signed manifest never covered. Hardened profiles must refuse it.
+    local root="$BATS_TEST_TMPDIR/dirty" dir pin
+    dir="$root/qdistro"; mkdir -p "$dir"
+    git -C "$dir" init -q
+    printf 'clean\n' > "$dir/tracked"
+    git -C "$dir" add tracked
+    git -C "$dir" -c user.email=t@t -c user.name=t commit -q -m one
+    pin="$(git -C "$dir" rev-parse HEAD)"
+    printf 'tampered\n' > "$dir/tracked"
+    printf 'extra\n' > "$dir/untracked"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "dirty tree at the pin was ACCEPTED:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"DIRTY"* ]] || { echo "$output" >&2; return 1; }
+    [[ "$output" == *"tracked"* ]]
+    [[ "$output" == *"untracked"* ]]
+}
+
+@test "root-checkout: dev profile still builds from a user-owned tree" {
+    # The gate is hardened-only: disposable dev VMs deliberately build from a
+    # developer checkout, so it must stay a no-op there.
+    local root="$BATS_TEST_TMPDIR/dev"
+    mkdir -p "$root/qdistro"
+    chmod 0777 "$root/qdistro"
+    run bash -c '
+        . "'"$PROFILE_LIB"'"
+        QDISTRO_PROFILE=dev; export QDISTRO_PROFILE
+        SCRIPT_PATH=x; EUID_UNUSED=
+        die() { echo "DIE: $*"; exit 1; }
+        '"$(sed -n '/^qd_trusted_component()/,/^}/p;/^assert_trusted_tree()/,/^}/p;/^trust_die()/,/^}/p' "$BOOT")"'
+        assert_trusted_tree "'"$root/qdistro"'" "dev tree" && echo DEV_NOOP
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *DEV_NOOP* ]]
+}
+
+@test "root-checkout: every root git call in the bootstrap goes through git_pinned" {
+    # Mutation guard: a future edit that reintroduces a bare `git -C \
+    # "$REPO_ROOT/..."` inside verify_repo_pin re-enables hook execution.
+    body="$(sed -n '/^verify_repo_pin()/,/^}/p' "$BOOT")"
+    [ -n "$body" ]
+    bare="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*[^#]*\bgit -C ' || true)"
+    [ -z "$bare" ] \
+        || { echo "bare 'git -C' (hooks enabled) in verify_repo_pin:"$'\n'"$bare" >&2; return 1; }
+    printf '%s\n' "$body" | grep -q 'assert_trusted_tree' \
+        || { echo "verify_repo_pin no longer gates the tree" >&2; return 1; }
+}
+
+@test "root-checkout: a symlink pointing OUTSIDE the tree is refused" {
+    # `chown -R root:root` makes a planted `build -> /tmp/attacker` symlink
+    # root-owned while leaving its nominal 0777 mode and its target untouched;
+    # meson/ninja/pip then follow it. The gate must reject escaping symlinks.
+    local root="$BATS_TEST_TMPDIR/esc" pin
+    mkdir -p "$root" "$BATS_TEST_TMPDIR/outside"
+    pin="$(hookrepo "$root/qdistro")"
+    ln -s "$BATS_TEST_TMPDIR/outside" "$root/qdistro/build"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "escaping symlink accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: an INCOMPLETE permission scan is fatal, not 'clean'" {
+    # "we saw nothing bad" must never be confused with "we looked". An
+    # unreadable subdirectory makes find exit non-zero; the gate must refuse.
+    local root="$BATS_TEST_TMPDIR/unscannable" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro/opaque"
+    chmod 0300 "$root/qdistro/opaque"
+    run_verify_pin "$root" qdistro "$pin"
+    chmod 0755 "$root/qdistro/opaque"
+    [ "$status" -ne 0 ] \
+        || { echo "unscannable tree accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"did not complete"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: --skip-sources pin-verifies every EXISTING tree, not just recognised ones" {
+    # repo_present only recognises .git / daemons / meson.build / pyproject.toml,
+    # but install_python_modules runs $REPO_ROOT/qdistro/scripts/install/*.sh and
+    # installs qdlocker's systemd/pam assets, so an unrecognisable-but-present
+    # tree must FAIL the pin, never silently skip it.
+    body="$(sed -n '/^fetch_sources()/,/^}/p' "$BOOT")"
+    [ -n "$body" ]
+    printf '%s\n' "$body" | grep -q '\[ -e "\$REPO_ROOT/\$repo" \] && verify_repo_pin' \
+        || { echo "--skip-sources no longer pin-verifies every existing tree:"$'\n'"$body" >&2; return 1; }
+    printf '%s\n' "$body" | grep -q 'repo_present "\$repo" && verify_repo_pin' \
+        && { echo "--skip-sources regressed to the narrow repo_present predicate" >&2; return 1; }
+    :
+}
+
+@test "root-checkout: git_pinned neutralises hooks, fsmonitor, replace-refs and outside gitconfig" {
+    body="$(sed -n '/^git_pinned()/,/^}/p' "$BOOT")"
+    for needle in 'core.hooksPath=/dev/null' 'core.fsmonitor=' \
+                  'GIT_NO_REPLACE_OBJECTS=1' 'GIT_CONFIG_GLOBAL=/dev/null' \
+                  'GIT_CONFIG_SYSTEM=/dev/null'; do
+        printf '%s\n' "$body" | grep -qF "$needle" \
+            || { echo "git_pinned lost '$needle':"$'\n'"$body" >&2; return 1; }
+    done
+}
+
+@test "root-checkout: the refusal does NOT advise chowning a hostile tree" {
+    # Laundering an attacker-prepared checkout with `chown -R root:root` makes
+    # it pass the mechanical check without making its .git/config, ignored
+    # build state or symlinks trustworthy. The message must not offer it.
+    body="$(sed -n '/^trust_die()/,/^}/p' "$BOOT")"
+    printf '%s\n' "$body" | grep -qE '^[^#]*sudo chown -R root:root \$2' \
+        && { echo "trust_die still recommends chowning the existing tree" >&2; return 1; }
+    printf '%s\n' "$body" | grep -q -- '--repo-root=/opt/qdistro-src' \
+        || { echo "trust_die lost the fresh-root remediation" >&2; return 1; }
+    printf '%s\n' "$body" | grep -q 'safe.directory' \
+        || { echo "trust_die lost the safe.directory warning" >&2; return 1; }
+}
+
+@test "root-checkout: an escaping symlink whose NAME contains a newline is refused" {
+    # Regression for a fail-open serialization: `find -print` into a command
+    # substitution loses NULs and strips trailing newlines, so a link named
+    # "decoy\n" beside a benign "decoy" would be checked as "decoy" and the
+    # real escaping link never examined. The rule is now decided by find
+    # itself against the link's own bytes; no list is ever parsed.
+    local root="$BATS_TEST_TMPDIR/nl" pin
+    mkdir -p "$root" "$BATS_TEST_TMPDIR/nl-outside"
+    pin="$(hookrepo "$root/qdistro")"
+    ln -s "." "$root/qdistro/decoy"
+    ln -s "$BATS_TEST_TMPDIR/nl-outside" "$root/qdistro/decoy
+"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "newline-named escaping symlink accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]] \
+        || { echo "wrong refusal reason:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a sibling directory named '<tree>NEWLINE' cannot spoof containment" {
+    # `rt="$(readlink -f ...)"` strips trailing newlines, so a link to a
+    # sibling literally named "qdistro\n" produced a string equal to the
+    # gated tree's own path and was accepted. The syntactic rule never
+    # resolves the target, so the spoof has nothing to act on.
+    local root="$BATS_TEST_TMPDIR/spoof" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro
+"
+    ln -s "$root/qdistro
+" "$root/qdistro/sneaky"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "newline-sibling spoof accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: an EXTERNAL mutable relay cannot launder containment" {
+    # tree/link -> <outside>/relay/payload, with relay currently pointing back
+    # inside the tree. A "where does it land right now" check accepted this and
+    # then memoised the tree; the attacker repoints relay afterwards and
+    # nothing inside the accepted tree ever changed. A syntactic rule refuses
+    # the absolute link outright.
+    local root="$BATS_TEST_TMPDIR/relay" pin
+    mkdir -p "$root" "$BATS_TEST_TMPDIR/relaydir"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro/safe"
+    ln -s "$root/qdistro/safe" "$BATS_TEST_TMPDIR/relaydir/relay"
+    ln -s "$BATS_TEST_TMPDIR/relaydir/relay" "$root/qdistro/link"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "external mutable relay accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: a '..' symlink that stays inside the tree is STILL refused" {
+    # `..` traversal walks through the parent directory, which the gate does
+    # not cover with leaf rules, so it is refused even when today's resolution
+    # happens to land back inside.
+    local root="$BATS_TEST_TMPDIR/dotdot" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    mkdir -p "$root/qdistro/a" "$root/qdistro/b"
+    ln -s "../b" "$root/qdistro/a/up"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -ne 0 ] \
+        || { echo "'..' symlink accepted:"$'\n'"$output" >&2; return 1; }
+    [[ "$output" == *"absolute or contains '..'"* ]]
+}
+
+@test "root-checkout: a relative in-tree symlink to a not-yet-existing path is accepted" {
+    # Complement to the above: the rule is syntactic containment, not
+    # existence. A relative, `..`-free link cannot escape, and its missing leaf
+    # lives inside the gated tree where no unprivileged user can create it.
+    local root="$BATS_TEST_TMPDIR/danglein" pin
+    mkdir -p "$root"
+    pin="$(hookrepo "$root/qdistro")"
+    ln -s "not-built-yet" "$root/qdistro/artifact"
+    git -C "$root/qdistro" add -A
+    git -C "$root/qdistro" -c user.email=t@t -c user.name=t commit -q -m link
+    pin="$(git -C "$root/qdistro" rev-parse HEAD)"
+    run_verify_pin "$root" qdistro "$pin"
+    [ "$status" -eq 0 ] \
+        || { echo "in-tree dangling symlink wrongly refused:"$'\n'"$output" >&2; return 1; }
+    [ ! -e "$root/qdistro.pwned" ]
+}
+
+@test "root-checkout: the too-late self-gate is documented, not claimed closed" {
+    # The bootstrap and lib/qdistro-profile.sh execute BEFORE any gate can run.
+    # That cannot be fixed from inside the script; it must be an explicit,
+    # documented distribution precondition. Pin both halves so a later edit
+    # cannot quietly upgrade the limitation into a claimed guarantee.
+    body="$(sed -n '/^main() {/,/^}/p' "$BOOT")"
+    [ -n "$body" ]
+    printf '%s\n' "$body" | grep -qi 'CANNOT authenticate' \
+        || { echo "the SCRIPT_DIR gate no longer states its limitation:"$'\n'"$body" >&2; return 1; }
+    printf '%s\n' "$body" | grep -qi 'out of band' \
+        || { echo "the SCRIPT_DIR gate no longer names the out-of-band precondition" >&2; return 1; }
+    grep -qi 'Trusting the bootstrap itself' "$REPO_ROOT/doc/release-signing.md" \
+        || { echo "doc/release-signing.md lost the bootstrap-trust precondition section" >&2; return 1; }
+}

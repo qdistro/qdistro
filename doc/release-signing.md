@@ -81,6 +81,42 @@ Overrides: `--release-keyring` / `QDISTRO_RELEASE_KEYRING`,
 `--manifest-sig` / `QDISTRO_SOURCE_MANIFEST_SIG`,
 `--release-signer` / `QDISTRO_RELEASE_SIGNER`.
 
+## Trusting the bootstrap itself
+
+The signed manifest authenticates the **sources**. It cannot authenticate the
+**installer**: by the time `qdistro-bootstrap.sh` can check anything, bash has
+already parsed and executed it and has sourced
+`scripts/install/lib/qdistro-profile.sh` from the same directory. A user
+who can write that directory has root the moment the operator types `sudo` —
+they can edit the script, or redefine `is_dev` so every hardened gate becomes a
+no-op. No check inside the script can undo that.
+
+So this is a **distribution precondition, not a runtime check**:
+
+- The bootstrap, `lib/qdistro-profile.sh`, `verify-source-manifest.sh`, the
+  manifest and the release keyring must reach the target through an
+  **authenticated channel** — a signed package/image, or a download whose
+  signature the operator verifies against the published release fingerprint
+  **before** running it — and must live in a **root-owned, non-group/other-
+  writable directory** when it is run.
+- `qdistro-bootstrap.sh` enforces the second half only (hardened profiles run
+  `assert_trusted_tree "$SCRIPT_DIR"` right after `require_root`, which refuses
+  a user-writable installer directory loudly and early, and protects the later
+  re-reads of the verifier/keyring/manifest). It does **not**, and cannot,
+  enforce the first half.
+- Corollary: never `sudo` a hardened install directly out of a developer
+  checkout under `/home/<user>`. Install from the release artifact, and let the
+  installer clone the sources itself into a root-owned `--repo-root`
+  (`/opt/qdistro-src`).
+
+The same reasoning is why the installer refuses to root-build from any source
+tree it cannot vouch for, and why its refusal message does **not** offer
+`chown -R root:root` as a remedy: current ownership is used as a proxy for
+provenance, and chowning a tree an unprivileged user could write makes it pass
+the check without making its `.git/config`, its ignored build state or its
+symlinks any more trustworthy. A fresh clone into a root-owned directory is the
+only remediation that removes the attacker's content.
+
 ## Key custody
 
 - **Generation.** One Ed25519 (or RSA-4096) OpenPGP release signing key per the
