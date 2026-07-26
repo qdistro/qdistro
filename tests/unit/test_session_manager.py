@@ -55,6 +55,11 @@ class _FakeOps:
         self.killed: list[tuple[int, int]] = []
         self.useradd_should_fail = False
         self.userdel_should_fail = False
+        # silo name → uid, mirroring the per-silo relay policy fragments
+        # under /etc/dbus-1/system.d/ (F4-a).
+        self.relay_policies: dict[str, int] = {}
+        self.relay_policy_write_should_fail = False
+        self.relay_policy_remove_should_fail = False
         # Snapshot of self.cgroup_frozen taken on each kill_pids call.
         self.frozen_at_kill: dict[str, bool] = {}
         # When True, a tier-2 stop's fail-closed verification reports the
@@ -128,6 +133,22 @@ class _FakeOps:
             import subprocess
             raise subprocess.CalledProcessError(1, ["userdel", name])
         self.users.pop(name, None)
+
+    # ---- per-silo user-relay D-Bus policy (F4-a) --------------------------
+
+    def write_relay_policy(self, name: str, uid: int):
+        if self.relay_policy_write_should_fail:
+            raise OSError(13, "Permission denied")
+        self.relay_policies[name] = int(uid)
+        return f"/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-{name}.conf"
+
+    def remove_relay_policy(self, name: str) -> None:
+        if self.relay_policy_remove_should_fail:
+            raise OSError(13, "Permission denied")
+        self.relay_policies.pop(name, None)
+
+    def list_relay_policies(self) -> list[str]:
+        return sorted(self.relay_policies)
 
     # ---- disposable containers --------------------------------------------
 
