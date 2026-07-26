@@ -35,3 +35,8 @@ dist/
 *~
 .cache/
 .zed
+
+# Local git worktrees (the /do workflow puts them here). Never part of a
+# commit — they are separate checkouts, so `git add -A` from the repo root
+# would otherwise stage them as embedded git repositories.
+.worktrees/
