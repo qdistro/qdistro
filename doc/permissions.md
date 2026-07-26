@@ -45,18 +45,38 @@ advertise. Twenty action IDs exist in the tree:
 | generated inline by `install-tier5-for-vm.sh` | 2 — `tier5.{spawn,cleanup}` |
 | `qdbrowser/polkit/org.qdistro.qdbrowser.policy` | 10 — tabs/downloads/cookies/history/bookmarks/page-extract. **Present in the repo but installed by nothing**: no script copies it to `/usr/share/polkit-1/actions`, and `qdbrowser`'s `pyproject.toml` packages only the Python package. |
 
-So sixteen actions ship and four more do not. Every one of them is a
-`pkexec`-style privileged-helper gate for one subsystem; none is a
-cross-silo policy verb. And three `.rules` files ship, of which exactly one
-routes anything toward the agent:
+So **ten actions ship and ten do not**. Every shipping one is a `pkexec`-style
+privileged-helper gate for a single subsystem; none is a cross-silo policy verb.
 
-- `pwd/qdistro-pwd.rules` (installed as `50-qdistro-pwd.rules`) returns `YES`
-  for admin/root on `org.qdistro.pwd.unlock` and `AUTH_ADMIN_KEEP` otherwise,
-  which does route that one action through whatever authentication agent is
-  registered. **This is the only qdistro-namespaced action wired to the agent.**
-- `pwd/qdistro-pwd-fprint.rules` runs the *opposite* direction: it **grants**
-  the `qdistro-pwd` uid implicit `YES` on three `net.reactivated.fprint.*`
-  actions, so fingerprint-gated unseal does not prompt for a password.
+**These actions do reach the qdistro agent**, and that follows from their
+`<defaults>`, not from any `.rules` file. An action invokes whatever
+authentication agent is registered whenever its applicable default is
+`auth_admin` / `auth_admin_keep`:
+
+| Action | `allow_any` | `allow_active` |
+|---|---|---|
+| `pwd.unlock` | `auth_admin` | `auth_admin_keep` |
+| `print.{attach-usb,detach-usb,cancel-job,purge-jobs}` | `auth_admin` | `auth_admin_keep` |
+| `print.access` | `auth_admin` | `yes` |
+| `tier3.{spawn,cleanup}` | `auth_admin_keep` | `auth_admin_keep` |
+| `tier5.{spawn,cleanup}` | `auth_admin_keep` | `yes` |
+
+So for an active admin session, eight of the ten prompt through the agent and
+therefore land in the broker's queue; `print.access` and the two tier5 actions
+are allowed outright for the active session and only prompt for a non-active or
+other-uid caller.
+
+Three `.rules` files ship. None of them is what wires an action to the agent —
+two **grant**, and the third mostly bypasses the agent for admin:
+
+- `pwd/qdistro-pwd.rules` (installed as `50-qdistro-pwd.rules`) short-circuits
+  admin/root to `YES` on `org.qdistro.pwd.unlock` so the admin's own CLI does
+  not trigger a prompt loop, and returns `AUTH_ADMIN_KEEP` otherwise — which is
+  what the action's own default already said. Its net effect is *less* agent
+  involvement, not more.
+- `pwd/qdistro-pwd-fprint.rules` **grants** the `qdistro-pwd` uid implicit `YES`
+  on three `net.reactivated.fprint.*` actions, so fingerprint-gated unseal does
+  not prompt for a password.
 - `50-qdistro-locker-idle.rules`, written inline by
   `install-qdwin-session-for-vm.sh`, likewise **grants**: admin gets `YES` on
   `org.freedesktop.login1.lock-sessions` so the locker can lock its own logind
