@@ -124,10 +124,14 @@ qdistro is *inspired* by Qubes, not a re-implementation. The major differences:
  implemented**. qdistro ships no PipeWire mediation code, no qdistro
  wireplumber policy, and no libcamera integration; the packages are installed
  with distro defaults.
-- **NetworkManager** — network configuration. It is *intended* to be
- admin-side only; nothing in the tree enforces that today, and the property
- currently holds only because silo sessions run no shell and no NM client
- (see [networking.md](networking.md)).
+- **NetworkManager** — network configuration, at **upstream's** defaults.
+ qdistro adds no NM-specific restriction: no D-Bus policy override for
+ `org.freedesktop.NetworkManager`, no NM polkit rule, and no installer touches
+ it. Privileged NM operations are still gated — by NM's own polkit actions, and
+ where the qdistro polkit agent is registered (admin's session) those prompts
+ route into the broker's approval queue. What is *not* true is a qdistro-added
+ "admin-only" boundary; the absence of NM clients in silos today is topology,
+ not enforcement (see [networking.md](networking.md)).
 - **systemd** — service management, user sessions, logind, timers.
 - **D-Bus** — IPC, configured per qdistro conventions (see [qbus](qbus.md)).
 - **polkit** — authorization layer.
