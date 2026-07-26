@@ -173,7 +173,7 @@ Start with [doc/overview.md](doc/overview.md) for the vision, then:
 | Compositor & shell | [compositor.md](doc/compositor.md), [admin-approval.md](doc/admin-approval.md), [window-handoff.md](doc/window-handoff.md), [window-hierarchy.md](doc/window-hierarchy.md), [clipboard.md](doc/clipboard.md) |
 | Sessions & devices | [sessions.md](doc/sessions.md), [devices.md](doc/devices.md), [qbus.md](doc/qbus.md), [filesystem.md](doc/filesystem.md) |
 | Permissions | [permissions.md](doc/permissions.md), [sudo.md](doc/sudo.md), [selinux.md](doc/selinux.md) |
-| Apps | [app-sdk.md](doc/app-sdk.md), [browser.md](doc/browser.md), [printing.md](doc/printing.md), [password-manager.md](doc/password-manager.md) |
+| Apps | [app-sdk.md](doc/app-sdk.md), [browser.md](doc/browser.md), [browser-extension-install.md](doc/browser-extension-install.md), [printing.md](doc/printing.md), [password-manager.md](doc/password-manager.md) |
 | Special workloads | [games.md](doc/games.md), [recall.md](doc/recall.md), [phone.md](doc/phone.md), [cross-machine.md](doc/cross-machine.md) |
 | For contributors | [dev.md](doc/dev.md), [ui.md](doc/ui.md), [vm-dev-tools.md](doc/vm-dev-tools.md), [AGENTS.md](doc/AGENTS.md) |
 

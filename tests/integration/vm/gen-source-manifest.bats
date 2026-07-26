@@ -8,7 +8,7 @@
 # verify_repo_pin to prove byte-compatibility (round-trip).
 #
 # What it pins:
-#   - Correct repo set (the 9 repos fetch_sources fetches), in order.
+#   - Correct repo set (the 11 repos fetch_sources fetches), in order.
 #   - Generated output parses IDENTICALLY through the bootstrap's manifest_pin
 #     awk path: the pin for each repo == that repo's stubbed HEAD SHA (exact).
 #   - verify_repo_pin accepts a generated manifest end-to-end (real checkout).
@@ -26,7 +26,7 @@ setup() {
     [ -f "$GEN" ]  || { echo "generator not found at $GEN" >&2; return 1; }
     [ -f "$BOOT" ] || { echo "bootstrap not found at $BOOT" >&2; return 1; }
 
-    REPOS=(qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman)
+    REPOS=(qdistro qdwin qdshell qdlocker qdbrowser qdgreeter qterminator qnotebook qfileman qdchrome-extension qdfirefox-extension)
 
     WORK="$BATS_TEST_TMPDIR/root"
     mkdir -p "$WORK"
@@ -47,7 +47,7 @@ stub_repo() {
     git -C "$dir" rev-parse HEAD
 }
 
-# Stub all 9 repos; populate EXPECTED[<repo>]=<sha>.
+# Stub all 11 repos; populate EXPECTED[<repo>]=<sha>.
 stub_all() {
     declare -gA EXPECTED=()
     local r
@@ -89,7 +89,7 @@ real_boot_fn() {
 }
 
 # --- repo set -----------------------------------------------------------
-@test "gen: emits exactly the 9 bootstrap repos, in fetch order" {
+@test "gen: emits exactly the 11 bootstrap repos, in fetch order" {
     stub_all
     run "$GEN" --repo-root "$WORK"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
@@ -128,9 +128,9 @@ real_boot_fn() {
         !NF || $0=="" { next }
         { lines++
           if (NF != 2)                       { print "not TAB-2-field: " $0; bad=1 }
-          else if ($1 !~ /^[a-z0-9]+$/)      { print "bad repo: " $1; bad=1 }
+          else if ($1 !~ /^[a-z0-9-]+$/)     { print "bad repo: " $1; bad=1 }
           else if ($2 !~ /^[0-9a-f]{40}$/)   { print "bad sha: " $2; bad=1 } }
-        END { if (lines != 9) { print "expected 9 lines, got " lines; bad=1 }
+        END { if (lines != 11) { print "expected 11 lines, got " lines; bad=1 }
               exit bad ? 1 : 0 }
     ' "$mf"
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
