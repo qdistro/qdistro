@@ -845,6 +845,13 @@ class _SystemOps:
             text = p.read_text(encoding="utf-8")
         except OSError:
             return None
+        # Regex rather than an XML parse, deliberately. It matches the exact
+        # spelling we generate; any other valid spelling of the same thing —
+        # reordered attributes, single quotes, spaces around `=` — yields no
+        # match, which the caller treats as "grants no numeric user policy"
+        # and therefore as UNSAFE. So the imprecision fails towards deleting
+        # a file we no longer recognise, which is the safe direction for a
+        # namespace whose files all say "Do not edit".
         return [int(m.group(1))
                 for m in _re.finditer(r'<policy\s+user="(\d+)"', text)]
 
@@ -2763,6 +2770,15 @@ class _SiloStore:
                     raise SessionError(
                         f"cannot delete silo {silo.name!r}: "
                         f"{self._unsafe_fragment_error(_unpurged)}")
+                if _rev:
+                    # The purge removes with reload=False. Normally the
+                    # delete's own remove_relay_policy reloads a moment
+                    # later, but if THIS silo had no fragment (it was one of
+                    # the ones just purged) nothing else would, and the bus
+                    # would keep serving the removed grants until something
+                    # unrelated triggered a reload. Safe to do here: we only
+                    # reach this line with nothing unsafe left on disk.
+                    self._ops.reload_dbus()
                 self._transition(silo, State.DELETING)
                 try:
                     self._ops.cgroup_remove(silo.name)
