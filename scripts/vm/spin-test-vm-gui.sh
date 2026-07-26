@@ -189,10 +189,13 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import qdistro_session_manager as sm
 name, uid = sys.argv[2], int(sys.argv[3])
-path = sm.RELAY_POLICY_DIR / sm.relay_policy_filename(name)
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(sm.relay_policy_xml(name, uid))
-path.chmod(0o644)
+# Go through the real ops object rather than writing the file directly:
+# it does the atomic write+fsync AND refuses to emit a fragment for a uid
+# with no passwd entry. That last part is not cosmetic — dbus-broker
+# ABORTS on an unresolvable numeric user= at its next reload, and the
+# launcher inotify-watches this directory, so a bad fragment written here
+# would take the VM's system bus down rather than just fail a scenario.
+path = sm._SystemOps().write_relay_policy(name, uid, reload=False)
 print(f"[gui-harness] issued relay policy {path}")
 PY
 done

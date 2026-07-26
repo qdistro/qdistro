@@ -466,13 +466,58 @@ class TestReconcile:
         that looks present and grants the wrong name. A reconcile that
         checked only presence would skip it and report everything fine."""
         store.create("payroll", 4242)
-        ops.relay_policies["payroll"] = 5555        # drifted
+        ops.relay_policies["payroll"] = 5555        # drifted, uid unknown
         issued, revoked = store.reconcile_relay_policies()
         assert issued == ["payroll"], (
             "the reconcile skipped a fragment that exists but grants the "
             "wrong bus name")
-        assert revoked == []
+        # It drifted to a uid with no passwd entry, which is the shape that
+        # aborts dbus-broker — so it is PURGED first and then reissued,
+        # rather than overwritten in place.
+        assert revoked == ["payroll"]
         assert ops.relay_policies == {"payroll": 4242}
+
+    def test_corrects_a_drift_to_a_uid_that_does_resolve(self, store, ops):
+        """The same drift, but to a uid that exists. Nothing here is unsafe
+        to leave on disk for a moment, so it is corrected by a plain
+        rewrite with no purge."""
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.relay_policies["payroll"] = 4243        # legal's uid: resolvable
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == ["payroll"]
+        assert revoked == []
+        assert ops.relay_policies == {"payroll": 4242, "legal": 4243}
+
+    def test_an_unreadable_fragment_is_purged_and_rewritten(self, store, ops):
+        """A torn write leaves a file we cannot parse a uid out of. It is
+        not safe to leave: dbus-broker may abort on whatever is in it. Treat
+        unreadable as unsafe rather than as absent."""
+        store.create("payroll", 4242)
+        ops.relay_policy_unreadable = {"payroll"}
+        issued, revoked = store.reconcile_relay_policies()
+        assert revoked == ["payroll"]
+        assert issued == ["payroll"]
+        assert ops.relay_policies == {"payroll": 4242}
+
+    def test_a_failed_purge_stops_all_writes_and_the_reload(self, store, ops):
+        """dbus-broker-launch inotify-watches the policy directory, so ANY
+        write there can trigger the reload that aborts the bus on a bad
+        fragment. If we could not remove the bad one, the safe move is to
+        stop touching the directory — not to carry on writing good files
+        next to a live landmine."""
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.users.pop("legal")                    # legal's fragment is stale
+        ops.relay_policies.pop("payroll")         # payroll needs issuing
+        ops.relay_policy_remove_should_fail = True
+        ops.dbus_reloads = 0
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == [], (
+            "the reconcile kept writing after failing to purge a fragment "
+            "that can abort the system bus")
+        assert revoked == []
+        assert ops.dbus_reloads == 0, "it reloaded the bus anyway"
 
     def test_one_bad_silo_does_not_stop_the_rest(self, store, ops):
         """Two silos, one unwritable. The healthy one must still get its
@@ -535,6 +580,23 @@ class TestReconcile:
         issued, revoked = store.reconcile_relay_policies()
         assert issued == [], (
             "a relay grant was issued even though the identity check failed")
+        assert ops.relay_policies == {}
+
+    def test_a_stale_fragment_for_a_deleted_user_is_revoked_not_left(
+            self, store, ops):
+        """An admin who runs `userdel` on a silo user directly leaves a
+        fragment naming a uid with no passwd entry. That is not inert:
+        dbus-broker ABORTS on it at its next reload, and the launcher
+        inotify-watches the directory, so anything at all can trigger it.
+        Skipping the silo is not enough — the fragment has to go."""
+        store.create("payroll", 4242)
+        assert ops.relay_policies == {"payroll": 4242}
+        ops.users.pop("payroll")            # hand-run userdel
+        issued, revoked = store.reconcile_relay_policies()
+        assert issued == []
+        assert revoked == ["payroll"], (
+            "the stale fragment was left on disk; it names a uid with no "
+            "passwd entry and will core-dump the system bus on reload")
         assert ops.relay_policies == {}
 
     def test_a_zombie_silo_can_still_be_deleted(self, store, ops):

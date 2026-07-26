@@ -63,6 +63,8 @@ class _FakeOps:
         # fragment does not stop the others being issued.
         self.relay_policy_write_fails_for: set[str] = set()
         self.relay_policy_remove_should_fail = False
+        # Fragments whose uid cannot be read back (torn write, hand edit).
+        self.relay_policy_unreadable: set[str] = set()
         self.dbus_reloads = 0
         # Snapshot of self.cgroup_frozen taken on each kill_pids call.
         self.frozen_at_kill: dict[str, bool] = {}
@@ -164,6 +166,11 @@ class _FakeOps:
 
     def list_relay_policies(self) -> list[str]:
         return sorted(self.relay_policies)
+
+    def relay_policy_uid(self, name: str):
+        if name in self.relay_policy_unreadable:
+            return None
+        return self.relay_policies.get(name)
 
     def relay_policy_matches(self, name: str, uid: int) -> bool:
         # The real ops compare the fragment's full text; the fragment's

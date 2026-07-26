@@ -197,9 +197,10 @@ systemctl enable --now qdistro-session-manager.service
 # memory — and the verify below passes, because the bus name is claimed by
 # the stale process. Observed live: an upgraded host silently ran the
 # previous session manager, which (among other things) issued no per-silo
-# relay policy. try-restart touches only an active unit, so this is a no-op
-# on a first install, where `enable --now` has just started it.
-# Mirrors install-user-relay-for-vm.sh, which already did this.
+# relay policy. try-restart acts only on an ACTIVE unit — it never starts a
+# stopped one — so it restarts whatever `enable --now` just left running,
+# which on a first install is a cheap second start and on an upgrade is the
+# whole point. Mirrors install-user-relay-for-vm.sh, which already did this.
 systemctl try-restart qdistro-session-manager.service 2>/dev/null || true
 
 for _ in 1 2 3 4 5; do
