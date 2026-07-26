@@ -198,7 +198,24 @@ shipped exclusively in repos nothing packaged. The tree is deleted,
 `--firefox-mode bundled` is a hard error, and the installer now stages the
 `qdchrome-extension` / `qdfirefox-extension` sources with a fail-closed gate
 assertion (`scripts/install/stage-browser-extension-source.sh`, pinned by
-`tests/unit/test_installed_extension_gate.py`).
+`tests/unit/test_installed_extension_gate.py`). The stager requires each tree's
+`src/gate.js` to exist, to be referenced by the background wiring or the
+manifest (an unloaded gate is an absent one), to carry the closed-by-default
+source line, and — when `node` is available — to *behave* closed: loaded with
+empty storage, `isOriginAllowed()` must deny.
+
+None of that uninstalls anything, though, so the id is also **revoked at the
+bridge**: `REVOKED_EXTENSION_IDS` in `qdistro_browser_bridge.py` refuses
+`qdistro@qdistro.local` even from an allowlisted Firefox, with a distinct
+`extension_revoked` error. That is the lever that reaches a host upgraded in
+place, which still has the fork loaded in a profile and an existing
+`~/.mozilla/native-messaging-hosts/qdistro.json` naming it — the installer
+never rewrites per-user manifests.
+
+**Residual, acknowledged:** a user who built the *pre-J11 qdfirefox* extension
+cannot be reached this way — the fixed build carries the same gecko id, and v1
+has no signed update channel, so there is no revocation or auto-update for it.
+Rebuilding and reloading from the staged source is the only remedy.
 
 The Chromium extension (`qdchrome-extension`) does **not** build a Firefox
 artifact: it formerly emitted an MV2 build under the same

@@ -122,7 +122,7 @@ def render_firefox_manifest(
         description: str = "qdistro browser bridge",
 ) -> dict:
     """Firefox-shape manifest. ``allowed_extensions`` is a list of
-    raw extension IDs (e.g. ``qdistro@qdistro.local``).
+    raw extension IDs (e.g. ``qdistro-firefox@qdistro.local``).
     """
     return {
         "name": NATIVE_HOST_NAME,
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
     browsers = parse_browser_list(args.browsers)
     # An explicit --firefox-extension-id wins; otherwise the id is the
-    # default for the chosen --firefox-mode (bundled vs standalone).
+    # default for the chosen --firefox-mode (standalone; `bundled` is retired).
     firefox_extension_id = (
         args.firefox_extension_id
         if args.firefox_extension_id is not None

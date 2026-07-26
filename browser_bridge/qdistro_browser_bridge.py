@@ -279,6 +279,27 @@ def parse_extension_id_from_argv(
     return ""
 
 
+# ---- revoked extension identities (J11) ---------------------------
+#
+# Extension ids the bridge must NEVER serve, whatever the per-user
+# native-messaging manifest says.
+#
+# ``qdistro@qdistro.local`` was the gecko id of the "bundled" MV2
+# extension vendored at ``browser_bridge/extension/``. It was an
+# abandoned fork of the pre-split Phase-9a extension that never grew the
+# module/origin gate — no origin allowlist at all — and it was the only
+# extension any install path actually laid down (J11). The tree is
+# deleted and the installer no longer authorizes the id, but neither of
+# those uninstalls anything: a host upgraded in place still has the fork
+# loaded in a Firefox profile and an existing
+# ``~/.mozilla/native-messaging-hosts/qdistro.json`` naming this id, and
+# the installer never rewrites per-user manifests. The bridge is the one
+# component an upgrade definitely replaces, so revocation belongs here.
+REVOKED_EXTENSION_IDS = frozenset({
+    "qdistro@qdistro.local",
+})
+
+
 def read_parent_exe(ppid: int) -> str:
     """Resolve /proc/<ppid>/exe to the on-disk path. Returns "" on
     any failure — caller treats empty string as "unknown" + denies.
@@ -327,12 +348,20 @@ def verify_parent(
     if argv is None:
         argv = sys.argv
     extension_id = parse_extension_id_from_argv(argv, exe)
+    # A revoked id is denied even from an allowlisted browser: the
+    # parent-exe check says "a real Firefox launched me", not "the code
+    # it launched me for is code we still serve". See
+    # REVOKED_EXTENSION_IDS.
+    revoked = bool(extension_id) and extension_id in REVOKED_EXTENSION_IDS
+    if revoked:
+        allowed = False
     return {
         "ppid": ppid,
         "parent_exe": exe,
         "parent_selinux": selinux,
         "extension_id": extension_id,
         "allowed": allowed,
+        "revoked_extension": revoked,
     }
 
 
@@ -690,6 +719,10 @@ def _identity_gate(identity: dict) -> dict | None:
     ``dispatch``. We re-check defensively.
     """
     if not identity.get("allowed"):
+        if identity.get("revoked_extension"):
+            return {"ok": False, "error": "extension_revoked",
+                    "detail": "this extension id is no longer served; "
+                              "install the current extension"}
         return {"ok": False, "error": "parent_not_allowed",
                 "parent_exe": identity.get("parent_exe", "")}
     return None
@@ -701,6 +734,7 @@ def _identity_gate(identity: dict) -> dict | None:
 
 _IDENTITY_FIELDS = frozenset({
     "ppid", "parent_exe", "parent_selinux", "extension_id", "allowed",
+    "revoked_extension",
 })
 
 # Ops whose reply intentionally surfaces (a subset of) identity
@@ -1881,6 +1915,16 @@ def dispatch(
     to redo the gate.
     """
     if not identity.get("allowed"):
+        # A revoked extension id (J11) is denied even from an allowlisted
+        # browser, and says so — "parent_not_allowed" would send the user
+        # hunting the wrong thing.
+        if identity.get("revoked_extension"):
+            return {
+                "ok": False,
+                "error": "extension_revoked",
+                "detail": "this extension id is no longer served; "
+                          "install the current extension",
+            }
         return {
             "ok": False,
             "error": "parent_not_allowed",

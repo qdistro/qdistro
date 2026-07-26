@@ -65,25 +65,41 @@ def _sibling(name: str) -> Path | None:
     return None
 
 
+# A minimal but REAL gate.js: it exports self.qdistroGate.isOriginAllowed
+# with the same closed-by-default shape the shipped gate has, so the
+# stager's behavioural node probe exercises it for real. ``gate_line`` is
+# the one line under test.
+_FAKE_GATE = """(function (root) {
+  "use strict";
+  const api = root.qdistroApi;
+  const state = { allowlist: [] };
+  api.storage.local.get(["modules", "origin_allowlist"], (cfg) => {
+    state.allowlist = (cfg && cfg.origin_allowlist) || [];
+  });
+  function isOriginAllowed(url) {
+    const list = state.allowlist;
+%s
+    if (list.some((e) => String(e || "").trim() === "*")) return true;
+    return list.indexOf(String(url || "")) !== -1;
+  }
+  root.qdistroGate = { isOriginAllowed };
+})(typeof self !== "undefined" ? self : globalThis);
+"""
+
+
 def _fake_repo(root: Path, name: str, gate_line: str | None) -> Path:
     """Build a minimal extension checkout the staging script accepts as a
-    repo (package.json + src/), with ``gate_line`` as its allowlist
-    default. ``None`` means no gate.js at all — the pre-J11 vendored
-    fork's shape."""
+    repo (package.json + src/ + a background that loads the gate), with
+    ``gate_line`` as its allowlist default. ``None`` means no gate.js at
+    all — the pre-J11 vendored fork's shape."""
     repo = root / name
     (repo / "src").mkdir(parents=True)
     (repo / "package.json").write_text(json.dumps({"name": name}), encoding="utf-8")
-    (repo / "src" / "background.js").write_text("// background\n", encoding="utf-8")
+    (repo / "src" / "background.js").write_text(
+        'importScripts("src/api.js", "src/gate.js");\n', encoding="utf-8")
     if gate_line is not None:
         (repo / "src" / "gate.js").write_text(
-            "(function (root) {\n"
-            "  function isOriginAllowed(url) {\n"
-            "    const list = state.allowlist;\n"
-            f"{gate_line}\n"
-            "    return false;\n"
-            "  }\n"
-            "})(self);\n",
-            encoding="utf-8")
+            _FAKE_GATE % gate_line, encoding="utf-8")
     return repo
 
 
@@ -199,6 +215,73 @@ class TestStagingRefusesUngatedTrees:
         assert "no browser-extension source installed" in r.stderr
         assert list(dest.iterdir()) == []
 
+    def test_refuses_a_gate_that_nothing_loads(self, tmp_path):
+        """A gate.js no background/manifest pulls in is not a gate: every
+        privileged call site consults ``root.qdistroGate``, so an unloaded
+        gate is an absent one."""
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        repo = _fake_repo(src_root, "qdchrome-extension", GATE_CLOSED_LINE)
+        (repo / "src" / "background.js").write_text(
+            'importScripts("src/api.js");\n', encoding="utf-8")
+        dest = tmp_path / "dest"
+        r = _run_stage(dest, src_root)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "not referenced" in r.stderr
+        assert not (dest / "chromium").exists()
+
+    def test_refuses_a_gate_whose_closed_line_is_dead_code(self, tmp_path):
+        """The textual check alone can be satisfied by a line that never
+        runs. The behavioural probe (empty allowlist must deny) is what
+        actually decides."""
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        repo = _fake_repo(src_root, "qdchrome-extension", GATE_CLOSED_LINE)
+        gate = repo / "src" / "gate.js"
+        # An early unconditional allow, with the closed-by-default line
+        # left intact below it — exactly what a grep-only check misses.
+        gate.write_text(
+            gate.read_text(encoding="utf-8").replace(
+                "    const list = state.allowlist;",
+                "    const list = state.allowlist;\n    if (true) return true;"),
+            encoding="utf-8")
+        dest = tmp_path / "dest"
+        r = _run_stage(dest, src_root)
+        if shutil.which("node") is None:
+            pytest.skip("node unavailable; the behavioural probe is skipped")
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "still allows origins" in r.stderr
+        assert not (dest / "chromium").exists()
+
+    def test_one_bad_tree_does_not_destroy_a_good_existing_install(self, tmp_path):
+        """Validation happens before the destination is touched, so a
+        malformed checkout cannot leave the host with nothing (or with a
+        half-replaced mix)."""
+        dest = tmp_path / "dest"
+        (dest / "chromium" / "src").mkdir(parents=True)
+        (dest / "chromium" / "src" / "gate.js").write_text(
+            "// previously staged, gated\n", encoding="utf-8")
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        _fake_repo(src_root, "qdchrome-extension", GATE_CLOSED_LINE)
+        _fake_repo(src_root, "qdfirefox-extension", GATE_OPEN_LINE)
+        r = _run_stage(dest, src_root)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert (dest / "chromium" / "src" / "gate.js").read_text() == (
+            "// previously staged, gated\n")
+        assert not (dest / "firefox").exists()
+
+    @pytest.mark.parametrize("bad", ["relative/dir", "/usr", "/"])
+    def test_refuses_an_implausible_destination(self, bad, tmp_path):
+        """The destination is replaced wholesale, so a mistyped or
+        unexpectedly-resolved path must not be honoured."""
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        r = subprocess.run(
+            ["bash", str(STAGE_SCRIPT), bad, str(src_root)],
+            capture_output=True, text=True, check=False)
+        assert r.returncode == 2, r.stdout + r.stderr
+
     def test_build_outputs_are_not_staged_as_source(self, tmp_path):
         """dist/ may predate the gate; never hand a stale build to a
         user as if it were the pinned source."""
@@ -252,7 +335,10 @@ class TestRealExtensionRepos:
         clone = src_root / repo
         (clone / "src").mkdir(parents=True)
         shutil.copy2(src / "package.json", clone / "package.json")
-        shutil.copy2(src / "src" / "gate.js", clone / "src" / "gate.js")
+        for rel in ("src/gate.js", "src/background.js", "manifest.json",
+                    "manifest.chromium.json"):
+            if (src / rel).is_file():
+                shutil.copy2(src / rel, clone / rel)
         dest = tmp_path / "dest"
         r = _run_stage(dest, src_root)
         assert r.returncode == 0, r.stdout + r.stderr

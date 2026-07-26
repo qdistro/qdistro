@@ -133,21 +133,12 @@ chmod 0755 "$DEST_BIN/qdistro-browser-install"
 
 # WebExtension source trees. Per-user installs are out of scope for this
 # script (v1 has no signed extension channel — the user builds from this
-# source and loads it by hand; see doc/browser-extension-install.md), but
-# WHICH source we lay down is a security decision, so it is fail-closed:
-# stage-browser-extension-source.sh refuses to stage any tree that lacks
-# the closed-by-default origin gate (J11), and purges $DEST_SHARE first
-# so an in-place upgrade cannot leave the old ungated fork behind.
-#
-# That fork used to live at "$SRC/extension" and was copied here blindly.
-# Its continued presence means the qdistro checkout predates its deletion
-# — refuse rather than risk an install path that reintroduces it.
-if [ -d "$SRC/extension" ]; then
-    echo "[install-browser-bridge] REFUSING to install: $SRC/extension still exists." >&2
-    echo "[install-browser-bridge] That vendored extension fork was deleted (J11) because it" >&2
-    echo "[install-browser-bridge] had no origin gate. Update the qdistro source checkout." >&2
-    exit 4
-fi
+# source and loads it by hand), but WHICH source we lay down is a
+# security decision, so it is fail-closed:
+# stage-browser-extension-source.sh refuses to stage any tree whose
+# origin allowlist is not closed by default (J11), and REPLACES
+# $DEST_SHARE so an in-place upgrade cannot leave the old ungated fork
+# behind.
 STAGE_EXT="$(cd "$(dirname "$0")" && pwd)/stage-browser-extension-source.sh"
 if [ ! -f "$STAGE_EXT" ]; then
     echo "[install-browser-bridge] missing $STAGE_EXT" >&2
@@ -159,6 +150,19 @@ fi
 # (needed under a git worktree, whose parent dir is .worktrees/).
 bash "$STAGE_EXT" "$DEST_SHARE" \
     "${QDISTRO_EXTENSION_SRC_ROOT:-$(cd "$SRC/../.." 2>/dev/null && pwd || echo "")}"
+
+# The ungated fork used to live at "$SRC/extension" and was copied to
+# $DEST_SHARE blindly. Its continued presence means the qdistro source
+# checkout predates its deletion — refuse, so no install path can
+# reintroduce it. Checked AFTER the staging call above on purpose: the
+# destination purge is the thing a pre-J11 host most needs, and it must
+# not be skipped just because the source tree is also stale.
+if [ -d "$SRC/extension" ]; then
+    echo "[install-browser-bridge] REFUSING to install: $SRC/extension still exists." >&2
+    echo "[install-browser-bridge] That vendored extension fork was deleted (J11) because it" >&2
+    echo "[install-browser-bridge] had no origin gate. Update the qdistro source checkout." >&2
+    exit 4
+fi
 
 # Stage the outer qdbrowser python package, so probes (and the bridge
 # orchestrator) can ``import qdbrowser.pwd_autofill`` even when the
