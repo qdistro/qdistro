@@ -185,15 +185,31 @@ on both the lock *intent* edge and the compositor's authoritative
 `locked_changed`, so a scan launched while the machine was still unlocked
 cannot survive as locked-machine state. No setting gates any of it.
 
-**Known gaps (RC blockers, not shipped guarantees):**
+**Runtime requirements.** The observer shells out to `pw-dump` and
+`busctl`. Both ship in the release image (`image/config.xml`
+`pipewire-tools`) and in the bootstrap chain
+(`scripts/install/install-deps.sh`), and `qdlocker/indicators.py` ships in
+the qdlocker wheel that both chains pip-install. If either tool were
+absent the indicator would read "unverified" forever — honest, but useless
+— so the live gate asserts their presence explicitly.
 
-- **Multi-output.** qdlocker paints one fullscreen window; qdwin blacks the
- remaining outputs but does not clone the locker surface, so on a
- multi-output seat the indicators appear on one output only.
-- **No live gate has been run.** The derivation is unit-tested; it has not
- been exercised against a real qdwin + qdlocker + PipeWire graph with an
- actual mic/camera/screencast, nor across outputs or a locked-state
- restart.
+**Known gaps (not shipped guarantees):**
+
+- **Multi-output.** qdlocker paints one fullscreen window and qdwin
+ fullscreens it onto `qdwin_primary_output()`, so the indicators appear on
+ the primary output only. The other outputs are covered by qdwin's opaque
+ lock curtain, which spans the union bounding box of every output, and all
+ non-lock layers are unset globally — so a secondary output is uniformly
+ black rather than showing stale desktop content. Options and costs are in
+ `todo/fable-release/11-j28-multi-output-lock-indicators.md`; the same note
+ records two pre-existing qdwin defects found alongside (output hotplug
+ while locked does not re-install the curtain, and
+ `qdwin_locker_surface_v1.configure` is documented but never sent).
+- **No live gate has been run.** The derivation is unit-tested and the live
+ scenario is written (`qdlocker/tests/gui/09-capture-indicators.md` — real
+ mic/camera/screencast, capture start/stop under lock, observer timeout,
+ `Stopping` egress, locked-state restart, second output), but it has not
+ been executed against a real qdwin + qdlocker + PipeWire graph.
 
 Making a kind report "clear" requires a real authoritative feed first: a
 qdwin event enumerating `weston_capture_v1` / view-stream clients and bound
