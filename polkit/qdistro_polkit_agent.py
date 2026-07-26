@@ -90,6 +90,12 @@ def _require_admin_account() -> None:
 
 ADMIN_UID = _resolve_admin_uid()
 
+# Reply timeouts for the broker delegation path. Filing is bounded; waiting
+# for a decision is bounded only by admin attention, so the cutoff there is
+# generous. Mirrors media/qdistro_media_exec.py, which had this right.
+_REQUEST_TIMEOUT_S = 90
+_WAIT_TIMEOUT_S = 900
+
 DEFAULT_METHOD = "broker"
 DEFAULT_PAM_SERVICE = "login"
 DEFAULT_CONFIG_PATH = "/etc/qdistro/polkit-agent.conf"
@@ -412,21 +418,59 @@ class QdistroPolkitAgent(dbus.service.Object):
             self._broker = dbus.Interface(obj, QDISTRO_BROKER_BUS)
         return self._broker
 
+    def _file_request(self, qdistro_action: str, details: dict) -> int:
+        """File one permission request, retrying ONLY when we know the first
+        attempt never reached the broker.
+
+        The retry used to catch every DBusException and re-file. Two of the
+        errors it caught — NoReply and a mid-call disconnect — mean "we do
+        not know whether the broker got it", so re-filing produced a second
+        pending request for the same polkit cookie: the admin saw the same
+        prompt twice and answering one left the other stranded. ServiceUnknown
+        and NameHasNoOwner are the only ones that positively mean nothing was
+        filed, because the name had no owner to receive the call.
+        """
+        try:
+            return int(self._broker_iface().RequestPermission(
+                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+        except dbus.DBusException as e:
+            if e.get_dbus_name() not in (
+                    "org.freedesktop.DBus.Error.ServiceUnknown",
+                    "org.freedesktop.DBus.Error.NameHasNoOwner"):
+                raise
+            # The broker was not on the bus. Drop the cached proxy (it may
+            # be bound to a dead unique name) and try once more, in case it
+            # is being restarted underneath us.
+            self._broker = None
+            return int(self._broker_iface().RequestPermission(
+                qdistro_action, details, timeout=_REQUEST_TIMEOUT_S))
+
     def _ask_broker(self, qdistro_action: str, details: dict) -> bool:
         try:
-            iface = self._broker_iface()
-            rid = int(iface.RequestPermission(qdistro_action, details))
-            return bool(iface.WaitForDecision(rid))
-        except dbus.DBusException:
+            rid = self._file_request(qdistro_action, details)
+        except dbus.DBusException as e:
             self._broker = None
-            try:
-                iface = self._broker_iface()
-                rid = int(iface.RequestPermission(qdistro_action, details))
-                return bool(iface.WaitForDecision(rid))
-            except dbus.DBusException as e:
-                syslog.syslog(syslog.LOG_ERR,
-                              f"broker unreachable: {e}; denying polkit request")
-                return False
+            syslog.syslog(syslog.LOG_ERR,
+                          f"could not file a broker request: {e}; "
+                          f"denying polkit request")
+            return False
+        try:
+            # An admin has to read the prompt and decide, so this blocks on
+            # human attention. dbus-python's default reply timeout is 25s,
+            # which expired long before any real decision and was then read
+            # as "broker unreachable" — the broker was up and healthy the
+            # whole time. Same generous cutoff as the media exec client.
+            return bool(self._broker_iface().WaitForDecision(
+                rid, timeout=_WAIT_TIMEOUT_S))
+        except dbus.DBusException as e:
+            self._broker = None
+            syslog.syslog(
+                syslog.LOG_ERR,
+                f"no decision for broker request {rid}: {e}; denying polkit "
+                f"request. The request may still be pending in the broker — "
+                f"it is NOT re-filed here, because a second copy of the same "
+                f"prompt is worse than one that goes unanswered.")
+            return False
 
     # -- BeginAuthentication ---------------------------------------------
 
@@ -593,9 +637,23 @@ def main() -> int:
         print(f"qdistro-polkit-agent: cannot claim {AGENT_BUS}: {e}",
               file=sys.stderr)
         return 1
-    agent = QdistroPolkitAgent(bus, AGENT_OBJ)  # noqa: F841
+    # The session-bus name above is only the per-session singleton guard: it
+    # stops two agents racing in one login. The AGENT OBJECT must live on the
+    # SYSTEM bus, on the same connection we register from.
+    #
+    # polkitd records the unique name of the connection that called
+    # RegisterAuthenticationAgent and calls BeginAuthentication back on THAT
+    # name. Exporting the object on the session bus while registering from a
+    # separate system-bus connection registered one name and exported the
+    # object on another, so every BeginAuthentication call polkitd made went
+    # to a system-bus connection with nothing at /org/qdistro/PolkitAgent.
+    # Registration succeeded, the unit looked healthy, and no authorization
+    # ever reached the agent — observed live: polkitd logged "FAILED to
+    # authenticate", the agent's journal showed nothing at all.
+    sysbus = dbus.SystemBus()
+    agent = QdistroPolkitAgent(sysbus, AGENT_OBJ)  # noqa: F841
     try:
-        _register(dbus.SystemBus(), AGENT_OBJ)
+        _register(sysbus, AGENT_OBJ)
     except Exception as e:  # noqa: BLE001
         syslog.syslog(syslog.LOG_ERR, f"registration failed: {e}")
         print(f"qdistro-polkit-agent: registration failed: {e}",

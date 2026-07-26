@@ -241,6 +241,44 @@ The method is picked per polkit action via fnmatch globs in
 config maps `org.qdistro.pwd.*` to `pam` so vault unlocks require a fresh
 admin password unless admin changes that policy.
 
+### Status (2026-07-26) — the agent cannot yet authorize anything
+
+Do not claim polkit integration as a working v1 feature. Driving a real
+greetd login on a VM — the first time this path had ever been exercised;
+every previous probe was headless, where polkitd refuses registration
+outright with "Cannot determine session the caller is in" — established
+the following.
+
+**Works.** The agent registers with polkitd on a real seat session, is
+consulted for authorizations, dispatches to the configured method, reaches
+the broker, and **denies** correctly. Everything fails closed.
+
+**Does not work.** No method can deliver a positive decision, so an admin
+who approves still gets "Not authorized":
+
+- `_respond()` calls `AuthenticationAgentResponse2` directly from the
+  uid-1000 agent. polkit accepts that call **only from uid 0**, and answers
+  `Only uid 0 may invoke this method. This incident has been logged.` Stock
+  agents never call it themselves: they hand cookie and password to the
+  setuid helper `/usr/libexec/polkit-1/polkit-agent-helper-1`, which runs
+  the PAM conversation as root and responds on their behalf. That maps onto
+  the `pam` method only — the helper *is* the PAM conversation, so `broker`
+  and `fprint` have no route to a polkit YES without qdistro shipping its
+  own privileged responder.
+- `_respond()` also hardcodes the identity `unix-user uid=ADMIN_UID`,
+  ignoring the `identities` list polkitd passes in. On the current image
+  `/usr/share/polkit-1/rules.d/50-default.rules` sets
+  `polkit._suse_admin_groups = []`, so that list is `[unix-user uid=0]` —
+  `admin` is uid 1000 and is in no `wheel` group (there is no `wheel`
+  group). Responding with an identity that is not in the list is rejected
+  even from uid 0. Either the image must add `admin` to polkit's admin
+  identities, or the agent must choose from the list it was given rather
+  than assert one.
+
+Closing this needs a design decision about the privileged responder, not a
+patch. Until then the honest claim is: **qdistro's polkit agent is wired in
+and enforces denials; it cannot grant.**
+
 ## Portal Secret integration
 
 A per-user session daemon `qdistro-pwd-portal` registers as
@@ -252,7 +290,7 @@ Per-app keys are stable across sessions and identical across silos of
 the same Flatpak app.
 
 A per-user oneshot systemd unit `qdistro-portal-keys-unlock.service` runs
-at `graphical-session.target` and calls `Pwd1.AutoUnlockPortalKeys`,
+at `qdwin-session.target` and calls `Pwd1.AutoUnlockPortalKeys`,
 which unseals and unlocks the portal-keys vault from a TPM-sealed PIN
 stash. Unmodified Flatpak apps then get their per-app portal Secret keys
 without a manual unlock step.
