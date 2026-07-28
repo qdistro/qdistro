@@ -1,8 +1,28 @@
 #!/bin/bash
 # vt-escape-lockdown.sh — runtime guard for the locked-session VT escape.
 #
-# Runs INSIDE a production-path VM (greetd -> qdgreeter -> qdwin on tty3;
-# `qci snapshot-daily` builds one). Static "no getty is enabled on tty3"
+# Runs INSIDE a production-path VM (greetd -> qdgreeter -> qdwin on tty3).
+#
+# WHERE THIS RUNS
+# ---------------
+# tests/integration/vm/vt-escape-lockdown.bats, which CONVERTS its disposable
+# VM to the production path first (enable-qdgreeter.sh plus a test-only
+# autologin) and only then runs this probe. That conversion is mandatory, not
+# incidental: the bats lane's VM masks greetd and keeps the greetd PACKAGE's
+# config, whose `vt = next` is dynamic by design and unparseable here. The
+# first version of that wrapper skipped the conversion and could never pass —
+# it failed for the whole of its first CI run (2026-07-25 to 2026-07-27).
+#
+# It is deliberately NOT run by image/verify.sh: that verifier is an SSH login
+# as admin on a release image with no passwordless sudo, and it never
+# authenticates through qdgreeter, so tty3 there belongs to the greeter rather
+# than the post-auth session. See the note in image/verify.sh.
+#
+# Static coverage of the installer and its invocation lives in
+# bootstrap-hardening.bats; this file is only for a box where a real
+# compositor owns a VT.
+#
+# Static "no getty is enabled on tty3"
 # checks are necessary but not sufficient — logind starts autovt@ttyN by unit
 # name on demand, so enablement state proves nothing. This probe measures the
 # property that actually matters.

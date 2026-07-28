@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import time
 import types
 from pathlib import Path
@@ -68,6 +69,13 @@ class _FakeOps:
         # name -> extra numeric <policy user="N"> entries beyond the real one
         self.relay_policy_extra_uids: dict[str, list[int]] = {}
         self.dbus_reloads = 0
+        # Per-silo launcher unit links (qdshell-session-<name>@.service).
+        self.launcher_links: set[str] = set()
+        self.launcher_link_should_fail = False
+        self.launcher_link_fails_for: set[str] = set()
+        self.daemon_reloads = 0
+        self.daemon_reload_should_fail = False
+        self.launcher_unlink_should_fail = False
         # Snapshot of self.cgroup_frozen taken on each kill_pids call.
         self.frozen_at_kill: dict[str, bool] = {}
         # When True, a tier-2 stop's fail-closed verification reports the
@@ -165,6 +173,72 @@ class _FakeOps:
 
     def reload_dbus(self) -> None:
         self.dbus_reloads += 1
+
+    # Per-silo launcher unit link (qdshell-session-<name>@.service). systemd
+    # cannot resolve qdshell-session-<name>@<uid>.service without it, so a
+    # silo missing its link can never reach Active.
+    # Mirrors _SystemOps: the link and the daemon-reload are ONE operation,
+    # and a link systemd has not re-read is not a usable launcher. Modelling
+    # the reload here is what lets a test prove that an unchecked reload
+    # failure cannot be reported as a successful link.
+    def link_silo_launcher(self, name: str) -> None:
+        if self.launcher_link_should_fail is True or \
+                name in self.launcher_link_fails_for:
+            raise OSError(13, "Permission denied")
+        if name in self.launcher_links:
+            return          # already linked: nothing changed, no reload
+        self.launcher_links.add(name)
+        try:
+            self.daemon_reload()
+        except Exception:
+            # Compensate, as the real one does — and, like the real one,
+            # TOLERATE a failure to compensate. That combination (link
+            # created, reload failed, compensating unlink also failed) is the
+            # sequence that makes create()'s outer sweep load-bearing.
+            if not self.launcher_unlink_should_fail:
+                self.launcher_links.discard(name)
+            try:
+                self.daemon_reload()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+    def restore_silo_launcher_link(self, name: str) -> None:
+        # Repair semantics: the link persists even if the reload fails. Used
+        # by delete()'s rollback and the startup reconcile, never by create().
+        if self.launcher_link_should_fail is True or \
+                name in self.launcher_link_fails_for:
+            raise OSError(13, "Permission denied")
+        if name in self.launcher_links:
+            return
+        self.launcher_links.add(name)
+        try:
+            self.daemon_reload()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def unlink_silo_launcher(self, name: str) -> None:
+        # Asymmetric with link, exactly like _SystemOps: removal from disk is
+        # the authoritative teardown, so a reload failure is swallowed rather
+        # than raised. Raising here is what made a failed delete leave a
+        # surviving silo with no launcher link.
+        if self.launcher_unlink_should_fail:
+            raise OSError(13, "Permission denied")
+        if name not in self.launcher_links:
+            return
+        self.launcher_links.discard(name)
+        try:
+            self.daemon_reload()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def silo_launcher_linked(self, name: str) -> bool:
+        return name in self.launcher_links
+
+    def daemon_reload(self) -> None:
+        if self.daemon_reload_should_fail:
+            raise subprocess.CalledProcessError(1, ["systemctl", "daemon-reload"])
+        self.daemon_reloads += 1
 
     def list_relay_policies(self) -> list[str]:
         return sorted(self.relay_policies)
@@ -291,6 +365,16 @@ class _FakeOps:
         return bool(self.cgroup_pids_map.get(name))
 
     def systemctl_start(self, unit: str) -> None:
+        # systemd resolves qdshell-session-<name>@<uid>.service only if the
+        # per-name link exists. Modelling that here stops a fake-based test
+        # reporting a successful autostart for a silo real systemd could not
+        # start at all.
+        if unit.startswith("qdshell-session-"):
+            _linked = unit.split("qdshell-session-", 1)[1].rsplit("@", 1)[0]
+            if _linked not in self.launcher_links:
+                raise subprocess.CalledProcessError(
+                    5, ["systemctl", "start", unit],
+                    stderr=f"Unit {unit} not found.")
         self.systemctl_calls.append(("start", unit))
         # Pretend the launcher spawned a PID inside the cgroup. The
         # test sets cgroup_pids_map[name] later if it cares.

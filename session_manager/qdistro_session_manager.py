@@ -152,6 +152,13 @@ _STUCK_CLEANUP_BUDGET_S = 10.0
 # whichever launcher the bake ships is fine — the session manager only
 # needs the unit name shape so it can `systemctl start` it.
 SILO_LAUNCHER_FMT = "qdshell-session-{name}@{uid}.service"
+# systemd resolves qdshell-session-<name>@<uid>.service by looking for a unit
+# named qdshell-session-<name>@.service, so every silo needs a per-name
+# symlink to the shared template before its launcher can start.
+SILO_LAUNCHER_LINK_FMT = "qdshell-session-{name}@.service"
+SILO_LAUNCHER_TEMPLATE = Path(
+    "/usr/lib/systemd/system/qdshell-session@.service")
+SILO_LAUNCHER_LINK_DIR = Path("/etc/systemd/system")
 # Tier-2 templated silos launch through their own unit, which runs
 # spawn-tier2 as admin (fableplan2 task 04). The session manager runs as
 # root; the unit boundary is where privileges drop to admin (rootless
@@ -1386,6 +1393,129 @@ class _SystemOps:
             (ETC_NETNS / str(ns) / "resolv.conf").unlink()
         except FileNotFoundError:
             pass
+
+    # ---- per-silo launcher unit link -------------------------------------
+    #
+    # StartSilo runs qdshell-session-<name>@<uid>.service, and systemd only
+    # resolves that if a unit named qdshell-session-<name>@.service exists.
+    # install-session-manager.sh seeds a link for `work` and for whatever
+    # silos.yaml listed AT INSTALL TIME, and used to call moving this into
+    # CreateSilo a future task. While that was outstanding, a silo created
+    # after install had no link, so StartSilo failed and the silo could never
+    # become Active — and the broker's cross-uid relay gate refuses any
+    # registered target that is not Active. Owning the link here makes the
+    # link a property of the silo, exactly like its relay grant.
+
+    def link_silo_launcher(self, name: str) -> None:
+        """Link the silo's launcher unit and make systemd SEE it.
+
+        The link and the reload are ONE operation. A link systemd has not
+        re-read is not a usable launcher, so a failed reload must not be
+        reported as a successful link — that would let create() persist a
+        silo row whose StartSilo cannot resolve its unit, which is the
+        harder-than-absent failure this whole change exists to avoid. On a
+        reload failure the link just created is removed again, so the caller
+        is left with the state it started from rather than a half-applied one.
+        """
+        link = SILO_LAUNCHER_LINK_DIR / SILO_LAUNCHER_LINK_FMT.format(name=name)
+        if link.is_symlink() or link.exists():
+            # Already present: nothing changed, so nothing to reload. Safe
+            # under the canonical install/startup path, which reloads after
+            # its own seeding.
+            return
+        # A symlink to a template that does not exist is a unit systemd
+        # cannot load; catch that here rather than at first StartSilo.
+        if not SILO_LAUNCHER_TEMPLATE.exists():
+            raise FileNotFoundError(
+                f"launcher template {SILO_LAUNCHER_TEMPLATE} is missing; "
+                f"cannot link a launcher for silo {name!r}")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(SILO_LAUNCHER_TEMPLATE)
+        try:
+            self.daemon_reload()
+        except Exception:
+            try:
+                link.unlink()
+            except OSError as undo:
+                log.error("could not remove the launcher link for %r after a "
+                          "failed daemon-reload: %s", name, undo)
+            # Best-effort second reload so we do not leave systemd holding a
+            # view that includes a link no longer on disk.
+            try:
+                self.daemon_reload()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+    def restore_silo_launcher_link(self, name: str) -> None:
+        """Ensure the link EXISTS on disk, without create()'s compensation.
+
+        `link_silo_launcher` deliberately removes its new link when the
+        reload fails, because a create that is being rolled back must not
+        leave a launcher behind for an unrelated later reload to materialise.
+        That is exactly wrong for repair paths — a failed delete rolling a
+        silo back, or the startup reconcile — where the link SHOULD persist
+        and simply take effect at the next successful reload. Using the
+        compensating version there produced the regression this exists to
+        avoid: a surviving silo left with no link at all.
+        """
+        link = SILO_LAUNCHER_LINK_DIR / SILO_LAUNCHER_LINK_FMT.format(name=name)
+        if link.is_symlink() or link.exists():
+            return
+        if not SILO_LAUNCHER_TEMPLATE.exists():
+            raise FileNotFoundError(
+                f"launcher template {SILO_LAUNCHER_TEMPLATE} is missing; "
+                f"cannot link a launcher for silo {name!r}")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(SILO_LAUNCHER_TEMPLATE)
+        try:
+            self.daemon_reload()
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "restored the launcher link for %r but could not reload "
+                "systemd (%s); it takes effect at the next successful "
+                "reload", name, e)
+
+    def unlink_silo_launcher(self, name: str) -> None:
+        """Remove the silo's launcher link. Deliberately ASYMMETRIC with
+        link_silo_launcher: there, the reload is checked, because a link
+        systemd has not read is not a usable launcher. Here, removal from
+        disk IS the authoritative teardown — systemd's cached copy of a unit
+        whose file is gone is discarded at the next successful reload, and
+        nothing can start it in the meantime because the silo is being
+        deleted.
+
+        So a failed reload is logged and deferred, never raised. Raising was
+        a real bug: delete() catches the failure and tries to relink, but the
+        SAME reload failure then makes link_silo_launcher() compensate by
+        removing the link it just restored — leaving a silo rolled back to
+        Stopped, with its user and grant intact, that can never be started.
+        """
+        link = SILO_LAUNCHER_LINK_DIR / SILO_LAUNCHER_LINK_FMT.format(name=name)
+        # Only ever remove OUR link. A real file at that path is an admin's
+        # hand-written override, not something a silo delete may eat.
+        if not link.is_symlink():
+            return
+        try:
+            link.unlink()
+        except FileNotFoundError:
+            return
+        try:
+            self.daemon_reload()
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "removed the launcher link for %r but could not reload "
+                "systemd (%s); the unit file is gone, so the stale cached "
+                "unit is discarded at the next successful reload", name, e)
+
+    def silo_launcher_linked(self, name: str) -> bool:
+        link = SILO_LAUNCHER_LINK_DIR / SILO_LAUNCHER_LINK_FMT.format(name=name)
+        return link.is_symlink() or link.exists()
+
+    def daemon_reload(self) -> None:
+        # check=True: a silent reload failure is what lets a create() report
+        # success for a silo whose launcher unit systemd cannot resolve.
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
 
     def systemctl_start(self, unit: str) -> None:
         subprocess.run(
@@ -2714,6 +2844,77 @@ class _SiloStore:
                         raise SessionError(
                             f"could not issue the user-relay D-Bus policy "
                             f"for silo {name!r}: {e}") from e
+                    # Link this silo's launcher unit. Same reasoning as the
+                    # relay grant above, and the same failure shape: without
+                    # it StartSilo has no unit to start, so the silo can never
+                    # reach Active — and the broker refuses a cross-uid relay
+                    # to any REGISTERED target that is not Active, which is a
+                    # harder failure than having no row at all. Roll the
+                    # useradd and the grant back rather than persist a row
+                    # that can never be started.
+                    try:
+                        self._ops.link_silo_launcher(name)
+                    except Exception as e:  # noqa: BLE001
+                        # Roll back in the ONLY safe order: the grant first,
+                        # and the account ONLY if the grant is definitely
+                        # gone. A fragment carries a numeric user="<uid>";
+                        # deleting the account while its fragment survives
+                        # leaves a fragment naming a uid NSS cannot resolve,
+                        # and dbus-broker ABORTS on that at its next reload
+                        # (see write_relay_policy). Killing the system bus is
+                        # far worse than leaking a Linux account, so a failed
+                        # revocation keeps the account — which keeps the uid
+                        # resolvable — and asks for manual cleanup.
+                        #
+                        # The launcher sweep runs on BOTH revocation
+                        # outcomes. link_silo_launcher compensates its own
+                        # partial state, but its compensation tolerates an
+                        # unlink failure — so on a double failure a link can
+                        # still be on disk, and an early `raise` here would
+                        # leave account + fragment + link together.
+                        _link_path = (SILO_LAUNCHER_LINK_DIR /
+                                      SILO_LAUNCHER_LINK_FMT.format(name=name))
+                        _frag_path = RELAY_POLICY_DIR / relay_policy_filename(name)
+                        _link_left = False
+                        try:
+                            self._ops.unlink_silo_launcher(name)
+                        except Exception as undo:  # noqa: BLE001
+                            _link_left = True
+                            log.error(
+                                "could not remove the launcher link for %r "
+                                "while rolling back: %s — remove %s by hand",
+                                name, undo, _link_path)
+                        try:
+                            self._ops.remove_relay_policy(name)
+                        except Exception as undo:  # noqa: BLE001
+                            log.error(
+                                "could not revoke the relay grant for %r "
+                                "while rolling back a launcher-link failure "
+                                "(%s). KEEPING the Linux user: deleting it "
+                                "now would leave a fragment naming an "
+                                "unresolvable uid, which aborts dbus-broker "
+                                "at its next reload. Remove %s%s and the "
+                                "user %r by hand, in that order.",
+                                name, undo, _frag_path,
+                                f" and {_link_path}" if _link_left else "",
+                                name)
+                            raise SessionError(
+                                f"could not link the launcher unit for silo "
+                                f"{name!r} ({e}), and rolling back its relay "
+                                f"grant also failed ({undo}); the Linux user "
+                                f"was kept so the bus stays up — remove "
+                                f"{_frag_path} and the user {name!r} by hand, "
+                                f"in that order") from e
+                        try:
+                            self._ops.userdel(name)
+                        except Exception as undo:  # noqa: BLE001
+                            log.error(
+                                "rolling back the useradd for %r after a "
+                                "launcher-link failure also failed: %s",
+                                name, undo)
+                        raise SessionError(
+                            f"could not link the launcher unit for silo "
+                            f"{name!r}: {e}") from e
                     self._ops.make_state_dir(name, uid)
                 # else tier2-template: no useradd / no per-uid state dir — the
                 # launch-owner is admin (already exists, shared across template
@@ -2791,6 +2992,16 @@ class _SiloStore:
                     # window in which the username is free for reuse is never
                     # also a window in which a grant naming it is still live.
                     self._ops.remove_relay_policy(silo.name)
+                    # The launcher link is per-silo state too, so it goes with
+                    # the silo. Leaving it would let a later silo that reuses
+                    # the name inherit a link nothing issued it.
+                    #
+                    # tier-3 only: a tier2-template silo never had one (it
+                    # starts through qdistro-tier2-silo@<name>.service), so
+                    # unlinking for one could only ever remove something
+                    # another owner put there.
+                    if silo.kind == KIND_TIER3_USER:
+                        self._ops.unlink_silo_launcher(silo.name)
                     self._ops.userdel(silo.name)
                 except Exception as e:  # noqa: BLE001
                     # Side-effect failure mid-delete: roll back to
@@ -2813,6 +3024,19 @@ class _SiloStore:
                                 "%r after a failed delete: %s — cross-silo "
                                 "Send-To will stay broken for this silo until "
                                 "the next daemon start reconciles it",
+                                silo.name, reissue)
+                        # Same for the launcher link: a surviving silo that
+                        # lost it can never be started again, and a
+                        # registered-but-not-Active silo is a HARDER failure
+                        # than an absent one (the broker refuses cross-uid
+                        # relays to it outright).
+                        try:
+                            self._ops.restore_silo_launcher_link(silo.name)
+                        except Exception as reissue:  # noqa: BLE001
+                            log.error(
+                                "could not re-link the launcher unit for %r "
+                                "after a failed delete: %s — this silo cannot "
+                                "be started until it is relinked",
                                 silo.name, reissue)
                     self._force_state(silo, State.STOPPED)
                     raise SessionError(f"delete failed: {e}") from e
@@ -3449,6 +3673,40 @@ class _SiloStore:
             except OSError as e:
                 log.warning("reaping orphan cgroup %r failed: %s", name, e)
         return reaped
+
+    def reconcile_silo_launcher_links(self) -> list[str]:
+        """Link the launcher unit for every tier-3 silo that lacks one.
+
+        Returns the names linked. Additive ONLY: unlike the relay-grant
+        reconcile, this never removes a link it did not expect. A relay
+        fragment naming a dead uid can abort the system bus, which is what
+        justifies purging that namespace; a stale launcher symlink is inert,
+        and install-session-manager.sh unconditionally seeds one for `work`
+        whether or not a silo by that name exists. Sweeping "unknown" links
+        would just fight the installer.
+
+        Best-effort per silo: one silo that cannot be linked must not stop
+        the others, and it must not stop the autostart pass that follows.
+        """
+        linked: list[str] = []
+        with self._lock:
+            want = {s.name for s in self._silos.values()
+                    if s.kind == KIND_TIER3_USER}
+        for name in sorted(want):
+            try:
+                if self._ops.silo_launcher_linked(name):
+                    continue
+                self._ops.restore_silo_launcher_link(name)
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    "could not link the launcher unit for silo %r: %s — it "
+                    "cannot be started until this is fixed, and the broker "
+                    "refuses cross-uid relays to a registered silo that is "
+                    "not Active", name, e)
+                continue
+            linked.append(name)
+            log.info("linked the launcher unit for silo %r", name)
+        return linked
 
     def reconcile_relay_policies(self) -> tuple[list[str], list[str]]:
         """Make the on-disk per-silo relay grants match the silo table.
@@ -4416,6 +4674,16 @@ class _SiloStore:
         # — see reap_disposable_containers — but ordering is the part that
         # belongs to this concern.)
         self.reconcile_relay_policies()
+        # Same upgrade argument as the relay grants, one field over: every
+        # silo created before CreateSilo owned the launcher link has none, and
+        # install-session-manager.sh only seeds links for what silos.yaml
+        # listed AT INSTALL TIME. Without this, the fix would work only for
+        # silos created after the upgrade — "correct code that never runs for
+        # the population that needs it", which is the defect class this whole
+        # workstream exists to close. It must also run BEFORE the autostart
+        # sweep below, or a silo this pass would have repaired fails to start
+        # on this very boot.
+        self.reconcile_silo_launcher_links()
         # Reclaim any cgroup dirs leaked by a previous stop()'s EBUSY rmdir
         # before we (re)start silos (02/S14a). Runs lock-free internally.
         self.reap_orphan_cgroups()

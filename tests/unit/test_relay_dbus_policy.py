@@ -44,6 +44,7 @@ from qdistro_session_manager import (
     RELAY_POLICY_PREFIX,
     SessionError,
     State,
+    UnknownSilo,
     _SiloStore,
     relay_policy_filename,
     relay_policy_silo_name,
@@ -384,6 +385,217 @@ def ops():
 @pytest.fixture
 def store(ops, tmp_path):
     return _SiloStore(ops, config_path=tmp_path / "silos.yaml")
+
+
+class TestLauncherLink:
+    """A silo's launcher unit link is per-silo state, exactly like its relay
+    grant, and for the same reason: without it the silo cannot be STARTED, and
+    a registered silo that cannot reach Active is a HARDER failure than one
+    with no row at all — the broker refuses any cross-uid relay to a
+    registered target whose state is not Active, while it treats an absent row
+    as legacy-compatible and lets it through.
+
+    install-session-manager.sh seeds a link for `work` and for whatever
+    silos.yaml listed AT INSTALL TIME, and used to call moving this into
+    CreateSilo a future task. While that was outstanding, any silo created
+    after install had no link.
+    """
+
+    def test_create_links_the_launcher_unit(self, store, ops):
+        store.create("payroll", 4242)
+        assert ops.silo_launcher_linked("payroll")
+
+    def test_delete_unlinks_the_launcher_unit(self, store, ops):
+        store.create("payroll", 4242)
+        store.delete("payroll")
+        assert not ops.silo_launcher_linked("payroll")
+
+    def test_a_tier2_template_silo_gets_no_link(self, store, ops):
+        """A tier2-template silo is not a Linux user and starts through
+        qdistro-tier2-silo@<name>.service, not the qdshell-session template."""
+        store.create("tmpl", 1000, kind=KIND_TIER2_TEMPLATE,
+                     launch={"workload": "container",
+                             "template_silo": "base",
+                             "network": "none", "argv": ["/bin/true"]})
+        assert not ops.silo_launcher_linked("tmpl")
+
+    def test_a_failed_link_rolls_back_the_whole_create(self, store, ops):
+        """A row that can never be started must not be persisted. Registering
+        it would flip the broker from 'absent row, allowed' to 'present and
+        not Active, denied'."""
+        ops.launcher_link_fails_for = {"payroll"}
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        with pytest.raises(UnknownSilo):
+            store.get("payroll")
+        assert ops.relay_policies == {}, (
+            "the relay grant survived a create that failed at the launcher "
+            "link; it must be rolled back with the useradd")
+        assert "payroll" not in ops.users, (
+            "useradd was not rolled back after a launcher-link failure")
+
+    def test_a_failed_daemon_reload_fails_the_create(self, store, ops):
+        """A link systemd has not re-read is not a usable launcher. If the
+        reload is unchecked, create() reports success for a silo whose
+        StartSilo cannot resolve its unit — and a registered silo that can
+        never reach Active is refused by the broker's cross-uid relay gate,
+        which is harder to diagnose than having no row at all."""
+        ops.daemon_reload_should_fail = True
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        with pytest.raises(UnknownSilo):
+            store.get("payroll")
+        assert not ops.silo_launcher_linked("payroll"), (
+            "the launcher link survived a failed daemon-reload; link+reload "
+            "must be one compensated operation")
+
+    def test_a_link_failure_keeps_the_user_when_revocation_fails(
+            self, store, ops):
+        """The bus-safety ordering. A relay fragment carries a numeric
+        user="<uid>"; deleting the account while the fragment survives leaves
+        a fragment naming a uid NSS cannot resolve, and dbus-broker ABORTS on
+        that at its next reload. So if revocation fails during rollback, the
+        Linux user must be KEPT — leaking an account is vastly cheaper than
+        killing the system bus."""
+        ops.launcher_link_fails_for = {"payroll"}
+        ops.relay_policy_remove_should_fail = True
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        with pytest.raises(UnknownSilo):
+            store.get("payroll")
+        assert "payroll" in ops.users, (
+            "the Linux user was deleted while its relay fragment was still "
+            "on disk; that fragment now names an unresolvable uid and "
+            "dbus-broker will abort at its next reload")
+
+    def test_reconcile_links_silos_that_predate_the_mechanism(
+            self, store, ops):
+        """The upgrade path. Every silo created before CreateSilo owned the
+        link has none, and install-session-manager.sh only seeds links for
+        what silos.yaml listed AT INSTALL TIME. Without a reconcile the fix
+        would only ever work for silos created after the upgrade."""
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.launcher_links.clear()          # simulate the pre-upgrade state
+        assert store.reconcile_silo_launcher_links() == ["legal", "payroll"]
+        assert ops.silo_launcher_linked("payroll")
+        assert ops.silo_launcher_linked("legal")
+
+    def test_reconcile_does_not_sweep_unknown_links(self, store, ops):
+        """Additive only. A stale launcher symlink is inert — unlike a relay
+        fragment naming a dead uid, which aborts the system bus — and
+        install-session-manager.sh unconditionally seeds one for `work`
+        whether or not such a silo exists. Sweeping would fight the
+        installer."""
+        store.create("payroll", 4242)
+        ops.launcher_links.add("ghost")
+        store.reconcile_silo_launcher_links()
+        assert ops.silo_launcher_linked("ghost")
+
+    def test_reconcile_is_best_effort_per_silo(self, store, ops):
+        """One silo that cannot be linked must not stop the others, nor the
+        autostart pass that runs straight after it."""
+        store.create("payroll", 4242)
+        store.create("legal", 4243)
+        ops.launcher_links.clear()
+        ops.launcher_link_fails_for = {"legal"}
+        assert store.reconcile_silo_launcher_links() == ["payroll"]
+        assert ops.silo_launcher_linked("payroll")
+
+    def test_a_failed_delete_under_reload_failure_keeps_the_link(
+            self, store, ops):
+        """Regression, found by review. `unlink_silo_launcher` used to raise
+        on a failed daemon-reload. delete() catches that and relinks — but the
+        SAME reload failure then made `link_silo_launcher` compensate by
+        removing the link it had just restored. Net result: a silo rolled back
+        to Stopped, user and grant intact, with no launcher link, so it could
+        never be started again — and the broker refuses cross-uid relays to a
+        registered silo that is not Active.
+
+        Removal from disk is the authoritative teardown, so a failed reload
+        there is logged and deferred, never raised.
+        """
+        store.create("payroll", 4242)
+        ops.daemon_reload_should_fail = True
+        ops.userdel_should_fail = True          # force the delete to roll back
+        with pytest.raises(SessionError):
+            store.delete("payroll")
+        assert store.get("payroll") is not None
+        assert ops.silo_launcher_linked("payroll"), (
+            "the surviving silo lost its launcher link to a reload failure")
+
+    def test_a_double_failure_does_not_strand_link_and_fragment(
+            self, store, ops):
+        """The rollback's launcher sweep must run on BOTH revocation
+        outcomes. It used to sit after the revocation branch, so a failed
+        revocation raised past it — leaving the account, its relay fragment
+        AND its launcher link together on disk."""
+        ops.launcher_link_fails_for = {"payroll"}
+        ops.relay_policy_remove_should_fail = True
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        assert not ops.silo_launcher_linked("payroll"), (
+            "a launcher link survived a create rollback whose relay "
+            "revocation also failed")
+        # ...and the user is still there, because the fragment is (bus safety).
+        assert "payroll" in ops.users
+
+    def test_the_outer_sweep_clears_a_link_the_compensation_could_not(
+            self, store, ops):
+        """The sequence that makes create()'s outer sweep load-bearing, and
+        which the sibling test above does NOT reach: the link IS created, the
+        reload fails, and link_silo_launcher's own compensating unlink fails
+        too (its compensation deliberately tolerates that). Without the outer
+        sweep the rolled-back create leaves a launcher on disk for a silo that
+        was never persisted — which a later unrelated daemon-reload would
+        then materialise.
+        """
+        ops.daemon_reload_should_fail = True        # link created, reload fails
+        ops.launcher_unlink_should_fail = True      # ...compensation fails too
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        with pytest.raises(UnknownSilo):
+            store.get("payroll")
+        # The sweep could not remove it either (unlink still failing), so the
+        # contract is that the operator is TOLD, with the exact path.
+        ops.launcher_unlink_should_fail = False
+        assert ops.silo_launcher_linked("payroll"), (
+            "precondition: this test is about the path where the link cannot "
+            "be removed at all")
+
+    def test_the_outer_sweep_removes_the_link_when_it_can(self, store, ops):
+        """Same sequence, but the outer sweep is able to remove the link that
+        the inner compensation could not: no launcher is left behind."""
+        ops.daemon_reload_should_fail = True
+        ops.launcher_unlink_should_fail = True
+        original = ops.link_silo_launcher
+
+        def link_then_stop_failing(name):
+            try:
+                original(name)
+            finally:
+                # The inner compensation has now failed; let the OUTER sweep
+                # succeed, which is the behaviour under test.
+                ops.launcher_unlink_should_fail = False
+
+        ops.link_silo_launcher = link_then_stop_failing
+        with pytest.raises(SessionError):
+            store.create("payroll", 4242)
+        assert not ops.silo_launcher_linked("payroll"), (
+            "create()'s outer sweep did not remove a launcher link that its "
+            "inner compensation had failed to remove")
+
+    def test_a_failed_delete_relinks_the_surviving_silo(self, store, ops):
+        """delete() rolls a silo back to Stopped when teardown fails. A
+        surviving silo that lost its link can never be started again."""
+        store.create("payroll", 4242)
+        ops.userdel_should_fail = True
+        with pytest.raises(sm.SessionError):
+            store.delete("payroll")
+        assert store.get("payroll") is not None
+        assert ops.silo_launcher_linked("payroll"), (
+            "a silo that survived a failed delete lost its launcher link, so "
+            "it can never reach Active again")
 
 
 class TestLifecycle:
@@ -770,34 +982,120 @@ class TestInstalledPath:
             "install-session-manager.sh is missing from image/config.sh's "
             "INSTALLERS list — the relay ships with no driver")
 
-    def test_the_gui_harness_issues_grants_for_its_hand_made_users(self):
-        """`spin-test-vm-gui.sh` creates `work` (2000) and `work2` (3000)
-        with a plain useradd, NOT through SessionManager1.CreateSilo, so they
-        have no row in silos.yaml and the session manager will never issue or
-        reconcile a fragment for them.
+    def test_the_gui_harness_provisions_work_and_work2_as_real_silos(self):
+        """`spin-test-vm-gui.sh` must create `work` (2000) and `work2` (3000)
+        through SessionManager1.CreateSilo, not with a plain useradd.
 
-        They did not need one while the static grants existed — those grants
-        were hardcoded to exactly these two names. Removing the static grants
-        leaves this harness as the one population that loses something, and
-        permissions-gui scenarios 11-17 assert the broker sees both relays.
-        Without the harness issuing its own fragments they fail at the next
-        golden rebake, which is late and confusing.
+        This test used to assert the OPPOSITE — that the harness hand-wrote
+        the two fragments itself — and that design was self-defeating. A
+        hand-made user has no row in silos.yaml, so the reconcile's first
+        pass classifies its fragment as "no such silo" and deletes it
+        (_purge_unsafe_relay_fragments). The reconcile runs at every daemon
+        start, and a cloned worker VM's first boot is such a start. So the
+        bake issued the grants and the very next boot revoked them: in the
+        full run of 2026-07-26 the golden logs show both fragments issued,
+        and the preserved scenario overlays have neither. permissions-gui 12
+        and 15 failed with the relays exiting 78 (AccessDenied on
+        org.qdistro.UserRelay.uid<N>).
 
-        The harness must generate them from `relay_policy_xml` rather than
-        embed a copy of the XML, or a change to the policy format silently
-        leaves the harness behind — the same class of drift as the original
-        bug.
+        A real silo has a durable row, so every reconcile REISSUES its grant
+        instead of revoking it — and the scenarios exercise the production
+        path rather than a harness-only shortcut.
         """
         gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
         text = gui.read_text()
-        assert "relay_policy_xml" in text, (
-            "spin-test-vm-gui.sh creates work/work2 by hand but issues them "
-            "no user-relay policy; their relays will be refused their bus "
-            "names and permissions-gui 11-17 will fail")
+        # Match the CALL, not a comment that mentions it: this test's
+        # predecessor asserted a bare `"relay_policy_xml" in text` and was
+        # satisfied by the rationale comment alone, so it stayed green while
+        # the script called something else entirely.
+        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        assert any("CreateSilo" in ln for ln in code), (
+            "spin-test-vm-gui.sh does not create work/work2 through "
+            "SessionManager1.CreateSilo; hand-made users have no silos.yaml "
+            "row, so the session manager purges their relay grants at its "
+            "next start and permissions-gui 11-17 break on the clone")
+        assert not any(
+            "useradd" in ln and ("work" in ln or "_u" in ln) for ln in code), (
+            "spin-test-vm-gui.sh still creates work/work2 with a plain "
+            "useradd; create() refuses a name or uid that already exists, so "
+            "a useradd here also makes the CreateSilo above impossible")
+        assert "write_relay_policy" not in text, (
+            "spin-test-vm-gui.sh still hand-writes relay policy fragments. "
+            "Fragments not backed by a silo row are purged at the next "
+            "reconcile; create the silo instead of forging its grant")
         assert "<allow own=" not in text, (
             "spin-test-vm-gui.sh embeds a hand-written copy of the policy "
-            "XML; it must call relay_policy_xml so there is one source of "
-            "truth")
+            "XML; the session manager must be the only writer")
+
+    def test_the_gui_harness_proves_the_grants_survive_a_restart(self):
+        """Issuing a grant is not the property that matters; surviving the
+        reconcile is. The bug this guards was invisible at bake time and only
+        appeared on the clone's next boot, spread across per-scenario
+        results. The harness must restart the session manager and re-check
+        the fragments, so a regression fails once, during golden
+        construction, where it is cheap and unambiguous."""
+        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        code = [ln for ln in gui.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        joined = "\n".join(code)
+        assert "restart qdistro-session-manager.service" in joined, (
+            "spin-test-vm-gui.sh never restarts the session manager after "
+            "provisioning work/work2, so it cannot observe the purge that "
+            "a cloned worker's first boot performs")
+        assert "org.qdistro.UserRelay.silo-" in joined, (
+            "spin-test-vm-gui.sh does not verify the per-silo relay policy "
+            "fragments exist; the golden can ship without them")
+
+    def test_the_gui_harness_brings_both_fixture_silos_to_active(self):
+        """CreateSilo persists State.CREATED, and the broker's cross-uid relay
+        gate refuses any REGISTERED target that is not Active — while it lets
+        an ABSENT row through as legacy-compatible. So registering the two
+        fixtures without starting them is WORSE than the bug it replaces:
+        permissions-gui 11-17 would fail earlier, with SiloNotActive.
+
+        The harness must therefore StartSilo both and assert the daemon's own
+        view of their state after the restart, not just that a file exists.
+        """
+        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        code = [ln for ln in gui.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        joined = "\n".join(code)
+        assert "StartSilo" in joined, (
+            "spin-test-vm-gui.sh creates the fixture silos but never starts "
+            "them; a Created (not Active) silo is refused by the broker's "
+            "cross-uid relay gate with SiloNotActive")
+        assert "Active" in joined, (
+            "spin-test-vm-gui.sh never asserts the silos reached Active")
+        assert "ListSilos" in joined, (
+            "spin-test-vm-gui.sh does not query the daemon for silo state. "
+            "The unit is Type=dbus and claims its bus name BEFORE the "
+            "constructor runs the reconcile, so `systemctl is-active` is not "
+            "a reconcile barrier — a synchronous method reply is")
+
+    def test_the_gui_harness_hard_fails_on_a_legacy_plain_user(self):
+        """A VM baked by the pre-2026-07-27 harness has work/work2 as plain
+        useradd users, possibly still carrying a forged relay fragment that
+        would sail past a file-presence check and then be purged at the next
+        reconcile. That state must stop the bake with a migration message —
+        not be silently skipped, and not be auto-repaired with userdel, which
+        would destroy a reused VM's fixture home."""
+        gui = _REPO / "scripts" / "vm" / "spin-test-vm-gui.sh"
+        code = [ln for ln in gui.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        joined = "\n".join(code)
+        assert "is NOT a registered" in joined, (
+            "spin-test-vm-gui.sh does not hard-fail when work/work2 exist as "
+            "plain Linux users with no silo row")
+        # The idempotent branch must match the EXACT fixture (name, uid and
+        # kind), not merely "some row came back" — a row of the wrong kind or
+        # uid is not the fixture we asked for.
+        assert "silo_matches" in joined, (
+            "spin-test-vm-gui.sh accepts any row for an existing username "
+            "instead of checking the exact tier3-user name/uid pair")
+        assert "userdel" not in joined, (
+            "spin-test-vm-gui.sh auto-repairs a legacy fixture user with "
+            "userdel; that destroys a reused VM's fixture home and is too "
+            "destructive for an implicit migration")
 
     def test_the_relay_diagnostic_points_at_the_real_mechanism(self):
         """The relay's name-refused message is the first thing an operator

@@ -30,6 +30,7 @@ setup() {
     FRESH="$REPO_ROOT/scripts/vm/fresh-vm-bootstrap.sh"
     SPAWN_COMMON="$REPO_ROOT/lib/spawn-common.sh"
     HARDEN_VT="$REPO_ROOT/scripts/install/harden-compositor-vt.sh"
+    GREETER_ENABLE="$REPO_ROOT/scripts/vm/enable-qdgreeter.sh"
     [ -f "$BOOT" ] || { echo "bootstrap not found at $BOOT" >&2; return 1; }
 }
 
@@ -321,12 +322,18 @@ refute_grep() { # refute_grep <pattern> <file>... — fails if the pattern match
     [ "$status" -ne 0 ] || { echo "unexpected match:"$'\n'"$output" >&2; return 1; }
 }
 
-@test "vt-isolation: both install paths INVOKE harden-compositor-vt.sh" {
+@test "vt-isolation: every install path INVOKES harden-compositor-vt.sh" {
     [ -x "$HARDEN_VT" ]
     # Match the invocation, not a comment mentioning the filename: commenting
     # the call out while leaving the rationale behind must turn this red.
     grep -qE '^[^#]*harden-compositor-vt\.sh' "$BOOT"
     grep -qE '^[^#]*harden-compositor-vt\.sh' "$IMAGE_CFG"
+    # enable-qdgreeter.sh is the THIRD path that installs greetd's config and
+    # starts the session — it is what `qci snapshot-daily` runs to build the
+    # production-path VM. It was omitted here and in the script until
+    # 2026-07-27, so the box the docs call production-path was the one greetd
+    # install shipping unhardened.
+    grep -qE '^[^#]*harden-compositor-vt\.sh' "$GREETER_ENABLE"
 }
 
 @test "vt-isolation: the compositor VT is MASKED, not merely disabled" {
@@ -471,6 +478,18 @@ EOF
     run awk '/^if ! bash .*harden-compositor-vt\.sh/,/^fi/' "$IMAGE_CFG"
     [ -n "$output" ]
     [[ "$output" == *"exit 1"* ]]
+    [[ "$output" != *"|| true"* ]]
+}
+
+@test "vt-isolation: enable-qdgreeter aborts when the VT is not secured" {
+    # Reachability (the invocation test above) is not enough: the greeter
+    # provisioner must also treat a hardening failure as FATAL. This is the
+    # path `qci snapshot-daily` and the vt-escape bats lane use to build a
+    # production-path box, so a warn-and-continue here would hand both of them
+    # a VM with a getty able to take tty3 — the exact state being tested for.
+    run awk '/^if ! bash .*harden-compositor-vt\.sh/,/^fi/' "$GREETER_ENABLE"
+    [ -n "$output" ]
+    [[ "$output" == *"exit "* ]]
     [[ "$output" != *"|| true"* ]]
 }
 

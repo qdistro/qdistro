@@ -137,8 +137,44 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
     fi
     # The baked install surface the scenarios require — fail-closed on core bits
     # (codex review: verify, don't ls-and-warn, the things a clone depends on).
-    id work >/dev/null 2>&1 && id work2 >/dev/null 2>&1 \
-        || { echo "[gui-spin] ERROR: work/work2 users missing in golden"; exit 1; }
+    # The work/work2 fixtures are provisioned on the labwc profile only (see
+    # the fixture block below for why), so only verify them there.
+    if [ "$SESSION" = labwc ]; then
+        id work >/dev/null 2>&1 && id work2 >/dev/null 2>&1 \
+            || { echo "[gui-spin] ERROR: work/work2 users missing in golden"; exit 1; }
+        # They must be real SILOS, not just Linux users, and they must be
+        # ACTIVE. The session manager purges any relay policy fragment whose
+        # name has no silos.yaml row at every daemon start — and a clone's
+        # first boot IS such a start. Checking the users alone is what let a
+        # golden ship with grants that this very boot had already deleted
+        # (permissions-gui 12/15, 2026-07-26). This runs AFTER that boot, so
+        # it observes the post-purge, post-autostart truth.
+        for _u in work work2; do
+            [ -f "/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-$_u.conf" ] \
+                || { echo "[gui-spin] ERROR: golden clone has no relay policy fragment" \
+                          "for $_u — it is not a registered silo, so its relay cannot own" \
+                          "org.qdistro.UserRelay.uid*"; exit 1; }
+        done
+        # An autostart failure would otherwise pass clone verification and
+        # resurface later as an opaque SiloNotActive inside a scenario.
+        for _u in work work2; do
+            _cstate=$(runuser -u admin -- /usr/bin/python3 -c '
+import json, sys, dbus
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.SessionManager1",
+                     "/org/qdistro/SessionManager1")
+for row in json.loads(dbus.Interface(
+        obj, "org.qdistro.SessionManager1").ListSilos(timeout=2.0)):
+    if row.get("name") == sys.argv[1]:
+        print(row.get("state", ""))
+        break
+' "$_u" 2>/dev/null)
+            [ "$_cstate" = Active ] \
+                || { echo "[gui-spin] ERROR: golden clone has silo $_u in state" \
+                          "'$_cstate', not Active — the broker refuses cross-uid" \
+                          "relays to a registered non-Active target"; exit 1; }
+        done
+    fi
     for _f in /usr/local/bin/qdistro-test-permission \
               /usr/local/bin/qdistro-start-admin-app \
               /usr/local/bin/qdistro-start-admin-tui; do
@@ -150,14 +186,159 @@ if [ "${GOLDEN_CLONE:-0}" = 1 ]; then
     exit 0
 fi
 
-# 1. work + work2 users (uids 2000 / 3000), linger so their session
-#    buses come up.
-if ! id work >/dev/null 2>&1; then
-    useradd -m -u 2000 -U -s /bin/bash work
-fi
-if ! id work2 >/dev/null 2>&1; then
-    useradd -m -u 3000 -U -s /bin/bash work2
-fi
+# 1. work + work2 as REAL SILOS (uids 2000 / 3000), linger so their
+#    session buses come up.
+#
+# These are created through SessionManager1.CreateSilo, NOT a plain
+# `useradd`, and that distinction is load-bearing. A silo's user-relay
+# bus-name grant lives in a per-silo fragment
+# (/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-<name>.conf) that the
+# session manager issues on create and RECONCILES against silos.yaml at
+# every daemon start. The reconcile's first pass purges every fragment
+# whose name has no silo row (_purge_unsafe_relay_fragments, "no such
+# silo") and then reloads dbus.
+#
+# So a plain useradd plus a hand-written fragment — what this script did
+# between 2026-07-26 and this change — is self-defeating: the bake writes
+# the two fragments, and then the FIRST boot of every cloned worker VM
+# starts the session manager, which deletes them again because work and
+# work2 have no rows. That is what broke permissions-gui 12 and 15 in the
+# full run of 2026-07-26 (both relays exit 78, AccessDenied on
+# org.qdistro.UserRelay.uid<N>), and what made 11 and 16 "pass" only
+# because their agents hand-repaired the VM mid-scenario.
+#
+# Creating real silos fixes it at the source: the row is durable, so every
+# reconcile REISSUES the grant instead of revoking it. It is also the
+# production path, so the scenarios now exercise what a real install does.
+#
+# They must also end up ACTIVE, not merely created. CreateSilo persists
+# State.CREATED, and the broker's cross-uid relay gate refuses any
+# REGISTERED target whose state is not Active — while it treats an ABSENT
+# row as legacy-compatible and lets it through. So registering these two
+# and stopping there would be worse than the bug it replaces: scenarios
+# 11-17 would fail earlier, with SiloNotActive, even with perfect grants.
+#
+# CreateSilo is called as admin, not root: _require_admin rejects any
+# caller whose uid != ADMIN_UID (1000), and root is not exempt. `--system`
+# reaches the system bus, so no XDG_RUNTIME_DIR is needed. The daemon
+# itself runs as root and does the useradd, so nothing is lost. Same
+# pattern as tests/integration/vm/s101-session-lifecycle.sh.
+#
+# Ordering matters: create() refuses a name or uid that already exists, so
+# it has to run BEFORE anything makes these accounts. Password and linger
+# are applied afterwards, to the users the daemon created.
+#
+# SCOPED TO THE labwc PROFILE ON PURPOSE.
+#
+# Only the permissions-gui scenarios need these fixtures, and qci routes
+# those through the labwc/gui-admin golden. Registered ACTIVE silos are not
+# invisible the way the old plain accounts were: qdshell's SiloEgress
+# service normalises egress=None to a legacy/host row and lists Active
+# legacy silos, and the qdwin LOCK SCREEN renders a network-egress
+# indicator from exactly that list. All qdlocker GUI scenarios run on the
+# qdwin golden, so baking the fixtures there would change what those
+# screens show — for no benefit, since permissions-gui 18-21 (the qdwin
+# profile's own scenarios) never reference work/work2.
+sm_call() {  # sm_call <Method> <signature> <args...>
+    runuser -u admin -- busctl --system call \
+        org.qdistro.SessionManager1 \
+        /org/qdistro/SessionManager1 \
+        org.qdistro.SessionManager1 "$@"
+}
+# ListSilos is also the RECONCILE BARRIER. The unit is Type=dbus and the
+# daemon claims its bus name BEFORE constructing SessionManager, and it is
+# that construction which runs autostart_pass() and the relay reconcile. So
+# `systemctl is-active` can be true while the reconcile has not run —
+# checking fragments then is flaky-green. A synchronous ListSilos reply
+# cannot be served until the GLib main loop is running, which is after
+# construction, so a successful reply is proof the reconcile has completed.
+#
+# There is no GetSilo method; ListSilos returns a JSON array of rows, so the
+# state query goes through python-dbus rather than parsing busctl's output.
+# An explicit short D-Bus timeout is what makes the outer deadline real.
+# dbus-python's default is ~25s, so a wedged constructor would turn a
+# "60 iteration" loop into ~26 minutes of bake — and autostart_pass() has
+# podman sweeps after the reconcile that can genuinely block. The loop is
+# bounded on the monotonic clock rather than by counting iterations, since
+# each iteration does not cost a fixed amount of time.
+silo_row() {  # silo_row <name> <field> — prints one field, or nothing
+    runuser -u admin -- /usr/bin/python3 -c '
+import json, sys, dbus
+bus = dbus.SystemBus()
+obj = bus.get_object("org.qdistro.SessionManager1",
+                     "/org/qdistro/SessionManager1")
+rows = json.loads(dbus.Interface(
+    obj, "org.qdistro.SessionManager1").ListSilos(timeout=2.0))
+for row in rows:
+    if row.get("name") == sys.argv[1]:
+        print(row.get(sys.argv[2], ""))
+        break
+' "$1" "$2" 2>/dev/null
+}
+silo_state() { silo_row "$1" state; }
+# /proc/uptime, not `date +%s`: the guest clock can step backwards (chrony
+# correcting a drifted VM clock is routine right after boot, which is exactly
+# when this runs), and a backward step silently extends a wall-clock deadline.
+_mono_s() { awk '{print int($1)}' /proc/uptime; }
+sm_ready() {  # bounded wait for a real method reply, not just is-active
+    local _deadline
+    _deadline=$(( $(_mono_s) + 120 ))
+    while [ "$(_mono_s)" -lt "$_deadline" ]; do
+        silo_row __probe__ state >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    return 1
+}
+# Exact identity, not merely "some row exists": a row of the wrong kind or
+# uid must not be mistaken for the fixture we asked for.
+silo_matches() {  # silo_matches <name> <uid>
+    [ "$(silo_row "$1" uid)" = "$2" ] && \
+    [ "$(silo_row "$1" kind)" = "tier3-user" ]
+}
+
+if [ "$SESSION" != labwc ]; then
+    echo "[gui-harness] $SESSION profile: skipping the work/work2 silo fixtures" \
+         "(permissions-gui runs on labwc; Active silos would add an egress" \
+         "indicator to this profile's lock screen)"
+else
+[ "$(id -u admin 2>/dev/null)" = 1000 ] \
+    || { echo "[gui-spin] ERROR: admin is not uid 1000; SessionManager1 rejects" \
+              "every caller whose uid != ADMIN_UID, so CreateSilo cannot work"; exit 1; }
+systemctl is-active --quiet qdistro-session-manager.service \
+    || systemctl start qdistro-session-manager.service \
+    || { echo "[gui-spin] ERROR: qdistro-session-manager.service will not start;" \
+              "work/work2 cannot be provisioned as silos"; exit 1; }
+sm_ready || { echo "[gui-spin] ERROR: SessionManager1 never answered ListSilos"; exit 1; }
+
+for _pair in "work:2000" "work2:3000"; do
+    _u=${_pair%%:*}; _uid=${_pair##*:}
+    if id "$_u" >/dev/null 2>&1; then
+        # An existing account is only acceptable if the DAEMON agrees it is
+        # this silo. A VM baked by the pre-2026-07-27 harness has a plain
+        # useradd user — possibly still carrying a forged relay fragment,
+        # which would sail past a fragment-presence check and then be purged
+        # at the next reconcile. Hard-fail with a migration message rather
+        # than repair: an automatic userdel would destroy a reused VM's
+        # fixture home, which is too destructive to do implicitly.
+        if silo_matches "$_u" "$_uid"; then
+            echo "[gui-harness] $_u is already a registered silo — skipping CreateSilo"
+        else
+            echo "[gui-spin] ERROR: user $_u exists but is NOT a registered" \
+                 "tier3-user silo at uid $_uid (daemon says uid='$(silo_row "$_u" uid)'" \
+                 "kind='$(silo_row "$_u" kind)'). This VM was probably baked by the" \
+                 "pre-2026-07-27 harness (plain useradd). Any relay grant it has will" \
+                 "be purged at the next reconcile. Rebake the golden, or remove $_u by" \
+                 "hand and re-run."; exit 1
+        fi
+    else
+        sm_call CreateSilo si "$_u" "$_uid" \
+            || { echo "[gui-spin] ERROR: CreateSilo failed for $_u (uid $_uid)"; exit 1; }
+        echo "[gui-harness] created silo $_u (uid $_uid)"
+    fi
+    id "$_u" >/dev/null 2>&1 \
+        || { echo "[gui-spin] ERROR: CreateSilo left no Linux user $_u"; exit 1; }
+done
+
 loginctl enable-linger work
 loginctl enable-linger work2
 
@@ -166,39 +347,43 @@ loginctl enable-linger work2
 echo "work:${VM_PASSWORD}" | chpasswd
 echo "work2:${VM_PASSWORD}" | chpasswd
 
-# 1b. Issue each of them a user-relay bus-name grant.
+# 1b. Bring both silos to ACTIVE — the state the broker's relay gate wants.
+for _pair in "work:2000" "work2:3000"; do
+    _u=${_pair%%:*}
+    if [ "$(silo_state "$_u")" != Active ]; then
+        sm_call StartSilo s "$_u" \
+            || { echo "[gui-spin] ERROR: StartSilo failed for $_u"; exit 1; }
+    fi
+done
+
+# 1c. Prove the whole thing SURVIVES a session-manager restart.
 #
-# These two are made with a plain `useradd` above, NOT through
-# SessionManager1.CreateSilo, so they have no row in silos.yaml and the
-# session manager will never issue or reconcile a fragment for them. Until
-# 2026-07-26 they did not need one: org.qdistro.UserRelay.conf carried
-# static grants hardcoded to the names `work` and `work2`. Those grants are
-# gone (F4-a: nothing in the install chain creates users by those names, so
-# on a real system they granted nothing and every silo's relay exited 78),
-# which leaves this harness as the one population that loses a grant it was
-# relying on. permissions-gui scenarios 11-17 assert the broker sees both
-# relays, so without this they fail at the next golden rebake.
-#
-# The fragments are generated by calling the session manager's own
-# relay_policy_xml(), not by pasting a copy of the XML here: one source of
-# truth, so a change to the policy format cannot leave the harness behind.
+# The bug this replaces was invisible at bake time and only appeared on the
+# clone's next boot, because the reconcile runs at daemon startup. Restarting
+# here reproduces that boot in the one place a failure is cheap — during
+# golden construction, not spread across per-scenario results.
+systemctl restart qdistro-session-manager.service \
+    || { echo "[gui-spin] ERROR: session manager failed to restart"; exit 1; }
+sm_ready || { echo "[gui-spin] ERROR: SessionManager1 did not come back after restart"; exit 1; }
 for _pair in "work:2000" "work2:3000"; do
     _u=${_pair%%:*}; _uid=${_pair##*:}
-    /usr/bin/python3 - "$SRC/session_manager" "$_u" "$_uid" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-import qdistro_session_manager as sm
-name, uid = sys.argv[2], int(sys.argv[3])
-# Go through the real ops object rather than writing the file directly:
-# it does the atomic write+fsync AND refuses to emit a fragment for a uid
-# with no passwd entry. That last part is not cosmetic — dbus-broker
-# ABORTS on an unresolvable numeric user= at its next reload, and the
-# launcher inotify-watches this directory, so a bad fragment written here
-# would take the VM's system bus down rather than just fail a scenario.
-path = sm._SystemOps().write_relay_policy(name, uid, reload=False)
-print(f"[gui-harness] issued relay policy {path}")
-PY
+    [ -f "/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-$_u.conf" ] \
+        || { echo "[gui-spin] ERROR: the relay policy fragment for $_u did not" \
+                  "survive a session-manager restart — it has no silos.yaml row"; exit 1; }
+    grep -q "uid$_uid" "/etc/dbus-1/system.d/org.qdistro.UserRelay.silo-$_u.conf" \
+        || { echo "[gui-spin] ERROR: the fragment for $_u does not grant" \
+                  "org.qdistro.UserRelay.uid$_uid"; exit 1; }
+    [ -e "/etc/systemd/system/qdshell-session-$_u@.service" ] \
+        || { echo "[gui-spin] ERROR: silo $_u has no launcher unit link, so it" \
+                  "can never reach Active"; exit 1; }
+    _state=$(silo_state "$_u")
+    [ "$_state" = Active ] \
+        || { echo "[gui-spin] ERROR: silo $_u is $_state, not Active, after restart" \
+                  "— the broker refuses cross-uid relays to a registered" \
+                  "non-Active target (SiloNotActive)"; exit 1; }
 done
+echo "[gui-harness] work/work2 are Active silos with surviving relay grants"
+fi   # end SESSION = labwc fixture provisioning
 
 # 2. qdistro-test-permission helper.
 install -m 0755 "$SRC/tests/unit/test_permission.py" \
@@ -563,8 +748,14 @@ fi
 
 # Confirm the surface the scenarios need:
 echo "--- post-install state ($SESSION) ---"
-id work
-id work2
+# labwc-only: the work/work2 fixtures are provisioned on that profile alone
+# (see the fixture block above). Under `set -e` an unguarded `id work` here
+# aborts the whole qdwin bake, because on qdwin those accounts correctly do
+# not exist.
+if [ "$SESSION" = labwc ]; then
+    id work
+    id work2
+fi
 ls -l /usr/local/bin/qdistro-{test-permission,start-admin-app,start-admin-tui}
 ls -l /usr/local/bin/qdistro-admin-tui
 ls -l /home/admin/qdistro/admin_app/qdistro_admin_app.py

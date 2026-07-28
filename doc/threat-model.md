@@ -172,7 +172,11 @@ Do not treat the broker pilot as evidence for those other domains.
   reset, so `getty@tty3`/`autovt@tty3` are masked at install time
   (`scripts/install/harden-compositor-vt.sh`); masking, not disabling, because
   logind starts `autovt@ttyN` by unit name on demand. Guarded at runtime by
-  `tests/integration/vm/probes/vt-escape-lockdown.sh`.
+  `tests/integration/vm/probes/vt-escape-lockdown.sh`, run from
+  `tests/integration/vm/vt-escape-lockdown.bats`, which converts its
+  disposable VM to the production greetd path and waits for a real qdwin
+  session before measuring. The static installer invariants are in
+  `bootstrap-hardening.bats`.
   **Accepted residual:** tty1's `agetty` remains a deliberate emergency console
   (`doc/recovery.md`) and is therefore a real password-authenticated local
   surface; removing VT *destinations* is explicitly not the security boundary.

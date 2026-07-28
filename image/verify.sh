@@ -314,6 +314,31 @@ EOF2
         echo \"qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
         [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
 
+# NOT asserted here: the locked-session VT escape
+# (tests/integration/vm/probes/vt-escape-lockdown.sh). Two reasons, both
+# specific to this verifier, and both worth writing down so nobody adds it
+# back without fixing them first:
+#
+#  1. It needs root. This verifier's `remote` is an SSH login as admin, and
+#     the canonical build is release-profile, which deliberately deletes
+#     /etc/sudoers.d/99-admin (image/config.sh) — so `sudo -n` cannot work.
+#     The other `sudo -n` assertions in this file are a pre-existing
+#     profile/verifier mismatch, not a precedent to copy. Weakening the
+#     shipped image's sudo policy to suit the verifier is not an option.
+#  2. It would measure the wrong process. The shipped greetd config has only
+#     a `_greeter` default_session and its initial_session is commented out,
+#     and image/config.sh removes qdwin-session's default-target enablement
+#     so only a real greeter authentication starts it. This verifier logs in
+#     over SSH and never authenticates through qdgreeter, so tty3 belongs to
+#     qdgreeter, not the post-auth qdwin session whose LOCKED screen the
+#     probe exists to protect. A green result here would be green for the
+#     wrong thing.
+#
+# The runtime probe therefore lives in tests/integration/vm/vt-escape-lockdown.bats,
+# which converts its own disposable VM (enable-qdgreeter.sh + a test-only
+# autologin) and so does reach a real qdwin session on tty3 — and which runs
+# in the bats lane that `qci full` actually invokes.
+
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'

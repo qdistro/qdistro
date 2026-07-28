@@ -92,6 +92,22 @@ install -d -m 0755 /etc/systemd/system/multi-user.target.wants
 ln -sfn /usr/lib/systemd/system/greetd.service \
     /etc/systemd/system/multi-user.target.wants/greetd.service
 systemctl reset-failed greetd.service 2>/dev/null || true
+
+# Keep the compositor's VT exclusively the compositor's BEFORE greetd takes
+# it. Both other install paths run this helper as a required, fail-closed step
+# (scripts/install/qdistro-bootstrap.sh, image/config.sh); this one installed
+# the same greetd config and started the same session without it, so the VM
+# `qci snapshot-daily` produces — the one the docs call the production-path
+# box — was the only greetd install shipping with a getty able to take tty3
+# and revert seatd's K_OFF. Fail closed for the same reason the image build
+# aborts: "I could not work out what to harden" must not be reported as
+# hardened.
+if ! bash "$QD/scripts/install/harden-compositor-vt.sh" /etc/greetd/config.toml; then
+    echo "compositor VT is not exclusively the compositor's; a getty could" \
+         "take it and revert seatd's K_OFF" >&2
+    exit 3
+fi
+
 systemctl restart --no-block greetd.service
 if [ ! -s /usr/bin/qdgreeter ]; then
     echo "installed /usr/bin/qdgreeter wrapper is empty after greeter setup" >&2

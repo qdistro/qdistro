@@ -152,11 +152,21 @@ chmod 0755 "$DEST/qdistro-silo-launch"
 ln -sf "$DEST/qdistro-silo-launch" /usr/local/bin/qdistro-silo-launch
 
 # Drop a per-silo symlink for every silo currently in
-# /etc/qdistro/silos.yaml. The session manager itself never
-# creates these — a future task will move this into CreateSilo
-# proper; for now installing what silos.yaml already lists is
-# enough to satisfy the app-launcher integration test (which
-# pre-creates a "work" silo).
+# /etc/qdistro/silos.yaml.
+#
+# As of 2026-07-28 the session manager DOES create these itself:
+# CreateSilo links the launcher and DeleteSilo unlinks it, and an
+# additive reconcile at daemon startup links any tier-3 silo that
+# lacks one. (Before that, a silo created after install had no
+# link, so StartSilo could not resolve its unit and the silo could
+# never reach Active — which the broker's cross-uid relay gate
+# then refuses outright.)
+#
+# This seeding stays because it runs BEFORE the daemon starts, so
+# a fresh install has links in place for the first autostart pass
+# rather than depending on the reconcile to repair them, and
+# because the app-launcher integration test pre-creates a "work"
+# silo out of band.
 seed_silo_symlink() {
     local name="$1"
     local link="/etc/systemd/system/qdshell-session-${name}@.service"
