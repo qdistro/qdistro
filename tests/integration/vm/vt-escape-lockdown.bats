@@ -92,8 +92,26 @@ command = "/usr/local/bin/qdwin-session-launcher"
 EOF'
     [ "$status" -eq 0 ] || fail_loud "could not install the test autologin: $output"
 
-    vm_run 'systemctl restart greetd.service'
-    [ "$status" -eq 0 ] || fail_loud "greetd would not restart: $output"
+    # initial_session is intentionally one-shot per boot.  Restarting greetd
+    # after this VM has already run an initial session falls back to the
+    # greeter, even though the stanza is present.  Reboot the disposable VM so
+    # the conversion exercises the real production ordering: greetd takes
+    # tty3 first, then its PAM session starts the user's qdwin target.
+    vm_run 'cat /proc/sys/kernel/random/boot_id'
+    [ "$status" -eq 0 ] || fail_loud "could not read the pre-reboot boot id: $output"
+    local _old_boot=${output//[[:space:]]/}
+    vm_run 'systemctl reboot'
+    sleep 3
+    for _i in $(seq 1 60); do
+        vm_run 'cat /proc/sys/kernel/random/boot_id'
+        if [ "$status" -eq 0 ] && \
+           [ "${output//[[:space:]]/}" != "$_old_boot" ]; then
+            break
+        fi
+        sleep 2
+    done
+    [ "$status" -eq 0 ] && [ "${output//[[:space:]]/}" != "$_old_boot" ] \
+        || fail_loud "the converted VM did not complete its production-path reboot"
 
     # Wait for the session the probe is actually about, not merely for greetd:
     # the compositor active, qdlocker active, AND tty3 actually current.

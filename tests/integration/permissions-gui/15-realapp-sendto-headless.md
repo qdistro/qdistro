@@ -32,7 +32,9 @@ VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
 # Fresh broker state.
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-sleep 1
+source /tmp/qci-gui-waiters.sh
+await_broker_pending_action \
+ app.send-to:3000:org.qdistro.Qnotebook.uid3000
 
 # Ensure both user-relays are up with linger.
 $VMEXEC "$VM" 'loginctl enable-linger work work2'
@@ -57,7 +59,9 @@ B64=$(base64 -w0 <<'EOF'
 set -e
 pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
 pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
-sleep 1
+source /tmp/qci-gui-waiters.sh
+await_broker_pending_action \
+ app.send-to:2000:org.qdistro.Qnotebook.uid2000
 rm -f /home/work/testnb/.zim-qt/lock /home/work2/testnb/.zim-qt/lock
 setsid runuser -u work -- env \
  XDG_RUNTIME_DIR=/run/user/2000 \

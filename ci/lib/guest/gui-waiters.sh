@@ -97,6 +97,32 @@ await_system_unit_active() {
     _await "system unit active: $unit" "$timeout" "$interval" \
         _probe_system_unit_active "$unit"
 }
+
+# await_broker_pending_action <action> [timeout] [interval]
+# Wait until GetPending exposes the exact action created by the operation under
+# test.  Printing the full reply on timeout keeps a missing request distinct
+# from a request that was created with the wrong target/action.
+await_broker_pending_action() {
+    local action=$1 timeout=${2:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${3:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    if [ -z "$action" ]; then
+        printf '[await] broker pending action must be non-empty\n' >&2
+        return 2
+    fi
+    _await "broker pending action: $action" "$timeout" "$interval" \
+        _probe_broker_pending_action "$action"
+}
+_probe_broker_pending_action() {
+    local action=$1 reply
+    reply=$(dbus-send --system --print-reply \
+        --dest=org.qdistro.AdminBroker1 \
+        /org/qdistro/AdminBroker1 \
+        org.qdistro.AdminBroker1.GetPending 2>&1) || {
+        printf '%s' "$reply"
+        return 1
+    }
+    printf '%s' "$reply"
+    grep -Fq "string \"$action\"" <<<"$reply"
+}
 _probe_system_unit_active() {
     local unit=$1 state
     state=$(systemctl is-active "$unit" 2>/dev/null)

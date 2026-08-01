@@ -93,6 +93,28 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "await_broker_pending_action: requires the exact pending action" {
+    dbus-send() {
+        printf 'string "app.send-to:3000:org.qdistro.Qnotebook.uid3000"\n'
+    }
+    export -f dbus-send
+    run await_broker_pending_action \
+        app.send-to:3000:org.qdistro.Qnotebook.uid3000 2 1
+    [ "$status" -eq 0 ]
+
+    run await_broker_pending_action \
+        app.send-to:2000:org.qdistro.Qnotebook.uid2000 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"app.send-to:3000:org.qdistro.Qnotebook.uid3000"* ]]
+}
+
+@test "await_broker_pending_action: rejects an empty action" {
+    run await_broker_pending_action "" 1 1
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"must be non-empty"* ]]
+}
+
 @test "await_domain_gone: passes when the domain is absent (virsh errors)" {
     virsh() { return 1; }   # domstate on an undefined domain errors, empty stdout
     export -f virsh
