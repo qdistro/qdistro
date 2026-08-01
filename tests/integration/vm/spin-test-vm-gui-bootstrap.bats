@@ -44,9 +44,15 @@ in_file() {
     [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
-@test "gui-spin: creates work (uid 2000) and work2 (uid 3000) users" {
-    in_file "useradd -m -u 2000" "$GUI_SPIN"
-    in_file "useradd -m -u 3000" "$GUI_SPIN"
+@test "gui-spin: provisions work fixtures as durable active silos" {
+    # The session manager owns the Linux-account creation.  A bare useradd
+    # creates no silos.yaml row, so the first reconcile purges the relay grant
+    # required by the cross-user GUI scenarios.
+    in_file "sm_call CreateSilo" "$GUI_SPIN"
+    in_file '"work:2000" "work2:3000"' "$GUI_SPIN"
+    in_file "sm_call StartSilo" "$GUI_SPIN"
+    in_file "silo_matches" "$GUI_SPIN"
+    in_file "silo_state" "$GUI_SPIN"
 }
 
 @test "gui-spin: enables linger for both work users" {
