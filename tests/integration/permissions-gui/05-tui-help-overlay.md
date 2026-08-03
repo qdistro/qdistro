@@ -32,7 +32,7 @@ sleep 1
 # env reason.
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-tui'
 sleep 3
-$VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s1-main.png
+$VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s1-main.png
 ```
 
 **Assert (main view):**
@@ -56,7 +56,8 @@ $VMEXEC "$VM" 'runuser -u admin -- env DISPLAY=:0 xdotool search --sync --name "
 # `?` = Shift+/ at evdev.
 virsh send-key "$VM" --codeset linux --holdtime 100 KEY_LEFTSHIFT KEY_SLASH
 sleep 1
-$VMGUI "$VM" screenshot /tmp/05-tui-help-overlay-s2-help-open.png
+$VMGUI "$VM" screenshot-fresh /tmp/05-tui-help-overlay-s2-help-open.png \
+  /tmp/05-tui-help-overlay-s1-main.png
 ```
 
 **Assert (help open):**
@@ -76,6 +77,10 @@ and **Navigation:** in that order.
 - Under "Decide current:", both `a / Ctrl+Y` (Approve) and `d / Ctrl+N`
 (Deny) are listed.
 - The last paragraph mentions "mirrored to the GUI app instantly".
+
+The S2 image must differ from S1 before judging modal content. The app header
+contains a live clock, so byte-identical captures separated by this step prove
+the screenshot path was stale rather than proving the `?` binding failed.
 
 ### S3 — Escape dismisses, main view returns intact
 
@@ -105,6 +110,7 @@ $VMEXEC "$VM" 'rm -f /tmp/qterminal-tui.log'
  again as dismiss keys. Only Escape is asserted here to keep the
  scenario narrow. A broader key-coverage scenario is a possible
  follow-up; don't expand this one in-place.
-- If the `?` key produces nothing (modal never appears), do not
- retry with different key names. Report FAIL — a regression in
- the `question_mark` binding is exactly what we want to catch.
+- If the `?` key produces nothing, first prove the TUI is alive and the S2
+ screenshot is fresh (its hash differs from S1). Do not retry with different
+ key names. Once those preconditions hold, report FAIL — a regression in the
+ `question_mark` binding is exactly what we want to catch.

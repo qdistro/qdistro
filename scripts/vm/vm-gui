@@ -4,6 +4,8 @@
 #
 # Usage:
 #   vm-gui <vm> screenshot [file]        Take screenshot (default: /tmp/vm-screenshot.png)
+#   vm-gui <vm> screenshot-fresh <file> [baseline] [attempts]
+#                                         Retry stale/near-black captures (default: 3 tries)
 #   vm-gui <vm> start <command>          Launch a GUI app
 #   vm-gui <vm> activate <title>         Focus window by title (wildcard match)
 #   vm-gui <vm> click <x> <y>           Left-click at coordinates
@@ -221,11 +223,73 @@ qmp_click() {
     qmp_mouse_button "$button" up
 }
 
+# Returns success if FILE is overwhelmingly black. A valid dark-theme TUI
+# frame still has substantial bright text/chrome; a stale black qterminal
+# capture from virsh screenshot measured 12.6% bright pixels. Keep the 15%
+# cutoff deliberately conservative and leave the raw attempts beside OUT for
+# triage rather than silently accepting a suspect frame.
+screenshot_is_black() {
+    local file=$1 bright
+    command -v magick >/dev/null 2>&1 || return 2
+    bright=$(magick "$file" -colorspace gray -threshold 10% \
+        -format '%[fx:mean]' info: 2>/dev/null) || return 2
+    awk -v bright="$bright" 'BEGIN { exit !(bright < 0.15) }'
+}
+
+screenshot_fresh() {
+    local out=$1 baseline=${2:-} attempts=${3:-3}
+    local i candidate hash baseline_hash reason
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || {
+        echo "vm-gui: screenshot-fresh attempts must be a positive integer" >&2
+        return 2
+    }
+    baseline_hash=""
+    if [ -n "$baseline" ]; then
+        [ -f "$baseline" ] || {
+            echo "vm-gui: screenshot-fresh baseline does not exist: $baseline" >&2
+            return 2
+        }
+        baseline_hash=$(sha256sum "$baseline" | awk '{print $1}')
+    fi
+    for (( i=1; i<=attempts; i++ )); do
+        candidate="${out}.attempt-${i}.png"
+        virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot \
+            "$VM" "$candidate" >/dev/null || return $?
+        reason=""
+        if screenshot_is_black "$candidate"; then
+            reason="near-black"
+        else
+            local black_rc=$?
+            if [ "$black_rc" -ne 1 ]; then
+                echo "vm-gui: cannot analyse screenshot brightness (requires ImageMagick magick)" >&2
+                return "$black_rc"
+            fi
+            hash=$(sha256sum "$candidate" | awk '{print $1}')
+            if [ -n "$baseline_hash" ] && [ "$hash" = "$baseline_hash" ]; then
+                reason="unchanged-baseline"
+            fi
+        fi
+        if [ -z "$reason" ]; then
+            cp "$candidate" "$out"
+            echo "$out"
+            return 0
+        fi
+        echo "vm-gui: screenshot attempt $i/$attempts rejected: $reason ($candidate)" >&2
+        [ "$i" -lt "$attempts" ] && sleep 1
+    done
+    echo "vm-gui: no fresh non-black screenshot after $attempts attempts; attempts retained beside $out" >&2
+    return 1
+}
+
 case "$CMD" in
     screenshot)
         OUT="${1:-/tmp/vm-screenshot.png}"
         virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$OUT" >/dev/null
         echo "$OUT"
+        ;;
+    screenshot-fresh)
+        OUT="${1:?Usage: vm-gui <vm> screenshot-fresh <file> [baseline] [attempts]}"
+        screenshot_fresh "$OUT" "${2:-}" "${3:-3}"
         ;;
     start)
         APP="$*"

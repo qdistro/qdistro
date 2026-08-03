@@ -141,6 +141,9 @@ Environment:
                             qdlocker, qdwin-noctalia, and tier-4/5 GUI
                             scenarios are recorded as intentional skips.
                             `qci gui-admin` sets this automatically.
+  QCI_XWAYLAND_E2E=1        Opt into qterminal/Textual scenarios that depend on
+                            XWayland focus and framebuffer capture. They skip
+                            by default in the normal GUI/full lane.
                             Without this, disposable `qci gui` provisions a
                             separate qdwin-profile VM for qdwin-dependent rows.
   QDWIN_IMG_DIR             libvirt image directory, default

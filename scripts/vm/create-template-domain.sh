@@ -75,7 +75,7 @@ else
     # builds that surface it.
     QEMU_CMDLINE_XML="  <qemu:commandline>
     <qemu:arg value='-device'/>
-    <qemu:arg value='virtio-gpu-pci,max_outputs=1,bus=pci.0,addr=0x10'/>
+    <qemu:arg value='virtio-gpu-pci,max_outputs=1,hostmem=134217728,max_hostmem=134217728,bus=pci.0,addr=0x10'/>
   </qemu:commandline>"
     DOMAIN_NS=" xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'"
 fi

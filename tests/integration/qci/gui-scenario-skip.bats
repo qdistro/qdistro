@@ -32,6 +32,25 @@ setup() {
     source "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
 
+@test "gui XWayland lane: qterminal TUI scenarios skip unless explicitly opted in" {
+    run gui_scenario_xwayland_skip_reason \
+        "qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md" 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"QCI_XWAYLAND_E2E=1"* ]]
+
+    run gui_scenario_xwayland_skip_reason \
+        "qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md" 1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gui XWayland lane: native GUI scenarios remain enabled" {
+    run gui_scenario_xwayland_skip_reason \
+        "qdistro/tests/integration/permissions-gui/04-qt-admin-app-approve.md" 0
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 # All outer-stack capabilities present (a fully provisioned tier-4/5 GUI VM).
 reason_full_stack() {
     local rel=$1

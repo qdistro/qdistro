@@ -313,6 +313,14 @@ screenshot and the broker state disagree, the broker state wins —
 note the screenshot staleness in your justification and decide from
 the broker.
 
+For visual-only assertions such as a Textual modal appearing, also verify that
+the post-action capture is fresh before interpreting it: hash the baseline and
+post-action PNGs and reject byte-identical captures as **invalid evidence**.
+The admin TUI header has a live clock, so a capture after the scenario's normal
+one-second wait should not be byte-identical to the baseline. An identical PNG
+does not prove an input binding failed; it proves the capture path did not
+produce a new frame.
+
 ## Running a scenario
 
 1. Pick the scenario file from the argument (e.g.

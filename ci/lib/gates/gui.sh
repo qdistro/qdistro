@@ -1169,6 +1169,29 @@ gui_scenario_app_deps_skip_reason() {
     return 0
 }
 
+# qterminal/Textual scenarios traverse the legacy XWayland presentation and
+# focus path. They are useful periodic desktop-integration coverage, but are
+# not part of the supported blocking GUI surface: virsh framebuffer captures
+# and X11 focus are independently flaky on the labwc template. Keep the
+# scenarios available in an explicit opt-in lane rather than deleting them.
+#
+# Args: rel xwayland_optin
+gui_scenario_xwayland_skip_reason() {
+    local rel=$1 xwayland_optin=${2:-0}
+    [ "$xwayland_optin" = 1 ] && return 0
+    case "$rel" in
+        qdistro/tests/integration/permissions-gui/01-tui-approver-visual.md|\
+        qdistro/tests/integration/permissions-gui/02-tui-scope-picker.md|\
+        qdistro/tests/integration/permissions-gui/05-tui-help-overlay.md|\
+        qdistro/tests/integration/permissions-gui/09-tui-broker-offline.md|\
+        qdistro/tests/integration/permissions-gui/35-tui-and-qt-concurrent.md|\
+        qdistro/tests/integration/permissions-gui/40-tui-survives-broker-restart.md|\
+        qdistro/tests/integration/permissions-gui/48-qsu-tui-argv-rendering.md)
+            printf '%s\n' "XWayland/qterminal E2E is opt-in (set QCI_XWAYLAND_E2E=1 for the dedicated desktop-integration lane)" ;;
+    esac
+    return 0
+}
+
 # Tier-4/5 base-image opt-in skip is handled SEPARATELY by
 # gui_scenario_tier_base_skip_reason (above) so it can run BEFORE the
 # qdwin-routing bypass in the dispatch loop; this function stays purely about
@@ -1489,12 +1512,15 @@ gate_gui() {
         # content, in EVERY path (this runs before the qdwin-routing bypass below
         # so routing qdwin scenarios to the qdwin profile doesn't unleash them as
         # agent ERRORs). Opt into a legacy lane with QCI_GUI_RUN_LEGACY_QDWIN_MD=1.
-        local tier_base_skip app_deps_skip
+        local tier_base_skip app_deps_skip xwayland_skip
         tier_base_skip=$(gui_scenario_tier_base_skip_reason "$rel" \
             "$tier5_base" "$tier4_base" "$tier5_optin" "$tier4_optin")
         app_deps_skip=$(gui_scenario_app_deps_skip_reason "$rel" "$app_deps")
+        xwayland_skip=$(gui_scenario_xwayland_skip_reason "$rel" "${QCI_XWAYLAND_E2E:-0}")
         if [ "${QCI_GUI_RUN_LEGACY_QDWIN_MD:-0}" != 1 ] && gui_scenario_uses_legacy_ctrl "$scenario"; then
             skip_reason="legacy qdshell.py ctrl-socket scenario not supported by the Quickshell qdshell session"
+        elif [ -n "$xwayland_skip" ]; then
+            skip_reason="$xwayland_skip"
         elif [ -n "$tier_base_skip" ]; then
             # Opt-in tier-4/5 base image absent (and not opted in): clean SKIP.
             # Runs BEFORE the qdwin-routing bypass below so it actually fires for
