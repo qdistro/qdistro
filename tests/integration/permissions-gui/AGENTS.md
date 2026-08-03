@@ -64,9 +64,10 @@ hides a real failure. Wait for the SAME condition your assertion checks; never
  - `${QDISTRO_REPO}/scripts/vm/vm-exec <vm> '<cmd>'`
  runs shell as root in VM via qemu-guest-agent.
  - `${QDISTRO_REPO}/scripts/vm/vm-gui <vm> ...`
- `start`, `screenshot [file]`, `click x y`, `type <text>`,
- `key <keysym>` — implemented via virsh screenshot + xdotool in
- XWayland (`DISPLAY=:0` XWayland is available on the GUI harness).
+ `start`, `screenshot [file]`, `click-preview x y [label]`,
+ `click-confirm <manifest>`, `click x y`, `type <text>`, `key <keysym>`.
+ Screenshots use virsh; raw pointer clicks use QEMU input events; window
+ activation and some keyboard fallbacks use xdotool in XWayland (`DISPLAY=:0`).
 - VM user password is `Pa_ssw0rd45` for `admin` and `work`.
 
 ## Hard-learned pitfalls (read before running commands)
@@ -144,11 +145,8 @@ hides a real failure. Wait for the SAME condition your assertion checks; never
  rely on it; `virsh send-key` is the portable path.
 
 3a. **Keyboard navigation via `virsh send-key` is the BLESSED input
- path.** Mouse-click delivery to Qt/XWayland windows is *not*
- reliable on this XWayland template (see 3b for why and the
- history). Unless a scenario's whole point is to exercise the mouse
- (06-qt-admin-app-mouse.md), drive every interaction with the
- keyboard:
+ path.** Unless a scenario explicitly exercises the pointer
+ (06-qt-admin-app-mouse.md), drive every interaction with the keyboard:
  - Modifier chords (`Ctrl+Y`, `Ctrl+N`): `virsh send-key "$VM"
  --codeset linux KEY_LEFTCTRL KEY_Y`.
  - Plain keys / arrows / Tab / Escape: `virsh send-key "$VM"
@@ -163,23 +161,13 @@ hides a real failure. Wait for the SAME condition your assertion checks; never
  template; do not introduce new scenarios that depend on pixel
  clicks.
 
-3b. **Mouse-click scenarios describe targets by visible text, not
- pixels.** Mouse clicks are PLATFORM-BLOCKED on this template —
- both `vm-gui click X Y` and direct `xdotool mousemove…click` fail
- to reach Qt XWayland windows on some compositor builds (the compositor may not
- synchronise pointer events into XWayland's focus the way the Qt
- windows expect). 06-qt-admin-app-mouse.md is therefore the *only*
- scenario that legitimately uses the mouse, and it is expected to
- stay platform-blocked until this harness has working XWayland
- pointer delivery is available; treat its mouse steps as a known
- ERROR-on-this-template, not a regression. For every other
- scenario use the keyboard path in 3a.
-
- When a scenario nonetheless describes a click target by visible
- text — `click Approve`, `click the "1 hour" radio`, `click OK` —
- and you are on a template where clicks DO work, the runner's job
- is:
- 1. Take a fresh screenshot after the window is focused.
+3b. **Every model-targeted mouse click uses a preview/confirm handshake.**
+ Direct `xdotool mousemove…click` remains unreliable for Qt XWayland windows
+ because X11 focus can disagree with the compositor's Wayland seat focus.
+ `vm-gui click` uses the better QEMU virtual-pointer path, but a model can still
+ choose the wrong coordinate or reason from a stale frame. Visual runners MUST
+ NOT invoke either raw path directly. Use this sequence:
+ 1. Activate the intended window and take a fresh screenshot.
  2. Extract text + bounding boxes from the screenshot. A
  vision-capable LLM agent can read text off the PNG
  directly; otherwise run `tesseract` (once installed —
@@ -193,11 +181,25 @@ hides a real failure. Wait for the SAME condition your assertion checks; never
  names. If the text is a label beside a control (radios,
  checkboxes), the clickable glyph sits ~15 pixels to the
  left of the label at the label's vertical midpoint —
- click there, not on the label itself.
+ target that glyph, not the label itself.
  4. For buttons (`Approve` / `Deny` / `OK` / `Cancel`), click
  the center of the text's bounding box; Qt buttons are
  hit-targets larger than their label.
- 5. Post-click screenshot; verify state via OCR again (the
+ 5. Run `$VMGUI "$VM" click-preview X Y "exact visible label"`. This command
+ moves the real QEMU pointer to `(x,y)` without a button press, waits for display
+ settlement, then writes a raw screenshot, a full screenshot with a red
+ ring/crosshair and printed `(x,y)`, a 3x zoomed crop, a preview manifest, and a
+ `clicks.tsv` row under `$QCI_GUI_ARTIFACT_DIR/click-targets/`. It does NOT click.
+ 6. Read BOTH the annotated full screenshot and zoom. When the renderer captures
+ the real cursor, verify that it aligns with the ring; some hardware cursor
+ planes are absent from virsh screenshots, so cursor invisibility is not a
+ failure. If the ring is not on the exact target, run another `click-preview`
+ with corrected coordinates. Do not exploratory-click while adjusting.
+ 7. Only after the marked location is visibly correct, run
+ `$VMGUI "$VM" click-confirm <preview-manifest>`. It clicks the exact stored
+ coordinates, rejects duplicate confirmation, logs the timestamp/coordinates,
+ and captures the post-click screenshot.
+ 8. Verify state via OCR and structured application evidence (the
  expected text disappeared, a new label appeared, etc.).
  **Never hard-code pixel coordinates in a scenario.** Qt
  font/DPI/theme drift invalidates pixel offsets across clones;
@@ -423,7 +425,7 @@ GUI scenario end-to-end against a live VM and return a PASS/FAIL report.
 ## Orientation — READ FIRST
 Read ${QDISTRO_REPO}/tests/integration/permissions-gui/AGENTS.md top to bottom.
 Internalise (modifier-key chords via `virsh send-key`), (OCR-first
-click targeting), (base64 wrapping for scripts with quotes).
+click preview + visual confirmation), (base64 wrapping for scripts with quotes).
 
 ## VM
 VMNAME=<vm>
@@ -434,7 +436,10 @@ anything the runner should expect to find>
 ## Tools
 - ${QDISTRO_REPO}/scripts/vm/{vm-exec,vm-gui} — absolute paths.
 - vm-gui <VM> screenshot /tmp/<name>.png then Read the PNG (vision-capable).
-- vm-gui <VM> click X Y — OCR the label, click its bounding-box center.
+- vm-gui <VM> click-preview X Y "label" — moves without clicking; Read the
+  annotated full image + zoom and confirm cursor/ring alignment when visible.
+- vm-gui <VM> click-confirm <manifest> — only after confirming the red ring.
+- Never use raw `vm-gui click X Y` or `xdotool click` for model-targeted input.
 - virsh send-key <VM> --codeset linux KEY_... — modifier chords.
 - Base64 scripts with embedded quotes.
 

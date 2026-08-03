@@ -8,7 +8,7 @@ and the admin app's read-only **Workflows** tab.
 ## Shared harness — read this first
 
 The orchestrator/runner split, the `scripts/vm/{vm-exec,vm-gui}` tooling,
-the base64-wrapping rule for quoted scripts, OCR-first click targeting,
+the base64-wrapping rule for quoted scripts, OCR-first click preview/confirmation,
 and `virsh send-key` for modifier chords are **identical** to the
 permissions-gui suite. Read
 `tests/integration/permissions-gui/AGENTS.md` top to bottom before running
@@ -72,7 +72,8 @@ broker start or on a reload.
    `name | trigger | steps | needs | description`; the bottom "Recent runs"
    table is `run_id | workflow | state | started | finished | error`. A
    `Refresh` button re-queries `ListWorkflows`/`ListWorkflowRuns`. Activate
-   the tab by OCR-clicking the `Workflows` tab label, then screenshot.
+   the tab by locating the `Workflows` label, previewing the marked target, and
+   confirming that click per the shared permissions-gui contract; then screenshot.
 
 ## Teardown hard rule
 

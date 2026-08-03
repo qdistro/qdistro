@@ -261,6 +261,25 @@ Rules:
   sockets unavailable to this agent process.
 - Save screenshots, OCR output, command logs, and notes under:
   \`$artifact_dir/\`
+- For every model-targeted mouse click, use the two-phase command-line workflow;
+  never call raw \`vm-gui click X Y\` or \`xdotool click\` directly:
+  1. Activate the target window and run
+     \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" click-preview X Y "visible target label"\`.
+     This moves the real VM pointer to (X,Y) without pressing a button, waits,
+     then captures the evidence.
+  2. Read BOTH ImageMagick outputs named by the command: the full annotated
+     screenshot and the zoomed crop. Confirm that the red ring, crosshair, and
+     printed coordinates land on the intended control. When the real cursor is
+     visible in the capture, it must align with the ring; cursor invisibility is
+     acceptable on renderers that use a hardware cursor plane. If targeting is
+     wrong, generate another preview with corrected coordinates. A preview moves
+     the pointer but never clicks.
+  3. Only after visual confirmation, run
+     \`$QDISTRO_REPO/scripts/vm/vm-gui "\$VMNAME" click-confirm <preview-manifest>\`.
+     This clicks the exact
+     coordinates stored in the reviewed manifest and captures the post-click
+     screenshot. All previews, coordinates, timestamps, and confirmations are
+     logged automatically under \`$artifact_dir/click-targets/\`.
 - Before returning, write \`$artifact_dir/status.txt\`
   containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - Use VMNAME=$vm.
@@ -895,7 +914,7 @@ gui_job_count() {
 # timing, then release the VM. Self-contained for backgrounded pool execution.
 # Returns 0 on pass/skip, EXIT_GUI on failure, EXIT_VM_PROVISION if no VM.
 gui_run_scenario() {
-    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name lane
+    local scenario=$1 provided=${2:-} rel vm prompt log_path status agent_rc frc=0 own=0 vm_live=1 t0 t1 t2 ta0 ta1 gate_name lane adir
     rel=$(gui_scenario_rel "$scenario")
     # Scheduling lane for the attempt ledger + correlated-burst detector: a qdwin
     # scenario runs on the heavier gui-qdwin profile, everything else on gui-admin.
@@ -919,9 +938,10 @@ gui_run_scenario() {
     t1=$(date +%s)
     local slug scratch
     slug=$(safe_name "$rel")
+    adir="$RDIR/gui/$slug"
     prompt="$RDIR/agent-notes/$slug.prompt.md"
     log_path="$RDIR/gui/$slug.agent.log"
-    mkdir -p "$(dirname "$log_path")"
+    mkdir -p "$(dirname "$log_path")" "$adir"
     # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
     # shared session VM). Passed to the agent's env at run_agent_command so a
     # scenario routes scratch here instead of a collision-prone fixed /tmp path.
@@ -940,12 +960,11 @@ gui_run_scenario() {
     # right disposable VM deterministically, instead of relying on the agent to
     # set it from the prompt (or a racy `virsh list | head` fallback).
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
+        QCI_GUI_ARTIFACT_DIR="$adir" \
         run_agent_command "$prompt" "$log_path"
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
-    local adir
-    adir="$RDIR/gui/$(safe_name "$rel")"
     status=$(agent_artifact_status "$adir" "$log_path")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
@@ -1032,6 +1051,7 @@ gui_run_scenario() {
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
+                    QCI_GUI_ARTIFACT_DIR="$adirN" \
                     run_agent_command "$prompt" "$logN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end

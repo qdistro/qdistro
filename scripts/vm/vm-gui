@@ -8,6 +8,9 @@
 #                                         Retry stale/near-black captures (default: 3 tries)
 #   vm-gui <vm> start <command>          Launch a GUI app
 #   vm-gui <vm> activate <title>         Focus window by title (wildcard match)
+#   vm-gui <vm> click-preview <x> <y> [label]
+#                                         Move pointer; save raw/marked/zoom review images
+#   vm-gui <vm> click-confirm <manifest> Click the exact reviewed coordinates
 #   vm-gui <vm> click <x> <y>           Left-click at coordinates
 #   vm-gui <vm> rightclick <x> <y>      Right-click at coordinates
 #   vm-gui <vm> doubleclick <x> <y>     Double-click at coordinates
@@ -223,6 +226,232 @@ qmp_click() {
     qmp_mouse_button "$button" up
 }
 
+click_artifact_dir() {
+    local root=${QCI_GUI_ARTIFACT_DIR:-}
+    [ -n "$root" ] || {
+        echo "vm-gui: QCI_GUI_ARTIFACT_DIR must name the scenario artifact directory" >&2
+        return 2
+    }
+    mkdir -p "$root/click-targets"
+    printf '%s\n' "$root/click-targets"
+}
+
+click_log_init() {
+    local log=$1
+    if [ ! -e "$log" ]; then
+        printf 'timestamp_utc\tpreview_id\tphase\tvm\tx\ty\twidth\theight\tlabel\traw\tannotated\tzoom\tpost\n' > "$log"
+    fi
+}
+
+click_log_row() {
+    local log=$1 preview_id=$2 phase=$3 x=$4 y=$5 width=$6 height=$7
+    local label=$8 raw=$9 annotated=${10} zoom=${11} post=${12:-}
+    label=${label//$'\t'/ }
+    label=${label//$'\r'/ }
+    label=${label//$'\n'/ }
+    click_log_init "$log"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$preview_id" "$phase" "$VM" \
+        "$x" "$y" "$width" "$height" "$label" "$raw" \
+        "$annotated" "$zoom" "$post" >> "$log"
+}
+
+click_next_id() {
+    local dir=$1 n=1 id
+    while :; do
+        id=$(printf 'click-%03d' "$n")
+        [ -e "$dir/$id.preview" ] || {
+            printf '%s\n' "$id"
+            return 0
+        }
+        n=$((n + 1))
+    done
+}
+
+click_validate_coordinate() {
+    local name=$1 value=$2 limit=$3
+    [[ "$value" =~ ^[0-9]+$ ]] || {
+        echo "vm-gui: $name must be a non-negative integer (got: $value)" >&2
+        return 2
+    }
+    [ "$value" -lt "$limit" ] || {
+        echo "vm-gui: $name=$value is outside screenshot bounds 0..$((limit - 1))" >&2
+        return 2
+    }
+}
+
+click_image_size() {
+    local image=$1
+    if command -v magick >/dev/null 2>&1; then
+        magick identify -format '%w %h\n' "$image"
+    elif command -v identify >/dev/null 2>&1; then
+        identify -format '%w %h\n' "$image"
+    else
+        echo "vm-gui: ImageMagick identify is required for click previews" >&2
+        return 2
+    fi
+}
+
+click_annotate_image() {
+    local raw=$1 annotated=$2 zoom=$3 x=$4 y=$5 width=$6 height=$7
+    local radius=16 tick=24 label_w=136 label_h=28 label_x label_y
+    local crop_w=180 crop_h=140 crop_x crop_y image_cmd
+    if command -v magick >/dev/null 2>&1; then
+        image_cmd=magick
+    elif command -v convert >/dev/null 2>&1; then
+        image_cmd=convert
+    else
+        echo "vm-gui: ImageMagick magick/convert is required for click previews" >&2
+        return 2
+    fi
+
+    if [ $((x + label_w + 24)) -lt "$width" ]; then label_x=$((x + 22)); else label_x=$((x - label_w - 22)); fi
+    if [ "$label_x" -lt 2 ]; then label_x=2; fi
+    if [ "$y" -gt 42 ]; then label_y=$((y - 36)); else label_y=$((y + 12)); fi
+    if [ $((label_y + label_h)) -ge "$height" ]; then label_y=$((height - label_h - 2)); fi
+
+    "$image_cmd" "$raw" \
+        -stroke '#ff1744' -strokewidth 4 -fill none \
+        -draw "circle $x,$y $((x + radius)),$y" \
+        -draw "line $((x - tick)),$y $((x - radius - 3)),$y line $((x + radius + 3)),$y $((x + tick)),$y" \
+        -draw "line $x,$((y - tick)) $x,$((y - radius - 3)) line $x,$((y + radius + 3)) $x,$((y + tick))" \
+        -fill 'rgba(0,0,0,0.78)' -stroke '#ff1744' -strokewidth 1 \
+        -draw "roundrectangle $label_x,$label_y $((label_x + label_w)),$((label_y + label_h)) 5,5" \
+        -fill white -stroke none -font DejaVu-Sans -pointsize 16 \
+        -annotate "+$((label_x + 8))+$((label_y + 20))" "x=$x  y=$y" \
+        "$annotated"
+
+    [ "$crop_w" -le "$width" ] || crop_w=$width
+    [ "$crop_h" -le "$height" ] || crop_h=$height
+    crop_x=$((x - crop_w / 2)); crop_y=$((y - crop_h / 2))
+    [ "$crop_x" -ge 0 ] || crop_x=0
+    [ "$crop_y" -ge 0 ] || crop_y=0
+    [ $((crop_x + crop_w)) -le "$width" ] || crop_x=$((width - crop_w))
+    [ $((crop_y + crop_h)) -le "$height" ] || crop_y=$((height - crop_h))
+    "$image_cmd" "$annotated" -crop "${crop_w}x${crop_h}+${crop_x}+${crop_y}" \
+        +repage -filter point -resize 300% "$zoom"
+}
+
+click_manifest_value() {
+    local manifest=$1 key=$2
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$manifest"
+}
+
+click_preview() {
+    local x=$1 y=$2 label=${3:-} dir id raw annotated zoom manifest log
+    local width height expected_w=${QDWIN_SCREEN_W:-1280} expected_h=${QDWIN_SCREEN_H:-800}
+    local label_b64 created hash
+    dir=$(click_artifact_dir) || return $?
+    id=$(click_next_id "$dir")
+    raw="$dir/$id.raw.png"
+    annotated="$dir/$id.annotated.png"
+    zoom="$dir/$id.zoom.png"
+    manifest="$dir/$id.preview"
+    log="$dir/clicks.tsv"
+
+    # Validate against the same geometry qmp_mouse_move uses BEFORE injecting
+    # even a move event. Preview deliberately emits no button event: it parks the
+    # real guest cursor at the proposal so the visual agent can compare cursor,
+    # ImageMagick ring, and widget target before authorising click-confirm.
+    click_validate_coordinate x "$x" "$expected_w" || return $?
+    click_validate_coordinate y "$y" "$expected_h" || return $?
+    qmp_mouse_move "$x" "$y"
+    sleep 0.3
+    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$raw" >/dev/null
+    read -r width height < <(click_image_size "$raw")
+    [ -n "$width" ] && [ -n "$height" ] || return 2
+    if [ "$width" -ne "$expected_w" ] || [ "$height" -ne "$expected_h" ]; then
+        echo "vm-gui: screenshot is ${width}x${height}, but QMP click mapping expects ${expected_w}x${expected_h}" >&2
+        echo "vm-gui: set QDWIN_SCREEN_W/H correctly before previewing a click" >&2
+        return 2
+    fi
+    click_validate_coordinate x "$x" "$width" || return $?
+    click_validate_coordinate y "$y" "$height" || return $?
+    click_annotate_image "$raw" "$annotated" "$zoom" "$x" "$y" "$width" "$height"
+    label_b64=$(printf '%s' "$label" | base64 -w0)
+    created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    hash=$(sha256sum "$raw" | awk '{print $1}')
+    {
+        printf 'preview_version=1\n'
+        printf 'preview_id=%s\n' "$id"
+        printf 'vm=%s\n' "$VM"
+        printf 'x=%s\n' "$x"
+        printf 'y=%s\n' "$y"
+        printf 'width=%s\n' "$width"
+        printf 'height=%s\n' "$height"
+        printf 'label_b64=%s\n' "$label_b64"
+        printf 'raw=%s\n' "$raw"
+        printf 'annotated=%s\n' "$annotated"
+        printf 'zoom=%s\n' "$zoom"
+        printf 'raw_sha256=%s\n' "$hash"
+        printf 'pointer_moved_before_capture=1\n'
+        printf 'button_events_before_confirmation=0\n'
+        printf 'created_utc=%s\n' "$created"
+    } > "$manifest"
+    click_log_row "$log" "$id" preview "$x" "$y" "$width" "$height" \
+        "$label" "$raw" "$annotated" "$zoom" ""
+
+    echo "click preview $id: x=$x y=$y"
+    echo "pointer moved without a button press before capture"
+    echo "annotated: $annotated"
+    echo "zoom: $zoom"
+    echo "Review both images. If visible, the real cursor must align with the ring."
+    echo "If the ring is correct, confirm with:"
+    echo "  $0 $VM click-confirm $manifest"
+    printf '%s\n' "$manifest"
+}
+
+click_confirm() {
+    local manifest=$1 dir manifest_real expected_dir preview_id manifest_vm x y width height
+    local label_b64 label raw annotated zoom post log confirmed
+    [ -f "$manifest" ] || { echo "vm-gui: click preview manifest not found: $manifest" >&2; return 2; }
+    dir=$(click_artifact_dir) || return $?
+    manifest_real=$(realpath "$manifest")
+    expected_dir=$(realpath "$dir")
+    case "$manifest_real" in
+        "$expected_dir"/*.preview) ;;
+        *) echo "vm-gui: refusing click manifest outside $expected_dir: $manifest_real" >&2; return 2 ;;
+    esac
+    preview_id=$(click_manifest_value "$manifest_real" preview_id)
+    manifest_vm=$(click_manifest_value "$manifest_real" vm)
+    x=$(click_manifest_value "$manifest_real" x)
+    y=$(click_manifest_value "$manifest_real" y)
+    width=$(click_manifest_value "$manifest_real" width)
+    height=$(click_manifest_value "$manifest_real" height)
+    label_b64=$(click_manifest_value "$manifest_real" label_b64)
+    label=$(printf '%s' "$label_b64" | base64 -d 2>/dev/null) || label=""
+    raw=$(click_manifest_value "$manifest_real" raw)
+    annotated=$(click_manifest_value "$manifest_real" annotated)
+    zoom=$(click_manifest_value "$manifest_real" zoom)
+    [ "$manifest_vm" = "$VM" ] || {
+        echo "vm-gui: preview belongs to VM $manifest_vm, not $VM" >&2
+        return 2
+    }
+    click_validate_coordinate x "$x" "$width" || return $?
+    click_validate_coordinate y "$y" "$height" || return $?
+    [ -f "$annotated" ] && [ -f "$zoom" ] || {
+        echo "vm-gui: reviewed preview images are missing for $preview_id" >&2
+        return 2
+    }
+    confirmed="$dir/$preview_id.confirmed"
+    [ ! -e "$confirmed" ] || {
+        echo "vm-gui: click preview $preview_id was already confirmed" >&2
+        return 2
+    }
+
+    qmp_click "$x" "$y" left
+    sleep 0.3
+    post="$dir/$preview_id.post.png"
+    virsh -c "${LIBVIRT_DEFAULT_URI:-qemu:///session}" screenshot "$VM" "$post" >/dev/null
+    printf 'confirmed_utc=%s\nx=%s\ny=%s\npost=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$x" "$y" "$post" > "$confirmed"
+    log="$dir/clicks.tsv"
+    click_log_row "$log" "$preview_id" confirmed "$x" "$y" "$width" "$height" \
+        "$label" "$raw" "$annotated" "$zoom" "$post"
+    echo "confirmed click $preview_id: x=$x y=$y"
+    echo "post-click: $post"
+}
+
 # Returns success if FILE is overwhelmingly black. A valid dark-theme TUI
 # frame still has substantial bright text/chrome; a stale black qterminal
 # capture from virsh screenshot measured 12.6% bright pixels. Keep the 15%
@@ -300,6 +529,16 @@ case "$CMD" in
         TITLE="$*"
         run_as_jan "wid=\$(xdotool search --onlyvisible --name \".*${TITLE}.*\" | head -n1); [ -n \"\$wid\" ] && xdotool windowactivate --sync \"\$wid\" windowraise \"\$wid\""
         sleep 0.5
+        ;;
+    click-preview)
+        X="${1:?Usage: vm-gui <vm> click-preview <x> <y> [label]}"
+        Y="${2:?Usage: vm-gui <vm> click-preview <x> <y> [label]}"
+        shift 2
+        click_preview "$X" "$Y" "$*"
+        ;;
+    click-confirm)
+        MANIFEST="${1:?Usage: vm-gui <vm> click-confirm <preview-manifest>}"
+        click_confirm "$MANIFEST"
         ;;
     click)
         X="${1:?Usage: vm-gui <vm> click <x> <y>}"
@@ -429,7 +668,7 @@ case "$CMD" in
         ;;
     *)
         echo "Unknown command: $CMD" >&2
-        echo "Commands: screenshot, start, activate, click, rightclick, doubleclick, drag, scroll, type, key, windowsize, windowmove, wait" >&2
+        echo "Commands: screenshot, start, activate, click-preview, click-confirm, click, rightclick, doubleclick, drag, scroll, type, key, windowsize, windowmove, wait" >&2
         exit 1
         ;;
 esac

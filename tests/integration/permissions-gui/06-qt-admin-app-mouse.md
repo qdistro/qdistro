@@ -13,9 +13,9 @@ keyboard scenario but break this one. Both paths must stay green.
 
 This scenario uses intent-level mouse instructions (AGENTS.md ).
 The runner takes screenshots, visually locates the target widgets,
-and issues `vm-gui click` with coordinates it computes — no
-hardcoded pixel offsets, portable across Qt font / DPI / theme
-changes.
+generates an ImageMagick `click-preview` with the coordinates it computes,
+visually confirms the moved cursor and red ring, then issues `click-confirm` —
+no hardcoded pixel offsets, portable across Qt font / DPI / theme changes.
 
 ## Setup
 
@@ -58,7 +58,8 @@ sleep 2
 # Runner: read /tmp/06-qt-admin-app-mouse-s1a-baseline.png, locate
 # the "1 hour" radio row in the Scope group (second radio, between
 # "Just this once" and "24 hours"), compute the click point on the
-# radio's bullet or label, then `vm-gui click X Y`. See AGENTS.md .
+# radio's bullet or label, then use `click-preview` / `click-confirm`.
+# See AGENTS.md.
 B64=$(base64 -w0 <<'EOF'
 #!/bin/bash
 runuser -u admin -- env DISPLAY=:0 \
@@ -68,8 +69,9 @@ EOF
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 $VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s1a-baseline.png
 
-# >>> Runner: take over here. Read the baseline screenshot, click
-# the "1 hour" radio, then capture:
+# >>> Runner: take over here. Read the baseline screenshot, preview the
+# proposed target, visually confirm its red ring, click-confirm the "1 hour"
+# radio, then capture:
 $VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s1b-1h-selected.png
 ```
 
@@ -95,8 +97,8 @@ EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
 
-# >>> Runner: using the s1b screenshot (or a fresh one if you prefer),
-# locate the "Approve" button, click it, then capture:
+# >>> Runner: using a fresh screenshot, locate the "Approve" button, generate
+# and visually confirm its marked preview, click-confirm it, then capture:
 $VMGUI "$VM" screenshot /tmp/06-qt-admin-app-mouse-s2-afterapprove.png
 
 $VMEXEC "$VM" 'wait $(cat /tmp/work1.pid) 2>/dev/null; cat /tmp/work1.log'
@@ -150,8 +152,9 @@ $VMEXEC "$VM" 'rm -f /tmp/work1.log /tmp/work1.pid /tmp/work2.log /tmp/work2.pid
  keyboard-driven equivalent with the same S3 cache-hit assertion.
  If both pass, the approve + cache path is covered for both
  interaction modes.
-- If S1 or S2 click misses, take a second screenshot to see where
- the cursor landed and adjust once. If still wrong, FAIL with the
- coordinates you used — two tries then stop.
+- If an S1 or S2 preview ring misses its target, adjust once and generate a
+ second preview without clicking the first. If the second preview is still
+ wrong, FAIL with both annotated images and coordinate rows — two tries then
+ stop.
 - The S3 cache-hit precondition is S2 having written a 1-hour row.
  If S2 FAILs, S3 will fail too; report both honestly.
