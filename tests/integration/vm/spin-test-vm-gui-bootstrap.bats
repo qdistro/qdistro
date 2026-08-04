@@ -159,11 +159,13 @@ in_file() {
 
 # --- AGENTS.md ground-truth + input contracts (items 3 + 4) ------------
 
-@test "AGENTS.md: blesses keyboard nav (virsh send-key) as input path" {
+@test "AGENTS.md: blesses keyboard nav and reviewed pointer input paths" {
     [ -f "$AGENTS" ] || { echo "AGENTS.md missing at $AGENTS" >&2; return 1; }
     in_file "virsh send-key" "$AGENTS"
     in_file "BLESSED input" "$AGENTS"
-    in_file "PLATFORM-BLOCKED" "$AGENTS"
+    in_file "click-preview" "$AGENTS"
+    in_file "click-confirm" "$AGENTS"
+    in_file "Every model-targeted mouse click" "$AGENTS"
 }
 
 @test "AGENTS.md: codifies broker-state + stdout as ground truth" {

@@ -297,6 +297,15 @@ reason_full_stack() {
     [[ "$output" == *"legacy qdshell ctrl-socket not available"* ]]
 }
 
+@test "gui run: qdwin app scenarios do not require the legacy ctrl-socket" {
+    # tests/apps uses qdwin-bystander + its own FIFO, not the retired qdshell
+    # control socket. App dependencies are gated separately.
+    run gui_scenario_skip_reason \
+        "qdwin/tests/apps/04-cursor-spam-suppressed.md" 0 1 1 "2222"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "gui skip: qdwin md SKIPs when qdwin lane is disabled" {
     run gui_scenario_skip_reason "qdwin/tests/gui/01-foo.md" 1 1 1 "2222" 1
     [ "$status" -eq 0 ]

@@ -45,6 +45,23 @@ setup() {
     [[ "$output" == *"TIMEOUT"* ]]
 }
 
+@test "await_x11_window: passes when a visible window id is returned" {
+    runuser() { echo 73400327; }
+    export -f runuser
+    run await_x11_window "admin approvals" admin :0 2 1
+    [ "$status" -eq 0 ]
+}
+
+@test "await_x11_window: TIMES OUT loudly when no window maps" {
+    runuser() { echo "xdotool: no matching window"; return 1; }
+    export -f runuser
+    run await_x11_window "admin approvals" admin :0 1 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TIMEOUT"* ]]
+    [[ "$output" == *"visible X11 window matching: admin approvals"* ]]
+    [[ "$output" == *"xdotool: no matching window"* ]]
+}
+
 @test "_await: reports the probe's last observed state on timeout" {
     # A probe that always fails but echoes a diagnostic line.
     probe() { echo "state=degraded"; return 1; }

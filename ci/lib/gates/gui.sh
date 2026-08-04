@@ -1225,7 +1225,7 @@ gui_scenario_skip_reason() {
         return 0
     fi
     case "$rel" in
-        qdwin/tests/gui/[0-9][0-9]-*.md|qdwin/tests/apps/[0-9][0-9]-*.md)
+        qdwin/tests/gui/[0-9][0-9]-*.md)
             [ "$legacy_ctrl" != 1 ] && \
                 printf '%s\n' "legacy qdshell ctrl-socket not available" ;;
         qdistro/tests/integration/permissions-gui/20-tier5-vm-cold-start.md|\

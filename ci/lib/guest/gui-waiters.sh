@@ -70,6 +70,25 @@ await_socket() {
     _await "socket to exist: $path" "$timeout" "$interval" test -S "$path"
 }
 
+# await_x11_window <title-pattern> [user] [display] [timeout] [interval]
+# Wait until xdotool can resolve a visible X11/XWayland window whose title
+# matches <title-pattern>. This is intentionally bounded: `xdotool search
+# --sync` can wait forever when an application crashes before mapping, hiding
+# the useful application log behind an agent-level timeout.
+await_x11_window() {
+    local title=$1 user=${2:-admin} display=${3:-:0}
+    local timeout=${4:-$QCI_AWAIT_TIMEOUT_DEFAULT} interval=${5:-$QCI_AWAIT_INTERVAL_DEFAULT}
+    _await "visible X11 window matching: $title (user $user, display $display)" \
+        "$timeout" "$interval" _probe_x11_window "$title" "$user" "$display"
+}
+_probe_x11_window() {
+    local title=$1 user=$2 display=$3 wid
+    wid=$(runuser -u "$user" -- env DISPLAY="$display" \
+        xdotool search --onlyvisible --name "$title" 2>&1 | head -n1)
+    printf 'window_id=%s' "${wid:-<none>}"
+    [[ "$wid" =~ ^[0-9]+$ ]]
+}
+
 # await_user_unit_active <unit> [user] [timeout] [interval]
 # Wait until a per-user systemd unit reports `active`, queried AS the session
 # user with XDG_RUNTIME_DIR set (so a root caller still reaches the user manager).
