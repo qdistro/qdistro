@@ -175,6 +175,14 @@ def _request_as(claim_uid, claim_pid, claim_exe, argv):
         str(ACTION), _details_for(argv)))
 
 
+# Host suspend/resume thrash under concurrent full-QCI (observed as
+# 30s+ uptime jumps in sibling tier-5 probes) makes a 10s dbus
+# subprocess timeout fire mid-flight even when the broker is healthy.
+# Budget enough to survive one suspend recovery without mis-labelling
+# a timed-out DecideRequest as a scope-policy failure.
+_DBUS_SUBPROC_TIMEOUT_S = 60
+
+
 def _get_pending_ids():
     """GetPending requires admin uid. Run via a setresuid'd subprocess."""
     out = subprocess.run(
@@ -187,7 +195,7 @@ def _get_pending_ids():
          "rows=iface.GetPending(); "
          "import sys,json; "
          "print(json.dumps([int(r['id']) for r in rows]))"],
-        capture_output=True, text=True, timeout=10)
+        capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
     if out.returncode != 0:
         raise RuntimeError(f"GetPending failed: {out.stderr.strip()}")
     return set(json.loads(out.stdout.strip() or "[]"))
@@ -202,7 +210,7 @@ def _decide_as_admin(rid, decision, scope):
          f"'/org/qdistro/AdminBroker1'); "
          f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
          f"iface.DecideRequest({int(rid)}, '{decision}', '{scope}')"],
-        capture_output=True, text=True, timeout=10)
+        capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
     if out.returncode != 0:
         raise RuntimeError(
             f"DecideRequest(rid={rid}, scope={scope!r}) failed: "
@@ -220,7 +228,7 @@ def _revoke_cache_for_uid(uid):
          f"'/org/qdistro/AdminBroker1'); "
          f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
          f"print(iface.RevokeAllForUid({int(uid)}))"],
-        capture_output=True, text=True, timeout=10)
+        capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
 
 
 def _drain_pending_deny():

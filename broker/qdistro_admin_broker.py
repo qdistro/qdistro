@@ -194,6 +194,7 @@ _ADMIN_CONTROL_STDIN_METHODS = frozenset((
     "ListHistory",
     "ListRules",
     "ReloadRules",
+    "RevokeAllForUid",
     "RevokeApproval",
     "SaveRule",
 ))

@@ -706,7 +706,10 @@ setup() {
     # Needs the tier-4 secctx stack + broker + qdshell. Skips cleanly on a
     # minimal bake; fails LOUDLY on the bad path otherwise.
     stage_vm_driver "s110-tier4-waypipe-display.sh"
-    vm_run "curl -fsS -o /tmp/s110.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s110-tier4-waypipe-display.sh && chmod +x /tmp/s110.sh && bash /tmp/s110.sh 2>/dev/null"
+    # Start the broker before the driver (setup() stops it). Keep stderr —
+    # s110 surfaces raw dbus replies on transport flake so we can tell
+    # fail-open (verdict=allow) from NoReply under host suspend thrash.
+    vm_run "systemctl start qdistro-admin-broker.service 2>/dev/null || true; curl -fsS -o /tmp/s110.sh http://10.0.2.2:${QDISTRO_BATS_HTTP_PORT}/s110-tier4-waypipe-display.sh && chmod +x /tmp/s110.sh && bash /tmp/s110.sh"
     assert_success
     if [[ "$output" == *"SKIP:"* ]]; then
         skip "tier-4 secctx stack / wayland-info / dbus-send absent on this VM (opt-in bake)"
