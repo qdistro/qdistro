@@ -30,11 +30,12 @@ is proven here with qnotebook running under two uids.
 VM=${VMNAME:-qdistro-dev-260421-1957}
 VMEXEC=${QDISTRO_REPO}/scripts/vm/vm-exec
 
-# Fresh broker state.
+# Fresh broker state. Do NOT await GetPending here: pending
+# app.send-to:* only appears after a RelayMessage in S2/S4, once both
+# qnotebook instances exist. A pre-launch waiter always times out on a
+# valid empty GetPending (literal agents ERROR; looser agents skip it).
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-source /tmp/qci-gui-waiters.sh
-await_broker_pending_action \
- app.send-to:3000:org.qdistro.Qnotebook.uid3000
+sleep 1
 
 # Ensure both user-relays are up with linger.
 $VMEXEC "$VM" 'loginctl enable-linger work work2'
@@ -59,9 +60,6 @@ B64=$(base64 -w0 <<'EOF'
 set -e
 pkill -u work -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
 pkill -u work2 -f "python3 -m (zim_qt|qnotebook)" 2>/dev/null || true
-source /tmp/qci-gui-waiters.sh
-await_broker_pending_action \
- app.send-to:2000:org.qdistro.Qnotebook.uid2000
 rm -f /home/work/testnb/.zim-qt/lock /home/work2/testnb/.zim-qt/lock
 setsid runuser -u work -- env \
  XDG_RUNTIME_DIR=/run/user/2000 \
@@ -77,10 +75,34 @@ setsid runuser -u work2 -- env \
  PYTHONUNBUFFERED=1 \
  /usr/local/bin/qnotebook /home/work2/testnb \
  </dev/null >/tmp/15-qnb-work2.log 2>&1 &
+# Give both processes a moment to claim their session-bus names.
 sleep 5
 EOF
 )
 $VMEXEC "$VM" "echo $B64 | base64 -d | bash"
+
+# Post-launch readiness: both real receivers visible on the broker.
+# This replaces the bogus pre-launch pending-action waits. If either
+# qnotebook failed to claim its bus name, S1 will still FAIL with the
+# ListReceivers evidence; the poll just avoids a pure startup race.
+ready=0
+for _ in $(seq 1 30); do
+ out=$($VMEXEC "$VM" 'dbus-send --system --print-reply \
+  --dest=org.qdistro.AdminBroker1 \
+  /org/qdistro/AdminBroker1 \
+  org.qdistro.AdminBroker1.ListReceivers' 2>&1) || true
+ if printf '%s' "$out" | grep -q 'org.qdistro.Qnotebook.uid2000' \
+  && printf '%s' "$out" | grep -q 'org.qdistro.Qnotebook.uid3000'; then
+  ready=1
+  break
+ fi
+ sleep 2
+done
+[ "$ready" = 1 ] || {
+ echo "ERROR: setup — ListReceivers never showed both Qnotebook receivers within ~60s"
+ echo "$out"
+ exit 2
+}
 ```
 
 ## Steps
@@ -239,6 +261,9 @@ $VMEXEC "$VM" '
 
 ## Notes for the runner
 
+- Setup must **not** call `await_broker_pending_action` before the
+  qnotebooks launch: `GetPending` is empty until S2/S4 issue
+  `RelayMessage`. Readiness is "both receivers in ListReceivers".
 - If S1 shows only one Qnotebook entry, the other instance died
  before claiming its bus name. Check
  `/tmp/15-qnb-{work,work2}.log` for stack traces. Usually:

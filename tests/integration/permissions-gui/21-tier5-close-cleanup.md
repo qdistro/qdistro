@@ -161,11 +161,18 @@ sleep 1
 $VMGUI "$VM" screenshot /tmp/s21-running.png
 ```
 
-**Assert** (agent-visual): `/tmp/s21-running.png` shows a
-weston-terminal window labelled `[tier5:$VM5]` rendered like a
-normal app window. (The readiness gate above already proved the
-toplevel mapped, so this is now a stable corroboration rather than a
-race against a blind sleep.)
+**Assert** (agent-visual, soft corroboration): `/tmp/s21-running.png`
+shows a weston-terminal (or equivalent terminal) window rendered like
+a normal app window. The readiness gate above already proved the
+toplevel mapped — that is the **hard** S1 gate. Do **not** FAIL solely
+because the window title is a generic client string such as
+`Wayland Terminal`: weston-terminal often keeps its own title and does
+not surface waypipe's `--title-prefix` (`[tier5:$VM5]`) on the
+xdg_toplevel title. The prefix is optional soft evidence when visible
+in the title bar or taskbar; its absence is not a product FAIL when
+`mapped handle=…` was already observed. Hard FAIL S1 only if there is
+no visible terminal window at all despite a mapped journal line
+(screenshot black / empty desktop).
 
 If S1 errors above (no visible toplevel within ~3min — guest never
 ran, died, or never mapped), record ERROR (not FAIL): the close path
