@@ -50,7 +50,7 @@ QDISTRO_PKGS=(
   audit
   libnotify-tools
   greetd
-  podman slirp4netns fuse-overlayfs crun
+  podman passt fuse-overlayfs crun
   # Per-silo netns egress (todo/fable-networking task 3 + Opt 3-A): the
   # session-manager's egress backend shells out to wg (wireguard-tools) for
   # wg: tunnels, nft (nftables) for the per-silo backstop + NAT +

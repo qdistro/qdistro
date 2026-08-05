@@ -89,7 +89,7 @@ systemd qdistro-tier2-silo@<name>.service    qdistro-podapp@<launch-token>.servi
  │   ├─ reads root-owned /run/qdistro/silo-launch/<name>.env
  │   │  (pod apps: /run/qdistro/podapp-launch/<launch-token>.env)
  │   └─ exec env -i TIER2_ROOT_LAUNCHER=1 TIER2_ADMIN_UID=1000
- │              TIER2_SILO=<binding> TIER2_NETWORK=<none|slirp4netns>
+ │              TIER2_SILO=<binding> TIER2_NETWORK=<none|pasta>
  │              (pod apps: TIER2_LAUNCH_TOKEN=<token>, no TIER2_SILO)
  │
  ▼ spawn-tier2.sh

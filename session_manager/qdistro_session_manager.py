@@ -183,7 +183,11 @@ SILO_KINDS = (KIND_TIER3_USER, KIND_TIER2_TEMPLATE)
 # deliberately aligned with the fixed deployment admin uid.
 TIER2_LAUNCH_OWNER_UID = ADMIN_UID
 # Network modes a tier2-template launch may request (maps to TIER2_NETWORK).
-SILO_NETWORK_MODES = ("none", "slirp4netns")
+# pasta is the Podman 6+ rootless egress backend (replaces slirp4netns).
+SILO_NETWORK_MODES = ("none", "pasta")
+# Legacy silos.yaml / launch stanzas still naming slirp4netns are accepted and
+# normalised to pasta so existing rows keep working after the Podman 6 migrate.
+_SILO_NETWORK_LEGACY = {"slirp4netns": "pasta"}
 # Per-silo launch env the daemon writes for the tier-2 launcher unit to read
 # (the unit drops privileges to admin and runs spawn-tier2). Under /run so it
 # is tmpfs-backed and gone on reboot — the daemon rewrites it on each start.
@@ -437,10 +441,16 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
     workload = _tok("workload")
     template_silo = _tok("template_silo")
     network = launch.get("network", "none")
+    if not isinstance(network, str):
+        raise BadArgument(
+            f"tier2-template launch.network must be a string, got {network!r}")
+    # One-release compat: Podman 6 removed slirp4netns; map the legacy name.
+    network = _SILO_NETWORK_LEGACY.get(network, network)
     if network not in SILO_NETWORK_MODES:
         raise BadArgument(
             f"tier2-template launch.network must be one of "
-            f"{SILO_NETWORK_MODES}, got {network!r}")
+            f"{SILO_NETWORK_MODES} (legacy 'slirp4netns' maps to 'pasta'), "
+            f"got {network!r}")
     argv = launch.get("argv", [])
     # PyYAML parses the rendered `argv: [...]` as a real list; the tolerant
     # fallback parser yields the JSON-array text verbatim — normalise both.
@@ -1778,7 +1788,7 @@ class _SystemOps:
 
         Stuck-descendant cleanup: if ``podman rm -f`` TIMES OUT the container may
         still be alive with a stuck descendant tree (a hung container child,
-        conmon, pasta, slirp4netns) holding resources, so the next sweep
+        conmon, pasta) holding resources, so the next sweep
         re-wedges the same way and the resources leak. After a timeout we run a
         bounded, fail-safe ``_cleanup_stuck_descendants`` that SIGKILLs ONLY this
         container's cgroup-verified payload host pids (never an unrelated host
@@ -4843,7 +4853,7 @@ def _silos_yaml_render(
         "#       launch:              # tier2-template only:",
         "#         workload: <str>    #   spawn-tier2 workload (seccomp/image)",
         "#         template_silo: <str>  # TIER2_SILO (binding to resolve)",
-        "#         network: <none|slirp4netns>  # TIER2_NETWORK",
+        "#         network: <none|pasta>  # TIER2_NETWORK (legacy slirp4netns→pasta)",
         "#         argv: [<str>, ...] #   app argv after `--`",
         "#   quarantined_silos:",
         "#     - reason: <str>        # rows preserved but not loaded",

@@ -171,7 +171,7 @@ silo_chromium() {  # silo_chromium <timeout> <ua> <url>  [extra chromium args...
         "$@" --dump-dom "$url"
 }
 
-# Run headless Chromium in a THROWAWAY slirp4netns container off an image digest
+# Run headless Chromium in a THROWAWAY pasta container off an image digest
 # with an EPHEMERAL profile (--entrypoint= bypasses the nested weston). Used for
 # "a fresh login" / "gen A still works" / marker-keyed breakage checks that must
 # not touch the silo profile. Remaining args are URLs visited in order through
@@ -183,7 +183,7 @@ throwaway_chromium() {  # throwaway_chromium <timeout> <image> <ua> <url...steps
     [ -n "${QD_TW_NAME:-}" ] && nameflag=(--name "$QD_TW_NAME")
     local script='export HOME=/tmp/home; mkdir -p "$HOME" /tmp/cr; export XDG_RUNTIME_DIR=/tmp/cr; chmod 700 /tmp/cr; CA=($CA); out=""; for u in "$@"; do out="$(chromium "${CA[@]}" --user-agent="$UA" --user-data-dir=/tmp/home/profile --dump-dom "$u")"; done; printf "%s" "$out"'
     timeout --kill-after=10 "$to" \
-        podman run --rm --network=slirp4netns "${nameflag[@]}" \
+        podman run --rm --network=pasta "${nameflag[@]}" \
         --cap-drop=ALL --security-opt=no-new-privileges --read-only \
         --tmpfs /tmp:rw,exec,size=512m,mode=1777 --shm-size=256m --entrypoint= \
         -e CA="${CHROMIUM_ARGS[*]}" -e UA="$ua" "$image" \
@@ -191,21 +191,29 @@ throwaway_chromium() {  # throwaway_chromium <timeout> <image> <ua> <url...steps
 }
 
 # --- login-site reachability --------------------------------------------
-# With the provision-silo podman shim adding allow_host_loopback, a
-# `--network=slirp4netns` container reaches the VM host (where the login site
-# binds 0.0.0.0) at the slirp gateway 10.0.2.2.
+# With the provision-silo podman shim adding pasta host-map options, a
+# `--network=pasta` container reaches the VM host (where the login site
+# binds 0.0.0.0) at 10.0.2.2 (mapped via pasta --map-host-loopback).
 BASE_HOST="10.0.2.2"
 base_url() { echo "http://$BASE_HOST:$LOGIN_PORT"; }
 
-# Assert the running silo's egress (plain slirp4netns + the shim) can reach the
-# login site. FAIL LOUD if not (tests/AGENTS.md: a missing prerequisite is a
+# Assert the running silo's egress (plain pasta + the nested-VM shim) can reach
+# the login site. FAIL LOUD if not (tests/AGENTS.md: a missing prerequisite is a
 # failure, not a skip) — a throwaway curl off the genA image (which ships curl).
+# Stderr is captured so a podman refusal (e.g. missing backend) surfaces on fail.
 assert_site_reachable() {  # assert_site_reachable <image> <label>
-    local image="$1" label="$2" out
-    out="$(timeout 30 podman run --rm --network=slirp4netns --entrypoint= "$image" \
-           curl -fsS --max-time 12 "$(base_url)/healthz" 2>/dev/null || true)"
-    printf '%s' "$out" | grep -q HEALTHZ-OK \
-        || fail "$label" "login site unreachable from a slirp4netns container at $(base_url) — the browser silo's egress cannot reach the test site"
+    local image="$1" label="$2" out err
+    err="$(mktemp)"
+    out="$(timeout 30 podman run --rm --network=pasta --entrypoint= "$image" \
+           curl -fsS --max-time 12 "$(base_url)/healthz" 2>"$err" || true)"
+    if printf '%s' "$out" | grep -q HEALTHZ-OK; then
+        rm -f "$err"
+        return 0
+    fi
+    local podman_err
+    podman_err="$(tr '\n' ' ' <"$err" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+    rm -f "$err"
+    fail "$label" "login site unreachable from a pasta container at $(base_url) — the browser silo's egress cannot reach the test site${podman_err:+; podman/curl: $podman_err}"
 }
 
 # Assert no stray chromium owns the silo profile before a profile check
@@ -379,7 +387,7 @@ if mode == "add":
         "    autostart: false", f"    created_at: {now}",
         f"    last_change: {now}", "    kind: tier2-template", "    launch:",
         f"      workload: {workload}", f"      template_silo: {silo}",
-        "      network: slirp4netns", '      argv: ["sleep", "infinity"]',
+        "      network: pasta", '      argv: ["sleep", "infinity"]',
     ]
 elif not keep:
     out.append("  []")
@@ -393,25 +401,26 @@ scenario_provision_silo() {
     [ "$(id -u)" = 0 ] || fail provision-silo "must run as root (silos.yaml + daemon restart)"
     [ -f "$LOGIN_SITE" ] || fail provision-silo "login site not staged at $LOGIN_SITE"
 
-    # CI-network accommodation. The qci VM is itself a qemu user-net (slirp)
-    # guest, so a rootless podman `--network=slirp4netns` container nests slirp
-    # inside slirp on the SAME 10.0.2.0/24 — the inner slirp cannot route to the
-    # VM host (where the test login site lives), so plain slirp4netns has no
-    # usable egress here. Only slirp4netns's `allow_host_loopback` reaches the
-    # VM host (at 10.0.2.2). A real silo on a real host needs no such option
-    # (its slirp egress works), so this is purely a nested-VM test fixup, not a
-    # product change: a tiny `podman` shim on PATH adds allow_host_loopback to a
-    # plain `--network=slirp4netns` (podman still reports NetworkMode=slirp4netns,
-    # so the suite's config-claim assertion stays honest).
+    # CI-network accommodation. The qci VM is itself a qemu user-net guest, so
+    # a rootless podman `--network=pasta` container needs pasta options to
+    # reach the VM host (where the test login site binds 0.0.0.0:8099).
+    # `--map-gw` redirects the pasta gateway to host loopback; additionally
+    # `--map-host-loopback=10.0.2.2` keeps the historical 10.0.2.2 address the
+    # suite uses as BASE_HOST. A real silo on a bare-metal host needs no such
+    # option (plain pasta egress works), so this is purely a nested-VM test
+    # fixup: a tiny `podman` shim on PATH rewrites plain `--network=pasta` to
+    # the mapped form (NetworkMode still contains `pasta`, so the suite's
+    # config-claim assertion stays honest).
     cat > /usr/local/bin/podman <<'WRAP'
 #!/bin/bash
-# fableplan2 task-06 test shim: nested-VM slirp can only reach the VM host via
-# allow_host_loopback. Adds it to a plain --network=slirp4netns; passes
-# everything else (--network=none / unrestricted) through untouched.
+# Nested-VM pasta host reachability: plain --network=pasta cannot reach the
+# guest host listener; map gateway + 10.0.2.2 to host loopback. Pass
+# everything else (--network=none / already-optioned pasta / unrestricted)
+# through untouched.
 args=()
 for a in "$@"; do
-    if [ "$a" = "--network=slirp4netns" ]; then
-        args+=("--network=slirp4netns:allow_host_loopback=true")
+    if [ "$a" = "--network=pasta" ]; then
+        args+=("--network=pasta:--map-gw,--map-host-loopback=10.0.2.2")
     else
         args+=("$a")
     fi
@@ -548,9 +557,9 @@ scenario_baseline() {
     # The running silo is bound to genA's DIGEST (never a tag).
     [ "$(container_image_digest)" = "$genA" ] \
         || fail baseline "silo not running genA digest (img=$(container_image_digest) genA=$genA)"
-    # Config claim: slirp4netns egress.
+    # Config claim: pasta egress (Podman 6 rootless backend).
     podman inspect --format '{{.HostConfig.NetworkMode}}' "$CONTAINER" 2>/dev/null \
-        | grep -q slirp4netns || fail baseline "silo not on --network=slirp4netns"
+        | grep -q pasta || fail baseline "silo not on --network=pasta"
     # task-01 state mount: /home/admin is the state bind, .cache is tmpfs on top.
     local mi; mi="$(podman exec "$CONTAINER" cat /proc/self/mountinfo 2>/dev/null)"
     echo "$mi" | grep -qE ' /home/admin ' || fail baseline "/home/admin is not a mount (state bind missing)"

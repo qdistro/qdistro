@@ -78,7 +78,7 @@ structural — the network *attributes* are simply not joined — and the
 `neverallow`s are the belt-and-braces pin on the classes most likely to
 be re-added by a careless future `allow`.
 
-A workload that genuinely needs outbound (`TIER2_NETWORK=slirp4netns`)
+A workload that genuinely needs outbound (`TIER2_NETWORK=pasta`)
 must run as stock `container_t`, not `qdistro_tier2_t` — an explicit,
 auditable downgrade rather than a silent allowance.
 

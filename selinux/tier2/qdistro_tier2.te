@@ -137,7 +137,7 @@ typebounds container_t qdistro_tier2_t;
 # carries full unconfined networking via corenet_unconfined_type /
 # sandbox_net_domain; by not joining those attributes the domain has no
 # net sockets, and these neverallows guarantee it stays that way. A
-# workload that genuinely needs outbound (TIER2_NETWORK=slirp4netns)
+# workload that genuinely needs outbound (TIER2_NETWORK=pasta)
 # must run as stock container_t, not qdistro_tier2_t — an explicit,
 # auditable downgrade rather than a silent allowance.
 # Covers the transport + raw + diag/route socket classes that

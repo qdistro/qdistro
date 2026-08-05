@@ -669,12 +669,12 @@ def test_open_relative_input_refused(tmp_path: Path) -> None:
 
 def test_open_class_pins_network_egress(tmp_path: Path) -> None:
     """url-preview-known-origin declares egress -> the plan network becomes
-    slirp4netns (the class pins it; a caller cannot widen a 'none' class)."""
+    pasta (the class pins it; a caller cannot widen a 'none' class)."""
     result = _run_open(tmp_path, open_class="url-preview-known-origin",
                        workload="url-preview", print_plan=True)
     assert result.returncode == 0, result.stderr
     plan = _plan(result)
-    assert plan["NETWORK"] == "slirp4netns"
+    assert plan["NETWORK"] == "pasta"
 
 
 def test_open_class_pins_app_argv_to_workload(tmp_path: Path) -> None:

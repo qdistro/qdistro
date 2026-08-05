@@ -1196,7 +1196,7 @@ class TestReviewFixups:
 _LAUNCH = {
     "workload": "browser",
     "template_silo": "browser1",
-    "network": "slirp4netns",
+    "network": "pasta",
     "argv": ["chromium"],
 }
 
@@ -1226,7 +1226,7 @@ class TestTier2TemplateKind:
     def test_validate_launch_normalises(self):
         out = sm.validate_launch("tier2-template", dict(_LAUNCH))
         assert out["workload"] == "browser"
-        assert out["network"] == "slirp4netns"
+        assert out["network"] == "pasta"
         assert out["argv"] == ["chromium"]
 
     @pytest.mark.parametrize("bad", [
@@ -1285,7 +1285,7 @@ class TestTier2TemplateKind:
         assert b.kind == "tier2-template"
         assert b.uid == sm.TIER2_LAUNCH_OWNER_UID
         assert b.launch == {"workload": "browser", "template_silo": "browser1",
-                            "network": "slirp4netns", "argv": ["chromium"]}
+                            "network": "pasta", "argv": ["chromium"]}
         assert s2.get("dev1").kind == "tier3-user"
         assert s2.get("dev1").launch == {}
 
@@ -1380,7 +1380,7 @@ class TestTier2TemplateKind:
         import json as _json
         recovered = _source_env_via_bash(env)
         assert recovered["TIER2_SILO"] == "browser1"
-        assert recovered["TIER2_NETWORK"] == "slirp4netns"
+        assert recovered["TIER2_NETWORK"] == "pasta"
         assert _json.loads(recovered["QD_APP_ARGV_JSON"]) == ["chromium"]
         assert recovered["QD_WORKLOAD"] == "browser"
         assert "QDISTRO_ADMIN_USER" not in recovered
@@ -1529,7 +1529,7 @@ def test_tier2_launch_round_trips_through_fallback_parser(ops, tmp_path, monkeyp
     assert silo.uid == sm.TIER2_LAUNCH_OWNER_UID
     assert silo.launch["workload"] == "browser"
     assert silo.launch["template_silo"] == "browser1"
-    assert silo.launch["network"] == "slirp4netns"
+    assert silo.launch["network"] == "pasta"
     # argv is rendered as a JSON array; the fallback yields it verbatim and the
     # loader normalises it back to a list.
     assert list(silo.launch["argv"]) == ["chromium"]

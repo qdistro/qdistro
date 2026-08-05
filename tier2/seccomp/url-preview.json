@@ -1,7 +1,7 @@
 {
 	"defaultAction": "SCMP_ACT_ERRNO",
 	"defaultErrnoRet": 38,
-	"comment": "Custom seccomp profile for the tier-2 url-preview container (open class url-preview-known-origin). Deny-by-default; the weston-terminal allowlist (bash + weston + weston-terminal + wayland libs + coreutils + less) PLUS the extra syscalls `curl` + glibc resolver need for an egress HTTP(S) fetch over the class-pinned slirp4netns network: sendmmsg/recvmmsg (glibc DNS), the AF_INET socket family (already permitted at the socket-syscall level; reachable here because --network slirp4netns is set, unlike the network=none classes). Measured deny-by-default superset (codex design fix 7), NOT podman's default.",
+	"comment": "Custom seccomp profile for the tier-2 url-preview container (open class url-preview-known-origin). Deny-by-default; the weston-terminal allowlist (bash + weston + weston-terminal + wayland libs + coreutils + less) PLUS the extra syscalls `curl` + glibc resolver need for an egress HTTP(S) fetch over the class-pinned pasta network: sendmmsg/recvmmsg (glibc DNS), the AF_INET socket family (already permitted at the socket-syscall level; reachable here because --network pasta is set, unlike the network=none classes). Measured deny-by-default superset (codex design fix 7), NOT podman's default.",
 	"archMap": [
 		{
 			"architecture": "SCMP_ARCH_X86_64",

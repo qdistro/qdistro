@@ -189,7 +189,7 @@ Hardening flags applied by `tier2/spawn-tier2.sh`:
 
   - `--cap-drop=ALL` (CapEff = 0)
   - `--security-opt=no-new-privileges`
-  - `--network=none` by default, or `slirp4netns` when the trusted
+  - `--network=none` by default, or `pasta` when the trusted
     session-manager launch stanza requests egress
   - `--pids-limit=512` (only delegated cgroup controller in the
     typical Tumbleweed user@1000.service setup; memory/cpu need

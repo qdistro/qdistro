@@ -59,7 +59,7 @@ QDISTRO_PKGS=(
   audit
   libnotify-tools
   greetd
-  podman slirp4netns fuse-overlayfs crun
+  podman passt fuse-overlayfs crun
   # Per-silo egress backend: session-manager shells out to `wg`
   # (wireguard-tools) and programs `nft` rules; `dnsmasq` serves the
   # per-netns resolver. Required in the baked base so the silo-egress
