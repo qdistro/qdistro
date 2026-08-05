@@ -122,7 +122,7 @@ Hardened v1 launches (`daily-driver` / `release`) go through the
 `spawn-tier2.sh` is kept for local tests and diagnostics only because it cannot
 provide the root-parent secctx attestation. Root-launcher mode rejects privesc,
 added capabilities, caller-selected seccomp profiles, and network modes outside
-`none`/`slirp4netns`; missing workload seccomp profiles fail closed.
+`none`/`pasta`; missing workload seccomp profiles fail closed.
 
 ## Tests
 

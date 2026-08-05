@@ -11,7 +11,7 @@
 #   - an open-in-disposable spawn of the class succeeds (CONTAINER= emitted)
 #   - /mnt/input/<basename> bound READ-ONLY (RW=false) and readable
 #   - NetworkMode matches the class: text-viewer = none (only `lo`),
-#     url-preview = the egress (slirp4netns) network (a non-`none` netns with a
+#     url-preview = the egress (pasta) network (a non-`none` netns with a
 #     non-loopback interface)
 #   - CapEff=0 (--cap-drop=ALL), NoNewPrivs=1, rootfs read-only
 #   - the workload-specific seccomp profile is APPLIED (Seccomp=2 == filtered;
@@ -223,7 +223,8 @@ spawn_and_assert() {
     pass "$workload: input bound READ-ONLY at /mnt/input/$base"
 
     # 2. Network mode matches the class. text-viewer=none -> only `lo`;
-    #    url-preview=egress -> a non-loopback interface present (slirp tap).
+    #    url-preview=egress -> a non-loopback interface present (backend-
+    #    agnostic: pasta under Podman 6; do not hard-code the net backend name).
     local ifs
     ifs=$(as_admin podman exec "$container" ls /sys/class/net 2>/dev/null | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')
     if [ -z "$ifs" ]; then
@@ -246,7 +247,7 @@ spawn_and_assert() {
                     *" lo "*)
                         # egress: there must be MORE than just lo (a tap/eth).
                         [ "$ifs" != "lo" ] \
-                            || fail "$workload-net" "egress class has only 'lo' — slirp4netns not attached";;
+                            || fail "$workload-net" "egress class has only 'lo' — pasta/egress net not attached";;
                     *) : ;;  # no lo listed but some iface -> still non-none, OK
                 esac
                 pass "$workload: egress network attached (interfaces: $ifs)";;

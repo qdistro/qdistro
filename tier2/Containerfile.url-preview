@@ -11,7 +11,7 @@
 # Security envelope is enforced ENTIRELY by the host spawn path
 # (tier2/spawn-tier2.sh): --cap-drop=ALL, --security-opt=no-new-privileges,
 # --read-only rootfs + tmpfs scratch, --userns=keep-id, custom seccomp
-# (tier2/seccomp/url-preview.json), and --network slirp4netns (egress) PINNED by
+# (tier2/seccomp/url-preview.json), and --network pasta (egress) PINNED by
 # the url-preview-known-origin class (a caller cannot widen/narrow it). The image
 # ships ONLY the workload binaries + weston runtime + curl. qdwin-shell.so is
 # bind-mounted at run time (not baked), same as the other tier-2 images.

@@ -263,7 +263,7 @@ neverallow qdistro_tier2_t self:{ netlink_route netlink_tcpdiag packet } socket 
 (The structural guarantee is that the network *attributes* aren't
 joined; the `neverallow`s belt-and-braces the transport/raw/diag classes
 most likely to be re-added by a careless future `allow`.) A workload
-that needs outbound (`TIER2_NETWORK=slirp4netns`) must run as
+that needs outbound (`TIER2_NETWORK=pasta`) must run as
 stock `container_t` — an explicit, auditable downgrade. The follow-up's
 "image-fs writes" and "pipewire socket access" points are handled by the
 launcher's existing posture (image rootfs `--read-only`; only the

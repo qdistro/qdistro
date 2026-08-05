@@ -505,7 +505,7 @@ def _ps_record_name(rec: dict) -> str | None:
 #
 # After a ``podman rm -f <disp>`` TIMES OUT (the M1 wedge guard returns False),
 # the container may still be alive with a stuck descendant tree (a hung
-# container child, conmon, pasta, slirp4netns) holding resources, so the next
+# container child, conmon, pasta) holding resources, so the next
 # sweep re-wedges the same way and the resources leak. The cleanup SIGKILLs the
 # container's PAYLOAD host PIDs — but ONLY host PIDs that are provably this
 # container's, verified via the cgroup membership of each pid. These pure helpers

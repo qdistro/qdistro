@@ -170,7 +170,7 @@
     <package name="libnotify-tools"/>
     <package name="greetd"/>
     <package name="podman"/>
-    <package name="slirp4netns"/>
+    <package name="passt"/>
     <package name="fuse-overlayfs"/>
     <package name="crun"/>
     <package name="waypipe"/>

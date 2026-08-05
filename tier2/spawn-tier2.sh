@@ -62,8 +62,9 @@
 # Hardening knobs (defaults are the secure choice; relax for special
 # workloads only):
 #   TIER2_NETWORK          podman --network value. Default "none". Use
-#                          "slirp4netns" for workloads that need outbound
-#                          (e.g. browser).
+#                          "pasta" for workloads that need outbound
+#                          (e.g. browser). Legacy "slirp4netns" is mapped
+#                          to pasta with a WARN (Podman 6 removed slirp).
 #   TIER2_PIDS_LIMIT       Default 512. Override for fork-heavy apps.
 #                          (`pids` is the only cgroup v2 controller
 #                          delegated to admin's user slice by default
@@ -231,9 +232,15 @@ if [ "$ROOT_LAUNCHER" = 1 ] && is_hardened_profile; then
         exit 2
     fi
     case "${TIER2_NETWORK:-none}" in
-        none|slirp4netns) ;;
+        none|pasta) ;;
+        slirp4netns)
+            # Podman 6 removed slirp4netns; keep one-release compat for silos.yaml
+            # / launch env that still say slirp4netns.
+            echo "spawn-tier2: WARN: TIER2_NETWORK=slirp4netns is deprecated (Podman 6); mapping to pasta" >&2
+            TIER2_NETWORK=pasta
+            ;;
         *)
-            echo "spawn-tier2: TIER2_NETWORK=${TIER2_NETWORK} is not an accepted hardened root-launcher network mode" >&2
+            echo "spawn-tier2: TIER2_NETWORK=${TIER2_NETWORK} is not an accepted hardened root-launcher network mode (want none|pasta; legacy slirp4netns maps to pasta)" >&2
             exit 2
             ;;
     esac
@@ -578,11 +585,12 @@ if [ -n "$OPEN_CLASS" ]; then
     APP_ARGV=("$WORKLOAD")
     APP_NAME="$WORKLOAD"
     # The class pins the network mode: 'none' -> --network none, 'egress' ->
-    # the slirp4netns egress contract. The trusted path SETS it from the class
-    # (a caller cannot widen a 'none' class to egress via TIER2_NETWORK).
+    # the pasta egress contract (Podman 6; replaces slirp4netns). The trusted
+    # path SETS it from the class (a caller cannot widen a 'none' class to
+    # egress via TIER2_NETWORK).
     case "$CLASS_NETWORK" in
         none)   TIER2_NETWORK="none" ;;
-        egress) TIER2_NETWORK="slirp4netns" ;;
+        egress) TIER2_NETWORK="pasta" ;;
         *) echo "spawn-tier2: open class '$OPEN_CLASS' has invalid network '$CLASS_NETWORK'" >&2; exit 2 ;;
     esac
     [ -n "$OPEN_ACTION" ] || { echo "spawn-tier2: resolver returned no OPEN_ACTION for '$OPEN_CLASS'" >&2; exit 2; }

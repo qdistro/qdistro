@@ -698,7 +698,7 @@ install_packages_ubuntu() {
         fprintd tpm2-tools libselinux1-dev
         auditd
         # sandbox / containers
-        podman slirp4netns fuse-overlayfs crun
+        podman passt fuse-overlayfs crun
         # session bits
         waypipe wl-clipboard libnotify-bin
         greetd

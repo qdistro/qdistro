@@ -8,7 +8,7 @@
 # /mnt/input/<basename> containing ONE url; the SDK execs the bare workload name
 # `url-preview` (no argument), so this script DISCOVERS the file, reads the URL,
 # validates it STRICTLY, fetches bounded response metadata + a capped text body
-# with `curl` over the class-pinned slirp4netns egress, SANITIZES the bytes
+# with `curl` over the class-pinned pasta egress, SANITIZES the bytes
 # (escape control sequences so attacker output can't drive the terminal), and
 # pages the result in a weston-terminal/less.
 #
@@ -21,7 +21,7 @@
 #
 # Security envelope is enforced by the spawn path: --cap-drop=ALL,
 # no-new-privileges, --read-only rootfs + tmpfs, --userns=keep-id, custom
-# seccomp (url-preview.json), and --network slirp4netns (egress) PINNED by the
+# seccomp (url-preview.json), and --network pasta (egress) PINNED by the
 # class (a caller cannot widen it; a 'none' class cannot reach here).
 set -u
 
