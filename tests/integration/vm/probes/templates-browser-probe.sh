@@ -65,16 +65,20 @@ export QDISTRO_ETC_DIR="$STATE/etc"
 
 # The pinned headless-Chromium arg set the slice reuses (mirror of
 # qdistro_template_validate.CHROMIUM_HEADLESS_ARGS — kept in lockstep; the
-# page-open gate and these checks must agree on the flags). The extra
-# --disable-dev-shm-usage is a runtime-robustness flag (NOT a render-behaviour
-# change): it makes Chromium use /tmp instead of /dev/shm, so a check does not
-# depend on the container's --shm-size (the silo container ships podman's
-# default 64m, which a real render can exhaust).
+# page-open gate and these checks must agree on the flags). Extra flags are
+# runtime-robustness only (NOT render-behaviour changes):
+#   --disable-dev-shm-usage: use /tmp instead of /dev/shm so a check does not
+#     depend on the container's --shm-size (silo ships podman default 64m,
+#     which a real render can exhaust).
+#   --renderer-process-limit=1 / --disable-extensions: cap Chromium's process
+#     fan-out. Under full-CI (many parallel 4 GiB bats VMs) the guest OOMs
+#     mid dump-dom and update-flip reports "genB silo did not render" with an
+#     empty DOM; these flags keep a single headless check under ~one renderer.
 CHROMIUM_ARGS=(
     --headless=new --no-sandbox --disable-background-networking
     --disable-sync --disable-features=Translate --no-first-run
     --no-default-browser-check --window-size=1024,768 --disable-gpu
-    --disable-dev-shm-usage
+    --disable-dev-shm-usage --renderer-process-limit=1 --disable-extensions
 )
 # A realistic Chromium UA; the generation marker is appended as a suffix the
 # login site keys breakage on (the site's JS must NOT UA-sniff — only the
@@ -159,16 +163,63 @@ ua_for() { printf '%s qdistro-mk/%s' "$UA_BASE" "$1"; }
 # Chromium drivers wrap a wall-clock `timeout` (codex r5: --virtual-time-budget
 # is virtual time and may stall on a pending request).
 #
-# Run headless Chromium INSIDE the running silo container against the persisted
-# profile (podman exec bypasses the entrypoint), dump the final DOM to stdout.
+# Dual timeout (host + in-container): a host-side `timeout` kills the podman
+# exec CLIENT, but under guest memory pressure podman can hang on cleanup and
+# leave chromium alive (same rootless conmon reality breakage-matrix asserts).
+# Nesting `timeout` inside the container (coreutils ships in the image) ensures
+# the renderer is SIGKILL'd even when the client path wedges. QD_SILO_PROFILE
+# overrides the user-data-dir (file:// render checks use an ephemeral dir so
+# they do not pay the cost of loading the full persisted profile).
+# QD_SILO_CHROMIUM_ERR, when set, receives chromium/podman stderr for diagnostics.
 silo_chromium() {  # silo_chromium <timeout> <ua> <url>  [extra chromium args...]
     local to="$1" ua="$2" url="$3"; shift 3
+    local profile="${QD_SILO_PROFILE:-$PROFILE}"
+    local errf="${QD_SILO_CHROMIUM_ERR:-/dev/null}"
+    # Inner budget slightly under the outer so the in-container kill fires first.
+    local inner=$(( to > 15 ? to - 10 : to ))
     timeout --kill-after=10 "$to" \
         podman exec -e HOME=/home/admin "$CONTAINER" \
         dbus-run-session -- /bin/sh -c \
-        'export XDG_RUNTIME_DIR=/tmp/cr; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"; exec chromium "$@"' _ \
-        "${CHROMIUM_ARGS[@]}" --user-agent="$ua" --user-data-dir="$PROFILE" \
-        "$@" --dump-dom "$url"
+        'export XDG_RUNTIME_DIR=/tmp/cr; mkdir -p "$XDG_RUNTIME_DIR" "$1"; chmod 700 "$XDG_RUNTIME_DIR"; shift; exec timeout --kill-after=5 "$@"' \
+        _ "$profile" "$inner" chromium \
+        "${CHROMIUM_ARGS[@]}" --user-agent="$ua" --user-data-dir="$profile" \
+        "$@" --dump-dom "$url" 2>"$errf"
+}
+
+# Assert a file:// RENDER-OK sentinel from the running silo. Retries under
+# transient guest memory pressure (full-CI OOM of a single dump-dom attempt is
+# the observed failure mode for update-flip). Uses an ephemeral profile so the
+# check only proves the runtime can render, not that the persisted profile is
+# healthy (session survival is asserted separately against $PROFILE).
+assert_silo_file_render() {  # assert_silo_file_render <label> <ua> <sentinel> [attempts]
+    local label="$1" ua="$2" sentinel="$3" attempts="${4:-3}"
+    local html="<!doctype html><html><body><div id=s>${sentinel}</div></body></html>"
+    local attempt=1 dom errf mem errsnip domsnip
+    errf="$(mktemp)"
+    while [ "$attempt" -le "$attempts" ]; do
+        ensure_profile_free
+        podman exec "$CONTAINER" sh -c 'printf "%s" "$1" > /tmp/probe.html' _ "$html" \
+            || fail "$label" "could not write /tmp/probe.html for render check"
+        # Ephemeral profile: render-only, no cookie DB load, no Singleton fights.
+        dom="$(
+            QD_SILO_PROFILE=/tmp/cr-render-profile \
+            QD_SILO_CHROMIUM_ERR="$errf" \
+            silo_chromium 90 "$ua" "file:///tmp/probe.html" || true
+        )"
+        if printf '%s' "$dom" | grep -qF "$sentinel"; then
+            rm -f "$errf"
+            return 0
+        fi
+        # Reclaim a wedged in-container chromium before the next attempt.
+        ensure_profile_free
+        sleep $(( attempt * 2 ))
+        attempt=$(( attempt + 1 ))
+    done
+    mem="$(free -m 2>/dev/null | head -2 | tr '\n' ' ' || true)"
+    errsnip="$(tr '\n' ' ' <"$errf" 2>/dev/null | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' | head -c 300)"
+    domsnip="$(printf '%s' "$dom" | tr -d '\n' | head -c 200)"
+    rm -f "$errf"
+    fail "$label" "silo did not render ${sentinel} after ${attempts} attempts (dom: ${domsnip:-<empty>}; stderr: ${errsnip:-<none>}; guest free: ${mem:-?})"
 }
 
 # Run headless Chromium in a THROWAWAY pasta container off an image digest
@@ -218,9 +269,18 @@ assert_site_reachable() {  # assert_site_reachable <image> <label>
 
 # Assert no stray chromium owns the silo profile before a profile check
 # (codex r5 profile-ownership invariant: the exec checks are the profile's
-# only user, strictly serialized).
+# only user, strictly serialized). Also reclaim orphans left when a host-side
+# timeout killed the podman-exec client but left the in-container renderer
+# alive (rootless conmon), and drop Singleton locks on both the persisted and
+# the ephemeral render profile.
 ensure_profile_free() {
-    podman exec "$CONTAINER" sh -c 'pkill -9 -f chromium 2>/dev/null; rm -f '"$PROFILE"'/Singleton* 2>/dev/null' >/dev/null 2>&1 || true
+    podman exec "$CONTAINER" sh -c '
+        pkill -9 -f chromium 2>/dev/null || true
+        pkill -9 -f chrome 2>/dev/null || true
+        rm -f '"$PROFILE"'/Singleton* /tmp/cr-render-profile/Singleton* 2>/dev/null || true
+        # Brief settle so the next chromium does not race a dying zygote.
+        sleep 0.3
+    ' >/dev/null 2>&1 || true
 }
 
 # --- recipe builders -----------------------------------------------------
@@ -323,16 +383,26 @@ launch_silo() {
     # misleading cascade (state/cookie assertions that never had a browser).
     out="$(qdistro-silo-launch "$SILO" 2>&1)" \
         || fail "$label" "qdistro-silo-launch $SILO failed (session manager/compositor up?): ${out:-<no output>}"
-    # Wait for the detached container to be running.
+    # Wait for the detached container to be running AND accept a trivial exec
+    # (Running alone can race the entrypoint/conmon setup under load).
     local i
     for i in $(seq 1 60); do
-        [ "$(podman inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ] \
-            && return 0
+        if [ "$(podman inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ] \
+            && podman exec "$CONTAINER" true >/dev/null 2>&1; then
+            ensure_profile_free
+            return 0
+        fi
         sleep 1
     done
-    fail "$label" "container $CONTAINER never reached Running"
+    fail "$label" "container $CONTAINER never reached Running+exec-ready"
 }
 stop_silo() {
+    # Kill any in-container chromium first so the unit's SIGTERM/stop does not
+    # sit on a wedged dump-dom (observed: StopSignal SIGTERM failed, systemd
+    # stop timed out, podman DB locked under OOM).
+    if podman container exists "$CONTAINER" 2>/dev/null; then
+        ensure_profile_free
+    fi
     qdistro-silo-launch --stop "$SILO" >/dev/null 2>&1 || true
     local i
     for i in $(seq 1 30); do
@@ -567,14 +637,12 @@ scenario_baseline() {
         || fail baseline "/home/admin/.cache is not tmpfs (shadowing regression)"
 
     url="$(base_url)"
-    # Render check (file://): write a sentinel page in the silo, render it.
-    ensure_profile_free
-    podman exec "$CONTAINER" sh -c 'printf "%s" "<!doctype html><html><body><div id=s>RENDER-OK-BASELINE</div></body></html>" > /tmp/probe.html'
-    local dom; dom="$(silo_chromium 90 "$(ua_for "$markerA")" "file:///tmp/probe.html")"
-    echo "$dom" | grep -q RENDER-OK-BASELINE || fail baseline "running silo did not render file:// page"
+    # Render check (file://): ephemeral profile + retries (see assert_silo_file_render).
+    assert_silo_file_render baseline "$(ua_for "$markerA")" "RENDER-OK-BASELINE"
 
     # Log in to the login site through the running silo: perform the navigation
     # flow (cookie persisted into the profile under state_path), then read /home.
+    local dom
     ensure_profile_free
     silo_chromium 60 "$(ua_for "$markerA")" "$url/login" >/dev/null 2>&1 || true
     ensure_profile_free
@@ -651,14 +719,12 @@ scenario_update_flip() {
     ls -d /var/lib/qdistro/silos/"$SILO"/state-snapshots/*/snapshot >/dev/null 2>&1 \
         || fail update-flip "no pre-activation state snapshot was taken on B's activation"
     local url dom markerB; url="$(base_url)"; markerB="$(cat "$STATE/markerB")"
-    # genB renders pages fine.
-    ensure_profile_free
-    podman exec "$CONTAINER" sh -c 'printf "%s" "<!doctype html><html><body><div id=s>RENDER-OK-GENB</div></body></html>" > /tmp/probe.html'
-    dom="$(silo_chromium 90 "$(ua_for "$markerB")" "file:///tmp/probe.html")"
-    echo "$dom" | grep -q RENDER-OK-GENB || fail update-flip "genB silo did not render"
+    # genB renders pages fine (ephemeral profile + retries; full-CI OOM of a
+    # single dump-dom is the observed flake mode — keep the sentinel assertion).
+    assert_silo_file_render update-flip "$(ua_for "$markerB")" "RENDER-OK-GENB"
     # The persisted A-era cookie still authenticates at /home under genB.
     ensure_profile_free
-    dom="$(silo_chromium 60 "$(ua_for "$markerB")" "$url/home")"
+    dom="$(silo_chromium 90 "$(ua_for "$markerB")" "$url/home")"
     echo "$dom" | grep -qE 'LOGIN-OK-[0-9a-f]+' \
         || fail update-flip "A-era session cookie did not survive the flip to genB (dom: $(echo "$dom" | tr -d '\n' | head -c 200))"
     # Plant a B-ERA-ONLY sentinel in the live profile. The A-era snapshot was
