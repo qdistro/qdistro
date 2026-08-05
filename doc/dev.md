@@ -107,25 +107,25 @@ but only inside a VM session where qdwin is the active compositor.
 
 ### Agent-assisted GUI runner
 
-Keep Claude Haiku as the default visual runner for the mechanical markdown
-scenarios:
-
-```sh
-QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
-  qdistro/ci/bin/qci gui
-```
-
-The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
-named in `QCI_AGENT_CMD`, and finally `haiku`. Set `QCI_AGENT_MODEL` whenever a
-generic wrapper selects the model outside the visible command template.
-
-Codex with `gpt-5.6-luna` is a verified vision-capable fallback when Haiku is
-unavailable. Run it non-interactively and let qci place each attempt in its own
-temporary working directory:
+Keep Codex with `gpt-5.6-luna` as the default visual runner for the mechanical
+markdown scenarios. Run it non-interactively and let qci place each attempt in
+its own temporary working directory:
 
 ```sh
 QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
 QCI_AGENT_MODEL=gpt-5.6-luna \
+  qdistro/ci/bin/qci gui
+```
+
+The recorded model uses `QCI_AGENT_MODEL` when it is set, otherwise a model
+named in `QCI_AGENT_CMD`, and finally `gpt-5.6-luna`. Set `QCI_AGENT_MODEL`
+whenever a generic wrapper selects the model outside the visible command
+template.
+
+Claude Haiku is a verified vision-capable fallback when Luna is unavailable:
+
+```sh
+QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
 QCI_GUI_RETRY=1 \
   qdistro/ci/bin/qci gui --scenario tests/integration/permissions-gui/01-tui-approver-visual.md
 ```
@@ -139,7 +139,8 @@ build a clean app-deps golden and use eight disposable VM workers:
 
 ```sh
 QCI_GUI_JOBS=8 QDWIN_APP_DEPS=1 \
-QCI_AGENT_CMD='claude -p "$(cat {prompt})" --dangerously-skip-permissions --model haiku' \
+QCI_AGENT_CMD='codex --yolo exec -m gpt-5.6-luna --skip-git-repo-check --ephemeral - < {prompt}' \
+QCI_AGENT_MODEL=gpt-5.6-luna \
   qdistro/ci/bin/qci gui
 ```
 
@@ -153,7 +154,7 @@ interactive approval. The scenario still fails closed unless the agent writes
 an explicit passing verdict and exits zero.
 
 The qci GUI gate enforces a host/guest boundary for every runner, including
-Haiku and Luna:
+Luna and Haiku:
 
 - Graphical applications, compositors, dialogs, screenshots, and input run only
   in disposable VMs. The host process is a non-interactive controller.
