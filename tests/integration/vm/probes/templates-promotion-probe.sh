@@ -133,8 +133,14 @@ build_validate() {
 scenario_setup() {
     rm -rf "$TROOT"
     ensure_policy
+    # Progress on stdout (captured by qga) so long podman builds under
+    # parallel CI are distinguishable from a wedged guest agent — setup is
+    # the slow path (real tier2-dev zypper build) and routinely exceeds 10
+    # minutes when QCI_JOBS>1 starves the guest.
+    echo "setup: building+validating generation A (may take several minutes under load)"
     local rid
     rid="$(build_validate)" || fail "setup" "build/validate A failed ($rid)"
+    echo "setup: promoting $rid"
     cli template-promote "$SILO" "$rid" >/dev/null 2>&1 || fail "setup" "promote A failed"
     local gen; gen="$(active_gen)"
     [ -n "$gen" ] || fail "setup" "no active generation after promote"
