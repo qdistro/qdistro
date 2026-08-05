@@ -1857,18 +1857,49 @@ class _SystemOps:
         disposable absent (rc == 1). Present (rc == 0), any other rc, timeout,
         or OSError => False (fail-closed): a timed-out remove must never be
         promoted to success on an uncertain check. Name-validated as defence
-        in depth so a non-disposable name never reaches the exists probe."""
+        in depth so a non-disposable name never reaches the exists probe.
+
+        Under host load ``podman container exists`` itself can time out even when
+        the container is already gone (observed under parallel full-QCI after a
+        timed-out ``podman rm``). Retry timeouts once with a short backoff so a
+        transient client stall does not force a false "still present" — but any
+        definitive present (rc==0) still returns False immediately (fail-closed).
+        """
         if not _disp.is_disposable_container(name):
             return False
-        try:
-            proc = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME,
-                 "--", "podman", "container", "exists", name],
-                capture_output=True, timeout=10)
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("disp remove: exists check for %r failed: %s", name, e)
+        last_err: BaseException | None = None
+        for attempt in range(2):
+            try:
+                proc = subprocess.run(
+                    ["runuser", "-u", ADMIN_USER_NAME,
+                     "--", "podman", "container", "exists", name],
+                    capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired as e:
+                last_err = e
+                if attempt == 0:
+                    log.warning("disp remove: exists check for %r timed out; "
+                                "retrying once", name)
+                    time.sleep(0.5)
+                    continue
+                log.warning("disp remove: exists check for %r failed: %s",
+                            name, e)
+                return False
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning("disp remove: exists check for %r failed: %s",
+                            name, e)
+                return False
+            # rc==1 definitively gone; rc==0 present; anything else uncertain.
+            if proc.returncode == 1:
+                return True
+            if proc.returncode == 0:
+                return False
+            log.warning("disp remove: exists check for %r rc=%d (uncertain)",
+                        name, proc.returncode)
             return False
-        return proc.returncode == 1
+        if last_err is not None:
+            log.warning("disp remove: exists check for %r failed: %s",
+                        name, last_err)
+        return False
 
     def _disp_container_full_id(self, name: str) -> str | None:
         """The full (64-hex) container id of a disposable, via a bounded
@@ -4005,12 +4036,31 @@ class _SiloStore:
                                reason="not a disposable container",
                                caller=caller)
             raise BadArgument(f"not a disposable container: {name!r}")
-        try:
-            ok = self._ops.disp_container_remove(name)
-        except OSError as e:
+        # Under host load a single ``podman rm -f`` can time out even when the
+        # server-side remove is progressing (or the container is already gone
+        # and only the exists-check was slow). Retry a False a few times with
+        # short backoff before reporting failure — never retries a raised
+        # OSError/BadArgument path. Total wall-clock stays bounded.
+        ok = False
+        last_oserr: OSError | None = None
+        for attempt in range(3):
+            try:
+                ok = self._ops.disp_container_remove(name)
+            except OSError as e:
+                last_oserr = e
+                log.warning("dispose %r remove errored (attempt %d/3): %s",
+                            name, attempt + 1, e)
+                ok = False
+            if ok:
+                break
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+        if last_oserr is not None and not ok:
             self._audit_record("dispose", str(name), decision="error",
-                               reason=f"remove errored: {e}", caller=caller)
-            raise BadState(f"dispose {name!r} failed: {e}") from e
+                               reason=f"remove errored: {last_oserr}",
+                               caller=caller)
+            raise BadState(
+                f"dispose {name!r} failed: {last_oserr}") from last_oserr
         self._audit_record("dispose", str(name),
                            decision="allow" if ok else "error",
                            reason="removed" if ok else "podman rm failed",
@@ -4132,6 +4182,26 @@ class _SiloStore:
                 log.warning("dispose-by-workflow: dispose(%r) failed: %s",
                             name, e)
                 failures.append(name)
+        # Second-pass retry on partial failures only: under parallel CI load
+        # podman can stall mid-group so the first pass leaves one member
+        # marked failed while a subsequent rm/exists succeeds. Never relaxes
+        # the fail-closed rule — if still failing after the retry, BadState.
+        if failures:
+            time.sleep(1.0)
+            still: list[str] = []
+            for name in list(failures):
+                try:
+                    if self.dispose(name, caller=caller):
+                        reaped += 1
+                        log.info("dispose-by-workflow: retry reaped %r", name)
+                    else:
+                        still.append(name)
+                except SessionError as e:
+                    log.warning(
+                        "dispose-by-workflow: retry dispose(%r) failed: %s",
+                        name, e)
+                    still.append(name)
+            failures = still
         if failures:
             self._audit_record(
                 "dispose-by-workflow", str(workflow_id), decision="error",

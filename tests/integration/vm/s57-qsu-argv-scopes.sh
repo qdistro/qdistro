@@ -202,33 +202,60 @@ def _get_pending_ids():
 
 
 def _decide_as_admin(rid, decision, scope):
-    out = subprocess.run(
-        ["runuser", "-u", "admin", "--",
-         "python3", "-c",
-         f"import dbus; bus=dbus.SystemBus(); "
-         f"obj=bus.get_object('org.qdistro.AdminBroker1', "
-         f"'/org/qdistro/AdminBroker1'); "
-         f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
-         f"iface.DecideRequest({int(rid)}, '{decision}', '{scope}')"],
-        capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
-    if out.returncode != 0:
-        raise RuntimeError(
-            f"DecideRequest(rid={rid}, scope={scope!r}) failed: "
-            f"{out.stderr.strip() or out.stdout.strip()}")
+    # Broker can return DBus.Error.NoReply under load even when the method
+    # eventually applies (observed mid forever_basename drain). Retry a few
+    # times on NoReply / timeout before treating as a real scope failure.
+    last_err = None
+    for attempt in range(3):
+        try:
+            out = subprocess.run(
+                ["runuser", "-u", "admin", "--",
+                 "python3", "-c",
+                 f"import dbus; bus=dbus.SystemBus(); "
+                 f"obj=bus.get_object('org.qdistro.AdminBroker1', "
+                 f"'/org/qdistro/AdminBroker1'); "
+                 f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
+                 f"iface.DecideRequest({int(rid)}, '{decision}', '{scope}')"],
+                capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
+        except subprocess.TimeoutExpired as e:
+            last_err = e
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        if out.returncode == 0:
+            return
+        err = (out.stderr or out.stdout or "").strip()
+        last_err = RuntimeError(
+            f"DecideRequest(rid={rid}, scope={scope!r}) failed: {err}")
+        if "NoReply" in err or "TimedOut" in err or "timeout" in err.lower():
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        raise last_err
+    raise last_err if last_err is not None else RuntimeError(
+        f"DecideRequest(rid={rid}, scope={scope!r}) failed")
 
 
 def _revoke_cache_for_uid(uid):
     """Drain every cache row this driver wrote. RevokeAllForUid wipes
     everything we put in for the live claim uid."""
-    subprocess.run(
-        ["runuser", "-u", "admin", "--",
-         "python3", "-c",
-         f"import dbus; bus=dbus.SystemBus(); "
-         f"obj=bus.get_object('org.qdistro.AdminBroker1', "
-         f"'/org/qdistro/AdminBroker1'); "
-         f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
-         f"print(iface.RevokeAllForUid({int(uid)}))"],
-        capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
+    last = None
+    for attempt in range(3):
+        try:
+            out = subprocess.run(
+                ["runuser", "-u", "admin", "--",
+                 "python3", "-c",
+                 f"import dbus; bus=dbus.SystemBus(); "
+                 f"obj=bus.get_object('org.qdistro.AdminBroker1', "
+                 f"'/org/qdistro/AdminBroker1'); "
+                 f"iface=dbus.Interface(obj, 'org.qdistro.AdminBroker1'); "
+                 f"print(iface.RevokeAllForUid({int(uid)}))"],
+                capture_output=True, text=True, timeout=_DBUS_SUBPROC_TIMEOUT_S)
+            if out.returncode == 0:
+                return
+            last = out.stderr or out.stdout
+        except subprocess.TimeoutExpired as e:
+            last = e
+        time.sleep(0.5 * (attempt + 1))
+    # Best-effort drain; phase isolation may still work via deny.
 
 
 def _drain_pending_deny():

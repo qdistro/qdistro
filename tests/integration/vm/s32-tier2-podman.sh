@@ -172,10 +172,25 @@ fi
 # bind_proxy_pixels; without it the proxy view stays on the placeholder
 # curtain. Match running process first, fall back to a journal grep
 # (in case the consumer exited cleanly between toplevel-add and assert).
-if pgrep -f qdistro-nested-pixelfeed >/dev/null 2>&1; then
+# Poll: the nested-proxy journal line can land before qdshell starts the
+# pixelfeed process (race under host load); a single-shot check flakes.
+PIXEL_OK=0
+pixel_deadline=$(( $(date +%s) + 20 ))
+while [ "$(date +%s)" -lt "$pixel_deadline" ]; do
+    if pgrep -f qdistro-nested-pixelfeed >/dev/null 2>&1; then
+        PIXEL_OK=1
+        break
+    fi
+    if [ -n "$CURSOR" ] && journalctl --after-cursor="$CURSOR" 2>/dev/null \
+            | grep -q "spawning pixelfeed\|qdistro-nested-pixelfeed\|bind_proxy_pixels"; then
+        PIXEL_OK=2
+        break
+    fi
+    sleep 0.5
+done
+if [ "$PIXEL_OK" = "1" ]; then
     pass "qdshell spawned pixelfeed for in-container toplevel"
-elif [ -n "$CURSOR" ] && journalctl --after-cursor="$CURSOR" 2>/dev/null \
-        | grep -q "spawning pixelfeed\|qdistro-nested-pixelfeed\|bind_proxy_pixels"; then
+elif [ "$PIXEL_OK" = "2" ]; then
     pass "qdshell spawned pixelfeed for in-container toplevel (journal-confirmed)"
 else
     fail "qdshell did not spawn qdistro-nested-pixelfeed for inner toplevel — check Qdwin.qml onNestedProxyPixelSource handler is firing (qdwin_shell_v1 v9+)"

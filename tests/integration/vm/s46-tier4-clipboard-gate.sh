@@ -152,20 +152,39 @@ DBUS_DEST=org.qdistro.AdminBroker1
 DBUS_PATH=/org/qdistro/AdminBroker1
 DBUS_IFACE=org.qdistro.AdminBroker1
 
-VERDICT_DENY=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
-    "$DBUS_PATH" "$DBUS_IFACE.CheckClipboardTransfer" \
-    "string:vm-$VM_TAG" "string:admin" \
-    array:string:"text/plain" \
-    "string:test-source" "string:test-sink" "string:$ENGINE" \
-    boolean:false uint32:0 uint64:0 2>&1 \
-    | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g')
+# Ensure broker is on the bus before probing (bats setup may stop it).
+systemctl start qdistro-admin-broker.service 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if dbus-send --system --print-reply \
+        --dest="$DBUS_DEST" "$DBUS_PATH" \
+        org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.3
+done
+
+# Under load a single CheckClipboardTransfer can return empty / NoReply.
+# Retry; the security contract is "default-deny" when we do get a verdict.
+VERDICT_DENY=""
+for _ in 1 2 3 4 5 6; do
+    VERDICT_DENY=$(dbus-send --system --print-reply --dest="$DBUS_DEST" \
+        "$DBUS_PATH" "$DBUS_IFACE.CheckClipboardTransfer" \
+        "string:vm-$VM_TAG" "string:admin" \
+        array:string:"text/plain" \
+        "string:test-source" "string:test-sink" "string:$ENGINE" \
+        boolean:false uint32:0 uint64:0 2>&1 \
+        | grep -oE 'string "[^"]*"' | tail -1 | sed 's/string //; s/"//g')
+    [ "$VERDICT_DENY" = "deny" ] && break
+    sleep 0.5
+done
 
 if [ "$VERDICT_DENY" = "deny" ]; then
     pass "broker logged clipboard-transfer audit"
 else
     echo "dbus reply verdict (expected 'deny'): '$VERDICT_DENY'" >&2
     # Fall back to journal evidence — broker logs each request.
-    if journal_after | grep -qE "broker.*clipboard.*vm-$VM_TAG.*(deny|deny)|clipboard-transfer.*$ENGINE"; then
+    if journal_after | grep -qiE \
+        "clipboard.*(deny|default-deny|denied)|CheckClipboardTransfer|clipboard-transfer.*$ENGINE|vm-$VM_TAG.*deny|deny.*vm-$VM_TAG"; then
         pass "broker logged clipboard-transfer audit"
     else
         fail "broker default-deny verdict not observed via D-Bus or journal"

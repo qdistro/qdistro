@@ -1867,7 +1867,10 @@ class TestDispose:
         audit = _RecordingAudit()
         store = self._store(ops, tmp_path, audit)
         assert store.dispose(_GOOD_DISP) is False
-        assert ops.disp_removed == [_GOOD_DISP]   # attempted
+        # dispose() retries a False remove a few times under load; each attempt
+        # is recorded. At least one attempt is required; all targets equal.
+        assert ops.disp_removed  # attempted
+        assert set(ops.disp_removed) == {_GOOD_DISP}
         assert audit.rows[-1]["decision"] == "error"
 
     def test_remove_oserror_maps_to_badstate(self, ops, tmp_path):
@@ -2084,9 +2087,11 @@ class TestSweepExpiredLeases:
         store = self._store(ops, tmp_path, _RecordingAudit())
         reaped = store.sweep_expired_leases(now=5000.0)
         # Neither was reaped (both rm-fail), but BOTH were attempted — the loop
-        # did not abort after the first.
+        # did not abort after the first. dispose() may retry each False remove
+        # (load hardening); every entry must still be one of the two names.
         assert reaped == []
-        assert ops.disp_removed == [_GOOD_DISP, other]
+        assert set(ops.disp_removed) == {_GOOD_DISP, other}
+        assert _GOOD_DISP in ops.disp_removed and other in ops.disp_removed
 
     def test_badstate_on_one_does_not_abort(self, ops, tmp_path):
         # dispose() raising BadState (podman OSError) on one candidate is caught
@@ -2342,9 +2347,10 @@ class TestDisposeByWorkflow:
         assert ops.disp_removed == []
         assert audit.rows[-1]["decision"] == "error"
 
-    def test_partial_failure_raises_not_clean_success(self, ops, tmp_path):
+    def test_partial_failure_raises_not_clean_success(self, ops, tmp_path, monkeypatch):
         # One of two containers fails to dispose -> the method MUST NOT report
         # clean success (cond 8). The other is still attempted (best-effort).
+        # dispose_by_workflow retries failures once; keep b permanently False.
         a = "disp-agent-20260612-151828"
         b = "disp-agent-20260612-151900"
         ops.disp_containers = [a, b]
@@ -2360,6 +2366,7 @@ class TestDisposeByWorkflow:
                 return orig(name, caller=caller)   # succeeds
             return False                            # podman rm "failed"
         store.dispose = flaky
+        monkeypatch.setattr(sm.time, "sleep", lambda *_a, **_k: None)
         with pytest.raises(BadState):
             store.dispose_by_workflow(_WF_ID)
         # Both were attempted (best-effort across the group)...
@@ -2368,6 +2375,29 @@ class TestDisposeByWorkflow:
         err = [r for r in audit.rows
                if r["action"] == "dispose-by-workflow" and r["decision"] == "error"]
         assert err
+
+    def test_partial_failure_retry_recovers(self, ops, tmp_path, monkeypatch):
+        # First pass: a ok, b fails. Retry pass: b succeeds -> clean reaped=2.
+        a = "disp-agent-20260612-151828"
+        b = "disp-agent-20260612-151900"
+        ops.disp_containers = [a, b]
+        ops.disp_workflow_map = {_WF_ID: [a, b]}
+        store = self._store(ops, tmp_path, _RecordingAudit())
+        orig = store.dispose
+        calls = {a: 0, b: 0}
+
+        def flaky(name, caller=None):
+            calls[name] = calls.get(name, 0) + 1
+            if name == a:
+                return orig(name, caller=caller)
+            # first attempt fails, retry succeeds
+            if calls[name] == 1:
+                return False
+            return orig(name, caller=caller)
+        store.dispose = flaky
+        monkeypatch.setattr(sm.time, "sleep", lambda *_a, **_k: None)
+        assert store.dispose_by_workflow(_WF_ID) == 2
+        assert calls[b] >= 2
 
     def test_nondisposable_workflow_match_resolves_to_nothing(self, ops, tmp_path):
         # Defence in depth: a workflow id whose only match is an UNLABELLED
@@ -2634,6 +2664,32 @@ class TestDispContainerRemoveTimeout:
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         monkeypatch.setattr(sm.subprocess, "run", fake_run)
         assert ops.disp_container_remove("disp-pdf-20260612-151828") is False
+
+    def test_exists_timeout_then_gone_is_success(self, monkeypatch):
+        # One exists timeout under load then a definitive rc==1 must promote
+        # the timed-out rm to success (container really gone).
+        ops = sm._SystemOps()
+        full_id = "a" * 64
+        exists_n = {"n": 0}
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=full_id,
+                                             stderr="")
+            if "top" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "exists" in argv:
+                exists_n["n"] += 1
+                if exists_n["n"] == 1:
+                    raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            if "rm" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        monkeypatch.setattr(sm.time, "sleep", lambda *_a, **_k: None)
+        assert ops.disp_container_remove("disp-pdf-20260612-151828") is True
+        assert exists_n["n"] == 2
 
     def test_nondisposable_name_still_refused(self):
         ops = sm._SystemOps()

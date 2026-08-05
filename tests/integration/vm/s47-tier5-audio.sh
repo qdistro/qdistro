@@ -181,8 +181,11 @@ fi
 
 # Wait for qga inside the guest to respond. cloud-init firstboot
 # can take 60s+; qemu-guest-agent doesn't bind until after that.
+# Under concurrent nested-KVM load (parallel bats / full QCI) firstboot
+# + agent bind routinely exceeds 120s — budget 240s without relaxing
+# the ping assertion.
 QGA_OK=0
-for _ in $(seq 1 120); do
+for _ in $(seq 1 240); do
     if runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
         virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' \
         >/dev/null 2>&1; then
@@ -193,7 +196,7 @@ done
 if [ "$QGA_OK" = "1" ]; then
     pass "qga ready"
 else
-    fail "guest qemu-guest-agent never responded within 120s"
+    fail "guest qemu-guest-agent never responded within 240s"
 fi
 
 # ---- 3. launch speaker-test inside the guest via qga guest-exec -----
@@ -204,14 +207,13 @@ fi
 # qga guest-exec returns {"return":{"pid":N}}. Anything else (no pid,
 # error, or the binary missing in the guest) is a hard fail.
 SPK_REQ='{"execute":"guest-exec","arguments":{"path":"/usr/bin/speaker-test","arg":["-t","sine","-f","440","-l","2","-c","2"],"capture-output":false}}'
+# Some builds path speaker-test at /usr/sbin or alsa-utils may be
+# missing entirely. PATH-resolved bare name is a second candidate.
+SPK_REQ2='{"execute":"guest-exec","arguments":{"path":"speaker-test","arg":["-t","sine","-f","440","-l","2","-c","2"],"capture-output":false}}'
 SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
     virsh qemu-agent-command "$VM_NAME" "$SPK_REQ" 2>/dev/null || true)
 
 if [ -z "$SPK_REPLY" ]; then
-    # Some builds path speaker-test at /usr/sbin or alsa-utils may be
-    # missing entirely. Retry with a bare command name to let the guest
-    # PATH resolve it, in case absolute path was wrong for this image.
-    SPK_REQ2='{"execute":"guest-exec","arguments":{"path":"speaker-test","arg":["-t","sine","-f","440","-l","2","-c","2"],"capture-output":false}}'
     SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
         virsh qemu-agent-command "$VM_NAME" "$SPK_REQ2" 2>/dev/null || true)
 fi
@@ -221,6 +223,26 @@ if echo "$SPK_REPLY" | grep -q '"pid"'; then
     SPK_PID=$(echo "$SPK_REPLY" \
         | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' \
         | grep -oE '[0-9]+' | head -1)
+fi
+
+# guest-exec can race the first successful ping (agent up but still
+# settling). Retry a few times before declaring the image missing alsa.
+if [ -z "$SPK_PID" ] || ! [ "$SPK_PID" -gt 0 ] 2>/dev/null; then
+    for _ in 1 2 3 4 5; do
+        sleep 2
+        SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+            virsh qemu-agent-command "$VM_NAME" "$SPK_REQ" 2>/dev/null || true)
+        if [ -z "$SPK_REPLY" ]; then
+            SPK_REPLY=$(runuser -u "$ADMIN_USER" -- env XDG_RUNTIME_DIR=/run/user/$ADMIN_UID \
+                virsh qemu-agent-command "$VM_NAME" "$SPK_REQ2" 2>/dev/null || true)
+        fi
+        if echo "$SPK_REPLY" | grep -q '"pid"'; then
+            SPK_PID=$(echo "$SPK_REPLY" \
+                | grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' \
+                | grep -oE '[0-9]+' | head -1)
+        fi
+        [ -n "$SPK_PID" ] && [ "$SPK_PID" -gt 0 ] 2>/dev/null && break
+    done
 fi
 
 if [ -n "$SPK_PID" ] && [ "$SPK_PID" -gt 0 ] 2>/dev/null; then

@@ -86,7 +86,10 @@ SPAWN_PID=$!
 
 # Wait until the domain is running, the overlay exists, AND the wrapper has
 # emitted its resolved lifecycle line (printed once the guest is up).
-deadline=$(( $(date +%s) + 120 ))
+# Nested KVM under concurrent host load routinely exceeds 120s to reach
+# running+lifecycle-line (same thrash that starves QGA in sibling tests);
+# budget 240s wall for readiness without relaxing the assert conditions.
+deadline=$(( $(date +%s) + 240 ))
 READY=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if virsh_admin domstate "$VM_NAME" 2>/dev/null | grep -qw running \
@@ -102,7 +105,7 @@ if [ "$READY" != "1" ]; then
     virsh_admin destroy "$VM_NAME" >/dev/null 2>&1 || true
     virsh_admin undefine "$VM_NAME" >/dev/null 2>&1 || true
     rm -f "$OVERLAY" "$CONF"
-    fail "domain never reached running + lifecycle-line state within 120s"
+    fail "domain never reached running + lifecycle-line state within 240s"
     echo "[s49] $PASSCOUNT passes, $FAILCOUNT failures"
     exit 1
 fi
