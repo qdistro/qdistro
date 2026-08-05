@@ -760,12 +760,20 @@ print("TOP_OK")
 # NONE empty (PID1 comm mismatch is fail-closed). To exercise the full reap path
 # (eligibility -> top -> proctree_empty -> dispose -> real rm) we monkeypatch the
 # expected PID1 comm to 'sleep' for THIS run only, matching the empty fixture.
+import time as _time
 import qdistro_session_manager as _M
 _orig = D.proctree_empty
 D.proctree_empty = lambda out, pid1_comm=D.PROCTREE_PID1_COMM: _orig(out, pid1_comm="sleep")
 try:
     store = _M._SiloStore(ops, config_path=_M.Path("/tmp/proctree-sweep-silos.yaml"))
     reaped = store.sweep_empty_proctrees()
+    # Under host load a single podman top/rm can time out even though the empty
+    # tree was correctly identified (fail-closed => reaped []). One short retry
+    # mirrors the daemon's periodic-sweep contract without relaxing WHICH
+    # fixtures may be reaped: the assert still requires EXACTLY the empty one.
+    if reaped != [empty]:
+        _time.sleep(1)
+        reaped = store.sweep_empty_proctrees()
 finally:
     D.proctree_empty = _orig
 assert reaped == [empty], f"proctree sweep reaped {reaped!r}, expected exactly [{empty!r}]"

@@ -1716,22 +1716,44 @@ class _SystemOps:
         to a SKIP (fail-closed: a podman error must never be read as 'tree
         empty'). Bounded by ``timeout`` so the single-flight sweep worker cannot
         wedge on a stuck container. Name-validated as defence in depth so a
-        non-disposable name can never reach ``podman top``."""
+        non-disposable name can never reach ``podman top``.
+
+        One retry on ``TimeoutExpired`` only: under host load a single slow
+        ``podman top`` is common and is not evidence that the tree is non-empty.
+        A second timeout / any non-timeout failure still returns ``None`` (SKIP)
+        — never a reap on a guess. Total wall-clock stays bounded (~2 * timeout
+        plus a short backoff); the worker cannot wedge forever."""
         if not _disp.is_disposable_container(name):
             return None
-        try:
-            proc = subprocess.run(
-                ["runuser", "-u", ADMIN_USER_NAME,
-                 "--", "podman", "top", name, "pid", "comm"],
-                capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError) as e:
-            log.warning("proctree sweep: podman top %r failed: %s", name, e)
-            return None
-        if proc.returncode != 0:
-            log.warning("proctree sweep: podman top %r rc=%d: %s",
-                        name, proc.returncode, proc.stderr.strip())
-            return None
-        return proc.stdout
+        last_timeout: BaseException | None = None
+        for attempt in range(2):
+            try:
+                proc = subprocess.run(
+                    ["runuser", "-u", ADMIN_USER_NAME,
+                     "--", "podman", "top", name, "pid", "comm"],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as e:
+                last_timeout = e
+                if attempt == 0:
+                    log.warning("proctree sweep: podman top %r timed out; "
+                                "retrying once", name)
+                    time.sleep(0.5)
+                    continue
+                log.warning("proctree sweep: podman top %r failed: %s",
+                            name, e)
+                return None
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning("proctree sweep: podman top %r failed: %s", name, e)
+                return None
+            if proc.returncode != 0:
+                log.warning("proctree sweep: podman top %r rc=%d: %s",
+                            name, proc.returncode, proc.stderr.strip())
+                return None
+            return proc.stdout
+        if last_timeout is not None:
+            log.warning("proctree sweep: podman top %r failed: %s",
+                        name, last_timeout)
+        return None
 
     def disp_containers_by_workflow(self, workflow_id: str) -> list[str]:
         """Names of disposable containers carrying the per-step
@@ -1809,8 +1831,8 @@ class _SystemOps:
                 capture_output=True, timeout=30)
         except subprocess.TimeoutExpired:
             log.warning("podman rm -f %r timed out; cleaning up stuck "
-                        "descendants then treating as a failed (retryable) "
-                        "removal", name)
+                        "descendants then re-checking whether the container "
+                        "is gone", name)
             try:
                 self._cleanup_stuck_descendants(name, full_id)
             except Exception as e:  # noqa: BLE001
@@ -1818,8 +1840,35 @@ class _SystemOps:
                 # a timed-out remove into a worker-killing exception.
                 log.warning("stuck-descendant cleanup for %r errored: %s",
                             name, e)
+            # Honest post-condition for dispose()/sweeps: "True if the container
+            # is gone afterward". Under load the CLI client can time out while
+            # the server-side rm (or the cleanup's rm retry) still finishes —
+            # report success ONLY when existence is definitively absent. Any
+            # uncertain exists-check remains a failed (retryable) removal.
+            if self._disp_container_gone(name):
+                log.info("podman rm -f %r timed out but container is gone; "
+                         "treating as success", name)
+                return True
             return False
         return proc.returncode == 0
+
+    def _disp_container_gone(self, name: str) -> bool:
+        """True only when ``podman container exists`` definitively reports the
+        disposable absent (rc == 1). Present (rc == 0), any other rc, timeout,
+        or OSError => False (fail-closed): a timed-out remove must never be
+        promoted to success on an uncertain check. Name-validated as defence
+        in depth so a non-disposable name never reaches the exists probe."""
+        if not _disp.is_disposable_container(name):
+            return False
+        try:
+            proc = subprocess.run(
+                ["runuser", "-u", ADMIN_USER_NAME,
+                 "--", "podman", "container", "exists", name],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            log.warning("disp remove: exists check for %r failed: %s", name, e)
+            return False
+        return proc.returncode == 1
 
     def _disp_container_full_id(self, name: str) -> str | None:
         """The full (64-hex) container id of a disposable, via a bounded

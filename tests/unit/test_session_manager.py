@@ -2529,11 +2529,32 @@ class TestDispProctreeCandidates:
 
     def test_top_timeout_returns_none(self, monkeypatch):
         ops = sm._SystemOps()
+        calls = {"n": 0}
 
         def boom(argv, **kw):
+            calls["n"] += 1
             raise sm.subprocess.TimeoutExpired(argv, 30)
         monkeypatch.setattr(sm.subprocess, "run", boom)
+        # Both attempts time out -> still None (fail-closed SKIP). The one
+        # retry is load-hardening, not a loop: exactly two bounded attempts.
+        monkeypatch.setattr(sm.time, "sleep", lambda *_a, **_k: None)
         assert ops.disp_container_top_pids("disp-agent-20260612-151828") is None
+        assert calls["n"] == 2
+
+    def test_top_retries_once_on_timeout_then_succeeds(self, monkeypatch):
+        ops = sm._SystemOps()
+        calls = {"n": 0}
+        out = "PID COMMAND\n1 weston\n"
+
+        def flaky(argv, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sm.subprocess.TimeoutExpired(argv, 30)
+            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", flaky)
+        monkeypatch.setattr(sm.time, "sleep", lambda *_a, **_k: None)
+        assert ops.disp_container_top_pids("disp-agent-20260612-151828") == out
+        assert calls["n"] == 2
 
 
 class TestDispContainerRemoveTimeout:
@@ -2546,8 +2567,72 @@ class TestDispContainerRemoveTimeout:
             assert kw.get("timeout"), "podman rm -f must pass a timeout"
             raise sm.subprocess.TimeoutExpired(argv, kw["timeout"])
         monkeypatch.setattr(sm.subprocess, "run", hang)
-        # A timed-out rm is a failed (retryable) removal -> False, NOT an
-        # exception (keeps the bool contract; unblocks the worker thread).
+        # A timed-out rm whose container is still present (or whose existence
+        # cannot be confirmed — every call hangs) is a failed (retryable)
+        # removal -> False, NOT an exception (keeps the bool contract; unblocks
+        # the worker thread).
+        assert ops.disp_container_remove("disp-pdf-20260612-151828") is False
+
+    def test_timeout_but_container_gone_is_success(self, monkeypatch):
+        # Under load the CLI client can time out while the server-side rm (or
+        # the stuck-descendant cleanup's rm retry) still finishes. dispose()
+        # promises "True if the container is gone afterward" — honour that
+        # when exists is DEFINITIVELY absent (rc==1).
+        ops = sm._SystemOps()
+        full_id = "a" * 64
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=full_id,
+                                             stderr="")
+            if "top" in argv:
+                # cleanup top: unusable -> cleanup kills nothing, still tries
+                # the rm retry (which we also time out) then exists wins.
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "exists" in argv:
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+            if "rm" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        assert ops.disp_container_remove("disp-pdf-20260612-151828") is True
+
+    def test_timeout_and_container_still_present_is_failed(self, monkeypatch):
+        ops = sm._SystemOps()
+        full_id = "a" * 64
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=full_id,
+                                             stderr="")
+            if "top" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "exists" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "rm" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
+        assert ops.disp_container_remove("disp-pdf-20260612-151828") is False
+
+    def test_timeout_exists_check_error_is_failed_not_success(self, monkeypatch):
+        # Fail-closed: an exists probe that itself times out must NOT promote
+        # the remove to success.
+        ops = sm._SystemOps()
+        full_id = "a" * 64
+
+        def fake_run(argv, **kw):
+            if "inspect" in argv:
+                return types.SimpleNamespace(returncode=0, stdout=full_id,
+                                             stderr="")
+            if "top" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "exists" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            if "rm" in argv:
+                raise sm.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(sm.subprocess, "run", fake_run)
         assert ops.disp_container_remove("disp-pdf-20260612-151828") is False
 
     def test_nondisposable_name_still_refused(self):
