@@ -18,8 +18,9 @@ fi
 # Overall deadline (seconds) for the in-guest command. A wedged/CPU-starved
 # command (e.g. a never-exiting weston-terminal spawn) would otherwise make the
 # status poller below loop forever, holding a parallel CI worker slot. Default
-# is generous (1800s): the slowest legitimate work item observed in a full
-# parallel `qci full` run was ~1031s, so a tighter window would false-kill.
+# is generous (1800s): parallel `qci full` has observed legitimate work near
+# ~1300s (templates-promotion setup under QCI_JOBS=8), so a tighter window
+# would false-kill.
 TIMEOUT=${QDISTRO_VM_EXEC_TIMEOUT:-1800}
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_TIMEOUT must be a non-negative integer, got: $TIMEOUT" >&2
@@ -36,19 +37,34 @@ if ! [[ "$AGENT_RPC_TIMEOUT" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# Consecutive guest-agent RPC failures before giving up. Under parallel CI a
+# guest can leave QGA unresponsive for well over the old hard-coded 5 attempts
+# (CPU-starved podman/buildah builds, post-suspend channel recovery). Default
+# 30 keeps overall TIMEOUT as the real upper bound while surviving multi-minute
+# blips that previously killed templates-promotion / templates-browser setup.
+AGENT_MAX_ERRORS=${QDISTRO_VM_AGENT_MAX_ERRORS:-30}
+if ! [[ "$AGENT_MAX_ERRORS" =~ ^[0-9]+$ ]] || [ "$AGENT_MAX_ERRORS" -lt 1 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_AGENT_MAX_ERRORS must be a positive integer, got: $AGENT_MAX_ERRORS" >&2
+    exit 1
+fi
+
 # Large /proc/uptime jumps (host suspend/resume) must not burn the whole
 # deadline in one step. Charge only the expected poll interval instead.
 # A normal iteration is agent RPC (<= AGENT_RPC_TIMEOUT) + sleep 1|2; jumps
-# far beyond that are treated as suspend. Default 30 matches historical
-# suspend false-timeouts (elapsed 8k+s) without under-charging steady RPC.
-DEADLINE_JUMP_THRESHOLD=${QDISTRO_VM_EXEC_JUMP_THRESHOLD:-30}
+# far beyond that are treated as suspend.
+#
+# Default MUST exceed AGENT_RPC_TIMEOUT: when the RPC `timeout` fires at 30s
+# the loop delta is ~31-32s. With threshold==30 those timed-out polls were
+# mis-logged as "host uptime jumped 32s (likely suspend/resume)" and only 1s
+# was charged — and five such hits killed the command while the guest was
+# still making progress (templates-promotion full-20260805T162915Z).
+DEADLINE_JUMP_THRESHOLD=${QDISTRO_VM_EXEC_JUMP_THRESHOLD:-60}
 if ! [[ "$DEADLINE_JUMP_THRESHOLD" =~ ^[0-9]+$ ]] || [ "$DEADLINE_JUMP_THRESHOLD" -lt 1 ]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_JUMP_THRESHOLD must be a positive integer, got: $DEADLINE_JUMP_THRESHOLD" >&2
     exit 1
 fi
 # Seconds charged when a jump is detected (matches the common poll sleep).
 DEADLINE_JUMP_CHARGE=1
-
 # Monotonic-ish clock for deadline accounting: successive /proc/uptime reads
 # with large positive deltas clamped. bash SECONDS tracks wall clock and jumps
 # with NTP/suspend, which false-fired exit 124 after host sleep in CI.
@@ -135,6 +151,9 @@ while true; do
         if [ "$DELTA" -gt "$DEADLINE_JUMP_THRESHOLD" ]; then
             echo "[vm-exec] WARN: host uptime jumped ${DELTA}s (likely suspend/resume); charging ${DEADLINE_JUMP_CHARGE}s to deadline" >&2
             DELTA=$DEADLINE_JUMP_CHARGE
+            # Post-suspend QGA often needs a recovery window; don't inherit
+            # pre-jump failures into the consecutive-error budget.
+            ERROR_COUNT=0
         fi
         ELAPSED=$((ELAPSED + DELTA))
         PREV_UPTIME=$NOW_UPTIME
@@ -154,8 +173,17 @@ while true; do
 
     if [ $VIRSH_EXIT -ne 0 ]; then
         ERROR_COUNT=$((ERROR_COUNT + 1))
-        if [ $ERROR_COUNT -lt 5 ]; then
-            sleep 2
+        if [ "$ERROR_COUNT" -lt "$AGENT_MAX_ERRORS" ]; then
+            # Mild backoff: keep early retries snappy, give starved/post-resume
+            # guests more time after a streak of failures. Cap so the overall
+            # deadline still advances under continuous failure.
+            sleep_s=2
+            if [ "$ERROR_COUNT" -ge 5 ]; then sleep_s=5; fi
+            if [ "$ERROR_COUNT" -ge 15 ]; then sleep_s=10; fi
+            if [ "$ERROR_COUNT" -le 3 ] || [ $((ERROR_COUNT % 5)) -eq 0 ]; then
+                echo "[vm-exec] WARN: guest agent RPC failed (attempt ${ERROR_COUNT}/${AGENT_MAX_ERRORS}, virsh_exit=${VIRSH_EXIT}); retry in ${sleep_s}s" >&2
+            fi
+            sleep "$sleep_s"
             continue
         fi
         echo "[vm-exec] ERROR: Guest agent not responding after $ERROR_COUNT attempts" >&2
@@ -164,11 +192,17 @@ while true; do
 
     if echo "$RESULT" | grep -q "error"; then
         ERROR_COUNT=$((ERROR_COUNT + 1))
-        if [ $ERROR_COUNT -lt 5 ]; then
-            sleep 2
+        if [ "$ERROR_COUNT" -lt "$AGENT_MAX_ERRORS" ]; then
+            sleep_s=2
+            if [ "$ERROR_COUNT" -ge 5 ]; then sleep_s=5; fi
+            if [ "$ERROR_COUNT" -ge 15 ]; then sleep_s=10; fi
+            if [ "$ERROR_COUNT" -le 3 ] || [ $((ERROR_COUNT % 5)) -eq 0 ]; then
+                echo "[vm-exec] WARN: guest agent returned error (attempt ${ERROR_COUNT}/${AGENT_MAX_ERRORS}); retry in ${sleep_s}s" >&2
+            fi
+            sleep "$sleep_s"
             continue
         fi
-        echo "[vm-exec] ERROR: Guest agent returned error" >&2
+        echo "[vm-exec] ERROR: Guest agent returned error after $ERROR_COUNT attempts: $RESULT" >&2
         exit 1
     fi
     ERROR_COUNT=0
@@ -179,11 +213,12 @@ while true; do
     fi
     WAIT_COUNT=$((WAIT_COUNT + 1))
     if [ $WAIT_COUNT -gt 0 ] && [ $((WAIT_COUNT % 30)) -eq 0 ]; then
-        echo "[vm-exec] Waiting... (${WAIT_COUNT}s)" >&2
+        # Report deadline-elapsed too: under load a single RPC can take
+        # AGENT_RPC_TIMEOUT, so WAIT_COUNT understates wall time.
+        echo "[vm-exec] Waiting... (polls=${WAIT_COUNT}s elapsed=${ELAPSED}s)" >&2
     fi
     sleep 1
 done
-
 # 4. Decode and print stdout
 OUT_DATA=$(echo "$RESULT" | jq -r '.return."out-data"')
 if [ "$OUT_DATA" != "null" ] && [ -n "$OUT_DATA" ]; then
