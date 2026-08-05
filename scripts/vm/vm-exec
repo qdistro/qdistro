@@ -26,7 +26,7 @@ if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# Per-RPC host-side cap. The overall SECONDS deadline below cannot fire while the
+# Per-RPC host-side cap. The overall deadline below cannot fire while the
 # shell is blocked inside a `virsh qemu-agent-command` command substitution, so a
 # single wedged agent RPC could still hang forever. Bound each RPC with
 # `timeout` so the poll loop always regains control to re-check the deadline.
@@ -35,6 +35,32 @@ if ! [[ "$AGENT_RPC_TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "[vm-exec] ERROR: QDISTRO_VM_AGENT_RPC_TIMEOUT must be a non-negative integer, got: $AGENT_RPC_TIMEOUT" >&2
     exit 1
 fi
+
+# Large /proc/uptime jumps (host suspend/resume) must not burn the whole
+# deadline in one step. Charge only the expected poll interval instead.
+# A normal iteration is agent RPC (<= AGENT_RPC_TIMEOUT) + sleep 1|2; jumps
+# far beyond that are treated as suspend. Default 30 matches historical
+# suspend false-timeouts (elapsed 8k+s) without under-charging steady RPC.
+DEADLINE_JUMP_THRESHOLD=${QDISTRO_VM_EXEC_JUMP_THRESHOLD:-30}
+if ! [[ "$DEADLINE_JUMP_THRESHOLD" =~ ^[0-9]+$ ]] || [ "$DEADLINE_JUMP_THRESHOLD" -lt 1 ]; then
+    echo "[vm-exec] ERROR: QDISTRO_VM_EXEC_JUMP_THRESHOLD must be a positive integer, got: $DEADLINE_JUMP_THRESHOLD" >&2
+    exit 1
+fi
+# Seconds charged when a jump is detected (matches the common poll sleep).
+DEADLINE_JUMP_CHARGE=1
+
+# Monotonic-ish clock for deadline accounting: successive /proc/uptime reads
+# with large positive deltas clamped. bash SECONDS tracks wall clock and jumps
+# with NTP/suspend, which false-fired exit 124 after host sleep in CI.
+read_uptime_s() {
+    local u
+    if ! read -r u _ < /proc/uptime 2>/dev/null; then
+        echo "[vm-exec] ERROR: cannot read /proc/uptime for deadline tracking" >&2
+        exit 1
+    fi
+    # Truncate fractional seconds (first field is "seconds.centiseconds").
+    printf '%s\n' "${u%%.*}"
+}
 
 # Single guest-agent RPC, bounded by AGENT_RPC_TIMEOUT (0 = unbounded). On timeout
 # `timeout` exits 124, which callers treat like any other virsh failure.
@@ -92,15 +118,31 @@ if [ -z "$PID" ] || ! [[ "$PID" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# 3. Wait until command completes (exitcode is set)
+# 3. Wait until command completes (exitcode is set).
+# Deadline uses clamped /proc/uptime deltas (not bash SECONDS / wall clock)
+# so host suspend/resume cannot jump elapsed past TIMEOUT in one poll.
 WAIT_COUNT=0
 ERROR_COUNT=0
-SECONDS=0
+ELAPSED=0
+PREV_UPTIME=$(read_uptime_s)
 while true; do
-    if [ "$TIMEOUT" -gt 0 ] && [ "$SECONDS" -ge "$TIMEOUT" ]; then
-        echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${SECONDS}s); killing guest PID $PID: $CMD" >&2
-        kill_guest_pid "$PID"
-        exit 124
+    if [ "$TIMEOUT" -gt 0 ]; then
+        NOW_UPTIME=$(read_uptime_s)
+        DELTA=$((NOW_UPTIME - PREV_UPTIME))
+        if [ "$DELTA" -lt 0 ]; then
+            DELTA=0
+        fi
+        if [ "$DELTA" -gt "$DEADLINE_JUMP_THRESHOLD" ]; then
+            echo "[vm-exec] WARN: host uptime jumped ${DELTA}s (likely suspend/resume); charging ${DEADLINE_JUMP_CHARGE}s to deadline" >&2
+            DELTA=$DEADLINE_JUMP_CHARGE
+        fi
+        ELAPSED=$((ELAPSED + DELTA))
+        PREV_UPTIME=$NOW_UPTIME
+        if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+            echo "[vm-exec] ERROR: command exceeded ${TIMEOUT}s (elapsed ${ELAPSED}s); killing guest PID $PID: $CMD" >&2
+            kill_guest_pid "$PID"
+            exit 124
+        fi
     fi
 
     set +e
