@@ -325,3 +325,23 @@ def test_arbitrary_uid_1000_cannot_assert_identity_verified_gates(
         getattr(broker, method)(*args)
 
     assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
+
+
+def test_admin_python_c_can_revoke_all_for_uid(broker, monkeypatch):
+    """RevokeAllForUid is an admin-control method the s57 probe drives
+    via `python3 -c`. It must be in _ADMIN_CONTROL_STDIN_METHODS so a
+    live admin interpreter is trusted the same way as DecideRequest.
+    """
+    broker.set_peer(uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3")
+    monkeypatch.setattr(B, "_read_proc_identity",
+                        lambda _pid: ("/usr/bin/python3", 1))
+    monkeypatch.setattr(B, "_read_proc_selinux_label", lambda _pid: "")
+    monkeypatch.setattr(B, "_read_proc_cmdline",
+                        lambda _pid: ["python3", "-c", "iface.RevokeAllForUid(1)"])
+
+    ok, reason = broker._peer_matches_admin_control(
+        uid=ADMIN_UID, pid=1234, exe="/usr/bin/python3",
+        method="RevokeAllForUid",
+    )
+    assert ok, reason
+    assert "RevokeAllForUid" in B._ADMIN_CONTROL_STDIN_METHODS
