@@ -232,12 +232,223 @@ gui_validate_scenarios() {
     return "$rc"
 }
 
+# Short, stable host alias for a canonical per-scenario artifact dir.
+# Agents under load routinely mangle long `ci/runs/full-<stamp>-<pid>/gui/<slug>`
+# paths (drop the pid suffix, invent siblings). A fixed /tmp/qci-gui-art/<16hex>
+# symlink is short, unique per adir (collision-safe under QCI_GUI_JOBS=N), and
+# still lands writes in the canonical dir via the symlink. Pure enough for
+# host selftests when TMPDIR is redirected.
+# Args: absolute canonical artifact dir. Echoes the alias path.
+gui_make_artifact_alias() {
+    local adir=$1 key base short
+    [ -n "$adir" ] || return 1
+    mkdir -p "$adir" || return 1
+    key=$(printf '%s' "$adir" | sha256sum 2>/dev/null | awk '{print substr($1,1,16)}')
+    [ -n "$key" ] || key=$(printf '%s' "$adir" | cksum | awk '{print $1}')
+    base="${QCI_GUI_ART_ALIAS_ROOT:-${TMPDIR:-/tmp}/qci-gui-art}"
+    mkdir -p "$base" || return 1
+    short="$base/$key"
+    # Atomic-ish replace: symlink into place (no race with other scenarios —
+    # key is a content hash of the full adir path).
+    ln -sfn "$adir" "$short" || return 1
+    printf '%s\n' "$adir" > "$base/$key.target" 2>/dev/null || true
+    printf '%s\n' "$short"
+}
+
+# Read first verdict token from a status.txt (or empty).
+gui_status_file_verdict() {
+    local f=$1 raw=""
+    [ -f "$f" ] || { printf '\n'; return 0; }
+    raw=$(tr -d '\r' < "$f" | awk 'NF {print toupper($1); exit}')
+    case "$raw" in
+        PASSN) raw=PASS ;;
+        FAILN) raw=FAIL ;;
+        ERRORN) raw=ERROR ;;
+        SKIPN) raw=SKIP ;;
+    esac
+    case "$raw" in
+        PASS|FAIL|ERROR|SKIP) printf '%s\n' "$raw" ;;
+        *) printf '\n' ;;
+    esac
+}
+
+# After an agent attempt: if the canonical adir has no usable status.txt, search
+# for a misplaced one for THIS slug only and copy evidence into the canonical
+# dir. Designed for dumb agents + concurrent GUI pools:
+#   * only paths whose parent directory basename is exactly `$slug` (never
+#     another scenario's artifacts)
+#   * refuses to harvest when candidates disagree on PASS/FAIL/ERROR/SKIP
+#   * prefers a candidate under the real RDIR, then under the timestamp-only
+#     truncated sibling (the observed Luna failure mode), then newest mtime
+# Returns 0 always (best-effort); leaves a `.harvested-from` breadcrumb on
+# success so report triage can see the recovery. Host-testable.
+# Args: canonical_adir slug [agent_log]
+gui_harvest_agent_artifacts() {
+    local adir=$1 slug=$2 log_path=${3:-}
+    local st="" cand="" cands=() seen="" v="" vs="" picked="" parent runs_parent rid rid_ts p
+    [ -n "$adir" ] && [ -n "$slug" ] || return 0
+    mkdir -p "$adir" 2>/dev/null || true
+
+    st=$(gui_status_file_verdict "$adir/status.txt")
+    if [ -n "$st" ]; then
+        return 0
+    fi
+    # report.md alone may still grade via agent_artifact_status — only harvest
+    # when status is missing; do not clobber a partial report mid-write.
+    if [ -f "$adir/report.md" ] && [ ! -f "$adir/status.txt" ]; then
+        st=$(agent_artifact_status "$adir" "${log_path:-/dev/null}")
+        case "$st" in PASS|FAIL|ERROR|SKIP) return 0 ;; esac
+    fi
+
+    # --- collect candidates (status.txt only; slug-scoped) ---
+    # Intentionally NOT a recursive find over all of RUNS_DIR: historical runs
+    # for the same slug routinely disagree (PASS vs FAIL) and would veto recovery
+    # under concurrent/long-lived CI hosts. Only THIS attempt's neighborhoods.
+    #
+    # 1) paths mentioned in the agent log (normalize accidental // prefixes
+    #    from greedy path extractors)
+    if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+        while IFS= read -r cand; do
+            [ -n "$cand" ] || continue
+            while [[ "$cand" == //* ]]; do cand=${cand#/}; done
+            cands+=("$cand")
+        done < <(grep -oE '/[[:alnum:]./_%+-]+/gui/'"$slug"'/status\.txt' "$log_path" 2>/dev/null \
+            | sort -u || true)
+    fi
+    # 2) known Luna truncation: drop trailing -<pid> from run id
+    #    (only a pure-digit suffix — never eat the ISO timestamp)
+    if [ -n "${RDIR:-}" ]; then
+        runs_parent=$(dirname "$RDIR")
+        rid=$(basename "$RDIR")
+        rid_ts=$rid
+        if [[ "$rid" =~ ^(.*)-([0-9]+)$ ]]; then
+            rid_ts="${BASH_REMATCH[1]}"
+        fi
+        if [ -n "$rid_ts" ] && [ "$rid_ts" != "$rid" ]; then
+            cands+=("$runs_parent/$rid_ts/gui/$slug/status.txt")
+        fi
+        # also: agent may have written under RDIR but a slightly wrong subdir
+        cands+=("$RDIR/gui/$slug/status.txt")
+    fi
+    # 3) short-alias target (symlink or real) — usually already the canonical adir
+    if [ -n "${QCI_GUI_ARTIFACT_DIR:-}" ]; then
+        cands+=("${QCI_GUI_ARTIFACT_DIR}/status.txt")
+    fi
+
+    # Dedup + validate: parent basename == slug, file exists, not already adir
+    local -a valid=()
+    local adir_real
+    adir_real=$(readlink -f "$adir" 2>/dev/null || printf '%s' "$adir")
+    seen=$'\n'
+    for cand in "${cands[@]+"${cands[@]}"}"; do
+        while [[ "$cand" == //* ]]; do cand=${cand#/}; done
+        [ -f "$cand" ] || continue
+        parent=$(basename "$(dirname "$cand")")
+        [ "$parent" = "$slug" ] || continue
+        # resolve to real path for comparison when possible
+        p=$(readlink -f "$cand" 2>/dev/null || printf '%s' "$cand")
+        case "$seen" in
+            *$'\n'"$p"$'\n'*) continue ;;
+        esac
+        seen+="$p"$'\n'
+        # skip if already inside the canonical adir (resolved)
+        case "$p" in
+            "$adir_real"|"$adir_real"/*) continue ;;
+        esac
+        v=$(gui_status_file_verdict "$cand")
+        [ -n "$v" ] || continue
+        # store the resolved path so prefer-matching is slash-stable
+        valid+=("$p")
+    done
+
+    [ "${#valid[@]}" -gt 0 ] || return 0
+
+    # Prefer: under real RDIR > truncated timestamp sibling of THIS run.
+    # A preferred path is trusted alone (other historical runs for the same
+    # slug may disagree and must not veto recovery of this attempt).
+    picked=""
+    if [ -n "${RDIR:-}" ]; then
+        local rdir_real trunc_real
+        rdir_real=$(readlink -f "$RDIR" 2>/dev/null || printf '%s' "$RDIR")
+        for cand in "${valid[@]}"; do
+            case "$cand" in
+                "$rdir_real"/*|"$RDIR"/*) picked=$cand; break ;;
+            esac
+        done
+        if [ -z "$picked" ]; then
+            rid=$(basename "$RDIR")
+            rid_ts=$rid
+            if [[ "$rid" =~ ^(.*)-([0-9]+)$ ]]; then
+                rid_ts="${BASH_REMATCH[1]}"
+            fi
+            runs_parent=$(dirname "$RDIR")
+            if [ "$rid_ts" != "$rid" ]; then
+                trunc_real=$(readlink -f "$runs_parent/$rid_ts" 2>/dev/null || printf '%s' "$runs_parent/$rid_ts")
+                for cand in "${valid[@]}"; do
+                    case "$cand" in
+                        "$trunc_real"/*|"$runs_parent/$rid_ts"/*) picked=$cand; break ;;
+                    esac
+                done
+            fi
+        fi
+    fi
+    if [ -z "$picked" ]; then
+        # No RDIR-local candidate: require unanimous verdict, then newest mtime.
+        vs=""
+        for cand in "${valid[@]}"; do
+            v=$(gui_status_file_verdict "$cand")
+            if [ -z "$vs" ]; then
+                vs=$v
+            elif [ "$v" != "$vs" ]; then
+                printf 'gui_harvest: refuse slug=%s conflicting verdicts among %s candidates\n' \
+                    "$slug" "${#valid[@]}" >> "${log_path:-/dev/null}" 2>/dev/null || true
+                return 0
+            fi
+        done
+        picked=$(ls -t "${valid[@]}" 2>/dev/null | head -n1)
+    fi
+    [ -n "$picked" ] && [ -f "$picked" ] || return 0
+
+    parent=$(dirname "$picked")
+    # Copy status + common evidence files; do not overwrite an existing
+    # canonical file (status is known missing; others may be partial).
+    if [ ! -f "$adir/status.txt" ]; then
+        cp -a "$picked" "$adir/status.txt" 2>/dev/null || cp "$picked" "$adir/status.txt" || return 0
+    fi
+    local f bn
+    for f in "$parent"/*; do
+        [ -e "$f" ] || continue
+        bn=$(basename "$f")
+        case "$bn" in
+            status.txt) continue ;;
+            .harvested-from) continue ;;
+        esac
+        if [ -f "$f" ] && [ ! -e "$adir/$bn" ]; then
+            cp -a "$f" "$adir/$bn" 2>/dev/null || cp "$f" "$adir/$bn" 2>/dev/null || true
+        elif [ -d "$f" ] && [ ! -e "$adir/$bn" ]; then
+            cp -a "$f" "$adir/$bn" 2>/dev/null || true
+        fi
+    done
+    {
+        printf 'harvested_from=%s\n' "$parent"
+        printf 'status=%s\n' "$(gui_status_file_verdict "$adir/status.txt")"
+        printf 'slug=%s\n' "$slug"
+    } > "$adir/.harvested-from" 2>/dev/null || true
+    if [ -n "$log_path" ]; then
+        printf '\nqci_gui_harvest: recovered status for slug=%s from %s\n' \
+            "$slug" "$parent" >> "$log_path" 2>/dev/null || true
+    fi
+    return 0
+}
+
 write_agent_prompt() {
     local vm=$1 scenario=$2 prompt=$3 artifact_dir=${4:-} scratch=${5:-} slug=${6:-} rel
     rel=$(gui_scenario_rel "$scenario")
     # Per-attempt artifact dir so a retry's agent writes its status/report to its
     # OWN directory and never clobbers the first attempt's evidence (the audit
     # trail that makes classified retry acceptable). Defaults to the canonical dir.
+    # Callers SHOULD pass the short /tmp/qci-gui-art/<hash> alias so weak models
+    # cannot truncate a long ci/runs/... path.
     [ -n "$artifact_dir" ] || artifact_dir="$RDIR/gui/$(safe_name "$rel")"
     cat > "$prompt" <<EOF
 # qdistro CI GUI scenario runner
@@ -247,8 +458,20 @@ Run this scenario against VM \`$vm\` and write a PASS/FAIL/ERROR report.
 Scenario file:
 \`$scenario\`
 
-Artifact directory:
-\`$RDIR\`
+## REQUIRED artifact directory (copy this path EXACTLY — do not invent, shorten, or drop path segments)
+
+\`$artifact_dir\`
+
+- Environment: \`QCI_GUI_ARTIFACT_DIR=$artifact_dir\` (already set for this process). Prefer that variable over retyping the path.
+- Save screenshots, OCR output, command logs, notes, and click-targets under:
+  \`$artifact_dir/\`
+- Before returning, write \`$artifact_dir/status.txt\`
+  containing exactly one word: PASS, FAIL, ERROR, or SKIP.
+- WRITE status.txt FIRST as soon as you have a verdict, then other evidence.
+- Do NOT write evidence under any other \`ci/runs/...\` path. Do NOT drop
+  trailing segments from the path above. A truncated path is a harness error.
+
+(Run root for human triage only — NOT for status.txt: \`${RDIR:-}\`)
 
 Rules:
 - Read the nearest AGENTS.md before executing the scenario.
@@ -259,8 +482,6 @@ Rules:
   DISPLAY/Wayland session). Drive the guest only through the repository's
   vm-exec/vm-gui helpers and virsh. qci deliberately makes the host desktop
   sockets unavailable to this agent process.
-- Save screenshots, OCR output, command logs, and notes under:
-  \`$artifact_dir/\`
 - For every model-targeted mouse click, use the two-phase command-line workflow;
   never call raw \`vm-gui click X Y\` or \`xdotool click\` directly:
   1. Activate the target window and run
@@ -280,8 +501,6 @@ Rules:
      coordinates stored in the reviewed manifest and captures the post-click
      screenshot. All previews, coordinates, timestamps, and confirmations are
      logged automatically under \`$artifact_dir/click-targets/\`.
-- Before returning, write \`$artifact_dir/status.txt\`
-  containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - Use VMNAME=$vm.
 - Scratch files: use isolated per-scenario scratch instead of fixed shared paths
   so parallel runs never collide. On the HOST, write scratch under
@@ -295,7 +514,7 @@ Rules:
   agent-command failure, and records the path in the agent log. Any tool that
   accidentally writes a relative temporary output stays there instead of
   polluting the source checkout. Required evidence must still be saved under the
-  artifact directory.
+  artifact directory above.
 - Execute setup, steps, assertions, and cleanup serially.
 - Return nonzero on FAIL or ERROR. Return 0 only when every required assertion passes.
 - Diagnose your OWN tooling before blaming the product:
@@ -936,18 +1155,22 @@ gui_run_scenario() {
         own=1
     fi
     t1=$(date +%s)
-    local slug scratch
+    local slug scratch art_alias
     slug=$(safe_name "$rel")
     adir="$RDIR/gui/$slug"
     prompt="$RDIR/agent-notes/$slug.prompt.md"
     log_path="$RDIR/gui/$slug.agent.log"
     mkdir -p "$(dirname "$log_path")" "$adir"
+    # Short /tmp alias for weak agents that truncate long ci/runs/... paths.
+    # Symlink target is the canonical adir so correct writes land in place;
+    # gui_harvest_agent_artifacts recovers the truncated-path failure mode.
+    art_alias=$(gui_make_artifact_alias "$adir") || art_alias=$adir
     # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
     # shared session VM). Passed to the agent's env at run_agent_command so a
     # scenario routes scratch here instead of a collision-prone fixed /tmp path.
     scratch=$(scenario_scratch_dir gui "$slug")
     mkdir -p "$scratch"
-    write_agent_prompt "$vm" "$scenario" "$prompt" "" "$scratch" "$slug"
+    write_agent_prompt "$vm" "$scenario" "$prompt" "$art_alias" "$scratch" "$slug"
     # Deliver the guest waiter library so the scenario can source
     # /tmp/qci-gui-waiters.sh (best-effort; a scenario that needs it and lacks it
     # fails its own assertion loudly).
@@ -959,12 +1182,15 @@ gui_run_scenario() {
     # Export VMNAME so the scenario's `VM=${VMNAME:?...}` always resolves to the
     # right disposable VM deterministically, instead of relying on the agent to
     # set it from the prompt (or a racy `virsh list | head` fallback).
+    # QCI_GUI_ARTIFACT_DIR is the SHORT alias (preferred for agents); harvest
+    # still grades the canonical adir after recovery.
     VMNAME="$vm" QCI_SCENARIO_TMPDIR="$scratch" QCI_SCENARIO_SLUG="$slug" \
-        QCI_GUI_ARTIFACT_DIR="$adir" \
+        QCI_GUI_ARTIFACT_DIR="$art_alias" \
         run_agent_command "$prompt" "$log_path"
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
+    gui_harvest_agent_artifacts "$adir" "$slug" "$log_path"
     status=$(agent_artifact_status "$adir" "$log_path")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
@@ -1028,10 +1254,11 @@ gui_run_scenario() {
                 vm_live=0   # previous VM collected+released; nothing live until a fresh one is up
                 # Each retry writes to its OWN log + artifact dir so every attempt's
                 # evidence is preserved and each fresh agent starts clean.
-                local vmN logN adirN scratchN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN
+                local vmN logN adirN scratchN art_aliasN tsa tsb statusN verdictN noteN classifierN transportN toolingN apiN
                 logN="${log_path_base%.agent.log}.retry${attempt}.agent.log"
                 adirN="${adir%.retry*}.retry${attempt}"
                 mkdir -p "$adirN"
+                art_aliasN=$(gui_make_artifact_alias "$adirN") || art_aliasN=$adirN
                 # Fresh host scratch PER RETRY so stale scratch from the failed
                 # attempt can't leak into the retry (mirrors the per-attempt
                 # logN/adirN discipline).
@@ -1045,16 +1272,17 @@ gui_run_scenario() {
                     break
                 fi
                 vm=$vmN; vm_live=1
-                write_agent_prompt "$vmN" "$scenario" "$prompt" "$adirN" "$scratchN" "$slug"
+                write_agent_prompt "$vmN" "$scenario" "$prompt" "$art_aliasN" "$scratchN" "$slug"
                 install_gui_waiters "$vmN" || log "agent scenario $rel: waiter-lib delivery failed (continuing)"
                 suppress_idle_lock "$vmN"
                 record_host_load gui "$rel" start
                 tsa=$(date +%s)
                 VMNAME="$vmN" QCI_SCENARIO_TMPDIR="$scratchN" QCI_SCENARIO_SLUG="$slug" \
-                    QCI_GUI_ARTIFACT_DIR="$adirN" \
+                    QCI_GUI_ARTIFACT_DIR="$art_aliasN" \
                     run_agent_command "$prompt" "$logN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
+                gui_harvest_agent_artifacts "$adirN" "$slug" "$logN"
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")
