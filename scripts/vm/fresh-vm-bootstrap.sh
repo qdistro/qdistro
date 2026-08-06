@@ -324,17 +324,47 @@ log "installing xwayland (Xwayland binary for qdwin's xwayland.so module)..."
 zypper -n install --no-recommends xwayland >/dev/null 2>&1 \
     || { log "  ERROR: zypper install xwayland failed"; exit 3; }
 
+# ---- Baseline desktop fonts (ALWAYS — not gated by QDWIN_APP_DEPS) ---------
+# qdshell's bar (Clock, ActiveWindow title, Workspace labels, etc.) needs at
+# least one real scalable face backing fontconfig's Sans/Monospace aliases.
+# When fonts were only installed under the opt-in app-deps lane
+# (QDWIN_APP_DEPS default 0 since 5f48e17), gui-qdwin goldens ended up with
+# empty fontconfig: FontService logged "Loaded 1 fonts, 1 monospace" (the
+# synthetic system-default row only) and the bar rendered icons with no text.
+# That made scenario 16's ActiveWindow title assert fail even though the
+# qdwin_shell_v1 binding was healthy (toplevel_added + seat_focus_changed OK).
+#
+# Keep this lane lean: just the two small face packages + fc-cache. Heavy
+# app binaries (firefox/vlc/...) stay opt-in below. Best-effort: a renamed
+# package must never abort the golden build.
+log "installing baseline desktop fonts (dejavu + liberation)..."
+_font_ok=0; _font_fail=""
+for _pkg in dejavu-fonts liberation-fonts; do
+    if zypper -n install --no-recommends "$_pkg" >/dev/null 2>&1; then
+        _font_ok=$((_font_ok + 1))
+    else
+        _font_fail="$_font_fail $_pkg"
+    fi
+done
+fc-cache -f >/dev/null 2>&1 || true
+log "  fonts: $_font_ok package(s) installed;${_font_fail:+ failed:$_font_fail}"
+if [ "$_font_ok" -eq 0 ]; then
+    log "  WARN: no baseline fonts installed — qdshell bar text may be blank"
+fi
+
 # ---- GUI app-deps lane (qdwin XWayland/Wayland app tests) — OPT-IN ---------
 # The qdwin app tests (qdwin/tests/apps/*.md) drive real desktop apps —
 # firefox, xterm, foot, thunar, vlc, chromium, audacity, feh, tk/fltk/swing.
 # OPT-IN (QDWIN_APP_DEPS=1), DEFAULT OFF: this bootstrap is shared by EVERY
-# golden (bats, gui-admin, gui-qdwin), so installing these heavy packages —
-# and especially the fonts below — unconditionally bloated all goldens and
-# shifted the qdshell bar layout enough to break compositor-shell.bats'
-# rocket-icon click-coords ("foot never launched"). Only the app-test lane
+# golden (bats, gui-admin, gui-qdwin), so installing these heavy packages
+# unconditionally bloated all goldens and (with foot present) unmasked a
+# dormant compositor-shell.bats launcher failure. Only the app-test lane
 # needs them, so it must opt in (e.g. a dedicated `QDWIN_APP_DEPS=1 qci gui`
 # run); the default full run stays lean and stable. With deps absent the app
 # tests are infra-blocked, exactly as before this lane existed.
+#
+# Baseline fonts (dejavu/liberation) are installed ABOVE, always — they are
+# not part of this opt-in set.
 #
 # Best-effort PER PACKAGE: an unavailable/renamed package is logged and
 # skipped, NEVER fatal. A wrong name here must never abort the golden build —
@@ -348,9 +378,8 @@ if [ "${QDWIN_APP_DEPS:-0}" = 1 ]; then
     # functional but incomplete file-manager test surface.
     # qt5=vlc, electron=chromium, wxwidgets=audacity, tk=python3-tk,
     # fltk demo needs fltk-devel+gcc-c++, swing=java(jdk for javac), imlib2=feh.
-    # Fonts: xterm's `-fa Monospace` (Xft) and most toolkits need a real font
-    # backing fontconfig's Monospace/Sans aliases — without dejavu/liberation
-    # the image has no scalable Monospace and xterm refuses to start.
+    # Fonts: already installed in the baseline lane above; listed again here
+    # as a no-op ensure for goldens that only hit the app-deps path.
     _app_pkgs="MozillaFirefox xterm foot gnome-text-editor thunar gvfs gvfs-backends vlc chromium \
 audacity python3-tk fltk fltk-devel gcc-c++ feh \
 java-21-openjdk java-21-openjdk-devel java-17-openjdk java-17-openjdk-devel \
