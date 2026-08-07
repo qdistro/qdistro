@@ -125,6 +125,16 @@ preview_manifest() {
 }
 
 @test "GUI workers export the artifact directory used by click previews" {
-    grep -Fq 'QCI_GUI_ARTIFACT_DIR="$adir"' "$REPO_ROOT/ci/lib/gates/gui.sh"
-    grep -Fq 'QCI_GUI_ARTIFACT_DIR="$adirN"' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    # Contract (post short-alias harvest): agents get QCI_GUI_ARTIFACT_DIR set to
+    # the short art_alias path under /tmp/qci-gui-art/... (not the long canonical
+    # adir). Harvest still grades adir after recovery. Primary attempt uses
+    # art_alias; retry attempts use art_aliasN.
+    grep -Fq 'QCI_GUI_ARTIFACT_DIR="$art_alias"' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    grep -Fq 'QCI_GUI_ARTIFACT_DIR="$art_aliasN"' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    # Alias is produced from the canonical adir (must stay wired).
+    grep -Eq 'art_alias=\$\(gui_make_artifact_alias "\$adir"\)' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    grep -Eq 'art_aliasN=\$\(gui_make_artifact_alias "\$adirN"\)' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    # Must not regress to exporting the long canonical path to agents.
+    ! grep -Fq 'QCI_GUI_ARTIFACT_DIR="$adir"' "$REPO_ROOT/ci/lib/gates/gui.sh"
+    ! grep -Fq 'QCI_GUI_ARTIFACT_DIR="$adirN"' "$REPO_ROOT/ci/lib/gates/gui.sh"
 }
