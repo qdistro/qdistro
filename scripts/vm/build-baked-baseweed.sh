@@ -31,6 +31,7 @@
 #   ./build-baked-baseweed.sh                # builds, errors if baked exists
 #   ./build-baked-baseweed.sh --force        # rebuild even if baked exists
 #   ./build-baked-baseweed.sh --image-dir <dir>  # override $IMG
+#   ./build-baked-baseweed.sh --network-probe-only  # no baked-image mutation
 #
 # Time budget: ~10–25 min on a warm zypper cache, longer on a cold
 # one. Mostly the zypper download + install. virt-customize itself
@@ -39,11 +40,13 @@
 set -euo pipefail
 
 FORCE=0
+NETWORK_PROBE_ONLY=0
 IMG_DIR_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --force)      FORCE=1; shift ;;
+        --network-probe-only) NETWORK_PROBE_ONLY=1; shift ;;
         --image-dir)  IMG_DIR_OVERRIDE="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,40p' "$0"; exit 0 ;;
@@ -66,16 +69,132 @@ if [ ! -f "$BASE" ]; then
     echo "       Build it first with: $SCRIPT_DIR/build-baseweed-from-scratch.sh" >&2
     exit 1
 fi
-if [ -f "$BAKED" ] && [ "$FORCE" -ne 1 ]; then
+if [ -f "$BAKED" ] && [ "$FORCE" -ne 1 ] && [ "$NETWORK_PROBE_ONLY" -ne 1 ]; then
     echo "$BAKED already exists. Use --force to rebuild." >&2
     echo "qemu-img info:"
     qemu-img info "$BAKED" | sed 's/^/    /'
     exit 0
 fi
 
-if ! command -v virt-customize >/dev/null 2>&1; then
-    echo "ERROR: virt-customize not found on host (install libguestfs + guestfs-tools)" >&2
+for tool in virt-customize guestfish qemu-img; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "ERROR: $tool not found on host (install libguestfs + guestfs-tools)" >&2
+        exit 3
+    }
+done
+
+usable_ipv4_resolver() {
+    local ip="$1" a b c d extra octet
+    IFS=. read -r a b c d extra <<<"$ip"
+    [ -z "${extra:-}" ] && [ -n "${d:-}" ] || return 1
+    for octet in "$a" "$b" "$c" "$d"; do
+        [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+        [ "$octet" -le 255 ] || return 1
+    done
+
+    # Private resolvers are valid on the host LAN.  Reject addresses that are
+    # never usable as an upstream unicast resolver from the passt appliance.
+    [ "$a" -ne 0 ] && [ "$a" -ne 127 ] && [ "$a" -lt 224 ] || return 1
+    { [ "$a" -ne 169 ] || [ "$b" -ne 254 ]; } || return 1
+    { [ "$a" -ne 192 ] || [ "$b" -ne 0 ] || { [ "$c" -ne 0 ] && [ "$c" -ne 2 ]; }; } || return 1
+    { [ "$a" -ne 198 ] || { [ "$b" -ne 18 ] && [ "$b" -ne 19 ]; }; } || return 1
+    { [ "$a" -ne 198 ] || [ "$b" -ne 51 ] || [ "$c" -ne 100 ]; } || return 1
+    { [ "$a" -ne 203 ] || [ "$b" -ne 0 ] || [ "$c" -ne 113 ]; } || return 1
+}
+
+select_host_resolver() {
+    local candidate stub=0
+    local -a resolv_conf_candidates=() resolved_candidates=()
+
+    mapfile -t resolv_conf_candidates < <(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
+    for candidate in "${resolv_conf_candidates[@]}"; do
+        case "$candidate" in 127.*|::1) stub=1 ;; esac
+    done
+    if command -v resolvectl >/dev/null 2>&1; then
+        mapfile -t resolved_candidates < <(
+            resolvectl dns 2>/dev/null \
+                | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+(\.[0-9]+){3}$/) print $i }'
+        )
+    fi
+
+    # A loopback resolv.conf belongs to systemd-resolved and is unreachable
+    # from passt.  Prefer resolvectl's per-link upstream in that case.
+    if [ "$stub" -eq 1 ]; then
+        for candidate in "${resolved_candidates[@]}" "${resolv_conf_candidates[@]}"; do
+            usable_ipv4_resolver "$candidate" && { printf '%s\n' "$candidate"; return 0; }
+        done
+    else
+        for candidate in "${resolv_conf_candidates[@]}" "${resolved_candidates[@]}"; do
+            usable_ipv4_resolver "$candidate" && { printf '%s\n' "$candidate"; return 0; }
+        done
+    fi
+    return 1
+}
+
+# libguestfs 1.60 prefers passt when it is runnable, but that is an internal
+# backend decision: the presence of /usr/bin/passt alone does not prove the
+# appliance actually uses it.  Launch a diskless network appliance and inspect
+# the generated libvirt XML/direct-QEMU command before permitting passt's fixed
+# 169.254.2.0/16 recovery addresses.
+PASST_CONFIRMED=0
+BACKEND_PROBE_LOG="$(mktemp)"
+if LIBGUESTFS_DEBUG=1 guestfish >"$BACKEND_PROBE_LOG" 2>&1 <<'GUESTFISH'
+set-network true
+run
+GUESTFISH
+then
+    if { grep -Fq '<backend type="passt"/>' "$BACKEND_PROBE_LOG" \
+         && grep -Fq 'address="169.254.2.15" prefix="16"' "$BACKEND_PROBE_LOG"; } \
+        || { grep -Fq 'command: run: passt' "$BACKEND_PROBE_LOG" \
+             && grep -Fq -- '--address 169.254.2.15' "$BACKEND_PROBE_LOG"; }; then
+        PASST_CONFIRMED=1
+    fi
+else
+    echo "ERROR: could not launch the libguestfs backend probe" >&2
+    tail -40 "$BACKEND_PROBE_LOG" >&2
+    rm -f "$BACKEND_PROBE_LOG"
     exit 3
+fi
+rm -f "$BACKEND_PROBE_LOG"
+
+HOST_DNS="$(select_host_resolver || true)"
+NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
+if [ "$PASST_CONFIRMED" -eq 1 ]; then
+    LIBGUESTFS_NET_ARGS=(
+        --run-command "set -eu; if ! ip -4 addr show dev eth0 | grep -q 'inet '; then [ -n '$HOST_DNS' ] || { echo 'ERROR: libguestfs passt DHCP failed and no usable non-loopback IPv4 resolver was found (checked /etc/resolv.conf and resolvectl)' >&2; exit 70; }; ip address replace 169.254.2.15/16 dev eth0; ip route replace default via 169.254.2.2 dev eth0; ip -4 addr show dev eth0 | grep -Fq 'inet 169.254.2.15/16'; ip route show default | grep -Fq 'default via 169.254.2.2 dev eth0'; mount -o remount,rw /etc/resolv.conf; printf 'nameserver %s\\n' '$HOST_DNS' >/etc/resolv.conf; grep -Fxq 'nameserver $HOST_DNS' /etc/resolv.conf; fi; $NET_CHECK"
+    )
+    echo "[bake] libguestfs network backend: passt (recovery enabled; host resolver: ${HOST_DNS:-none})"
+else
+    # Never apply passt's static subnet to an unconfirmed backend.  Still fail
+    # before zypper if the backend's normal DHCP/DNS path is unusable.
+    LIBGUESTFS_NET_ARGS=(--run-command "set -eu; $NET_CHECK")
+    echo "[bake] libguestfs network backend: non-passt (static recovery disabled)"
+fi
+
+probe_networked_customize() {
+    local backing="$1" label="$2" probe_dir probe_disk rc=0
+    probe_dir="$(mktemp -d)"
+    probe_disk="$probe_dir/network-probe.qcow2"
+    qemu-img create -f qcow2 -F qcow2 -b "$backing" "$probe_disk" >/dev/null
+    echo "[bake] probing $label through networked virt-customize..."
+    virt-customize -a "$probe_disk" "${LIBGUESTFS_NET_ARGS[@]}" \
+        --run-command ':' || rc=$?
+    rm -f "$probe_disk"
+    rmdir "$probe_dir"
+    [ "$rc" -eq 0 ] && echo "[bake] $label networked virt-customize probe OK"
+    return "$rc"
+}
+
+if [ "$NETWORK_PROBE_ONLY" -eq 1 ]; then
+    probe_networked_customize "$BASE" "baseweed-admin" || exit 6
+    TIER5_CLOUD_PROBE="$HOME/.cache/qdistro/tier5-base-cloud.qcow2"
+    if [ -s "$TIER5_CLOUD_PROBE" ]; then
+        probe_networked_customize "$TIER5_CLOUD_PROBE" "cached tier-5 cloud image" || exit 6
+    else
+        echo "[bake] WARN: $TIER5_CLOUD_PROBE absent; tier-5 network phase not probed" >&2
+        exit 6
+    fi
+    exit 0
 fi
 
 # Pull the package list from install-deps.sh — single source of truth.
@@ -132,6 +251,7 @@ virt-customize \
     --memsize 4096 \
     --smp 4 \
     -a "$PARTIAL" \
+    "${LIBGUESTFS_NET_ARGS[@]}" \
     --run-command 'zypper -n refresh' \
     --run-command 'rpm -q kernel-default-base >/dev/null 2>&1 && zypper -n remove kernel-default-base || true' \
     --run-command "zypper -n install --no-recommends ${PKG_CSV//,/ }" \
@@ -187,6 +307,10 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
         CLOUD_DIGEST="$(sha256sum "$CLOUD_CACHE" | awk '{print $1}')"
         if [ -s "$BAKED_CACHE" ] && [ "$(cat "$BAKED_CACHE.provenance" 2>/dev/null)" = "$CLOUD_DIGEST" ]; then
             echo "[bake] tier-5 customized base already cached (provenance-verified)"
+            probe_networked_customize "$CLOUD_CACHE" "cached tier-5 cloud image" || {
+                echo "[bake] FAIL: tier-5 networked virt-customize probe failed" >&2
+                exit 6
+            }
         else
             [ -s "$BAKED_CACHE" ] && echo "[bake] tier-5 customized base missing/mismatched provenance; rebuilding from verified base" >&2
             rm -f "$BAKED_CACHE" "$BAKED_CACHE.provenance"
@@ -203,6 +327,7 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
                 | sed '1d;$d' >"$PUBLISHER_TMP"
             chmod +x "$PUBLISHER_TMP"
             virt-customize -a "$BAKED_CACHE.partial" \
+                "${LIBGUESTFS_NET_ARGS[@]}" \
                 --run-command 'zypper -n refresh' \
                 `# weston provides weston-terminal (the tier-5 cold-start app);` \
                 `# dejavu-fonts gives it a monospace face. Without these the` \
