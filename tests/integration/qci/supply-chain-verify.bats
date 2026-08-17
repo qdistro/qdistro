@@ -117,11 +117,17 @@ gate_flags_for() {
 }
 
 # --- tier-5 customized-base provenance gate (build-baked-baseweed.sh) -------
-# Mirrors the exact reuse predicate: reuse the derivative ONLY when it exists
-# AND its .provenance stamp equals the current verified cloud digest.
+# Mirrors the digest portion of the reuse predicate: reuse the derivative ONLY
+# when its provenance binds both the authenticated source and derivative bytes.
+# The production predicate additionally requires `qemu-img check`.
 provenance_reuse() {
     local baked="$1" digest="$2"
-    [ -s "$baked" ] && [ "$(cat "$baked.provenance" 2>/dev/null)" = "$digest" ]
+    local source_digest image_digest actual_digest
+    [ -s "$baked" ] || return 1
+    source_digest="$(awk -F= '$1 == "source_sha256" { print $2; exit }' "$baked.provenance" 2>/dev/null)"
+    image_digest="$(awk -F= '$1 == "image_sha256" { print $2; exit }' "$baked.provenance" 2>/dev/null)"
+    actual_digest="$(sha256sum "$baked" | awk '{print $1}')"
+    [ "$source_digest" = "$digest" ] && [ -n "$image_digest" ] && [ "$image_digest" = "$actual_digest" ]
 }
 
 @test "provenance gate: rebuild when the derivative is absent" {
@@ -133,14 +139,26 @@ provenance_reuse() {
     printf 'img' > "$WORK/baked.qcow2"
     run provenance_reuse "$WORK/baked.qcow2" "deadbeef"   # no .provenance
     [ "$status" -ne 0 ]
-    printf 'OLDDIGEST\n' > "$WORK/baked.qcow2.provenance" # stale stamp
+    printf 'source_sha256=OLDDIGEST\nimage_sha256=ignored\n' > "$WORK/baked.qcow2.provenance"
     run provenance_reuse "$WORK/baked.qcow2" "deadbeef"
     [ "$status" -ne 0 ]
 }
 
-@test "provenance gate: reuse only when the stamp matches the verified digest" {
+@test "provenance gate: reuse only when source and derivative digests match" {
     printf 'img' > "$WORK/baked.qcow2"
-    printf 'deadbeef\n' > "$WORK/baked.qcow2.provenance"
+    image_digest="$(sha256sum "$WORK/baked.qcow2" | awk '{print $1}')"
+    printf 'source_sha256=deadbeef\nimage_sha256=%s\n' "$image_digest" \
+        > "$WORK/baked.qcow2.provenance"
     run provenance_reuse "$WORK/baked.qcow2" "deadbeef"
     [ "$status" -eq 0 ]
+}
+
+@test "provenance gate: rejects tampered derivative with retained stamp" {
+    printf 'img' > "$WORK/baked.qcow2"
+    image_digest="$(sha256sum "$WORK/baked.qcow2" | awk '{print $1}')"
+    printf 'source_sha256=deadbeef\nimage_sha256=%s\n' "$image_digest" \
+        > "$WORK/baked.qcow2.provenance"
+    printf 'tampered' >> "$WORK/baked.qcow2"
+    run provenance_reuse "$WORK/baked.qcow2" "deadbeef"
+    [ "$status" -ne 0 ]
 }

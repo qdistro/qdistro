@@ -59,6 +59,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSITOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMG="${IMG_DIR_OVERRIDE:-${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}}"
 TIER5_BUILD_GUEST="$SCRIPT_DIR/../../tier5-vm/build-guest-image.sh"
+CACHE_DIR="${QDWIN_CACHE_DIR:-$HOME/.cache/qdistro}"
+CLOUD_CACHE="$CACHE_DIR/tier5-base-cloud.qcow2"
+BAKED_CACHE="$CACHE_DIR/tier5-base-customized.qcow2"
+CLOUD_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
+
+# J25 verification is also required by --network-probe-only: qemu-img and
+# libguestfs must never parse an unauthenticated cached cloud disk.
+# shellcheck source=lib/opensuse-cloud-image.sh
+. "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
 
 BASE="$IMG/baseweed-admin.qcow2"
 BAKED="$IMG/baseweed-baked.qcow2"
@@ -102,9 +111,10 @@ usable_ipv4_resolver() {
     { [ "$a" -ne 203 ] || [ "$b" -ne 0 ] || [ "$c" -ne 113 ]; } || return 1
 }
 
-select_host_resolver() {
+select_host_resolvers() {
     local candidate stub=0
     local -a resolv_conf_candidates=() resolved_candidates=()
+    local -A emitted=()
 
     mapfile -t resolv_conf_candidates < <(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf)
     for candidate in "${resolv_conf_candidates[@]}"; do
@@ -118,17 +128,23 @@ select_host_resolver() {
     fi
 
     # A loopback resolv.conf belongs to systemd-resolved and is unreachable
-    # from passt.  Prefer resolvectl's per-link upstream in that case.
+    # from passt. Prefer resolvectl's per-link upstream in that case. Emit all
+    # usable unique candidates so a stale/unreachable first server does not
+    # hide a working fallback from the appliance.
     if [ "$stub" -eq 1 ]; then
-        for candidate in "${resolved_candidates[@]}" "${resolv_conf_candidates[@]}"; do
-            usable_ipv4_resolver "$candidate" && { printf '%s\n' "$candidate"; return 0; }
-        done
+        resolv_conf_candidates=("${resolved_candidates[@]}" "${resolv_conf_candidates[@]}")
     else
-        for candidate in "${resolv_conf_candidates[@]}" "${resolved_candidates[@]}"; do
-            usable_ipv4_resolver "$candidate" && { printf '%s\n' "$candidate"; return 0; }
-        done
+        resolv_conf_candidates+=("${resolved_candidates[@]}")
     fi
-    return 1
+    for candidate in "${resolv_conf_candidates[@]}"; do
+        if usable_ipv4_resolver "$candidate" && [ -z "${emitted[$candidate]:-}" ]; then
+            printf '%s\n' "$candidate"
+            emitted[$candidate]=1
+        fi
+    done
+    if [ "${#emitted[@]}" -eq 0 ]; then
+        return 1
+    fi
 }
 
 # libguestfs 1.60 prefers passt when it is runnable, but that is an internal
@@ -157,11 +173,12 @@ else
 fi
 rm -f "$BACKEND_PROBE_LOG"
 
-HOST_DNS="$(select_host_resolver || true)"
+mapfile -t HOST_DNS_SERVERS < <(select_host_resolvers || true)
+HOST_DNS="${HOST_DNS_SERVERS[*]:-}"
 NET_CHECK='getent ahostsv4 download.opensuse.org >/dev/null && curl -fsS --connect-timeout 10 --max-time 30 https://download.opensuse.org/tumbleweed/repo/oss/repodata/repomd.xml >/dev/null'
 if [ "$PASST_CONFIRMED" -eq 1 ]; then
     LIBGUESTFS_NET_ARGS=(
-        --run-command "set -eu; if ! ip -4 addr show dev eth0 | grep -q 'inet '; then [ -n '$HOST_DNS' ] || { echo 'ERROR: libguestfs passt DHCP failed and no usable non-loopback IPv4 resolver was found (checked /etc/resolv.conf and resolvectl)' >&2; exit 70; }; ip address replace 169.254.2.15/16 dev eth0; ip route replace default via 169.254.2.2 dev eth0; ip -4 addr show dev eth0 | grep -Fq 'inet 169.254.2.15/16'; ip route show default | grep -Fq 'default via 169.254.2.2 dev eth0'; mount -o remount,rw /etc/resolv.conf; printf 'nameserver %s\\n' '$HOST_DNS' >/etc/resolv.conf; grep -Fxq 'nameserver $HOST_DNS' /etc/resolv.conf; fi; $NET_CHECK"
+        --run-command "set -eu; if ! ip -4 addr show dev eth0 | grep -q 'inet '; then [ -n '$HOST_DNS' ] || { echo 'ERROR: libguestfs passt DHCP failed and no usable non-loopback IPv4 resolver was found (checked /etc/resolv.conf and resolvectl)' >&2; exit 70; }; ip address replace 169.254.2.15/16 dev eth0; ip route replace default via 169.254.2.2 dev eth0; ip -4 addr show dev eth0 | grep -Fq 'inet 169.254.2.15/16'; ip route show default | grep -Fq 'default via 169.254.2.2 dev eth0'; mount -o remount,rw /etc/resolv.conf; for dns in $HOST_DNS; do printf 'nameserver %s\\n' \"\$dns\"; done >/etc/resolv.conf; for dns in $HOST_DNS; do grep -Fxq \"nameserver \$dns\" /etc/resolv.conf; done; fi; $NET_CHECK"
     )
     echo "[bake] libguestfs network backend: passt (recovery enabled; host resolver: ${HOST_DNS:-none})"
 else
@@ -171,30 +188,87 @@ else
     echo "[bake] libguestfs network backend: non-passt (static recovery disabled)"
 fi
 
-probe_networked_customize() {
-    local backing="$1" label="$2" probe_dir probe_disk rc=0
-    probe_dir="$(mktemp -d)"
+probe_networked_customize() (
+    local backing="$1" label="$2" probe_root probe_dir probe_disk rc=0
+    probe_root="${TMPDIR:-/tmp}"
+    case "$probe_root" in
+        /*) ;;
+        *) echo "[bake] FAIL: probe TMPDIR must be absolute: $probe_root" >&2; return 1 ;;
+    esac
+    [ "$probe_root" != "/" ] && [ -d "$probe_root" ] || {
+        echo "[bake] FAIL: unsafe or missing probe temp root: $probe_root" >&2
+        return 1
+    }
+    if ! probe_dir="$(mktemp -d -- "$probe_root/qdistro-network-probe.XXXXXX")"; then
+        echo "[bake] FAIL: could not create private probe directory under $probe_root" >&2
+        return 1
+    fi
+    case "$probe_dir" in
+        "$probe_root"/qdistro-network-probe.??????) ;;
+        *) echo "[bake] FAIL: mktemp returned unexpected probe path: ${probe_dir:-<empty>}" >&2; return 1 ;;
+    esac
+    [ -n "$probe_dir" ] && [ "$probe_dir" != "/" ] && [ -d "$probe_dir" ] || {
+        echo "[bake] FAIL: refusing unsafe probe path: ${probe_dir:-<empty>}" >&2
+        return 1
+    }
     probe_disk="$probe_dir/network-probe.qcow2"
-    qemu-img create -f qcow2 -F qcow2 -b "$backing" "$probe_disk" >/dev/null
+    cleanup_probe() {
+        case "$probe_dir" in
+            "$probe_root"/qdistro-network-probe.??????)
+                rm -f -- "$probe_disk" || return 1
+                rmdir -- "$probe_dir" || return 1
+                ;;
+            *) echo "[bake] REFUSING cleanup of unexpected probe path: ${probe_dir:-<empty>}" >&2; return 1 ;;
+        esac
+    }
+    trap 'cleanup_probe >/dev/null 2>&1 || true' EXIT
+    trap 'exit 130' INT TERM
+    if ! qemu-img create -f qcow2 -F qcow2 -b "$backing" "$probe_disk" >/dev/null; then
+        echo "[bake] FAIL: could not create $label probe overlay" >&2
+        return 1
+    fi
     echo "[bake] probing $label through networked virt-customize..."
-    virt-customize -a "$probe_disk" "${LIBGUESTFS_NET_ARGS[@]}" \
-        --run-command ':' || rc=$?
-    rm -f "$probe_disk"
-    rmdir "$probe_dir"
-    [ "$rc" -eq 0 ] && echo "[bake] $label networked virt-customize probe OK"
+    if ! virt-customize -a "$probe_disk" "${LIBGUESTFS_NET_ARGS[@]}" --run-command ':'; then
+        echo "[bake] FAIL: $label networked virt-customize probe failed" >&2
+        rc=1
+    fi
+    trap - EXIT INT TERM
+    if ! cleanup_probe; then
+        echo "[bake] FAIL: could not safely remove $label probe artifacts" >&2
+        return 1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        echo "[bake] $label networked virt-customize probe OK"
+    fi
     return "$rc"
-}
+)
 
 if [ "$NETWORK_PROBE_ONLY" -eq 1 ]; then
-    probe_networked_customize "$BASE" "baseweed-admin" || exit 6
-    TIER5_CLOUD_PROBE="$HOME/.cache/qdistro/tier5-base-cloud.qcow2"
-    if [ -s "$TIER5_CLOUD_PROBE" ]; then
-        probe_networked_customize "$TIER5_CLOUD_PROBE" "cached tier-5 cloud image" || exit 6
+    if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" = "1" ]; then
+        echo "[bake] tier-5 network probe skipped (QDWIN_SKIP_TIER5_BAKE=1)"
     else
-        echo "[bake] WARN: $TIER5_CLOUD_PROBE absent; tier-5 network phase not probed" >&2
-        exit 6
+        # Authenticate before qemu-img or libguestfs opens any probe disk.
+        download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" || {
+            echo "[bake] FAIL: tier-5 cloud cache could not be authenticated; refusing to open it" >&2
+            exit 6
+        }
+    fi
+    probe_networked_customize "$BASE" "baseweed-admin" || exit 6
+    if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
+        probe_networked_customize "$CLOUD_CACHE" "verified cached tier-5 cloud image" || exit 6
     fi
     exit 0
+fi
+
+# Authenticate the tier-5 source before creating or opening any build overlay.
+# The default golden promises a tier-5 disk; verification failure is fatal
+# unless the caller explicitly requested the documented tier-5-free variant.
+if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
+    install -d "$CACHE_DIR"
+    download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE" || {
+        echo "[bake] FAIL: tier-5 cloud cache could not be authenticated" >&2
+        exit 6
+    }
 fi
 
 # Pull the package list from install-deps.sh — single source of truth.
@@ -288,25 +362,27 @@ virt-customize \
 # Skip with QDWIN_SKIP_TIER5_BAKE=1 for a smaller baked image (the
 # default tier-5 SKIP is acceptable for that path; see spec/29 §7).
 if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
-    CACHE_DIR="$HOME/.cache/qdistro"
-    CLOUD_CACHE="$CACHE_DIR/tier5-base-cloud.qcow2"
-    BAKED_CACHE="$CACHE_DIR/tier5-base-customized.qcow2"
-    CLOUD_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
-    install -d "$CACHE_DIR"
     # J25 (fail-closed): the tier-5 cloud base becomes a bootable guest disk
     # baked into every --from-baked overlay, so bake ONLY when it verifies.
     # Gating on the helper's EXIT STATUS — not `[ -s cache ]` — means a
     # stale/unverified pre-existing cache the helper refused is never baked in.
-    # shellcheck source=lib/opensuse-cloud-image.sh
-    . "$SCRIPT_DIR/lib/opensuse-cloud-image.sh"
     if download_verified_cloud_image "$CLOUD_URL" "$CLOUD_CACHE"; then
         # J25 (fail-closed): the customized derivative (tier5-base-customized.qcow2)
         # is bound to THIS verified cloud digest via a provenance stamp. Reuse it
         # only when the stamp matches; otherwise rebuild from the verified base so
         # a stale, tampered, or pre-J25 derivative is never uploaded into the overlay.
         CLOUD_DIGEST="$(sha256sum "$CLOUD_CACHE" | awk '{print $1}')"
-        if [ -s "$BAKED_CACHE" ] && [ "$(cat "$BAKED_CACHE.provenance" 2>/dev/null)" = "$CLOUD_DIGEST" ]; then
-            echo "[bake] tier-5 customized base already cached (provenance-verified)"
+        CACHED_SOURCE_DIGEST="$(awk -F= '$1 == "source_sha256" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
+        CACHED_IMAGE_DIGEST="$(awk -F= '$1 == "image_sha256" { print $2; exit }' "$BAKED_CACHE.provenance" 2>/dev/null || true)"
+        ACTUAL_BAKED_DIGEST=""
+        if [ -s "$BAKED_CACHE" ] && [ "$CACHED_SOURCE_DIGEST" = "$CLOUD_DIGEST" ] && [ -n "$CACHED_IMAGE_DIGEST" ]; then
+            ACTUAL_BAKED_DIGEST="$(sha256sum "$BAKED_CACHE" | awk '{print $1}')"
+        fi
+        if [ -s "$BAKED_CACHE" ] \
+            && [ "$CACHED_SOURCE_DIGEST" = "$CLOUD_DIGEST" ] \
+            && [ "$CACHED_IMAGE_DIGEST" = "$ACTUAL_BAKED_DIGEST" ] \
+            && qemu-img check "$BAKED_CACHE" >/dev/null; then
+            echo "[bake] tier-5 customized base already cached (digest/provenance verified)"
             probe_networked_customize "$CLOUD_CACHE" "cached tier-5 cloud image" || {
                 echo "[bake] FAIL: tier-5 networked virt-customize probe failed" >&2
                 exit 6
@@ -376,7 +452,14 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             rm -f "$PUBLISHER_TMP"
             virt-sparsify --in-place "$BAKED_CACHE.partial" 2>/dev/null || true
             mv "$BAKED_CACHE.partial" "$BAKED_CACHE"
-            printf '%s\n' "$CLOUD_DIGEST" > "$BAKED_CACHE.provenance"
+            qemu-img check "$BAKED_CACHE" >/dev/null || {
+                echo "[bake] FAIL: customized tier-5 cache is structurally invalid" >&2
+                rm -f "$BAKED_CACHE" "$BAKED_CACHE.provenance"
+                exit 5
+            }
+            BAKED_DIGEST="$(sha256sum "$BAKED_CACHE" | awk '{print $1}')"
+            printf 'source_sha256=%s\nimage_sha256=%s\n' \
+                "$CLOUD_DIGEST" "$BAKED_DIGEST" > "$BAKED_CACHE.provenance"
             echo "[bake] tier-5 customized base cached → $BAKED_CACHE ($(du -h "$BAKED_CACHE" | cut -f1))"
         fi
         echo "[bake] uploading tier-5 base into baked overlay..."
@@ -387,7 +470,8 @@ if [ "${QDWIN_SKIP_TIER5_BAKE:-0}" != "1" ]; then
             >/dev/null
         echo "[bake] tier-5 base uploaded into baked overlay"
     else
-        echo "[bake] WARN: cloud base download/verification failed; tier-5 bake skipped" >&2
+        echo "[bake] FAIL: cloud base verification unexpectedly failed after preflight" >&2
+        exit 6
     fi
 fi
 
