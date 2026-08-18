@@ -257,6 +257,92 @@ start_throwaway_chromium() {  # start_throwaway_chromium <name> <image> <ua> <ur
         dbus-run-session -- /bin/sh -c "$THROWAWAY_CHROMIUM_SCRIPT" _ "$@"
 }
 
+# Remove the named slow-auth check and prove it is absent. Podman's
+# `container exists` contract is tri-state: 0=present, 1=absent, 125=operational
+# error. Only 1 establishes cleanup; treating every nonzero as "gone" would
+# false-green when rootless storage or Podman itself is broken.
+slowcheck_exists() {
+    if [ "${QD_TB_INJECT_SLOWCHECK_EXISTS_ERROR:-0}" = 1 ]; then
+        echo "injected podman container-exists operational error" >&2
+        return 125
+    fi
+    podman container exists fp2-slowcheck
+}
+
+cleanup_slowcheck() {
+    local rm_rc exists_rc
+    podman rm -f fp2-slowcheck >/dev/null 2>&1
+    rm_rc=$?
+    slowcheck_exists >/dev/null 2>&1
+    exists_rc=$?
+    case "$exists_rc" in
+        1) return 0 ;;
+        0)
+            echo "slow-auth cleanup failed: fp2-slowcheck still exists (rm_rc=$rm_rc)" >&2
+            return 1
+            ;;
+        *)
+            echo "slow-auth cleanup failed closed: podman container exists operational error rc=$exists_rc (rm_rc=$rm_rc)" >&2
+            return 1
+            ;;
+    esac
+}
+
+cleanup_slowcheck_on_exit() {
+    local original_rc=$?
+    # Avoid recursive EXIT dispatch when this handler exits explicitly.
+    trap - EXIT
+    if ! cleanup_slowcheck; then
+        echo "FAIL: slow-auth cleanup could not establish container absence" >&2
+        exit 1
+    fi
+    exit "$original_rc"
+}
+
+# Regression for the cleanup contract itself. A failure immediately after the
+# detached start must reap the container, while an operational error from the
+# authoritative existence probe must make an otherwise-successful exit fail.
+slowcheck_cleanup_regression() {  # slowcheck_cleanup_regression <image>
+    local image="$1" rc errf
+    cleanup_slowcheck \
+        || fail breakage-matrix "slow-auth regression pre-clean could not establish absence"
+
+    (
+        podman run -d --name fp2-slowcheck --network=none --read-only \
+            --entrypoint= "$image" sleep 300 >/dev/null \
+            || exit 90
+        trap cleanup_slowcheck_on_exit EXIT
+        exit 91  # injected post-start readiness/assertion failure
+    )
+    rc=$?
+    [ "$rc" -eq 91 ] \
+        || fail breakage-matrix "slow-auth cleanup trap did not preserve injected failure rc=91 (rc=$rc)"
+    cleanup_slowcheck \
+        || fail breakage-matrix "slow-auth cleanup trap left the injected-failure container"
+
+    errf="$(mktemp)" || fail breakage-matrix "could not allocate cleanup regression evidence"
+    (
+        podman run -d --name fp2-slowcheck --network=none --read-only \
+            --entrypoint= "$image" sleep 300 >/dev/null \
+            || exit 90
+        trap cleanup_slowcheck_on_exit EXIT
+        export QD_TB_INJECT_SLOWCHECK_EXISTS_ERROR=1
+        exit 0
+    ) 2>"$errf"
+    rc=$?
+    if [ "$rc" -eq 0 ] \
+        || ! grep -q 'container exists operational error' "$errf"; then
+        local errsnip
+        errsnip="$(tr '\n' ' ' <"$errf" | head -c 300)"
+        rm -f "$errf"
+        fail breakage-matrix "slow-auth cleanup operational error did not fail closed (rc=$rc; stderr=${errsnip:-<none>})"
+    fi
+    rm -f "$errf"
+    cleanup_slowcheck \
+        || fail breakage-matrix "slow-auth operational-error regression left a container"
+    echo "PASS: slowcheck-cleanup-regression"
+}
+
 # --- login-site reachability --------------------------------------------
 # With the provision-silo podman shim adding pasta host-map options, a
 # `--network=pasta` container reaches the VM host (where the login site
@@ -834,6 +920,8 @@ scenario_breakage_matrix() {
     genA="$(cat "$STATE/genA")"; genB="$(cat "$STATE/genB")"
     markerA="$(cat "$STATE/markerA")"; markerB="$(cat "$STATE/markerB")"; url="$(base_url)"
 
+    slowcheck_cleanup_regression "$genB"
+
     # js-break: the page RENDERS (banner present, screenshot non-uniform) but
     # the flow dies; only the DOM sentinel catches it.
     site_ctl "/__break?mode=js-break&marker=$markerB" | grep -q BREAK-SET \
@@ -864,10 +952,13 @@ scenario_breakage_matrix() {
     status="$(site_ctl "/__slow_auth_status?marker=$markerB" 2>/dev/null || true)"
     [ "$status" = "SLOW-AUTH-WAITING-$markerB" ] \
         || fail breakage-matrix "slow-auth: readiness was stale before the browser started (status=${status:-<none>})"
-    podman rm -f fp2-slowcheck >/dev/null 2>&1 || true
+    cleanup_slowcheck \
+        || fail breakage-matrix "slow-auth pre-clean could not establish container absence"
     start_throwaway_chromium fp2-slowcheck "$genB" "$(ua_for "$markerB")" \
         "$url/login" "$url/home" >/dev/null \
         || fail breakage-matrix "slow-auth: could not start the named browser check"
+    # From this exact point until verified removal, every exit path owns cleanup.
+    trap cleanup_slowcheck_on_exit EXIT
     for ((i = 0; i < 40; i++)); do
         status="$(site_ctl "/__slow_auth_status?marker=$markerB" 2>/dev/null || true)"
         [ "$status" = "SLOW-AUTH-ENTERED-$markerB" ] && break
@@ -893,9 +984,11 @@ scenario_breakage_matrix() {
     # (3) The harness reclaims it deterministically — `leaves no containers
     # behind` is achieved by the harness's teardown, and the container is not
     # wedged/unkillable.
-    podman rm -f fp2-slowcheck >/dev/null 2>&1 || true
-    podman ps -a --filter "name=fp2-slowcheck" -q | grep -q . \
-        && fail breakage-matrix "slow-auth container survived rm -f (wedged/unkillable — harness cannot reclaim it)"
+    cleanup_slowcheck \
+        || fail breakage-matrix "slow-auth container survived removal or absence could not be verified"
+    # Disarm only after cleanup_slowcheck established the exact container is
+    # absent (exists rc=1); later scenario failures no longer own this resource.
+    trap - EXIT
     # gen A still logs in under slow-auth (keyed).
     dom="$(throwaway_chromium 90 "$genA" "$(ua_for "$markerA")" "$url/login" "$url/home")"
     echo "$dom" | grep -qE 'LOGIN-OK-[0-9a-f]+' || fail breakage-matrix "slow-auth leaked onto gen A"
