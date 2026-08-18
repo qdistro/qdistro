@@ -228,17 +228,33 @@ assert_silo_file_render() {  # assert_silo_file_render <label> <ua> <sentinel> [
 # not touch the silo profile. Remaining args are URLs visited in order through
 # ONE profile (perform-login then read-/home share the cookie); only the LAST
 # dump is emitted to stdout.
+# shellcheck disable=SC2016  # Expanded by /bin/sh inside the container.
+readonly THROWAWAY_CHROMIUM_SCRIPT='export HOME=/tmp/home; mkdir -p "$HOME" /tmp/cr; export XDG_RUNTIME_DIR=/tmp/cr; chmod 700 /tmp/cr; CA=($CA); out=""; for u in "$@"; do out="$(chromium "${CA[@]}" --user-agent="$UA" --user-data-dir=/tmp/home/profile --dump-dom "$u")"; done; printf "%s" "$out"'
+
 throwaway_chromium() {  # throwaway_chromium <timeout> <image> <ua> <url...steps>
     local to="$1" image="$2" ua="$3"; shift 3
     local nameflag=()
     [ -n "${QD_TW_NAME:-}" ] && nameflag=(--name "$QD_TW_NAME")
-    local script='export HOME=/tmp/home; mkdir -p "$HOME" /tmp/cr; export XDG_RUNTIME_DIR=/tmp/cr; chmod 700 /tmp/cr; CA=($CA); out=""; for u in "$@"; do out="$(chromium "${CA[@]}" --user-agent="$UA" --user-data-dir=/tmp/home/profile --dump-dom "$u")"; done; printf "%s" "$out"'
     timeout --kill-after=10 "$to" \
         podman run --rm --network=pasta "${nameflag[@]}" \
         --cap-drop=ALL --security-opt=no-new-privileges --read-only \
         --tmpfs /tmp:rw,exec,size=512m,mode=1777 --shm-size=256m --entrypoint= \
         -e CA="${CHROMIUM_ARGS[*]}" -e UA="$ua" "$image" \
-        dbus-run-session -- /bin/sh -c "$script" _ "$@"
+        dbus-run-session -- /bin/sh -c "$THROWAWAY_CHROMIUM_SCRIPT" _ "$@"
+}
+
+# Start the same throwaway browser check detached under an exact name. This is
+# used by slow-auth so the wall-clock deadline can time out `podman wait`
+# without signalling `podman run`: signalling the attached run client races
+# Podman's --rm cleanup, so the container may disappear before the harness can
+# prove that Chromium was still blocked in /auth.
+start_throwaway_chromium() {  # start_throwaway_chromium <name> <image> <ua> <url...steps>
+    local name="$1" image="$2" ua="$3"; shift 3
+    podman run -d --name "$name" --network=pasta \
+        --cap-drop=ALL --security-opt=no-new-privileges --read-only \
+        --tmpfs /tmp:rw,exec,size=512m,mode=1777 --shm-size=256m --entrypoint= \
+        -e CA="${CHROMIUM_ARGS[*]}" -e UA="$ua" "$image" \
+        dbus-run-session -- /bin/sh -c "$THROWAWAY_CHROMIUM_SCRIPT" _ "$@"
 }
 
 # --- login-site reachability --------------------------------------------
@@ -837,25 +853,41 @@ scenario_breakage_matrix() {
     echo "$dom" | grep -qE 'LOGIN-OK-[0-9a-f]+' || fail breakage-matrix "js-break leaked onto gen A"
 
     # slow-auth: the check must TIME OUT (reported as a failure, not a hang) and
-    # the HARNESS must leave no container behind. Name the throwaway so the
-    # leftover check is exact. NB (the rootless-podman reality this asserts): a
-    # host-side `timeout` kills the attached `podman run` CLIENT, but conmon
-    # keeps the rootless container alive OUTSIDE the client's process tree — so
-    # `--rm` never fires and the stalled container leaks unless the harness
-    # reclaims it explicitly. That teardown IS the harness's responsibility.
+    # the HARNESS must leave no container behind. Start the named check detached
+    # and first require the fixture's direct signal that /auth entered the
+    # deliberate stall. Then bound `podman wait`, not `podman run`: killing an
+    # attached run client races Podman's --rm cleanup and made the live-at-
+    # deadline assertion depend on signal scheduling under full-CI load.
     site_ctl "/__break?mode=slow-auth&marker=$markerB" | grep -q BREAK-SET \
         || fail breakage-matrix "could not arm slow-auth"
-    local rc; podman rm -f fp2-slowcheck >/dev/null 2>&1 || true
-    QD_TW_NAME=fp2-slowcheck throwaway_chromium 20 "$genB" "$(ua_for "$markerB")" \
-        "$url/login" "$url/home" >/dev/null 2>&1
+    local rc status="" i logs
+    status="$(site_ctl "/__slow_auth_status?marker=$markerB" 2>/dev/null || true)"
+    [ "$status" = "SLOW-AUTH-WAITING-$markerB" ] \
+        || fail breakage-matrix "slow-auth: readiness was stale before the browser started (status=${status:-<none>})"
+    podman rm -f fp2-slowcheck >/dev/null 2>&1 || true
+    start_throwaway_chromium fp2-slowcheck "$genB" "$(ua_for "$markerB")" \
+        "$url/login" "$url/home" >/dev/null \
+        || fail breakage-matrix "slow-auth: could not start the named browser check"
+    for ((i = 0; i < 40; i++)); do
+        status="$(site_ctl "/__slow_auth_status?marker=$markerB" 2>/dev/null || true)"
+        [ "$status" = "SLOW-AUTH-ENTERED-$markerB" ] && break
+        if ! podman ps --filter "name=fp2-slowcheck" -q | grep -q .; then
+            logs="$(podman logs fp2-slowcheck 2>&1 | tr '\n' ' ' | head -c 400)"
+            fail breakage-matrix "slow-auth: browser exited before /auth entered the stall (status=${status:-<none>}; logs=${logs:-<none>})"
+        fi
+        sleep 0.25
+    done
+    [ "$status" = "SLOW-AUTH-ENTERED-$markerB" ] \
+        || fail breakage-matrix "slow-auth: /auth did not enter the marker-keyed stall (status=${status:-<none>})"
+
+    timeout --kill-after=2 5 podman wait fp2-slowcheck >/dev/null 2>&1
     rc=$?
     # (1) A stall surfaces as a FAILURE within the wall-clock budget, not an
-    # infinite hang: the host-side `timeout` fires and the client exits nonzero.
-    [ "$rc" -ne 0 ] || fail breakage-matrix "slow-auth check did not time out (rc=$rc) — a stall must surface as a failure"
-    sleep 2
+    # infinite hang: the host-side deadline fires with timeout's exact status.
+    [ "$rc" -eq 124 ] || fail breakage-matrix "slow-auth check did not time out (rc=$rc, expected 124) — a stall must surface as a failure"
     # (2) The stall held a LIVE container at the timeout (proof /auth really
-    # stalled chromium mid-request, not that it exited early): the client was
-    # killed, but the container is still up.
+    # stalled chromium mid-request, not that it exited early). The direct
+    # fixture readiness signal above rules out a pre-request startup hang.
     podman ps --filter "name=fp2-slowcheck" -q | grep -q . \
         || fail breakage-matrix "slow-auth: expected a live stalled container at the timeout (the request did not stall mid-flight)"
     # (3) The harness reclaims it deterministically — `leaves no containers
