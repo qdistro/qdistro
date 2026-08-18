@@ -1015,6 +1015,7 @@ class Broker(dbus.service.Object):
         # cache GC.
         self.launch_records = LaunchRecordStore()
         self._lineage_store: Any | None = None
+        self._lineage_store_startup_error: Exception | None = None
         print(f"[broker] lineage_enforce={LINEAGE_ENFORCE} "
               f"(False=shadow/audit-only)", flush=True)
         # Retention knob: env override wins for tests; 0 disables GC.
@@ -1551,20 +1552,31 @@ class Broker(dbus.service.Object):
         return False, f"untrusted root helper exe={exe_s!r}"
 
     def _get_lineage_store(self):
-        """Lazily open the broker-owned export lineage store."""
+        """Open and cache the broker-owned export lineage store."""
+        startup_error = getattr(
+            self, "_lineage_store_startup_error", None)
+        if startup_error is not None:
+            raise RuntimeError(
+                f"lineage store unavailable since broker startup: "
+                f"{startup_error}") from startup_error
         if self._lineage_store is None:
             from qdistro_lineage_store import LineageStore
 
-            parent = os.path.dirname(LINEAGE_DB_PATH)
-            if parent:
-                created = not os.path.exists(parent)
-                os.makedirs(parent, exist_ok=True)
-                if created:
-                    try:
-                        os.chmod(parent, 0o700)
-                    except OSError as e:
-                        print(f"[broker] lineage dir chmod failed: {e}", flush=True)
-            self._lineage_store = LineageStore(LINEAGE_DB_PATH)
+            try:
+                parent = os.path.dirname(LINEAGE_DB_PATH)
+                if parent:
+                    created = not os.path.exists(parent)
+                    os.makedirs(parent, exist_ok=True)
+                    if created:
+                        try:
+                            os.chmod(parent, 0o700)
+                        except OSError as e:
+                            print(f"[broker] lineage dir chmod failed: {e}",
+                                  flush=True)
+                self._lineage_store = LineageStore(LINEAGE_DB_PATH)
+            except Exception as e:  # noqa: BLE001 - cache startup failure
+                self._lineage_store_startup_error = e
+                raise
         return self._lineage_store
 
     def _require_root_helper_peer(self, sender, conn, method: str,
@@ -5423,6 +5435,28 @@ class Broker(dbus.service.Object):
         pass
 
 
+def _create_ready_broker(bus):
+    """Construct the broker and initialize durable lineage before exposure.
+
+    ``LineageStore`` performs schema creation/migration on first open.  Doing
+    that work from the first D-Bus method call can occupy the single GLib
+    dispatch thread long enough for a caller to receive ``NoReply`` under IO
+    load.  Acquire the well-known name only after the cold path completes, so
+    no lineage method can run on a half-initialized broker.  Lineage is explicitly
+    best-effort, however, so a cold-open failure is cached and the broker still
+    acquires its name: unrelated authorization methods remain available while
+    lineage methods return ``LineageUnavailable`` immediately, without doing a
+    lazy disk retry on the D-Bus thread.
+    """
+    broker = Broker(bus)
+    try:
+        broker._get_lineage_store()
+    except Exception as e:  # noqa: BLE001 - lineage must not take broker down
+        print(f"[broker] lineage startup unavailable: {e}", flush=True)
+    name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
+    return name, broker
+
+
 def main():
     # Cheap, side-effect-free health smoke. The broker has no argparse
     # (its only real invocation is the systemd ExecStart with no args),
@@ -5436,8 +5470,7 @@ def main():
     _require_admin_account()
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    _name = dbus.service.BusName(BUS_NAME, bus, do_not_queue=True)
-    broker = Broker(bus)
+    _name, broker = _create_ready_broker(bus)
     print(f"[qdistro-admin-broker] listening on {BUS_NAME} {OBJ_PATH}", flush=True)
     try:
         GLib.MainLoop().run()

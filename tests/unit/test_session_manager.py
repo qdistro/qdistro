@@ -11,15 +11,14 @@ swapped.
 from __future__ import annotations
 
 import json
-import os
 import signal
 import subprocess
+import sys
 import time
 import types
 from pathlib import Path
 
 import pytest
-
 import qdistro_session_manager as sm
 from qdistro_session_manager import (
     _STATE_TRANSITIONS,
@@ -1466,6 +1465,100 @@ def test_real_write_launch_env_is_owner_restricted_no_admin_chown(tmp_path,
     src = (sm.__file__ and open(sm.__file__).read()) or ""
     assert "fchown(fd, TIER2_LAUNCH_OWNER_UID" not in src, \
         "write_launch_env must not chown the root-sourced env file to admin"
+
+
+class _FakeDBusError(Exception):
+    def __init__(self, name):
+        super().__init__(name)
+        self._name = name
+
+    def get_dbus_name(self):
+        return self._name
+
+
+class _LineageContextProxy:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = 0
+
+    def GetLineageReceiptContext(self, **kwargs):
+        self.calls += 1
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+def _install_lineage_context_dbus(monkeypatch, outcomes):
+    queue = list(outcomes)
+    stats = {"system_bus_calls": 0, "get_object_calls": 0, "proxies": []}
+
+    def get_object(bus_name, object_path):
+        stats["get_object_calls"] += 1
+        proxy = _LineageContextProxy(queue.pop(0))
+        stats["proxies"].append(proxy)
+        return proxy
+
+    def system_bus():
+        stats["system_bus_calls"] += 1
+        return types.SimpleNamespace(get_object=get_object)
+
+    monkeypatch.setitem(
+        sys.modules, "dbus", types.SimpleNamespace(SystemBus=system_bus))
+    return stats
+
+
+def test_lineage_context_retries_transient_noreply(monkeypatch):
+    stats = _install_lineage_context_dbus(monkeypatch, [
+        _FakeDBusError("org.freedesktop.DBus.Error.NoReply"),
+        '{"chain_head":"head","issuer":"qdistro-broker","version":1}',
+    ])
+    sleeps = []
+    monkeypatch.setattr(sm.time, "sleep", sleeps.append)
+
+    result = sm._SystemOps().broker_lineage_receipt_context()
+
+    assert result == {
+        "chain_head": "head", "issuer": "qdistro-broker", "version": 1}
+    assert stats["system_bus_calls"] == 2
+    assert stats["get_object_calls"] == 2
+    assert len({id(proxy) for proxy in stats["proxies"]}) == 2
+    assert [proxy.calls for proxy in stats["proxies"]] == [1, 1]
+    assert sleeps == [0.25]
+
+
+def test_lineage_context_exhausts_transient_failures(monkeypatch):
+    stats = _install_lineage_context_dbus(monkeypatch, [
+        _FakeDBusError("org.freedesktop.DBus.Error.NoReply"),
+        _FakeDBusError("org.freedesktop.DBus.Error.Disconnected"),
+        _FakeDBusError("org.freedesktop.DBus.Error.ServiceUnknown"),
+    ])
+    sleeps = []
+    monkeypatch.setattr(sm.time, "sleep", sleeps.append)
+
+    with pytest.raises(_FakeDBusError) as exc:
+        sm._SystemOps().broker_lineage_receipt_context()
+
+    assert exc.value.get_dbus_name() == \
+        "org.freedesktop.DBus.Error.ServiceUnknown"
+    assert stats["system_bus_calls"] == 3
+    assert stats["get_object_calls"] == 3
+    assert [proxy.calls for proxy in stats["proxies"]] == [1, 1, 1]
+    assert sleeps == [0.25, 0.5]
+
+
+def test_lineage_context_does_not_retry_concrete_refusal(monkeypatch):
+    stats = _install_lineage_context_dbus(monkeypatch, [
+        _FakeDBusError("org.qdistro.AdminBroker1.AccessDenied")])
+    sleeps = []
+    monkeypatch.setattr(sm.time, "sleep", sleeps.append)
+
+    with pytest.raises(_FakeDBusError):
+        sm._SystemOps().broker_lineage_receipt_context()
+
+    assert stats["system_bus_calls"] == 1
+    assert stats["get_object_calls"] == 1
+    assert stats["proxies"][0].calls == 1
+    assert sleeps == []
 
 
 def test_stop_tier2_stops_unit_and_clears_env(store, ops):
