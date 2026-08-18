@@ -13,6 +13,59 @@
 #
 # This file expects bash 4+ (for [[ =~ ]]).
 
+# qd_deadline_start SECONDS LABEL [JUMP_THRESHOLD] [JUMP_CHARGE]
+# qd_deadline_pending
+#
+# Start and poll one bounded deadline whose elapsed-time accounting survives a
+# host suspend/resume.  Linux /proc/uptime (and bash SECONDS on the systems we
+# run) can jump by the whole sleep interval after resume.  A cold nested guest
+# was consequently declared dead immediately after the host woke even though
+# neither the guest nor its qemu-guest-agent had received any CPU time.  Clamp a
+# single implausibly-large poll delta to the normal one-second charge, matching
+# scripts/vm/vm-exec's established deadline contract.
+#
+# State is deliberately process-global: callers use one deadline at a time and
+# call qd_deadline_start again before a new wait.  JUMP_THRESHOLD defaults to
+# 30s, comfortably above tier-5's bounded 5s agent RPC plus its 1s poll sleep.
+# The LABEL is used only for an evidence-bearing warning on a detected jump.
+qd_deadline_read_uptime_s() {
+    local u
+    if ! read -r u _ < /proc/uptime 2>/dev/null; then
+        return 1
+    fi
+    case "$u" in ''|*[!0-9.]*) return 1 ;; esac
+    printf '%s\n' "${u%%.*}"
+}
+
+qd_deadline_start() {
+    local budget="$1" label="${2:-deadline}" threshold="${3:-30}" charge="${4:-1}"
+    case "$budget" in ''|*[!0-9]*) return 1 ;; esac
+    case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
+    case "$charge" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$threshold" -gt 0 ] || return 1
+
+    QD_DEADLINE_BUDGET="$budget"
+    QD_DEADLINE_LABEL="$label"
+    QD_DEADLINE_JUMP_THRESHOLD="$threshold"
+    QD_DEADLINE_JUMP_CHARGE="$charge"
+    QD_DEADLINE_ELAPSED=0
+    QD_DEADLINE_PREV_UPTIME="$(qd_deadline_read_uptime_s)" || return 1
+}
+
+qd_deadline_pending() {
+    local now delta
+    now="$(qd_deadline_read_uptime_s)" || return 2
+    delta=$((now - QD_DEADLINE_PREV_UPTIME))
+    [ "$delta" -ge 0 ] || delta=0
+    if [ "$delta" -gt "$QD_DEADLINE_JUMP_THRESHOLD" ]; then
+        echo "$QD_DEADLINE_LABEL: host uptime jumped ${delta}s (likely suspend/resume); charging ${QD_DEADLINE_JUMP_CHARGE}s to deadline" >&2
+        delta="$QD_DEADLINE_JUMP_CHARGE"
+    fi
+    QD_DEADLINE_ELAPSED=$((QD_DEADLINE_ELAPSED + delta))
+    QD_DEADLINE_PREV_UPTIME="$now"
+    [ "$QD_DEADLINE_ELAPSED" -lt "$QD_DEADLINE_BUDGET" ]
+}
+
 # gen_launch_token <log-prefix>
 #
 # Print a 32-lowercase-hex per-spawn launch token on stdout. Exits the

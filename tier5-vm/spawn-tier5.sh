@@ -903,9 +903,15 @@ echo "[tier5] domain $VM_NAME running (cid=$CID)" >&2
 
 # Wait for qga. A deadline (rather than a fixed iteration count) keeps the
 # contract honest if individual virsh calls stall briefly under nested VM load.
+# qd_deadline_pending clamps a host suspend/resume jump: the nested guest gets
+# no CPU while its host is asleep, so that interval must not consume its boot
+# budget.  This is the same accounting contract used by scripts/vm/vm-exec.
 QGA_OK=0
-qga_deadline=$((SECONDS + QGA_TIMEOUT_SECS))
-while [ "$SECONDS" -lt "$qga_deadline" ]; do
+if ! qd_deadline_start "$QGA_TIMEOUT_SECS" "[tier5] WARN: qga wait"; then
+    echo "[tier5] FAIL: cannot initialize qga deadline clock" >&2
+    exit 7
+fi
+while qd_deadline_pending; do
     if run_as_admin virsh qemu-agent-command --timeout 5 "$VM_NAME" \
         '{"execute":"guest-ping"}' >/dev/null 2>&1; then
         QGA_OK=1; break

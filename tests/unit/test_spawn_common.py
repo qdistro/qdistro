@@ -1,4 +1,4 @@
-"""Host unit tests for lib/spawn-common.sh:domain_xml_tmpfile.
+"""Host unit tests for shared shell helpers in lib/spawn-common.sh.
 
 Regression guard for the tier-4/tier-5 "virsh define: No such file or directory"
 bug: domain_xml_tmpfile returns a temp-file path via stdout and is ALWAYS called
@@ -65,3 +65,31 @@ def test_non_private_base_isolated_in_0700_subdir(tmp_path: Path) -> None:
     assert returned.parent.name.startswith("qdistro-domxml."), returned
     assert returned.parent.parent == rt, returned
     assert (returned.parent.stat().st_mode & 0o077) == 0, "subdir must be 0700"
+
+
+def test_deadline_clamps_suspend_jump_but_still_expires(tmp_path: Path) -> None:
+    """A suspend-sized uptime jump costs one poll, while ordinary subsequent
+    deltas still exhaust the original budget (the deadline remains bounded)."""
+    samples = tmp_path / "uptime.samples"
+    samples.write_text("100\n101\n38001\n38003\n38005\n", encoding="utf-8")
+    res = _bash(
+        f'exec 3<"{samples}"\n'
+        "qd_deadline_read_uptime_s() { IFS= read -r sample <&3 || return 1; printf '%s\\n' \"$sample\"; }\n"
+        "qd_deadline_start 6 test-wait 30 1 || exit 10\n"
+        "qd_deadline_pending || exit 11\n"  # +1 = 1
+        "qd_deadline_pending || exit 12\n"  # suspend +1 = 2
+        "qd_deadline_pending || exit 13\n"  # +2 = 4
+        "if qd_deadline_pending; then exit 14; fi\n"  # +2 = 6, expired
+        'printf "elapsed=%s\\n" "$QD_DEADLINE_ELAPSED"\n'
+    )
+    assert res.returncode == 0, res.stderr
+    assert "likely suspend/resume" in res.stderr
+    assert res.stdout.strip() == "elapsed=6"
+
+
+def test_deadline_rejects_unreadable_clock() -> None:
+    res = _bash(
+        "qd_deadline_read_uptime_s() { return 1; }\n"
+        "qd_deadline_start 30 broken-clock\n"
+    )
+    assert res.returncode != 0

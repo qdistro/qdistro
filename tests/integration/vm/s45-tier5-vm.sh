@@ -41,6 +41,8 @@ if [ -d "$SRC/tier5-vm" ]; then
 fi
 SPAWN="$TIER5_DIR/tier5-vm/spawn-tier5.sh"
 [ -f "$SPAWN" ] || skip "tier5-vm source not unpacked at $SPAWN"
+# shellcheck source=../../../lib/spawn-common.sh
+. "$TIER5_DIR/lib/spawn-common.sh"
 
 BASE=/var/lib/libvirt/images/qdistro-tier5-base.qcow2
 [ -f "$BASE" ] || skip "tier-5 base image $BASE not built; run tier5-vm/build-guest-image.sh first"
@@ -127,14 +129,17 @@ done
 # cold-boot budget is 180s; allow another 30s for process scheduling and log
 # observation, while also stopping promptly if the wrapper has already failed.
 QGA_OK=0
-deadline=$(( $(date +%s) + 210 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -q "qga ready" "$SPAWN_LOG" 2>/dev/null; then
-        QGA_OK=1; break
-    fi
-    kill -0 "$SPAWN_PID" 2>/dev/null || break
-    sleep 1
-done
+if qd_deadline_start 210 "[s45] WARN: qga observation wait"; then
+    while qd_deadline_pending; do
+        if grep -q "qga ready" "$SPAWN_LOG" 2>/dev/null; then
+            QGA_OK=1; break
+        fi
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 1
+    done
+else
+    fail "could not initialize qga observation deadline clock"
+fi
 [ "$QGA_OK" = "1" ] \
     && pass "guest qemu-guest-agent responded" \
     || {
@@ -148,14 +153,17 @@ done
 # spawn-tier5.sh emits "[tier5] guest publisher pid=N running" once
 # guest-exec delivers the publisher start.
 PUBLISHER_OK=0
-deadline=$(( $(date +%s) + 60 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -q "guest publisher pid=" "$SPAWN_LOG" 2>/dev/null; then
-        PUBLISHER_OK=1; break
-    fi
-    kill -0 "$SPAWN_PID" 2>/dev/null || break
-    sleep 1
-done
+if qd_deadline_start 60 "[s45] WARN: publisher observation wait"; then
+    while qd_deadline_pending; do
+        if grep -q "guest publisher pid=" "$SPAWN_LOG" 2>/dev/null; then
+            PUBLISHER_OK=1; break
+        fi
+        kill -0 "$SPAWN_PID" 2>/dev/null || break
+        sleep 1
+    done
+else
+    fail "could not initialize publisher observation deadline clock"
+fi
 [ "$PUBLISHER_OK" = "1" ] \
     && pass "guest publisher pid reported via qga guest-exec" \
     || fail "qdistro-tier5-publisher.sh never reported a pid within 60s after qga ready"
@@ -177,16 +185,19 @@ else
 fi
 
 # qdwin should see a new wl_client tagged with tier-5 secctx.
-deadline=$(( $(date +%s) + 30 ))
 TIER5_LINE=""
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if [ -n "$CURSOR" ]; then
-        TIER5_LINE=$(journalctl --after-cursor="$CURSOR" 2>/dev/null \
-            | grep -m1 -E "qdwin:.*qdistro\.tier5\." || true)
-    fi
-    [ -n "$TIER5_LINE" ] && break
-    sleep 1
-done
+if qd_deadline_start 30 "[s45] WARN: secctx journal wait"; then
+    while qd_deadline_pending; do
+        if [ -n "$CURSOR" ]; then
+            TIER5_LINE=$(journalctl --after-cursor="$CURSOR" 2>/dev/null \
+                | grep -m1 -E "qdwin:.*qdistro\.tier5\." || true)
+        fi
+        [ -n "$TIER5_LINE" ] && break
+        sleep 1
+    done
+else
+    fail "could not initialize secctx journal deadline clock"
+fi
 if [ -n "$TIER5_LINE" ]; then
     pass "qdwin observed wl_client with secctx app_id=qdistro.tier5.*"
 else
