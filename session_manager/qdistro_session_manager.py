@@ -2110,19 +2110,49 @@ class _SystemOps:
     def broker_lineage_receipt_context(self) -> dict:
         """Fetch broker-owned lineage receipt context.
 
-        Any D-Bus or parse failure is an exception; the caller degrades to no
-        receipt surfaces and still imports the artifacts.
+        A context lookup is read-only, so transient bus failures are safe to
+        retry.  During a broker ownership transition or transient system-bus
+        load, dbus-python can fail one call even though a fresh proxy succeeds.
+        Concrete broker refusals and malformed replies are never retried.  After
+        the bounded attempts, the exception still reaches the caller, which
+        degrades honestly to no receipt surfaces rather than claiming unsealed
+        lineage.
         """
         import dbus  # local import: optional dependency in unit tests
 
-        bus = dbus.SystemBus()
-        proxy = bus.get_object(ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH)
-        raw = proxy.GetLineageReceiptContext(
-            dbus_interface=ADMIN_BROKER_BUS_NAME, timeout=5.0)
-        obj = json.loads(str(raw))
-        if not isinstance(obj, dict):
-            raise RuntimeError("broker lineage context is not a JSON object")
-        return obj
+        retryable = {
+            "org.freedesktop.DBus.Error.Disconnected",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+        }
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                bus = dbus.SystemBus()
+                proxy = bus.get_object(
+                    ADMIN_BROKER_BUS_NAME, ADMIN_BROKER_OBJ_PATH)
+                raw = proxy.GetLineageReceiptContext(
+                    dbus_interface=ADMIN_BROKER_BUS_NAME, timeout=5.0)
+            except Exception as e:  # noqa: BLE001 - classify D-Bus errors below
+                get_name = getattr(e, "get_dbus_name", None)
+                name = get_name() if callable(get_name) else ""
+                if name not in retryable or attempt >= attempts:
+                    raise
+                delay = 0.25 * attempt
+                log.warning(
+                    "broker lineage context transient %s (attempt %d/%d); "
+                    "retrying in %.2fs", name, attempt, attempts, delay)
+                time.sleep(delay)
+                continue
+
+            obj = json.loads(str(raw))
+            if not isinstance(obj, dict):
+                raise RuntimeError(
+                    "broker lineage context is not a JSON object")
+            return obj
+
+        raise AssertionError("unreachable broker lineage context retry loop")
 
     def broker_record_export_lineage(self, descriptor: dict) -> dict:
         """Ask the broker to validate and seal landed export lineage."""
