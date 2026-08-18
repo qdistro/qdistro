@@ -19,6 +19,8 @@ Routes
   GET  /home               requires the cookie -> LOGIN-OK-<nonce>, else
                            LOGIN-FAILED-<reason>
   POST /__break            test control: set breakage mode + the broken marker
+  POST /__slow_auth_status test control: report whether the selected marker's
+                           /auth request entered the deliberate stall
   POST /__reset            clear breakage + forget issued sessions
 
 Breakage modes (apply ONLY to a request whose UA carries the broken marker;
@@ -61,6 +63,7 @@ _LOCK = threading.Lock()
 _ISSUED: set[str] = set()        # nonces this server has handed out
 _BREAK_MODE: str | None = None   # None | reject-login | js-break | slow-auth
 _BREAK_MARKER: str | None = None # the generation marker that is "broken"
+_SLOW_AUTH_ENTERED: set[str] = set()  # markers whose /auth reached the stall
 
 
 def _marker_from_ua(ua: str) -> str | None:
@@ -187,6 +190,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/__break":
             self._do_break()
             return
+        if path == "/__slow_auth_status":
+            self._do_slow_auth_status()
+            return
         if path == "/__clearbreak":
             self._do_clearbreak()
             return
@@ -209,6 +215,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # slow-auth: stall past the harness timeout for the broken marker. A
         # good-marker request authenticates normally.
         if _is_broken(ua, "slow-auth"):
+            marker = _marker_from_ua(ua)
+            if marker is not None:
+                with _LOCK:
+                    _SLOW_AUTH_ENTERED.add(marker)
             time.sleep(SLOW_AUTH_STALL_S)
 
         creds_ok = (user == TEST_USER and password == TEST_PASS)
@@ -268,7 +278,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with _LOCK:
             _BREAK_MODE = mode
             _BREAK_MARKER = marker
+            # Re-arming a marker starts a new observation window. This keeps a
+            # reused fixture from satisfying readiness with an older request.
+            _SLOW_AUTH_ENTERED.discard(marker)
         self._send_html(f"BREAK-SET-{mode}".encode())
+
+    def _do_slow_auth_status(self):
+        self._read_body()
+        q = parse_qs(urlsplit(self.path).query)
+        marker = (q.get("marker") or [""])[0]
+        with _LOCK:
+            entered = bool(marker) and marker in _SLOW_AUTH_ENTERED
+        sentinel = "SLOW-AUTH-ENTERED" if entered else "SLOW-AUTH-WAITING"
+        self._send_html(f"{sentinel}-{marker}".encode())
 
     def _do_clearbreak(self):
         # Clear ONLY the breakage; KEEP issued sessions so an already-issued
@@ -291,6 +313,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _BREAK_MODE = None
             _BREAK_MARKER = None
             _ISSUED.clear()
+            _SLOW_AUTH_ENTERED.clear()
         self._send_html(b"RESET-OK")
 
 
