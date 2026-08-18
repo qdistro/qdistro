@@ -126,8 +126,8 @@ preview_manifest() {
 
 @test "GUI workers export the artifact directory used by click previews" {
     # Contract (post short-alias harvest): agents get QCI_GUI_ARTIFACT_DIR set to
-    # the short art_alias path under /tmp/qci-gui-art/... (not the long canonical
-    # adir). Harvest still grades adir after recovery. Primary attempt uses
+    # the short real art_alias directory under /tmp/qci-gui-art/... (not the long
+    # canonical adir). Harvest still grades adir after recovery. Primary attempt uses
     # art_alias; retry attempts use art_aliasN.
     grep -Fq 'QCI_GUI_ARTIFACT_DIR="$art_alias"' "$REPO_ROOT/ci/lib/gates/gui.sh"
     grep -Fq 'QCI_GUI_ARTIFACT_DIR="$art_aliasN"' "$REPO_ROOT/ci/lib/gates/gui.sh"

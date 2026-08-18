@@ -235,30 +235,97 @@ gui_validate_scenarios() {
 # Short, stable host alias for a canonical per-scenario artifact dir.
 # Agents under load routinely mangle long `ci/runs/full-<stamp>-<pid>/gui/<slug>`
 # paths (drop the pid suffix, invent siblings). A fixed /tmp/qci-gui-art/<16hex>
-# symlink is short, unique per adir (collision-safe under QCI_GUI_JOBS=N), and
-# still lands writes in the canonical dir via the symlink. Pure enough for
-# host selftests when TMPDIR is redirected.
+# real directory is short and unique per adir (collision-safe under
+# QCI_GUI_JOBS=N). It must not be a symlink: hardened ImageMagick policies deny
+# output through symlinked path components, which previously tempted an agent to
+# replace the alias and strand an otherwise valid PASS outside the run dir.
+# gui_harvest_agent_artifacts copies the attempt evidence into the canonical dir.
+# Pure enough for host selftests when TMPDIR is redirected.
 # Args: absolute canonical artifact dir. Echoes the alias path.
 gui_make_artifact_alias() {
-    local adir=$1 key base short
+    local adir=$1 key base short target_file owner
     [ -n "$adir" ] || return 1
     mkdir -p "$adir" || return 1
     key=$(printf '%s' "$adir" | sha256sum 2>/dev/null | awk '{print substr($1,1,16)}')
     [ -n "$key" ] || key=$(printf '%s' "$adir" | cksum | awk '{print $1}')
     base="${QCI_GUI_ART_ALIAS_ROOT:-${TMPDIR:-/tmp}/qci-gui-art}"
-    mkdir -p "$base" || return 1
+    if [ -L "$base" ]; then
+        return 1
+    elif [ -e "$base" ]; then
+        [ -d "$base" ] || return 1
+        owner=$(stat -c %u "$base" 2>/dev/null || true)
+        [ "$owner" = "$(id -u)" ] || return 1
+        chmod 0700 "$base" || return 1
+    else
+        mkdir -m 0700 "$base" || return 1
+    fi
     short="$base/$key"
-    # Atomic-ish replace: symlink into place (no race with other scenarios —
-    # key is a content hash of the full adir path).
-    ln -sfn "$adir" "$short" || return 1
-    printf '%s\n' "$adir" > "$base/$key.target" 2>/dev/null || true
+    target_file="$base/$key.target"
+    # Never reuse a real directory or sidecar: stale PASS/evidence from a
+    # repeated/interrupted setup must not become this attempt's result.
+    [ ! -e "$target_file" ] && [ ! -L "$target_file" ] || return 1
+    # A key is a content hash of the full adir path, so any pre-existing entry
+    # belongs to a repeated/interrupted setup. Refuse both historical symlinks
+    # and real directories; the caller safely falls back to the canonical path.
+    [ ! -e "$short" ] && [ ! -L "$short" ] || return 1
+    mkdir -m 0700 "$short" || return 1
+    if ! (set -o noclobber; printf '%s\n' "$adir" > "$target_file") 2>/dev/null; then
+        rmdir "$short" 2>/dev/null || true
+        return 1
+    fi
     printf '%s\n' "$short"
+}
+
+# Remove a successfully harvested real-directory alias. The exact sidecar
+# mapping and containment checks make the recursive removal fail closed; an
+# untrusted/malformed path is left behind for an operator instead of widened.
+# Args: short_alias_dir canonical_adir
+gui_remove_artifact_alias() {
+    local short=$1 adir=$2 base real_short real_base target owner
+    [ -n "$short" ] && [ -n "$adir" ] || return 1
+    [ -d "$short" ] && [ ! -L "$short" ] || return 1
+    [ -f "$short.target" ] && [ ! -L "$short.target" ] || return 1
+    target=$(cat "$short.target" 2>/dev/null || true)
+    [ "$target" = "$adir" ] || return 1
+    base=$(dirname "$short")
+    real_short=$(readlink -f "$short" 2>/dev/null || true)
+    real_base=$(readlink -f "$base" 2>/dev/null || true)
+    [ -n "$real_short" ] && [ -n "$real_base" ] || return 1
+    owner=$(stat -c %u "$real_short" 2>/dev/null || true)
+    [ "$owner" = "$(id -u)" ] || return 1
+    case "$real_short" in
+        "$real_base"/*) ;;
+        *) return 1 ;;
+    esac
+    rm -rf -- "$real_short" || return 1
+    rm -f -- "$short.target" || return 1
+}
+
+# Rewrite report-style links after evidence moves from the short alias to the
+# canonical run directory. Only exact alias prefixes in human-authored report
+# files are changed; raw logs and screenshots remain byte-for-byte evidence.
+gui_rebase_artifact_report_links() {
+    local adir=$1 alias_real=$2 f
+    for f in report.md report.txt debug.md notes.txt; do
+        [ -e "$adir/$f" ] || continue
+        [ -f "$adir/$f" ] && [ ! -L "$adir/$f" ] || return 1
+        python3 - "$adir/$f" "$alias_real/" <<'PY' || return 1
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2].encode()
+data = path.read_bytes()
+if old in data:
+    path.write_bytes(data.replace(old, b"./"))
+PY
+    done
 }
 
 # Read first verdict token from a status.txt (or empty).
 gui_status_file_verdict() {
     local f=$1 raw=""
-    [ -f "$f" ] || { printf '\n'; return 0; }
+    [ -f "$f" ] && [ ! -L "$f" ] || { printf '\n'; return 0; }
     raw=$(tr -d '\r' < "$f" | awk 'NF {print toupper($1); exit}')
     case "$raw" in
         PASSN) raw=PASS ;;
@@ -272,6 +339,13 @@ gui_status_file_verdict() {
     esac
 }
 
+gui_mark_harvest_invalid() {
+    local adir=$1 log_path=$2 reason=$3
+    printf '%s\n' "$reason" > "$adir/.harvest-invalid" 2>/dev/null || true
+    printf 'gui_harvest: INVALID: %s\n' "$reason" \
+        >> "${log_path:-/dev/null}" 2>/dev/null || true
+}
+
 # After an agent attempt: if the canonical adir has no usable status.txt, search
 # for a misplaced one for THIS slug only and copy evidence into the canonical
 # dir. Designed for dumb agents + concurrent GUI pools:
@@ -282,22 +356,68 @@ gui_status_file_verdict() {
 #     truncated sibling (the observed Luna failure mode), then newest mtime
 # Returns 0 always (best-effort); leaves a `.harvested-from` breadcrumb on
 # success so report triage can see the recovery. Host-testable.
-# Args: canonical_adir slug [agent_log]
+# Args: canonical_adir slug [agent_log] [short_alias_dir]
 gui_harvest_agent_artifacts() {
-    local adir=$1 slug=$2 log_path=${3:-}
-    local st="" cand="" cands=() seen="" v="" vs="" picked="" parent runs_parent rid rid_ts p
+    local adir=$1 slug=$2 log_path=${3:-} alias_dir=${4:-}
+    local st="" alias_st="" cand="" cands=() seen="" v="" vs="" picked="" parent runs_parent rid rid_ts p
+    local alias_real="" alias_target="" alias_base="" alias_base_real="" alias_valid=0
     [ -n "$adir" ] && [ -n "$slug" ] || return 0
     mkdir -p "$adir" 2>/dev/null || true
 
-    st=$(gui_status_file_verdict "$adir/status.txt")
-    if [ -n "$st" ]; then
+    # Authenticate the harness-created real alias before considering a verdict
+    # written elsewhere. If the agent swaps/removes it, canonical prose/status
+    # must not bypass the short-path contract. `alias_dir == adir` is the
+    # intentional fallback when alias creation itself failed before the agent.
+    if [ -n "$alias_dir" ] && [ "$alias_dir" != "$adir" ]; then
+        alias_real=$(readlink -f "$alias_dir" 2>/dev/null || printf '%s' "$alias_dir")
+        alias_base="${QCI_GUI_ART_ALIAS_ROOT:-${TMPDIR:-/tmp}/qci-gui-art}"
+        alias_base_real=$(readlink -f "$alias_base" 2>/dev/null || printf '%s' "$alias_base")
+        if [ -f "$alias_dir.target" ] && [ ! -L "$alias_dir.target" ]; then
+            alias_target=$(cat "$alias_dir.target" 2>/dev/null || true)
+        fi
+        if [ "$alias_target" = "$adir" ] && [ -d "$alias_dir" ] && [ ! -L "$alias_dir" ] \
+                && [ "$(stat -c %u "$alias_dir" 2>/dev/null || true)" = "$(id -u)" ]; then
+            case "$alias_real" in
+                "$alias_base_real"/*) alias_valid=1 ;;
+            esac
+        fi
+        if [ "$alias_valid" -ne 1 ]; then
+            gui_mark_harvest_invalid "$adir" "$log_path" \
+                "artifact alias authentication failed: $alias_dir"
+            return 0
+        fi
+        if [ -e "$alias_real/status.txt" ] || [ -L "$alias_real/status.txt" ]; then
+            if [ ! -f "$alias_real/status.txt" ] || [ -L "$alias_real/status.txt" ]; then
+                gui_mark_harvest_invalid "$adir" "$log_path" \
+                    "artifact alias status is not a regular non-symlink file: $alias_real/status.txt"
+                return 0
+            fi
+            alias_st=$(gui_status_file_verdict "$alias_real/status.txt")
+            if [ -z "$alias_st" ]; then
+                gui_mark_harvest_invalid "$adir" "$log_path" \
+                    "artifact alias status has no usable verdict: $alias_real/status.txt"
+                return 0
+            fi
+        fi
+    fi
+
+    if [ -L "$adir/status.txt" ] || [ -L "$adir/report.md" ]; then
+        gui_mark_harvest_invalid "$adir" "$log_path" \
+            "canonical verdict artifact is a symlink"
         return 0
     fi
-    # report.md alone may still grade via agent_artifact_status — only harvest
-    # when status is missing; do not clobber a partial report mid-write.
+    st=$(gui_status_file_verdict "$adir/status.txt")
     if [ -f "$adir/report.md" ] && [ ! -f "$adir/status.txt" ]; then
         st=$(agent_artifact_status "$adir" "${log_path:-/dev/null}")
-        case "$st" in PASS|FAIL|ERROR|SKIP) return 0 ;; esac
+        case "$st" in PASS|FAIL|ERROR|SKIP) ;; *) st="" ;; esac
+    fi
+    if [ -n "$st" ] && [ -n "$alias_st" ] && [ "$st" != "$alias_st" ]; then
+        gui_mark_harvest_invalid "$adir" "$log_path" \
+            "canonical verdict $st conflicts with authenticated alias verdict $alias_st"
+        return 0
+    fi
+    if [ -n "$st" ] && [ -z "$alias_st" ]; then
+        return 0
     fi
 
     # --- collect candidates (status.txt only; slug-scoped) ---
@@ -330,9 +450,9 @@ gui_harvest_agent_artifacts() {
         # also: agent may have written under RDIR but a slightly wrong subdir
         cands+=("$RDIR/gui/$slug/status.txt")
     fi
-    # 3) short-alias target (symlink or real) — usually already the canonical adir
-    if [ -n "${QCI_GUI_ARTIFACT_DIR:-}" ]; then
-        cands+=("${QCI_GUI_ARTIFACT_DIR}/status.txt")
+    # 3) the already-authenticated short real-directory alias.
+    if [ "$alias_valid" -eq 1 ] && [ -n "$alias_st" ]; then
+        cands+=("$alias_real/status.txt")
     fi
 
     # Dedup + validate: parent basename == slug, file exists, not already adir
@@ -342,9 +462,11 @@ gui_harvest_agent_artifacts() {
     seen=$'\n'
     for cand in "${cands[@]+"${cands[@]}"}"; do
         while [[ "$cand" == //* ]]; do cand=${cand#/}; done
-        [ -f "$cand" ] || continue
+        [ -f "$cand" ] && [ ! -L "$cand" ] || continue
         parent=$(basename "$(dirname "$cand")")
-        [ "$parent" = "$slug" ] || continue
+        if [ "$parent" != "$slug" ]; then
+            [ "$alias_valid" -eq 1 ] && [ "$cand" = "$alias_real/status.txt" ] || continue
+        fi
         # resolve to real path for comparison when possible
         p=$(readlink -f "$cand" 2>/dev/null || printf '%s' "$cand")
         case "$seen" in
@@ -363,11 +485,15 @@ gui_harvest_agent_artifacts() {
 
     [ "${#valid[@]}" -gt 0 ] || return 0
 
-    # Prefer: under real RDIR > truncated timestamp sibling of THIS run.
+    # Prefer the harness-authenticated alias, then real RDIR, then the truncated
+    # timestamp sibling of THIS run.
     # A preferred path is trusted alone (other historical runs for the same
     # slug may disagree and must not veto recovery of this attempt).
     picked=""
-    if [ -n "${RDIR:-}" ]; then
+    if [ "$alias_valid" -eq 1 ] && [ -f "$alias_real/status.txt" ]; then
+        picked="$alias_real/status.txt"
+    fi
+    if [ -z "$picked" ] && [ -n "${RDIR:-}" ]; then
         local rdir_real trunc_real
         rdir_real=$(readlink -f "$RDIR" 2>/dev/null || printf '%s' "$RDIR")
         for cand in "${valid[@]}"; do
@@ -410,11 +536,9 @@ gui_harvest_agent_artifacts() {
     [ -n "$picked" ] && [ -f "$picked" ] || return 0
 
     parent=$(dirname "$picked")
-    # Copy status + common evidence files; do not overwrite an existing
-    # canonical file (status is known missing; others may be partial).
-    if [ ! -f "$adir/status.txt" ]; then
-        cp -a "$picked" "$adir/status.txt" 2>/dev/null || cp "$picked" "$adir/status.txt" || return 0
-    fi
+    # Stage every evidence entry before publishing status.txt. A conflicting
+    # partial canonical artifact or any copy failure leaves status absent and
+    # retains the complete alias for triage; PASS must never outlive its proof.
     local f bn
     for f in "$parent"/*; do
         [ -e "$f" ] || continue
@@ -423,20 +547,68 @@ gui_harvest_agent_artifacts() {
             status.txt) continue ;;
             .harvested-from) continue ;;
         esac
-        if [ -f "$f" ] && [ ! -e "$adir/$bn" ]; then
-            cp -a "$f" "$adir/$bn" 2>/dev/null || cp "$f" "$adir/$bn" 2>/dev/null || true
-        elif [ -d "$f" ] && [ ! -e "$adir/$bn" ]; then
-            cp -a "$f" "$adir/$bn" 2>/dev/null || true
+        if [ -L "$f" ] || { [ -d "$f" ] && [ -n "$(find "$f" -type l -print -quit 2>/dev/null)" ]; }; then
+            gui_mark_harvest_invalid "$adir" "$log_path" \
+                "evidence contains a symlink: $f"
+            return 0
+        fi
+        if [ -L "$adir/$bn" ] \
+                || { [ -d "$adir/$bn" ] && [ -n "$(find "$adir/$bn" -type l -print -quit 2>/dev/null)" ]; }; then
+            gui_mark_harvest_invalid "$adir" "$log_path" \
+                "canonical evidence contains a symlink: $adir/$bn"
+            return 0
+        fi
+        if [ -e "$adir/$bn" ]; then
+            if [ -f "$f" ] && [ -f "$adir/$bn" ]; then
+                cmp -s "$f" "$adir/$bn" || {
+                    gui_mark_harvest_invalid "$adir" "$log_path" \
+                        "evidence conflict; retained source=$f canonical=$adir/$bn"
+                    return 0
+                }
+            elif [ -d "$f" ] && [ -d "$adir/$bn" ]; then
+                diff -qr "$f" "$adir/$bn" >/dev/null 2>&1 || {
+                    gui_mark_harvest_invalid "$adir" "$log_path" \
+                        "evidence directory conflict; retained source=$f canonical=$adir/$bn"
+                    return 0
+                }
+            else
+                gui_mark_harvest_invalid "$adir" "$log_path" \
+                    "evidence type conflict; retained source=$f canonical=$adir/$bn"
+                return 0
+            fi
+        elif ! cp -a "$f" "$adir/$bn" 2>/dev/null; then
+            gui_mark_harvest_invalid "$adir" "$log_path" \
+                "evidence copy failed; retained source=$f canonical=$adir/$bn"
+            return 0
         fi
     done
-    {
+    if [ ! -f "$adir/status.txt" ] && ! cp -a "$picked" "$adir/status.txt" 2>/dev/null; then
+        gui_mark_harvest_invalid "$adir" "$log_path" \
+            "status copy failed; retained source=$picked canonical=$adir/status.txt"
+        return 0
+    fi
+    if ! {
         printf 'harvested_from=%s\n' "$parent"
         printf 'status=%s\n' "$(gui_status_file_verdict "$adir/status.txt")"
         printf 'slug=%s\n' "$slug"
-    } > "$adir/.harvested-from" 2>/dev/null || true
+    } > "$adir/.harvested-from" 2>/dev/null; then
+        gui_mark_harvest_invalid "$adir" "$log_path" \
+            "breadcrumb write failed; retained alias=$parent"
+        return 0
+    fi
     if [ -n "$log_path" ]; then
         printf '\nqci_gui_harvest: recovered status for slug=%s from %s\n' \
             "$slug" "$parent" >> "$log_path" 2>/dev/null || true
+    fi
+    if [ "$alias_valid" -eq 1 ] && [ "$parent" = "$alias_real" ]; then
+        if ! gui_rebase_artifact_report_links "$adir" "$alias_real"; then
+            gui_mark_harvest_invalid "$adir" "$log_path" \
+                "report-link rebase failed; retained alias=$alias_dir"
+            return 0
+        fi
+        gui_remove_artifact_alias "$alias_dir" "$adir" || \
+            printf 'gui_harvest: retained alias after cleanup refusal: %s\n' \
+                "$alias_dir" >> "${log_path:-/dev/null}" 2>/dev/null || true
     fi
     return 0
 }
@@ -447,7 +619,7 @@ write_agent_prompt() {
     # Per-attempt artifact dir so a retry's agent writes its status/report to its
     # OWN directory and never clobbers the first attempt's evidence (the audit
     # trail that makes classified retry acceptable). Defaults to the canonical dir.
-    # Callers SHOULD pass the short /tmp/qci-gui-art/<hash> alias so weak models
+    # Callers SHOULD pass the short /tmp/qci-gui-art/<hash> directory so weak models
     # cannot truncate a long ci/runs/... path.
     [ -n "$artifact_dir" ] || artifact_dir="$RDIR/gui/$(safe_name "$rel")"
     cat > "$prompt" <<EOF
@@ -465,6 +637,10 @@ Scenario file:
 - Environment: \`QCI_GUI_ARTIFACT_DIR=$artifact_dir\` (already set for this process). Prefer that variable over retyping the path.
 - Save screenshots, OCR output, command logs, notes, and click-targets under:
   \`$artifact_dir/\`
+- This is a harness-owned real directory. Never move, replace, or resolve it to
+  another path; tools including ImageMagick are expected to write there directly.
+- In reports, link to sibling evidence with relative paths (for example
+  \`step2.png\`), never with the absolute temporary artifact-directory prefix.
 - Before returning, write \`$artifact_dir/status.txt\`
   containing exactly one word: PASS, FAIL, ERROR, or SKIP.
 - WRITE status.txt FIRST as soon as you have a verdict, then other evidence.
@@ -564,7 +740,11 @@ EOF
 
 agent_artifact_status() {
     local artifact_dir=$1 log_path=$2 raw=""
-    if [ -f "$artifact_dir/status.txt" ]; then
+    if [ -f "$artifact_dir/.harvest-invalid" ]; then
+        printf 'UNKNOWN\n'
+        return 0
+    fi
+    if [ -f "$artifact_dir/status.txt" ] && [ ! -L "$artifact_dir/status.txt" ]; then
         raw=$(tr -d '\r' < "$artifact_dir/status.txt" | awk 'NF {print toupper($1); exit}')
         # Some small-model runs wrote a literal trailing "n" instead of a
         # newline (`PASSn`). Treat only that exact typo as the intended verdict;
@@ -575,7 +755,7 @@ agent_artifact_status() {
             ERRORN) raw=ERROR ;;
             SKIPN) raw=SKIP ;;
         esac
-    elif [ -f "$artifact_dir/report.md" ]; then
+    elif [ -f "$artifact_dir/report.md" ] && [ ! -L "$artifact_dir/report.md" ]; then
         raw=$(awk '
             NR > 30 { exit }
             /(^# .*(FAIL|ERROR|SKIP|PASS))|([[:space:]]-[[:space:]](FAIL|ERROR|SKIP|PASS))|([—-][[:space:]]*(FAIL|ERROR|SKIP|PASS)[[:space:]]*$)/ {
@@ -1161,9 +1341,9 @@ gui_run_scenario() {
     prompt="$RDIR/agent-notes/$slug.prompt.md"
     log_path="$RDIR/gui/$slug.agent.log"
     mkdir -p "$(dirname "$log_path")" "$adir"
-    # Short /tmp alias for weak agents that truncate long ci/runs/... paths.
-    # Symlink target is the canonical adir so correct writes land in place;
-    # gui_harvest_agent_artifacts recovers the truncated-path failure mode.
+    # Short real /tmp directory for weak agents that truncate long paths and for
+    # ImageMagick policies that reject symlinked output paths. Harvest copies it
+    # into the canonical run directory after the agent exits.
     art_alias=$(gui_make_artifact_alias "$adir") || art_alias=$adir
     # Per-scenario isolated scratch dir (host) + slug (for guest scratch on a
     # shared session VM). Passed to the agent's env at run_agent_command so a
@@ -1190,7 +1370,7 @@ gui_run_scenario() {
     agent_rc=$?
     ta1=$(date +%s)
     record_host_load gui "$rel" end
-    gui_harvest_agent_artifacts "$adir" "$slug" "$log_path"
+    gui_harvest_agent_artifacts "$adir" "$slug" "$log_path" "$art_alias"
     status=$(agent_artifact_status "$adir" "$log_path")
     # Fail-closed status/rc mapping (see gui_agent_verdict). UNKNOWN:0 — an agent
     # that exited 0 without rendering a usable verdict — is a hard failure here,
@@ -1282,7 +1462,7 @@ gui_run_scenario() {
                     run_agent_command "$prompt" "$logN"
                 agent_rc=$?; tsb=$(date +%s)
                 record_host_load gui "$rel" end
-                gui_harvest_agent_artifacts "$adirN" "$slug" "$logN"
+                gui_harvest_agent_artifacts "$adirN" "$slug" "$logN" "$art_aliasN"
                 statusN=$(agent_artifact_status "$adirN" "$logN")
                 transportN=0; toolingN=0; apiN=0; classifierN=""; local extnetN=0
                 IFS=$'\t' read -r verdictN noteN < <(gui_agent_verdict "$statusN" "$agent_rc")

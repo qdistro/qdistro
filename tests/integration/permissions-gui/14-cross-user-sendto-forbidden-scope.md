@@ -23,7 +23,15 @@ VMGUI=${QDISTRO_REPO}/scripts/vm/vm-gui
 
 $VMEXEC "$VM" 'pkill -u admin -f qdistro_admin_app 2>/dev/null; true'
 $VMEXEC "$VM" 'systemctl restart qdistro-admin-broker.service'
-$VMEXEC "$VM" 'systemctl --machine=work2@.host --user restart qstub-notepad.service'
+# Establish work2's user manager before addressing its units. A linger-enabled
+# account can still be between manager teardown and startup under an 8-worker
+# GUI run; `systemctl --machine` then fails with a misleading transport error.
+$VMEXEC "$VM" 'loginctl enable-linger work2 && systemctl start user@3000.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && await_socket /run/user/3000/bus 30 1'
+$VMEXEC "$VM" 'runuser -u work2 -- env XDG_RUNTIME_DIR=/run/user/3000 \
+ systemctl --user restart qstub-notepad.service'
+$VMEXEC "$VM" 'source /tmp/qci-gui-waiters.sh && \
+ await_user_unit_active qstub-notepad.service work2 30 1'
 $VMEXEC "$VM" 'runuser -u admin -- /usr/local/bin/qdistro-start-admin-app'
 sleep 3
 ```
