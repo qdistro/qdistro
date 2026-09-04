@@ -14,6 +14,7 @@ Each plugin module should define one or more classes extending:
 import importlib
 import importlib.util
 import os
+import re
 import sys
 
 from qterminator.config import CONFIG_DIR, Config
@@ -50,6 +51,33 @@ class URLHandler(Plugin):
     def handle_url(self, url):
         """Return the URL to open, or None to skip."""
         return url
+
+
+def select_url_handler(handlers, url_str):
+    """Return the most specific handler whose pattern fullmatches ``url_str``.
+
+    Among handlers that ``re.fullmatch`` the whole URL, the longest
+    pattern string wins (more specific beats an over-broad earlier
+    registration). Invalid patterns are skipped. Returns None if
+    nothing matches.
+    """
+    best = None
+    best_len = -1
+    for handler in handlers:
+        pat = getattr(handler, "match_pattern", None)
+        if not pat:
+            continue
+        try:
+            m = re.fullmatch(pat, url_str)
+        except re.error:
+            continue
+        if not m:
+            continue
+        n = len(pat)
+        if n > best_len:
+            best = handler
+            best_len = n
+    return best
 
 
 class MenuProvider(Plugin):

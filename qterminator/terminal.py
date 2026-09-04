@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
 from QTermWidget import QTermWidget
 
 from qterminator.config import Config
+from qterminator.plugin import select_url_handler
 from qterminator.titlebar import TerminalTitlebar
 
 
@@ -239,11 +240,10 @@ class TerminalWidget(QWidget):
             window = self.window()
             pm = getattr(window, '_plugin_manager', None)
             if pm:
-                for handler in pm.get_url_handlers():
-                    import re
-                    if handler.match_pattern and re.search(handler.match_pattern, url_str):
-                        handler.handle_url(url_str)
-                        return
+                handler = select_url_handler(pm.get_url_handlers(), url_str)
+                if handler:
+                    handler.handle_url(url_str)
+                    return
         except Exception:
             pass
         # Fallback: open with system browser
