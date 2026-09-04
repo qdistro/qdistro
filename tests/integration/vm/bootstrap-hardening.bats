@@ -475,10 +475,129 @@ EOF
 @test "vt-isolation: the image build aborts when the VT is not secured" {
     # Anchor on the actual invocation line, not the comment above it, and
     # require the failure branch to exit — `|| true` must turn this red.
-    run awk '/^if ! bash .*harden-compositor-vt\.sh/,/^fi/' "$IMAGE_CFG"
+    # Tolerates leading env assignments and options (e.g. `--offline`) on the
+    # invocation without letting the failure branch go unchecked.
+    run awk '/^if ! ([A-Za-z_][A-Za-z0-9_]*=[^ ]* )*bash .*harden-compositor-vt\.sh/,/^fi/' "$IMAGE_CFG"
     [ -n "$output" ]
     [[ "$output" == *"exit 1"* ]]
     [[ "$output" != *"|| true"* ]]
+}
+
+@test "vt-isolation: the image build asserts the offline mode it relies on" {
+    # config.sh runs in the kiwi chroot and must say so with the ARGUMENT
+    # (not an environment variable, which leaks into live installs).
+    run awk '/^if ! ([A-Za-z_][A-Za-z0-9_]*=[^ ]* )*bash .*harden-compositor-vt\.sh/{print;exit}' "$IMAGE_CFG"
+    [[ "$output" == *"--offline"* ]]
+    [[ "$output" != *"QDISTRO_OFFLINE_INSTALL"* ]]
+}
+
+# --- A2. harden-compositor-vt.sh live/offline boundary ------------------
+#
+# The security property is K_OFF on the compositor VT for the whole
+# greeter/session/locked-session lifetime, and masking does NOT stop a getty
+# that is already running. So the runtime probes (stop + is-active) may be
+# skipped ONLY where no system manager can be running one. These cases pin
+# that boundary: an offline claim that is contradicted by the root must never
+# buy a pass. Driven with a stubbed `systemctl` + `systemd-detect-virt` on
+# PATH, so no VM and no root are needed.
+
+vt_stub_dir() {
+    local dir="$BATS_TEST_TMPDIR/stub-$1" mode="$2" active="$3"
+    mkdir -p "$dir" "$BATS_TEST_TMPDIR/etc/systemd/system"
+    cat >"$dir/systemctl" <<EOS
+#!/bin/bash
+case "\$1" in
+  is-system-running) echo "$mode"; [ "$mode" = running ] || exit 1 ;;
+  is-active) echo "$active-called" >>"$BATS_TEST_TMPDIR/probes.log"
+             [ "$active" = active ] && exit 0 || exit 3 ;;
+  stop)     echo "stop-called" >>"$BATS_TEST_TMPDIR/probes.log" ;;
+  mask)     ln -sfn /dev/null "$BATS_TEST_TMPDIR/etc/systemd/system/\$2" ;;
+  is-enabled) echo masked ;;
+  disable)  : ;;
+esac
+exit 0
+EOS
+    cat >"$dir/systemd-detect-virt" <<'EOS'
+#!/bin/bash
+exit 1   # not a chroot
+EOS
+    cat >"$dir/systemd-analyze" <<'EOS'
+#!/bin/bash
+exit 0
+EOS
+    chmod +x "$dir"/*
+    printf '%s
+' "$dir"
+}
+
+@test "vt-isolation: a leaked QDISTRO_OFFLINE_INSTALL does not skip live probes" {
+    # Phase B makes QDISTRO_OFFLINE_INSTALL=1 a general offline contract, so
+    # it can be present in a live install's environment. If that alone
+    # selected offline mode, a getty already holding tty3 (recovery scenario
+    # A) would go unstopped and unreported while the script exits 0.
+    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
+    printf '[terminal]
+vt = 3
+' >"$cfg"
+    local stub; stub="$(vt_stub_dir leak running active)"
+    : >"$BATS_TEST_TMPDIR/probes.log"
+    QDISTRO_OFFLINE_INSTALL=1 PATH="$stub:$PATH" run bash "$HARDEN_VT" "$cfg"
+    # The live probes must have run...
+    grep -q 'stop-called'   "$BATS_TEST_TMPDIR/probes.log"
+    grep -q 'active-called' "$BATS_TEST_TMPDIR/probes.log"
+    # ...and a getty still active on the VT must fail the script.
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"still active on the compositor VT"* ]]
+}
+
+@test "vt-isolation: --offline is refused on a live root" {
+    # An explicit caller assertion that is false about the root it points at
+    # is a caller bug: fail closed (exit 2) rather than skip a check.
+    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
+    printf '[terminal]
+vt = 3
+' >"$cfg"
+    local stub; stub="$(vt_stub_dir refuse running inactive)"
+    PATH="$stub:$PATH" run bash "$HARDEN_VT" --offline "$cfg"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"refusing to skip the runtime checks on a live system"* ]]
+}
+
+@test "vt-isolation: an offline root skips the probes" {
+    # In a chroot systemd answers is-active with a no-op exit 0, so probing it
+    # there reports every unit as running — that false positive aborted the
+    # first image build (iso/14 Phase A).
+    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
+    printf '[terminal]\nvt = 3\n' >"$cfg"
+    local stub; stub="$(vt_stub_dir offline offline active)"
+    : >"$BATS_TEST_TMPDIR/probes.log"
+    PATH="$stub:$PATH" run bash "$HARDEN_VT" --offline "$cfg"
+    [[ "$output" == *"offline root"* ]]
+    [ ! -s "$BATS_TEST_TMPDIR/probes.log" ]
+}
+
+@test "vt-isolation: offline mode still fails when the mask is not on disk" {
+    # Offline, the mask symlink IS the whole guarantee, so it must still be
+    # asserted — otherwise skipping the runtime probes would let the offline
+    # branch report success unconditionally. Needs a private
+    # /etc/systemd/system because the script asserts absolute paths
+    # (deliberately: a test-only path override in a security check would be a
+    # way to fake a pass). Note this host masks getty@tty3 itself, which is
+    # exactly the state that would otherwise hide the bug.
+    unshare -r --mount true 2>/dev/null || skip "no unprivileged mount namespace"
+    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
+    printf '[terminal]\nvt = 3\n' >"$cfg"
+    local stub; stub="$(vt_stub_dir nomask offline inactive)"
+    local empty="$BATS_TEST_TMPDIR/empty-units"
+    mkdir -p "$empty"
+    run unshare -r --mount bash -c '
+        mount --make-rprivate / 2>/dev/null || true
+        mount --bind "$1" /etc/systemd/system || exit 111
+        PATH="$2:$PATH" exec bash "$3" --offline "$4"
+    ' _ "$empty" "$stub" "$HARDEN_VT" "$cfg"
+    [ "$status" -ne 111 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a mask symlink to /dev/null"* ]]
 }
 
 @test "vt-isolation: enable-qdgreeter aborts when the VT is not secured" {

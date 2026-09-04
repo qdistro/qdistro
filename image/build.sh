@@ -38,19 +38,30 @@ sync_sources() {
             exit 2
         fi
         echo "[build] rsyncing $repo -> $SRC_OVERLAY/$repo"
-        # --exclude=image/root/root: with the corrected $SIBLINGS the qdistro
-        # repo contains this very overlay, so an unfiltered sync would copy
-        # the destination into itself.
-        # --exclude=ci/runs: gigabytes of untracked CI run artifacts in a
-        # working checkout; never part of the image.
+        # Leading slashes anchor these at the repo root: an unanchored
+        # `ci/runs` would also drop an unrelated `anything/ci/runs`.
+        #   /image/root/root — with the corrected $SIBLINGS the qdistro repo
+        #     contains this very overlay, so an unfiltered sync copies the
+        #     destination into itself.
+        #   /image/logs — build logs, each holding the tarball of a previous
+        #     run (which holds the run before it). Left in, they made the
+        #     overlay 169 MB of stale nested tarballs and shipped them to
+        #     /root/qdistro-src in the image, differing run to run.
+        #   /ci/runs — gigabytes of untracked CI run artifacts in a working
+        #     checkout; never part of the image.
+        # Excluded paths are also protected from --delete, so debris left by
+        # an earlier unfiltered sync would survive forever: clear it first.
+        rm -rf "$SRC_OVERLAY/$repo/image/root/root" \
+               "$SRC_OVERLAY/$repo/image/logs"
         rsync -a --delete \
               --exclude=.git \
               --exclude=__pycache__ \
               --exclude='*.pyc' \
               --exclude=build \
               --exclude=node_modules \
-              --exclude=image/root/root \
-              --exclude=ci/runs \
+              --exclude=/image/root/root \
+              --exclude=/image/logs \
+              --exclude=/ci/runs \
               "$SIBLINGS/$repo/" "$SRC_OVERLAY/$repo/"
     done
     echo "[build] source overlay sizes:"

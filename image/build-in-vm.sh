@@ -43,11 +43,12 @@ HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 # Forwarded into the in-VM kiwi run so config.sh's profile gate sees it
 # (release = no passwordless sudo; dev = passwordless sudo for test harnesses).
 # This is a shell variable read by config.sh, NOT a kiwi XML profile.
-# Default is dev: the artifact this driver builds today is the tester image
-# decided in iso/13. Set QDISTRO_PROFILE=release explicitly for a shipped
-# build. The value is validated so a typo cannot silently produce the other
-# image (iso/14 Phase A item 5).
-QDISTRO_PROFILE="${QDISTRO_PROFILE:-dev}"
+# The default stays `release`, the SAFE profile: dev means default credentials
+# and passwordless sudo, so an unqualified build must never produce it by
+# accident. A tester build passes QDISTRO_PROFILE=dev explicitly (iso/14
+# Phase A item 5). The value is validated so a typo cannot silently select
+# the other image instead of failing.
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-release}"
 case "$QDISTRO_PROFILE" in
     dev|release) ;;
     *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_PROFILE must be dev or release, got: %s\n' "$QDISTRO_PROFILE" >&2; exit 1 ;;
@@ -196,39 +197,233 @@ mountpoint -q /build || mount /dev/vdb /build
 df -h /build
 EOS
 
-#-- 7. Install kiwi inside the VM ---------------------------------------------
+#-- 7. Make zypper abandon dead mirrors ---------------------------------------
+# Observed 2026-09-04 (runs 4/5/6): a mirror completes the TCP/TLS handshake and
+# then delivers ~0 B/s. libzypp's download.min_download_speed defaults to 0, so
+# such a transfer is never abandoned: the build hangs until vm-exec's timeout
+# kills it instead of retrying and eventually failing. Guest curl to the same
+# URL stayed healthy throughout, so the transfer stalls, not DNS or routing.
+# A speed floor plus bounded retries turns an unbounded hang into a few retries
+# and then a real error -- the behaviour a flaky uplink should produce.
+#
+# Written as a zypp.conf.d drop-in, which the vendor zypp.conf asks for; note
+# zypp.conf itself ships in /usr/etc here (same usr-etc split as qemu-ga's
+# sysconfig), so editing /etc/zypp/zypp.conf would mean copying a vendor file.
+# Builder-VM tuning only: it does not touch the image's repo list or sizes.
+MIN_MIRROR_BPS="${QDISTRO_MIN_MIRROR_BPS:-20000}"
+log "setting libzypp mirror timeouts in builder VM (floor ${MIN_MIRROR_BPS} B/s)"
+vms <<EOS | tee "$LOGS/zypp-tuning.log"
+set -eu
+mkdir -p /etc/zypp/zypp.conf.d
+cat > /etc/zypp/zypp.conf.d/99-qdistro-mirror.conf <<'CONF'
+[main]
+# Drop a mirror that stalls below this instead of hanging on it forever.
+download.min_download_speed = $MIN_MIRROR_BPS
+# NB: the key is transfer_timeout, NOT "timeout" -- libzypp silently ignores
+# unknown keys, so a wrong name looks applied but does nothing (seen in run 8).
+# Valid names confirmed from libzypp's own symbol table.
+download.transfer_timeout = 120
+download.connect_timeout = 30
+download.max_silent_tries = 5
+CONF
+cat /etc/zypp/zypp.conf.d/99-qdistro-mirror.conf
+EOS
+
+#-- 7b. Install kiwi inside the VM --------------------------------------------
 log "installing kiwi-ng inside VM (idempotent zypper)"
-# J25: this builds the SHIPPED image (release profile). No --no-gpg-checks and
+# J25: with the default QDISTRO_PROFILE=release this builds the SHIPPED
+# image. No --no-gpg-checks and
 # no `|| true` — a release image build MUST fail if it cannot refresh verified
 # repo metadata, rather than baking packages from an unsigned/tampered mirror.
 # J25: this host script runs under `set -euo pipefail`, so a failed (now
 # gpg-verified) `zypper refresh` propagates out of `vms` and fails this whole
 # `vms | tee` pipeline (pipefail) — the release build stops here rather than
 # proceeding to install kiwi from unsigned/tampered metadata.
-vms <<'EOS' | tee "$LOGS/kiwi-install.log"
-set -eu
-zypper -n refresh
-zypper -n install --no-recommends python3-kiwi kiwi-systemdeps 2>&1 | tail -10
+#
+# Retried, because this step is transient-failure-prone in exactly the two ways
+# the build loop below already defends against, and until now a single bad draw
+# here killed the whole run before the loop got a turn (run 14): a mirror that
+# stalls at ~0 B/s (bounded now by the drop-in above, which is why it is written
+# BEFORE this refresh -- it used to be written after, so the one command it was
+# meant to protect ran unprotected), and a repomd.xml whose signature does not
+# match because the mirror was caught mid-update. The latter is what run 14 hit;
+# zypper says so itself ("might be a transient issue if the server is in the
+# midst of receiving new data"). `zypper clean -m` between attempts discards the
+# mismatched metadata so the retry refetches rather than re-reading the bad copy.
+# Verification is NOT relaxed: no --no-gpg-checks, and a run that fails every
+# attempt still fails the build.
+ZYPP_TRIES="${QDISTRO_ZYPP_TRIES:-3}"
+log "  ${ZYPP_TRIES} attempts, gpg verification unchanged"
+vms <<EOS | tee "$LOGS/kiwi-install.log"
+# pipefail matters: the install is piped through tail, so without it a failed
+# zypper would be reported as tail's exit 0 and the retry would never trigger.
+set -uo pipefail
+rc=1
+for attempt in \$(seq 1 $ZYPP_TRIES); do
+    echo "[zypp] attempt \$attempt/$ZYPP_TRIES"
+    zypper -n refresh \
+      && zypper -n install --no-recommends python3-kiwi kiwi-systemdeps 2>&1 | tail -10
+    rc=\$?
+    if [ "\$rc" = 0 ]; then break; fi
+    echo "[zypp] attempt \$attempt failed (rc=\$rc); dropping cached metadata"
+    zypper clean -m >/dev/null 2>&1 || true
+    sleep 20
+done
+echo "[zypp] final rc=\$rc"
+exit \$rc
 EOS
 
 #-- 8. Run the kiwi build ------------------------------------------------------
-log "running kiwi-ng build inside VM (this will take 30-60 min)"
+log "running kiwi-ng build inside VM (~16 min measured 2026-09-04; ~10 min of it the raw)"
 log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
 set +e
 log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE"
+# Retry on stall. Measured 2026-09-04: fetching repo metadata / the repo gpg
+# key from download.opensuse.org hangs outright on roughly half of attempts on
+# a flaky uplink -- an A/B of 6 runs failed 1/3 at 1 connection and 1/3 at 5,
+# so it is neither concurrency nor one bad mirror (blackholing the first
+# offender just moved the hang to the next). libzypp's download.* timeouts do
+# not bound the gpg-key fetch, so the hang is unbounded: without this the build
+# sits until vm-exec's timeout kills it, ~30 min per lost attempt.
+#
+# So bound it here: watch the build and treat a genuine stall as failure.
+#
+# "Silence == hung" is NOT a safe test, and run 16 proved it: attempts 2 and 3
+# were both killed at the identical step, kiwi xz-compressing the 20 GiB raw
+# into the install-ISO squashfs (mksquashfs -comp xz), which emits nothing for
+# many minutes while working perfectly. So the guard also samples CPU consumed
+# by the build's process tree: a compressing build burns most of a core, while
+# a transfer stalled at ~0 B/s burns essentially none. Stalled therefore means
+# no log output AND no CPU -- which mksquashfs never satisfies and a dead
+# download always does. Each attempt wipes /build/out --
+# kiwi refuses a non-empty target dir, and reusing a root killed mid-bootstrap
+# risks a corrupt tree, so the package cache under it is discarded too. That
+# costs little in practice: the observed hang is at repo metadata, before any
+# package is cached.
+KIWI_STALL_S="${QDISTRO_KIWI_STALL_S:-240}"
+KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
+# A healthy build is ~16 min, so an attempt that is producing output but has run
+# well past that is wedged in a way the stall guard cannot see; cap it too.
+# Run 16: a cold-cache attempt was still partitioning at 1500s, so 1500 was too
+# tight and killed a working build. The budget is a backstop against a wedge the
+# stall guard cannot see, not a performance expectation -- keep it generous.
+KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-2700}"
+# Minimum CPU ticks (100/s per core) the build tree must burn in a sample for it
+# to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below
+# mksquashfs or rpm, far above a stalled socket.
+KIWI_CPU_TICKS_MIN="${QDISTRO_KIWI_CPU_TICKS_MIN:-100}"
+# vm-exec caps a guest command at QDISTRO_VM_EXEC_TIMEOUT, default 1800s. That
+# default silently made the retry loop a lie: three ~16 min attempts cannot fit
+# in 30 min, so only the first ever had room. Run 15 died exactly here -- two
+# attempts stalled, the third had written the full 20 GiB raw and was in kiwi's
+# final rpm verification when the HOST clock killed it at 1800s, and the run was
+# reported as a kiwi failure (exit 124) rather than as the driver's own cap.
+# So derive the host cap from the retry budget instead of leaving it defaulted.
+KIWI_EXEC_TIMEOUT=$(( KIWI_TRIES * KIWI_ATTEMPT_BUDGET_S + 300 ))
+log "  stall guard: abort+retry after ${KIWI_STALL_S}s of no output, ${KIWI_TRIES} attempts"
+log "  per-attempt cap ${KIWI_ATTEMPT_BUDGET_S}s; host vm-exec cap ${KIWI_EXEC_TIMEOUT}s"
+log "  liveness also counted as CPU: >=${KIWI_CPU_TICKS_MIN} ticks/sample keeps an attempt alive"
+export QDISTRO_VM_EXEC_TIMEOUT="$KIWI_EXEC_TIMEOUT"
 vms <<EOS | tee "$LOGS/kiwi-driver.log"
 cd /root/qdistro-image
+# Keep this script's stdout tiny: guest-exec ferries it through the qemu agent,
+# whose response is capped (~10 MB) -- overflowing it wedges the agent for the
+# rest of the run, which is how run 12 died. Everything goes to a file; only a
+# bounded tail is emitted at the end.
+exec 3>&1                      # keep the real stdout for the bounded tail
+exec >/root/kiwi-loop.log 2>&1
+
+# Kill ONLY descendants of the build, walking the pid tree. Deliberately not by
+# name (this script's command line contains "zypper" and "kiwi-ng", so pkill -f
+# matches this shell -- that is how run 11 died) and deliberately not by process
+# group (the group can include the guest agent's child, i.e. this shell).
+kill_tree() {
+    local p=\$1 c
+    for c in \$(pgrep -P "\$p" 2>/dev/null); do kill_tree "\$c"; done
+    kill -9 "\$p" 2>/dev/null || true
+}
+
+# Cumulative CPU ticks of a pid and every descendant. The comm field in
+# /proc/pid/stat is parenthesised and can contain spaces, so fields are counted
+# after the last ')': utime+stime, plus cutime+cstime so a child that has already
+# been reaped between two samples still registers as work done.
+tree_cpu() {
+    local p=\$1 c total=0 v
+    v=\$(awk '{ sub(/^.*\\) /, ""); print \$12 + \$13 + \$14 + \$15 }' /proc/\$p/stat 2>/dev/null) || v=0
+    total=\${v:-0}
+    for c in \$(pgrep -P "\$p" 2>/dev/null); do
+        total=\$(( total + \$(tree_cpu "\$c") ))
+    done
+    echo "\$total"
+}
+
 # TMPDIR is intentionally NOT redirected to /build/tmp: dracut runs inside
 # the image-root chroot and won't see anything mounted under /build there.
 # QDISTRO_PROFILE is forwarded so config.sh's sudoers/profile gate matches the
 # host invocation; kiwi inherits it into config.sh's environment.
-QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_BUILD_DIR=/build/out bash build.sh --no-sync \\
-    >/root/kiwi-build.log 2>&1
+rc=1
+for attempt in \$(seq 1 $KIWI_TRIES); do
+    echo "[kiwi] attempt \$attempt/$KIWI_TRIES"
+    # kiwi refuses a non-empty --target-dir; a killed attempt leaves one behind.
+    # A killed kiwi also leaves its bind mounts (/dev, /proc, /sys, the package
+    # cache) live inside image-root -- rm -rf then fails with "Device or resource
+    # busy" and every later attempt dies before it starts (run 13). Unmount
+    # deepest-first and lazily, so the wipe cannot recurse through a live mount.
+    for m in \$(awk '{print \$2}' /proc/mounts | grep '^/build/out' | sort -r); do
+        umount -l "\$m" 2>/dev/null || true
+    done
+    rm -rf /build/out
+    mkdir -p /build/out
+    : > /root/kiwi-build.log
+    started=\$(date +%s)
+    env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_BUILD_DIR=/build/out \\
+        bash build.sh --no-sync >/root/kiwi-build.log 2>&1 &
+    kpid=\$!
+    last_active=\$started
+    prev_cpu=0
+    prev_mtime=0
+    while kill -0 \$kpid 2>/dev/null; do
+        sleep 15
+        now=\$(date +%s)
+        mtime=\$(stat -c %Y /root/kiwi-build.log 2>/dev/null || echo 0)
+        cpu=\$(tree_cpu \$kpid)
+        if [ "\$mtime" != "\$prev_mtime" ] || \
+           [ \$(( cpu - prev_cpu )) -ge $KIWI_CPU_TICKS_MIN ]; then
+            last_active=\$now
+        fi
+        prev_mtime=\$mtime
+        prev_cpu=\$cpu
+        idle=\$(( now - last_active ))
+        if [ "\$idle" -ge $KIWI_STALL_S ]; then
+            echo "[kiwi] STALLED \${idle}s: no log output and no CPU - aborting attempt \$attempt"
+            kill_tree \$kpid
+            break
+        fi
+        if [ \$(( now - started )) -ge $KIWI_ATTEMPT_BUDGET_S ]; then
+            echo "[kiwi] attempt \$attempt exceeded ${KIWI_ATTEMPT_BUDGET_S}s - aborting"
+            kill_tree \$kpid
+            break
+        fi
+    done
+    wait \$kpid 2>/dev/null; rc=\$?
+    if [ "\$rc" = 0 ]; then echo "[kiwi] attempt \$attempt succeeded"; break; fi
+    echo "[kiwi] attempt \$attempt failed (rc=\$rc) after \$(( \$(date +%s) - started ))s"
+    # Each attempt truncates kiwi-build.log, so without this the only surviving
+    # build log is the last attempt's and a stall cannot be located afterwards.
+    cp /root/kiwi-build.log /root/kiwi-build.attempt\$attempt.log 2>/dev/null || true
+    sleep 10
+done
+echo "[kiwi] final rc=\$rc"
+tail -c 4000 /root/kiwi-loop.log >&3
+exit \$rc
 EOS
 KIWI_RC=${PIPESTATUS[0]}
 set -e
+# Back to vm-exec's default for the short steps that follow; the long cap was
+# only ever meant to cover the build itself.
+unset QDISTRO_VM_EXEC_TIMEOUT
 log "kiwi exit code: $KIWI_RC"
 
 log "fetching kiwi-build.log to host"
