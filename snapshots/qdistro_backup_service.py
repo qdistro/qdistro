@@ -78,12 +78,15 @@ def _mkdir_private(path: str) -> None:
     """Create ``path`` 0700. The snapshot + collect dirs hold UNENCRYPTED
     silo/metadata bytes on local disk (btrfs snapshots are plaintext; the
     collector stages /etc/qdistro copies), so they must never be world- or
-    group-readable. chmod after makedirs in case the dir pre-existed looser."""
-    os.makedirs(path, exist_ok=True)
+    group-readable. chmod after makedirs in case the dir pre-existed looser.
+    The chmod is the sole enforcement of that requirement, so its failure
+    is fatal rather than swallowed (iso2 `01` F1)."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
     try:
         os.chmod(path, 0o700)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise BackupServiceError(
+            f"cannot make {path!r} private (chmod 0700): {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -596,10 +599,13 @@ def collect_metadata(sv: dict, dest: str, rsync_cmd: str,
             raise BackupServiceError(
                 f"collector: creating subvolume {dest!r} failed "
                 f"(exit {proc.returncode})")
+    # Sole privacy control on a plaintext btrfs snapshot: fatal on failure
+    # (iso2 `01` F2).
     try:
         os.chmod(dest, 0o700)
-    except OSError:
-        pass
+    except OSError as exc:
+        raise BackupServiceError(
+            f"collector: cannot make subvolume {dest!r} private: {exc}") from exc
     # Clear children (regular files/dirs, never the subvol root) for a fresh
     # rebuild — this is what drops a source dropped from config.
     for child in os.listdir(dest):

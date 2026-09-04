@@ -21,7 +21,19 @@
 # runs receive it.
 # ---------------------------------------------------------------------------
 lint_shell_files() {
-    # Bounded, first-party set; excludes vendored/build trees.
+    # Bounded, first-party set; excludes vendored/build trees. Tracked
+    # files only: untracked scratch scripts (tests/integration/s*.sh is
+    # gitignored on purpose) must not inflate the migration metric
+    # (iso2 `07` M4). Falls back to find outside a git checkout.
+    if git -C "$QDISTRO_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$QDISTRO_REPO" ls-files -z -- scripts ci/bin ci/lib image tests/integration 2>/dev/null \
+            | tr '\0' '\n' \
+            | awk -v root="$QDISTRO_REPO" '
+                /^tests\/integration\// { n = gsub("/", "/"); if (n > 3 || $0 !~ /\.sh$/) next; print root "/" $0; next }
+                /^ci\/bin\// { if ($0 ~ /\.sh$/ || $0 !~ /\./) print root "/" $0; next }
+                /\.sh$/ { print root "/" $0 }'
+        return 0
+    fi
     find "$QDISTRO_REPO/scripts" "$QDISTRO_REPO/ci/bin" "$QDISTRO_REPO/ci/lib" "$QDISTRO_REPO/image" \
         -type f -name '*.sh' 2>/dev/null
     find "$QDISTRO_REPO/ci/bin" -type f ! -name '*.*' 2>/dev/null   # qci itself

@@ -247,11 +247,12 @@ def save_user_config(entries: list[tuple[str, str]],
         os.makedirs(parent, mode=0o700, exist_ok=True)
     body = render_user_config(entries)
     tmp = f"{resolved}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(body)
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
+    os.chmod(tmp, 0o600)  # in case tmp pre-existed with a looser mode
     os.replace(tmp, resolved)
     return resolved
 

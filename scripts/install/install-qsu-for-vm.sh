@@ -88,7 +88,8 @@ build_and_install_binary() {
     # behind. Single-shot trap is fine — this is the only temp dir.
     trap 'rm -rf "$build_dir"' RETURN
     echo "compiling qsu.c with $QSU_CC ($QSU_CFLAGS) ..."
-    # shellcheck disable=SC2086 -- QSU_CFLAGS is an intentional word list
+    # QSU_CFLAGS is an intentional word list.
+    # shellcheck disable=SC2086
     if ! "$QSU_CC" $QSU_CFLAGS -o "$build_dir/qsu" "$QSU_SRC/qsu.c"; then
         echo "ERROR: failed to compile $QSU_SRC/qsu.c with $QSU_CC" >&2
         return 1

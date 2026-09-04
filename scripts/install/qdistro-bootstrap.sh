@@ -1696,14 +1696,14 @@ pip_install_one() {
         # VM does not care). --prefix=/usr launchers land in /usr/bin.
         python3 -m pip install --break-system-packages --no-deps --prefix=/usr --quiet \
             "$REPO_ROOT/$app" \
-            || warn "  pip install $app failed (non-fatal)"
+            || fail_or_warn "  pip install $app failed"
         return 0
     fi
     # Hardened: isolated /opt/qdistro prefix; no writes into RPM-owned /usr.
     install -d -m 0755 "$QDISTRO_OPT_PREFIX"
     python3 -m pip install --no-deps --prefix="$QDISTRO_OPT_PREFIX" --quiet \
         "$REPO_ROOT/$app" \
-        || { warn "  pip install $app -> $QDISTRO_OPT_PREFIX failed (non-fatal)"; return 0; }
+        || { fail_or_warn "  pip install $app -> $QDISTRO_OPT_PREFIX failed"; return 0; }
     # Expose the launcher on PATH via a thin wrapper that sets PYTHONPATH to
     # the isolated prefix's site dir. Avoids touching /usr/lib*/python*/site.
     launcher="$QDISTRO_OPT_PREFIX/bin/$app"

@@ -113,9 +113,10 @@ def save_phone_conf(config_dir: str, phone_id: str,
     os.makedirs(config_dir, mode=0o755, exist_ok=True)
     path = os.path.join(config_dir, f"{phone_id}.conf")
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(render_phone_conf(phone_id, trust))
-    os.chmod(tmp, 0o600)
+    os.chmod(tmp, 0o600)  # in case tmp pre-existed with a looser mode
     os.replace(tmp, path)
     return path
 

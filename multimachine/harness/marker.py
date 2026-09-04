@@ -208,8 +208,6 @@ class MarkerLayout:
     @property
     def corner_px(self) -> tuple[int, int, int, int]:
         """(x0, y0, x1, y1) logical rect of the corner barcode incl. quiet zone."""
-        side_cells = max(GRID_ROWS, GRID_COLS) + 2 * QUIET_CELLS
-        side = side_cells * CELL_PX
         return (0, 0, GRID_COLS * CELL_PX + 2 * QUIET_CELLS * CELL_PX,
                 GRID_ROWS * CELL_PX + 2 * QUIET_CELLS * CELL_PX)
 

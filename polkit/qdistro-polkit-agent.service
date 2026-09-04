@@ -21,6 +21,11 @@ Restart=on-failure
 RestartSec=3
 # Subprocess prompt path — agent spawns this on PAM auth.
 Environment=QDISTRO_POLKIT_PROMPT_BIN=/usr/local/bin/qdistro-polkit-prompt
+# The agent honours QDISTRO_POLKIT_NONINTERACTIVE=allow as a test seam.
+# The user manager environment is writable by any same-UID process
+# (`systemctl --user set-environment` + restart), so never inherit it
+# into the production unit (iso2 `17` E9).
+UnsetEnvironment=QDISTRO_POLKIT_NONINTERACTIVE
 
 # TCB no-network discipline. The agent talks to polkitd, qdistro-broker,
 # fprintd/PAM, and its local prompt over AF_UNIX/system facilities only;

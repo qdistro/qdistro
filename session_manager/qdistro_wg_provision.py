@@ -117,7 +117,7 @@ def provision(name: str, *, peer_public_key: str, endpoint: str, address: str,
     """Provision tunnel `<name>`: generate the silo end's keypair, store its
     private key in pwd, write the non-secret conf. Returns the silo end's
     PUBLIC key (register it with the VPN provider). Deps are injectable."""
-    if not _TUNNEL_NAME_RE.match(name) or ".." in name:
+    if not _TUNNEL_NAME_RE.fullmatch(name) or ".." in name:
         raise ValueError(
             f"invalid tunnel name {name!r} (lowercase alnum/_/-, "
             f"must start alnum, <=31 chars)")

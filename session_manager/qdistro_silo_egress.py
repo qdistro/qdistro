@@ -89,7 +89,7 @@ class EgressPolicy:
             return cls(mode="direct")
         if spec.startswith(_WG_PREFIX):
             name = spec[len(_WG_PREFIX):]
-            if not _TUNNEL_NAME_RE.match(name) or ".." in name:
+            if not _TUNNEL_NAME_RE.fullmatch(name) or ".." in name:
                 raise EgressError(
                     f"egress tunnel name {name!r} is invalid (lowercase "
                     f"alnum/underscore/dash, must start alnum, <=31 chars)")

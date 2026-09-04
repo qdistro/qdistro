@@ -924,14 +924,15 @@ if [ "$QGA_OK" != "1" ]; then
 fi
 echo "[tier5] qga ready" >&2
 
-# Build guest-exec arguments. Each user arg becomes a JSON string in
-# the "arg" array; first arg is the port for the publisher.
-QGA_ARGS_JSON='"'"$PORT"'"'
+# Build guest-exec arguments via python3 json.dumps so every byte
+# (control characters included) is encoded, matching spawn-tier5b's
+# HIGH-2 fix (iso2 `15` E3). First arg is the port for the publisher.
+json_encode_stdin() {
+    python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))'
+}
+QGA_ARGS_JSON="$(printf '%s' "$PORT" | json_encode_stdin)"
 for a in "$@"; do
-    # JSON-escape backslashes and quotes.
-    esc=${a//\\/\\\\}
-    esc=${esc//\"/\\\"}
-    QGA_ARGS_JSON="$QGA_ARGS_JSON,\"$esc\""
+    QGA_ARGS_JSON="$QGA_ARGS_JSON,$(printf '%s' "$a" | json_encode_stdin)"
 done
 
 QGA_REQ="{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/usr/local/bin/qdistro-tier5-publisher.sh\",\"arg\":[$QGA_ARGS_JSON],\"capture-output\":true}}"

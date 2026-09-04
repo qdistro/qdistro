@@ -205,10 +205,14 @@ if [ -f "$PLUGIN_SO" ]; then
         /usr/share/qdistro/qml/Qdistro/Qdwin/qmldir
     echo "qdwin-shell-v1 QML plugin installed: $(ls -la /usr/share/qdistro/qml/Qdistro/Qdwin/libqdistro-qdwin.so | awk '{print $5}') bytes"
 else
-    echo "WARN: $QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so not found —" \
-         "qdshell will run without qdwin_shell_v1 binding (Qdwin.qml" \
-         "import will fail). Rebuild qdshell with 'meson setup build &&" \
-         "meson compile -C build' in $QDSHELL_SRC, then re-run this script."
+    echo "ERROR: $QDSHELL_PLUGIN_BUILD/qml-plugin/libqdistro-qdwin.so not found —" >&2
+    echo "       qdshell would run without the qdwin_shell_v1 binding (Qdwin.qml" >&2
+    echo "       import fails). Rebuild qdshell with 'meson setup build &&" >&2
+    echo "       meson compile -C build' in $QDSHELL_SRC, then re-run this script." >&2
+    echo "       (override with QDSHELL_ALLOW_MISSING_PLUGIN=1)" >&2
+    if [ "${QDSHELL_ALLOW_MISSING_PLUGIN:-0}" != 1 ]; then
+        exit 2
+    fi
 fi
 
 # 3c. Tier-2 host-side spawn helper. PodApps.qml shells out to

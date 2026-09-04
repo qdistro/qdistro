@@ -59,7 +59,7 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def require_safe_name(name: object, kind: str = "name") -> str:
-    if not isinstance(name, str) or not _SAFE_NAME_RE.match(name) or ".." in name:
+    if not isinstance(name, str) or not _SAFE_NAME_RE.fullmatch(name) or ".." in name:
         raise TemplateError(
             f"unsafe {kind} {name!r}: must match [A-Za-z0-9][A-Za-z0-9_.-]* "
             f"and contain no '..'"

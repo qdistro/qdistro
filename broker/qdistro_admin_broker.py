@@ -611,7 +611,7 @@ def _argv_from_details(details: dict) -> list[str] | None:
     indexed: list[tuple[int, str]] = []
     have_zero = False
     for k, v in details.items():
-        m = _ARGV_KEY_RE.match(str(k))
+        m = _ARGV_KEY_RE.fullmatch(str(k))
         if m is None:
             continue
         idx = int(m.group(1))
@@ -3606,7 +3606,7 @@ class Broker(dbus.service.Object):
                 raise dbus.DBusException(
                     f"target_uid must be >= 0, got {target_uid_i}",
                     name=BUS_NAME + ".BadArgument")
-            if not _SERVICE_NAME_RE.match(target_service_s):
+            if not _SERVICE_NAME_RE.fullmatch(target_service_s):
                 raise dbus.DBusException(
                     f"target_service {target_service_s!r} does not match "
                     f"expected org.qdistro.* shape",
@@ -5131,18 +5131,19 @@ class Broker(dbus.service.Object):
     @dbus.service.method(BUS_NAME, in_signature="i", out_signature="i",
                          sender_keyword="sender", connection_keyword="conn")
     def RunAuditGc(self, retention_days: int, sender=None, conn=None) -> int:
-        """Delete audit rows older than retention_days ago. Admin/root
-        only. Returns deleted count. 0 is valid (nothing expired)."""
-        admin_uid, _pid, _exe, _st = self._peer_info(sender, conn)
-        if admin_uid not in (0, ADMIN_UID):
-            raise dbus.DBusException(
-                f"RunAuditGc restricted to admin/root; got uid {admin_uid}",
-                name=BUS_NAME + ".AccessDenied",
-            )
+        """Delete audit rows older than retention_days ago. Trusted
+        admin control-plane peers only (same layered predicate as the
+        other destructive admin methods; an arbitrary admin-uid process
+        must not be able to erase history — iso2 `14` E1). Returns
+        deleted count; a returned 0 is valid (nothing expired).
+        retention_days must be >= 1: RunAuditGc(0) would delete every
+        row older than the current second, i.e. the whole history."""
+        admin_uid, _pid, _exe, _st = self._require_admin_control_peer(
+            sender, conn, "RunAuditGc")
         days = int(retention_days)
-        if days < 0:
+        if days < 1:
             raise dbus.DBusException(
-                f"retention_days must be >= 0, got {days}",
+                f"retention_days must be >= 1, got {days}",
                 name=BUS_NAME + ".BadArgument",
             )
         n = self.audit.gc(days * 86400)
