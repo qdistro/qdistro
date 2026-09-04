@@ -80,6 +80,13 @@ class _StubBroker(Broker):
         return (self._peer_uid, self._peer_pid, self._peer_exe,
                 self._peer_start)
 
+    def _peer_matches_admin_control(self, *, uid: int, pid: int,
+                                    exe: str, method: str = ""
+                                    ) -> tuple[bool, str]:
+        if int(uid) in (0, ADMIN_UID):
+            return True, "test-injected admin-control peer"
+        return False, f"uid {uid} is not admin uid {ADMIN_UID}"
+
     def RequestPending(self, rid):  # type: ignore[override]
         self.pending_signals.append(int(rid))
 

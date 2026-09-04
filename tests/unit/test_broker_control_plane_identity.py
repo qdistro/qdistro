@@ -327,6 +327,20 @@ def test_arbitrary_uid_1000_cannot_assert_identity_verified_gates(
     assert ei.value.get_dbus_name() == B.BUS_NAME + ".AccessDenied"
 
 
+def test_pytest_env_does_not_trust_synthetic_admin_exes(broker, monkeypatch):
+    """iso2 01 F3: PYTEST_CURRENT_TEST must not widen the admin-control
+    allowlist. Tests inject trust by overriding the predicate, not via
+    the environment."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/unit/test_x.py::t")
+    broker.set_peer(uid=ADMIN_UID, pid=DEAD_PID, exe="/usr/bin/test-app")
+    ok, reason = broker._peer_matches_admin_control(
+        uid=ADMIN_UID, pid=DEAD_PID, exe="/usr/bin/test-app",
+        method="DecideRequest",
+    )
+    assert not ok
+    assert "untrusted" in reason or "not an installed" in reason or "not trusted" in reason
+
+
 def test_admin_python_c_can_revoke_all_for_uid(broker, monkeypatch):
     """RevokeAllForUid is an admin-control method the s57 probe drives
     via `python3 -c`. It must be in _ADMIN_CONTROL_STDIN_METHODS so a

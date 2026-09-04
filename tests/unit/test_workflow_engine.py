@@ -687,7 +687,6 @@ class TestWorkflowEngineSteps:
     def test_all_step_types(self, tmp_path, monkeypatch):
         # The default call_dbus policy is fail-closed default-deny; allowlist
         # the test bus so the call_dbus step in this end-to-end run succeeds.
-        monkeypatch.delenv("QDISTRO_WORKFLOW_DBUS_OPEN", raising=False)
         monkeypatch.setenv("QDISTRO_WORKFLOW_DBUS_ALLOW", "org.example")
         _install_fake_dbus(monkeypatch, return_value="pong")
         # A reaped pid: pidfd_open/kill(0) report it gone immediately.

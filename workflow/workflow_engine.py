@@ -80,9 +80,8 @@ _BROKER_METHOD_WHITELIST = frozenset({
 #      ONLY the configured well-known bus names are callable. An empty
 #      allowlist means NOTHING is callable — the fail-closed end state,
 #      mirroring call_broker's allowlist model.
-# A documented dev escape hatch (QDISTRO_WORKFLOW_DBUS_OPEN=1) restores the
-# historical wide-open behavior for bring-up/testing; it must never be set
-# in a daily-driver/production deployment.
+# Tests that need the historical wide-open path inject it through
+# WorkflowEngine(dbus_open=True); there is no environment escape hatch.
 _DBUS_BUS_NAME_DENYLIST = frozenset({
     "org.qdistro.Pwd1",            # vault/secret daemon
     "org.qdistro.AdminBroker1",    # our own broker (use call_broker, whitelisted)
@@ -95,22 +94,6 @@ _DBUS_BUS_NAME_DENYLIST = frozenset({
 def _dbus_allowlist() -> frozenset[str]:
     raw = os.environ.get("QDISTRO_WORKFLOW_DBUS_ALLOW", "")
     return frozenset(p.strip() for p in raw.split(",") if p.strip())
-
-
-def _dbus_open_escape_hatch() -> bool:
-    """Whether the dev escape hatch restoring wide-open call_dbus is set.
-
-    DEFAULT OFF — the call_dbus destination policy (denylist + unique-name
-    rejection + default-deny allowlist) is ENFORCED by default and
-    fail-closed. Setting QDISTRO_WORKFLOW_DBUS_OPEN=1 reverts to the
-    historical wide-open behavior (only the private-method ``_`` guard
-    remains) for workflow bring-up/testing. This is the inverse of the
-    former QDISTRO_WORKFLOW_DBUS_HARDENING opt-in and MUST NOT be set in a
-    daily-driver/production deployment — see
-    todo/issues/qdistro/qdistro-workflow-dbus-hardening.md."""
-    return os.environ.get(
-        "QDISTRO_WORKFLOW_DBUS_OPEN", "").strip().lower() in (
-        "1", "true", "yes", "on")
 
 
 # Default + ceiling for step-level bounded waits/calls (seconds). A step
@@ -217,6 +200,11 @@ class WorkflowEngine:
         When None, ``deliver_secret`` runs in tracking-only mode (no real
         secret is fetched or delivered) so the engine can be exercised
         without a vault backend.
+    dbus_open:
+        When True, skip the call_dbus destination policy (denylist,
+        unique-name rejection, default-deny allowlist). Production
+        always leaves this False. Tests that need the historical
+        wide-open path pass True explicitly.
     """
 
     def __init__(
@@ -228,9 +216,11 @@ class WorkflowEngine:
         own_dbus_loop: bool = True,
         max_concurrent_runs: int = 4,
         channel_registrar: Any | None = None,
+        dbus_open: bool = False,
     ):
         self._broker = broker_proxy
         self._audit = audit_logger
+        self._dbus_open = bool(dbus_open)
         # Optional sink notified (run_id, name, value) the instant a
         # NON-SECRET allowlisted channel reference is published, and
         # (run_id, name, None) when it is scrubbed. The zero-coordination
@@ -1138,10 +1128,9 @@ class WorkflowEngine:
             return
         # F2: this runs as root inside the broker, so without a policy a
         # workflow YAML is an arbitrary root D-Bus escape hatch. The policy
-        # is ENFORCED by default and fail-closed; only the dev escape hatch
-        # (QDISTRO_WORKFLOW_DBUS_OPEN=1) reverts to the historical wide-open
-        # behavior for bring-up/testing.
-        if not _dbus_open_escape_hatch():
+        # is ENFORCED by default and fail-closed. Tests inject the
+        # historical wide-open path via dbus_open=True on the constructor.
+        if not self._dbus_open:
             # Reject unique connection names (":1.N"): the denylist /
             # allowlist match well-known names, but a workflow could
             # otherwise name the *unique* owner of a denied service (e.g.

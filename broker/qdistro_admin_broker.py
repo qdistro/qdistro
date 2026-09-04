@@ -263,14 +263,6 @@ _ROOT_QSU_EXES = frozenset((
     "/usr/local/lib/qdistro/qdistro-root-exec",
 ))
 
-_PYTEST_ADMIN_CONTROL_EXES = frozenset((
-    "/usr/bin/admin-app",
-    "/usr/bin/test-app",
-    "/usr/bin/peer",
-))
-
-_PYTEST_ROOT_HELPER_EXES = frozenset(("x",))
-
 # One-shot actions are gated to scope='once' regardless of delegation.
 # RelayMessage is the initial use case: every cross-user send goes to
 # admin on its own, and the (target_uid, target_service) pair is too
@@ -681,10 +673,6 @@ def _selinux_enforcing() -> bool:
             return f.read(16).strip() == "1"
     except OSError:
         return False
-
-
-def _pytest_running() -> bool:
-    return "PYTEST_CURRENT_TEST" in os.environ
 
 
 def _argv_names_broker_call(argv: list[str], method: str) -> bool:
@@ -1385,8 +1373,6 @@ class Broker(dbus.service.Object):
         """
         if int(uid) == 0:
             exe_s = str(exe or "")
-            if _pytest_running() and exe_s in _PYTEST_ADMIN_CONTROL_EXES:
-                return True, "pytest synthetic root admin-control helper"
             if exe_s in _ROOT_ADMIN_CONTROL_EXES:
                 return True, "trusted root admin-control helper"
             argv = self._peer_cmdline(pid)
@@ -1406,8 +1392,6 @@ class Broker(dbus.service.Object):
             return False, f"SELinux type {typ!r} is not an admin peer"
 
         exe_s = str(exe or "")
-        if _pytest_running() and exe_s in _PYTEST_ADMIN_CONTROL_EXES:
-            return True, "pytest synthetic admin-control peer"
         if exe_s in _ADMIN_CONTROL_DIRECT_EXES:
             return True, "trusted direct admin-control exe"
 
@@ -1514,9 +1498,6 @@ class Broker(dbus.service.Object):
             expected_types.add("qdistro_root_exec_t")
         else:
             expected_exes = set()
-
-        if _pytest_running() and exe_s in _PYTEST_ROOT_HELPER_EXES:
-            return True, f"pytest synthetic root {family} helper"
 
         live_exe, _live_start = _read_proc_identity(pid)
         if (_selinux_enforcing() and expected_types and typ

@@ -31,6 +31,8 @@ def _broker(engine, uid=0):
     br = b.Broker.__new__(b.Broker)
     br.workflow_engine = engine
     br._peer_info = lambda sender, conn: (uid, 1, "x", 0)  # type: ignore
+    br._peer_matches_root_helper = (  # type: ignore[method-assign]
+        lambda **kw: (True, "test-injected root helper"))
     return br
 
 
