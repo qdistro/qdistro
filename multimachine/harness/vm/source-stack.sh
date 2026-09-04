@@ -102,7 +102,7 @@ if [ "$MODE" = export2 ]; then
   if ! systemctl --user is-active mm-bystander >/dev/null 2>&1; then echo "FAIL: no live shell client (mm-bystander) for export2"; exit 9; fi
   OUTPUT_ID=${OUTPUT_ID:-2}
   BOUT="$XDG_RUNTIME_DIR/bystander.out"
-  FIFO=${QDWIN_BYSTANDER_FIFO:-/tmp/qdwin-cmd.fifo}
+  FIFO=${QDWIN_BYSTANDER_FIFO:-$XDG_RUNTIME_DIR/qdwin-cmd.fifo}   # bystander default since 1de2f80
   # RDP_PASSWORD is the LAST line of each approval block (HANDLE/NODE/PORT/CERT/
   # PASSWORD), so waiting for a NEW one guarantees port+node are already flushed —
   # no partial-block race (codex impl-16).
