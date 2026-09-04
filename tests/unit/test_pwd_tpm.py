@@ -249,8 +249,12 @@ class _CapturingTpm(Tpm2ToolsBackend):
     def _run(self, *args, input_bytes=None, cwd=None):
         self.calls.append({"argv": list(args), "input": input_bytes})
         # Write any requested output files so the caller's reads succeed.
+        # ``-c`` is context-OR-handle in tpm2-tools: ``tpm2_readpublic -c
+        # 0x81000010`` names a persistent handle, not a file, and writing it
+        # would litter the cwd (repo root) with a stray "0x81000010" file.
         for i, a in enumerate(args):
-            if a in ("-r", "-u", "-c") and i + 1 < len(args):
+            if a in ("-r", "-u", "-c") and i + 1 < len(args) \
+                    and not args[i + 1].startswith("0x"):
                 try:
                     with open(args[i + 1], "wb") as f:
                         f.write(b"\x00")
