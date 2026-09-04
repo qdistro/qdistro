@@ -87,6 +87,11 @@ TCP_PORT = int(os.environ.get("QDISTRO_PRINT_TCP_PORT", "631"))
 
 CONNECT_TIMEOUT_S = 5.0
 BUFSIZE = 64 * 1024
+# Cap on how many already-received bytes _pump will hold for a destination
+# that is not draining. Reads from a source stop while its peer is over the
+# cap, so backpressure propagates to the sender instead of growing the
+# proxy's heap without bound (iso2 `17` E1).
+MAX_BACKLOG = 4 * 1024 * 1024
 
 # Per-connection audit (Phase-9 §step 2). Lazy-initialised on first
 # event to keep the import path light; tests can pin the DB path via
@@ -216,21 +221,83 @@ def _peer_cred(client: socket.socket) -> tuple[int, int, int]:
 
 
 def _pump(a: socket.socket, b: socket.socket) -> None:
-    """Bidirectional byte copy between a and b until EOF / error."""
+    """Bidirectional byte copy between a and b until EOF / error.
+
+    Every byte taken off a source is either delivered to its peer or the
+    connection is torn down — never silently dropped (iso2 `17` E1). The
+    previous version broke out of the send loop on ``BlockingIOError`` and
+    discarded the unsent tail of the slice ``recv`` had already consumed
+    from the kernel, so a slow vsock cupsd under a large job got a
+    truncated IPP stream. Instead the tail is stashed in a per-destination
+    ``pending`` buffer, the destination joins select's WRITE set until it
+    drains, and a source is not read again while its peer is over
+    MAX_BACKLOG. A destination whose source hit EOF is only shut down for
+    write once its backlog has been flushed.
+    """
     a.setblocking(False)
     b.setblocking(False)
-    open_ = {a.fileno(): a, b.fileno(): b}
-    peer_of = {a.fileno(): b, b.fileno(): a}
+    fa, fb = a.fileno(), b.fileno()
+    socks = {fa: a, fb: b}
+    peer_of = {fa: fb, fb: fa}
+    readable = {fa, fb}                 # sources still open for reading
+    broken: set[int] = set()            # sockets that errored — unusable
+    pending = {fa: bytearray(), fb: bytearray()}
+    shut_when_drained: set[int] = set()
+
+    def _break(fd: int) -> None:
+        """A socket errored: it is neither a usable source nor sink."""
+        broken.add(fd)
+        readable.discard(fd)
+        pending[fd].clear()
+        shut_when_drained.discard(fd)
+
+    def _flush(fd: int) -> None:
+        """Push as much of fd's backlog as the kernel will take."""
+        sock, buf = socks[fd], pending[fd]
+        while buf:
+            mv = memoryview(buf)
+            try:
+                sent = sock.send(mv)
+            except BlockingIOError:
+                return
+            except OSError:
+                _break(fd)
+                return
+            finally:
+                mv.release()
+            if sent <= 0:
+                return
+            del buf[:sent]
+        if fd in shut_when_drained:
+            # EOF on the source has been fully relayed; only now is it
+            # honest to half-close the destination.
+            shut_when_drained.discard(fd)
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
     try:
-        while open_:
-            ready, _, _ = select.select(list(open_.keys()), [], [], 30.0)
-            if not ready:
+        while True:
+            rlist = [fd for fd in readable
+                     if fd not in broken
+                     and peer_of[fd] not in broken
+                     and len(pending[peer_of[fd]]) < MAX_BACKLOG]
+            wlist = [fd for fd in (fa, fb)
+                     if pending[fd] and fd not in broken]
+            if not rlist and not wlist:
+                break
+            ready_r, ready_w, _ = select.select(rlist, wlist, [], 30.0)
+            if not ready_r and not ready_w:
                 continue
-            for fd in ready:
-                src = open_.get(fd)
-                dst = peer_of.get(fd)
-                if src is None or dst is None:
+            # Drain backlogs first: it frees the cap that is gating reads.
+            for fd in ready_w:
+                _flush(fd)
+            for fd in ready_r:
+                if fd in broken:
                     continue
+                src = socks[fd]
+                dfd = peer_of[fd]
                 try:
                     buf = src.recv(BUFSIZE)
                 except OSError as e:
@@ -238,26 +305,21 @@ def _pump(a: socket.socket, b: socket.socket) -> None:
                         continue
                     buf = b""
                 if not buf:
-                    open_.pop(fd, None)
-                    try:
-                        dst.shutdown(socket.SHUT_WR)
-                    except OSError:
-                        pass
+                    readable.discard(fd)
+                    if dfd in broken:
+                        pass            # nothing left to deliver it to
+                    elif pending[dfd]:
+                        shut_when_drained.add(dfd)
+                    else:
+                        try:
+                            socks[dfd].shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
                     continue
-                view = memoryview(buf)
-                while view:
-                    try:
-                        sent = dst.send(view)
-                    except BlockingIOError:
-                        # drop the rest of this slice so we don't busy-spin;
-                        # next select cycle picks it up.
-                        sent = 0
-                        break
-                    except OSError:
-                        sent = 0
-                        open_.pop(dst.fileno(), None)
-                        break
-                    view = view[sent:]
+                # Append then flush: appending first keeps ordering exact
+                # even when a backlog is already queued for this peer.
+                pending[dfd] += buf
+                _flush(dfd)
     finally:
         for s in (a, b):
             try:

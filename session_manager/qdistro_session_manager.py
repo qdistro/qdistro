@@ -210,7 +210,11 @@ PODAPP_LAUNCH_ENV_DIR = Path("/run/qdistro/podapp-launch")
 # The token is the secctx instance-id spawn-tier2 stamps on the wire, and the
 # clicking shell matches it against toplevel_security_context to resolve its
 # launch placeholder. Same shape the shell's correlators already filter on.
-_LAUNCH_TOKEN_RE = _re.compile(r"^[0-9a-f]{32}$")
+# (There is deliberately no token validator here: launch_podapp mints the
+# token itself with secrets.token_hex(16) and never accepts one from a
+# caller, so a `^[0-9a-f]{32}$` check would have no untrusted input to
+# guard — the unused _LAUNCH_TOKEN_RE that used to sit here was dead and
+# was removed, iso2 `01` F4.)
 
 # Per-silo network-namespace egress (todo/fable-networking task 3), applied only
 # to tier3-user silos that carry an explicit `egress` policy. A silo with no
@@ -351,7 +355,11 @@ _VALID_NAME_RE = _re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 def validate_name(name: str) -> str:
     if not isinstance(name, str):
         raise BadArgument(f"name must be a string, got {type(name).__name__}")
-    if not _VALID_NAME_RE.match(name):
+    # fullmatch, not match: a `$`-anchored pattern under .match() still
+    # accepts one trailing newline, so `work` and "work\n" would be two
+    # distinct silos that render identically in every log, CLI listing
+    # and approval prompt (iso2 `01` F4).
+    if not _VALID_NAME_RE.fullmatch(name):
         raise BadArgument(
             f"name {name!r} is not a valid silo name (lowercase + "
             f"alnum/underscore/dash, ≤32 chars, must start with a "
@@ -434,7 +442,10 @@ def validate_launch(kind: str, launch: object) -> dict[str, Any]:
             if required:
                 raise BadArgument(f"tier2-template launch.{key} is required")
             return default
-        if not isinstance(v, str) or not _SAFE_TOKEN_RE.match(v) or ".." in v:
+        # fullmatch: `$` alone would let a trailing newline through into
+        # the TIER2_* env file (iso2 `01` F4).
+        if (not isinstance(v, str) or not _SAFE_TOKEN_RE.fullmatch(v)
+                or ".." in v):
             raise BadArgument(f"tier2-template launch.{key} is unsafe: {v!r}")
         return v
 
@@ -3317,7 +3328,7 @@ class _SiloStore:
             raise BadArgument(f"pod-app {field} is required")
         if len(value) > 128:
             raise BadArgument(f"pod-app {field} is too long")
-        if not _SAFE_TOKEN_RE.match(value) or ".." in value:
+        if not _SAFE_TOKEN_RE.fullmatch(value) or ".." in value:  # iso2 `01` F4
             raise BadArgument(f"pod-app {field} is unsafe: {value!r}")
         return value
 

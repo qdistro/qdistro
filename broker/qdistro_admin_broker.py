@@ -4932,22 +4932,32 @@ class Broker(dbus.service.Object):
         engine = getattr(self, "workflow_engine", None)
         if engine is None:
             return False
+        # Audit BEFORE the release, and fail closed if it raises (iso2 `14`
+        # E2). The old order called approve_run() first and swallowed a
+        # failing audit.log with a bare `except: pass`, so a human approval
+        # could schedule a run with no forensic row at all. Same shape the
+        # prompt path already gets right at DecideRequest: never grant past
+        # a failed audit. The row is written for the attempt, so an approve
+        # that finds no pending run leaves a decision=True row for an
+        # approval that released nothing — cheaper than the alternative.
+        try:
+            self.audit.log(
+                caller_uid=admin_uid, caller_pid=_pid,
+                caller_exe=_exe or "qdistro-admin",
+                action=f"qdistro.workflow.approve:{run_id}",
+                decision=True, scope=None,
+                source=f"run_id={run_id}", approver_uid=admin_uid,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[broker] qdistro.audit.failure: ApproveWorkflowRun "
+                  f"run_id={run_id!r}, reason={e!r}; approval refused",
+                  flush=True)
+            return False
         try:
             approved = bool(engine.approve_run(str(run_id)))
         except Exception as e:  # noqa: BLE001
             print(f"[broker] ApproveWorkflowRun failed: {e!r}", flush=True)
             return False
-        if approved:
-            try:
-                self.audit.log(
-                    caller_uid=admin_uid, caller_pid=_pid,
-                    caller_exe=_exe or "qdistro-admin",
-                    action=f"qdistro.workflow.approve:{run_id}",
-                    decision=True, scope=None,
-                    source=f"run_id={run_id}", approver_uid=admin_uid,
-                )
-            except Exception:  # noqa: BLE001
-                pass
         return approved
 
     @dbus.service.method(BUS_NAME, in_signature="sasi", out_signature="a{ss}",

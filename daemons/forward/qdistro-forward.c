@@ -1294,13 +1294,36 @@ static BOOL qfwd_xmouse(rdpShadowSubsystem *s, rdpShadowClient *c,
 
 /* ---------- authentication ---------- */
 
+/* Constant-time string equality (iso2 `03` F3). strcmp() returns at the
+ * first differing byte, so its timing leaks the length of the correct
+ * prefix of the RDP password to a client that can measure it. Neither
+ * FreeRDP nor WinPR is linked here for a CRYPTO_memcmp, so: compare the
+ * lengths up front (the length of the configured secret is not itself the
+ * secret being guarded), then fold every remaining byte into a volatile
+ * accumulator so the loop can never short-circuit. Returns 1 on equal. */
+static int qfwd_consttime_eq(const char *a, const char *b)
+{
+	size_t la, lb, i;
+	volatile unsigned char acc = 0;
+
+	if (!a || !b)
+		return 0;
+	la = strlen(a);
+	lb = strlen(b);
+	if (la != lb)
+		return 0;
+	for (i = 0; i < la; i++)
+		acc = (unsigned char)(acc | ((unsigned char)a[i] ^ (unsigned char)b[i]));
+	return acc == 0;
+}
+
 static int qfwd_authenticate(rdpShadowSubsystem *base, rdpShadowClient *client,
 			     const char *user, const char *domain, const char *pw)
 {
 	(void)base; (void)client; (void)user; (void)domain;
 	if (!pw)
 		return -1;
-	if (strcmp(pw, g_args.password) != 0) {
+	if (!qfwd_consttime_eq(pw, g_args.password)) {
 		LOGE("auth FAIL: wrong password");
 		return -1;
 	}
@@ -1468,10 +1491,26 @@ int main(int argc, char **argv)
 	/* Cert/key live on rdpShadowServer (not in rdpSettings). If unset,
 	 * shadow_server_init auto-generates a self-signed cert via makecert.
 	 * sdl-freerdp with /cert:ignore connects either way. */
+	/* Both strdups are checked (iso2 `03` F2): a NULL CertificateFile is
+	 * read by shadow_server_init as "no certificate configured" and it
+	 * silently auto-generates a self-signed one, so an OOM here would
+	 * turn an operator-pinned TLS identity into a fresh throwaway
+	 * identity instead of a startup failure. Fail loudly instead. */
 	if (g_args.cert_path && g_args.cert_path[0]) {
 		g_server->CertificateFile = strdup(g_args.cert_path);
-		if (g_args.key_path && g_args.key_path[0])
+		if (!g_server->CertificateFile) {
+			LOGE("out of memory duplicating --cert path");
+			shadow_server_free(g_server);
+			return 1;
+		}
+		if (g_args.key_path && g_args.key_path[0]) {
 			g_server->PrivateKeyFile = strdup(g_args.key_path);
+			if (!g_server->PrivateKeyFile) {
+				LOGE("out of memory duplicating --key path");
+				shadow_server_free(g_server);
+				return 1;
+			}
+		}
 	}
 
 	/* Auth wiring: enable framework's auth path; subsystem->Authenticate

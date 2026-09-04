@@ -553,6 +553,17 @@ class TestValidation:
         with pytest.raises(BadArgument):
             validate_name(bad)
 
+    @pytest.mark.parametrize("bad", ["work\n", "work\r", "work\n\n"])
+    def test_name_rejects_trailing_newline(self, bad):
+        """iso2 `01` F4: `$` under re.match() matches BEFORE a trailing
+        newline, so `_VALID_NAME_RE.match("work\n")` used to succeed.
+        `work` and `work\n` are two distinct silos that render identically
+        in every log line, CLI listing and approval prompt, and the second
+        produces a netns name, a unit name and file paths with an embedded
+        newline. fullmatch closes it."""
+        with pytest.raises(BadArgument):
+            validate_name(bad)
+
     def test_uid_in_range(self):
         assert validate_uid(2000) == 2000
         assert validate_uid(60000) == 60000
@@ -1238,6 +1249,23 @@ class TestTier2TemplateKind:
     def test_validate_launch_rejects_bad(self, bad):
         with pytest.raises(BadArgument):
             sm.validate_launch("tier2-template", bad)
+
+    @pytest.mark.parametrize("field", ["workload", "template_silo"])
+    def test_validate_launch_rejects_trailing_newline(self, field):
+        """iso2 `01` F4 on the _SAFE_TOKEN_RE side: these values cross into
+        the TIER2_* launch env the launcher unit sources, so a token with a
+        trailing newline must not validate."""
+        stanza = {"workload": "w", "template_silo": "s", "network": "none"}
+        stanza[field] = stanza[field] + "\n"
+        with pytest.raises(BadArgument):
+            sm.validate_launch("tier2-template", stanza)
+
+    def test_podapp_token_rejects_trailing_newline(self):
+        """Same regex, the pod-app launch path (iso2 `01` F4)."""
+        assert sm._SiloStore._validate_podapp_token(
+            "container", "podapp-x") == "podapp-x"
+        with pytest.raises(BadArgument):
+            sm._SiloStore._validate_podapp_token("container", "podapp-x\n")
 
     def test_validate_launch_rejects_nul_in_argv(self):
         """NUL is the launcher's argv separator, and json.loads decodes the

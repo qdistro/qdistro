@@ -182,3 +182,65 @@ class TestRegistryLoopSharing:
             assert trig._loop is None  # no private loop started
         finally:
             reg.unregister_all()
+
+
+class TestApproveWorkflowRunAuditOrdering:
+    """iso2 `14` E2: a human approval that cannot be recorded must not
+    release the run.
+
+    ApproveWorkflowRun used to call ``engine.approve_run()`` FIRST and then
+    write the audit row inside a bare ``except: pass``. With the audit DB
+    unwritable (full filesystem, immutable sqlite) a PENDING workflow could
+    therefore execute leaving no forensic row at all — the opposite of what
+    the prompt path in the same file does, which force-denies rather than
+    "extend trust past a failed audit".
+    """
+
+    @staticmethod
+    def _broker(engine, audit):
+        br = b.Broker.__new__(b.Broker)
+        br.workflow_engine = engine
+        br.audit = audit
+        br._require_admin_control_peer = (            # type: ignore[method-assign]
+            lambda sender, conn, method: (ADMIN, 1, "qdistro-admin", 0))
+        return br
+
+    class _Engine:
+        def __init__(self):
+            self.calls = []
+
+        def approve_run(self, run_id):
+            self.calls.append(run_id)
+            return True
+
+    class _FailingAudit:
+        def log(self, **kw):
+            raise OSError("audit db is read-only")
+
+    class _RecordingAudit:
+        def __init__(self):
+            self.rows = []
+
+        def log(self, **kw):
+            self.rows.append(kw)
+
+    def test_audit_failure_refuses_approval(self, capsys):
+        engine = self._Engine()
+        br = self._broker(engine, self._FailingAudit())
+        assert br.ApproveWorkflowRun("run-1", sender=":1", conn=None) is False
+        assert engine.calls == [], (
+            "the run was released despite the audit row failing to write")
+        out = capsys.readouterr().out
+        assert "qdistro.audit.failure: ApproveWorkflowRun" in out
+
+    def test_audit_row_precedes_release(self):
+        audit = self._RecordingAudit()
+        engine = self._Engine()
+        br = self._broker(engine, audit)
+        assert br.ApproveWorkflowRun("run-1", sender=":1", conn=None) is True
+        assert engine.calls == ["run-1"]
+        assert len(audit.rows) == 1
+        row = audit.rows[0]
+        assert row["action"] == "qdistro.workflow.approve:run-1"
+        assert row["decision"] is True
+        assert row["approver_uid"] == ADMIN

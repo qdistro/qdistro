@@ -76,7 +76,28 @@ SOCKET_PATH = os.environ.get("QDISTRO_HOOK_SOCKET",
                              "/run/qdistro/hook-executor.sock")
 # UID the broker process runs as (used for SO_PEERCRED verification).
 # 0 = root (production default), configurable for dev/test.
-BROKER_UID = int(os.environ.get("QDISTRO_HOOK_BROKER_UID", "0"))
+# A negative value used to be an escape hatch that turned the SO_PEERCRED
+# identity check into a no-op, letting any local process that could reach
+# the socket drive an executor that loads and runs hook modules in-process
+# (iso2 `01` F5). Reject it here so the escape does not exist at all;
+# callers that want a non-root broker must name its real uid.
+def _parse_broker_uid(raw: str) -> int:
+    # _log is defined further down (module import order), so warn directly.
+    try:
+        val = int(raw)
+    except ValueError:
+        print(f"[hook-executor] QDISTRO_HOOK_BROKER_UID={raw!r} is not an "
+              f"integer; falling back to 0 (root)", flush=True, file=sys.stderr)
+        return 0
+    if val < 0:
+        print(f"[hook-executor] QDISTRO_HOOK_BROKER_UID={val} is negative; "
+              f"peer authentication is not optional — falling back to 0 "
+              f"(root)", flush=True, file=sys.stderr)
+        return 0
+    return val
+
+
+BROKER_UID = _parse_broker_uid(os.environ.get("QDISTRO_HOOK_BROKER_UID", "0"))
 
 # Maximum time a single hook invocation may take before being
 # abandoned.  The broker has its own outer timeout; this is an
@@ -534,7 +555,8 @@ def serve(hook_dir: str = HOOK_DIR,
                      "SO_PEERCRED unavailable")
                 conn.close()
                 continue
-            if broker_uid >= 0 and uid != broker_uid:
+            # Unconditional: there is no "checking disabled" uid (iso2 `01` F5).
+            if uid != broker_uid:
                 _log(f"[hook-executor] rejecting connection from uid={uid} "
                      f"(expected {broker_uid})")
                 conn.close()

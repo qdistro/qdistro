@@ -523,7 +523,7 @@ class TestServerIntegration:
             kwargs={
                 "hook_dir": str(hooks),
                 "socket_path": sock_path,
-                "broker_uid": -1,  # disable peer-uid check for test
+                "broker_uid": os.getuid(),  # the test client connects as us
                 "stop_event": stop,
             },
             daemon=True,
@@ -577,7 +577,7 @@ class TestServerIntegration:
             kwargs={
                 "hook_dir": str(hooks),
                 "socket_path": sock_path,
-                "broker_uid": -1,
+                "broker_uid": os.getuid(),
                 "stop_event": stop,
             },
             daemon=True,
@@ -636,3 +636,71 @@ class TestPeerCredentials:
         finally:
             a.close()
             b.close()
+
+
+# ---------------------------------------------------------------------------
+# Peer-uid parsing (iso2 `01` F5)
+# ---------------------------------------------------------------------------
+
+class TestBrokerUidParsing:
+    """A negative QDISTRO_HOOK_BROKER_UID used to turn the SO_PEERCRED
+    identity check into a no-op (`if broker_uid >= 0 and uid != broker_uid`),
+    so any local process that could reach the socket could drive an executor
+    that loads and runs hook modules in-process. There is no longer a value
+    that disables the check."""
+
+    def test_negative_falls_back_to_root(self, capsys):
+        import qdistro_hook_executor as hx
+        assert hx._parse_broker_uid("-1") == 0
+        assert "negative" in capsys.readouterr().err
+
+    def test_non_integer_falls_back_to_root(self, capsys):
+        import qdistro_hook_executor as hx
+        assert hx._parse_broker_uid("nobody") == 0
+        assert "not an" in capsys.readouterr().err
+
+    def test_valid_uid_kept(self):
+        import qdistro_hook_executor as hx
+        assert hx._parse_broker_uid("0") == 0
+        assert hx._parse_broker_uid("1000") == 1000
+
+    def test_wrong_uid_is_rejected(self, tmp_path):
+        """serve() with a broker_uid that is not ours must refuse the
+        connection even though the old escape hatch is gone."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        sock_path = str(tmp_path / "x.sock")
+        stop = threading.Event()
+        # An impossible uid: never the test process's own.
+        wrong = os.getuid() + 424242
+        t = threading.Thread(
+            target=serve,
+            kwargs={
+                "hook_dir": str(hooks),
+                "socket_path": sock_path,
+                "broker_uid": wrong,
+                "stop_event": stop,
+            },
+            daemon=True,
+        )
+        t.start()
+        try:
+            deadline = time.time() + 5.0
+            while not os.path.exists(sock_path) and time.time() < deadline:
+                time.sleep(0.02)
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.connect(sock_path)
+            c.settimeout(5.0)
+            # The server closes on the SO_PEERCRED mismatch, so the write
+            # either raises EPIPE or the subsequent read sees EOF; both are
+            # "refused". What must NOT happen is a decoded reply frame.
+            try:
+                _send_frame(c, json.dumps({"op": "list"}).encode())
+                assert c.recv(4096) == b"", \
+                    "server did not drop the wrong-uid peer"
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            c.close()
+        finally:
+            stop.set()
+            t.join(timeout=5)

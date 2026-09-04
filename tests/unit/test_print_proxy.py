@@ -146,3 +146,65 @@ def test_proxy_handles_backend_unreachable(tmp_path):
             proxy.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proxy.kill()
+
+
+# ---------------------------------------------------------------------------
+# _pump backpressure (iso2 `17` E1)
+# ---------------------------------------------------------------------------
+
+def test_pump_does_not_drop_bytes_under_backpressure():
+    """A destination that is not drained must not cost the job bytes.
+
+    The old _pump broke out of its send loop on BlockingIOError and threw
+    away the unsent tail of the slice recv() had already consumed, so a
+    slow cupsd silently truncated the IPP stream. Here the "backend" side
+    is deliberately left unread until well after the sender has pushed far
+    more than a socket buffer holds; every byte must still arrive, in
+    order.
+    """
+    import threading
+
+    import qdistro_print_proxy as P
+
+    client_a, proxy_a = socket.socketpair()
+    proxy_b, backend_b = socket.socketpair()
+
+    # ~2 MiB of position-tagged payload: far beyond any default socket
+    # buffer, so the proxy WILL hit EAGAIN on the backend side.
+    payload = b"".join(b"%08d-qdistro-print-payload\n" % i
+                       for i in range(80000))
+
+    t = threading.Thread(target=P._pump, args=(proxy_a, proxy_b), daemon=True)
+    t.start()
+
+    def _send_all():
+        client_a.sendall(payload)
+        client_a.shutdown(socket.SHUT_WR)
+
+    sender = threading.Thread(target=_send_all, daemon=True)
+    sender.start()
+
+    # Stall the destination long enough that the proxy is guaranteed to
+    # have hit a full send buffer and stashed a backlog.
+    time.sleep(1.0)
+
+    got = bytearray()
+    backend_b.settimeout(20.0)
+    while True:
+        chunk = backend_b.recv(65536)
+        if not chunk:
+            break
+        got += chunk
+
+    sender.join(timeout=10)
+    t.join(timeout=10)
+    for s in (client_a, backend_b):
+        try:
+            s.close()
+        except OSError:
+            pass
+
+    assert len(got) == len(payload), (
+        f"proxy delivered {len(got)} of {len(payload)} bytes "
+        f"(a short read here is the silent print-job truncation)")
+    assert bytes(got) == payload, "bytes arrived out of order / corrupted"

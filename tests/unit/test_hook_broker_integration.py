@@ -542,7 +542,7 @@ class TestEndToEndWithRealExecutor:
             kwargs={
                 "hook_dir": str(hook_dir),
                 "socket_path": sock_path,
-                "broker_uid": -1,
+                "broker_uid": os.getuid(),
                 "stop_event": stop,
             },
             daemon=True,
@@ -578,7 +578,7 @@ class TestEndToEndWithRealExecutor:
             kwargs={
                 "hook_dir": str(hook_dir),
                 "socket_path": sock_path,
-                "broker_uid": -1,
+                "broker_uid": os.getuid(),
                 "stop_event": stop,
             },
             daemon=True,
@@ -614,7 +614,7 @@ class TestEndToEndWithRealExecutor:
             kwargs={
                 "hook_dir": str(hook_dir),
                 "socket_path": sock_path,
-                "broker_uid": -1,
+                "broker_uid": os.getuid(),
                 "stop_event": stop,
             },
             daemon=True,
@@ -652,7 +652,7 @@ class TestEndToEndWithRealExecutor:
             kwargs={
                 "hook_dir": str(hook_dir),
                 "socket_path": sock_path,
-                "broker_uid": -1,
+                "broker_uid": os.getuid(),
                 "stop_event": stop,
             },
             daemon=True,

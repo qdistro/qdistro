@@ -248,7 +248,11 @@ def phase_main():
 
     # ---- assertion 2 core: move A; B's rect + stream + input unperturbed ----
     gb_before = be.viewer_qdwin_geometry("vm-b").get(hb)
-    fb_before = (be.read_telemetry("vm-a", TEL_B) or {}).get("totals", {})
+    # No frame-counter snapshot here (iso2 `07` M3): the marker's telemetry
+    # "totals" carries only pointer_enter/pointer_motion/button_press/
+    # keyboard_enter/key_press (qdwin/test-client/qdwin-marker-client.c),
+    # so there is no frames field to assert advanced. Stream continuity is
+    # proved instead by the fresh decode below (rb2) plus the key delta.
     move_handle(ha, *POS_A1)
     geo2 = be.viewer_qdwin_geometry("vm-b")
     ga2, gb_after = geo2.get(ha), geo2.get(hb)

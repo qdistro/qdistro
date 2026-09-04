@@ -63,7 +63,7 @@ class _Server:
             kwargs={
                 "hook_dir": hook_dir,
                 "socket_path": sock_path,
-                "broker_uid": -1,  # disable SO_PEERCRED check for tests
+                "broker_uid": os.getuid(),  # the test client connects as us
                 "stop_event": self._stop,
             },
             daemon=True,
