@@ -57,6 +57,9 @@ bats_run_one() {
     slug=$(safe_name "$base")
     scratch=$(scenario_scratch_dir bats "$slug")
     mkdir -p "$scratch"
+    if bats_skip_if_sibling_app_missing "$vm" "$file"; then
+        return 0
+    fi
     log "bats $base on $vm"
     (
         cd "$QDISTRO_REPO" || exit 2
@@ -80,6 +83,11 @@ bats_run_disposable() {
     local file=$1 base vm frc t0 t1 t2
     base=$(basename "$file")
     t0=$(date +%s)
+    # Cache hit: sibling app already probed missing — skip without a VM.
+    if bats_skip_if_sibling_app_missing "" "$file"; then
+        record_timing bats "$base" 0 0 "$(( $(date +%s) - t0 ))" skip ""
+        return 0
+    fi
     vm=$(acquire_vm "bats-$(safe_name "${base%.bats}")" "") || {
         record_timing bats "$base" "$(( $(date +%s) - t0 ))" 0 "$(( $(date +%s) - t0 ))" provfail ""
         return "$EXIT_VM_PROVISION"
@@ -119,13 +127,81 @@ assert_unique_bats_basenames() {
     [ "$dup" -eq 0 ]
 }
 
+# Discover scheduled bats files: qdistro's tests/integration/vm plus
+# sibling repos' tests/integration/vm/*.bats. Sibling files are later
+# gated on the golden actually containing that app.
+bats_discover_files() {
+    local ws="${WORKSPACE:-}" dir
+    if [ -z "$ws" ]; then
+        ws=$(cd "$QDISTRO_REPO/.." && pwd)
+    fi
+    {
+        find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f
+        for dir in "$ws"/*/tests/integration/vm; do
+            [ -d "$dir" ] || continue
+            case "$dir" in
+                "$QDISTRO_REPO"/tests/integration/vm) continue ;;
+            esac
+            find "$dir" -maxdepth 1 -name '*.bats' -type f
+        done
+    } | sort
+}
+
+# Map a sibling bats path to a short app id, or empty for qdistro's own files.
+bats_sibling_app_id() {
+    case "$1" in
+        */qdbrowser/tests/integration/vm/*.bats) printf '%s\n' qdbrowser ;;
+        *) printf '\n' ;;
+    esac
+}
+
+# Guest command that succeeds iff the golden has that app.
+bats_sibling_app_probe_cmd() {
+    case "$1" in
+        qdbrowser)
+            printf '%s\n' 'python3 -c "import qdbrowser, PyQt6.QtWebEngineWidgets"'
+            ;;
+        *) printf '\n' ;;
+    esac
+}
+
+# If this sibling bats file's app is known-missing in the golden, record
+# SKIP and return 0. Return 1 if the caller should run the file.
+# $1=vm (may be empty to consult cache only), $2=file.
+bats_skip_if_sibling_app_missing() {
+    local vm=$1 file=$2 app cache probe
+    app=$(bats_sibling_app_id "$file")
+    [ -n "$app" ] || return 1
+    mkdir -p "$RDIR/bats-app-probes"
+    cache="$RDIR/bats-app-probes/$app"
+    if [ -f "$cache" ]; then
+        if [ "$(cat "$cache")" = missing ]; then
+            record_result bats "$(basename "$file")" skip 0 pass bats "" \
+                "golden image lacks $app (no module / PyQt6-WebEngine)"
+            return 0
+        fi
+        return 1
+    fi
+    [ -n "$vm" ] || return 1
+    probe=$(bats_sibling_app_probe_cmd "$app")
+    [ -n "$probe" ] || return 1
+    if "$VM_TOOLS/vm-exec" "$vm" "$probe" >/dev/null 2>&1; then
+        printf 'present\n' > "$cache"
+        return 1
+    fi
+    printf 'missing\n' > "$cache"
+    record_result bats "$(basename "$file")" skip 0 pass bats "" \
+        "golden image lacks $app (no module / PyQt6-WebEngine)"
+    return 0
+}
+
 gate_bats() {
     qci_assert_run_dir || return $?
     local explicit=${1:-}; shift || true
     local files=("$@")
     local rc=$EXIT_OK file base frc running jobs
     if [ "${#files[@]}" -eq 0 ]; then
-        while IFS= read -r file; do files+=("$file"); done < <(find "$QDISTRO_REPO/tests/integration/vm" -maxdepth 1 -name '*.bats' -type f | sort)
+        while IFS= read -r file; do files+=("$file"); done < <(bats_discover_files)
     fi
     # H10: the scheduled set must have unique basenames (rows + VM names key on
     # them). Fail the gate loudly before spinning any VM if it ever does not.

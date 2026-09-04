@@ -49,3 +49,18 @@ teardown() { [ -n "${TMP:-}" ] && rm -rf "$TMP"; }
     [ "$status" -ne 0 ]
     [[ "$output" == *"backup-rehearse-e2e.bats"* ]]
 }
+
+@test "discover includes sibling-repo vm bats and skips the qdistro duplicate" {
+    mkdir -p "$TMP/ws/qdistro/tests/integration/vm" \
+             "$TMP/ws/qdbrowser/tests/integration/vm"
+    : > "$TMP/ws/qdistro/tests/integration/vm/shell-modules.bats"
+    : > "$TMP/ws/qdbrowser/tests/integration/vm/qdbrowser-smoke.bats"
+    QDISTRO_REPO="$TMP/ws/qdistro" WORKSPACE="$TMP/ws" \
+        run bats_discover_files
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/qdistro/tests/integration/vm/shell-modules.bats"* ]]
+    [[ "$output" == *"/qdbrowser/tests/integration/vm/qdbrowser-smoke.bats"* ]]
+    # qdistro's own dir is not listed twice
+    count=$(printf '%s\n' "$output" | grep -c 'shell-modules.bats' || true)
+    [ "$count" -eq 1 ]
+}
