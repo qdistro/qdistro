@@ -6,7 +6,7 @@
 #
 # What this does:
 #   1. Clones baseweed -> qdistro-builder-<ts> via qdistro/scripts/vm/.
-#   2. Attaches a fresh 60 GiB qcow2 to host the kiwi workspace
+#   2. Attaches a fresh 120 GiB qcow2 to host the kiwi workspace
 #      ($BUILD_DIR inside the VM).
 #   3. Bakes the entire qdistro-image/ description (with sources
 #      already rsynced under root/root/qdistro-src/) into the VM at
@@ -24,18 +24,34 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-QDISTRO="$(cd "$HERE/../qdistro" && pwd)"
+# image/ lives inside the qdistro repo; the old "$HERE/../qdistro" form dates
+# from the pre-import sibling layout and cannot resolve from the in-repo path
+# (iso/14 Phase A item 1).
+QDISTRO="$(cd "$HERE/.." && pwd)"
 VM_TOOLS="$QDISTRO/scripts/vm"
 IMG_DIR="${QDWIN_IMG_DIR:-$HOME/.local/share/libvirt/images}"
 URI="qemu:///session"
 export LIBVIRT_DEFAULT_URI="$URI"
 
 VM="${QDISTRO_BUILDER_VM:-qdistro-builder-$(date +%y%m%d-%H%M)}"
-BUILD_DISK_GB="${QDISTRO_BUILD_DISK_GB:-60}"
-HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+# 120 GiB: the raw, the kiwi image-root tree and the compressed output all
+# live on this disk at once (iso/14 Phase A item 6).
+BUILD_DISK_GB="${QDISTRO_BUILD_DISK_GB:-120}"
+# Never /tmp: it is a tmpfs on the build hosts and a multi-GiB raw does not
+# fit in RAM (iso/14 Phase A item 6).
+HOST_BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 # Forwarded into the in-VM kiwi run so config.sh's profile gate sees it
 # (release = no passwordless sudo; dev = passwordless sudo for test harnesses).
-QDISTRO_PROFILE="${QDISTRO_PROFILE:-release}"
+# This is a shell variable read by config.sh, NOT a kiwi XML profile.
+# Default is dev: the artifact this driver builds today is the tester image
+# decided in iso/13. Set QDISTRO_PROFILE=release explicitly for a shipped
+# build. The value is validated so a typo cannot silently produce the other
+# image (iso/14 Phase A item 5).
+QDISTRO_PROFILE="${QDISTRO_PROFILE:-dev}"
+case "$QDISTRO_PROFILE" in
+    dev|release) ;;
+    *) printf '\033[1;31m[in-vm] FATAL:\033[0m QDISTRO_PROFILE must be dev or release, got: %s\n' "$QDISTRO_PROFILE" >&2; exit 1 ;;
+esac
 LOGS="$HERE/logs/in-vm-$(date +%y%m%d-%H%M%S)"
 mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 
@@ -83,8 +99,29 @@ if [ "$TEARDOWN" = 1 ]; then
 fi
 
 #-- 1. Pre-flight checks ------------------------------------------------------
-[ -d "$HERE/root/root/qdistro-src" ] || die "sources not in overlay; run: ./build.sh --sync-only"
-[ -f "$IMG_DIR/baseweed.qcow2" ]     || die "$IMG_DIR/baseweed.qcow2 missing"
+# The overlay is a build product, not a checked-in tree (image/.gitignore),
+# so a fresh checkout always lacks it. Sync it rather than telling the caller
+# to run a second command (iso/14 Phase A item 3). The sync is idempotent.
+log "syncing sources into the overlay"
+bash "$HERE/build.sh" --sync-only 2>&1 | tee "$LOGS/sync.log"
+[ -d "$HERE/root/root/qdistro-src" ] || die "sync did not produce $HERE/root/root/qdistro-src"
+
+# Record what went in, so a built artifact can be traced to five commits.
+# Best-effort: a synced-from-tarball tree has no .git.
+SIBLINGS="$(cd "$HERE/../.." && pwd)"
+for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
+    if [ -d "$SIBLINGS/$repo/.git" ]; then
+        printf '%-10s %s %s\n' "$repo" \
+            "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" \
+            "$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q . && echo DIRTY || echo clean)"
+    else
+        printf '%-10s %s\n' "$repo" "no-git"
+    fi
+done | tee "$LOGS/sources.txt"
+
+# The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
+# must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
+[ -f "$IMG_DIR/baseweed-baked.qcow2" ] || die "$IMG_DIR/baseweed-baked.qcow2 missing (build it via scripts/vm/build-baked-baseweed.sh)"
 virsh dominfo qdistro-template >/dev/null 2>&1 || die "qdistro-template domain missing"
 
 #-- 2. Clone baseweed via the project's own tool ------------------------------
@@ -105,7 +142,7 @@ else
     log "VM name: $VM"
 fi
 
-#-- 3. Attach a fresh 60 GiB build disk ---------------------------------------
+#-- 3. Attach the build disk -------------------------------------------------
 BUILD_DISK="$IMG_DIR/$VM-build.qcow2"
 if [ ! -f "$BUILD_DISK" ]; then
     log "creating $BUILD_DISK_GB GiB build disk: $BUILD_DISK"

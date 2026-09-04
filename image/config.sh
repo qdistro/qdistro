@@ -352,7 +352,12 @@ systemctl set-default graphical.target
 # bootstrap path runs — see scripts/install/harden-compositor-vt.sh.
 # REQUIRED gate: an image that ships with a getty able to take tty3 is a
 # lock-security regression, so a failure aborts the build.
-if ! bash "$QD/scripts/install/harden-compositor-vt.sh" /etc/greetd/config.toml; then
+# QDISTRO_OFFLINE_INSTALL=1: this runs in the kiwi chroot, where no system
+# manager is running and systemd answers runtime queries with a no-op exit 0.
+# The helper masks and verifies the mask on disk; it skips only the probes
+# that cannot be answered here. Detection is also automatic, but stating it
+# means the gate does not depend on which mounts kiwi happens to provide.
+if ! QDISTRO_OFFLINE_INSTALL=1 bash "$QD/scripts/install/harden-compositor-vt.sh" /etc/greetd/config.toml; then
     echo "[qdistro-image] FATAL: compositor VT is not exclusively the compositor's;" \
          "a getty could take it and revert seatd's K_OFF. Aborting build." >&2
     exit 1

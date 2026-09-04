@@ -51,6 +51,14 @@
 # thing that can take it away. Scoped to the compositor VT only: tty1 and
 # tty5+ are untouched.
 #
+# OFFLINE ROOTS
+# -------------
+# Also runs inside the kiwi chroot (image/config.sh), where no system manager
+# is running. There the mask symlinks are still written into the image's /etc
+# and are what the booted image obeys, so the guarantee is unchanged; only the
+# runtime probes (stop / is-active) are skipped, because in a chroot systemd
+# answers them with a no-op and exit 0 rather than the truth.
+#
 # Usage: harden-compositor-vt.sh [greetd-config.toml]
 #   Reads the compositor VT from `[terminal] vt = N`. Defaults to
 #   /etc/greetd/config.toml.
@@ -163,14 +171,33 @@ log "compositor VT is tty$VT (from $CFG)"
 
 UNITS="getty@tty$VT.service autovt@tty$VT.service"
 
+# Offline root (kiwi chroot in image/config.sh, or any install into a tree
+# whose PID 1 is not running)? Then runtime state does not exist yet and
+# CANNOT be probed: inside a chroot systemd prints "Running in chroot,
+# ignoring command 'is-active'" and exits **0**, so `is-active --quiet`
+# reports every unit as running. That false positive aborted the first
+# in-repo image build (iso/14 Phase A). Detect the offline root and assert
+# the persistent state instead — which is the only thing that governs what
+# the built image does when it actually boots.
+OFFLINE=0
+if [ "${QDISTRO_OFFLINE_INSTALL:-0}" = 1 ] \
+   || systemd-detect-virt --chroot --quiet 2>/dev/null \
+   || [ ! -d /run/systemd/system ]; then
+    OFFLINE=1
+    log "offline root (no running system manager): masking only, runtime probes skipped"
+fi
+
 # Stop first: masking an already-running instance leaves it running (and
-# holding the VT with a reset keyboard) until the next boot.
-for unit in $UNITS; do
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
-        log "stopping $unit (it is holding the compositor VT)"
-        systemctl stop "$unit" 2>/dev/null || warn "could not stop $unit"
-    fi
-done
+# holding the VT with a reset keyboard) until the next boot. Nothing runs in
+# an offline root, and `stop` there is the same chroot no-op as `is-active`.
+if [ "$OFFLINE" = 0 ]; then
+    for unit in $UNITS; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            log "stopping $unit (it is holding the compositor VT)"
+            systemctl stop "$unit" 2>/dev/null || warn "could not stop $unit"
+        fi
+    done
+fi
 
 # `systemctl mask` is idempotent (it reports "Created symlink" only the first
 # time) and upgrades a runtime-only mask to a persistent one. Disable first so
@@ -192,7 +219,19 @@ for unit in $UNITS; do
         warn "$unit is '$state', expected 'masked' — a login prompt can still take tty$VT"
         rc=1
     fi
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    # A mask is a symlink to /dev/null. Assert the artifact directly rather
+    # than trusting systemctl's answer: in an offline root `is-enabled` is
+    # the only one of these that reads the filesystem, and this check holds
+    # in both modes, so the mask is verified the same way either way.
+    link="$(readlink "/etc/systemd/system/$unit" 2>/dev/null || true)"
+    if [ "$link" != "/dev/null" ]; then
+        warn "/etc/systemd/system/$unit is not a mask symlink to /dev/null (got '${link:-none}')"
+        rc=1
+    fi
+    # Runtime state is real only where a system manager is running. Offline,
+    # there is nothing running to check and systemd answers 0 to every such
+    # question; the boot-time guarantee rests on the mask asserted above.
+    if [ "$OFFLINE" = 0 ] && systemctl is-active --quiet "$unit" 2>/dev/null; then
         warn "$unit is still active on the compositor VT"
         rc=1
     fi

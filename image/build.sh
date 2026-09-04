@@ -18,8 +18,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SIBLINGS="$(cd "$HERE/.." && pwd)"
-BUILD_DIR="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+# $HERE is <repo>/image, so the sibling-repo root is two levels up, not one
+# (iso/14 Phase A item 2). The one-level form predates the import of image/
+# into the qdistro repo and made every in-repo build fail its sibling check.
+SIBLINGS="$(cd "$HERE/../.." && pwd)"
+# /tmp is a tmpfs on the build hosts; a kiwi run does not fit in RAM.
+BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 SRC_OVERLAY="$HERE/root/root/qdistro-src"  # ends up at /root/qdistro-src in image
 
 sync_sources() {
@@ -34,12 +38,19 @@ sync_sources() {
             exit 2
         fi
         echo "[build] rsyncing $repo -> $SRC_OVERLAY/$repo"
+        # --exclude=image/root/root: with the corrected $SIBLINGS the qdistro
+        # repo contains this very overlay, so an unfiltered sync would copy
+        # the destination into itself.
+        # --exclude=ci/runs: gigabytes of untracked CI run artifacts in a
+        # working checkout; never part of the image.
         rsync -a --delete \
               --exclude=.git \
               --exclude=__pycache__ \
               --exclude='*.pyc' \
               --exclude=build \
               --exclude=node_modules \
+              --exclude=image/root/root \
+              --exclude=ci/runs \
               "$SIBLINGS/$repo/" "$SRC_OVERLAY/$repo/"
     done
     echo "[build] source overlay sizes:"
