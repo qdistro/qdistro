@@ -30,7 +30,14 @@ except ImportError:
 
 
 APP_FRIENDLY_NAME = "QTerminator"
-APP_SUPPORTED_KINDS = ("text/*", "application/octet-stream")
+# Only literal text is ever typed into the PTY, so only advertise text
+# kinds (same allowlist as qnotebook). application/octet-stream is
+# arbitrary bytes and has no honest meaning as "typed text" (iso2 `16` E1).
+APP_SUPPORTED_KINDS = ("text/plain", "text/markdown")
+
+# Hard cap on an inbound payload: a huge drop would stall the emulator
+# (there is no confirmation step before typing). Mirrors qnotebook.
+MAX_PAYLOAD_BYTES = 256 * 1024
 
 
 def maybe_install(window) -> object | None:
@@ -66,7 +73,13 @@ def maybe_install(window) -> object | None:
 
 
 def _deliver_to_active_terminal(window, kind: str, payload: str) -> None:
-    """Append received payload as typed text to the active terminal.
+    """Deliver a received payload to the active terminal as typed text.
+
+    The payload is forwarded byte-for-byte: no newline is synthesised.
+    Appending Enter would execute the payload at a shell prompt (or submit
+    it to a foreground program) on behalf of a remote peer, without the
+    user's confirmation (iso2 `16` E1). Treat it like a paste — the user
+    presses Enter.
 
     Best-effort: if the window doesn't expose a usable target we
     surface the drop via the status bar rather than raising into
@@ -74,18 +87,29 @@ def _deliver_to_active_terminal(window, kind: str, payload: str) -> None:
     in the broker's audit thread).
     """
     try:
+        if kind not in APP_SUPPORTED_KINDS:
+            _status(window, f"qdistro: refused {kind} payload (unsupported kind)")
+            return
+        if len(payload.encode("utf-8", "surrogateescape")) > MAX_PAYLOAD_BYTES:
+            _status(window, f"qdistro: refused {kind} payload "
+                            f"(> {MAX_PAYLOAD_BYTES} bytes)")
+            return
         term = getattr(window, "_active_terminal", None)
         if term is not None and hasattr(term, "send_text"):
-            text = payload if payload.endswith("\n") else payload + "\n"
-            term.send_text(text)
+            term.send_text(payload)
             return
-        bar = window.statusBar() if hasattr(window, "statusBar") else None
-        if bar is not None:
-            bar.showMessage(f"qdistro: dropped {kind} payload "
-                            f"({len(payload)} bytes) — no active terminal", 4000)
+        _status(window, f"qdistro: dropped {kind} payload "
+                        f"({len(payload)} bytes) — no active terminal")
     except Exception as e:  # noqa: BLE001
         print(f"[qterminator/qdistro] deliver failed: {e}",
               file=sys.stderr, flush=True)
+
+
+def _status(window, msg: str) -> None:
+    """Best-effort status-bar message; silent when the window has none."""
+    bar = window.statusBar() if hasattr(window, "statusBar") else None
+    if bar is not None:
+        bar.showMessage(msg, 4000)
 
 
 def send_to_targets(*, kind: str = "text/plain") -> list[dict]:
