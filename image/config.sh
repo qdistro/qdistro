@@ -104,24 +104,38 @@ INSTALLERS=(
     "scripts/install/install-portal-backend-for-vm.sh  $QD"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-    "scripts/install/install-recall-for-vm.sh          $QD"
+    # install-recall-for-vm.sh is deliberately NOT here: recall is cut from
+    # v1 and the installer refuses to run without QDISTRO_ENABLE_POSTV1_RECALL=1
+    # (exit 2). Under the fail-open loop that refusal was logged as "verify
+    # failed" on every build; under the fatal chain it would abort the build.
+    # The tester image ships without recall (todo/iso/14 Phase B).
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
 )
-# Each installer drops files (broker python, dbus policy, systemd units)
-# then tries to start the service via `systemctl enable --now ...` and
-# verify with `busctl` — both fail in a kiwi chroot because there's no
-# running systemd or system bus. The file-drop happens before the verify
-# step, so a non-zero exit here means "verify failed", not "install
-# failed". The installed image is functional; we record the warning and
-# move on. Audit each WARN if a verify.sh assertion fails downstream.
+# Offline-install contract (todo/iso/14 Phase B): every installer in the
+# chain sources scripts/install/lib/qdistro-offline.sh. With this flag set
+# AND the root corroborated as a chroot (positive evidence: kiwi bind-mounts
+# the builder's /proc here first), file drops and `systemctl enable` run as
+# normal while every operation that needs a running system manager or bus
+# (`start`, `daemon-reload`, `busctl`, `loginctl`, readiness probes) is
+# skipped with a logged "[offline] skipped" line. Any other non-zero exit is
+# a real failure, so the chain is FATAL: a missing installer or one that
+# fails aborts the build. The old fail-open loop ("verify failed, expected
+# in chroot") hid five installers failing per build and made a green build
+# mean nothing about completeness.
+export QDISTRO_OFFLINE_INSTALL=1
 for entry in "${INSTALLERS[@]}"; do
     # shellcheck disable=SC2086
     set -- $entry
     installer="$1"
     src_dir="$2"
-    if [ -x "$installer" ]; then
-        bash "$installer" "$src_dir" \
-            || echo "[qdistro-image]   WARN: $installer verify failed (expected in chroot)"
+    if [ ! -x "$installer" ]; then
+        echo "[qdistro-image] FATAL: chain installer missing or not executable: $installer" >&2
+        exit 1
+    fi
+    echo "[qdistro-image] -> $installer $src_dir"
+    if ! bash "$installer" "$src_dir"; then
+        echo "[qdistro-image] FATAL: $installer failed; the image would be incomplete. Aborting build." >&2
+        exit 1
     fi
 done
 
@@ -135,49 +149,14 @@ for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     fi
 done
 
-# install-qdwin-session-for-vm.sh uses `loginctl enable-linger` and
-# `runuser -l admin -c systemctl --user enable ...` — both require a
-# live logind / user-manager, so they abort in a kiwi chroot. Shadow
-# them with chroot-safe shims for the duration of the call.
-SHIMS="$(mktemp -d)"
-cat > "$SHIMS/loginctl" <<'SHIM'
-#!/bin/bash
-# kiwi-chroot shim: emulate `loginctl enable-linger <user>` via the
-# on-disk marker file instead of poking the (absent) logind socket.
-case "${1:-}" in
-    enable-linger)
-        install -d -m 0755 /var/lib/systemd/linger
-        : > "/var/lib/systemd/linger/${2:-admin}"
-        ;;
-    *) exit 0 ;;
-esac
-SHIM
-cat > "$SHIMS/runuser" <<'SHIM'
-#!/bin/bash
-# kiwi-chroot shim: the upstream call (install-qdwin-session-for-vm.sh) is
-#   runuser -l admin -c 'systemctl --user enable qdwin-session.target ydotoold.service'
-# We emulate `enable` by writing the WantedBy=default.target symlinks
-# directly under admin's default.target.wants (there is no live user
-# manager in the kiwi chroot).
-#
-# IMPORTANT: in the IMAGE / greeter path we do NOT auto-start
-# qdwin-session.target under default.target — the greeter's
-# qdwin-session-launcher starts the target EXPLICITLY after PAM auth, and
-# a default.target.wants/qdwin-session.target symlink would race it for
-# the wayland-1 socket. So this shim enables ydotoold (VM-test support)
-# but deliberately SKIPS the session target. (The spin/test-VM path keeps
-# the target auto-started via the installer's own enable — see
-# install-qdwin-session-for-vm.sh. This shim is the image-build override.)
-target=/home/admin/.config/systemd/user/default.target.wants
-mkdir -p "$target"
-for u in ydotoold.service ; do
-    src="/home/admin/.config/systemd/user/$u"
-    [ -f "$src" ] || continue
-    ln -sf "../$u" "$target/$u"
-done
-chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
-SHIM
-chmod +x "$SHIMS"/loginctl "$SHIMS"/runuser
+# install-qdwin-session-for-vm.sh honours the same offline contract
+# (linger marker written directly; user-unit wants-symlinks written
+# directly). QDWIN_SESSION_AUTOSTART=0: in the greeter image
+# qdwin-session.target must NOT be pulled in by default.target -- the
+# greeter's qdwin-session-launcher starts it explicitly after PAM auth, and
+# an auto-started target would race it for the wayland-1 socket. (This
+# replaces the loginctl/runuser shims that used to be interposed on PATH.)
+export QDWIN_SESSION_AUTOSTART=0
 # install-qdwin-session-for-vm.sh does `usermod -aG ...,seat admin`, assuming the
 # `seat` group already exists (its comment says fresh-vm-bootstrap.sh creates it).
 # The kiwi image build never runs fresh-vm-bootstrap.sh, so create the libseat
@@ -188,8 +167,7 @@ getent group seat >/dev/null || groupadd -r seat
 # but unset it explicitly so an operator's inherited test environment cannot
 # leak it into a shipped unit.
 unset QDWIN_ENABLE_SHELL_CAPTURE
-PATH="$SHIMS:$PATH" bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
-rm -rf "$SHIMS"
+bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
 
 install -d -m 0755 /etc/greetd
 

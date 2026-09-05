@@ -56,6 +56,14 @@
 
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 QDSHELL_SRC=${1:-/root/qdistro-src/qdshell}
 
 if [ ! -d "$QDSHELL_SRC" ]; then
@@ -70,7 +78,7 @@ fi
 # (which has no logind seat of its own). The group is created by
 # fresh-vm-bootstrap.sh's seatd setup step.
 usermod -aG video,input,render,seat admin
-loginctl enable-linger admin
+linger_enable admin
 
 # 2. weston.ini: qdwin-shell.so + drm backend so the VM console sees
 # the framebuffer.
@@ -501,10 +509,26 @@ EOF
 # (not the services directly): the target Requires= the compositor and
 # Wants= the shell, so enabling + starting the target brings up the whole
 # session in the right order. ydotoold is VM-test-only support, enabled
-# independently. The greeter image must remove the resulting
-# default.target.wants/qdwin-session.target symlink (the greeter starts
-# the target explicitly) — image/config.sh handles that.
-runuser -l admin -c 'systemctl --user enable qdwin-session.target ydotoold.service' \
+# independently.
+#
+# QDWIN_SESSION_AUTOSTART=0 (the greeter image, set by image/config.sh)
+# leaves qdwin-session.target OUT of default.target.wants: there the
+# greeter's qdwin-session-launcher starts the target explicitly after PAM
+# auth, and an auto-started target would race it for the wayland-1 socket.
+# The headless spin-test VM keeps the default (1). This replaces the
+# runuser/loginctl shims image/config.sh used to interpose.
+#
+# Offline (kiwi chroot) the wants-symlinks are written directly; live, the
+# user manager does it. Live failure stays a WARN as before: on a fresh VM
+# admin's manager may not be up yet, and linger brings the units up later.
+SESSION_UNITS="ydotoold.service"
+if [ "${QDWIN_SESSION_AUTOSTART:-1}" = 1 ]; then
+    SESSION_UNITS="qdwin-session.target $SESSION_UNITS"
+else
+    echo "QDWIN_SESSION_AUTOSTART=0: qdwin-session.target NOT enabled under default.target (greeter starts it)"
+fi
+# shellcheck disable=SC2086
+user_unit_enable admin users $SESSION_UNITS \
     2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
 
 echo "qdwin session installed (deploy-named units: qdwin-compositor.service + qdshell.service + qdwin-session.target)."

@@ -18,6 +18,14 @@
 # URL + HMAC secret (Phase-8 MVP: no default URL).
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/phone-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-phone] missing source dir $SRC" >&2
@@ -46,6 +54,6 @@ chmod 0755 "$DEST_BIN/qdistro-phone"
 
 install -m 0644 "$SRC/qdistro-phone.service" "$DEST_SYSD/"
 
-systemctl daemon-reload >/dev/null 2>&1 || true
+sd_daemon_reload >/dev/null 2>&1 || true
 
 echo "[install-phone] OK"

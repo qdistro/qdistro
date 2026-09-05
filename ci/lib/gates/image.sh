@@ -42,6 +42,20 @@ gate_image() {
             [ -d "$cand" ] && { static_root="$cand"; break; }
         done
     fi
+    # No extracted tree but a built .raw: extract the checklist's paths from
+    # it (image/extract-root.sh, guestfish copy-out; seconds, ~100 MB) so the
+    # static stage runs on the artifact rather than being blocked (Phase B).
+    if [ -z "$static_root" ] && [ -f "$build_dir/qdistro.x86_64-0.1.0.raw" ] && [ -x "$IMAGE_DIR/extract-root.sh" ]; then
+        local ex_log="$RDIR/host/image-extract-root.log"
+        mkdir -p "$(dirname "$ex_log")"
+        log "image: extracting checklist paths from $build_dir/qdistro.x86_64-0.1.0.raw"
+        if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" > "$ex_log" 2>&1; then
+            static_root="$build_dir/extracted"
+        else
+            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection"
+            return "$EXIT_BUILD"
+        fi
+    fi
     # Run the checker whenever the user EXPLICITLY passed --root (even a bad
     # path: verify-contents.sh returns 2 for a missing/non-dir root, which must
     # surface as a FAIL, not be masked as a non-failing record_blocked). Only

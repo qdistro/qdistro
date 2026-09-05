@@ -7,6 +7,14 @@
 # Usage: $0 [SRC]      # SRC defaults to /root/qdistro-src/qdistro/session_manager
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/qdistro-src/qdistro/session_manager}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-session-manager.service
@@ -87,7 +95,14 @@ install -d -o root -g root -m 0700 /var/lib/qdistro/lineage
 # reaps orphans.
 _qd_admin_user="admin"
 if id "$_qd_admin_user" >/dev/null 2>&1; then
-    install -d -o "$_qd_admin_user" -g "$_qd_admin_user" -m 0700 \
+    # The admin user's PRIMARY group, not a group literally named "admin":
+    # the image creates admin with primary group `users`, and `install -g
+    # admin` then fails -- which, under set -e, aborted this installer
+    # before its unit and bus policy were dropped, and the image build's
+    # old fail-open loop hid that as "verify failed" (found by iso/14
+    # Phase B; run 19's image shipped without qdistro-session-manager.service).
+    _qd_admin_group="$(id -gn "$_qd_admin_user")"
+    install -d -o "$_qd_admin_user" -g "$_qd_admin_group" -m 0700 \
         /var/lib/qdistro/disposable-export
 else
     echo "install-session-manager: WARN: admin user '$_qd_admin_user' absent;" \
@@ -196,12 +211,10 @@ if [ -r /etc/qdistro/silos.yaml ]; then
     ' /etc/qdistro/silos.yaml 2>/dev/null || true)
 fi
 
-systemctl reload dbus-broker.service 2>/dev/null \
-    || systemctl reload dbus.service 2>/dev/null \
-    || true
+sd_reload_dbus
 
-systemctl daemon-reload
-systemctl enable --now qdistro-session-manager.service
+sd_daemon_reload
+sd_enable_now qdistro-session-manager.service
 # `enable --now` is a no-op against an ALREADY-RUNNING daemon, so on an
 # upgrade the new file lands on disk and the old code keeps serving from
 # memory — and the verify below passes, because the bus name is claimed by
@@ -211,19 +224,23 @@ systemctl enable --now qdistro-session-manager.service
 # stopped one — so it restarts whatever `enable --now` just left running,
 # which on a first install is a cheap second start and on an upgrade is the
 # whole point. Mirrors install-user-relay-for-vm.sh, which already did this.
-systemctl try-restart qdistro-session-manager.service 2>/dev/null || true
+sd_try_restart qdistro-session-manager.service 2>/dev/null || true
 
-for _ in 1 2 3 4 5; do
-    busctl list --no-pager 2>/dev/null \
-        | grep -q org.qdistro.SessionManager1 && break
-    sleep 0.5
-done
+if is_offline; then
+    echo "[offline] skipped (needs a running system bus): probe org.qdistro.SessionManager1"
+else
+    for _ in 1 2 3 4 5; do
+        busctl list --no-pager 2>/dev/null \
+            | grep -q org.qdistro.SessionManager1 && break
+        sleep 0.5
+    done
 
-if ! busctl list --no-pager 2>/dev/null \
-        | grep -q org.qdistro.SessionManager1; then
-    echo "ERROR: qdistro-session-manager failed to claim bus name" >&2
-    journalctl -u qdistro-session-manager.service --no-pager -n 30 >&2
-    exit 3
+    if ! busctl list --no-pager 2>/dev/null \
+            | grep -q org.qdistro.SessionManager1; then
+        echo "ERROR: qdistro-session-manager failed to claim bus name" >&2
+        journalctl -u qdistro-session-manager.service --no-pager -n 30 >&2
+        exit 3
+    fi
+
+    echo "session manager ready on org.qdistro.SessionManager1"
 fi
-
-echo "session manager ready on org.qdistro.SessionManager1"

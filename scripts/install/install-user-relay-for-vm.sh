@@ -31,6 +31,14 @@
 # Usage: $0 [SRC]     # SRC defaults to /root/qdistro-src/qdistro/user_relay
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/qdistro-src/qdistro/user_relay}
 DESTDIR=${DESTDIR:-}
 DEST_LIB=$DESTDIR/usr/libexec/qdistro
@@ -82,11 +90,9 @@ install "${OWN[@]}" -m 0644 "$SRC/org.qdistro.UserRelay.conf" "$POLICY"
 install "${OWN[@]}" -m 0644 "$SRC/qdistro-user-relay@.service" "$UNIT_TEMPLATE"
 
 if [ -z "$DESTDIR" ]; then
-    systemctl reload dbus-broker.service 2>/dev/null \
-        || systemctl reload dbus.service 2>/dev/null \
-        || true
+    sd_reload_dbus
 
-    systemctl daemon-reload
+    sd_daemon_reload
 
     # Upgrades: a relay that is ALREADY running holds the old code in
     # memory, so replacing the file on disk changes nothing until the
@@ -95,8 +101,7 @@ if [ -z "$DESTDIR" ]; then
     # — it never starts a dormant uid's relay, which is
     # qdshell-session-launcher's job. Best-effort: on a first install
     # there is nothing to restart.
-    systemctl try-restart 'qdistro-user-relay@*.service' 2>/dev/null || true
+    sd_try_restart 'qdistro-user-relay@*.service' 2>/dev/null || true
 fi
 
-echo "qdistro-user-relay template installed; start per-uid with: " \
-     "systemctl start qdistro-user-relay@<uid>.service"
+echo "qdistro-user-relay template installed; start per-uid with: systemctl start qdistro-user-relay@<uid>.service"

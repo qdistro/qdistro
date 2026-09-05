@@ -12,6 +12,14 @@
 # so install order is broker → qsu.
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 QSU_SRC=${1:-/root/qdistro-src/qdistro/qsu}
 DEST_LIB=/usr/local/lib/qdistro
 DEST_BIN=/usr/local/bin
@@ -143,21 +151,26 @@ fi
 install -m 0644 "$QSU_SRC/qdistro-root-exec.socket"  "$SOCKET_UNIT"
 install -m 0644 "$QSU_SRC/qdistro-root-exec.service" "$SERVICE_UNIT"
 
-systemctl daemon-reload
-systemctl enable --now qdistro-root-exec.socket >/dev/null
+sd_daemon_reload
+sd_enable_now qdistro-root-exec.socket >/dev/null
 
 # 4. Verify the socket is listening. Service is socket-activated so
 #    .service unit may be inactive until first connect — that's fine.
-for _ in 1 2 3 4 5; do
-    if [ -S /run/qdistro-root-exec/sock ]; then
-        break
+#    Live only: offline nothing was started.
+if is_offline; then
+    echo "[offline] skipped (needs a running system manager): probe /run/qdistro-root-exec/sock"
+else
+    for _ in 1 2 3 4 5; do
+        if [ -S /run/qdistro-root-exec/sock ]; then
+            break
+        fi
+        sleep 0.5
+    done
+    if [ ! -S /run/qdistro-root-exec/sock ]; then
+        echo "ERROR: /run/qdistro-root-exec/sock did not appear" >&2
+        journalctl -u qdistro-root-exec.socket --no-pager -n 20 >&2 || true
+        exit 3
     fi
-    sleep 0.5
-done
-if [ ! -S /run/qdistro-root-exec/sock ]; then
-    echo "ERROR: /run/qdistro-root-exec/sock did not appear" >&2
-    journalctl -u qdistro-root-exec.socket --no-pager -n 20 >&2 || true
-    exit 3
-fi
 
-echo "qsu ready (socket /run/qdistro-root-exec/sock + /usr/local/bin/qsu)"
+    echo "qsu ready (socket /run/qdistro-root-exec/sock + /usr/local/bin/qsu)"
+fi

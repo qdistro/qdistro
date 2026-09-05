@@ -25,6 +25,9 @@ _IS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=lib/qdistro-profile.sh
 . "$_IS_DIR/lib/qdistro-profile.sh"
 resolve_profile || exit 2
+# shellcheck source=lib/qdistro-offline.sh
+. "$_IS_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
 
 SRC=${1:-/root/snapshots-src}
 if [ ! -d "$SRC" ]; then
@@ -116,6 +119,6 @@ if [ -f "$SRC/backup.conf.example" ]; then
     install -m 0644 "$SRC/backup.conf.example" /etc/qdistro/backup.conf.example
 fi
 
-systemctl daemon-reload >/dev/null 2>&1 || true
+sd_daemon_reload >/dev/null 2>&1 || true
 
 echo "[install-snapshots] OK"

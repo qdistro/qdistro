@@ -68,11 +68,16 @@ REQUIRED_OK=0
 OPT_TOTAL=0
 OPT_OK=0
 
+# present <path> — exists, OR is a symlink. systemd wants-links are absolute
+# (`-> /etc/systemd/user/foo.service`) and dangle when the tree is inspected
+# from the host, but the link is the artifact the image ships.
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+
 # check_req <label> <test-expr-as-path> — a path under $ROOT that must exist
 check_req() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if [ -e "$full" ]; then
+    if present "$full"; then
         printf 'OK   %s: %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
@@ -89,7 +94,7 @@ check_req_any() {
     for rel in "$@"; do
         full="$ROOT/${rel#/}"
         tried+=("$full")
-        if [ -e "$full" ]; then
+        if present "$full"; then
             printf 'OK   %s: %s\n' "$label" "$full"
             REQUIRED_OK=$((REQUIRED_OK + 1))
             hit=1
@@ -106,7 +111,7 @@ check_req_any() {
 check_opt() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    if [ -e "$full" ]; then
+    if present "$full"; then
         printf 'OK   %s: %s\n' "$label" "$full"
         OPT_OK=$((OPT_OK + 1))
     else
@@ -140,6 +145,20 @@ check_glob_opt() {
         OPT_OK=$((OPT_OK + 1))
     else
         printf 'WARN %s (optional): %s\n' "$label" "$ROOT/${glob#/}"
+    fi
+}
+
+# check_absent <label> <rel> — a path that must NOT exist (a wiring the image
+# deliberately leaves out); present => FAIL
+check_absent() {
+    local label=$1 rel=$2 full="$ROOT/${2#/}"
+    REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+    if ! present "$full"; then
+        printf 'OK   %s: absent as required: %s\n' "$label" "$full"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'FAIL %s: must be absent but exists: %s\n' "$label" "$full"
+        FAIL=1
     fi
 }
 
@@ -286,6 +305,77 @@ else
     check_opt "qfileman .desktop"  /usr/share/applications/qfileman.desktop
     check_opt "qfileman metainfo"  /usr/share/metainfo/qfileman.metainfo.xml
 fi
+
+echo
+echo "-- installer chain: one row per step (todo/iso/14 Phase B) --"
+# Each image/config.sh chain step must have dropped the artifacts it exists
+# for. Under the old fail-open loop an installer could die half-way and the
+# build still went green; these rows are the static half of "a green build
+# means a complete image" (the fatal chain is the other half). Keep in the
+# chain's order. A step's row names its unit(s), policy and main binary/module.
+check_req "[broker] unit"              /etc/systemd/system/qdistro-admin-broker.service
+check_req "[broker] dbus-reload unit"  /etc/systemd/system/qdistro-dbus-reload.service
+check_req "[broker] bus policy"        /etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
+check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker.py
+check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
+check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
+check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf
+check_req "[session-manager] daemon module" /usr/libexec/qdistro/qdistro_session_manager.py
+check_req "[session-manager] egress module"  /usr/libexec/qdistro/qdistro_silo_egress.py
+check_req "[session-manager] qdshell-session template" /usr/lib/systemd/system/qdshell-session@.service
+check_req "[session-manager] tier2 silo unit" /etc/systemd/system/qdistro-tier2-silo@.service
+check_req "[session-manager] podapp unit" /etc/systemd/system/qdistro-podapp@.service
+check_req "[session-manager] silo-launch CLI" /usr/local/bin/qdistro-silo-launch
+check_req "[session-manager] work silo link" /etc/systemd/system/qdshell-session-work@.service
+check_req "[polkit-agent] user unit"   /etc/systemd/user/qdistro-polkit-agent.service
+check_req "[polkit-agent] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-polkit-agent.service
+check_req "[polkit-agent] module"      /usr/libexec/qdistro/qdistro_polkit_agent.py
+check_req "[polkit-agent] prompt helper" /usr/local/bin/qdistro-polkit-prompt
+check_req "[pwd] unit"                 /etc/systemd/system/qdistro-pwd.service
+check_req "[pwd] bus policy"           /etc/dbus-1/system.d/org.qdistro.Pwd1.conf
+check_req "[pwd] daemon module"        /usr/libexec/qdistro/qdistro_pwd_daemon.py
+check_req "[pwd] polkit action"        /usr/share/polkit-1/actions/org.qdistro.pwd.policy
+check_req "[pwd] portal-keys unlock user unit" /etc/systemd/user/qdistro-portal-keys-unlock.service
+check_req "[pwd] portal-keys unlock wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-portal-keys-unlock.service
+check_req "[pwd] PortalSecret portal"  /usr/share/xdg-desktop-portal/portals/org.qdistro.PortalSecret.portal
+check_req "[pwd] CLI"                  /usr/local/bin/qdistro-pwd-get
+check_req "[qsu] socket unit"          /etc/systemd/system/qdistro-root-exec.socket
+check_req "[qsu] service unit"         /etc/systemd/system/qdistro-root-exec.service
+check_req "[qsu] root-exec module"     /usr/local/lib/qdistro/qdistro_root_exec.py
+check_req "[media] socket unit"        /etc/systemd/system/qdistro-media-exec.socket
+check_req "[media] service unit"       /etc/systemd/system/qdistro-media-exec.service
+check_req "[media] exec module"        /usr/local/lib/qdistro/qdistro_media_exec.py
+check_req "[multimachine] broker module" /usr/local/lib/qdistro/multimachine/mm_broker.py
+check_req "[multimachine] broker CLI"  /usr/local/bin/qdistro-mm-broker
+check_req "[browser-bridge] host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
+check_req "[browser-bridge] downloads user unit" /etc/systemd/user/qdistro-downloads.service
+check_req "[browser-bridge] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-downloads.service
+check_req "[portal-backend] backend module" /usr/lib/qdistro/daemons/qdistro_portal_backend.py
+check_req "[portal-backend] user unit"  /etc/systemd/user/qdistro-portal-backend.service
+check_req "[portal-backend] portal"     /usr/share/xdg-desktop-portal/portals/qdistro.portal
+check_req "[portal-backend] bus service" /usr/share/dbus-1/services/org.freedesktop.impl.portal.qdistro.service
+check_req "[phone] unit"               /etc/systemd/system/qdistro-phone.service
+check_req "[phone] daemon module"      /usr/libexec/qdistro/qdistro_phone_daemon.py
+check_req "[print-proxy] unit"         /etc/systemd/system/qdistro-print-proxy.service
+check_req "[print-proxy] proxy binary" /usr/local/bin/qdistro-print-proxy
+check_req "[print-proxy] polkit action" /usr/share/polkit-1/actions/org.qdistro.print.policy
+check_req "[print-proxy] VM template"  /usr/share/qdistro/print-vm/domain-template.xml
+check_req "[snapshots] backup unit"    /etc/systemd/system/qdistro-backup.service
+check_req "[snapshots] backup timer"   /etc/systemd/system/qdistro-backup.timer
+check_req "[snapshots] service module" /usr/libexec/qdistro/qdistro_backup_service.py
+check_req "[snapshots] CLI"            /usr/local/bin/qdistro-backup
+# Recall is cut from v1 and deliberately not in the chain.
+check_absent "[recall] not shipped"    /etc/systemd/system/qdistro-recall@.timer
+# qdwin session installer (called directly by config.sh, same contract).
+check_req "[qdwin-session] compositor user unit" /home/admin/.config/systemd/user/qdwin-compositor.service
+check_req "[qdwin-session] admin linger marker"  /var/lib/systemd/linger/admin
+check_req "[qdwin-session] ydotoold wired"       /home/admin/.config/systemd/user/default.target.wants/ydotoold.service
+# The greeter starts the session target; default.target must not (race for
+# wayland-1). QDWIN_SESSION_AUTOSTART=0 in config.sh is what guarantees it.
+check_absent "[qdwin-session] target NOT auto-started" /home/admin/.config/systemd/user/default.target.wants/qdwin-session.target
+check_req "[qdwin-session] greeter launcher"     /usr/local/bin/qdwin-session-launcher
+# qdlocker: the binary itself, not just its unit and wants link (Phase B item 3).
+check_req "[qdlocker] binary"          /usr/bin/qdlocker
 
 echo
 echo "== summary =="

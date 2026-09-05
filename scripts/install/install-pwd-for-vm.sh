@@ -26,6 +26,14 @@
 # `useradd --system qdistro-pwd` + chown of the dirs.
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/pwd-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-pwd] missing source dir $SRC" >&2
@@ -154,8 +162,12 @@ fi
 # polkitd reads its actions+rules at startup AND watches for changes;
 # but a brand-new install doesn't always see the inotify event before
 # the daemon's first CheckAuthorization call, so kick it.
-systemctl reload polkit.service 2>/dev/null || \
-    systemctl restart polkit.service 2>/dev/null || true
+if is_offline; then
+    echo "[offline] skipped (needs a running system manager): reload polkit.service"
+else
+    systemctl reload polkit.service 2>/dev/null || \
+        systemctl restart polkit.service 2>/dev/null || true
+fi
 
 # tpm2-tools is a runtime dep for v2 / TPM-sealed vaults. The daemon
 # auto-falls-back to v1 / scrypt if absent — install is best-effort.
@@ -194,21 +206,25 @@ fi
 # call ReloadConfig unconditionally via busctl (the mechanism that
 # actually works on dbus-broker 35.x — see spec/30 §"dbus-broker
 # policy-reload mystery").
-systemctl daemon-reload
-busctl --system --quiet call \
-    org.freedesktop.DBus /org/freedesktop/DBus \
-    org.freedesktop.DBus ReloadConfig 2>/dev/null \
-    || systemctl reload dbus-broker.service 2>/dev/null \
-    || systemctl reload dbus.service 2>/dev/null \
-    || true
+sd_daemon_reload
+if is_offline; then
+    echo "[offline] skipped (needs a running system bus): org.freedesktop.DBus.ReloadConfig"
+else
+    busctl --system --quiet call \
+        org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus ReloadConfig 2>/dev/null \
+        || systemctl reload dbus-broker.service 2>/dev/null \
+        || systemctl reload dbus.service 2>/dev/null \
+        || true
+fi
 # `--now` may fail on a fresh VM if the dbus policy hasn't fully
 # propagated yet, or if a TPM/keyring dependency is missing. The
 # sanity-probe block below handles a delayed start with a warning;
 # allow this line to fail without taking the whole bootstrap down
 # (set -e at the top of the script would otherwise abort here, which
 # breaks `spin-test-vm.sh` chains that don't need pwd to be live).
-systemctl enable --now qdistro-pwd.service || \
-    echo "[install-pwd] WARN: enable --now returned non-zero; sanity probe will retry" >&2
+sd_enable_now qdistro-pwd.service || \
+    echo "[install-pwd] WARN: enable/start returned non-zero; sanity probe will retry" >&2
 
 # Per-user login oneshot that unlocks the portal-keys vault. Installed
 # since Phase-8.3 and enabled by NOTHING until 2026-07-26, so the
@@ -233,15 +249,20 @@ systemctl --global enable qdistro-portal-keys-unlock.service >/dev/null 2>&1 || 
     echo "[install-pwd] WARN: could not globally enable qdistro-portal-keys-unlock.service" >&2
 
 # Sanity probe — broker will be active+listening within ~1s normally.
-for _ in 1 2 3 4 5; do
-    if systemctl is-active --quiet qdistro-pwd.service; then
-        break
+# Live only: in a chroot systemd answers is-active with a no-op exit 0.
+if is_offline; then
+    echo "[offline] skipped (needs a running system manager): probe qdistro-pwd.service is-active"
+else
+    for _ in 1 2 3 4 5; do
+        if systemctl is-active --quiet qdistro-pwd.service; then
+            break
+        fi
+        sleep 1
+    done
+    if ! systemctl is-active --quiet qdistro-pwd.service; then
+        echo "[install-pwd] WARN: qdistro-pwd.service not active after install" >&2
+        journalctl -u qdistro-pwd.service --no-pager -n 30 >&2 || true
     fi
-    sleep 1
-done
-if ! systemctl is-active --quiet qdistro-pwd.service; then
-    echo "[install-pwd] WARN: qdistro-pwd.service not active after install" >&2
-    journalctl -u qdistro-pwd.service --no-pager -n 30 >&2 || true
 fi
 
 echo "[install-pwd] OK — qdistro-pwd installed at $DEST_LIB"

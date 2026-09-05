@@ -15,6 +15,14 @@
 # `systemctl --user enable --now` for the admin uid (admin).
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/polkit-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-polkit-agent] missing source dir $SRC" >&2
@@ -70,7 +78,7 @@ fi
 # running user manager, so it cannot fail for this reason. It applies to every
 # uid, which is correct and costs nothing: the unit is WantedBy the desktop
 # session target, and a silo uid never reaches it.
-systemctl daemon-reload 2>/dev/null || true
+sd_daemon_reload 2>/dev/null || true
 if ! systemctl --global enable qdistro-polkit-agent.service >/dev/null 2>&1; then
     echo "[install-polkit-agent] ERROR: could not enable qdistro-polkit-agent.service" >&2
     echo "       the polkit agent would be installed and never started" >&2
@@ -84,7 +92,9 @@ fi
 # on.
 ADMIN_UID=1000
 ADMIN_USER=admin
-if id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
+if is_offline; then
+    echo "[offline] skipped (needs a running user manager): start qdistro-polkit-agent.service for admin"
+elif id "$ADMIN_USER" >/dev/null 2>&1 && [ -d "/run/user/$ADMIN_UID" ]; then
     runuser -u "$ADMIN_USER" -- env \
         XDG_RUNTIME_DIR="/run/user/$ADMIN_UID" \
         systemctl --user start qdistro-polkit-agent.service >/dev/null 2>&1 \
