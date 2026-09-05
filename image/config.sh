@@ -24,10 +24,40 @@ echo "[qdistro-image] kiwi config.sh: $kiwi_iname-$kiwi_iversion"
 SRC=/root/qdistro-src
 QD="$SRC/qdistro"
 
+# The build profile, validated ONCE: dev (passwordless sudo, the tester
+# image) or release (the safe default). Every later gate -- sudoers, the
+# release stamp -- reads this variable, so the accepted set is stated here
+# and nowhere else; build-in-vm.sh applies the same check on the host.
+QDISTRO_IMAGE_PROFILE="${QDISTRO_PROFILE:-release}"
+case "$QDISTRO_IMAGE_PROFILE" in
+    dev|release) ;;
+    *) echo "[qdistro-image] FATAL: QDISTRO_PROFILE must be dev or release, got: $QDISTRO_IMAGE_PROFILE" >&2; exit 1 ;;
+esac
+
 if [ -f /etc/os-release.qdistro ]; then
     rm -f /etc/os-release
     mv /etc/os-release.qdistro /etc/os-release
 fi
+
+# /etc/qdistro/release: what this image was built from (todo/iso/14 Phase C).
+# build.sh strips .git while syncing the five source repos into the overlay,
+# so the commits can only be read on the host at sync time; sync_sources
+# writes them, with the Tumbleweed snapshot id the repositories are pinned
+# to, into /root/qdistro-source-manifest. Version comes from kiwi's own
+# /.profile and must agree with os-release; profile is this build's.
+# FATAL if the manifest is missing or short: an image that cannot say what
+# went in is not a tester image, and a bug report needs these lines.
+# kiwi imports only the description's scripts into the chroot, not lib/; the
+# synced qdistro source tree carries the same file, from the same checkout.
+. "$QD/image/lib/release-stamp.sh"
+if ! qdistro_write_release /root/qdistro-source-manifest /etc/os-release \
+        /etc/qdistro/release "$kiwi_iversion" "$QDISTRO_IMAGE_PROFILE"; then
+    echo "[qdistro-image] FATAL: could not write /etc/qdistro/release. Aborting build." >&2
+    exit 1
+fi
+rm -f /root/qdistro-source-manifest
+echo "[qdistro-image] /etc/qdistro/release:"
+sed 's/^/[qdistro-image]   /' /etc/qdistro/release
 
 # jeos-firstboot fights us for tty1 and blocks multi-user.target on
 # openSUSE JeOS-derived images. Mask before greetd takes over.
@@ -55,13 +85,12 @@ systemctl enable qemu-guest-agent.service
 # through qsu / the broker's scoped approval; admin keeps password-required
 # sudo via wheel membership. Set QDISTRO_PROFILE=dev when baking a disposable
 # developer image to restore the passwordless rule.
-QDISTRO_IMAGE_PROFILE="${QDISTRO_PROFILE:-release}"
 if [ "$QDISTRO_IMAGE_PROFILE" = dev ]; then
     install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
     echo "[qdistro-image] WARN: dev profile — baked passwordless sudoers (admin NOPASSWD: ALL); NOT for release"
 else
     rm -f /etc/sudoers.d/99-admin
-    echo "[qdistro-image] hardened profile ($QDISTRO_IMAGE_PROFILE): no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
+    echo "[qdistro-image] release profile: no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
 fi
 
 # Build the three sibling projects out of /root/qdistro-src/.

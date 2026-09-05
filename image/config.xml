@@ -2,11 +2,33 @@
 
 <!--
   qdistro kiwi description.
-  Builds a Tumbleweed-derived OEM disk image that lays itself onto
-  internal storage on first boot. See build.sh.
+  Builds the qdistro disk image: a Tumbleweed-derived OEM raw that boots
+  as-is from a USB stick or as a VM disk (todo/iso/13). See build.sh.
 -->
 
 <image schemaversion="8.4" name="qdistro">
+  <!-- ===== TUMBLEWEED SNAPSHOT PIN ==========================================
+       The build is pinned to one Tumbleweed snapshot so a rebuild inside
+       download.opensuse.org's ~4-week history window is exact, and a bug
+       report can name the snapshot it ran (todo/iso/13, decided 2026-09-04).
+       Bump the id deliberately per tester release: it is the 8-digit
+       directory under https://download.opensuse.org/history/ and MUST be the
+       same in both source paths below. build.sh reads it from here (the
+       only place it is written) for the artifact name and /etc/qdistro/release,
+       and refuses to build if the two paths disagree. kiwi's XML parser
+       rejects entities, so there is no way to spell it once.
+       HTTPS transport (J25): plain http:// leaves repo metadata + RPMs open
+       to a MITM/poisoned-mirror substituting a trojaned package into the
+       baked image. kiwi still verifies the openSUSE repo GPG signatures;
+       https adds transport integrity + confidentiality on top.
+       ====================================================================== -->
+  <repository type="rpm-md" alias="Tumbleweed-OSS">
+    <source path="https://download.opensuse.org/history/20260902/tumbleweed/repo/oss/"/>
+  </repository>
+  <repository type="rpm-md" alias="Tumbleweed-NonOSS">
+    <source path="https://download.opensuse.org/history/20260902/tumbleweed/repo/non-oss/"/>
+  </repository>
+
   <description type="system">
     <author>qdistro contributors</author>
     <contact>kjan80@gmail.com</contact>
@@ -22,11 +44,18 @@
     <timezone>UTC</timezone>
     <rpm-excludedocs>true</rpm-excludedocs>
 
+    <!-- installiso="false": the tester release is the raw alone (todo/iso/13).
+         A tester who boots an install ISO from a stick is offered a wipe of
+         their internal disk. The installable ISO is post-v1 and gets a kiwi
+         profile when it returns; installboot and install-test.sh stay for it.
+         bundle_format names the release artifact <name>-<version>-<id>.raw.xz
+         when build.sh runs `kiwi-ng result bundle` with the snapshot as bundle id. -->
     <type image="oem"
           filesystem="btrfs"
           firmware="uefi"
-          installiso="true"
+          installiso="false"
           installboot="install"
+          bundle_format="%N-%v-%I"
           kernelcmdline="quiet"
           efipartsize="512">
       <!-- kernelcmdline deliberately does NOT carry a systemd.default_vt
@@ -49,13 +78,26 @@
            default Install entry, but the destroy-confirm still stops it
            short of touching the disk. -->
       <bootloader name="grub2" timeout="30" timeout_style="menu"/>
+      <!-- Sizes (todo/iso/13, decided 2026-09-04): the raw is 28 GiB
+           (28672 MiB = 30,064,771,072 bytes) so it fits nominal "32 GB"
+           media (~31.0 GB usable) with ~0.9 GB to spare, and a VM booting
+           the raw directly gets that filesystem without first-boot repart.
+           No oem-systemsize: it capped the root at 20 GiB on first boot and
+           left the rest of the stick unpartitioned; with the raw at 28 GiB,
+           repart's only job is growing onto a bigger stick. oem-resize is
+           left at its default, which runs on EVERY boot (kiwi's opt-out is
+           the counter-intuitive <oem-resize-once>false</oem-resize-once>):
+           harmless when there is nothing to grow, and a stick copied to a
+           larger one grows again. 2 GiB swap is created by kiwi at build
+           time, not after repart. kiwi's `compressed` attribute is valid
+           only for pxe/kis types, so build.sh xz-compresses the raw via
+           `kiwi-ng result bundle` instead. -->
       <oemconfig>
-        <oem-systemsize>20480</oem-systemsize>
         <oem-swap>true</oem-swap>
         <oem-swapsize>2048</oem-swapsize>
         <oem-skip-verify>true</oem-skip-verify>
       </oemconfig>
-      <size unit="M">20480</size>
+      <size unit="M">28672</size>
       <systemdisk name="qdistro">
         <volume name="home"/>
         <volume name="root" copy_on_write="false"/>
@@ -75,17 +117,6 @@
     <user name="user"  password="$6$PMKXCoJ3YkAcBLHW$sDLRaPFepJ6L.UL/zvjDpIiSwcRbewvCXRGbbRaqS7MMy20OKGefi/HRlp7RC9xMV/TpmblrRhhIsS4DAr6Jl/" pwdformat="encrypted"
           home="/home/user"  id="1001" groups="users,video,audio,input"/>
   </users>
-
-  <!-- HTTPS transport (J25): plain http:// leaves repo metadata + RPMs open to
-       a MITM/poisoned-mirror substituting a trojaned package into the baked
-       image. kiwi still verifies the openSUSE repo GPG signatures; https adds
-       transport integrity + confidentiality on top. -->
-  <repository type="rpm-md" alias="Tumbleweed-OSS">
-    <source path="https://download.opensuse.org/tumbleweed/repo/oss/"/>
-  </repository>
-  <repository type="rpm-md" alias="Tumbleweed-NonOSS">
-    <source path="https://download.opensuse.org/tumbleweed/repo/non-oss/"/>
-  </repository>
 
   <packages type="image">
     <!-- base system -->

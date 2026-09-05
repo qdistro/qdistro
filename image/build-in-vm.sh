@@ -14,14 +14,18 @@
 #   4. Starts the VM, waits for qga.
 #   5. Inside the VM: zypper in python3-kiwi + systemdeps, format/mount
 #      /dev/vdb as /build, run kiwi-ng system build.
-#   6. virt-copy-out the resulting .raw / .install.iso back to the host
-#      $BUILD_DIR.
+#   6. Copy the resulting .raw and the release bundle (.raw.xz + .sha256,
+#      named <name>-<version>-<snapshot>) back to the host $BUILD_DIR, then
+#      prove the bundle: name, `xz -t`, decompressed size == config.xml
+#      <size>, checksum (todo/iso/14 Phase C).
 #   7. (Default) keeps the VM around for re-runs; --teardown wipes it.
 #
 # Pattern lineage: qdistro/scripts/vm/clone-baseweed.sh +
 # fresh-vm-bootstrap.sh; reuses vm-exec, vm-start-and-wait verbatim.
 
-set -euo pipefail
+# -E: the ERR trap below must fire inside functions too (host_free_check and
+# friends); bash does not inherit it into them otherwise.
+set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # image/ lives inside the qdistro repo; the old "$HERE/../qdistro" form dates
@@ -59,6 +63,12 @@ mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 log()  { printf '\033[1;36m[in-vm]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[in-vm] WARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[in-vm] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
+# Name the line when set -e ends this script. Three runs in a row ended with
+# a driver that simply vanished (a guestfish stream abort; `ls ... | head -1`
+# returning ls's status 2 under pipefail once there was no install ISO),
+# each costing a build to diagnose. The trap reports only while errexit is
+# on: the kiwi loop runs with set +e and expects non-zero statuses.
+trap 'rc=$?; case $- in *e*) printf "\033[1;31m[in-vm] ABORT:\033[0m line %s exited %s: %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2 ;; esac' ERR
 
 vmx() {
     "$VM_TOOLS/vm-exec" "$VM" "$@"
@@ -107,25 +117,38 @@ log "syncing sources into the overlay"
 bash "$HERE/build.sh" --sync-only 2>&1 | tee "$LOGS/sync.log"
 [ -d "$HERE/root/root/qdistro-src" ] || die "sync did not produce $HERE/root/root/qdistro-src"
 
-# Record what went in, so a built artifact can be traced to five commits.
-# Best-effort: a synced-from-tarball tree has no .git.
-SIBLINGS="$(cd "$HERE/../.." && pwd)"
-# "DIRTY" alone cannot distinguish two different uncommitted states on the
-# same parent, so a dirty tree also records the sha256 of its diff against
-# HEAD (tracked changes; untracked files are listed by count).
-for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
-    if [ -d "$SIBLINGS/$repo/.git" ]; then
-        if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
-            state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??')"
-        else
-            state=clean
-        fi
-        printf '%-10s %s %s\n' "$repo" \
-            "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" "$state"
-    else
-        printf '%-10s %s\n' "$repo" "no-git"
+# What went in: the source manifest sync_sources just wrote (five commits with
+# clean/DIRTY state, plus the pinned Tumbleweed snapshot). The same file rides
+# into the chroot and becomes /etc/qdistro/release, so the log and the image
+# agree by construction.
+MANIFEST="$HERE/root/root/qdistro-source-manifest"
+[ -s "$MANIFEST" ] || die "sync did not write $MANIFEST"
+cp "$MANIFEST" "$LOGS/sources.txt"
+cat "$LOGS/sources.txt"
+SNAPSHOT="$(bash "$HERE/build.sh" --snapshot-id)" || die "config.xml snapshot pin is inconsistent"
+IMAGE_VERSION="$(sed -n 's|.*<version>\([0-9][0-9.]*\)</version>.*|\1|p' "$HERE/config.xml" | head -n1)"
+IMAGE_SIZE_MB="$(sed -n 's|.*<size unit="M">\([0-9]*\)</size>.*|\1|p' "$HERE/config.xml" | head -n1)"
+[ -n "$IMAGE_VERSION" ] && [ -n "$IMAGE_SIZE_MB" ] || die "config.xml: could not read <version> or <size unit=\"M\">"
+XZ_NAME="qdistro-$IMAGE_VERSION-$SNAPSHOT.raw.xz"
+log "release artifact will be $XZ_NAME (raw $IMAGE_SIZE_MB MiB, Tumbleweed $SNAPSHOT)"
+# The copy-out lands the full raw (guestfish does not preserve sparseness)
+# plus the bundle. Refuse now, before a 40-minute build, if even the raw
+# plus 8 GiB will not fit; the bundle's size is only known after the build,
+# so an exact raw + bundle check follows the inventory (step 9). Old
+# artifacts are deleted before the copy, so they count as reclaimable.
+host_free_check() {
+    # host_free_check <need-bytes> <what>
+    local need="$1" what="$2" old_bytes=0 avail_bytes f
+    for f in "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/bundle/*.raw.xz; do
+        [ -f "$f" ] && old_bytes=$(( old_bytes + $(stat -c %s "$f") ))
+    done
+    avail_bytes="$(df --output=avail -B1 "$HOST_BUILD_DIR" | tail -n1)"
+    if [ $(( avail_bytes + old_bytes )) -lt "$need" ]; then
+        die "$HOST_BUILD_DIR has $avail_bytes bytes free (+$old_bytes reclaimable); $what needs $need"
     fi
-done | tee "$LOGS/sources.txt"
+    log "host free space: $avail_bytes bytes (+$old_bytes reclaimable) for $what ($need bytes)"
+}
+host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the raw + 8 GiB slack (bundle checked after the build)"
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
@@ -283,7 +306,7 @@ exit \$rc
 EOS
 
 #-- 8. Run the kiwi build ------------------------------------------------------
-log "running kiwi-ng build inside VM (17-26 min measured 2026-09-04, n=2)"
+log "running kiwi-ng build inside VM (17-26 min kiwi measured 2026-09-04 n=2, plus the xz bundle step)"
 log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
@@ -326,7 +349,12 @@ KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
 # Run 16: a cold-cache attempt was still partitioning at 1500s, so 1500 was too
 # tight and killed a working build. The budget is a backstop against a wedge the
 # stall guard cannot see, not a performance expectation -- keep it generous.
-KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-2700}"
+# Phase C added the bundle step to the same attempt: kiwi's full-file cp of
+# the raw into bundle/ then xz -T0 of it. Measured 2026-09-05 on the 28 GiB
+# raw with 4 vCPUs: 6m36s (run 23), 6m09s (run 27) -- a little more than the
+# ISO's mksquashfs -comp xz it replaced (5m03s, run 17). Warm-cache kiwi
+# itself was ~4 min; a cold run is the 17-26 min above.
+KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-3300}"
 # Minimum CPU ticks (100/s per core) the build tree must burn in a sample for it
 # to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below
 # mksquashfs or rpm, far above a stalled socket.
@@ -523,11 +551,15 @@ fi
 log "build artifacts in VM:"
 vmx 'ls -lh /build/out/' | tee "$LOGS/artifacts.txt"
 # Exact byte sizes, so the copy-out below can prove it copied THIS build.
-vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified 2>/dev/null' \
+vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified bundle/* 2>/dev/null' \
     > "$LOGS/artifact-sizes.txt" 2>/dev/null || true
 IN_VM_RAW_SIZE="$(awk '$2 ~ /\.raw$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 IN_VM_ISO_SIZE="$(awk '$2 ~ /\.install\.iso$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
+IN_VM_XZ_SIZE="$(awk -v n="bundle/$XZ_NAME" '$2 == n { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 [ -n "$IN_VM_RAW_SIZE" ] || die "no .raw in /build/out despite kiwi exit 0 (see $LOGS/artifacts.txt)"
+[ -n "$IN_VM_XZ_SIZE" ] || die "no bundle/$XZ_NAME in /build/out despite build.sh exit 0 (see $LOGS/artifacts.txt)"
+# Exact: what is about to be copied, plus 1 GiB.
+host_free_check $(( IN_VM_RAW_SIZE + IN_VM_XZ_SIZE + ${IN_VM_ISO_SIZE:-0} + 1024 * 1024 * 1024 )) "the copy-out (raw + bundle${IN_VM_ISO_SIZE:++ iso} + 1 GiB)"
 
 #-- 10. Copy artifacts back to host ------------------------------------------
 log "copying artifacts back to host ($HOST_BUILD_DIR)"
@@ -564,32 +596,43 @@ export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 # wrote inside the VM.
 rm -f "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/*.packages \
       "$HOST_BUILD_DIR"/*.changes "$HOST_BUILD_DIR"/*.verified
-copied=0
-for attempt in $(seq 1 6); do
-    guestfish --ro -a "$BUILD_DISK" -m /dev/sda <<EOF 2>>"$LOGS/copy-out.log"
-glob copy-out /out/*.raw $HOST_BUILD_DIR/
-glob copy-out /out/*.install.iso $HOST_BUILD_DIR/
-glob copy-out /out/*.packages $HOST_BUILD_DIR/
-glob copy-out /out/*.changes $HOST_BUILD_DIR/
-glob copy-out /out/*.verified $HOST_BUILD_DIR/
-EOF
-    host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
-    host_iso="$(ls "$HOST_BUILD_DIR"/*.install.iso 2>/dev/null | head -1)"
-    iso_ok=1
-    if [ -n "$IN_VM_ISO_SIZE" ]; then
-        [ -n "$host_iso" ] && [ "$(stat -c %s "$host_iso")" = "$IN_VM_ISO_SIZE" ] || iso_ok=0
-    fi
-    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ] && [ "$iso_ok" = 1 ]; then copied=1; break; fi
-    log "copy-out: artifacts not settled yet (attempt $attempt/6; want $IN_VM_RAW_SIZE bytes); waiting..."
-    sleep 5
-done
-[ "$copied" = 1 ] || die "copy-out: no .raw of $IN_VM_RAW_SIZE bytes appeared (see $LOGS/copy-out.log)"
+rm -rf "$HOST_BUILD_DIR/bundle"
+# image/lib/copy-out.sh: the raw and bundle/ are required, the ISO and the
+# small result files optional (`-` prefix), because guestfish aborts the
+# whole stream at the first failing command and a no-match glob is one --
+# run 24 lost its bundle to the ISO glob. Its status is deliberately not
+# fatal here: the size checks below decide, and the loop retries.
+. "$HERE/lib/copy-out.sh"
+# The settle loop is the library's (tested against a scratch build disk):
+# it accepts only a raw and a bundle/$XZ_NAME of the sizes read inside the
+# VM, retrying while the just-shut-off qcow2 is still flushing.
+qdistro_copy_out_settled "$BUILD_DISK" "$HOST_BUILD_DIR" "$IN_VM_RAW_SIZE" "$XZ_NAME" "$IN_VM_XZ_SIZE" "$IN_VM_ISO_SIZE" "$LOGS/copy-out.log" \
+    || die "copy-out: raw of $IN_VM_RAW_SIZE bytes and bundle/$XZ_NAME of $IN_VM_XZ_SIZE bytes did not both appear (see $LOGS/copy-out.log)"
+host_raw=""; for f in "$HOST_BUILD_DIR"/*.raw; do [ -f "$f" ] && { host_raw="$f"; break; }; done
+host_xz="$HOST_BUILD_DIR/bundle/$XZ_NAME"
 
 log "artifacts on host:"
-ls -lh "$HOST_BUILD_DIR/" | tee -a "$LOGS/artifacts.txt"
+ls -lh "$HOST_BUILD_DIR/" "$HOST_BUILD_DIR/bundle/" | tee -a "$LOGS/artifacts.txt" || true
+
+#-- 11. Prove the release artifact (todo/iso/14 Phase C DONE bar) ------------
+# The .raw.xz is what testers download, so the build is not done until the
+# host has checked it (image/lib/release-proof.sh): the name carries version
+# and snapshot; its checksum file names it and matches; `xz -t` decompresses
+# the whole stream against its integrity check; and the decompressed size is
+# exactly config.xml's <size>, i.e. the 28 GiB the raw was declared at (the
+# raw itself is checked the same way). Reads 28 GiB a couple of times: a few
+# minutes, and the point. Subshell, so a failed check returns here and is
+# reported by die() with the file to read (round-1 review: a brace group
+# would have exited the script silently).
+log "checking release artifact $host_xz"
+. "$HERE/lib/release-proof.sh"
+( qdistro_prove_release "$host_raw" "$HOST_BUILD_DIR/bundle" "$XZ_NAME" "$IMAGE_SIZE_MB" ) \
+    > "$LOGS/release-artifact.txt" 2>&1 \
+    || { cat "$LOGS/release-artifact.txt"; die "release artifact check failed; see $LOGS/release-artifact.txt"; }
+cat "$LOGS/release-artifact.txt"
 
 if [ "$KEEP_RUNNING" = 1 ]; then
-    virsh start "$VM"
+    virsh start "$VM" || warn "--keep: could not restart $VM"
 fi
 
 log "DONE. logs: $LOGS"

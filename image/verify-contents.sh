@@ -319,6 +319,70 @@ echo
 echo "-- branding / identity --"
 check_req_any "os-release present"        /etc/os-release /usr/lib/os-release
 check_opt     "qdistro-release marker"    /etc/qdistro-release
+# /etc/qdistro/release (todo/iso/14 Phase C): the image must say what it was
+# built from -- version, the pinned Tumbleweed snapshot, the profile and one
+# SOURCE line per synced repo (five). Content is checked, not just presence:
+# an empty or truncated file is exactly what a broken manifest step would
+# leave, and a bug report needs these lines.
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
+release_problem=""
+# field <KEY> -- the value of exactly one KEY= line, or nothing (so a
+# duplicated or missing key fails the row rather than picking one).
+release_field() {
+    local v
+    v="$(grep "^$1=" "$release_file")"
+    [ "$(printf '%s\n' "$v" | grep -c .)" -eq 1 ] || return 1
+    printf '%s\n' "${v#*=}"
+}
+if [ -z "$release_file" ]; then
+    release_problem="missing"
+else
+    rel_version="$(release_field VERSION || true)"
+    rel_snapshot="$(release_field SNAPSHOT || true)"
+    rel_profile="$(release_field PROFILE || true)"
+    rel_artifact="$(release_field ARTIFACT || true)"
+    [[ "$rel_version"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || release_problem="$release_problem no single VERSION=x.y.z;"
+    [[ "$rel_snapshot" =~ ^[0-9]{8}$ ]]                || release_problem="$release_problem no single SNAPSHOT=YYYYMMDD;"
+    [[ "$rel_profile"  =~ ^(dev|release)$ ]]           || release_problem="$release_problem no single PROFILE=dev|release;"
+    # The artifact name is derived from the other two fields; a file whose
+    # fields disagree is corrupt, not merely oddly named (round-1 review).
+    [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
+        || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
+    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 5 ] || release_problem="$release_problem not exactly five SOURCE lines;"
+    for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
+        [ "$(grep -cE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
+            || release_problem="$release_problem no single well-formed SOURCE $repo line;"
+    done
+fi
+if [ -z "$release_problem" ]; then
+    printf 'OK   %s: %s (%s)\n' "image provenance" "$ROOT/etc/qdistro/release" \
+        "$(sed -n 's/^VERSION=//p;s/^SNAPSHOT=//p;s/^PROFILE=//p' "$release_file" | paste -sd' ')"
+    REQUIRED_OK=$((REQUIRED_OK + 1))
+else
+    printf 'MISS %s: %s (%s)\n' "image provenance" "$ROOT/etc/qdistro/release" "$release_problem"
+    FAIL=1
+fi
+# The profile the image says it is decides two rows below: a dev image must
+# carry the passwordless-sudo rule config.sh bakes for test harnesses, and a
+# release image must NOT (the rule is the escape hatch the hardening review
+# flagged). Read it from the provenance file, never assumed.
+image_profile="${rel_profile:-}"
+case "$image_profile" in dev|release) ;; *) image_profile="" ;; esac
+
+echo
+echo "-- credentials and remote access (todo/iso/13) --"
+# sshd is installed (host keys generated for the VM harness) but must NOT be
+# enabled: a network-reachable sshd plus the baked default password is a
+# remote default-credential exposure. This is what keeps the shared
+# credential local, so it is a REQUIRED absence, not a warning.
+check_absent "sshd NOT enabled (multi-user)" /etc/systemd/system/multi-user.target.wants/sshd.service
+check_absent "sshd NOT enabled (sockets)"    /etc/systemd/system/sockets.target.wants/sshd.socket
+case "$image_profile" in
+    dev)     check_req    "dev profile: passwordless sudoers baked" /etc/sudoers.d/99-admin ;;
+    release) check_absent "release profile: no passwordless sudoers" /etc/sudoers.d/99-admin ;;
+    *)       ;; # provenance row above already failed
+esac
 
 echo
 echo "-- in-place source tree (LLM-modifiability) --"

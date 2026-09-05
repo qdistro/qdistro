@@ -154,6 +154,23 @@ gate_image() {
         [ "$rc" -eq 0 ] && rc=$EXIT_VM_BOOT
     fi
 
+    # The tester build is the raw alone: config.xml sets installiso="false"
+    # (todo/iso/13), so no .install.iso exists next to the raw and there is
+    # nothing for install-test.sh to boot. That is the designed shape of the
+    # artifact, not a missing prerequisite: record it as a skip with the
+    # reason, and only run the install stages when an ISO from THIS build
+    # (same directory as the raw) is present.
+    local iso
+    iso="$(ls "$build_dir"/*.install.iso 2>/dev/null | head -1)"
+    if [ -z "$iso" ]; then
+        local why="no .install.iso next to $img: the tester image is built with installiso=false (todo/iso/13), so install-test.sh (and --idempotency, which re-runs it) is inert until the post-v1 installable ISO returns; not a missing prerequisite"
+        record_skip image install-test.sh image "$why"
+        if [ "$idempotency" = 1 ]; then
+            record_skip image install-test.sh-2nd image "$why"
+        fi
+        return "$rc"
+    fi
+
     local i_log="$RDIR/host/image-install.log"
     log "image: install-test (image/install-test.sh)"
     bash "$IMAGE_DIR/install-test.sh" > "$i_log" 2>&1
