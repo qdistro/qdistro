@@ -47,8 +47,21 @@ case "${1:-}" in
 esac
 
 #-- 0. Locate the built image -------------------------------------------------
-IMG=$(find "$BUILD_DIR" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -F "$VM" | head -1)
-[ -n "$IMG" ] || die "no image in $BUILD_DIR; run build.sh first"
+# QDISTRO_IMAGE names the artifact explicitly (the CI gate passes the raw it
+# just inspected statically, so both stages judge the SAME file). Without
+# it exactly one candidate may exist: picking "the first find hit" among a
+# stale qcow2 and a fresh raw booted an arbitrary artifact (Phase B review).
+if [ -n "${QDISTRO_IMAGE:-}" ]; then
+    IMG="$QDISTRO_IMAGE"
+    [ -f "$IMG" ] || die "QDISTRO_IMAGE does not exist: $IMG"
+else
+    mapfile -t _imgs < <(find "$BUILD_DIR" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -F "$VM" | grep -v -- '-verify-' | sort)
+    case "${#_imgs[@]}" in
+        1) IMG="${_imgs[0]}" ;;
+        0) die "no image in $BUILD_DIR; run build.sh first" ;;
+        *) die "${#_imgs[@]} images under $BUILD_DIR (${_imgs[*]}); set QDISTRO_IMAGE to the one to boot" ;;
+    esac
+fi
 log "image: $IMG"
 
 mkdir -p "$VERIFY_DIR/screenshots" "$VERIFY_DIR/journal"

@@ -14,6 +14,14 @@
 #   /run/qdistro-print/                          # tmpfs at runtime
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/print-src}
 if [ ! -d "$SRC" ]; then
     echo "[install-print] missing source dir $SRC" >&2
@@ -153,8 +161,10 @@ if [ -f "$SRC/org.qdistro.print.policy" ]; then
         "$DEST_POLKIT_ACTION/org.qdistro.print.policy"
 fi
 
-systemctl daemon-reload
-systemctl enable qdistro-print-proxy.service >/dev/null 2>&1 || true
+sd_daemon_reload
+# Required: the wants-link is what starts the proxy at boot; a failed enable
+# is an install failure, not a warning.
+systemctl enable qdistro-print-proxy.service >/dev/null
 # Don't `--now` start: with no print VM the proxy logs ECONNREFUSED on
 # every accept, which would clutter journals. Tests start it explicitly.
 

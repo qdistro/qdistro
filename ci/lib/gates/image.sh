@@ -37,6 +37,36 @@ gate_image() {
     # Resolve the tree to inspect: explicit --root, else an extracted tree
     # under the build dir, else nothing (boot-only build present).
     local static_root="$root"
+    # A built .raw and no explicit --root: ALWAYS extract the checklist's
+    # paths from THAT raw (image/extract-root.sh, guestfish copy-out; seconds,
+    # ~100 MB) into $build_dir/extracted, replacing whatever was there. An
+    # older extracted tree must never be inspected in place of a newer raw
+    # (Phase B review): a rebuilt-broken raw next to yesterday's clean tree
+    # would otherwise pass.
+    local raw="" nraws
+    nraws="$(ls "$build_dir"/*.raw 2>/dev/null | wc -l)"
+    if [ "$nraws" -gt 1 ] && [ -z "$static_root" ]; then
+        # Two raws make "the built artifact" ambiguous; never pick one by name.
+        record_result image extract-root fail "$EXIT_BUILD" build image "" "$nraws .raw files under $build_dir; cannot tell which was built -- pass --root or remove the stale one"
+        return "$EXIT_BUILD"
+    fi
+    [ "$nraws" = 1 ] && raw="$(ls "$build_dir"/*.raw)"
+    # `extracted_fresh` is the FACT that Stage B keys on (not the path string
+    # of $static_root, which a stale fallback tree would also satisfy).
+    local extracted_fresh=0
+    if [ -z "$static_root" ] && [ -n "$raw" ] && [ -f "$IMAGE_DIR/extract-root.sh" ]; then
+        local ex_log="$RDIR/host/image-extract-root.log"
+        mkdir -p "$(dirname "$ex_log")"
+        log "image: extracting checklist paths from $raw"
+        if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" "$raw" > "$ex_log" 2>&1; then
+            static_root="$build_dir/extracted"
+            extracted_fresh=1
+        else
+            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection (image/extract-root.sh needs guestfish/libguestfs; see $ex_log)"
+            return "$EXIT_BUILD"
+        fi
+    fi
+    # No raw: fall back to a pre-extracted tree if one exists.
     if [ -z "$static_root" ]; then
         for cand in "$build_dir/extracted" "$build_dir/root" "$build_dir/mnt"; do
             [ -d "$cand" ] && { static_root="$cand"; break; }
@@ -74,16 +104,36 @@ gate_image() {
     # --- Stage B: boot-verify + install-test (needs VM + built image) -------
     # These are NOT runnable without libvirt and a built artifact. Guard each
     # and degrade to record_blocked with a precise reason.
-    local have_image=0 img
-    img=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | head -1)
-    [ -n "$img" ] && have_image=1
+    # The artifact to boot is the ONE the static stage selected ($raw, the
+    # sole top-level .raw). Re-discovering it here with a broader find could
+    # boot a stale qcow2 or nested raw while the static stage judged another
+    # file (Phase B review); verify.sh is told the exact path.
+    # Boot ONLY the artifact Stage A inspected: the sole top-level raw that
+    # extract-root.sh just unpacked. With --root, or with a pre-extracted
+    # fallback tree, there is no provable link between the inspected tree
+    # and any bootable file, so booting one would judge two different
+    # artifacts as if they were one (round-4 review); that case is BLOCKED
+    # with the reason, not silently booted.
+    local img=""
+    if [ -z "$root" ] && [ -n "$raw" ] && [ "$extracted_fresh" = 1 ]; then
+        img="$raw"
+    fi
+    if [ -z "$img" ]; then
+        local why="boot needs the built raw Stage A inspected:"
+        [ -n "$root" ] && why="$why --root was given, so the inspected tree has no provable source image;"
+        [ -z "$raw" ] && why="$why no single top-level .raw under $build_dir;"
+        record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
+        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why"
+        if [ "$idempotency" = 1 ]; then
+            record_blocked image install-test.sh-2nd "$EXIT_VM_PROVISION" image "$why"
+        fi
+        return "$rc"
+    fi
     local have_virsh=0
     command -v virsh >/dev/null 2>&1 && "${VIRSH[@]}" list >/dev/null 2>&1 && have_virsh=1
 
-    if [ "$have_image" = 0 ] || [ "$have_virsh" = 0 ]; then
-        local why="needs VM/image:"
-        [ "$have_image" = 0 ] && why="$why no built image in $build_dir;"
-        [ "$have_virsh" = 0 ] && why="$why libvirt session unavailable;"
+    if [ "$have_virsh" = 0 ]; then
+        local why="needs VM: libvirt session unavailable;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
         record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
         if [ "$idempotency" = 1 ]; then
@@ -95,7 +145,7 @@ gate_image() {
     # Prerequisites present: run the existing boot/install flow.
     local v_log="$RDIR/host/image-verify.log"
     log "image: boot-verify (image/verify.sh)"
-    bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
+    QDISTRO_IMAGE="$img" bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
     local v_rc=$?
     if [ "$v_rc" -eq 0 ]; then
         record_result image verify.sh pass 0 pass image "$v_log" "boot-verify passed"

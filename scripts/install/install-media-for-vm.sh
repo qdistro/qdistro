@@ -14,6 +14,14 @@
 # is broker -> media.
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 MEDIA_SRC=${1:-/root/qdistro-src/qdistro/media}
 DEST_LIB=/usr/local/lib/qdistro
 SYSTEMD_DIR=/etc/systemd/system
@@ -43,19 +51,23 @@ install -o root -g root -m 0644 "$MEDIA_SRC/qdistro_media_exec_client.py" \
 install -m 0644 "$MEDIA_SRC/qdistro-media-exec.socket"  "$SOCKET_UNIT"
 install -m 0644 "$MEDIA_SRC/qdistro-media-exec.service" "$SERVICE_UNIT"
 
-systemctl daemon-reload
-systemctl enable --now qdistro-media-exec.socket >/dev/null
+sd_daemon_reload
+sd_enable_now qdistro-media-exec.socket
 
-for _ in 1 2 3 4 5; do
-    if [ -S /run/qdistro-media-exec/sock ]; then
-        break
+if is_offline; then
+    echo "[offline] skipped (needs a running system manager): probe /run/qdistro-media-exec/sock"
+else
+    for _ in 1 2 3 4 5; do
+        if [ -S /run/qdistro-media-exec/sock ]; then
+            break
+        fi
+        sleep 0.5
+    done
+    if [ ! -S /run/qdistro-media-exec/sock ]; then
+        echo "ERROR: /run/qdistro-media-exec/sock did not appear" >&2
+        journalctl -u qdistro-media-exec.socket --no-pager -n 20 >&2 || true
+        exit 3
     fi
-    sleep 0.5
-done
-if [ ! -S /run/qdistro-media-exec/sock ]; then
-    echo "ERROR: /run/qdistro-media-exec/sock did not appear" >&2
-    journalctl -u qdistro-media-exec.socket --no-pager -n 20 >&2 || true
-    exit 3
-fi
 
-echo "qdistro-media-exec ready (socket /run/qdistro-media-exec/sock)"
+    echo "qdistro-media-exec ready (socket /run/qdistro-media-exec/sock)"
+fi

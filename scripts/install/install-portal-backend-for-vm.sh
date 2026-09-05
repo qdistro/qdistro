@@ -3,6 +3,14 @@
 # xdg-desktop-portal backend onto a VM or image build.
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SRC=${1:-/root/qdistro-src/qdistro}
 if [ ! -d "$SRC" ]; then
     echo "[install-portal-backend] missing source dir $SRC" >&2

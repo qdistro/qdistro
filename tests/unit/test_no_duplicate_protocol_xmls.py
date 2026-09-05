@@ -69,6 +69,12 @@ def find_protocol_xmls() -> dict[str, list[Path]]:
         if not root.is_dir():
             continue
         for xml in root.rglob("*.xml"):
+            # qdistro/image/root/root/ is the rsynced sibling-source overlay
+            # the kiwi build stages (gitignored; present only in a checkout
+            # that has built an image): copies of the other repos, not code.
+            rel = xml.relative_to(root).parts
+            if repo == "qdistro" and rel[:3] == ("image", "root", "root"):
+                continue
             if any(part in EXCLUDE_PARTS for part in xml.parts):
                 continue
             try:

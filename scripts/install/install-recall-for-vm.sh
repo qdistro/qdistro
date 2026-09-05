@@ -23,6 +23,14 @@
 # `import qdistro_app.recall` works without PYTHONPATH gymnastics.
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 if [ "${QDISTRO_ENABLE_POSTV1_RECALL:-0}" != "1" ]; then
     echo "[install-recall] Recall is cut from v1; refusing install." >&2
     echo "                 Set QDISTRO_ENABLE_POSTV1_RECALL=1 for post-v1/dev use." >&2
@@ -88,8 +96,8 @@ fi
 # Enable the timer for admin if present. Skipped on hosts without the
 # user (e.g. the bake's pre-user provisioning pass).
 if id admin >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now qdistro-recall@admin.timer >/dev/null 2>&1 || true
+    sd_daemon_reload || true
+    sd_enable_now qdistro-recall@admin.timer || true
 fi
 
 echo "[install-recall] OK"

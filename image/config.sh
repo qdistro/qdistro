@@ -104,24 +104,41 @@ INSTALLERS=(
     "scripts/install/install-portal-backend-for-vm.sh  $QD"
     "scripts/install/install-phone-for-vm.sh           $QD/phone"
     "scripts/install/install-print-proxy-for-vm.sh     $QD/print"
-    "scripts/install/install-recall-for-vm.sh          $QD"
+    # install-recall-for-vm.sh is deliberately NOT here: recall is cut from
+    # v1 and the installer refuses to run without QDISTRO_ENABLE_POSTV1_RECALL=1
+    # (exit 2). Under the fail-open loop that refusal was logged as "verify
+    # failed" on every build; under the fatal chain it would abort the build.
+    # The tester image ships without recall (todo/iso/14 Phase B).
+    # Also deliberately absent: the admin approval-queue TUI (admin_app/,
+    # tui/). Neither chain has ever installed it; the tester image ships
+    # without it and the download page says so (todo/iso/14 Phase B item 4).
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
 )
-# Each installer drops files (broker python, dbus policy, systemd units)
-# then tries to start the service via `systemctl enable --now ...` and
-# verify with `busctl` — both fail in a kiwi chroot because there's no
-# running systemd or system bus. The file-drop happens before the verify
-# step, so a non-zero exit here means "verify failed", not "install
-# failed". The installed image is functional; we record the warning and
-# move on. Audit each WARN if a verify.sh assertion fails downstream.
+# Offline-install contract (todo/iso/14 Phase B): every installer in the
+# chain sources scripts/install/lib/qdistro-offline.sh. With this flag set
+# AND the root corroborated as a chroot (positive evidence: kiwi bind-mounts
+# the builder's /proc here first), file drops and `systemctl enable` run as
+# normal while every operation that needs a running system manager or bus
+# (`start`, `daemon-reload`, `busctl`, `loginctl`, readiness probes) is
+# skipped with a logged "[offline] skipped" line. Any other non-zero exit is
+# a real failure, so the chain is FATAL: a missing installer or one that
+# fails aborts the build. The old fail-open loop ("verify failed, expected
+# in chroot") hid five installers failing per build and made a green build
+# mean nothing about completeness.
+export QDISTRO_OFFLINE_INSTALL=1
 for entry in "${INSTALLERS[@]}"; do
     # shellcheck disable=SC2086
     set -- $entry
     installer="$1"
     src_dir="$2"
-    if [ -x "$installer" ]; then
-        bash "$installer" "$src_dir" \
-            || echo "[qdistro-image]   WARN: $installer verify failed (expected in chroot)"
+    if [ ! -x "$installer" ]; then
+        echo "[qdistro-image] FATAL: chain installer missing or not executable: $installer" >&2
+        exit 1
+    fi
+    echo "[qdistro-image] -> $installer $src_dir"
+    if ! bash "$installer" "$src_dir"; then
+        echo "[qdistro-image] FATAL: $installer failed; the image would be incomplete. Aborting build." >&2
+        exit 1
     fi
 done
 
@@ -130,54 +147,24 @@ for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     if [ -d "$QD/$pol" ] && [ -x "$QD/$pol/install-policy.sh" ]; then
         # tier1 module references types defined by broker module; if it
         # loads first the AST resolves on the second pass at boot time.
-        (cd "$QD/$pol" && bash install-policy.sh) \
-            || echo "[qdistro-image]   WARN: $pol policy install failed (chroot semodule)"
+        # Fatal (Phase B): a service shipped without its policy module is an
+        # incomplete image, and the fail-open form hid exactly that class of
+        # defect in the installer chain above.
+        if ! (cd "$QD/$pol" && bash install-policy.sh); then
+            echo "[qdistro-image] FATAL: $pol policy install failed. Aborting build." >&2
+            exit 1
+        fi
     fi
 done
 
-# install-qdwin-session-for-vm.sh uses `loginctl enable-linger` and
-# `runuser -l admin -c systemctl --user enable ...` — both require a
-# live logind / user-manager, so they abort in a kiwi chroot. Shadow
-# them with chroot-safe shims for the duration of the call.
-SHIMS="$(mktemp -d)"
-cat > "$SHIMS/loginctl" <<'SHIM'
-#!/bin/bash
-# kiwi-chroot shim: emulate `loginctl enable-linger <user>` via the
-# on-disk marker file instead of poking the (absent) logind socket.
-case "${1:-}" in
-    enable-linger)
-        install -d -m 0755 /var/lib/systemd/linger
-        : > "/var/lib/systemd/linger/${2:-admin}"
-        ;;
-    *) exit 0 ;;
-esac
-SHIM
-cat > "$SHIMS/runuser" <<'SHIM'
-#!/bin/bash
-# kiwi-chroot shim: the upstream call (install-qdwin-session-for-vm.sh) is
-#   runuser -l admin -c 'systemctl --user enable qdwin-session.target ydotoold.service'
-# We emulate `enable` by writing the WantedBy=default.target symlinks
-# directly under admin's default.target.wants (there is no live user
-# manager in the kiwi chroot).
-#
-# IMPORTANT: in the IMAGE / greeter path we do NOT auto-start
-# qdwin-session.target under default.target — the greeter's
-# qdwin-session-launcher starts the target EXPLICITLY after PAM auth, and
-# a default.target.wants/qdwin-session.target symlink would race it for
-# the wayland-1 socket. So this shim enables ydotoold (VM-test support)
-# but deliberately SKIPS the session target. (The spin/test-VM path keeps
-# the target auto-started via the installer's own enable — see
-# install-qdwin-session-for-vm.sh. This shim is the image-build override.)
-target=/home/admin/.config/systemd/user/default.target.wants
-mkdir -p "$target"
-for u in ydotoold.service ; do
-    src="/home/admin/.config/systemd/user/$u"
-    [ -f "$src" ] || continue
-    ln -sf "../$u" "$target/$u"
-done
-chown -R admin:users /home/admin/.config/systemd 2>/dev/null || true
-SHIM
-chmod +x "$SHIMS"/loginctl "$SHIMS"/runuser
+# install-qdwin-session-for-vm.sh honours the same offline contract
+# (linger marker written directly; user-unit wants-symlinks written
+# directly). QDWIN_SESSION_AUTOSTART=0: in the greeter image
+# qdwin-session.target must NOT be pulled in by default.target -- the
+# greeter's qdwin-session-launcher starts it explicitly after PAM auth, and
+# an auto-started target would race it for the wayland-1 socket. (This
+# replaces the loginctl/runuser shims that used to be interposed on PATH.)
+export QDWIN_SESSION_AUTOSTART=0
 # install-qdwin-session-for-vm.sh does `usermod -aG ...,seat admin`, assuming the
 # `seat` group already exists (its comment says fresh-vm-bootstrap.sh creates it).
 # The kiwi image build never runs fresh-vm-bootstrap.sh, so create the libseat
@@ -188,8 +175,7 @@ getent group seat >/dev/null || groupadd -r seat
 # but unset it explicitly so an operator's inherited test environment cannot
 # leak it into a shipped unit.
 unset QDWIN_ENABLE_SHELL_CAPTURE
-PATH="$SHIMS:$PATH" bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
-rm -rf "$SHIMS"
+bash "$QD/scripts/install/install-qdwin-session-for-vm.sh" "$SRC/qdshell"
 
 install -d -m 0755 /etc/greetd
 
@@ -232,7 +218,7 @@ for pyapp in qdgreeter qdlocker; do
         echo "[qdistro-image] pip installing $pyapp -> /usr ..."
         python3 -m pip install --break-system-packages --no-deps \
             --prefix=/usr "$SRC/$pyapp" \
-            || echo "[qdistro-image]   WARN: pip install $pyapp failed"
+            || { echo "[qdistro-image] FATAL: pip install $pyapp failed. Aborting build." >&2; exit 1; }
     else
         echo "[qdistro-image]   WARN: $SRC/$pyapp not synced — $pyapp binary will be missing"
     fi
@@ -262,9 +248,9 @@ echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
 # wiring into qdwin-session.target.wants/.
 #
 # The greeter launcher does `systemctl --user start qdwin-session.target`,
-# and the runuser shim above deliberately does NOT enable the target under
-# default.target in the image path (the greeter is the authoritative
-# starter; auto-start would race for wayland-1).
+# and QDWIN_SESSION_AUTOSTART=0 (exported above) keeps the installer from
+# enabling the target under default.target in the image path (the greeter
+# is the authoritative starter; auto-start would race for wayland-1).
 ADMIN_USER_UNITS=/home/admin/.config/systemd/user
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS"
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS/qdwin-session.target.wants"
@@ -319,8 +305,8 @@ fi
 # chroot. qdwin-session.target itself is NOT enabled under default.target —
 # the greeter's qdwin-session-launcher starts it explicitly
 # (`systemctl --user start qdwin-session.target`) after PAM auth, which is
-# the authoritative session-start path (the runuser shim above skips the
-# target's default.target.wants symlink for exactly this reason).
+# the authoritative session-start path (QDWIN_SESSION_AUTOSTART=0 above
+# leaves the target out of default.target.wants for exactly this reason).
 for unit in qdlocker.service; do
     [ -f "$ADMIN_USER_UNITS/$unit" ] || continue
     ln -sf "../$unit" "$ADMIN_USER_UNITS/qdwin-session.target.wants/$unit"

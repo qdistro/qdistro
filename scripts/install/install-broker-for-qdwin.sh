@@ -19,6 +19,14 @@
 # python313-gobject (Gdk/GLib), user `admin` (uid 1000).
 set -eu
 
+# Offline-install contract (todo/iso/14 Phase B): file drops always run;
+# operations that need a running system manager / bus are skipped and
+# logged when QDISTRO_OFFLINE_INSTALL=1 names a corroborated chroot.
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 BROKER_SRC=${1:-/root/qdistro-src/qdistro/broker}
 DEST=/usr/libexec/qdistro
 UNIT=/etc/systemd/system/qdistro-admin-broker.service
@@ -154,26 +162,31 @@ install -m 0644 "$BROKER_SRC/qdistro-dbus-reload.service" "$RELOAD_UNIT"
 # 4. Reload dbus so the new policy takes effect. System bus uses
 #    dbus-broker.service on modern Tumbleweed, fall back to dbus.service
 #    on older variants.
-systemctl reload dbus-broker.service 2>/dev/null \
-    || systemctl reload dbus.service 2>/dev/null \
-    || true
+sd_reload_dbus
 
-# 5. Start the broker.
-systemctl daemon-reload
-systemctl enable --now qdistro-dbus-reload.service 2>/dev/null || true
-systemctl enable --now qdistro-admin-broker.service
+# 5. Start the broker (enable always; start only on a live system).
+sd_daemon_reload
+# Enable is required for both (the wants-links are the boot wiring); only
+# the live start of the reload oneshot is best-effort, as before.
+sd_enable qdistro-dbus-reload.service
+sd_start qdistro-dbus-reload.service || true
+sd_enable_now qdistro-admin-broker.service
 
 # 6. Wait for the bus name (Type=dbus activates automatically, but
-#    give it a moment to claim).
-for _ in 1 2 3 4 5; do
-    busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1 && break
-    sleep 0.5
-done
+#    give it a moment to claim). Live only: offline there is no bus.
+if is_offline; then
+    echo "[offline] skipped (needs a running system bus): probe org.qdistro.AdminBroker1"
+else
+    for _ in 1 2 3 4 5; do
+        busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1 && break
+        sleep 0.5
+    done
 
-if ! busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1; then
-    echo "ERROR: broker service failed to claim bus name" >&2
-    journalctl -u qdistro-admin-broker.service --no-pager -n 30 >&2
-    exit 3
+    if ! busctl list --no-pager 2>/dev/null | grep -q org.qdistro.AdminBroker1; then
+        echo "ERROR: broker service failed to claim bus name" >&2
+        journalctl -u qdistro-admin-broker.service --no-pager -n 30 >&2
+        exit 3
+    fi
+
+    echo "broker ready on org.qdistro.AdminBroker1"
 fi
-
-echo "broker ready on org.qdistro.AdminBroker1"

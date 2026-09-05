@@ -64,8 +64,15 @@ def _unit_files() -> list[Path]:
             # path containing an excluded name (a `.worktrees/<topic>`
             # worktree, say), and filtering on absolute parts silently
             # excluded EVERY unit — a vacuous green.
-            parts = set(p.relative_to(_REPO).parts)
+            rel = p.relative_to(_REPO)
+            parts = set(rel.parts)
             if parts & {".git", ".worktrees", "tests", "__pycache__"}:
+                continue
+            # image/root/root/ is the rsynced sibling-source overlay the kiwi
+            # build stages (gitignored; present only in a checkout that has
+            # built an image) and image/logs/ its build logs. Both carry
+            # copies of OTHER repos' units and are not this repo's code.
+            if rel.parts[:3] == ("image", "root", "root") or rel.parts[:2] == ("image", "logs"):
                 continue
             out.append(p)
     assert out, "no unit files found — the scan is vacuous"
