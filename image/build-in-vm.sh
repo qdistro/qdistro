@@ -110,11 +110,18 @@ bash "$HERE/build.sh" --sync-only 2>&1 | tee "$LOGS/sync.log"
 # Record what went in, so a built artifact can be traced to five commits.
 # Best-effort: a synced-from-tarball tree has no .git.
 SIBLINGS="$(cd "$HERE/../.." && pwd)"
+# "DIRTY" alone cannot distinguish two different uncommitted states on the
+# same parent, so a dirty tree also records the sha256 of its diff against
+# HEAD (tracked changes; untracked files are listed by count).
 for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
     if [ -d "$SIBLINGS/$repo/.git" ]; then
+        if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
+            state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??')"
+        else
+            state=clean
+        fi
         printf '%-10s %s %s\n' "$repo" \
-            "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" \
-            "$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q . && echo DIRTY || echo clean)"
+            "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" "$state"
     else
         printf '%-10s %s\n' "$repo" "no-git"
     fi
@@ -211,6 +218,7 @@ EOS
 # sysconfig), so editing /etc/zypp/zypp.conf would mean copying a vendor file.
 # Builder-VM tuning only: it does not touch the image's repo list or sizes.
 MIN_MIRROR_BPS="${QDISTRO_MIN_MIRROR_BPS:-20000}"
+[[ "$MIN_MIRROR_BPS" =~ ^[0-9]+$ ]] || die "QDISTRO_MIN_MIRROR_BPS must be a non-negative integer, got: $MIN_MIRROR_BPS"
 log "setting libzypp mirror timeouts in builder VM (floor ${MIN_MIRROR_BPS} B/s)"
 vms <<EOS | tee "$LOGS/zypp-tuning.log"
 set -eu
@@ -253,6 +261,7 @@ log "installing kiwi-ng inside VM (idempotent zypper)"
 # Verification is NOT relaxed: no --no-gpg-checks, and a run that fails every
 # attempt still fails the build.
 ZYPP_TRIES="${QDISTRO_ZYPP_TRIES:-3}"
+[[ "$ZYPP_TRIES" =~ ^[1-9][0-9]*$ ]] || die "QDISTRO_ZYPP_TRIES must be a positive integer, got: $ZYPP_TRIES"
 log "  ${ZYPP_TRIES} attempts, gpg verification unchanged"
 vms <<EOS | tee "$LOGS/kiwi-install.log"
 # pipefail matters: the install is piped through tail, so without it a failed
@@ -274,7 +283,7 @@ exit \$rc
 EOS
 
 #-- 8. Run the kiwi build ------------------------------------------------------
-log "running kiwi-ng build inside VM (~16 min measured 2026-09-04; ~10 min of it the raw)"
+log "running kiwi-ng build inside VM (17-26 min measured 2026-09-04, n=2)"
 log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
@@ -293,19 +302,27 @@ log "  building with QDISTRO_PROFILE=$QDISTRO_PROFILE"
 # "Silence == hung" is NOT a safe test, and run 16 proved it: attempts 2 and 3
 # were both killed at the identical step, kiwi xz-compressing the 20 GiB raw
 # into the install-ISO squashfs (mksquashfs -comp xz), which emits nothing for
-# many minutes while working perfectly. So the guard also samples CPU consumed
-# by the build's process tree: a compressing build burns most of a core, while
-# a transfer stalled at ~0 B/s burns essentially none. Stalled therefore means
-# no log output AND no CPU -- which mksquashfs never satisfies and a dead
-# download always does. Each attempt wipes /build/out --
-# kiwi refuses a non-empty target dir, and reusing a root killed mid-bootstrap
-# risks a corrupt tree, so the package cache under it is discarded too. That
-# costs little in practice: the observed hang is at repo metadata, before any
-# package is cached.
+# many minutes while working perfectly (5m03s in run 17). So an attempt counts
+# as alive when ANY of these moved in the last sample (image/lib/build-guard.sh):
+#   * the build log's mtime            -- kiwi printed something
+#   * CPU ticks across the build's process tree -- mksquashfs, rpm, xz
+#   * a process in the tree in state D -- blocked in kernel I/O: a 20 GiB
+#     unmount/sync or mkfs burns no ticks of its own and prints nothing
+#   * bytes received on the VM's uplink -- a slow-but-alive download; the
+#     libzypp floor above deliberately tolerates ~20 kB/s, so the guard must
+#     tolerate it too, or the two would encode opposite policies
+# Stalled therefore means none of those for KIWI_STALL_S, which a dead
+# transfer at 0 B/s satisfies and a working build should not. It is still a
+# heuristic: a wedge that keeps logging or spinning is not caught here and
+# costs one attempt budget, which the per-attempt cap bounds. Each attempt
+# wipes /build/out -- kiwi refuses a non-empty target dir, and reusing a root
+# killed mid-bootstrap risks a corrupt tree. kiwi's package cache lives at
+# /var/cache/kiwi on the VM's root disk, not under /build/out, so it survives
+# between attempts (which is why run 15's attempt 3 rebuilt in minutes).
 KIWI_STALL_S="${QDISTRO_KIWI_STALL_S:-240}"
 KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
-# A healthy build is ~16 min, so an attempt that is producing output but has run
-# well past that is wedged in a way the stall guard cannot see; cap it too.
+# A healthy build is 17-26 min, so an attempt that is producing output but has
+# run well past that is wedged in a way the stall guard cannot see; cap it too.
 # Run 16: a cold-cache attempt was still partitioning at 1500s, so 1500 was too
 # tight and killed a working build. The budget is a backstop against a wedge the
 # stall guard cannot see, not a performance expectation -- keep it generous.
@@ -314,50 +331,65 @@ KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-2700}"
 # to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below
 # mksquashfs or rpm, far above a stalled socket.
 KIWI_CPU_TICKS_MIN="${QDISTRO_KIWI_CPU_TICKS_MIN:-100}"
+# Sample period. 15 s is the calibration for the floors below (they are
+# scaled by it); a fault-injection run polls faster to hit a short phase.
+KIWI_POLL_S="${QDISTRO_KIWI_POLL_S:-15}"
+# Minimum bytes received per sample to count as a live download: the same
+# floor libzypp is told to accept (MIN_MIRROR_BPS), over the sample period.
+KIWI_RX_BYTES_MIN=$(( MIN_MIRROR_BPS * KIWI_POLL_S ))
+# Fault injection for the retry path itself: kill attempt 1 after this many
+# seconds (0 = off). The retry/cleanup path is the feature and a green
+# attempt-1 build never exercises it, so a review run sets this to land the
+# kill in a phase that holds mounts and a loop device, and the log must then
+# show a clean attempt 2. Never set in a real build.
+KIWI_FAULT_KILL_AT_S="${QDISTRO_KIWI_FAULT_KILL_AT_S:-0}"
+# Same, keyed on a build-log line instead of a clock (empty = off): lands the
+# kill deterministically in a chosen phase, e.g. "Syncing root filesystem
+# data" while the raw's loop device and kiwi's /var/tmp/kiwi_volumes.* mounts
+# are all live -- the state the cleanup exists for.
+KIWI_FAULT_KILL_ON_LOG="${QDISTRO_KIWI_FAULT_KILL_ON_LOG:-}"
+# Every knob feeds shell arithmetic or a comparison; a typo must fail here, not
+# turn into an arithmetic error mid-build or a silently shortened host cap
+# (the exact bug the derived cap below fixes). Same gate as QDISTRO_PROFILE.
+for knob in KIWI_STALL_S KIWI_TRIES KIWI_ATTEMPT_BUDGET_S KIWI_CPU_TICKS_MIN KIWI_FAULT_KILL_AT_S KIWI_POLL_S; do
+    [[ "${!knob}" =~ ^[0-9]+$ ]] || die "$knob must be a non-negative integer, got: ${!knob}"
+done
+[ "$KIWI_TRIES" -ge 1 ] || die "KIWI_TRIES must be >= 1"
+[ "$KIWI_POLL_S" -ge 1 ] || die "KIWI_POLL_S must be >= 1"
+# The CPU floor is calibrated per 15 s; scale it to the poll period.
+KIWI_CPU_TICKS_MIN=$(( KIWI_CPU_TICKS_MIN * KIWI_POLL_S / 15 ))
+[ "$KIWI_CPU_TICKS_MIN" -ge 1 ] || KIWI_CPU_TICKS_MIN=1
+[[ "$KIWI_FAULT_KILL_ON_LOG" != *"'"* ]] || die "QDISTRO_KIWI_FAULT_KILL_ON_LOG must not contain a single quote"
 # vm-exec caps a guest command at QDISTRO_VM_EXEC_TIMEOUT, default 1800s. That
 # default silently made the retry loop a lie: three ~16 min attempts cannot fit
 # in 30 min, so only the first ever had room. Run 15 died exactly here -- two
 # attempts stalled, the third had written the full 20 GiB raw and was in kiwi's
 # final rpm verification when the HOST clock killed it at 1800s, and the run was
 # reported as a kiwi failure (exit 124) rather than as the driver's own cap.
-# So derive the host cap from the retry budget instead of leaving it defaulted.
-KIWI_EXEC_TIMEOUT=$(( KIWI_TRIES * KIWI_ATTEMPT_BUDGET_S + 300 ))
-log "  stall guard: abort+retry after ${KIWI_STALL_S}s of no output, ${KIWI_TRIES} attempts"
+# So derive the host cap from the retry budget instead of leaving it defaulted:
+# attempts * budget, plus the inter-attempt sleeps, kill waits and poll slack.
+KIWI_EXEC_TIMEOUT=$(( KIWI_TRIES * (KIWI_ATTEMPT_BUDGET_S + 60) + 300 ))
+log "  stall guard: abort+retry after ${KIWI_STALL_S}s with no log/CPU/D-state/rx activity, ${KIWI_TRIES} attempts"
 log "  per-attempt cap ${KIWI_ATTEMPT_BUDGET_S}s; host vm-exec cap ${KIWI_EXEC_TIMEOUT}s"
-log "  liveness also counted as CPU: >=${KIWI_CPU_TICKS_MIN} ticks/sample keeps an attempt alive"
+log "  liveness floors: >=${KIWI_CPU_TICKS_MIN} ticks or >=${KIWI_RX_BYTES_MIN} rx bytes per ${KIWI_POLL_S}s sample"
+if [ "$KIWI_FAULT_KILL_AT_S" != 0 ]; then
+    warn "FAULT INJECTION: attempt 1 will be killed at ${KIWI_FAULT_KILL_AT_S}s"
+fi
+if [ -n "$KIWI_FAULT_KILL_ON_LOG" ]; then
+    warn "FAULT INJECTION: attempt 1 will be killed once the log contains: $KIWI_FAULT_KILL_ON_LOG"
+fi
 export QDISTRO_VM_EXEC_TIMEOUT="$KIWI_EXEC_TIMEOUT"
 vms <<EOS | tee "$LOGS/kiwi-driver.log"
-cd /root/qdistro-image
-# Keep this script's stdout tiny: guest-exec ferries it through the qemu agent,
-# whose response is capped (~10 MB) -- overflowing it wedges the agent for the
-# rest of the run, which is how run 12 died. Everything goes to a file; only a
-# bounded tail is emitted at the end.
+cd /root/qdistro-image || exit 1
+# Keep this script's stdout tiny: guest-exec ferries it through the qemu agent
+# and libvirt caps an agent response at ~10 MiB (QEMU_AGENT_MAX_RESPONSE),
+# dropping the agent connection when it overflows -- run 12 died with the
+# agent wedged for the rest of the run after a chatty attempt. Everything goes
+# to a file; only a bounded tail is emitted at the end.
 exec 3>&1                      # keep the real stdout for the bounded tail
 exec >/root/kiwi-loop.log 2>&1
-
-# Kill ONLY descendants of the build, walking the pid tree. Deliberately not by
-# name (this script's command line contains "zypper" and "kiwi-ng", so pkill -f
-# matches this shell -- that is how run 11 died) and deliberately not by process
-# group (the group can include the guest agent's child, i.e. this shell).
-kill_tree() {
-    local p=\$1 c
-    for c in \$(pgrep -P "\$p" 2>/dev/null); do kill_tree "\$c"; done
-    kill -9 "\$p" 2>/dev/null || true
-}
-
-# Cumulative CPU ticks of a pid and every descendant. The comm field in
-# /proc/pid/stat is parenthesised and can contain spaces, so fields are counted
-# after the last ')': utime+stime, plus cutime+cstime so a child that has already
-# been reaped between two samples still registers as work done.
-tree_cpu() {
-    local p=\$1 c total=0 v
-    v=\$(awk '{ sub(/^.*\\) /, ""); print \$12 + \$13 + \$14 + \$15 }' /proc/\$p/stat 2>/dev/null) || v=0
-    total=\${v:-0}
-    for c in \$(pgrep -P "\$p" 2>/dev/null); do
-        total=\$(( total + \$(tree_cpu "\$c") ))
-    done
-    echo "\$total"
-}
+set -u
+. /root/qdistro-image/lib/build-guard.sh
 
 # TMPDIR is intentionally NOT redirected to /build/tmp: dracut runs inside
 # the image-root chroot and won't see anything mounted under /build there.
@@ -366,44 +398,66 @@ tree_cpu() {
 rc=1
 for attempt in \$(seq 1 $KIWI_TRIES); do
     echo "[kiwi] attempt \$attempt/$KIWI_TRIES"
-    # kiwi refuses a non-empty --target-dir; a killed attempt leaves one behind.
-    # A killed kiwi also leaves its bind mounts (/dev, /proc, /sys, the package
-    # cache) live inside image-root -- rm -rf then fails with "Device or resource
-    # busy" and every later attempt dies before it starts (run 13). Unmount
-    # deepest-first and lazily, so the wipe cannot recurse through a live mount.
-    for m in \$(awk '{print \$2}' /proc/mounts | grep '^/build/out' | sort -r); do
-        umount -l "\$m" 2>/dev/null || true
-    done
-    rm -rf /build/out
+    # kiwi refuses a non-empty --target-dir, and a killed attempt leaves one
+    # behind with its bind mounts, /var/tmp/kiwi_* mounts and loop device
+    # still live (run 13: rm -rf died with "Device or resource busy" and every
+    # later attempt failed before it started). Release all of it and VERIFY
+    # the release; a leftover fails this attempt rather than being papered
+    # over with a fresh mkdir for kiwi to trip on later.
+    if ! guard_cleanup_target /build/out; then
+        echo "[kiwi] attempt \$attempt: previous attempt's resources could not be released - giving up"
+        rc=1
+        break
+    fi
     mkdir -p /build/out
     : > /root/kiwi-build.log
     started=\$(date +%s)
+    # setsid: the build leads its own process group, so the group can be
+    # killed as a whole without touching this shell (the guest agent's child).
     env QDISTRO_PROFILE=$QDISTRO_PROFILE QDISTRO_BUILD_DIR=/build/out \\
-        bash build.sh --no-sync >/root/kiwi-build.log 2>&1 &
+        setsid bash build.sh --no-sync >/root/kiwi-build.log 2>&1 &
     kpid=\$!
     last_active=\$started
     prev_cpu=0
     prev_mtime=0
+    prev_rx=\$(guard_rx_bytes)
+    reason=""
     while kill -0 \$kpid 2>/dev/null; do
-        sleep 15
+        sleep $KIWI_POLL_S
         now=\$(date +%s)
         mtime=\$(stat -c %Y /root/kiwi-build.log 2>/dev/null || echo 0)
-        cpu=\$(tree_cpu \$kpid)
-        if [ "\$mtime" != "\$prev_mtime" ] || \
-           [ \$(( cpu - prev_cpu )) -ge $KIWI_CPU_TICKS_MIN ]; then
-            last_active=\$now
-        fi
+        cpu=\$(guard_tree_cpu \$kpid)
+        dst=\$(guard_tree_dstate \$kpid)
+        rx=\$(guard_rx_bytes)
+        why=""
+        [ "\$mtime" != "\$prev_mtime" ] && why="log"
+        [ \$(( cpu - prev_cpu )) -ge $KIWI_CPU_TICKS_MIN ] && why="\$why cpu=\$(( cpu - prev_cpu ))"
+        [ "\$dst" -gt 0 ] && why="\$why dstate=\$dst"
+        [ \$(( rx - prev_rx )) -ge $KIWI_RX_BYTES_MIN ] && why="\$why rx=\$(( rx - prev_rx ))"
+        [ -n "\$why" ] && last_active=\$now
         prev_mtime=\$mtime
         prev_cpu=\$cpu
+        prev_rx=\$rx
         idle=\$(( now - last_active ))
+        # One line per sample so a kill can be explained afterwards.
+        echo "[kiwi] t=\$(( now - started ))s idle=\${idle}s alive:\${why:- none}"
         if [ "\$idle" -ge $KIWI_STALL_S ]; then
-            echo "[kiwi] STALLED \${idle}s: no log output and no CPU - aborting attempt \$attempt"
-            kill_tree \$kpid
-            break
+            reason="STALLED \${idle}s: no log output, CPU, D-state or rx activity"
+        elif [ \$(( now - started )) -ge $KIWI_ATTEMPT_BUDGET_S ]; then
+            reason="exceeded the ${KIWI_ATTEMPT_BUDGET_S}s attempt budget (a wedge the stall guard cannot see)"
+        elif [ "\$attempt" = 1 ] && [ $KIWI_FAULT_KILL_AT_S -gt 0 ] && [ \$(( now - started )) -ge $KIWI_FAULT_KILL_AT_S ]; then
+            reason="FAULT INJECTION at ${KIWI_FAULT_KILL_AT_S}s (QDISTRO_KIWI_FAULT_KILL_AT_S)"
+        elif [ "\$attempt" = 1 ] && [ -n '$KIWI_FAULT_KILL_ON_LOG' ] && grep -qF -- '$KIWI_FAULT_KILL_ON_LOG' /root/kiwi-build.log; then
+            reason="FAULT INJECTION on log line '$KIWI_FAULT_KILL_ON_LOG' (QDISTRO_KIWI_FAULT_KILL_ON_LOG)"
+            echo "[kiwi] mounts under /build/out + /var/tmp/kiwi_* at kill time: \$(guard_mounts_under /build/out | wc -l)+\$(guard_mounts_under /var/tmp | grep -c '^/var/tmp/kiwi_'); loops backed by /build/out: \$(guard_loops_under /build/out | tr '\n' ' ')"
         fi
-        if [ \$(( now - started )) -ge $KIWI_ATTEMPT_BUDGET_S ]; then
-            echo "[kiwi] attempt \$attempt exceeded ${KIWI_ATTEMPT_BUDGET_S}s - aborting"
-            kill_tree \$kpid
+        if [ -n "\$reason" ]; then
+            echo "[kiwi] \$reason - aborting attempt \$attempt"
+            if guard_kill_tree \$kpid 60; then
+                echo "[kiwi] attempt \$attempt: build tree killed"
+            else
+                echo "[kiwi] attempt \$attempt: build tree NOT fully dead after 60s (D-state?)"
+            fi
             break
         fi
     done
@@ -413,6 +467,7 @@ for attempt in \$(seq 1 $KIWI_TRIES); do
     # Each attempt truncates kiwi-build.log, so without this the only surviving
     # build log is the last attempt's and a stall cannot be located afterwards.
     cp /root/kiwi-build.log /root/kiwi-build.attempt\$attempt.log 2>/dev/null || true
+    echo "[kiwi] state after attempt \$attempt: mounts=\$(guard_mounts_under /build/out | wc -l) loops=\$(guard_loops_under /build/out | wc -l)"
     sleep 10
 done
 echo "[kiwi] final rc=\$rc"
@@ -430,6 +485,13 @@ log "fetching kiwi-build.log to host"
 vmx 'tail -100 /root/kiwi-build.log' > "$LOGS/kiwi-build.tail.log" 2>&1 || true
 virt-cat -a "$IMG_DIR/$VM.qcow2" /root/kiwi-build.log > "$LOGS/kiwi-build.full.log" 2>&1 \
     || vmx 'cat /root/kiwi-build.log' > "$LOGS/kiwi-build.full.log" 2>&1 || true
+# The loop log (one liveness line per 15 s sample, every kill with its reason)
+# and any per-attempt logs of failed attempts: the evidence for a retry.
+vmx 'cat /root/kiwi-loop.log' > "$LOGS/kiwi-loop.log" 2>&1 || true
+for n in $(seq 1 "$KIWI_TRIES"); do
+    vmx "cat /root/kiwi-build.attempt$n.log 2>/dev/null" > "$LOGS/kiwi-build.attempt$n.log" 2>/dev/null || true
+    [ -s "$LOGS/kiwi-build.attempt$n.log" ] || rm -f "$LOGS/kiwi-build.attempt$n.log"
+done
 
 if [ "$KIWI_RC" != "0" ]; then
     warn "kiwi build failed (exit $KIWI_RC); see $LOGS/kiwi-build.full.log"
@@ -440,6 +502,11 @@ fi
 #-- 9. Inventory the artifacts inside the VM ----------------------------------
 log "build artifacts in VM:"
 vmx 'ls -lh /build/out/' | tee "$LOGS/artifacts.txt"
+# Exact byte sizes, so the copy-out below can prove it copied THIS build.
+vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified 2>/dev/null' \
+    > "$LOGS/artifact-sizes.txt" 2>/dev/null || true
+IN_VM_RAW_SIZE="$(awk '$2 ~ /\.raw$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
+[ -n "$IN_VM_RAW_SIZE" ] || die "no .raw in /build/out despite kiwi exit 0 (see $LOGS/artifacts.txt)"
 
 #-- 10. Copy artifacts back to host ------------------------------------------
 log "copying artifacts back to host ($HOST_BUILD_DIR)"
@@ -469,6 +536,13 @@ export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 # Retry until the artifacts have settled on the host side.
 # Copy only the artifact files (not /out/build/, the multi-GB extracted
 # image-root tree kiwi leaves behind).
+# $HOST_BUILD_DIR is under /var/tmp and persists across runs, so "a .raw
+# exists" would be satisfied by the PREVIOUS build if this copy-out copied
+# nothing -- and verify.sh would then verify the wrong image. Clear the old
+# artifacts first and accept only a .raw whose size matches the one kiwi just
+# wrote inside the VM.
+rm -f "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/*.packages \
+      "$HOST_BUILD_DIR"/*.changes "$HOST_BUILD_DIR"/*.verified
 copied=0
 for attempt in $(seq 1 6); do
     guestfish --ro -a "$BUILD_DISK" -m /dev/sda <<EOF 2>>"$LOGS/copy-out.log"
@@ -478,11 +552,12 @@ glob copy-out /out/*.packages $HOST_BUILD_DIR/
 glob copy-out /out/*.changes $HOST_BUILD_DIR/
 glob copy-out /out/*.verified $HOST_BUILD_DIR/
 EOF
-    if ls "$HOST_BUILD_DIR"/*.raw >/dev/null 2>&1; then copied=1; break; fi
-    log "copy-out: artifacts not settled yet (attempt $attempt/6); waiting..."
+    host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
+    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ]; then copied=1; break; fi
+    log "copy-out: artifacts not settled yet (attempt $attempt/6; want $IN_VM_RAW_SIZE bytes); waiting..."
     sleep 5
 done
-[ "$copied" = 1 ] || die "copy-out: build artifacts never appeared (see $LOGS/copy-out.log)"
+[ "$copied" = 1 ] || die "copy-out: no .raw of $IN_VM_RAW_SIZE bytes appeared (see $LOGS/copy-out.log)"
 
 log "artifacts on host:"
 ls -lh "$HOST_BUILD_DIR/" | tee -a "$LOGS/artifacts.txt"

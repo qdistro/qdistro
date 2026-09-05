@@ -62,19 +62,28 @@
 # LIVE IS THE DEFAULT, AND OFFLINE CANNOT BE ASSERTED INTO EXISTENCE.
 # Skipping the runtime probes on a LIVE system would be a security hole: a
 # getty already running on the compositor VT holds it with a reset keyboard
-# until reboot, and masking does not stop a running instance. So:
+# until reboot, and masking does not stop a running instance. So offline
+# mode needs BOTH a request and corroboration, and the corroboration is
+# positive evidence of a chroot, never mere absence of systemd:
 #   * `--offline` (an argument, which is not inherited by accident) is a
-#     caller assertion that must be CORROBORATED by this root; if the root
-#     turns out to be live, that is a caller bug and we exit 2 rather than
-#     skip a check.
+#     caller assertion that must be CORROBORATED by this root; if it is not,
+#     that is a caller bug and we exit 2 rather than skip a check.
 #   * QDISTRO_OFFLINE_INSTALL=1 (Phase B's environment contract, which CAN
-#     leak) is only a request. Corroborated, it selects offline; contradicted,
-#     it is ignored with a warning and the live probes run.
-#   * With neither, the mode is detected from this root alone.
-# The probe for "no system manager serving this root" asks systemd itself
-# (`systemctl is-system-running` prints `offline` in a chroot), which also
-# covers a chroot that has /run bind-mounted and no /proc — where
-# systemd-detect-virt cannot answer and /run/systemd/system exists.
+#     leak) is only a request. Corroborated, it selects offline; not
+#     corroborated, it is ignored with a warning and the live probes run.
+#   * With neither, the live probes ALWAYS run. Detection alone never
+#     selects offline: a caller that wants the offline branch must say so.
+# Corroboration means `systemd-detect-virt --chroot` (PID 1's root is not
+# this root; kiwi bind-mounts the builder's /proc into the image root before
+# config.sh runs, so this answers there), or -- for a chroot with no /proc at
+# all -- the conjunction of no /proc/1, no /run/systemd/system and
+# `systemctl is-system-running` = offline. Any one of those three alone is
+# satisfiable on a live machine (a mount namespace hiding /run, a non-systemd
+# PID 1 with `offline` printed because the manager is unreachable), so none
+# of them is sufficient by itself. A live system in `degraded`, `starting`
+# or `maintenance` is live. A chroot that has the host's /run bind-mounted
+# reaches the HOST manager, which answers `running`/`degraded`: that case is
+# refused (exit 2), i.e. it fails closed rather than open.
 #
 # Usage: harden-compositor-vt.sh [--offline] [greetd-config.toml]
 #   Reads the compositor VT from `[terminal] vt = N`. Defaults to
@@ -199,43 +208,54 @@ log "compositor VT is tty$VT (from $CFG)"
 
 UNITS="getty@tty$VT.service autovt@tty$VT.service"
 
-# Offline root (kiwi chroot in image/config.sh, or any install into a tree
-# whose PID 1 is not running)? Then runtime state does not exist yet and
-# CANNOT be probed: inside a chroot systemd prints "Running in chroot,
-# ignoring command 'is-active'" and exits **0**, so `is-active --quiet`
-# reports every unit as running. That false positive aborted the first
-# in-repo image build (iso/14 Phase A). Detect the offline root and assert
-# the persistent state instead — which is the only thing that governs what
-# the built image does when it actually boots.
-# Does THIS root have a system manager that could be running a getty?
-# Any one of these is positive evidence that it does not.
+# Offline root (the kiwi chroot in image/config.sh, or any chroot whose / is
+# the target and whose PID 1 is not running)? Then runtime state does not
+# exist yet and CANNOT be probed: inside a chroot systemd prints "Running in
+# chroot, ignoring command 'is-active'" and exits **0**, so `is-active
+# --quiet` reports every unit as running. That false positive aborted the
+# first in-repo image build (iso/14 Phase A). In that case assert the
+# persistent state instead — which is the only thing that governs what the
+# built image does when it actually boots.
+#
+# offline_root() is the CORROBORATION for an explicit request; it is never
+# consulted without one (see the header). It returns 0 only on positive
+# evidence that this root is a chroot, not on the absence of a manager.
 offline_root() {
-    # systemd's own answer for "I am not the manager of a booted system".
-    [ "$(systemctl is-system-running 2>/dev/null)" = offline ] && return 0
+    # PID 1's root differs from ours: this root is a chroot. Needs /proc.
     systemd-detect-virt --chroot --quiet 2>/dev/null && return 0
-    [ ! -d /run/systemd/system ] && return 0
+    # No /proc at all, no manager runtime dir, and systemd agrees it cannot
+    # reach a manager: a bare chroot. All three together, never one alone.
+    if [ ! -e /proc/1/comm ] && [ ! -d /run/systemd/system ] \
+       && [ "$(systemctl is-system-running 2>/dev/null)" = offline ]; then
+        return 0
+    fi
     return 1
 }
 
 OFFLINE=0
-if offline_root; then
-    OFFLINE=1
-fi
-
-if [ "$OFFLINE_ASSERTED" = 1 ] && [ "$OFFLINE" = 0 ]; then
-    # --offline is a caller assertion about the root it is pointed at. Being
-    # wrong about that would silently skip the live checks, so refuse.
-    warn "--offline was given, but this root has a running system manager"
-    warn "refusing to skip the runtime checks on a live system"
-    exit 2
-fi
-if [ "${QDISTRO_OFFLINE_INSTALL:-0}" = 1 ] && [ "$OFFLINE" = 0 ]; then
-    warn "QDISTRO_OFFLINE_INSTALL=1 in the environment, but this root has a"
-    warn "running system manager; ignoring it and running the live checks"
+if [ "$OFFLINE_ASSERTED" = 1 ]; then
+    if offline_root; then
+        OFFLINE=1
+    else
+        # --offline is a caller assertion about the root it is pointed at.
+        # Being wrong about that would silently skip the live checks, so
+        # refuse. This also covers a chroot with the host's /run bind-mounted
+        # (the host manager answers, so the chroot is not corroborated).
+        warn "--offline was given, but this root is not corroborated as a chroot"
+        warn "refusing to skip the runtime checks on a possibly live system"
+        exit 2
+    fi
+elif [ "${QDISTRO_OFFLINE_INSTALL:-0}" = 1 ]; then
+    if offline_root; then
+        OFFLINE=1
+    else
+        warn "QDISTRO_OFFLINE_INSTALL=1 in the environment, but this root is not"
+        warn "corroborated as a chroot; ignoring it and running the live checks"
+    fi
 fi
 
 if [ "$OFFLINE" = 1 ]; then
-    log "offline root (no running system manager): masking only, runtime probes skipped"
+    log "offline root (corroborated chroot, no running system manager): masking only, runtime probes skipped"
 fi
 
 # Stop first: masking an already-running instance leaves it running (and

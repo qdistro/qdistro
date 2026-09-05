@@ -496,14 +496,29 @@ EOF
 # The security property is K_OFF on the compositor VT for the whole
 # greeter/session/locked-session lifetime, and masking does NOT stop a getty
 # that is already running. So the runtime probes (stop + is-active) may be
-# skipped ONLY where no system manager can be running one. These cases pin
-# that boundary: an offline claim that is contradicted by the root must never
-# buy a pass. Driven with a stubbed `systemctl` + `systemd-detect-virt` on
-# PATH, so no VM and no root are needed.
-
+# skipped ONLY where no system manager can be running one, and only when the
+# caller asked for that AND the root corroborates it with positive chroot
+# evidence. These cases pin that boundary: an offline claim that is not
+# corroborated must never buy a pass, and detection alone must never select
+# offline. Driven with a stubbed `systemctl` + `systemd-detect-virt` on PATH.
+#
+# Hermetic: every case runs in an unprivileged mount namespace with an EMPTY
+# directory bound over /etc/systemd/system, because the script asserts the
+# mask at that absolute path on purpose (a test-only path override in a
+# security check would be a way to fake a pass). Without the namespace the
+# cases would silently depend on whether THIS host masks getty@tty3 (it
+# does), which is exactly the state that hides a broken mask step.
+#
+# vt_stub_dir NAME MODE ACTIVE CHROOT [nomask]
+#   MODE   = what `systemctl is-system-running` prints (running|offline|...)
+#   ACTIVE = active|inactive: what `systemctl is-active` answers for a getty
+#   CHROOT = yes|no: what `systemd-detect-virt --chroot` answers
+#   nomask = the stub's `mask` writes nothing (simulates a failed mask)
 vt_stub_dir() {
-    local dir="$BATS_TEST_TMPDIR/stub-$1" mode="$2" active="$3"
-    mkdir -p "$dir" "$BATS_TEST_TMPDIR/etc/systemd/system"
+    local dir="$BATS_TEST_TMPDIR/stub-$1" mode="$2" active="$3" chroot="$4" nomask="${5:-}"
+    mkdir -p "$dir"
+    local maskcmd='ln -sfn /dev/null "/etc/systemd/system/$2"'
+    [ "$nomask" = nomask ] && maskcmd=':'
     cat >"$dir/systemctl" <<EOS
 #!/bin/bash
 case "\$1" in
@@ -511,23 +526,48 @@ case "\$1" in
   is-active) echo "$active-called" >>"$BATS_TEST_TMPDIR/probes.log"
              [ "$active" = active ] && exit 0 || exit 3 ;;
   stop)     echo "stop-called" >>"$BATS_TEST_TMPDIR/probes.log" ;;
-  mask)     ln -sfn /dev/null "$BATS_TEST_TMPDIR/etc/systemd/system/\$2" ;;
-  is-enabled) echo masked ;;
+  mask)     $maskcmd ;;
+  is-enabled) [ "\$(readlink "/etc/systemd/system/\$2" 2>/dev/null)" = /dev/null ] && echo masked || echo disabled ;;
   disable)  : ;;
 esac
 exit 0
 EOS
-    cat >"$dir/systemd-detect-virt" <<'EOS'
+    cat >"$dir/systemd-detect-virt" <<EOS
 #!/bin/bash
-exit 1   # not a chroot
+[ "$chroot" = yes ] && exit 0 || exit 1
 EOS
     cat >"$dir/systemd-analyze" <<'EOS'
 #!/bin/bash
 exit 0
 EOS
     chmod +x "$dir"/*
-    printf '%s
-' "$dir"
+    printf '%s\n' "$dir"
+}
+
+# vt_run STUBDIR [harden-vt args...]  -> sets $status/$output like `run`
+# Runs the hardener inside a private mount namespace with an empty
+# /etc/systemd/system, so the on-disk mask assertion sees only what the
+# stub's `mask` wrote. Exit 111 means the namespace setup itself failed.
+vt_run() {
+    local stub="$1"; shift
+    local units="$BATS_TEST_TMPDIR/units-$$-$RANDOM"
+    mkdir -p "$units"
+    : >"$BATS_TEST_TMPDIR/probes.log"
+    run unshare -r --mount bash -c '
+        mount --make-rprivate / 2>/dev/null || true
+        mount --bind "$1" /etc/systemd/system || exit 111
+        stub="$2"; shift 2
+        PATH="$stub:$PATH" exec bash "$@"
+    ' _ "$units" "$stub" "$HARDEN_VT" "$@"
+    [ "$status" -ne 111 ] || fail "namespace setup failed: $output"
+    VT_UNITS_DIR="$units"
+}
+
+vt_require_ns() {
+    unshare -r --mount true 2>/dev/null || skip "no unprivileged mount namespace"
+    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
+    printf '[terminal]\nvt = 3\n' >"$cfg"
+    VT_CFG="$cfg"
 }
 
 @test "vt-isolation: a leaked QDISTRO_OFFLINE_INSTALL does not skip live probes" {
@@ -535,13 +575,9 @@ EOS
     # it can be present in a live install's environment. If that alone
     # selected offline mode, a getty already holding tty3 (recovery scenario
     # A) would go unstopped and unreported while the script exits 0.
-    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
-    printf '[terminal]
-vt = 3
-' >"$cfg"
-    local stub; stub="$(vt_stub_dir leak running active)"
-    : >"$BATS_TEST_TMPDIR/probes.log"
-    QDISTRO_OFFLINE_INSTALL=1 PATH="$stub:$PATH" run bash "$HARDEN_VT" "$cfg"
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir leak running active no)"
+    QDISTRO_OFFLINE_INSTALL=1 vt_run "$stub" "$VT_CFG"
     # The live probes must have run...
     grep -q 'stop-called'   "$BATS_TEST_TMPDIR/probes.log"
     grep -q 'active-called' "$BATS_TEST_TMPDIR/probes.log"
@@ -551,53 +587,87 @@ vt = 3
 }
 
 @test "vt-isolation: --offline is refused on a live root" {
-    # An explicit caller assertion that is false about the root it points at
-    # is a caller bug: fail closed (exit 2) rather than skip a check.
-    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
-    printf '[terminal]
-vt = 3
-' >"$cfg"
-    local stub; stub="$(vt_stub_dir refuse running inactive)"
-    PATH="$stub:$PATH" run bash "$HARDEN_VT" --offline "$cfg"
+    # An explicit caller assertion that is not corroborated by the root it
+    # points at is a caller bug: fail closed (exit 2) rather than skip a check.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir refuse running inactive no)"
+    vt_run "$stub" --offline "$VT_CFG"
     [ "$status" -eq 2 ]
-    [[ "$output" == *"refusing to skip the runtime checks on a live system"* ]]
+    [[ "$output" == *"refusing to skip the runtime checks"* ]]
+    [ ! -s "$BATS_TEST_TMPDIR/probes.log" ]
 }
 
-@test "vt-isolation: an offline root skips the probes" {
+@test "vt-isolation: is-system-running=offline alone does not corroborate --offline" {
+    # `offline` only means systemd cannot reach a manager: a non-systemd PID 1
+    # or a mount namespace hiding /run prints it on a LIVE machine (round-2
+    # review, both reviewers). With /proc present and no chroot evidence the
+    # assertion must be refused, and the env request must fall back to live.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir offline-alone offline active no)"
+    vt_run "$stub" --offline "$VT_CFG"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not corroborated as a chroot"* ]]
+    QDISTRO_OFFLINE_INSTALL=1 vt_run "$stub" "$VT_CFG"
+    grep -q 'stop-called' "$BATS_TEST_TMPDIR/probes.log"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"still active on the compositor VT"* ]]
+}
+
+@test "vt-isolation: detection alone never selects offline mode" {
+    # Even a root that IS a chroot runs the live probes unless the caller
+    # asked for offline: the offline branch is opt-in, so a bootstrap path
+    # can never drift into it because of what the root looks like.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir unasked offline active yes)"
+    vt_run "$stub" "$VT_CFG"
+    grep -q 'stop-called'   "$BATS_TEST_TMPDIR/probes.log"
+    grep -q 'active-called' "$BATS_TEST_TMPDIR/probes.log"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"offline root"* ]]
+}
+
+@test "vt-isolation: a corroborated offline root skips the probes and masks on disk" {
     # In a chroot systemd answers is-active with a no-op exit 0, so probing it
     # there reports every unit as running — that false positive aborted the
-    # first image build (iso/14 Phase A).
-    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
-    printf '[terminal]\nvt = 3\n' >"$cfg"
-    local stub; stub="$(vt_stub_dir offline offline active)"
-    : >"$BATS_TEST_TMPDIR/probes.log"
-    PATH="$stub:$PATH" run bash "$HARDEN_VT" --offline "$cfg"
+    # first image build (iso/14 Phase A). With --offline AND chroot evidence
+    # the probes are skipped, and the pass is earned by the masks on disk.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir offline offline active yes)"
+    vt_run "$stub" --offline "$VT_CFG"
+    [ "$status" -eq 0 ]
     [[ "$output" == *"offline root"* ]]
+    [ ! -s "$BATS_TEST_TMPDIR/probes.log" ]
+    [ "$(readlink "$VT_UNITS_DIR/getty@tty3.service")"  = /dev/null ]
+    [ "$(readlink "$VT_UNITS_DIR/autovt@tty3.service")" = /dev/null ]
+    # The env form of the request is corroborated the same way.
+    QDISTRO_OFFLINE_INSTALL=1 vt_run "$stub" "$VT_CFG"
+    [ "$status" -eq 0 ]
     [ ! -s "$BATS_TEST_TMPDIR/probes.log" ]
 }
 
 @test "vt-isolation: offline mode still fails when the mask is not on disk" {
     # Offline, the mask symlink IS the whole guarantee, so it must still be
     # asserted — otherwise skipping the runtime probes would let the offline
-    # branch report success unconditionally. Needs a private
-    # /etc/systemd/system because the script asserts absolute paths
-    # (deliberately: a test-only path override in a security check would be a
-    # way to fake a pass). Note this host masks getty@tty3 itself, which is
-    # exactly the state that would otherwise hide the bug.
-    unshare -r --mount true 2>/dev/null || skip "no unprivileged mount namespace"
-    local cfg="$BATS_TEST_TMPDIR/greetd.toml"
-    printf '[terminal]\nvt = 3\n' >"$cfg"
-    local stub; stub="$(vt_stub_dir nomask offline inactive)"
-    local empty="$BATS_TEST_TMPDIR/empty-units"
-    mkdir -p "$empty"
-    run unshare -r --mount bash -c '
-        mount --make-rprivate / 2>/dev/null || true
-        mount --bind "$1" /etc/systemd/system || exit 111
-        PATH="$2:$PATH" exec bash "$3" --offline "$4"
-    ' _ "$empty" "$stub" "$HARDEN_VT" "$cfg"
-    [ "$status" -ne 111 ]
+    # branch report success unconditionally.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir nomask offline inactive yes nomask)"
+    vt_run "$stub" --offline "$VT_CFG"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not a mask symlink to /dev/null"* ]]
+}
+
+@test "vt-isolation: live mode also asserts the mask on disk" {
+    # The on-disk assertion is not an offline-only fallback: a live run whose
+    # `mask` silently did nothing must fail too, even with no getty active.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir live-nomask running inactive no nomask)"
+    vt_run "$stub" "$VT_CFG"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a mask symlink to /dev/null"* ]]
+    local ok; ok="$(vt_stub_dir live-ok running inactive no)"
+    vt_run "$ok" "$VT_CFG"
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$VT_UNITS_DIR/getty@tty3.service")" = /dev/null ]
 }
 
 @test "vt-isolation: enable-qdgreeter aborts when the VT is not secured" {

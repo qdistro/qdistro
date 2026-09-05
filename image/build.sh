@@ -52,7 +52,12 @@ sync_sources() {
         # Excluded paths are also protected from --delete, so debris left by
         # an earlier unfiltered sync would survive forever: clear it first.
         rm -rf "$SRC_OVERLAY/$repo/image/root/root" \
-               "$SRC_OVERLAY/$repo/image/logs"
+               "$SRC_OVERLAY/$repo/image/logs" \
+               "$SRC_OVERLAY/$repo/ci/runs"
+        # `build`, `node_modules`, `__pycache__` and `*.pyc` stay UNanchored on
+        # purpose: they are build products at any depth (meson/cmake build
+        # dirs, vendored JS). No tracked path in the five repos is named
+        # `build` today, so nothing shipped is dropped by that.
         rsync -a --delete \
               --exclude=.git \
               --exclude=__pycache__ \
