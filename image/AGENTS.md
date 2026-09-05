@@ -33,11 +33,14 @@ is a full, persistent install).
 - **No install ISO.** `installiso="false"`: a tester who boots an install
   ISO from a stick is offered a wipe of their internal disk. The installable
   ISO is post-v1 and gets a kiwi profile when it returns; `installboot` and
-  `install-test.sh` stay for it and are inert until then (the CI image gate
-  records install-test as *skipped* when no `.install.iso` exists).
+  `install-test.sh` stay for it and are inert until then: the CI image gate
+  records install-test as *skipped* when no `.install.iso` exists, and its
+  `--idempotency` flag (a second install pass) has no effect on the image
+  gate until the ISO returns. Not a missing stage.
 - **Profile: dev.** The tester image is built with `QDISTRO_PROFILE=dev`
   (baked passwordless `admin` sudoers; `config.sh` prints
-  `WARN: dev profile …` in the build log). root/admin/user share the
+  `WARN: dev profile …` in the build log). `QDISTRO_PROFILE` accepts only
+  `dev` or `release`; `config.sh` validates it once, up front. root/admin/user share the
   crypt-sha512 password `qdistro`; this is decided (`todo/iso/13`), the
   download page states it. **sshd is installed but never enabled** — that is
   what keeps the shared credential local; `verify-contents.sh` fails an image
@@ -73,7 +76,8 @@ its presence.
 | `build.sh` | in-VM kiwi driver (also the host-side sync). `--sync-only` rsyncs the five sibling repos into `root/root/qdistro-src/` and writes the source manifest; `--snapshot-id` prints the pin; the build runs `kiwi-ng system build` then `kiwi-ng result bundle --id <snapshot>` (xz `--threads=0` of the raw + `.sha256`) into `$BUILD_DIR/bundle/`. |
 | `build-in-vm.sh` | **the canonical entry point.** Clones `baseweed-baked.qcow2` (`--reuse` keeps an existing builder), attaches a 120 GiB scratch disk, bakes `image/` into the VM, runs `build.sh` under a liveness-guarded retry loop (`lib/build-guard.sh`), copies the raw and `bundle/` back to `$QDISTRO_BUILD_DIR`, then proves the release artifact on the host: name, `sha256sum -c`, `xz -t`, decompressed size == `<size>` (`logs/in-vm-*/release-artifact.txt`). |
 | `lib/build-guard.sh` | liveness (log mtime / CPU ticks / D-state / uplink bytes), kill-tree and mount/loop cleanup used by the retry loop. |
-| `lib/release-stamp.sh` | `qdistro_write_release`: manifest + os-release → `/etc/qdistro/release`, refusing a short manifest or a version mismatch. |
+| `lib/release-stamp.sh` | `qdistro_write_release`: manifest + os-release → `/etc/qdistro/release`, refusing anything but the five expected repos with 40-hex commits, or a version mismatch. |
+| `lib/release-proof.sh` | `qdistro_prove_release`: the host-side proof of the copied-out artifact (raw size, checksum file naming and matching, `xz -l` size, `xz -t`). |
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
@@ -86,7 +90,7 @@ its presence.
 
 ```sh
 cd image/
-QDISTRO_PROFILE=dev ./build-in-vm.sh   # 17-30 min: clone + bake + kiwi + bundle + host proof
+QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-45 min: clone + bake + kiwi (17-26) + xz bundle (10-15) + host proof
 ./verify.sh                            # ~5 min: rootless boot + SSH assertions + screenshots
 ```
 
@@ -174,7 +178,10 @@ When a kiwi build fails:
 1. Read `logs/in-vm-*/kiwi-build.full.log` (or `vm-exec <builder> 'tail -f
    /root/kiwi-build.log'` while it runs) and find the `FATAL` line.
 2. Edit `config.xml` or `config.sh` locally on the host.
-3. `./iterate-kiwi.sh` pushes the new files into the builder VM and re-runs
-   kiwi against the warm package cache, or `QDISTRO_BUILDER_VM=<vm>
-   ./build-in-vm.sh --reuse` for the full path with the copy-out and proof.
+3. `./iterate-kiwi.sh` re-syncs, pushes `config.xml`/`build.sh`/`config.sh`,
+   the source manifest and `lib/release-stamp.sh` (into the synced tree,
+   where `config.sh` reads it) into the builder VM and re-runs kiwi against
+   the warm package cache; or `QDISTRO_BUILDER_VM=<vm> ./build-in-vm.sh
+   --reuse` for the full path with the copy-out and the artifact proof.
+   Other files under `image/lib/` or in the five repos need the full path.
 4. When the build lands, run the static checklist, then `verify.sh`.

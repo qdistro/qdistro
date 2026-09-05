@@ -71,30 +71,46 @@ image_version() {
 # build.sh strips .git during the sync, so this is the only moment the
 # commits can be read. "DIRTY" alone cannot distinguish two uncommitted
 # states on the same parent, so a dirty tree also records the sha256 of its
-# diff against HEAD and the count of untracked files. A tree without .git
-# (synced from a tarball) records "no-git": the build is not refused, but
-# the image says so.
+# diff against HEAD and the count of untracked files. Every one of the five
+# must be a git checkout whose top level IS the sibling directory (a linked
+# worktree or submodule, where .git is a file, counts; a plain directory
+# that merely sits inside some other repository does not, or the manifest
+# would name a stranger's commit) with a 40-hex HEAD. Anything else refuses
+# the sync: a tester image that cannot say what went in is not built
+# (round-1 review: a worktree was silently stamped "no-git").
+repo_head() {
+    local dir="$1" top head
+    top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    [ "$(realpath -e -- "$top")" = "$(realpath -e -- "$dir")" ] || return 1
+    head="$(git -C "$dir" rev-parse --verify HEAD 2>/dev/null)" || return 1
+    [[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 1
+    printf '%s\n' "$head"
+}
 write_manifest() {
-    local snap repo state
+    local snap repo state head
     snap="$(snapshot_id)" || exit 2
+    # Written to a temp name and moved into place: a refusal mid-way must
+    # not leave a partial manifest that a later --no-sync would accept.
+    rm -f "$MANIFEST" "$MANIFEST.tmp"
     {
         echo "SNAPSHOT=$snap"
         for repo in $SYNC_REPOS; do
-            if [ -d "$SIBLINGS/$repo/.git" ]; then
-                if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
-                    state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??' || true)"
-                else
-                    state=clean
-                fi
+            if ! head="$(repo_head "$SIBLINGS/$repo")"; then
+                echo "[build] ERROR: $SIBLINGS/$repo is not a git checkout with a commit at HEAD; the image could not say what went in" >&2
+                rm -f "$MANIFEST.tmp"
+                exit 2
+            fi
+            if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
                 # (grep -c exits 1 on a zero count; under set -e that would
                 # abort the sync for a tree with tracked changes only.)
-                printf 'SOURCE %s %s %s\n' "$repo" \
-                    "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" "$state"
+                state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??' || true)"
             else
-                printf 'SOURCE %s no-git\n' "$repo"
+                state=clean
             fi
+            printf 'SOURCE %s %s %s\n' "$repo" "$head" "$state"
         done
-    } > "$MANIFEST"
+    } > "$MANIFEST.tmp"
+    mv "$MANIFEST.tmp" "$MANIFEST"
     echo "[build] source manifest ($MANIFEST):"
     sed 's/^/  /' "$MANIFEST"
 }

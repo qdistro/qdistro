@@ -123,6 +123,18 @@ IMAGE_SIZE_MB="$(sed -n 's|.*<size unit="M">\([0-9]*\)</size>.*|\1|p' "$HERE/con
 [ -n "$IMAGE_VERSION" ] && [ -n "$IMAGE_SIZE_MB" ] || die "config.xml: could not read <version> or <size unit=\"M\">"
 XZ_NAME="qdistro-$IMAGE_VERSION-$SNAPSHOT.raw.xz"
 log "release artifact will be $XZ_NAME (raw $IMAGE_SIZE_MB MiB, Tumbleweed $SNAPSHOT)"
+# The copy-out lands the full raw (guestfish does not preserve sparseness)
+# plus the bundle; refuse now rather than after a 40-minute build. The old
+# artifacts are deleted before the copy, so they do not count against us.
+old_bytes=0
+for f in "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/bundle/*.raw.xz; do
+    [ -f "$f" ] && old_bytes=$(( old_bytes + $(stat -c %s "$f") ))
+done
+need_bytes=$(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 ))
+avail_bytes="$(df --output=avail -B1 "$HOST_BUILD_DIR" | tail -n1)"
+if [ $(( avail_bytes + old_bytes )) -lt "$need_bytes" ]; then
+    die "$HOST_BUILD_DIR has $avail_bytes bytes free (+$old_bytes reclaimable); the copy-out needs $need_bytes (raw + bundle + slack)"
+fi
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
@@ -280,7 +292,7 @@ exit \$rc
 EOS
 
 #-- 8. Run the kiwi build ------------------------------------------------------
-log "running kiwi-ng build inside VM (17-26 min measured 2026-09-04, n=2)"
+log "running kiwi-ng build inside VM (17-26 min kiwi measured 2026-09-04 n=2, plus the xz bundle step)"
 log "  tail with: $VM_TOOLS/vm-exec $VM 'tail -f /root/kiwi-build.log'"
 # Use --no-sync because sources are already in root/root/qdistro-src/.
 # Redirect inside the VM so qga doesn't have to ferry GB of output.
@@ -323,8 +335,12 @@ KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
 # Run 16: a cold-cache attempt was still partitioning at 1500s, so 1500 was too
 # tight and killed a working build. The budget is a backstop against a wedge the
 # stall guard cannot see, not a performance expectation -- keep it generous.
-# Phase C added the bundle step (xz -T0 of the 28 GiB raw) to the same
-# attempt; the ISO's mksquashfs -comp xz it replaced cost about as much.
+# Phase C added the bundle step to the same attempt: kiwi's full-file cp of
+# the raw into bundle/ then xz -T0 of it. Measured on this host (review of
+# b7afb3e): xz -6 does ~15 MB/s on real data and ~550 MB/s on zeros at four
+# threads, so a 28 GiB raw with 8-12 GiB of real data is 10-15 min of xz on
+# top of the 17-26 min kiwi run -- about twice what the ISO's mksquashfs it
+# replaced cost (5m03s, run 17). Re-measure from run 23's kiwi-loop.log.
 KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-3300}"
 # Minimum CPU ticks (100/s per core) the build tree must burn in a sample for it
 # to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below
@@ -596,27 +612,19 @@ ls -lh "$HOST_BUILD_DIR/" "$HOST_BUILD_DIR/bundle/" | tee -a "$LOGS/artifacts.tx
 
 #-- 11. Prove the release artifact (todo/iso/14 Phase C DONE bar) ------------
 # The .raw.xz is what testers download, so the build is not done until the
-# host has checked it: the name carries version and snapshot; its checksum
-# file matches; `xz -t` decompresses the whole stream against its integrity
-# check; and the decompressed size is exactly config.xml's <size>, i.e. the
-# 28 GiB the raw was declared at (the raw itself is checked the same way).
-# All of this reads 28 GiB once or twice; a few minutes, and the point.
+# host has checked it (image/lib/release-proof.sh): the name carries version
+# and snapshot; its checksum file names it and matches; `xz -t` decompresses
+# the whole stream against its integrity check; and the decompressed size is
+# exactly config.xml's <size>, i.e. the 28 GiB the raw was declared at (the
+# raw itself is checked the same way). Reads 28 GiB a couple of times: a few
+# minutes, and the point. Subshell, so a failed check returns here and is
+# reported by die() with the file to read (round-1 review: a brace group
+# would have exited the script silently).
 log "checking release artifact $host_xz"
-{
-    echo "artifact: $host_xz"
-    want_bytes=$(( IMAGE_SIZE_MB * 1024 * 1024 ))
-    raw_bytes="$(stat -c %s "$host_raw")"
-    echo "raw: $host_raw $raw_bytes bytes (want $want_bytes)"
-    [ "$raw_bytes" = "$want_bytes" ] || { echo "FAIL: raw size != <size unit=M>$IMAGE_SIZE_MB"; exit 1; }
-    (cd "$HOST_BUILD_DIR/bundle" && sha256sum -c "$XZ_NAME.sha256") || { echo "FAIL: sha256 mismatch"; exit 1; }
-    xz -l --robot "$host_xz" | tee "$LOGS/xz-list.txt"
-    unc="$(awk '$1 == "totals" { print $5 }' "$LOGS/xz-list.txt")"
-    echo "xz uncompressed: $unc bytes (want $want_bytes)"
-    [ "$unc" = "$want_bytes" ] || { echo "FAIL: decompressed size != <size unit=M>$IMAGE_SIZE_MB"; exit 1; }
-    xz -t -T0 "$host_xz" || { echo "FAIL: xz -t"; exit 1; }
-    echo "xz -t: OK"
-    echo "RESULT: PASS $XZ_NAME"
-} > "$LOGS/release-artifact.txt" 2>&1 || die "release artifact check failed; see $LOGS/release-artifact.txt"
+. "$HERE/lib/release-proof.sh"
+( qdistro_prove_release "$host_raw" "$HOST_BUILD_DIR/bundle" "$XZ_NAME" "$IMAGE_SIZE_MB" ) \
+    > "$LOGS/release-artifact.txt" 2>&1 \
+    || { cat "$LOGS/release-artifact.txt"; die "release artifact check failed; see $LOGS/release-artifact.txt"; }
 cat "$LOGS/release-artifact.txt"
 
 if [ "$KEEP_RUNNING" = 1 ]; then

@@ -24,6 +24,16 @@ echo "[qdistro-image] kiwi config.sh: $kiwi_iname-$kiwi_iversion"
 SRC=/root/qdistro-src
 QD="$SRC/qdistro"
 
+# The build profile, validated ONCE: dev (passwordless sudo, the tester
+# image) or release (the safe default). Every later gate -- sudoers, the
+# release stamp -- reads this variable, so the accepted set is stated here
+# and nowhere else; build-in-vm.sh applies the same check on the host.
+QDISTRO_IMAGE_PROFILE="${QDISTRO_PROFILE:-release}"
+case "$QDISTRO_IMAGE_PROFILE" in
+    dev|release) ;;
+    *) echo "[qdistro-image] FATAL: QDISTRO_PROFILE must be dev or release, got: $QDISTRO_IMAGE_PROFILE" >&2; exit 1 ;;
+esac
+
 if [ -f /etc/os-release.qdistro ]; then
     rm -f /etc/os-release
     mv /etc/os-release.qdistro /etc/os-release
@@ -41,7 +51,7 @@ fi
 # synced qdistro source tree carries the same file, from the same checkout.
 . "$QD/image/lib/release-stamp.sh"
 if ! qdistro_write_release /root/qdistro-source-manifest /etc/os-release \
-        /etc/qdistro/release "$kiwi_iversion" "${QDISTRO_PROFILE:-release}"; then
+        /etc/qdistro/release "$kiwi_iversion" "$QDISTRO_IMAGE_PROFILE"; then
     echo "[qdistro-image] FATAL: could not write /etc/qdistro/release. Aborting build." >&2
     exit 1
 fi
@@ -75,13 +85,12 @@ systemctl enable qemu-guest-agent.service
 # through qsu / the broker's scoped approval; admin keeps password-required
 # sudo via wheel membership. Set QDISTRO_PROFILE=dev when baking a disposable
 # developer image to restore the passwordless rule.
-QDISTRO_IMAGE_PROFILE="${QDISTRO_PROFILE:-release}"
 if [ "$QDISTRO_IMAGE_PROFILE" = dev ]; then
     install -m 0440 /dev/stdin /etc/sudoers.d/99-admin <<<'admin ALL=(ALL) NOPASSWD: ALL'
     echo "[qdistro-image] WARN: dev profile — baked passwordless sudoers (admin NOPASSWD: ALL); NOT for release"
 else
     rm -f /etc/sudoers.d/99-admin
-    echo "[qdistro-image] hardened profile ($QDISTRO_IMAGE_PROFILE): no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
+    echo "[qdistro-image] release profile: no passwordless sudoers baked (admin uses password-required sudo; cross-uid via qsu/broker)"
 fi
 
 # Build the three sibling projects out of /root/qdistro-src/.

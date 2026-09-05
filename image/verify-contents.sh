@@ -327,16 +327,32 @@ check_opt     "qdistro-release marker"    /etc/qdistro-release
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
 release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
 release_problem=""
+# field <KEY> -- the value of exactly one KEY= line, or nothing (so a
+# duplicated or missing key fails the row rather than picking one).
+release_field() {
+    local v
+    v="$(grep "^$1=" "$release_file")"
+    [ "$(printf '%s\n' "$v" | grep -c .)" -eq 1 ] || return 1
+    printf '%s\n' "${v#*=}"
+}
 if [ -z "$release_file" ]; then
     release_problem="missing"
 else
-    grep -qE '^VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$release_file" || release_problem="$release_problem no VERSION=x.y.z;"
-    grep -qE '^SNAPSHOT=[0-9]{8}$' "$release_file"          || release_problem="$release_problem no SNAPSHOT=YYYYMMDD;"
-    grep -qE '^PROFILE=(dev|release)$' "$release_file"      || release_problem="$release_problem no PROFILE=dev|release;"
-    grep -qE '^ARTIFACT=qdistro-[0-9.]+-[0-9]{8}\.raw\.xz$' "$release_file" || release_problem="$release_problem no ARTIFACT=qdistro-<ver>-<snap>.raw.xz;"
+    rel_version="$(release_field VERSION || true)"
+    rel_snapshot="$(release_field SNAPSHOT || true)"
+    rel_profile="$(release_field PROFILE || true)"
+    rel_artifact="$(release_field ARTIFACT || true)"
+    [[ "$rel_version"  =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || release_problem="$release_problem no single VERSION=x.y.z;"
+    [[ "$rel_snapshot" =~ ^[0-9]{8}$ ]]                || release_problem="$release_problem no single SNAPSHOT=YYYYMMDD;"
+    [[ "$rel_profile"  =~ ^(dev|release)$ ]]           || release_problem="$release_problem no single PROFILE=dev|release;"
+    # The artifact name is derived from the other two fields; a file whose
+    # fields disagree is corrupt, not merely oddly named (round-1 review).
+    [ -n "$rel_version" ] && [ -n "$rel_snapshot" ] && [ "$rel_artifact" = "qdistro-$rel_version-$rel_snapshot.raw.xz" ] \
+        || release_problem="$release_problem ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"
+    [ "$(grep -c '^SOURCE ' "$release_file")" -eq 5 ] || release_problem="$release_problem not exactly five SOURCE lines;"
     for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
-        grep -qE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY.*)$" "$release_file" \
-            || release_problem="$release_problem no SOURCE $repo <commit> clean|DIRTY;"
+        [ "$(grep -cE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY diff-sha256=[0-9a-f]{16} untracked=[0-9]+)$" "$release_file")" -eq 1 ] \
+            || release_problem="$release_problem no single well-formed SOURCE $repo line;"
     done
 fi
 if [ -z "$release_problem" ]; then
@@ -351,7 +367,8 @@ fi
 # carry the passwordless-sudo rule config.sh bakes for test harnesses, and a
 # release image must NOT (the rule is the escape hatch the hardening review
 # flagged). Read it from the provenance file, never assumed.
-image_profile="$( [ -n "$release_file" ] && sed -n 's/^PROFILE=//p' "$release_file" | head -n1 || true)"
+image_profile="${rel_profile:-}"
+case "$image_profile" in dev|release) ;; *) image_profile="" ;; esac
 
 echo
 echo "-- credentials and remote access (todo/iso/13) --"

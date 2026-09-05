@@ -163,7 +163,7 @@ gate_image() {
     local iso
     iso="$(ls "$build_dir"/*.install.iso 2>/dev/null | head -1)"
     if [ -z "$iso" ]; then
-        local why="no .install.iso next to $img: the tester image is built with installiso=false (todo/iso/13); install-test.sh applies only to the post-v1 installable ISO"
+        local why="no .install.iso next to $img: the tester image is built with installiso=false (todo/iso/13), so install-test.sh (and --idempotency, which re-runs it) is inert until the post-v1 installable ISO returns; not a missing prerequisite"
         record_skip image install-test.sh image "$why"
         if [ "$idempotency" = 1 ]; then
             record_skip image install-test.sh-2nd image "$why"

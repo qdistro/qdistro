@@ -103,7 +103,11 @@ fake_tree() {
     fake_tree
     echo dirty >> "$T/tree/qdwin/README"           # tracked change -> DIRTY
     echo new > "$T/tree/qdshell/untracked.txt"     # untracked only -> DIRTY, untracked=1
-    rm -rf "$T/tree/qdlocker/.git"                 # no-git
+    # a linked worktree: .git is a FILE, and it is still a checkout with a
+    # commit (round-1 review: it used to be stamped no-git)
+    mv "$T/tree/qdlocker" "$T/main-qdlocker"
+    git -C "$T/main-qdlocker" worktree add -q "$T/tree/qdlocker" -b linked
+    [ -f "$T/tree/qdlocker/.git" ]
     run bash "$T/tree/qdistro/image/build.sh" --sync-only
     [ "$status" -eq 0 ]
     local m="$T/tree/qdistro/image/root/root/qdistro-source-manifest"
@@ -115,12 +119,32 @@ fake_tree() {
     grep -qE "^SOURCE qdwin [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=0$" "$m"
     grep -qE "^SOURCE qdshell [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" "$m"
     grep -qE "^SOURCE qdgreeter [0-9a-f]{40} clean$" "$m"
-    grep -qx "SOURCE qdlocker no-git" "$m"
+    grep -q "^SOURCE qdlocker $(git -C "$T/tree/qdlocker" rev-parse HEAD) clean$" "$m"
     # the commit recorded is the sibling's HEAD
     grep -q "^SOURCE qdistro $(git -C "$T/tree/qdistro" rev-parse HEAD) " "$m"
     # and the sync itself still lands the sources (with .git stripped)
     [ -f "$T/tree/qdistro/image/root/root/qdistro-src/qdwin/README" ]
     [ ! -e "$T/tree/qdistro/image/root/root/qdistro-src/qdwin/.git" ]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-src/qdlocker/.git" ]
+}
+
+@test "build.sh: a sibling that is not its own git checkout refuses the sync (no 'no-git' placeholder)" {
+    fake_tree
+    rm -rf "$T/tree/qdlocker/.git"
+    run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"qdlocker is not a git checkout with a commit at HEAD"* ]]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest" ]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest.tmp" ]
+    # a plain directory INSIDE another repository must not borrow that
+    # repository's commit either
+    rm -rf "$T/tree"; fake_tree
+    rm -rf "$T/tree/qdlocker/.git"
+    git -C "$T/tree" init -q; git -C "$T/tree" -c user.email=t@t -c user.name=t add -A qdlocker
+    git -C "$T/tree" -c user.email=t@t -c user.name=t commit -q -m outer
+    run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"qdlocker is not a git checkout"* ]]
 }
 
 @test "build.sh: --no-sync without a manifest is refused (the image could not say what went in)" {
@@ -179,6 +203,28 @@ M
     [ ! -e "$T/out" ]
 }
 
+@test "release-stamp: five lines is not enough -- each expected repo once, 40-hex commit, exact DIRTY grammar" {
+    source "$IMAGE/lib/release-stamp.sh"
+    printf 'VERSION_ID="0.1.0"\n' > "$T/os-release"
+    # a stranger's repo in place of qdlocker
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker/SOURCE stranger/' "$T/m"
+    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdlocker"* ]]
+    # duplicate repo
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker/SOURCE qdwin/' "$T/m"
+    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]
+    # the old no-git placeholder
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdlocker .*/SOURCE qdlocker no-git/' "$T/m"
+    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdlocker"* ]]
+    # malformed DIRTY data
+    good_manifest "$T/m"; sed -i 's/^SOURCE qdwin \(.*\) DIRTY.*/SOURCE qdwin \1 DIRTY/' "$T/m"
+    run qdistro_write_release "$T/m" "$T/os-release" "$T/out" 0.1.0 dev
+    [ "$status" -eq 1 ]; [[ "$output" == *"SOURCE qdwin"* ]]
+    [ ! -e "$T/out" ]
+}
+
 @test "release-stamp: config.xml <version> and the os-release override agree (what the chroot check enforces)" {
     local v; v="$(xml version)"
     grep -qx "VERSION_ID=\"$v\"" "$IMAGE/root/etc/os-release.qdistro"
@@ -225,9 +271,33 @@ fake_root() {
     fake_root dev
     sed -i '/^SOURCE qdlocker/d;/^SNAPSHOT/d;/^PROFILE/d' "$T/root/etc/qdistro/release"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
-    [[ "$output" == *"MISS image provenance:"*"no SNAPSHOT=YYYYMMDD;"*"no SOURCE qdlocker"* ]]
+    [[ "$output" == *"MISS image provenance:"*"no single SNAPSHOT=YYYYMMDD;"*"no single well-formed SOURCE qdlocker line"* ]]
     # profile unknown -> neither sudoers row is emitted rather than guessed
     [[ "$output" != *"passwordless sudoers"* ]]
+}
+
+@test "verify-contents: provenance fields must agree with each other (artifact name, duplicates, DIRTY grammar, repo set)" {
+    local f="$T/root/etc/qdistro/release"
+    fake_root dev; echo x > "$T/root/etc/sudoers.d/99-admin"
+    sed -i 's/^ARTIFACT=.*/ARTIFACT=qdistro-9.9.9-19990101.raw.xz/' "$f"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS image provenance:"*"ARTIFACT != qdistro-<VERSION>-<SNAPSHOT>.raw.xz;"* ]]
+    fake_root dev; echo "PROFILE=release" >> "$f"          # duplicate key
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS image provenance:"*"no single PROFILE=dev|release;"* ]]
+    [[ "$output" != *"passwordless sudoers"* ]]
+    fake_root dev; sed -i 's/^\(SOURCE qdwin [0-9a-f]*\) DIRTY.*/\1 DIRTY/' "$f"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdwin line;"* ]]
+    fake_root dev; sed -i 's/^SOURCE qdlocker/SOURCE stranger/' "$f"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS image provenance:"*"no single well-formed SOURCE qdlocker line;"* ]]
+    fake_root dev; sed -i 's/^SOURCE qdlocker/SOURCE qdwin/' "$f"  # five lines, one repo twice
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"MISS image provenance:"*"SOURCE qdwin line;"*"SOURCE qdlocker line;"* ]]
+    fake_root dev
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [[ "$output" == *"OK   image provenance:"* ]]
 }
 
 @test "config.sh: stamps the release file from the synced lib before the installer chain, fatally" {
@@ -242,16 +312,80 @@ fake_root() {
     ! grep -qE 'systemctl (enable|start).*sshd' "$c"
     # the dev-profile sudoers warning still prints
     grep -q 'WARN: dev profile' "$c"
+    # one profile gate: validated once, before anything reads it, and the
+    # stamp receives the validated value (round-1 review)
+    grep -q 'QDISTRO_PROFILE must be dev or release' "$c"
+    [ "$(grep -n 'QDISTRO_PROFILE must be dev or release' "$c" | cut -d: -f1)" -lt "$(grep -n 'qdistro_write_release' "$c" | head -1 | cut -d: -f1)" ]
+    grep -q '/etc/qdistro/release "\$kiwi_iversion" "\$QDISTRO_IMAGE_PROFILE"' "$c"
+    ! grep -q 'hardened profile' "$c"
 }
 
-@test "build-in-vm.sh: proves the release artifact on the host (name, checksum, xz -t, exact size)" {
+# A 1 MiB "raw" (half random, half zeros) bundled the way kiwi does it:
+# xz -T0 in place under the release name, sha256 of the compressed file.
+fixture_bundle() {
+    local name=$1
+    mkdir -p "$T/b"
+    { head -c 524288 /dev/urandom; head -c 524288 /dev/zero; } > "$T/raw"
+    cp "$T/raw" "$T/b/${name%.xz}"
+    xz -T0 -f "$T/b/${name%.xz}"
+    (cd "$T/b" && sha256sum "$name" > "$name.sha256")
+}
+
+@test "release-proof: passes a well-formed artifact and reports the evidence" {
+    source "$IMAGE/lib/release-proof.sh"
+    fixture_bundle qdistro-0.1.0-20260902.raw.xz
+    run qdistro_prove_release "$T/raw" "$T/b" qdistro-0.1.0-20260902.raw.xz 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"raw: $T/raw 1048576 bytes (want 1048576)"* ]]
+    [[ "$output" == *": OK"* ]]                      # sha256sum -c line
+    [[ "$output" == *"xz uncompressed: 1048576 bytes (want 1048576)"* ]]
+    [[ "$output" == *"xz -t: OK"* ]]
+    [ "${lines[-1]}" = "RESULT: PASS qdistro-0.1.0-20260902.raw.xz" ]
+}
+
+@test "release-proof: every check fails closed, and a failure returns (does not exit) to the caller" {
+    source "$IMAGE/lib/release-proof.sh"
+    local n=qdistro-0.1.0-20260902.raw.xz
+    fixture_bundle $n
+    # declared size disagrees with the raw
+    run qdistro_prove_release "$T/raw" "$T/b" $n 2
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: raw size != <size unit=M>2" ]]
+    # raw right, but the xz decompresses to something else
+    fixture_bundle $n; head -c 1048576 /dev/zero > "$T/raw2"
+    truncate -s 2097152 "$T/raw2"; cp "$T/raw2" "$T/b/x.raw"; xz -T0 -f "$T/b/x.raw"; mv "$T/b/x.raw.xz" "$T/b/$n"
+    (cd "$T/b" && sha256sum $n > $n.sha256)
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: decompressed size != <size unit=M>1" ]]
+    # checksum mismatch
+    fixture_bundle $n; sed -i 's/^[0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' "$T/b/$n.sha256"
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: sha256 mismatch" ]]
+    # checksum file that names another artifact
+    fixture_bundle $n; sed -i "s/ $n\$/ other.raw.xz/" "$T/b/$n.sha256"
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: $n.sha256 does not name $n" ]]
+    # corrupted stream whose checksum file was regenerated: only xz -t sees it
+    fixture_bundle $n; printf '\xff\xff\xff\xff' | dd of="$T/b/$n" bs=1 seek=100 conv=notrunc status=none
+    (cd "$T/b" && sha256sum $n > $n.sha256)
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: xz -t" ]]
+    # wrong name (no such artifact in the bundle)
+    fixture_bundle $n
+    run qdistro_prove_release "$T/raw" "$T/b" qdistro-0.1.0-19990101.raw.xz 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == FAIL:\ artifact\ missing:* ]]
+    # and the caller survives a failure the way build-in-vm.sh invokes it
+    run bash -c "set -euo pipefail; source '$IMAGE/lib/release-proof.sh'; ( qdistro_prove_release '$T/raw' '$T/b' $n 2 ) > '$T/out' 2>&1 || echo CALLER-SAW-FAILURE; echo TAIL"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *CALLER-SAW-FAILURE*TAIL* ]]
+    grep -q '^FAIL: raw size' "$T/out"
+}
+
+@test "build-in-vm.sh: runs the proof in a subshell and dies with the log on failure" {
     local b="$IMAGE/build-in-vm.sh"
-    grep -q 'XZ_NAME="qdistro-\$IMAGE_VERSION-\$SNAPSHOT.raw.xz"' "$b"
+    grep -q '^\. "\$HERE/lib/release-proof.sh"$' "$b"
+    grep -q '^( qdistro_prove_release "\$host_raw" "\$HOST_BUILD_DIR/bundle" "\$XZ_NAME" "\$IMAGE_SIZE_MB" )' "$b"
+    grep -q 'die "release artifact check failed' "$b"
     grep -q 'copy-out /out/bundle' "$b"
-    grep -q 'sha256sum -c "\$XZ_NAME.sha256"' "$b"
-    grep -q 'xz -t -T0 "\$host_xz"' "$b"
-    grep -q 'decompressed size != <size unit=M>' "$b"
-    grep -q 'raw size != <size unit=M>' "$b"
 }
 
 @test "ci image gate: with no install ISO the install stages are recorded as skipped, not run" {
