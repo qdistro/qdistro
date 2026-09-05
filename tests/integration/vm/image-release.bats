@@ -424,6 +424,7 @@ fixture_bundle() {
     grep -q '^qdistro_copy_out_settled "\$BUILD_DISK" "\$HOST_BUILD_DIR"' "$b"
     ! grep -qE '\$\(ls [^)]*\| head' "$b"
     grep -q "^trap 'rc=\$?; case \$- in \*e\*)" "$b"
+    grep -q '^set -Eeuo pipefail$' "$b"       # errtrace: the trap covers functions
     grep -q '^\. "\$HERE/lib/copy-out.sh"$' "$b"
 }
 

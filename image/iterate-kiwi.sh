@@ -1,7 +1,8 @@
 #!/bin/bash
 # Push the local config.xml/build.sh/config.sh (plus the source manifest and
 # lib/release-stamp.sh, which config.sh reads from the synced tree) into the
-# running builder VM and re-run kiwi. Faster than build-in-vm.sh from
+# running builder VM and re-run kiwi. It re-runs `build.sh --sync-only`
+# first (an rsync of the five repos; seconds). Faster than build-in-vm.sh from
 # scratch, but it stops at the kiwi log: the copy-out and the host proof of
 # the .raw.xz are build-in-vm.sh --reuse's job.
 #

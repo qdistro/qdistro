@@ -90,7 +90,7 @@ its presence.
 
 ```sh
 cd image/
-QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-45 min: clone + bake + kiwi (17-26) + xz bundle (10-15) + host proof
+QDISTRO_PROFILE=dev ./build-in-vm.sh   # ~30-40 min cold: clone + bake + kiwi (17-26) + xz bundle (~6) + copy-out + host proof
 ./verify.sh                            # ~5 min: rootless boot + SSH assertions + screenshots
 ```
 

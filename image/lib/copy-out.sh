@@ -20,7 +20,7 @@
 # guestfish's, for the caller's retry loop to judge together with the size
 # checks. stderr is left to the caller to redirect.
 qdistro_copy_out() {
-    local disk="$1" dest="$2" dev="${3:-/dev/sda}"
+    local disk="$1" dest="$2" dev="${3:-/dev/sda}" p
     for p in "$disk" "$dest"; do
         case "$p" in
             *[[:space:]\"\'\\]*) echo "copy-out: refusing path with whitespace or quotes: $p" >&2; return 2 ;;

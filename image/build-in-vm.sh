@@ -23,7 +23,9 @@
 # Pattern lineage: qdistro/scripts/vm/clone-baseweed.sh +
 # fresh-vm-bootstrap.sh; reuses vm-exec, vm-start-and-wait verbatim.
 
-set -euo pipefail
+# -E: the ERR trap below must fire inside functions too (host_free_check and
+# friends); bash does not inherit it into them otherwise.
+set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # image/ lives inside the qdistro repo; the old "$HERE/../qdistro" form dates
@@ -348,11 +350,10 @@ KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
 # tight and killed a working build. The budget is a backstop against a wedge the
 # stall guard cannot see, not a performance expectation -- keep it generous.
 # Phase C added the bundle step to the same attempt: kiwi's full-file cp of
-# the raw into bundle/ then xz -T0 of it. Measured on this host (review of
-# b7afb3e): xz -6 does ~15 MB/s on real data and ~550 MB/s on zeros at four
-# threads, so a 28 GiB raw with 8-12 GiB of real data is 10-15 min of xz on
-# top of the 17-26 min kiwi run -- about twice what the ISO's mksquashfs it
-# replaced cost (5m03s, run 17). Re-measure from run 23's kiwi-loop.log.
+# the raw into bundle/ then xz -T0 of it. Measured 2026-09-05 on the 28 GiB
+# raw with 4 vCPUs: 6m36s (run 23), 6m09s (run 27) -- a little more than the
+# ISO's mksquashfs -comp xz it replaced (5m03s, run 17). Warm-cache kiwi
+# itself was ~4 min; a cold run is the 17-26 min above.
 KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-3300}"
 # Minimum CPU ticks (100/s per core) the build tree must burn in a sample for it
 # to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below

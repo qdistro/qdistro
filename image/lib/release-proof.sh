@@ -11,6 +11,12 @@
 #   xz-name     qdistro-<version>-<snapshot>.raw.xz (what the name must be)
 #   size-mib    config.xml <size unit="M">: the raw and the decompressed xz
 #               must both be exactly this many MiB
+# What this does NOT prove: that the xz decompresses to the very bytes of
+# <raw>. The two are bound by the caller: build.sh's `result bundle` copied
+# the raw kiwi had just written and compressed that copy, in the same
+# attempt, and build-in-vm.sh size-matches both against the in-VM inventory.
+# A byte-for-byte check (xz -dc | cmp) is another full read of 28 GiB and
+# would prove only that kiwi's cp works.
 qdistro_prove_release() {
     local raw="$1" bundle="$2" name="$3" size_mib="$4"
     local xz="$bundle/$name" want raw_bytes unc
