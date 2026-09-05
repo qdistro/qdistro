@@ -147,6 +147,32 @@ fake_tree() {
     [[ "$output" == *"qdlocker is not a git checkout"* ]]
 }
 
+@test "build.sh: a tree with thousands of untracked files is DIRTY, not clean (SIGPIPE under pipefail)" {
+    fake_tree
+    mkdir -p "$T/tree/qdwin/many"
+    (cd "$T/tree/qdwin/many" && seq 1 12000 | xargs touch)
+    run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 0 ]
+    grep -qE "^SOURCE qdwin [0-9a-f]{40} DIRTY diff-sha256=[0-9a-f]{16} untracked=1$" \
+        "$T/tree/qdistro/image/root/root/qdistro-source-manifest"   # one untracked dir
+}
+
+@test "build.sh: a failing git status refuses the sync instead of reading as clean" {
+    fake_tree
+    mkdir -p "$T/shim"
+    cat > "$T/shim/git" <<SH
+#!/bin/bash
+for a in "\$@"; do [ "\$a" = status ] && { echo "fatal: simulated index corruption" >&2; exit 128; }; done
+exec /usr/bin/git "\$@"
+SH
+    chmod +x "$T/shim/git"
+    PATH="$T/shim:$PATH" run bash "$T/tree/qdistro/image/build.sh" --sync-only
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"git status failed"*"simulated index corruption"* ]]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest" ]
+    [ ! -e "$T/tree/qdistro/image/root/root/qdistro-source-manifest.tmp" ]
+}
+
 @test "build.sh: --no-sync without a manifest is refused (the image could not say what went in)" {
     fake_tree
     run bash "$T/tree/qdistro/image/build.sh" --no-sync
@@ -363,7 +389,15 @@ fixture_bundle() {
     # checksum file that names another artifact
     fixture_bundle $n; sed -i "s/ $n\$/ other.raw.xz/" "$T/b/$n.sha256"
     run qdistro_prove_release "$T/raw" "$T/b" $n 1
-    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: $n.sha256 does not name $n" ]]
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: $n.sha256 names 'other.raw.xz', not $n" ]]
+    # a lookalike that a regex compare would accept (dots as any-char)
+    fixture_bundle $n; sed -i "s/ $n\$/ qdistro-0.1.0-20260902XrawXxz/" "$T/b/$n.sha256"
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: $n.sha256 names 'qdistro-0.1.0-20260902XrawXxz', not $n" ]]
+    # two records
+    fixture_bundle $n; (cd "$T/b" && sha256sum $n >> $n.sha256)
+    run qdistro_prove_release "$T/raw" "$T/b" $n 1
+    [ "$status" -eq 1 ]; [[ "${lines[-1]}" == "FAIL: $n.sha256 has 2 records, want 1" ]]
     # corrupted stream whose checksum file was regenerated: only xz -t sees it
     fixture_bundle $n; printf '\xff\xff\xff\xff' | dd of="$T/b/$n" bs=1 seek=100 conv=notrunc status=none
     (cd "$T/b" && sha256sum $n > $n.sha256)
@@ -385,6 +419,11 @@ fixture_bundle() {
     grep -q '^\. "\$HERE/lib/release-proof.sh"$' "$b"
     grep -q '^( qdistro_prove_release "\$host_raw" "\$HOST_BUILD_DIR/bundle" "\$XZ_NAME" "\$IMAGE_SIZE_MB" )' "$b"
     grep -q 'die "release artifact check failed' "$b"
+    # the copy-out is the library's settle loop, and no `ls | head` probe is
+    # left to exit the driver under pipefail (round-2 review, runs 24-26)
+    grep -q '^qdistro_copy_out_settled "\$BUILD_DISK" "\$HOST_BUILD_DIR"' "$b"
+    ! grep -qE '\$\(ls [^)]*\| head' "$b"
+    grep -q "^trap 'rc=\$?; case \$- in \*e\*)" "$b"
     grep -q '^\. "\$HERE/lib/copy-out.sh"$' "$b"
 }
 
@@ -424,8 +463,33 @@ GF
     [ ! -e "$T/dest/install.iso" ]
     # the driver keeps its own error handling: the call is `|| true` inside
     # the retry loop, and the size checks decide
-    grep -q 'qdistro_copy_out "\$BUILD_DISK" "\$HOST_BUILD_DIR" 2>>"\$LOGS/copy-out.log" || true' "$IMAGE/build-in-vm.sh"
+    grep -q '^qdistro_copy_out_settled "\$BUILD_DISK" "\$HOST_BUILD_DIR" "\$IN_VM_RAW_SIZE" "\$XZ_NAME" "\$IN_VM_XZ_SIZE" "\$IN_VM_ISO_SIZE" "\$LOGS/copy-out.log"' "$IMAGE/build-in-vm.sh"
     ! grep -q '^glob copy-out /out/\*.install.iso' "$IMAGE/build-in-vm.sh"
+}
+
+@test "copy-out: the settle loop accepts only a raw and an xz of the sizes seen in the VM, and retries otherwise" {
+    scratch_build_disk
+    source "$IMAGE/lib/copy-out.sh"
+    mkdir -p "$T/dest"
+    # sizes as the in-VM inventory would report them: RAW=3 bytes, XZ=2 bytes
+    QDISTRO_COPY_OUT_TRIES=2 QDISTRO_COPY_OUT_SLEEP_S=0 \
+        run qdistro_copy_out_settled "$T/build.img" "$T/dest" 3 qdistro-0.1.0-20260902.raw.xz 2 "" "$T/copy.log"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"settled"* ]]
+    [ -f "$T/dest/bundle/qdistro-0.1.0-20260902.raw.xz.sha256" ]
+    # wrong xz size (a stale or truncated copy) never settles
+    rm -rf "$T/dest"; mkdir -p "$T/dest"
+    QDISTRO_COPY_OUT_TRIES=2 QDISTRO_COPY_OUT_SLEEP_S=0 \
+        run qdistro_copy_out_settled "$T/build.img" "$T/dest" 3 qdistro-0.1.0-20260902.raw.xz 999 "" "$T/copy.log"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not settled yet (attempt 1/2"* ]]
+    [[ "$output" == *"not settled yet (attempt 2/2"* ]]
+    # an ISO size given but no ISO on the disk: never settles either
+    QDISTRO_COPY_OUT_TRIES=1 QDISTRO_COPY_OUT_SLEEP_S=0 \
+        run qdistro_copy_out_settled "$T/build.img" "$T/dest" 3 qdistro-0.1.0-20260902.raw.xz 2 12345 "$T/copy.log"
+    [ "$status" -eq 1 ]
+    # the ignored ISO glob line went to the log, not the caller's output
+    grep -q "install.iso" "$T/copy.log"
 }
 
 @test "copy-out: a missing bundle/ IS a failure (required), and unsafe paths are refused" {

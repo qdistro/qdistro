@@ -61,6 +61,12 @@ mkdir -p "$LOGS" "$HOST_BUILD_DIR"
 log()  { printf '\033[1;36m[in-vm]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[in-vm] WARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[in-vm] FATAL:\033[0m %s\n' "$*" >&2; exit 1; }
+# Name the line when set -e ends this script. Three runs in a row ended with
+# a driver that simply vanished (a guestfish stream abort; `ls ... | head -1`
+# returning ls's status 2 under pipefail once there was no install ISO),
+# each costing a build to diagnose. The trap reports only while errexit is
+# on: the kiwi loop runs with set +e and expects non-zero statuses.
+trap 'rc=$?; case $- in *e*) printf "\033[1;31m[in-vm] ABORT:\033[0m line %s exited %s: %s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2 ;; esac' ERR
 
 vmx() {
     "$VM_TOOLS/vm-exec" "$VM" "$@"
@@ -124,17 +130,23 @@ IMAGE_SIZE_MB="$(sed -n 's|.*<size unit="M">\([0-9]*\)</size>.*|\1|p' "$HERE/con
 XZ_NAME="qdistro-$IMAGE_VERSION-$SNAPSHOT.raw.xz"
 log "release artifact will be $XZ_NAME (raw $IMAGE_SIZE_MB MiB, Tumbleweed $SNAPSHOT)"
 # The copy-out lands the full raw (guestfish does not preserve sparseness)
-# plus the bundle; refuse now rather than after a 40-minute build. The old
-# artifacts are deleted before the copy, so they do not count against us.
-old_bytes=0
-for f in "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/bundle/*.raw.xz; do
-    [ -f "$f" ] && old_bytes=$(( old_bytes + $(stat -c %s "$f") ))
-done
-need_bytes=$(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 ))
-avail_bytes="$(df --output=avail -B1 "$HOST_BUILD_DIR" | tail -n1)"
-if [ $(( avail_bytes + old_bytes )) -lt "$need_bytes" ]; then
-    die "$HOST_BUILD_DIR has $avail_bytes bytes free (+$old_bytes reclaimable); the copy-out needs $need_bytes (raw + bundle + slack)"
-fi
+# plus the bundle. Refuse now, before a 40-minute build, if even the raw
+# plus 8 GiB will not fit; the bundle's size is only known after the build,
+# so an exact raw + bundle check follows the inventory (step 9). Old
+# artifacts are deleted before the copy, so they count as reclaimable.
+host_free_check() {
+    # host_free_check <need-bytes> <what>
+    local need="$1" what="$2" old_bytes=0 avail_bytes f
+    for f in "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/bundle/*.raw.xz; do
+        [ -f "$f" ] && old_bytes=$(( old_bytes + $(stat -c %s "$f") ))
+    done
+    avail_bytes="$(df --output=avail -B1 "$HOST_BUILD_DIR" | tail -n1)"
+    if [ $(( avail_bytes + old_bytes )) -lt "$need" ]; then
+        die "$HOST_BUILD_DIR has $avail_bytes bytes free (+$old_bytes reclaimable); $what needs $need"
+    fi
+    log "host free space: $avail_bytes bytes (+$old_bytes reclaimable) for $what ($need bytes)"
+}
+host_free_check $(( IMAGE_SIZE_MB * 1024 * 1024 + 8 * 1024 * 1024 * 1024 )) "the raw + 8 GiB slack (bundle checked after the build)"
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
@@ -545,6 +557,8 @@ IN_VM_ISO_SIZE="$(awk '$2 ~ /\.install\.iso$/ { print $1; exit }' "$LOGS/artifac
 IN_VM_XZ_SIZE="$(awk -v n="bundle/$XZ_NAME" '$2 == n { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 [ -n "$IN_VM_RAW_SIZE" ] || die "no .raw in /build/out despite kiwi exit 0 (see $LOGS/artifacts.txt)"
 [ -n "$IN_VM_XZ_SIZE" ] || die "no bundle/$XZ_NAME in /build/out despite build.sh exit 0 (see $LOGS/artifacts.txt)"
+# Exact: what is about to be copied, plus 1 GiB.
+host_free_check $(( IN_VM_RAW_SIZE + IN_VM_XZ_SIZE + ${IN_VM_ISO_SIZE:-0} + 1024 * 1024 * 1024 )) "the copy-out (raw + bundle${IN_VM_ISO_SIZE:++ iso} + 1 GiB)"
 
 #-- 10. Copy artifacts back to host ------------------------------------------
 log "copying artifacts back to host ($HOST_BUILD_DIR)"
@@ -588,26 +602,16 @@ rm -rf "$HOST_BUILD_DIR/bundle"
 # run 24 lost its bundle to the ISO glob. Its status is deliberately not
 # fatal here: the size checks below decide, and the loop retries.
 . "$HERE/lib/copy-out.sh"
-copied=0
-for attempt in $(seq 1 6); do
-    qdistro_copy_out "$BUILD_DISK" "$HOST_BUILD_DIR" 2>>"$LOGS/copy-out.log" || true
-    host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
-    host_iso="$(ls "$HOST_BUILD_DIR"/*.install.iso 2>/dev/null | head -1)"
-    host_xz="$HOST_BUILD_DIR/bundle/$XZ_NAME"
-    iso_ok=1
-    if [ -n "$IN_VM_ISO_SIZE" ]; then
-        [ -n "$host_iso" ] && [ "$(stat -c %s "$host_iso")" = "$IN_VM_ISO_SIZE" ] || iso_ok=0
-    fi
-    xz_ok=0
-    [ -f "$host_xz" ] && [ "$(stat -c %s "$host_xz")" = "$IN_VM_XZ_SIZE" ] && [ -s "$host_xz.sha256" ] && xz_ok=1
-    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ] && [ "$iso_ok" = 1 ] && [ "$xz_ok" = 1 ]; then copied=1; break; fi
-    log "copy-out: artifacts not settled yet (attempt $attempt/6; want raw $IN_VM_RAW_SIZE bytes, $XZ_NAME $IN_VM_XZ_SIZE bytes); waiting..."
-    sleep 5
-done
-[ "$copied" = 1 ] || die "copy-out: raw of $IN_VM_RAW_SIZE bytes and bundle/$XZ_NAME of $IN_VM_XZ_SIZE bytes did not both appear (see $LOGS/copy-out.log)"
+# The settle loop is the library's (tested against a scratch build disk):
+# it accepts only a raw and a bundle/$XZ_NAME of the sizes read inside the
+# VM, retrying while the just-shut-off qcow2 is still flushing.
+qdistro_copy_out_settled "$BUILD_DISK" "$HOST_BUILD_DIR" "$IN_VM_RAW_SIZE" "$XZ_NAME" "$IN_VM_XZ_SIZE" "$IN_VM_ISO_SIZE" "$LOGS/copy-out.log" \
+    || die "copy-out: raw of $IN_VM_RAW_SIZE bytes and bundle/$XZ_NAME of $IN_VM_XZ_SIZE bytes did not both appear (see $LOGS/copy-out.log)"
+host_raw=""; for f in "$HOST_BUILD_DIR"/*.raw; do [ -f "$f" ] && { host_raw="$f"; break; }; done
+host_xz="$HOST_BUILD_DIR/bundle/$XZ_NAME"
 
 log "artifacts on host:"
-ls -lh "$HOST_BUILD_DIR/" "$HOST_BUILD_DIR/bundle/" | tee -a "$LOGS/artifacts.txt"
+ls -lh "$HOST_BUILD_DIR/" "$HOST_BUILD_DIR/bundle/" | tee -a "$LOGS/artifacts.txt" || true
 
 #-- 11. Prove the release artifact (todo/iso/14 Phase C DONE bar) ------------
 # The .raw.xz is what testers download, so the build is not done until the
@@ -627,7 +631,7 @@ log "checking release artifact $host_xz"
 cat "$LOGS/release-artifact.txt"
 
 if [ "$KEEP_RUNNING" = 1 ]; then
-    virsh start "$VM"
+    virsh start "$VM" || warn "--keep: could not restart $VM"
 fi
 
 log "DONE. logs: $LOGS"

@@ -87,7 +87,7 @@ repo_head() {
     printf '%s\n' "$head"
 }
 write_manifest() {
-    local snap repo state head
+    local snap repo state head status untracked
     snap="$(snapshot_id)" || exit 2
     # Written to a temp name and moved into place: a refusal mid-way must
     # not leave a partial manifest that a later --no-sync would accept.
@@ -100,10 +100,19 @@ write_manifest() {
                 rm -f "$MANIFEST.tmp"
                 exit 2
             fi
-            if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
-                # (grep -c exits 1 on a zero count; under set -e that would
-                # abort the sync for a tree with tracked changes only.)
-                state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??' || true)"
+            # Captured once, and its failure is a failure: piping status into
+            # `grep -q` under pipefail returned 141 (SIGPIPE after the first
+            # match) on a tree with thousands of untracked files and the
+            # else-branch stamped it clean (round-2 review); a git error
+            # would have read as clean the same way.
+            if ! status="$(git -C "$SIBLINGS/$repo" status --porcelain 2>&1)"; then
+                echo "[build] ERROR: git status failed in $SIBLINGS/$repo: $status" >&2
+                rm -f "$MANIFEST.tmp"
+                exit 2
+            fi
+            if [ -n "$status" ]; then
+                untracked="$(printf '%s\n' "$status" | grep -c '^??' || true)"
+                state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$untracked"
             else
                 state=clean
             fi

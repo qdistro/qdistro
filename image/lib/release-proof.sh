@@ -22,8 +22,14 @@ qdistro_prove_release() {
     [ "$raw_bytes" = "$want" ] || { echo "FAIL: raw size != <size unit=M>$size_mib"; return 1; }
     [ -f "$xz" ] || { echo "FAIL: artifact missing: $xz"; return 1; }
     [ -s "$xz.sha256" ] || { echo "FAIL: checksum file missing: $xz.sha256"; return 1; }
-    # The checksum file names the artifact; it must name THIS one.
-    grep -q " $name\$" "$xz.sha256" || { echo "FAIL: $name.sha256 does not name $name"; return 1; }
+    # The checksum file names the artifact; it must name THIS one, literally
+    # (a regex would let the dots match a lookalike, round-2 review), and it
+    # must be the file's only record.
+    local sum_lines sum_name
+    sum_lines="$(grep -c . "$xz.sha256")"
+    [ "$sum_lines" = 1 ] || { echo "FAIL: $name.sha256 has $sum_lines records, want 1"; return 1; }
+    sum_name="$(awk 'NR == 1 { sub(/^[0-9a-f]+ [ *]/, ""); print }' "$xz.sha256")"
+    [ "$sum_name" = "$name" ] || { echo "FAIL: $name.sha256 names '$sum_name', not $name"; return 1; }
     (cd "$bundle" && sha256sum -c "$name.sha256") || { echo "FAIL: sha256 mismatch"; return 1; }
     # xz -l --robot: the `totals` row is streams, blocks, compressed,
     # uncompressed, ratio, check, ...; column 5 is the uncompressed size.
