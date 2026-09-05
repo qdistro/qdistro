@@ -248,9 +248,9 @@ echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
 # wiring into qdwin-session.target.wants/.
 #
 # The greeter launcher does `systemctl --user start qdwin-session.target`,
-# and the runuser shim above deliberately does NOT enable the target under
-# default.target in the image path (the greeter is the authoritative
-# starter; auto-start would race for wayland-1).
+# and QDWIN_SESSION_AUTOSTART=0 (exported above) keeps the installer from
+# enabling the target under default.target in the image path (the greeter
+# is the authoritative starter; auto-start would race for wayland-1).
 ADMIN_USER_UNITS=/home/admin/.config/systemd/user
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS"
 install -d -o admin -g users -m 0755 "$ADMIN_USER_UNITS/qdwin-session.target.wants"
@@ -305,8 +305,8 @@ fi
 # chroot. qdwin-session.target itself is NOT enabled under default.target —
 # the greeter's qdwin-session-launcher starts it explicitly
 # (`systemctl --user start qdwin-session.target`) after PAM auth, which is
-# the authoritative session-start path (the runuser shim above skips the
-# target's default.target.wants symlink for exactly this reason).
+# the authoritative session-start path (QDWIN_SESSION_AUTOSTART=0 above
+# leaves the target out of default.target.wants for exactly this reason).
 for unit in qdlocker.service; do
     [ -f "$ADMIN_USER_UNITS/$unit" ] || continue
     ln -sf "../$unit" "$ADMIN_USER_UNITS/qdwin-session.target.wants/$unit"

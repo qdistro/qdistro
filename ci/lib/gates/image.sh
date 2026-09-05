@@ -58,7 +58,7 @@ gate_image() {
         if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" "$raw" > "$ex_log" 2>&1; then
             static_root="$build_dir/extracted"
         else
-            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection"
+            record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection (image/extract-root.sh needs guestfish/libguestfs; see $ex_log)"
             return "$EXIT_BUILD"
         fi
     fi
@@ -104,17 +104,28 @@ gate_image() {
     # sole top-level .raw). Re-discovering it here with a broader find could
     # boot a stale qcow2 or nested raw while the static stage judged another
     # file (Phase B review); verify.sh is told the exact path.
-    local have_image=0 img="$raw"
-    if [ -z "$img" ]; then
-        local nimgs
-        nimgs=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -- '-verify-' | wc -l)
-        if [ "$nimgs" -gt 1 ]; then
-            record_result image verify.sh fail "$EXIT_BUILD" build image "" "$nimgs bootable artifacts under $build_dir and no single top-level .raw; cannot tell which to boot"
-            return "$EXIT_BUILD"
-        fi
-        [ "$nimgs" = 1 ] && img=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -- '-verify-')
+    # Boot ONLY the artifact Stage A inspected: the sole top-level raw that
+    # extract-root.sh just unpacked. With --root, or with a pre-extracted
+    # fallback tree, there is no provable link between the inspected tree
+    # and any bootable file, so booting one would judge two different
+    # artifacts as if they were one (round-4 review); that case is BLOCKED
+    # with the reason, not silently booted.
+    local have_image=0 img=""
+    if [ -z "$root" ] && [ -n "$raw" ] && [ "$static_root" = "$build_dir/extracted" ]; then
+        img="$raw"
     fi
-    [ -n "$img" ] && have_image=1
+    if [ -z "$img" ]; then
+        local why="boot needs the built raw Stage A inspected:"
+        [ -n "$root" ] && why="$why --root was given, so the inspected tree has no provable source image;"
+        [ -z "$raw" ] && why="$why no single top-level .raw under $build_dir;"
+        record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh and rerun without --root"
+        record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why"
+        if [ "$idempotency" = 1 ]; then
+            record_blocked image install-test.sh-2nd "$EXIT_VM_PROVISION" image "$why"
+        fi
+        return "$rc"
+    fi
+    have_image=1
     local have_virsh=0
     command -v virsh >/dev/null 2>&1 && "${VIRSH[@]}" list >/dev/null 2>&1 && have_virsh=1
 

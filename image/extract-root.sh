@@ -5,8 +5,10 @@
 # unreliable under rootless qemu:///session here; guestfish copy-out is not).
 #
 # Usage: extract-root.sh [raw] [dest]
-#   raw   defaults to $QDISTRO_BUILD_DIR/qdistro.x86_64-0.1.0.raw
-#   dest  defaults to $QDISTRO_BUILD_DIR/extracted (wiped first)
+#   raw   defaults to the SINGLE *.raw under $QDISTRO_BUILD_DIR; with none
+#         or several it exits 2 naming them (pass the path explicitly)
+#   dest  defaults to $QDISTRO_BUILD_DIR/extracted (wiped first; must be a
+#         child of $QDISTRO_BUILD_DIR)
 # Only the directories the checklist reads are copied (a few hundred MB, not
 # the 20 GiB image); add a path here when a checklist row needs one.
 set -euo pipefail

@@ -19,9 +19,13 @@ setup() {
     # deliberately omitted installer) plus the one direct call.
     CHAIN=$( { awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -oE '^\s*"scripts/install/install-[a-z0-9-]+\.sh' | tr -d ' "';
                grep -oE '^bash "\$QD/scripts/install/install-[a-z0-9-]+\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-[a-z0-9-]+\.sh'; } | sort -u)
-    # 13 array entries + the direct qdwin-session call today.
-    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -lt 14 ]; then
-        echo "chain parse found too few installers: $CHAIN" >&2; return 1
+    # Cardinality from the array itself (+1 for the direct qdwin-session
+    # call), so an installer added to the array is in the walk or the count
+    # check goes red.
+    local n_array
+    n_array=$(awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -cE '^\s*"scripts/install/install-[a-z0-9-]+\.sh')
+    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_array + 1 )) ] || [ "$n_array" -lt 10 ]; then
+        echo "chain parse mismatch: array=$n_array parsed: $CHAIN" >&2; return 1
     fi
 }
 

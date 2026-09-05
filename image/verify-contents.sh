@@ -89,8 +89,9 @@ resolve_in_image() {
         if [ "$rest" = "$comp" ]; then rest=""; else rest="${rest#*/}"; fi
         case "$comp" in
             ""|.) continue ;;
-            ..) [ "$cur" = "$ROOT" ] && return 1     # would escape the image
-                cur="${cur%/*}"; continue ;;
+            # Linux clamps `..` at `/`; with $ROOT as `/` so do we (round-4
+            # review: failing here made `usr/bin -> ../../` a false MISS).
+            ..) [ "$cur" = "$ROOT" ] || cur="${cur%/*}"; continue ;;
         esac
         next="$cur/$comp"
         if [ -L "$next" ]; then
@@ -113,6 +114,25 @@ in_image() {
     local r
     r="$(resolve_in_image "$1")" || return 1
     [ -e "$r" ]
+}
+
+# entry_in_image <path> — resolve the PARENT with image semantics and print
+# the host path of the directory entry itself (which may be a symlink, or
+# absent). For checks about the entry as such: `-L`, readlink, absence.
+entry_in_image() {
+    local parent
+    parent="$(resolve_in_image "$(dirname "$1")")" || return 1
+    printf '%s/%s\n' "$parent" "$(basename "$1")"
+}
+
+# file_in_image <path> — print the host path of a regular file resolved with
+# image semantics, for reading its CONTENT (never read "$ROOT/x" directly:
+# an ancestor or the file itself may be a symlink into the host).
+file_in_image() {
+    local r
+    r="$(resolve_in_image "$1")" || return 1
+    [ -f "$r" ] || return 1
+    printf '%s\n' "$r"
 }
 
 # check_req <label> <test-expr-as-path> — a path under $ROOT that must exist
@@ -168,10 +188,11 @@ check_glob_req() {
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
     # shellcheck disable=SC2086
     local matches m hit=""
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -20)
-    for m in $matches; do
+    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null)
+    while IFS= read -r m; do
+        [ -n "$m" ] || continue
         if in_image "$m"; then hit="$m"; break; fi
-    done
+    done <<<"$matches"
     if [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         REQUIRED_OK=$((REQUIRED_OK + 1))
@@ -185,10 +206,11 @@ check_glob_req() {
 check_glob_opt() {
     local label=$1 glob=$2 matches m hit=""
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -20)
-    for m in $matches; do
+    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null)
+    while IFS= read -r m; do
+        [ -n "$m" ] || continue
         if in_image "$m"; then hit="$m"; break; fi
-    done
+    done <<<"$matches"
     if [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         OPT_OK=$((OPT_OK + 1))
@@ -200,9 +222,12 @@ check_glob_opt() {
 # check_absent <label> <rel> — a path that must NOT exist (a wiring the image
 # deliberately leaves out); present => FAIL
 check_absent() {
-    local label=$1 rel=$2 full="$ROOT/${2#/}"
+    local label=$1 rel=$2 full="$ROOT/${2#/}" entry
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if [ ! -e "$full" ] && [ ! -L "$full" ]; then
+    # The parent is resolved with image semantics; a parent that does not
+    # exist in the image means the entry is absent too.
+    entry="$(entry_in_image "$full")" || entry=""
+    if [ -z "$entry" ] || { [ ! -e "$entry" ] && [ ! -L "$entry" ]; }; then
         printf 'OK   %s: absent as required: %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
@@ -218,14 +243,15 @@ check_absent() {
 # resolved against the link's directory. A missing link, a non-link, or a
 # target that is not in the image all FAIL.
 check_link() {
-    local label=$1 rel=$2 full="$ROOT/${2#/}" target resolved
+    local label=$1 rel=$2 full="$ROOT/${2#/}" entry target
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if [ ! -L "$full" ]; then
+    entry="$(entry_in_image "$full")" || entry=""
+    if [ -z "$entry" ] || [ ! -L "$entry" ]; then
         printf 'MISS %s: not a symlink: %s\n' "$label" "$full"
         FAIL=1
         return
     fi
-    target="$(readlink "$full")"
+    target="$(readlink "$entry")"
     if in_image "$full"; then
         printf 'OK   %s: %s -> %s\n' "$label" "$full" "$target"
         REQUIRED_OK=$((REQUIRED_OK + 1))
@@ -267,10 +293,17 @@ echo "-- admin uid assumptions (single-tenant: admin=1000) --"
 # Static proxy for "admin uid 1000": passwd entry + home dir. We grep
 # the on-disk passwd, not a live `id`, so this stays bootless.
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-if [ -f "$ROOT/etc/passwd" ] && grep -qE '^admin:[^:]*:1000:' "$ROOT/etc/passwd"; then
+passwd_file="$(file_in_image "$ROOT/etc/passwd" 2>/dev/null || true)"
+if [ -n "$passwd_file" ] && grep -qE '^admin:[^:]*:1000:' "$passwd_file"; then
     printf 'OK   %s: %s\n' "admin uid 1000 in passwd" "$ROOT/etc/passwd"
     REQUIRED_OK=$((REQUIRED_OK + 1))
-elif [ -d "$ROOT/home/admin" ]; then
+elif in_image "$ROOT/etc"; then
+    # /etc is in this tree, so passwd should have been found as a regular
+    # in-image file with the admin line; falling back to the home dir here
+    # would let a passwd that is a symlink into the host pass (round-4).
+    printf 'MISS %s: %s (present /etc but no in-image passwd with admin:1000)\n' "admin uid 1000" "$ROOT/etc/passwd"
+    FAIL=1
+elif in_image "$ROOT/home/admin"; then
     # Fall back to the home dir if passwd is not in this tree slice.
     printf 'OK   %s: %s\n' "admin home dir (passwd not in tree)" "$ROOT/home/admin"
     REQUIRED_OK=$((REQUIRED_OK + 1))
@@ -336,6 +369,16 @@ check_glob_opt "qdistro SELinux .pp modules" \
     "/usr/share/selinux/*/qdistro_*.pp"
 check_glob_opt "qdistro SELinux .pp (packages dir)" \
     "/usr/share/selinux/packages/qdistro_*.pp"
+# The four qdistro policy modules must be IN the module store: config.sh's
+# policy installs are fatal on failure, but the policy installer SKIPs with
+# exit 0 when selinux-policy-devel is absent, so an image built without it
+# would ship every qdistro service unconfined and still be green (Phase B
+# round-2 review). SELINUX= is permissive today (Phase C); this is about
+# completeness, not enforcement.
+check_req "[selinux] qdistro_broker module"          /etc/selinux/targeted/active/modules/400/qdistro_broker
+check_req "[selinux] qdistro_pwd module"             /etc/selinux/targeted/active/modules/400/qdistro_pwd
+check_req "[selinux] qdistro_session_manager module" /etc/selinux/targeted/active/modules/400/qdistro_session_manager
+check_req "[selinux] qdistro_tier1 module"           /etc/selinux/targeted/active/modules/400/qdistro_tier1
 check_glob_opt "SELinux active module store" \
     "/etc/selinux/targeted/active/modules/*/qdistro_*"
 
@@ -364,7 +407,7 @@ echo "-- utility app desktop integration assets --"
 # (finding #21). Optional: an image that does not include these utility
 # apps legitimately omits them, but when an app's /usr/bin entry exists its
 # assets should too.
-if [ -e "$ROOT/usr/bin/qterminator" ]; then
+if in_image "$ROOT/usr/bin/qterminator"; then
     check_req "qterminator .desktop"  /usr/share/applications/qterminator.desktop
     check_req "qterminator metainfo"  /usr/share/metainfo/qterminator.metainfo.xml
     check_glob_req "qterminator icon" "/usr/share/icons/hicolor/*/apps/qterminator.*"
@@ -372,7 +415,7 @@ else
     check_opt "qterminator .desktop"  /usr/share/applications/qterminator.desktop
     check_opt "qterminator metainfo"  /usr/share/metainfo/qterminator.metainfo.xml
 fi
-if [ -e "$ROOT/usr/bin/qfileman" ]; then
+if in_image "$ROOT/usr/bin/qfileman"; then
     check_req "qfileman .desktop"  /usr/share/applications/qfileman.desktop
     check_req "qfileman metainfo"  /usr/share/metainfo/qfileman.metainfo.xml
     check_glob_req "qfileman icon" "/usr/share/icons/hicolor/*/apps/qfileman.*"
@@ -429,7 +472,7 @@ check_req "[media] exec module"        /usr/local/lib/qdistro/qdistro_media_exec
 check_link "[media] socket enabled"    /etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket
 check_req "[multimachine] broker module" /usr/local/lib/qdistro/multimachine/mm_broker.py
 check_req "[multimachine] broker CLI"  /usr/local/bin/qdistro-mm-broker
-check_req "[multimachine] session launcher (last drop)" /usr/local/bin/qdistro-mm-session-launcher
+check_req "[multimachine] session launcher" /usr/local/bin/qdistro-mm-session-launcher
 check_req "[multimachine] rdp client wrapper"  /usr/local/bin/qdistro-mm-rdp-client-wrapper
 check_req "[browser-bridge] host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_req "[browser-bridge] downloads user unit" /etc/systemd/user/qdistro-downloads.service
@@ -454,13 +497,14 @@ check_req "[print-proxy] proxy binary" /usr/local/bin/qdistro-print-proxy
 check_req "[print-proxy] polkit action" /usr/share/polkit-1/actions/org.qdistro.print.policy
 check_req "[print-proxy] VM template"  /usr/share/qdistro/print-vm/domain-template.xml
 check_link "[print-proxy] enabled"     /etc/systemd/system/multi-user.target.wants/qdistro-print-proxy.service
-check_req "[print-proxy] manifest (last drop)" /etc/qdistro/printvm-manifest.json
+# Installed only when a source manifest exists and /etc has none yet.
+check_opt "[print-proxy] manifest"     /etc/qdistro/printvm-manifest.json
 check_req "[snapshots] backup unit"    /etc/systemd/system/qdistro-backup.service
 check_req "[snapshots] backup timer"   /etc/systemd/system/qdistro-backup.timer
 check_req "[snapshots] service module" /usr/libexec/qdistro/qdistro_backup_service.py
 check_req "[snapshots] CLI"            /usr/local/bin/qdistro-backup
 check_req "[snapshots] verify unit"    /etc/systemd/system/qdistro-backup-verify.service
-check_req "[snapshots] verify timer (last drop)" /etc/systemd/system/qdistro-backup-verify.timer
+check_req "[snapshots] verify timer"   /etc/systemd/system/qdistro-backup-verify.timer
 check_req "[qdwin-session] ydotoold unit"        /home/admin/.config/systemd/user/ydotoold.service
 # Recall is cut from v1 and deliberately not in the chain: none of its
 # artefacts may ship.
