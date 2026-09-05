@@ -34,6 +34,13 @@
 # fresh-vm-bootstrap.sh's $SRC).
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): live operations are
+# skipped and logged inside a corroborated chroot (the kiwi image build).
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "[install-tier4] must run as root" >&2
     exit 2

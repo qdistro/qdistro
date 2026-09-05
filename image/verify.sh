@@ -357,6 +357,31 @@ EOF2
 
 expect "weston (qdwin) on disk" \
     remote 'test -f /usr/lib64/weston/qdwin-shell.so || test -f /usr/lib/weston/qdwin-shell.so'
+
+# One chain (todo/iso/14 Phase D): the image ran the bootstrap's installer
+# chain, so the isolation ladder above tier 2 is on the stick. Tier 3 is the
+# top of the SUPPORTED ladder (spawn helper + group + polkit action); the
+# tier-4 host control script is what spawn-tier4.sh falls back to on an
+# installed image (experimental tier, host launch code only).
+expect "tier-3 spawn helper installed (chain step tier3)" \
+    remote 'test -x /usr/local/bin/qdistro-tier3-spawn && getent group qdistro-tier3 >/dev/null && test -f /usr/share/polkit-1/actions/org.qdistro.tier3.policy'
+expect "tier-3 silo users exist with locked passwords" \
+    remote 'for u in user1 user2; do id -u "$u" >/dev/null && sudo -n passwd -S "$u" | awk "{exit !(\$2==\"L\" || \$2==\"LK\")}" || exit 1; done'
+expect "tier-3 runtime dir created at boot by tmpfiles" \
+    remote 'test -d /run/qdistro-tier3'
+expect "tier-4 host control script installed (chain step tier4-host)" \
+    remote 'test -f /usr/share/qdistro/tier4-vm/tier4_control.py && test -f /usr/share/qdistro/tier4-vm/tier4_chrome.py'
+expect "sdk (qdistro_app) importable" \
+    remote 'python3 -c "import qdistro_app"'
+# The DONE bar, on the booted image: the steps recorded as installed equal
+# the bootstrap's chain for this image's profile (dev-only steps excluded
+# outside dev). chain_expected_names is the bootstrap's own definition.
+expect "installer chain record equals the bootstrap chain for this profile" \
+    remote 'p=$(sed -n "s/^PROFILE=//p" /etc/qdistro/release); [ -n "$p" ] || exit 1;
+            exp=$(QDISTRO_PROFILE="$p" bash -c ". /root/qdistro-src/qdistro/scripts/install/qdistro-bootstrap.sh; resolve_profile >/dev/null; chain_expected_names") || exit 1;
+            [ -n "$exp" ] && [ "$exp" = "$(cat /var/lib/qdistro/bootstrap/installer-chain.state)" ]'
+expect "no media/multimachine/recall artefacts (not in the chain)" \
+    remote 'for f in /etc/systemd/system/qdistro-media-exec.socket /usr/local/bin/qdistro-mm-broker /usr/local/bin/qdistro-recall; do test -e "$f" && exit 1; done; exit 0'
 expect "qdshell QML installed"  remote 'test -d /usr/share/quickshell/qdshell'
 
 # Priority 0/1 journal entries. The single benign one we tolerate is the
@@ -371,6 +396,8 @@ remote 'sudo -n journalctl -b -p err --no-pager'         > "$VERIFY_DIR/journal/
 remote 'sudo -n journalctl -u qdistro-admin-broker --no-pager' > "$VERIFY_DIR/journal/broker.log" 2>&1 || true
 remote 'sudo -n journalctl -u greetd --no-pager'         > "$VERIFY_DIR/journal/greetd.log"    2>&1 || true
 remote 'systemctl --failed --no-pager'                   > "$VERIFY_DIR/journal/failed-units.log" 2>&1 || true
+remote 'cat /var/lib/qdistro/bootstrap/installer-chain.state' > "$VERIFY_DIR/journal/installer-chain.state" 2>&1 || true
+remote 'cat /etc/qdistro/release'                        > "$VERIFY_DIR/journal/release.txt"       2>&1 || true
 remote 'sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user --no-pager status qdwin-session.target qdwin-compositor.service qdshell.service qdlocker.service' \
     > "$VERIFY_DIR/journal/user-units.log" 2>&1 || true
 

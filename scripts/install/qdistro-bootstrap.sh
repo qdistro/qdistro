@@ -27,9 +27,15 @@
 #   9.  pip-installs qdgreeter, qdlocker, qdbrowser, qterminator,
 #       qnotebook, qfileman.
 #  10.  Runs the existing scripts/install/install-*.sh installer chain
-#       (broker, session-manager, polkit, pwd, qsu, browser-bridge, phone,
-#       print, snapshots, tier3, tier5). Recall is cut from v1 and is not in
-#       the bootstrap chain.
+#       (sdk, broker, session-manager, user-relay, polkit, pwd, qsu,
+#       browser-bridge, portal-backend, phone [dev only], print, snapshots,
+#       tier3, tier4-host, tier5, tier5b), then checks it is COMPLETE: the
+#       steps recorded as succeeded must equal the chain (minus dev-only
+#       steps outside dev). Incomplete is FATAL in daily-driver/release and
+#       under --strict, a WARN in dev. Recall is cut from v1 and is not in
+#       the bootstrap chain. image/config.sh runs the SAME functions inside
+#       the kiwi chroot (see "Sourcing contract" below), so the image and a
+#       machine install lay down one product (todo/iso/14 Phase D).
 #  11.  Installs qdlocker systemd user service for admin.
 #  12.  Installs locker configuration via deploy/install-locker-config.sh.
 #  13.  (Tumbleweed) loads SELinux policy modules; hardened profiles require
@@ -142,6 +148,18 @@
 #   --list-steps           print the ordered installer-chain step names and
 #                          exit (no install performed).
 #   -h, --help             show help and exit
+#
+# Sourcing contract (image/config.sh, the test harnesses): this file may be
+#   SOURCED; main() runs only when it is executed. Sourcing still runs
+#   `set -euo pipefail`, sources lib/qdistro-profile.sh, defines log/warn/die
+#   and (re)initialises every global from its QDISTRO_* env form -- so a
+#   caller sets QDISTRO_REPO_ROOT, QDISTRO_PROFILE, QDISTRO_STRICT,
+#   QDISTRO_STATE_DIR in the ENVIRONMENT before sourcing, never the internal
+#   names (REPO_ROOT, STRICT, ...), which the source would clobber. After
+#   sourcing, call resolve_profile, then install_python_modules to run the
+#   chain with the completeness check. QDISTRO_OFFLINE_INSTALL=1 (exported)
+#   makes every chain installer honour the offline contract
+#   (lib/qdistro-offline.sh) inside a corroborated chroot.
 #
 # Equivalent env vars (CLI wins): QDISTRO_ADMIN_PASSWORD,
 #   QDISTRO_USER_NAME, QDISTRO_USER_PASSWORD, QDISTRO_REPO_ROOT,
@@ -1996,9 +2014,72 @@ chain_step_completed() {
     chain_state_completed | grep -qxF "$1"
 }
 
+# chain_expected_names — the step names this run is expected to end with
+# recorded complete: every chain step, minus the dev-only steps when the
+# profile is not dev (they are skipped, not failed).
+chain_expected_names() {
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if chain_step_dev_only "$n" && ! is_dev; then continue; fi
+        printf '%s\n' "$n"
+    done < <(installer_chain_names)
+}
+
+# chain_completeness_check <mode> — the end-of-run check the resume state
+# file makes possible (iso2 02 F1): compare the steps RECORDED complete
+# against chain_expected_names. The state file is written only on success
+# (run_installer_step), so a step that failed, was skipped as missing, or
+# whose record could not be written is a gap here even when the per-step
+# classification was a warning. Nothing else reads the record; without this
+# check a warn-and-continue run exits 0 with the permission broker absent.
+#
+#   full / resume  the run promised the whole chain: a gap is FATAL in the
+#                  hardened profiles (daily-driver, release) and under
+#                  --strict / QDISTRO_STRICT, a WARN in dev (a disposable
+#                  VM may be brought up piecewise; the gap is still logged
+#                  and --resume finishes it).
+#   only / from    the operator scoped the run to part of the chain, so an
+#                  incomplete record is expected and only REPORTED (the
+#                  fatal form would make --rerun-step unusable on a machine
+#                  that has not finished installing).
+#
+# Prints the gap by name so the operator's next command is `--resume` or
+# `--rerun-step <name>`, not a log search.
+chain_completeness_check() {
+    local mode="${1:-full}" expected recorded missing n
+    expected="$(chain_expected_names)"
+    recorded="$(chain_state_completed)"
+    missing=""
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if ! printf '%s\n' "$recorded" | grep -qxF -- "$n"; then
+            missing="${missing:+$missing }$n"
+        fi
+    done <<EOF
+$expected
+EOF
+    if [ -z "$missing" ]; then
+        log "installer chain complete: $(printf '%s\n' "$expected" | grep -c .) of $(printf '%s\n' "$expected" | grep -c .) expected steps recorded in $CHAIN_STATE_FILE"
+        return 0
+    fi
+    case "$mode" in
+        only|from)
+            warn "installer chain not complete after a scoped run (--rerun-step/--from-step): not recorded: $missing (run --resume to finish the chain)"
+            return 0 ;;
+    esac
+    if is_hardened || [ -n "$STRICT" ]; then
+        die "installer chain INCOMPLETE in '$QDISTRO_PROFILE' profile: not recorded as installed: $missing. A system without these is not the product; fix the cause and run --resume (or --rerun-step <name>). State: $CHAIN_STATE_FILE"
+    fi
+    warn "installer chain INCOMPLETE (dev profile continues): not recorded as installed: $missing. Run --resume to finish. State: $CHAIN_STATE_FILE"
+    return 0
+}
+
 # run_installer_step <name> <installer-rel-path> <src-dir> — execute one chain
 # step (relative to the already-cwd'd qdistro dir) and, on success, record it
-# in the state file. Same fatal/warn classification as before.
+# in the state file. Same fatal/warn classification as before; the END of the
+# chain is then judged by chain_completeness_check, which is what makes the
+# default warn-and-continue safe on a hardened profile.
 run_installer_step() {
     local name="$1" installer="$2" src_dir="$3"
     if [ -x "$installer" ]; then
@@ -2079,6 +2160,9 @@ install_python_modules() {
         fi
         run_installer_step "$name" "$installer" "$QD$src_suffix"
     done < <(installer_chain_entries)
+
+    # Recorded steps vs the chain (iso2 02 F1). Fatal in hardened profiles.
+    chain_completeness_check "$mode"
 }
 
 # ---------------------------------------------------------------------------

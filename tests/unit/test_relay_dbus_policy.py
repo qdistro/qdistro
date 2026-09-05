@@ -976,11 +976,20 @@ class TestInstalledPath:
         """Follow-up F4-b: image/config.sh staged install-user-relay but not
         install-session-manager, so on the release image the relay template
         was present and nothing ever created a silo, started a relay, or
-        issued a grant."""
+        issued a grant. Since todo/iso/14 Phase D config.sh carries no list
+        of its own: it sources the bootstrap and runs its chain
+        (install_python_modules), so the bootstrap assertion above covers the
+        image too -- provided config.sh really runs that chain."""
         cfg = _REPO / "image" / "config.sh"
-        assert self._installer_lines(cfg, "install-session-manager.sh"), (
-            "install-session-manager.sh is missing from image/config.sh's "
-            "INSTALLERS list — the relay ships with no driver")
+        assert not self._installer_lines(cfg, "INSTALLERS=("), (
+            "image/config.sh grew its own INSTALLERS list again; the image "
+            "must run the bootstrap's chain (one chain)")
+        assert self._installer_lines(cfg, '. "$QD/scripts/install/qdistro-bootstrap.sh"'), (
+            "image/config.sh does not source qdistro-bootstrap.sh")
+        assert "install_python_modules" in [
+            ln.strip() for ln in self._installer_lines(cfg, "install_python_modules")], (
+            "image/config.sh does not run the bootstrap's installer chain "
+            "(install_python_modules) — the relay would ship with no driver")
 
     def test_the_gui_harness_provisions_work_and_work2_as_real_silos(self):
         """`spin-test-vm-gui.sh` must create `work` (2000) and `work2` (3000)

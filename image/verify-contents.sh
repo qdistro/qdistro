@@ -30,6 +30,11 @@
 set -uo pipefail
 
 PROG=$(basename "$0")
+# The repo's bootstrap: its installer_chain_entries is the ONE list of what
+# the image installs (todo/iso/14 Phase D); the chain-record row diffs the
+# image's record against it.
+CHECKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_SH="$CHECKER_DIR/../scripts/install/qdistro-bootstrap.sh"
 
 usage() {
     cat <<EOF
@@ -312,6 +317,20 @@ check_link() {
     fi
 }
 
+# check_line <label> <rel> <ERE> — a regular file in the image whose content
+# has at least one line matching <ERE> (read with image semantics).
+check_line() {
+    local label=$1 rel=$2 re=$3 full="$ROOT/${2#/}" f
+    REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+    if f="$(file_in_image "$full")" && grep -Eq -- "$re" "$f"; then
+        printf 'OK   %s: %s matches /%s/\n' "$label" "$full" "$re"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'MISS %s: %s has no line matching /%s/\n' "$label" "$full" "$re"
+        FAIL=1
+    fi
+}
+
 echo "== qdistro static image-content checklist =="
 echo "root: $ROOT"
 echo
@@ -581,14 +600,17 @@ check_req "[qsu] socket unit"          /etc/systemd/system/qdistro-root-exec.soc
 check_req "[qsu] service unit"         /etc/systemd/system/qdistro-root-exec.service
 check_req "[qsu] root-exec module"     /usr/local/lib/qdistro/qdistro_root_exec.py
 check_link "[qsu] socket enabled"      /etc/systemd/system/sockets.target.wants/qdistro-root-exec.socket
-check_req "[media] socket unit"        /etc/systemd/system/qdistro-media-exec.socket
-check_req "[media] service unit"       /etc/systemd/system/qdistro-media-exec.service
-check_req "[media] exec module"        /usr/local/lib/qdistro/qdistro_media_exec.py
-check_link "[media] socket enabled"    /etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket
-check_req "[multimachine] broker module" /usr/local/lib/qdistro/multimachine/mm_broker.py
-check_req "[multimachine] broker CLI"  /usr/local/bin/qdistro-mm-broker
-check_req "[multimachine] session launcher" /usr/local/bin/qdistro-mm-session-launcher
-check_req "[multimachine] rdp client wrapper"  /usr/local/bin/qdistro-mm-rdp-client-wrapper
+# media and multimachine are NOT in the bootstrap chain (audit
+# recommendation DEMOTE, fable-release/13 rows 11d/11e, never promoted);
+# since the image runs that chain (Phase D) none of their artefacts may ship.
+check_absent "[media] socket unit not shipped"   /etc/systemd/system/qdistro-media-exec.socket
+check_absent "[media] service unit not shipped"  /etc/systemd/system/qdistro-media-exec.service
+check_absent "[media] exec module not shipped"   /usr/local/lib/qdistro/qdistro_media_exec.py
+check_absent "[media] socket not enabled"        /etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket
+check_absent "[multimachine] broker module not shipped" /usr/local/lib/qdistro/multimachine/mm_broker.py
+check_absent "[multimachine] broker CLI not shipped"    /usr/local/bin/qdistro-mm-broker
+check_absent "[multimachine] session launcher not shipped" /usr/local/bin/qdistro-mm-session-launcher
+check_absent "[multimachine] rdp client wrapper not shipped" /usr/local/bin/qdistro-mm-rdp-client-wrapper
 check_req "[browser-bridge] host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_req "[browser-bridge] downloads user unit" /etc/systemd/user/qdistro-downloads.service
 # `systemctl --global enable` of the four browser daemons writes two links
@@ -605,8 +627,19 @@ check_req "[portal-backend] backend module" /usr/lib/qdistro/daemons/qdistro_por
 check_req "[portal-backend] user unit"  /etc/systemd/user/qdistro-portal-backend.service
 check_req "[portal-backend] portal"     /usr/share/xdg-desktop-portal/portals/qdistro.portal
 check_req "[portal-backend] bus service" /usr/share/dbus-1/services/org.freedesktop.impl.portal.qdistro.service
-check_req "[phone] unit"               /etc/systemd/system/qdistro-phone.service
-check_req "[phone] daemon module"      /usr/libexec/qdistro/qdistro_phone_daemon.py
+# phone is a dev-only chain step (decision D4, CHAIN_DEV_ONLY_STEPS): laid
+# down in the dev (tester) image, never in a release image.
+case "$image_profile" in
+    dev)
+        check_req "[phone] unit (dev profile)"          /etc/systemd/system/qdistro-phone.service
+        check_req "[phone] daemon module (dev profile)" /usr/libexec/qdistro/qdistro_phone_daemon.py ;;
+    release)
+        check_absent "[phone] unit not shipped (release profile)"   /etc/systemd/system/qdistro-phone.service
+        check_absent "[phone] daemon not shipped (release profile)" /usr/libexec/qdistro/qdistro_phone_daemon.py ;;
+    *)
+        REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1)); FAIL=1
+        printf 'MISS [phone] profile-gated rows: image profile unknown (provenance row failed)\n' ;;
+esac
 check_req "[print-proxy] unit"         /etc/systemd/system/qdistro-print-proxy.service
 check_req "[print-proxy] proxy binary" /usr/local/bin/qdistro-print-proxy
 check_req "[print-proxy] polkit action" /usr/share/polkit-1/actions/org.qdistro.print.policy
@@ -638,6 +671,81 @@ check_absent "[qdwin-session] target NOT auto-started" /home/admin/.config/syste
 check_req "[qdwin-session] greeter launcher"     /usr/local/bin/qdwin-session-launcher
 # qdlocker: the binary itself, not just its unit and wants link (Phase B item 3).
 check_req "[qdlocker] binary"          /usr/bin/qdlocker
+
+echo
+echo "-- one chain: the steps the image used to lack (todo/iso/14 Phase D) --"
+# sdk: the qdistro_app package in the system python's purelib.
+check_glob_req "[sdk] qdistro_app package" "/usr/lib/python3*/site-packages/qdistro_app/__init__.py"
+# tier3: the top of the SUPPORTED ladder (tiers 0-3). Spawn/cleanup are
+# symlinks into the on-image source tree; the group, the two locked silo
+# users, the tmpfiles entry and the polkit action complete it.
+check_link "[tier3] spawn helper"      /usr/local/bin/qdistro-tier3-spawn
+check_link "[tier3] cleanup helper"    /usr/local/bin/qdistro-tier3-cleanup
+check_req  "[tier3] spawn-common lib"  /usr/local/lib/qdistro/spawn-common.sh
+check_req  "[tier3] tmpfiles entry"    /etc/tmpfiles.d/qdistro-tier3.conf
+check_req  "[tier3] polkit action"     /usr/share/polkit-1/actions/org.qdistro.tier3.policy
+check_line "[tier3] group exists"      /etc/group  '^qdistro-tier3:'
+check_line "[tier3] admin in group"    /etc/group  '^qdistro-tier3:[^:]*:[^:]*:.*\badmin\b'
+check_line "[tier3] silo user1"        /etc/passwd '^user1:'
+check_line "[tier3] silo user2"        /etc/passwd '^user2:'
+check_line "[tier3] user1 password locked" /etc/shadow '^user1:!'
+check_line "[tier3] user2 password locked" /etc/shadow '^user2:!'
+# tier4-host / tier5 / tier5b: EXPERIMENTAL tiers, host launch code only
+# (the guest base image is the bootstrap's --tier4-base opt-in and is not
+# built into the image). Present so the documented fallback paths resolve.
+check_req "[tier4-host] control script"   /usr/share/qdistro/tier4-vm/tier4_control.py
+check_req "[tier4-host] chrome module"    /usr/share/qdistro/tier4-vm/tier4_chrome.py
+check_req "[tier4-host] publisher identity" /usr/share/qdistro/tier4-vm/tier4_publisher_identity.py
+check_req "[tier5] spawn wrapper"         /usr/local/bin/qdistro-tier5-spawn
+check_req "[tier5] cleanup wrapper"       /usr/local/bin/qdistro-tier5-cleanup
+check_req "[tier5] guest-image build wrapper" /usr/local/bin/qdistro-tier5-build-guest-image
+check_req "[tier5] domain template"       /usr/share/qdistro/tier5/domain-template.xml
+check_req "[tier5] polkit action"         /usr/share/polkit-1/actions/org.qdistro.tier5.policy
+check_req "[tier5b] spawn wrapper"        /usr/local/bin/qdistro-tier5b-spawn
+check_req "[tier5b] cleanup wrapper"      /usr/local/bin/qdistro-tier5b-cleanup
+check_req "[tier5b] guest-image build wrapper" /usr/local/bin/qdistro-tier5b-build-guest-image
+check_req "[tier5b] domain template"      /usr/share/qdistro/tier5b/domain-template.xml
+# The guest agent must answer guest-exec (verify.sh drives the booted image
+# with it); the vendor default blocks it.
+check_line "[qemu-ga] guest-exec allowed" /etc/sysconfig/qemu-ga '^FILTER_RPC_ARGS=""$'
+
+echo
+echo "-- installer chain record (the Phase D DONE bar) --"
+# config.sh ran the bootstrap's chain with QDISTRO_STATE_DIR on the image, so
+# /var/lib/qdistro/bootstrap/installer-chain.state lists every step that
+# succeeded, in chain order. It must equal the bootstrap's expected names
+# for this image's profile (chain_expected_names: the chain minus dev-only
+# steps outside dev). The bootstrap is the REPO's copy -- the expectation --
+# sourced in a subshell; it runs nothing when sourced.
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+chain_state_rel=/var/lib/qdistro/bootstrap/installer-chain.state
+chain_state_file="$(file_in_image "$ROOT$chain_state_rel" || true)"
+chain_expected=""
+if [ -z "$chain_state_file" ]; then
+    printf 'MISS [chain] record: %s%s absent (config.sh did not run the bootstrap chain with QDISTRO_STATE_DIR on the image)\n' "$ROOT" "$chain_state_rel"
+    FAIL=1
+elif [ -z "$image_profile" ]; then
+    printf 'MISS [chain] record: image profile unknown (provenance row failed); cannot compute the expected chain\n'
+    FAIL=1
+elif [ ! -f "$BOOTSTRAP_SH" ]; then
+    printf 'MISS [chain] record: %s not found; cannot compute the expected chain\n' "$BOOTSTRAP_SH"
+    FAIL=1
+elif ! chain_expected="$(QDISTRO_PROFILE="$image_profile" bash -c '. "$1" && resolve_profile >/dev/null && chain_expected_names' _ "$BOOTSTRAP_SH" 2>&1)" \
+        || [ -z "$chain_expected" ]; then
+    printf 'MISS [chain] record: could not read chain_expected_names from %s: %s\n' "$BOOTSTRAP_SH" "$chain_expected"
+    FAIL=1
+else
+    chain_recorded="$(grep -vE '^[[:space:]]*(#|$)' "$chain_state_file" || true)"
+    if [ "$chain_recorded" = "$chain_expected" ]; then
+        printf 'OK   [chain] record equals the bootstrap chain (%s profile, %d steps): %s\n' \
+            "$image_profile" "$(printf '%s\n' "$chain_expected" | grep -c .)" "$(printf '%s' "$chain_expected" | tr '\n' ' ')"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'MISS [chain] record differs from the bootstrap chain (%s profile):\n' "$image_profile"
+        diff <(printf '%s\n' "$chain_expected") <(printf '%s\n' "$chain_recorded") | sed 's/^/     /'
+        FAIL=1
+    fi
+fi
 
 echo
 echo "== summary =="

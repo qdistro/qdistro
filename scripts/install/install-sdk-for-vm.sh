@@ -20,6 +20,13 @@
 # installs independently.
 set -euo pipefail
 
+# Offline-install contract (todo/iso/14 Phase B): live operations are
+# skipped and logged inside a corroborated chroot (the kiwi image build).
+_QDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/qdistro-offline.sh
+. "$_QDO_DIR/lib/qdistro-offline.sh"
+resolve_offline_install
+
 SDK_SRC=${1:-/root/qdistro-src/qdistro/sdk/qdistro_app}
 if [ ! -d "$SDK_SRC" ] || [ ! -f "$SDK_SRC/__init__.py" ]; then
     echo "[install-sdk] qdistro_app SDK not found at $SDK_SRC" >&2

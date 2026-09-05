@@ -11,6 +11,10 @@
 # that ran. log/warn/die are tamed; the state dir is redirected into the test
 # tmp so chain_state_record writes a real (atomic) file we can inspect.
 #
+# Also the end-of-run completeness check (iso2 02 F1, todo/iso/14 Phase D):
+# recorded steps vs the chain, fatal in hardened profiles / strict, warn in
+# dev, report-only for scoped runs.
+#
 # Run: bats tests/integration/vm/bootstrap-installer-resume.bats
 
 setup() {
@@ -62,7 +66,9 @@ EOF
 }
 
 # Drive install_python_modules() with the chain pointed at the stub tree.
-# Args: extra shell to set the rerun-mode globals (e.g. 'RESUME=1').
+# Args: extra shell to set the rerun-mode globals (e.g. 'RESUME=1', or
+# 'QDISTRO_PROFILE=dev'). The profile is the bootstrap's default,
+# daily-driver (hardened), unless the caller sets it; STRICT is unset.
 # Echoes nothing; populates $TRACE + the state file. Returns the rc.
 _run_chain() {
     local mode_setup="$1"
@@ -294,9 +300,15 @@ exit 1
 EOF
     chmod +x "$FAKE_QD/scripts/install/install-qsu-for-vm.sh"
 
-    # First run (default mode, non-strict): qsu fails but chain continues.
+    # First run (default mode, non-strict, hardened profile): qsu fails, the
+    # chain CONTINUES past it (every later step still runs, so --resume has
+    # exactly one gap to fill) -- and the run then exits nonzero from the
+    # end-of-run completeness check, naming the gap.
     _run_chain ''
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"installer chain INCOMPLETE in 'daily-driver' profile"* ]]
+    [[ "$output" == *"not recorded as installed: qsu."* ]]
+    grep -q "install-tier5b-for-vm.sh" "$TRACE"
     # qsu must NOT be recorded as complete.
     ! grep -qx "qsu" "$STATE_DIR/installer-chain.state"
     # but broker..browser-bridge etc ARE recorded.
@@ -312,8 +324,102 @@ EOF
     : > "$TRACE"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
+    [[ "$output" != *"INCOMPLETE"* ]]
     # The resumed run re-ran qsu (first un-recorded step) ...
     grep -q "install-qsu-for-vm.sh .* FIXED" "$TRACE"
     # ... and did NOT re-run the already-recorded broker.
     ! grep -q "install-broker-for-qdwin.sh" "$TRACE"
+}
+
+# --- end-of-run completeness check (iso2 02 F1) ---------------------------
+
+_break_step() {
+    cat > "$FAKE_QD/scripts/install/$1" <<EOF
+#!/bin/bash
+echo "$1 \$1" >> "$TRACE"
+exit 1
+EOF
+    chmod +x "$FAKE_QD/scripts/install/$1"
+}
+
+@test "completeness: a clean hardened run reports the chain complete (phone is not a gap)" {
+    _run_chain ''
+    [ "$status" -eq 0 ]
+    # 16 steps, phone skipped as dev-only, so 15 expected and 15 recorded.
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    ! grep -qx phone "$STATE_DIR/installer-chain.state"
+    ! grep -q "install-phone-for-vm.sh" "$TRACE"
+}
+
+@test "completeness: dev profile -- a failed step is a WARN, the run exits 0, and phone is expected" {
+    _break_step install-pwd-for-vm.sh
+    _run_chain 'QDISTRO_PROFILE=dev'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain INCOMPLETE (dev profile continues): not recorded as installed: pwd."* ]]
+    grep -q "install-phone-for-vm.sh" "$TRACE"
+    grep -qx phone "$STATE_DIR/installer-chain.state"
+    ! grep -qx pwd "$STATE_DIR/installer-chain.state"
+}
+
+@test "completeness: release profile -- a MISSING installer is a gap and the run exits nonzero" {
+    rm "$FAKE_QD/scripts/install/install-tier4-host-for-vm.sh"
+    _run_chain 'QDISTRO_PROFILE=release'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"installer not found or not executable"* ]]
+    [[ "$output" == *"installer chain INCOMPLETE in 'release' profile: not recorded as installed: tier4-host."* ]]
+}
+
+@test "completeness: two gaps are both named" {
+    _break_step install-pwd-for-vm.sh
+    _break_step install-tier3-for-vm.sh
+    _run_chain ''
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not recorded as installed: pwd tier3."* ]]
+}
+
+@test "completeness: a scoped run (--rerun-step) on a partial machine reports, does not die" {
+    _run_chain 'RERUN_STEP=print'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain not complete after a scoped run"* ]]
+    [[ "$output" != *"INCOMPLETE in"* ]]
+    # --from-step likewise
+    : > "$TRACE"; rm -f "$STATE_DIR/installer-chain.state"
+    _run_chain 'FROM_STEP=tier5'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain not complete after a scoped run"* ]]
+}
+
+@test "completeness: strict -- a failed step aborts at once; nothing after it runs" {
+    _break_step install-qsu-for-vm.sh
+    _run_chain 'STRICT=1'
+    [ "$status" -ne 0 ]
+    grep -q "install-qsu-for-vm.sh" "$TRACE"
+    ! grep -q "install-browser-bridge-for-vm.sh" "$TRACE"
+    ! grep -qx qsu "$STATE_DIR/installer-chain.state"
+}
+
+@test "completeness: strict in DEV (the image build) is fatal too -- the gap can never ship" {
+    # image/config.sh exports QDISTRO_STRICT=1 with QDISTRO_PROFILE=dev.
+    # Break the record instead of a step: an unwritable state dir means a
+    # succeeded step cannot be recorded (chain_state_record warns and
+    # returns 0), so the ONLY thing standing between that and a green build
+    # is the completeness check.
+    # (chain_state_record's own `install -d -m 0755` would re-open a
+    # read-only state dir, so the dir is made uncreatable instead.)
+    mkdir -p "$BATS_TEST_TMPDIR/ro"; chmod 0555 "$BATS_TEST_TMPDIR/ro"
+    _run_chain 'QDISTRO_PROFILE=dev; STRICT=1; QDISTRO_STATE_DIR="'"$BATS_TEST_TMPDIR"'/ro/state"; CHAIN_STATE_FILE="$QDISTRO_STATE_DIR/installer-chain.state"'
+    chmod 0755 "$BATS_TEST_TMPDIR/ro"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"installer chain INCOMPLETE in 'dev' profile"* ]]
+    # every step ran (the failure is in the record, not the steps)
+    grep -q "install-tier5b-for-vm.sh" "$TRACE"
+}
+
+@test "completeness: hardened -- an unwritable state dir fails the run rather than exit 0" {
+    mkdir -p "$BATS_TEST_TMPDIR/ro"; chmod 0555 "$BATS_TEST_TMPDIR/ro"
+    _run_chain 'QDISTRO_STATE_DIR="'"$BATS_TEST_TMPDIR"'/ro/state"; CHAIN_STATE_FILE="$QDISTRO_STATE_DIR/installer-chain.state"'
+    chmod 0755 "$BATS_TEST_TMPDIR/ro"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not recorded"* ]]
+    [[ "$output" == *"INCOMPLETE in 'daily-driver'"* ]]
 }
