@@ -310,6 +310,9 @@ chain_root() {
         "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/qdistro/tier3" \
         "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system"
     : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
+    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
+    : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
+    : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/Main.qml"
     # the vendor qemu-ga default and the unit lines the override relies on
     # (copied from the run-28 image)
     printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
@@ -333,6 +336,8 @@ chain_root() {
     chain_root dev
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [[ "$output" == *"OK   [sdk] qdistro_app package"* ]]
+    [[ "$output" == *"OK   [qdgreeter] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
     [[ "$output" == *"OK   [tier3] spawn helper"* ]]
     [[ "$output" == *"OK   [tier3] user1 password locked"* ]]
     [[ "$output" == *"OK   [tier3] admin in group"* ]]
@@ -412,6 +417,7 @@ chain_root() {
     # the extraction never produces. Pin the extractor's side of the contract.
     local x="$IMAGE/extract-root.sh"
     grep -q '^    /usr/local$' "$x"                      # sdk package + tier helpers
+    grep -q 'PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")' "$x"   # pip apps' QML rows
     grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
     grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
     grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
@@ -652,4 +658,19 @@ GF
     local g="$REPO/ci/lib/gates/image.sh"
     grep -q 'record_skip image install-test.sh image' "$g"
     grep -q 'installiso=false' "$g"
+}
+
+@test "verify-contents: a qdgreeter package without its QML is a MISS (run 28's crash-looping greeter)" {
+    chain_root dev
+    rm "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"
+    run bash "$IMAGE/verify-contents.sh" "$T/root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"MISS [qdgreeter] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
+}
+
+@test "config.sh: gates each pip app on its QML being inside the installed package" {
+    grep -q "r.files('\$pyapp') / 'qml' / 'Main.qml'" "$IMAGE/config.sh"
+    grep -q 'FATAL: $pyapp installed without its QML' "$IMAGE/config.sh"
+    grep -q '^for pyapp in qdgreeter qdlocker; do$' "$IMAGE/config.sh"
 }

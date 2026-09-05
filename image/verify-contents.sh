@@ -671,6 +671,12 @@ check_absent "[qdwin-session] target NOT auto-started" /home/admin/.config/syste
 check_req "[qdwin-session] greeter launcher"     /usr/local/bin/qdwin-session-launcher
 # qdlocker: the binary itself, not just its unit and wants link (Phase B item 3).
 check_req "[qdlocker] binary"          /usr/bin/qdlocker
+# The pip-installed apps must ship their QML: qdgreeter's used to live
+# outside the package, so every image booted to a crash-looping greeter
+# ("Main.qml: No such file") -- found by verify.sh on run 28 (Phase D).
+check_glob_req "[qdgreeter] QML shipped with the package" "/usr/lib/python3*/site-packages/qdgreeter/qml/Main.qml"
+check_glob_req "[qdgreeter] QML shim module shipped"     "/usr/lib/python3*/site-packages/qdgreeter/qml/shim/qmldir"
+check_glob_req "[qdlocker] QML shipped with the package"  "/usr/lib/python3*/site-packages/qdlocker/qml/Main.qml"
 
 echo
 echo "-- one chain: the steps the image used to lack (todo/iso/14 Phase D) --"

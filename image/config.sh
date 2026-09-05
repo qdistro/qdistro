@@ -302,6 +302,19 @@ if [ ! -x /usr/bin/qdgreeter ]; then
     exit 1
 fi
 echo "[qdistro-image] /usr/bin/qdgreeter present: $(command -v qdgreeter)"
+# ...and each app's QML is INSIDE its installed package. A wheel that ships
+# the Python but not the QML installs fine and dies at first launch
+# ("Main.qml: No such file"): run 28 booted to a crash-looping greeter that
+# way (todo/iso/14 Phase D). Same gate for both pip apps.
+for pyapp in qdgreeter qdlocker; do
+    qml_main="$(python3 -c "import importlib.resources as r; p = r.files('$pyapp') / 'qml' / 'Main.qml'; print(p if p.is_file() else '')" 2>/dev/null || true)"
+    if [ -z "$qml_main" ]; then
+        echo "[qdistro-image] FATAL: $pyapp installed without its QML (no qml/Main.qml inside the package);" \
+             "it would crash at first launch. Fix $pyapp's pyproject package-data. Aborting build." >&2
+        exit 1
+    fi
+    echo "[qdistro-image] $pyapp QML present: $qml_main"
+done
 
 # Production session units. As of 2026-06-16 the VM installer above
 # (install-qdwin-session-for-vm.sh) is the SINGLE SOURCE for the deploy-

@@ -43,6 +43,13 @@ for p in "$RAW" "$DEST"; do
     esac
 done
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
+# The pip-installed apps (qdgreeter, qdlocker) land in the system python's
+# versioned site-packages (/usr/lib/python3.N/...); copy-out takes literal
+# paths and guestfish's `glob` expands only the last component, so ask the
+# image for N first. awk, not `head -1`: this script runs under pipefail.
+PYLIB="$(printf 'glob echo /usr/lib/python3*\n' | guestfish --ro -a "$RAW" -i \
+         | awk '/^\/usr\/lib\/python3\.[0-9]+\/?$/ { sub(/\/$/, ""); v=$0 } END { print v }')"
+[ -n "$PYLIB" ] || echo "extract-root: WARN: no /usr/lib/python3.N in the image; the [qdgreeter]/[qdlocker] package rows will MISS" >&2
 PATHS=(
     /etc
     /usr/bin/qdgreeter /usr/bin/qdlocker /usr/bin/qterminator /usr/bin/qfileman
@@ -60,7 +67,10 @@ PATHS=(
 )
 # (The chain's sdk step installs qdistro_app under /usr/local/lib/python3.N/
 # site-packages -- openSUSE's purelib for non-RPM installs -- so /usr/local
-# above already carries the [sdk] row's file.)
+# above already carries the [sdk] row's file.) The two pip apps go to /usr:
+if [ -n "$PYLIB" ]; then
+    PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")
+fi
 # The copy includes the image's /etc (shadow with the baked test-password
 # hash, generated SSH host keys). File modes survive the copy, and the tree
 # itself is made private to the invoking user.
