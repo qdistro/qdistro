@@ -59,8 +59,10 @@ if [ ! -d "$ROOT" ]; then
     printf 'hint: mount/extract the raw image first, then pass the mountpoint.\n' >&2
     exit 2
 fi
-# Normalize (strip trailing slash) for clean path printing.
-ROOT=${ROOT%/}
+# Canonicalise once: every candidate path is compared textually against
+# $ROOT below, so $ROOT must be the real directory (not a symlink to it,
+# not spelled with trailing slashes).
+ROOT="$(realpath -e -- "$ROOT")"
 
 FAIL=0
 REQUIRED_TOTAL=0
@@ -68,29 +70,49 @@ REQUIRED_OK=0
 OPT_TOTAL=0
 OPT_OK=0
 
-# in_image <path> — the artifact exists IN THE IMAGE. A plain file: `-e`. A
-# symlink: its target is resolved the way the booted image would resolve it
-# (absolute -> under $ROOT, relative -> against the link's directory),
-# canonicalised, required to stay inside $ROOT, and required to exist. A
-# bare `-e` would follow an absolute link in the HOST namespace, so
-# `usr/bin/qdlocker -> /bin/sh` in a tree with no bin/sh would pass (round-2
-# review); `..` escapes are refused for the same reason. Never a host lookup.
+# resolve_in_image <host-path-under-ROOT> — resolve the path the way the
+# BOOTED IMAGE would, i.e. with $ROOT as `/`: walk component by component
+# from $ROOT; a symlink component (ancestor or final) is followed with an
+# absolute target rebased onto $ROOT and a relative target spliced in place;
+# `..` never climbs above $ROOT; at most 40 symlink hops. Prints the fully
+# resolved host path (which by construction contains no symlink and lies
+# under $ROOT), or fails. Nothing here consults the host's own tree: a bare
+# `-e` followed an absolute link in the HOST namespace (`usr/bin/qdlocker ->
+# /bin/sh` passed with no bin/sh in the tree, round-2 review) and an
+# ancestor that is a symlink to a host directory made every file below it
+# a host lookup (round-3 review). This resolver has neither hole.
+resolve_in_image() {
+    local rest="${1#"$ROOT"}" cur="$ROOT" comp next target hops=0
+    rest="${rest#/}"
+    while [ -n "$rest" ]; do
+        comp="${rest%%/*}"
+        if [ "$rest" = "$comp" ]; then rest=""; else rest="${rest#*/}"; fi
+        case "$comp" in
+            ""|.) continue ;;
+            ..) [ "$cur" = "$ROOT" ] && return 1     # would escape the image
+                cur="${cur%/*}"; continue ;;
+        esac
+        next="$cur/$comp"
+        if [ -L "$next" ]; then
+            hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+            target="$(readlink "$next")"
+            case "$target" in
+                /*) cur="$ROOT"; target="${target#/}" ;;
+            esac
+            rest="$target${rest:+/$rest}"
+            continue
+        fi
+        [ -e "$next" ] || return 1
+        cur="$next"
+    done
+    printf '%s\n' "$cur"
+}
+
+# in_image <path> — the artifact exists IN THE IMAGE (see resolve_in_image).
 in_image() {
-    local p=$1 target resolved
-    if [ ! -L "$p" ]; then
-        [ -e "$p" ]
-        return
-    fi
-    target="$(readlink "$p")"
-    case "$target" in
-        /*) resolved="$ROOT/${target#/}" ;;
-        *)  resolved="$(dirname "$p")/$target" ;;
-    esac
-    resolved="$(realpath -m -- "$resolved")"
-    case "$resolved" in
-        "$ROOT"/*) [ -e "$resolved" ] ;;
-        *) return 1 ;;
-    esac
+    local r
+    r="$(resolve_in_image "$1")" || return 1
+    [ -e "$r" ]
 }
 
 # check_req <label> <test-expr-as-path> — a path under $ROOT that must exist

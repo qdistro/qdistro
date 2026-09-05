@@ -100,8 +100,20 @@ gate_image() {
     # --- Stage B: boot-verify + install-test (needs VM + built image) -------
     # These are NOT runnable without libvirt and a built artifact. Guard each
     # and degrade to record_blocked with a precise reason.
-    local have_image=0 img
-    img=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | head -1)
+    # The artifact to boot is the ONE the static stage selected ($raw, the
+    # sole top-level .raw). Re-discovering it here with a broader find could
+    # boot a stale qcow2 or nested raw while the static stage judged another
+    # file (Phase B review); verify.sh is told the exact path.
+    local have_image=0 img="$raw"
+    if [ -z "$img" ]; then
+        local nimgs
+        nimgs=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -- '-verify-' | wc -l)
+        if [ "$nimgs" -gt 1 ]; then
+            record_result image verify.sh fail "$EXIT_BUILD" build image "" "$nimgs bootable artifacts under $build_dir and no single top-level .raw; cannot tell which to boot"
+            return "$EXIT_BUILD"
+        fi
+        [ "$nimgs" = 1 ] && img=$(find "$build_dir" -maxdepth 2 \( -name '*.raw' -o -name '*.qcow2' \) 2>/dev/null | grep -v -- '-verify-')
+    fi
     [ -n "$img" ] && have_image=1
     local have_virsh=0
     command -v virsh >/dev/null 2>&1 && "${VIRSH[@]}" list >/dev/null 2>&1 && have_virsh=1
@@ -121,7 +133,7 @@ gate_image() {
     # Prerequisites present: run the existing boot/install flow.
     local v_log="$RDIR/host/image-verify.log"
     log "image: boot-verify (image/verify.sh)"
-    bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
+    QDISTRO_IMAGE="$img" bash "$IMAGE_DIR/verify.sh" > "$v_log" 2>&1
     local v_rc=$?
     if [ "$v_rc" -eq 0 ]; then
         record_result image verify.sh pass 0 pass image "$v_log" "boot-verify passed"
