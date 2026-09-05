@@ -1977,33 +1977,72 @@ chain_state_completed() {
 # already-present name does not duplicate it.
 # A record that cannot be written is a warning HERE and a gap in
 # chain_completeness_check, which names it as such (CHAIN_UNRECORDED).
+# CHAIN_RUN_RECORDED is every name recorded by THIS process, in order: a
+# full run is judged against it, not against the file, which may carry
+# lines from earlier runs (see chain_state_prune_stale).
 CHAIN_UNRECORDED=""
+CHAIN_RUN_RECORDED=""
 chain_state_record() {
     local name="$1" tmp
-    if ! install -d -m 0755 "$QDISTRO_STATE_DIR" 2>/dev/null; then
-        warn "could not create state dir $QDISTRO_STATE_DIR; step '$name' ran OK but is not recorded"
-        CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"; return 0
+    # Every way the write can fail lands here: the step ran OK, the record
+    # did not happen, the completeness check will say exactly that.
+    _chain_unrecorded() {
+        warn "$1; step '$name' ran OK but is not recorded"
+        [ -z "${tmp:-}" ] || rm -f "$tmp" 2>/dev/null || true
+        CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"
+        return 0
+    }
+    if [ -e "$CHAIN_STATE_FILE" ] && [ ! -f "$CHAIN_STATE_FILE" ]; then
+        _chain_unrecorded "$CHAIN_STATE_FILE exists but is not a regular file"; return 0
     fi
+    install -d -m 0755 "$QDISTRO_STATE_DIR" 2>/dev/null \
+        || { _chain_unrecorded "could not create state dir $QDISTRO_STATE_DIR"; return 0; }
     tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
-        || { warn "could not create state temp file in $QDISTRO_STATE_DIR; step '$name' ran OK but is not recorded"
-             CHAIN_UNRECORDED="${CHAIN_UNRECORDED:+$CHAIN_UNRECORDED }$name"; return 0; }
+        || { tmp=""; _chain_unrecorded "could not create a state temp file in $QDISTRO_STATE_DIR"; return 0; }
     {
         chain_state_completed
         printf '%s\n' "$name"
-    } | awk 'NF && !seen[$0]++' > "$tmp"
+    } | awk 'NF && !seen[$0]++' > "$tmp" \
+        || { _chain_unrecorded "could not write $tmp"; return 0; }
     chmod 0644 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$CHAIN_STATE_FILE"
+    mv -f "$tmp" "$CHAIN_STATE_FILE" 2>/dev/null \
+        || { _chain_unrecorded "could not rename $tmp to $CHAIN_STATE_FILE"; return 0; }
+    CHAIN_RUN_RECORDED="${CHAIN_RUN_RECORDED:+$CHAIN_RUN_RECORDED
+}$name"
 }
 
-# chain_state_reset — remove the record at the start of a FULL run, so the
-# file describes THIS run: a step that succeeded on an earlier run and fails
-# now must not stay "recorded" (that would mask the failure in
-# chain_completeness_check and make a later --resume skip it). Fatal when
-# the stale file cannot be removed: the record would be untrustworthy.
-chain_state_reset() {
+# chain_state_prune_stale <expected> — after a FULL run, drop from the record
+# every line that this profile expects and this run did NOT record: such a
+# line is a step that succeeded on an earlier run and failed (or was not
+# recorded) now, and left in place it would mask the failure in
+# chain_completeness_check and make a later --resume skip the step. Lines
+# the profile does NOT expect (a dev-only or retired step left by an earlier
+# install) are KEPT: they are the only evidence that the artifacts are on
+# disk, and the completeness check keeps reporting them on every run until
+# the operator cleans up and deletes the line. (An earlier draft truncated
+# the whole file at the start of a full run; the second run then found
+# nothing unexpected -- opus round 2 B5.) Unwritable: warn; the check reports
+# the gap either way.
+chain_state_prune_stale() {
+    local expected="$1" n keep="" tmp
     [ -f "$CHAIN_STATE_FILE" ] || return 0
-    rm -f "$CHAIN_STATE_FILE" \
-        || die "cannot reset the installer-chain record $CHAIN_STATE_FILE for a full run (a stale record would mask a step that fails now); fix the permissions of $QDISTRO_STATE_DIR"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        if printf '%s\n' "$expected" | grep -qxF -- "$n" \
+                && ! printf '%s\n' "$CHAIN_RUN_RECORDED" | grep -qxF -- "$n"; then
+            log "installer chain: dropping stale record '$n' (recorded by an earlier run, not by this one)"
+            continue
+        fi
+        keep="${keep:+$keep
+}$n"
+    done <<EOF
+$(chain_state_completed)
+EOF
+    tmp="$(mktemp "$QDISTRO_STATE_DIR/.installer-chain.state.XXXXXX" 2>/dev/null)" \
+        || { warn "could not rewrite $CHAIN_STATE_FILE to drop stale records"; return 0; }
+    printf '%s\n' "$keep" | awk 'NF' > "$tmp"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$CHAIN_STATE_FILE"
 }
 
 # chain_resume_validate — fail-closed validation of the state file for a
@@ -2064,10 +2103,13 @@ chain_expected_names() {
 #               name this bootstrap no longer knows (retired). A full run
 #               never removes what it does not install, so this is reported
 #               with the cleanup the operator must do; the record is the only
-#               evidence the product statement has. A full run RESETS the
-#               record first (chain_state_reset) so that "recorded" means
-#               "by this run"; the names it found before the reset are passed
-#               in as <prior> and judged here the same way.
+#               evidence the product statement has, so they stay in the
+#               record (chain_state_prune_stale keeps them) and are reported
+#               on EVERY run until the operator deletes the line.
+#
+# <this-run> (a full run passes CHAIN_RUN_RECORDED) is what "recorded" means
+# for the missing check: the file may still carry lines from earlier runs.
+# Other modes judge the file (--resume's whole point is the earlier lines).
 #
 # A step that ran OK but whose record could not be written (CHAIN_UNRECORDED)
 # is a gap of the first kind, named as a record failure so the operator fixes
@@ -2091,12 +2133,10 @@ chain_expected_names() {
 # Prints the gap by name so the operator's next command is `--resume`,
 # `--rerun-step <name>` or the named cleanup, not a log search.
 chain_completeness_check() {
-    local mode="${1:-full}" prior="${2:-}" expected recorded seen missing unexpected unrecorded n n_expected
+    local mode="${1:-full}" this_run="${2:-}" expected recorded seen missing unexpected unrecorded n n_expected
     expected="$(chain_expected_names)"
-    recorded="$(chain_state_completed)"
-    # <missing> is judged against what THIS run recorded; <unexpected> against
-    # everything ever seen (this run's record plus the pre-reset <prior>).
-    seen="$(printf '%s\n%s\n' "$recorded" "$prior" | awk 'NF && !seen[$0]++')"
+    seen="$(chain_state_completed)"
+    if [ "$mode" = full ]; then recorded="$this_run"; else recorded="$seen"; fi
     n_expected="$(printf '%s\n' "$expected" | grep -c .)"
     missing=""
     while IFS= read -r n; do
@@ -2108,13 +2148,14 @@ chain_completeness_check() {
 $expected
 EOF
     unexpected=""
+    local devonly="" unknown=""
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         if ! printf '%s\n' "$expected" | grep -qxF -- "$n"; then
             if chain_step_dev_only "$n"; then
-                unexpected="${unexpected:+$unexpected }$n(dev-only)"
+                unexpected="${unexpected:+$unexpected }$n(dev-only)"; devonly=1
             else
-                unexpected="${unexpected:+$unexpected }$n(unknown)"
+                unexpected="${unexpected:+$unexpected }$n(unknown)"; unknown=1
             fi
         fi
     done <<EOF
@@ -2130,12 +2171,15 @@ EOF
         gap="not recorded as installed: $missing."
         unrecorded=""
         for n in $missing; do
-            printf '%s\n' $CHAIN_UNRECORDED | grep -qxF -- "$n" && unrecorded="${unrecorded:+$unrecorded }$n"
+            case " $CHAIN_UNRECORDED " in *" $n "*) unrecorded="${unrecorded:+$unrecorded }$n" ;; esac
         done
         [ -z "$unrecorded" ] || gap="$gap (of these, ran OK but the record could not be written: $unrecorded -- fix $QDISTRO_STATE_DIR, then --rerun-step them.)"
     fi
     if [ -n "$unexpected" ]; then
-        gap="${gap:+$gap }recorded but not part of the '$QDISTRO_PROFILE' chain: $unexpected -- a dev-only step was installed by an earlier --profile=dev run: remove what its scripts/install/install-<step>-for-vm.sh laid down; an unknown step was retired. (A full run has already reset the record; after --resume/--rerun-step delete that line from $CHAIN_STATE_FILE.)"
+        gap="${gap:+$gap }recorded but not part of the '$QDISTRO_PROFILE' chain: $unexpected --"
+        [ -z "$devonly" ] || gap="$gap a dev-only step was installed by an earlier --profile=dev run: remove what its scripts/install/install-<step>-for-vm.sh laid down;"
+        [ -z "$unknown" ] || gap="$gap an unknown step is one this bootstrap no longer has (retired);"
+        gap="$gap then delete that line from $CHAIN_STATE_FILE (it is kept, and reported, until you do)."
     fi
     case "$mode" in
         only|from)
@@ -2207,17 +2251,15 @@ install_python_modules() {
         fi
     fi
 
-    # A FULL run promises the whole chain and its record must describe THIS
-    # run (see chain_state_reset); what was recorded before is still judged
-    # (a dev-only or retired step left behind is a gap: chain_completeness_check).
-    local prior_recorded=""
-    if [ "$mode" = full ]; then
-        prior_recorded="$(chain_state_completed)"
-        if [ -n "$prior_recorded" ]; then
-            log "installer chain: full run -- resetting the record $CHAIN_STATE_FILE (previously recorded: $(printf '%s' "$prior_recorded" | tr '\n' ' '))"
-            chain_state_reset
-        fi
+    # A FULL run promises the whole chain and is judged on what THIS run
+    # records (CHAIN_RUN_RECORDED); afterwards chain_state_prune_stale drops
+    # the earlier-run lines this run did not re-record and keeps the ones the
+    # profile does not expect, so a leftover dev-only/retired step is
+    # reported on every run until cleaned up (chain_completeness_check).
+    if [ "$mode" = full ] && [ -n "$(chain_state_completed)" ]; then
+        log "installer chain: full run -- previously recorded: $(chain_state_completed | tr '\n' ' ')(judging this run's record; stale lines are dropped afterwards)"
     fi
+    CHAIN_RUN_RECORDED=""
 
     log "installing Python modules + systemd units..."
     local name installer src_suffix from_reached=""
@@ -2249,7 +2291,12 @@ install_python_modules() {
 
     # Recorded steps vs the chain, both directions (iso2 02 F1). Fatal in
     # hardened profiles and under --strict.
-    chain_completeness_check "$mode" "$prior_recorded"
+    if [ "$mode" = full ]; then
+        chain_state_prune_stale "$(chain_expected_names)"
+        chain_completeness_check full "$CHAIN_RUN_RECORDED"
+    else
+        chain_completeness_check "$mode"
+    fi
 }
 
 # ---------------------------------------------------------------------------

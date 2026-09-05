@@ -313,6 +313,8 @@ chain_root() {
     mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim" "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml"
     : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/Main.qml"; : > "$T/root/usr/lib/python3.13/site-packages/qdgreeter/qml/shim/qmldir"
     : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/Main.qml"
+    mkdir -p "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim"; : > "$T/root/usr/lib/python3.13/site-packages/qdlocker/qml/shim/qmldir"
+    mkdir -p "$T/root/usr/share/fonts/truetype"; : > "$T/root/usr/share/fonts/truetype/DejaVuSans.ttf"
     # the vendor qemu-ga default and the unit lines the override relies on
     # (copied from the run-28 image)
     printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
@@ -338,6 +340,8 @@ chain_root() {
     [[ "$output" == *"OK   [sdk] qdistro_app package"* ]]
     [[ "$output" == *"OK   [qdgreeter] QML shipped with the package"* ]]
     [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
+    [[ "$output" == *"OK   [qdlocker] QML shim module shipped"* ]]
+    [[ "$output" == *"OK   [fonts] DejaVu"* ]]
     [[ "$output" == *"OK   [tier3] spawn helper"* ]]
     [[ "$output" == *"OK   [tier3] user1 password locked"* ]]
     [[ "$output" == *"OK   [tier3] admin in group"* ]]
@@ -419,6 +423,7 @@ chain_root() {
     grep -q '^    /usr/local$' "$x"                      # sdk package + tier helpers
     grep -q 'PATHS+=("$PYLIB/site-packages/qdgreeter" "$PYLIB/site-packages/qdlocker")' "$x"   # pip apps' QML rows
     grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
+    grep -q '^    /usr/share/fonts/truetype$' "$x"        # fonts row
     grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
     grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
     grep -q '^    /root/qdistro-src$' "$x"
@@ -669,8 +674,24 @@ GF
     [[ "$output" == *"OK   [qdlocker] QML shipped with the package"* ]]
 }
 
-@test "config.sh: gates each pip app on its QML being inside the installed package" {
-    grep -q "r.files('\$pyapp') / 'qml' / 'Main.qml'" "$IMAGE/config.sh"
-    grep -q 'FATAL: $pyapp installed without its QML' "$IMAGE/config.sh"
-    grep -q '^for pyapp in qdgreeter qdlocker; do$' "$IMAGE/config.sh"
+@test "pip-app-qml-gate: passes a package with Main.qml + shim/qmldir, fails one missing either, ignores the CWD" {
+    grep -q '^pip_app_qml_gate qdgreeter qdlocker || exit 1$' "$IMAGE/config.sh"
+    local site="$BATS_TEST_TMPDIR/site"
+    mkdir -p "$site/fakeapp/qml/shim" "$site/noshim/qml" "$site/noqml"
+    : > "$site/fakeapp/__init__.py"; : > "$site/fakeapp/qml/Main.qml"; : > "$site/fakeapp/qml/shim/qmldir"
+    : > "$site/noshim/__init__.py";  : > "$site/noshim/qml/Main.qml"
+    : > "$site/noqml/__init__.py"
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate fakeapp' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"fakeapp QML present: $site/fakeapp/qml/Main.qml"* ]]
+    [[ "$output" == *"fakeapp QML present: $site/fakeapp/qml/shim/qmldir"* ]]
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate fakeapp noshim' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: noshim installed without its QML (qml/shim/qmldir is not inside the installed package)"* ]]
+    run bash -c 'source "$1"; PYTHONPATH="$2" pip_app_qml_gate noqml' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"noqml installed without its QML (qml/Main.qml"* ]]
+    # a source checkout in the CWD must not stand in for an installed package (-P)
+    run bash -c 'cd "$2" && source "$1" && pip_app_qml_gate fakeapp' _ "$IMAGE/lib/pip-app-qml-gate.sh" "$site"
+    [ "$status" -ne 0 ]
 }

@@ -47,8 +47,10 @@ export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 # versioned site-packages (/usr/lib/python3.N/...); copy-out takes literal
 # paths and guestfish's `glob` expands only the last component, so ask the
 # image for N first. awk, not `head -1`: this script runs under pipefail.
+# Highest minor wins numerically (lexically "3.9" > "3.13"), should an
+# image ever carry two interpreters.
 PYLIB="$(printf 'glob echo /usr/lib/python3*\n' | guestfish --ro -a "$RAW" -i \
-         | awk '/^\/usr\/lib\/python3\.[0-9]+\/?$/ { sub(/\/$/, ""); v=$0 } END { print v }')"
+         | awk '/^\/usr\/lib\/python3\.[0-9]+\/?$/ { p=$0; sub(/\/$/, "", p); n=p; sub(/.*python3\./, "", n); if (n+0 > best) { best=n+0; v=p } } END { print v }')"
 [ -n "$PYLIB" ] || echo "extract-root: WARN: no /usr/lib/python3.N in the image; the [qdgreeter]/[qdlocker] package rows will MISS" >&2
 PATHS=(
     /etc
@@ -61,6 +63,7 @@ PATHS=(
     /usr/share/quickshell /usr/share/qdistro /usr/share/polkit-1
     /usr/share/xdg-desktop-portal /usr/share/dbus-1 /usr/share/applications
     /usr/share/metainfo /usr/share/icons/hicolor /usr/share/selinux
+    /usr/share/fonts/truetype
     /home/admin/.config /home/admin/weston.ini
     /var/lib/systemd/linger /var/lib/qdistro /var/lib/selinux
     /root/qdistro-src

@@ -200,6 +200,12 @@
     <package name="audit"/>
     <package name="libnotify-tools"/>
     <package name="greetd"/>
+    <!-- Fonts: qdgreeter/qdlocker/qdshell draw text with Qt; with no font
+         on the image every glyph is a box (run 29's login screen). These
+         are what scripts/vm/enable-qdgreeter.sh always installed into the
+         test VMs, so the stick matches them (todo/iso/14 Phase D). -->
+    <package name="dejavu-fonts"/>
+    <package name="google-noto-coloremoji-fonts"/>
     <package name="podman"/>
     <package name="passt"/>
     <package name="fuse-overlayfs"/>

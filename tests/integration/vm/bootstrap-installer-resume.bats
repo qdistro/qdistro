@@ -445,14 +445,26 @@ _seed_state() {
     [[ "$output" == *"INCOMPLETE in 'release' profile"* ]]
     [[ "$output" == *"recorded but not part of the 'release' chain: phone(dev-only)"* ]]
     [[ "$output" == *"remove what its scripts/install/install-<step>-for-vm.sh laid down"* ]]
+    [[ "$output" == *"delete that line from $STATE_DIR/installer-chain.state (it is kept, and reported, until you do)"* ]]
+    [[ "$output" != *"retired"* ]]          # only the applicable explanation (N13)
     [[ "$output" != *"installer chain complete"* ]]
-    # every release step still ran and was recorded; phone was not run. The
-    # full run reset the record, so the file now describes this run only
-    # (the operator is told about the phone artifacts in the message).
+    # every release step ran and was recorded; phone was not run and its
+    # line is KEPT (it is the only evidence the artifacts are on disk).
     [ "$(_trace_scripts | wc -l)" -eq 15 ]
     ! grep -q "install-phone-for-vm.sh" "$TRACE"
-    ! grep -qx phone "$STATE_DIR/installer-chain.state"
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    grep -qx phone "$STATE_DIR/installer-chain.state"
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 16 ]
+    # ...so the natural retry (no cleanup) dies again -- it must not forget
+    # (opus round 2 B5: a truncate-first design passed on the second run).
+    : > "$TRACE"
+    _run_chain 'QDISTRO_PROFILE=release'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"phone(dev-only)"* ]]
+    # and once the operator deletes the line, the next full run is complete
+    sed -i '/^phone$/d' "$STATE_DIR/installer-chain.state"
+    _run_chain 'QDISTRO_PROFILE=release; log() { echo "LOG: $*"; }'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain complete: 15 of 15"* ]]
 }
 
 # --- completeness judges THIS run: a full run resets a stale record -----------
@@ -467,7 +479,6 @@ _seed_state() {
     _break_step install-pwd-for-vm.sh
     _run_chain ''
     [ "$status" -ne 0 ]
-    [[ "$output" == *"resetting the record"* ]] || true   # log() is silenced in _run_chain
     [[ "$output" == *"INCOMPLETE in 'daily-driver' profile: not recorded as installed: pwd."* ]]
     ! grep -qx pwd "$STATE_DIR/installer-chain.state"
     [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 14 ]
@@ -483,13 +494,28 @@ EOF
     [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
 }
 
-@test "completeness: full run -- a clean re-run leaves exactly this run's record (no accumulation)" {
+@test "completeness: full run -- a leftover unknown record is kept and reported again; stale expected lines are dropped" {
     _seed_state retired-thing
     _run_chain 'QDISTRO_PROFILE=dev'
     [ "$status" -eq 0 ]
     [[ "$output" == *"retired-thing(unknown)"* ]]
-    ! grep -qx retired-thing "$STATE_DIR/installer-chain.state"
-    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 16 ]
+    [[ "$output" == *"no longer has (retired)"* ]]
+    [[ "$output" != *"dev-only step"* ]]
+    grep -qx retired-thing "$STATE_DIR/installer-chain.state"
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
+    # second run: still reported (WARN in dev), no accumulation
+    _run_chain 'QDISTRO_PROFILE=dev'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"retired-thing(unknown)"* ]]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 17 ]
+}
+
+@test "completeness: a scoped run's message does not claim a reset happened (N13)" {
+    _seed_state phone
+    _run_chain 'QDISTRO_PROFILE=release; RERUN_STEP=print'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"reset"* ]]
+    [[ "$output" == *"kept, and reported, until you do"* ]]
 }
 
 @test "completeness: a record write failure is named as such, not as a failed installer" {
@@ -548,4 +574,14 @@ EOF
     [[ "$output" == *"installer chain complete: 15 of 15 expected steps recorded, nothing unexpected"* ]]
     [ "$(tail -1 "$STATE_DIR/installer-chain.state")" = pwd ]
     [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
+}
+
+@test "completeness: a state path that is a DIRECTORY is a record failure, named as such (codex r2 N8)" {
+    mkdir -p "$STATE_DIR/installer-chain.state"
+    _run_chain 'QDISTRO_PROFILE=dev; STRICT=1'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"exists but is not a regular file"* ]]
+    [[ "$output" == *"ran OK but the record could not be written: sdk broker"* ]]
+    # nothing was moved INTO the directory
+    [ -z "$(ls -A "$STATE_DIR/installer-chain.state")" ]
 }

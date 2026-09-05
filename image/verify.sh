@@ -174,7 +174,9 @@ qga() {
 # return its exit code. This is the verifier's root channel: it works on every
 # profile (the release image deletes admin's sudoers rule), so an assertion
 # that needs root reads through here, not through `sudo -n` over SSH.
-# Bounded at 60 s; a timeout or an agent error returns 97/98 (never 0).
+# The status polling has a 60 s deadline (each agent call is bounded by
+# libvirt, not by this shell); a timeout or an agent error returns 97/98
+# (never 0).
 command -v jq >/dev/null 2>&1 || die "jq not installed; install with: sudo zypper in jq"
 qga_root() {
     local cmd="$1" out pid st="" deadline
@@ -252,6 +254,26 @@ shoot 01-ssh-ready
 # (exit 1). We accept `running` OR `degraded` as "settled" — a degraded manager
 # has still finished its startup transaction, and the individual assertions
 # below are what should adjudicate any unit failure, not this gate.
+# The SYSTEM manager first: sshd is started through the agent within a few
+# seconds of boot now (run 28 onward), so the assertions can otherwise run
+# while Type=notify units are still activating -- run 29 sampled the admin
+# broker four seconds before it finished starting and failed two rows that
+# run 28 had passed. Bounded; running or degraded both mean "startup done".
+sys_wait_deadline=$(( $(date +%s) + 180 ))
+log "waiting for the system manager to finish startup (max 180s)..."
+sys_state=""
+while [ "$(date +%s)" -lt "$sys_wait_deadline" ]; do
+    sys_state="$(remote 'systemctl is-system-running' 2>/dev/null || true)"
+    case "$sys_state" in
+        running|degraded) log "system manager settled (is-system-running=$sys_state)"; break ;;
+    esac
+    sleep 3
+done
+case "$sys_state" in
+    running|degraded) ;;
+    *) warn "system manager did not settle within 180s (is-system-running='$sys_state'); running assertions anyway" ;;
+esac
+
 user_mgr_check() {
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-system-running" 2>/dev/null
 }
@@ -341,18 +363,35 @@ expect "qdlocker.service did not 203/EXEC (ExecStart/binary-path match)" \
 # during an active window. So after first reaching active we settle, then
 # require ActiveState=active AND SubState=running AND a low restart count
 # (NRestarts<=1) so a flapping locker fails the gate.
-expect "qdlocker.service reaches and holds active/running (not flapping)" \
+#
+# qdlocker is WantedBy qdwin-session.target, which only a real greeter
+# authentication starts (see the VT-escape note below): on the shipped
+# image this verifier never logs in through qdgreeter, so with the greeter
+# on tty3 the locker is legitimately inactive/dead with NRestarts=0. The
+# row therefore adjudicates by session state: session up -> must hold
+# active/running; no session -> must be inactive, never failed, never
+# restarted (a locker that started and died without a session IS flapping).
+# Until run 29 this row demanded `active` unconditionally, which no
+# password-gated image can satisfy; it had never passed.
+expect "qdlocker.service is healthy: holds active/running with a session, inactive and never failed without one" \
     remote "sudo -n -u admin XDG_RUNTIME_DIR=/run/user/1000 sh -c '
-        for i in 1 2 3 4 5 6 7 8 9 10; do
-            [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
-            sleep 1
-        done
-        sleep 3
+        sess=\$(systemctl --user is-active qdwin-session.target)
+        if [ \"\$sess\" = active ]; then
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                [ \"\$(systemctl --user is-active qdlocker.service)\" = active ] && break
+                sleep 1
+            done
+            sleep 3
+        fi
         read as ss nr <<EOF2
 \$(systemctl --user show -p ActiveState -p SubState -p NRestarts --value qdlocker.service | tr \"\\n\" \" \")
 EOF2
-        echo \"qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
-        [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]'"
+        echo \"qdwin-session.target=\$sess qdlocker ActiveState=\$as SubState=\$ss NRestarts=\$nr\"
+        if [ \"\$sess\" = active ]; then
+            [ \"\$as\" = active ] && [ \"\$ss\" = running ] && [ \"\${nr:-99}\" -le 1 ]
+        else
+            [ \"\$as\" = inactive ] && [ \"\$ss\" = dead ] && [ \"\${nr:-99}\" -eq 0 ]
+        fi'"
 
 # NOT asserted here: the locked-session VT escape
 # (tests/integration/vm/probes/vt-escape-lockdown.sh). Two reasons, both
