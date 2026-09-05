@@ -84,7 +84,19 @@ decision is recorded.
 **Guest agent.** `/etc/sysconfig/qemu-ga` clears the vendor
 `--block-rpcs=guest-exec,guest-exec-status` so `verify.sh` can start sshd
 over the hypervisor-only virtio-serial channel; on hardware the agent's
-device never appears and it does not run.
+device never appears and it does not run. The same channel is
+`verify.sh`'s root channel (`qga_root`): an assertion that needs root
+(anything under `/root`, `passwd -S`, sourcing the on-image bootstrap)
+reads through it on every profile, not through `sudo -n` over SSH, which
+the release profile deliberately breaks. `verify-contents.sh` pins the
+unit's `EnvironmentFile`/`ExecStart` lines and that the vendor default
+blocks exactly those two RPCs.
+
+**Pip apps ship their QML.** qdgreeter and qdlocker are pip-installed into
+`/usr`; each must carry `qml/Main.qml` INSIDE its package (package-data),
+or it installs fine and dies at first launch. Run 28 booted to a
+crash-looping greeter that way; `config.sh` now fails the build on it and
+the checklist has a row per app.
 
 ## Tumbleweed snapshot pin and provenance
 
@@ -121,7 +133,7 @@ its presence.
 | `iterate-kiwi.sh` | pushes local `config.xml`/`config.sh`/`build.sh` into a running builder VM and re-runs kiwi (skips the clone). |
 | `extract-root.sh` | guestfish copy-out of the checklist's paths from a `.raw` into `$QDISTRO_BUILD_DIR/extracted` (no boot, no FUSE). |
 | `verify-contents.sh` | static checklist over an extracted tree, resolved with the *image's* path semantics (symlinks never followed into the host). |
-| `verify.sh` | boots the `.raw` rootlessly (`qemu:///session`, qcow2 overlay), SSH over a `passt` forward, journal-side assertions, screenshots. `QDISTRO_IMAGE` names the artifact; otherwise exactly one candidate may exist. |
+| `verify.sh` | boots the `.raw` rootlessly (`qemu:///session`, qcow2 overlay), SSH over a `passt` forward as `admin` plus a root channel through the guest agent (`qga_root`), journal-side assertions, screenshots. Host needs `sshpass` and `jq`. `QDISTRO_IMAGE` names the artifact; otherwise exactly one candidate may exist. |
 | `install-test.sh` | drives the *install ISO* (post-v1); inert while `installiso="false"`. |
 | `root/` | kiwi overlay tree. `etc/os-release.qdistro` is the branding override (its `VERSION_ID` must equal `config.xml` `<version>`; the build checks). `root/qdistro-src/` and `root/qdistro-source-manifest` are generated (gitignored). |
 | `logs/` | (gitignored) per-run build / verify logs and screenshots. |
@@ -186,6 +198,8 @@ the host. Green means:
    profile, the absence of media/multimachine/recall, and the chain record
    diffed against `installer_chain_names`.
 3. **Boot-verify.** `verify.sh` boots the raw and prints `pass: N / M`.
+   The first image to reach that summary was run 28 (Phase D); before it,
+   every run died at the sshd-start baseline on the vendor RPC filter.
    Known benign: `RDSEED32 is broken. Disabling the corresponding CPUID
    bit` trips the priority-0/1 journal check under kvm.
 
