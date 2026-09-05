@@ -359,7 +359,14 @@ done
 # The CPU floor is calibrated per 15 s; scale it to the poll period.
 KIWI_CPU_TICKS_MIN=$(( KIWI_CPU_TICKS_MIN * KIWI_POLL_S / 15 ))
 [ "$KIWI_CPU_TICKS_MIN" -ge 1 ] || KIWI_CPU_TICKS_MIN=1
-[[ "$KIWI_FAULT_KILL_ON_LOG" != *"'"* ]] || die "QDISTRO_KIWI_FAULT_KILL_ON_LOG must not contain a single quote"
+# The pattern is interpolated into the guest script by the host, so restrict
+# it to a character class that cannot break out of either quoting context.
+[[ "$KIWI_FAULT_KILL_ON_LOG" =~ ^[[:alnum:]\ _.:/=-]*$ ]] || die "QDISTRO_KIWI_FAULT_KILL_ON_LOG may only contain [A-Za-z0-9 _.:/=-], got: $KIWI_FAULT_KILL_ON_LOG"
+# Fault injection is a dev-profile instrument; a release build refuses it so
+# a leaked knob cannot silently cost a production build an attempt.
+if { [ "$KIWI_FAULT_KILL_AT_S" != 0 ] || [ -n "$KIWI_FAULT_KILL_ON_LOG" ]; } && [ "$QDISTRO_PROFILE" != dev ]; then
+    die "fault injection (QDISTRO_KIWI_FAULT_KILL_*) is only allowed with QDISTRO_PROFILE=dev"
+fi
 # vm-exec caps a guest command at QDISTRO_VM_EXEC_TIMEOUT, default 1800s. That
 # default silently made the retry loop a lie: three ~16 min attempts cannot fit
 # in 30 min, so only the first ever had room. Run 15 died exactly here -- two
@@ -396,6 +403,9 @@ set -u
 # QDISTRO_PROFILE is forwarded so config.sh's sudoers/profile gate matches the
 # host invocation; kiwi inherits it into config.sh's environment.
 rc=1
+# Per-attempt logs of a PREVIOUS run on a reused VM would otherwise be
+# fetched as this run's evidence (run 18b shipped run 18's attempt 2/3 logs).
+rm -f /root/kiwi-build.attempt*.log
 for attempt in \$(seq 1 $KIWI_TRIES); do
     echo "[kiwi] attempt \$attempt/$KIWI_TRIES"
     # kiwi refuses a non-empty --target-dir, and a killed attempt leaves one
@@ -467,7 +477,9 @@ for attempt in \$(seq 1 $KIWI_TRIES); do
     # Each attempt truncates kiwi-build.log, so without this the only surviving
     # build log is the last attempt's and a stall cannot be located afterwards.
     cp /root/kiwi-build.log /root/kiwi-build.attempt\$attempt.log 2>/dev/null || true
-    echo "[kiwi] state after attempt \$attempt: mounts=\$(guard_mounts_under /build/out | wc -l) loops=\$(guard_loops_under /build/out | wc -l)"
+    # Counted BEFORE the next attempt's cleanup, so non-zero here is expected
+    # after a kill; the cleanup's own verification is what gates reuse.
+    echo "[kiwi] state after attempt \$attempt (pre-cleanup): mounts=\$(guard_mounts_under /build/out | wc -l)+\$(guard_mounts_under /var/tmp | grep -c '^/var/tmp/kiwi_') loops=\$(guard_loops_under /build/out | wc -l)"
     sleep 10
 done
 echo "[kiwi] final rc=\$rc"
@@ -506,6 +518,7 @@ vmx 'ls -lh /build/out/' | tee "$LOGS/artifacts.txt"
 vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified 2>/dev/null' \
     > "$LOGS/artifact-sizes.txt" 2>/dev/null || true
 IN_VM_RAW_SIZE="$(awk '$2 ~ /\.raw$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
+IN_VM_ISO_SIZE="$(awk '$2 ~ /\.install\.iso$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 [ -n "$IN_VM_RAW_SIZE" ] || die "no .raw in /build/out despite kiwi exit 0 (see $LOGS/artifacts.txt)"
 
 #-- 10. Copy artifacts back to host ------------------------------------------
@@ -553,7 +566,12 @@ glob copy-out /out/*.changes $HOST_BUILD_DIR/
 glob copy-out /out/*.verified $HOST_BUILD_DIR/
 EOF
     host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
-    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ]; then copied=1; break; fi
+    host_iso="$(ls "$HOST_BUILD_DIR"/*.install.iso 2>/dev/null | head -1)"
+    iso_ok=1
+    if [ -n "$IN_VM_ISO_SIZE" ]; then
+        [ -n "$host_iso" ] && [ "$(stat -c %s "$host_iso")" = "$IN_VM_ISO_SIZE" ] || iso_ok=0
+    fi
+    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ] && [ "$iso_ok" = 1 ]; then copied=1; break; fi
     log "copy-out: artifacts not settled yet (attempt $attempt/6; want $IN_VM_RAW_SIZE bytes); waiting..."
     sleep 5
 done

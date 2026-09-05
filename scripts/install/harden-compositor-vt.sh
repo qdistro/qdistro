@@ -73,17 +73,14 @@
 #     corroborated, it is ignored with a warning and the live probes run.
 #   * With neither, the live probes ALWAYS run. Detection alone never
 #     selects offline: a caller that wants the offline branch must say so.
-# Corroboration means `systemd-detect-virt --chroot` (PID 1's root is not
-# this root; kiwi bind-mounts the builder's /proc into the image root before
-# config.sh runs, so this answers there), or -- for a chroot with no /proc at
-# all -- the conjunction of no /proc/1, no /run/systemd/system and
-# `systemctl is-system-running` = offline. Any one of those three alone is
-# satisfiable on a live machine (a mount namespace hiding /run, a non-systemd
-# PID 1 with `offline` printed because the manager is unreachable), so none
-# of them is sufficient by itself. A live system in `degraded`, `starting`
-# or `maintenance` is live. A chroot that has the host's /run bind-mounted
-# reaches the HOST manager, which answers `running`/`degraded`: that case is
-# refused (exit 2), i.e. it fails closed rather than open.
+# Corroboration means `systemd-detect-virt --chroot` with a real /proc/1 to
+# compare against (PID 1's root is not this root; kiwi bind-mounts the
+# builder's /proc into the image root before config.sh runs, so this answers
+# there). Nothing absence-based counts: no /proc, no /run/systemd/system and
+# `systemctl is-system-running` = offline are each reproducible on a live
+# machine by hiding a mount or running a non-systemd PID 1, so a chroot
+# without /proc is refused (exit 2) rather than guessed at. A live system in
+# `degraded`, `starting` or `maintenance` is live.
 #
 # Usage: harden-compositor-vt.sh [--offline] [greetd-config.toml]
 #   Reads the compositor VT from `[terminal] vt = N`. Defaults to
@@ -221,14 +218,19 @@ UNITS="getty@tty$VT.service autovt@tty$VT.service"
 # consulted without one (see the header). It returns 0 only on positive
 # evidence that this root is a chroot, not on the absence of a manager.
 offline_root() {
-    # PID 1's root differs from ours: this root is a chroot. Needs /proc.
+    # `systemd-detect-virt --chroot` compares PID 1's root with ours, but it
+    # also answers "chroot" when /proc is simply not mounted -- which is an
+    # absence, not evidence (round-3 review: a live root with a tmpfs over
+    # /proc passed). So the verdict counts only when there IS a PID 1 to
+    # compare against. There is no fallback for a chroot without /proc: that
+    # case fails closed (exit 2 on --offline), because every absence-based
+    # rule -- no /proc, no /run/systemd/system, `is-system-running` = offline
+    # -- is reproducible on a live machine by hiding the same two mounts.
+    # kiwi bind-mounts the builder's /proc into the image root before
+    # config.sh runs (RootBind.mount_kernel_file_systems), so the image build
+    # is corroborated by construction.
+    [ -e /proc/1/comm ] || return 1
     systemd-detect-virt --chroot --quiet 2>/dev/null && return 0
-    # No /proc at all, no manager runtime dir, and systemd agrees it cannot
-    # reach a manager: a bare chroot. All three together, never one alone.
-    if [ ! -e /proc/1/comm ] && [ ! -d /run/systemd/system ] \
-       && [ "$(systemctl is-system-running 2>/dev/null)" = offline ]; then
-        return 0
-    fi
     return 1
 }
 

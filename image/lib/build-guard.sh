@@ -16,6 +16,12 @@
 #   * "no log output == hung" is false: mksquashfs -comp xz is silent for
 #     minutes (run 16). Liveness is therefore several signals OR-ed together.
 #
+# Scope: the loop-device + `partx` topology kiwi uses for this description.
+# Device-mapper / kpartx / LUKS / nested loop layouts are not released here;
+# a future image type that uses them needs this extended first. The orphan
+# sweep scans every loop device, which is right for a single-purpose builder
+# VM and wrong for a shared host.
+#
 # Every function is safe to call with a pid that has already exited, and
 # safe under a caller's `set -e`: nothing here exits non-zero except the
 # deliberate return codes documented per function.
@@ -113,10 +119,10 @@ guard_sweep_orphan_partitions() {
     local b
     for b in /sys/block/loop*; do
         [ -d "$b" ] || continue
-        [ -e "$b/loop/backing_file" ] && continue
+        if [ -e "$b/loop/backing_file" ]; then continue; fi
         if ls "$b"/loop*p* >/dev/null 2>&1; then
             echo "/dev/${b##*/}"
-            [ "${1:-fix}" = fix ] && partx -d "/dev/${b##*/}" 2>/dev/null || true
+            if [ "${1:-fix}" = fix ]; then partx -d "/dev/${b##*/}" 2>/dev/null || true; fi
         fi
     done
 }
@@ -157,6 +163,11 @@ guard_cleanup_target() {
     if [ -n "$(guard_loops_under "$dir")" ]; then
         echo "[guard] loop devices still backed by $dir:" >&2
         guard_loops_under "$dir" >&2
+        rc=1
+    fi
+    if [ -n "$(guard_mounts_under /var/tmp | grep '^/var/tmp/kiwi_')" ]; then
+        echo "[guard] kiwi scratch mounts still present under /var/tmp:" >&2
+        guard_mounts_under /var/tmp | grep '^/var/tmp/kiwi_' >&2
         rc=1
     fi
     if [ -n "$(guard_sweep_orphan_partitions list)" ]; then

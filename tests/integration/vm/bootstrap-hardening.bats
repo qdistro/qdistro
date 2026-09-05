@@ -553,9 +553,12 @@ vt_run() {
     local units="$BATS_TEST_TMPDIR/units-$$-$RANDOM"
     mkdir -p "$units"
     : >"$BATS_TEST_TMPDIR/probes.log"
+    # VT_HIDE_PROC=1 mounts an empty tmpfs over /proc first (a root with no
+    # PID 1 to compare against).
     run unshare -r --mount bash -c '
         mount --make-rprivate / 2>/dev/null || true
         mount --bind "$1" /etc/systemd/system || exit 111
+        if [ "${VT_HIDE_PROC:-0}" = 1 ]; then mount -t tmpfs none /proc || exit 111; fi
         stub="$2"; shift 2
         PATH="$stub:$PATH" exec bash "$@"
     ' _ "$units" "$stub" "$HARDEN_VT" "$@"
@@ -611,6 +614,21 @@ vt_require_ns() {
     grep -q 'stop-called' "$BATS_TEST_TMPDIR/probes.log"
     [ "$status" -ne 0 ]
     [[ "$output" == *"still active on the compositor VT"* ]]
+}
+
+@test "vt-isolation: a chroot verdict without a /proc to back it is not corroboration" {
+    # systemd-detect-virt --chroot also says "chroot" when /proc is simply
+    # absent; that is an absence, not evidence (round-3 review). A live root
+    # with a tmpfs over /proc must refuse --offline and treat the env request
+    # as live.
+    vt_require_ns
+    local stub; stub="$(vt_stub_dir noproc offline active yes)"
+    VT_HIDE_PROC=1 vt_run "$stub" --offline "$VT_CFG"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not corroborated as a chroot"* ]]
+    VT_HIDE_PROC=1 QDISTRO_OFFLINE_INSTALL=1 vt_run "$stub" "$VT_CFG"
+    grep -q 'stop-called' "$BATS_TEST_TMPDIR/probes.log"
+    [ "$status" -ne 0 ]
 }
 
 @test "vt-isolation: detection alone never selects offline mode" {
