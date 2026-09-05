@@ -182,35 +182,69 @@ check_opt() {
     fi
 }
 
+# glob_in_image <glob-under-root> — expand a glob with the booted image's
+# path semantics and print the first IMAGE path (under $ROOT) that resolves
+# to an existing artifact, or nothing. `compgen -G "$ROOT/pattern"` alone
+# walks the pattern's prefixes in the HOST namespace, so a directory that
+# is an absolute symlink inside the image hid every match below it (round-5
+# review: `/usr/libexec/qdistro -> /inside-libexec` gave a false MISS).
+# Here each component is expanded against the resolver's host directory
+# for the image path so far, and every match is re-resolved as an image
+# path before the walk continues; enumeration is capped per level.
+glob_in_image() {
+    local pattern="${1#/}" comp rest cands=("") next=() c host names n
+    rest="$pattern"
+    while [ -n "$rest" ]; do
+        comp="${rest%%/*}"
+        if [ "$rest" = "$comp" ]; then rest=""; else rest="${rest#*/}"; fi
+        [ -n "$comp" ] || continue
+        next=()
+        for c in "${cands[@]}"; do
+            case "$comp" in
+                *[*?[]*)
+                    # The image directory so far, as a real host dir.
+                    host="$(resolve_in_image "$ROOT/$c")" || continue
+                    [ -d "$host" ] || continue
+                    n=0
+                    while IFS= read -r names; do
+                        [ -n "$names" ] || continue
+                        n=$((n + 1)); [ "$n" -le 200 ] || break
+                        next+=("${c:+$c/}${names##*/}")
+                    done < <(compgen -G "$host/$comp" 2>/dev/null)
+                    ;;
+                *)  next+=("${c:+$c/}$comp") ;;
+            esac
+        done
+        [ "${#next[@]}" -gt 0 ] || return 1
+        cands=("${next[@]}")
+    done
+    for c in "${cands[@]}"; do
+        if in_image "$ROOT/$c"; then printf '%s\n' "$ROOT/$c"; return 0; fi
+    done
+    return 1
+}
+
 # check_glob_req <label> <glob-under-root> — required; matches >=1 path
 check_glob_req() {
     local label=$1 glob=$2
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
     # shellcheck disable=SC2086
-    local matches m hit=""
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null)
-    while IFS= read -r m; do
-        [ -n "$m" ] || continue
-        if in_image "$m"; then hit="$m"; break; fi
-    done <<<"$matches"
+    local hit
+    hit="$(glob_in_image "$glob")" || hit=""
     if [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
-        printf 'MISS %s: %s%s\n' "$label" "$ROOT/${glob#/}" "${matches:+ (matches exist but none resolves in the image)}"
+        printf 'MISS %s: %s (no match resolves in the image)\n' "$label" "$ROOT/${glob#/}"
         FAIL=1
     fi
 }
 
 # check_glob_opt <label> <glob-under-root> — optional glob
 check_glob_opt() {
-    local label=$1 glob=$2 matches m hit=""
+    local label=$1 glob=$2 hit
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null)
-    while IFS= read -r m; do
-        [ -n "$m" ] || continue
-        if in_image "$m"; then hit="$m"; break; fi
-    done <<<"$matches"
+    hit="$(glob_in_image "$glob")" || hit=""
     if [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         OPT_OK=$((OPT_OK + 1))
