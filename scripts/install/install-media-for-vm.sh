@@ -52,7 +52,7 @@ install -m 0644 "$MEDIA_SRC/qdistro-media-exec.socket"  "$SOCKET_UNIT"
 install -m 0644 "$MEDIA_SRC/qdistro-media-exec.service" "$SERVICE_UNIT"
 
 sd_daemon_reload
-sd_enable_now qdistro-media-exec.socket >/dev/null
+sd_enable_now qdistro-media-exec.socket
 
 if is_offline; then
     echo "[offline] skipped (needs a running system manager): probe /run/qdistro-media-exec/sock"

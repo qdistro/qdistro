@@ -527,9 +527,17 @@ if [ "${QDWIN_SESSION_AUTOSTART:-1}" = 1 ]; then
 else
     echo "QDWIN_SESSION_AUTOSTART=0: qdwin-session.target NOT enabled under default.target (greeter starts it)"
 fi
+# Live, a failure stays a WARN (admin's manager may not be up yet; linger
+# brings the units up later). Offline there is no such excuse: the helper
+# writes symlinks, and a failure means the units were never dropped.
 # shellcheck disable=SC2086
-user_unit_enable admin users $SESSION_UNITS \
-    2>&1 || echo "WARN: enable failed (admin user manager not running yet?)"
+if ! user_unit_enable admin "$(id -gn admin)" $SESSION_UNITS 2>&1; then
+    if is_offline; then
+        echo "ERROR: could not enable $SESSION_UNITS for admin in the offline root" >&2
+        exit 4
+    fi
+    echo "WARN: enable failed (admin user manager not running yet?)"
+fi
 
 echo "qdwin session installed (deploy-named units: qdwin-compositor.service + qdshell.service + qdwin-session.target)."
 echo "  start now:    runuser -l admin -c 'systemctl --user start qdwin-session.target'"

@@ -380,8 +380,15 @@ def test_installer_restarts_already_running_relays_on_upgrade():
     started here — that stays qdshell-session-launcher's job.
     """
     text = _RELAY_INSTALLER.read_text()
-    assert "systemctl try-restart 'qdistro-user-relay@*.service'" in text
+    # Through the offline-install contract helper (lib/qdistro-offline.sh):
+    # live it runs `systemctl try-restart`, in a corroborated chroot it logs
+    # the skip. A raw `systemctl try-restart` would run in the kiwi chroot.
+    assert "sd_try_restart 'qdistro-user-relay@*.service'" in text
+    assert "systemctl try-restart 'qdistro-user-relay@" not in text
     assert "systemctl restart 'qdistro-user-relay@" not in text
+    assert "sd_restart 'qdistro-user-relay@" not in text
+    lib = (_RELAY_INSTALLER.parent / "lib" / "qdistro-offline.sh").read_text()
+    assert 'sd_try_restart() { live_only "systemctl try-restart $*" systemctl try-restart "$@"; }' in lib
 
 
 @_needs_runtime

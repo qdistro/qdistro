@@ -78,7 +78,7 @@ fi
 # running user manager, so it cannot fail for this reason. It applies to every
 # uid, which is correct and costs nothing: the unit is WantedBy the desktop
 # session target, and a silo uid never reaches it.
-sd_daemon_reload 2>/dev/null || true
+sd_daemon_reload || true
 if ! systemctl --global enable qdistro-polkit-agent.service >/dev/null 2>&1; then
     echo "[install-polkit-agent] ERROR: could not enable qdistro-polkit-agent.service" >&2
     echo "       the polkit agent would be installed and never started" >&2

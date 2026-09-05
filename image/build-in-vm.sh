@@ -474,6 +474,14 @@ for attempt in \$(seq 1 $KIWI_TRIES); do
     wait \$kpid 2>/dev/null; rc=\$?
     if [ "\$rc" = 0 ]; then echo "[kiwi] attempt \$attempt succeeded"; break; fi
     echo "[kiwi] attempt \$attempt failed (rc=\$rc) after \$(( \$(date +%s) - started ))s"
+    # An image-description FATAL (config.sh's own abort: a missing or failed
+    # chain installer, policy, pip) is deterministic; retrying it only costs
+    # two more attempts. Stalls and transport failures are what the loop is for.
+    if grep -q '\[qdistro-image\] FATAL' /root/kiwi-build.log 2>/dev/null; then
+        echo "[kiwi] attempt \$attempt hit an image-description FATAL; not retrying"
+        cp /root/kiwi-build.log /root/kiwi-build.attempt\$attempt.log 2>/dev/null || true
+        break
+    fi
     # Each attempt truncates kiwi-build.log, so without this the only surviving
     # build log is the last attempt's and a stall cannot be located afterwards.
     cp /root/kiwi-build.log /root/kiwi-build.attempt\$attempt.log 2>/dev/null || true

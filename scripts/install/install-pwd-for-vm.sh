@@ -217,14 +217,15 @@ else
         || systemctl reload dbus.service 2>/dev/null \
         || true
 fi
-# `--now` may fail on a fresh VM if the dbus policy hasn't fully
-# propagated yet, or if a TPM/keyring dependency is missing. The
-# sanity-probe block below handles a delayed start with a warning;
-# allow this line to fail without taking the whole bootstrap down
-# (set -e at the top of the script would otherwise abort here, which
-# breaks `spin-test-vm.sh` chains that don't need pwd to be live).
-sd_enable_now qdistro-pwd.service || \
-    echo "[install-pwd] WARN: enable/start returned non-zero; sanity probe will retry" >&2
+# Enable is REQUIRED (it writes the multi-user.target wants-link the booted
+# system needs) and fails the install if it fails. Only the live start is
+# tolerant: it may fail on a fresh VM if the dbus policy hasn't fully
+# propagated yet, or if a TPM/keyring dependency is missing; the sanity
+# probe below reports a delayed start, and `spin-test-vm.sh` chains that
+# don't need pwd live must not be taken down by it.
+sd_enable qdistro-pwd.service
+sd_start qdistro-pwd.service || \
+    echo "[install-pwd] WARN: start returned non-zero; sanity probe will retry" >&2
 
 # Per-user login oneshot that unlocks the portal-keys vault. Installed
 # since Phase-8.3 and enabled by NOTHING until 2026-07-26, so the
@@ -245,8 +246,10 @@ sd_enable_now qdistro-pwd.service || \
 # admin HAS sealed a portal-keys PIN the backend comes up as part of the
 # session transaction. Both routes are intended; neither is required for
 # the other to work.
-systemctl --global enable qdistro-portal-keys-unlock.service >/dev/null 2>&1 || \
-    echo "[install-pwd] WARN: could not globally enable qdistro-portal-keys-unlock.service" >&2
+# Required: without the wants-link the documented auto-unlock never runs
+# (which is exactly how it was silently absent from every install until
+# 2026-07-26). A failed enable is an install failure.
+systemctl --global enable qdistro-portal-keys-unlock.service >/dev/null
 
 # Sanity probe — broker will be active+listening within ~1s normally.
 # Live only: in a chroot systemd answers is-active with a no-op exit 0.

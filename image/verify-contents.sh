@@ -68,16 +68,13 @@ REQUIRED_OK=0
 OPT_TOTAL=0
 OPT_OK=0
 
-# present <path> — exists, OR is a symlink. systemd wants-links are absolute
-# (`-> /etc/systemd/user/foo.service`) and dangle when the tree is inspected
-# from the host, but the link is the artifact the image ships.
-present() { [ -e "$1" ] || [ -L "$1" ]; }
-
 # check_req <label> <test-expr-as-path> — a path under $ROOT that must exist
+# (a dangling symlink does NOT count: `-e` follows it; see check_link for
+# the wants-links, which legitimately dangle when read from the host).
 check_req() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if present "$full"; then
+    if [ -e "$full" ]; then
         printf 'OK   %s: %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
@@ -94,7 +91,7 @@ check_req_any() {
     for rel in "$@"; do
         full="$ROOT/${rel#/}"
         tried+=("$full")
-        if present "$full"; then
+        if [ -e "$full" ]; then
             printf 'OK   %s: %s\n' "$label" "$full"
             REQUIRED_OK=$((REQUIRED_OK + 1))
             hit=1
@@ -111,7 +108,7 @@ check_req_any() {
 check_opt() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    if present "$full"; then
+    if [ -e "$full" ]; then
         printf 'OK   %s: %s\n' "$label" "$full"
         OPT_OK=$((OPT_OK + 1))
     else
@@ -153,11 +150,39 @@ check_glob_opt() {
 check_absent() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if ! present "$full"; then
+    if [ ! -e "$full" ] && [ ! -L "$full" ]; then
         printf 'OK   %s: absent as required: %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
         printf 'FAIL %s: must be absent but exists: %s\n' "$label" "$full"
+        FAIL=1
+    fi
+}
+
+# check_link <label> <rel> — a systemd wants-link (or any symlink) that must
+# exist AND whose target must exist inside the image. systemd writes these
+# ABSOLUTE (`-> /etc/systemd/user/foo.service`), so read from the host they
+# dangle; the target is therefore resolved under $ROOT. A relative target is
+# resolved against the link's directory. A missing link, a non-link, or a
+# target that is not in the image all FAIL.
+check_link() {
+    local label=$1 rel=$2 full="$ROOT/${2#/}" target resolved
+    REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+    if [ ! -L "$full" ]; then
+        printf 'MISS %s: not a symlink: %s\n' "$label" "$full"
+        FAIL=1
+        return
+    fi
+    target="$(readlink "$full")"
+    case "$target" in
+        /*) resolved="$ROOT/${target#/}" ;;
+        *)  resolved="$(dirname "$full")/$target" ;;
+    esac
+    if [ -e "$resolved" ]; then
+        printf 'OK   %s: %s -> %s\n' "$label" "$full" "$target"
+        REQUIRED_OK=$((REQUIRED_OK + 1))
+    else
+        printf 'MISS %s: %s -> %s (target absent in image)\n' "$label" "$full" "$target"
         FAIL=1
     fi
 }
@@ -215,8 +240,6 @@ check_req_any "admin broker unit" \
 check_req_any "dbus-reload unit" \
     /etc/systemd/system/qdistro-dbus-reload.service \
     /usr/lib/systemd/system/qdistro-dbus-reload.service
-check_opt "root-exec unit" \
-    /usr/lib/systemd/system/qdistro-root-exec.service
 check_opt "greetd unit" \
     /usr/lib/systemd/system/greetd.service
 
@@ -241,8 +264,12 @@ echo "-- systemd units enabled (wants/ symlinks) --"
 # System-level enable lands as a symlink under */.wants/.
 check_glob_opt "system multi-user.wants symlinks" \
     "/etc/systemd/system/multi-user.target.wants/*"
-check_glob_opt "greetd enabled (wants symlink)" \
-    "/etc/systemd/system/*.wants/greetd.service"
+# greetd's only [Install] is Alias=display-manager.service, so `enable`
+# creates exactly that alias link and graphical.target's built-in
+# Wants=display-manager.service starts it. Required: without the alias the
+# image boots to no login at all.
+check_link "greetd enabled (display-manager alias)" \
+    /etc/systemd/system/display-manager.service
 # qdshell + qdlocker are wired into qdwin-session.target.wants/ so the
 # greeter-started target pulls them in (findings #15, #16). The target
 # itself is started transiently by the launcher, not enabled under
@@ -317,6 +344,8 @@ check_req "[broker] unit"              /etc/systemd/system/qdistro-admin-broker.
 check_req "[broker] dbus-reload unit"  /etc/systemd/system/qdistro-dbus-reload.service
 check_req "[broker] bus policy"        /etc/dbus-1/system.d/org.qdistro.AdminBroker1.conf
 check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker.py
+check_link "[broker] enabled"          /etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service
+check_link "[broker] dbus-reload enabled" /etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service
 check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
 check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
 check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf
@@ -325,10 +354,11 @@ check_req "[session-manager] egress module"  /usr/libexec/qdistro/qdistro_silo_e
 check_req "[session-manager] qdshell-session template" /usr/lib/systemd/system/qdshell-session@.service
 check_req "[session-manager] tier2 silo unit" /etc/systemd/system/qdistro-tier2-silo@.service
 check_req "[session-manager] podapp unit" /etc/systemd/system/qdistro-podapp@.service
-check_req "[session-manager] silo-launch CLI" /usr/local/bin/qdistro-silo-launch
-check_req "[session-manager] work silo link" /etc/systemd/system/qdshell-session-work@.service
+check_link "[session-manager] silo-launch CLI" /usr/local/bin/qdistro-silo-launch
+check_link "[session-manager] work silo link" /etc/systemd/system/qdshell-session-work@.service
+check_link "[session-manager] enabled" /etc/systemd/system/multi-user.target.wants/qdistro-session-manager.service
 check_req "[polkit-agent] user unit"   /etc/systemd/user/qdistro-polkit-agent.service
-check_req "[polkit-agent] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-polkit-agent.service
+check_link "[polkit-agent] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-polkit-agent.service
 check_req "[polkit-agent] module"      /usr/libexec/qdistro/qdistro_polkit_agent.py
 check_req "[polkit-agent] prompt helper" /usr/local/bin/qdistro-polkit-prompt
 check_req "[pwd] unit"                 /etc/systemd/system/qdistro-pwd.service
@@ -336,20 +366,25 @@ check_req "[pwd] bus policy"           /etc/dbus-1/system.d/org.qdistro.Pwd1.con
 check_req "[pwd] daemon module"        /usr/libexec/qdistro/qdistro_pwd_daemon.py
 check_req "[pwd] polkit action"        /usr/share/polkit-1/actions/org.qdistro.pwd.policy
 check_req "[pwd] portal-keys unlock user unit" /etc/systemd/user/qdistro-portal-keys-unlock.service
-check_req "[pwd] portal-keys unlock wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-portal-keys-unlock.service
+check_link "[pwd] portal-keys unlock wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-portal-keys-unlock.service
+check_link "[pwd] enabled"             /etc/systemd/system/multi-user.target.wants/qdistro-pwd.service
 check_req "[pwd] PortalSecret portal"  /usr/share/xdg-desktop-portal/portals/org.qdistro.PortalSecret.portal
 check_req "[pwd] CLI"                  /usr/local/bin/qdistro-pwd-get
 check_req "[qsu] socket unit"          /etc/systemd/system/qdistro-root-exec.socket
 check_req "[qsu] service unit"         /etc/systemd/system/qdistro-root-exec.service
 check_req "[qsu] root-exec module"     /usr/local/lib/qdistro/qdistro_root_exec.py
+check_link "[qsu] socket enabled"      /etc/systemd/system/sockets.target.wants/qdistro-root-exec.socket
 check_req "[media] socket unit"        /etc/systemd/system/qdistro-media-exec.socket
 check_req "[media] service unit"       /etc/systemd/system/qdistro-media-exec.service
 check_req "[media] exec module"        /usr/local/lib/qdistro/qdistro_media_exec.py
+check_link "[media] socket enabled"    /etc/systemd/system/sockets.target.wants/qdistro-media-exec.socket
 check_req "[multimachine] broker module" /usr/local/lib/qdistro/multimachine/mm_broker.py
 check_req "[multimachine] broker CLI"  /usr/local/bin/qdistro-mm-broker
+check_req "[multimachine] session launcher (last drop)" /usr/local/bin/qdistro-mm-session-launcher
+check_req "[multimachine] rdp client wrapper"  /usr/local/bin/qdistro-mm-rdp-client-wrapper
 check_req "[browser-bridge] host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_req "[browser-bridge] downloads user unit" /etc/systemd/user/qdistro-downloads.service
-check_req "[browser-bridge] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-downloads.service
+check_link "[browser-bridge] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-downloads.service
 check_req "[portal-backend] backend module" /usr/lib/qdistro/daemons/qdistro_portal_backend.py
 check_req "[portal-backend] user unit"  /etc/systemd/user/qdistro-portal-backend.service
 check_req "[portal-backend] portal"     /usr/share/xdg-desktop-portal/portals/qdistro.portal
@@ -360,16 +395,25 @@ check_req "[print-proxy] unit"         /etc/systemd/system/qdistro-print-proxy.s
 check_req "[print-proxy] proxy binary" /usr/local/bin/qdistro-print-proxy
 check_req "[print-proxy] polkit action" /usr/share/polkit-1/actions/org.qdistro.print.policy
 check_req "[print-proxy] VM template"  /usr/share/qdistro/print-vm/domain-template.xml
+check_link "[print-proxy] enabled"     /etc/systemd/system/multi-user.target.wants/qdistro-print-proxy.service
+check_req "[print-proxy] manifest (last drop)" /etc/qdistro/printvm-manifest.json
 check_req "[snapshots] backup unit"    /etc/systemd/system/qdistro-backup.service
 check_req "[snapshots] backup timer"   /etc/systemd/system/qdistro-backup.timer
 check_req "[snapshots] service module" /usr/libexec/qdistro/qdistro_backup_service.py
 check_req "[snapshots] CLI"            /usr/local/bin/qdistro-backup
-# Recall is cut from v1 and deliberately not in the chain.
-check_absent "[recall] not shipped"    /etc/systemd/system/qdistro-recall@.timer
+check_req "[snapshots] verify unit"    /etc/systemd/system/qdistro-backup-verify.service
+check_req "[snapshots] verify timer (last drop)" /etc/systemd/system/qdistro-backup-verify.timer
+check_req "[qdwin-session] ydotoold unit"        /home/admin/.config/systemd/user/ydotoold.service
+# Recall is cut from v1 and deliberately not in the chain: none of its
+# artefacts may ship.
+check_absent "[recall] timer not shipped"  /etc/systemd/system/qdistro-recall@.timer
+check_absent "[recall] unit not shipped"   /etc/systemd/system/qdistro-recall@.service
+check_absent "[recall] daemon not shipped" /usr/libexec/qdistro/qdistro_recall_daemon.py
+check_absent "[recall] CLI not shipped"    /usr/local/bin/qdistro-recall
 # qdwin session installer (called directly by config.sh, same contract).
 check_req "[qdwin-session] compositor user unit" /home/admin/.config/systemd/user/qdwin-compositor.service
 check_req "[qdwin-session] admin linger marker"  /var/lib/systemd/linger/admin
-check_req "[qdwin-session] ydotoold wired"       /home/admin/.config/systemd/user/default.target.wants/ydotoold.service
+check_link "[qdwin-session] ydotoold wired"      /home/admin/.config/systemd/user/default.target.wants/ydotoold.service
 # The greeter starts the session target; default.target must not (race for
 # wayland-1). QDWIN_SESSION_AUTOSTART=0 in config.sh is what guarantees it.
 check_absent "[qdwin-session] target NOT auto-started" /home/admin/.config/systemd/user/default.target.wants/qdwin-session.target

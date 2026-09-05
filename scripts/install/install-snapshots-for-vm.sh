@@ -119,6 +119,6 @@ if [ -f "$SRC/backup.conf.example" ]; then
     install -m 0644 "$SRC/backup.conf.example" /etc/qdistro/backup.conf.example
 fi
 
-sd_daemon_reload >/dev/null 2>&1 || true
+sd_daemon_reload || true
 
 echo "[install-snapshots] OK"

@@ -152,7 +152,7 @@ install -m 0644 "$QSU_SRC/qdistro-root-exec.socket"  "$SOCKET_UNIT"
 install -m 0644 "$QSU_SRC/qdistro-root-exec.service" "$SERVICE_UNIT"
 
 sd_daemon_reload
-sd_enable_now qdistro-root-exec.socket >/dev/null
+sd_enable_now qdistro-root-exec.socket
 
 # 4. Verify the socket is listening. Service is socket-activated so
 #    .service unit may be inactive until first connect — that's fine.

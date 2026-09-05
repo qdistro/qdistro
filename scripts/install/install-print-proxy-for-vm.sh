@@ -162,7 +162,9 @@ if [ -f "$SRC/org.qdistro.print.policy" ]; then
 fi
 
 sd_daemon_reload
-systemctl enable qdistro-print-proxy.service >/dev/null 2>&1 || true
+# Required: the wants-link is what starts the proxy at boot; a failed enable
+# is an install failure, not a warning.
+systemctl enable qdistro-print-proxy.service >/dev/null
 # Don't `--now` start: with no print VM the proxy logs ECONNREFUSED on
 # every accept, which would clutter journals. Tests start it explicitly.
 

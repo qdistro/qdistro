@@ -96,8 +96,8 @@ fi
 # Enable the timer for admin if present. Skipped on hosts without the
 # user (e.g. the bake's pre-user provisioning pass).
 if id admin >/dev/null 2>&1; then
-    sd_daemon_reload >/dev/null 2>&1 || true
-    sd_enable_now qdistro-recall@admin.timer >/dev/null 2>&1 || true
+    sd_daemon_reload || true
+    sd_enable_now qdistro-recall@admin.timer || true
 fi
 
 echo "[install-recall] OK"

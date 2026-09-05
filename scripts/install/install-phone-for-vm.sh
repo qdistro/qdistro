@@ -54,6 +54,6 @@ chmod 0755 "$DEST_BIN/qdistro-phone"
 
 install -m 0644 "$SRC/qdistro-phone.service" "$DEST_SYSD/"
 
-sd_daemon_reload >/dev/null 2>&1 || true
+sd_daemon_reload || true
 
 echo "[install-phone] OK"

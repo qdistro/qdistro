@@ -104,7 +104,7 @@ for daemon in downloads mpris notifications compositor; do
         "$BROWSER_DAEMONS_SRC/qdistro-${daemon}.service" \
         "$DEST_USER_SYSD/"
 done
-sd_daemon_reload 2>/dev/null || true
+sd_daemon_reload || true
 systemctl --global enable \
     qdistro-downloads.service \
     qdistro-mpris.service \

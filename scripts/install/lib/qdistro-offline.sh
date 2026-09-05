@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # qdistro-offline.sh — the offline-install contract (todo/iso/14 Phase B).
 #
 # Sourced (never executed) by every install-*.sh in the chain. An installer
@@ -23,9 +24,23 @@
 # never absence of systemd. The rule is the one harden-compositor-vt.sh
 # uses; tests/integration/vm/offline-install.bats asserts the two agree.
 # A leaked flag on a live machine therefore does nothing but print a
-# warning: live installs stay live. Skipped operations are LOGGED one per
+# warning: live installs stay live. The converse is deliberate: a
+# corroborated chroot is offline UNCONDITIONALLY, even if a manager or bus
+# happens to be reachable from inside it (a bind-mounted /run) -- the
+# installers target the chroot's tree, and a reachable manager would be
+# the HOST's, so starting or probing units there would be wrong anyway. Skipped operations are LOGGED one per
 # line, so a build log shows exactly what the booted image still has to do
-# at first boot (enable symlinks are on disk; nothing is started).
+# at first boot (enable symlinks are on disk; nothing is started). The skip
+# lines go to STDERR so an installer's `>/dev/null` on the command cannot eat
+# them and the build log stays the complete first-boot to-do list.
+#
+# Residual hazard, stated plainly: the skipped operations include the
+# UPGRADE mechanism (`sd_reload_dbus`, `sd_try_restart`) and the readiness
+# probes. If offline were ever selected on a root that is also live (an
+# operator chrooting into a running system's mount), the new code and bus
+# policy would land on disk while the OLD daemon kept serving under the OLD
+# policy, and nothing would have verified the fresh unit works. That is why
+# offline is opt-in AND corroborated, and never auto-detected.
 #
 # Any other non-zero exit from an installer is a real failure; nothing here
 # converts one into a warning.
@@ -51,7 +66,8 @@ resolve_offline_install() {
             printf '[offline] WARN: QDISTRO_OFFLINE_INSTALL=1 in the environment, but this root is not corroborated as a chroot; ignoring it and running live\n' >&2
         fi
     fi
-    export QDISTRO_OFFLINE
+    # Deliberately NOT exported: the decision belongs to this script; a child
+    # that sources the library must resolve for itself.
     return 0
 }
 
@@ -62,20 +78,22 @@ is_offline() { [ "${QDISTRO_OFFLINE:-0}" = 1 ]; }
 live_only() {
     local label="$1"; shift
     if is_offline; then
-        printf '[offline] skipped (needs a running system manager): %s\n' "$label"
+        printf '[offline] skipped (needs a running system manager): %s\n' "$label" >&2
         return 0
     fi
     "$@"
 }
 
-# sd_daemon_reload — live only.
+# sd_daemon_reload — live only. Callers that tolerate a live failure write
+# `sd_daemon_reload || true`, never a redirect: a redirect would also hide
+# the offline skip line.
 sd_daemon_reload() { live_only "systemctl daemon-reload" systemctl daemon-reload; }
 
 # sd_reload_dbus — reload the system bus's policy (dbus-broker or dbus);
 # live only, best-effort as before.
 sd_reload_dbus() {
     if is_offline; then
-        printf '[offline] skipped (needs a running system bus): reload dbus policy\n'
+        printf '[offline] skipped (needs a running system bus): reload dbus policy\n' >&2
         return 0
     fi
     systemctl reload dbus-broker.service 2>/dev/null \
@@ -131,13 +149,17 @@ user_unit_enable() {
     fi
     target="$units/default.target.wants"
     install -d -o "$user" -g "$group" -m 0755 "$target"
+    local rc=0
     for u in "$@"; do
         if [ ! -f "$units/$u" ]; then
-            printf '[offline] user unit %s not present under %s; not enabled\n' "$u" "$units" >&2
+            # `systemctl enable` fails on a unit it cannot find; so do we.
+            printf '[offline] user unit %s not present under %s; cannot enable\n' "$u" "$units" >&2
+            rc=1
             continue
         fi
         ln -sfn "../$u" "$target/$u"
         chown -h "$user:$group" "$target/$u"
         printf '[offline] systemctl --user enable %s for %s: wrote %s/%s\n' "$u" "$user" "$target" "$u"
     done
+    return $rc
 }

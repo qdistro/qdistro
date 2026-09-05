@@ -166,7 +166,10 @@ sd_reload_dbus
 
 # 5. Start the broker (enable always; start only on a live system).
 sd_daemon_reload
-sd_enable_now qdistro-dbus-reload.service 2>/dev/null || true
+# Enable is required for both (the wants-links are the boot wiring); only
+# the live start of the reload oneshot is best-effort, as before.
+sd_enable qdistro-dbus-reload.service
+sd_start qdistro-dbus-reload.service 2>/dev/null || true
 sd_enable_now qdistro-admin-broker.service
 
 # 6. Wait for the bus name (Type=dbus activates automatically, but

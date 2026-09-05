@@ -109,6 +109,9 @@ INSTALLERS=(
     # (exit 2). Under the fail-open loop that refusal was logged as "verify
     # failed" on every build; under the fatal chain it would abort the build.
     # The tester image ships without recall (todo/iso/14 Phase B).
+    # Also deliberately absent: the admin approval-queue TUI (admin_app/,
+    # tui/). Neither chain has ever installed it; the tester image ships
+    # without it and the download page says so (todo/iso/14 Phase B item 4).
     "scripts/install/install-snapshots-for-vm.sh       $QD/snapshots"
 )
 # Offline-install contract (todo/iso/14 Phase B): every installer in the
@@ -144,8 +147,13 @@ for pol in selinux/broker selinux/pwd selinux/session_manager selinux/tier1; do
     if [ -d "$QD/$pol" ] && [ -x "$QD/$pol/install-policy.sh" ]; then
         # tier1 module references types defined by broker module; if it
         # loads first the AST resolves on the second pass at boot time.
-        (cd "$QD/$pol" && bash install-policy.sh) \
-            || echo "[qdistro-image]   WARN: $pol policy install failed (chroot semodule)"
+        # Fatal (Phase B): a service shipped without its policy module is an
+        # incomplete image, and the fail-open form hid exactly that class of
+        # defect in the installer chain above.
+        if ! (cd "$QD/$pol" && bash install-policy.sh); then
+            echo "[qdistro-image] FATAL: $pol policy install failed. Aborting build." >&2
+            exit 1
+        fi
     fi
 done
 
@@ -210,7 +218,7 @@ for pyapp in qdgreeter qdlocker; do
         echo "[qdistro-image] pip installing $pyapp -> /usr ..."
         python3 -m pip install --break-system-packages --no-deps \
             --prefix=/usr "$SRC/$pyapp" \
-            || echo "[qdistro-image]   WARN: pip install $pyapp failed"
+            || { echo "[qdistro-image] FATAL: pip install $pyapp failed. Aborting build." >&2; exit 1; }
     else
         echo "[qdistro-image]   WARN: $SRC/$pyapp not synced — $pyapp binary will be missing"
     fi

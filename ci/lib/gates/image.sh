@@ -37,24 +37,30 @@ gate_image() {
     # Resolve the tree to inspect: explicit --root, else an extracted tree
     # under the build dir, else nothing (boot-only build present).
     local static_root="$root"
-    if [ -z "$static_root" ]; then
-        for cand in "$build_dir/extracted" "$build_dir/root" "$build_dir/mnt"; do
-            [ -d "$cand" ] && { static_root="$cand"; break; }
-        done
-    fi
-    # No extracted tree but a built .raw: extract the checklist's paths from
-    # it (image/extract-root.sh, guestfish copy-out; seconds, ~100 MB) so the
-    # static stage runs on the artifact rather than being blocked (Phase B).
-    if [ -z "$static_root" ] && [ -f "$build_dir/qdistro.x86_64-0.1.0.raw" ] && [ -x "$IMAGE_DIR/extract-root.sh" ]; then
+    # A built .raw and no explicit --root: ALWAYS extract the checklist's
+    # paths from THAT raw (image/extract-root.sh, guestfish copy-out; seconds,
+    # ~100 MB) into $build_dir/extracted, replacing whatever was there. An
+    # older extracted tree must never be inspected in place of a newer raw
+    # (Phase B review): a rebuilt-broken raw next to yesterday's clean tree
+    # would otherwise pass.
+    local raw
+    raw="$(ls "$build_dir"/*.raw 2>/dev/null | head -1)"
+    if [ -z "$static_root" ] && [ -n "$raw" ] && [ -x "$IMAGE_DIR/extract-root.sh" ]; then
         local ex_log="$RDIR/host/image-extract-root.log"
         mkdir -p "$(dirname "$ex_log")"
-        log "image: extracting checklist paths from $build_dir/qdistro.x86_64-0.1.0.raw"
-        if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" > "$ex_log" 2>&1; then
+        log "image: extracting checklist paths from $raw"
+        if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" "$raw" > "$ex_log" 2>&1; then
             static_root="$build_dir/extracted"
         else
             record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection"
             return "$EXIT_BUILD"
         fi
+    fi
+    # No raw: fall back to a pre-extracted tree if one exists.
+    if [ -z "$static_root" ]; then
+        for cand in "$build_dir/extracted" "$build_dir/root" "$build_dir/mnt"; do
+            [ -d "$cand" ] && { static_root="$cand"; break; }
+        done
     fi
     # Run the checker whenever the user EXPLICITLY passed --root (even a bad
     # path: verify-contents.sh returns 2 for a missing/non-dir root, which must

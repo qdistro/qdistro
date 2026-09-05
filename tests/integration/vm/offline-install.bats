@@ -15,8 +15,14 @@ setup() {
     [ -f "$LIB" ]
     # The chain: every installer image/config.sh runs (the INSTALLERS array
     # plus the qdwin-session installer it calls directly).
-    CHAIN=$(grep -oE 'scripts/install/install-[a-z0-9-]+\.sh' "$CONFIG_SH" | sort -u)
-    [ -n "$CHAIN" ]
+    # From the EXECUTED array entries (not comments, which may name a
+    # deliberately omitted installer) plus the one direct call.
+    CHAIN=$( { awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -oE '^\s*"scripts/install/install-[a-z0-9-]+\.sh' | tr -d ' "';
+               grep -oE '^bash "\$QD/scripts/install/install-[a-z0-9-]+\.sh"' "$CONFIG_SH" | grep -oE 'scripts/install/install-[a-z0-9-]+\.sh'; } | sort -u)
+    # 13 array entries + the direct qdwin-session call today.
+    if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -lt 14 ]; then
+        echo "chain parse found too few installers: $CHAIN" >&2; return 1
+    fi
 }
 
 # ---- static invariants ---------------------------------------------------
@@ -24,8 +30,8 @@ setup() {
 @test "offline: every chain installer sources the library and resolves the mode" {
     local f
     for f in $CHAIN; do
-        grep -q 'lib/qdistro-offline.sh' "$REPO/$f" || fail "$f does not source lib/qdistro-offline.sh"
-        grep -q '^resolve_offline_install' "$REPO/$f" || fail "$f does not call resolve_offline_install"
+        grep -q 'lib/qdistro-offline.sh' "$REPO/$f" || { echo "$f does not source lib/qdistro-offline.sh"; return 1; }
+        grep -q '^resolve_offline_install' "$REPO/$f" || { echo "$f does not call resolve_offline_install"; return 1; }
     done
 }
 
@@ -42,7 +48,7 @@ setup() {
             depth > 0 && /^[[:space:]]*fi[[:space:]]*$/ && indent($0) == ind[depth] { depth--; next }
             depth > 0 { next }
             /^[[:space:]]*echo / { next }
-            /systemctl[[:space:]]+(start|stop|restart|try-restart|reload|daemon-reload|is-active)|--now|busctl|loginctl|systemctl[[:space:]]+--user[[:space:]]+(start|enable)/ {
+            /systemctl[[:space:]]+(start|stop|restart|try-restart|reload|daemon-reload|is-active|preset)|--now|busctl|loginctl|dbus-send|systemd-run|gdbus|systemctl[[:space:]]+--user[[:space:]]+(start|enable|daemon-reload)|systemctl[[:space:]]+--global[[:space:]]+(start|daemon-reload)/ {
                 print FILENAME ":" FNR ": " $0
             }' "$REPO/$f"
         if [ -n "$output" ]; then echo "$output"; bad=1; fi
@@ -147,14 +153,17 @@ EOS
         mount --bind "$3" "$HOME" || exit 111
         mkdir -p "$HOME/.config/systemd/user"; : >"$HOME/.config/systemd/user/present.service"
         linger_enable "$5" || exit 20
-        user_unit_enable "$5" "$6" present.service absent.service || exit 21
+        # A requested unit that is not installed is an error (as `systemctl
+        # enable` would refuse it) -- but the present one must still be wired.
+        if user_unit_enable "$5" "$6" present.service absent.service; then exit 21; fi
+        user_unit_enable "$5" "$6" present.service || exit 25
         [ -e /var/lib/systemd/linger/"$5" ] || exit 22
         [ "$(readlink "$HOME/.config/systemd/user/default.target.wants/present.service")" = ../present.service ] || exit 23
         [ ! -e "$HOME/.config/systemd/user/default.target.wants/absent.service" ] || exit 24
     ' _ "$LIB" "$root" "$root/home" "$stub" "$me" "$grp"
     [ "$status" -eq 0 ]
     [[ "$output" == *"wrote /var/lib/systemd/linger/$me"* ]]
-    [[ "$output" == *"absent.service not present"* ]]
+    [[ "$output" == *"absent.service not present"*"cannot enable"* ]]
     ! grep -q loginctl "$BATS_TEST_TMPDIR/calls.log"
     ! grep -q runuser "$BATS_TEST_TMPDIR/calls.log"
 }
@@ -171,8 +180,12 @@ EOS
 @test "offline: the image path leaves qdwin-session.target out of default.target.wants" {
     # The greeter starts the target; config.sh sets QDWIN_SESSION_AUTOSTART=0
     # and the installer must honour it (this replaces the old runuser shim).
-    run awk '/^SESSION_UNITS=/,/^user_unit_enable/' "$REPO/scripts/install/install-qdwin-session-for-vm.sh"
+    run awk '/^SESSION_UNITS=/,/user_unit_enable admin/' "$REPO/scripts/install/install-qdwin-session-for-vm.sh"
     [[ "$output" == *'QDWIN_SESSION_AUTOSTART'* ]]
     [[ "$output" == *'SESSION_UNITS="qdwin-session.target $SESSION_UNITS"'* ]]
-    [[ "$output" == *'user_unit_enable admin users $SESSION_UNITS'* ]]
+    [[ "$output" == *'user_unit_enable admin "$(id -gn admin)" $SESSION_UNITS'* ]]
+    # Offline, a failed enable is fatal (the symlinks ARE the wiring).
+    run awk '/user_unit_enable admin/,/^fi/' "$REPO/scripts/install/install-qdwin-session-for-vm.sh"
+    [[ "$output" == *'is_offline'* ]]
+    [[ "$output" == *'exit 4'* ]]
 }
