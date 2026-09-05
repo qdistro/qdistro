@@ -179,7 +179,10 @@ for pair in spawn-tier3.sh:qdistro-tier3-spawn \
     dst_name="${pair##*:}"
     src="$TIER3_DIR/$src_basename"
     dst="/usr/local/bin/$dst_name"
-    [ -x "$src" ] || { echo "[install-tier3] WARN: $src missing or not executable"; continue; }
+    # A helper the repo ships but the tree lacks (or lost its exec bit in
+    # the sync) is a broken tree: fail the step, so the chain records a gap
+    # instead of a half-installed tier (todo/iso/14 Phase D review).
+    [ -x "$src" ] || { echo "[install-tier3] FATAL: $src missing or not executable" >&2; exit 1; }
     ln -sf "$src" "$dst"
     echo "[install-tier3] linked $dst → $src"
 done

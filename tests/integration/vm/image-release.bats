@@ -307,8 +307,14 @@ chain_root() {
     mkdir -p "$T/root/etc/tmpfiles.d" "$T/root/usr/local/bin" "$T/root/usr/local/lib/qdistro" \
         "$T/root/usr/share/polkit-1/actions" "$T/root/usr/share/qdistro/tier4-vm" \
         "$T/root/usr/share/qdistro/tier5" "$T/root/usr/share/qdistro/tier5b" \
-        "$T/root/usr/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/qdistro/tier3"
-    : > "$T/root/usr/lib/python3.13/site-packages/qdistro_app/__init__.py"
+        "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app" "$T/root/root/qdistro-src/qdistro/tier3" \
+        "$T/root/usr/etc/sysconfig" "$T/root/usr/lib/systemd/system"
+    : > "$T/root/usr/local/lib/python3.13/site-packages/qdistro_app/__init__.py"
+    # the vendor qemu-ga default and the unit lines the override relies on
+    # (copied from the run-28 image)
+    printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/usr/etc/sysconfig/qemu-ga"
+    printf '[Service]\nEnvironmentFile=-/usr/etc/sysconfig/qemu-ga\nEnvironmentFile=-/etc/sysconfig/qemu-ga\nExecStart=-/usr/bin/qemu-ga -p /dev/virtio-ports/org.qemu.guest_agent.0 ${FILTER_RPC_ARGS}\n' \
+        > "$T/root/usr/lib/systemd/system/qemu-guest-agent.service"
     : > "$T/root/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$T/root/root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh"
     ln -sfn /root/qdistro-src/qdistro/tier3/spawn-tier3.sh "$T/root/usr/local/bin/qdistro-tier3-spawn"
     ln -sfn /root/qdistro-src/qdistro/tier3/qdistro-tier3-cleanup.sh "$T/root/usr/local/bin/qdistro-tier3-cleanup"
@@ -334,6 +340,9 @@ chain_root() {
     [[ "$output" == *"OK   [tier5] polkit action"* ]]
     [[ "$output" == *"OK   [tier5b] domain template"* ]]
     [[ "$output" == *"OK   [qemu-ga] guest-exec allowed"* ]]
+    [[ "$output" == *"OK   [qemu-ga] unit reads the override"* ]]
+    [[ "$output" == *"OK   [qemu-ga] unit passes the filter"* ]]
+    [[ "$output" == *"OK   [qemu-ga] vendor default blocks only guest-exec"* ]]
     [[ "$output" == *"OK   [chain] record equals the bootstrap chain (dev profile, 16 steps): sdk broker"*"phone"*"tier5b"* ]]
     [[ "$output" == *"OK   [media] socket unit not shipped: absent as required"* ]]
     [[ "$output" == *"OK   [multimachine] broker CLI not shipped: absent as required"* ]]
@@ -396,6 +405,27 @@ chain_root() {
     printf 'FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"\n' > "$T/root/etc/sysconfig/qemu-ga"
     run bash "$IMAGE/verify-contents.sh" "$T/root"
     [[ "$output" == *"MISS [qemu-ga] guest-exec allowed"* ]]
+}
+
+@test "extract-root: copies every path the Phase D rows resolve and keeps the tier-3 link targets through the prune" {
+    # Round-1 review (opus B1/B2): the chain_root fixture can assert shapes
+    # the extraction never produces. Pin the extractor's side of the contract.
+    local x="$IMAGE/extract-root.sh"
+    grep -q '^    /usr/local$' "$x"                      # sdk package + tier helpers
+    grep -q '^    /usr/etc/sysconfig/qemu-ga$' "$x"      # vendor default row
+    grep -q '/usr/lib/systemd' "$x"                      # qemu-ga unit rows
+    grep -q '^    /var/lib/systemd/linger /var/lib/qdistro' "$x"   # chain record
+    grep -q '^    /root/qdistro-src$' "$x"
+    grep -q -- "-not -path '\*/qdistro/tier3' -not -path '\*/qdistro/tier3/\*'" "$x"
+    # and the prune really keeps them: run its find on a mock tree
+    local m="$BATS_TEST_TMPDIR/prune"
+    mkdir -p "$m/root/qdistro-src/qdistro/tier3" "$m/root/qdistro-src/qdistro/scripts/install" "$m/root/qdistro-src/qdwin/src"
+    : > "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh"; : > "$m/root/qdistro-src/qdistro/scripts/install/x.sh"; : > "$m/root/qdistro-src/qdwin/src/a.c"
+    find "$m/root/qdistro-src" -mindepth 2 -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' -delete 2>/dev/null || true
+    [ -f "$m/root/qdistro-src/qdistro/tier3/spawn-tier3.sh" ]
+    [ ! -e "$m/root/qdistro-src/qdistro/scripts" ]
+    [ ! -e "$m/root/qdistro-src/qdwin/src" ]
+    [ -d "$m/root/qdistro-src/qdwin" ]
 }
 
 @test "verify-contents: a missing or truncated /etc/qdistro/release is a MISS, not a pass" {

@@ -674,8 +674,11 @@ check_req "[qdlocker] binary"          /usr/bin/qdlocker
 
 echo
 echo "-- one chain: the steps the image used to lack (todo/iso/14 Phase D) --"
-# sdk: the qdistro_app package in the system python's purelib.
-check_glob_req "[sdk] qdistro_app package" "/usr/lib/python3*/site-packages/qdistro_app/__init__.py"
+# sdk: the qdistro_app package in the system python's purelib. On openSUSE
+# sysconfig's purelib for a non-RPM install is /usr/local/lib/python3.N/
+# site-packages (the distro patch; run 28 log: "installed at /usr/local/...");
+# verify.sh proves the booted python imports it from there.
+check_glob_req "[sdk] qdistro_app package" "/usr/local/lib/python3*/site-packages/qdistro_app/__init__.py"
 # tier3: the top of the SUPPORTED ladder (tiers 0-3). Spawn/cleanup are
 # symlinks into the on-image source tree; the group, the two locked silo
 # users, the tmpfiles entry and the polkit action complete it.
@@ -685,7 +688,7 @@ check_req  "[tier3] spawn-common lib"  /usr/local/lib/qdistro/spawn-common.sh
 check_req  "[tier3] tmpfiles entry"    /etc/tmpfiles.d/qdistro-tier3.conf
 check_req  "[tier3] polkit action"     /usr/share/polkit-1/actions/org.qdistro.tier3.policy
 check_line "[tier3] group exists"      /etc/group  '^qdistro-tier3:'
-check_line "[tier3] admin in group"    /etc/group  '^qdistro-tier3:[^:]*:[^:]*:.*\badmin\b'
+check_line "[tier3] admin in group"    /etc/group  '^qdistro-tier3:[^:]*:[^:]*:([^,]*,)*admin(,|$)'
 check_line "[tier3] silo user1"        /etc/passwd '^user1:'
 check_line "[tier3] silo user2"        /etc/passwd '^user2:'
 check_line "[tier3] user1 password locked" /etc/shadow '^user1:!'
@@ -708,6 +711,14 @@ check_req "[tier5b] domain template"      /usr/share/qdistro/tier5b/domain-templ
 # The guest agent must answer guest-exec (verify.sh drives the booted image
 # with it); the vendor default blocks it.
 check_line "[qemu-ga] guest-exec allowed" /etc/sysconfig/qemu-ga '^FILTER_RPC_ARGS=""$'
+# ...and the two facts that make that override effective, pinned so a vendor
+# change surfaces here instead of as a verify.sh timeout: the unit reads the
+# admin override after the vendor default and passes the variable; the vendor
+# default blocks EXACTLY guest-exec,guest-exec-status (so clearing the filter
+# is "vendor list minus those two", nothing broader).
+check_line "[qemu-ga] unit reads the override" /usr/lib/systemd/system/qemu-guest-agent.service '^EnvironmentFile=-/etc/sysconfig/qemu-ga$'
+check_line "[qemu-ga] unit passes the filter"  /usr/lib/systemd/system/qemu-guest-agent.service '^ExecStart=.*\$\{FILTER_RPC_ARGS\}'
+check_line "[qemu-ga] vendor default blocks only guest-exec" /usr/etc/sysconfig/qemu-ga '^FILTER_RPC_ARGS="--block-rpcs=guest-exec,guest-exec-status"$'
 
 echo
 echo "-- installer chain record (the Phase D DONE bar) --"
@@ -718,6 +729,7 @@ echo "-- installer chain record (the Phase D DONE bar) --"
 # steps outside dev). The bootstrap is the REPO's copy -- the expectation --
 # sourced in a subshell; it runs nothing when sourced.
 REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+chain_err="$(mktemp)"; trap 'rm -f "$chain_err"' EXIT
 chain_state_rel=/var/lib/qdistro/bootstrap/installer-chain.state
 chain_state_file="$(file_in_image "$ROOT$chain_state_rel" || true)"
 chain_expected=""
@@ -730,9 +742,11 @@ elif [ -z "$image_profile" ]; then
 elif [ ! -f "$BOOTSTRAP_SH" ]; then
     printf 'MISS [chain] record: %s not found; cannot compute the expected chain\n' "$BOOTSTRAP_SH"
     FAIL=1
-elif ! chain_expected="$(QDISTRO_PROFILE="$image_profile" bash -c '. "$1" && resolve_profile >/dev/null && chain_expected_names' _ "$BOOTSTRAP_SH" 2>&1)" \
+elif ! chain_expected="$(QDISTRO_PROFILE="$image_profile" bash -c '. "$1" && resolve_profile >/dev/null && chain_expected_names' _ "$BOOTSTRAP_SH" 2>"$chain_err")" \
         || [ -z "$chain_expected" ]; then
-    printf 'MISS [chain] record: could not read chain_expected_names from %s: %s\n' "$BOOTSTRAP_SH" "$chain_expected"
+    # stdout only is the expectation; anything the source printed to stderr
+    # is reported here, never folded into the list under comparison.
+    printf 'MISS [chain] record: could not read chain_expected_names from %s (stderr: %s)\n' "$BOOTSTRAP_SH" "$(tr '\n' ' ' <"$chain_err")"
     FAIL=1
 else
     chain_recorded="$(grep -vE '^[[:space:]]*(#|$)' "$chain_state_file" || true)"

@@ -50,6 +50,7 @@ PATHS=(
     /usr/local
     /usr/lib/qdistro /usr/lib/systemd /usr/lib/os-release
     /usr/lib64/weston
+    /usr/etc/sysconfig/qemu-ga
     /usr/share/quickshell /usr/share/qdistro /usr/share/polkit-1
     /usr/share/xdg-desktop-portal /usr/share/dbus-1 /usr/share/applications
     /usr/share/metainfo /usr/share/icons/hicolor /usr/share/selinux
@@ -57,6 +58,9 @@ PATHS=(
     /var/lib/systemd/linger /var/lib/qdistro /var/lib/selinux
     /root/qdistro-src
 )
+# (The chain's sdk step installs qdistro_app under /usr/local/lib/python3.N/
+# site-packages -- openSUSE's purelib for non-RPM installs -- so /usr/local
+# above already carries the [sdk] row's file.)
 # The copy includes the image's /etc (shadow with the baked test-password
 # hash, generated SSH host keys). File modes survive the copy, and the tree
 # itself is made private to the invoking user.
@@ -72,9 +76,13 @@ rm -rf "$DEST"; mkdir -p "$DEST"; chmod 0700 "$DEST"
         echo "-copy-out $p $DEST${p%/*}"
     done
 } | guestfish --ro -a "$RAW" -i
-# /root/qdistro-src is only checked for presence of its three dirs; keep it
-# small on the host by dropping everything below the second level.
+# /root/qdistro-src is checked for presence of its three dirs, and for the
+# targets of the tier-3 spawn/cleanup symlinks (check_link resolves them);
+# keep it small on the host by dropping everything else below the second
+# level. Add an exemption here when a checklist row resolves into the tree.
 if [ -d "$DEST/root/qdistro-src" ]; then
-    find "$DEST/root/qdistro-src" -mindepth 2 -delete 2>/dev/null || true
+    find "$DEST/root/qdistro-src" -mindepth 2 \
+        -not -path '*/qdistro/tier3' -not -path '*/qdistro/tier3/*' \
+        -delete 2>/dev/null || true
 fi
 echo "extract-root: $RAW -> $DEST ($(du -sh "$DEST" | cut -f1))"

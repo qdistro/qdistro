@@ -81,8 +81,11 @@ systemctl enable qemu-guest-agent.service
 # --block-rpcs=guest-exec,guest-exec-status, so the agent answered
 # guest-ping and guest-file-* but refused the one call verify.sh needs to
 # start sshd (every Phase A-C verify.sh run died at that baseline). The
-# admin override file the unit reads (EnvironmentFile=-/etc/sysconfig/qemu-ga)
-# clears the filter. Exposure: none new -- the agent listens only on the
+# admin override file the unit reads after the vendor default
+# (EnvironmentFile=-/etc/sysconfig/qemu-ga, expanded into ExecStart as
+# ${FILTER_RPC_ARGS}; image/verify-contents.sh pins both lines of the unit
+# and that the vendor list is exactly those two RPCs, so "" is the vendor
+# list minus them). Exposure: none new -- the agent listens only on the
 # virtio-serial port, which exists only when a hypervisor created the VM,
 # and that hypervisor already holds the disk. On real hardware the unit's
 # BindsTo= device never appears and the agent does not run.
@@ -197,9 +200,9 @@ if [ "$REPO_ROOT" != "$SRC" ] || [ "$STRICT" != 1 ] \
          "(REPO_ROOT=$REPO_ROOT STRICT=$STRICT QDISTRO_STATE_DIR=$QDISTRO_STATE_DIR). Aborting build." >&2
     exit 1
 fi
+# resolve_profile validates the exported profile (the canonical names this
+# script admits are fixed points of it; the alias forms were refused above).
 resolve_profile || { echo "[qdistro-image] FATAL: bootstrap rejected QDISTRO_PROFILE=$QDISTRO_PROFILE" >&2; exit 1; }
-[ "$QDISTRO_PROFILE" = "$QDISTRO_IMAGE_PROFILE" ] \
-    || { echo "[qdistro-image] FATAL: profile changed under resolve_profile: $QDISTRO_PROFILE != $QDISTRO_IMAGE_PROFILE" >&2; exit 1; }
 echo "[qdistro-image] installer chain (bootstrap's, profile=$QDISTRO_PROFILE, strict, offline): $(installer_chain_names | tr '\n' ' ')"
 # Runs every chain step through run_installer_step (fatal under STRICT) and
 # then chain_completeness_check: the recorded steps must equal the chain

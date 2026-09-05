@@ -12,8 +12,9 @@
 # tmp so chain_state_record writes a real (atomic) file we can inspect.
 #
 # Also the end-of-run completeness check (iso2 02 F1, todo/iso/14 Phase D):
-# recorded steps vs the chain, fatal in hardened profiles / strict, warn in
-# dev, report-only for scoped runs.
+# recorded steps vs the chain in both directions (missing AND unexpected,
+# as sets), fatal in hardened profiles / strict, warn in dev, report-only
+# for scoped runs.
 #
 # Run: bats tests/integration/vm/bootstrap-installer-resume.bats
 
@@ -220,7 +221,9 @@ install-tier5b-for-vm.sh"
 
 @test "resume: all steps already recorded runs NOTHING" {
     mkdir -p "$STATE_DIR"
-    bash -c 'source "'"$BOOT"'"; installer_chain_names' \
+    # every step the default (daily-driver) profile expects -- phone is
+    # dev-only and, if recorded here, would rightly be an unexpected record
+    bash -c 'source "'"$BOOT"'"; resolve_profile >/dev/null; chain_expected_names' \
         > "$STATE_DIR/installer-chain.state"
     _run_chain 'RESUME=1'
     [ "$status" -eq 0 ]
@@ -422,4 +425,127 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"not recorded"* ]]
     [[ "$output" == *"INCOMPLETE in 'daily-driver'"* ]]
+}
+
+# --- completeness, the other direction: RECORDED but not expected -------------
+# A full run never removes what it does not install, so a record left behind
+# by an earlier install (a dev-only step on a machine now installed as
+# release, or a step this bootstrap no longer knows) must be a gap too, or a
+# release run would exit 0 "15 of 15" with phone still on disk.
+
+_seed_state() {
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$@" > "$STATE_DIR/installer-chain.state"
+}
+
+@test "completeness: release -- phone recorded by an earlier dev install is UNEXPECTED and fatal" {
+    _seed_state phone
+    _run_chain 'QDISTRO_PROFILE=release'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"INCOMPLETE in 'release' profile"* ]]
+    [[ "$output" == *"recorded but not part of the 'release' chain: phone(dev-only)"* ]]
+    [[ "$output" == *"remove what its scripts/install/install-<step>-for-vm.sh laid down"* ]]
+    [[ "$output" != *"installer chain complete"* ]]
+    # every release step still ran and was recorded; phone was not run. The
+    # full run reset the record, so the file now describes this run only
+    # (the operator is told about the phone artifacts in the message).
+    [ "$(_trace_scripts | wc -l)" -eq 15 ]
+    ! grep -q "install-phone-for-vm.sh" "$TRACE"
+    ! grep -qx phone "$STATE_DIR/installer-chain.state"
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+}
+
+# --- completeness judges THIS run: a full run resets a stale record -----------
+
+@test "completeness: full run -- a stale record does not mask a step that fails NOW (hardened)" {
+    # A daily-driver machine installed once, complete. Re-run the full
+    # chain with pwd now broken: the old 'pwd' line must not count.
+    _run_chain ''
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 15 ]
+    : > "$TRACE"
+    _break_step install-pwd-for-vm.sh
+    _run_chain ''
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"resetting the record"* ]] || true   # log() is silenced in _run_chain
+    [[ "$output" == *"INCOMPLETE in 'daily-driver' profile: not recorded as installed: pwd."* ]]
+    ! grep -qx pwd "$STATE_DIR/installer-chain.state"
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 14 ]
+    # ...and --resume now re-runs exactly pwd
+    cat > "$FAKE_QD/scripts/install/install-pwd-for-vm.sh" <<EOF
+#!/bin/bash
+echo "install-pwd-for-vm.sh \$1" >> "$TRACE"
+exit 0
+EOF
+    : > "$TRACE"
+    _run_chain 'RESUME=1'
+    [ "$status" -eq 0 ]
+    [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
+}
+
+@test "completeness: full run -- a clean re-run leaves exactly this run's record (no accumulation)" {
+    _seed_state retired-thing
+    _run_chain 'QDISTRO_PROFILE=dev'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"retired-thing(unknown)"* ]]
+    ! grep -qx retired-thing "$STATE_DIR/installer-chain.state"
+    [ "$(grep -c . "$STATE_DIR/installer-chain.state")" -eq 16 ]
+}
+
+@test "completeness: a record write failure is named as such, not as a failed installer" {
+    mkdir -p "$BATS_TEST_TMPDIR/ro"; chmod 0555 "$BATS_TEST_TMPDIR/ro"
+    _run_chain 'QDISTRO_PROFILE=dev; STRICT=1; QDISTRO_STATE_DIR="'"$BATS_TEST_TMPDIR"'/ro/state"; CHAIN_STATE_FILE="$QDISTRO_STATE_DIR/installer-chain.state"'
+    chmod 0755 "$BATS_TEST_TMPDIR/ro"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ran OK but the record could not be written: sdk broker"* ]]
+    [[ "$output" == *"fix $BATS_TEST_TMPDIR/ro/state"* ]]
+}
+
+@test "completeness: hardened -- a retired step name in the record is fatal in a FULL run (--resume refuses it up front)" {
+    _seed_state retired-thing
+    _run_chain ''
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"INCOMPLETE in 'daily-driver' profile"* ]]
+    [[ "$output" == *"retired-thing(unknown)"* ]]
+    [[ "$output" != *"not recorded as installed"* ]]
+}
+
+@test "completeness: missing and unexpected are both named in one message" {
+    _seed_state phone
+    _break_step install-pwd-for-vm.sh
+    _run_chain 'QDISTRO_PROFILE=release'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not recorded as installed: pwd. recorded but not part of the 'release' chain: phone(dev-only)"* ]]
+}
+
+@test "completeness: dev -- an unexpected record is a WARN and the run exits 0" {
+    _seed_state retired-thing
+    _run_chain 'QDISTRO_PROFILE=dev'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN: installer chain INCOMPLETE (dev profile continues): recorded but not part of the 'dev' chain: retired-thing(unknown)"* ]]
+    # phone is expected in dev, so it is not unexpected
+    [[ "$output" != *"phone(dev-only)"* ]]
+}
+
+@test "completeness: a scoped run reports an unexpected record and does not die" {
+    _seed_state phone
+    _run_chain 'QDISTRO_PROFILE=release; RERUN_STEP=print'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain not complete after a scoped run"* ]]
+    [[ "$output" == *"phone(dev-only)"* ]]
+    [[ "$output" != *"INCOMPLETE in"* ]]
+}
+
+@test "completeness: a reordered but equal record is complete (--resume appends in run order)" {
+    # Sets, not order: a machine recovered by --resume records the retried
+    # step last. Seed everything except pwd, resume, and expect "complete".
+    local names
+    names="$(bash -c '. "$1"; QDISTRO_PROFILE=release; resolve_profile >/dev/null; chain_expected_names' _ "$BOOT" | grep -vx pwd)"
+    # shellcheck disable=SC2086
+    _seed_state $names
+    _run_chain 'QDISTRO_PROFILE=release; RESUME=1; log() { echo "LOG: $*"; }'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"installer chain complete: 15 of 15 expected steps recorded, nothing unexpected"* ]]
+    [ "$(tail -1 "$STATE_DIR/installer-chain.state")" = pwd ]
+    [ "$(_trace_scripts)" = "install-pwd-for-vm.sh" ]
 }
