@@ -190,9 +190,15 @@ check_opt() {
 # review: `/usr/libexec/qdistro -> /inside-libexec` gave a false MISS).
 # Here each component is expanded against the resolver's host directory
 # for the image path so far, and every match is re-resolved as an image
-# path before the walk continues; enumeration is capped per level.
+# path before the walk continues. Enumeration is exhaustive; a pathological
+# tree that yields more than GLOB_MAX candidates makes the row FAIL as
+# INDETERMINATE (rc 2, distinct from "no match"), never silently "absent"
+# (round-6 review). A trailing slash requires the match to be a directory,
+# as it does in bash.
+GLOB_MAX=${GLOB_MAX:-20000}
 glob_in_image() {
-    local pattern="${1#/}" comp rest cands=("") next=() c host names n
+    local pattern="${1#/}" comp rest cands=("") next=() c host names want_dir=0 total=0
+    case "$pattern" in */) want_dir=1 ;; esac
     rest="$pattern"
     while [ -n "$rest" ]; do
         comp="${rest%%/*}"
@@ -205,10 +211,10 @@ glob_in_image() {
                     # The image directory so far, as a real host dir.
                     host="$(resolve_in_image "$ROOT/$c")" || continue
                     [ -d "$host" ] || continue
-                    n=0
                     while IFS= read -r names; do
                         [ -n "$names" ] || continue
-                        n=$((n + 1)); [ "$n" -le 200 ] || break
+                        total=$((total + 1))
+                        [ "$total" -le "$GLOB_MAX" ] || return 2
                         next+=("${c:+$c/}${names##*/}")
                     done < <(compgen -G "$host/$comp" 2>/dev/null)
                     ;;
@@ -219,7 +225,10 @@ glob_in_image() {
         cands=("${next[@]}")
     done
     for c in "${cands[@]}"; do
-        if in_image "$ROOT/$c"; then printf '%s\n' "$ROOT/$c"; return 0; fi
+        if in_image "$ROOT/$c"; then
+            if [ "$want_dir" = 1 ] && [ ! -d "$(resolve_in_image "$ROOT/$c")" ]; then continue; fi
+            printf '%s\n' "$ROOT/$c"; return 0
+        fi
     done
     return 1
 }
@@ -229,9 +238,12 @@ check_glob_req() {
     local label=$1 glob=$2
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
     # shellcheck disable=SC2086
-    local hit
-    hit="$(glob_in_image "$glob")" || hit=""
-    if [ -n "$hit" ]; then
+    local hit grc
+    hit="$(glob_in_image "$glob")"; grc=$?
+    if [ "$grc" -eq 2 ]; then
+        printf 'FAIL %s: %s (INDETERMINATE: more than %s candidates while expanding; not a verdict on presence)\n' "$label" "$ROOT/${glob#/}" "$GLOB_MAX"
+        FAIL=1
+    elif [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
@@ -242,10 +254,15 @@ check_glob_req() {
 
 # check_glob_opt <label> <glob-under-root> — optional glob
 check_glob_opt() {
-    local label=$1 glob=$2 hit
+    local label=$1 glob=$2 hit grc
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    hit="$(glob_in_image "$glob")" || hit=""
-    if [ -n "$hit" ]; then
+    hit="$(glob_in_image "$glob")"; grc=$?
+    if [ "$grc" -eq 2 ]; then
+        # Indeterminate is a failure even for an optional row: the tree is
+        # not something this checklist can judge.
+        printf 'FAIL %s (optional): %s (INDETERMINATE: more than %s candidates while expanding)\n' "$label" "$ROOT/${glob#/}" "$GLOB_MAX"
+        FAIL=1
+    elif [ -n "$hit" ]; then
         printf 'OK   %s: %s\n' "$label" "$hit"
         OPT_OK=$((OPT_OK + 1))
     else
