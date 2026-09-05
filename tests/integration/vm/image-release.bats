@@ -385,7 +385,64 @@ fixture_bundle() {
     grep -q '^\. "\$HERE/lib/release-proof.sh"$' "$b"
     grep -q '^( qdistro_prove_release "\$host_raw" "\$HOST_BUILD_DIR/bundle" "\$XZ_NAME" "\$IMAGE_SIZE_MB" )' "$b"
     grep -q 'die "release artifact check failed' "$b"
-    grep -q 'copy-out /out/bundle' "$b"
+    grep -q '^\. "\$HERE/lib/copy-out.sh"$' "$b"
+}
+
+# A scratch build disk shaped like the builder's (bare xfs on the whole
+# device, /out with a raw and a bundle, NO install ISO), so the exact
+# guestfish stream the driver sends is exercised. Needs guestfish + a
+# libguestfs appliance (~10 s); skipped where absent.
+scratch_build_disk() {
+    command -v guestfish >/dev/null 2>&1 || skip "guestfish not installed"
+    command -v qemu-img  >/dev/null 2>&1 || skip "qemu-img not installed"
+    export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
+    qemu-img create -q -f raw "$T/build.img" 300M
+    guestfish -a "$T/build.img" <<'GF' >/dev/null 2>&1 || skip "libguestfs appliance unavailable"
+run
+mkfs xfs /dev/sda
+mount /dev/sda /
+mkdir /out
+mkdir /out/bundle
+write /out/qdistro.x86_64-0.1.0.raw "RAW"
+write /out/qdistro.x86_64-0.1.0.packages "PKG"
+write /out/bundle/qdistro-0.1.0-20260902.raw.xz "XZ"
+write /out/bundle/qdistro-0.1.0-20260902.raw.xz.sha256 "SUM"
+GF
+}
+
+@test "copy-out: a missing install ISO does not abort the stream; raw and bundle/ both land (run 24)" {
+    scratch_build_disk
+    source "$IMAGE/lib/copy-out.sh"
+    mkdir -p "$T/dest"
+    run qdistro_copy_out "$T/build.img" "$T/dest"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/out/*.install.iso"* ]]      # the ignored error is still reported
+    [ "$(cat "$T/dest/qdistro.x86_64-0.1.0.raw")" = RAW ]
+    [ "$(cat "$T/dest/bundle/qdistro-0.1.0-20260902.raw.xz")" = XZ ]
+    [ -f "$T/dest/bundle/qdistro-0.1.0-20260902.raw.xz.sha256" ]
+    [ "$(cat "$T/dest/qdistro.x86_64-0.1.0.packages")" = PKG ]
+    [ ! -e "$T/dest/install.iso" ]
+    # the driver keeps its own error handling: the call is `|| true` inside
+    # the retry loop, and the size checks decide
+    grep -q 'qdistro_copy_out "\$BUILD_DISK" "\$HOST_BUILD_DIR" 2>>"\$LOGS/copy-out.log" || true' "$IMAGE/build-in-vm.sh"
+    ! grep -q '^glob copy-out /out/\*.install.iso' "$IMAGE/build-in-vm.sh"
+}
+
+@test "copy-out: a missing bundle/ IS a failure (required), and unsafe paths are refused" {
+    scratch_build_disk
+    guestfish -a "$T/build.img" -m /dev/sda <<'GF' >/dev/null 2>&1
+rm-rf /out/bundle
+GF
+    source "$IMAGE/lib/copy-out.sh"
+    mkdir -p "$T/dest" "$T/de st"
+    run qdistro_copy_out "$T/build.img" "$T/dest"
+    [ "$status" -ne 0 ]
+    [ "$(cat "$T/dest/qdistro.x86_64-0.1.0.raw")" = RAW ]   # the raw before it still copied
+    [ ! -e "$T/dest/bundle" ]
+    run qdistro_copy_out "$T/build.img" "$T/de st"
+    [ "$status" -eq 2 ]; [[ "$output" == *"refusing path"* ]]
+    run qdistro_copy_out "$T/build.img" "$T/nonexistent"
+    [ "$status" -eq 2 ]; [[ "$output" == *"not a directory"* ]]
 }
 
 @test "ci image gate: with no install ISO the install stages are recorded as skipped, not run" {

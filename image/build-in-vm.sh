@@ -582,16 +582,15 @@ export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 rm -f "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/*.packages \
       "$HOST_BUILD_DIR"/*.changes "$HOST_BUILD_DIR"/*.verified
 rm -rf "$HOST_BUILD_DIR/bundle"
+# image/lib/copy-out.sh: the raw and bundle/ are required, the ISO and the
+# small result files optional (`-` prefix), because guestfish aborts the
+# whole stream at the first failing command and a no-match glob is one --
+# run 24 lost its bundle to the ISO glob. Its status is deliberately not
+# fatal here: the size checks below decide, and the loop retries.
+. "$HERE/lib/copy-out.sh"
 copied=0
 for attempt in $(seq 1 6); do
-    guestfish --ro -a "$BUILD_DISK" -m /dev/sda <<EOF 2>>"$LOGS/copy-out.log"
-glob copy-out /out/*.raw $HOST_BUILD_DIR/
-glob copy-out /out/*.install.iso $HOST_BUILD_DIR/
-glob copy-out /out/*.packages $HOST_BUILD_DIR/
-glob copy-out /out/*.changes $HOST_BUILD_DIR/
-glob copy-out /out/*.verified $HOST_BUILD_DIR/
-copy-out /out/bundle $HOST_BUILD_DIR/
-EOF
+    qdistro_copy_out "$BUILD_DISK" "$HOST_BUILD_DIR" 2>>"$LOGS/copy-out.log" || true
     host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
     host_iso="$(ls "$HOST_BUILD_DIR"/*.install.iso 2>/dev/null | head -1)"
     host_xz="$HOST_BUILD_DIR/bundle/$XZ_NAME"
