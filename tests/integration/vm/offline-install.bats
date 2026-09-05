@@ -23,7 +23,7 @@ setup() {
     # call), so an installer added to the array is in the walk or the count
     # check goes red.
     local n_array
-    n_array=$(awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -cE '^\s*"scripts/install/install-[a-z0-9-]+\.sh')
+    n_array=$(awk '/^INSTALLERS=\(/,/^\)/' "$CONFIG_SH" | grep -oE '^\s*"scripts/install/install-[a-z0-9-]+\.sh' | sort -u | wc -l)
     if [ "$(printf '%s\n' "$CHAIN" | wc -l)" -ne $(( n_array + 1 )) ] || [ "$n_array" -lt 10 ]; then
         echo "chain parse mismatch: array=$n_array parsed: $CHAIN" >&2; return 1
     fi

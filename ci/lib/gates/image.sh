@@ -51,12 +51,16 @@ gate_image() {
         return "$EXIT_BUILD"
     fi
     [ "$nraws" = 1 ] && raw="$(ls "$build_dir"/*.raw)"
-    if [ -z "$static_root" ] && [ -n "$raw" ] && [ -x "$IMAGE_DIR/extract-root.sh" ]; then
+    # `extracted_fresh` is the FACT that Stage B keys on (not the path string
+    # of $static_root, which a stale fallback tree would also satisfy).
+    local extracted_fresh=0
+    if [ -z "$static_root" ] && [ -n "$raw" ] && [ -f "$IMAGE_DIR/extract-root.sh" ]; then
         local ex_log="$RDIR/host/image-extract-root.log"
         mkdir -p "$(dirname "$ex_log")"
         log "image: extracting checklist paths from $raw"
         if QDISTRO_BUILD_DIR="$build_dir" bash "$IMAGE_DIR/extract-root.sh" "$raw" > "$ex_log" 2>&1; then
             static_root="$build_dir/extracted"
+            extracted_fresh=1
         else
             record_result image extract-root fail "$EXIT_BUILD" build image "$ex_log" "could not extract the built raw for inspection (image/extract-root.sh needs guestfish/libguestfs; see $ex_log)"
             return "$EXIT_BUILD"
@@ -110,8 +114,8 @@ gate_image() {
     # and any bootable file, so booting one would judge two different
     # artifacts as if they were one (round-4 review); that case is BLOCKED
     # with the reason, not silently booted.
-    local have_image=0 img=""
-    if [ -z "$root" ] && [ -n "$raw" ] && [ "$static_root" = "$build_dir/extracted" ]; then
+    local img=""
+    if [ -z "$root" ] && [ -n "$raw" ] && [ "$extracted_fresh" = 1 ]; then
         img="$raw"
     fi
     if [ -z "$img" ]; then
@@ -125,14 +129,11 @@ gate_image() {
         fi
         return "$rc"
     fi
-    have_image=1
     local have_virsh=0
     command -v virsh >/dev/null 2>&1 && "${VIRSH[@]}" list >/dev/null 2>&1 && have_virsh=1
 
-    if [ "$have_image" = 0 ] || [ "$have_virsh" = 0 ]; then
-        local why="needs VM/image:"
-        [ "$have_image" = 0 ] && why="$why no built image in $build_dir;"
-        [ "$have_virsh" = 0 ] && why="$why libvirt session unavailable;"
+    if [ "$have_virsh" = 0 ]; then
+        local why="needs VM: libvirt session unavailable;"
         record_blocked image verify.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
         record_blocked image install-test.sh "$EXIT_VM_PROVISION" image "$why run image/build-in-vm.sh on a test machine"
         if [ "$idempotency" = 1 ]; then

@@ -348,7 +348,7 @@ passwd_file="$(file_in_image "$ROOT/etc/passwd" 2>/dev/null || true)"
 if [ -n "$passwd_file" ] && grep -qE '^admin:[^:]*:1000:' "$passwd_file"; then
     printf 'OK   %s: %s\n' "admin uid 1000 in passwd" "$ROOT/etc/passwd"
     REQUIRED_OK=$((REQUIRED_OK + 1))
-elif in_image "$ROOT/etc"; then
+elif entry="$(entry_in_image "$ROOT/etc")" && { [ -e "$entry" ] || [ -L "$entry" ]; }; then
     # /etc is in this tree, so passwd should have been found as a regular
     # in-image file with the admin line; falling back to the home dir here
     # would let a passwd that is a symlink into the host pass (round-4).
@@ -548,8 +548,9 @@ check_req "[print-proxy] proxy binary" /usr/local/bin/qdistro-print-proxy
 check_req "[print-proxy] polkit action" /usr/share/polkit-1/actions/org.qdistro.print.policy
 check_req "[print-proxy] VM template"  /usr/share/qdistro/print-vm/domain-template.xml
 check_link "[print-proxy] enabled"     /etc/systemd/system/multi-user.target.wants/qdistro-print-proxy.service
-# Installed only when a source manifest exists and /etc has none yet.
-check_opt "[print-proxy] manifest"     /etc/qdistro/printvm-manifest.json
+# The source manifest is tracked and a fresh image has no /etc copy, so the
+# installer always drops it.
+check_req "[print-proxy] manifest"     /etc/qdistro/printvm-manifest.json
 check_req "[snapshots] backup unit"    /etc/systemd/system/qdistro-backup.service
 check_req "[snapshots] backup timer"   /etc/systemd/system/qdistro-backup.timer
 check_req "[snapshots] service module" /usr/libexec/qdistro/qdistro_backup_service.py
