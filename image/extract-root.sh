@@ -11,9 +11,20 @@
 # the 20 GiB image); add a path here when a checklist row needs one.
 set -euo pipefail
 BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
-RAW="${1:-$(ls "$BUILD_DIR"/*.raw 2>/dev/null | head -1)}"
+if [ -n "${1:-}" ]; then
+    RAW="$1"
+else
+    # Exactly one raw may be inferred; two would make "which build?" a
+    # lexical accident (round-2 review). Pass the path explicitly otherwise.
+    mapfile -t _raws < <(ls "$BUILD_DIR"/*.raw 2>/dev/null)
+    case "${#_raws[@]}" in
+        1) RAW="${_raws[0]}" ;;
+        0) echo "extract-root: no .raw under $BUILD_DIR" >&2; exit 2 ;;
+        *) echo "extract-root: ${#_raws[@]} .raw files under $BUILD_DIR; pass the one to inspect explicitly: ${_raws[*]}" >&2; exit 2 ;;
+    esac
+fi
 DEST="${2:-$BUILD_DIR/extracted}"
-[ -n "$RAW" ] && [ -f "$RAW" ] || { echo "extract-root: no such raw: ${RAW:-<none under $BUILD_DIR>}" >&2; exit 2; }
+[ -f "$RAW" ] || { echo "extract-root: no such raw: $RAW" >&2; exit 2; }
 # The destination is WIPED (rm -rf) below, so it must be a child of the
 # build dir -- never an arbitrary caller path -- and both paths go into a
 # generated guestfish command stream, so refuse characters that could split

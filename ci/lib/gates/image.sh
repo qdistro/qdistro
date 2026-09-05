@@ -43,8 +43,14 @@ gate_image() {
     # older extracted tree must never be inspected in place of a newer raw
     # (Phase B review): a rebuilt-broken raw next to yesterday's clean tree
     # would otherwise pass.
-    local raw
-    raw="$(ls "$build_dir"/*.raw 2>/dev/null | head -1)"
+    local raw="" nraws
+    nraws="$(ls "$build_dir"/*.raw 2>/dev/null | wc -l)"
+    if [ "$nraws" -gt 1 ] && [ -z "$static_root" ]; then
+        # Two raws make "the built artifact" ambiguous; never pick one by name.
+        record_result image extract-root fail "$EXIT_BUILD" build image "" "$nraws .raw files under $build_dir; cannot tell which was built -- pass --root or remove the stale one"
+        return "$EXIT_BUILD"
+    fi
+    [ "$nraws" = 1 ] && raw="$(ls "$build_dir"/*.raw)"
     if [ -z "$static_root" ] && [ -n "$raw" ] && [ -x "$IMAGE_DIR/extract-root.sh" ]; then
         local ex_log="$RDIR/host/image-extract-root.log"
         mkdir -p "$(dirname "$ex_log")"

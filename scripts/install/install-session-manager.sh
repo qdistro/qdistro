@@ -224,7 +224,7 @@ sd_enable_now qdistro-session-manager.service
 # stopped one — so it restarts whatever `enable --now` just left running,
 # which on a first install is a cheap second start and on an upgrade is the
 # whole point. Mirrors install-user-relay-for-vm.sh, which already did this.
-sd_try_restart qdistro-session-manager.service 2>/dev/null || true
+sd_try_restart qdistro-session-manager.service || true
 
 if is_offline; then
     echo "[offline] skipped (needs a running system bus): probe org.qdistro.SessionManager1"

@@ -68,13 +68,37 @@ REQUIRED_OK=0
 OPT_TOTAL=0
 OPT_OK=0
 
+# in_image <path> — the artifact exists IN THE IMAGE. A plain file: `-e`. A
+# symlink: its target is resolved the way the booted image would resolve it
+# (absolute -> under $ROOT, relative -> against the link's directory),
+# canonicalised, required to stay inside $ROOT, and required to exist. A
+# bare `-e` would follow an absolute link in the HOST namespace, so
+# `usr/bin/qdlocker -> /bin/sh` in a tree with no bin/sh would pass (round-2
+# review); `..` escapes are refused for the same reason. Never a host lookup.
+in_image() {
+    local p=$1 target resolved
+    if [ ! -L "$p" ]; then
+        [ -e "$p" ]
+        return
+    fi
+    target="$(readlink "$p")"
+    case "$target" in
+        /*) resolved="$ROOT/${target#/}" ;;
+        *)  resolved="$(dirname "$p")/$target" ;;
+    esac
+    resolved="$(realpath -m -- "$resolved")"
+    case "$resolved" in
+        "$ROOT"/*) [ -e "$resolved" ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # check_req <label> <test-expr-as-path> — a path under $ROOT that must exist
-# (a dangling symlink does NOT count: `-e` follows it; see check_link for
-# the wants-links, which legitimately dangle when read from the host).
+# in the image (see in_image for what a symlink has to satisfy).
 check_req() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
-    if [ -e "$full" ]; then
+    if in_image "$full"; then
         printf 'OK   %s: %s\n' "$label" "$full"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
@@ -91,7 +115,7 @@ check_req_any() {
     for rel in "$@"; do
         full="$ROOT/${rel#/}"
         tried+=("$full")
-        if [ -e "$full" ]; then
+        if in_image "$full"; then
             printf 'OK   %s: %s\n' "$label" "$full"
             REQUIRED_OK=$((REQUIRED_OK + 1))
             hit=1
@@ -108,7 +132,7 @@ check_req_any() {
 check_opt() {
     local label=$1 rel=$2 full="$ROOT/${2#/}"
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    if [ -e "$full" ]; then
+    if in_image "$full"; then
         printf 'OK   %s: %s\n' "$label" "$full"
         OPT_OK=$((OPT_OK + 1))
     else
@@ -121,24 +145,30 @@ check_glob_req() {
     local label=$1 glob=$2
     REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
     # shellcheck disable=SC2086
-    local matches
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -5)
-    if [ -n "$matches" ]; then
-        printf 'OK   %s: %s\n' "$label" "$(echo "$matches" | head -1)"
+    local matches m hit=""
+    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -20)
+    for m in $matches; do
+        if in_image "$m"; then hit="$m"; break; fi
+    done
+    if [ -n "$hit" ]; then
+        printf 'OK   %s: %s\n' "$label" "$hit"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
-        printf 'MISS %s: %s\n' "$label" "$ROOT/${glob#/}"
+        printf 'MISS %s: %s%s\n' "$label" "$ROOT/${glob#/}" "${matches:+ (matches exist but none resolves in the image)}"
         FAIL=1
     fi
 }
 
 # check_glob_opt <label> <glob-under-root> — optional glob
 check_glob_opt() {
-    local label=$1 glob=$2 matches
+    local label=$1 glob=$2 matches m hit=""
     OPT_TOTAL=$((OPT_TOTAL + 1))
-    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -5)
-    if [ -n "$matches" ]; then
-        printf 'OK   %s: %s\n' "$label" "$(echo "$matches" | head -1)"
+    matches=$(compgen -G "$ROOT/${glob#/}" 2>/dev/null | head -20)
+    for m in $matches; do
+        if in_image "$m"; then hit="$m"; break; fi
+    done
+    if [ -n "$hit" ]; then
+        printf 'OK   %s: %s\n' "$label" "$hit"
         OPT_OK=$((OPT_OK + 1))
     else
         printf 'WARN %s (optional): %s\n' "$label" "$ROOT/${glob#/}"
@@ -174,15 +204,11 @@ check_link() {
         return
     fi
     target="$(readlink "$full")"
-    case "$target" in
-        /*) resolved="$ROOT/${target#/}" ;;
-        *)  resolved="$(dirname "$full")/$target" ;;
-    esac
-    if [ -e "$resolved" ]; then
+    if in_image "$full"; then
         printf 'OK   %s: %s -> %s\n' "$label" "$full" "$target"
         REQUIRED_OK=$((REQUIRED_OK + 1))
     else
-        printf 'MISS %s: %s -> %s (target absent in image)\n' "$label" "$full" "$target"
+        printf 'MISS %s: %s -> %s (target absent in image or escapes it)\n' "$label" "$full" "$target"
         FAIL=1
     fi
 }
@@ -274,10 +300,10 @@ check_link "greetd enabled (display-manager alias)" \
 # greeter-started target pulls them in (findings #15, #16). The target
 # itself is started transiently by the launcher, not enabled under
 # default.target.
-check_glob_req "qdshell wired into qdwin-session.target.wants" \
-    "/home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service"
-check_glob_req "qdlocker wired into qdwin-session.target.wants" \
-    "/home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service"
+check_link "qdshell wired into qdwin-session.target.wants" \
+    /home/admin/.config/systemd/user/qdwin-session.target.wants/qdshell.service
+check_link "qdlocker wired into qdwin-session.target.wants" \
+    /home/admin/.config/systemd/user/qdwin-session.target.wants/qdlocker.service
 
 echo
 echo "-- SELinux policy modules / files --"
@@ -346,6 +372,7 @@ check_req "[broker] bus policy"        /etc/dbus-1/system.d/org.qdistro.AdminBro
 check_req "[broker] daemon module"     /usr/libexec/qdistro/qdistro_admin_broker.py
 check_link "[broker] enabled"          /etc/systemd/system/multi-user.target.wants/qdistro-admin-broker.service
 check_link "[broker] dbus-reload enabled" /etc/systemd/system/multi-user.target.wants/qdistro-dbus-reload.service
+check_link "[broker] dbus-reload wanted by broker" /etc/systemd/system/qdistro-admin-broker.service.wants/qdistro-dbus-reload.service
 check_req "[user-relay] bus policy"    /etc/dbus-1/system.d/org.qdistro.UserRelay.conf
 check_req "[session-manager] unit"     /etc/systemd/system/qdistro-session-manager.service
 check_req "[session-manager] bus policy" /etc/dbus-1/system.d/org.qdistro.SessionManager1.conf
@@ -384,7 +411,16 @@ check_req "[multimachine] session launcher (last drop)" /usr/local/bin/qdistro-m
 check_req "[multimachine] rdp client wrapper"  /usr/local/bin/qdistro-mm-rdp-client-wrapper
 check_req "[browser-bridge] host module" /usr/libexec/qdistro/qdistro_browser_bridge.py
 check_req "[browser-bridge] downloads user unit" /etc/systemd/user/qdistro-downloads.service
-check_link "[browser-bridge] session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-downloads.service
+# `systemctl --global enable` of the four browser daemons writes two links
+# each (WantedBy=default.target and qdwin-session.target): all eight.
+check_link "[browser-bridge] downloads: session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-downloads.service
+check_link "[browser-bridge] downloads: default wants link" /etc/systemd/user/default.target.wants/qdistro-downloads.service
+check_link "[browser-bridge] mpris: session wants link"     /etc/systemd/user/qdwin-session.target.wants/qdistro-mpris.service
+check_link "[browser-bridge] mpris: default wants link"     /etc/systemd/user/default.target.wants/qdistro-mpris.service
+check_link "[browser-bridge] notifications: session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-notifications.service
+check_link "[browser-bridge] notifications: default wants link" /etc/systemd/user/default.target.wants/qdistro-notifications.service
+check_link "[browser-bridge] compositor: session wants link" /etc/systemd/user/qdwin-session.target.wants/qdistro-compositor.service
+check_link "[browser-bridge] compositor: default wants link" /etc/systemd/user/default.target.wants/qdistro-compositor.service
 check_req "[portal-backend] backend module" /usr/lib/qdistro/daemons/qdistro_portal_backend.py
 check_req "[portal-backend] user unit"  /etc/systemd/user/qdistro-portal-backend.service
 check_req "[portal-backend] portal"     /usr/share/xdg-desktop-portal/portals/qdistro.portal

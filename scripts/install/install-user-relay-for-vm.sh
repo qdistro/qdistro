@@ -101,7 +101,7 @@ if [ -z "$DESTDIR" ]; then
     # — it never starts a dormant uid's relay, which is
     # qdshell-session-launcher's job. Best-effort: on a first install
     # there is nothing to restart.
-    sd_try_restart 'qdistro-user-relay@*.service' 2>/dev/null || true
+    sd_try_restart 'qdistro-user-relay@*.service' || true
 fi
 
 echo "qdistro-user-relay template installed; start per-uid with: systemctl start qdistro-user-relay@<uid>.service"

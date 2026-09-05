@@ -191,12 +191,15 @@ install -m 0644 "$SRC/qdistro-pwd.service"   "$DEST_SYSD/qdistro-pwd.service"
 # Phase-8.4: load the qdistro_pwd SELinux module if a pwd-policy
 # directory was staged alongside the source tree. install-policy.sh
 # is idempotent and SKIPs cleanly when selinux-policy-devel is absent.
+# An ATTEMPTED install that fails is an install failure (Phase B: no
+# fail-open on the confinement layer); install-policy.sh's own clean SKIP
+# when selinux-policy-devel is absent still exits 0.
 if [ -d "$SRC/../pwd-policy" ] && [ -f "$SRC/../pwd-policy/install-policy.sh" ]; then
-    bash "$SRC/../pwd-policy/install-policy.sh" || \
-        echo "[install-pwd] WARN: pwd-policy install failed (non-fatal)" >&2
+    bash "$SRC/../pwd-policy/install-policy.sh" || {
+        echo "[install-pwd] ERROR: pwd-policy install failed" >&2; exit 5; }
 elif [ -d /root/pwd-policy ] && [ -f /root/pwd-policy/install-policy.sh ]; then
-    bash /root/pwd-policy/install-policy.sh || \
-        echo "[install-pwd] WARN: pwd-policy install failed (non-fatal)" >&2
+    bash /root/pwd-policy/install-policy.sh || {
+        echo "[install-pwd] ERROR: pwd-policy install failed" >&2; exit 5; }
 fi
 
 # Reload + enable. The qdistro-dbus-reload.service oneshot has
