@@ -51,7 +51,38 @@
 # thing that can take it away. Scoped to the compositor VT only: tty1 and
 # tty5+ are untouched.
 #
-# Usage: harden-compositor-vt.sh [greetd-config.toml]
+# OFFLINE ROOTS
+# -------------
+# Also runs inside the kiwi chroot (image/config.sh), where no system manager
+# is running. There the mask symlinks are still written into the image's /etc
+# and are what the booted image obeys, so the guarantee is unchanged; only the
+# runtime probes (stop / is-active) are skipped, because in a chroot systemd
+# answers them with a no-op and exit 0 rather than the truth.
+#
+# LIVE IS THE DEFAULT, AND OFFLINE CANNOT BE ASSERTED INTO EXISTENCE.
+# Skipping the runtime probes on a LIVE system would be a security hole: a
+# getty already running on the compositor VT holds it with a reset keyboard
+# until reboot, and masking does not stop a running instance. So offline
+# mode needs BOTH a request and corroboration, and the corroboration is
+# positive evidence of a chroot, never mere absence of systemd:
+#   * `--offline` (an argument, which is not inherited by accident) is a
+#     caller assertion that must be CORROBORATED by this root; if it is not,
+#     that is a caller bug and we exit 2 rather than skip a check.
+#   * QDISTRO_OFFLINE_INSTALL=1 (Phase B's environment contract, which CAN
+#     leak) is only a request. Corroborated, it selects offline; not
+#     corroborated, it is ignored with a warning and the live probes run.
+#   * With neither, the live probes ALWAYS run. Detection alone never
+#     selects offline: a caller that wants the offline branch must say so.
+# Corroboration means `systemd-detect-virt --chroot` with a real /proc/1 to
+# compare against (PID 1's root is not this root; kiwi bind-mounts the
+# builder's /proc into the image root before config.sh runs, so this answers
+# there). Nothing absence-based counts: no /proc, no /run/systemd/system and
+# `systemctl is-system-running` = offline are each reproducible on a live
+# machine by hiding a mount or running a non-systemd PID 1, so a chroot
+# without /proc is refused (exit 2) rather than guessed at. A live system in
+# `degraded`, `starting` or `maintenance` is live.
+#
+# Usage: harden-compositor-vt.sh [--offline] [greetd-config.toml]
 #   Reads the compositor VT from `[terminal] vt = N`. Defaults to
 #   /etc/greetd/config.toml.
 # Exit: 0 on success, 1 if the VT is still not exclusively the compositor's
@@ -63,7 +94,18 @@
 
 set -uo pipefail
 
-CFG="${1:-/etc/greetd/config.toml}"
+CFG=""
+OFFLINE_ASSERTED=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --offline) OFFLINE_ASSERTED=1 ;;
+        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+        -*) printf '[harden-vt] WARN: unknown option: %s\n' "$1" >&2 ;;
+        *)  CFG="$1" ;;
+    esac
+    shift
+done
+CFG="${CFG:-/etc/greetd/config.toml}"
 
 log()  { printf '[harden-vt] %s\n' "$*"; }
 warn() { printf '[harden-vt] WARN: %s\n' "$*" >&2; }
@@ -163,14 +205,72 @@ log "compositor VT is tty$VT (from $CFG)"
 
 UNITS="getty@tty$VT.service autovt@tty$VT.service"
 
-# Stop first: masking an already-running instance leaves it running (and
-# holding the VT with a reset keyboard) until the next boot.
-for unit in $UNITS; do
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
-        log "stopping $unit (it is holding the compositor VT)"
-        systemctl stop "$unit" 2>/dev/null || warn "could not stop $unit"
+# Offline root (the kiwi chroot in image/config.sh, or any chroot whose / is
+# the target and whose PID 1 is not running)? Then runtime state does not
+# exist yet and CANNOT be probed: inside a chroot systemd prints "Running in
+# chroot, ignoring command 'is-active'" and exits **0**, so `is-active
+# --quiet` reports every unit as running. That false positive aborted the
+# first in-repo image build (iso/14 Phase A). In that case assert the
+# persistent state instead — which is the only thing that governs what the
+# built image does when it actually boots.
+#
+# offline_root() is the CORROBORATION for an explicit request; it is never
+# consulted without one (see the header). It returns 0 only on positive
+# evidence that this root is a chroot, not on the absence of a manager.
+offline_root() {
+    # `systemd-detect-virt --chroot` compares PID 1's root with ours, but it
+    # also answers "chroot" when /proc is simply not mounted -- which is an
+    # absence, not evidence (round-3 review: a live root with a tmpfs over
+    # /proc passed). So the verdict counts only when there IS a PID 1 to
+    # compare against. There is no fallback for a chroot without /proc: that
+    # case fails closed (exit 2 on --offline), because every absence-based
+    # rule -- no /proc, no /run/systemd/system, `is-system-running` = offline
+    # -- is reproducible on a live machine by hiding the same two mounts.
+    # kiwi bind-mounts the builder's /proc into the image root before
+    # config.sh runs (RootBind.mount_kernel_file_systems), so the image build
+    # is corroborated by construction.
+    [ -e /proc/1/comm ] || return 1
+    systemd-detect-virt --chroot --quiet 2>/dev/null && return 0
+    return 1
+}
+
+OFFLINE=0
+if [ "$OFFLINE_ASSERTED" = 1 ]; then
+    if offline_root; then
+        OFFLINE=1
+    else
+        # --offline is a caller assertion about the root it is pointed at.
+        # Being wrong about that would silently skip the live checks, so
+        # refuse. This also covers a chroot with the host's /run bind-mounted
+        # (the host manager answers, so the chroot is not corroborated).
+        warn "--offline was given, but this root is not corroborated as a chroot"
+        warn "refusing to skip the runtime checks on a possibly live system"
+        exit 2
     fi
-done
+elif [ "${QDISTRO_OFFLINE_INSTALL:-0}" = 1 ]; then
+    if offline_root; then
+        OFFLINE=1
+    else
+        warn "QDISTRO_OFFLINE_INSTALL=1 in the environment, but this root is not"
+        warn "corroborated as a chroot; ignoring it and running the live checks"
+    fi
+fi
+
+if [ "$OFFLINE" = 1 ]; then
+    log "offline root (corroborated chroot, no running system manager): masking only, runtime probes skipped"
+fi
+
+# Stop first: masking an already-running instance leaves it running (and
+# holding the VT with a reset keyboard) until the next boot. Nothing runs in
+# an offline root, and `stop` there is the same chroot no-op as `is-active`.
+if [ "$OFFLINE" = 0 ]; then
+    for unit in $UNITS; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            log "stopping $unit (it is holding the compositor VT)"
+            systemctl stop "$unit" 2>/dev/null || warn "could not stop $unit"
+        fi
+    done
+fi
 
 # `systemctl mask` is idempotent (it reports "Created symlink" only the first
 # time) and upgrades a runtime-only mask to a persistent one. Disable first so
@@ -192,7 +292,19 @@ for unit in $UNITS; do
         warn "$unit is '$state', expected 'masked' — a login prompt can still take tty$VT"
         rc=1
     fi
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    # A mask is a symlink to /dev/null. Assert the artifact directly rather
+    # than trusting systemctl's answer: in an offline root `is-enabled` is
+    # the only one of these that reads the filesystem, and this check holds
+    # in both modes, so the mask is verified the same way either way.
+    link="$(readlink "/etc/systemd/system/$unit" 2>/dev/null || true)"
+    if [ "$link" != "/dev/null" ]; then
+        warn "/etc/systemd/system/$unit is not a mask symlink to /dev/null (got '${link:-none}')"
+        rc=1
+    fi
+    # Runtime state is real only where a system manager is running. Offline,
+    # there is nothing running to check and systemd answers 0 to every such
+    # question; the boot-time guarantee rests on the mask asserted above.
+    if [ "$OFFLINE" = 0 ] && systemctl is-active --quiet "$unit" 2>/dev/null; then
         warn "$unit is still active on the compositor VT"
         rc=1
     fi

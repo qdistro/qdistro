@@ -41,7 +41,7 @@ REQUIRED item is missing, 2 on a bad/nonexistent root path.
 
 Examples:
   $PROG /mnt/qdistro-root
-  $PROG /tmp/qdistro-build/extracted
+  $PROG /var/tmp/qdistro-build/extracted
 EOF
 }
 

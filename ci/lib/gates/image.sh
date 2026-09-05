@@ -25,7 +25,7 @@ gate_image() {
     done
 
     local checker="$IMAGE_DIR/verify-contents.sh"
-    local build_dir="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+    local build_dir="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
     kv image_build_dir "$build_dir"
     [ -n "$root" ] && kv image_static_root "$root"
 

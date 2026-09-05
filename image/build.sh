@@ -18,8 +18,12 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SIBLINGS="$(cd "$HERE/.." && pwd)"
-BUILD_DIR="${QDISTRO_BUILD_DIR:-/tmp/qdistro-build}"
+# $HERE is <repo>/image, so the sibling-repo root is two levels up, not one
+# (iso/14 Phase A item 2). The one-level form predates the import of image/
+# into the qdistro repo and made every in-repo build fail its sibling check.
+SIBLINGS="$(cd "$HERE/../.." && pwd)"
+# /tmp is a tmpfs on the build hosts; a kiwi run does not fit in RAM.
+BUILD_DIR="${QDISTRO_BUILD_DIR:-/var/tmp/qdistro-build}"
 SRC_OVERLAY="$HERE/root/root/qdistro-src"  # ends up at /root/qdistro-src in image
 
 sync_sources() {
@@ -34,12 +38,35 @@ sync_sources() {
             exit 2
         fi
         echo "[build] rsyncing $repo -> $SRC_OVERLAY/$repo"
+        # Leading slashes anchor these at the repo root: an unanchored
+        # `ci/runs` would also drop an unrelated `anything/ci/runs`.
+        #   /image/root/root — with the corrected $SIBLINGS the qdistro repo
+        #     contains this very overlay, so an unfiltered sync copies the
+        #     destination into itself.
+        #   /image/logs — build logs, each holding the tarball of a previous
+        #     run (which holds the run before it). Left in, they made the
+        #     overlay 169 MB of stale nested tarballs and shipped them to
+        #     /root/qdistro-src in the image, differing run to run.
+        #   /ci/runs — gigabytes of untracked CI run artifacts in a working
+        #     checkout; never part of the image.
+        # Excluded paths are also protected from --delete, so debris left by
+        # an earlier unfiltered sync would survive forever: clear it first.
+        rm -rf "$SRC_OVERLAY/$repo/image/root/root" \
+               "$SRC_OVERLAY/$repo/image/logs" \
+               "$SRC_OVERLAY/$repo/ci/runs"
+        # `build`, `node_modules`, `__pycache__` and `*.pyc` stay UNanchored on
+        # purpose: they are build products at any depth (meson/cmake build
+        # dirs, vendored JS). No tracked path in the five repos is named
+        # `build` today, so nothing shipped is dropped by that.
         rsync -a --delete \
               --exclude=.git \
               --exclude=__pycache__ \
               --exclude='*.pyc' \
               --exclude=build \
               --exclude=node_modules \
+              --exclude=/image/root/root \
+              --exclude=/image/logs \
+              --exclude=/ci/runs \
               "$SIBLINGS/$repo/" "$SRC_OVERLAY/$repo/"
     done
     echo "[build] source overlay sizes:"
