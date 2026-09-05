@@ -14,8 +14,10 @@
 #   4. Starts the VM, waits for qga.
 #   5. Inside the VM: zypper in python3-kiwi + systemdeps, format/mount
 #      /dev/vdb as /build, run kiwi-ng system build.
-#   6. virt-copy-out the resulting .raw / .install.iso back to the host
-#      $BUILD_DIR.
+#   6. Copy the resulting .raw and the release bundle (.raw.xz + .sha256,
+#      named <name>-<version>-<snapshot>) back to the host $BUILD_DIR, then
+#      prove the bundle: name, `xz -t`, decompressed size == config.xml
+#      <size>, checksum (todo/iso/14 Phase C).
 #   7. (Default) keeps the VM around for re-runs; --teardown wipes it.
 #
 # Pattern lineage: qdistro/scripts/vm/clone-baseweed.sh +
@@ -107,25 +109,20 @@ log "syncing sources into the overlay"
 bash "$HERE/build.sh" --sync-only 2>&1 | tee "$LOGS/sync.log"
 [ -d "$HERE/root/root/qdistro-src" ] || die "sync did not produce $HERE/root/root/qdistro-src"
 
-# Record what went in, so a built artifact can be traced to five commits.
-# Best-effort: a synced-from-tarball tree has no .git.
-SIBLINGS="$(cd "$HERE/../.." && pwd)"
-# "DIRTY" alone cannot distinguish two different uncommitted states on the
-# same parent, so a dirty tree also records the sha256 of its diff against
-# HEAD (tracked changes; untracked files are listed by count).
-for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
-    if [ -d "$SIBLINGS/$repo/.git" ]; then
-        if git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -q .; then
-            state="DIRTY diff-sha256=$(git -C "$SIBLINGS/$repo" diff HEAD 2>/dev/null | sha256sum | cut -c1-16) untracked=$(git -C "$SIBLINGS/$repo" status --porcelain 2>/dev/null | grep -c '^??')"
-        else
-            state=clean
-        fi
-        printf '%-10s %s %s\n' "$repo" \
-            "$(git -C "$SIBLINGS/$repo" rev-parse HEAD 2>/dev/null || echo unknown)" "$state"
-    else
-        printf '%-10s %s\n' "$repo" "no-git"
-    fi
-done | tee "$LOGS/sources.txt"
+# What went in: the source manifest sync_sources just wrote (five commits with
+# clean/DIRTY state, plus the pinned Tumbleweed snapshot). The same file rides
+# into the chroot and becomes /etc/qdistro/release, so the log and the image
+# agree by construction.
+MANIFEST="$HERE/root/root/qdistro-source-manifest"
+[ -s "$MANIFEST" ] || die "sync did not write $MANIFEST"
+cp "$MANIFEST" "$LOGS/sources.txt"
+cat "$LOGS/sources.txt"
+SNAPSHOT="$(bash "$HERE/build.sh" --snapshot-id)" || die "config.xml snapshot pin is inconsistent"
+IMAGE_VERSION="$(sed -n 's|.*<version>\([0-9][0-9.]*\)</version>.*|\1|p' "$HERE/config.xml" | head -n1)"
+IMAGE_SIZE_MB="$(sed -n 's|.*<size unit="M">\([0-9]*\)</size>.*|\1|p' "$HERE/config.xml" | head -n1)"
+[ -n "$IMAGE_VERSION" ] && [ -n "$IMAGE_SIZE_MB" ] || die "config.xml: could not read <version> or <size unit=\"M\">"
+XZ_NAME="qdistro-$IMAGE_VERSION-$SNAPSHOT.raw.xz"
+log "release artifact will be $XZ_NAME (raw $IMAGE_SIZE_MB MiB, Tumbleweed $SNAPSHOT)"
 
 # The clone below is --from-baked, so baseweed-baked.qcow2 is the image that
 # must exist; baseweed.qcow2 is not used by this path (iso/14 Phase A item 4).
@@ -326,7 +323,9 @@ KIWI_TRIES="${QDISTRO_KIWI_TRIES:-3}"
 # Run 16: a cold-cache attempt was still partitioning at 1500s, so 1500 was too
 # tight and killed a working build. The budget is a backstop against a wedge the
 # stall guard cannot see, not a performance expectation -- keep it generous.
-KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-2700}"
+# Phase C added the bundle step (xz -T0 of the 28 GiB raw) to the same
+# attempt; the ISO's mksquashfs -comp xz it replaced cost about as much.
+KIWI_ATTEMPT_BUDGET_S="${QDISTRO_KIWI_ATTEMPT_BUDGET_S:-3300}"
 # Minimum CPU ticks (100/s per core) the build tree must burn in a sample for it
 # to count as alive. 100 = 1 CPU-second per 15s poll, ~7% of one core: far below
 # mksquashfs or rpm, far above a stalled socket.
@@ -523,11 +522,13 @@ fi
 log "build artifacts in VM:"
 vmx 'ls -lh /build/out/' | tee "$LOGS/artifacts.txt"
 # Exact byte sizes, so the copy-out below can prove it copied THIS build.
-vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified 2>/dev/null' \
+vmx 'cd /build/out && stat -c "%s %n" *.raw *.install.iso *.packages *.changes *.verified bundle/* 2>/dev/null' \
     > "$LOGS/artifact-sizes.txt" 2>/dev/null || true
 IN_VM_RAW_SIZE="$(awk '$2 ~ /\.raw$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 IN_VM_ISO_SIZE="$(awk '$2 ~ /\.install\.iso$/ { print $1; exit }' "$LOGS/artifact-sizes.txt")"
+IN_VM_XZ_SIZE="$(awk -v n="bundle/$XZ_NAME" '$2 == n { print $1; exit }' "$LOGS/artifact-sizes.txt")"
 [ -n "$IN_VM_RAW_SIZE" ] || die "no .raw in /build/out despite kiwi exit 0 (see $LOGS/artifacts.txt)"
+[ -n "$IN_VM_XZ_SIZE" ] || die "no bundle/$XZ_NAME in /build/out despite build.sh exit 0 (see $LOGS/artifacts.txt)"
 
 #-- 10. Copy artifacts back to host ------------------------------------------
 log "copying artifacts back to host ($HOST_BUILD_DIR)"
@@ -564,6 +565,7 @@ export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 # wrote inside the VM.
 rm -f "$HOST_BUILD_DIR"/*.raw "$HOST_BUILD_DIR"/*.install.iso "$HOST_BUILD_DIR"/*.packages \
       "$HOST_BUILD_DIR"/*.changes "$HOST_BUILD_DIR"/*.verified
+rm -rf "$HOST_BUILD_DIR/bundle"
 copied=0
 for attempt in $(seq 1 6); do
     guestfish --ro -a "$BUILD_DISK" -m /dev/sda <<EOF 2>>"$LOGS/copy-out.log"
@@ -572,21 +574,50 @@ glob copy-out /out/*.install.iso $HOST_BUILD_DIR/
 glob copy-out /out/*.packages $HOST_BUILD_DIR/
 glob copy-out /out/*.changes $HOST_BUILD_DIR/
 glob copy-out /out/*.verified $HOST_BUILD_DIR/
+copy-out /out/bundle $HOST_BUILD_DIR/
 EOF
     host_raw="$(ls "$HOST_BUILD_DIR"/*.raw 2>/dev/null | head -1)"
     host_iso="$(ls "$HOST_BUILD_DIR"/*.install.iso 2>/dev/null | head -1)"
+    host_xz="$HOST_BUILD_DIR/bundle/$XZ_NAME"
     iso_ok=1
     if [ -n "$IN_VM_ISO_SIZE" ]; then
         [ -n "$host_iso" ] && [ "$(stat -c %s "$host_iso")" = "$IN_VM_ISO_SIZE" ] || iso_ok=0
     fi
-    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ] && [ "$iso_ok" = 1 ]; then copied=1; break; fi
-    log "copy-out: artifacts not settled yet (attempt $attempt/6; want $IN_VM_RAW_SIZE bytes); waiting..."
+    xz_ok=0
+    [ -f "$host_xz" ] && [ "$(stat -c %s "$host_xz")" = "$IN_VM_XZ_SIZE" ] && [ -s "$host_xz.sha256" ] && xz_ok=1
+    if [ -n "$host_raw" ] && [ "$(stat -c %s "$host_raw")" = "$IN_VM_RAW_SIZE" ] && [ "$iso_ok" = 1 ] && [ "$xz_ok" = 1 ]; then copied=1; break; fi
+    log "copy-out: artifacts not settled yet (attempt $attempt/6; want raw $IN_VM_RAW_SIZE bytes, $XZ_NAME $IN_VM_XZ_SIZE bytes); waiting..."
     sleep 5
 done
-[ "$copied" = 1 ] || die "copy-out: no .raw of $IN_VM_RAW_SIZE bytes appeared (see $LOGS/copy-out.log)"
+[ "$copied" = 1 ] || die "copy-out: raw of $IN_VM_RAW_SIZE bytes and bundle/$XZ_NAME of $IN_VM_XZ_SIZE bytes did not both appear (see $LOGS/copy-out.log)"
 
 log "artifacts on host:"
-ls -lh "$HOST_BUILD_DIR/" | tee -a "$LOGS/artifacts.txt"
+ls -lh "$HOST_BUILD_DIR/" "$HOST_BUILD_DIR/bundle/" | tee -a "$LOGS/artifacts.txt"
+
+#-- 11. Prove the release artifact (todo/iso/14 Phase C DONE bar) ------------
+# The .raw.xz is what testers download, so the build is not done until the
+# host has checked it: the name carries version and snapshot; its checksum
+# file matches; `xz -t` decompresses the whole stream against its integrity
+# check; and the decompressed size is exactly config.xml's <size>, i.e. the
+# 28 GiB the raw was declared at (the raw itself is checked the same way).
+# All of this reads 28 GiB once or twice; a few minutes, and the point.
+log "checking release artifact $host_xz"
+{
+    echo "artifact: $host_xz"
+    want_bytes=$(( IMAGE_SIZE_MB * 1024 * 1024 ))
+    raw_bytes="$(stat -c %s "$host_raw")"
+    echo "raw: $host_raw $raw_bytes bytes (want $want_bytes)"
+    [ "$raw_bytes" = "$want_bytes" ] || { echo "FAIL: raw size != <size unit=M>$IMAGE_SIZE_MB"; exit 1; }
+    (cd "$HOST_BUILD_DIR/bundle" && sha256sum -c "$XZ_NAME.sha256") || { echo "FAIL: sha256 mismatch"; exit 1; }
+    xz -l --robot "$host_xz" | tee "$LOGS/xz-list.txt"
+    unc="$(awk '$1 == "totals" { print $5 }' "$LOGS/xz-list.txt")"
+    echo "xz uncompressed: $unc bytes (want $want_bytes)"
+    [ "$unc" = "$want_bytes" ] || { echo "FAIL: decompressed size != <size unit=M>$IMAGE_SIZE_MB"; exit 1; }
+    xz -t -T0 "$host_xz" || { echo "FAIL: xz -t"; exit 1; }
+    echo "xz -t: OK"
+    echo "RESULT: PASS $XZ_NAME"
+} > "$LOGS/release-artifact.txt" 2>&1 || die "release artifact check failed; see $LOGS/release-artifact.txt"
+cat "$LOGS/release-artifact.txt"
 
 if [ "$KEEP_RUNNING" = 1 ]; then
     virsh start "$VM"

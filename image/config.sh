@@ -29,6 +29,26 @@ if [ -f /etc/os-release.qdistro ]; then
     mv /etc/os-release.qdistro /etc/os-release
 fi
 
+# /etc/qdistro/release: what this image was built from (todo/iso/14 Phase C).
+# build.sh strips .git while syncing the five source repos into the overlay,
+# so the commits can only be read on the host at sync time; sync_sources
+# writes them, with the Tumbleweed snapshot id the repositories are pinned
+# to, into /root/qdistro-source-manifest. Version comes from kiwi's own
+# /.profile and must agree with os-release; profile is this build's.
+# FATAL if the manifest is missing or short: an image that cannot say what
+# went in is not a tester image, and a bug report needs these lines.
+# kiwi imports only the description's scripts into the chroot, not lib/; the
+# synced qdistro source tree carries the same file, from the same checkout.
+. "$QD/image/lib/release-stamp.sh"
+if ! qdistro_write_release /root/qdistro-source-manifest /etc/os-release \
+        /etc/qdistro/release "$kiwi_iversion" "${QDISTRO_PROFILE:-release}"; then
+    echo "[qdistro-image] FATAL: could not write /etc/qdistro/release. Aborting build." >&2
+    exit 1
+fi
+rm -f /root/qdistro-source-manifest
+echo "[qdistro-image] /etc/qdistro/release:"
+sed 's/^/[qdistro-image]   /' /etc/qdistro/release
+
 # jeos-firstboot fights us for tty1 and blocks multi-user.target on
 # openSUSE JeOS-derived images. Mask before greetd takes over.
 systemctl mask jeos-firstboot.service jeos-firstboot-snapshot.service 2>/dev/null || true

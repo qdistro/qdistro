@@ -319,6 +319,53 @@ echo
 echo "-- branding / identity --"
 check_req_any "os-release present"        /etc/os-release /usr/lib/os-release
 check_opt     "qdistro-release marker"    /etc/qdistro-release
+# /etc/qdistro/release (todo/iso/14 Phase C): the image must say what it was
+# built from -- version, the pinned Tumbleweed snapshot, the profile and one
+# SOURCE line per synced repo (five). Content is checked, not just presence:
+# an empty or truncated file is exactly what a broken manifest step would
+# leave, and a bug report needs these lines.
+REQUIRED_TOTAL=$((REQUIRED_TOTAL + 1))
+release_file="$(file_in_image "$ROOT/etc/qdistro/release" 2>/dev/null || true)"
+release_problem=""
+if [ -z "$release_file" ]; then
+    release_problem="missing"
+else
+    grep -qE '^VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$release_file" || release_problem="$release_problem no VERSION=x.y.z;"
+    grep -qE '^SNAPSHOT=[0-9]{8}$' "$release_file"          || release_problem="$release_problem no SNAPSHOT=YYYYMMDD;"
+    grep -qE '^PROFILE=(dev|release)$' "$release_file"      || release_problem="$release_problem no PROFILE=dev|release;"
+    grep -qE '^ARTIFACT=qdistro-[0-9.]+-[0-9]{8}\.raw\.xz$' "$release_file" || release_problem="$release_problem no ARTIFACT=qdistro-<ver>-<snap>.raw.xz;"
+    for repo in qdistro qdwin qdshell qdgreeter qdlocker; do
+        grep -qE "^SOURCE $repo [0-9a-f]{40} (clean|DIRTY.*)$" "$release_file" \
+            || release_problem="$release_problem no SOURCE $repo <commit> clean|DIRTY;"
+    done
+fi
+if [ -z "$release_problem" ]; then
+    printf 'OK   %s: %s (%s)\n' "image provenance" "$ROOT/etc/qdistro/release" \
+        "$(sed -n 's/^VERSION=//p;s/^SNAPSHOT=//p;s/^PROFILE=//p' "$release_file" | paste -sd' ')"
+    REQUIRED_OK=$((REQUIRED_OK + 1))
+else
+    printf 'MISS %s: %s (%s)\n' "image provenance" "$ROOT/etc/qdistro/release" "$release_problem"
+    FAIL=1
+fi
+# The profile the image says it is decides two rows below: a dev image must
+# carry the passwordless-sudo rule config.sh bakes for test harnesses, and a
+# release image must NOT (the rule is the escape hatch the hardening review
+# flagged). Read it from the provenance file, never assumed.
+image_profile="$( [ -n "$release_file" ] && sed -n 's/^PROFILE=//p' "$release_file" | head -n1 || true)"
+
+echo
+echo "-- credentials and remote access (todo/iso/13) --"
+# sshd is installed (host keys generated for the VM harness) but must NOT be
+# enabled: a network-reachable sshd plus the baked default password is a
+# remote default-credential exposure. This is what keeps the shared
+# credential local, so it is a REQUIRED absence, not a warning.
+check_absent "sshd NOT enabled (multi-user)" /etc/systemd/system/multi-user.target.wants/sshd.service
+check_absent "sshd NOT enabled (sockets)"    /etc/systemd/system/sockets.target.wants/sshd.socket
+case "$image_profile" in
+    dev)     check_req    "dev profile: passwordless sudoers baked" /etc/sudoers.d/99-admin ;;
+    release) check_absent "release profile: no passwordless sudoers" /etc/sudoers.d/99-admin ;;
+    *)       ;; # provenance row above already failed
+esac
 
 echo
 echo "-- in-place source tree (LLM-modifiability) --"
